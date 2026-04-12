@@ -144,6 +144,10 @@ class SignalDatabase:
                 quantity REAL NOT NULL,
                 notional_usd REAL NOT NULL,
                 entry_price REAL NOT NULL,
+                take_profit_price REAL,
+                stop_loss_price REAL,
+                profit_protection_adjustments INTEGER NOT NULL DEFAULT 0,
+                pending_exit_reason TEXT,
                 exit_price REAL,
                 regime_score_at_entry INTEGER,
                 dom_state_at_entry TEXT,
@@ -202,6 +206,22 @@ class SignalDatabase:
             self._conn.execute(
                 "ALTER TABLE positions ADD COLUMN entry_hurst REAL"
             )
+        if "take_profit_price" not in position_columns:
+            self._conn.execute(
+                "ALTER TABLE positions ADD COLUMN take_profit_price REAL"
+            )
+        if "stop_loss_price" not in position_columns:
+            self._conn.execute(
+                "ALTER TABLE positions ADD COLUMN stop_loss_price REAL"
+            )
+        if "profit_protection_adjustments" not in position_columns:
+            self._conn.execute(
+                "ALTER TABLE positions ADD COLUMN profit_protection_adjustments INTEGER NOT NULL DEFAULT 0"
+            )
+        if "pending_exit_reason" not in position_columns:
+            self._conn.execute(
+                "ALTER TABLE positions ADD COLUMN pending_exit_reason TEXT"
+            )
         self._conn.execute(
             """
             CREATE TABLE IF NOT EXISTS trade_analytics (
@@ -237,6 +257,14 @@ class SignalDatabase:
                 entry_momentum_z REAL,
                 entry_curvature REAL,
                 entry_hurst REAL,
+                exit_rank INTEGER,
+                exit_composite_score REAL,
+                exit_momentum_z REAL,
+                exit_curvature REAL,
+                exit_hurst REAL,
+                take_profit_price_at_exit REAL,
+                stop_loss_price_at_exit REAL,
+                profit_protection_adjustments INTEGER NOT NULL DEFAULT 0,
                 notes TEXT NOT NULL DEFAULT '',
                 post_exit_bars_target INTEGER NOT NULL DEFAULT 0,
                 post_exit_bars_observed INTEGER NOT NULL DEFAULT 0,
@@ -433,6 +461,28 @@ class SignalDatabase:
         if "notes" not in trade_columns:
             self._conn.execute(
                 "ALTER TABLE trade_analytics ADD COLUMN notes TEXT NOT NULL DEFAULT ''"
+            )
+        if "exit_rank" not in trade_columns:
+            self._conn.execute("ALTER TABLE trade_analytics ADD COLUMN exit_rank INTEGER")
+        if "exit_composite_score" not in trade_columns:
+            self._conn.execute("ALTER TABLE trade_analytics ADD COLUMN exit_composite_score REAL")
+        if "exit_momentum_z" not in trade_columns:
+            self._conn.execute("ALTER TABLE trade_analytics ADD COLUMN exit_momentum_z REAL")
+        if "exit_curvature" not in trade_columns:
+            self._conn.execute("ALTER TABLE trade_analytics ADD COLUMN exit_curvature REAL")
+        if "exit_hurst" not in trade_columns:
+            self._conn.execute("ALTER TABLE trade_analytics ADD COLUMN exit_hurst REAL")
+        if "take_profit_price_at_exit" not in trade_columns:
+            self._conn.execute(
+                "ALTER TABLE trade_analytics ADD COLUMN take_profit_price_at_exit REAL"
+            )
+        if "stop_loss_price_at_exit" not in trade_columns:
+            self._conn.execute(
+                "ALTER TABLE trade_analytics ADD COLUMN stop_loss_price_at_exit REAL"
+            )
+        if "profit_protection_adjustments" not in trade_columns:
+            self._conn.execute(
+                "ALTER TABLE trade_analytics ADD COLUMN profit_protection_adjustments INTEGER NOT NULL DEFAULT 0"
             )
         self._conn.execute(
             """
@@ -689,6 +739,9 @@ class SignalDatabase:
         quantity: float,
         notional_usd: float,
         entry_price: float,
+        take_profit_price: float | None = None,
+        stop_loss_price: float | None = None,
+        profit_protection_adjustments: int = 0,
         regime_score_at_entry: int | None = None,
         dom_state_at_entry: str | None = None,
         dom_change_pct_at_entry: float | None = None,
@@ -711,6 +764,9 @@ class SignalDatabase:
             quantity,
             notional_usd,
             entry_price,
+            take_profit_price,
+            stop_loss_price,
+            profit_protection_adjustments,
             regime_score_at_entry,
             dom_state_at_entry,
             dom_change_pct_at_entry,
@@ -734,6 +790,9 @@ class SignalDatabase:
         quantity: float,
         notional_usd: float,
         entry_price: float,
+        take_profit_price: float | None,
+        stop_loss_price: float | None,
+        profit_protection_adjustments: int,
         regime_score_at_entry: int | None,
         dom_state_at_entry: str | None,
         dom_change_pct_at_entry: float | None,
@@ -758,6 +817,9 @@ class SignalDatabase:
                 quantity,
                 notional_usd,
                 entry_price,
+                take_profit_price,
+                stop_loss_price,
+                profit_protection_adjustments,
                 regime_score_at_entry,
                 dom_state_at_entry,
                 dom_change_pct_at_entry,
@@ -768,7 +830,7 @@ class SignalDatabase:
                 entry_hurst,
                 notes
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ticker,
@@ -782,6 +844,9 @@ class SignalDatabase:
                 quantity,
                 notional_usd,
                 entry_price,
+                take_profit_price,
+                stop_loss_price,
+                profit_protection_adjustments,
                 regime_score_at_entry,
                 dom_state_at_entry,
                 dom_change_pct_at_entry,
@@ -795,6 +860,62 @@ class SignalDatabase:
         )
         self._conn.commit()
         return int(cursor.lastrowid)
+
+    async def update_position_protection(
+        self,
+        position_id: int,
+        *,
+        take_profit_price: float,
+        stop_loss_price: float,
+        profit_protection_adjustments: int,
+        updated_at: str,
+        notes: str = "",
+    ) -> None:
+        await asyncio.to_thread(
+            self._update_position_protection_sync,
+            position_id,
+            take_profit_price,
+            stop_loss_price,
+            profit_protection_adjustments,
+            updated_at,
+            notes,
+        )
+
+    def _update_position_protection_sync(
+        self,
+        position_id: int,
+        take_profit_price: float,
+        stop_loss_price: float,
+        profit_protection_adjustments: int,
+        updated_at: str,
+        notes: str,
+    ) -> None:
+        self._conn.execute(
+            """
+            UPDATE positions
+            SET take_profit_price = ?,
+                stop_loss_price = ?,
+                profit_protection_adjustments = ?,
+                updated_at = ?,
+                notes = CASE
+                    WHEN ? = '' THEN notes
+                    WHEN notes = '' THEN ?
+                    ELSE notes || ' | ' || ?
+                END
+            WHERE id = ?
+            """,
+            (
+                take_profit_price,
+                stop_loss_price,
+                profit_protection_adjustments,
+                updated_at,
+                notes,
+                notes,
+                notes,
+                position_id,
+            ),
+        )
+        self._conn.commit()
 
     async def get_open_position(self, ticker: str) -> sqlite3.Row | None:
         return await asyncio.to_thread(self._get_open_position_sync, ticker)
@@ -1056,6 +1177,14 @@ class SignalDatabase:
                 entry_momentum_z,
                 entry_curvature,
                 entry_hurst,
+                exit_rank,
+                exit_composite_score,
+                exit_momentum_z,
+                exit_curvature,
+                exit_hurst,
+                take_profit_price_at_exit,
+                stop_loss_price_at_exit,
+                profit_protection_adjustments,
                 notes,
                 post_exit_bars_target,
                 post_exit_bars_observed,
@@ -1102,6 +1231,14 @@ class SignalDatabase:
                 :entry_momentum_z,
                 :entry_curvature,
                 :entry_hurst,
+                :exit_rank,
+                :exit_composite_score,
+                :exit_momentum_z,
+                :exit_curvature,
+                :exit_hurst,
+                :take_profit_price_at_exit,
+                :stop_loss_price_at_exit,
+                :profit_protection_adjustments,
                 :notes,
                 :post_exit_bars_target,
                 :post_exit_bars_observed,
@@ -1328,6 +1465,89 @@ class SignalDatabase:
             (exit_event, utc_day),
         ).fetchone()
         return int(row[0]) if row is not None else 0
+
+    async def latest_profitable_trade_close_for_ticker(self, ticker: str) -> str | None:
+        return await asyncio.to_thread(self._latest_profitable_trade_close_for_ticker_sync, ticker)
+
+    def _latest_profitable_trade_close_for_ticker_sync(self, ticker: str) -> str | None:
+        row = self._conn.execute(
+            """
+            SELECT closed_at
+            FROM trade_analytics
+            WHERE ticker = ?
+              AND realized_pnl_usd > 0
+            ORDER BY closed_at DESC
+            LIMIT 1
+            """,
+            (ticker,),
+        ).fetchone()
+        return str(row[0]) if row is not None and row[0] not in (None, "") else None
+
+    async def count_ticker_losing_trades_for_day(self, ticker: str, utc_day: str) -> int:
+        return await asyncio.to_thread(
+            self._count_ticker_losing_trades_for_day_sync,
+            ticker,
+            utc_day,
+        )
+
+    def _count_ticker_losing_trades_for_day_sync(self, ticker: str, utc_day: str) -> int:
+        row = self._conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM trade_analytics
+            WHERE ticker = ?
+              AND realized_pnl_usd < 0
+              AND substr(closed_at, 1, 10) = ?
+            """,
+            (ticker, utc_day),
+        ).fetchone()
+        return int(row[0]) if row is not None else 0
+
+    async def set_position_pending_exit_reason(
+        self,
+        position_id: int,
+        *,
+        pending_exit_reason: str | None,
+        updated_at: str,
+        notes: str = "",
+    ) -> None:
+        await asyncio.to_thread(
+            self._set_position_pending_exit_reason_sync,
+            position_id,
+            pending_exit_reason,
+            updated_at,
+            notes,
+        )
+
+    def _set_position_pending_exit_reason_sync(
+        self,
+        position_id: int,
+        pending_exit_reason: str | None,
+        updated_at: str,
+        notes: str,
+    ) -> None:
+        self._conn.execute(
+            """
+            UPDATE positions
+            SET pending_exit_reason = ?,
+                updated_at = ?,
+                notes = CASE
+                    WHEN ? = '' THEN notes
+                    WHEN notes = '' THEN ?
+                    ELSE notes || ' | ' || ?
+                END
+            WHERE id = ?
+            """,
+            (
+                pending_exit_reason,
+                updated_at,
+                notes,
+                notes,
+                notes,
+                position_id,
+            ),
+        )
+        self._conn.commit()
 
     async def summarize_trade_day(self, utc_day: str) -> sqlite3.Row:
         return await asyncio.to_thread(self._summarize_trade_day_sync, utc_day)

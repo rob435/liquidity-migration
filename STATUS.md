@@ -11,6 +11,18 @@
 - Ordinary intrabar backtests now also support a fixed UTC anchor via `python backtest.py --end-date YYYY-MM-DD ...`, so a warmed cache can be reused without the default CLI quietly drifting into fresh tail fetches.
 - `backtest.py` now emits explicit stdout phase messages for prefetch, ordinary runs, compare mode, grid mode, sweeps, walk-forward, and export steps so long jobs are operationally legible.
 - Single comprehensive runs are no longer silent during the heavy replay loop. They now emit replay progress with a text bar, completed bars, elapsed time, and ETA.
+- Open positions now also carry live current TP/SL state plus a bounded profit-protection ratchet count. If a long is still `entry_ready` and still highly ranked near TP, the engine can extend the target once and lift the stop into profit instead of taking profit and re-entering immediately.
+- The live Bybit path now updates venue-managed TP/SL in place when that bounded profit-protection rule fires, and the simulator now mirrors the same behavior conservatively for backtests.
+- Reports and backtest summaries now count protected-profit exits separately from raw stop losses and take profits.
+- The execution path now also has explicit anti-churn controls:
+  - `REENTRY_COOLDOWN_AFTER_PROFIT_MINUTES` blocks immediate same-ticker re-entry after a profitable close
+  - `MAX_TICKER_LOSING_TRADES_PER_DAY` stops re-trading a churny loser for the rest of the UTC day
+  - `STALE_WINNER_*` lets profit-protected winners exit once they are still profitable but no longer strong
+- Trade analytics and exports are richer now:
+  - exit-time signal state is recorded on closed trades
+  - TP/SL values active at exit are recorded
+  - profit-protection adjustment count is recorded
+  - stale-winner exits are counted separately in reports and backtest summaries
 - `./backtest-runs/` now exists as the dedicated local home for heavy backtest outputs. The folder itself is tracked, but its contents are ignored by git so large SQLite/export artifacts stop cluttering the repo root.
 - The backtest now also has an explicit `--research-fast` mode that skips signal-row persistence and post-run signal-summary SQL while keeping trade and equity simulation intact for parameter sweeps.
 - The backtest now also supports generic plan-reuse grids through `--grid-setting KEY=v1,v2,...`, so one fetched `MinuteReplayPlan` can drive many parameter variants without rebuilding the same replay input every time.
@@ -35,7 +47,7 @@
 - `main.py` supports bounded live runs with runtime counters for soak validation.
 - Deployment docs now include a dedicated soak-run guide and production env template.
 - Deployment scaffold exists for `systemd`.
-- Local verification is green: `84` tests passing.
+- Local verification is green: `95` tests passing.
 - Cycle processing now batches DB writes and waits briefly for the WebSocket close wave before scoring.
 - Confirmed logs and cooldown are tied to candle event time; emerging alerts use wall-clock detection time because they fire before candle close.
 - Default universe was live-validated against Bybit; `FETUSDT` and `FTMUSDT` were removed after failing validation.
@@ -166,6 +178,9 @@
 - There are still intentional legacy compatibility paths in reporting and schema handling for old `confirmed`/`confirmed_strong` data. They are not live-strategy logic anymore, but they are still serving historical DB reads, so they were left in place deliberately.
 - Existing SQLite databases may still physically contain `confirmation_signal_kind` / `confirmed_at` columns from older runs. The new code no longer writes or depends on them, but cleaning the on-disk schema itself would require an explicit SQLite table-rebuild migration.
 - TP/SL is checked only when the runtime processes a cycle. There is no separate sub-second price watcher, so a violent move can still gap through the exact configured threshold.
+- Profit protection is intentionally bounded, not trailing. It will stop the dumb immediate-reentry loop in strong names, but it will not perfectly maximize every winner and it will still miss intracycle microstructure because the engine is not tick-driven.
+- Re-entry cooldown and ticker-loss throttles are blunt controls, not alpha. They reduce churn and obvious same-name overtrading, but they can still suppress a genuinely valid second opportunity if the market keeps trending cleanly.
+- Stale-winner exits are only as honest as the cycle cadence. They act on cycle-time signal state, not on a continuous price stream, so a fast intracycle reversal can still behave differently live than the clean conceptual rule suggests.
 - Venue exit reconciliation is polling-based, not websocket-based. Telegram exit messages and SQLite close state will lag until the next engine cycle sees that Bybit has already closed the position.
 - A real demo smoke entry was executed successfully on `SOLUSDT`; the venue accepted the order and TP/SL were installed. There is now a live demo position unless it has already exited on Bybit.
 - Because Telegram remains unset in this local `.env`, a run from this checkout will trade on the demo venue but will not send Telegram notifications until those credentials are added.

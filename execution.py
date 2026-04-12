@@ -121,13 +121,103 @@ class ExecutionEngine:
         return f"{lifecycle}-{ticker.lower()}-{uuid4().hex[:12]}"
 
     def _infer_exit_event(self, entry_price: float, exit_price: float) -> str:
-        tp_price = entry_price * (1 + self.settings.take_profit_pct)
-        sl_price = entry_price * (1 - self.settings.stop_loss_pct)
-        if exit_price >= tp_price:
+        return self._infer_exit_event_with_targets(
+            entry_price=entry_price,
+            exit_price=exit_price,
+            take_profit_price=entry_price * (1 + self.settings.take_profit_pct),
+            stop_loss_price=entry_price * (1 - self.settings.stop_loss_pct),
+        )
+
+    def _infer_exit_event_with_targets(
+        self,
+        *,
+        entry_price: float,
+        exit_price: float,
+        take_profit_price: float,
+        stop_loss_price: float,
+    ) -> str:
+        if exit_price >= take_profit_price:
             return "take_profit_exit"
-        if exit_price <= sl_price:
+        if exit_price <= stop_loss_price:
+            if stop_loss_price >= entry_price:
+                return "protected_profit_exit"
             return "stop_loss_exit"
         return "exchange_exit"
+
+    def _position_take_profit_price(self, position) -> float:
+        value = position["take_profit_price"]
+        if value not in (None, ""):
+            return float(value)
+        return float(position["entry_price"]) * (1 + self.settings.take_profit_pct)
+
+    def _position_stop_loss_price(self, position) -> float:
+        value = position["stop_loss_price"]
+        if value not in (None, ""):
+            return float(value)
+        return float(position["entry_price"]) * (1 - self.settings.stop_loss_pct)
+
+    def _position_profit_protection_adjustments(self, position) -> int:
+        value = position["profit_protection_adjustments"]
+        if value in (None, ""):
+            return 0
+        return int(value)
+
+    def _protected_exit_reason(self, position) -> str:
+        if self._position_stop_loss_price(position) >= float(position["entry_price"]):
+            return "protected_profit_hit"
+        return "stop_loss_hit"
+
+    def _profit_protection_signal_by_ticker(
+        self,
+        ranked_signals: list[RankedSignal],
+    ) -> dict[str, RankedSignal]:
+        return {
+            signal.ticker: signal
+            for signal in ranked_signals
+            if signal.signal_kind == "entry_ready" and signal.rank <= self.settings.profit_protection_max_rank
+        }
+
+    def _eligible_strength_signal_by_ticker(
+        self,
+        ranked_signals: list[RankedSignal],
+        *,
+        max_rank: int,
+    ) -> dict[str, RankedSignal]:
+        return {
+            signal.ticker: signal
+            for signal in ranked_signals
+            if signal.signal_kind == "entry_ready" and signal.rank <= max_rank
+        }
+
+    def _holding_minutes(self, opened_at: str, now_iso: str) -> float:
+        return (datetime.fromisoformat(now_iso) - datetime.fromisoformat(opened_at)).total_seconds() / 60.0
+
+    def _reentry_cooldown_active(self, closed_at_iso: str | None, now_iso: str) -> bool:
+        if not closed_at_iso or self.settings.reentry_cooldown_after_profit_minutes <= 0:
+            return False
+        elapsed_minutes = self._holding_minutes(closed_at_iso, now_iso)
+        return elapsed_minutes < self.settings.reentry_cooldown_after_profit_minutes
+
+    def _should_exit_stale_winner(
+        self,
+        *,
+        position,
+        current_price: float,
+        now_iso: str,
+        strong_signal: RankedSignal | None,
+    ) -> bool:
+        if not self.settings.stale_winner_exit_enabled:
+            return False
+        if self.settings.stale_winner_require_profit_protection and self._position_profit_protection_adjustments(position) <= 0:
+            return False
+        holding_minutes = self._holding_minutes(str(position["opened_at"]), now_iso)
+        if holding_minutes < self.settings.stale_winner_min_hold_minutes:
+            return False
+        entry_price = float(position["entry_price"])
+        pnl_pct = self._directional_pnl_pct(str(position["side"]), entry_price, current_price)
+        if pnl_pct < self.settings.stale_winner_min_profit_pct:
+            return False
+        return strong_signal is None
 
     def _directional_pnl_pct(self, side: str, entry_price: float, price: float) -> float:
         if entry_price <= 0:
@@ -297,6 +387,101 @@ class ExecutionEngine:
                 phase="open",
             )
 
+    async def _maybe_adjust_open_positions(
+        self,
+        *,
+        stage: str,
+        cycle_time_ms: int | None,
+        ranked_signals: list[RankedSignal],
+    ) -> list[ExecutionAction]:
+        if stage != "emerging" or not self.settings.profit_protection_enabled:
+            return []
+        eligible_signals = self._profit_protection_signal_by_ticker(ranked_signals)
+        if not eligible_signals:
+            return []
+        now_iso = self._now(cycle_time_ms=cycle_time_ms, stage=stage).isoformat()
+        actions: list[ExecutionAction] = []
+        for position in await self.database.list_open_positions():
+            ticker = str(position["ticker"])
+            signal = eligible_signals.get(ticker)
+            if signal is None:
+                continue
+            adjustment_count = self._position_profit_protection_adjustments(position)
+            if adjustment_count >= self.settings.profit_protection_max_adjustments:
+                continue
+            entry_price = float(position["entry_price"])
+            current_price = self._latest_price(ticker, stage=stage)
+            if current_price is None:
+                continue
+            if current_price < entry_price * (1 + self.settings.profit_protection_trigger_pct):
+                continue
+            current_tp = self._position_take_profit_price(position)
+            current_sl = self._position_stop_loss_price(position)
+            target_tp = entry_price * (
+                1
+                + self.settings.take_profit_pct
+                + self.settings.profit_protection_tp_extension_pct * (adjustment_count + 1)
+            )
+            target_sl = entry_price * (1 + self.settings.profit_protection_sl_lock_pct)
+            new_tp = max(current_tp, target_tp)
+            new_sl = max(current_sl, target_sl)
+            if new_tp <= current_tp and new_sl <= current_sl:
+                continue
+
+            if self._using_live_venue():
+                venue_position = await self.client.get_position(ticker)
+                if venue_position is None or venue_position.size <= 0:
+                    continue
+                spec = await self.client.fetch_instrument_spec(ticker)
+                tp_decimal = round_decimal(
+                    Decimal(str(new_tp)),
+                    spec.tick_size,
+                    ROUND_HALF_UP,
+                )
+                sl_decimal = round_decimal(
+                    Decimal(str(new_sl)),
+                    spec.tick_size,
+                    ROUND_HALF_UP,
+                )
+                await self.client.set_trading_stop(
+                    symbol=ticker,
+                    position_idx=venue_position.position_idx,
+                    take_profit=tp_decimal,
+                    stop_loss=sl_decimal,
+                )
+                new_tp = float(tp_decimal)
+                new_sl = float(sl_decimal)
+
+            note = (
+                f"profit protection adjusted tp={new_tp:.6f} sl={new_sl:.6f} "
+                f"signal_rank={signal.rank} composite={signal.composite_score:.3f}"
+            )
+            await self.database.update_position_protection(
+                int(position["id"]),
+                take_profit_price=new_tp,
+                stop_loss_price=new_sl,
+                profit_protection_adjustments=adjustment_count + 1,
+                updated_at=now_iso,
+                notes=note,
+            )
+            await self._log_runtime_event(
+                severity="info",
+                event_type="profit_protection_adjusted",
+                detail=note,
+                stage=stage,
+                ticker=ticker,
+            )
+            actions.append(
+                ExecutionAction(
+                    ticker=ticker,
+                    action="adjust_profit_protection",
+                    signal_kind=signal.signal_kind,
+                    detail=note,
+                    position_id=int(position["id"]),
+                )
+            )
+        return actions
+
     async def detect_position_drift(self) -> tuple[str, str]:
         if not self._using_live_venue():
             return ("disabled", "live venue not enabled")
@@ -320,12 +505,15 @@ class ExecutionEngine:
         self,
         *,
         position,
+        exit_signal: RankedSignal | None,
         exit_stage: str,
         exit_signal_kind: str,
         exit_event: str,
         exit_reason: str,
         closed_at_iso: str,
         exit_price: float,
+        take_profit_price_at_exit: float,
+        stop_loss_price_at_exit: float,
     ) -> None:
         if not self.settings.analytics_enabled:
             return
@@ -392,6 +580,14 @@ class ExecutionEngine:
             entry_momentum_z=position["entry_momentum_z"],
             entry_curvature=position["entry_curvature"],
             entry_hurst=position["entry_hurst"],
+            exit_rank=exit_signal.rank if exit_signal is not None else None,
+            exit_composite_score=exit_signal.composite_score if exit_signal is not None else None,
+            exit_momentum_z=exit_signal.momentum_z if exit_signal is not None else None,
+            exit_curvature=exit_signal.curvature if exit_signal is not None else None,
+            exit_hurst=exit_signal.hurst if exit_signal is not None else None,
+            take_profit_price_at_exit=take_profit_price_at_exit,
+            stop_loss_price_at_exit=stop_loss_price_at_exit,
+            profit_protection_adjustments=self._position_profit_protection_adjustments(position),
             notes=str(position["notes"] or ""),
             post_exit_bars_target=max(self.settings.analytics_post_exit_bars, 0),
             post_exit_bars_observed=0,
@@ -595,6 +791,8 @@ class ExecutionEngine:
         exit_price: float,
         exit_reason: str,
         signal_kind: str = "none",
+        exit_signal: RankedSignal | None = None,
+        explicit_event: str | None = None,
     ) -> ExecutionAction:
         quantity = float(position["quantity"])
         submission = await self.client.submit_market_order(
@@ -627,7 +825,14 @@ class ExecutionEngine:
         )
         realized_price = float(submission.fill_price or exit_price)
         pnl_pct = (realized_price / float(position["entry_price"])) - 1.0
-        exit_event = self._infer_exit_event(float(position["entry_price"]), realized_price)
+        take_profit_price_at_exit = self._position_take_profit_price(position)
+        stop_loss_price_at_exit = self._position_stop_loss_price(position)
+        exit_event = explicit_event or self._infer_exit_event_with_targets(
+            entry_price=float(position["entry_price"]),
+            exit_price=realized_price,
+            take_profit_price=take_profit_price_at_exit,
+            stop_loss_price=stop_loss_price_at_exit,
+        )
         await self.database.close_position(
             int(position["id"]),
             exit_order_id=order_id,
@@ -638,12 +843,15 @@ class ExecutionEngine:
         )
         await self._record_trade_analytics(
             position=position,
+            exit_signal=exit_signal,
             exit_stage=stage,
             exit_signal_kind=signal_kind,
             exit_event=exit_event,
             exit_reason=exit_reason,
             closed_at_iso=now_iso,
             exit_price=realized_price,
+            take_profit_price_at_exit=take_profit_price_at_exit,
+            stop_loss_price_at_exit=stop_loss_price_at_exit,
         )
         await self._send_execution_notification(
             event=exit_event,
@@ -670,18 +878,24 @@ class ExecutionEngine:
         *,
         stage: str,
         cycle_time_ms: int | None,
+        ranked_signals: list[RankedSignal],
     ) -> tuple[list[ExecutionAction], set[str]]:
         actions: list[ExecutionAction] = []
         closed_tickers: set[str] = set()
         now_iso = self._now(cycle_time_ms=cycle_time_ms, stage=stage).isoformat()
+        signal_by_ticker = {signal.ticker: signal for signal in ranked_signals}
+        strong_signal_by_ticker = self._eligible_strength_signal_by_ticker(
+            ranked_signals,
+            max_rank=self.settings.stale_winner_max_rank,
+        )
         for position in await self.database.list_open_positions():
             ticker = str(position["ticker"])
             current_price = self._latest_price(ticker, stage=stage)
             if current_price is None:
                 continue
-            entry_price = float(position["entry_price"])
-            pnl_pct = (current_price / entry_price) - 1.0
-            if pnl_pct >= self.settings.take_profit_pct:
+            take_profit_price = self._position_take_profit_price(position)
+            stop_loss_price = self._position_stop_loss_price(position)
+            if current_price >= take_profit_price:
                 actions.append(
                     await self._submit_simulated_exit(
                         position=position,
@@ -690,11 +904,12 @@ class ExecutionEngine:
                         now_iso=now_iso,
                         exit_price=current_price,
                         exit_reason="take_profit_hit",
+                        exit_signal=signal_by_ticker.get(ticker),
                     )
                 )
                 closed_tickers.add(ticker)
                 continue
-            if pnl_pct <= -self.settings.stop_loss_pct:
+            if current_price <= stop_loss_price:
                 actions.append(
                     await self._submit_simulated_exit(
                         position=position,
@@ -702,9 +917,133 @@ class ExecutionEngine:
                         stage=stage,
                         now_iso=now_iso,
                         exit_price=current_price,
-                        exit_reason="stop_loss_hit",
+                        exit_reason=self._protected_exit_reason(position),
+                        exit_signal=signal_by_ticker.get(ticker),
                     )
                 )
+                closed_tickers.add(ticker)
+                continue
+            if self._should_exit_stale_winner(
+                position=position,
+                current_price=current_price,
+                now_iso=now_iso,
+                strong_signal=strong_signal_by_ticker.get(ticker),
+            ):
+                actions.append(
+                    await self._submit_simulated_exit(
+                        position=position,
+                        ticker=ticker,
+                        stage=stage,
+                        now_iso=now_iso,
+                        exit_price=current_price,
+                        exit_reason="stale_winner_exit",
+                        signal_kind=signal_by_ticker.get(ticker).signal_kind if signal_by_ticker.get(ticker) is not None else "none",
+                        exit_signal=signal_by_ticker.get(ticker),
+                        explicit_event="stale_winner_exit",
+                    )
+                )
+                closed_tickers.add(ticker)
+        return actions, closed_tickers
+
+    async def _submit_live_reduce_only_exit(
+        self,
+        *,
+        position,
+        ticker: str,
+        stage: str,
+        now_iso: str,
+        exit_reason: str,
+    ) -> ExecutionAction | None:
+        venue_position = await self.client.get_position(ticker)
+        if venue_position is None or venue_position.size <= 0:
+            return None
+        order_link_id = self._client_order_id("exit-live", ticker)
+        ack = await self.client.place_market_order(
+            symbol=ticker,
+            side="Sell",
+            quantity=venue_position.size,
+            order_link_id=order_link_id,
+            reduce_only=True,
+        )
+        note = f"submitted reduce-only exit reason={exit_reason}"
+        order_id = await self.database.create_order(
+            client_order_id=order_link_id,
+            ticker=ticker,
+            side="Sell",
+            order_type="Market",
+            lifecycle="exit",
+            status="submitted_live_reduce_only",
+            stage=stage,
+            signal_kind="none",
+            requested_qty=float(venue_position.size),
+            requested_notional_usd=float(venue_position.size * venue_position.avg_price),
+            requested_price=float(venue_position.avg_price),
+            venue="bybit",
+            is_demo=self.settings.demo_mode,
+            created_at=now_iso,
+            updated_at=now_iso,
+            external_order_id=ack.order_id,
+            notes=note,
+        )
+        await self.database.set_position_pending_exit_reason(
+            int(position["id"]),
+            pending_exit_reason=exit_reason,
+            updated_at=now_iso,
+            notes=note,
+        )
+        await self._log_runtime_event(
+            severity="info",
+            event_type="live_exit_submitted",
+            detail=note,
+            stage=stage,
+            ticker=ticker,
+        )
+        return ExecutionAction(
+            ticker=ticker,
+            action="exit_submitted",
+            signal_kind="none",
+            detail=exit_reason,
+            order_id=order_id,
+            position_id=int(position["id"]),
+        )
+
+    async def _process_live_stale_winner_exits(
+        self,
+        *,
+        stage: str,
+        cycle_time_ms: int | None,
+        ranked_signals: list[RankedSignal],
+    ) -> tuple[list[ExecutionAction], set[str]]:
+        if stage != "emerging":
+            return [], set()
+        actions: list[ExecutionAction] = []
+        closed_tickers: set[str] = set()
+        now_iso = self._now(cycle_time_ms=cycle_time_ms, stage=stage).isoformat()
+        strong_signal_by_ticker = self._eligible_strength_signal_by_ticker(
+            ranked_signals,
+            max_rank=self.settings.stale_winner_max_rank,
+        )
+        for position in await self.database.list_open_positions():
+            ticker = str(position["ticker"])
+            current_price = self._latest_price(ticker, stage=stage)
+            if current_price is None:
+                continue
+            if not self._should_exit_stale_winner(
+                position=position,
+                current_price=current_price,
+                now_iso=now_iso,
+                strong_signal=strong_signal_by_ticker.get(ticker),
+            ):
+                continue
+            action = await self._submit_live_reduce_only_exit(
+                position=position,
+                ticker=ticker,
+                stage=stage,
+                now_iso=now_iso,
+                exit_reason="stale_winner_exit",
+            )
+            if action is not None:
+                actions.append(action)
                 closed_tickers.add(ticker)
         return actions, closed_tickers
 
@@ -761,15 +1100,30 @@ class ExecutionEngine:
                 updated_at=now_iso,
                 notes="closed on Bybit venue",
             )
-            event = self._infer_exit_event(entry_price, exit_price)
+            pending_exit_reason = (
+                str(position["pending_exit_reason"])
+                if position["pending_exit_reason"] not in (None, "")
+                else None
+            )
+            take_profit_price_at_exit = self._position_take_profit_price(position)
+            stop_loss_price_at_exit = self._position_stop_loss_price(position)
+            event = pending_exit_reason or self._infer_exit_event_with_targets(
+                entry_price=entry_price,
+                exit_price=exit_price,
+                take_profit_price=take_profit_price_at_exit,
+                stop_loss_price=stop_loss_price_at_exit,
+            )
             await self._record_trade_analytics(
                 position=position,
+                exit_signal=None,
                 exit_stage=stage,
                 exit_signal_kind="none",
                 exit_event=event,
-                exit_reason="closed on Bybit venue",
+                exit_reason=pending_exit_reason or "closed on Bybit venue",
                 closed_at_iso=now_iso,
                 exit_price=exit_price,
+                take_profit_price_at_exit=take_profit_price_at_exit,
+                stop_loss_price_at_exit=stop_loss_price_at_exit,
             )
             await self._send_execution_notification(
                 event=event,
@@ -816,14 +1170,28 @@ class ExecutionEngine:
             sync_actions, closed_tickers = await self._process_risk_exits(
                 stage=stage,
                 cycle_time_ms=cycle_time_ms,
+                ranked_signals=ranked_signals,
             )
         if stage == "emerging":
+            protection_actions = await self._maybe_adjust_open_positions(
+                stage=stage,
+                cycle_time_ms=cycle_time_ms,
+                ranked_signals=ranked_signals,
+            )
+            if self._using_live_venue():
+                stale_actions, stale_closed_tickers = await self._process_live_stale_winner_exits(
+                    stage=stage,
+                    cycle_time_ms=cycle_time_ms,
+                    ranked_signals=ranked_signals,
+                )
+            else:
+                stale_actions, stale_closed_tickers = ([], set())
             stage_actions = await self._process_entries(
                 cycle_time_ms=cycle_time_ms,
                 ranked_signals=ranked_signals,
-                blocked_tickers=closed_tickers,
+                blocked_tickers=closed_tickers | stale_closed_tickers,
             )
-            actions = sync_actions + stage_actions
+            actions = sync_actions + protection_actions + stale_actions + stage_actions
             await self._maybe_log_portfolio_snapshot(
                 stage=stage,
                 cycle_time_ms=cycle_time_ms,
@@ -988,6 +1356,56 @@ class ExecutionEngine:
                     )
                 )
                 continue
+            latest_profitable_close = await self.database.latest_profitable_trade_close_for_ticker(
+                signal.ticker
+            )
+            if self._reentry_cooldown_active(latest_profitable_close, now_iso):
+                detail = (
+                    "reentry_cooldown_after_profit "
+                    f"minutes={self.settings.reentry_cooldown_after_profit_minutes}"
+                )
+                actions.append(
+                    ExecutionAction(
+                        ticker=signal.ticker,
+                        action="skip_entry",
+                        signal_kind=signal.signal_kind,
+                        detail=detail,
+                    )
+                )
+                await self._log_runtime_event(
+                    severity="info",
+                    event_type="entry_blocked",
+                    detail=detail,
+                    stage="emerging",
+                    ticker=signal.ticker,
+                )
+                continue
+            if self.settings.max_ticker_losing_trades_per_day > 0:
+                ticker_losses = await self.database.count_ticker_losing_trades_for_day(
+                    signal.ticker,
+                    now_iso[:10],
+                )
+                if ticker_losses >= self.settings.max_ticker_losing_trades_per_day:
+                    detail = (
+                        "max_ticker_losing_trades_per_day_reached "
+                        f"count={ticker_losses} limit={self.settings.max_ticker_losing_trades_per_day}"
+                    )
+                    actions.append(
+                        ExecutionAction(
+                            ticker=signal.ticker,
+                            action="skip_entry",
+                            signal_kind=signal.signal_kind,
+                            detail=detail,
+                        )
+                    )
+                    await self._log_runtime_event(
+                        severity="info",
+                        event_type="entry_blocked",
+                        detail=detail,
+                        stage="emerging",
+                        ticker=signal.ticker,
+                    )
+                    continue
             if (
                 self.settings.max_daily_stop_losses > 0
                 and daily_stop_loss_count >= self.settings.max_daily_stop_losses
@@ -1142,6 +1560,8 @@ class ExecutionEngine:
                     quantity=float(venue_position.size),
                     notional_usd=float(venue_position.size * entry_price),
                     entry_price=float(entry_price),
+                    take_profit_price=float(tp_price),
+                    stop_loss_price=float(sl_price),
                     regime_score_at_entry=signal.regime_score,
                     dom_state_at_entry=(
                         "falling"
@@ -1287,6 +1707,8 @@ class ExecutionEngine:
                 quantity=quantity,
                 notional_usd=self.settings.entry_notional_usd,
                 entry_price=submission.fill_price,
+                take_profit_price=submission.fill_price * (1 + self.settings.take_profit_pct),
+                stop_loss_price=submission.fill_price * (1 - self.settings.stop_loss_pct),
                 regime_score_at_entry=signal.regime_score,
                 dom_state_at_entry=(
                     "falling"

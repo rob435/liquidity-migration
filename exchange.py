@@ -279,6 +279,7 @@ class BybitTradeClient:
         side: str,
         quantity: Decimal,
         order_link_id: str,
+        reduce_only: bool = False,
     ) -> OrderAck:
         result = await self._request(
             "POST",
@@ -291,7 +292,7 @@ class BybitTradeClient:
                 "qty": format(quantity.normalize(), "f"),
                 "positionIdx": 0,
                 "orderLinkId": order_link_id,
-                "reduceOnly": False,
+                "reduceOnly": reduce_only,
             },
         )
         return OrderAck(

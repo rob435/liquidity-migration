@@ -76,6 +76,19 @@ class Settings:
     max_entries_per_rebalance: int = 0
     take_profit_pct: float = 0.02
     stop_loss_pct: float = 0.02
+    profit_protection_enabled: bool = True
+    profit_protection_trigger_pct: float = 0.015
+    profit_protection_tp_extension_pct: float = 0.01
+    profit_protection_sl_lock_pct: float = 0.005
+    profit_protection_max_adjustments: int = 1
+    profit_protection_max_rank: int = 2
+    reentry_cooldown_after_profit_minutes: int = 90
+    max_ticker_losing_trades_per_day: int = 1
+    stale_winner_exit_enabled: bool = True
+    stale_winner_min_profit_pct: float = 0.006
+    stale_winner_min_hold_minutes: int = 360
+    stale_winner_max_rank: int = 3
+    stale_winner_require_profit_protection: bool = True
     max_daily_stop_losses: int = 0
     operator_pause_new_entries: bool = False
     bybit_recv_window: int = 5000
@@ -225,6 +238,28 @@ def load_settings() -> Settings:
         max_entries_per_rebalance=_get_int("MAX_ENTRIES_PER_REBALANCE", 0),
         take_profit_pct=_get_float("TAKE_PROFIT_PCT", 0.02),
         stop_loss_pct=_get_float("STOP_LOSS_PCT", 0.02),
+        profit_protection_enabled=_get_bool("PROFIT_PROTECTION_ENABLED", True),
+        profit_protection_trigger_pct=_get_float("PROFIT_PROTECTION_TRIGGER_PCT", 0.015),
+        profit_protection_tp_extension_pct=_get_float(
+            "PROFIT_PROTECTION_TP_EXTENSION_PCT",
+            0.01,
+        ),
+        profit_protection_sl_lock_pct=_get_float("PROFIT_PROTECTION_SL_LOCK_PCT", 0.005),
+        profit_protection_max_adjustments=_get_int("PROFIT_PROTECTION_MAX_ADJUSTMENTS", 1),
+        profit_protection_max_rank=_get_int("PROFIT_PROTECTION_MAX_RANK", 2),
+        reentry_cooldown_after_profit_minutes=_get_int(
+            "REENTRY_COOLDOWN_AFTER_PROFIT_MINUTES",
+            90,
+        ),
+        max_ticker_losing_trades_per_day=_get_int("MAX_TICKER_LOSING_TRADES_PER_DAY", 1),
+        stale_winner_exit_enabled=_get_bool("STALE_WINNER_EXIT_ENABLED", True),
+        stale_winner_min_profit_pct=_get_float("STALE_WINNER_MIN_PROFIT_PCT", 0.006),
+        stale_winner_min_hold_minutes=_get_int("STALE_WINNER_MIN_HOLD_MINUTES", 360),
+        stale_winner_max_rank=_get_int("STALE_WINNER_MAX_RANK", 3),
+        stale_winner_require_profit_protection=_get_bool(
+            "STALE_WINNER_REQUIRE_PROFIT_PROTECTION",
+            True,
+        ),
         max_daily_stop_losses=_get_int("MAX_DAILY_STOP_LOSSES", 0),
         operator_pause_new_entries=_get_bool("OPERATOR_PAUSE_NEW_ENTRIES", False),
         bybit_recv_window=_get_int("BYBIT_RECV_WINDOW", 5000),

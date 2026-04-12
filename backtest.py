@@ -188,6 +188,7 @@ class SimulatedPosition:
     stop_loss_price: float
     entry_fee_usd: float
     entry_slippage_usd: float
+    profit_protection_adjustments: int = 0
     mfe_pct: float = 0.0
     mae_pct: float = 0.0
     peak_favorable_price: float | None = None
@@ -204,10 +205,19 @@ class BacktestTrade:
     entry_signal_kind: str
     cluster_label: str
     entry_diagnostics: str
+    exit_signal_kind: str | None
+    exit_rank: int | None
+    exit_composite_score: float | None
+    exit_momentum_z: float | None
+    exit_curvature: float | None
+    exit_hurst: float | None
     exit_reason: str
     quantity: float
     entry_price: float
     exit_price: float
+    take_profit_price_at_exit: float
+    stop_loss_price_at_exit: float
+    profit_protection_adjustments: int
     notional_usd: float
     gross_pnl_usd: float
     net_pnl_usd: float
@@ -302,6 +312,8 @@ class ComprehensiveBacktestSummary:
     avg_volatility_pct: float | None
     take_profits: int
     stop_losses: int
+    protected_profit_exits: int
+    stale_winner_exits: int
     forced_exits: int
     entry_ready_signals: int
     entries_filled: int
@@ -310,8 +322,11 @@ class ComprehensiveBacktestSummary:
     skipped_cluster_limit: int
     skipped_max_entries_per_rebalance: int
     skipped_daily_stop_losses: int
+    skipped_reentry_cooldown: int
+    skipped_ticker_daily_loss_limit: int
     skipped_gross_exposure_cap: int
     skipped_too_small: int
+    profit_protection_adjustments: int
     max_open_positions_observed: int
     signal_summary: ReportSummary
     daily: list[DailyBacktestSummary]
@@ -1273,11 +1288,16 @@ class HistoricalBacktestSimulator:
         self.skipped_cluster_limit = 0
         self.skipped_max_entries_per_rebalance = 0
         self.skipped_daily_stop_losses = 0
+        self.skipped_reentry_cooldown = 0
+        self.skipped_ticker_daily_loss_limit = 0
         self.skipped_gross_exposure_cap = 0
         self.skipped_too_small = 0
         self.max_open_positions_observed = 0
         self.stop_loss_exits_by_day: dict[str, int] = defaultdict(int)
+        self.ticker_losses_by_day: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self.last_profitable_exit_ms_by_ticker: dict[str, int] = {}
         self.post_exit_trackers: list[PostExitTracker] = []
+        self.profit_protection_adjustments = 0
 
     @property
     def slippage_rate(self) -> float:
@@ -1403,6 +1423,47 @@ class HistoricalBacktestSimulator:
                 self._finalize_post_exit_tracker(tracker)
         self.post_exit_trackers.clear()
 
+    def _reentry_cooldown_active(self, ticker: str, timestamp_ms: int) -> bool:
+        if self.settings.reentry_cooldown_after_profit_minutes <= 0:
+            return False
+        last_exit_ms = self.last_profitable_exit_ms_by_ticker.get(ticker)
+        if last_exit_ms is None:
+            return False
+        return (timestamp_ms - last_exit_ms) < (
+            self.settings.reentry_cooldown_after_profit_minutes * 60_000
+        )
+
+    def _ticker_daily_loss_limit_reached(self, ticker: str, timestamp_ms: int) -> bool:
+        if self.settings.max_ticker_losing_trades_per_day <= 0:
+            return False
+        return (
+            self.ticker_losses_by_day[ticker][_utc_day(timestamp_ms)]
+            >= self.settings.max_ticker_losing_trades_per_day
+        )
+
+    def _should_exit_stale_winner(
+        self,
+        *,
+        position: SimulatedPosition,
+        timestamp_ms: int,
+        current_price: float,
+        strong_signal: RankedSignal | None,
+    ) -> bool:
+        if not self.settings.stale_winner_exit_enabled:
+            return False
+        if (
+            self.settings.stale_winner_require_profit_protection
+            and position.profit_protection_adjustments <= 0
+        ):
+            return False
+        holding_minutes = (timestamp_ms - position.opened_at_ms) / 60_000.0
+        if holding_minutes < self.settings.stale_winner_min_hold_minutes:
+            return False
+        pnl_pct = (current_price / position.entry_price) - 1.0 if position.entry_price > 0 else 0.0
+        if pnl_pct < self.settings.stale_winner_min_profit_pct:
+            return False
+        return strong_signal is None
+
     def _close_position(
         self,
         *,
@@ -1411,6 +1472,7 @@ class HistoricalBacktestSimulator:
         timestamp_ms: int,
         exit_reason: str,
         intrabar_candle: HistoricalCandle | None = None,
+        exit_signal: RankedSignal | None = None,
     ) -> None:
         position = self.positions.pop(ticker)
         exit_price = self._exit_fill_price(raw_exit_price)
@@ -1433,10 +1495,19 @@ class HistoricalBacktestSimulator:
             entry_signal_kind=position.entry_signal_kind,
             cluster_label=position.cluster_label,
             entry_diagnostics=position.entry_diagnostics,
+            exit_signal_kind=exit_signal.signal_kind if exit_signal is not None else None,
+            exit_rank=exit_signal.rank if exit_signal is not None else None,
+            exit_composite_score=exit_signal.composite_score if exit_signal is not None else None,
+            exit_momentum_z=exit_signal.momentum_z if exit_signal is not None else None,
+            exit_curvature=exit_signal.curvature if exit_signal is not None else None,
+            exit_hurst=exit_signal.hurst if exit_signal is not None else None,
             exit_reason=exit_reason,
             quantity=position.quantity,
             entry_price=position.entry_price,
             exit_price=exit_price,
+            take_profit_price_at_exit=position.take_profit_price,
+            stop_loss_price_at_exit=position.stop_loss_price,
+            profit_protection_adjustments=position.profit_protection_adjustments,
             notional_usd=position.notional_usd,
             gross_pnl_usd=gross_pnl_usd,
             net_pnl_usd=net_pnl_usd,
@@ -1451,8 +1522,54 @@ class HistoricalBacktestSimulator:
         )
         self.trades.append(trade)
         self._track_post_exit_trade(len(self.trades) - 1, ticker, exit_price)
-        if exit_reason == "stop_loss":
+        if net_pnl_usd > 0:
+            self.last_profitable_exit_ms_by_ticker[ticker] = timestamp_ms
+        if net_pnl_usd < 0:
+            self.ticker_losses_by_day[ticker][_utc_day(timestamp_ms)] += 1
+        if exit_reason in {"stop_loss", "protected_profit"}:
             self.stop_loss_exits_by_day[_utc_day(timestamp_ms)] += 1
+
+    def adjust_profit_protection(
+        self,
+        *,
+        ranked_signals: list[RankedSignal],
+        mark_prices: dict[str, float],
+    ) -> None:
+        if not self.settings.profit_protection_enabled:
+            return
+        eligible_signals = {
+            signal.ticker: signal
+            for signal in ranked_signals
+            if signal.signal_kind == "entry_ready" and signal.rank <= self.settings.profit_protection_max_rank
+        }
+        if not eligible_signals:
+            return
+        for ticker, position in self.positions.items():
+            signal = eligible_signals.get(ticker)
+            if signal is None:
+                continue
+            if position.profit_protection_adjustments >= self.settings.profit_protection_max_adjustments:
+                continue
+            current_price = mark_prices.get(ticker)
+            if current_price is None:
+                continue
+            if current_price < position.entry_price * (1.0 + self.settings.profit_protection_trigger_pct):
+                continue
+            target_tp = position.entry_price * (
+                1.0
+                + self.settings.take_profit_pct
+                + self.settings.profit_protection_tp_extension_pct
+                * (position.profit_protection_adjustments + 1)
+            )
+            target_sl = position.entry_price * (1.0 + self.settings.profit_protection_sl_lock_pct)
+            new_tp = max(position.take_profit_price, target_tp)
+            new_sl = max(position.stop_loss_price, target_sl)
+            if new_tp <= position.take_profit_price and new_sl <= position.stop_loss_price:
+                continue
+            position.take_profit_price = new_tp
+            position.stop_loss_price = new_sl
+            position.profit_protection_adjustments += 1
+            self.profit_protection_adjustments += 1
 
     def process_intrabar_exits(
         self,
@@ -1460,9 +1577,16 @@ class HistoricalBacktestSimulator:
         timestamp_ms: int,
         intrabar_candles: dict[str, HistoricalCandle],
         mark_prices: dict[str, float],
+        ranked_signals: list[RankedSignal],
     ) -> set[str]:
         closed_tickers: set[str] = set()
         self.update_post_exit_trackers(intrabar_candles)
+        signal_by_ticker = {signal.ticker: signal for signal in ranked_signals}
+        strong_signal_by_ticker = {
+            signal.ticker: signal
+            for signal in ranked_signals
+            if signal.signal_kind == "entry_ready" and signal.rank <= self.settings.stale_winner_max_rank
+        }
         for ticker in list(self.positions):
             position = self.positions.get(ticker)
             candle = intrabar_candles.get(ticker)
@@ -1471,13 +1595,19 @@ class HistoricalBacktestSimulator:
             self._update_position_excursions(position, candle)
             hit_stop = candle.low_price <= position.stop_loss_price
             hit_take_profit = candle.high_price >= position.take_profit_price
+            stop_exit_reason = (
+                "protected_profit"
+                if position.stop_loss_price >= position.entry_price
+                else "stop_loss"
+            )
             if hit_stop and hit_take_profit:
                 self._close_position(
                     ticker=ticker,
                     raw_exit_price=position.stop_loss_price,
                     timestamp_ms=timestamp_ms,
-                    exit_reason="stop_loss",
+                    exit_reason=stop_exit_reason,
                     intrabar_candle=candle,
+                    exit_signal=signal_by_ticker.get(ticker),
                 )
                 closed_tickers.add(ticker)
                 continue
@@ -1486,8 +1616,9 @@ class HistoricalBacktestSimulator:
                     ticker=ticker,
                     raw_exit_price=position.stop_loss_price,
                     timestamp_ms=timestamp_ms,
-                    exit_reason="stop_loss",
+                    exit_reason=stop_exit_reason,
                     intrabar_candle=candle,
+                    exit_signal=signal_by_ticker.get(ticker),
                 )
                 closed_tickers.add(ticker)
                 continue
@@ -1498,6 +1629,23 @@ class HistoricalBacktestSimulator:
                     timestamp_ms=timestamp_ms,
                     exit_reason="take_profit",
                     intrabar_candle=candle,
+                    exit_signal=signal_by_ticker.get(ticker),
+                )
+                closed_tickers.add(ticker)
+                continue
+            if self._should_exit_stale_winner(
+                position=position,
+                timestamp_ms=timestamp_ms,
+                current_price=candle.close_price,
+                strong_signal=strong_signal_by_ticker.get(ticker),
+            ):
+                self._close_position(
+                    ticker=ticker,
+                    raw_exit_price=candle.close_price,
+                    timestamp_ms=timestamp_ms,
+                    exit_reason="stale_winner",
+                    intrabar_candle=candle,
+                    exit_signal=signal_by_ticker.get(ticker),
                 )
                 closed_tickers.add(ticker)
         self._record_snapshot(timestamp_ms, mark_prices)
@@ -1523,6 +1671,12 @@ class HistoricalBacktestSimulator:
                 continue
             if signal.ticker in self.positions:
                 self.skipped_duplicate_ticker += 1
+                continue
+            if self._reentry_cooldown_active(signal.ticker, timestamp_ms):
+                self.skipped_reentry_cooldown += 1
+                continue
+            if self._ticker_daily_loss_limit_reached(signal.ticker, timestamp_ms):
+                self.skipped_ticker_daily_loss_limit += 1
                 continue
             if (
                 self.settings.max_open_positions > 0
@@ -1582,6 +1736,7 @@ class HistoricalBacktestSimulator:
                 entry_diagnostics=signal.entry_diagnostics,
                 take_profit_price=entry_price * (1.0 + self.settings.take_profit_pct),
                 stop_loss_price=entry_price * (1.0 - self.settings.stop_loss_pct),
+                profit_protection_adjustments=0,
                 entry_fee_usd=entry_fee_usd,
                 entry_slippage_usd=entry_slippage_usd,
             )
@@ -1924,6 +2079,7 @@ def format_comprehensive_backtest(result: ComprehensiveBacktestResult) -> str:
         ),
         (
             f"Exits: take_profit={summary.take_profits} stop_loss={summary.stop_losses} "
+            f"protected={summary.protected_profit_exits} stale={summary.stale_winner_exits} "
             f"forced={summary.forced_exits}"
         ),
         (
@@ -1931,7 +2087,10 @@ def format_comprehensive_backtest(result: ComprehensiveBacktestResult) -> str:
             f"dup={summary.skipped_duplicate_ticker} max_open={summary.skipped_max_open_positions} "
             f"cluster_cap={summary.skipped_cluster_limit} "
             f"batch_cap={summary.skipped_max_entries_per_rebalance} daily_stop={summary.skipped_daily_stop_losses} "
-            f"gross_cap={summary.skipped_gross_exposure_cap} too_small={summary.skipped_too_small}"
+            f"reentry_cooldown={summary.skipped_reentry_cooldown} "
+            f"ticker_loss_cap={summary.skipped_ticker_daily_loss_limit} "
+            f"gross_cap={summary.skipped_gross_exposure_cap} too_small={summary.skipped_too_small} "
+            f"profit_adjustments={summary.profit_protection_adjustments}"
         ),
         f"Max open positions observed: {summary.max_open_positions_observed}",
         "",
@@ -2033,6 +2192,7 @@ async def run_comprehensive_backtest_plan(
         started_at=time.monotonic(),
         last_reported_at=time.monotonic(),
     )
+    prior_emerging_signals: list[RankedSignal] = []
 
     try:
         for offset, bar_start_ms in enumerate(plan.confirmed_plan.replay_timestamps):
@@ -2081,10 +2241,19 @@ async def run_comprehensive_backtest_plan(
                     symbol: candle.close_price
                     for symbol, candle in intrabar_candles.items()
                 }
+                pre_exit_prices = {
+                    symbol: candle.open_price
+                    for symbol, candle in intrabar_candles.items()
+                }
+                simulator.adjust_profit_protection(
+                    ranked_signals=prior_emerging_signals,
+                    mark_prices=pre_exit_prices,
+                )
                 closed_tickers = simulator.process_intrabar_exits(
                     timestamp_ms=minute_close_ms,
                     intrabar_candles=intrabar_candles,
                     mark_prices=mark_prices,
+                    ranked_signals=emerging_signals,
                 )
                 simulator.process_entries(
                     timestamp_ms=minute_close_ms,
@@ -2092,6 +2261,7 @@ async def run_comprehensive_backtest_plan(
                     mark_prices=mark_prices,
                     blocked_tickers=closed_tickers,
                 )
+                prior_emerging_signals = emerging_signals
 
             confirmed_prices: dict[str, float] = {}
             confirmed_timestamp_ms = bar_start_ms + backtest_settings.ticker_interval_ms
@@ -2191,6 +2361,10 @@ async def run_comprehensive_backtest_plan(
         ),
         take_profits=sum(1 for trade in simulator.trades if trade.exit_reason == "take_profit"),
         stop_losses=sum(1 for trade in simulator.trades if trade.exit_reason == "stop_loss"),
+        protected_profit_exits=sum(
+            1 for trade in simulator.trades if trade.exit_reason == "protected_profit"
+        ),
+        stale_winner_exits=sum(1 for trade in simulator.trades if trade.exit_reason == "stale_winner"),
         forced_exits=sum(1 for trade in simulator.trades if trade.exit_reason == "end_of_backtest"),
         entry_ready_signals=simulator.entry_ready_signals,
         entries_filled=simulator.entries_filled,
@@ -2199,8 +2373,11 @@ async def run_comprehensive_backtest_plan(
         skipped_cluster_limit=simulator.skipped_cluster_limit,
         skipped_max_entries_per_rebalance=simulator.skipped_max_entries_per_rebalance,
         skipped_daily_stop_losses=simulator.skipped_daily_stop_losses,
+        skipped_reentry_cooldown=simulator.skipped_reentry_cooldown,
+        skipped_ticker_daily_loss_limit=simulator.skipped_ticker_daily_loss_limit,
         skipped_gross_exposure_cap=simulator.skipped_gross_exposure_cap,
         skipped_too_small=simulator.skipped_too_small,
+        profit_protection_adjustments=simulator.profit_protection_adjustments,
         max_open_positions_observed=simulator.max_open_positions_observed,
         signal_summary=signal_summary,
         daily=daily,

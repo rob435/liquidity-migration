@@ -33,9 +33,18 @@ TRADE_EXPORT_COLUMNS = [
     "ticker",
     "side",
     "entry_signal_kind",
+    "exit_signal_kind",
+    "exit_rank",
+    "exit_composite_score",
+    "exit_momentum_z",
+    "exit_curvature",
+    "exit_hurst",
     "exit_reason",
     "entry_price",
     "exit_price",
+    "take_profit_price_at_exit",
+    "stop_loss_price_at_exit",
+    "profit_protection_adjustments",
     "quantity",
     "notional_usd",
     "pnl_pct",
@@ -87,6 +96,8 @@ class TradeOverview:
     avg_volatility_pct: float | None
     stop_losses: int
     take_profits: int
+    protected_profit_exits: int
+    stale_winner_exits: int
 
 
 @dataclass(slots=True)
@@ -105,6 +116,8 @@ class TradeDaySummary:
     avg_holding_minutes: float | None
     stop_losses: int
     take_profits: int
+    protected_profit_exits: int
+    stale_winner_exits: int
     avg_mfe_pct: float | None
     avg_mae_pct: float | None
     avg_post_exit_best_pct: float | None
@@ -291,9 +304,20 @@ def _normalize_trade_row(row: dict[str, Any]) -> dict[str, Any]:
         "entry_signal_kind": _first_present(
             row, ("entry_signal_kind", "signal_kind", "signal", "entry_kind")
         ),
+        "exit_signal_kind": _first_present(row, ("exit_signal_kind",)),
+        "exit_rank": _int_or_none(_first_present(row, ("exit_rank",))),
+        "exit_composite_score": _float_or_none(_first_present(row, ("exit_composite_score",))),
+        "exit_momentum_z": _float_or_none(_first_present(row, ("exit_momentum_z",))),
+        "exit_curvature": _float_or_none(_first_present(row, ("exit_curvature",))),
+        "exit_hurst": _float_or_none(_first_present(row, ("exit_hurst",))),
         "exit_reason": exit_reason,
         "entry_price": entry_price,
         "exit_price": exit_price,
+        "take_profit_price_at_exit": _float_or_none(_first_present(row, ("take_profit_price_at_exit",))),
+        "stop_loss_price_at_exit": _float_or_none(_first_present(row, ("stop_loss_price_at_exit",))),
+        "profit_protection_adjustments": _int_or_none(
+            _first_present(row, ("profit_protection_adjustments",))
+        ),
         "quantity": quantity,
         "notional_usd": notional_usd,
         "pnl_pct": pnl_pct,
@@ -614,6 +638,8 @@ def _summarize_trades(rows: list[dict[str, Any]]) -> tuple[TradeOverview | None,
     trade_count = len(rows)
     stop_losses = _count_reason(rows, "stop_loss")
     take_profits = _count_reason(rows, "take_profit")
+    protected_profit_exits = _count_reason(rows, "protected_profit")
+    stale_winner_exits = _count_reason(rows, "stale_winner")
 
     daily_groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
@@ -644,6 +670,8 @@ def _summarize_trades(rows: list[dict[str, Any]]) -> tuple[TradeOverview | None,
         avg_volatility_pct=_mean(volatility_values),
         stop_losses=stop_losses,
         take_profits=take_profits,
+        protected_profit_exits=protected_profit_exits,
+        stale_winner_exits=stale_winner_exits,
     )
     return overview, daily_rows
 
@@ -681,6 +709,8 @@ def _summarize_trade_day(day: str, rows: list[dict[str, Any]]) -> TradeDaySummar
         avg_holding_minutes=_mean(holding_values),
         stop_losses=_count_reason(rows, "stop_loss"),
         take_profits=_count_reason(rows, "take_profit"),
+        protected_profit_exits=_count_reason(rows, "protected_profit"),
+        stale_winner_exits=_count_reason(rows, "stale_winner"),
         avg_mfe_pct=_mean(mfe_values),
         avg_mae_pct=_mean(mae_values),
         avg_post_exit_best_pct=_mean(post_exit_best_values),
@@ -893,7 +923,10 @@ def format_report(summary: ReportSummary) -> str:
                 f"avg_volatility_pct={_format_float(trade_overview.avg_volatility_pct)}"
             )
         lines.append(
-            f"  stop_losses={trade_overview.stop_losses} take_profits={trade_overview.take_profits}"
+            f"  stop_losses={trade_overview.stop_losses} "
+            f"protected_profit_exits={trade_overview.protected_profit_exits} "
+            f"stale_winner_exits={trade_overview.stale_winner_exits} "
+            f"take_profits={trade_overview.take_profits}"
         )
         trade_daily = getattr(summary, "trade_daily", [])
         if trade_daily:
@@ -905,7 +938,10 @@ def format_report(summary: ReportSummary) -> str:
                     f"pnl_pct={row.total_pnl_pct:.3f} pnl_usd={row.total_pnl_usd:.2f} "
                     f"avg_notional_usd={_format_float(row.avg_notional_usd, 2)} "
                     f"avg_holding_minutes={_format_float(row.avg_holding_minutes, 1)} "
-                    f"stop_losses={row.stop_losses} take_profits={row.take_profits}"
+                    f"stop_losses={row.stop_losses} "
+                    f"protected_profit_exits={row.protected_profit_exits} "
+                    f"stale_winner_exits={row.stale_winner_exits} "
+                    f"take_profits={row.take_profits}"
                 )
         else:
             lines.append("Daily trade results:")

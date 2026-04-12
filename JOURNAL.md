@@ -395,3 +395,36 @@
 - Added real replay-loop progress output for single comprehensive runs:
   - stdout now prints a text progress bar plus completed bars, elapsed time, and ETA during the actual replay loop instead of going silent after `replay plan ready`
   - kept it dependency-free and time-gated so the terminal gets useful updates without dumping a line for every bar
+- Added one-step profit protection to both live execution and the simulator:
+  - open positions now persist their current TP, current SL, and how many profit-protection ratchets have already been used
+  - when an open long is still `entry_ready`, still highly ranked, and already near TP, the engine now extends the TP once and lifts the stop above entry instead of blindly taking profit and immediately re-entering
+  - the live Bybit path updates venue-owned TP/SL in place; the simulator mirrors the same ratchet logic conservatively using the prior intrabar signal state so the backtest does not cheat on the same candle
+- Added explicit protected-profit accounting:
+  - protected stop-outs now land as `protected_profit` / `protected_profit_exit` instead of being mislabeled as ordinary stop losses
+  - report output now counts protected-profit exits separately from raw stop losses and take profits
+- Added regression coverage for the new behavior:
+  - live execution test now verifies a second Bybit `set_trading_stop` call occurs when strength persists near TP
+  - simulator test now verifies the ratchet can lock profit and exit through the raised stop
+- Reran validation after the profit-protection pass:
+  - `python3 -m py_compile config.py database.py alerting.py execution.py backtest.py report.py tests/test_execution.py tests/test_backtest.py`
+  - `python3 -m pyflakes config.py database.py alerting.py execution.py backtest.py report.py tests/test_execution.py tests/test_backtest.py`
+  - `python3 -m pytest -q` -> `88 passed`
+- Added three new anti-churn / profit-management behaviors without leaving the v1 contract:
+  - same-ticker re-entry cooldown after profitable exits
+  - same-ticker UTC-day loss throttle after repeated losers
+  - stale-winner exits for profit-protected names that stay profitable but lose signal strength and overstay their useful holding window
+- Added richer exit analytics to `trade_analytics` and trade exports:
+  - exit-time signal state (`exit_signal_kind`, rank, composite, momentum, curvature, Hurst)
+  - TP/SL levels active at exit
+  - profit-protection adjustment count
+- Added live-path support for explicit pending exit reasons on venue-managed exits so stale-winner and protected exits survive Bybit close reconciliation instead of collapsing into generic labels.
+- Added focused regression coverage for the new controls:
+  - profitable-exit re-entry cooldown in live/paper execution
+  - same-ticker daily loser throttle in live/paper execution
+  - stale-winner exit in live/paper execution
+  - matching simulator/backtest behavior for re-entry cooldown, ticker loss caps, and stale-winner exits
+- Reran validation after the anti-churn / analytics pass:
+  - `python3 -m py_compile config.py database.py exchange.py alerting.py execution.py backtest.py report.py tests/test_execution.py tests/test_backtest.py`
+  - `python3 -m pyflakes config.py database.py exchange.py alerting.py execution.py backtest.py report.py tests/test_execution.py tests/test_backtest.py`
+  - `python3 -m pytest -q tests/test_execution.py tests/test_backtest.py` -> `43 passed`
+  - `python3 -m pytest -q` -> `95 passed`

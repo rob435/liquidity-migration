@@ -17,6 +17,7 @@ from backtest import (
     InMemorySignalDatabase,
     MinuteReplayPlan,
     ReplayProgressTracker,
+    SimulatedPosition,
     export_variant_run_result,
     fetch_minute_replay_plan,
     format_variant_run_result,
@@ -30,6 +31,7 @@ from backtest import (
     _combine_variant_specs,
     _build_sweep_window_end_times,
     _load_plan_snapshot,
+    _utc_day,
     _write_plan_snapshot,
     run_backtest_plan,
     run_comprehensive_backtest_plan,
@@ -39,6 +41,7 @@ from config import Settings
 from database import SignalRecord
 from exchange import HistoricalCandle, interval_to_milliseconds
 from replay import build_replay_plan
+from signal_engine import RankedSignal
 
 
 def test_backtest_plan_generates_closed_trades(tmp_path: Path) -> None:
@@ -289,10 +292,19 @@ def test_post_exit_tracking_populates_trade_follow_through_metrics() -> None:
             entry_signal_kind="entry_ready",
             cluster_label="corr:AAAUSDT",
             entry_diagnostics="ref=cluster_relative:corr:AAAUSDT",
+            exit_signal_kind="entry_ready",
+            exit_rank=1,
+            exit_composite_score=1.4,
+            exit_momentum_z=2.0,
+            exit_curvature=0.2,
+            exit_hurst=0.7,
             exit_reason="take_profit",
             quantity=1.0,
             entry_price=99.0,
             exit_price=100.0,
+            take_profit_price_at_exit=100.98,
+            stop_loss_price_at_exit=97.02,
+            profit_protection_adjustments=0,
             notional_usd=99.0,
             gross_pnl_usd=1.0,
             net_pnl_usd=1.0,
@@ -341,6 +353,183 @@ def test_post_exit_tracking_populates_trade_follow_through_metrics() -> None:
     assert trade.volatility_pct is not None
     assert trade.volatility_pct > 0.0
     assert simulator.post_exit_trackers == []
+
+
+def test_profit_protection_locks_profit_in_simulator() -> None:
+    settings = Settings(
+        profit_protection_enabled=True,
+        profit_protection_trigger_pct=0.015,
+        profit_protection_tp_extension_pct=0.01,
+        profit_protection_sl_lock_pct=0.005,
+        profit_protection_max_adjustments=1,
+        profit_protection_max_rank=2,
+    )
+    simulator = HistoricalBacktestSimulator(settings)
+    simulator.positions["AAAUSDT"] = SimulatedPosition(
+        ticker="AAAUSDT",
+        quantity=1.0,
+        entry_price=100.0,
+        raw_entry_price=100.0,
+        notional_usd=100.0,
+        opened_at_ms=0,
+        entry_stage="emerging",
+        entry_signal_kind="entry_ready",
+        cluster_label="manual:layer1",
+        entry_diagnostics="ref=cluster_relative:manual:layer1",
+        take_profit_price=102.0,
+        stop_loss_price=98.0,
+        entry_fee_usd=0.0,
+        entry_slippage_usd=0.0,
+        profit_protection_adjustments=0,
+    )
+
+    simulator.adjust_profit_protection(
+        ranked_signals=[
+            RankedSignal(
+                stage="emerging",
+                signal_kind="entry_ready",
+                ticker="AAAUSDT",
+                current_price=101.6,
+                momentum_z=2.2,
+                curvature=0.2,
+                hurst=0.7,
+                regime_score=2,
+                composite_score=1.5,
+                rank=1,
+                persistence_hits=1,
+                alerted=False,
+            )
+        ],
+        mark_prices={"AAAUSDT": 101.6},
+    )
+
+    position = simulator.positions["AAAUSDT"]
+    assert position.take_profit_price == pytest.approx(103.0)
+    assert position.stop_loss_price == pytest.approx(100.5)
+    assert position.profit_protection_adjustments == 1
+    assert simulator.profit_protection_adjustments == 1
+
+    closed_tickers = simulator.process_intrabar_exits(
+        timestamp_ms=60_000,
+        intrabar_candles={
+            "AAAUSDT": HistoricalCandle(
+                start_time_ms=0,
+                open_price=101.2,
+                high_price=101.3,
+                low_price=100.4,
+                close_price=100.4,
+            )
+        },
+        mark_prices={"AAAUSDT": 100.4},
+        ranked_signals=[],
+    )
+
+    assert closed_tickers == {"AAAUSDT"}
+    assert simulator.trades[-1].exit_reason == "protected_profit"
+
+
+def test_reentry_cooldown_blocks_immediate_reentry_in_simulator() -> None:
+    settings = Settings(
+        reentry_cooldown_after_profit_minutes=90,
+        take_profit_pct=0.02,
+        stop_loss_pct=0.02,
+    )
+    simulator = HistoricalBacktestSimulator(settings)
+    simulator.last_profitable_exit_ms_by_ticker["AAAUSDT"] = 0
+    simulator.process_entries(
+        timestamp_ms=30 * 60_000,
+        ranked_signals=[
+            RankedSignal(
+                stage="emerging",
+                signal_kind="entry_ready",
+                ticker="AAAUSDT",
+                current_price=100.0,
+                momentum_z=2.0,
+                curvature=0.2,
+                hurst=0.7,
+                regime_score=2,
+                composite_score=1.4,
+                rank=1,
+                persistence_hits=0,
+                alerted=False,
+            )
+        ],
+        mark_prices={"AAAUSDT": 100.0},
+    )
+    assert "AAAUSDT" not in simulator.positions
+    assert simulator.skipped_reentry_cooldown == 1
+
+
+def test_ticker_daily_loss_limit_blocks_new_entries_in_simulator() -> None:
+    settings = Settings(max_ticker_losing_trades_per_day=1)
+    simulator = HistoricalBacktestSimulator(settings)
+    simulator.ticker_losses_by_day["AAAUSDT"][_utc_day(0)] = 1
+    simulator.process_entries(
+        timestamp_ms=1,
+        ranked_signals=[
+            RankedSignal(
+                stage="emerging",
+                signal_kind="entry_ready",
+                ticker="AAAUSDT",
+                current_price=100.0,
+                momentum_z=2.0,
+                curvature=0.2,
+                hurst=0.7,
+                regime_score=2,
+                composite_score=1.4,
+                rank=1,
+                persistence_hits=0,
+                alerted=False,
+            )
+        ],
+        mark_prices={"AAAUSDT": 100.0},
+    )
+    assert "AAAUSDT" not in simulator.positions
+    assert simulator.skipped_ticker_daily_loss_limit == 1
+
+
+def test_stale_winner_exit_closes_faded_profitable_trade_in_simulator() -> None:
+    settings = Settings(
+        stale_winner_exit_enabled=True,
+        stale_winner_min_profit_pct=0.006,
+        stale_winner_min_hold_minutes=360,
+        stale_winner_max_rank=3,
+        stale_winner_require_profit_protection=True,
+    )
+    simulator = HistoricalBacktestSimulator(settings)
+    simulator.positions["AAAUSDT"] = SimulatedPosition(
+        ticker="AAAUSDT",
+        quantity=1.0,
+        entry_price=100.0,
+        raw_entry_price=100.0,
+        notional_usd=100.0,
+        opened_at_ms=0,
+        entry_stage="emerging",
+        entry_signal_kind="entry_ready",
+        cluster_label="manual:layer1",
+        entry_diagnostics="ref=cluster_relative:manual:layer1",
+        take_profit_price=103.0,
+        stop_loss_price=100.5,
+        entry_fee_usd=0.0,
+        entry_slippage_usd=0.0,
+        profit_protection_adjustments=1,
+    )
+    closed_tickers = simulator.process_intrabar_exits(
+        timestamp_ms=360 * 60_000,
+        intrabar_candles={
+            "AAAUSDT": HistoricalCandle(
+                start_time_ms=0,
+                open_price=100.9,
+                high_price=101.0,
+                low_price=100.7,
+                close_price=100.8,
+            )
+        },
+        mark_prices={"AAAUSDT": 100.8},
+        ranked_signals=[],
+    )
+    assert closed_tickers == {"AAAUSDT"}
+    assert simulator.trades[-1].exit_reason == "stale_winner"
 
 
 def test_build_sweep_window_end_times_honors_spacing_and_limit() -> None:
