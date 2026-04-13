@@ -17,3 +17,4 @@ smoke-replay.sqlite3
 *.sqlite3.gz
 backtest.sqlite3
 backtest-*.sqlite3
+prefetch.log
