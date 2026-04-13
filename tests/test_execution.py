@@ -71,12 +71,20 @@ def test_execution_engine_blocks_reentry_after_profitable_exit(tmp_path: Path) -
     asyncio.run(_exercise_reentry_cooldown_after_profit(tmp_path))
 
 
+def test_execution_engine_requires_fresh_improvement_for_reentry_after_profit(tmp_path: Path) -> None:
+    asyncio.run(_exercise_reentry_improvement_gate_after_profit(tmp_path))
+
+
 def test_execution_engine_blocks_same_ticker_after_daily_loser(tmp_path: Path) -> None:
     asyncio.run(_exercise_ticker_daily_loss_throttle(tmp_path))
 
 
 def test_execution_engine_exits_stale_winner_in_paper_mode(tmp_path: Path) -> None:
     asyncio.run(_exercise_paper_stale_winner_exit(tmp_path))
+
+
+def test_execution_engine_records_time_to_first_profit_metrics(tmp_path: Path) -> None:
+    asyncio.run(_exercise_time_to_first_profit_metrics(tmp_path))
 
 
 def test_execution_engine_skips_live_entry_when_venue_position_exists(tmp_path: Path) -> None:
@@ -389,6 +397,56 @@ async def _exercise_reentry_cooldown_after_profit(tmp_path: Path) -> None:
     assert "reentry_cooldown_after_profit" in actions[0].detail
 
 
+async def _exercise_reentry_improvement_gate_after_profit(tmp_path: Path) -> None:
+    settings = Settings(
+        sqlite_path=str(tmp_path / "execution-reentry-improvement.db"),
+        universe=["AAAUSDT"],
+        execution_enabled=True,
+        demo_mode=True,
+        execution_submit_orders=False,
+        entry_notional_usd=200.0,
+        take_profit_pct=0.02,
+        stop_loss_pct=0.02,
+        reentry_cooldown_after_profit_minutes=0,
+        reentry_after_profit_min_rank_improvement=1,
+        reentry_after_profit_min_composite_improvement=0.10,
+    )
+    state = MarketState(settings=settings)
+    state.replace_history("BTCUSDT", [(0, 20_000.0), (settings.ticker_interval_ms, 20_100.0)])
+    state.replace_history("AAAUSDT", [(0, 100.0), (settings.ticker_interval_ms, 101.0)])
+
+    database = SignalDatabase(settings.sqlite_path)
+    await database.initialize()
+    execution = ExecutionEngine(settings=settings, state=state, database=database, notifier=RecordingNotifier())
+
+    await execution.process_cycle(
+        stage="emerging",
+        cycle_time_ms=settings.ticker_interval_ms * 2,
+        ranked_signals=[RankedSignal(stage="emerging", signal_kind="entry_ready", ticker="AAAUSDT", current_price=101.0, momentum_z=2.0, curvature=0.2, hurst=0.7, regime_score=2, composite_score=1.4, rank=2, persistence_hits=0, alerted=False)],
+    )
+    assert state.update_provisional("AAAUSDT", settings.ticker_interval_ms * 2, 103.1) is True
+    await execution.process_cycle(
+        stage="emerging",
+        cycle_time_ms=settings.ticker_interval_ms * 2,
+        ranked_signals=[RankedSignal(stage="emerging", signal_kind="entry_ready", ticker="AAAUSDT", current_price=103.1, momentum_z=2.1, curvature=0.2, hurst=0.7, regime_score=2, composite_score=1.45, rank=2, persistence_hits=0, alerted=False)],
+    )
+
+    blocked_actions = await execution.process_cycle(
+        stage="emerging",
+        cycle_time_ms=settings.ticker_interval_ms * 3,
+        ranked_signals=[RankedSignal(stage="emerging", signal_kind="entry_ready", ticker="AAAUSDT", current_price=103.1, momentum_z=2.1, curvature=0.2, hurst=0.7, regime_score=2, composite_score=1.46, rank=2, persistence_hits=0, alerted=False)],
+    )
+    assert [(action.action, action.ticker) for action in blocked_actions] == [("skip_entry", "AAAUSDT")]
+    assert "reentry_no_improvement_after_profit" in blocked_actions[0].detail
+
+    allowed_actions = await execution.process_cycle(
+        stage="emerging",
+        cycle_time_ms=settings.ticker_interval_ms * 4,
+        ranked_signals=[RankedSignal(stage="emerging", signal_kind="entry_ready", ticker="AAAUSDT", current_price=103.1, momentum_z=2.2, curvature=0.2, hurst=0.7, regime_score=2, composite_score=1.56, rank=2, persistence_hits=0, alerted=False)],
+    )
+    assert [(action.action, action.ticker) for action in allowed_actions] == [("enter_long", "AAAUSDT")]
+
+
 async def _exercise_ticker_daily_loss_throttle(tmp_path: Path) -> None:
     settings = Settings(
         sqlite_path=str(tmp_path / "execution-ticker-loss-cap.db"),
@@ -479,6 +537,51 @@ async def _exercise_paper_stale_winner_exit(tmp_path: Path) -> None:
 
     assert [(action.action, action.ticker) for action in actions] == [("exit_long", "AAAUSDT")]
     assert notifier.events == [("enter_long", "AAAUSDT"), ("stale_winner_exit", "AAAUSDT")]
+
+
+async def _exercise_time_to_first_profit_metrics(tmp_path: Path) -> None:
+    settings = Settings(
+        sqlite_path=str(tmp_path / "execution-profit-timing.db"),
+        universe=["AAAUSDT"],
+        execution_enabled=True,
+        backtest_mode=True,
+        demo_mode=True,
+        execution_submit_orders=False,
+        entry_notional_usd=200.0,
+        take_profit_pct=0.02,
+        stop_loss_pct=0.02,
+    )
+    state = MarketState(settings=settings)
+    state.replace_history("BTCUSDT", [(0, 20_000.0), (settings.ticker_interval_ms, 20_100.0)])
+    state.replace_history("AAAUSDT", [(0, 100.0), (settings.ticker_interval_ms, 101.0)])
+
+    database = SignalDatabase(settings.sqlite_path)
+    await database.initialize()
+    execution = ExecutionEngine(settings=settings, state=state, database=database, notifier=RecordingNotifier())
+
+    await execution.process_cycle(
+        stage="emerging",
+        cycle_time_ms=settings.ticker_interval_ms * 2,
+        ranked_signals=[RankedSignal(stage="emerging", signal_kind="entry_ready", ticker="AAAUSDT", current_price=101.0, momentum_z=2.0, curvature=0.2, hurst=0.7, regime_score=2, composite_score=1.4, rank=1, persistence_hits=0, alerted=False)],
+    )
+    assert state.update_provisional("AAAUSDT", settings.ticker_interval_ms * 2, 103.2) is True
+    await execution.process_cycle(
+        stage="emerging",
+        cycle_time_ms=settings.ticker_interval_ms * 2,
+        ranked_signals=[],
+    )
+
+    with sqlite3.connect(settings.sqlite_path) as connection:
+        row = connection.execute(
+            """
+            SELECT minutes_to_first_profit_50bps, minutes_to_first_profit_100bps
+            FROM trade_analytics
+            WHERE ticker = 'AAAUSDT'
+            ORDER BY position_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    assert row == (0.0, 0.0)
 
 
 async def _exercise_per_ticker_entry_guard(tmp_path: Path) -> None:

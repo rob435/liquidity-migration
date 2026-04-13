@@ -166,3 +166,24 @@
 - Stale winners should exit only after they have already earned the right to be treated as winners. The stale-winner path therefore requires profit protection first by default; otherwise it would just become another discretionary early-exit rule.
 - Exit analytics need exit-state fields, not just more raw signal spam. Recording exit-time rank/composite/momentum/curvature/Hurst plus active TP/SL and ratchet count is the useful data-driven compromise.
 - Venue close reconciliation must preserve intentional exit reasons. If the engine submitted a reduce-only stale-winner exit, the later Bybit sync path should not relabel it as a generic venue close just because the final close was observed asynchronously.
+
+## 2026-04-13
+
+- A profitable same-ticker re-entry should not be allowed merely because the cooldown expired. Treat it as a fresh setup only if it is measurably better than the last profitable exit, using exit-state rank and/or composite improvement rather than vague “still strong” logic.
+- The re-entry gate should be permissive only when there is no useful prior exit-state information. If the last profitable exit has no exit rank or exit composite recorded, allow the trade rather than inventing a fake block.
+- Time-to-first-profit is worth tracking because it supports a real stale-trade hypothesis without adding a discretionary exit rule first. The repo now records those milestones before trying to optimize around them.
+- Ticker-level fee-farm analysis belongs in the backtest outputs, not in hand-run spreadsheets after the fact. Per-ticker fees, slippage, expectancy, and win rate are now first-class backtest summary fields.
+- Do not add a made-up “regime slippage model” just because Reddit likes harsher backtests. Stress modeling is only worth adding when the scaling rule is defendable from repo data; arbitrary regime penalties would be cargo culting.
+- Stability screening should sit on top of the existing grid runner, not become a separate optimization engine. The useful contract is robust neighborhood summaries and per-setting robustness exports, not another bespoke search mode to maintain.
+- Prefer median / profitable-fraction / worst-drawdown style robustness metrics over “best row wins.” That is the cleanest way to penalize fragile parameter pockets without pretending the repo can certify true robustness from one number.
+- Treat volatility expansion as a regime-filter experiment, not as an excuse for dynamic stops or ATR sizing. The honest v1-safe implementation is an optional blocker on `entry_ready`, not another adaptive risk engine.
+- Do not fake true ATR when the regime path only has close series. The repo now uses a close-only ATR-style ratio on the normalized basket path and names it accordingly in docs instead of pretending the data is richer than it is.
+- The immediate research priority is no longer “add features.” It is: prove net edge after costs, validate entry quality, measure anti-churn opportunity cost, and prune weak filters.
+- Hurst, VEI, and every intraday regime sub-check are on probation. If isolated testing does not justify them, cut them instead of preserving them for sophistication theater.
+- Keep the structural core unless data disproves it: residual/cluster-relative momentum, cluster exposure caps, fixed TP/SL, and one-step profit protection are currently more defensible than extra gatekeeping layers.
+- Promote the winning 30-day grid row into the active baseline instead of continuing to tune around weaker `pass_count=3` variants:
+  - `ENTRY_READY_MIN_COMPOSITE_GAIN=0.00`
+  - `ENTRY_READY_MIN_OBSERVATIONS=3`
+  - `INTRADAY_REGIME_MIN_PASS_COUNT=4`
+- Treat VEI hard-gating as the honest test of the idea. Soft-vote VEI remains available for comparison, but it is too weak to answer whether volatility expansion should truly block `entry_ready`.
+- Keep VEI off by default. If hard-gate tests do not improve net results or robustness materially, deprioritize it instead of stacking more volatility heuristics.

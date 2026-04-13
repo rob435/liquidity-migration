@@ -43,6 +43,24 @@ def test_signal_engine_can_disable_intraday_regime_filter(tmp_path: Path) -> Non
     asyncio.run(_exercise_intraday_regime_disabled(tmp_path))
 
 
+def test_signal_engine_blocks_entry_ready_when_volatility_expansion_filter_trips(
+    tmp_path: Path,
+) -> None:
+    asyncio.run(_exercise_volatility_expansion_block(tmp_path))
+
+
+def test_signal_engine_can_disable_volatility_expansion_filter(tmp_path: Path) -> None:
+    asyncio.run(_exercise_volatility_expansion_disabled(tmp_path))
+
+
+def test_signal_engine_keeps_vei_as_soft_vote_without_hard_gate(tmp_path: Path) -> None:
+    asyncio.run(_exercise_volatility_expansion_soft_vote(tmp_path))
+
+
+def test_signal_engine_hard_gates_entry_ready_when_vei_fails(tmp_path: Path) -> None:
+    asyncio.run(_exercise_volatility_expansion_hard_gate(tmp_path))
+
+
 def test_signal_engine_confirmed_stage_emits_no_trade_signals(tmp_path: Path) -> None:
     asyncio.run(_exercise_confirmed_stage_is_inert(tmp_path))
 
@@ -206,6 +224,7 @@ async def _exercise_emerging_transition_behavior(tmp_path: Path) -> None:
         entry_ready_min_observations=5,
         entry_ready_min_rank_improvement=2,
         entry_ready_min_composite_gain=0.01,
+        intraday_regime_filter_enabled=False,
         regime_thresholds={0: None, 1: None, 2: None, 3: None},
     )
     state = MarketState(settings=settings)
@@ -443,6 +462,376 @@ async def _exercise_intraday_regime_disabled(tmp_path: Path) -> None:
     regime = engine.last_intraday_regime["emerging"]
     assert regime is not None
     assert regime.tradeable is True
+
+
+def _series_with_volatile_tail(
+    length: int,
+    per_bar_drift: float,
+    *,
+    tail_multipliers: list[float] | None = None,
+) -> list[float]:
+    if tail_multipliers is None:
+        tail_multipliers = [
+            1.000,
+            1.002,
+            1.004,
+            1.006,
+            1.008,
+            1.010,
+            1.012,
+            1.014,
+            1.016,
+            1.018,
+            1.020,
+            1.022,
+            1.050,
+            1.028,
+            1.058,
+            1.034,
+            1.066,
+        ]
+    series = [100 + idx * per_bar_drift for idx in range(length)]
+    tail_len = len(tail_multipliers)
+    anchor = series[-tail_len]
+    series[-tail_len:] = [anchor * multiplier for multiplier in tail_multipliers]
+    return series
+
+
+async def _exercise_volatility_expansion_block(tmp_path: Path) -> None:
+    settings = Settings(
+        sqlite_path=str(tmp_path / "volatility-expansion-block.db"),
+        universe=["AAAUSDT", "BBBUSDT", "CCCUSDT"],
+        telegram_bot_token=None,
+        telegram_chat_id=None,
+        watchlist_telegram_enabled=True,
+        top_n=1,
+        emerging_top_n=1,
+        entry_ready_top_n=1,
+        watchlist_top_n=5,
+        emerging_min_observations=3,
+        emerging_min_rank_improvement=2,
+        entry_ready_min_observations=5,
+        entry_ready_min_rank_improvement=2,
+        entry_ready_min_composite_gain=0.01,
+        intraday_regime_filter_enabled=True,
+        intraday_regime_lookback_bars=16,
+        intraday_regime_min_breadth=0.0,
+        intraday_regime_min_efficiency=0.0,
+        intraday_regime_min_basket_return=-1.0,
+        intraday_regime_min_leadership_persistence=0.0,
+        intraday_regime_min_pass_count=5,
+        volatility_expansion_filter_enabled=True,
+        volatility_expansion_short_bars=4,
+        volatility_expansion_long_bars=16,
+        volatility_expansion_max_ratio=1.2,
+        regime_thresholds={0: None, 1: None, 2: None, 3: None},
+    )
+    state = MarketState(settings=settings)
+    timestamps = [idx * settings.ticker_interval_ms for idx in range(settings.state_window)]
+    next_timestamp = timestamps[-1] + settings.ticker_interval_ms
+    btc_prices = [20_000 + idx * 50 for idx in range(settings.state_window)]
+    strong = [100 + idx * 0.03 for idx in range(settings.state_window)]
+    base = [100 + idx * 0.02 for idx in range(settings.state_window)]
+    weak = [100 + idx * 0.01 for idx in range(settings.state_window)]
+
+    state.replace_history("BTCUSDT", list(zip(timestamps, btc_prices)))
+    state.replace_history("AAAUSDT", list(zip(timestamps, strong)))
+    state.replace_history("BBBUSDT", list(zip(timestamps, base)))
+    state.replace_history("CCCUSDT", list(zip(timestamps, weak)))
+    state.global_state.btc_daily_closes = np.asarray(
+        [20_000 + idx * 100 for idx in range(settings.btc_daily_lookback)],
+        dtype=float,
+    )
+
+    class SilentNotifier:
+        async def send(self, payload) -> bool:
+            return True
+
+    database = SignalDatabase(settings.sqlite_path)
+    await database.initialize()
+    engine = SignalEngine(
+        settings=settings,
+        state=state,
+        database=database,
+        notifier=SilentNotifier(),
+    )
+
+    state.intrabar_observations["AAAUSDT"] = deque(
+        [
+            IntrabarObservation(observed_at_ms=next_timestamp - 40_000, rank=5, composite_score=-0.1),
+            IntrabarObservation(observed_at_ms=next_timestamp - 30_000, rank=3, composite_score=0.1),
+            IntrabarObservation(observed_at_ms=next_timestamp - 20_000, rank=2, composite_score=0.2),
+            IntrabarObservation(observed_at_ms=next_timestamp - 10_000, rank=1, composite_score=0.3),
+        ],
+        maxlen=state.intrabar_observations["AAAUSDT"].maxlen,
+    )
+    state.intrabar_state["AAAUSDT"] = "emerging"
+    assert state.update_provisional("AAAUSDT", next_timestamp, strong[-1] + 8.0) is True
+
+    signals = await engine.process(cycle_time_ms=next_timestamp, stage="emerging")
+
+    aaa_signal = next(signal for signal in signals if signal.ticker == "AAAUSDT")
+    assert aaa_signal.signal_kind in {"watchlist", "emerging"}
+    assert aaa_signal.signal_kind != "entry_ready"
+    regime = engine.last_intraday_regime["emerging"]
+    assert regime is not None
+    assert regime.tradeable is False
+    assert regime.total_checks == 5
+    assert regime.volatility_expansion_ratio is not None
+    assert regime.volatility_expansion_ratio > settings.volatility_expansion_max_ratio
+    assert "volatility_expansion" in regime.blockers
+
+
+async def _exercise_volatility_expansion_disabled(tmp_path: Path) -> None:
+    settings = Settings(
+        sqlite_path=str(tmp_path / "volatility-expansion-disabled.db"),
+        universe=["AAAUSDT", "BBBUSDT", "CCCUSDT"],
+        telegram_bot_token=None,
+        telegram_chat_id=None,
+        watchlist_telegram_enabled=True,
+        top_n=1,
+        emerging_top_n=1,
+        entry_ready_top_n=1,
+        watchlist_top_n=5,
+        emerging_min_observations=3,
+        emerging_min_rank_improvement=2,
+        entry_ready_min_observations=5,
+        entry_ready_min_rank_improvement=2,
+        entry_ready_min_composite_gain=0.01,
+        intraday_regime_filter_enabled=True,
+        intraday_regime_lookback_bars=16,
+        intraday_regime_min_breadth=0.0,
+        intraday_regime_min_efficiency=0.0,
+        intraday_regime_min_basket_return=-1.0,
+        intraday_regime_min_leadership_persistence=0.0,
+        intraday_regime_min_pass_count=4,
+        volatility_expansion_filter_enabled=False,
+        regime_thresholds={0: None, 1: None, 2: None, 3: None},
+    )
+    state = MarketState(settings=settings)
+    timestamps = [idx * settings.ticker_interval_ms for idx in range(settings.state_window)]
+    next_timestamp = timestamps[-1] + settings.ticker_interval_ms
+    btc_prices = [20_000 + idx * 50 for idx in range(settings.state_window)]
+    strong = [100 + idx * 0.03 for idx in range(settings.state_window)]
+    base = [100 + idx * 0.02 for idx in range(settings.state_window)]
+    weak = [100 + idx * 0.01 for idx in range(settings.state_window)]
+
+    state.replace_history("BTCUSDT", list(zip(timestamps, btc_prices)))
+    state.replace_history("AAAUSDT", list(zip(timestamps, strong)))
+    state.replace_history("BBBUSDT", list(zip(timestamps, base)))
+    state.replace_history("CCCUSDT", list(zip(timestamps, weak)))
+    state.global_state.btc_daily_closes = np.asarray(
+        [20_000 + idx * 100 for idx in range(settings.btc_daily_lookback)],
+        dtype=float,
+    )
+
+    class SilentNotifier:
+        async def send(self, payload) -> bool:
+            return True
+
+    database = SignalDatabase(settings.sqlite_path)
+    await database.initialize()
+    engine = SignalEngine(
+        settings=settings,
+        state=state,
+        database=database,
+        notifier=SilentNotifier(),
+    )
+
+    state.intrabar_observations["AAAUSDT"] = deque(
+        [
+            IntrabarObservation(observed_at_ms=next_timestamp - 40_000, rank=5, composite_score=-0.1),
+            IntrabarObservation(observed_at_ms=next_timestamp - 30_000, rank=3, composite_score=0.1),
+            IntrabarObservation(observed_at_ms=next_timestamp - 20_000, rank=2, composite_score=0.2),
+            IntrabarObservation(observed_at_ms=next_timestamp - 10_000, rank=1, composite_score=0.3),
+        ],
+        maxlen=state.intrabar_observations["AAAUSDT"].maxlen,
+    )
+    state.intrabar_state["AAAUSDT"] = "emerging"
+    assert state.update_provisional("AAAUSDT", next_timestamp, strong[-1] + 8.0) is True
+
+    signals = await engine.process(cycle_time_ms=next_timestamp, stage="emerging")
+
+    aaa_signal = next(signal for signal in signals if signal.ticker == "AAAUSDT")
+    assert aaa_signal.signal_kind == "entry_ready"
+    assert "vei=n/a" in aaa_signal.entry_diagnostics
+    regime = engine.last_intraday_regime["emerging"]
+    assert regime is not None
+    assert regime.tradeable is True
+    assert regime.total_checks == 4
+    assert regime.volatility_expansion_ratio is None
+
+
+async def _exercise_volatility_expansion_soft_vote(tmp_path: Path) -> None:
+    settings = Settings(
+        sqlite_path=str(tmp_path / "volatility-expansion-soft-vote.db"),
+        universe=["AAAUSDT", "BBBUSDT", "CCCUSDT"],
+        telegram_bot_token=None,
+        telegram_chat_id=None,
+        watchlist_telegram_enabled=True,
+        top_n=1,
+        emerging_top_n=1,
+        entry_ready_top_n=1,
+        watchlist_top_n=5,
+        emerging_min_observations=3,
+        emerging_min_rank_improvement=2,
+        entry_ready_min_observations=5,
+        entry_ready_min_rank_improvement=2,
+        entry_ready_min_composite_gain=0.01,
+        intraday_regime_filter_enabled=True,
+        intraday_regime_lookback_bars=16,
+        intraday_regime_min_breadth=0.0,
+        intraday_regime_min_efficiency=0.0,
+        intraday_regime_min_basket_return=-1.0,
+        intraday_regime_min_leadership_persistence=0.0,
+        intraday_regime_min_pass_count=4,
+        volatility_expansion_filter_enabled=True,
+        volatility_expansion_hard_gate=False,
+        volatility_expansion_short_bars=4,
+        volatility_expansion_long_bars=16,
+        volatility_expansion_max_ratio=1.2,
+        regime_thresholds={0: None, 1: None, 2: None, 3: None},
+    )
+    state = MarketState(settings=settings)
+    timestamps = [idx * settings.ticker_interval_ms for idx in range(settings.state_window)]
+    next_timestamp = timestamps[-1] + settings.ticker_interval_ms
+    btc_prices = [20_000 + idx * 50 for idx in range(settings.state_window)]
+    strong = [100 + idx * 0.03 for idx in range(settings.state_window)]
+    base = [100 + idx * 0.02 for idx in range(settings.state_window)]
+    weak = [100 + idx * 0.01 for idx in range(settings.state_window)]
+
+    state.replace_history("BTCUSDT", list(zip(timestamps, btc_prices)))
+    state.replace_history("AAAUSDT", list(zip(timestamps, strong)))
+    state.replace_history("BBBUSDT", list(zip(timestamps, base)))
+    state.replace_history("CCCUSDT", list(zip(timestamps, weak)))
+    state.global_state.btc_daily_closes = np.asarray(
+        [20_000 + idx * 100 for idx in range(settings.btc_daily_lookback)],
+        dtype=float,
+    )
+
+    class SilentNotifier:
+        async def send(self, payload) -> bool:
+            return True
+
+    database = SignalDatabase(settings.sqlite_path)
+    await database.initialize()
+    engine = SignalEngine(
+        settings=settings,
+        state=state,
+        database=database,
+        notifier=SilentNotifier(),
+    )
+
+    state.intrabar_observations["AAAUSDT"] = deque(
+        [
+            IntrabarObservation(observed_at_ms=next_timestamp - 40_000, rank=5, composite_score=-0.1),
+            IntrabarObservation(observed_at_ms=next_timestamp - 30_000, rank=3, composite_score=0.1),
+            IntrabarObservation(observed_at_ms=next_timestamp - 20_000, rank=2, composite_score=0.2),
+            IntrabarObservation(observed_at_ms=next_timestamp - 10_000, rank=1, composite_score=0.3),
+        ],
+        maxlen=state.intrabar_observations["AAAUSDT"].maxlen,
+    )
+    state.intrabar_state["AAAUSDT"] = "emerging"
+    assert state.update_provisional("AAAUSDT", next_timestamp, strong[-1] + 8.0) is True
+
+    signals = await engine.process(cycle_time_ms=next_timestamp, stage="emerging")
+
+    aaa_signal = next(signal for signal in signals if signal.ticker == "AAAUSDT")
+    assert aaa_signal.signal_kind == "entry_ready"
+    assert "vei=" in aaa_signal.entry_diagnostics
+    regime = engine.last_intraday_regime["emerging"]
+    assert regime is not None
+    assert regime.tradeable is True
+    assert regime.total_checks == 5
+    assert regime.volatility_expansion_ratio is not None
+    assert regime.volatility_expansion_ratio > settings.volatility_expansion_max_ratio
+    assert "volatility_expansion" in regime.blockers
+
+
+async def _exercise_volatility_expansion_hard_gate(tmp_path: Path) -> None:
+    settings = Settings(
+        sqlite_path=str(tmp_path / "volatility-expansion-hard-gate.db"),
+        universe=["AAAUSDT", "BBBUSDT", "CCCUSDT"],
+        telegram_bot_token=None,
+        telegram_chat_id=None,
+        watchlist_telegram_enabled=True,
+        top_n=1,
+        emerging_top_n=1,
+        entry_ready_top_n=1,
+        watchlist_top_n=5,
+        emerging_min_observations=3,
+        emerging_min_rank_improvement=2,
+        entry_ready_min_observations=5,
+        entry_ready_min_rank_improvement=2,
+        entry_ready_min_composite_gain=0.01,
+        intraday_regime_filter_enabled=True,
+        intraday_regime_lookback_bars=16,
+        intraday_regime_min_breadth=0.0,
+        intraday_regime_min_efficiency=0.0,
+        intraday_regime_min_basket_return=-1.0,
+        intraday_regime_min_leadership_persistence=0.0,
+        intraday_regime_min_pass_count=4,
+        volatility_expansion_filter_enabled=True,
+        volatility_expansion_hard_gate=True,
+        volatility_expansion_short_bars=4,
+        volatility_expansion_long_bars=16,
+        volatility_expansion_max_ratio=1.2,
+        regime_thresholds={0: None, 1: None, 2: None, 3: None},
+    )
+    state = MarketState(settings=settings)
+    timestamps = [idx * settings.ticker_interval_ms for idx in range(settings.state_window)]
+    next_timestamp = timestamps[-1] + settings.ticker_interval_ms
+    btc_prices = [20_000 + idx * 50 for idx in range(settings.state_window)]
+    strong = [100 + idx * 0.03 for idx in range(settings.state_window)]
+    base = [100 + idx * 0.02 for idx in range(settings.state_window)]
+    weak = [100 + idx * 0.01 for idx in range(settings.state_window)]
+
+    state.replace_history("BTCUSDT", list(zip(timestamps, btc_prices)))
+    state.replace_history("AAAUSDT", list(zip(timestamps, strong)))
+    state.replace_history("BBBUSDT", list(zip(timestamps, base)))
+    state.replace_history("CCCUSDT", list(zip(timestamps, weak)))
+    state.global_state.btc_daily_closes = np.asarray(
+        [20_000 + idx * 100 for idx in range(settings.btc_daily_lookback)],
+        dtype=float,
+    )
+
+    class SilentNotifier:
+        async def send(self, payload) -> bool:
+            return True
+
+    database = SignalDatabase(settings.sqlite_path)
+    await database.initialize()
+    engine = SignalEngine(
+        settings=settings,
+        state=state,
+        database=database,
+        notifier=SilentNotifier(),
+    )
+
+    state.intrabar_observations["AAAUSDT"] = deque(
+        [
+            IntrabarObservation(observed_at_ms=next_timestamp - 40_000, rank=5, composite_score=-0.1),
+            IntrabarObservation(observed_at_ms=next_timestamp - 30_000, rank=3, composite_score=0.1),
+            IntrabarObservation(observed_at_ms=next_timestamp - 20_000, rank=2, composite_score=0.2),
+            IntrabarObservation(observed_at_ms=next_timestamp - 10_000, rank=1, composite_score=0.3),
+        ],
+        maxlen=state.intrabar_observations["AAAUSDT"].maxlen,
+    )
+    state.intrabar_state["AAAUSDT"] = "emerging"
+    assert state.update_provisional("AAAUSDT", next_timestamp, strong[-1] + 8.0) is True
+
+    signals = await engine.process(cycle_time_ms=next_timestamp, stage="emerging")
+
+    aaa_signal = next(signal for signal in signals if signal.ticker == "AAAUSDT")
+    assert aaa_signal.signal_kind in {"watchlist", "emerging"}
+    assert aaa_signal.signal_kind != "entry_ready"
+    regime = engine.last_intraday_regime["emerging"]
+    assert regime is not None
+    assert regime.tradeable is False
+    assert regime.total_checks == 5
+    assert regime.volatility_expansion_ratio is not None
+    assert regime.volatility_expansion_ratio > settings.volatility_expansion_max_ratio
+    assert "volatility_expansion" in regime.blockers
 
 
 async def _exercise_signal_alert_toggle(tmp_path: Path) -> None:

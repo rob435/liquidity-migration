@@ -50,6 +50,8 @@ TRADE_EXPORT_COLUMNS = [
     "pnl_pct",
     "pnl_usd",
     "holding_minutes",
+    "minutes_to_first_profit_50bps",
+    "minutes_to_first_profit_100bps",
     "bars_held",
     "mfe_pct",
     "mae_pct",
@@ -89,6 +91,8 @@ class TradeOverview:
     avg_pnl_usd: float
     avg_notional_usd: float | None
     avg_holding_minutes: float | None
+    avg_minutes_to_first_profit_50bps: float | None
+    avg_minutes_to_first_profit_100bps: float | None
     avg_mfe_pct: float | None
     avg_mae_pct: float | None
     avg_post_exit_best_pct: float | None
@@ -114,6 +118,8 @@ class TradeDaySummary:
     avg_pnl_usd: float
     avg_notional_usd: float | None
     avg_holding_minutes: float | None
+    avg_minutes_to_first_profit_50bps: float | None
+    avg_minutes_to_first_profit_100bps: float | None
     stop_losses: int
     take_profits: int
     protected_profit_exits: int
@@ -323,6 +329,12 @@ def _normalize_trade_row(row: dict[str, Any]) -> dict[str, Any]:
         "pnl_pct": pnl_pct,
         "pnl_usd": pnl_usd,
         "holding_minutes": holding_minutes,
+        "minutes_to_first_profit_50bps": _float_or_none(
+            _first_present(row, ("minutes_to_first_profit_50bps",))
+        ),
+        "minutes_to_first_profit_100bps": _float_or_none(
+            _first_present(row, ("minutes_to_first_profit_100bps",))
+        ),
         "bars_held": _int_or_none(_first_present(row, ("bars_held", "holding_bars"))),
         "mfe_pct": _float_or_none(_first_present(row, ("mfe_pct", "max_favorable_excursion_pct"))),
         "mae_pct": _float_or_none(_first_present(row, ("mae_pct", "max_adverse_excursion_pct"))),
@@ -622,6 +634,16 @@ def _summarize_trades(rows: list[dict[str, Any]]) -> tuple[TradeOverview | None,
     pnl_usd_values = [row["pnl_usd"] for row in rows if row["pnl_usd"] is not None]
     notional_values = [row["notional_usd"] for row in rows if row["notional_usd"] is not None]
     holding_values = [row["holding_minutes"] for row in rows if row["holding_minutes"] is not None]
+    first_profit_50bps_values = [
+        row["minutes_to_first_profit_50bps"]
+        for row in rows
+        if row["minutes_to_first_profit_50bps"] is not None
+    ]
+    first_profit_100bps_values = [
+        row["minutes_to_first_profit_100bps"]
+        for row in rows
+        if row["minutes_to_first_profit_100bps"] is not None
+    ]
     mfe_values = [row["mfe_pct"] for row in rows if row["mfe_pct"] is not None]
     mae_values = [row["mae_pct"] for row in rows if row["mae_pct"] is not None]
     post_exit_best_values = [
@@ -663,6 +685,8 @@ def _summarize_trades(rows: list[dict[str, Any]]) -> tuple[TradeOverview | None,
         avg_pnl_usd=_mean(pnl_usd_values) or 0.0,
         avg_notional_usd=_mean(notional_values),
         avg_holding_minutes=_mean(holding_values),
+        avg_minutes_to_first_profit_50bps=_mean(first_profit_50bps_values),
+        avg_minutes_to_first_profit_100bps=_mean(first_profit_100bps_values),
         avg_mfe_pct=_mean(mfe_values),
         avg_mae_pct=_mean(mae_values),
         avg_post_exit_best_pct=_mean(post_exit_best_values),
@@ -681,6 +705,16 @@ def _summarize_trade_day(day: str, rows: list[dict[str, Any]]) -> TradeDaySummar
     pnl_usd_values = [row["pnl_usd"] for row in rows if row["pnl_usd"] is not None]
     notional_values = [row["notional_usd"] for row in rows if row["notional_usd"] is not None]
     holding_values = [row["holding_minutes"] for row in rows if row["holding_minutes"] is not None]
+    first_profit_50bps_values = [
+        row["minutes_to_first_profit_50bps"]
+        for row in rows
+        if row["minutes_to_first_profit_50bps"] is not None
+    ]
+    first_profit_100bps_values = [
+        row["minutes_to_first_profit_100bps"]
+        for row in rows
+        if row["minutes_to_first_profit_100bps"] is not None
+    ]
     mfe_values = [row["mfe_pct"] for row in rows if row["mfe_pct"] is not None]
     mae_values = [row["mae_pct"] for row in rows if row["mae_pct"] is not None]
     post_exit_best_values = [
@@ -707,6 +741,8 @@ def _summarize_trade_day(day: str, rows: list[dict[str, Any]]) -> TradeDaySummar
         avg_pnl_usd=_mean(pnl_usd_values) or 0.0,
         avg_notional_usd=_mean(notional_values),
         avg_holding_minutes=_mean(holding_values),
+        avg_minutes_to_first_profit_50bps=_mean(first_profit_50bps_values),
+        avg_minutes_to_first_profit_100bps=_mean(first_profit_100bps_values),
         stop_losses=_count_reason(rows, "stop_loss"),
         take_profits=_count_reason(rows, "take_profit"),
         protected_profit_exits=_count_reason(rows, "protected_profit"),
@@ -907,6 +943,14 @@ def format_report(summary: ReportSummary) -> str:
             lines.append(f"  avg_notional_usd={trade_overview.avg_notional_usd:.2f}")
         if trade_overview.avg_holding_minutes is not None:
             lines.append(f"  avg_holding_minutes={trade_overview.avg_holding_minutes:.1f}")
+        if (
+            trade_overview.avg_minutes_to_first_profit_50bps is not None
+            or trade_overview.avg_minutes_to_first_profit_100bps is not None
+        ):
+            lines.append(
+                f"  avg_minutes_to_first_profit_50bps={_format_float(trade_overview.avg_minutes_to_first_profit_50bps, 1)} "
+                f"avg_minutes_to_first_profit_100bps={_format_float(trade_overview.avg_minutes_to_first_profit_100bps, 1)}"
+            )
         if trade_overview.avg_mfe_pct is not None or trade_overview.avg_mae_pct is not None:
             lines.append(
                 f"  avg_mfe_pct={_format_float(trade_overview.avg_mfe_pct)} "
@@ -938,6 +982,8 @@ def format_report(summary: ReportSummary) -> str:
                     f"pnl_pct={row.total_pnl_pct:.3f} pnl_usd={row.total_pnl_usd:.2f} "
                     f"avg_notional_usd={_format_float(row.avg_notional_usd, 2)} "
                     f"avg_holding_minutes={_format_float(row.avg_holding_minutes, 1)} "
+                    f"avg_minutes_to_first_profit_50bps={_format_float(row.avg_minutes_to_first_profit_50bps, 1)} "
+                    f"avg_minutes_to_first_profit_100bps={_format_float(row.avg_minutes_to_first_profit_100bps, 1)} "
                     f"stop_losses={row.stop_losses} "
                     f"protected_profit_exits={row.protected_profit_exits} "
                     f"stale_winner_exits={row.stale_winner_exits} "

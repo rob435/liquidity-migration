@@ -9,6 +9,7 @@ import math
 import os
 import pickle
 import sqlite3
+import statistics
 import sys
 import tempfile
 import time
@@ -189,6 +190,8 @@ class SimulatedPosition:
     entry_fee_usd: float
     entry_slippage_usd: float
     profit_protection_adjustments: int = 0
+    first_profit_50bps_minutes: float | None = None
+    first_profit_100bps_minutes: float | None = None
     mfe_pct: float = 0.0
     mae_pct: float = 0.0
     peak_favorable_price: float | None = None
@@ -227,6 +230,8 @@ class BacktestTrade:
     entry_slippage_usd: float
     exit_slippage_usd: float
     holding_minutes: float
+    minutes_to_first_profit_50bps: float | None
+    minutes_to_first_profit_100bps: float | None
     mfe_pct: float
     mae_pct: float
     post_exit_best_pct: float | None = None
@@ -282,6 +287,10 @@ class TickerBacktestSummary:
     losses: int
     gross_pnl_usd: float
     net_pnl_usd: float
+    fees_usd: float
+    slippage_usd: float
+    expectancy_usd: float
+    win_rate: float
     avg_pnl_pct: float
 
 
@@ -323,6 +332,7 @@ class ComprehensiveBacktestSummary:
     skipped_max_entries_per_rebalance: int
     skipped_daily_stop_losses: int
     skipped_reentry_cooldown: int
+    skipped_reentry_no_improvement: int
     skipped_ticker_daily_loss_limit: int
     skipped_gross_exposure_cap: int
     skipped_too_small: int
@@ -1230,6 +1240,12 @@ def _mean(values: list[float]) -> float | None:
     return sum(values) / len(values) if values else None
 
 
+def _median(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return float(statistics.median(values))
+
+
 def _set_btc_daily_state(
     state: MarketState,
     btc_daily_history: list[tuple[int, float]],
@@ -1273,6 +1289,7 @@ def _set_btcdom_state(
 class HistoricalBacktestSimulator:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self.intrabar_interval_ms = interval_to_milliseconds(settings.backtest_intrabar_interval)
         self.positions: dict[str, SimulatedPosition] = {}
         self.trades: list[BacktestTrade] = []
         self.equity_curve: list[EquitySnapshot] = []
@@ -1289,6 +1306,7 @@ class HistoricalBacktestSimulator:
         self.skipped_max_entries_per_rebalance = 0
         self.skipped_daily_stop_losses = 0
         self.skipped_reentry_cooldown = 0
+        self.skipped_reentry_no_improvement = 0
         self.skipped_ticker_daily_loss_limit = 0
         self.skipped_gross_exposure_cap = 0
         self.skipped_too_small = 0
@@ -1296,6 +1314,7 @@ class HistoricalBacktestSimulator:
         self.stop_loss_exits_by_day: dict[str, int] = defaultdict(int)
         self.ticker_losses_by_day: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
         self.last_profitable_exit_ms_by_ticker: dict[str, int] = {}
+        self.last_profitable_exit_state_by_ticker: dict[str, tuple[int, int | None, float | None]] = {}
         self.post_exit_trackers: list[PostExitTracker] = []
         self.profit_protection_adjustments = 0
 
@@ -1364,6 +1383,16 @@ class HistoricalBacktestSimulator:
     def _update_position_excursions(self, position: SimulatedPosition, candle: HistoricalCandle) -> None:
         favorable_pct = max((candle.high_price / position.entry_price) - 1.0, 0.0)
         adverse_pct = max(1.0 - (candle.low_price / position.entry_price), 0.0)
+        favorable_minutes = max(
+            0.0,
+            (
+                candle.start_time_ms + self.intrabar_interval_ms - position.opened_at_ms
+            ) / 60_000.0,
+        )
+        if favorable_pct >= 0.005 and position.first_profit_50bps_minutes is None:
+            position.first_profit_50bps_minutes = favorable_minutes
+        if favorable_pct >= 0.010 and position.first_profit_100bps_minutes is None:
+            position.first_profit_100bps_minutes = favorable_minutes
         if favorable_pct >= position.mfe_pct:
             position.mfe_pct = favorable_pct
             position.peak_favorable_price = candle.high_price
@@ -1441,6 +1470,36 @@ class HistoricalBacktestSimulator:
             >= self.settings.max_ticker_losing_trades_per_day
         )
 
+    def _reentry_improvement_satisfied(self, signal: RankedSignal, ticker: str) -> bool:
+        prior_state = self.last_profitable_exit_state_by_ticker.get(ticker)
+        if prior_state is None:
+            return True
+        _, prior_exit_rank, prior_exit_composite_score = prior_state
+        checks: list[bool] = []
+        if (
+            prior_exit_rank is not None
+            and self.settings.reentry_after_profit_min_rank_improvement > 0
+        ):
+            target_rank = max(
+                1,
+                prior_exit_rank - self.settings.reentry_after_profit_min_rank_improvement,
+            )
+            checks.append(signal.rank <= target_rank)
+        if (
+            prior_exit_composite_score is not None
+            and self.settings.reentry_after_profit_min_composite_improvement > 0
+        ):
+            checks.append(
+                signal.composite_score
+                >= (
+                    prior_exit_composite_score
+                    + self.settings.reentry_after_profit_min_composite_improvement
+                )
+            )
+        if not checks:
+            return True
+        return any(checks)
+
     def _should_exit_stale_winner(
         self,
         *,
@@ -1517,6 +1576,8 @@ class HistoricalBacktestSimulator:
             entry_slippage_usd=position.entry_slippage_usd,
             exit_slippage_usd=exit_slippage_usd,
             holding_minutes=holding_minutes,
+            minutes_to_first_profit_50bps=position.first_profit_50bps_minutes,
+            minutes_to_first_profit_100bps=position.first_profit_100bps_minutes,
             mfe_pct=position.mfe_pct,
             mae_pct=position.mae_pct,
         )
@@ -1524,6 +1585,11 @@ class HistoricalBacktestSimulator:
         self._track_post_exit_trade(len(self.trades) - 1, ticker, exit_price)
         if net_pnl_usd > 0:
             self.last_profitable_exit_ms_by_ticker[ticker] = timestamp_ms
+            self.last_profitable_exit_state_by_ticker[ticker] = (
+                timestamp_ms,
+                trade.exit_rank,
+                trade.exit_composite_score,
+            )
         if net_pnl_usd < 0:
             self.ticker_losses_by_day[ticker][_utc_day(timestamp_ms)] += 1
         if exit_reason in {"stop_loss", "protected_profit"}:
@@ -1674,6 +1740,9 @@ class HistoricalBacktestSimulator:
                 continue
             if self._reentry_cooldown_active(signal.ticker, timestamp_ms):
                 self.skipped_reentry_cooldown += 1
+                continue
+            if not self._reentry_improvement_satisfied(signal, signal.ticker):
+                self.skipped_reentry_no_improvement += 1
                 continue
             if self._ticker_daily_loss_limit_reached(signal.ticker, timestamp_ms):
                 self.skipped_ticker_daily_loss_limit += 1
@@ -1826,6 +1895,13 @@ def _ticker_summaries(trades: list[BacktestTrade]) -> list[TickerBacktestSummary
                 losses=losses,
                 gross_pnl_usd=sum(trade.gross_pnl_usd for trade in ticker_trades),
                 net_pnl_usd=sum(trade.net_pnl_usd for trade in ticker_trades),
+                fees_usd=sum(trade.entry_fee_usd + trade.exit_fee_usd for trade in ticker_trades),
+                slippage_usd=sum(
+                    trade.entry_slippage_usd + trade.exit_slippage_usd
+                    for trade in ticker_trades
+                ),
+                expectancy_usd=_mean([trade.net_pnl_usd for trade in ticker_trades]) or 0.0,
+                win_rate=(wins / len(ticker_trades)) if ticker_trades else 0.0,
                 avg_pnl_pct=_mean([trade.pnl_pct for trade in ticker_trades]) or 0.0,
             )
         )
@@ -1924,6 +2000,70 @@ def _variant_ranked_rows(rows: list[BacktestVariantSummary]) -> list[dict]:
                 "expectancy_usd": _variant_expectancy_usd(row),
             }
         )
+    return output
+
+
+def _parse_variant_name(name: str) -> dict[str, str]:
+    parsed: dict[str, str] = {}
+    for part in name.split(","):
+        piece = part.strip()
+        if not piece or "=" not in piece:
+            continue
+        key, value = piece.split("=", 1)
+        parsed[key.strip()] = value.strip()
+    return parsed
+
+
+def _variant_stability_summary(rows: list[BacktestVariantSummary]) -> dict[str, float | int | None]:
+    profitable = [row for row in rows if row.net_pnl_usd > 0]
+    pf_gt_one = [row for row in rows if row.profit_factor is not None and row.profit_factor > 1.0]
+    return {
+        "variant_count": len(rows),
+        "profitable_variants": len(profitable),
+        "profitable_fraction": (len(profitable) / len(rows)) if rows else None,
+        "pf_gt_one_variants": len(pf_gt_one),
+        "pf_gt_one_fraction": (len(pf_gt_one) / len(rows)) if rows else None,
+        "median_net_pnl_usd": _median([row.net_pnl_usd for row in rows]),
+        "min_net_pnl_usd": min((row.net_pnl_usd for row in rows), default=None),
+        "max_net_pnl_usd": max((row.net_pnl_usd for row in rows), default=None),
+        "median_return_pct": _median([row.total_return_pct for row in rows]),
+        "median_max_drawdown_pct": _median([row.max_drawdown_pct for row in rows]),
+        "worst_max_drawdown_pct": max((row.max_drawdown_pct for row in rows), default=None),
+        "median_trade_count": _median([float(row.trade_count) for row in rows]),
+        "median_expectancy_usd": _median(
+            [
+                expectancy
+                for row in rows
+                if (expectancy := _variant_expectancy_usd(row)) is not None
+            ]
+        ),
+    }
+
+
+def _variant_setting_stability_rows(rows: list[BacktestVariantSummary]) -> list[dict]:
+    grouped: dict[tuple[str, str], list[BacktestVariantSummary]] = defaultdict(list)
+    for row in rows:
+        for key, value in _parse_variant_name(row.name).items():
+            grouped[(key, value)].append(row)
+    output: list[dict] = []
+    for (key, value), group in sorted(grouped.items(), key=lambda item: (item[0][0], item[0][1])):
+        summary = _variant_stability_summary(group)
+        output.append(
+            {
+                "setting": key,
+                "value": value,
+                **summary,
+            }
+        )
+    output.sort(
+        key=lambda row: (
+            row["setting"],
+            -(row["profitable_fraction"] or 0.0),
+            -(row["pf_gt_one_fraction"] or 0.0),
+            -(row["median_net_pnl_usd"] or float("-inf")),
+            row["worst_max_drawdown_pct"] or float("inf"),
+        ),
+    )
     return output
 
 
@@ -2088,6 +2228,7 @@ def format_comprehensive_backtest(result: ComprehensiveBacktestResult) -> str:
             f"cluster_cap={summary.skipped_cluster_limit} "
             f"batch_cap={summary.skipped_max_entries_per_rebalance} daily_stop={summary.skipped_daily_stop_losses} "
             f"reentry_cooldown={summary.skipped_reentry_cooldown} "
+            f"reentry_no_improvement={summary.skipped_reentry_no_improvement} "
             f"ticker_loss_cap={summary.skipped_ticker_daily_loss_limit} "
             f"gross_cap={summary.skipped_gross_exposure_cap} too_small={summary.skipped_too_small} "
             f"profit_adjustments={summary.profit_protection_adjustments}"
@@ -2112,7 +2253,9 @@ def format_comprehensive_backtest(result: ComprehensiveBacktestResult) -> str:
         for row in summary.tickers[:10]:
             lines.append(
                 f"  {row.ticker}: trades={row.trades} wins={row.wins} losses={row.losses} "
-                f"net_pnl_usd={row.net_pnl_usd:.2f} avg_pnl_pct={row.avg_pnl_pct * 100:.2f}%"
+                f"net_pnl_usd={row.net_pnl_usd:.2f} fees_usd={row.fees_usd:.2f} "
+                f"slippage_usd={row.slippage_usd:.2f} win_rate={row.win_rate * 100:.1f}% "
+                f"avg_pnl_pct={row.avg_pnl_pct * 100:.2f}% expectancy_usd={row.expectancy_usd:.2f}"
             )
     return "\n".join(lines)
 
@@ -2374,6 +2517,7 @@ async def run_comprehensive_backtest_plan(
         skipped_max_entries_per_rebalance=simulator.skipped_max_entries_per_rebalance,
         skipped_daily_stop_losses=simulator.skipped_daily_stop_losses,
         skipped_reentry_cooldown=simulator.skipped_reentry_cooldown,
+        skipped_reentry_no_improvement=simulator.skipped_reentry_no_improvement,
         skipped_ticker_daily_loss_limit=simulator.skipped_ticker_daily_loss_limit,
         skipped_gross_exposure_cap=simulator.skipped_gross_exposure_cap,
         skipped_too_small=simulator.skipped_too_small,
@@ -2550,6 +2694,8 @@ def export_sweep_comparison(result: SweepComparisonResult, *, export_dir: str) -
 
 
 def format_variant_run_result(result: BacktestVariantRunResult) -> str:
+    stability = _variant_stability_summary(result.variants)
+    setting_stability = _variant_setting_stability_rows(result.variants)
     lines = [
         "Backtest variants",
         f"  requested={result.variants_requested or len(result.variants)}",
@@ -2558,6 +2704,14 @@ def format_variant_run_result(result: BacktestVariantRunResult) -> str:
         f"  elapsed={_format_duration_seconds(result.total_elapsed_seconds)}",
         f"  avg_variant={_format_duration_seconds(result.avg_variant_seconds)}",
     ]
+    if result.variants:
+        lines.append(
+            "  stability="
+            f"profitable_fraction={(stability['profitable_fraction'] or 0.0) * 100:.1f}% "
+            f"pf_gt_one_fraction={(stability['pf_gt_one_fraction'] or 0.0) * 100:.1f}% "
+            f"median_net_pnl_usd={(stability['median_net_pnl_usd'] or 0.0):.2f} "
+            f"worst_drawdown_pct={(stability['worst_max_drawdown_pct'] or 0.0) * 100:.2f}%"
+        )
     if result.best_variant is not None:
         lines.append(
             "  best_variant="
@@ -2576,6 +2730,16 @@ def format_variant_run_result(result: BacktestVariantRunResult) -> str:
             f"win_rate={(_variant_win_rate(row) or 0.0) * 100:.1f}% "
             f"runtime={_format_duration_seconds(row.run_seconds)}"
         )
+    if setting_stability:
+        lines.append("  setting_stability")
+        for row in setting_stability[:10]:
+            lines.append(
+                f"    {row['setting']}={row['value']}: "
+                f"profitable_fraction={(row['profitable_fraction'] or 0.0) * 100:.1f}% "
+                f"pf_gt_one_fraction={(row['pf_gt_one_fraction'] or 0.0) * 100:.1f}% "
+                f"median_net_pnl_usd={(row['median_net_pnl_usd'] or 0.0):.2f} "
+                f"worst_drawdown_pct={(row['worst_max_drawdown_pct'] or 0.0) * 100:.2f}%"
+            )
     return "\n".join(lines)
 
 
@@ -2594,6 +2758,11 @@ def export_variant_run_result(
     _write_csv(export_path / "variant_summary.csv", [asdict(row) for row in result.variants])
     ranked_rows = _variant_ranked_rows(result.variants)
     _write_csv(export_path / "variant_ranked_summary.csv", ranked_rows)
+    _write_csv(export_path / "variant_stability_summary.csv", [_variant_stability_summary(result.variants)])
+    _write_csv(
+        export_path / "variant_setting_stability.csv",
+        _variant_setting_stability_rows(result.variants),
+    )
     best_variant = result.best_variant or (_select_best_variant(result.variants) if result.variants else None)
     if best_variant is not None:
         _write_csv(export_path / "variant_best_summary.csv", [asdict(best_variant)])

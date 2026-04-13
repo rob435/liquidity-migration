@@ -83,6 +83,8 @@ class Settings:
     profit_protection_max_adjustments: int = 1
     profit_protection_max_rank: int = 2
     reentry_cooldown_after_profit_minutes: int = 90
+    reentry_after_profit_min_rank_improvement: int = 1
+    reentry_after_profit_min_composite_improvement: float = 0.10
     max_ticker_losing_trades_per_day: int = 1
     stale_winner_exit_enabled: bool = True
     stale_winner_min_profit_pct: float = 0.006
@@ -124,7 +126,12 @@ class Settings:
     intraday_regime_min_efficiency: float = 0.35
     intraday_regime_min_basket_return: float = 0.0
     intraday_regime_min_leadership_persistence: float = 0.25
-    intraday_regime_min_pass_count: int = 3
+    intraday_regime_min_pass_count: int = 4
+    volatility_expansion_filter_enabled: bool = False
+    volatility_expansion_hard_gate: bool = False
+    volatility_expansion_short_bars: int = 4
+    volatility_expansion_long_bars: int = 16
+    volatility_expansion_max_ratio: float = 1.2
     watchlist_top_n: int = 8
     emerging_top_n: int = 5
     entry_ready_top_n: int = 4
@@ -140,9 +147,9 @@ class Settings:
     watchlist_telegram_enabled: bool = False
     emerging_min_observations: int = 3
     emerging_min_rank_improvement: int = 2
-    entry_ready_min_observations: int = 4
+    entry_ready_min_observations: int = 3
     entry_ready_min_rank_improvement: int = 2
-    entry_ready_min_composite_gain: float = 0.02
+    entry_ready_min_composite_gain: float = 0.0
     min_volatility: float = 1e-5
     btc_realized_vol_threshold: float = 0.65
     bootstrap_concurrency: int = 8
@@ -251,6 +258,14 @@ def load_settings() -> Settings:
             "REENTRY_COOLDOWN_AFTER_PROFIT_MINUTES",
             90,
         ),
+        reentry_after_profit_min_rank_improvement=_get_int(
+            "REENTRY_AFTER_PROFIT_MIN_RANK_IMPROVEMENT",
+            1,
+        ),
+        reentry_after_profit_min_composite_improvement=_get_float(
+            "REENTRY_AFTER_PROFIT_MIN_COMPOSITE_IMPROVEMENT",
+            0.10,
+        ),
         max_ticker_losing_trades_per_day=_get_int("MAX_TICKER_LOSING_TRADES_PER_DAY", 1),
         stale_winner_exit_enabled=_get_bool("STALE_WINNER_EXIT_ENABLED", True),
         stale_winner_min_profit_pct=_get_float("STALE_WINNER_MIN_PROFIT_PCT", 0.006),
@@ -300,7 +315,18 @@ def load_settings() -> Settings:
             "INTRADAY_REGIME_MIN_LEADERSHIP_PERSISTENCE",
             0.25,
         ),
-        intraday_regime_min_pass_count=_get_int("INTRADAY_REGIME_MIN_PASS_COUNT", 3),
+        intraday_regime_min_pass_count=_get_int("INTRADAY_REGIME_MIN_PASS_COUNT", 4),
+        volatility_expansion_filter_enabled=_get_bool(
+            "VOLATILITY_EXPANSION_FILTER_ENABLED",
+            False,
+        ),
+        volatility_expansion_hard_gate=_get_bool(
+            "VOLATILITY_EXPANSION_HARD_GATE",
+            False,
+        ),
+        volatility_expansion_short_bars=_get_int("VOLATILITY_EXPANSION_SHORT_BARS", 4),
+        volatility_expansion_long_bars=_get_int("VOLATILITY_EXPANSION_LONG_BARS", 16),
+        volatility_expansion_max_ratio=_get_float("VOLATILITY_EXPANSION_MAX_RATIO", 1.2),
         watchlist_top_n=_get_int("WATCHLIST_TOP_N", 8),
         emerging_top_n=_get_int("EMERGING_TOP_N", 5),
         entry_ready_top_n=_get_int("ENTRY_READY_TOP_N", 4),
@@ -316,9 +342,9 @@ def load_settings() -> Settings:
         watchlist_telegram_enabled=_get_bool("WATCHLIST_TELEGRAM_ENABLED", False),
         emerging_min_observations=_get_int("EMERGING_MIN_OBSERVATIONS", 3),
         emerging_min_rank_improvement=_get_int("EMERGING_MIN_RANK_IMPROVEMENT", 2),
-        entry_ready_min_observations=_get_int("ENTRY_READY_MIN_OBSERVATIONS", 4),
+        entry_ready_min_observations=_get_int("ENTRY_READY_MIN_OBSERVATIONS", 3),
         entry_ready_min_rank_improvement=_get_int("ENTRY_READY_MIN_RANK_IMPROVEMENT", 2),
-        entry_ready_min_composite_gain=_get_float("ENTRY_READY_MIN_COMPOSITE_GAIN", 0.02),
+        entry_ready_min_composite_gain=_get_float("ENTRY_READY_MIN_COMPOSITE_GAIN", 0.0),
         min_volatility=_get_float("MIN_VOLATILITY", 1e-5),
         btc_realized_vol_threshold=_get_float("BTC_REALIZED_VOL_THRESHOLD", 0.65),
         bootstrap_concurrency=_get_int("BOOTSTRAP_CONCURRENCY", 8),

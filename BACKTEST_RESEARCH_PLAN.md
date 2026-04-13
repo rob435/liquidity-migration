@@ -112,27 +112,46 @@ These are the highest-leverage knobs for the current system.
    - `intraday_regime_min_efficiency=0.35`
    - `intraday_regime_min_basket_return=0.00`
    - `intraday_regime_min_leadership_persistence=0.25`
-   - `intraday_regime_min_pass_count=3`
+   - `intraday_regime_min_pass_count=4`
 
    First-pass ranges:
    - `intraday_regime_min_breadth`: `0.45`, `0.55`, `0.65`
    - `intraday_regime_min_efficiency`: `0.25`, `0.35`, `0.45`
    - `intraday_regime_min_basket_return`: `-0.002`, `0.00`, `0.002`
    - `intraday_regime_min_leadership_persistence`: `0.15`, `0.25`, `0.35`
-   - `intraday_regime_min_pass_count`: `2`, `3`, `4`
+   - `intraday_regime_min_pass_count`: `3`, `4`
 
 3. `entry_ready` selectivity
    Current defaults:
-   - `entry_ready_min_observations=4`
+   - `entry_ready_min_observations=3`
    - `entry_ready_min_rank_improvement=2`
-   - `entry_ready_min_composite_gain=0.02`
+   - `entry_ready_min_composite_gain=0.00`
    - `entry_ready_top_n=4`
 
    First-pass ranges:
    - `entry_ready_min_observations`: `3`, `4`, `5`
    - `entry_ready_min_rank_improvement`: `1`, `2`, `3`
-   - `entry_ready_min_composite_gain`: `0.00`, `0.02`, `0.05`
+   - `entry_ready_min_composite_gain`: `0.00`, `0.05`, `0.08`
    - `entry_ready_top_n`: `2`, `3`, `4`
+
+### Current Baseline From the 30-Day Grid
+
+Use this as the active research baseline until a later out-of-sample window disproves it:
+
+- `entry_ready_min_composite_gain=0.00`
+- `entry_ready_min_observations=3`
+- `intraday_regime_min_pass_count=4`
+
+The strongest signal from the completed 30-day grid was not "tighten everything." It was: keep the intrabar confirmation modest, and make the session-quality gate stricter.
+
+### VEI Validation Rule
+
+The volatility-expansion filter now has two modes:
+
+- soft vote: VEI contributes one more intraday regime check
+- hard gate: VEI failure alone blocks `entry_ready`
+
+Keep the feature off by default and test it explicitly. If you are evaluating whether VEI genuinely helps, use the hard-gate path. The soft-vote path is weaker and should be treated as a secondary comparator, not the main test.
 
 4. Residual momentum / clustering
    Current defaults:
@@ -270,7 +289,7 @@ python backtest.py \
   --research-fast \
   --variant-workers 4 \
   --grid-setting intraday_regime_min_breadth=0.45,0.55,0.65 \
-  --grid-setting intraday_regime_min_pass_count=2,3,4
+  --grid-setting intraday_regime_min_pass_count=3,4
 ```
 
 And:
@@ -281,7 +300,7 @@ python backtest.py \
   --research-fast \
   --variant-workers 4 \
   --grid-setting entry_ready_min_observations=3,4,5 \
-  --grid-setting entry_ready_min_composite_gain=0.00,0.02,0.05
+  --grid-setting entry_ready_min_composite_gain=0.00,0.05,0.08
 ```
 
 And:
@@ -332,9 +351,42 @@ python backtest.py \
   --cycles 96 \
   --research-fast \
   --variant-workers 4 \
-  --grid-setting hurst_cutoff=0.50,0.55,0.60 \
-  --grid-setting intraday_regime_min_pass_count=2,3,4
+  --grid-setting entry_ready_min_composite_gain=0.00,0.05 \
+  --grid-setting intraday_regime_min_pass_count=4
 ```
+
+### Immediate VEI Comparison Batch
+
+Anchor all runs to the same 30-day window and do not mix in any other logic changes:
+
+1. Baseline only
+   - `entry_ready_min_composite_gain=0.00`
+   - `entry_ready_min_observations=3`
+   - `intraday_regime_min_pass_count=4`
+   - `VOLATILITY_EXPANSION_FILTER_ENABLED=false`
+
+2. VEI soft vote
+   - same baseline
+   - `VOLATILITY_EXPANSION_FILTER_ENABLED=true`
+   - `VOLATILITY_EXPANSION_HARD_GATE=false`
+
+3. VEI hard gate
+   - same baseline
+   - `VOLATILITY_EXPANSION_FILTER_ENABLED=true`
+   - `VOLATILITY_EXPANSION_HARD_GATE=true`
+
+4. Conservative comparator
+   - `entry_ready_min_composite_gain=0.05`
+   - `entry_ready_min_observations=3`
+   - `intraday_regime_min_pass_count=4`
+   - VEI off
+
+5. Conservative comparator with VEI hard gate
+   - same comparator
+   - VEI on
+   - hard gate on
+
+VEI only earns its place if it improves net PnL, profit factor, or drawdown materially without collapsing trade count into irrelevance.
 
 ### Phase 3: Exit Optimization
 

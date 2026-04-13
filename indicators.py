@@ -103,6 +103,18 @@ def path_efficiency(prices: np.ndarray) -> float:
     return float(np.clip(net_move / total_path, 0.0, 1.0))
 
 
+def close_only_atr(prices: np.ndarray, window: int) -> float:
+    prices = np.asarray(prices, dtype=float)
+    if window <= 0:
+        raise ValueError("window must be > 0")
+    if prices.size < window + 1 or np.any(prices <= 0):
+        return float("nan")
+    ranges = np.abs(np.diff(prices))
+    if ranges.size < window:
+        return float("nan")
+    return float(np.mean(ranges[-window:]))
+
+
 def correlation_cluster_labels(
     price_history_by_symbol: dict[str, np.ndarray],
     *,

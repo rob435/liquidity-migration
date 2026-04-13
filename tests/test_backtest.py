@@ -32,6 +32,8 @@ from backtest import (
     _build_sweep_window_end_times,
     _load_plan_snapshot,
     _utc_day,
+    _variant_setting_stability_rows,
+    _variant_stability_summary,
     _write_plan_snapshot,
     run_backtest_plan,
     run_comprehensive_backtest_plan,
@@ -314,6 +316,8 @@ def test_post_exit_tracking_populates_trade_follow_through_metrics() -> None:
             entry_slippage_usd=0.0,
             exit_slippage_usd=0.0,
             holding_minutes=15.0,
+            minutes_to_first_profit_50bps=1.0,
+            minutes_to_first_profit_100bps=2.0,
             mfe_pct=0.02,
             mae_pct=0.01,
         )
@@ -460,6 +464,60 @@ def test_reentry_cooldown_blocks_immediate_reentry_in_simulator() -> None:
     assert simulator.skipped_reentry_cooldown == 1
 
 
+def test_reentry_after_profit_requires_fresh_improvement_in_simulator() -> None:
+    settings = Settings(
+        reentry_cooldown_after_profit_minutes=0,
+        reentry_after_profit_min_rank_improvement=1,
+        reentry_after_profit_min_composite_improvement=0.10,
+    )
+    simulator = HistoricalBacktestSimulator(settings)
+    simulator.last_profitable_exit_state_by_ticker["AAAUSDT"] = (0, 2, 1.40)
+    simulator.process_entries(
+        timestamp_ms=60_000,
+        ranked_signals=[
+            RankedSignal(
+                stage="emerging",
+                signal_kind="entry_ready",
+                ticker="AAAUSDT",
+                current_price=100.0,
+                momentum_z=2.0,
+                curvature=0.2,
+                hurst=0.7,
+                regime_score=2,
+                composite_score=1.45,
+                rank=2,
+                persistence_hits=0,
+                alerted=False,
+            )
+        ],
+        mark_prices={"AAAUSDT": 100.0},
+    )
+    assert "AAAUSDT" not in simulator.positions
+    assert simulator.skipped_reentry_no_improvement == 1
+
+    simulator.process_entries(
+        timestamp_ms=120_000,
+        ranked_signals=[
+            RankedSignal(
+                stage="emerging",
+                signal_kind="entry_ready",
+                ticker="AAAUSDT",
+                current_price=100.0,
+                momentum_z=2.0,
+                curvature=0.2,
+                hurst=0.7,
+                regime_score=2,
+                composite_score=1.55,
+                rank=2,
+                persistence_hits=0,
+                alerted=False,
+            )
+        ],
+        mark_prices={"AAAUSDT": 100.0},
+    )
+    assert "AAAUSDT" in simulator.positions
+
+
 def test_ticker_daily_loss_limit_blocks_new_entries_in_simulator() -> None:
     settings = Settings(max_ticker_losing_trades_per_day=1)
     simulator = HistoricalBacktestSimulator(settings)
@@ -530,6 +588,45 @@ def test_stale_winner_exit_closes_faded_profitable_trade_in_simulator() -> None:
     )
     assert closed_tickers == {"AAAUSDT"}
     assert simulator.trades[-1].exit_reason == "stale_winner"
+
+
+def test_profit_timing_fields_populate_on_trade_close() -> None:
+    settings = Settings()
+    simulator = HistoricalBacktestSimulator(settings)
+    simulator.positions["AAAUSDT"] = SimulatedPosition(
+        ticker="AAAUSDT",
+        quantity=1.0,
+        entry_price=100.0,
+        raw_entry_price=100.0,
+        notional_usd=100.0,
+        opened_at_ms=0,
+        entry_stage="emerging",
+        entry_signal_kind="entry_ready",
+        cluster_label="manual:layer1",
+        entry_diagnostics="ref=cluster_relative:manual:layer1",
+        take_profit_price=103.0,
+        stop_loss_price=98.0,
+        entry_fee_usd=0.0,
+        entry_slippage_usd=0.0,
+    )
+    simulator.process_intrabar_exits(
+        timestamp_ms=60_000,
+        intrabar_candles={
+            "AAAUSDT": HistoricalCandle(
+                start_time_ms=0,
+                open_price=100.0,
+                high_price=101.2,
+                low_price=99.8,
+                close_price=100.8,
+            )
+        },
+        mark_prices={"AAAUSDT": 100.8},
+        ranked_signals=[],
+    )
+    simulator.force_close_all(timestamp_ms=120_000, mark_prices={"AAAUSDT": 100.8})
+    trade = simulator.trades[-1]
+    assert trade.minutes_to_first_profit_50bps == 1.0
+    assert trade.minutes_to_first_profit_100bps == 1.0
 
 
 def test_build_sweep_window_end_times_honors_spacing_and_limit() -> None:
@@ -1235,3 +1332,107 @@ def _seed_trade_analytics_db(path: Path) -> None:
         connection.commit()
     finally:
         connection.close()
+
+
+def test_variant_stability_summary_reports_robustness_metrics() -> None:
+    rows = [
+        BacktestVariantSummary(
+            name="take_profit_pct=0.02,stop_loss_pct=0.02",
+            database_path="a.sqlite3",
+            run_seconds=1.0,
+            trade_count=10,
+            wins=6,
+            losses=4,
+            net_pnl_usd=120.0,
+            total_return_pct=0.012,
+            max_drawdown_pct=0.03,
+            profit_factor=1.2,
+            entry_ready_signals=20,
+            entries_filled=10,
+        ),
+        BacktestVariantSummary(
+            name="take_profit_pct=0.025,stop_loss_pct=0.02",
+            database_path="b.sqlite3",
+            run_seconds=1.0,
+            trade_count=10,
+            wins=5,
+            losses=5,
+            net_pnl_usd=-20.0,
+            total_return_pct=-0.002,
+            max_drawdown_pct=0.04,
+            profit_factor=0.9,
+            entry_ready_signals=20,
+            entries_filled=10,
+        ),
+        BacktestVariantSummary(
+            name="take_profit_pct=0.015,stop_loss_pct=0.02",
+            database_path="c.sqlite3",
+            run_seconds=1.0,
+            trade_count=10,
+            wins=6,
+            losses=4,
+            net_pnl_usd=60.0,
+            total_return_pct=0.006,
+            max_drawdown_pct=0.025,
+            profit_factor=1.1,
+            entry_ready_signals=20,
+            entries_filled=10,
+        ),
+    ]
+    summary = _variant_stability_summary(rows)
+    assert summary["variant_count"] == 3
+    assert summary["profitable_variants"] == 2
+    assert summary["pf_gt_one_variants"] == 2
+    assert summary["median_net_pnl_usd"] == 60.0
+    assert summary["worst_max_drawdown_pct"] == 0.04
+
+
+def test_variant_setting_stability_rows_group_by_setting_value() -> None:
+    rows = [
+        BacktestVariantSummary(
+            name="take_profit_pct=0.02,stop_loss_pct=0.02",
+            database_path="a.sqlite3",
+            run_seconds=1.0,
+            trade_count=10,
+            wins=6,
+            losses=4,
+            net_pnl_usd=100.0,
+            total_return_pct=0.01,
+            max_drawdown_pct=0.03,
+            profit_factor=1.2,
+            entry_ready_signals=20,
+            entries_filled=10,
+        ),
+        BacktestVariantSummary(
+            name="take_profit_pct=0.02,stop_loss_pct=0.025",
+            database_path="b.sqlite3",
+            run_seconds=1.0,
+            trade_count=10,
+            wins=5,
+            losses=5,
+            net_pnl_usd=40.0,
+            total_return_pct=0.004,
+            max_drawdown_pct=0.05,
+            profit_factor=1.05,
+            entry_ready_signals=20,
+            entries_filled=10,
+        ),
+        BacktestVariantSummary(
+            name="take_profit_pct=0.03,stop_loss_pct=0.02",
+            database_path="c.sqlite3",
+            run_seconds=1.0,
+            trade_count=10,
+            wins=4,
+            losses=6,
+            net_pnl_usd=-10.0,
+            total_return_pct=-0.001,
+            max_drawdown_pct=0.04,
+            profit_factor=0.95,
+            entry_ready_signals=20,
+            entries_filled=10,
+        ),
+    ]
+    setting_rows = _variant_setting_stability_rows(rows)
+    tp_rows = [row for row in setting_rows if row["setting"] == "take_profit_pct"]
+    assert any(row["value"] == "0.02" and row["variant_count"] == 2 for row in tp_rows)
+    assert any(row["value"] == "0.03" and row["profitable_variants"] == 0 for row in tp_rows)

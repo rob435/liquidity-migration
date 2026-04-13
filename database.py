@@ -265,6 +265,8 @@ class SignalDatabase:
                 take_profit_price_at_exit REAL,
                 stop_loss_price_at_exit REAL,
                 profit_protection_adjustments INTEGER NOT NULL DEFAULT 0,
+                minutes_to_first_profit_50bps REAL,
+                minutes_to_first_profit_100bps REAL,
                 notes TEXT NOT NULL DEFAULT '',
                 post_exit_bars_target INTEGER NOT NULL DEFAULT 0,
                 post_exit_bars_observed INTEGER NOT NULL DEFAULT 0,
@@ -483,6 +485,14 @@ class SignalDatabase:
         if "profit_protection_adjustments" not in trade_columns:
             self._conn.execute(
                 "ALTER TABLE trade_analytics ADD COLUMN profit_protection_adjustments INTEGER NOT NULL DEFAULT 0"
+            )
+        if "minutes_to_first_profit_50bps" not in trade_columns:
+            self._conn.execute(
+                "ALTER TABLE trade_analytics ADD COLUMN minutes_to_first_profit_50bps REAL"
+            )
+        if "minutes_to_first_profit_100bps" not in trade_columns:
+            self._conn.execute(
+                "ALTER TABLE trade_analytics ADD COLUMN minutes_to_first_profit_100bps REAL"
             )
         self._conn.execute(
             """
@@ -1185,6 +1195,8 @@ class SignalDatabase:
                 take_profit_price_at_exit,
                 stop_loss_price_at_exit,
                 profit_protection_adjustments,
+                minutes_to_first_profit_50bps,
+                minutes_to_first_profit_100bps,
                 notes,
                 post_exit_bars_target,
                 post_exit_bars_observed,
@@ -1239,6 +1251,8 @@ class SignalDatabase:
                 :take_profit_price_at_exit,
                 :stop_loss_price_at_exit,
                 :profit_protection_adjustments,
+                :minutes_to_first_profit_50bps,
+                :minutes_to_first_profit_100bps,
                 :notes,
                 :post_exit_bars_target,
                 :post_exit_bars_observed,
@@ -1467,12 +1481,19 @@ class SignalDatabase:
         return int(row[0]) if row is not None else 0
 
     async def latest_profitable_trade_close_for_ticker(self, ticker: str) -> str | None:
-        return await asyncio.to_thread(self._latest_profitable_trade_close_for_ticker_sync, ticker)
+        row = await self.latest_profitable_trade_state_for_ticker(ticker)
+        return str(row["closed_at"]) if row is not None and row["closed_at"] not in (None, "") else None
 
-    def _latest_profitable_trade_close_for_ticker_sync(self, ticker: str) -> str | None:
-        row = self._conn.execute(
+    async def latest_profitable_trade_state_for_ticker(
+        self,
+        ticker: str,
+    ) -> sqlite3.Row | None:
+        return await asyncio.to_thread(self._latest_profitable_trade_state_for_ticker_sync, ticker)
+
+    def _latest_profitable_trade_state_for_ticker_sync(self, ticker: str) -> sqlite3.Row | None:
+        return self._conn.execute(
             """
-            SELECT closed_at
+            SELECT closed_at, exit_rank, exit_composite_score
             FROM trade_analytics
             WHERE ticker = ?
               AND realized_pnl_usd > 0
@@ -1481,7 +1502,6 @@ class SignalDatabase:
             """,
             (ticker,),
         ).fetchone()
-        return str(row[0]) if row is not None and row[0] not in (None, "") else None
 
     async def count_ticker_losing_trades_for_day(self, ticker: str, utc_day: str) -> int:
         return await asyncio.to_thread(

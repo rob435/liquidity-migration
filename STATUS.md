@@ -16,13 +16,32 @@
 - Reports and backtest summaries now count protected-profit exits separately from raw stop losses and take profits.
 - The execution path now also has explicit anti-churn controls:
   - `REENTRY_COOLDOWN_AFTER_PROFIT_MINUTES` blocks immediate same-ticker re-entry after a profitable close
+  - `REENTRY_AFTER_PROFIT_MIN_*` can now demand a measurably better same-ticker re-entry than the last profitable exit state, instead of re-buying a name just because the cooldown expired
   - `MAX_TICKER_LOSING_TRADES_PER_DAY` stops re-trading a churny loser for the rest of the UTC day
   - `STALE_WINNER_*` lets profit-protected winners exit once they are still profitable but no longer strong
 - Trade analytics and exports are richer now:
   - exit-time signal state is recorded on closed trades
   - TP/SL values active at exit are recorded
   - profit-protection adjustment count is recorded
+  - time-to-first-profit milestones at `+0.5%` and `+1.0%` are recorded
   - stale-winner exits are counted separately in reports and backtest summaries
+- The intraday regime layer now also supports an optional volatility-expansion blocker:
+  - `VOLATILITY_EXPANSION_*` computes a close-only ATR-style short-vs-long ratio on the normalized basket path
+  - when enabled, a high ratio adds `volatility_expansion` to the blocker list before `entry_ready` promotion
+  - when `VOLATILITY_EXPANSION_HARD_GATE=true`, VEI failure alone makes the session non-tradeable for `entry_ready`
+  - when disabled, the previous intraday regime behavior is unchanged
+- The current short-window research baseline is now:
+  - `ENTRY_READY_MIN_COMPOSITE_GAIN=0.00`
+  - `ENTRY_READY_MIN_OBSERVATIONS=3`
+  - `INTRADAY_REGIME_MIN_PASS_COUNT=4`
+  This came directly from the strongest completed 30-day grid row and should replace further `pass_count=3` tuning unless a later out-of-sample window contradicts it.
+- Backtest ticker summaries are now more diagnostic:
+  - `backtest_tickers.csv` includes fees, slippage, expectancy, and win rate per ticker
+  - the CLI top-ticker block now exposes cost drag directly instead of only net PnL
+- Variant grids now also emit an explicit stability screen:
+  - `variant_stability_summary.csv` for whole-grid robustness
+  - `variant_setting_stability.csv` grouped by each varied setting/value
+  - stdout stability lines so local-neighborhood grids can be judged on robustness instead of only the single top row
 - `./backtest-runs/` now exists as the dedicated local home for heavy backtest outputs. The folder itself is tracked, but its contents are ignored by git so large SQLite/export artifacts stop cluttering the repo root.
 - The backtest now also has an explicit `--research-fast` mode that skips signal-row persistence and post-run signal-summary SQL while keeping trade and equity simulation intact for parameter sweeps.
 - The backtest now also supports generic plan-reuse grids through `--grid-setting KEY=v1,v2,...`, so one fetched `MinuteReplayPlan` can drive many parameter variants without rebuilding the same replay input every time.
@@ -47,7 +66,7 @@
 - `main.py` supports bounded live runs with runtime counters for soak validation.
 - Deployment docs now include a dedicated soak-run guide and production env template.
 - Deployment scaffold exists for `systemd`.
-- Local verification is green: `95` tests passing.
+- Local verification is green: `101` tests passing.
 - Cycle processing now batches DB writes and waits briefly for the WebSocket close wave before scoring.
 - Confirmed logs and cooldown are tied to candle event time; emerging alerts use wall-clock detection time because they fire before candle close.
 - Default universe was live-validated against Bybit; `FETUSDT` and `FTMUSDT` were removed after failing validation.
@@ -180,6 +199,11 @@
 - TP/SL is checked only when the runtime processes a cycle. There is no separate sub-second price watcher, so a violent move can still gap through the exact configured threshold.
 - Profit protection is intentionally bounded, not trailing. It will stop the dumb immediate-reentry loop in strong names, but it will not perfectly maximize every winner and it will still miss intracycle microstructure because the engine is not tick-driven.
 - Re-entry cooldown and ticker-loss throttles are blunt controls, not alpha. They reduce churn and obvious same-name overtrading, but they can still suppress a genuinely valid second opportunity if the market keeps trending cleanly.
+- Re-entry improvement gating depends on exit-state analytics being present. If live exits frequently happen without useful exit rank/composite context, the gate degrades back toward the simpler cooldown behavior.
+- The new volatility-expansion gate is deliberately coarse. It is basket-level and close-only, not true OHLC ATR and not per-ticker microstructure, so it should be validated as a session-quality filter instead of treated like exact risk sizing logic.
+- The weakest part of the system is still net edge after costs, not missing features. Gross edge can exist while the strategy is still operationally bad if fees and slippage keep wiping it out.
+- The entry engine is still carrying a lot of heuristic weight. Hurst, intraday regime voting, and anti-churn rules all need to keep earning their place instead of being treated as permanent truth.
+- Live sizing is still more aggressive than it looks because `1%` risk with a `2%` stop implies large notional exposure relative to available balance.
 - Stale-winner exits are only as honest as the cycle cadence. They act on cycle-time signal state, not on a continuous price stream, so a fast intracycle reversal can still behave differently live than the clean conceptual rule suggests.
 - Venue exit reconciliation is polling-based, not websocket-based. Telegram exit messages and SQLite close state will lag until the next engine cycle sees that Bybit has already closed the position.
 - A real demo smoke entry was executed successfully on `SOLUSDT`; the venue accepted the order and TP/SL were installed. There is now a live demo position unless it has already exited on Bybit.
@@ -199,6 +223,25 @@
 - If another live day still shows regime stuck at `1`, revisit the macro regime design before cutting curvature any further.
 - Check whether `entry_ready` is selective enough to stand alone as the only tradeable tier before adding complexity back into the live contract.
 - Run longer backtests with CSV export (`python backtest.py --export-dir ...`) and inspect equity-by-day plus per-ticker concentration instead of only staring at aggregate net PnL.
+- Run short-window A/B tests before adding more logic:
+  - current baseline
+  - VEI soft vote vs VEI hard gate
+  - conservative comparator (`ENTRY_READY_MIN_COMPOSITE_GAIN=0.05`)
+  - anti-churn rules measured by blocked-trade opportunity cost
+- Judge the next VEI batch by:
+  - net PnL
+  - return %
+  - max drawdown
+  - profit factor
+  - trade count
+  - entry-ready signals vs filled trades
+  - per-ticker expectancy / fees / slippage
+- Attack the next research priorities in this order:
+  - entry quality
+  - fee/slippage drag by ticker
+  - regime-filter pruning
+  - live sizing realism
+  - re-entry-rule validation
 - If repeated backtests become a routine workflow, warm the cache once first (`python backtest.py --prefetch-lookback-days 365`). That removes most repeated REST fetch waste, but replay runtime is still dominated by the CPU loop.
 - For broad variable sweeps, use `python backtest.py --research-fast ...` first, then rerun shortlisted configs in full mode before trusting them. Fast mode is meant to reduce bookkeeping cost, not replace final audited validation.
 - For multi-parameter sweeps, pair `--research-fast` with `--grid-setting ...`. That is now the honest fast path: reuse one replay plan, vary the settings, then rerun finalists in full mode.

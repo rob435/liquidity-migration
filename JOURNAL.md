@@ -428,3 +428,57 @@
   - `python3 -m pyflakes config.py database.py exchange.py alerting.py execution.py backtest.py report.py tests/test_execution.py tests/test_backtest.py`
   - `python3 -m pytest -q tests/test_execution.py tests/test_backtest.py` -> `43 passed`
   - `python3 -m pytest -q` -> `95 passed`
+
+## 2026-04-13
+
+- Tightened same-ticker re-entry after profitable exits:
+  - cooldown alone was not enough
+  - the engine and simulator now also require a genuinely stronger re-entry than the last profitable exit state, using prior exit rank and prior exit composite score
+  - the new knobs are `REENTRY_AFTER_PROFIT_MIN_RANK_IMPROVEMENT` and `REENTRY_AFTER_PROFIT_MIN_COMPOSITE_IMPROVEMENT`
+- Added richer trade timing analytics:
+  - trades now record `minutes_to_first_profit_50bps` and `minutes_to_first_profit_100bps`
+  - the live execution path derives those from open position marks
+  - the simulator/backtester tracks the same milestones from intrabar candles
+- Made ticker-level backtest diagnostics more useful:
+  - `backtest_tickers.csv` now includes fees, slippage, expectancy, and win rate per ticker instead of just trade count and net PnL
+  - the CLI top-ticker summary now prints that cost drag directly so fee-farm names stand out faster
+- Added a first-pass stability screen on top of existing grids:
+  - `variant_stability_summary.csv` now exports whole-neighborhood robustness metrics like profitable fraction, PF>1 fraction, median net PnL, and worst drawdown
+  - `variant_setting_stability.csv` now groups those same metrics by each varied setting/value so local parameter neighborhoods can be judged for robustness instead of only peak return
+  - CLI output now prints the same high-level stability readout directly after grid completion
+- Updated report exports/formatting so DB-backed trade reports now also surface the new time-to-first-profit fields.
+- Reran validation after the re-entry-improvement / timing pass:
+  - `python3 -m py_compile config.py database.py execution.py backtest.py report.py tests/test_execution.py tests/test_backtest.py tests/test_report.py`
+  - `python3 -m pyflakes config.py database.py execution.py backtest.py report.py tests/test_execution.py tests/test_backtest.py tests/test_report.py`
+  - `python3 -m pytest -q tests/test_execution.py tests/test_backtest.py tests/test_report.py` -> `53 passed`
+  - `python3 -m pytest -q` -> `99 passed`
+- Added focused regression coverage for the stability screen and reran validation:
+  - `python3 -m pytest -q tests/test_backtest.py tests/test_execution.py tests/test_report.py` -> `55 passed`
+  - `python3 -m pytest -q` -> `101 passed`
+- Added an optional volatility-expansion gate to the existing intraday regime filter:
+  - the new switch is `VOLATILITY_EXPANSION_FILTER_ENABLED`
+  - it computes a close-only ATR-style short/long ratio on the normalized basket path instead of pretending the regime path has real OHLC ATR available
+  - when enabled, an elevated ratio adds a `volatility_expansion` blocker and can stop `entry_ready` promotion
+  - when disabled, live behavior is unchanged
+- Added focused signal-engine regression coverage for the new gate:
+  - enabled path blocks `entry_ready` when the expansion ratio breaches the configured ceiling
+  - disabled path leaves the same setup tradeable
+- Reran validation after the VEI-style regime pass:
+  - `python3 -m py_compile config.py indicators.py signal_engine.py tests/test_signal_engine.py`
+  - `python3 -m pyflakes config.py indicators.py signal_engine.py tests/test_signal_engine.py`
+  - `python3 -m pytest -q tests/test_signal_engine.py` -> `11 passed`
+- Re-centered the active research plan around the actual weak points instead of more feature creep:
+  - prove net edge after costs on short windows before adding more logic
+  - A/B test the VEI gate with it off vs on
+  - measure what the anti-churn rules block and whether those blocked trades were actually bad
+- Wrote down the current deletion watchlist explicitly so the strategy does not accumulate dead heuristics:
+  - Hurst if isolated tests do not justify it
+  - VEI if it does not clearly improve results
+  - any intraday regime sub-check that cannot earn its keep
+  - any anti-churn rule that suppresses too many profitable second-leg trades
+- Promoted the winning 30-day grid settings into the active research baseline:
+  - `ENTRY_READY_MIN_COMPOSITE_GAIN=0.00`
+  - `ENTRY_READY_MIN_OBSERVATIONS=3`
+  - `INTRADAY_REGIME_MIN_PASS_COUNT=4`
+- Added `VOLATILITY_EXPANSION_HARD_GATE` so VEI can be tested as a real blocker instead of only as one more intraday-regime vote.
+- Updated the research docs to make the next validation batch explicit: baseline vs VEI soft vote vs VEI hard gate, plus the `0.05` conservative comparator.

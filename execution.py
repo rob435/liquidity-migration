@@ -198,6 +198,63 @@ class ExecutionEngine:
         elapsed_minutes = self._holding_minutes(closed_at_iso, now_iso)
         return elapsed_minutes < self.settings.reentry_cooldown_after_profit_minutes
 
+    def _reentry_improvement_satisfied(
+        self,
+        signal: RankedSignal,
+        *,
+        prior_exit_rank: int | None,
+        prior_exit_composite_score: float | None,
+    ) -> bool:
+        rank_checks: list[bool] = []
+        if (
+            prior_exit_rank is not None
+            and self.settings.reentry_after_profit_min_rank_improvement > 0
+        ):
+            target_rank = max(
+                1,
+                prior_exit_rank - self.settings.reentry_after_profit_min_rank_improvement,
+            )
+            rank_checks.append(signal.rank <= target_rank)
+        composite_checks: list[bool] = []
+        if (
+            prior_exit_composite_score is not None
+            and self.settings.reentry_after_profit_min_composite_improvement > 0
+        ):
+            composite_checks.append(
+                signal.composite_score
+                >= (
+                    prior_exit_composite_score
+                    + self.settings.reentry_after_profit_min_composite_improvement
+                )
+            )
+        checks = rank_checks + composite_checks
+        if not checks:
+            return True
+        return any(checks)
+
+    def _minutes_to_first_profit_target(
+        self,
+        open_marks: list,
+        *,
+        opened_at_iso: str,
+        threshold_pct: float,
+    ) -> float | None:
+        opened_at = datetime.fromisoformat(opened_at_iso)
+        for mark in open_marks:
+            if float(mark["favorable_excursion_pct"]) + 1e-12 < threshold_pct:
+                continue
+            timestamp = mark["timestamp"]
+            if timestamp in (None, ""):
+                continue
+            return max(
+                0.0,
+                (
+                    datetime.fromisoformat(str(timestamp)) - opened_at
+                ).total_seconds()
+                / 60.0,
+            )
+        return None
+
     def _should_exit_stale_winner(
         self,
         *,
@@ -547,6 +604,16 @@ class ExecutionEngine:
             mae_pct = adverse
             peak_favorable_price = exit_price
             peak_adverse_price = exit_price
+        minutes_to_first_profit_50bps = self._minutes_to_first_profit_target(
+            open_marks,
+            opened_at_iso=str(position["opened_at"]),
+            threshold_pct=0.005,
+        )
+        minutes_to_first_profit_100bps = self._minutes_to_first_profit_target(
+            open_marks,
+            opened_at_iso=str(position["opened_at"]),
+            threshold_pct=0.010,
+        )
         await self.database.record_trade_analytics(
             position_id=position_id,
             ticker=str(position["ticker"]),
@@ -588,6 +655,8 @@ class ExecutionEngine:
             take_profit_price_at_exit=take_profit_price_at_exit,
             stop_loss_price_at_exit=stop_loss_price_at_exit,
             profit_protection_adjustments=self._position_profit_protection_adjustments(position),
+            minutes_to_first_profit_50bps=minutes_to_first_profit_50bps,
+            minutes_to_first_profit_100bps=minutes_to_first_profit_100bps,
             notes=str(position["notes"] or ""),
             post_exit_bars_target=max(self.settings.analytics_post_exit_bars, 0),
             post_exit_bars_observed=0,
@@ -1356,13 +1425,53 @@ class ExecutionEngine:
                     )
                 )
                 continue
-            latest_profitable_close = await self.database.latest_profitable_trade_close_for_ticker(
+            latest_profitable_trade = await self.database.latest_profitable_trade_state_for_ticker(
                 signal.ticker
+            )
+            latest_profitable_close = (
+                str(latest_profitable_trade["closed_at"])
+                if latest_profitable_trade is not None
+                and latest_profitable_trade["closed_at"] not in (None, "")
+                else None
             )
             if self._reentry_cooldown_active(latest_profitable_close, now_iso):
                 detail = (
                     "reentry_cooldown_after_profit "
                     f"minutes={self.settings.reentry_cooldown_after_profit_minutes}"
+                )
+                actions.append(
+                    ExecutionAction(
+                        ticker=signal.ticker,
+                        action="skip_entry",
+                        signal_kind=signal.signal_kind,
+                        detail=detail,
+                    )
+                )
+                await self._log_runtime_event(
+                    severity="info",
+                    event_type="entry_blocked",
+                    detail=detail,
+                    stage="emerging",
+                    ticker=signal.ticker,
+                )
+                continue
+            if latest_profitable_trade is not None and not self._reentry_improvement_satisfied(
+                signal,
+                prior_exit_rank=(
+                    int(latest_profitable_trade["exit_rank"])
+                    if latest_profitable_trade["exit_rank"] not in (None, "")
+                    else None
+                ),
+                prior_exit_composite_score=(
+                    float(latest_profitable_trade["exit_composite_score"])
+                    if latest_profitable_trade["exit_composite_score"] not in (None, "")
+                    else None
+                ),
+            ):
+                detail = (
+                    "reentry_no_improvement_after_profit "
+                    f"min_rank_improvement={self.settings.reentry_after_profit_min_rank_improvement} "
+                    f"min_composite_improvement={self.settings.reentry_after_profit_min_composite_improvement:.3f}"
                 )
                 actions.append(
                     ExecutionAction(
