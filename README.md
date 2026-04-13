@@ -247,12 +247,6 @@ The current short-window research baseline is:
 
 That came directly from the winning 30-day grid row. Treat `pass_count=4` as the provisional standard unless a later out-of-sample window disproves it.
 
-The VEI filter still defaults off, and when it is enabled it remains only an extra intraday-regime vote unless you also enable:
-
-- `VOLATILITY_EXPANSION_HARD_GATE=true`
-
-Use that hard gate for honest VEI evaluation. Without it, you are testing a softer idea than "VEI should block entry-ready conditions."
-
 For built-in stress testing, add one or more `--stress-profile` flags:
 
 ```bash
@@ -455,14 +449,13 @@ For the first VPS validation run, use [SOAK_RUN.md](deploy/SOAK_RUN.md) and star
 - `ENTRY_READY` has explicit tuning knobs in the env templates: `ENTRY_READY_TOP_N`, `ENTRY_READY_COOLDOWN_MINUTES`, `ENTRY_READY_MIN_OBSERVATIONS`, `ENTRY_READY_MIN_RANK_IMPROVEMENT`, and `ENTRY_READY_MIN_COMPOSITE_GAIN`. Use those to keep the live entry tier tighter than `EMERGING` without adding another fake confirmation stage.
 - Execution is currently aligned with the momentum ranking again. The bot buys the strongest `entry_ready` names, exits them at `+2%` take profit or `-2%` stop loss by default, and can now ratchet one still-strong winner outward with `PROFIT_PROTECTION_*` instead of TP-ing and immediately re-entering.
 - The anti-churn layer now has explicit operator knobs too: `REENTRY_COOLDOWN_AFTER_PROFIT_MINUTES` blocks immediate same-ticker re-entry after a profitable close, `MAX_TICKER_LOSING_TRADES_PER_DAY` cuts off repeat losers on the same name for the rest of the UTC day, and `STALE_WINNER_*` lets a profit-protected winner exit cleanly once the strength signal has faded instead of lingering indefinitely.
-- Same-ticker re-entry is now stricter than “still entry_ready.” After a profitable close, the next same-name entry can also require a better rank and/or a higher composite score than the prior profitable exit state, using `REENTRY_AFTER_PROFIT_MIN_RANK_IMPROVEMENT` and `REENTRY_AFTER_PROFIT_MIN_COMPOSITE_IMPROVEMENT`.
+- Same-ticker re-entry can be made stricter than “still entry_ready” with `REENTRY_AFTER_PROFIT_MIN_RANK_IMPROVEMENT` and `REENTRY_AFTER_PROFIT_MIN_COMPOSITE_IMPROVEMENT`. The current shipped baseline leaves both at zero, so the active anti-churn behavior is the shorter `REENTRY_COOLDOWN_AFTER_PROFIT_MINUTES=15` rather than an additional same-name improvement gate.
 - Trade analytics are richer now on exits. The trade ledger records exit-time rank/composite/momentum/curvature/Hurst, the active TP/SL levels, profit-protection adjustment count, and time-to-first-profit milestones (`+0.5%`, `+1.0%`), so later tuning can use actual exit-state and timing evidence instead of guessing from entry-only data.
 - Variant grids now emit a first-pass stability screen automatically:
   - `variant_stability_summary.csv` for the whole neighborhood
   - `variant_setting_stability.csv` grouped by each varied setting/value
   - stdout also prints the same high-level robustness readout so you can see whether a grid is broadly stable or just lucky at one point
 - `INTRADAY_REGIME_*` is now the practical no-trade layer. It only blocks `entry_ready` promotion; the engine still logs broad intrabar context on bad days so you can see what it wanted to do without actually entering.
-- `VOLATILITY_EXPANSION_*` is an optional add-on to that same intraday regime gate. It uses a close-only ATR-style short-vs-long ratio on the normalized basket path, defaults off, and should be treated as a testable filter rather than assumed alpha.
 - `MAX_OPEN_POSITIONS` is back as a blunt portfolio safety net. It caps the total number of simultaneously open positions, while `MAX_ENTRIES_PER_REBALANCE` separately caps how many new names one rebalance pass may add.
 - `MAX_POSITIONS_PER_CLUSTER` is the more useful anti-pileup control. It stops the book from filling with multiple names from the same current cluster even when raw position count still looks safe.
 - `MAX_ENTRIES_PER_REBALANCE` is now the clean way to cap how many fresh positions one `emerging` rebalance pass may open. It does not change ranking; it just limits how many top-ranked `entry_ready` names are allowed through in that batch.

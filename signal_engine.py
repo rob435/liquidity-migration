@@ -12,7 +12,6 @@ from database import SignalDatabase, SignalRecord
 from indicators import (
     btc_regime_score,
     clip_value,
-    close_only_atr,
     correlation_cluster_labels,
     cross_sectional_zscores,
     curvature_signal,
@@ -78,9 +77,7 @@ class IntradayRegimeContext:
     basket_return_pct: float
     trend_efficiency: float
     leadership_persistence: float
-    volatility_expansion_ratio: float | None
     pass_count: int
-    total_checks: int
     tradeable: bool
     blockers: tuple[str, ...]
 
@@ -118,16 +115,13 @@ class SignalEngine:
         return "neutral"
 
     def _default_intraday_regime_context(self) -> IntradayRegimeContext:
-        total_checks = 5 if self.settings.volatility_expansion_filter_enabled else 4
         return IntradayRegimeContext(
             lookback_bars=max(self.settings.intraday_regime_lookback_bars, 2),
             breadth_pct=1.0,
             basket_return_pct=0.0,
             trend_efficiency=1.0,
             leadership_persistence=1.0,
-            volatility_expansion_ratio=1.0,
-            pass_count=total_checks,
-            total_checks=total_checks,
+            pass_count=4,
             tradeable=True,
             blockers=(),
         )
@@ -443,16 +437,13 @@ class SignalEngine:
             normalized_paths.append(window / window[0])
             symbol_returns.append(float((window[-1] / window[0]) - 1.0))
         if len(normalized_paths) < 3 or not metrics:
-            total_checks = 5 if self.settings.volatility_expansion_filter_enabled else 4
             return IntradayRegimeContext(
                 lookback_bars=lookback_bars,
                 breadth_pct=1.0,
                 basket_return_pct=0.0,
                 trend_efficiency=1.0,
                 leadership_persistence=1.0,
-                volatility_expansion_ratio=1.0,
-                pass_count=total_checks,
-                total_checks=total_checks,
+                pass_count=4,
                 tradeable=True,
                 blockers=(),
             )
@@ -463,20 +454,9 @@ class SignalEngine:
         trend_efficiency = path_efficiency(basket_path)
         current_leaders = list(metrics)[: max(self.settings.intraday_regime_top_n, 1)]
         leadership_persistence = self._leadership_persistence(current_leaders)
-        volatility_expansion_ratio: float | None = None
-        if self.settings.volatility_expansion_filter_enabled:
-            short_window = max(self.settings.volatility_expansion_short_bars, 1)
-            long_window = max(self.settings.volatility_expansion_long_bars, short_window)
-            short_atr = close_only_atr(basket_path, short_window)
-            long_atr = close_only_atr(basket_path, long_window)
-            if np.isfinite(short_atr) and np.isfinite(long_atr):
-                if long_atr == 0.0:
-                    volatility_expansion_ratio = 1.0 if short_atr == 0.0 else float("inf")
-                else:
-                    volatility_expansion_ratio = float(short_atr / long_atr)
         blockers: list[str] = []
         pass_count = 0
-        checks: list[tuple[str, bool]] = [
+        checks = [
             (
                 "breadth",
                 breadth_pct >= self.settings.intraday_regime_min_breadth,
@@ -494,14 +474,6 @@ class SignalEngine:
                 leadership_persistence >= self.settings.intraday_regime_min_leadership_persistence,
             ),
         ]
-        if self.settings.volatility_expansion_filter_enabled:
-            checks.append(
-                (
-                    "volatility_expansion",
-                    volatility_expansion_ratio is not None
-                    and volatility_expansion_ratio <= self.settings.volatility_expansion_max_ratio,
-                )
-            )
         for blocker, passed in checks:
             if passed:
                 pass_count += 1
@@ -510,21 +482,13 @@ class SignalEngine:
         tradeable = True
         if self.settings.intraday_regime_filter_enabled:
             tradeable = pass_count >= max(self.settings.intraday_regime_min_pass_count, 1)
-            if (
-                self.settings.volatility_expansion_filter_enabled
-                and self.settings.volatility_expansion_hard_gate
-                and "volatility_expansion" in blockers
-            ):
-                tradeable = False
         return IntradayRegimeContext(
             lookback_bars=lookback_bars,
             breadth_pct=breadth_pct,
             basket_return_pct=basket_return_pct,
             trend_efficiency=trend_efficiency,
             leadership_persistence=leadership_persistence,
-            volatility_expansion_ratio=volatility_expansion_ratio,
             pass_count=pass_count,
-            total_checks=len(checks),
             tradeable=tradeable,
             blockers=tuple(blockers),
         )
@@ -587,11 +551,6 @@ class SignalEngine:
             min_observations=self.settings.entry_ready_min_observations,
         )
         blockers = ",".join(intraday_regime.blockers) if intraday_regime.blockers else "none"
-        vei = (
-            f"{intraday_regime.volatility_expansion_ratio:.2f}"
-            if intraday_regime.volatility_expansion_ratio is not None
-            else "n/a"
-        )
         return (
             f"ref={item.momentum_reference_label} "
             f"cluster={item.cluster_label} "
@@ -602,8 +561,7 @@ class SignalEngine:
             f"mom_z={item.momentum_z:.2f} "
             f"curv={item.curvature_raw:.6f} "
             f"hurst={item.hurst:.3f} "
-            f"vei={vei} "
-            f"regime_passes={intraday_regime.pass_count}/{intraday_regime.total_checks} "
+            f"regime_passes={intraday_regime.pass_count}/4 "
             f"blockers={blockers}"
         )
 

@@ -82,9 +82,9 @@ class Settings:
     profit_protection_sl_lock_pct: float = 0.005
     profit_protection_max_adjustments: int = 1
     profit_protection_max_rank: int = 2
-    reentry_cooldown_after_profit_minutes: int = 90
-    reentry_after_profit_min_rank_improvement: int = 1
-    reentry_after_profit_min_composite_improvement: float = 0.10
+    reentry_cooldown_after_profit_minutes: int = 15
+    reentry_after_profit_min_rank_improvement: int = 0
+    reentry_after_profit_min_composite_improvement: float = 0.0
     max_ticker_losing_trades_per_day: int = 1
     stale_winner_exit_enabled: bool = True
     stale_winner_min_profit_pct: float = 0.006
@@ -127,11 +127,6 @@ class Settings:
     intraday_regime_min_basket_return: float = 0.0
     intraday_regime_min_leadership_persistence: float = 0.25
     intraday_regime_min_pass_count: int = 4
-    volatility_expansion_filter_enabled: bool = False
-    volatility_expansion_hard_gate: bool = False
-    volatility_expansion_short_bars: int = 4
-    volatility_expansion_long_bars: int = 16
-    volatility_expansion_max_ratio: float = 1.2
     watchlist_top_n: int = 8
     emerging_top_n: int = 5
     entry_ready_top_n: int = 4
@@ -256,15 +251,15 @@ def load_settings() -> Settings:
         profit_protection_max_rank=_get_int("PROFIT_PROTECTION_MAX_RANK", 2),
         reentry_cooldown_after_profit_minutes=_get_int(
             "REENTRY_COOLDOWN_AFTER_PROFIT_MINUTES",
-            90,
+            15,
         ),
         reentry_after_profit_min_rank_improvement=_get_int(
             "REENTRY_AFTER_PROFIT_MIN_RANK_IMPROVEMENT",
-            1,
+            0,
         ),
         reentry_after_profit_min_composite_improvement=_get_float(
             "REENTRY_AFTER_PROFIT_MIN_COMPOSITE_IMPROVEMENT",
-            0.10,
+            0.0,
         ),
         max_ticker_losing_trades_per_day=_get_int("MAX_TICKER_LOSING_TRADES_PER_DAY", 1),
         stale_winner_exit_enabled=_get_bool("STALE_WINNER_EXIT_ENABLED", True),
@@ -316,17 +311,6 @@ def load_settings() -> Settings:
             0.25,
         ),
         intraday_regime_min_pass_count=_get_int("INTRADAY_REGIME_MIN_PASS_COUNT", 4),
-        volatility_expansion_filter_enabled=_get_bool(
-            "VOLATILITY_EXPANSION_FILTER_ENABLED",
-            False,
-        ),
-        volatility_expansion_hard_gate=_get_bool(
-            "VOLATILITY_EXPANSION_HARD_GATE",
-            False,
-        ),
-        volatility_expansion_short_bars=_get_int("VOLATILITY_EXPANSION_SHORT_BARS", 4),
-        volatility_expansion_long_bars=_get_int("VOLATILITY_EXPANSION_LONG_BARS", 16),
-        volatility_expansion_max_ratio=_get_float("VOLATILITY_EXPANSION_MAX_RATIO", 1.2),
         watchlist_top_n=_get_int("WATCHLIST_TOP_N", 8),
         emerging_top_n=_get_int("EMERGING_TOP_N", 5),
         entry_ready_top_n=_get_int("ENTRY_READY_TOP_N", 4),

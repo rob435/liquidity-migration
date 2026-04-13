@@ -144,15 +144,6 @@ Use this as the active research baseline until a later out-of-sample window disp
 
 The strongest signal from the completed 30-day grid was not "tighten everything." It was: keep the intrabar confirmation modest, and make the session-quality gate stricter.
 
-### VEI Validation Rule
-
-The volatility-expansion filter now has two modes:
-
-- soft vote: VEI contributes one more intraday regime check
-- hard gate: VEI failure alone blocks `entry_ready`
-
-Keep the feature off by default and test it explicitly. If you are evaluating whether VEI genuinely helps, use the hard-gate path. The soft-vote path is weaker and should be treated as a secondary comparator, not the main test.
-
 4. Residual momentum / clustering
    Current defaults:
    - `momentum_reference_mode=cluster_relative`
@@ -354,39 +345,6 @@ python backtest.py \
   --grid-setting entry_ready_min_composite_gain=0.00,0.05 \
   --grid-setting intraday_regime_min_pass_count=4
 ```
-
-### Immediate VEI Comparison Batch
-
-Anchor all runs to the same 30-day window and do not mix in any other logic changes:
-
-1. Baseline only
-   - `entry_ready_min_composite_gain=0.00`
-   - `entry_ready_min_observations=3`
-   - `intraday_regime_min_pass_count=4`
-   - `VOLATILITY_EXPANSION_FILTER_ENABLED=false`
-
-2. VEI soft vote
-   - same baseline
-   - `VOLATILITY_EXPANSION_FILTER_ENABLED=true`
-   - `VOLATILITY_EXPANSION_HARD_GATE=false`
-
-3. VEI hard gate
-   - same baseline
-   - `VOLATILITY_EXPANSION_FILTER_ENABLED=true`
-   - `VOLATILITY_EXPANSION_HARD_GATE=true`
-
-4. Conservative comparator
-   - `entry_ready_min_composite_gain=0.05`
-   - `entry_ready_min_observations=3`
-   - `intraday_regime_min_pass_count=4`
-   - VEI off
-
-5. Conservative comparator with VEI hard gate
-   - same comparator
-   - VEI on
-   - hard gate on
-
-VEI only earns its place if it improves net PnL, profit factor, or drawdown materially without collapsing trade count into irrelevance.
 
 ### Phase 3: Exit Optimization
 

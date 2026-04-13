@@ -16,7 +16,7 @@
 - Reports and backtest summaries now count protected-profit exits separately from raw stop losses and take profits.
 - The execution path now also has explicit anti-churn controls:
   - `REENTRY_COOLDOWN_AFTER_PROFIT_MINUTES` blocks immediate same-ticker re-entry after a profitable close
-  - `REENTRY_AFTER_PROFIT_MIN_*` can now demand a measurably better same-ticker re-entry than the last profitable exit state, instead of re-buying a name just because the cooldown expired
+  - `REENTRY_AFTER_PROFIT_MIN_*` can demand a measurably better same-ticker re-entry than the last profitable exit state, but the current active baseline sets those thresholds to zero so the improvement gate is operationally permissive
   - `MAX_TICKER_LOSING_TRADES_PER_DAY` stops re-trading a churny loser for the rest of the UTC day
   - `STALE_WINNER_*` lets profit-protected winners exit once they are still profitable but no longer strong
 - Trade analytics and exports are richer now:
@@ -25,15 +25,13 @@
   - profit-protection adjustment count is recorded
   - time-to-first-profit milestones at `+0.5%` and `+1.0%` are recorded
   - stale-winner exits are counted separately in reports and backtest summaries
-- The intraday regime layer now also supports an optional volatility-expansion blocker:
-  - `VOLATILITY_EXPANSION_*` computes a close-only ATR-style short-vs-long ratio on the normalized basket path
-  - when enabled, a high ratio adds `volatility_expansion` to the blocker list before `entry_ready` promotion
-  - when `VOLATILITY_EXPANSION_HARD_GATE=true`, VEI failure alone makes the session non-tradeable for `entry_ready`
-  - when disabled, the previous intraday regime behavior is unchanged
 - The current short-window research baseline is now:
   - `ENTRY_READY_MIN_COMPOSITE_GAIN=0.00`
   - `ENTRY_READY_MIN_OBSERVATIONS=3`
   - `INTRADAY_REGIME_MIN_PASS_COUNT=4`
+  - `REENTRY_COOLDOWN_AFTER_PROFIT_MINUTES=15`
+  - `REENTRY_AFTER_PROFIT_MIN_RANK_IMPROVEMENT=0`
+  - `REENTRY_AFTER_PROFIT_MIN_COMPOSITE_IMPROVEMENT=0.00`
   This came directly from the strongest completed 30-day grid row and should replace further `pass_count=3` tuning unless a later out-of-sample window contradicts it.
 - Backtest ticker summaries are now more diagnostic:
   - `backtest_tickers.csv` includes fees, slippage, expectancy, and win rate per ticker
@@ -225,17 +223,8 @@
 - Run longer backtests with CSV export (`python backtest.py --export-dir ...`) and inspect equity-by-day plus per-ticker concentration instead of only staring at aggregate net PnL.
 - Run short-window A/B tests before adding more logic:
   - current baseline
-  - VEI soft vote vs VEI hard gate
   - conservative comparator (`ENTRY_READY_MIN_COMPOSITE_GAIN=0.05`)
   - anti-churn rules measured by blocked-trade opportunity cost
-- Judge the next VEI batch by:
-  - net PnL
-  - return %
-  - max drawdown
-  - profit factor
-  - trade count
-  - entry-ready signals vs filled trades
-  - per-ticker expectancy / fees / slippage
 - Attack the next research priorities in this order:
   - entry quality
   - fee/slippage drag by ticker

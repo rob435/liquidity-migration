@@ -455,30 +455,21 @@
 - Added focused regression coverage for the stability screen and reran validation:
   - `python3 -m pytest -q tests/test_backtest.py tests/test_execution.py tests/test_report.py` -> `55 passed`
   - `python3 -m pytest -q` -> `101 passed`
-- Added an optional volatility-expansion gate to the existing intraday regime filter:
-  - the new switch is `VOLATILITY_EXPANSION_FILTER_ENABLED`
-  - it computes a close-only ATR-style short/long ratio on the normalized basket path instead of pretending the regime path has real OHLC ATR available
-  - when enabled, an elevated ratio adds a `volatility_expansion` blocker and can stop `entry_ready` promotion
-  - when disabled, live behavior is unchanged
-- Added focused signal-engine regression coverage for the new gate:
-  - enabled path blocks `entry_ready` when the expansion ratio breaches the configured ceiling
-  - disabled path leaves the same setup tradeable
-- Reran validation after the VEI-style regime pass:
-  - `python3 -m py_compile config.py indicators.py signal_engine.py tests/test_signal_engine.py`
-  - `python3 -m pyflakes config.py indicators.py signal_engine.py tests/test_signal_engine.py`
-  - `python3 -m pytest -q tests/test_signal_engine.py` -> `11 passed`
 - Re-centered the active research plan around the actual weak points instead of more feature creep:
   - prove net edge after costs on short windows before adding more logic
-  - A/B test the VEI gate with it off vs on
   - measure what the anti-churn rules block and whether those blocked trades were actually bad
 - Wrote down the current deletion watchlist explicitly so the strategy does not accumulate dead heuristics:
   - Hurst if isolated tests do not justify it
-  - VEI if it does not clearly improve results
   - any intraday regime sub-check that cannot earn its keep
   - any anti-churn rule that suppresses too many profitable second-leg trades
 - Promoted the winning 30-day grid settings into the active research baseline:
   - `ENTRY_READY_MIN_COMPOSITE_GAIN=0.00`
   - `ENTRY_READY_MIN_OBSERVATIONS=3`
   - `INTRADAY_REGIME_MIN_PASS_COUNT=4`
-- Added `VOLATILITY_EXPANSION_HARD_GATE` so VEI can be tested as a real blocker instead of only as one more intraday-regime vote.
-- Updated the research docs to make the next validation batch explicit: baseline vs VEI soft vote vs VEI hard gate, plus the `0.05` conservative comparator.
+- Relaxed the active same-ticker re-entry defaults after the anti-churn rerun:
+  - `REENTRY_COOLDOWN_AFTER_PROFIT_MINUTES=15`
+  - `REENTRY_AFTER_PROFIT_MIN_RANK_IMPROVEMENT=0`
+  - `REENTRY_AFTER_PROFIT_MIN_COMPOSITE_IMPROVEMENT=0.00`
+- Kept the improvement-gate code path intact. Zero thresholds now make it operationally permissive without deleting the feature from the repo.
+- Removed the VEI / volatility-expansion filter completely after the first real comparison failed to justify it.
+- Stripped the config surface, signal-engine logic, test scaffolding, and research-plan references instead of keeping a dead heuristic around for sophistication theater.

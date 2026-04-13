@@ -179,11 +179,14 @@
 - Treat volatility expansion as a regime-filter experiment, not as an excuse for dynamic stops or ATR sizing. The honest v1-safe implementation is an optional blocker on `entry_ready`, not another adaptive risk engine.
 - Do not fake true ATR when the regime path only has close series. The repo now uses a close-only ATR-style ratio on the normalized basket path and names it accordingly in docs instead of pretending the data is richer than it is.
 - The immediate research priority is no longer “add features.” It is: prove net edge after costs, validate entry quality, measure anti-churn opportunity cost, and prune weak filters.
-- Hurst, VEI, and every intraday regime sub-check are on probation. If isolated testing does not justify them, cut them instead of preserving them for sophistication theater.
+- Hurst and every intraday regime sub-check are on probation. If isolated testing does not justify them, cut them instead of preserving them for sophistication theater.
 - Keep the structural core unless data disproves it: residual/cluster-relative momentum, cluster exposure caps, fixed TP/SL, and one-step profit protection are currently more defensible than extra gatekeeping layers.
 - Promote the winning 30-day grid row into the active baseline instead of continuing to tune around weaker `pass_count=3` variants:
   - `ENTRY_READY_MIN_COMPOSITE_GAIN=0.00`
   - `ENTRY_READY_MIN_OBSERVATIONS=3`
   - `INTRADAY_REGIME_MIN_PASS_COUNT=4`
-- Treat VEI hard-gating as the honest test of the idea. Soft-vote VEI remains available for comparison, but it is too weak to answer whether volatility expansion should truly block `entry_ready`.
-- Keep VEI off by default. If hard-gate tests do not improve net results or robustness materially, deprioritize it instead of stacking more volatility heuristics.
+- Remove VEI / volatility expansion completely. The first real comparison did not justify keeping it, and the repo is better off without another weak filter to babysit.
+- Relax the active re-entry controls for the next research pass instead of deleting them outright:
+  - shorten profitable same-ticker cooldown to `15` minutes
+  - set rank/composite improvement requirements to zero so re-entry is no longer blocked by the improvement gate
+- Keep the improvement-gate implementation in the codebase. Zero thresholds are enough to disable it operationally without losing the ability to test it again later.
