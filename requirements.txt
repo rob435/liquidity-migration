@@ -1,4 +1,9 @@
 aiohttp>=3.10,<4
 certifi>=2024.0.0
+duckdb>=1.0,<2
 numpy>=1.26,<3
+polars>=1.0,<2
+pyarrow>=15.0,<22
+pybit>=5.8,<6
 pytest>=8.0,<9
+PyYAML>=6.0,<7

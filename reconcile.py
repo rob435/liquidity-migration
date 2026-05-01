@@ -605,18 +605,6 @@ async def log_reconciliation_result(
         )
     finally:
         database.close()
-    sections = {
-        "unmatched_actual_entries.csv": result.unmatched_actual_entries,
-        "unmatched_backtest_entries.csv": result.unmatched_backtest_entries,
-        "unmatched_actual_exits.csv": result.unmatched_actual_exits,
-        "unmatched_backtest_exits.csv": result.unmatched_backtest_exits,
-    }
-    for filename, rows in sections.items():
-        with (export_path / filename).open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=["timestamp", "ticker", "event", "side", "reason"])
-            writer.writeheader()
-            for row in rows:
-                writer.writerow(asdict(row))
 
 
 def parse_args() -> argparse.Namespace:

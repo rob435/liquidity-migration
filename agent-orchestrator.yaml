@@ -1,0 +1,35 @@
+$schema: https://raw.githubusercontent.com/ComposioHQ/agent-orchestrator/main/schema/config.schema.json
+port: 3000
+
+defaults:
+  runtime: tmux
+  agent: codex
+  workspace: worktree
+  notifiers:
+    - desktop
+
+projects:
+  model050426:
+    name: MODEL050426
+    repo: rob435/MODEL05042026
+    path: /Users/jhbvdnsbkvnsd/Desktop/MODEL050426
+    defaultBranch: main
+    sessionPrefix: model050426
+    agentRulesFile: AGENTS.md
+    tracker:
+      plugin: github
+    scm:
+      plugin: github
+
+reactions:
+  ci-failed:
+    auto: true
+    action: send-to-agent
+    retries: 2
+  changes-requested:
+    auto: true
+    action: send-to-agent
+    escalateAfter: 30m
+  approved-and-green:
+    auto: false
+    action: notify

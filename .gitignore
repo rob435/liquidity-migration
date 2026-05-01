@@ -14,7 +14,13 @@ signals.sqlite3-wal
 replay-signals.sqlite3
 smoke-replay.sqlite3
 .cache/
+.tmp/
+data/
 *.sqlite3.gz
 backtest.sqlite3
 backtest-*.sqlite3
 prefetch.log
+graphify-out/cache/
+graphify-out/manifest.json
+graphify-out/cost.json
+graphify-out/graph.html
