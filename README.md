@@ -13,6 +13,18 @@ Crypto trading research codebase. The previous live strategy spec has been remov
 
 ## Useful Commands
 
+Fresh Windows setup:
+
+```powershell
+cd $HOME\Desktop
+git clone https://github.com/rob435/MODEL05042026.git
+cd MODEL05042026
+powershell -ExecutionPolicy Bypass -File .\scripts\windows_setup.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\run_agc_3m.ps1
+```
+
+See [docs/WINDOWS_QUICKSTART.md](docs/WINDOWS_QUICKSTART.md) for the full Windows setup, troubleshooting, fixture check, and 3-month Bybit run instructions.
+
 ```bash
 python3 -m venv .venv
 . .venv/bin/activate
