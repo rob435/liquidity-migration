@@ -5,7 +5,7 @@ import gzip
 import polars as pl
 import pytest
 
-from aggression_carry.archive import read_public_trade_archive
+from aggression_carry.archive import download_public_trade_archive, read_public_trade_archive
 from aggression_carry.config import ResearchConfig
 from aggression_carry import downloaders
 from aggression_carry.downloaders import _archive_filename, download_market_data
@@ -34,6 +34,23 @@ def test_archive_filename_preserves_compression_suffix() -> None:
     url = "https://public.bybit.com/trading/BTCUSDT/BTCUSDT2025-01-01.csv.gz"
 
     assert _archive_filename(url, "2025-01-01") == "BTCUSDT2025-01-01.csv.gz"
+
+
+def test_download_public_trade_archive_ignores_stale_fixed_temp_name(tmp_path, monkeypatch) -> None:
+    destination = tmp_path / "BTCUSDT2025-01-23.csv.gz"
+    stale_temp = tmp_path / "BTCUSDT2025-01-23.csv.gz.tmp"
+    stale_temp.write_bytes(b"stale")
+
+    monkeypatch.setattr(
+        "aggression_carry.archive.download_archive_bytes",
+        lambda _url: gzip.compress(b"timestamp,symbol,side,size,price,tickDirection,trdMatchID,grossValue,homeNotional,foreignNotional\n"),
+    )
+
+    output = download_public_trade_archive("https://example.com/BTCUSDT2025-01-23.csv.gz", destination)
+
+    assert output == destination
+    assert destination.exists()
+    assert stale_temp.read_bytes() == b"stale"
 
 
 def test_archive_only_download_does_not_construct_rest_client(tmp_path, monkeypatch) -> None:

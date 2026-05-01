@@ -4,6 +4,7 @@ import csv
 import gzip
 import io
 import ssl
+import tempfile
 import zipfile
 from pathlib import Path
 from urllib.request import urlopen
@@ -41,7 +42,19 @@ def download_public_trade_archive(url: str, destination: str | Path) -> Path:
     if output.exists() and output.stat().st_size > 0:
         return output
     output.parent.mkdir(parents=True, exist_ok=True)
-    temp_output = output.with_suffix(f"{output.suffix}.tmp")
-    temp_output.write_bytes(download_archive_bytes(url))
-    temp_output.replace(output)
+    with tempfile.NamedTemporaryFile(
+        dir=output.parent,
+        prefix=f"{output.name}.",
+        suffix=".tmp",
+        delete=False,
+    ) as temp_file:
+        temp_output = Path(temp_file.name)
+    try:
+        temp_output.write_bytes(download_archive_bytes(url))
+        if output.exists() and output.stat().st_size > 0:
+            temp_output.unlink(missing_ok=True)
+            return output
+        temp_output.replace(output)
+    finally:
+        temp_output.unlink(missing_ok=True)
     return output
