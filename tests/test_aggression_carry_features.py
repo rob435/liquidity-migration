@@ -8,6 +8,7 @@ from aggression_carry.features import compute_features_from_store
 from aggression_carry.ingestion import generate_fixture_data
 from aggression_carry.research import attach_forward_returns, run_alpha_report
 from aggression_carry.storage import read_dataset
+from aggression_carry.sweep import build_sweep_candidates, run_research_sweep
 
 
 def test_fixture_feature_pipeline_builds_expected_columns(tmp_path: Path) -> None:
@@ -90,3 +91,26 @@ def test_alpha_report_contains_standalone_and_ablation_metrics(tmp_path: Path) -
     assert (tmp_path / "research_quantile_ledger").exists()
     assert (tmp_path / "research_monthly_spreads").exists()
     assert (tmp_path / "reports" / "alpha_report.md").exists()
+
+
+def test_research_sweep_compares_inverted_and_carry_candidates(tmp_path: Path) -> None:
+    generate_fixture_data(tmp_path)
+    features = compute_features_from_store(tmp_path)
+
+    candidates = build_sweep_candidates(features)
+    assert "score_carry_inverse_bad_stack" in candidates.columns
+    assert "score_inverse_momentum" in candidates.columns
+
+    payload = run_research_sweep(tmp_path)
+
+    candidate_names = set(payload["candidates"])
+    portfolio_candidates = {item["candidate"] for item in payload["portfolio"]}
+    assert "carry_only" in candidate_names
+    assert "inverse_momentum" in candidate_names
+    assert "carry_inverse_bad_stack" in candidate_names
+    assert candidate_names.issubset(portfolio_candidates)
+    assert payload["best_by_horizon"]
+    assert payload["best_portfolio"]
+    assert (tmp_path / "reports" / "research_sweep.md").exists()
+    assert (tmp_path / "research_sweep_metrics").exists()
+    assert (tmp_path / "research_sweep_portfolio").exists()

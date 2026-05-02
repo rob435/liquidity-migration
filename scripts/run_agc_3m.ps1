@@ -82,8 +82,12 @@ Invoke-Checked "Writing alpha report" {
 Invoke-Checked "Writing portfolio backtest" {
     & $Python -m aggression_carry --data-root $DataRoot --config $Config portfolio-backtest
 }
+Invoke-Checked "Writing research sweep" {
+    & $Python -m aggression_carry --data-root $DataRoot --config $Config research-sweep
+}
 
 Write-Host ""
 Write-Host "Done."
 Write-Host "Alpha report: $DataRoot/reports/alpha_report.md"
 Write-Host "Portfolio report: $DataRoot/reports/portfolio_backtest.md"
+Write-Host "Research sweep: $DataRoot/reports/research_sweep.md"

@@ -84,6 +84,7 @@ This does not download Bybit data. It only proves the local pipeline works.
 .\.venv\Scripts\python.exe -m aggression_carry --data-root .tmp/agc-fixture build-features
 .\.venv\Scripts\python.exe -m aggression_carry --data-root .tmp/agc-fixture alpha-report
 .\.venv\Scripts\python.exe -m aggression_carry --data-root .tmp/agc-fixture portfolio-backtest
+.\.venv\Scripts\python.exe -m aggression_carry --data-root .tmp/agc-fixture research-sweep
 ```
 
 Reports:
@@ -91,6 +92,7 @@ Reports:
 ```text
 .tmp/agc-fixture/reports/alpha_report.md
 .tmp/agc-fixture/reports/portfolio_backtest.md
+.tmp/agc-fixture/reports/research_sweep.md
 ```
 
 ## 5. Run The 3-Month Bybit Test
@@ -120,6 +122,7 @@ Manual equivalent:
 .\.venv\Scripts\python.exe -m aggression_carry --data-root data/agc-bybit-3m --config configs/aggression_carry.default.yaml build-features
 .\.venv\Scripts\python.exe -m aggression_carry --data-root data/agc-bybit-3m --config configs/aggression_carry.default.yaml alpha-report
 .\.venv\Scripts\python.exe -m aggression_carry --data-root data/agc-bybit-3m --config configs/aggression_carry.default.yaml portfolio-backtest
+.\.venv\Scripts\python.exe -m aggression_carry --data-root data/agc-bybit-3m --config configs/aggression_carry.default.yaml research-sweep
 ```
 
 Reports:
@@ -127,6 +130,7 @@ Reports:
 ```text
 data/agc-bybit-3m/reports/alpha_report.md
 data/agc-bybit-3m/reports/portfolio_backtest.md
+data/agc-bybit-3m/reports/research_sweep.md
 ```
 
 ## Notes

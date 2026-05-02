@@ -12,7 +12,9 @@ def test_cli_fixture_pipeline_end_to_end(tmp_path: Path) -> None:
     assert main(["--data-root", str(data_root), "build-features"]) == 0
     assert main(["--data-root", str(data_root), "alpha-report"]) == 0
     assert main(["--data-root", str(data_root), "portfolio-backtest"]) == 0
+    assert main(["--data-root", str(data_root), "research-sweep"]) == 0
 
     assert (data_root / "features_1h").exists()
     assert (data_root / "reports" / "alpha_report.md").exists()
     assert (data_root / "reports" / "portfolio_backtest.md").exists()
+    assert (data_root / "reports" / "research_sweep.md").exists()

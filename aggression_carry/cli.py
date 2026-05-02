@@ -9,6 +9,7 @@ from .features import compute_features_from_store
 from .ingestion import generate_fixture_data
 from .portfolio import run_portfolio_backtest
 from .research import run_alpha_report
+from .sweep import run_research_sweep
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -41,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("build-features", help="Build 1h alpha features from stored datasets.")
     subparsers.add_parser("alpha-report", help="Run standalone alpha IC and ablation report.")
     subparsers.add_parser("portfolio-backtest", help="Run cost-sensitive long/short portfolio backtest.")
+    subparsers.add_parser("research-sweep", help="Compare carry/aggression/inverted candidate alpha variants.")
     return parser
 
 
@@ -98,6 +100,17 @@ def main(argv: list[str] | None = None) -> int:
             cost_config=config.costs,
         )
         print(f"portfolio scenarios={len(payload['scenarios'])} path={data_root / 'reports' / 'portfolio_backtest.md'}")
+        return 0
+
+    if args.command == "research-sweep":
+        payload = run_research_sweep(
+            data_root,
+            horizons_h=config.horizons_h,
+            portfolio_config=config.portfolio,
+            signal_config=config.signals,
+            cost_config=config.costs,
+        )
+        print(f"research sweep candidates={len(payload['candidates'])} path={data_root / 'reports' / 'research_sweep.md'}")
         return 0
 
     raise AssertionError(f"unhandled command: {args.command}")
