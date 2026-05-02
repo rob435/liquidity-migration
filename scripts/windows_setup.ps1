@@ -18,18 +18,29 @@ function Invoke-Checked {
 
 function Get-CompatiblePython {
     $Candidates = @(
-        @{ Exe = "py"; Args = @("-3.11") },
         @{ Exe = "py"; Args = @("-3") },
-        @{ Exe = "python"; Args = @() }
+        @{ Exe = "python"; Args = @() },
+        @{ Exe = "python3"; Args = @() }
     )
 
     foreach ($Candidate in $Candidates) {
         if (-not (Get-Command $Candidate.Exe -ErrorAction SilentlyContinue)) {
             continue
         }
-        & $Candidate.Exe @($Candidate.Args) -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" *> $null
-        if ($LASTEXITCODE -eq 0) {
-            return $Candidate
+
+        $PreviousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            & $Candidate.Exe @($Candidate.Args) -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" *> $null
+            if ($LASTEXITCODE -eq 0) {
+                return $Candidate
+            }
+        }
+        catch {
+            continue
+        }
+        finally {
+            $ErrorActionPreference = $PreviousErrorActionPreference
         }
     }
 
