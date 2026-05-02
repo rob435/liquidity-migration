@@ -32,6 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional public-trade archive URL template with {symbol} and {date}.",
     )
+    download.add_argument(
+        "--skip-raw-public-trades",
+        action="store_true",
+        help="For archive ingestion, write signed-flow aggregates but skip raw_public_trades Parquet storage.",
+    )
 
     subparsers.add_parser("build-features", help="Build 1h alpha features from stored datasets.")
     subparsers.add_parser("alpha-report", help="Run standalone alpha IC and ablation report.")
@@ -58,6 +63,7 @@ def main(argv: list[str] | None = None) -> int:
                 end_ms=parse_date_ms(args.end),
                 datasets={item.strip() for item in args.datasets.split(",") if item.strip()},
                 archive_url_template=args.archive_url_template,
+                store_raw_public_trades=not args.skip_raw_public_trades,
             )
         action = "fixture datasets written" if args.fixture else "Bybit datasets written"
         print(f"{action} under {data_root}")

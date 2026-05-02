@@ -34,6 +34,7 @@ def download_market_data(
     end_ms: int,
     datasets: set[str],
     archive_url_template: str | None = None,
+    store_raw_public_trades: bool = True,
 ) -> dict[str, Path]:
     client = BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet) if datasets & REST_DATASETS else None
     symbols = tuple(dict.fromkeys(symbol.upper() for symbol in symbols))
@@ -75,9 +76,10 @@ def download_market_data(
             for date in _dates_between(start_ms, end_ms):
                 url = archive_url_template.format(symbol=symbol, date=date)
                 local_path = Path(data_root) / "archives" / symbol / _archive_filename(url, date)
-                if _archive_outputs_exist(data_root, symbol=symbol, date=date):
+                if _archive_outputs_exist(data_root, symbol=symbol, date=date, include_raw=store_raw_public_trades):
                     print(f"archive_trades: {symbol} {date} cached", flush=True)
-                    outputs["raw_public_trades"] = dataset_path(data_root, "raw_public_trades")
+                    if store_raw_public_trades:
+                        outputs["raw_public_trades"] = dataset_path(data_root, "raw_public_trades")
                     outputs["signed_flow_1m"] = dataset_path(data_root, "signed_flow_1m")
                     outputs["signed_flow_1h"] = dataset_path(data_root, "signed_flow_1h")
                     continue
@@ -85,7 +87,8 @@ def download_market_data(
                 trades = read_public_trade_archive(download_public_trade_archive(url, local_path), symbol=symbol)
                 flow_1m = aggregate_signed_flow_1m(trades, config=config.features)
                 flow_1h = aggregate_signed_flow_1h(flow_1m)
-                outputs["raw_public_trades"] = write_dataset(trades, data_root, "raw_public_trades")
+                if store_raw_public_trades:
+                    outputs["raw_public_trades"] = write_dataset(trades, data_root, "raw_public_trades", append=False)
                 outputs["signed_flow_1m"] = write_dataset(flow_1m, data_root, "signed_flow_1m")
                 outputs["signed_flow_1h"] = write_dataset(flow_1h, data_root, "signed_flow_1h")
                 del trades, flow_1m, flow_1h
@@ -107,7 +110,8 @@ def download_market_data(
         trades = pl.concat(trade_frames).unique(subset=["symbol", "trade_id"]).sort(["symbol", "ts_ms", "trade_id"])
         flow_1m = aggregate_signed_flow_1m(trades, config=config.features)
         flow_1h = aggregate_signed_flow_1h(flow_1m)
-        outputs["raw_public_trades"] = write_dataset(trades, data_root, "raw_public_trades")
+        if store_raw_public_trades:
+            outputs["raw_public_trades"] = write_dataset(trades, data_root, "raw_public_trades")
         outputs["signed_flow_1m"] = write_dataset(flow_1m, data_root, "signed_flow_1m")
         outputs["signed_flow_1h"] = write_dataset(flow_1h, data_root, "signed_flow_1h")
 
@@ -233,11 +237,16 @@ def _archive_filename(url: str, fallback_stem: str) -> str:
     return name or f"{fallback_stem}.csv.gz"
 
 
-def _archive_outputs_exist(data_root: str | Path, *, symbol: str, date: str) -> bool:
-    return all(
-        (dataset_path(data_root, dataset) / f"date={date}" / f"symbol={symbol}" / "part.parquet").exists()
-        for dataset in ("raw_public_trades", "signed_flow_1m", "signed_flow_1h")
-    )
+def _archive_outputs_exist(data_root: str | Path, *, symbol: str, date: str, include_raw: bool) -> bool:
+    datasets = ["signed_flow_1m", "signed_flow_1h"]
+    if include_raw:
+        datasets.append("raw_public_trades")
+    return all(_partition_exists(data_root, dataset=dataset, symbol=symbol, date=date) for dataset in datasets)
+
+
+def _partition_exists(data_root: str | Path, *, dataset: str, symbol: str, date: str) -> bool:
+    part = dataset_path(data_root, dataset) / f"date={date}" / f"symbol={symbol}" / "part.parquet"
+    return part.exists() and part.stat().st_size > 0
 
 
 def _float_or_none(value) -> float | None:

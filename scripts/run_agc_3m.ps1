@@ -2,6 +2,7 @@ param(
     [string]$DataRoot = "data/agc-bybit-3m",
     [string]$Start = "2025-01-01",
     [string]$End = "2025-04-01",
+    [switch]$KeepRawTrades,
     [string[]]$Symbols = @(
         "BTCUSDT",
         "ETHUSDT",
@@ -45,13 +46,32 @@ if (-not (Test-Path $Python)) {
     throw "Virtualenv not found. Run .\scripts\windows_setup.ps1 first."
 }
 
+Invoke-Checked "Checking virtualenv Python version" {
+    & $Python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)"
+}
+
 $SymbolCsv = $Symbols -join ","
 $Datasets = "instruments,klines_1h,klines_5m,funding,open_interest,ticker_snapshots,archive_trades"
 $ArchiveTemplate = "https://public.bybit.com/trading/{symbol}/{symbol}{date}.csv.gz"
 $Config = "configs/aggression_carry.default.yaml"
+$DownloadArgs = @(
+    "-m", "aggression_carry",
+    "--data-root", $DataRoot,
+    "--config", $Config,
+    "download-data",
+    "--symbols", $SymbolCsv,
+    "--start", $Start,
+    "--end", $End,
+    "--datasets", $Datasets,
+    "--archive-url-template", $ArchiveTemplate
+)
+
+if (-not $KeepRawTrades) {
+    $DownloadArgs += "--skip-raw-public-trades"
+}
 
 Invoke-Checked "Downloading Bybit research data into $DataRoot" {
-    & $Python -m aggression_carry --data-root $DataRoot --config $Config download-data --symbols $SymbolCsv --start $Start --end $End --datasets $Datasets --archive-url-template $ArchiveTemplate
+    & $Python @DownloadArgs
 }
 Invoke-Checked "Building features" {
     & $Python -m aggression_carry --data-root $DataRoot --config $Config build-features

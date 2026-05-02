@@ -124,7 +124,7 @@ def test_archive_only_download_does_not_construct_rest_client(tmp_path, monkeypa
 
 
 def test_archive_download_skips_completed_partitions(tmp_path, monkeypatch) -> None:
-    for dataset in ("raw_public_trades", "signed_flow_1m", "signed_flow_1h"):
+    for dataset in ("signed_flow_1m", "signed_flow_1h"):
         part = tmp_path / dataset / "date=2025-01-01" / "symbol=BTCUSDT" / "part.parquet"
         part.parent.mkdir(parents=True)
         pl.DataFrame({"ts_ms": [1_735_689_600_000], "symbol": ["BTCUSDT"]}).write_parquet(part)
@@ -142,6 +142,49 @@ def test_archive_download_skips_completed_partitions(tmp_path, monkeypatch) -> N
         end_ms=1_735_776_000_000,
         datasets={"archive_trades"},
         archive_url_template="https://public.bybit.com/trading/{symbol}/{symbol}{date}.csv.gz",
+        store_raw_public_trades=False,
     )
 
-    assert {"raw_public_trades", "signed_flow_1m", "signed_flow_1h"}.issubset(outputs)
+    assert {"signed_flow_1m", "signed_flow_1h"}.issubset(outputs)
+    assert "raw_public_trades" not in outputs
+
+
+def test_archive_download_can_skip_raw_public_trade_storage(tmp_path, monkeypatch) -> None:
+    def fake_download(_url, destination):
+        return destination
+
+    def fake_read(_path, *, symbol=None):
+        return pl.DataFrame(
+            [
+                {
+                    "trade_id": "1",
+                    "seq": None,
+                    "ts_ms": 1_735_689_600_000,
+                    "symbol": symbol,
+                    "side": "Buy",
+                    "price": 100.0,
+                    "size_base": 2.0,
+                    "quote_value": 200.0,
+                    "is_block_trade": False,
+                    "is_rpi_trade": False,
+                }
+            ]
+        )
+
+    monkeypatch.setattr(downloaders, "download_public_trade_archive", fake_download)
+    monkeypatch.setattr(downloaders, "read_public_trade_archive", fake_read)
+
+    outputs = download_market_data(
+        tmp_path,
+        config=ResearchConfig(),
+        symbols=["BTCUSDT"],
+        start_ms=1_735_689_600_000,
+        end_ms=1_735_776_000_000,
+        datasets={"archive_trades"},
+        archive_url_template="https://public.bybit.com/trading/{symbol}/{symbol}{date}.csv.gz",
+        store_raw_public_trades=False,
+    )
+
+    assert {"signed_flow_1m", "signed_flow_1h"}.issubset(outputs)
+    assert "raw_public_trades" not in outputs
+    assert not (tmp_path / "raw_public_trades").exists()

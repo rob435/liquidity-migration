@@ -52,7 +52,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows_setup.ps1
 Manual equivalent:
 
 ```powershell
-py -3.11 -m venv .venv
+py -3.11 -m venv --clear .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m pytest -q
@@ -61,7 +61,7 @@ py -3.11 -m venv .venv
 Expected test result:
 
 ```text
-127 passed
+128 passed
 ```
 
 If `.\.venv\Scripts\python.exe` is not found, the virtualenv was not created. Run:
@@ -99,6 +99,12 @@ Preferred path:
 .\scripts\run_agc_3m.ps1
 ```
 
+By default, this run skips raw public-trade Parquet storage and keeps the signed-flow aggregates needed for features, reports, and portfolio backtests. This saves a lot of disk and memory. To also store raw public trades, run:
+
+```powershell
+.\scripts\run_agc_3m.ps1 -KeepRawTrades
+```
+
 If PowerShell blocks the script because of execution policy, run:
 
 ```powershell
@@ -108,7 +114,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_agc_3m.ps1
 Manual equivalent:
 
 ```powershell
-.\.venv\Scripts\python.exe -m aggression_carry --data-root data/agc-bybit-3m --config configs/aggression_carry.default.yaml download-data --symbols "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,APTUSDT,BNBUSDT,ADAUSDT,DOTUSDT,LTCUSDT,NEARUSDT,OPUSDT,ARBUSDT,INJUSDT" --start "2025-01-01" --end "2025-04-01" --datasets "instruments,klines_1h,klines_5m,funding,open_interest,ticker_snapshots,archive_trades" --archive-url-template "https://public.bybit.com/trading/{symbol}/{symbol}{date}.csv.gz"
+.\.venv\Scripts\python.exe -m aggression_carry --data-root data/agc-bybit-3m --config configs/aggression_carry.default.yaml download-data --symbols "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,APTUSDT,BNBUSDT,ADAUSDT,DOTUSDT,LTCUSDT,NEARUSDT,OPUSDT,ARBUSDT,INJUSDT" --start "2025-01-01" --end "2025-04-01" --datasets "instruments,klines_1h,klines_5m,funding,open_interest,ticker_snapshots,archive_trades" --archive-url-template "https://public.bybit.com/trading/{symbol}/{symbol}{date}.csv.gz" --skip-raw-public-trades
 .\.venv\Scripts\python.exe -m aggression_carry --data-root data/agc-bybit-3m --config configs/aggression_carry.default.yaml build-features
 .\.venv\Scripts\python.exe -m aggression_carry --data-root data/agc-bybit-3m --config configs/aggression_carry.default.yaml alpha-report
 .\.venv\Scripts\python.exe -m aggression_carry --data-root data/agc-bybit-3m --config configs/aggression_carry.default.yaml portfolio-backtest
@@ -124,6 +130,7 @@ data/agc-bybit-3m/reports/portfolio_backtest.md
 ## Notes
 
 - The 3-month run can download many GB and may take a long time.
+- `run_agc_3m.ps1` requires the virtualenv to use Python 3.11. If it fails the version check, rerun `.\scripts\windows_setup.ps1`.
 - The downloader prints each archive symbol/date while it works.
 - Existing archive files are reused, so an interrupted run can usually be restarted with the same command.
 - Completed raw-trade and signed-flow Parquet partitions are reused too, so reruns skip finished symbol/day outputs.

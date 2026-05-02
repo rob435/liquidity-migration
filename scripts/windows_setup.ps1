@@ -21,7 +21,7 @@ if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
 }
 
 Invoke-Checked "Checking Python 3.11" { & py -3.11 --version }
-Invoke-Checked "Creating virtualenv" { & py -3.11 -m venv .venv }
+Invoke-Checked "Creating Python 3.11 virtualenv" { & py -3.11 -m venv --clear .venv }
 
 $Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path $Python)) {
