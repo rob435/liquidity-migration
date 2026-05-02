@@ -10,6 +10,7 @@ from .ingestion import generate_fixture_data
 from .portfolio import run_portfolio_backtest
 from .research import run_alpha_report
 from .sweep import run_research_sweep
+from .volume_alpha import run_volume_alpha
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("alpha-report", help="Run standalone alpha IC and ablation report.")
     subparsers.add_parser("portfolio-backtest", help="Run cost-sensitive long/short portfolio backtest.")
     subparsers.add_parser("research-sweep", help="Compare carry/aggression/inverted candidate alpha variants.")
+    subparsers.add_parser("volume-alpha", help="Run isolated daily volume-only alpha research and backtest.")
     return parser
 
 
@@ -111,6 +113,11 @@ def main(argv: list[str] | None = None) -> int:
             cost_config=config.costs,
         )
         print(f"research sweep candidates={len(payload['candidates'])} path={data_root / 'reports' / 'research_sweep.md'}")
+        return 0
+
+    if args.command == "volume-alpha":
+        payload = run_volume_alpha(data_root, cost_config=config.costs)
+        print(f"volume alpha rows={payload['rows']} path={data_root / 'reports' / 'volume_alpha_report.md'}")
         return 0
 
     raise AssertionError(f"unhandled command: {args.command}")
