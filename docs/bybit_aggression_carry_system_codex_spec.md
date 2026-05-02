@@ -1,5 +1,10 @@
 # Bybit Aggression-Carry Crypto Perp Trading System — Codex Implementation Spec
 
+Status note, 2026-05-02: this is retained as a Bybit data/source reference and
+as background for future research. It is not the active implementation surface
+after the strip-down. The active plan is `docs/volume_alpha.md`, and the current
+repo intentionally tests one isolated volume alpha before any composite rebuild.
+
 Version: 2026-05-01
 Target venue: Bybit V5 API
 Target product: USDT linear perpetuals (`category="linear"`)

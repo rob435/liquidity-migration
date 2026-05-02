@@ -85,7 +85,7 @@ def download_market_data(
                     continue
                 print(f"archive_trades: {symbol} {date}", flush=True)
                 trades = read_public_trade_archive(download_public_trade_archive(url, local_path), symbol=symbol)
-                flow_1m = aggregate_signed_flow_1m(trades, config=config.features)
+                flow_1m = aggregate_signed_flow_1m(trades, config=config.trade_flow)
                 flow_1h = aggregate_signed_flow_1h(flow_1m)
                 if store_raw_public_trades:
                     outputs["raw_public_trades"] = write_dataset(trades, data_root, "raw_public_trades", append=False)
@@ -108,7 +108,7 @@ def download_market_data(
         trade_frames.append(trades_to_frame(recent_trade_rows))
     if trade_frames:
         trades = pl.concat(trade_frames).unique(subset=["symbol", "trade_id"]).sort(["symbol", "ts_ms", "trade_id"])
-        flow_1m = aggregate_signed_flow_1m(trades, config=config.features)
+        flow_1m = aggregate_signed_flow_1m(trades, config=config.trade_flow)
         flow_1h = aggregate_signed_flow_1h(flow_1m)
         if store_raw_public_trades:
             outputs["raw_public_trades"] = write_dataset(trades, data_root, "raw_public_trades")

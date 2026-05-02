@@ -10,7 +10,8 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only in missing depe
     yaml = None
 
 
-DEFAULT_HORIZONS_H = (4, 12, 24, 72)
+DEFAULT_VOLUME_HORIZONS_D = (1, 3, 7)
+DEFAULT_VOLUME_QUANTILES = (0.20, 0.30, 0.50)
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,43 +23,15 @@ class ExchangeConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class FeatureConfig:
-    aggression_fast_span_h: int = 6
-    aggression_slow_span_h: int = 24
-    volume_fast_span_h: int = 6
-    volume_slow_span_h: int = 72
-    momentum_windows_h: tuple[int, int, int] = (12, 24, 72)
-    momentum_weights: tuple[float, float, float] = (0.50, 0.30, 0.20)
-    carry_ema_span: int = 3
-    oi_impulse_window_h: int = 12
-    robust_z_clip: float = 3.0
-    exclude_block_trades_from_aggression: bool = True
-    exclude_rpi_trades_from_aggression: bool = True
+class TradeFlowConfig:
+    exclude_block_trades: bool = True
+    exclude_rpi_trades: bool = True
 
 
 @dataclass(frozen=True, slots=True)
-class SignalConfig:
-    weights: dict[str, float] = field(
-        default_factory=lambda: {
-            "aggression_confirmed": 0.42,
-            "momentum": 0.18,
-            "carry": 0.20,
-            "quality": 0.12,
-            "oi_impulse": 0.08,
-        }
-    )
-    min_abs_score_entry: float = 0.25
-    long_quantile: float = 0.20
-    short_quantile: float = 0.20
-
-
-@dataclass(frozen=True, slots=True)
-class PortfolioConfig:
-    rebalance_interval_h: int = 4
-    base_gross_exposure: float = 1.0
-    max_net_exposure_abs: float = 0.10
-    max_single_position_weight: float = 0.05
-    volatility_window_h: int = 168
+class VolumeAlphaConfig:
+    horizons_d: tuple[int, ...] = DEFAULT_VOLUME_HORIZONS_D
+    quantiles: tuple[float, ...] = DEFAULT_VOLUME_QUANTILES
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,12 +56,10 @@ class CostConfig:
 @dataclass(frozen=True, slots=True)
 class ResearchConfig:
     exchange: ExchangeConfig = field(default_factory=ExchangeConfig)
-    features: FeatureConfig = field(default_factory=FeatureConfig)
-    signals: SignalConfig = field(default_factory=SignalConfig)
-    portfolio: PortfolioConfig = field(default_factory=PortfolioConfig)
+    trade_flow: TradeFlowConfig = field(default_factory=TradeFlowConfig)
+    volume_alpha: VolumeAlphaConfig = field(default_factory=VolumeAlphaConfig)
     costs: CostConfig = field(default_factory=CostConfig)
-    horizons_h: tuple[int, ...] = DEFAULT_HORIZONS_H
-    data_root: Path = Path("data/aggression_carry")
+    data_root: Path = Path("data/volume_alpha")
 
 
 def _merge_dataclass(cls: type, payload: dict[str, Any] | None):
@@ -96,10 +67,11 @@ def _merge_dataclass(cls: type, payload: dict[str, Any] | None):
     return cls(**payload)
 
 
-def _merge_signal_config(payload: dict[str, Any] | None) -> SignalConfig:
+def _merge_volume_alpha_config(payload: dict[str, Any] | None) -> VolumeAlphaConfig:
     payload = dict(payload or {})
-    weights = {**SignalConfig().weights, **payload.pop("weights", {})}
-    return SignalConfig(weights=weights, **payload)
+    horizons = tuple(int(item) for item in payload.get("horizons_d", DEFAULT_VOLUME_HORIZONS_D))
+    quantiles = tuple(float(item) for item in payload.get("quantiles", DEFAULT_VOLUME_QUANTILES))
+    return VolumeAlphaConfig(horizons_d=horizons, quantiles=quantiles)
 
 
 def load_config(path: str | Path | None = None, *, data_root: str | Path | None = None) -> ResearchConfig:
@@ -114,13 +86,11 @@ def load_config(path: str | Path | None = None, *, data_root: str | Path | None 
         if loaded:
             raw = dict(loaded)
 
-    root = Path(data_root or raw.get("data_root") or "data/aggression_carry")
+    root = Path(data_root or raw.get("data_root") or "data/volume_alpha")
     return ResearchConfig(
         exchange=_merge_dataclass(ExchangeConfig, raw.get("exchange")),
-        features=_merge_dataclass(FeatureConfig, raw.get("features")),
-        signals=_merge_signal_config(raw.get("signals")),
-        portfolio=_merge_dataclass(PortfolioConfig, raw.get("portfolio")),
+        trade_flow=_merge_dataclass(TradeFlowConfig, raw.get("trade_flow")),
+        volume_alpha=_merge_volume_alpha_config(raw.get("volume_alpha")),
         costs=_merge_dataclass(CostConfig, raw.get("cost_model")),
-        horizons_h=tuple(raw.get("horizons_h", DEFAULT_HORIZONS_H)),
         data_root=root,
     )

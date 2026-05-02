@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import polars as pl
 
-from aggression_carry.config import FeatureConfig
+from aggression_carry.config import TradeFlowConfig
 from aggression_carry.ingestion import (
     aggregate_signed_flow_1h,
     aggregate_signed_flow_1m,
@@ -50,7 +50,7 @@ def test_trade_aggregation_excludes_block_and_rpi() -> None:
         ]
     )
 
-    flow = aggregate_signed_flow_1m(trades, config=FeatureConfig())
+    flow = aggregate_signed_flow_1m(trades, config=TradeFlowConfig())
 
     assert flow["buy_quote"].sum() == 200.0
     assert flow["sell_quote"].sum() == 0.0

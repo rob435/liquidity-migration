@@ -15,21 +15,9 @@ DATASETS = {
     "funding",
     "open_interest",
     "ticker_snapshots",
-    "features_1h",
-    "research_returns",
-    "research_timestamp_ic",
-    "research_quantile_ledger",
-    "research_monthly_spreads",
-    "research_sweep_metrics",
-    "research_sweep_portfolio",
     "volume_alpha_features",
     "volume_alpha_metrics",
     "volume_alpha_portfolios",
-    "portfolio_backtest",
-    "portfolio_periods",
-    "portfolio_positions",
-    "portfolio_symbol_attribution",
-    "portfolio_monthly_attribution",
 }
 
 DATASET_KEYS = {
@@ -42,21 +30,9 @@ DATASET_KEYS = {
     "funding": ("ts_ms", "symbol"),
     "open_interest": ("ts_ms", "symbol"),
     "ticker_snapshots": ("ts_ms", "symbol"),
-    "features_1h": ("ts_ms", "symbol"),
-    "research_returns": ("ts_ms", "symbol"),
-    "research_timestamp_ic": ("signal", "horizon_h", "ts_ms"),
-    "research_quantile_ledger": ("signal", "horizon_h", "ts_ms", "symbol"),
-    "research_monthly_spreads": ("signal", "horizon_h", "month"),
-    "research_sweep_metrics": ("signal", "horizon_h"),
-    "research_sweep_portfolio": ("candidate", "scenario"),
     "volume_alpha_features": ("ts_ms", "symbol"),
     "volume_alpha_metrics": ("signal", "horizon_d"),
     "volume_alpha_portfolios": ("score", "scenario", "hold_days", "quantile"),
-    "portfolio_backtest": ("scenario",),
-    "portfolio_periods": ("scenario", "ts_ms"),
-    "portfolio_positions": ("scenario", "ts_ms", "symbol"),
-    "portfolio_symbol_attribution": ("scenario", "symbol"),
-    "portfolio_monthly_attribution": ("scenario", "month"),
 }
 
 

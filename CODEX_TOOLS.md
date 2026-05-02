@@ -1,6 +1,6 @@
 # Codex Companion Tools
 
-This repo keeps agent tooling outside the trading runtime. The bot should not depend on GitHub, Composio, Graphify, or AO packages to trade.
+This repo keeps agent tooling outside the research runtime. The alpha code should not depend on GitHub, Composio, Graphify, or AO packages.
 
 ## Installed Here
 
@@ -52,8 +52,8 @@ python deploy/setup_codex_tools.py --no-overwrite-skills
 
 ```bash
 graphify update .
-graphify query "how does live execution reconcile venue exits?"
-graphify explain "SignalEngine"
+graphify query "how does volume alpha use kline data?"
+graphify explain "run_volume_alpha"
 ```
 
 In Codex, the skill trigger is `$graphify .`. If the command is not on PATH, use `python3 -m graphify ...`.

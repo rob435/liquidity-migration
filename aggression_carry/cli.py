@@ -5,16 +5,12 @@ from pathlib import Path
 
 from .config import load_config
 from .downloaders import download_market_data, parse_date_ms
-from .features import compute_features_from_store
 from .ingestion import generate_fixture_data
-from .portfolio import run_portfolio_backtest
-from .research import run_alpha_report
-from .sweep import run_research_sweep
 from .volume_alpha import run_volume_alpha
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Bybit aggression-carry alpha-proof research CLI.")
+    parser = argparse.ArgumentParser(description="Bybit volume-alpha research CLI.")
     parser.add_argument("--config", default=None, help="YAML config path. Defaults to built-in research settings.")
     parser.add_argument("--data-root", default=None, help="Research data root. Overrides config data_root.")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -26,7 +22,7 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument("--end", default=None, help="ISO end timestamp/date for real Bybit downloads.")
     download.add_argument(
         "--datasets",
-        default="instruments,klines_1h,klines_5m,funding,open_interest,ticker_snapshots,recent_trades",
+        default="instruments,klines_1h",
         help="Comma-separated datasets: instruments, klines_1h, klines_5m, funding, open_interest, ticker_snapshots, recent_trades, archive_trades.",
     )
     download.add_argument(
@@ -40,10 +36,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="For archive ingestion, write signed-flow aggregates but skip raw_public_trades Parquet storage.",
     )
 
-    subparsers.add_parser("build-features", help="Build 1h alpha features from stored datasets.")
-    subparsers.add_parser("alpha-report", help="Run standalone alpha IC and ablation report.")
-    subparsers.add_parser("portfolio-backtest", help="Run cost-sensitive long/short portfolio backtest.")
-    subparsers.add_parser("research-sweep", help="Compare carry/aggression/inverted candidate alpha variants.")
     subparsers.add_parser("volume-alpha", help="Run isolated daily volume-only alpha research and backtest.")
     return parser
 
@@ -75,48 +67,13 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{dataset}: {path}")
         return 0
 
-    if args.command == "build-features":
-        features = compute_features_from_store(
-            data_root,
-            feature_config=config.features,
-            signal_config=config.signals,
-        )
-        print(f"features_1h rows={features.height} root={data_root}")
-        return 0
-
-    if args.command == "alpha-report":
-        payload = run_alpha_report(
-            data_root,
-            horizons_h=config.horizons_h,
-            cost_bps=config.costs.base_entry_exit_cost_bps,
-            config_payload=config,
-        )
-        print(f"alpha report rows={payload['rows']} path={data_root / 'reports' / 'alpha_report.md'}")
-        return 0
-
-    if args.command == "portfolio-backtest":
-        payload = run_portfolio_backtest(
-            data_root,
-            portfolio_config=config.portfolio,
-            signal_config=config.signals,
-            cost_config=config.costs,
-        )
-        print(f"portfolio scenarios={len(payload['scenarios'])} path={data_root / 'reports' / 'portfolio_backtest.md'}")
-        return 0
-
-    if args.command == "research-sweep":
-        payload = run_research_sweep(
-            data_root,
-            horizons_h=config.horizons_h,
-            portfolio_config=config.portfolio,
-            signal_config=config.signals,
-            cost_config=config.costs,
-        )
-        print(f"research sweep candidates={len(payload['candidates'])} path={data_root / 'reports' / 'research_sweep.md'}")
-        return 0
-
     if args.command == "volume-alpha":
-        payload = run_volume_alpha(data_root, cost_config=config.costs)
+        payload = run_volume_alpha(
+            data_root,
+            horizons_d=config.volume_alpha.horizons_d,
+            quantiles=config.volume_alpha.quantiles,
+            cost_config=config.costs,
+        )
         print(f"volume alpha rows={payload['rows']} path={data_root / 'reports' / 'volume_alpha_report.md'}")
         return 0
 

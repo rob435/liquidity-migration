@@ -1,9 +1,13 @@
 ## Repo Rules
 
 - Be honest and call out wrong decisions directly.
-- Do not let agent-tooling convenience change the trading runtime contract.
-- Before changing strategy, data ingestion, feature engineering, or backtesting logic, read `docs/bybit_aggression_carry_system_codex_spec.md`.
-- Treat `docs/bybit_aggression_carry_system_codex_spec.md` as the authoritative current plan. Old live-runtime assumptions are not authoritative.
+- This repo is a research lab, not a live trading runtime.
+- Current implementation plan: `docs/volume_alpha.md`.
+- Bybit venue/data reference: `docs/bybit_aggression_carry_system_codex_spec.md`.
+- Before changing strategy, data ingestion, feature engineering, or backtesting logic, read both docs.
+- Do not rebuild the deleted legacy live runtime or blended signal stack unless explicitly requested.
+- Do not add live execution, alerts, kill switches, deployment, or exchange order submission.
+- Do not combine signals until each alpha clears costs standalone.
 
 ## graphify
 

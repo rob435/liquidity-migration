@@ -1,7 +1,7 @@
 # Volume Alpha Research Path
 
-This is the isolated test for the podcast volume hypothesis. It is separate from
-the aggression-carry composite.
+This is the current implementation plan for the stripped-down rebuild. It tests
+the podcast volume hypothesis without mixing in the deleted composite stack.
 
 ## Hypothesis
 
@@ -19,7 +19,7 @@ The first implementation separates two things that should not be confused:
 ## Command
 
 ```bash
-/Library/Frameworks/Python.framework/Versions/3.11/bin/python3 -m aggression_carry --data-root data/agc-bybit-3m --config configs/aggression_carry.default.yaml volume-alpha
+/Library/Frameworks/Python.framework/Versions/3.11/bin/python3 -m aggression_carry --data-root data/agc-bybit-3m --config configs/volume_alpha.default.yaml volume-alpha
 ```
 
 ## Outputs
@@ -35,6 +35,7 @@ data/agc-bybit-3m/volume_alpha_portfolios
 ## Current Scope
 
 - Uses Bybit 1h klines aggregated into UTC daily turnover.
+- Does not require Bybit public-trade archives.
 - Builds daily volume-only signals.
 - Tests 1d, 3d, and 7d forward returns.
 - Runs equal-weight long/short portfolios at 20%, 30%, and 50% quantiles.

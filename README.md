@@ -1,29 +1,38 @@
 # MODEL050426
 
-Crypto trading research codebase. The previous live strategy spec has been removed because the system logic is being replaced.
+Bybit crypto research repo. This has been stripped down around one alpha family:
+daily volume / dollar-volume ranking. The old live bot and blended signal stack
+are intentionally gone.
 
-## Current Posture
+## Current Source Of Truth
 
-- The authoritative current plan is [docs/bybit_aggression_carry_system_codex_spec.md](docs/bybit_aggression_carry_system_codex_spec.md).
-- The new alpha-proof research path lives in `aggression_carry/`.
-- The existing signal/execution runtime is legacy and not a design target for the new system.
-- The backtester, cache bundle helper, reconciliation tooling, database helpers, and tests remain useful scaffolding.
-- No production deployment files are authoritative right now.
-- Do not infer live-trading readiness from old passing tests.
+- Current implementation plan: [docs/volume_alpha.md](docs/volume_alpha.md)
+- Bybit data constraints/background: [docs/bybit_aggression_carry_system_codex_spec.md](docs/bybit_aggression_carry_system_codex_spec.md)
+- Windows setup: [docs/WINDOWS_QUICKSTART.md](docs/WINDOWS_QUICKSTART.md)
 
-## Useful Commands
+The Bybit aggression-carry spec is still useful for venue/data details, especially
+the warning that taker aggression requires signed public trades. It is not a
+license to rebuild the old composite stack.
 
-Fresh Windows setup:
+## What Exists
 
-```powershell
-cd $HOME\Desktop
-git clone https://github.com/rob435/MODEL05042026.git
-cd MODEL05042026
-powershell -ExecutionPolicy Bypass -File .\scripts\windows_setup.ps1
-powershell -ExecutionPolicy Bypass -File .\scripts\run_agc_3m.ps1
-```
+- `aggression_carry/`: public data download, Parquet storage, signed-flow parsing,
+  fixture data, and the isolated `volume-alpha` backtest.
+- `configs/volume_alpha.default.yaml`: current research config.
+- `scripts/run_agc_3m.ps1`: Windows 3-month volume-alpha run.
+- `deploy/setup_codex_tools.py`: optional Codex/Graphify/AO/Composio helper setup.
 
-See [docs/WINDOWS_QUICKSTART.md](docs/WINDOWS_QUICKSTART.md) for the full Windows setup, troubleshooting, fixture check, and 3-month Bybit run instructions.
+## What Was Removed
+
+- Old live runtime: `main.py`, `execution.py`, `signal_engine.py`, `state.py`,
+  `runtime_monitor.py`, `runtime_validation.py`, `alerting.py`.
+- Old root research/backtest plumbing tied to that runtime.
+- Old blended aggression/carry/momentum/quality/OI feature/report/sweep modules.
+- Tests that only protected the deleted behavior.
+
+## Commands
+
+Install and test:
 
 ```bash
 python3 -m venv .venv
@@ -32,91 +41,39 @@ pip install -r requirements.txt
 pytest -q
 ```
 
-Aggression-carry fixture pipeline:
+Tiny fixture run:
 
 ```bash
-python -m aggression_carry --data-root .tmp/agc-fixture download-data --fixture
-python -m aggression_carry --data-root .tmp/agc-fixture build-features
-python -m aggression_carry --data-root .tmp/agc-fixture alpha-report
-python -m aggression_carry --data-root .tmp/agc-fixture portfolio-backtest
+python -m aggression_carry --data-root .tmp/volume-fixture download-data --fixture
+python -m aggression_carry --data-root .tmp/volume-fixture volume-alpha
 ```
 
-The alpha report writes:
-
-- `research_returns`
-- `research_timestamp_ic`
-- `research_quantile_ledger`
-- `research_monthly_spreads`
-- `reports/alpha_report.md`
-
-The portfolio backtest writes:
-
-- `portfolio_periods`
-- `portfolio_positions`
-- `portfolio_symbol_attribution`
-- `portfolio_monthly_attribution`
-- `reports/portfolio_backtest.md`
-
-Bybit REST data download skeleton:
+3-month Bybit run:
 
 ```bash
 python -m aggression_carry \
-  --config configs/aggression_carry.default.yaml \
+  --data-root data/agc-bybit-3m \
+  --config configs/volume_alpha.default.yaml \
   download-data \
-  --symbols BTCUSDT,ETHUSDT \
+  --symbols BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,APTUSDT,BNBUSDT,ADAUSDT,DOTUSDT,LTCUSDT,NEARUSDT,OPUSDT,ARBUSDT,INJUSDT \
   --start 2025-01-01 \
-  --end 2025-01-08 \
-  --datasets instruments,klines_1h,klines_5m,funding,open_interest,ticker_snapshots,recent_trades
-```
+  --end 2025-04-01 \
+  --datasets instruments,klines_1h
 
-Bybit historical public-trade archive smoke run:
-
-```bash
 python -m aggression_carry \
-  --data-root data/agc-bybit-smoke \
-  --config configs/aggression_carry.default.yaml \
-  download-data \
-  --symbols BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,APTUSDT \
-  --start 2025-01-01 \
-  --end 2025-01-08 \
-  --datasets instruments,klines_1h,klines_5m,funding,open_interest,ticker_snapshots,archive_trades \
-  --archive-url-template "https://public.bybit.com/trading/{symbol}/{symbol}{date}.csv.gz"
+  --data-root data/agc-bybit-3m \
+  --config configs/volume_alpha.default.yaml \
+  volume-alpha
 ```
 
-Recent trades alone are not enough to prove the aggression alpha over history. Use Bybit's daily public-trade `.csv.gz` archive for signed taker flow, and keep 5m candles as supporting path/cost data.
+Report:
 
-Backtest entrypoint:
-
-```bash
-python backtest.py --help
+```text
+data/agc-bybit-3m/reports/volume_alpha_report.md
 ```
 
-Cache bundle helper:
+## Research Rule
 
-```bash
-python deploy/cache_bundle.py --help
-```
-
-Codex companion tools:
-
-```bash
-python deploy/setup_codex_tools.py
-```
-
-See [CODEX_TOOLS.md](CODEX_TOOLS.md) for the agent tooling setup.
-
-## Repo Layout
-
-- `aggression_carry/`: isolated Bybit aggression-carry alpha-proof package.
-- `configs/aggression_carry.default.yaml`: research config for the new package.
-- `backtest.py`: historical replay/backtest harness retained for reuse.
-- `exchange.py`: Bybit market-data and trade-client code; keep under review during overhaul.
-- `database.py`: SQLite persistence helpers.
-- `reconcile.py` / `report.py`: analysis and export tooling.
-- `config.py`: current settings surface, likely to shrink once the new strategy is defined.
-- `signal_engine.py` / `execution.py` / `main.py`: legacy live runtime path, not a design target.
-- `tests/`: regression coverage for the current code, useful as a safety net while refactoring.
-
-## Before The Overhaul
-
-Read [docs/bybit_aggression_carry_system_codex_spec.md](docs/bybit_aggression_carry_system_codex_spec.md) first. That file is the source of truth for the Bybit aggression-carry alpha-proof overhaul. Do not wire new research code into the legacy live runtime.
+Do not combine signals until a single alpha clears costs standalone. The latest
+lead is `dollar_volume_rank`; the previous increasing-volume variants failed in
+the corrected 3-month test.

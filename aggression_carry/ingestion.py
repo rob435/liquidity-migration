@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import polars as pl
 
-from .config import FeatureConfig
+from .config import TradeFlowConfig
 from .storage import write_dataset
 
 
@@ -79,15 +79,15 @@ def trades_to_frame(trades: list[dict[str, Any]], symbol: str | None = None) -> 
 def aggregate_signed_flow_1m(
     trades: pl.DataFrame,
     *,
-    config: FeatureConfig | None = None,
+    config: TradeFlowConfig | None = None,
 ) -> pl.DataFrame:
     if trades.is_empty():
         return pl.DataFrame()
-    cfg = config or FeatureConfig()
+    cfg = config or TradeFlowConfig()
     filtered = trades.unique(subset=["symbol", "trade_id"], keep="last") if "trade_id" in trades.columns else trades
-    if cfg.exclude_block_trades_from_aggression and "is_block_trade" in filtered.columns:
+    if cfg.exclude_block_trades and "is_block_trade" in filtered.columns:
         filtered = filtered.filter(~pl.col("is_block_trade"))
-    if cfg.exclude_rpi_trades_from_aggression and "is_rpi_trade" in filtered.columns:
+    if cfg.exclude_rpi_trades and "is_rpi_trade" in filtered.columns:
         filtered = filtered.filter(~pl.col("is_rpi_trade"))
     filtered = filtered.with_columns((pl.col("ts_ms") // MS_PER_MINUTE * MS_PER_MINUTE).alias("ts_ms"))
     grouped = (
@@ -190,12 +190,7 @@ def normalize_funding_history(funding: pl.DataFrame, *, default_interval_min: in
 def generate_fixture_data(data_root: str | Path, spec: FixtureSpec | None = None) -> dict[str, Path]:
     fixture = spec or FixtureSpec()
     start_ms = int(fixture.start.timestamp() * 1000)
-    rows_trades: list[dict[str, Any]] = []
     rows_kline_1h: list[dict[str, Any]] = []
-    rows_kline_5m: list[dict[str, Any]] = []
-    rows_funding: list[dict[str, Any]] = []
-    rows_oi: list[dict[str, Any]] = []
-    rows_ticker: list[dict[str, Any]] = []
     rows_instruments: list[dict[str, Any]] = []
 
     symbol_count = len(fixture.symbols)
@@ -220,7 +215,6 @@ def generate_fixture_data(data_root: str | Path, spec: FixtureSpec | None = None
             }
         )
         price = base_price
-        oi_value = 8_000_000.0 + symbol_index * 2_000_000.0
         for hour in range(fixture.hours):
             ts_ms = start_ms + hour * MS_PER_HOUR
             cyclical = math.sin((hour + symbol_index) / 9.0)
@@ -243,80 +237,10 @@ def generate_fixture_data(data_root: str | Path, spec: FixtureSpec | None = None
                     "source": "fixture",
                 }
             )
-            for five_minute in range(12):
-                sub_ts = ts_ms + five_minute * 5 * MS_PER_MINUTE
-                sub_open = open_price + (close_price - open_price) * five_minute / 12.0
-                sub_close = open_price + (close_price - open_price) * (five_minute + 1) / 12.0
-                rows_kline_5m.append(
-                    {
-                        "ts_ms": sub_ts,
-                        "symbol": symbol,
-                        "open": sub_open,
-                        "high": max(sub_open, sub_close) * 1.0005,
-                        "low": min(sub_open, sub_close) * 0.9995,
-                        "close": sub_close,
-                        "volume_base": (turnover / 12.0) / max(sub_close, 1e-9),
-                        "turnover_quote": turnover / 12.0,
-                        "source": "fixture",
-                    }
-                )
-            buy_share = min(max(0.50 + 0.18 * strength + 0.04 * cyclical, 0.05), 0.95)
-            buy_quote = turnover * buy_share
-            sell_quote = turnover - buy_quote
-            for side, quote in (("Buy", buy_quote), ("Sell", sell_quote)):
-                rows_trades.append(
-                    {
-                        "trade_id": f"{symbol}-{hour}-{side}",
-                        "seq": str(hour),
-                        "ts_ms": ts_ms + 30_000,
-                        "symbol": symbol,
-                        "side": side,
-                        "price": close_price,
-                        "size_base": quote / close_price,
-                        "quote_value": quote,
-                        "is_block_trade": False,
-                        "is_rpi_trade": False,
-                    }
-                )
-            funding_rate = -0.00012 * strength + 0.00001 * cyclical
-            rows_funding.append(
-                {
-                    "ts_ms": ts_ms,
-                    "symbol": symbol,
-                    "funding_rate": funding_rate,
-                    "funding_interval_min": 480,
-                }
-            )
-            oi_value *= math.exp(0.0006 * abs(strength) + 0.0002 * cyclical)
-            rows_oi.append({"ts_ms": ts_ms, "symbol": symbol, "open_interest_value": oi_value})
-            rows_ticker.append(
-                {
-                    "ts_ms": ts_ms,
-                    "symbol": symbol,
-                    "last_price": close_price,
-                    "mark_price": close_price,
-                    "bid1_price": close_price * 0.9999,
-                    "ask1_price": close_price * 1.0001,
-                    "open_interest_value": oi_value,
-                    "turnover_24h": turnover * 24.0,
-                    "funding_rate": funding_rate,
-                }
-            )
             price = close_price
 
-    trades = pl.DataFrame(rows_trades)
-    flow_1m = aggregate_signed_flow_1m(trades)
-    flow_1h = aggregate_signed_flow_1h(flow_1m)
-    funding = normalize_funding_history(pl.DataFrame(rows_funding))
     outputs = {
         "instruments": write_dataset(pl.DataFrame(rows_instruments), data_root, "instruments"),
-        "raw_public_trades": write_dataset(trades, data_root, "raw_public_trades"),
-        "signed_flow_1m": write_dataset(flow_1m, data_root, "signed_flow_1m"),
-        "signed_flow_1h": write_dataset(flow_1h, data_root, "signed_flow_1h"),
         "klines_1h": write_dataset(pl.DataFrame(rows_kline_1h), data_root, "klines_1h"),
-        "klines_5m": write_dataset(pl.DataFrame(rows_kline_5m), data_root, "klines_5m"),
-        "funding": write_dataset(funding, data_root, "funding"),
-        "open_interest": write_dataset(pl.DataFrame(rows_oi), data_root, "open_interest"),
-        "ticker_snapshots": write_dataset(pl.DataFrame(rows_ticker), data_root, "ticker_snapshots"),
     }
     return outputs
