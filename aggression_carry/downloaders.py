@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Iterable
@@ -11,7 +12,7 @@ from .archive import download_public_trade_archive, read_public_trade_archive
 from .bybit import BybitMarketData
 from .config import ResearchConfig
 from .ingestion import aggregate_signed_flow_1h, aggregate_signed_flow_1m, normalize_funding_history, trades_to_frame
-from .storage import write_dataset
+from .storage import dataset_path, write_dataset
 
 
 REST_DATASETS = {"instruments", "klines_1h", "klines_5m", "funding", "open_interest", "ticker_snapshots", "recent_trades"}
@@ -53,7 +54,6 @@ def download_market_data(
     funding_rows: list[dict] = []
     oi_rows: list[dict] = []
     recent_trade_rows: list[dict] = []
-    archive_trade_frames: list[pl.DataFrame] = []
 
     for symbol in symbols:
         if "klines_1h" in datasets:
@@ -75,8 +75,21 @@ def download_market_data(
             for date in _dates_between(start_ms, end_ms):
                 url = archive_url_template.format(symbol=symbol, date=date)
                 local_path = Path(data_root) / "archives" / symbol / _archive_filename(url, date)
+                if _archive_outputs_exist(data_root, symbol=symbol, date=date):
+                    print(f"archive_trades: {symbol} {date} cached", flush=True)
+                    outputs["raw_public_trades"] = dataset_path(data_root, "raw_public_trades")
+                    outputs["signed_flow_1m"] = dataset_path(data_root, "signed_flow_1m")
+                    outputs["signed_flow_1h"] = dataset_path(data_root, "signed_flow_1h")
+                    continue
                 print(f"archive_trades: {symbol} {date}", flush=True)
-                archive_trade_frames.append(read_public_trade_archive(download_public_trade_archive(url, local_path), symbol=symbol))
+                trades = read_public_trade_archive(download_public_trade_archive(url, local_path), symbol=symbol)
+                flow_1m = aggregate_signed_flow_1m(trades, config=config.features)
+                flow_1h = aggregate_signed_flow_1h(flow_1m)
+                outputs["raw_public_trades"] = write_dataset(trades, data_root, "raw_public_trades")
+                outputs["signed_flow_1m"] = write_dataset(flow_1m, data_root, "signed_flow_1m")
+                outputs["signed_flow_1h"] = write_dataset(flow_1h, data_root, "signed_flow_1h")
+                del trades, flow_1m, flow_1h
+                gc.collect()
 
     if kline_1h_rows:
         outputs["klines_1h"] = write_dataset(pl.DataFrame(kline_1h_rows), data_root, "klines_1h")
@@ -90,7 +103,6 @@ def download_market_data(
     trade_frames = []
     if recent_trade_rows:
         trade_frames.append(trades_to_frame(recent_trade_rows))
-    trade_frames.extend(archive_trade_frames)
     if trade_frames:
         trades = pl.concat(trade_frames).unique(subset=["symbol", "trade_id"]).sort(["symbol", "ts_ms", "trade_id"])
         flow_1m = aggregate_signed_flow_1m(trades, config=config.features)
@@ -219,6 +231,13 @@ def _dates_between(start_ms: int, end_ms: int) -> list[str]:
 def _archive_filename(url: str, fallback_stem: str) -> str:
     name = Path(urlparse(url).path).name
     return name or f"{fallback_stem}.csv.gz"
+
+
+def _archive_outputs_exist(data_root: str | Path, *, symbol: str, date: str) -> bool:
+    return all(
+        (dataset_path(data_root, dataset) / f"date={date}" / f"symbol={symbol}" / "part.parquet").exists()
+        for dataset in ("raw_public_trades", "signed_flow_1m", "signed_flow_1h")
+    )
 
 
 def _float_or_none(value) -> float | None:

@@ -10,7 +10,7 @@
 - The backtester remains the main reusable asset.
 - Codex companion tooling remains installed and documented in `CODEX_TOOLS.md`.
 - Graphify code graph exists under `graphify-out/` for navigation after the cleanup rebuild.
-- Local tests pass with `126` tests.
+- Local tests pass with `127` tests.
 - `pyflakes` is not installed in the active Python; compile, full tests, and `git diff --check` are clean.
 
 ## Keep For Now

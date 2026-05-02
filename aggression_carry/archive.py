@@ -28,6 +28,31 @@ def download_archive_bytes(url: str, *, timeout_seconds: int = DEFAULT_TIMEOUT_S
 
 def read_public_trade_archive(path: str | Path, *, symbol: str | None = None) -> pl.DataFrame:
     file_path = Path(path)
+    try:
+        frame = pl.read_csv(file_path)
+        if {"timestamp", "side", "size", "price", "trdMatchID"}.issubset(frame.columns):
+            symbol_expr = pl.lit(symbol) if symbol is not None else pl.col("symbol").cast(pl.Utf8)
+            return (
+                frame.select(
+                    [
+                        pl.col("trdMatchID").cast(pl.Utf8).alias("trade_id"),
+                        pl.lit(None, dtype=pl.Utf8).alias("seq"),
+                        (pl.col("timestamp").cast(pl.Float64) * 1000).cast(pl.Int64).alias("ts_ms"),
+                        symbol_expr.alias("symbol"),
+                        pl.col("side").cast(pl.Utf8),
+                        pl.col("price").cast(pl.Float64),
+                        pl.col("size").cast(pl.Float64).alias("size_base"),
+                        (pl.col("price").cast(pl.Float64) * pl.col("size").cast(pl.Float64)).alias("quote_value"),
+                        pl.lit(False).alias("is_block_trade"),
+                        pl.lit(False).alias("is_rpi_trade"),
+                    ]
+                )
+                .unique(subset=["symbol", "trade_id"], keep="last")
+                .sort(["symbol", "ts_ms", "trade_id"])
+            )
+    except Exception:
+        pass
+
     data = file_path.read_bytes()
     if file_path.suffix == ".gz":
         data = gzip.decompress(data)

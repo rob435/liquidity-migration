@@ -121,3 +121,27 @@ def test_archive_only_download_does_not_construct_rest_client(tmp_path, monkeypa
     )
 
     assert {"raw_public_trades", "signed_flow_1m", "signed_flow_1h"}.issubset(outputs)
+
+
+def test_archive_download_skips_completed_partitions(tmp_path, monkeypatch) -> None:
+    for dataset in ("raw_public_trades", "signed_flow_1m", "signed_flow_1h"):
+        part = tmp_path / dataset / "date=2025-01-01" / "symbol=BTCUSDT" / "part.parquet"
+        part.parent.mkdir(parents=True)
+        pl.DataFrame({"ts_ms": [1_735_689_600_000], "symbol": ["BTCUSDT"]}).write_parquet(part)
+
+    def fail_download(_url, destination):
+        raise AssertionError("completed archive outputs should be reused")
+
+    monkeypatch.setattr(downloaders, "download_public_trade_archive", fail_download)
+
+    outputs = download_market_data(
+        tmp_path,
+        config=ResearchConfig(),
+        symbols=["BTCUSDT"],
+        start_ms=1_735_689_600_000,
+        end_ms=1_735_776_000_000,
+        datasets={"archive_trades"},
+        archive_url_template="https://public.bybit.com/trading/{symbol}/{symbol}{date}.csv.gz",
+    )
+
+    assert {"raw_public_trades", "signed_flow_1m", "signed_flow_1h"}.issubset(outputs)
