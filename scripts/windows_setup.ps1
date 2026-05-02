@@ -16,12 +16,33 @@ function Invoke-Checked {
     }
 }
 
-if (-not (Get-Command py -ErrorAction SilentlyContinue)) {
-    throw "Python launcher 'py' was not found. Install Python 3.11 with: winget install -e --id Python.Python.3.11"
+function Get-CompatiblePython {
+    $Candidates = @(
+        @{ Exe = "py"; Args = @("-3.11") },
+        @{ Exe = "py"; Args = @("-3") },
+        @{ Exe = "python"; Args = @() }
+    )
+
+    foreach ($Candidate in $Candidates) {
+        if (-not (Get-Command $Candidate.Exe -ErrorAction SilentlyContinue)) {
+            continue
+        }
+        & $Candidate.Exe @($Candidate.Args) -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)" *> $null
+        if ($LASTEXITCODE -eq 0) {
+            return $Candidate
+        }
+    }
+
+    throw "No compatible Python found. Install Python 3.11 or newer from https://www.python.org/downloads/windows/ and enable the Python launcher. Microsoft Store is not required."
 }
 
-Invoke-Checked "Checking Python 3.11" { & py -3.11 --version }
-Invoke-Checked "Creating Python 3.11 virtualenv" { & py -3.11 -m venv --clear .venv }
+$BasePython = Get-CompatiblePython
+Invoke-Checked "Checking Python >=3.11" {
+    & $BasePython.Exe @($BasePython.Args) -c "import sys; print(sys.executable); print(sys.version)"
+}
+Invoke-Checked "Creating Python virtualenv" {
+    & $BasePython.Exe @($BasePython.Args) -m venv --clear .venv
+}
 
 $Python = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 if (-not (Test-Path $Python)) {

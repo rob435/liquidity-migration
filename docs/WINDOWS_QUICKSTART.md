@@ -6,12 +6,14 @@ Use this when setting up a fresh Windows PC from zero.
 
 Open PowerShell as your normal user, not Administrator.
 
+Use the python.org installer if Microsoft Store is unavailable or disabled. Microsoft Store is not required.
+
 ```powershell
 winget install -e --id Git.Git
 winget install -e --id Python.Python.3.11
 ```
 
-If `winget` is unavailable, install Git from `https://git-scm.com/download/win` and Python 3.11 from `https://www.python.org/downloads/`. During Python install, keep the Python Launcher option enabled.
+If `winget` or Microsoft Store is unavailable, install Git from `https://git-scm.com/download/win` and Python 3.11 or newer from `https://www.python.org/downloads/windows/`. During Python install, keep the Python Launcher option enabled.
 
 Close PowerShell completely, then open a new PowerShell window.
 
@@ -20,10 +22,10 @@ Verify both tools:
 ```powershell
 git --version
 py -0p
-py -3.11 --version
+py -3 --version
 ```
 
-If `py -0p` says `No installed Pythons found`, Python is not installed correctly. Reinstall Python 3.11 and make sure the launcher is enabled.
+If `py -0p` says `No installed Pythons found`, Python is not installed correctly. Reinstall Python from python.org and make sure the launcher is enabled. The setup script accepts Python 3.11 or newer.
 
 ## 2. Clone The Repo
 
@@ -52,7 +54,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\windows_setup.ps1
 Manual equivalent:
 
 ```powershell
-py -3.11 -m venv --clear .venv
+py -3 -m venv --clear .venv
 .\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 .\.venv\Scripts\python.exe -m pytest -q
@@ -68,7 +70,7 @@ If `.\.venv\Scripts\python.exe` is not found, the virtualenv was not created. Ru
 
 ```powershell
 Remove-Item -Recurse -Force .venv -ErrorAction SilentlyContinue
-py -3.11 -m venv .venv
+py -3 -m venv .venv
 ```
 
 Then rerun the install commands.
@@ -130,7 +132,7 @@ data/agc-bybit-3m/reports/portfolio_backtest.md
 ## Notes
 
 - The 3-month run can download many GB and may take a long time.
-- `run_agc_3m.ps1` requires the virtualenv to use Python 3.11. If it fails the version check, rerun `.\scripts\windows_setup.ps1`.
+- `run_agc_3m.ps1` requires the virtualenv to use Python 3.11 or newer. If it fails the version check, rerun `.\scripts\windows_setup.ps1`.
 - The downloader prints each archive symbol/date while it works.
 - Existing archive files are reused, so an interrupted run can usually be restarted with the same command.
 - Completed raw-trade and signed-flow Parquet partitions are reused too, so reruns skip finished symbol/day outputs.

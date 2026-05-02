@@ -47,7 +47,7 @@ if (-not (Test-Path $Python)) {
 }
 
 Invoke-Checked "Checking virtualenv Python version" {
-    & $Python -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)"
+    & $Python -c "import sys; print(sys.version); raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
 }
 
 $SymbolCsv = $Symbols -join ","
