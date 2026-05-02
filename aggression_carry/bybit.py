@@ -57,35 +57,31 @@ class BybitMarketData:
                 return rows
 
     def get_klines(self, symbol: str, interval: str, start: int, end: int, limit: int = 1000) -> list[dict[str, Any]]:
-        rows: list[Any] = []
         interval_ms = INTERVAL_MS[interval] if interval in INTERVAL_MS else int(interval) * 60_000
+        rows_by_ts: dict[int, Any] = {}
         cursor = start
-        seen: set[int] = set()
-        while cursor < end:
+        window_span_ms = interval_ms * max(limit - 1, 1)
+        while cursor <= end:
+            window_end = min(end, cursor + window_span_ms)
             payload = self._get(
                 "get_kline",
                 category=self.category,
                 symbol=symbol,
                 interval=interval,
                 start=cursor,
-                end=end,
+                end=window_end,
                 limit=limit,
             )
             batch = payload.get("result", {}).get("list", [])
-            if not batch:
+            for item in batch:
+                ts = int(item[0])
+                if start <= ts <= end:
+                    rows_by_ts[ts] = item
+            if window_end >= end:
                 break
-            rows.extend(batch)
-            timestamps = sorted(int(item[0]) for item in batch if int(item[0]) not in seen)
-            seen.update(timestamps)
-            if not timestamps:
-                break
-            next_cursor = max(timestamps) + interval_ms
-            if next_cursor <= cursor:
-                break
-            cursor = next_cursor
-            if len(batch) < limit:
-                break
-        return sorted(rows, key=lambda item: int(item[0]))
+            next_cursor = window_end
+            cursor = next_cursor if next_cursor > cursor else cursor + interval_ms
+        return [rows_by_ts[ts] for ts in sorted(rows_by_ts)]
 
     def get_recent_trades(self, symbol: str, limit: int = 1000) -> list[dict[str, Any]]:
         payload = self._get("get_public_trade_history", category=self.category, symbol=symbol, limit=limit)
@@ -114,29 +110,32 @@ class BybitMarketData:
         )
 
     def _paged_time_range(self, method_name: str, timestamp_key: str, **params: Any) -> list[dict[str, Any]]:
-        rows: list[dict[str, Any]] = []
-        cursor = int(params["startTime"])
+        rows_by_ts: dict[int, dict[str, Any]] = {}
+        start = int(params["startTime"])
         end = int(params["endTime"])
+        cursor_end = end
         limit = int(params.get("limit", 200))
-        seen: set[int] = set()
-        while cursor < end:
-            request_params = {**params, "startTime": cursor, "endTime": end}
+        while cursor_end >= start:
+            request_params = {**params, "startTime": start, "endTime": cursor_end}
             payload = self._get(method_name, category=self.category, **request_params)
             batch = payload.get("result", {}).get("list", [])
             if not batch:
                 break
-            rows.extend(batch)
-            timestamps = sorted(int(item[timestamp_key]) for item in batch if int(item[timestamp_key]) not in seen)
-            seen.update(timestamps)
+            timestamps = sorted(int(item[timestamp_key]) for item in batch)
             if not timestamps:
                 break
-            next_cursor = max(timestamps) + 1
-            if next_cursor <= cursor:
+            for item in batch:
+                ts = int(item[timestamp_key])
+                if start <= ts <= end:
+                    rows_by_ts[ts] = item
+            oldest = min(timestamps)
+            if len(batch) < limit or oldest <= start:
                 break
-            cursor = next_cursor
-            if len(batch) < limit:
+            next_cursor_end = oldest - 1
+            if next_cursor_end >= cursor_end:
                 break
-        return sorted(rows, key=lambda item: int(item[timestamp_key]))
+            cursor_end = next_cursor_end
+        return [rows_by_ts[ts] for ts in sorted(rows_by_ts)]
 
     def _get(self, method_name: str, **params: Any) -> dict[str, Any]:
         method = getattr(self._client, method_name)
