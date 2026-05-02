@@ -5,6 +5,7 @@ import gzip
 import polars as pl
 import pytest
 
+from aggression_carry import archive as archive_module
 from aggression_carry.archive import download_public_trade_archive, read_public_trade_archive
 from aggression_carry.config import ResearchConfig
 from aggression_carry import downloaders
@@ -41,16 +42,43 @@ def test_download_public_trade_archive_ignores_stale_fixed_temp_name(tmp_path, m
     stale_temp = tmp_path / "BTCUSDT2025-01-23.csv.gz.tmp"
     stale_temp.write_bytes(b"stale")
 
-    monkeypatch.setattr(
-        "aggression_carry.archive.download_archive_bytes",
-        lambda _url: gzip.compress(b"timestamp,symbol,side,size,price,tickDirection,trdMatchID,grossValue,homeNotional,foreignNotional\n"),
-    )
+    def fake_download(_url, *, timeout_seconds):
+        assert timeout_seconds == archive_module.DEFAULT_TIMEOUT_SECONDS
+        return gzip.compress(b"timestamp,symbol,side,size,price,tickDirection,trdMatchID,grossValue,homeNotional,foreignNotional\n")
+
+    monkeypatch.setattr(archive_module, "download_archive_bytes", fake_download)
 
     output = download_public_trade_archive("https://example.com/BTCUSDT2025-01-23.csv.gz", destination)
 
     assert output == destination
     assert destination.exists()
     assert stale_temp.read_bytes() == b"stale"
+
+
+def test_archive_download_retries_and_removes_partial_temp(tmp_path, monkeypatch) -> None:
+    attempts = 0
+
+    def flaky_download(_url, *, timeout_seconds):
+        nonlocal attempts
+        attempts += 1
+        assert timeout_seconds == 123
+        if attempts == 1:
+            raise TimeoutError("socket read timed out")
+        return b"ok"
+
+    monkeypatch.setattr(archive_module, "download_archive_bytes", flaky_download)
+    monkeypatch.setattr(archive_module.time, "sleep", lambda _seconds: None)
+
+    output = download_public_trade_archive(
+        "https://public.bybit.com/trading/BTCUSDT/BTCUSDT2025-01-01.csv.gz",
+        tmp_path / "BTCUSDT2025-01-01.csv.gz",
+        retries=2,
+        timeout_seconds=123,
+    )
+
+    assert output.read_bytes() == b"ok"
+    assert attempts == 2
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_archive_only_download_does_not_construct_rest_client(tmp_path, monkeypatch) -> None:

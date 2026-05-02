@@ -75,6 +75,7 @@ def download_market_data(
             for date in _dates_between(start_ms, end_ms):
                 url = archive_url_template.format(symbol=symbol, date=date)
                 local_path = Path(data_root) / "archives" / symbol / _archive_filename(url, date)
+                print(f"archive_trades: {symbol} {date}", flush=True)
                 archive_trade_frames.append(read_public_trade_archive(download_public_trade_archive(url, local_path), symbol=symbol))
 
     if kline_1h_rows:

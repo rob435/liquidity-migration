@@ -61,7 +61,7 @@ py -3.11 -m venv .venv
 Expected test result:
 
 ```text
-124 passed
+126 passed
 ```
 
 If `.\.venv\Scripts\python.exe` is not found, the virtualenv was not created. Run:
@@ -124,7 +124,8 @@ data/agc-bybit-3m/reports/portfolio_backtest.md
 ## Notes
 
 - The 3-month run can download many GB and may take a long time.
-- The downloader is currently quiet while it works. If PowerShell appears idle, check whether `data/agc-bybit-3m` is growing.
-- Existing archive files are reused, so an interrupted run can usually be restarted.
+- The downloader prints each archive symbol/date while it works.
+- Existing archive files are reused, so an interrupted run can usually be restarted with the same command.
+- Large archive downloads can still hit network timeouts. The downloader retries failed files automatically with a longer timeout before giving up.
 - If Bybit REST rejects your network or region, the download step will fail. Run from a network where Bybit public market endpoints are reachable.
 - This is a research backtest path only. It does not place live orders.

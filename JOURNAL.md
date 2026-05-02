@@ -20,5 +20,6 @@
 - Fixed a stale unreachable block in `reconcile.py` that referenced an undefined `export_path`.
 - Fixed Bybit public archive handling so downloaded `.csv.gz` files keep their compression suffix, parse archive `timestamp`/`trdMatchID` rows, and can run archive-only without constructing a REST client.
 - Verified a real one-day SOLUSDT archive smoke: `560,085` raw trades, `1,440` signed-flow 1m rows, and `24` signed-flow 1h rows.
-- Verified with `compileall`, `git diff --check`, and `pytest -q` (`124` passing tests). `pyflakes` is not installed in the active Python.
+- Verified with `compileall`, `git diff --check`, and `pytest -q` (`126` passing tests). `pyflakes` is not installed in the active Python.
 - Added Windows fresh-clone setup docs plus PowerShell helper scripts for dependency setup and the 3-month Bybit aggression-carry test run.
+- Hardened Bybit archive downloads with longer timeouts, retry/backoff, partial-file cleanup, and per-file progress output for long Windows runs.
