@@ -18,7 +18,7 @@
       "source_file": "aggression_carry/ingestion.py",
       "source_location": "L20",
       "id": "aggression_carry_ingestion_fixturespec",
-      "community": 5,
+      "community": 2,
       "norm_label": "fixturespec"
     },
     {
@@ -126,7 +126,7 @@
       "source_file": "aggression_carry/volume_backtest.py",
       "source_location": "L27",
       "id": "aggression_carry_volume_backtest_run_volume_trade_backtest",
-      "community": 2,
+      "community": 0,
       "norm_label": "run_volume_trade_backtest()"
     },
     {
@@ -144,7 +144,7 @@
       "source_file": "aggression_carry/volume_backtest.py",
       "source_location": "L160",
       "id": "aggression_carry_volume_backtest_resolve_workers",
-      "community": 0,
+      "community": 2,
       "norm_label": "_resolve_workers()"
     },
     {
@@ -153,7 +153,7 @@
       "source_file": "aggression_carry/volume_backtest.py",
       "source_location": "L171",
       "id": "aggression_carry_volume_backtest_grid_chunksize",
-      "community": 0,
+      "community": 2,
       "norm_label": "_grid_chunksize()"
     },
     {
@@ -486,7 +486,7 @@
       "source_file": "aggression_carry/volume_backtest.py",
       "source_location": "L1358",
       "id": "aggression_carry_volume_backtest_price_bars_by_symbol",
-      "community": 1,
+      "community": 3,
       "norm_label": "_price_bars_by_symbol()"
     },
     {
@@ -621,7 +621,7 @@
       "source_file": "aggression_carry/volume_backtest.py",
       "source_location": "L1571",
       "id": "aggression_carry_volume_backtest_date_range",
-      "community": 2,
+      "community": 0,
       "norm_label": "_date_range()"
     },
     {
@@ -1017,7 +1017,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L113",
       "id": "aggression_carry_config_researchconfig",
-      "community": 3,
+      "community": 1,
       "norm_label": "researchconfig"
     },
     {
@@ -1116,7 +1116,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L1",
       "id": "aggression_carry_bybit_py",
-      "community": 1,
+      "community": 3,
       "norm_label": "bybit.py"
     },
     {
@@ -1125,7 +1125,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L13",
       "id": "aggression_carry_bybit_bybitdataerror",
-      "community": 1,
+      "community": 3,
       "norm_label": "bybitdataerror"
     },
     {
@@ -1134,7 +1134,7 @@
       "source_file": "",
       "source_location": "",
       "id": "runtimeerror",
-      "community": 1,
+      "community": 3,
       "norm_label": "runtimeerror"
     },
     {
@@ -1143,7 +1143,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L33",
       "id": "aggression_carry_bybit_bybitmarketdata",
-      "community": 1,
+      "community": 3,
       "norm_label": "bybitmarketdata"
     },
     {
@@ -1152,7 +1152,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L40",
       "id": "aggression_carry_bybit_bybitmarketdata_post_init",
-      "community": 1,
+      "community": 3,
       "norm_label": ".__post_init__()"
     },
     {
@@ -1161,7 +1161,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L45",
       "id": "aggression_carry_bybit_bybitmarketdata_get_instruments_info",
-      "community": 1,
+      "community": 3,
       "norm_label": ".get_instruments_info()"
     },
     {
@@ -1170,7 +1170,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L59",
       "id": "aggression_carry_bybit_bybitmarketdata_get_klines",
-      "community": 1,
+      "community": 3,
       "norm_label": ".get_klines()"
     },
     {
@@ -1179,7 +1179,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L86",
       "id": "aggression_carry_bybit_bybitmarketdata_get_recent_trades",
-      "community": 1,
+      "community": 3,
       "norm_label": ".get_recent_trades()"
     },
     {
@@ -1188,7 +1188,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L90",
       "id": "aggression_carry_bybit_bybitmarketdata_get_funding_history",
-      "community": 1,
+      "community": 3,
       "norm_label": ".get_funding_history()"
     },
     {
@@ -1197,7 +1197,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L93",
       "id": "aggression_carry_bybit_bybitmarketdata_get_tickers",
-      "community": 1,
+      "community": 3,
       "norm_label": ".get_tickers()"
     },
     {
@@ -1206,7 +1206,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L97",
       "id": "aggression_carry_bybit_bybitmarketdata_get_orderbook",
-      "community": 1,
+      "community": 3,
       "norm_label": ".get_orderbook()"
     },
     {
@@ -1215,7 +1215,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L101",
       "id": "aggression_carry_bybit_bybitmarketdata_get_open_interest",
-      "community": 1,
+      "community": 3,
       "norm_label": ".get_open_interest()"
     },
     {
@@ -1224,7 +1224,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L112",
       "id": "aggression_carry_bybit_bybitmarketdata_paged_time_range",
-      "community": 1,
+      "community": 3,
       "norm_label": "._paged_time_range()"
     },
     {
@@ -1233,7 +1233,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L140",
       "id": "aggression_carry_bybit_bybitmarketdata_get",
-      "community": 1,
+      "community": 3,
       "norm_label": "._get()"
     },
     {
@@ -1260,7 +1260,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L1",
       "id": "aggression_carry_universe_py",
-      "community": 1,
+      "community": 3,
       "norm_label": "universe.py"
     },
     {
@@ -1269,7 +1269,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L19",
       "id": "aggression_carry_universe_run_discover_universe",
-      "community": 1,
+      "community": 3,
       "norm_label": "run_discover_universe()"
     },
     {
@@ -1278,7 +1278,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L60",
       "id": "aggression_carry_universe_build_current_universe_table",
-      "community": 1,
+      "community": 3,
       "norm_label": "build_current_universe_table()"
     },
     {
@@ -1287,7 +1287,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L130",
       "id": "aggression_carry_universe_format_universe_report",
-      "community": 1,
+      "community": 3,
       "norm_label": "format_universe_report()"
     },
     {
@@ -1296,7 +1296,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L171",
       "id": "aggression_carry_universe_empty_universe_table",
-      "community": 1,
+      "community": 3,
       "norm_label": "_empty_universe_table()"
     },
     {
@@ -1305,7 +1305,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L189",
       "id": "aggression_carry_universe_age_filter_label",
-      "community": 1,
+      "community": 3,
       "norm_label": "_age_filter_label()"
     },
     {
@@ -1314,7 +1314,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L201",
       "id": "aggression_carry_universe_safe_name",
-      "community": 1,
+      "community": 3,
       "norm_label": "_safe_name()"
     },
     {
@@ -1503,7 +1503,7 @@
       "source_file": "aggression_carry/archive.py",
       "source_location": "L1",
       "id": "aggression_carry_archive_py",
-      "community": 3,
+      "community": 1,
       "norm_label": "archive.py"
     },
     {
@@ -1512,7 +1512,7 @@
       "source_file": "aggression_carry/archive.py",
       "source_location": "L23",
       "id": "aggression_carry_archive_download_archive_bytes",
-      "community": 3,
+      "community": 1,
       "norm_label": "download_archive_bytes()"
     },
     {
@@ -1521,7 +1521,7 @@
       "source_file": "aggression_carry/archive.py",
       "source_location": "L29",
       "id": "aggression_carry_archive_read_public_trade_archive",
-      "community": 3,
+      "community": 1,
       "norm_label": "read_public_trade_archive()"
     },
     {
@@ -1530,7 +1530,7 @@
       "source_file": "aggression_carry/archive.py",
       "source_location": "L70",
       "id": "aggression_carry_archive_download_public_trade_archive",
-      "community": 3,
+      "community": 1,
       "norm_label": "download_public_trade_archive()"
     },
     {
@@ -1539,115 +1539,151 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L1",
       "id": "aggression_carry_downloaders_py",
-      "community": 3,
+      "community": 1,
       "norm_label": "downloaders.py"
     },
     {
       "label": "parse_date_ms()",
       "file_type": "code",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L21",
+      "source_location": "L22",
       "id": "aggression_carry_downloaders_parse_date_ms",
-      "community": 3,
+      "community": 7,
       "norm_label": "parse_date_ms()"
     },
     {
       "label": "download_market_data()",
       "file_type": "code",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L28",
+      "source_location": "L29",
       "id": "aggression_carry_downloaders_download_market_data",
-      "community": 3,
+      "community": 1,
       "norm_label": "download_market_data()"
+    },
+    {
+      "label": "_download_symbol_dataset()",
+      "file_type": "code",
+      "source_file": "aggression_carry/downloaders.py",
+      "source_location": "L150",
+      "id": "aggression_carry_downloaders_download_symbol_dataset",
+      "community": 1,
+      "norm_label": "_download_symbol_dataset()"
+    },
+    {
+      "label": "_marker_path()",
+      "file_type": "code",
+      "source_file": "aggression_carry/downloaders.py",
+      "source_location": "L181",
+      "id": "aggression_carry_downloaders_marker_path",
+      "community": 1,
+      "norm_label": "_marker_path()"
+    },
+    {
+      "label": "_marked_complete()",
+      "file_type": "code",
+      "source_file": "aggression_carry/downloaders.py",
+      "source_location": "L186",
+      "id": "aggression_carry_downloaders_marked_complete",
+      "community": 1,
+      "norm_label": "_marked_complete()"
+    },
+    {
+      "label": "_mark_complete()",
+      "file_type": "code",
+      "source_file": "aggression_carry/downloaders.py",
+      "source_location": "L191",
+      "id": "aggression_carry_downloaders_mark_complete",
+      "community": 1,
+      "norm_label": "_mark_complete()"
     },
     {
       "label": "_normalize_klines()",
       "file_type": "code",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L121",
+      "source_location": "L196",
       "id": "aggression_carry_downloaders_normalize_klines",
-      "community": 3,
+      "community": 1,
       "norm_label": "_normalize_klines()"
     },
     {
       "label": "_normalize_funding()",
       "file_type": "code",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L140",
+      "source_location": "L215",
       "id": "aggression_carry_downloaders_normalize_funding",
-      "community": 3,
+      "community": 1,
       "norm_label": "_normalize_funding()"
     },
     {
       "label": "_normalize_open_interest()",
       "file_type": "code",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L152",
+      "source_location": "L227",
       "id": "aggression_carry_downloaders_normalize_open_interest",
-      "community": 3,
+      "community": 1,
       "norm_label": "_normalize_open_interest()"
     },
     {
       "label": "_normalize_tickers()",
       "file_type": "code",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L164",
+      "source_location": "L239",
       "id": "aggression_carry_downloaders_normalize_tickers",
-      "community": 3,
+      "community": 1,
       "norm_label": "_normalize_tickers()"
     },
     {
       "label": "_normalize_instruments()",
       "file_type": "code",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L190",
+      "source_location": "L265",
       "id": "aggression_carry_downloaders_normalize_instruments",
-      "community": 3,
+      "community": 1,
       "norm_label": "_normalize_instruments()"
     },
     {
       "label": "_dates_between()",
       "file_type": "code",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L224",
+      "source_location": "L299",
       "id": "aggression_carry_downloaders_dates_between",
-      "community": 3,
+      "community": 1,
       "norm_label": "_dates_between()"
     },
     {
       "label": "_archive_filename()",
       "file_type": "code",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L235",
+      "source_location": "L310",
       "id": "aggression_carry_downloaders_archive_filename",
-      "community": 3,
+      "community": 1,
       "norm_label": "_archive_filename()"
     },
     {
       "label": "_archive_outputs_exist()",
       "file_type": "code",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L240",
+      "source_location": "L315",
       "id": "aggression_carry_downloaders_archive_outputs_exist",
-      "community": 3,
+      "community": 1,
       "norm_label": "_archive_outputs_exist()"
     },
     {
       "label": "_partition_exists()",
       "file_type": "code",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L247",
+      "source_location": "L322",
       "id": "aggression_carry_downloaders_partition_exists",
-      "community": 3,
+      "community": 1,
       "norm_label": "_partition_exists()"
     },
     {
       "label": "_float_or_none()",
       "file_type": "code",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L252",
+      "source_location": "L327",
       "id": "aggression_carry_downloaders_float_or_none",
-      "community": 3,
+      "community": 1,
       "norm_label": "_float_or_none()"
     },
     {
@@ -1908,71 +1944,89 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L1",
       "id": "tests_test_aggression_carry_archive_py",
-      "community": 3,
+      "community": 1,
       "norm_label": "test_aggression_carry_archive.py"
     },
     {
       "label": "test_read_bybit_public_trade_csv_gz_archive()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_archive.py",
-      "source_location": "L15",
+      "source_location": "L16",
       "id": "tests_test_aggression_carry_archive_test_read_bybit_public_trade_csv_gz_archive",
-      "community": 3,
+      "community": 1,
       "norm_label": "test_read_bybit_public_trade_csv_gz_archive()"
     },
     {
       "label": "test_archive_filename_preserves_compression_suffix()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_archive.py",
-      "source_location": "L34",
+      "source_location": "L35",
       "id": "tests_test_aggression_carry_archive_test_archive_filename_preserves_compression_suffix",
-      "community": 3,
+      "community": 1,
       "norm_label": "test_archive_filename_preserves_compression_suffix()"
     },
     {
       "label": "test_download_public_trade_archive_ignores_stale_fixed_temp_name()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_archive.py",
-      "source_location": "L40",
+      "source_location": "L41",
       "id": "tests_test_aggression_carry_archive_test_download_public_trade_archive_ignores_stale_fixed_temp_name",
-      "community": 3,
+      "community": 1,
       "norm_label": "test_download_public_trade_archive_ignores_stale_fixed_temp_name()"
     },
     {
       "label": "test_archive_download_retries_and_removes_partial_temp()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_archive.py",
-      "source_location": "L58",
+      "source_location": "L59",
       "id": "tests_test_aggression_carry_archive_test_archive_download_retries_and_removes_partial_temp",
-      "community": 3,
+      "community": 1,
       "norm_label": "test_archive_download_retries_and_removes_partial_temp()"
     },
     {
       "label": "test_archive_only_download_does_not_construct_rest_client()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_archive.py",
-      "source_location": "L84",
+      "source_location": "L85",
       "id": "tests_test_aggression_carry_archive_test_archive_only_download_does_not_construct_rest_client",
-      "community": 3,
+      "community": 1,
       "norm_label": "test_archive_only_download_does_not_construct_rest_client()"
     },
     {
       "label": "test_archive_download_skips_completed_partitions()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_archive.py",
-      "source_location": "L126",
+      "source_location": "L127",
       "id": "tests_test_aggression_carry_archive_test_archive_download_skips_completed_partitions",
-      "community": 3,
+      "community": 1,
       "norm_label": "test_archive_download_skips_completed_partitions()"
     },
     {
       "label": "test_archive_download_can_skip_raw_public_trade_storage()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_archive.py",
-      "source_location": "L152",
+      "source_location": "L153",
       "id": "tests_test_aggression_carry_archive_test_archive_download_can_skip_raw_public_trade_storage",
-      "community": 3,
+      "community": 1,
       "norm_label": "test_archive_download_can_skip_raw_public_trade_storage()"
+    },
+    {
+      "label": "test_rest_kline_download_writes_each_symbol_and_resumes()",
+      "file_type": "code",
+      "source_file": "tests/test_aggression_carry_archive.py",
+      "source_location": "L194",
+      "id": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes",
+      "community": 1,
+      "norm_label": "test_rest_kline_download_writes_each_symbol_and_resumes()"
+    },
+    {
+      "label": "test_rest_kline_download_only_marks_successful_symbols()",
+      "file_type": "code",
+      "source_file": "tests/test_aggression_carry_archive.py",
+      "source_location": "L243",
+      "id": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols",
+      "community": 1,
+      "norm_label": "test_rest_kline_download_only_marks_successful_symbols()"
     },
     {
       "label": "test_aggression_carry_storage.py",
@@ -2007,7 +2061,7 @@
       "source_file": "tests/test_aggression_carry_universe.py",
       "source_location": "L1",
       "id": "tests_test_aggression_carry_universe_py",
-      "community": 1,
+      "community": 3,
       "norm_label": "test_aggression_carry_universe.py"
     },
     {
@@ -2016,7 +2070,7 @@
       "source_file": "tests/test_aggression_carry_universe.py",
       "source_location": "L10",
       "id": "tests_test_aggression_carry_universe_test_current_universe_table_filters_and_ranks",
-      "community": 1,
+      "community": 3,
       "norm_label": "test_current_universe_table_filters_and_ranks()"
     },
     {
@@ -2025,7 +2079,7 @@
       "source_file": "tests/test_aggression_carry_universe.py",
       "source_location": "L49",
       "id": "tests_test_aggression_carry_universe_test_universe_report_contains_symbol_csv",
-      "community": 1,
+      "community": 3,
       "norm_label": "test_universe_report_contains_symbol_csv()"
     },
     {
@@ -2034,7 +2088,7 @@
       "source_file": "tests/test_aggression_carry_universe.py",
       "source_location": "L84",
       "id": "tests_test_aggression_carry_universe_instrument",
-      "community": 1,
+      "community": 3,
       "norm_label": "_instrument()"
     },
     {
@@ -2043,7 +2097,7 @@
       "source_file": "tests/test_aggression_carry_universe.py",
       "source_location": "L100",
       "id": "tests_test_aggression_carry_universe_ticker",
-      "community": 1,
+      "community": 3,
       "norm_label": "_ticker()"
     },
     {
@@ -2721,18 +2775,6 @@
       "relation": "calls",
       "confidence": "INFERRED",
       "confidence_score": 0.8,
-      "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L102",
-      "weight": 1.0,
-      "_src": "aggression_carry_ingestion_normalize_funding_history",
-      "_tgt": "aggression_carry_downloaders_download_market_data",
-      "source": "aggression_carry_ingestion_normalize_funding_history",
-      "target": "aggression_carry_downloaders_download_market_data"
-    },
-    {
-      "relation": "calls",
-      "confidence": "INFERRED",
-      "confidence_score": 0.8,
       "source_file": "tests/test_aggression_carry_ingestion.py",
       "source_location": "L104",
       "weight": 1.0,
@@ -2740,6 +2782,18 @@
       "_tgt": "tests_test_aggression_carry_ingestion_test_funding_interval_normalization",
       "source": "aggression_carry_ingestion_normalize_funding_history",
       "target": "tests_test_aggression_carry_ingestion_test_funding_interval_normalization"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "aggression_carry/downloaders.py",
+      "source_location": "L102",
+      "weight": 1.0,
+      "_src": "aggression_carry_ingestion_normalize_funding_history",
+      "_tgt": "aggression_carry_downloaders_download_market_data",
+      "source": "aggression_carry_ingestion_normalize_funding_history",
+      "target": "aggression_carry_downloaders_download_market_data"
     },
     {
       "relation": "calls",
@@ -2796,8 +2850,8 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L63",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_daily_liquidity_bucket",
-      "_tgt": "aggression_carry_ingestion_generate_fixture_data",
+      "_src": "aggression_carry_ingestion_generate_fixture_data",
+      "_tgt": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_daily_liquidity_bucket",
       "source": "aggression_carry_ingestion_generate_fixture_data",
       "target": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_daily_liquidity_bucket"
     },
@@ -3936,8 +3990,8 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L65",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_daily_liquidity_bucket",
-      "_tgt": "aggression_carry_volume_backtest_run_volume_trade_backtest",
+      "_src": "aggression_carry_volume_backtest_run_volume_trade_backtest",
+      "_tgt": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_daily_liquidity_bucket",
       "source": "aggression_carry_volume_backtest_run_volume_trade_backtest",
       "target": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_daily_liquidity_bucket"
     },
@@ -4152,8 +4206,8 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L44",
       "weight": 1.0,
-      "_src": "scripts_run_volume_bucket_sweep_main",
-      "_tgt": "aggression_carry_volume_backtest_run_volume_grid",
+      "_src": "aggression_carry_volume_backtest_run_volume_grid",
+      "_tgt": "scripts_run_volume_bucket_sweep_main",
       "source": "aggression_carry_volume_backtest_run_volume_grid",
       "target": "scripts_run_volume_bucket_sweep_main"
     },
@@ -4272,8 +4326,8 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L148",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_volume_alpha_test_iter_grid_configs_preserves_universe_bucket",
-      "_tgt": "aggression_carry_volume_backtest_iter_grid_configs",
+      "_src": "aggression_carry_volume_backtest_iter_grid_configs",
+      "_tgt": "tests_test_aggression_carry_volume_alpha_test_iter_grid_configs_preserves_universe_bucket",
       "source": "aggression_carry_volume_backtest_iter_grid_configs",
       "target": "tests_test_aggression_carry_volume_alpha_test_iter_grid_configs_preserves_universe_bucket"
     },
@@ -5952,8 +6006,8 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L67",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_daily_liquidity_bucket",
-      "_tgt": "aggression_carry_config_volumebacktestconfig",
+      "_src": "aggression_carry_config_volumebacktestconfig",
+      "_tgt": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_daily_liquidity_bucket",
       "source": "aggression_carry_config_volumebacktestconfig",
       "target": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_daily_liquidity_bucket"
     },
@@ -6000,8 +6054,8 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L150",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_volume_alpha_test_iter_grid_configs_preserves_universe_bucket",
-      "_tgt": "aggression_carry_config_volumebacktestconfig",
+      "_src": "aggression_carry_config_volumebacktestconfig",
+      "_tgt": "tests_test_aggression_carry_volume_alpha_test_iter_grid_configs_preserves_universe_bucket",
       "source": "aggression_carry_config_volumebacktestconfig",
       "target": "tests_test_aggression_carry_volume_alpha_test_iter_grid_configs_preserves_universe_bucket"
     },
@@ -6060,8 +6114,8 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L149",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_volume_alpha_test_iter_grid_configs_preserves_universe_bucket",
-      "_tgt": "aggression_carry_config_volumegridconfig",
+      "_src": "aggression_carry_config_volumegridconfig",
+      "_tgt": "tests_test_aggression_carry_volume_alpha_test_iter_grid_configs_preserves_universe_bucket",
       "source": "aggression_carry_config_volumegridconfig",
       "target": "tests_test_aggression_carry_volume_alpha_test_iter_grid_configs_preserves_universe_bucket"
     },
@@ -6072,8 +6126,8 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L23",
       "weight": 1.0,
-      "_src": "scripts_run_volume_bucket_sweep_main",
-      "_tgt": "aggression_carry_config_volumegridconfig",
+      "_src": "aggression_carry_config_volumegridconfig",
+      "_tgt": "scripts_run_volume_bucket_sweep_main",
       "source": "aggression_carry_config_volumegridconfig",
       "target": "scripts_run_volume_bucket_sweep_main"
     },
@@ -6096,8 +6150,8 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L220",
       "weight": 1.0,
-      "_src": "aggression_carry_cli_universe_config_from_args",
-      "_tgt": "aggression_carry_config_universeconfig",
+      "_src": "aggression_carry_config_universeconfig",
+      "_tgt": "aggression_carry_cli_universe_config_from_args",
       "source": "aggression_carry_config_universeconfig",
       "target": "aggression_carry_cli_universe_config_from_args"
     },
@@ -6108,8 +6162,8 @@
       "source_file": "tests/test_aggression_carry_universe.py",
       "source_location": "L34",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_universe_test_current_universe_table_filters_and_ranks",
-      "_tgt": "aggression_carry_config_universeconfig",
+      "_src": "aggression_carry_config_universeconfig",
+      "_tgt": "tests_test_aggression_carry_universe_test_current_universe_table_filters_and_ranks",
       "source": "aggression_carry_config_universeconfig",
       "target": "tests_test_aggression_carry_universe_test_current_universe_table_filters_and_ranks"
     },
@@ -6160,6 +6214,30 @@
       "_tgt": "tests_test_aggression_carry_archive_test_archive_download_can_skip_raw_public_trade_storage",
       "source": "aggression_carry_config_researchconfig",
       "target": "tests_test_aggression_carry_archive_test_archive_download_can_skip_raw_public_trade_storage"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "tests/test_aggression_carry_archive.py",
+      "source_location": "L210",
+      "weight": 1.0,
+      "_src": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes",
+      "_tgt": "aggression_carry_config_researchconfig",
+      "source": "aggression_carry_config_researchconfig",
+      "target": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "tests/test_aggression_carry_archive.py",
+      "source_location": "L258",
+      "weight": 1.0,
+      "_src": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols",
+      "_tgt": "aggression_carry_config_researchconfig",
+      "source": "aggression_carry_config_researchconfig",
+      "target": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols"
     },
     {
       "relation": "calls",
@@ -6336,8 +6414,8 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L22",
       "weight": 1.0,
-      "_src": "scripts_run_volume_bucket_sweep_main",
-      "_tgt": "aggression_carry_config_load_config",
+      "_src": "aggression_carry_config_load_config",
+      "_tgt": "scripts_run_volume_bucket_sweep_main",
       "source": "aggression_carry_config_load_config",
       "target": "scripts_run_volume_bucket_sweep_main"
     },
@@ -6432,8 +6510,8 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L75",
       "weight": 1.0,
-      "_src": "aggression_carry_universe_build_current_universe_table",
-      "_tgt": "runtimeerror",
+      "_src": "runtimeerror",
+      "_tgt": "aggression_carry_universe_build_current_universe_table",
       "source": "runtimeerror",
       "target": "aggression_carry_universe_build_current_universe_table"
     },
@@ -6600,8 +6678,8 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L28",
       "weight": 1.0,
-      "_src": "aggression_carry_universe_run_discover_universe",
-      "_tgt": "aggression_carry_bybit_bybitmarketdata",
+      "_src": "aggression_carry_bybit_bybitmarketdata",
+      "_tgt": "aggression_carry_universe_run_discover_universe",
       "source": "aggression_carry_bybit_bybitmarketdata",
       "target": "aggression_carry_universe_run_discover_universe"
     },
@@ -6912,8 +6990,8 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L116",
       "weight": 1.0,
-      "_src": "aggression_carry_cli_main",
-      "_tgt": "aggression_carry_universe_run_discover_universe",
+      "_src": "aggression_carry_universe_run_discover_universe",
+      "_tgt": "aggression_carry_cli_main",
       "source": "aggression_carry_universe_run_discover_universe",
       "target": "aggression_carry_cli_main"
     },
@@ -6936,8 +7014,8 @@
       "source_file": "tests/test_aggression_carry_universe.py",
       "source_location": "L31",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_universe_test_current_universe_table_filters_and_ranks",
-      "_tgt": "aggression_carry_universe_build_current_universe_table",
+      "_src": "aggression_carry_universe_build_current_universe_table",
+      "_tgt": "tests_test_aggression_carry_universe_test_current_universe_table_filters_and_ranks",
       "source": "aggression_carry_universe_build_current_universe_table",
       "target": "tests_test_aggression_carry_universe_test_current_universe_table_filters_and_ranks"
     },
@@ -6960,8 +7038,8 @@
       "source_file": "tests/test_aggression_carry_universe.py",
       "source_location": "L50",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_universe_test_universe_report_contains_symbol_csv",
-      "_tgt": "aggression_carry_universe_format_universe_report",
+      "_src": "aggression_carry_universe_format_universe_report",
+      "_tgt": "tests_test_aggression_carry_universe_test_universe_report_contains_symbol_csv",
       "source": "aggression_carry_universe_format_universe_report",
       "target": "tests_test_aggression_carry_universe_test_universe_report_contains_symbol_csv"
     },
@@ -7510,6 +7588,18 @@
       "confidence": "INFERRED",
       "confidence_score": 0.8,
       "source_file": "aggression_carry/downloaders.py",
+      "source_location": "L162",
+      "weight": 1.0,
+      "_src": "aggression_carry_downloaders_download_symbol_dataset",
+      "_tgt": "aggression_carry_storage_dataset_path",
+      "source": "aggression_carry_storage_dataset_path",
+      "target": "aggression_carry_downloaders_download_symbol_dataset"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "aggression_carry/downloaders.py",
       "source_location": "L248",
       "weight": 1.0,
       "_src": "aggression_carry_storage_dataset_path",
@@ -7569,6 +7659,18 @@
       "relation": "calls",
       "confidence": "INFERRED",
       "confidence_score": 0.8,
+      "source_file": "aggression_carry/downloaders.py",
+      "source_location": "L173",
+      "weight": 1.0,
+      "_src": "aggression_carry_downloaders_download_symbol_dataset",
+      "_tgt": "aggression_carry_storage_write_dataset",
+      "source": "aggression_carry_storage_write_dataset",
+      "target": "aggression_carry_downloaders_download_symbol_dataset"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
       "source_file": "tests/test_aggression_carry_storage.py",
       "source_location": "L22",
       "weight": 1.0,
@@ -7620,10 +7722,34 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L76",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_daily_liquidity_bucket",
-      "_tgt": "aggression_carry_storage_read_dataset",
+      "_src": "aggression_carry_storage_read_dataset",
+      "_tgt": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_daily_liquidity_bucket",
       "source": "aggression_carry_storage_read_dataset",
       "target": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_daily_liquidity_bucket"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "tests/test_aggression_carry_archive.py",
+      "source_location": "L219",
+      "weight": 1.0,
+      "_src": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes",
+      "_tgt": "aggression_carry_storage_read_dataset",
+      "source": "aggression_carry_storage_read_dataset",
+      "target": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "tests/test_aggression_carry_archive.py",
+      "source_location": "L267",
+      "weight": 1.0,
+      "_src": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols",
+      "_tgt": "aggression_carry_storage_read_dataset",
+      "source": "aggression_carry_storage_read_dataset",
+      "target": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols"
     },
     {
       "relation": "calls",
@@ -7773,7 +7899,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L21",
+      "source_location": "L22",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_py",
       "_tgt": "aggression_carry_downloaders_parse_date_ms",
@@ -7785,7 +7911,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L28",
+      "source_location": "L29",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_py",
       "_tgt": "aggression_carry_downloaders_download_market_data",
@@ -7797,7 +7923,55 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L121",
+      "source_location": "L150",
+      "weight": 1.0,
+      "_src": "aggression_carry_downloaders_py",
+      "_tgt": "aggression_carry_downloaders_download_symbol_dataset",
+      "source": "aggression_carry_downloaders_py",
+      "target": "aggression_carry_downloaders_download_symbol_dataset",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/downloaders.py",
+      "source_location": "L181",
+      "weight": 1.0,
+      "_src": "aggression_carry_downloaders_py",
+      "_tgt": "aggression_carry_downloaders_marker_path",
+      "source": "aggression_carry_downloaders_py",
+      "target": "aggression_carry_downloaders_marker_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/downloaders.py",
+      "source_location": "L186",
+      "weight": 1.0,
+      "_src": "aggression_carry_downloaders_py",
+      "_tgt": "aggression_carry_downloaders_marked_complete",
+      "source": "aggression_carry_downloaders_py",
+      "target": "aggression_carry_downloaders_marked_complete",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/downloaders.py",
+      "source_location": "L191",
+      "weight": 1.0,
+      "_src": "aggression_carry_downloaders_py",
+      "_tgt": "aggression_carry_downloaders_mark_complete",
+      "source": "aggression_carry_downloaders_py",
+      "target": "aggression_carry_downloaders_mark_complete",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/downloaders.py",
+      "source_location": "L196",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_py",
       "_tgt": "aggression_carry_downloaders_normalize_klines",
@@ -7809,7 +7983,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L140",
+      "source_location": "L215",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_py",
       "_tgt": "aggression_carry_downloaders_normalize_funding",
@@ -7821,7 +7995,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L152",
+      "source_location": "L227",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_py",
       "_tgt": "aggression_carry_downloaders_normalize_open_interest",
@@ -7833,7 +8007,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L164",
+      "source_location": "L239",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_py",
       "_tgt": "aggression_carry_downloaders_normalize_tickers",
@@ -7845,7 +8019,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L190",
+      "source_location": "L265",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_py",
       "_tgt": "aggression_carry_downloaders_normalize_instruments",
@@ -7857,7 +8031,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L224",
+      "source_location": "L299",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_py",
       "_tgt": "aggression_carry_downloaders_dates_between",
@@ -7869,7 +8043,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L235",
+      "source_location": "L310",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_py",
       "_tgt": "aggression_carry_downloaders_archive_filename",
@@ -7881,7 +8055,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L240",
+      "source_location": "L315",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_py",
       "_tgt": "aggression_carry_downloaders_archive_outputs_exist",
@@ -7893,7 +8067,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L247",
+      "source_location": "L322",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_py",
       "_tgt": "aggression_carry_downloaders_partition_exists",
@@ -7905,7 +8079,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L252",
+      "source_location": "L327",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_py",
       "_tgt": "aggression_carry_downloaders_float_or_none",
@@ -7917,7 +8091,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L45",
+      "source_location": "L46",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_download_market_data",
       "_tgt": "aggression_carry_downloaders_normalize_instruments",
@@ -7929,7 +8103,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L50",
+      "source_location": "L51",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_download_market_data",
       "_tgt": "aggression_carry_downloaders_normalize_tickers",
@@ -7941,7 +8115,19 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L62",
+      "source_location": "L57",
+      "weight": 1.0,
+      "_src": "aggression_carry_downloaders_download_market_data",
+      "_tgt": "aggression_carry_downloaders_download_symbol_dataset",
+      "source": "aggression_carry_downloaders_download_market_data",
+      "target": "aggression_carry_downloaders_download_symbol_dataset",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/downloaders.py",
+      "source_location": "L65",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_download_market_data",
       "_tgt": "aggression_carry_downloaders_normalize_klines",
@@ -7953,7 +8139,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L68",
+      "source_location": "L97",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_download_market_data",
       "_tgt": "aggression_carry_downloaders_normalize_funding",
@@ -7965,7 +8151,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L71",
+      "source_location": "L110",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_download_market_data",
       "_tgt": "aggression_carry_downloaders_normalize_open_interest",
@@ -7977,7 +8163,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L76",
+      "source_location": "L126",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_download_market_data",
       "_tgt": "aggression_carry_downloaders_dates_between",
@@ -7989,7 +8175,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L78",
+      "source_location": "L128",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_download_market_data",
       "_tgt": "aggression_carry_downloaders_archive_filename",
@@ -8001,7 +8187,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L79",
+      "source_location": "L129",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_download_market_data",
       "_tgt": "aggression_carry_downloaders_archive_outputs_exist",
@@ -8047,9 +8233,81 @@
     },
     {
       "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "tests/test_aggression_carry_archive.py",
+      "source_location": "L208",
+      "weight": 1.0,
+      "_src": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes",
+      "_tgt": "aggression_carry_downloaders_download_market_data",
+      "source": "aggression_carry_downloaders_download_market_data",
+      "target": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "tests/test_aggression_carry_archive.py",
+      "source_location": "L256",
+      "weight": 1.0,
+      "_src": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols",
+      "_tgt": "aggression_carry_downloaders_download_market_data",
+      "source": "aggression_carry_downloaders_download_market_data",
+      "target": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols"
+    },
+    {
+      "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L171",
+      "source_location": "L163",
+      "weight": 1.0,
+      "_src": "aggression_carry_downloaders_download_symbol_dataset",
+      "_tgt": "aggression_carry_downloaders_marker_path",
+      "source": "aggression_carry_downloaders_download_symbol_dataset",
+      "target": "aggression_carry_downloaders_marker_path",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/downloaders.py",
+      "source_location": "L164",
+      "weight": 1.0,
+      "_src": "aggression_carry_downloaders_download_symbol_dataset",
+      "_tgt": "aggression_carry_downloaders_marked_complete",
+      "source": "aggression_carry_downloaders_download_symbol_dataset",
+      "target": "aggression_carry_downloaders_marked_complete",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/downloaders.py",
+      "source_location": "L174",
+      "weight": 1.0,
+      "_src": "aggression_carry_downloaders_download_symbol_dataset",
+      "_tgt": "aggression_carry_downloaders_mark_complete",
+      "source": "aggression_carry_downloaders_download_symbol_dataset",
+      "target": "aggression_carry_downloaders_mark_complete",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/downloaders.py",
+      "source_location": "L187",
+      "weight": 1.0,
+      "_src": "aggression_carry_downloaders_marked_complete",
+      "_tgt": "aggression_carry_downloaders_marker_path",
+      "source": "aggression_carry_downloaders_marker_path",
+      "target": "aggression_carry_downloaders_marked_complete",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/downloaders.py",
+      "source_location": "L246",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_normalize_tickers",
       "_tgt": "aggression_carry_downloaders_float_or_none",
@@ -8061,7 +8319,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L208",
+      "source_location": "L283",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_normalize_instruments",
       "_tgt": "aggression_carry_downloaders_float_or_none",
@@ -8085,7 +8343,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/downloaders.py",
-      "source_location": "L244",
+      "source_location": "L319",
       "weight": 1.0,
       "_src": "aggression_carry_downloaders_archive_outputs_exist",
       "_tgt": "aggression_carry_downloaders_partition_exists",
@@ -8517,7 +8775,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_archive.py",
-      "source_location": "L15",
+      "source_location": "L16",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_archive_py",
       "_tgt": "tests_test_aggression_carry_archive_test_read_bybit_public_trade_csv_gz_archive",
@@ -8529,7 +8787,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_archive.py",
-      "source_location": "L34",
+      "source_location": "L35",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_archive_py",
       "_tgt": "tests_test_aggression_carry_archive_test_archive_filename_preserves_compression_suffix",
@@ -8541,7 +8799,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_archive.py",
-      "source_location": "L40",
+      "source_location": "L41",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_archive_py",
       "_tgt": "tests_test_aggression_carry_archive_test_download_public_trade_archive_ignores_stale_fixed_temp_name",
@@ -8553,7 +8811,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_archive.py",
-      "source_location": "L58",
+      "source_location": "L59",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_archive_py",
       "_tgt": "tests_test_aggression_carry_archive_test_archive_download_retries_and_removes_partial_temp",
@@ -8565,7 +8823,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_archive.py",
-      "source_location": "L84",
+      "source_location": "L85",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_archive_py",
       "_tgt": "tests_test_aggression_carry_archive_test_archive_only_download_does_not_construct_rest_client",
@@ -8577,7 +8835,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_archive.py",
-      "source_location": "L126",
+      "source_location": "L127",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_archive_py",
       "_tgt": "tests_test_aggression_carry_archive_test_archive_download_skips_completed_partitions",
@@ -8589,12 +8847,36 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_archive.py",
-      "source_location": "L152",
+      "source_location": "L153",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_archive_py",
       "_tgt": "tests_test_aggression_carry_archive_test_archive_download_can_skip_raw_public_trade_storage",
       "source": "tests_test_aggression_carry_archive_py",
       "target": "tests_test_aggression_carry_archive_test_archive_download_can_skip_raw_public_trade_storage",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_aggression_carry_archive.py",
+      "source_location": "L194",
+      "weight": 1.0,
+      "_src": "tests_test_aggression_carry_archive_py",
+      "_tgt": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes",
+      "source": "tests_test_aggression_carry_archive_py",
+      "target": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_aggression_carry_archive.py",
+      "source_location": "L243",
+      "weight": 1.0,
+      "_src": "tests_test_aggression_carry_archive_py",
+      "_tgt": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols",
+      "source": "tests_test_aggression_carry_archive_py",
+      "target": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols",
       "confidence_score": 1.0
     },
     {

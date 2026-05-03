@@ -10,6 +10,7 @@ from aggression_carry.archive import download_public_trade_archive, read_public_
 from aggression_carry.config import ResearchConfig
 from aggression_carry import downloaders
 from aggression_carry.downloaders import _archive_filename, download_market_data
+from aggression_carry.storage import read_dataset
 
 
 def test_read_bybit_public_trade_csv_gz_archive(tmp_path) -> None:
@@ -188,3 +189,79 @@ def test_archive_download_can_skip_raw_public_trade_storage(tmp_path, monkeypatc
     assert {"signed_flow_1m", "signed_flow_1h"}.issubset(outputs)
     assert "raw_public_trades" not in outputs
     assert not (tmp_path / "raw_public_trades").exists()
+
+
+def test_rest_kline_download_writes_each_symbol_and_resumes(tmp_path, monkeypatch, capsys) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class FakeMarketData:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_klines(self, symbol, interval, start, end):
+            calls.append((symbol, interval))
+            close = 100.0 + len(calls)
+            return [[start, "100", "101", "99", str(close), "10", "1000"]]
+
+    monkeypatch.setattr(downloaders, "BybitMarketData", FakeMarketData)
+
+    outputs = download_market_data(
+        tmp_path,
+        config=ResearchConfig(),
+        symbols=["btcusdt", "ethusdt"],
+        start_ms=1_735_689_600_000,
+        end_ms=1_735_776_000_000,
+        datasets={"klines_1h"},
+    )
+
+    assert outputs["klines_1h"] == tmp_path / "klines_1h"
+    assert calls == [("BTCUSDT", "60"), ("ETHUSDT", "60")]
+    klines = read_dataset(tmp_path, "klines_1h")
+    assert klines.height == 2
+    assert sorted(klines["symbol"].to_list()) == ["BTCUSDT", "ETHUSDT"]
+    markers = sorted((tmp_path / "_download_markers" / "klines_1h").glob("*.done"))
+    assert len(markers) == 2
+
+    calls.clear()
+    outputs = download_market_data(
+        tmp_path,
+        config=ResearchConfig(),
+        symbols=["BTCUSDT", "ETHUSDT"],
+        start_ms=1_735_689_600_000,
+        end_ms=1_735_776_000_000,
+        datasets={"klines_1h"},
+    )
+
+    assert outputs["klines_1h"] == tmp_path / "klines_1h"
+    assert calls == []
+    output = capsys.readouterr().out
+    assert "klines_1h: 1/2 BTCUSDT downloading" in output
+    assert "klines_1h: 2/2 ETHUSDT rows=1" in output
+    assert "klines_1h: 1/2 BTCUSDT cached" in output
+
+
+def test_rest_kline_download_only_marks_successful_symbols(tmp_path, monkeypatch) -> None:
+    class FlakyMarketData:
+        def __init__(self, **_kwargs):
+            pass
+
+        def get_klines(self, symbol, interval, start, end):
+            if symbol == "ETHUSDT":
+                raise TimeoutError("synthetic timeout")
+            return [[start, "100", "101", "99", "100.5", "10", "1000"]]
+
+    monkeypatch.setattr(downloaders, "BybitMarketData", FlakyMarketData)
+
+    with pytest.raises(TimeoutError):
+        download_market_data(
+            tmp_path,
+            config=ResearchConfig(),
+            symbols=["BTCUSDT", "ETHUSDT"],
+            start_ms=1_735_689_600_000,
+            end_ms=1_735_776_000_000,
+            datasets={"klines_1h"},
+        )
+
+    markers = sorted(path.name for path in (tmp_path / "_download_markers" / "klines_1h").glob("*.done"))
+    assert markers == ["BTCUSDT_1735689600000_1735776000000.done"]
+    assert read_dataset(tmp_path, "klines_1h").height == 1

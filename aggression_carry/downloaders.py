@@ -3,7 +3,7 @@ from __future__ import annotations
 import gc
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 from urllib.parse import urlparse
 
 import polars as pl
@@ -16,6 +16,7 @@ from .storage import dataset_path, write_dataset
 
 
 REST_DATASETS = {"instruments", "klines_1h", "klines_5m", "funding", "open_interest", "ticker_snapshots", "recent_trades"}
+MARKER_DIR = "_download_markers"
 
 
 def parse_date_ms(value: str) -> int:
@@ -50,28 +51,77 @@ def download_market_data(
         tickers = _normalize_tickers(client.get_tickers())
         outputs["ticker_snapshots"] = write_dataset(tickers, data_root, "ticker_snapshots")
 
-    kline_1h_rows: list[dict] = []
-    kline_5m_rows: list[dict] = []
-    funding_rows: list[dict] = []
-    oi_rows: list[dict] = []
-    recent_trade_rows: list[dict] = []
-
-    for symbol in symbols:
+    for index, symbol in enumerate(symbols, start=1):
         if "klines_1h" in datasets:
             assert client is not None
-            kline_1h_rows.extend(_normalize_klines(symbol, client.get_klines(symbol, "60", start_ms, end_ms), source="bybit_rest"))
+            outputs["klines_1h"] = _download_symbol_dataset(
+                data_root,
+                dataset="klines_1h",
+                symbol=symbol,
+                index=index,
+                total=len(symbols),
+                start_ms=start_ms,
+                end_ms=end_ms,
+                fetch=lambda symbol=symbol: _normalize_klines(
+                    symbol,
+                    client.get_klines(symbol, "60", start_ms, end_ms),
+                    source="bybit_rest",
+                ),
+            )
         if "klines_5m" in datasets:
             assert client is not None
-            kline_5m_rows.extend(_normalize_klines(symbol, client.get_klines(symbol, "5", start_ms, end_ms), source="bybit_rest"))
+            outputs["klines_5m"] = _download_symbol_dataset(
+                data_root,
+                dataset="klines_5m",
+                symbol=symbol,
+                index=index,
+                total=len(symbols),
+                start_ms=start_ms,
+                end_ms=end_ms,
+                fetch=lambda symbol=symbol: _normalize_klines(
+                    symbol,
+                    client.get_klines(symbol, "5", start_ms, end_ms),
+                    source="bybit_rest",
+                ),
+            )
         if "funding" in datasets:
             assert client is not None
-            funding_rows.extend(_normalize_funding(symbol, client.get_funding_history(symbol, start_ms, end_ms)))
+            outputs["funding"] = _download_symbol_dataset(
+                data_root,
+                dataset="funding",
+                symbol=symbol,
+                index=index,
+                total=len(symbols),
+                start_ms=start_ms,
+                end_ms=end_ms,
+                fetch=lambda symbol=symbol: _normalize_funding(symbol, client.get_funding_history(symbol, start_ms, end_ms)),
+                postprocess=normalize_funding_history,
+            )
         if "open_interest" in datasets:
             assert client is not None
-            oi_rows.extend(_normalize_open_interest(symbol, client.get_open_interest(symbol, "1h", start_ms, end_ms)))
+            outputs["open_interest"] = _download_symbol_dataset(
+                data_root,
+                dataset="open_interest",
+                symbol=symbol,
+                index=index,
+                total=len(symbols),
+                start_ms=start_ms,
+                end_ms=end_ms,
+                fetch=lambda symbol=symbol: _normalize_open_interest(symbol, client.get_open_interest(symbol, "1h", start_ms, end_ms)),
+            )
         if "recent_trades" in datasets:
             assert client is not None
-            recent_trade_rows.extend(client.get_recent_trades(symbol))
+            print(f"recent_trades: {index}/{len(symbols)} {symbol} downloading", flush=True)
+            trades = trades_to_frame(client.get_recent_trades(symbol))
+            flow_1m = aggregate_signed_flow_1m(trades, config=config.trade_flow)
+            flow_1h = aggregate_signed_flow_1h(flow_1m)
+            if store_raw_public_trades:
+                outputs["raw_public_trades"] = write_dataset(trades, data_root, "raw_public_trades")
+            outputs["signed_flow_1m"] = write_dataset(flow_1m, data_root, "signed_flow_1m")
+            outputs["signed_flow_1h"] = write_dataset(flow_1h, data_root, "signed_flow_1h")
+            print(f"recent_trades: {index}/{len(symbols)} {symbol} rows={trades.height}", flush=True)
+            del trades, flow_1m, flow_1h
+            gc.collect()
         if "archive_trades" in datasets and archive_url_template:
             for date in _dates_between(start_ms, end_ms):
                 url = archive_url_template.format(symbol=symbol, date=date)
@@ -94,28 +144,53 @@ def download_market_data(
                 del trades, flow_1m, flow_1h
                 gc.collect()
 
-    if kline_1h_rows:
-        outputs["klines_1h"] = write_dataset(pl.DataFrame(kline_1h_rows), data_root, "klines_1h")
-    if kline_5m_rows:
-        outputs["klines_5m"] = write_dataset(pl.DataFrame(kline_5m_rows), data_root, "klines_5m")
-    if funding_rows:
-        outputs["funding"] = write_dataset(normalize_funding_history(pl.DataFrame(funding_rows)), data_root, "funding")
-    if oi_rows:
-        outputs["open_interest"] = write_dataset(pl.DataFrame(oi_rows), data_root, "open_interest")
-
-    trade_frames = []
-    if recent_trade_rows:
-        trade_frames.append(trades_to_frame(recent_trade_rows))
-    if trade_frames:
-        trades = pl.concat(trade_frames).unique(subset=["symbol", "trade_id"]).sort(["symbol", "ts_ms", "trade_id"])
-        flow_1m = aggregate_signed_flow_1m(trades, config=config.trade_flow)
-        flow_1h = aggregate_signed_flow_1h(flow_1m)
-        if store_raw_public_trades:
-            outputs["raw_public_trades"] = write_dataset(trades, data_root, "raw_public_trades")
-        outputs["signed_flow_1m"] = write_dataset(flow_1m, data_root, "signed_flow_1m")
-        outputs["signed_flow_1h"] = write_dataset(flow_1h, data_root, "signed_flow_1h")
-
     return outputs
+
+
+def _download_symbol_dataset(
+    data_root: str | Path,
+    *,
+    dataset: str,
+    symbol: str,
+    index: int,
+    total: int,
+    start_ms: int,
+    end_ms: int,
+    fetch: Callable[[], list[dict]],
+    postprocess: Callable[[pl.DataFrame], pl.DataFrame] | None = None,
+) -> Path:
+    output = dataset_path(data_root, dataset)
+    marker = _marker_path(data_root, dataset=dataset, symbol=symbol, start_ms=start_ms, end_ms=end_ms)
+    if _marked_complete(data_root, dataset=dataset, symbol=symbol, start_ms=start_ms, end_ms=end_ms):
+        print(f"{dataset}: {index}/{total} {symbol} cached", flush=True)
+        return output
+
+    print(f"{dataset}: {index}/{total} {symbol} downloading", flush=True)
+    rows = fetch()
+    frame = pl.DataFrame(rows)
+    if postprocess is not None and not frame.is_empty():
+        frame = postprocess(frame)
+    output = write_dataset(frame, data_root, dataset)
+    _mark_complete(marker)
+    print(f"{dataset}: {index}/{total} {symbol} rows={frame.height}", flush=True)
+    del rows, frame
+    gc.collect()
+    return output
+
+
+def _marker_path(data_root: str | Path, *, dataset: str, symbol: str, start_ms: int, end_ms: int) -> Path:
+    safe_symbol = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in symbol)
+    return Path(data_root).expanduser() / MARKER_DIR / dataset / f"{safe_symbol}_{start_ms}_{end_ms}.done"
+
+
+def _marked_complete(data_root: str | Path, *, dataset: str, symbol: str, start_ms: int, end_ms: int) -> bool:
+    marker = _marker_path(data_root, dataset=dataset, symbol=symbol, start_ms=start_ms, end_ms=end_ms)
+    return marker.exists() and marker.stat().st_size > 0
+
+
+def _mark_complete(marker: Path) -> None:
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(datetime.now(tz=UTC).isoformat(), encoding="utf-8")
 
 
 def _normalize_klines(symbol: str, rows: list, *, source: str) -> list[dict]:

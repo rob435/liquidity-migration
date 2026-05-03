@@ -151,6 +151,24 @@ The current bucket definitions are:
 The bucket filter is dynamic by day and based on trailing daily quote turnover
 inside the downloaded universe.
 
+## Download Resume Behavior
+
+REST downloads for large symbol lists write each symbol immediately and create a
+small completion marker under `_download_markers/` after the symbol succeeds.
+If the terminal is interrupted, rerun the same `download-data` command; completed
+symbol/range chunks are printed as `cached` and skipped.
+
+For broad 1-year or 3-year universes, expect progress lines like:
+
+```text
+klines_1h: 1/156 BTCUSDT downloading
+klines_1h: 1/156 BTCUSDT rows=26305
+klines_1h: 2/156 ETHUSDT cached
+```
+
+Do not delete `_download_markers/` unless you intentionally want to refetch a
+completed symbol/range.
+
 Use paired runs when judging stops:
 
 ```bash

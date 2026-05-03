@@ -106,6 +106,11 @@ data/agc-bybit-3m/reports/volume_grid_report.md
 data/agc-bybit-3m/reports/volume_grid_results.csv
 ```
 
+Large Bybit downloads are resumable. The downloader prints one line per
+symbol/dataset and writes completed chunks immediately. If PowerShell is stopped
+with Ctrl+C or a network timeout kills the command, rerun the same command; rows
+already completed will show as `cached`.
+
 ## 6. Run The One-Year Concurrent Grid
 
 On a 5950X:
