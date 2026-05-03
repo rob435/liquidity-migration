@@ -18,7 +18,7 @@
       "source_file": "aggression_carry/ingestion.py",
       "source_location": "L20",
       "id": "aggression_carry_ingestion_fixturespec",
-      "community": 2,
+      "community": 5,
       "norm_label": "fixturespec"
     },
     {
@@ -108,7 +108,7 @@
       "source_file": "aggression_carry/ingestion.py",
       "source_location": "L190",
       "id": "aggression_carry_ingestion_generate_fixture_data",
-      "community": 2,
+      "community": 1,
       "norm_label": "generate_fixture_data()"
     },
     {
@@ -126,7 +126,7 @@
       "source_file": "aggression_carry/volume_backtest.py",
       "source_location": "L27",
       "id": "aggression_carry_volume_backtest_run_volume_trade_backtest",
-      "community": 0,
+      "community": 1,
       "norm_label": "run_volume_trade_backtest()"
     },
     {
@@ -135,7 +135,7 @@
       "source_file": "aggression_carry/volume_backtest.py",
       "source_location": "L104",
       "id": "aggression_carry_volume_backtest_run_volume_grid",
-      "community": 2,
+      "community": 1,
       "norm_label": "run_volume_grid()"
     },
     {
@@ -144,7 +144,7 @@
       "source_file": "aggression_carry/volume_backtest.py",
       "source_location": "L160",
       "id": "aggression_carry_volume_backtest_resolve_workers",
-      "community": 2,
+      "community": 1,
       "norm_label": "_resolve_workers()"
     },
     {
@@ -153,7 +153,7 @@
       "source_file": "aggression_carry/volume_backtest.py",
       "source_location": "L171",
       "id": "aggression_carry_volume_backtest_grid_chunksize",
-      "community": 2,
+      "community": 1,
       "norm_label": "_grid_chunksize()"
     },
     {
@@ -189,7 +189,7 @@
       "source_file": "aggression_carry/volume_backtest.py",
       "source_location": "L218",
       "id": "aggression_carry_volume_backtest_iter_grid_configs",
-      "community": 2,
+      "community": 1,
       "norm_label": "iter_grid_configs()"
     },
     {
@@ -594,7 +594,7 @@
       "source_file": "aggression_carry/volume_backtest.py",
       "source_location": "L1519",
       "id": "aggression_carry_volume_backtest_exit_reason_rows",
-      "community": 0,
+      "community": 1,
       "norm_label": "_exit_reason_rows()"
     },
     {
@@ -612,7 +612,7 @@
       "source_file": "aggression_carry/volume_backtest.py",
       "source_location": "L1553",
       "id": "aggression_carry_volume_backtest_attribution_rows",
-      "community": 0,
+      "community": 1,
       "norm_label": "_attribution_rows()"
     },
     {
@@ -621,7 +621,7 @@
       "source_file": "aggression_carry/volume_backtest.py",
       "source_location": "L1571",
       "id": "aggression_carry_volume_backtest_date_range",
-      "community": 0,
+      "community": 1,
       "norm_label": "_date_range()"
     },
     {
@@ -711,7 +711,7 @@
       "source_file": "aggression_carry/volume_backtest.py",
       "source_location": "L1638",
       "id": "aggression_carry_volume_backtest_replace_dataset",
-      "community": 2,
+      "community": 1,
       "norm_label": "_replace_dataset()"
     },
     {
@@ -972,7 +972,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L43",
       "id": "aggression_carry_config_volumebacktestconfig",
-      "community": 2,
+      "community": 1,
       "norm_label": "volumebacktestconfig"
     },
     {
@@ -981,7 +981,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L70",
       "id": "aggression_carry_config_volumegridconfig",
-      "community": 2,
+      "community": 1,
       "norm_label": "volumegridconfig"
     },
     {
@@ -1017,7 +1017,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L113",
       "id": "aggression_carry_config_researchconfig",
-      "community": 1,
+      "community": 2,
       "norm_label": "researchconfig"
     },
     {
@@ -1242,7 +1242,7 @@
       "source_file": "aggression_carry/__init__.py",
       "source_location": "L1",
       "id": "aggression_carry_init_py",
-      "community": 12,
+      "community": 13,
       "norm_label": "__init__.py"
     },
     {
@@ -1250,7 +1250,7 @@
       "file_type": "rationale",
       "source_file": "aggression_carry/__init__.py",
       "source_location": "L1",
-      "community": 12,
+      "community": 13,
       "norm_label": "bybit volume-alpha research package.  this package is the stripped-down rebuild",
       "id": "aggression_carry_init_rationale_1"
     },
@@ -1440,7 +1440,7 @@
       "source_file": "aggression_carry/storage.py",
       "source_location": "L1",
       "id": "aggression_carry_storage_py",
-      "community": 2,
+      "community": 1,
       "norm_label": "storage.py"
     },
     {
@@ -1449,7 +1449,7 @@
       "source_file": "aggression_carry/storage.py",
       "source_location": "L53",
       "id": "aggression_carry_storage_dataset_path",
-      "community": 2,
+      "community": 1,
       "norm_label": "dataset_path()"
     },
     {
@@ -1458,7 +1458,7 @@
       "source_file": "aggression_carry/storage.py",
       "source_location": "L59",
       "id": "aggression_carry_storage_ensure_data_root",
-      "community": 2,
+      "community": 1,
       "norm_label": "ensure_data_root()"
     },
     {
@@ -1467,7 +1467,7 @@
       "source_file": "aggression_carry/storage.py",
       "source_location": "L65",
       "id": "aggression_carry_storage_with_date_column",
-      "community": 2,
+      "community": 1,
       "norm_label": "with_date_column()"
     },
     {
@@ -1476,7 +1476,7 @@
       "source_file": "aggression_carry/storage.py",
       "source_location": "L75",
       "id": "aggression_carry_storage_write_dataset",
-      "community": 2,
+      "community": 1,
       "norm_label": "write_dataset()"
     },
     {
@@ -1485,7 +1485,7 @@
       "source_file": "aggression_carry/storage.py",
       "source_location": "L108",
       "id": "aggression_carry_storage_read_dataset",
-      "community": 2,
+      "community": 1,
       "norm_label": "read_dataset()"
     },
     {
@@ -1494,7 +1494,7 @@
       "source_file": "aggression_carry/storage.py",
       "source_location": "L118",
       "id": "aggression_carry_storage_write_part",
-      "community": 2,
+      "community": 1,
       "norm_label": "_write_part()"
     },
     {
@@ -1503,7 +1503,7 @@
       "source_file": "aggression_carry/archive.py",
       "source_location": "L1",
       "id": "aggression_carry_archive_py",
-      "community": 1,
+      "community": 2,
       "norm_label": "archive.py"
     },
     {
@@ -1512,7 +1512,7 @@
       "source_file": "aggression_carry/archive.py",
       "source_location": "L23",
       "id": "aggression_carry_archive_download_archive_bytes",
-      "community": 1,
+      "community": 2,
       "norm_label": "download_archive_bytes()"
     },
     {
@@ -1521,7 +1521,7 @@
       "source_file": "aggression_carry/archive.py",
       "source_location": "L29",
       "id": "aggression_carry_archive_read_public_trade_archive",
-      "community": 1,
+      "community": 2,
       "norm_label": "read_public_trade_archive()"
     },
     {
@@ -1530,7 +1530,7 @@
       "source_file": "aggression_carry/archive.py",
       "source_location": "L70",
       "id": "aggression_carry_archive_download_public_trade_archive",
-      "community": 1,
+      "community": 2,
       "norm_label": "download_public_trade_archive()"
     },
     {
@@ -1539,7 +1539,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L1",
       "id": "aggression_carry_downloaders_py",
-      "community": 1,
+      "community": 2,
       "norm_label": "downloaders.py"
     },
     {
@@ -1557,7 +1557,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L29",
       "id": "aggression_carry_downloaders_download_market_data",
-      "community": 1,
+      "community": 2,
       "norm_label": "download_market_data()"
     },
     {
@@ -1566,7 +1566,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L150",
       "id": "aggression_carry_downloaders_download_symbol_dataset",
-      "community": 1,
+      "community": 2,
       "norm_label": "_download_symbol_dataset()"
     },
     {
@@ -1575,7 +1575,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L181",
       "id": "aggression_carry_downloaders_marker_path",
-      "community": 1,
+      "community": 2,
       "norm_label": "_marker_path()"
     },
     {
@@ -1584,7 +1584,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L186",
       "id": "aggression_carry_downloaders_marked_complete",
-      "community": 1,
+      "community": 2,
       "norm_label": "_marked_complete()"
     },
     {
@@ -1593,7 +1593,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L191",
       "id": "aggression_carry_downloaders_mark_complete",
-      "community": 1,
+      "community": 2,
       "norm_label": "_mark_complete()"
     },
     {
@@ -1602,7 +1602,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L196",
       "id": "aggression_carry_downloaders_normalize_klines",
-      "community": 1,
+      "community": 2,
       "norm_label": "_normalize_klines()"
     },
     {
@@ -1611,7 +1611,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L215",
       "id": "aggression_carry_downloaders_normalize_funding",
-      "community": 1,
+      "community": 2,
       "norm_label": "_normalize_funding()"
     },
     {
@@ -1620,7 +1620,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L227",
       "id": "aggression_carry_downloaders_normalize_open_interest",
-      "community": 1,
+      "community": 2,
       "norm_label": "_normalize_open_interest()"
     },
     {
@@ -1629,7 +1629,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L239",
       "id": "aggression_carry_downloaders_normalize_tickers",
-      "community": 1,
+      "community": 2,
       "norm_label": "_normalize_tickers()"
     },
     {
@@ -1638,7 +1638,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L265",
       "id": "aggression_carry_downloaders_normalize_instruments",
-      "community": 1,
+      "community": 2,
       "norm_label": "_normalize_instruments()"
     },
     {
@@ -1647,7 +1647,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L299",
       "id": "aggression_carry_downloaders_dates_between",
-      "community": 1,
+      "community": 2,
       "norm_label": "_dates_between()"
     },
     {
@@ -1656,7 +1656,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L310",
       "id": "aggression_carry_downloaders_archive_filename",
-      "community": 1,
+      "community": 2,
       "norm_label": "_archive_filename()"
     },
     {
@@ -1665,7 +1665,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L315",
       "id": "aggression_carry_downloaders_archive_outputs_exist",
-      "community": 1,
+      "community": 2,
       "norm_label": "_archive_outputs_exist()"
     },
     {
@@ -1674,7 +1674,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L322",
       "id": "aggression_carry_downloaders_partition_exists",
-      "community": 1,
+      "community": 2,
       "norm_label": "_partition_exists()"
     },
     {
@@ -1683,7 +1683,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L327",
       "id": "aggression_carry_downloaders_float_or_none",
-      "community": 1,
+      "community": 2,
       "norm_label": "_float_or_none()"
     },
     {
@@ -1791,7 +1791,7 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L1",
       "id": "tests_test_aggression_carry_volume_alpha_py",
-      "community": 2,
+      "community": 1,
       "norm_label": "test_aggression_carry_volume_alpha.py"
     },
     {
@@ -1800,7 +1800,7 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L12",
       "id": "tests_test_aggression_carry_volume_alpha_test_volume_alpha_isolated_daily_research_path",
-      "community": 2,
+      "community": 1,
       "norm_label": "test_volume_alpha_isolated_daily_research_path()"
     },
     {
@@ -1809,7 +1809,7 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L36",
       "id": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_writes_trade_ledger",
-      "community": 2,
+      "community": 1,
       "norm_label": "test_volume_backtest_writes_trade_ledger()"
     },
     {
@@ -1818,7 +1818,7 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L62",
       "id": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_daily_liquidity_bucket",
-      "community": 2,
+      "community": 1,
       "norm_label": "test_volume_backtest_can_filter_daily_liquidity_bucket()"
     },
     {
@@ -1827,7 +1827,7 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L81",
       "id": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_records_stop_loss_exit_reason",
-      "community": 2,
+      "community": 1,
       "norm_label": "test_volume_backtest_records_stop_loss_exit_reason()"
     },
     {
@@ -1836,7 +1836,7 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L93",
       "id": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_zero_stop_disables_stop_loss",
-      "community": 2,
+      "community": 1,
       "norm_label": "test_volume_backtest_zero_stop_disables_stop_loss()"
     },
     {
@@ -1845,7 +1845,7 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L105",
       "id": "tests_test_aggression_carry_volume_alpha_test_volume_grid_runs_parallel_fixture",
-      "community": 2,
+      "community": 1,
       "norm_label": "test_volume_grid_runs_parallel_fixture()"
     },
     {
@@ -1854,7 +1854,7 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L129",
       "id": "tests_test_aggression_carry_volume_alpha_test_iter_grid_configs_includes_fixed_vol_and_rank_variants",
-      "community": 2,
+      "community": 1,
       "norm_label": "test_iter_grid_configs_includes_fixed_vol_and_rank_variants()"
     },
     {
@@ -1863,7 +1863,7 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L147",
       "id": "tests_test_aggression_carry_volume_alpha_test_iter_grid_configs_preserves_universe_bucket",
-      "community": 2,
+      "community": 1,
       "norm_label": "test_iter_grid_configs_preserves_universe_bucket()"
     },
     {
@@ -1872,7 +1872,7 @@
       "source_file": "tests/conftest.py",
       "source_location": "L1",
       "id": "tests_conftest_py",
-      "community": 15,
+      "community": 16,
       "norm_label": "conftest.py"
     },
     {
@@ -1944,7 +1944,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L1",
       "id": "tests_test_aggression_carry_archive_py",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_aggression_carry_archive.py"
     },
     {
@@ -1953,7 +1953,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L16",
       "id": "tests_test_aggression_carry_archive_test_read_bybit_public_trade_csv_gz_archive",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_read_bybit_public_trade_csv_gz_archive()"
     },
     {
@@ -1962,7 +1962,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L35",
       "id": "tests_test_aggression_carry_archive_test_archive_filename_preserves_compression_suffix",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_archive_filename_preserves_compression_suffix()"
     },
     {
@@ -1971,7 +1971,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L41",
       "id": "tests_test_aggression_carry_archive_test_download_public_trade_archive_ignores_stale_fixed_temp_name",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_download_public_trade_archive_ignores_stale_fixed_temp_name()"
     },
     {
@@ -1980,7 +1980,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L59",
       "id": "tests_test_aggression_carry_archive_test_archive_download_retries_and_removes_partial_temp",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_archive_download_retries_and_removes_partial_temp()"
     },
     {
@@ -1989,7 +1989,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L85",
       "id": "tests_test_aggression_carry_archive_test_archive_only_download_does_not_construct_rest_client",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_archive_only_download_does_not_construct_rest_client()"
     },
     {
@@ -1998,7 +1998,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L127",
       "id": "tests_test_aggression_carry_archive_test_archive_download_skips_completed_partitions",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_archive_download_skips_completed_partitions()"
     },
     {
@@ -2007,7 +2007,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L153",
       "id": "tests_test_aggression_carry_archive_test_archive_download_can_skip_raw_public_trade_storage",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_archive_download_can_skip_raw_public_trade_storage()"
     },
     {
@@ -2016,7 +2016,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L194",
       "id": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_rest_kline_download_writes_each_symbol_and_resumes()"
     },
     {
@@ -2025,7 +2025,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L243",
       "id": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_rest_kline_download_only_marks_successful_symbols()"
     },
     {
@@ -2034,7 +2034,7 @@
       "source_file": "tests/test_aggression_carry_storage.py",
       "source_location": "L1",
       "id": "tests_test_aggression_carry_storage_py",
-      "community": 2,
+      "community": 1,
       "norm_label": "test_aggression_carry_storage.py"
     },
     {
@@ -2043,7 +2043,7 @@
       "source_file": "tests/test_aggression_carry_storage.py",
       "source_location": "L10",
       "id": "tests_test_aggression_carry_storage_test_incremental_parquet_writes_merge_existing_partition",
-      "community": 2,
+      "community": 1,
       "norm_label": "test_incremental_parquet_writes_merge_existing_partition()"
     },
     {
@@ -2052,7 +2052,7 @@
       "source_file": "tests/test_aggression_carry_storage.py",
       "source_location": "L30",
       "id": "tests_test_aggression_carry_storage_test_incremental_parquet_writes_replace_duplicate_keys",
-      "community": 2,
+      "community": 1,
       "norm_label": "test_incremental_parquet_writes_replace_duplicate_keys()"
     },
     {
@@ -2212,7 +2212,7 @@
       "label": "_parse_buckets()",
       "file_type": "code",
       "source_file": "scripts/run_volume_bucket_sweep.py",
-      "source_location": "L94",
+      "source_location": "L96",
       "id": "scripts_run_volume_bucket_sweep_parse_buckets",
       "community": 8,
       "norm_label": "_parse_buckets()"
@@ -2221,7 +2221,7 @@
       "label": "_csv_int()",
       "file_type": "code",
       "source_file": "scripts/run_volume_bucket_sweep.py",
-      "source_location": "L107",
+      "source_location": "L109",
       "id": "scripts_run_volume_bucket_sweep_csv_int",
       "community": 8,
       "norm_label": "_csv_int()"
@@ -2230,7 +2230,7 @@
       "label": "_csv_float()",
       "file_type": "code",
       "source_file": "scripts/run_volume_bucket_sweep.py",
-      "source_location": "L111",
+      "source_location": "L113",
       "id": "scripts_run_volume_bucket_sweep_csv_float",
       "community": 8,
       "norm_label": "_csv_float()"
@@ -2239,7 +2239,7 @@
       "label": "_csv_bool()",
       "file_type": "code",
       "source_file": "scripts/run_volume_bucket_sweep.py",
-      "source_location": "L115",
+      "source_location": "L117",
       "id": "scripts_run_volume_bucket_sweep_csv_bool",
       "community": 8,
       "norm_label": "_csv_bool()"
@@ -2248,7 +2248,7 @@
       "label": "_csv_str()",
       "file_type": "code",
       "source_file": "scripts/run_volume_bucket_sweep.py",
-      "source_location": "L119",
+      "source_location": "L121",
       "id": "scripts_run_volume_bucket_sweep_csv_str",
       "community": 8,
       "norm_label": "_csv_str()"
@@ -2257,7 +2257,7 @@
       "label": "_format_summary()",
       "file_type": "code",
       "source_file": "scripts/run_volume_bucket_sweep.py",
-      "source_location": "L123",
+      "source_location": "L125",
       "id": "scripts_run_volume_bucket_sweep_format_summary",
       "community": 8,
       "norm_label": "_format_summary()"
@@ -2268,7 +2268,7 @@
       "source_file": "scripts/run_agc_3m.ps1",
       "source_location": "L1",
       "id": "scripts_run_agc_3m_ps1",
-      "community": 13,
+      "community": 14,
       "norm_label": "run_agc_3m.ps1"
     },
     {
@@ -2277,7 +2277,7 @@
       "source_file": "scripts/run_agc_3m.ps1",
       "source_location": "L30",
       "id": "scripts_run_agc_3m_invoke_checked",
-      "community": 13,
+      "community": 14,
       "norm_label": "invoke-checked()"
     },
     {
@@ -2313,7 +2313,7 @@
       "source_file": "scripts/run_agc_1y_grid.ps1",
       "source_location": "L1",
       "id": "scripts_run_agc_1y_grid_ps1",
-      "community": 14,
+      "community": 15,
       "norm_label": "run_agc_1y_grid.ps1"
     },
     {
@@ -2322,8 +2322,35 @@
       "source_file": "scripts/run_agc_1y_grid.ps1",
       "source_location": "L31",
       "id": "scripts_run_agc_1y_grid_invoke_checked",
-      "community": 14,
+      "community": 15,
       "norm_label": "invoke-checked()"
+    },
+    {
+      "label": "run_volume_overnight_sweep.ps1",
+      "file_type": "code",
+      "source_file": "scripts/run_volume_overnight_sweep.ps1",
+      "source_location": "L1",
+      "id": "scripts_run_volume_overnight_sweep_ps1",
+      "community": 12,
+      "norm_label": "run_volume_overnight_sweep.ps1"
+    },
+    {
+      "label": "Invoke-Checked()",
+      "file_type": "code",
+      "source_file": "scripts/run_volume_overnight_sweep.ps1",
+      "source_location": "L20",
+      "id": "scripts_run_volume_overnight_sweep_invoke_checked",
+      "community": 12,
+      "norm_label": "invoke-checked()"
+    },
+    {
+      "label": "Get-PresetConfig()",
+      "file_type": "code",
+      "source_file": "scripts/run_volume_overnight_sweep.ps1",
+      "source_location": "L34",
+      "id": "scripts_run_volume_overnight_sweep_get_presetconfig",
+      "community": 12,
+      "norm_label": "get-presetconfig()"
     }
   ],
   "links": [
@@ -6222,8 +6249,8 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L210",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes",
-      "_tgt": "aggression_carry_config_researchconfig",
+      "_src": "aggression_carry_config_researchconfig",
+      "_tgt": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes",
       "source": "aggression_carry_config_researchconfig",
       "target": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes"
     },
@@ -6234,8 +6261,8 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L258",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols",
-      "_tgt": "aggression_carry_config_researchconfig",
+      "_src": "aggression_carry_config_researchconfig",
+      "_tgt": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols",
       "source": "aggression_carry_config_researchconfig",
       "target": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols"
     },
@@ -7590,8 +7617,8 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L162",
       "weight": 1.0,
-      "_src": "aggression_carry_downloaders_download_symbol_dataset",
-      "_tgt": "aggression_carry_storage_dataset_path",
+      "_src": "aggression_carry_storage_dataset_path",
+      "_tgt": "aggression_carry_downloaders_download_symbol_dataset",
       "source": "aggression_carry_storage_dataset_path",
       "target": "aggression_carry_downloaders_download_symbol_dataset"
     },
@@ -7662,8 +7689,8 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L173",
       "weight": 1.0,
-      "_src": "aggression_carry_downloaders_download_symbol_dataset",
-      "_tgt": "aggression_carry_storage_write_dataset",
+      "_src": "aggression_carry_storage_write_dataset",
+      "_tgt": "aggression_carry_downloaders_download_symbol_dataset",
       "source": "aggression_carry_storage_write_dataset",
       "target": "aggression_carry_downloaders_download_symbol_dataset"
     },
@@ -7734,8 +7761,8 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L219",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes",
-      "_tgt": "aggression_carry_storage_read_dataset",
+      "_src": "aggression_carry_storage_read_dataset",
+      "_tgt": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes",
       "source": "aggression_carry_storage_read_dataset",
       "target": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes"
     },
@@ -7746,8 +7773,8 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L267",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols",
-      "_tgt": "aggression_carry_storage_read_dataset",
+      "_src": "aggression_carry_storage_read_dataset",
+      "_tgt": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols",
       "source": "aggression_carry_storage_read_dataset",
       "target": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols"
     },
@@ -8238,8 +8265,8 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L208",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes",
-      "_tgt": "aggression_carry_downloaders_download_market_data",
+      "_src": "aggression_carry_downloaders_download_market_data",
+      "_tgt": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes",
       "source": "aggression_carry_downloaders_download_market_data",
       "target": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes"
     },
@@ -8250,8 +8277,8 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L256",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols",
-      "_tgt": "aggression_carry_downloaders_download_market_data",
+      "_src": "aggression_carry_downloaders_download_market_data",
+      "_tgt": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols",
       "source": "aggression_carry_downloaders_download_market_data",
       "target": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols"
     },
@@ -9087,7 +9114,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "scripts/run_volume_bucket_sweep.py",
-      "source_location": "L94",
+      "source_location": "L96",
       "weight": 1.0,
       "_src": "scripts_run_volume_bucket_sweep_py",
       "_tgt": "scripts_run_volume_bucket_sweep_parse_buckets",
@@ -9099,7 +9126,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "scripts/run_volume_bucket_sweep.py",
-      "source_location": "L107",
+      "source_location": "L109",
       "weight": 1.0,
       "_src": "scripts_run_volume_bucket_sweep_py",
       "_tgt": "scripts_run_volume_bucket_sweep_csv_int",
@@ -9111,7 +9138,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "scripts/run_volume_bucket_sweep.py",
-      "source_location": "L111",
+      "source_location": "L113",
       "weight": 1.0,
       "_src": "scripts_run_volume_bucket_sweep_py",
       "_tgt": "scripts_run_volume_bucket_sweep_csv_float",
@@ -9123,7 +9150,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "scripts/run_volume_bucket_sweep.py",
-      "source_location": "L115",
+      "source_location": "L117",
       "weight": 1.0,
       "_src": "scripts_run_volume_bucket_sweep_py",
       "_tgt": "scripts_run_volume_bucket_sweep_csv_bool",
@@ -9135,7 +9162,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "scripts/run_volume_bucket_sweep.py",
-      "source_location": "L119",
+      "source_location": "L121",
       "weight": 1.0,
       "_src": "scripts_run_volume_bucket_sweep_py",
       "_tgt": "scripts_run_volume_bucket_sweep_csv_str",
@@ -9147,7 +9174,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "scripts/run_volume_bucket_sweep.py",
-      "source_location": "L123",
+      "source_location": "L125",
       "weight": 1.0,
       "_src": "scripts_run_volume_bucket_sweep_py",
       "_tgt": "scripts_run_volume_bucket_sweep_format_summary",
@@ -9231,7 +9258,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "scripts/run_volume_bucket_sweep.py",
-      "source_location": "L108",
+      "source_location": "L110",
       "weight": 1.0,
       "_src": "scripts_run_volume_bucket_sweep_csv_int",
       "_tgt": "scripts_run_volume_bucket_sweep_csv_str",
@@ -9243,7 +9270,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "scripts/run_volume_bucket_sweep.py",
-      "source_location": "L112",
+      "source_location": "L114",
       "weight": 1.0,
       "_src": "scripts_run_volume_bucket_sweep_csv_float",
       "_tgt": "scripts_run_volume_bucket_sweep_csv_str",
@@ -9255,7 +9282,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "scripts/run_volume_bucket_sweep.py",
-      "source_location": "L116",
+      "source_location": "L118",
       "weight": 1.0,
       "_src": "scripts_run_volume_bucket_sweep_csv_bool",
       "_tgt": "scripts_run_volume_bucket_sweep_csv_str",
@@ -9309,6 +9336,30 @@
       "_tgt": "scripts_run_agc_1y_grid_invoke_checked",
       "source": "scripts_run_agc_1y_grid_ps1",
       "target": "scripts_run_agc_1y_grid_invoke_checked",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/run_volume_overnight_sweep.ps1",
+      "source_location": "L20",
+      "weight": 1.0,
+      "_src": "scripts_run_volume_overnight_sweep_ps1",
+      "_tgt": "scripts_run_volume_overnight_sweep_invoke_checked",
+      "source": "scripts_run_volume_overnight_sweep_ps1",
+      "target": "scripts_run_volume_overnight_sweep_invoke_checked",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/run_volume_overnight_sweep.ps1",
+      "source_location": "L34",
+      "weight": 1.0,
+      "_src": "scripts_run_volume_overnight_sweep_ps1",
+      "_tgt": "scripts_run_volume_overnight_sweep_get_presetconfig",
+      "source": "scripts_run_volume_overnight_sweep_ps1",
+      "target": "scripts_run_volume_overnight_sweep_get_presetconfig",
       "confidence_score": 1.0
     }
   ],

@@ -212,6 +212,32 @@ trade simulation variants, so process-level CPU parallelism is the right first
 optimization. GPU work would require a separate cuDF/CuPy rewrite and only makes
 sense after the trade logic stabilizes.
 
+## Overnight 5950X Sweep
+
+For a Windows workstation with a 5950X, use the overnight runner. It discovers
+the current top-160 Bybit universe, resumes the 3-year kline download, rebuilds
+the volume-alpha feature report, then runs large bucketed grids with reverse
+side enabled.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_volume_overnight_sweep.ps1 -Preset deep -Workers 32
+```
+
+Presets:
+
+- `deep`: core, mid, tail, and broad buckets; roughly 4,480 variants.
+- `tail`: focuses on ranks 51-160; roughly 10,080 variants.
+- `insane`: splits core/mid/tail/broad more finely; roughly 20,160 variants.
+
+The runner writes a transcript under:
+
+```text
+data/agc-bybit-3y-auto150-20230503-20260503/logs/
+```
+
+The download stage uses `_download_markers/`, so rerunning the same script skips
+symbols already fetched for the same date range.
+
 ## One-Year Run
 
 Windows:

@@ -28,8 +28,8 @@ def main() -> int:
         vol_stop_multipliers=_csv_float(args.vol_stops),
         rank_exit_modes=_csv_bool(args.rank_exits),
         include_reverse_side=args.include_reverse,
-        take_profit_pcts=(0.0,),
-        cost_multipliers=(1.0,),
+        take_profit_pcts=_csv_float(args.take_profits),
+        cost_multipliers=_csv_float(args.cost_multipliers),
     )
     summary_rows = []
     for name, rank_min, rank_max in _parse_buckets(args.buckets):
@@ -87,6 +87,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fixed-stops", default="0")
     parser.add_argument("--vol-stops", default="")
     parser.add_argument("--rank-exits", default="false,true")
+    parser.add_argument("--take-profits", default="0")
+    parser.add_argument("--cost-multipliers", default="1")
     parser.add_argument("--include-reverse", action="store_true")
     return parser.parse_args()
 
@@ -124,8 +126,8 @@ def _format_summary(rows: list[dict]) -> str:
     lines = [
         "# Volume Bucket Sweep",
         "",
-        "| Bucket | Ranks | Return | Sharpe | Max DD | Hold | Quantile | Rank Exit | Side | Long | Short |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|",
+        "| Bucket | Ranks | Return | Sharpe | Max DD | Hold | Quantile | Rank Exit | Cost | Side | Long | Short |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|",
     ]
     for row in rows:
         lines.append(
@@ -133,7 +135,7 @@ def _format_summary(rows: list[dict]) -> str:
             f"{row.get('total_return', 0.0):.2%} | {row.get('sharpe_like', 0.0):.2f} | "
             f"{row.get('max_drawdown', 0.0):.2%} | {row.get('hold_days')}d | "
             f"{row.get('quantile', 0.0):.0%} | {row.get('rank_exit_enabled')} | "
-            f"{row.get('side_mode')} | {row.get('long_return', 0.0):.2%} | "
+            f"{row.get('cost_multiplier', 1.0):.1f}x | {row.get('side_mode')} | {row.get('long_return', 0.0):.2%} | "
             f"{row.get('short_return', 0.0):.2%} |"
         )
     lines.append("")
