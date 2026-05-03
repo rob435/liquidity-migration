@@ -7,6 +7,7 @@ import polars as pl
 
 DATASETS = {
     "instruments",
+    "klines_1m",
     "klines_1h",
     "klines_5m",
     "raw_public_trades",
@@ -25,10 +26,15 @@ DATASETS = {
     "volume_backtest_equity_vs_btc",
     "volume_backtest_monthly",
     "volume_backtest_grid",
+    "daily_close_fade_features",
+    "daily_close_fade_trades",
+    "daily_close_fade_baskets",
+    "daily_close_fade_grid",
 }
 
 DATASET_KEYS = {
     "instruments": ("symbol",),
+    "klines_1m": ("ts_ms", "symbol"),
     "klines_1h": ("ts_ms", "symbol"),
     "klines_5m": ("ts_ms", "symbol"),
     "raw_public_trades": ("symbol", "trade_id"),
@@ -47,6 +53,10 @@ DATASET_KEYS = {
     "volume_backtest_equity_vs_btc": ("ts_ms",),
     "volume_backtest_monthly": ("month",),
     "volume_backtest_grid": ("grid_id",),
+    "daily_close_fade_features": ("signal_ts_ms", "symbol"),
+    "daily_close_fade_trades": ("trade_id",),
+    "daily_close_fade_baskets": ("basket_id",),
+    "daily_close_fade_grid": ("grid_id",),
 }
 
 

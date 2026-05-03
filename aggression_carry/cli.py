@@ -4,7 +4,16 @@ import argparse
 from dataclasses import replace
 from pathlib import Path
 
-from .config import DEFAULT_MAJOR_SYMBOLS, UniverseConfig, VolumeBacktestConfig, VolumeGridConfig, load_config
+from .config import (
+    DEFAULT_MAJOR_SYMBOLS,
+    DailyCloseFadeConfig,
+    DailyCloseFadeGridConfig,
+    UniverseConfig,
+    VolumeBacktestConfig,
+    VolumeGridConfig,
+    load_config,
+)
+from .daily_close_fade import run_daily_close_fade, run_daily_close_fade_grid
 from .downloaders import download_market_data, parse_date_ms
 from .ingestion import generate_fixture_data
 from .universe import run_discover_universe
@@ -26,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument(
         "--datasets",
         default="instruments,klines_1h",
-        help="Comma-separated datasets: instruments, klines_1h, klines_5m, funding, open_interest, ticker_snapshots, recent_trades, archive_trades.",
+        help="Comma-separated datasets: instruments, klines_1m, klines_1h, klines_5m, funding, open_interest, ticker_snapshots, recent_trades, archive_trades.",
     )
     download.add_argument(
         "--archive-url-template",
@@ -81,6 +90,41 @@ def build_parser() -> argparse.ArgumentParser:
     grid.add_argument("--include-reverse", action="store_true", help="Also test short-high/long-low reversal.")
     grid.add_argument("--workers", type=int, default=0, help="Parallel worker processes. 0 uses CPU count minus one; 1 is serial.")
     _add_universe_backtest_args(grid)
+
+    close_fade = subparsers.add_parser("daily-close-fade", help="Run the 1m UTC daily-close top-gainer short fade.")
+    close_fade.add_argument("--signal-time", default=None, help="UTC signal time HH:MM or minute-of-day, e.g. 23:00.")
+    close_fade.add_argument("--top-n", type=int, default=None, help="Number of top gainers to short.")
+    close_fade.add_argument("--hold-minutes", type=int, default=None, help="Mechanical holding period in minutes.")
+    close_fade.add_argument("--entry-delay-minutes", type=int, default=None, help="Minutes after signal bar before entry.")
+    close_fade.add_argument("--score", default=None, help="day_return or vol_adjusted_day_return.")
+    close_fade.add_argument("--pump-filter", default=None, help="all, pump, or non_pump.")
+    close_fade.add_argument("--min-age-days", type=int, default=None, help="Minimum listing age; default is 10.")
+    close_fade.add_argument("--min-day-turnover", type=float, default=None, help="Minimum day-to-date quote turnover at signal.")
+    close_fade.add_argument("--min-last-60m-turnover", type=float, default=None, help="Minimum last-60m quote turnover at signal.")
+    close_fade.add_argument("--stop-loss-pct", type=float, default=None, help="Hard short stop as decimal; 0 disables.")
+    close_fade.add_argument("--trailing-stop-pct", type=float, default=None, help="Trailing stop distance as decimal; 0 disables.")
+    close_fade.add_argument("--trailing-activation-pct", type=float, default=None, help="Profit threshold before trailing activates.")
+    close_fade.add_argument("--stop-delay-minutes", type=int, default=None, help="Minutes before stops can trigger.")
+    close_fade.add_argument("--cost-multiplier", type=float, default=None, help="Multiplier on configured round-trip costs.")
+    close_fade.add_argument("--exclude-symbols", default=None, help="Comma-separated static symbol blocklist.")
+    close_fade.add_argument("--include-majors", action="store_true", help="Do not exclude BTC/ETH/SOL/BNB.")
+
+    close_grid = subparsers.add_parser("daily-close-fade-grid", help="Run a parameter grid for the 1m daily-close fade.")
+    close_grid.add_argument("--signal-times", default=None, help="Comma-separated UTC signal times, e.g. 22:45,23:00.")
+    close_grid.add_argument("--top-ns", default=None, help="Comma-separated top-N values, e.g. 3,5,10.")
+    close_grid.add_argument("--hold-minutes", default=None, help="Comma-separated hold minutes, e.g. 30,60,120,180.")
+    close_grid.add_argument("--scores", default=None, help="Comma-separated scores.")
+    close_grid.add_argument("--pump-filters", default=None, help="Comma-separated filters: all,pump,non_pump.")
+    close_grid.add_argument("--stop-loss-pcts", default=None, help="Comma-separated hard stop pcts; include 0 for no stop.")
+    close_grid.add_argument("--trailing-stop-pcts", default=None, help="Comma-separated trailing stop pcts; include 0 to disable.")
+    close_grid.add_argument("--trailing-activation-pcts", default=None, help="Comma-separated trailing activation pcts.")
+    close_grid.add_argument("--cost-multipliers", default=None, help="Comma-separated cost multipliers.")
+    close_grid.add_argument("--workers", type=int, default=0, help="Parallel worker processes. 0 uses CPU count minus one; 1 is serial.")
+    close_grid.add_argument("--min-age-days", type=int, default=None, help="Minimum listing age; default is 10.")
+    close_grid.add_argument("--min-day-turnover", type=float, default=None, help="Minimum day-to-date quote turnover at signal.")
+    close_grid.add_argument("--min-last-60m-turnover", type=float, default=None, help="Minimum last-60m quote turnover at signal.")
+    close_grid.add_argument("--exclude-symbols", default=None, help="Comma-separated static symbol blocklist.")
+    close_grid.add_argument("--include-majors", action="store_true", help="Do not exclude BTC/ETH/SOL/BNB.")
     return parser
 
 
@@ -159,7 +203,97 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "daily-close-fade":
+        fade_config = _close_fade_config_from_args(config.daily_close_fade, args)
+        payload = run_daily_close_fade(data_root, fade_config=fade_config, cost_config=config.costs)
+        print(
+            "daily close fade "
+            f"trades={payload['rows']['trades']} "
+            f"return={payload['summary']['total_return']:.2%} "
+            f"path={data_root / 'reports' / 'daily_close_fade_report.md'}"
+        )
+        return 0
+
+    if args.command == "daily-close-fade-grid":
+        base_fade_config = _close_fade_base_from_grid_args(config.daily_close_fade, args)
+        grid_config = _close_fade_grid_config_from_args(config.daily_close_fade_grid, args)
+        payload = run_daily_close_fade_grid(
+            data_root,
+            grid_config=grid_config,
+            base_fade_config=base_fade_config,
+            cost_config=config.costs,
+            max_workers=args.workers,
+        )
+        best = payload.get("best_total_return", {})
+        print(
+            "daily close fade grid "
+            f"rows={payload['rows']} "
+            f"workers={payload['workers']} "
+            f"best_return={best.get('total_return', 0.0):.2%} "
+            f"path={data_root / 'reports' / 'daily_close_fade_grid_report.md'}"
+        )
+        return 0
+
     raise AssertionError(f"unhandled command: {args.command}")
+
+
+def _close_fade_config_from_args(base: DailyCloseFadeConfig, args: argparse.Namespace) -> DailyCloseFadeConfig:
+    return DailyCloseFadeConfig(
+        signal_minute=_signal_minute(args.signal_time) if args.signal_time is not None else base.signal_minute,
+        top_n=args.top_n if args.top_n is not None else base.top_n,
+        hold_minutes=args.hold_minutes if args.hold_minutes is not None else base.hold_minutes,
+        entry_delay_minutes=args.entry_delay_minutes if args.entry_delay_minutes is not None else base.entry_delay_minutes,
+        score=args.score if args.score is not None else base.score,
+        pump_filter=args.pump_filter if args.pump_filter is not None else base.pump_filter,
+        min_age_days=args.min_age_days if args.min_age_days is not None else base.min_age_days,
+        min_day_turnover=args.min_day_turnover if args.min_day_turnover is not None else base.min_day_turnover,
+        min_last_60m_turnover=(
+            args.min_last_60m_turnover
+            if args.min_last_60m_turnover is not None
+            else base.min_last_60m_turnover
+        ),
+        vol_lookback_days=base.vol_lookback_days,
+        gross_exposure=base.gross_exposure,
+        stop_loss_pct=args.stop_loss_pct if args.stop_loss_pct is not None else base.stop_loss_pct,
+        trailing_stop_pct=args.trailing_stop_pct if args.trailing_stop_pct is not None else base.trailing_stop_pct,
+        trailing_activation_pct=(
+            args.trailing_activation_pct
+            if args.trailing_activation_pct is not None
+            else base.trailing_activation_pct
+        ),
+        stop_delay_minutes=args.stop_delay_minutes if args.stop_delay_minutes is not None else base.stop_delay_minutes,
+        cost_multiplier=args.cost_multiplier if args.cost_multiplier is not None else base.cost_multiplier,
+        min_symbols=base.min_symbols,
+        exclude_symbols=_close_fade_exclusions(args, base.exclude_symbols),
+    )
+
+
+def _close_fade_base_from_grid_args(base: DailyCloseFadeConfig, args: argparse.Namespace) -> DailyCloseFadeConfig:
+    return replace(
+        base,
+        min_age_days=args.min_age_days if args.min_age_days is not None else base.min_age_days,
+        min_day_turnover=args.min_day_turnover if args.min_day_turnover is not None else base.min_day_turnover,
+        min_last_60m_turnover=(
+            args.min_last_60m_turnover
+            if args.min_last_60m_turnover is not None
+            else base.min_last_60m_turnover
+        ),
+        exclude_symbols=_close_fade_exclusions(args, base.exclude_symbols),
+    )
+
+
+def _close_fade_grid_config_from_args(base: DailyCloseFadeGridConfig, args: argparse.Namespace) -> DailyCloseFadeGridConfig:
+    return DailyCloseFadeGridConfig(
+        signal_minutes=_csv_signal_minutes(args.signal_times, base.signal_minutes),
+        top_ns=_csv_int(args.top_ns, base.top_ns),
+        hold_minutes=_csv_int(args.hold_minutes, base.hold_minutes),
+        scores=_csv_str(args.scores, base.scores),
+        pump_filters=_csv_str(args.pump_filters, base.pump_filters),
+        stop_loss_pcts=_csv_float(args.stop_loss_pcts, base.stop_loss_pcts),
+        trailing_stop_pcts=_csv_float(args.trailing_stop_pcts, base.trailing_stop_pcts),
+        trailing_activation_pcts=_csv_float(args.trailing_activation_pcts, base.trailing_activation_pcts),
+        cost_multipliers=_csv_float(args.cost_multipliers, base.cost_multipliers),
+    )
 
 
 def _backtest_config_from_args(base: VolumeBacktestConfig, args: argparse.Namespace) -> VolumeBacktestConfig:
@@ -257,6 +391,29 @@ def _exclude_symbols_from_args(args: argparse.Namespace, default: tuple[str, ...
     if getattr(args, "exclude_majors", False):
         symbols = tuple(dict.fromkeys((*symbols, *DEFAULT_MAJOR_SYMBOLS)))
     return symbols
+
+
+def _close_fade_exclusions(args: argparse.Namespace, default: tuple[str, ...]) -> tuple[str, ...]:
+    base = () if getattr(args, "include_majors", False) else default
+    return _csv_str(args.exclude_symbols, base)
+
+
+def _signal_minute(value: str) -> int:
+    text = value.strip()
+    if ":" not in text:
+        minute = int(text)
+    else:
+        hour_text, minute_text = text.split(":", 1)
+        minute = int(hour_text) * 60 + int(minute_text)
+    if not 0 <= minute < 24 * 60:
+        raise ValueError(f"signal time is outside one UTC day: {value!r}")
+    return minute
+
+
+def _csv_signal_minutes(value: str | None, default: tuple[int, ...]) -> tuple[int, ...]:
+    if value is None:
+        return default
+    return tuple(_signal_minute(item) for item in _csv_str(value, ()))
 
 
 def _csv_str(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:

@@ -1,12 +1,13 @@
 # MODEL050426
 
-Bybit crypto research repo. This has been stripped down around one alpha family:
-daily volume / dollar-volume ranking. The old live bot and blended signal stack
-are intentionally gone.
+Bybit crypto research repo. This has been stripped down around isolated alpha
+research paths. The old live bot and blended signal stack are intentionally
+gone.
 
 ## Current Source Of Truth
 
 - Current implementation plan: [docs/volume_alpha.md](docs/volume_alpha.md)
+- Daily close fade plan: [docs/daily_close_fade.md](docs/daily_close_fade.md)
 - Bybit data constraints/background: [docs/bybit_aggression_carry_system_codex_spec.md](docs/bybit_aggression_carry_system_codex_spec.md)
 - Windows setup: [docs/WINDOWS_QUICKSTART.md](docs/WINDOWS_QUICKSTART.md)
 
@@ -19,6 +20,8 @@ license to rebuild the old composite stack.
 - `aggression_carry/`: public data download, Parquet storage, signed-flow parsing,
   fixture data, isolated `volume-alpha` research sweep, and detailed
   `volume-backtest` trade-ledger backtest.
+- `aggression_carry/daily_close_fade.py`: separate 1m UTC daily-close top-gainer
+  short-fade research path.
 - `configs/volume_alpha.default.yaml`: current research config.
 - `scripts/run_agc_3m.ps1`: Windows 3-month volume-alpha run.
 - `scripts/run_volume_bucket_sweep.py`: daily liquidity-rank bucket grid runner.
@@ -170,6 +173,31 @@ python scripts/run_volume_bucket_sweep.py \
 This runs separate grids for daily liquidity-rank buckets: core `1-20`, mid
 `21-80`, and tail `81-150`.
 
+Daily close fade 1m grid:
+
+```bash
+python -m aggression_carry \
+  --data-root data/daily-close-fade-1m-3m \
+  --config configs/volume_alpha.default.yaml \
+  download-data \
+  --symbols BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,APTUSDT,BNBUSDT,ADAUSDT,DOTUSDT,LTCUSDT,NEARUSDT,OPUSDT,ARBUSDT,INJUSDT \
+  --start 2026-02-03 \
+  --end 2026-05-03 \
+  --datasets instruments,klines_1m
+
+python -m aggression_carry \
+  --data-root data/daily-close-fade-1m-3m \
+  --config configs/volume_alpha.default.yaml \
+  daily-close-fade-grid \
+  --workers 0
+```
+
+Windows 1m runner:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_daily_close_fade_1m.ps1 -Workers 32
+```
+
 One-year grid on Windows:
 
 ```powershell
@@ -178,9 +206,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_agc_1y_grid.ps1 -Workers 
 
 ## Research Rule
 
-Do not combine signals until a single alpha clears costs standalone. The latest
-lead is `dollar_volume_rank`; the previous increasing-volume variants failed in
-the corrected 3-month test. The current broad-universe test found a separate
-tail-liquid lead where the best direction reversed to `short_high_long_low`, so
-that must be researched separately instead of being blended into the original
-result.
+Do not combine signals until a single alpha clears costs standalone. The volume
+rank path and the daily-close fade path are separate systems for now. A future
+multistrat allocator only makes sense after each one has its own profitable,
+cost-adjusted trade ledger.

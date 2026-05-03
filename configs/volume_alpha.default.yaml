@@ -50,6 +50,37 @@ volume_grid:
   take_profit_pcts: [0.0]
   cost_multipliers: [1.0]
 
+daily_close_fade:
+  signal_minute: 1380
+  top_n: 3
+  hold_minutes: 120
+  entry_delay_minutes: 1
+  score: vol_adjusted_day_return
+  pump_filter: all
+  min_age_days: 10
+  min_day_turnover: 0.0
+  min_last_60m_turnover: 0.0
+  vol_lookback_days: 20
+  gross_exposure: 1.0
+  stop_loss_pct: 0.0
+  trailing_stop_pct: 0.0
+  trailing_activation_pct: 0.01
+  stop_delay_minutes: 15
+  cost_multiplier: 1.0
+  min_symbols: 1
+  exclude_symbols: [BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT]
+
+daily_close_fade_grid:
+  signal_minutes: [1320, 1350, 1365, 1380, 1395]
+  top_ns: [3, 5, 10]
+  hold_minutes: [30, 60, 90, 120, 180]
+  scores: [vol_adjusted_day_return, day_return]
+  pump_filters: [all, pump, non_pump]
+  stop_loss_pcts: [0.0, 0.03, 0.05, 0.08]
+  trailing_stop_pcts: [0.0, 0.015, 0.025]
+  trailing_activation_pcts: [0.01, 0.02]
+  cost_multipliers: [1.0, 2.0, 3.0]
+
 universe:
   min_turnover_24h: 2000000.0
   min_age_days: 30

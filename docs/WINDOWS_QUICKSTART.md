@@ -125,12 +125,29 @@ If the machine starts swapping or RAM pressure gets high:
 powershell -ExecutionPolicy Bypass -File .\scripts\run_agc_1y_grid.ps1 -Workers 16
 ```
 
+## 7. Run The 1m Daily-Close Fade Grid
+
+This is a separate short-only top-gainer fade test. It downloads 1m klines, so
+start with the default 3-month window before trying a full year.
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_daily_close_fade_1m.ps1 -Workers 32
+```
+
+If RAM pressure gets high:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_daily_close_fade_1m.ps1 -Workers 16
+```
+
 ## Notes
 
-- The current official path is volume-only. It does not download Bybit public
-  trade archives.
+- The current official paths are isolated research systems: volume rank and
+  daily-close fade. Do not blend them until each clears costs standalone.
 - `volume-alpha` is the statistical sweep. `volume-backtest` is the trade ledger
   with entries, exits, exit reasons, stops, costs, and symbol/month attribution.
+- `daily-close-fade-grid` tests the 1m UTC close-window short fade with top-N,
+  pump-tag, stop, trailing-stop, hold-time, and cost sensitivity.
 - `volume-grid` runs parameter variants concurrently with process workers.
 - The RTX GPU is not used by this path. The current bottleneck is Python trade
   simulation across independent variants, so CPU process parallelism is the

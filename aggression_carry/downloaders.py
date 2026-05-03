@@ -15,7 +15,7 @@ from .ingestion import aggregate_signed_flow_1h, aggregate_signed_flow_1m, norma
 from .storage import dataset_path, write_dataset
 
 
-REST_DATASETS = {"instruments", "klines_1h", "klines_5m", "funding", "open_interest", "ticker_snapshots", "recent_trades"}
+REST_DATASETS = {"instruments", "klines_1m", "klines_1h", "klines_5m", "funding", "open_interest", "ticker_snapshots", "recent_trades"}
 MARKER_DIR = "_download_markers"
 
 
@@ -52,6 +52,22 @@ def download_market_data(
         outputs["ticker_snapshots"] = write_dataset(tickers, data_root, "ticker_snapshots")
 
     for index, symbol in enumerate(symbols, start=1):
+        if "klines_1m" in datasets:
+            assert client is not None
+            outputs["klines_1m"] = _download_symbol_dataset(
+                data_root,
+                dataset="klines_1m",
+                symbol=symbol,
+                index=index,
+                total=len(symbols),
+                start_ms=start_ms,
+                end_ms=end_ms,
+                fetch=lambda symbol=symbol: _normalize_klines(
+                    symbol,
+                    client.get_klines(symbol, "1", start_ms, end_ms),
+                    source="bybit_rest",
+                ),
+            )
         if "klines_1h" in datasets:
             assert client is not None
             outputs["klines_1h"] = _download_symbol_dataset(

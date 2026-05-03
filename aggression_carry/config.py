@@ -17,6 +17,9 @@ DEFAULT_GRID_QUANTILES = (0.30, 0.50)
 DEFAULT_GRID_FIXED_STOPS = (0.0, 0.12, 0.20, 0.30)
 DEFAULT_GRID_VOL_STOPS = (3.0, 4.0)
 DEFAULT_MAJOR_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT")
+DEFAULT_CLOSE_FADE_SIGNAL_MINUTES = (22 * 60 + 45, 23 * 60)
+DEFAULT_CLOSE_FADE_TOP_NS = (3, 5)
+DEFAULT_CLOSE_FADE_HOLD_MINUTES = (60, 120, 180)
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,6 +83,41 @@ class VolumeGridConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class DailyCloseFadeConfig:
+    signal_minute: int = 23 * 60
+    top_n: int = 3
+    hold_minutes: int = 120
+    entry_delay_minutes: int = 1
+    score: str = "vol_adjusted_day_return"
+    pump_filter: str = "all"
+    min_age_days: int = 10
+    min_day_turnover: float = 0.0
+    min_last_60m_turnover: float = 0.0
+    vol_lookback_days: int = 20
+    gross_exposure: float = 1.0
+    stop_loss_pct: float = 0.0
+    trailing_stop_pct: float = 0.0
+    trailing_activation_pct: float = 0.01
+    stop_delay_minutes: int = 15
+    cost_multiplier: float = 1.0
+    min_symbols: int = 1
+    exclude_symbols: tuple[str, ...] = DEFAULT_MAJOR_SYMBOLS
+
+
+@dataclass(frozen=True, slots=True)
+class DailyCloseFadeGridConfig:
+    signal_minutes: tuple[int, ...] = DEFAULT_CLOSE_FADE_SIGNAL_MINUTES
+    top_ns: tuple[int, ...] = DEFAULT_CLOSE_FADE_TOP_NS
+    hold_minutes: tuple[int, ...] = DEFAULT_CLOSE_FADE_HOLD_MINUTES
+    scores: tuple[str, ...] = ("vol_adjusted_day_return", "day_return")
+    pump_filters: tuple[str, ...] = ("all", "pump", "non_pump")
+    stop_loss_pcts: tuple[float, ...] = (0.0, 0.03, 0.05, 0.08)
+    trailing_stop_pcts: tuple[float, ...] = (0.0, 0.015, 0.025)
+    trailing_activation_pcts: tuple[float, ...] = (0.01, 0.02)
+    cost_multipliers: tuple[float, ...] = (1.0, 2.0, 3.0)
+
+
+@dataclass(frozen=True, slots=True)
 class UniverseConfig:
     min_turnover_24h: float = 2_000_000.0
     min_age_days: int = 30
@@ -116,6 +154,8 @@ class ResearchConfig:
     volume_alpha: VolumeAlphaConfig = field(default_factory=VolumeAlphaConfig)
     volume_backtest: VolumeBacktestConfig = field(default_factory=VolumeBacktestConfig)
     volume_grid: VolumeGridConfig = field(default_factory=VolumeGridConfig)
+    daily_close_fade: DailyCloseFadeConfig = field(default_factory=DailyCloseFadeConfig)
+    daily_close_fade_grid: DailyCloseFadeGridConfig = field(default_factory=DailyCloseFadeGridConfig)
     universe: UniverseConfig = field(default_factory=UniverseConfig)
     costs: CostConfig = field(default_factory=CostConfig)
     data_root: Path = Path("data/volume_alpha")
@@ -193,6 +233,45 @@ def _merge_volume_grid_config(payload: dict[str, Any] | None) -> VolumeGridConfi
     )
 
 
+def _merge_daily_close_fade_config(payload: dict[str, Any] | None) -> DailyCloseFadeConfig:
+    payload = dict(payload or {})
+    return DailyCloseFadeConfig(
+        signal_minute=int(payload.get("signal_minute", 23 * 60)),
+        top_n=int(payload.get("top_n", 3)),
+        hold_minutes=int(payload.get("hold_minutes", 120)),
+        entry_delay_minutes=int(payload.get("entry_delay_minutes", 1)),
+        score=str(payload.get("score", "vol_adjusted_day_return")),
+        pump_filter=str(payload.get("pump_filter", "all")),
+        min_age_days=int(payload.get("min_age_days", 10)),
+        min_day_turnover=float(payload.get("min_day_turnover", 0.0)),
+        min_last_60m_turnover=float(payload.get("min_last_60m_turnover", 0.0)),
+        vol_lookback_days=int(payload.get("vol_lookback_days", 20)),
+        gross_exposure=float(payload.get("gross_exposure", 1.0)),
+        stop_loss_pct=float(payload.get("stop_loss_pct", 0.0)),
+        trailing_stop_pct=float(payload.get("trailing_stop_pct", 0.0)),
+        trailing_activation_pct=float(payload.get("trailing_activation_pct", 0.01)),
+        stop_delay_minutes=int(payload.get("stop_delay_minutes", 15)),
+        cost_multiplier=float(payload.get("cost_multiplier", 1.0)),
+        min_symbols=int(payload.get("min_symbols", 1)),
+        exclude_symbols=_tuple_str(payload, "exclude_symbols", DEFAULT_MAJOR_SYMBOLS),
+    )
+
+
+def _merge_daily_close_fade_grid_config(payload: dict[str, Any] | None) -> DailyCloseFadeGridConfig:
+    payload = dict(payload or {})
+    return DailyCloseFadeGridConfig(
+        signal_minutes=_tuple_int(payload, "signal_minutes", DEFAULT_CLOSE_FADE_SIGNAL_MINUTES),
+        top_ns=_tuple_int(payload, "top_ns", DEFAULT_CLOSE_FADE_TOP_NS),
+        hold_minutes=_tuple_int(payload, "hold_minutes", DEFAULT_CLOSE_FADE_HOLD_MINUTES),
+        scores=_tuple_str(payload, "scores", ("vol_adjusted_day_return", "day_return")),
+        pump_filters=_tuple_str(payload, "pump_filters", ("all", "pump", "non_pump")),
+        stop_loss_pcts=_tuple_float(payload, "stop_loss_pcts", (0.0, 0.03, 0.05, 0.08)),
+        trailing_stop_pcts=_tuple_float(payload, "trailing_stop_pcts", (0.0, 0.015, 0.025)),
+        trailing_activation_pcts=_tuple_float(payload, "trailing_activation_pcts", (0.01, 0.02)),
+        cost_multipliers=_tuple_float(payload, "cost_multipliers", (1.0, 2.0, 3.0)),
+    )
+
+
 def _merge_universe_config(payload: dict[str, Any] | None) -> UniverseConfig:
     payload = dict(payload or {})
     return UniverseConfig(
@@ -225,6 +304,8 @@ def load_config(path: str | Path | None = None, *, data_root: str | Path | None 
         volume_alpha=_merge_volume_alpha_config(raw.get("volume_alpha")),
         volume_backtest=_merge_volume_backtest_config(raw.get("volume_backtest")),
         volume_grid=_merge_volume_grid_config(raw.get("volume_grid")),
+        daily_close_fade=_merge_daily_close_fade_config(raw.get("daily_close_fade")),
+        daily_close_fade_grid=_merge_daily_close_fade_grid_config(raw.get("daily_close_fade_grid")),
         universe=_merge_universe_config(raw.get("universe")),
         costs=_merge_dataclass(CostConfig, raw.get("cost_model")),
         data_root=root,
