@@ -10,9 +10,22 @@
   lifecycle parameter grids.
 - Universe tooling now exists: `discover-universe` builds current Bybit symbol
   snapshots and the backtester/grid can filter daily liquidity-rank buckets.
+- Point-in-time universe groundwork now exists: `archive-manifest` scans Bybit's
+  public trading archive into symbol/date membership, and `archive_klines_1m`
+  plus `archive-download-klines` can build 1m bars directly from public trade
+  archives.
 - The old live runtime and old blended signal stack have been deleted.
-- No live execution, Telegram alerts, kill switches, production deployment, or
-  exchange order submission exist in the active code.
+- Repo-local Codex hooks and AO/Composio helper installer files have been
+  deleted.
+- Paper forward testing is implemented for the daily-close fade path via
+  `forward-scan`, `forward-run`, and `forward-report`. It uses public Bybit
+  data only and writes a paper ledger.
+- Daily-close fade now has a three-sleeve comparison path:
+  `major_control` ranks 1-30, `core` ranks 31-150, and experimental `microcap`
+  ranks 151+ with turnover floors and capacity-limited sizing.
+- No live execution, kill switches, production deployment, or exchange order
+  submission exist in the active code. Telegram is notification-only for paper
+  forward testing.
 
 ## Active Path
 
@@ -50,12 +63,44 @@
   trade lifecycle assumptions instead of only forward-return buckets.
 - The next intended validation is a longer broad-universe run with point-in-time
   universe improvements, plus funding/spread/impact stress on the tail bucket.
+- Daily-close fade current-universe results are promising only with adaptive
+  exits; final proof still requires the archive-based walk-forward path in
+  `docs/walk_forward_universe.md`.
+- Corrected daily-close short PnL to USDT-linear math. The simple 22:15 UTC
+  top-5 pump short with 180m hold, 20% stop, no fixed TP, and no adaptive exit
+  is not confirmed: +86.69% on the biased one-year current-universe sample but
+  -60.96% on the three-year current top-160 sample.
+- Current daily-close lead: no fixed TP, baseline liquidity ranks 31-150, 20%
+  disaster stop, `0.25x` daily-vol trailing stop active after the 15-minute
+  stop delay, and 20% MFE giveback after a +1% favorable move. The liquidity
+  filter uses prior 7-day average quote turnover, not same-day pump volume.
+  Current-universe reads for 31-150: +126.33% over 1y and +249.03% over 3y
+  current top-160, with 3y max drawdown -8.08%.
+- Rank 151+ is now treated as a separate microcap sleeve, not a blind extension
+  of the core book. The first implementation requires prior baseline turnover,
+  day-to-date turnover, last-hour turnover, and position-size caps tied to a
+  configured account equity assumption.
+- Latest exit sweeps say fixed take-profits are not the answer yet. Daily-close
+  fixed TP and VWAP-reversion exits cut too much right tail; volume-alpha fixed
+  TP hurt the 3-year tail bucket. Daily-close adaptive exits are cost-sensitive:
+  the 31-150 3y current top-160 bucket is +249.03% at base costs, +50.51% at
+  2x costs, and -35.15% at 3x costs.
+- The 3-year current-universe volume tail bucket now points to
+  `long_high_short_low`, 7d hold, 50% quantile, 12% stop, no TP, no rank exit:
+  +120.10%, Sharpe-like 1.09, max drawdown -21.19%. The earlier 1-year
+  `short_high_long_low` tail reversal did not survive the 3-year side-mode
+  check.
 
 ## Remaining Risks
 
 - Three months and 16 symbols is not enough evidence.
 - Current-universe discovery is survivorship-biased until delisted/dead
   contracts are incorporated.
+- Current top-160 daily-close fade tests are explicitly biased benchmarks until
+  the archive manifest and archive-derived 1m bars cover every eligible
+  symbol/date.
+- Earlier daily-close fade reports from before the USDT-linear short PnL fix
+  are invalid and should not be used for decisions.
 - Bybit-only data may miss the venue where price discovery actually happens.
 - Dollar-volume rank may be a hidden size/liquidity effect, not the podcast's
   claimed increasing-volume alpha.

@@ -113,6 +113,36 @@ def aggregate_signed_flow_1m(
     return grouped
 
 
+def aggregate_trade_klines_1m(trades: pl.DataFrame) -> pl.DataFrame:
+    if trades.is_empty():
+        return pl.DataFrame()
+    filtered = trades.unique(subset=["symbol", "trade_id"], keep="last") if "trade_id" in trades.columns else trades
+    sort_cols = [col for col in ("symbol", "ts_ms", "trade_ts_ms", "trade_id") if col in filtered.columns or col == "trade_ts_ms"]
+    bars = (
+        filtered.with_columns(
+            [
+                pl.col("ts_ms").alias("trade_ts_ms"),
+                (pl.col("ts_ms") // MS_PER_MINUTE * MS_PER_MINUTE).alias("ts_ms"),
+            ]
+        )
+        .sort(sort_cols)
+        .group_by(["ts_ms", "symbol"], maintain_order=True)
+        .agg(
+            [
+                pl.col("price").first().alias("open"),
+                pl.col("price").max().alias("high"),
+                pl.col("price").min().alias("low"),
+                pl.col("price").last().alias("close"),
+                pl.col("size_base").sum().alias("volume_base"),
+                pl.col("quote_value").sum().alias("turnover_quote"),
+            ]
+        )
+        .with_columns(pl.lit("bybit_public_trades").alias("source"))
+        .sort(["symbol", "ts_ms"])
+    )
+    return bars
+
+
 def _parse_bool(value: Any) -> bool:
     if value is None:
         return False

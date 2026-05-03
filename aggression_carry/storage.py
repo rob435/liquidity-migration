@@ -16,6 +16,7 @@ DATASETS = {
     "funding",
     "open_interest",
     "ticker_snapshots",
+    "archive_trade_manifest",
     "universe_current",
     "volume_alpha_features",
     "volume_alpha_metrics",
@@ -30,6 +31,13 @@ DATASETS = {
     "daily_close_fade_trades",
     "daily_close_fade_baskets",
     "daily_close_fade_grid",
+    "daily_close_fade_sleeves",
+    "daily_close_fade_sleeve_trades",
+    "daily_close_fade_sleeve_baskets",
+    "daily_close_fade_sleeve_equity",
+    "forward_scan_features",
+    "forward_paper_trades",
+    "forward_paper_baskets",
 }
 
 DATASET_KEYS = {
@@ -43,6 +51,7 @@ DATASET_KEYS = {
     "funding": ("ts_ms", "symbol"),
     "open_interest": ("ts_ms", "symbol"),
     "ticker_snapshots": ("ts_ms", "symbol"),
+    "archive_trade_manifest": ("symbol", "date", "url"),
     "universe_current": ("snapshot_ts_ms", "symbol"),
     "volume_alpha_features": ("ts_ms", "symbol"),
     "volume_alpha_metrics": ("signal", "horizon_d"),
@@ -57,6 +66,13 @@ DATASET_KEYS = {
     "daily_close_fade_trades": ("trade_id",),
     "daily_close_fade_baskets": ("basket_id",),
     "daily_close_fade_grid": ("grid_id",),
+    "daily_close_fade_sleeves": ("sleeve",),
+    "daily_close_fade_sleeve_trades": ("sleeve", "trade_id"),
+    "daily_close_fade_sleeve_baskets": ("sleeve", "basket_id"),
+    "daily_close_fade_sleeve_equity": ("sleeve", "basket_id"),
+    "forward_scan_features": ("scan_id", "symbol"),
+    "forward_paper_trades": ("trade_id",),
+    "forward_paper_baskets": ("basket_id",),
 }
 
 

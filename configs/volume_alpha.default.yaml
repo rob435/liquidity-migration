@@ -16,6 +16,8 @@ volume_alpha:
 
 volume_backtest:
   score: dollar_volume_rank
+  start_date: ""
+  end_date: ""
   quantile: 0.50
   hold_days: 7
   rebalance_days: 7
@@ -51,35 +53,77 @@ volume_grid:
   cost_multipliers: [1.0]
 
 daily_close_fade:
-  signal_minute: 1380
-  top_n: 3
-  hold_minutes: 120
+  signal_minute: 1335
+  top_n: 5
+  hold_minutes: 180
   entry_delay_minutes: 1
   score: vol_adjusted_day_return
-  pump_filter: all
+  pump_filter: pump
   min_age_days: 10
   min_day_turnover: 0.0
   min_last_60m_turnover: 0.0
   vol_lookback_days: 20
+  liquidity_lookback_days: 7
+  liquidity_rank_min: 31
+  liquidity_rank_max: 150
+  min_baseline_turnover: 0.0
+  account_equity: 10000.0
+  max_position_weight: 0.0
+  max_trade_notional_pct_of_day_turnover: 0.0
+  max_trade_notional_pct_of_baseline_turnover: 0.0
   gross_exposure: 1.0
-  stop_loss_pct: 0.0
+  stop_loss_pct: 0.20
+  take_profit_pct: 0.0
+  basket_stop_loss_pct: 0.0
   trailing_stop_pct: 0.0
-  trailing_activation_pct: 0.01
+  trailing_activation_pct: 0.0
+  vol_trailing_stop_mult: 0.25
+  vol_trailing_activation_mult: 0.0
+  mfe_giveback_activation_pct: 0.01
+  mfe_giveback_pct: 0.20
+  vwap_reversion_pct: 0.0
   stop_delay_minutes: 15
   cost_multiplier: 1.0
   min_symbols: 1
   exclude_symbols: [BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT]
+  require_archive_membership: false
 
 daily_close_fade_grid:
-  signal_minutes: [1320, 1350, 1365, 1380, 1395]
+  signal_minutes: [1320, 1335, 1350, 1365, 1380, 1395]
   top_ns: [3, 5, 10]
   hold_minutes: [30, 60, 90, 120, 180]
+  gross_exposures: [1.0]
   scores: [vol_adjusted_day_return, day_return]
   pump_filters: [all, pump, non_pump]
-  stop_loss_pcts: [0.0, 0.03, 0.05, 0.08]
+  stop_loss_pcts: [0.0, 0.03, 0.05, 0.08, 0.20]
+  take_profit_pcts: [0.0]
+  basket_stop_loss_pcts: [0.0]
   trailing_stop_pcts: [0.0, 0.015, 0.025]
   trailing_activation_pcts: [0.01, 0.02]
+  vol_trailing_stop_mults: [0.0]
+  vol_trailing_activation_mults: [0.0]
+  mfe_giveback_activation_pcts: [0.0]
+  mfe_giveback_pcts: [0.0]
+  vwap_reversion_pcts: [0.0]
+  liquidity_lookback_days: [7]
+  liquidity_rank_mins: [31]
+  liquidity_rank_maxs: [150]
+  min_baseline_turnovers: [0.0]
+  account_equities: [10000.0]
+  max_position_weights: [0.0]
+  max_trade_notional_pct_day_turnovers: [0.0]
+  max_trade_notional_pct_baseline_turnovers: [0.0]
   cost_multipliers: [1.0, 2.0, 3.0]
+
+forward_test:
+  name: daily-close-fade-paper
+  min_turnover_24h: 2000000.0
+  max_spread_bps: 80.0
+  min_open_interest_value: 0.0
+  max_symbols: 0
+  workers: 16
+  max_entry_lag_minutes: 10
+  send_telegram: false
 
 universe:
   min_turnover_24h: 2000000.0

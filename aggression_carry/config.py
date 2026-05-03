@@ -45,6 +45,8 @@ class VolumeAlphaConfig:
 @dataclass(frozen=True, slots=True)
 class VolumeBacktestConfig:
     score: str = "dollar_volume_rank"
+    start_date: str = ""
+    end_date: str = ""
     quantile: float = 0.50
     hold_days: int = 7
     rebalance_days: int = 7
@@ -94,14 +96,30 @@ class DailyCloseFadeConfig:
     min_day_turnover: float = 0.0
     min_last_60m_turnover: float = 0.0
     vol_lookback_days: int = 20
+    liquidity_lookback_days: int = 7
+    liquidity_rank_min: int = 1
+    liquidity_rank_max: int = 0
+    min_baseline_turnover: float = 0.0
+    account_equity: float = 10_000.0
+    max_position_weight: float = 0.0
+    max_trade_notional_pct_of_day_turnover: float = 0.0
+    max_trade_notional_pct_of_baseline_turnover: float = 0.0
     gross_exposure: float = 1.0
     stop_loss_pct: float = 0.0
+    take_profit_pct: float = 0.0
+    basket_stop_loss_pct: float = 0.0
     trailing_stop_pct: float = 0.0
     trailing_activation_pct: float = 0.01
+    vol_trailing_stop_mult: float = 0.0
+    vol_trailing_activation_mult: float = 0.0
+    mfe_giveback_activation_pct: float = 0.0
+    mfe_giveback_pct: float = 0.0
+    vwap_reversion_pct: float = 0.0
     stop_delay_minutes: int = 15
     cost_multiplier: float = 1.0
     min_symbols: int = 1
     exclude_symbols: tuple[str, ...] = DEFAULT_MAJOR_SYMBOLS
+    require_archive_membership: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,12 +127,40 @@ class DailyCloseFadeGridConfig:
     signal_minutes: tuple[int, ...] = DEFAULT_CLOSE_FADE_SIGNAL_MINUTES
     top_ns: tuple[int, ...] = DEFAULT_CLOSE_FADE_TOP_NS
     hold_minutes: tuple[int, ...] = DEFAULT_CLOSE_FADE_HOLD_MINUTES
+    gross_exposures: tuple[float, ...] = (1.0,)
     scores: tuple[str, ...] = ("vol_adjusted_day_return", "day_return")
     pump_filters: tuple[str, ...] = ("all", "pump", "non_pump")
     stop_loss_pcts: tuple[float, ...] = (0.0, 0.03, 0.05, 0.08)
+    take_profit_pcts: tuple[float, ...] = (0.0,)
+    basket_stop_loss_pcts: tuple[float, ...] = (0.0,)
     trailing_stop_pcts: tuple[float, ...] = (0.0, 0.015, 0.025)
     trailing_activation_pcts: tuple[float, ...] = (0.01, 0.02)
+    vol_trailing_stop_mults: tuple[float, ...] = (0.0,)
+    vol_trailing_activation_mults: tuple[float, ...] = (0.0,)
+    mfe_giveback_activation_pcts: tuple[float, ...] = (0.0,)
+    mfe_giveback_pcts: tuple[float, ...] = (0.0,)
+    vwap_reversion_pcts: tuple[float, ...] = (0.0,)
+    liquidity_lookback_days: tuple[int, ...] = (7,)
+    liquidity_rank_mins: tuple[int, ...] = (1,)
+    liquidity_rank_maxs: tuple[int, ...] = (0,)
+    min_baseline_turnovers: tuple[float, ...] = (0.0,)
+    account_equities: tuple[float, ...] = (10_000.0,)
+    max_position_weights: tuple[float, ...] = (0.0,)
+    max_trade_notional_pct_day_turnovers: tuple[float, ...] = (0.0,)
+    max_trade_notional_pct_baseline_turnovers: tuple[float, ...] = (0.0,)
     cost_multipliers: tuple[float, ...] = (1.0, 2.0, 3.0)
+
+
+@dataclass(frozen=True, slots=True)
+class ForwardTestConfig:
+    name: str = "daily-close-fade-paper"
+    min_turnover_24h: float = 2_000_000.0
+    max_spread_bps: float = 80.0
+    min_open_interest_value: float = 0.0
+    max_symbols: int = 0
+    workers: int = 16
+    max_entry_lag_minutes: int = 10
+    send_telegram: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,6 +202,7 @@ class ResearchConfig:
     volume_grid: VolumeGridConfig = field(default_factory=VolumeGridConfig)
     daily_close_fade: DailyCloseFadeConfig = field(default_factory=DailyCloseFadeConfig)
     daily_close_fade_grid: DailyCloseFadeGridConfig = field(default_factory=DailyCloseFadeGridConfig)
+    forward_test: ForwardTestConfig = field(default_factory=ForwardTestConfig)
     universe: UniverseConfig = field(default_factory=UniverseConfig)
     costs: CostConfig = field(default_factory=CostConfig)
     data_root: Path = Path("data/volume_alpha")
@@ -177,6 +224,8 @@ def _merge_volume_backtest_config(payload: dict[str, Any] | None) -> VolumeBackt
     payload = dict(payload or {})
     return VolumeBacktestConfig(
         score=str(payload.get("score", "dollar_volume_rank")),
+        start_date=str(payload.get("start_date", "")),
+        end_date=str(payload.get("end_date", "")),
         quantile=float(payload.get("quantile", 0.50)),
         hold_days=int(payload.get("hold_days", 7)),
         rebalance_days=int(payload.get("rebalance_days", payload.get("hold_days", 7))),
@@ -246,14 +295,32 @@ def _merge_daily_close_fade_config(payload: dict[str, Any] | None) -> DailyClose
         min_day_turnover=float(payload.get("min_day_turnover", 0.0)),
         min_last_60m_turnover=float(payload.get("min_last_60m_turnover", 0.0)),
         vol_lookback_days=int(payload.get("vol_lookback_days", 20)),
+        liquidity_lookback_days=int(payload.get("liquidity_lookback_days", 7)),
+        liquidity_rank_min=int(payload.get("liquidity_rank_min", 1)),
+        liquidity_rank_max=int(payload.get("liquidity_rank_max", 0)),
+        min_baseline_turnover=float(payload.get("min_baseline_turnover", 0.0)),
+        account_equity=float(payload.get("account_equity", 10_000.0)),
+        max_position_weight=float(payload.get("max_position_weight", 0.0)),
+        max_trade_notional_pct_of_day_turnover=float(payload.get("max_trade_notional_pct_of_day_turnover", 0.0)),
+        max_trade_notional_pct_of_baseline_turnover=float(
+            payload.get("max_trade_notional_pct_of_baseline_turnover", 0.0)
+        ),
         gross_exposure=float(payload.get("gross_exposure", 1.0)),
         stop_loss_pct=float(payload.get("stop_loss_pct", 0.0)),
+        take_profit_pct=float(payload.get("take_profit_pct", 0.0)),
+        basket_stop_loss_pct=float(payload.get("basket_stop_loss_pct", 0.0)),
         trailing_stop_pct=float(payload.get("trailing_stop_pct", 0.0)),
         trailing_activation_pct=float(payload.get("trailing_activation_pct", 0.01)),
+        vol_trailing_stop_mult=float(payload.get("vol_trailing_stop_mult", 0.0)),
+        vol_trailing_activation_mult=float(payload.get("vol_trailing_activation_mult", 0.0)),
+        mfe_giveback_activation_pct=float(payload.get("mfe_giveback_activation_pct", 0.0)),
+        mfe_giveback_pct=float(payload.get("mfe_giveback_pct", 0.0)),
+        vwap_reversion_pct=float(payload.get("vwap_reversion_pct", 0.0)),
         stop_delay_minutes=int(payload.get("stop_delay_minutes", 15)),
         cost_multiplier=float(payload.get("cost_multiplier", 1.0)),
         min_symbols=int(payload.get("min_symbols", 1)),
         exclude_symbols=_tuple_str(payload, "exclude_symbols", DEFAULT_MAJOR_SYMBOLS),
+        require_archive_membership=bool(payload.get("require_archive_membership", False)),
     )
 
 
@@ -263,12 +330,46 @@ def _merge_daily_close_fade_grid_config(payload: dict[str, Any] | None) -> Daily
         signal_minutes=_tuple_int(payload, "signal_minutes", DEFAULT_CLOSE_FADE_SIGNAL_MINUTES),
         top_ns=_tuple_int(payload, "top_ns", DEFAULT_CLOSE_FADE_TOP_NS),
         hold_minutes=_tuple_int(payload, "hold_minutes", DEFAULT_CLOSE_FADE_HOLD_MINUTES),
+        gross_exposures=_tuple_float(payload, "gross_exposures", (1.0,)),
         scores=_tuple_str(payload, "scores", ("vol_adjusted_day_return", "day_return")),
         pump_filters=_tuple_str(payload, "pump_filters", ("all", "pump", "non_pump")),
         stop_loss_pcts=_tuple_float(payload, "stop_loss_pcts", (0.0, 0.03, 0.05, 0.08)),
+        take_profit_pcts=_tuple_float(payload, "take_profit_pcts", (0.0,)),
+        basket_stop_loss_pcts=_tuple_float(payload, "basket_stop_loss_pcts", (0.0,)),
         trailing_stop_pcts=_tuple_float(payload, "trailing_stop_pcts", (0.0, 0.015, 0.025)),
         trailing_activation_pcts=_tuple_float(payload, "trailing_activation_pcts", (0.01, 0.02)),
+        vol_trailing_stop_mults=_tuple_float(payload, "vol_trailing_stop_mults", (0.0,)),
+        vol_trailing_activation_mults=_tuple_float(payload, "vol_trailing_activation_mults", (0.0,)),
+        mfe_giveback_activation_pcts=_tuple_float(payload, "mfe_giveback_activation_pcts", (0.0,)),
+        mfe_giveback_pcts=_tuple_float(payload, "mfe_giveback_pcts", (0.0,)),
+        vwap_reversion_pcts=_tuple_float(payload, "vwap_reversion_pcts", (0.0,)),
+        liquidity_lookback_days=_tuple_int(payload, "liquidity_lookback_days", (7,)),
+        liquidity_rank_mins=_tuple_int(payload, "liquidity_rank_mins", (1,)),
+        liquidity_rank_maxs=_tuple_int(payload, "liquidity_rank_maxs", (0,)),
+        min_baseline_turnovers=_tuple_float(payload, "min_baseline_turnovers", (0.0,)),
+        account_equities=_tuple_float(payload, "account_equities", (10_000.0,)),
+        max_position_weights=_tuple_float(payload, "max_position_weights", (0.0,)),
+        max_trade_notional_pct_day_turnovers=_tuple_float(
+            payload, "max_trade_notional_pct_day_turnovers", (0.0,)
+        ),
+        max_trade_notional_pct_baseline_turnovers=_tuple_float(
+            payload, "max_trade_notional_pct_baseline_turnovers", (0.0,)
+        ),
         cost_multipliers=_tuple_float(payload, "cost_multipliers", (1.0, 2.0, 3.0)),
+    )
+
+
+def _merge_forward_test_config(payload: dict[str, Any] | None) -> ForwardTestConfig:
+    payload = dict(payload or {})
+    return ForwardTestConfig(
+        name=str(payload.get("name", "daily-close-fade-paper")),
+        min_turnover_24h=float(payload.get("min_turnover_24h", 2_000_000.0)),
+        max_spread_bps=float(payload.get("max_spread_bps", 80.0)),
+        min_open_interest_value=float(payload.get("min_open_interest_value", 0.0)),
+        max_symbols=int(payload.get("max_symbols", 0)),
+        workers=int(payload.get("workers", 16)),
+        max_entry_lag_minutes=int(payload.get("max_entry_lag_minutes", 10)),
+        send_telegram=bool(payload.get("send_telegram", False)),
     )
 
 
@@ -306,6 +407,7 @@ def load_config(path: str | Path | None = None, *, data_root: str | Path | None 
         volume_grid=_merge_volume_grid_config(raw.get("volume_grid")),
         daily_close_fade=_merge_daily_close_fade_config(raw.get("daily_close_fade")),
         daily_close_fade_grid=_merge_daily_close_fade_grid_config(raw.get("daily_close_fade_grid")),
+        forward_test=_merge_forward_test_config(raw.get("forward_test")),
         universe=_merge_universe_config(raw.get("universe")),
         costs=_merge_dataclass(CostConfig, raw.get("cost_model")),
         data_root=root,

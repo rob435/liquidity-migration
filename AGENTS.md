@@ -6,7 +6,8 @@
 - Bybit venue/data reference: `docs/bybit_aggression_carry_system_codex_spec.md`.
 - Before changing strategy, data ingestion, feature engineering, or backtesting logic, read both docs.
 - Do not rebuild the deleted legacy live runtime or blended signal stack unless explicitly requested.
-- Do not add live execution, alerts, kill switches, deployment, or exchange order submission.
+- Do not add live execution, kill switches, deployment, or exchange order submission.
+- Telegram is allowed only for paper forward-test notifications; it must not submit or approve orders.
 - Do not combine signals until each alpha clears costs standalone.
 - Use `volume-alpha` for signal sweeps, `volume-backtest` for trade-ledger testing, and `volume-grid` for concurrent parameter sweeps.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gc
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable
@@ -11,11 +12,12 @@ import polars as pl
 from .archive import download_public_trade_archive, read_public_trade_archive
 from .bybit import BybitMarketData
 from .config import ResearchConfig
-from .ingestion import aggregate_signed_flow_1h, aggregate_signed_flow_1m, normalize_funding_history, trades_to_frame
+from .ingestion import aggregate_signed_flow_1h, aggregate_signed_flow_1m, aggregate_trade_klines_1m, normalize_funding_history, trades_to_frame
 from .storage import dataset_path, write_dataset
 
 
 REST_DATASETS = {"instruments", "klines_1m", "klines_1h", "klines_5m", "funding", "open_interest", "ticker_snapshots", "recent_trades"}
+PER_SYMBOL_REST_DATASETS = {"klines_1m", "klines_1h", "klines_5m", "funding", "open_interest", "recent_trades"}
 MARKER_DIR = "_download_markers"
 
 
@@ -36,6 +38,7 @@ def download_market_data(
     datasets: set[str],
     archive_url_template: str | None = None,
     store_raw_public_trades: bool = True,
+    workers: int = 1,
 ) -> dict[str, Path]:
     client = BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet) if datasets & REST_DATASETS else None
     symbols = tuple(dict.fromkeys(symbol.upper() for symbol in symbols))
@@ -51,115 +54,186 @@ def download_market_data(
         tickers = _normalize_tickers(client.get_tickers())
         outputs["ticker_snapshots"] = write_dataset(tickers, data_root, "ticker_snapshots")
 
+    per_symbol_rest = datasets & PER_SYMBOL_REST_DATASETS
+    archive_requested = bool({"archive_trades", "archive_klines_1m"} & datasets)
+    if per_symbol_rest and workers > 1 and not archive_requested:
+        max_workers = max(1, min(workers, len(symbols)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    _download_rest_symbol_datasets,
+                    data_root,
+                    config=config,
+                    symbol=symbol,
+                    index=index,
+                    total=len(symbols),
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    datasets=per_symbol_rest,
+                    store_raw_public_trades=store_raw_public_trades,
+                ): symbol
+                for index, symbol in enumerate(symbols, start=1)
+            }
+            for future in as_completed(futures):
+                outputs.update(future.result())
+        return outputs
+
     for index, symbol in enumerate(symbols, start=1):
-        if "klines_1m" in datasets:
+        if per_symbol_rest:
             assert client is not None
-            outputs["klines_1m"] = _download_symbol_dataset(
-                data_root,
-                dataset="klines_1m",
-                symbol=symbol,
-                index=index,
-                total=len(symbols),
-                start_ms=start_ms,
-                end_ms=end_ms,
-                fetch=lambda symbol=symbol: _normalize_klines(
-                    symbol,
-                    client.get_klines(symbol, "1", start_ms, end_ms),
-                    source="bybit_rest",
-                ),
+            outputs.update(
+                _download_rest_symbol_datasets(
+                    data_root,
+                    config=config,
+                    client=client,
+                    symbol=symbol,
+                    index=index,
+                    total=len(symbols),
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    datasets=per_symbol_rest,
+                    store_raw_public_trades=store_raw_public_trades,
+                )
             )
-        if "klines_1h" in datasets:
-            assert client is not None
-            outputs["klines_1h"] = _download_symbol_dataset(
-                data_root,
-                dataset="klines_1h",
-                symbol=symbol,
-                index=index,
-                total=len(symbols),
-                start_ms=start_ms,
-                end_ms=end_ms,
-                fetch=lambda symbol=symbol: _normalize_klines(
-                    symbol,
-                    client.get_klines(symbol, "60", start_ms, end_ms),
-                    source="bybit_rest",
-                ),
-            )
-        if "klines_5m" in datasets:
-            assert client is not None
-            outputs["klines_5m"] = _download_symbol_dataset(
-                data_root,
-                dataset="klines_5m",
-                symbol=symbol,
-                index=index,
-                total=len(symbols),
-                start_ms=start_ms,
-                end_ms=end_ms,
-                fetch=lambda symbol=symbol: _normalize_klines(
-                    symbol,
-                    client.get_klines(symbol, "5", start_ms, end_ms),
-                    source="bybit_rest",
-                ),
-            )
-        if "funding" in datasets:
-            assert client is not None
-            outputs["funding"] = _download_symbol_dataset(
-                data_root,
-                dataset="funding",
-                symbol=symbol,
-                index=index,
-                total=len(symbols),
-                start_ms=start_ms,
-                end_ms=end_ms,
-                fetch=lambda symbol=symbol: _normalize_funding(symbol, client.get_funding_history(symbol, start_ms, end_ms)),
-                postprocess=normalize_funding_history,
-            )
-        if "open_interest" in datasets:
-            assert client is not None
-            outputs["open_interest"] = _download_symbol_dataset(
-                data_root,
-                dataset="open_interest",
-                symbol=symbol,
-                index=index,
-                total=len(symbols),
-                start_ms=start_ms,
-                end_ms=end_ms,
-                fetch=lambda symbol=symbol: _normalize_open_interest(symbol, client.get_open_interest(symbol, "1h", start_ms, end_ms)),
-            )
-        if "recent_trades" in datasets:
-            assert client is not None
-            print(f"recent_trades: {index}/{len(symbols)} {symbol} downloading", flush=True)
-            trades = trades_to_frame(client.get_recent_trades(symbol))
-            flow_1m = aggregate_signed_flow_1m(trades, config=config.trade_flow)
-            flow_1h = aggregate_signed_flow_1h(flow_1m)
-            if store_raw_public_trades:
-                outputs["raw_public_trades"] = write_dataset(trades, data_root, "raw_public_trades")
-            outputs["signed_flow_1m"] = write_dataset(flow_1m, data_root, "signed_flow_1m")
-            outputs["signed_flow_1h"] = write_dataset(flow_1h, data_root, "signed_flow_1h")
-            print(f"recent_trades: {index}/{len(symbols)} {symbol} rows={trades.height}", flush=True)
-            del trades, flow_1m, flow_1h
-            gc.collect()
-        if "archive_trades" in datasets and archive_url_template:
+        if archive_requested and archive_url_template:
+            include_flow = "archive_trades" in datasets
+            include_klines = "archive_klines_1m" in datasets
+            include_raw = include_flow and store_raw_public_trades
             for date in _dates_between(start_ms, end_ms):
                 url = archive_url_template.format(symbol=symbol, date=date)
                 local_path = Path(data_root) / "archives" / symbol / _archive_filename(url, date)
-                if _archive_outputs_exist(data_root, symbol=symbol, date=date, include_raw=store_raw_public_trades):
+                if _archive_outputs_exist(
+                    data_root,
+                    symbol=symbol,
+                    date=date,
+                    include_raw=include_raw,
+                    include_flow=include_flow,
+                    include_klines=include_klines,
+                ):
                     print(f"archive_trades: {symbol} {date} cached", flush=True)
-                    if store_raw_public_trades:
+                    if include_raw:
                         outputs["raw_public_trades"] = dataset_path(data_root, "raw_public_trades")
-                    outputs["signed_flow_1m"] = dataset_path(data_root, "signed_flow_1m")
-                    outputs["signed_flow_1h"] = dataset_path(data_root, "signed_flow_1h")
+                    if include_flow:
+                        outputs["signed_flow_1m"] = dataset_path(data_root, "signed_flow_1m")
+                        outputs["signed_flow_1h"] = dataset_path(data_root, "signed_flow_1h")
+                    if include_klines:
+                        outputs["klines_1m"] = dataset_path(data_root, "klines_1m")
                     continue
                 print(f"archive_trades: {symbol} {date}", flush=True)
                 trades = read_public_trade_archive(download_public_trade_archive(url, local_path), symbol=symbol)
-                flow_1m = aggregate_signed_flow_1m(trades, config=config.trade_flow)
-                flow_1h = aggregate_signed_flow_1h(flow_1m)
-                if store_raw_public_trades:
+                if include_klines:
+                    klines_1m = aggregate_trade_klines_1m(trades)
+                    outputs["klines_1m"] = write_dataset(klines_1m, data_root, "klines_1m", append=False)
+                    del klines_1m
+                if include_flow:
+                    flow_1m = aggregate_signed_flow_1m(trades, config=config.trade_flow)
+                    flow_1h = aggregate_signed_flow_1h(flow_1m)
+                    outputs["signed_flow_1m"] = write_dataset(flow_1m, data_root, "signed_flow_1m")
+                    outputs["signed_flow_1h"] = write_dataset(flow_1h, data_root, "signed_flow_1h")
+                    del flow_1m, flow_1h
+                if include_raw:
                     outputs["raw_public_trades"] = write_dataset(trades, data_root, "raw_public_trades", append=False)
-                outputs["signed_flow_1m"] = write_dataset(flow_1m, data_root, "signed_flow_1m")
-                outputs["signed_flow_1h"] = write_dataset(flow_1h, data_root, "signed_flow_1h")
-                del trades, flow_1m, flow_1h
+                del trades
                 gc.collect()
 
+    return outputs
+
+
+def _download_rest_symbol_datasets(
+    data_root: str | Path,
+    *,
+    config: ResearchConfig,
+    symbol: str,
+    index: int,
+    total: int,
+    start_ms: int,
+    end_ms: int,
+    datasets: set[str],
+    store_raw_public_trades: bool,
+    client: BybitMarketData | None = None,
+) -> dict[str, Path]:
+    local_client = client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
+    outputs: dict[str, Path] = {}
+    if "klines_1m" in datasets:
+        outputs["klines_1m"] = _download_symbol_dataset(
+            data_root,
+            dataset="klines_1m",
+            symbol=symbol,
+            index=index,
+            total=total,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            fetch=lambda: _normalize_klines(
+                symbol,
+                local_client.get_klines(symbol, "1", start_ms, end_ms),
+                source="bybit_rest",
+            ),
+        )
+    if "klines_1h" in datasets:
+        outputs["klines_1h"] = _download_symbol_dataset(
+            data_root,
+            dataset="klines_1h",
+            symbol=symbol,
+            index=index,
+            total=total,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            fetch=lambda: _normalize_klines(
+                symbol,
+                local_client.get_klines(symbol, "60", start_ms, end_ms),
+                source="bybit_rest",
+            ),
+        )
+    if "klines_5m" in datasets:
+        outputs["klines_5m"] = _download_symbol_dataset(
+            data_root,
+            dataset="klines_5m",
+            symbol=symbol,
+            index=index,
+            total=total,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            fetch=lambda: _normalize_klines(
+                symbol,
+                local_client.get_klines(symbol, "5", start_ms, end_ms),
+                source="bybit_rest",
+            ),
+        )
+    if "funding" in datasets:
+        outputs["funding"] = _download_symbol_dataset(
+            data_root,
+            dataset="funding",
+            symbol=symbol,
+            index=index,
+            total=total,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            fetch=lambda: _normalize_funding(symbol, local_client.get_funding_history(symbol, start_ms, end_ms)),
+            postprocess=normalize_funding_history,
+        )
+    if "open_interest" in datasets:
+        outputs["open_interest"] = _download_symbol_dataset(
+            data_root,
+            dataset="open_interest",
+            symbol=symbol,
+            index=index,
+            total=total,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            fetch=lambda: _normalize_open_interest(symbol, local_client.get_open_interest(symbol, "1h", start_ms, end_ms)),
+        )
+    if "recent_trades" in datasets:
+        print(f"recent_trades: {index}/{total} {symbol} downloading", flush=True)
+        trades = trades_to_frame(local_client.get_recent_trades(symbol))
+        flow_1m = aggregate_signed_flow_1m(trades, config=config.trade_flow)
+        flow_1h = aggregate_signed_flow_1h(flow_1m)
+        if store_raw_public_trades:
+            outputs["raw_public_trades"] = write_dataset(trades, data_root, "raw_public_trades")
+        outputs["signed_flow_1m"] = write_dataset(flow_1m, data_root, "signed_flow_1m")
+        outputs["signed_flow_1h"] = write_dataset(flow_1h, data_root, "signed_flow_1h")
+        print(f"recent_trades: {index}/{total} {symbol} rows={trades.height}", flush=True)
+        del trades, flow_1m, flow_1h
+        gc.collect()
     return outputs
 
 
@@ -328,10 +402,24 @@ def _archive_filename(url: str, fallback_stem: str) -> str:
     return name or f"{fallback_stem}.csv.gz"
 
 
-def _archive_outputs_exist(data_root: str | Path, *, symbol: str, date: str, include_raw: bool) -> bool:
-    datasets = ["signed_flow_1m", "signed_flow_1h"]
+def _archive_outputs_exist(
+    data_root: str | Path,
+    *,
+    symbol: str,
+    date: str,
+    include_raw: bool,
+    include_flow: bool = True,
+    include_klines: bool = False,
+) -> bool:
+    datasets = []
+    if include_flow:
+        datasets.extend(["signed_flow_1m", "signed_flow_1h"])
+    if include_klines:
+        datasets.append("klines_1m")
     if include_raw:
         datasets.append("raw_public_trades")
+    if not datasets:
+        return False
     return all(_partition_exists(data_root, dataset=dataset, symbol=symbol, date=date) for dataset in datasets)
 
 

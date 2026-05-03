@@ -12,6 +12,51 @@
 - Treat the tail-liquid reversal as a separate research lead. Do not blend it
   with the original 16-symbol result until it survives longer history,
   point-in-time universe checks, and execution/funding stress.
+- Treat current-symbol daily-close fade runs as biased benchmarks only. Proper
+  confirmation requires Bybit public archive symbol/date membership plus
+  archive-derived 1m bars so delisted/dead contracts are present.
+- Add `archive-manifest`, `archive_klines_1m`, `archive-download-klines`, and
+  `--require-archive-membership` as the first point-in-time universe controls
+  for the daily-close fade alpha.
+- Correct daily-close fade short PnL for Bybit USDT linear perps. Short returns
+  are `(entry_price - exit_price) / entry_price`; inverse-style math is wrong
+  for this contract type.
+- Lock the current daily-close fade stop at 20% per symbol. The 5% stop cuts
+  drawdown but damages returns, 40% is too loose, and no-stop exposes the book
+  to unacceptable squeeze damage. Use gross exposure, not a tighter stop, to
+  dial risk down until the point-in-time archive run says otherwise.
+- Keep the volume-alpha detailed backtester conservative for ambiguous hourly
+  bars: if a stop and take-profit are both touched inside the same 1h bar, the
+  stop wins.
+- Keep repo-local Codex hooks and AO/Composio setup out of this repo. The repo
+  should contain research code, configs, tests, and docs only; global agent
+  tooling belongs in the user's Codex/tool environment.
+- Add paper forward testing for daily-close fade before any demo execution.
+  Forward testing may scan live public Bybit data and send Telegram
+  notifications, but it must not use private Bybit keys or submit orders.
+- Do not add a fixed TP to the daily-close default. The one-year TP sweep showed
+  fixed TP caps too many winners, and VWAP-reversion exits had the same problem.
+  The daily-close paper-forward default is now the adaptive exit that survived
+  the current local checks: no fixed TP, baseline liquidity ranks 31-150, 20%
+  disaster stop, `0.25x` daily-vol trail active after the 15-minute stop delay,
+  and 20% MFE giveback after +1% favorable excursion.
+- Use dynamic baseline liquidity rank instead of extending the static ignore
+  list. The rank uses prior 7-day average quote turnover, not same-day pump
+  turnover. This keeps top 20/30-type names out without stale manual symbol
+  maintenance.
+- Do not call the simple daily-close entry alpha confirmed. Without adaptive
+  exits, the three-year current top-160 sample lost -60.96% with -90.38% max
+  drawdown. The promising result is the entry plus adaptive exit stack, and it
+  remains cost-sensitive and current-universe biased until the archive
+  walk-forward universe is complete.
+- Do not use fixed TP on the volume-alpha tail bucket yet. The 3-year sweep
+  showed the best tail result uses no TP. The earlier one-year reversed-tail
+  result is unstable until it survives the longer side-mode check.
+- Treat daily-close rank 151+ as an experimental microcap sleeve, not as part
+  of the core 31-150 book. Microcap tests must use turnover floors and
+  capacity-limited sizing from account equity, day-to-date turnover, and prior
+  baseline turnover; otherwise the backtest can invent fills that a small live
+  account still could not get cleanly.
 
 ## 2026-05-02
 

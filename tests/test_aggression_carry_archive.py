@@ -6,7 +6,16 @@ import polars as pl
 import pytest
 
 from aggression_carry import archive as archive_module
+from aggression_carry import archive_manifest as manifest_module
 from aggression_carry.archive import download_public_trade_archive, read_public_trade_archive
+from aggression_carry.archive_manifest import (
+    ArchiveKlineDownloadConfig,
+    ArchiveManifestConfig,
+    parse_symbol_directories,
+    parse_trade_archive_entries,
+    run_archive_klines_download,
+    run_archive_manifest,
+)
 from aggression_carry.config import ResearchConfig
 from aggression_carry import downloaders
 from aggression_carry.downloaders import _archive_filename, download_market_data
@@ -36,6 +45,64 @@ def test_archive_filename_preserves_compression_suffix() -> None:
     url = "https://public.bybit.com/trading/BTCUSDT/BTCUSDT2025-01-01.csv.gz"
 
     assert _archive_filename(url, "2025-01-01") == "BTCUSDT2025-01-01.csv.gz"
+
+
+def test_archive_manifest_parses_symbols_and_files() -> None:
+    root_html = """
+    <a href="BTCUSDT/">BTCUSDT/</a>
+    <a href="BTCPERP/">BTCPERP/</a>
+    <a href="ETHUSDT/">ETHUSDT/</a>
+    <a href="BTC-30JUN23/">BTC-30JUN23/</a>
+    """
+    symbol_html = """
+    <a href="BTCUSDT2025-01-01.csv.gz">BTCUSDT2025-01-01.csv.gz</a>
+    <a href="BTCUSDT2025-01-02.csv.gz">BTCUSDT2025-01-02.csv.gz</a>
+    <a href="README.txt">README.txt</a>
+    """
+
+    assert parse_symbol_directories(root_html) == ["BTCUSDT", "ETHUSDT"]
+    rows = parse_trade_archive_entries(
+        symbol_html,
+        symbol="BTCUSDT",
+        symbol_url="https://public.bybit.com/trading/BTCUSDT/",
+        start="2025-01-02",
+        end="2025-01-02",
+    )
+
+    assert rows == [
+        {
+            "symbol": "BTCUSDT",
+            "date": "2025-01-02",
+            "url": "https://public.bybit.com/trading/BTCUSDT/BTCUSDT2025-01-02.csv.gz",
+            "source": "bybit_public_trading_archive",
+        }
+    ]
+
+
+def test_run_archive_manifest_writes_symbol_date_dataset(tmp_path, monkeypatch) -> None:
+    pages = {
+        "https://public.bybit.com/trading/": '<a href="BTCUSDT/">BTCUSDT/</a><a href="ETHUSDT/">ETHUSDT/</a>',
+        "https://public.bybit.com/trading/BTCUSDT/": '<a href="BTCUSDT2025-01-01.csv.gz">file</a>',
+        "https://public.bybit.com/trading/ETHUSDT/": '<a href="ETHUSDT2025-01-01.csv.gz">file</a>',
+    }
+
+    def fake_fetch(url, *, timeout_seconds=60):
+        assert timeout_seconds == 60
+        return pages[url]
+
+    monkeypatch.setattr(manifest_module, "fetch_directory_html", fake_fetch)
+
+    payload = run_archive_manifest(
+        tmp_path,
+        config=ArchiveManifestConfig(start="2025-01-01", end="2025-01-01", workers=1, name="fixture"),
+    )
+
+    manifest = read_dataset(tmp_path, "archive_trade_manifest")
+    assert payload["rows"] == 2
+    assert manifest.select(["symbol", "date"]).sort("symbol").to_dicts() == [
+        {"symbol": "BTCUSDT", "date": "2025-01-01"},
+        {"symbol": "ETHUSDT", "date": "2025-01-01"},
+    ]
 
 
 def test_download_public_trade_archive_ignores_stale_fixed_temp_name(tmp_path, monkeypatch) -> None:
@@ -189,6 +256,132 @@ def test_archive_download_can_skip_raw_public_trade_storage(tmp_path, monkeypatc
     assert {"signed_flow_1m", "signed_flow_1h"}.issubset(outputs)
     assert "raw_public_trades" not in outputs
     assert not (tmp_path / "raw_public_trades").exists()
+
+
+def test_archive_download_can_build_1m_klines_from_public_trades(tmp_path, monkeypatch) -> None:
+    def fail_client(**_kwargs):
+        raise AssertionError("REST client should not be constructed for archive kline downloads")
+
+    def fake_download(_url, destination):
+        return destination
+
+    def fake_read(_path, *, symbol=None):
+        return pl.DataFrame(
+            [
+                {
+                    "trade_id": "1",
+                    "seq": None,
+                    "ts_ms": 1_735_689_600_100,
+                    "symbol": symbol,
+                    "side": "Buy",
+                    "price": 100.0,
+                    "size_base": 2.0,
+                    "quote_value": 200.0,
+                    "is_block_trade": False,
+                    "is_rpi_trade": False,
+                },
+                {
+                    "trade_id": "2",
+                    "seq": None,
+                    "ts_ms": 1_735_689_620_000,
+                    "symbol": symbol,
+                    "side": "Sell",
+                    "price": 102.0,
+                    "size_base": 1.0,
+                    "quote_value": 102.0,
+                    "is_block_trade": False,
+                    "is_rpi_trade": False,
+                },
+                {
+                    "trade_id": "3",
+                    "seq": None,
+                    "ts_ms": 1_735_689_659_000,
+                    "symbol": symbol,
+                    "side": "Buy",
+                    "price": 99.0,
+                    "size_base": 0.5,
+                    "quote_value": 49.5,
+                    "is_block_trade": False,
+                    "is_rpi_trade": False,
+                },
+            ]
+        )
+
+    monkeypatch.setattr(downloaders, "BybitMarketData", fail_client)
+    monkeypatch.setattr(downloaders, "download_public_trade_archive", fake_download)
+    monkeypatch.setattr(downloaders, "read_public_trade_archive", fake_read)
+
+    outputs = download_market_data(
+        tmp_path,
+        config=ResearchConfig(),
+        symbols=["BTCUSDT"],
+        start_ms=1_735_689_600_000,
+        end_ms=1_735_776_000_000,
+        datasets={"archive_klines_1m"},
+        archive_url_template="https://public.bybit.com/trading/{symbol}/{symbol}{date}.csv.gz",
+    )
+
+    klines = read_dataset(tmp_path, "klines_1m")
+    assert outputs["klines_1m"] == tmp_path / "klines_1m"
+    assert klines.select(["open", "high", "low", "close", "volume_base", "turnover_quote"]).to_dicts() == [
+        {
+            "open": 100.0,
+            "high": 102.0,
+            "low": 99.0,
+            "close": 99.0,
+            "volume_base": 3.5,
+            "turnover_quote": 351.5,
+        }
+    ]
+
+
+def test_archive_manifest_downloader_resumes_and_writes_klines(tmp_path, monkeypatch) -> None:
+    pages = {
+        "https://public.bybit.com/trading/": '<a href="BTCUSDT/">BTCUSDT/</a>',
+        "https://public.bybit.com/trading/BTCUSDT/": '<a href="BTCUSDT2025-01-01.csv.gz">file</a>',
+    }
+
+    monkeypatch.setattr(manifest_module, "fetch_directory_html", lambda url, *, timeout_seconds=60: pages[url])
+    run_archive_manifest(
+        tmp_path,
+        config=ArchiveManifestConfig(start="2025-01-01", end="2025-01-01", workers=1, name="fixture"),
+    )
+
+    monkeypatch.setattr(manifest_module, "download_public_trade_archive", lambda _url, destination: destination)
+    monkeypatch.setattr(
+        manifest_module,
+        "read_public_trade_archive",
+        lambda _path, *, symbol=None: pl.DataFrame(
+            [
+                {
+                    "trade_id": "1",
+                    "seq": None,
+                    "ts_ms": 1_735_689_600_100,
+                    "symbol": symbol,
+                    "side": "Buy",
+                    "price": 10.0,
+                    "size_base": 1.0,
+                    "quote_value": 10.0,
+                    "is_block_trade": False,
+                    "is_rpi_trade": False,
+                }
+            ]
+        ),
+    )
+
+    payload = run_archive_klines_download(
+        tmp_path,
+        config=ArchiveKlineDownloadConfig(start="2025-01-01", end="2025-01-01", workers=1, name="fixture"),
+    )
+    cached_payload = run_archive_klines_download(
+        tmp_path,
+        config=ArchiveKlineDownloadConfig(start="2025-01-01", end="2025-01-01", workers=1, name="fixture"),
+    )
+
+    assert payload["downloaded"] == 1
+    assert payload["failures"] == 0
+    assert cached_payload["rows"] == 0
+    assert read_dataset(tmp_path, "klines_1m").height == 1
 
 
 def test_rest_kline_download_writes_each_symbol_and_resumes(tmp_path, monkeypatch, capsys) -> None:

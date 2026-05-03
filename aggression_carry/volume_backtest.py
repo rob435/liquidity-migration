@@ -22,6 +22,7 @@ from .volume_alpha import MS_PER_DAY, MS_PER_HOUR, VOLUME_SCORE_COLUMNS, build_v
 
 _GRID_FEATURES: pl.DataFrame | None = None
 _GRID_KLINES: pl.DataFrame | None = None
+_GRID_RANK_FEATURES: pl.DataFrame | None = None
 
 
 def run_volume_trade_backtest(
@@ -39,12 +40,14 @@ def run_volume_trade_backtest(
     if klines.is_empty():
         raise RuntimeError("klines_1h is empty; run download-data first")
 
-    features = build_volume_features(klines)
+    all_features = build_volume_features(klines)
+    features = _filter_signal_window(all_features, config)
     trades = backtest_volume_trades(
         features,
         klines,
         config=config,
         round_trip_cost_bps=costs.base_entry_exit_cost_bps * config.cost_multiplier,
+        rank_features=all_features,
     )
     baskets = summarize_baskets(trades, config=config)
     equity = build_equity_curve(baskets)
@@ -117,7 +120,8 @@ def run_volume_grid(
     if klines.is_empty():
         raise RuntimeError("klines_1h is empty; run download-data first")
 
-    features = build_volume_features(klines)
+    all_features = build_volume_features(klines)
+    features = _filter_signal_window(all_features, base)
     variants = list(iter_grid_configs(grid, base))
     tasks = [
         (f"grid-{index:04d}", config, costs.base_entry_exit_cost_bps * config.cost_multiplier)
@@ -126,14 +130,21 @@ def run_volume_grid(
     workers = _resolve_workers(max_workers, len(tasks))
     if workers <= 1:
         rows = [
-            _evaluate_grid_variant(features, klines, grid_id=grid_id, config=config, round_trip_cost_bps=round_trip_cost_bps)
+            _evaluate_grid_variant(
+                features,
+                klines,
+                grid_id=grid_id,
+                config=config,
+                round_trip_cost_bps=round_trip_cost_bps,
+                rank_features=all_features,
+            )
             for grid_id, config, round_trip_cost_bps in tasks
         ]
     else:
         with ProcessPoolExecutor(
             max_workers=workers,
             initializer=_init_grid_worker,
-            initargs=(features, klines),
+            initargs=(features, klines, all_features),
         ) as executor:
             rows = list(executor.map(_evaluate_grid_variant_worker, tasks, chunksize=_grid_chunksize(len(tasks), workers)))
 
@@ -172,14 +183,15 @@ def _grid_chunksize(task_count: int, workers: int) -> int:
     return max(1, math.ceil(task_count / (workers * 4)))
 
 
-def _init_grid_worker(features: pl.DataFrame, klines: pl.DataFrame) -> None:
-    global _GRID_FEATURES, _GRID_KLINES
+def _init_grid_worker(features: pl.DataFrame, klines: pl.DataFrame, rank_features: pl.DataFrame) -> None:
+    global _GRID_FEATURES, _GRID_KLINES, _GRID_RANK_FEATURES
     _GRID_FEATURES = features
     _GRID_KLINES = klines
+    _GRID_RANK_FEATURES = rank_features
 
 
 def _evaluate_grid_variant_worker(task: tuple[str, VolumeBacktestConfig, float]) -> dict[str, Any]:
-    if _GRID_FEATURES is None or _GRID_KLINES is None:
+    if _GRID_FEATURES is None or _GRID_KLINES is None or _GRID_RANK_FEATURES is None:
         raise RuntimeError("grid worker was not initialized")
     grid_id, config, round_trip_cost_bps = task
     return _evaluate_grid_variant(
@@ -188,6 +200,7 @@ def _evaluate_grid_variant_worker(task: tuple[str, VolumeBacktestConfig, float])
         grid_id=grid_id,
         config=config,
         round_trip_cost_bps=round_trip_cost_bps,
+        rank_features=_GRID_RANK_FEATURES,
     )
 
 
@@ -198,8 +211,15 @@ def _evaluate_grid_variant(
     grid_id: str,
     config: VolumeBacktestConfig,
     round_trip_cost_bps: float,
+    rank_features: pl.DataFrame | None = None,
 ) -> dict[str, Any]:
-    trades = backtest_volume_trades(features, klines, config=config, round_trip_cost_bps=round_trip_cost_bps)
+    trades = backtest_volume_trades(
+        features,
+        klines,
+        config=config,
+        round_trip_cost_bps=round_trip_cost_bps,
+        rank_features=rank_features,
+    )
     baskets = summarize_baskets(trades, config=config)
     equity = build_equity_curve(baskets)
     summary = summarize_trade_backtest(trades, baskets, equity, config=config)
@@ -253,6 +273,8 @@ def iter_grid_configs(
         configs.append(
             VolumeBacktestConfig(
                 score=score,
+                start_date=base_config.start_date,
+                end_date=base_config.end_date,
                 quantile=quantile,
                 hold_days=hold_days,
                 rebalance_days=hold_days,
@@ -286,6 +308,7 @@ def backtest_volume_trades(
     *,
     config: VolumeBacktestConfig,
     round_trip_cost_bps: float,
+    rank_features: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     _validate_config(config)
     score_col = _score_column(config.score)
@@ -296,7 +319,12 @@ def backtest_volume_trades(
 
     bars = _price_bars_by_symbol(klines)
     stop_lookup = _volatility_stop_lookup(klines, lookback_days=config.vol_stop_lookback_days)
-    rank_lookup = _rank_lookup(features, score_col=score_col, entry_delay_hours=config.entry_delay_hours, config=config)
+    rank_lookup = _rank_lookup(
+        rank_features if rank_features is not None else features,
+        score_col=score_col,
+        entry_delay_hours=config.entry_delay_hours,
+        config=config,
+    )
     first_signal_ts = int(features["ts_ms"].min())
     rows: list[dict[str, Any]] = []
 
@@ -605,6 +633,7 @@ def format_volume_backtest_report(payload: dict[str, Any]) -> str:
         f"- Side mode: `{config['side_mode']}`",
         f"- Quantile bucket: {config['quantile']:.0%}",
         f"- Hold/rebalance: {config['hold_days']}d / {config['rebalance_days']}d",
+        f"- Signal window: {_window_label(config)}",
         f"- Gross exposure: {config['gross_exposure']:.2f}x",
         f"- Entry delay: {config['entry_delay_hours']}h after daily signal close",
         f"- Stop: {_grid_stop_label(config)}",
@@ -1107,8 +1136,8 @@ def _validate_config(config: VolumeBacktestConfig) -> None:
         raise ValueError("min/max stop loss pct values must be non-negative")
     if config.max_stop_loss_pct and config.min_stop_loss_pct > config.max_stop_loss_pct:
         raise ValueError("min_stop_loss_pct cannot exceed max_stop_loss_pct")
-    if not 0.0 <= config.take_profit_pct < 10.0:
-        raise ValueError("take_profit_pct must be non-negative and sane")
+    if not 0.0 <= config.take_profit_pct < 1.0:
+        raise ValueError("take_profit_pct must be in [0, 1) for long/short linear perp tests")
     if config.min_symbols < 4:
         raise ValueError("min_symbols must be at least 4")
     if config.cost_multiplier < 0.0:
@@ -1123,6 +1152,35 @@ def _validate_config(config: VolumeBacktestConfig) -> None:
         raise ValueError("universe_rank_max must be 0 or >= universe_rank_min")
     if config.universe_min_daily_turnover < 0.0:
         raise ValueError("universe_min_daily_turnover must be non-negative")
+    start_ms = _date_boundary_ms(config.start_date)
+    end_ms = _date_boundary_ms(config.end_date)
+    if start_ms is not None and end_ms is not None and end_ms <= start_ms:
+        raise ValueError("end_date must be after start_date")
+
+
+def _filter_signal_window(features: pl.DataFrame, config: VolumeBacktestConfig) -> pl.DataFrame:
+    if features.is_empty():
+        return features
+    start_ms = _date_boundary_ms(config.start_date)
+    end_ms = _date_boundary_ms(config.end_date)
+    filtered = features
+    if start_ms is not None:
+        filtered = filtered.filter(pl.col("ts_ms") >= start_ms)
+    if end_ms is not None:
+        filtered = filtered.filter(pl.col("ts_ms") < end_ms)
+    return filtered
+
+
+def _date_boundary_ms(value: str) -> int | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    else:
+        dt = dt.astimezone(UTC)
+    return int(dt.timestamp() * 1000)
 
 
 def _filter_universe(part: pl.DataFrame, config: VolumeBacktestConfig) -> pl.DataFrame:
@@ -1599,6 +1657,12 @@ def _currency_or_disabled(value: float) -> str:
     if value <= 0.0:
         return "disabled"
     return f"${value:,.0f}"
+
+
+def _window_label(row: dict[str, Any]) -> str:
+    start = str(row.get("start_date") or "").strip() or "all history"
+    end = str(row.get("end_date") or "").strip() or "open ended"
+    return f"{start} <= signal < {end}"
 
 
 def _symbols_or_all(value: list[str] | tuple[str, ...]) -> str:

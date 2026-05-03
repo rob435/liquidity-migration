@@ -14,6 +14,8 @@ volume_alpha:
   quantiles: [0.25, 0.50]
 volume_backtest:
   score: dollar_volume_rank
+  start_date: "2025-01-01"
+  end_date: "2025-12-31"
   quantile: 0.30
   hold_days: 3
   rebalance_days: 3
@@ -24,6 +26,43 @@ volume_grid:
   hold_days: [3, 7]
   fixed_stop_loss_pcts: [0.0, 0.20]
   rank_exit_modes: [false, true]
+daily_close_fade:
+  signal_minute: 1335
+  liquidity_lookback_days: 9
+  liquidity_rank_min: 31
+  liquidity_rank_max: 150
+  min_baseline_turnover: 123000.0
+  account_equity: 25000.0
+  max_position_weight: 0.20
+  max_trade_notional_pct_of_day_turnover: 0.002
+  max_trade_notional_pct_of_baseline_turnover: 0.005
+  stop_loss_pct: 0.20
+  take_profit_pct: 0.05
+  vol_trailing_stop_mult: 0.5
+  vol_trailing_activation_mult: 1.0
+  mfe_giveback_activation_pct: 0.03
+  mfe_giveback_pct: 0.40
+  vwap_reversion_pct: 0.50
+daily_close_fade_grid:
+  stop_loss_pcts: [0.0, 0.20]
+  take_profit_pcts: [0.0, 0.03, 0.05]
+  vol_trailing_stop_mults: [0.0, 0.5]
+  vol_trailing_activation_mults: [0.0, 1.0]
+  mfe_giveback_activation_pcts: [0.0, 0.03]
+  mfe_giveback_pcts: [0.0, 0.40]
+  vwap_reversion_pcts: [0.0, 0.50]
+  liquidity_lookback_days: [7, 14]
+  liquidity_rank_mins: [31, 81]
+  liquidity_rank_maxs: [80, 150]
+  min_baseline_turnovers: [0.0, 1000000.0]
+  account_equities: [10000.0, 25000.0]
+  max_position_weights: [0.0, 0.20]
+  max_trade_notional_pct_day_turnovers: [0.0, 0.002]
+  max_trade_notional_pct_baseline_turnovers: [0.0, 0.005]
+forward_test:
+  min_turnover_24h: 3000000.0
+  max_spread_bps: 50.0
+  max_entry_lag_minutes: 15
 universe:
   min_turnover_24h: 5000000.0
   rank_start: 21
@@ -39,6 +78,8 @@ cost_model:
 
     assert config.volume_alpha.horizons_d == (1, 7)
     assert config.volume_alpha.quantiles == (0.25, 0.50)
+    assert config.volume_backtest.start_date == "2025-01-01"
+    assert config.volume_backtest.end_date == "2025-12-31"
     assert config.volume_backtest.quantile == 0.30
     assert config.volume_backtest.hold_days == 3
     assert config.volume_backtest.stop_mode == "volatility"
@@ -47,6 +88,40 @@ cost_model:
     assert config.volume_grid.hold_days == (3, 7)
     assert config.volume_grid.fixed_stop_loss_pcts == (0.0, 0.20)
     assert config.volume_grid.rank_exit_modes == (False, True)
+    assert config.daily_close_fade.signal_minute == 1335
+    assert config.daily_close_fade.liquidity_lookback_days == 9
+    assert config.daily_close_fade.liquidity_rank_min == 31
+    assert config.daily_close_fade.liquidity_rank_max == 150
+    assert config.daily_close_fade.min_baseline_turnover == 123000.0
+    assert config.daily_close_fade.account_equity == 25_000.0
+    assert config.daily_close_fade.max_position_weight == 0.20
+    assert config.daily_close_fade.max_trade_notional_pct_of_day_turnover == 0.002
+    assert config.daily_close_fade.max_trade_notional_pct_of_baseline_turnover == 0.005
+    assert config.daily_close_fade.stop_loss_pct == 0.20
+    assert config.daily_close_fade.take_profit_pct == 0.05
+    assert config.daily_close_fade.vol_trailing_stop_mult == 0.5
+    assert config.daily_close_fade.vol_trailing_activation_mult == 1.0
+    assert config.daily_close_fade.mfe_giveback_activation_pct == 0.03
+    assert config.daily_close_fade.mfe_giveback_pct == 0.40
+    assert config.daily_close_fade.vwap_reversion_pct == 0.50
+    assert config.daily_close_fade_grid.stop_loss_pcts == (0.0, 0.20)
+    assert config.daily_close_fade_grid.take_profit_pcts == (0.0, 0.03, 0.05)
+    assert config.daily_close_fade_grid.vol_trailing_stop_mults == (0.0, 0.5)
+    assert config.daily_close_fade_grid.vol_trailing_activation_mults == (0.0, 1.0)
+    assert config.daily_close_fade_grid.mfe_giveback_activation_pcts == (0.0, 0.03)
+    assert config.daily_close_fade_grid.mfe_giveback_pcts == (0.0, 0.40)
+    assert config.daily_close_fade_grid.vwap_reversion_pcts == (0.0, 0.50)
+    assert config.daily_close_fade_grid.liquidity_lookback_days == (7, 14)
+    assert config.daily_close_fade_grid.liquidity_rank_mins == (31, 81)
+    assert config.daily_close_fade_grid.liquidity_rank_maxs == (80, 150)
+    assert config.daily_close_fade_grid.min_baseline_turnovers == (0.0, 1_000_000.0)
+    assert config.daily_close_fade_grid.account_equities == (10_000.0, 25_000.0)
+    assert config.daily_close_fade_grid.max_position_weights == (0.0, 0.20)
+    assert config.daily_close_fade_grid.max_trade_notional_pct_day_turnovers == (0.0, 0.002)
+    assert config.daily_close_fade_grid.max_trade_notional_pct_baseline_turnovers == (0.0, 0.005)
+    assert config.forward_test.min_turnover_24h == 3_000_000.0
+    assert config.forward_test.max_spread_bps == 50.0
+    assert config.forward_test.max_entry_lag_minutes == 15
     assert config.universe.min_turnover_24h == 5_000_000.0
     assert config.universe.rank_start == 21
     assert config.universe.rank_end == 80

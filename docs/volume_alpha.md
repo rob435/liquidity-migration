@@ -50,6 +50,7 @@ data/agc-bybit-3m/volume_backtest_grid
 data/universe-research/reports/universe_top160-current.md
 data/universe-research/reports/universe_top160-current_symbols.txt
 data/agc-bybit-1y-auto150-20250503-20260503/reports/volume_bucket_sweep_summary.md
+data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_oos_validation/volume_oos_validation_summary.md
 ```
 
 ## Current Scope
@@ -62,6 +63,9 @@ data/agc-bybit-1y-auto150-20250503-20260503/reports/volume_bucket_sweep_summary.
 - Tests base, 2x, and 3x cost assumptions.
 - Runs a detailed trade-ledger backtest for the current lead:
   `dollar_volume_rank`, long high-volume names, short low-volume names.
+- Supports signal date windows on `volume-backtest` and `volume-grid` with
+  `--start` and `--end`. The start is inclusive and the end is exclusive.
+  Trades opened before the end can still exit naturally after the end date.
 - Records every trade entry, exit, side, score, rank, stop level, exit reason,
   MAE/MFE, gross return, cost return, and net return.
 - Runs concurrent parameter grids over hold period, quantile, no/fixed/volatility
@@ -82,6 +86,7 @@ The default detailed test is intentionally simple:
 - hold days: `7`
 - rebalance days: `7`
 - entry delay: `1h` after the daily signal close
+- signal window: all downloaded history unless `--start` / `--end` is set
 - stop loss: `8%` by default; set `--stop-loss-pct 0` to disable for comparison
 - take profit: disabled
 - costs: configured round-trip cost model
@@ -97,6 +102,38 @@ Exit reasons currently include:
 - `rank_exit`
 - `max_hold`
 - `data_end`
+
+## Stop / Take-Profit Accounting
+
+The detailed `volume-backtest` command uses linear perp return math:
+
+```text
+long return  = exit / entry - 1
+short return = (entry - exit) / entry
+```
+
+Stops and take-profits are side-aware:
+
+- long stop: `entry * (1 - stop_loss_pct)`
+- short stop: `entry * (1 + stop_loss_pct)`
+- long take profit: `entry * (1 + take_profit_pct)`
+- short take profit: `entry * (1 - take_profit_pct)`
+
+If both stop and take-profit are touched inside the same 1h OHLC bar, the
+backtester exits at the stop. This is deliberately conservative because 1h bars
+do not reveal the true intrabar path.
+
+Returns are weighted before basket aggregation. A 10% trade move at `0.25`
+notional weight contributes 2.5% to that basket before costs.
+
+Current limitations:
+
+- stop/TP fills assume the trigger price is fillable inside the bar
+- slippage beyond the configured round-trip cost model is not modeled
+- `take_profit_pct` must be below 100%, because the system tests long/short
+  linear perps and a short-side TP cannot exceed the entry price
+- the simple `volume-alpha` IC/forward-return sweep has no TP/SL; TP/SL only
+  exists in the detailed `volume-backtest` lifecycle
 
 The detailed report also writes:
 
@@ -146,10 +183,52 @@ The current bucket definitions are:
 
 - core: daily ranks 1-20
 - mid: daily ranks 21-80
-- tail: daily ranks 81-150
+- tail: daily ranks 81-160
 
 The bucket filter is dynamic by day and based on trailing daily quote turnover
 inside the downloaded universe.
+
+Latest 3-year current-universe bucket grid:
+
+- core ranks 1-20 favor `long_high_short_low`, meaning high-volume major/core
+  names still behave more like trend/liquidity winners than pump fades.
+- mid ranks 21-80 favor `short_high_long_low`, meaning the sign flips below
+  the core bucket.
+- tail ranks 81-160 also favor `short_high_long_low`, but the most aggressive
+  return row is stop-heavy and should be treated as an optimized research lead,
+  not the production default.
+- broad ranks 1-160 can also work with `short_high_long_low`, but it mixes
+  regimes and is less interpretable than explicit bucket sleeves.
+
+Current frozen candidate rules for stability testing:
+
+| Candidate | Ranks | Direction | Hold | Quantile | Stop | Rank exit | Status |
+|---|---:|---|---:|---:|---|---:|---|
+| core trend | 1-20 | long high / short low | 10d | 20% | fixed 30% | on | not active; recent years weak |
+| mid fade | 21-80 | short high / long low | 10d | 10% | 3x daily vol | off | promising but failed year 2 |
+| tail fade clean | 81-160 | short high / long low | 5d | 20% | none | off | best clean tail lead, recent-listing heavy |
+| tail fade max-return | 81-160 | short high / long low | 10d | 50% | fixed 12% | off | high return, optimized/suspicious |
+| broad fade | 1-160 | short high / long low | 21d | 10% | none | off | robust full-period, mixed regime |
+
+Stability validation output:
+
+```text
+data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_oos_validation/volume_oos_validation_summary.md
+data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_oos_validation/volume_universe_coverage_by_month.csv
+```
+
+Current honest read:
+
+- The full 3-year numbers are encouraging, but they are not final proof because
+  they use a current top-160 universe.
+- Tail ranks had no trades in year 1 because the downloaded current top-160
+  universe only had 57-70 active historical symbols in early 2023. The tail
+  result is therefore mostly a recent-listing / recent-market result.
+- Year 2 is the stress period. Mid fade lost -30.87%, tail clean lost -5.47%,
+  and broad fade lost -9.81% at 1x costs. Any official volume sleeve must be
+  judged against that failure period.
+- The next validation gate is a true point-in-time universe from Bybit archive
+  availability/listing dates, not a wider current-universe download.
 
 ## Download Resume Behavior
 
@@ -206,6 +285,26 @@ The current grid tests:
 - optional reverse side: `short_high_long_low`
 - optional daily universe rank filters via `--universe-rank-min` and
   `--universe-rank-max`
+
+Use date windows for stability checks:
+
+```bash
+python -m aggression_carry \
+  --data-root data/agc-bybit-3y-auto150-20230503-20260503 \
+  --config configs/volume_alpha.default.yaml \
+  volume-backtest \
+  --start 2025-05-03 \
+  --end 2026-05-03 \
+  --score dollar_volume_rank \
+  --universe-rank-min 81 \
+  --universe-rank-max 160 \
+  --side-mode short_high_long_low \
+  --hold-days 5 \
+  --rebalance-days 5 \
+  --quantile 0.20 \
+  --stop-mode none \
+  --stop-loss-pct 0
+```
 
 GPU note: this is not a CUDA workload yet. The bottleneck is independent Python
 trade simulation variants, so process-level CPU parallelism is the right first
@@ -268,24 +367,21 @@ Do not combine this alpha with other signals until it clears costs standalone.
 If the standalone volume alpha fails, the composite should not receive a volume
 component just because it sounds plausible.
 
-The current corrected 3-month Bybit run says the expansion variants fail, while
+The corrected Bybit runs say the expansion variants fail, while
 `dollar_volume_rank` is the only useful variant so far. Treat that as a lead to
-refine, not as proof of a production strategy. The detailed backtest is the next
-tool for deciding whether that lead survives actual trade lifecycle assumptions.
+refine, not as proof of a production strategy.
 
 ## Current Broad-Universe Read
 
-One-year current top-150 snapshot test, using 2025-05-03 to 2026-05-03:
+The broad-universe result is not one simple "volume is bullish" rule. It splits
+by liquidity bucket:
 
-- core ranks 1-20: best `long_high_short_low`, 3d hold, 20% buckets,
-  rank exit on, +67.86%, Sharpe-like 1.14, max drawdown -26.52%
-- mid ranks 21-80: best `short_high_long_low`, 14d hold, 20% buckets,
-  rank exit off, +38.92%, Sharpe-like 1.30, max drawdown -11.56%
-- tail ranks 81-150: best `short_high_long_low`, 14d hold, 20% buckets,
-  rank exit off, +154.10%, Sharpe-like 2.08, max drawdown -16.97%
+- Core/top names: high dollar-volume rank tends to trend.
+- Mid/tail names: high dollar-volume rank tends to fade.
+- The 2024-2025 year is the weak point for the fade sleeves, so do not mark the
+  volume bucket system as official until point-in-time universe testing explains
+  or survives that period.
 
-This is not simply the original "long high-volume / short low-volume" result
-getting stronger in lower caps. In the tail bucket the best result reverses the
-direction: long the lowest-volume names inside the tail bucket and short the
-highest-volume names inside that same tail bucket. That is a different lead and
-must be tested separately.
+Current priority: build and test point-in-time historical universe membership.
+Downloading every current Bybit listing is useful, but it still cannot prove
+what a trader would have seen each day in 2023 or 2024.
