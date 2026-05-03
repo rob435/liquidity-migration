@@ -97,6 +97,35 @@ python -m aggression_carry \
   forward-run
 ```
 
+Run all forward sleeves:
+
+```bash
+python -m aggression_carry \
+  --data-root data/forward-paper \
+  --config configs/volume_alpha.default.yaml \
+  forward-run-sleeves
+```
+
+Sleeves:
+
+```text
+control_top_1_30: ranks 1-30, includes majors, 0.25x gross cap
+core_31_150: ranks 31-150, top 5, current locked core logic
+microcap_151_plus: ranks 151+, top 3, 0.50x gross cap, turnover floors,
+                   and capacity-limited sizing for a $10k account
+```
+
+Each sleeve keeps an isolated ledger:
+
+```text
+data/forward-paper/forward_sleeves/control_top_1_30/
+data/forward-paper/forward_sleeves/core_31_150/
+data/forward-paper/forward_sleeves/microcap_151_plus/
+```
+
+This isolation matters. If the sleeves shared one ledger, same-day basket IDs
+and same-symbol trade IDs could block or overwrite each other.
+
 Write a report from the current paper ledger:
 
 ```bash
@@ -149,9 +178,20 @@ python -m aggression_carry \
   --telegram
 ```
 
+For the sleeve runner:
+
+```bash
+python -m aggression_carry \
+  --data-root data/forward-paper \
+  --config configs/volume_alpha.default.yaml \
+  forward-run-sleeves \
+  --telegram
+```
+
 The message includes scan status, candidate count, new paper trades, open
-trades, closed trades, and the top candidates. Missing env vars make Telegram a
-no-op.
+trades, closed trades, and the top candidates. The sleeve runner sends one
+aggregate message instead of one message per sleeve. Missing env vars make
+Telegram a no-op.
 
 ## Scheduling
 
@@ -166,6 +206,9 @@ Useful schedule:
 - every 5-15 minutes until flat: `forward-run` to mark stops/exits
 - after the window: `forward-report`
 
+For the three-sleeve observation run, replace `forward-run` with
+`forward-run-sleeves` at the same times.
+
 ## Outputs
 
 ```text
@@ -174,9 +217,14 @@ data/forward-paper/reports/forward_scan_candidates.csv
 data/forward-paper/reports/forward_paper_report.md
 data/forward-paper/reports/forward_paper_trades.csv
 data/forward-paper/reports/forward_paper_baskets.csv
+data/forward-paper/reports/forward_sleeves_report.md
+data/forward-paper/reports/forward_sleeves_results.csv
+data/forward-paper/reports/forward_sleeves/<sleeve>/forward_scan_report.md
+data/forward-paper/reports/forward_sleeves/<sleeve>/forward_paper_report.md
 data/forward-paper/forward_scan_features
 data/forward-paper/forward_paper_trades
 data/forward-paper/forward_paper_baskets
+data/forward-paper/forward_sleeves/<sleeve>/forward_paper_trades
 ```
 
 ## Evidence Standard

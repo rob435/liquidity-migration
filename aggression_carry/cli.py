@@ -19,7 +19,7 @@ from .config import (
 )
 from .daily_close_fade import run_daily_close_fade, run_daily_close_fade_grid, run_daily_close_fade_sleeves
 from .downloaders import download_market_data, parse_date_ms
-from .forward_test import run_forward_once, run_forward_report, run_forward_scan
+from .forward_test import run_forward_once, run_forward_report, run_forward_scan, run_forward_sleeves
 from .ingestion import generate_fixture_data
 from .universe import run_discover_universe
 from .volume_alpha import run_volume_alpha
@@ -246,6 +246,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_forward_runtime_args(forward_run)
     forward_run.add_argument("--telegram", action="store_true", help="Send a Telegram paper-test update if env vars are configured.")
 
+    forward_sleeves = subparsers.add_parser(
+        "forward-run-sleeves",
+        aliases=["forward-sleeves"],
+        help="Run core, microcap, and control paper forward-test sleeves.",
+    )
+    _add_forward_fade_args(forward_sleeves)
+    _add_forward_runtime_args(forward_sleeves)
+    forward_sleeves.add_argument("--telegram", action="store_true", help="Send one Telegram summary for all paper sleeves.")
+
     subparsers.add_parser("forward-report", help="Write a report from the paper forward-test ledger.")
     return parser
 
@@ -444,6 +453,24 @@ def main(argv: list[str] | None = None) -> int:
             f"open={payload['rows']['open_trades']} "
             f"closed={payload['rows']['closed_trades']} "
             f"path={data_root / 'reports' / 'forward_paper_report.md'}"
+        )
+        return 0
+
+    if args.command in {"forward-run-sleeves", "forward-sleeves"}:
+        fade_config = _close_fade_config_from_args(config.daily_close_fade, args)
+        forward_config = _forward_config_from_args(config.forward_test, args)
+        payload = run_forward_sleeves(
+            data_root,
+            config=config,
+            fade_config=fade_config,
+            forward_config=forward_config,
+            now=_parse_now(args.now),
+            send_telegram=args.telegram or forward_config.send_telegram,
+        )
+        print(
+            "forward sleeves "
+            f"sleeves={payload['rows']['sleeves']} "
+            f"path={data_root / 'reports' / 'forward_sleeves_report.md'}"
         )
         return 0
 

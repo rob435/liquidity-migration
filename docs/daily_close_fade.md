@@ -299,6 +299,29 @@ daily-close fade candidate logic, opens paper shorts only, tracks exits, and can
 send Telegram notifications. It does not use Bybit private keys and does not
 submit demo or live orders.
 
+Use the sleeve runner for the current paper-forward campaign:
+
+```bash
+python -m aggression_carry \
+  --data-root data/forward-paper \
+  --config configs/volume_alpha.default.yaml \
+  forward-run-sleeves
+```
+
+This runs isolated ledgers for:
+
+```text
+control_top_1_30
+core_31_150
+microcap_151_plus
+```
+
+The aggregate report is:
+
+```text
+data/forward-paper/reports/forward_sleeves_report.md
+```
+
 ## Current Caution
 
 One-minute data is much heavier than the 1h volume-rank path. Start with 3

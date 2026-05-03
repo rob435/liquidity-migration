@@ -172,6 +172,127 @@ def run_forward_once(
     return payload
 
 
+def run_forward_sleeves(
+    data_root: str | Path,
+    *,
+    config: ResearchConfig,
+    fade_config: DailyCloseFadeConfig | None = None,
+    forward_config: ForwardTestConfig | None = None,
+    now: datetime | None = None,
+    client: Any | None = None,
+    report_dir: str | Path | None = None,
+    send_telegram: bool | None = None,
+    sleeves: dict[str, DailyCloseFadeConfig] | None = None,
+) -> dict[str, Any]:
+    fade = fade_config or config.daily_close_fade
+    forward = forward_config or config.forward_test
+    now_dt = _as_utc(now or datetime.now(tz=UTC))
+    sleeve_configs = sleeves or default_forward_sleeves(fade)
+    output_dir = Path(report_dir or Path(data_root) / "reports")
+    sleeve_root_base = Path(data_root) / "forward_sleeves"
+    results = []
+
+    for name, sleeve_fade in sleeve_configs.items():
+        sleeve_root = sleeve_root_base / _safe_sleeve_name(name)
+        sleeve_report_dir = output_dir / "forward_sleeves" / _safe_sleeve_name(name)
+        payload = run_forward_once(
+            sleeve_root,
+            config=config,
+            fade_config=sleeve_fade,
+            forward_config=forward,
+            now=now_dt,
+            client=client,
+            report_dir=sleeve_report_dir,
+            send_telegram=False,
+        )
+        summary = payload.get("summary") or summarize_forward_paper_trades(read_dataset(sleeve_root, "forward_paper_trades"))
+        results.append(
+            {
+                "sleeve": name,
+                "data_root": str(sleeve_root),
+                "report_dir": str(sleeve_report_dir),
+                "signal_minute": sleeve_fade.signal_minute,
+                "top_n": sleeve_fade.top_n,
+                "gross_exposure": sleeve_fade.gross_exposure,
+                "liquidity_rank_min": sleeve_fade.liquidity_rank_min,
+                "liquidity_rank_max": sleeve_fade.liquidity_rank_max,
+                "min_baseline_turnover": sleeve_fade.min_baseline_turnover,
+                "min_day_turnover": sleeve_fade.min_day_turnover,
+                "min_last_60m_turnover": sleeve_fade.min_last_60m_turnover,
+                "max_position_weight": sleeve_fade.max_position_weight,
+                "max_trade_notional_pct_of_day_turnover": sleeve_fade.max_trade_notional_pct_of_day_turnover,
+                "max_trade_notional_pct_of_baseline_turnover": sleeve_fade.max_trade_notional_pct_of_baseline_turnover,
+                "scan_status": payload.get("scan", {}).get("status"),
+                "universe": payload.get("scan", {}).get("rows", {}).get("universe", 0),
+                "candidates": payload.get("scan", {}).get("rows", {}).get("candidates", 0),
+                "new_trades": payload.get("rows", {}).get("new_trades", 0),
+                "open_trades": payload.get("rows", {}).get("open_trades", 0),
+                "closed_trades": payload.get("rows", {}).get("closed_trades", 0),
+                "total_trades": payload.get("rows", {}).get("total_trades", 0),
+                "marked_net_return": summary.get("marked_net_return", 0.0),
+                "closed_net_return": summary.get("closed_net_return", 0.0),
+                "capacity_limited_trades": summary.get("capacity_limited_trades", 0),
+                "stop_loss_exits": summary.get("stop_loss_exits", 0),
+                "take_profit_exits": summary.get("take_profit_exits", 0),
+                "max_hold_exits": summary.get("max_hold_exits", 0),
+                "trailing_stop_exits": summary.get("trailing_stop_exits", 0),
+                "vol_trailing_stop_exits": summary.get("vol_trailing_stop_exits", 0),
+                "mfe_giveback_exits": summary.get("mfe_giveback_exits", 0),
+                "vwap_reversion_exits": summary.get("vwap_reversion_exits", 0),
+            }
+        )
+
+    payload = {
+        "now": now_dt.isoformat(),
+        "rows": {"sleeves": len(results)},
+        "config": {"forward": asdict(forward)},
+        "results": results,
+    }
+    _write_forward_sleeves_outputs(payload, output_dir=output_dir)
+    telegram_enabled = forward.send_telegram if send_telegram is None else send_telegram
+    send_telegram_message(format_forward_sleeves_message(payload), enabled=telegram_enabled)
+    return payload
+
+
+def default_forward_sleeves(base: DailyCloseFadeConfig) -> dict[str, DailyCloseFadeConfig]:
+    return {
+        "control_top_1_30": replace(
+            base,
+            liquidity_rank_min=1,
+            liquidity_rank_max=30,
+            exclude_symbols=(),
+            top_n=5,
+            gross_exposure=min(base.gross_exposure, 0.25),
+            max_position_weight=0.0,
+            max_trade_notional_pct_of_day_turnover=0.0,
+            max_trade_notional_pct_of_baseline_turnover=0.0,
+        ),
+        "core_31_150": replace(
+            base,
+            liquidity_rank_min=31,
+            liquidity_rank_max=150,
+            top_n=5,
+            gross_exposure=base.gross_exposure,
+            max_position_weight=0.0,
+            max_trade_notional_pct_of_day_turnover=0.0,
+            max_trade_notional_pct_of_baseline_turnover=0.0,
+        ),
+        "microcap_151_plus": replace(
+            base,
+            liquidity_rank_min=151,
+            liquidity_rank_max=0,
+            top_n=3,
+            gross_exposure=min(base.gross_exposure, 0.5),
+            min_baseline_turnover=max(base.min_baseline_turnover, 250_000.0),
+            min_day_turnover=max(base.min_day_turnover, 750_000.0),
+            min_last_60m_turnover=max(base.min_last_60m_turnover, 75_000.0),
+            max_position_weight=base.max_position_weight or 0.20,
+            max_trade_notional_pct_of_day_turnover=base.max_trade_notional_pct_of_day_turnover or 0.002,
+            max_trade_notional_pct_of_baseline_turnover=base.max_trade_notional_pct_of_baseline_turnover or 0.005,
+        ),
+    }
+
+
 def run_forward_report(
     data_root: str | Path,
     *,
@@ -574,6 +695,64 @@ def format_forward_run_message(payload: dict[str, Any]) -> str:
         f"new_trades: {rows.get('new_trades', 0)} open={rows.get('open_trades', 0)} closed={rows.get('closed_trades', 0)}\n"
         f"candidates: {symbols}"
     )
+
+
+def format_forward_sleeves_report(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Forward Paper Sleeves",
+        "",
+        f"Now: {payload.get('now')}",
+        "",
+        "| Sleeve | Scan | Universe | Candidates | New | Open | Closed | Marked Net | Closed Net | Capacity Capped | Stop | Max Hold | Vol Trail | MFE Giveback |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for row in payload.get("results", []):
+        lines.append(
+            f"| {row['sleeve']} | {row.get('scan_status')} | {row.get('universe', 0)} | "
+            f"{row.get('candidates', 0)} | {row.get('new_trades', 0)} | {row.get('open_trades', 0)} | "
+            f"{row.get('closed_trades', 0)} | {row.get('marked_net_return', 0.0):.2%} | "
+            f"{row.get('closed_net_return', 0.0):.2%} | {row.get('capacity_limited_trades', 0)} | "
+            f"{row.get('stop_loss_exits', 0)} | {row.get('max_hold_exits', 0)} | "
+            f"{row.get('vol_trailing_stop_exits', 0)} | {row.get('mfe_giveback_exits', 0)} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Sleeve Configs",
+            "",
+            "| Sleeve | Ranks | Top N | Gross | Min Baseline Turnover | Min DTD Turnover | Min 60m Turnover | Max Weight | Day Cap | Baseline Cap |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in payload.get("results", []):
+        rank_max = int(row.get("liquidity_rank_max") or 0)
+        ranks = f"{row.get('liquidity_rank_min')}-{'all' if rank_max <= 0 else rank_max}"
+        lines.append(
+            f"| {row['sleeve']} | {ranks} | {row.get('top_n')} | {row.get('gross_exposure', 0.0):.2f}x | "
+            f"{row.get('min_baseline_turnover', 0.0):,.0f} | {row.get('min_day_turnover', 0.0):,.0f} | "
+            f"{row.get('min_last_60m_turnover', 0.0):,.0f} | {row.get('max_position_weight', 0.0):.2%} | "
+            f"{row.get('max_trade_notional_pct_of_day_turnover', 0.0):.3%} | "
+            f"{row.get('max_trade_notional_pct_of_baseline_turnover', 0.0):.3%} |"
+        )
+    lines.extend(
+        [
+            "",
+            "Each sleeve keeps its own ledger under `forward_sleeves/<sleeve>/` and report files under `reports/forward_sleeves/<sleeve>/`.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def format_forward_sleeves_message(payload: dict[str, Any]) -> str:
+    lines = [f"Forward sleeves update\nnow: {payload.get('now')}"]
+    for row in payload.get("results", []):
+        lines.append(
+            f"{row['sleeve']}: {row.get('scan_status')} cand={row.get('candidates', 0)} "
+            f"new={row.get('new_trades', 0)} open={row.get('open_trades', 0)} "
+            f"closed={row.get('closed_trades', 0)} marked={row.get('marked_net_return', 0.0):.2%}"
+        )
+    return "\n".join(lines)
 
 
 def _fetch_forward_bars(
@@ -1096,6 +1275,15 @@ def _write_forward_trade_outputs(
     _replace_dataset(baskets, data_root, "forward_paper_baskets", partition_by=("date",))
 
 
+def _write_forward_sleeves_outputs(payload: dict[str, Any], *, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "forward_sleeves_report.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    (output_dir / "forward_sleeves_report.md").write_text(format_forward_sleeves_report(payload), encoding="utf-8")
+    results = pl.DataFrame(payload.get("results", []), infer_schema_length=None)
+    if not results.is_empty():
+        results.write_csv(output_dir / "forward_sleeves_results.csv")
+
+
 def _replace_dataset(df: pl.DataFrame, data_root: str | Path, dataset: str, *, partition_by: tuple[str, ...]) -> None:
     path = dataset_path(data_root, dataset)
     if path.exists():
@@ -1134,6 +1322,11 @@ def _scan_status(now_ms: int, signal_ts_ms: int, features: pl.DataFrame, candida
 
 def _scan_id(scan_end_ms: int, signal_minute: int) -> str:
     return f"{_dt_from_ms(scan_end_ms).date().isoformat()}-{signal_minute}"
+
+
+def _safe_sleeve_name(value: str) -> str:
+    safe = "".join(ch.lower() if ch.isalnum() else "_" for ch in value).strip("_")
+    return safe or "sleeve"
 
 
 def _signal_ts_ms(now: datetime, signal_minute: int) -> int:

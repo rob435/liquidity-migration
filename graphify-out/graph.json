@@ -9,7 +9,7 @@
       "source_file": "aggression_carry/ingestion.py",
       "source_location": "L1",
       "id": "aggression_carry_ingestion_py",
-      "community": 1,
+      "community": 2,
       "norm_label": "ingestion.py"
     },
     {
@@ -18,7 +18,7 @@
       "source_file": "aggression_carry/ingestion.py",
       "source_location": "L20",
       "id": "aggression_carry_ingestion_fixturespec",
-      "community": 1,
+      "community": 2,
       "norm_label": "fixturespec"
     },
     {
@@ -27,7 +27,7 @@
       "source_file": "aggression_carry/ingestion.py",
       "source_location": "L35",
       "id": "aggression_carry_ingestion_floor_timestamp_ms",
-      "community": 1,
+      "community": 2,
       "norm_label": "floor_timestamp_ms()"
     },
     {
@@ -36,7 +36,7 @@
       "source_file": "aggression_carry/ingestion.py",
       "source_location": "L39",
       "id": "aggression_carry_ingestion_normalize_trade",
-      "community": 1,
+      "community": 2,
       "norm_label": "normalize_trade()"
     },
     {
@@ -45,7 +45,7 @@
       "source_file": "aggression_carry/ingestion.py",
       "source_location": "L68",
       "id": "aggression_carry_ingestion_trades_to_frame",
-      "community": 1,
+      "community": 2,
       "norm_label": "trades_to_frame()"
     },
     {
@@ -54,7 +54,7 @@
       "source_file": "aggression_carry/ingestion.py",
       "source_location": "L79",
       "id": "aggression_carry_ingestion_aggregate_signed_flow_1m",
-      "community": 1,
+      "community": 2,
       "norm_label": "aggregate_signed_flow_1m()"
     },
     {
@@ -72,7 +72,7 @@
       "source_file": "aggression_carry/ingestion.py",
       "source_location": "L146",
       "id": "aggression_carry_ingestion_parse_bool",
-      "community": 1,
+      "community": 2,
       "norm_label": "_parse_bool()"
     },
     {
@@ -81,7 +81,7 @@
       "source_file": "aggression_carry/ingestion.py",
       "source_location": "L156",
       "id": "aggression_carry_ingestion_first_present",
-      "community": 1,
+      "community": 2,
       "norm_label": "_first_present()"
     },
     {
@@ -90,7 +90,7 @@
       "source_file": "aggression_carry/ingestion.py",
       "source_location": "L163",
       "id": "aggression_carry_ingestion_parse_ts_ms",
-      "community": 1,
+      "community": 2,
       "norm_label": "_parse_ts_ms()"
     },
     {
@@ -99,7 +99,7 @@
       "source_file": "aggression_carry/ingestion.py",
       "source_location": "L170",
       "id": "aggression_carry_ingestion_aggregate_signed_flow_1h",
-      "community": 1,
+      "community": 2,
       "norm_label": "aggregate_signed_flow_1h()"
     },
     {
@@ -108,7 +108,7 @@
       "source_file": "aggression_carry/ingestion.py",
       "source_location": "L204",
       "id": "aggression_carry_ingestion_normalize_funding_history",
-      "community": 1,
+      "community": 2,
       "norm_label": "normalize_funding_history()"
     },
     {
@@ -747,7 +747,7 @@
       "source_file": "aggression_carry/volume_backtest.py",
       "source_location": "L1702",
       "id": "aggression_carry_volume_backtest_replace_dataset",
-      "community": 1,
+      "community": 0,
       "norm_label": "_replace_dataset()"
     },
     {
@@ -756,7 +756,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L1",
       "id": "aggression_carry_volume_alpha_py",
-      "community": 7,
+      "community": 6,
       "norm_label": "volume_alpha.py"
     },
     {
@@ -765,7 +765,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L30",
       "id": "aggression_carry_volume_alpha_volumemetric",
-      "community": 7,
+      "community": 6,
       "norm_label": "volumemetric"
     },
     {
@@ -774,7 +774,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L41",
       "id": "aggression_carry_volume_alpha_run_volume_alpha",
-      "community": 7,
+      "community": 6,
       "norm_label": "run_volume_alpha()"
     },
     {
@@ -783,7 +783,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L96",
       "id": "aggression_carry_volume_alpha_build_volume_features",
-      "community": 7,
+      "community": 6,
       "norm_label": "build_volume_features()"
     },
     {
@@ -792,7 +792,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L145",
       "id": "aggression_carry_volume_alpha_attach_volume_forward_returns",
-      "community": 7,
+      "community": 6,
       "norm_label": "attach_volume_forward_returns()"
     },
     {
@@ -801,7 +801,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L175",
       "id": "aggression_carry_volume_alpha_compute_volume_metrics",
-      "community": 7,
+      "community": 6,
       "norm_label": "compute_volume_metrics()"
     },
     {
@@ -810,7 +810,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L209",
       "id": "aggression_carry_volume_alpha_run_volume_portfolio",
-      "community": 7,
+      "community": 6,
       "norm_label": "run_volume_portfolio()"
     },
     {
@@ -819,7 +819,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L288",
       "id": "aggression_carry_volume_alpha_format_volume_alpha_report",
-      "community": 7,
+      "community": 6,
       "norm_label": "format_volume_alpha_report()"
     },
     {
@@ -828,7 +828,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L341",
       "id": "aggression_carry_volume_alpha_daily_bars",
-      "community": 7,
+      "community": 6,
       "norm_label": "_daily_bars()"
     },
     {
@@ -837,7 +837,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L364",
       "id": "aggression_carry_volume_alpha_add_cross_sectional_z",
-      "community": 7,
+      "community": 6,
       "norm_label": "_add_cross_sectional_z()"
     },
     {
@@ -846,7 +846,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L380",
       "id": "aggression_carry_volume_alpha_add_liquidity_rank",
-      "community": 7,
+      "community": 6,
       "norm_label": "_add_liquidity_rank()"
     },
     {
@@ -855,7 +855,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L397",
       "id": "aggression_carry_volume_alpha_rolling_sum",
-      "community": 7,
+      "community": 6,
       "norm_label": "_rolling_sum()"
     },
     {
@@ -864,7 +864,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L404",
       "id": "aggression_carry_volume_alpha_rolling_mean",
-      "community": 7,
+      "community": 6,
       "norm_label": "_rolling_mean()"
     },
     {
@@ -873,7 +873,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L411",
       "id": "aggression_carry_volume_alpha_quantile_spread",
-      "community": 7,
+      "community": 6,
       "norm_label": "_quantile_spread()"
     },
     {
@@ -882,7 +882,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L417",
       "id": "aggression_carry_volume_alpha_cost_adjusted_spread",
-      "community": 7,
+      "community": 6,
       "norm_label": "_cost_adjusted_spread()"
     },
     {
@@ -891,7 +891,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L425",
       "id": "aggression_carry_volume_alpha_summarize_metric",
-      "community": 7,
+      "community": 6,
       "norm_label": "_summarize_metric()"
     },
     {
@@ -900,7 +900,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L449",
       "id": "aggression_carry_volume_alpha_best_base_portfolio",
-      "community": 7,
+      "community": 6,
       "norm_label": "_best_base_portfolio()"
     },
     {
@@ -909,7 +909,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L454",
       "id": "aggression_carry_volume_alpha_date_range",
-      "community": 7,
+      "community": 6,
       "norm_label": "_date_range()"
     },
     {
@@ -918,7 +918,7 @@
       "source_file": "aggression_carry/math_utils.py",
       "source_location": "L1",
       "id": "aggression_carry_math_utils_py",
-      "community": 7,
+      "community": 6,
       "norm_label": "math_utils.py"
     },
     {
@@ -927,7 +927,7 @@
       "source_file": "aggression_carry/math_utils.py",
       "source_location": "L9",
       "id": "aggression_carry_math_utils_ema",
-      "community": 7,
+      "community": 6,
       "norm_label": "ema()"
     },
     {
@@ -936,7 +936,7 @@
       "source_file": "aggression_carry/math_utils.py",
       "source_location": "L26",
       "id": "aggression_carry_math_utils_rolling_median",
-      "community": 7,
+      "community": 6,
       "norm_label": "rolling_median()"
     },
     {
@@ -945,7 +945,7 @@
       "source_file": "aggression_carry/math_utils.py",
       "source_location": "L38",
       "id": "aggression_carry_math_utils_robust_z",
-      "community": 7,
+      "community": 6,
       "norm_label": "robust_z()"
     },
     {
@@ -954,7 +954,7 @@
       "source_file": "aggression_carry/math_utils.py",
       "source_location": "L54",
       "id": "aggression_carry_math_utils_rank_correlation",
-      "community": 7,
+      "community": 6,
       "norm_label": "rank_correlation()"
     },
     {
@@ -963,7 +963,7 @@
       "source_file": "aggression_carry/math_utils.py",
       "source_location": "L67",
       "id": "aggression_carry_math_utils_ordinal_rank",
-      "community": 7,
+      "community": 6,
       "norm_label": "_ordinal_rank()"
     },
     {
@@ -972,7 +972,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L1",
       "id": "aggression_carry_config_py",
-      "community": 9,
+      "community": 8,
       "norm_label": "config.py"
     },
     {
@@ -981,7 +981,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L26",
       "id": "aggression_carry_config_exchangeconfig",
-      "community": 9,
+      "community": 8,
       "norm_label": "exchangeconfig"
     },
     {
@@ -990,7 +990,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L34",
       "id": "aggression_carry_config_tradeflowconfig",
-      "community": 1,
+      "community": 2,
       "norm_label": "tradeflowconfig"
     },
     {
@@ -999,7 +999,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L40",
       "id": "aggression_carry_config_volumealphaconfig",
-      "community": 9,
+      "community": 8,
       "norm_label": "volumealphaconfig"
     },
     {
@@ -1035,7 +1035,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L126",
       "id": "aggression_carry_config_dailyclosefadegridconfig",
-      "community": 9,
+      "community": 8,
       "norm_label": "dailyclosefadegridconfig"
     },
     {
@@ -1044,7 +1044,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L155",
       "id": "aggression_carry_config_forwardtestconfig",
-      "community": 9,
+      "community": 8,
       "norm_label": "forwardtestconfig"
     },
     {
@@ -1053,7 +1053,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L167",
       "id": "aggression_carry_config_universeconfig",
-      "community": 9,
+      "community": 8,
       "norm_label": "universeconfig"
     },
     {
@@ -1071,7 +1071,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L186",
       "id": "aggression_carry_config_base_entry_exit_cost_bps",
-      "community": 9,
+      "community": 8,
       "norm_label": "base_entry_exit_cost_bps()"
     },
     {
@@ -1080,7 +1080,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L197",
       "id": "aggression_carry_config_researchconfig",
-      "community": 1,
+      "community": 2,
       "norm_label": "researchconfig"
     },
     {
@@ -1089,7 +1089,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L211",
       "id": "aggression_carry_config_merge_dataclass",
-      "community": 9,
+      "community": 8,
       "norm_label": "_merge_dataclass()"
     },
     {
@@ -1098,7 +1098,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L216",
       "id": "aggression_carry_config_merge_volume_alpha_config",
-      "community": 9,
+      "community": 8,
       "norm_label": "_merge_volume_alpha_config()"
     },
     {
@@ -1107,7 +1107,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L223",
       "id": "aggression_carry_config_merge_volume_backtest_config",
-      "community": 9,
+      "community": 8,
       "norm_label": "_merge_volume_backtest_config()"
     },
     {
@@ -1116,7 +1116,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L254",
       "id": "aggression_carry_config_tuple_str",
-      "community": 9,
+      "community": 8,
       "norm_label": "_tuple_str()"
     },
     {
@@ -1125,7 +1125,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L258",
       "id": "aggression_carry_config_tuple_int",
-      "community": 9,
+      "community": 8,
       "norm_label": "_tuple_int()"
     },
     {
@@ -1134,7 +1134,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L262",
       "id": "aggression_carry_config_tuple_float",
-      "community": 9,
+      "community": 8,
       "norm_label": "_tuple_float()"
     },
     {
@@ -1143,7 +1143,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L266",
       "id": "aggression_carry_config_tuple_bool",
-      "community": 9,
+      "community": 8,
       "norm_label": "_tuple_bool()"
     },
     {
@@ -1152,7 +1152,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L270",
       "id": "aggression_carry_config_merge_volume_grid_config",
-      "community": 9,
+      "community": 8,
       "norm_label": "_merge_volume_grid_config()"
     },
     {
@@ -1161,7 +1161,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L285",
       "id": "aggression_carry_config_merge_daily_close_fade_config",
-      "community": 9,
+      "community": 8,
       "norm_label": "_merge_daily_close_fade_config()"
     },
     {
@@ -1170,7 +1170,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L327",
       "id": "aggression_carry_config_merge_daily_close_fade_grid_config",
-      "community": 9,
+      "community": 8,
       "norm_label": "_merge_daily_close_fade_grid_config()"
     },
     {
@@ -1179,7 +1179,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L362",
       "id": "aggression_carry_config_merge_forward_test_config",
-      "community": 9,
+      "community": 8,
       "norm_label": "_merge_forward_test_config()"
     },
     {
@@ -1188,7 +1188,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L376",
       "id": "aggression_carry_config_merge_universe_config",
-      "community": 9,
+      "community": 8,
       "norm_label": "_merge_universe_config()"
     },
     {
@@ -1197,7 +1197,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L389",
       "id": "aggression_carry_config_load_config",
-      "community": 9,
+      "community": 8,
       "norm_label": "load_config()"
     },
     {
@@ -1206,7 +1206,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1",
       "id": "aggression_carry_daily_close_fade_py",
-      "community": 2,
+      "community": 3,
       "norm_label": "daily_close_fade.py"
     },
     {
@@ -1224,7 +1224,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L72",
       "id": "aggression_carry_daily_close_fade_run_daily_close_fade_grid",
-      "community": 2,
+      "community": 3,
       "norm_label": "run_daily_close_fade_grid()"
     },
     {
@@ -1233,7 +1233,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L133",
       "id": "aggression_carry_daily_close_fade_run_daily_close_fade_sleeves",
-      "community": 2,
+      "community": 3,
       "norm_label": "run_daily_close_fade_sleeves()"
     },
     {
@@ -1242,7 +1242,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L217",
       "id": "aggression_carry_daily_close_fade_close_fade_sleeve_configs",
-      "community": 2,
+      "community": 3,
       "norm_label": "close_fade_sleeve_configs()"
     },
     {
@@ -1251,7 +1251,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L261",
       "id": "aggression_carry_daily_close_fade_build_daily_close_fade_features",
-      "community": 2,
+      "community": 3,
       "norm_label": "build_daily_close_fade_features()"
     },
     {
@@ -1260,7 +1260,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L336",
       "id": "aggression_carry_daily_close_fade_backtest_daily_close_fade",
-      "community": 2,
+      "community": 3,
       "norm_label": "backtest_daily_close_fade()"
     },
     {
@@ -1269,7 +1269,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L375",
       "id": "aggression_carry_daily_close_fade_select_close_fade_candidates",
-      "community": 2,
+      "community": 3,
       "norm_label": "select_close_fade_candidates()"
     },
     {
@@ -1278,7 +1278,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L399",
       "id": "aggression_carry_daily_close_fade_validate_close_fade_config",
-      "community": 2,
+      "community": 3,
       "norm_label": "_validate_close_fade_config()"
     },
     {
@@ -1287,7 +1287,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L450",
       "id": "aggression_carry_daily_close_fade_summarize_close_fade_baskets",
-      "community": 2,
+      "community": 3,
       "norm_label": "summarize_close_fade_baskets()"
     },
     {
@@ -1296,7 +1296,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L474",
       "id": "aggression_carry_daily_close_fade_apply_close_fade_basket_stop",
-      "community": 2,
+      "community": 3,
       "norm_label": "apply_close_fade_basket_stop()"
     },
     {
@@ -1305,7 +1305,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L500",
       "id": "aggression_carry_daily_close_fade_apply_basket_stop_to_rows",
-      "community": 2,
+      "community": 3,
       "norm_label": "_apply_basket_stop_to_rows()"
     },
     {
@@ -1314,7 +1314,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L586",
       "id": "aggression_carry_daily_close_fade_rewrite_trade_exit",
-      "community": 2,
+      "community": 3,
       "norm_label": "_rewrite_trade_exit()"
     },
     {
@@ -1323,7 +1323,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L630",
       "id": "aggression_carry_daily_close_fade_trade_excursion",
-      "community": 2,
+      "community": 3,
       "norm_label": "_trade_excursion()"
     },
     {
@@ -1332,7 +1332,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L648",
       "id": "aggression_carry_daily_close_fade_build_close_fade_equity",
-      "community": 2,
+      "community": 3,
       "norm_label": "build_close_fade_equity()"
     },
     {
@@ -1341,7 +1341,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L659",
       "id": "aggression_carry_daily_close_fade_summarize_close_fade",
-      "community": 2,
+      "community": 3,
       "norm_label": "summarize_close_fade()"
     },
     {
@@ -1350,7 +1350,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L738",
       "id": "aggression_carry_daily_close_fade_iter_close_fade_grid_configs",
-      "community": 2,
+      "community": 3,
       "norm_label": "iter_close_fade_grid_configs()"
     },
     {
@@ -1359,7 +1359,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L866",
       "id": "aggression_carry_daily_close_fade_format_close_fade_report",
-      "community": 2,
+      "community": 3,
       "norm_label": "format_close_fade_report()"
     },
     {
@@ -1368,7 +1368,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L922",
       "id": "aggression_carry_daily_close_fade_format_close_fade_sleeves_report",
-      "community": 2,
+      "community": 3,
       "norm_label": "format_close_fade_sleeves_report()"
     },
     {
@@ -1377,7 +1377,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L950",
       "id": "aggression_carry_daily_close_fade_format_close_fade_grid_report",
-      "community": 2,
+      "community": 3,
       "norm_label": "format_close_fade_grid_report()"
     },
     {
@@ -1386,7 +1386,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L991",
       "id": "aggression_carry_daily_close_fade_signal_feature_frame",
-      "community": 2,
+      "community": 3,
       "norm_label": "_signal_feature_frame()"
     },
     {
@@ -1395,7 +1395,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1024",
       "id": "aggression_carry_daily_close_fade_daily_realized_vol",
-      "community": 2,
+      "community": 3,
       "norm_label": "_daily_realized_vol()"
     },
     {
@@ -1404,7 +1404,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1047",
       "id": "aggression_carry_daily_close_fade_baseline_liquidity_rank",
-      "community": 2,
+      "community": 3,
       "norm_label": "_baseline_liquidity_rank()"
     },
     {
@@ -1413,7 +1413,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1083",
       "id": "aggression_carry_daily_close_fade_baseline_liquidity_filter_expr",
-      "community": 2,
+      "community": 3,
       "norm_label": "_baseline_liquidity_filter_expr()"
     },
     {
@@ -1422,7 +1422,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1098",
       "id": "aggression_carry_daily_close_fade_candidate_liquidity_filter_expr",
-      "community": 2,
+      "community": 3,
       "norm_label": "_candidate_liquidity_filter_expr()"
     },
     {
@@ -1431,7 +1431,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1106",
       "id": "aggression_carry_daily_close_fade_scan_klines_1m",
-      "community": 2,
+      "community": 3,
       "norm_label": "_scan_klines_1m()"
     },
     {
@@ -1440,7 +1440,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1114",
       "id": "aggression_carry_daily_close_fade_minute_frame",
-      "community": 2,
+      "community": 3,
       "norm_label": "_minute_frame()"
     },
     {
@@ -1449,7 +1449,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1124",
       "id": "aggression_carry_daily_close_fade_attach_instrument_age",
-      "community": 2,
+      "community": 3,
       "norm_label": "_attach_instrument_age()"
     },
     {
@@ -1458,7 +1458,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1155",
       "id": "aggression_carry_daily_close_fade_attach_archive_membership",
-      "community": 2,
+      "community": 3,
       "norm_label": "_attach_archive_membership()"
     },
     {
@@ -1467,7 +1467,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1167",
       "id": "aggression_carry_daily_close_fade_simulate_short_trade",
-      "community": 2,
+      "community": 3,
       "norm_label": "_simulate_short_trade()"
     },
     {
@@ -1476,7 +1476,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1361",
       "id": "aggression_carry_daily_close_fade_close_fade_position_weight",
-      "community": 2,
+      "community": 1,
       "norm_label": "_close_fade_position_weight()"
     },
     {
@@ -1485,7 +1485,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1400",
       "id": "aggression_carry_daily_close_fade_vwap_reversion_exit_price",
-      "community": 2,
+      "community": 3,
       "norm_label": "_vwap_reversion_exit_price()"
     },
     {
@@ -1494,7 +1494,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1410",
       "id": "aggression_carry_daily_close_fade_mfe_giveback_stop_price",
-      "community": 2,
+      "community": 3,
       "norm_label": "_mfe_giveback_stop_price()"
     },
     {
@@ -1503,7 +1503,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1416",
       "id": "aggression_carry_daily_close_fade_load_trade_window",
-      "community": 2,
+      "community": 3,
       "norm_label": "_load_trade_window()"
     },
     {
@@ -1512,7 +1512,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1436",
       "id": "aggression_carry_daily_close_fade_short_return",
-      "community": 2,
+      "community": 3,
       "norm_label": "_short_return()"
     },
     {
@@ -1521,7 +1521,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1440",
       "id": "aggression_carry_daily_close_fade_dates_for_window",
-      "community": 2,
+      "community": 3,
       "norm_label": "_dates_for_window()"
     },
     {
@@ -1530,7 +1530,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1451",
       "id": "aggression_carry_daily_close_fade_evaluate_grid_variant",
-      "community": 2,
+      "community": 3,
       "norm_label": "_evaluate_grid_variant()"
     },
     {
@@ -1539,7 +1539,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1473",
       "id": "aggression_carry_daily_close_fade_init_grid_worker",
-      "community": 2,
+      "community": 3,
       "norm_label": "_init_grid_worker()"
     },
     {
@@ -1548,7 +1548,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1480",
       "id": "aggression_carry_daily_close_fade_evaluate_grid_variant_worker",
-      "community": 2,
+      "community": 3,
       "norm_label": "_evaluate_grid_variant_worker()"
     },
     {
@@ -1557,7 +1557,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1493",
       "id": "aggression_carry_daily_close_fade_resolve_workers",
-      "community": 2,
+      "community": 3,
       "norm_label": "_resolve_workers()"
     },
     {
@@ -1566,7 +1566,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1504",
       "id": "aggression_carry_daily_close_fade_grid_chunksize",
-      "community": 2,
+      "community": 3,
       "norm_label": "_grid_chunksize()"
     },
     {
@@ -1575,7 +1575,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1508",
       "id": "aggression_carry_daily_close_fade_concat_frames",
-      "community": 2,
+      "community": 3,
       "norm_label": "_concat_frames()"
     },
     {
@@ -1584,7 +1584,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1512",
       "id": "aggression_carry_daily_close_fade_replace_dataset",
-      "community": 2,
+      "community": 4,
       "norm_label": "_replace_dataset()"
     },
     {
@@ -1593,7 +1593,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1519",
       "id": "aggression_carry_daily_close_fade_format_grid_row",
-      "community": 2,
+      "community": 3,
       "norm_label": "_format_grid_row()"
     },
     {
@@ -1602,7 +1602,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1542",
       "id": "aggression_carry_daily_close_fade_format_signal_minute",
-      "community": 2,
+      "community": 3,
       "norm_label": "_format_signal_minute()"
     },
     {
@@ -1611,7 +1611,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1548",
       "id": "aggression_carry_daily_close_fade_date_range",
-      "community": 2,
+      "community": 3,
       "norm_label": "_date_range()"
     },
     {
@@ -1620,7 +1620,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L1557",
       "id": "aggression_carry_daily_close_fade_dt_from_ms",
-      "community": 2,
+      "community": 3,
       "norm_label": "_dt_from_ms()"
     },
     {
@@ -1629,7 +1629,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L1",
       "id": "aggression_carry_bybit_py",
-      "community": 6,
+      "community": 9,
       "norm_label": "bybit.py"
     },
     {
@@ -1638,7 +1638,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L13",
       "id": "aggression_carry_bybit_bybitdataerror",
-      "community": 6,
+      "community": 9,
       "norm_label": "bybitdataerror"
     },
     {
@@ -1647,7 +1647,7 @@
       "source_file": "",
       "source_location": "",
       "id": "runtimeerror",
-      "community": 2,
+      "community": 3,
       "norm_label": "runtimeerror"
     },
     {
@@ -1656,7 +1656,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L33",
       "id": "aggression_carry_bybit_bybitmarketdata",
-      "community": 6,
+      "community": 9,
       "norm_label": "bybitmarketdata"
     },
     {
@@ -1665,7 +1665,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L40",
       "id": "aggression_carry_bybit_bybitmarketdata_post_init",
-      "community": 6,
+      "community": 9,
       "norm_label": ".__post_init__()"
     },
     {
@@ -1674,7 +1674,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L45",
       "id": "aggression_carry_bybit_bybitmarketdata_get_instruments_info",
-      "community": 6,
+      "community": 9,
       "norm_label": ".get_instruments_info()"
     },
     {
@@ -1683,7 +1683,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L59",
       "id": "aggression_carry_bybit_bybitmarketdata_get_klines",
-      "community": 6,
+      "community": 9,
       "norm_label": ".get_klines()"
     },
     {
@@ -1692,7 +1692,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L86",
       "id": "aggression_carry_bybit_bybitmarketdata_get_recent_trades",
-      "community": 6,
+      "community": 9,
       "norm_label": ".get_recent_trades()"
     },
     {
@@ -1701,7 +1701,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L90",
       "id": "aggression_carry_bybit_bybitmarketdata_get_funding_history",
-      "community": 6,
+      "community": 9,
       "norm_label": ".get_funding_history()"
     },
     {
@@ -1710,7 +1710,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L93",
       "id": "aggression_carry_bybit_bybitmarketdata_get_tickers",
-      "community": 6,
+      "community": 9,
       "norm_label": ".get_tickers()"
     },
     {
@@ -1719,7 +1719,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L97",
       "id": "aggression_carry_bybit_bybitmarketdata_get_orderbook",
-      "community": 6,
+      "community": 9,
       "norm_label": ".get_orderbook()"
     },
     {
@@ -1728,7 +1728,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L101",
       "id": "aggression_carry_bybit_bybitmarketdata_get_open_interest",
-      "community": 6,
+      "community": 9,
       "norm_label": ".get_open_interest()"
     },
     {
@@ -1737,7 +1737,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L112",
       "id": "aggression_carry_bybit_bybitmarketdata_paged_time_range",
-      "community": 6,
+      "community": 9,
       "norm_label": "._paged_time_range()"
     },
     {
@@ -1746,7 +1746,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L140",
       "id": "aggression_carry_bybit_bybitmarketdata_get",
-      "community": 6,
+      "community": 9,
       "norm_label": "._get()"
     },
     {
@@ -1971,7 +1971,7 @@
       "source_file": "aggression_carry/telegram.py",
       "source_location": "L1",
       "id": "aggression_carry_telegram_py",
-      "community": 3,
+      "community": 1,
       "norm_label": "telegram.py"
     },
     {
@@ -1980,7 +1980,7 @@
       "source_file": "aggression_carry/telegram.py",
       "source_location": "L10",
       "id": "aggression_carry_telegram_telegramconfig",
-      "community": 3,
+      "community": 1,
       "norm_label": "telegramconfig"
     },
     {
@@ -1989,7 +1989,7 @@
       "source_file": "aggression_carry/telegram.py",
       "source_location": "L16",
       "id": "aggression_carry_telegram_telegram_configured",
-      "community": 3,
+      "community": 1,
       "norm_label": "telegram_configured()"
     },
     {
@@ -1998,7 +1998,7 @@
       "source_file": "aggression_carry/telegram.py",
       "source_location": "L21",
       "id": "aggression_carry_telegram_send_telegram_message",
-      "community": 3,
+      "community": 1,
       "norm_label": "send_telegram_message()"
     },
     {
@@ -2025,7 +2025,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1",
       "id": "aggression_carry_forward_test_py",
-      "community": 3,
+      "community": 1,
       "norm_label": "forward_test.py"
     },
     {
@@ -2034,7 +2034,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L31",
       "id": "aggression_carry_forward_test_run_forward_scan",
-      "community": 3,
+      "community": 1,
       "norm_label": "run_forward_scan()"
     },
     {
@@ -2043,230 +2043,275 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L102",
       "id": "aggression_carry_forward_test_run_forward_once",
-      "community": 3,
+      "community": 1,
       "norm_label": "run_forward_once()"
+    },
+    {
+      "label": "run_forward_sleeves()",
+      "file_type": "code",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L175",
+      "id": "aggression_carry_forward_test_run_forward_sleeves",
+      "community": 1,
+      "norm_label": "run_forward_sleeves()"
+    },
+    {
+      "label": "default_forward_sleeves()",
+      "file_type": "code",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L257",
+      "id": "aggression_carry_forward_test_default_forward_sleeves",
+      "community": 1,
+      "norm_label": "default_forward_sleeves()"
     },
     {
       "label": "run_forward_report()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L175",
+      "source_location": "L296",
       "id": "aggression_carry_forward_test_run_forward_report",
-      "community": 3,
+      "community": 1,
       "norm_label": "run_forward_report()"
     },
     {
       "label": "build_forward_universe()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L195",
+      "source_location": "L316",
       "id": "aggression_carry_forward_test_build_forward_universe",
-      "community": 3,
+      "community": 1,
       "norm_label": "build_forward_universe()"
     },
     {
       "label": "build_forward_scan_features()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L237",
+      "source_location": "L358",
       "id": "aggression_carry_forward_test_build_forward_scan_features",
-      "community": 3,
+      "community": 1,
       "norm_label": "build_forward_scan_features()"
     },
     {
       "label": "open_forward_paper_trades()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L327",
+      "source_location": "L448",
       "id": "aggression_carry_forward_test_open_forward_paper_trades",
-      "community": 3,
+      "community": 1,
       "norm_label": "open_forward_paper_trades()"
     },
     {
       "label": "mark_forward_open_trades()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L381",
+      "source_location": "L502",
       "id": "aggression_carry_forward_test_mark_forward_open_trades",
-      "community": 3,
+      "community": 1,
       "norm_label": "mark_forward_open_trades()"
     },
     {
       "label": "summarize_forward_paper_baskets()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L428",
+      "source_location": "L549",
       "id": "aggression_carry_forward_test_summarize_forward_paper_baskets",
-      "community": 3,
+      "community": 1,
       "norm_label": "summarize_forward_paper_baskets()"
     },
     {
       "label": "summarize_forward_paper_trades()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L452",
+      "source_location": "L573",
       "id": "aggression_carry_forward_test_summarize_forward_paper_trades",
-      "community": 3,
+      "community": 1,
       "norm_label": "summarize_forward_paper_trades()"
     },
     {
       "label": "format_forward_scan_report()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L484",
+      "source_location": "L605",
       "id": "aggression_carry_forward_test_format_forward_scan_report",
-      "community": 3,
+      "community": 1,
       "norm_label": "format_forward_scan_report()"
     },
     {
       "label": "format_forward_run_report()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L522",
+      "source_location": "L643",
       "id": "aggression_carry_forward_test_format_forward_run_report",
-      "community": 3,
+      "community": 1,
       "norm_label": "format_forward_run_report()"
     },
     {
       "label": "format_forward_run_message()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L565",
+      "source_location": "L686",
       "id": "aggression_carry_forward_test_format_forward_run_message",
-      "community": 3,
+      "community": 1,
       "norm_label": "format_forward_run_message()"
+    },
+    {
+      "label": "format_forward_sleeves_report()",
+      "file_type": "code",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L700",
+      "id": "aggression_carry_forward_test_format_forward_sleeves_report",
+      "community": 1,
+      "norm_label": "format_forward_sleeves_report()"
+    },
+    {
+      "label": "format_forward_sleeves_message()",
+      "file_type": "code",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L747",
+      "id": "aggression_carry_forward_test_format_forward_sleeves_message",
+      "community": 1,
+      "norm_label": "format_forward_sleeves_message()"
     },
     {
       "label": "_fetch_forward_bars()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L579",
+      "source_location": "L758",
       "id": "aggression_carry_forward_test_fetch_forward_bars",
-      "community": 3,
+      "community": 1,
       "norm_label": "_fetch_forward_bars()"
     },
     {
       "label": "_fetch_symbol_klines()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L635",
+      "source_location": "L814",
       "id": "aggression_carry_forward_test_fetch_symbol_klines",
-      "community": 3,
+      "community": 1,
       "norm_label": "_fetch_symbol_klines()"
     },
     {
       "label": "_normalize_live_instruments()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L642",
+      "source_location": "L821",
       "id": "aggression_carry_forward_test_normalize_live_instruments",
-      "community": 3,
+      "community": 1,
       "norm_label": "_normalize_live_instruments()"
     },
     {
       "label": "_normalize_live_tickers()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L658",
+      "source_location": "L837",
       "id": "aggression_carry_forward_test_normalize_live_tickers",
-      "community": 3,
+      "community": 1,
       "norm_label": "_normalize_live_tickers()"
     },
     {
       "label": "_normalize_klines()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L674",
+      "source_location": "L853",
       "id": "aggression_carry_forward_test_normalize_klines",
-      "community": 3,
+      "community": 1,
       "norm_label": "_normalize_klines()"
     },
     {
       "label": "_signal_feature_frame()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L693",
+      "source_location": "L872",
       "id": "aggression_carry_forward_test_signal_feature_frame",
-      "community": 3,
+      "community": 1,
       "norm_label": "_signal_feature_frame()"
     },
     {
       "label": "_latest_realized_vol()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L728",
+      "source_location": "L907",
       "id": "aggression_carry_forward_test_latest_realized_vol",
-      "community": 3,
+      "community": 1,
       "norm_label": "_latest_realized_vol()"
     },
     {
       "label": "_latest_baseline_liquidity()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L750",
+      "source_location": "L929",
       "id": "aggression_carry_forward_test_latest_baseline_liquidity",
-      "community": 3,
+      "community": 1,
       "norm_label": "_latest_baseline_liquidity()"
     },
     {
       "label": "_minute_frame()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L772",
+      "source_location": "L951",
       "id": "aggression_carry_forward_test_minute_frame",
-      "community": 3,
+      "community": 1,
       "norm_label": "_minute_frame()"
     },
     {
       "label": "_new_paper_trade()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L782",
+      "source_location": "L961",
       "id": "aggression_carry_forward_test_new_paper_trade",
-      "community": 3,
+      "community": 1,
       "norm_label": "_new_paper_trade()"
     },
     {
       "label": "_mark_trade_from_bars()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L876",
+      "source_location": "L1055",
       "id": "aggression_carry_forward_test_mark_trade_from_bars",
-      "community": 3,
+      "community": 1,
       "norm_label": "_mark_trade_from_bars()"
     },
     {
       "label": "_trade_number()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1050",
+      "source_location": "L1229",
       "id": "aggression_carry_forward_test_trade_number",
-      "community": 3,
+      "community": 1,
       "norm_label": "_trade_number()"
     },
     {
       "label": "_write_forward_scan_outputs()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1060",
+      "source_location": "L1239",
       "id": "aggression_carry_forward_test_write_forward_scan_outputs",
-      "community": 3,
+      "community": 1,
       "norm_label": "_write_forward_scan_outputs()"
     },
     {
       "label": "_write_forward_trade_outputs()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1077",
+      "source_location": "L1256",
       "id": "aggression_carry_forward_test_write_forward_trade_outputs",
-      "community": 3,
+      "community": 1,
       "norm_label": "_write_forward_trade_outputs()"
+    },
+    {
+      "label": "_write_forward_sleeves_outputs()",
+      "file_type": "code",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L1278",
+      "id": "aggression_carry_forward_test_write_forward_sleeves_outputs",
+      "community": 1,
+      "norm_label": "_write_forward_sleeves_outputs()"
     },
     {
       "label": "_replace_dataset()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1099",
+      "source_location": "L1287",
       "id": "aggression_carry_forward_test_replace_dataset",
       "community": 1,
       "norm_label": "_replace_dataset()"
@@ -2275,153 +2320,162 @@
       "label": "_merge_trade_frames()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1106",
+      "source_location": "L1294",
       "id": "aggression_carry_forward_test_merge_trade_frames",
-      "community": 3,
+      "community": 1,
       "norm_label": "_merge_trade_frames()"
     },
     {
       "label": "_basket_already_opened()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1113",
+      "source_location": "L1301",
       "id": "aggression_carry_forward_test_basket_already_opened",
-      "community": 3,
+      "community": 1,
       "norm_label": "_basket_already_opened()"
     },
     {
       "label": "_count_status()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1117",
+      "source_location": "L1305",
       "id": "aggression_carry_forward_test_count_status",
-      "community": 3,
+      "community": 1,
       "norm_label": "_count_status()"
     },
     {
       "label": "_count_reason()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1121",
+      "source_location": "L1309",
       "id": "aggression_carry_forward_test_count_reason",
-      "community": 3,
+      "community": 1,
       "norm_label": "_count_reason()"
     },
     {
       "label": "_scan_status()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1125",
+      "source_location": "L1313",
       "id": "aggression_carry_forward_test_scan_status",
-      "community": 3,
+      "community": 1,
       "norm_label": "_scan_status()"
     },
     {
       "label": "_scan_id()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1135",
+      "source_location": "L1323",
       "id": "aggression_carry_forward_test_scan_id",
-      "community": 3,
+      "community": 1,
       "norm_label": "_scan_id()"
+    },
+    {
+      "label": "_safe_sleeve_name()",
+      "file_type": "code",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L1327",
+      "id": "aggression_carry_forward_test_safe_sleeve_name",
+      "community": 1,
+      "norm_label": "_safe_sleeve_name()"
     },
     {
       "label": "_signal_ts_ms()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1139",
+      "source_location": "L1332",
       "id": "aggression_carry_forward_test_signal_ts_ms",
-      "community": 3,
+      "community": 1,
       "norm_label": "_signal_ts_ms()"
     },
     {
       "label": "_day_start_ms()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1144",
+      "source_location": "L1337",
       "id": "aggression_carry_forward_test_day_start_ms",
-      "community": 3,
+      "community": 1,
       "norm_label": "_day_start_ms()"
     },
     {
       "label": "_floor_minute_ms()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1149",
+      "source_location": "L1342",
       "id": "aggression_carry_forward_test_floor_minute_ms",
-      "community": 3,
+      "community": 1,
       "norm_label": "_floor_minute_ms()"
     },
     {
       "label": "_ms_from_dt()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1153",
+      "source_location": "L1346",
       "id": "aggression_carry_forward_test_ms_from_dt",
-      "community": 3,
+      "community": 1,
       "norm_label": "_ms_from_dt()"
     },
     {
       "label": "_dt_from_ms()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1157",
+      "source_location": "L1350",
       "id": "aggression_carry_forward_test_dt_from_ms",
-      "community": 3,
+      "community": 1,
       "norm_label": "_dt_from_ms()"
     },
     {
       "label": "_as_utc()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1161",
+      "source_location": "L1354",
       "id": "aggression_carry_forward_test_as_utc",
-      "community": 3,
+      "community": 1,
       "norm_label": "_as_utc()"
     },
     {
       "label": "_concat()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1165",
+      "source_location": "L1358",
       "id": "aggression_carry_forward_test_concat",
-      "community": 3,
+      "community": 1,
       "norm_label": "_concat()"
     },
     {
       "label": "_empty_universe()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1169",
+      "source_location": "L1362",
       "id": "aggression_carry_forward_test_empty_universe",
-      "community": 3,
+      "community": 1,
       "norm_label": "_empty_universe()"
     },
     {
       "label": "_float_or_none()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1182",
+      "source_location": "L1375",
       "id": "aggression_carry_forward_test_float_or_none",
-      "community": 3,
+      "community": 1,
       "norm_label": "_float_or_none()"
     },
     {
       "label": "_int_or_none()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1186",
+      "source_location": "L1379",
       "id": "aggression_carry_forward_test_int_or_none",
-      "community": 3,
+      "community": 1,
       "norm_label": "_int_or_none()"
     },
     {
       "label": "_bool_value()",
       "file_type": "code",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1190",
+      "source_location": "L1383",
       "id": "aggression_carry_forward_test_bool_value",
-      "community": 3,
+      "community": 1,
       "norm_label": "_bool_value()"
     },
     {
@@ -2430,7 +2484,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L1",
       "id": "aggression_carry_universe_py",
-      "community": 6,
+      "community": 2,
       "norm_label": "universe.py"
     },
     {
@@ -2439,7 +2493,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L19",
       "id": "aggression_carry_universe_run_discover_universe",
-      "community": 6,
+      "community": 2,
       "norm_label": "run_discover_universe()"
     },
     {
@@ -2448,7 +2502,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L60",
       "id": "aggression_carry_universe_build_current_universe_table",
-      "community": 6,
+      "community": 2,
       "norm_label": "build_current_universe_table()"
     },
     {
@@ -2457,7 +2511,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L130",
       "id": "aggression_carry_universe_format_universe_report",
-      "community": 6,
+      "community": 2,
       "norm_label": "format_universe_report()"
     },
     {
@@ -2466,7 +2520,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L171",
       "id": "aggression_carry_universe_empty_universe_table",
-      "community": 6,
+      "community": 2,
       "norm_label": "_empty_universe_table()"
     },
     {
@@ -2475,7 +2529,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L189",
       "id": "aggression_carry_universe_age_filter_label",
-      "community": 6,
+      "community": 2,
       "norm_label": "_age_filter_label()"
     },
     {
@@ -2484,7 +2538,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L201",
       "id": "aggression_carry_universe_safe_name",
-      "community": 6,
+      "community": 2,
       "norm_label": "_safe_name()"
     },
     {
@@ -2493,7 +2547,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L1",
       "id": "aggression_carry_cli_py",
-      "community": 8,
+      "community": 7,
       "norm_label": "cli.py"
     },
     {
@@ -2502,196 +2556,196 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L29",
       "id": "aggression_carry_cli_build_parser",
-      "community": 8,
+      "community": 7,
       "norm_label": "build_parser()"
     },
     {
       "label": "main()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L253",
+      "source_location": "L262",
       "id": "aggression_carry_cli_main",
-      "community": 8,
+      "community": 7,
       "norm_label": "main()"
     },
     {
       "label": "_close_fade_config_from_args()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L464",
+      "source_location": "L491",
       "id": "aggression_carry_cli_close_fade_config_from_args",
-      "community": 8,
+      "community": 7,
       "norm_label": "_close_fade_config_from_args()"
     },
     {
       "label": "_close_fade_base_from_grid_args()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L543",
+      "source_location": "L570",
       "id": "aggression_carry_cli_close_fade_base_from_grid_args",
-      "community": 8,
+      "community": 7,
       "norm_label": "_close_fade_base_from_grid_args()"
     },
     {
       "label": "_close_fade_grid_config_from_args()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L566",
+      "source_location": "L593",
       "id": "aggression_carry_cli_close_fade_grid_config_from_args",
-      "community": 8,
+      "community": 7,
       "norm_label": "_close_fade_grid_config_from_args()"
     },
     {
       "label": "_backtest_config_from_args()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L606",
+      "source_location": "L633",
       "id": "aggression_carry_cli_backtest_config_from_args",
-      "community": 8,
+      "community": 7,
       "norm_label": "_backtest_config_from_args()"
     },
     {
       "label": "_grid_config_from_args()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L641",
+      "source_location": "L668",
       "id": "aggression_carry_cli_grid_config_from_args",
-      "community": 8,
+      "community": 7,
       "norm_label": "_grid_config_from_args()"
     },
     {
       "label": "_universe_config_from_args()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L655",
+      "source_location": "L682",
       "id": "aggression_carry_cli_universe_config_from_args",
-      "community": 8,
+      "community": 7,
       "norm_label": "_universe_config_from_args()"
     },
     {
       "label": "_add_universe_backtest_args()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L674",
+      "source_location": "L701",
       "id": "aggression_carry_cli_add_universe_backtest_args",
-      "community": 8,
+      "community": 7,
       "norm_label": "_add_universe_backtest_args()"
     },
     {
       "label": "_add_forward_fade_args()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L683",
+      "source_location": "L710",
       "id": "aggression_carry_cli_add_forward_fade_args",
-      "community": 8,
+      "community": 7,
       "norm_label": "_add_forward_fade_args()"
     },
     {
       "label": "_add_forward_runtime_args()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L728",
+      "source_location": "L755",
       "id": "aggression_carry_cli_add_forward_runtime_args",
-      "community": 8,
+      "community": 7,
       "norm_label": "_add_forward_runtime_args()"
     },
     {
       "label": "_forward_config_from_args()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L739",
+      "source_location": "L766",
       "id": "aggression_carry_cli_forward_config_from_args",
-      "community": 8,
+      "community": 7,
       "norm_label": "_forward_config_from_args()"
     },
     {
       "label": "_apply_universe_backtest_args()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L756",
+      "source_location": "L783",
       "id": "aggression_carry_cli_apply_universe_backtest_args",
-      "community": 8,
+      "community": 7,
       "norm_label": "_apply_universe_backtest_args()"
     },
     {
       "label": "_exclude_symbols_from_args()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L773",
+      "source_location": "L800",
       "id": "aggression_carry_cli_exclude_symbols_from_args",
-      "community": 8,
+      "community": 7,
       "norm_label": "_exclude_symbols_from_args()"
     },
     {
       "label": "_close_fade_exclusions()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L780",
+      "source_location": "L807",
       "id": "aggression_carry_cli_close_fade_exclusions",
-      "community": 8,
+      "community": 7,
       "norm_label": "_close_fade_exclusions()"
     },
     {
       "label": "_signal_minute()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L785",
+      "source_location": "L812",
       "id": "aggression_carry_cli_signal_minute",
-      "community": 8,
+      "community": 7,
       "norm_label": "_signal_minute()"
     },
     {
       "label": "_csv_signal_minutes()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L797",
+      "source_location": "L824",
       "id": "aggression_carry_cli_csv_signal_minutes",
-      "community": 8,
+      "community": 7,
       "norm_label": "_csv_signal_minutes()"
     },
     {
       "label": "_csv_str()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L803",
+      "source_location": "L830",
       "id": "aggression_carry_cli_csv_str",
-      "community": 8,
+      "community": 7,
       "norm_label": "_csv_str()"
     },
     {
       "label": "_csv_int()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L809",
+      "source_location": "L836",
       "id": "aggression_carry_cli_csv_int",
-      "community": 8,
+      "community": 7,
       "norm_label": "_csv_int()"
     },
     {
       "label": "_csv_float()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L813",
+      "source_location": "L840",
       "id": "aggression_carry_cli_csv_float",
-      "community": 8,
+      "community": 7,
       "norm_label": "_csv_float()"
     },
     {
       "label": "_csv_bool()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L817",
+      "source_location": "L844",
       "id": "aggression_carry_cli_csv_bool",
-      "community": 8,
+      "community": 7,
       "norm_label": "_csv_bool()"
     },
     {
       "label": "_parse_now()",
       "file_type": "code",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L826",
+      "source_location": "L853",
       "id": "aggression_carry_cli_parse_now",
-      "community": 8,
+      "community": 7,
       "norm_label": "_parse_now()"
     },
     {
@@ -2700,7 +2754,7 @@
       "source_file": "aggression_carry/storage.py",
       "source_location": "L1",
       "id": "aggression_carry_storage_py",
-      "community": 1,
+      "community": 4,
       "norm_label": "storage.py"
     },
     {
@@ -2709,7 +2763,7 @@
       "source_file": "aggression_carry/storage.py",
       "source_location": "L79",
       "id": "aggression_carry_storage_dataset_path",
-      "community": 1,
+      "community": 4,
       "norm_label": "dataset_path()"
     },
     {
@@ -2718,7 +2772,7 @@
       "source_file": "aggression_carry/storage.py",
       "source_location": "L85",
       "id": "aggression_carry_storage_ensure_data_root",
-      "community": 1,
+      "community": 4,
       "norm_label": "ensure_data_root()"
     },
     {
@@ -2727,7 +2781,7 @@
       "source_file": "aggression_carry/storage.py",
       "source_location": "L91",
       "id": "aggression_carry_storage_with_date_column",
-      "community": 1,
+      "community": 4,
       "norm_label": "with_date_column()"
     },
     {
@@ -2736,7 +2790,7 @@
       "source_file": "aggression_carry/storage.py",
       "source_location": "L101",
       "id": "aggression_carry_storage_write_dataset",
-      "community": 1,
+      "community": 4,
       "norm_label": "write_dataset()"
     },
     {
@@ -2754,7 +2808,7 @@
       "source_file": "aggression_carry/storage.py",
       "source_location": "L144",
       "id": "aggression_carry_storage_write_part",
-      "community": 1,
+      "community": 4,
       "norm_label": "_write_part()"
     },
     {
@@ -2763,7 +2817,7 @@
       "source_file": "aggression_carry/archive.py",
       "source_location": "L1",
       "id": "aggression_carry_archive_py",
-      "community": 1,
+      "community": 2,
       "norm_label": "archive.py"
     },
     {
@@ -2772,7 +2826,7 @@
       "source_file": "aggression_carry/archive.py",
       "source_location": "L23",
       "id": "aggression_carry_archive_download_archive_bytes",
-      "community": 1,
+      "community": 2,
       "norm_label": "download_archive_bytes()"
     },
     {
@@ -2781,7 +2835,7 @@
       "source_file": "aggression_carry/archive.py",
       "source_location": "L29",
       "id": "aggression_carry_archive_read_public_trade_archive",
-      "community": 1,
+      "community": 2,
       "norm_label": "read_public_trade_archive()"
     },
     {
@@ -2790,7 +2844,7 @@
       "source_file": "aggression_carry/archive.py",
       "source_location": "L70",
       "id": "aggression_carry_archive_download_public_trade_archive",
-      "community": 1,
+      "community": 2,
       "norm_label": "download_public_trade_archive()"
     },
     {
@@ -2799,7 +2853,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L1",
       "id": "aggression_carry_downloaders_py",
-      "community": 1,
+      "community": 2,
       "norm_label": "downloaders.py"
     },
     {
@@ -2808,7 +2862,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L24",
       "id": "aggression_carry_downloaders_parse_date_ms",
-      "community": 1,
+      "community": 2,
       "norm_label": "parse_date_ms()"
     },
     {
@@ -2817,7 +2871,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L31",
       "id": "aggression_carry_downloaders_download_market_data",
-      "community": 1,
+      "community": 2,
       "norm_label": "download_market_data()"
     },
     {
@@ -2826,7 +2880,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L142",
       "id": "aggression_carry_downloaders_download_rest_symbol_datasets",
-      "community": 1,
+      "community": 2,
       "norm_label": "_download_rest_symbol_datasets()"
     },
     {
@@ -2835,7 +2889,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L240",
       "id": "aggression_carry_downloaders_download_symbol_dataset",
-      "community": 1,
+      "community": 2,
       "norm_label": "_download_symbol_dataset()"
     },
     {
@@ -2844,7 +2898,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L271",
       "id": "aggression_carry_downloaders_marker_path",
-      "community": 1,
+      "community": 2,
       "norm_label": "_marker_path()"
     },
     {
@@ -2853,7 +2907,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L276",
       "id": "aggression_carry_downloaders_marked_complete",
-      "community": 1,
+      "community": 2,
       "norm_label": "_marked_complete()"
     },
     {
@@ -2862,7 +2916,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L281",
       "id": "aggression_carry_downloaders_mark_complete",
-      "community": 1,
+      "community": 2,
       "norm_label": "_mark_complete()"
     },
     {
@@ -2871,7 +2925,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L286",
       "id": "aggression_carry_downloaders_normalize_klines",
-      "community": 1,
+      "community": 2,
       "norm_label": "_normalize_klines()"
     },
     {
@@ -2880,7 +2934,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L305",
       "id": "aggression_carry_downloaders_normalize_funding",
-      "community": 1,
+      "community": 2,
       "norm_label": "_normalize_funding()"
     },
     {
@@ -2889,7 +2943,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L317",
       "id": "aggression_carry_downloaders_normalize_open_interest",
-      "community": 1,
+      "community": 2,
       "norm_label": "_normalize_open_interest()"
     },
     {
@@ -2898,7 +2952,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L329",
       "id": "aggression_carry_downloaders_normalize_tickers",
-      "community": 1,
+      "community": 2,
       "norm_label": "_normalize_tickers()"
     },
     {
@@ -2907,7 +2961,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L355",
       "id": "aggression_carry_downloaders_normalize_instruments",
-      "community": 1,
+      "community": 2,
       "norm_label": "_normalize_instruments()"
     },
     {
@@ -2916,7 +2970,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L389",
       "id": "aggression_carry_downloaders_dates_between",
-      "community": 1,
+      "community": 2,
       "norm_label": "_dates_between()"
     },
     {
@@ -2925,7 +2979,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L400",
       "id": "aggression_carry_downloaders_archive_filename",
-      "community": 1,
+      "community": 2,
       "norm_label": "_archive_filename()"
     },
     {
@@ -2934,7 +2988,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L405",
       "id": "aggression_carry_downloaders_archive_outputs_exist",
-      "community": 1,
+      "community": 4,
       "norm_label": "_archive_outputs_exist()"
     },
     {
@@ -2943,7 +2997,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L426",
       "id": "aggression_carry_downloaders_partition_exists",
-      "community": 1,
+      "community": 4,
       "norm_label": "_partition_exists()"
     },
     {
@@ -2952,7 +3006,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L431",
       "id": "aggression_carry_downloaders_float_or_none",
-      "community": 1,
+      "community": 2,
       "norm_label": "_float_or_none()"
     },
     {
@@ -2961,7 +3015,7 @@
       "source_file": "aggression_carry/__main__.py",
       "source_location": "L1",
       "id": "aggression_carry_main_py",
-      "community": 8,
+      "community": 7,
       "norm_label": "__main__.py"
     },
     {
@@ -3105,7 +3159,7 @@
       "source_file": "tests/test_aggression_carry_ingestion.py",
       "source_location": "L1",
       "id": "tests_test_aggression_carry_ingestion_py",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_aggression_carry_ingestion.py"
     },
     {
@@ -3114,7 +3168,7 @@
       "source_file": "tests/test_aggression_carry_ingestion.py",
       "source_location": "L14",
       "id": "tests_test_aggression_carry_ingestion_test_trade_aggregation_buy_sell_quote",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_trade_aggregation_buy_sell_quote()"
     },
     {
@@ -3123,7 +3177,7 @@
       "source_file": "tests/test_aggression_carry_ingestion.py",
       "source_location": "L28",
       "id": "tests_test_aggression_carry_ingestion_test_trade_aggregation_excludes_block_and_rpi",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_trade_aggregation_excludes_block_and_rpi()"
     },
     {
@@ -3132,7 +3186,7 @@
       "source_file": "tests/test_aggression_carry_ingestion.py",
       "source_location": "L59",
       "id": "tests_test_aggression_carry_ingestion_test_trade_parser_handles_websocket_aliases_and_string_booleans",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_trade_parser_handles_websocket_aliases_and_string_booleans()"
     },
     {
@@ -3141,7 +3195,7 @@
       "source_file": "tests/test_aggression_carry_ingestion.py",
       "source_location": "L72",
       "id": "tests_test_aggression_carry_ingestion_test_trade_aggregation_dedupes_replayed_trade_ids",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_trade_aggregation_dedupes_replayed_trade_ids()"
     },
     {
@@ -3150,7 +3204,7 @@
       "source_file": "tests/test_aggression_carry_ingestion.py",
       "source_location": "L88",
       "id": "tests_test_aggression_carry_ingestion_test_signed_flow_1h_fields",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_signed_flow_1h_fields()"
     },
     {
@@ -3159,7 +3213,7 @@
       "source_file": "tests/test_aggression_carry_ingestion.py",
       "source_location": "L103",
       "id": "tests_test_aggression_carry_ingestion_test_funding_interval_normalization",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_funding_interval_normalization()"
     },
     {
@@ -3168,7 +3222,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L1",
       "id": "tests_test_aggression_carry_archive_py",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_aggression_carry_archive.py"
     },
     {
@@ -3177,7 +3231,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L25",
       "id": "tests_test_aggression_carry_archive_test_read_bybit_public_trade_csv_gz_archive",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_read_bybit_public_trade_csv_gz_archive()"
     },
     {
@@ -3186,7 +3240,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L44",
       "id": "tests_test_aggression_carry_archive_test_archive_filename_preserves_compression_suffix",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_archive_filename_preserves_compression_suffix()"
     },
     {
@@ -3213,7 +3267,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L108",
       "id": "tests_test_aggression_carry_archive_test_download_public_trade_archive_ignores_stale_fixed_temp_name",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_download_public_trade_archive_ignores_stale_fixed_temp_name()"
     },
     {
@@ -3222,7 +3276,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L126",
       "id": "tests_test_aggression_carry_archive_test_archive_download_retries_and_removes_partial_temp",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_archive_download_retries_and_removes_partial_temp()"
     },
     {
@@ -3231,7 +3285,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L152",
       "id": "tests_test_aggression_carry_archive_test_archive_only_download_does_not_construct_rest_client",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_archive_only_download_does_not_construct_rest_client()"
     },
     {
@@ -3240,7 +3294,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L194",
       "id": "tests_test_aggression_carry_archive_test_archive_download_skips_completed_partitions",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_archive_download_skips_completed_partitions()"
     },
     {
@@ -3249,7 +3303,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L220",
       "id": "tests_test_aggression_carry_archive_test_archive_download_can_skip_raw_public_trade_storage",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_archive_download_can_skip_raw_public_trade_storage()"
     },
     {
@@ -3258,7 +3312,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L261",
       "id": "tests_test_aggression_carry_archive_test_archive_download_can_build_1m_klines_from_public_trades",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_archive_download_can_build_1m_klines_from_public_trades()"
     },
     {
@@ -3276,7 +3330,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L387",
       "id": "tests_test_aggression_carry_archive_test_rest_kline_download_writes_each_symbol_and_resumes",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_rest_kline_download_writes_each_symbol_and_resumes()"
     },
     {
@@ -3285,7 +3339,7 @@
       "source_file": "tests/test_aggression_carry_archive.py",
       "source_location": "L436",
       "id": "tests_test_aggression_carry_archive_test_rest_kline_download_only_marks_successful_symbols",
-      "community": 1,
+      "community": 2,
       "norm_label": "test_rest_kline_download_only_marks_successful_symbols()"
     },
     {
@@ -3312,7 +3366,7 @@
       "source_file": "tests/test_aggression_carry_daily_close_fade.py",
       "source_location": "L48",
       "id": "tests_test_aggression_carry_daily_close_fade_test_daily_close_fade_uses_linear_usdt_short_returns",
-      "community": 2,
+      "community": 3,
       "norm_label": "test_daily_close_fade_uses_linear_usdt_short_returns()"
     },
     {
@@ -3438,7 +3492,7 @@
       "source_file": "tests/test_aggression_carry_storage.py",
       "source_location": "L1",
       "id": "tests_test_aggression_carry_storage_py",
-      "community": 1,
+      "community": 4,
       "norm_label": "test_aggression_carry_storage.py"
     },
     {
@@ -3447,7 +3501,7 @@
       "source_file": "tests/test_aggression_carry_storage.py",
       "source_location": "L10",
       "id": "tests_test_aggression_carry_storage_test_incremental_parquet_writes_merge_existing_partition",
-      "community": 1,
+      "community": 4,
       "norm_label": "test_incremental_parquet_writes_merge_existing_partition()"
     },
     {
@@ -3456,7 +3510,7 @@
       "source_file": "tests/test_aggression_carry_storage.py",
       "source_location": "L30",
       "id": "tests_test_aggression_carry_storage_test_incremental_parquet_writes_replace_duplicate_keys",
-      "community": 1,
+      "community": 4,
       "norm_label": "test_incremental_parquet_writes_replace_duplicate_keys()"
     },
     {
@@ -3465,7 +3519,7 @@
       "source_file": "tests/test_aggression_carry_universe.py",
       "source_location": "L1",
       "id": "tests_test_aggression_carry_universe_py",
-      "community": 6,
+      "community": 2,
       "norm_label": "test_aggression_carry_universe.py"
     },
     {
@@ -3474,7 +3528,7 @@
       "source_file": "tests/test_aggression_carry_universe.py",
       "source_location": "L10",
       "id": "tests_test_aggression_carry_universe_test_current_universe_table_filters_and_ranks",
-      "community": 6,
+      "community": 2,
       "norm_label": "test_current_universe_table_filters_and_ranks()"
     },
     {
@@ -3483,7 +3537,7 @@
       "source_file": "tests/test_aggression_carry_universe.py",
       "source_location": "L49",
       "id": "tests_test_aggression_carry_universe_test_universe_report_contains_symbol_csv",
-      "community": 6,
+      "community": 2,
       "norm_label": "test_universe_report_contains_symbol_csv()"
     },
     {
@@ -3492,7 +3546,7 @@
       "source_file": "tests/test_aggression_carry_universe.py",
       "source_location": "L84",
       "id": "tests_test_aggression_carry_universe_instrument",
-      "community": 6,
+      "community": 2,
       "norm_label": "_instrument()"
     },
     {
@@ -3501,7 +3555,7 @@
       "source_file": "tests/test_aggression_carry_universe.py",
       "source_location": "L100",
       "id": "tests_test_aggression_carry_universe_ticker",
-      "community": 6,
+      "community": 2,
       "norm_label": "_ticker()"
     },
     {
@@ -3510,142 +3564,151 @@
       "source_file": "tests/test_aggression_carry_forward_test.py",
       "source_location": "L1",
       "id": "tests_test_aggression_carry_forward_test_py",
-      "community": 4,
+      "community": 1,
       "norm_label": "test_aggression_carry_forward_test.py"
     },
     {
       "label": "test_forward_scan_uses_live_universe_filters_and_pump_selection()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L13",
+      "source_location": "L14",
       "id": "tests_test_aggression_carry_forward_test_test_forward_scan_uses_live_universe_filters_and_pump_selection",
-      "community": 4,
+      "community": 1,
       "norm_label": "test_forward_scan_uses_live_universe_filters_and_pump_selection()"
     },
     {
       "label": "test_forward_run_opens_paper_trades_without_orders()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L29",
+      "source_location": "L30",
       "id": "tests_test_aggression_carry_forward_test_test_forward_run_opens_paper_trades_without_orders",
-      "community": 4,
+      "community": 1,
       "norm_label": "test_forward_run_opens_paper_trades_without_orders()"
     },
     {
       "label": "test_forward_run_marks_short_stop_with_linear_pnl()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L42",
+      "source_location": "L43",
       "id": "tests_test_aggression_carry_forward_test_test_forward_run_marks_short_stop_with_linear_pnl",
-      "community": 4,
+      "community": 1,
       "norm_label": "test_forward_run_marks_short_stop_with_linear_pnl()"
     },
     {
       "label": "test_forward_run_marks_short_take_profit_with_linear_pnl()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L60",
+      "source_location": "L61",
       "id": "tests_test_aggression_carry_forward_test_test_forward_run_marks_short_take_profit_with_linear_pnl",
-      "community": 4,
+      "community": 1,
       "norm_label": "test_forward_run_marks_short_take_profit_with_linear_pnl()"
     },
     {
       "label": "test_forward_open_trade_uses_stored_exit_config_after_config_change()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L74",
+      "source_location": "L75",
       "id": "tests_test_aggression_carry_forward_test_test_forward_open_trade_uses_stored_exit_config_after_config_change",
-      "community": 4,
+      "community": 1,
       "norm_label": "test_forward_open_trade_uses_stored_exit_config_after_config_change()"
+    },
+    {
+      "label": "test_forward_sleeves_use_isolated_roots_and_reports()",
+      "file_type": "code",
+      "source_file": "tests/test_aggression_carry_forward_test.py",
+      "source_location": "L89",
+      "id": "tests_test_aggression_carry_forward_test_test_forward_sleeves_use_isolated_roots_and_reports",
+      "community": 1,
+      "norm_label": "test_forward_sleeves_use_isolated_roots_and_reports()"
     },
     {
       "label": "_research_config()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L88",
+      "source_location": "L116",
       "id": "tests_test_aggression_carry_forward_test_research_config",
-      "community": 4,
+      "community": 1,
       "norm_label": "_research_config()"
     },
     {
       "label": "_FakeBybit",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L114",
+      "source_location": "L142",
       "id": "tests_test_aggression_carry_forward_test_fakebybit",
-      "community": 4,
+      "community": 1,
       "norm_label": "_fakebybit"
     },
     {
       "label": ".__init__()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L115",
+      "source_location": "L143",
       "id": "tests_test_aggression_carry_forward_test_fakebybit_init",
-      "community": 4,
+      "community": 1,
       "norm_label": ".__init__()"
     },
     {
       "label": ".create_order()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L120",
+      "source_location": "L148",
       "id": "tests_test_aggression_carry_forward_test_fakebybit_create_order",
-      "community": 4,
+      "community": 1,
       "norm_label": ".create_order()"
     },
     {
       "label": ".get_instruments_info()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L125",
+      "source_location": "L153",
       "id": "tests_test_aggression_carry_forward_test_fakebybit_get_instruments_info",
-      "community": 4,
+      "community": 1,
       "norm_label": ".get_instruments_info()"
     },
     {
       "label": ".get_tickers()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L147",
+      "source_location": "L175",
       "id": "tests_test_aggression_carry_forward_test_fakebybit_get_tickers",
-      "community": 4,
+      "community": 1,
       "norm_label": ".get_tickers()"
     },
     {
       "label": ".get_klines()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L160",
+      "source_location": "L188",
       "id": "tests_test_aggression_carry_forward_test_fakebybit_get_klines",
-      "community": 4,
+      "community": 1,
       "norm_label": ".get_klines()"
     },
     {
       "label": "._daily_klines()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L166",
+      "source_location": "L194",
       "id": "tests_test_aggression_carry_forward_test_fakebybit_daily_klines",
-      "community": 4,
+      "community": 1,
       "norm_label": "._daily_klines()"
     },
     {
       "label": "._minute_klines()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L180",
+      "source_location": "L208",
       "id": "tests_test_aggression_carry_forward_test_fakebybit_minute_klines",
-      "community": 4,
+      "community": 1,
       "norm_label": "._minute_klines()"
     },
     {
       "label": "_base_price()",
       "file_type": "code",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L217",
+      "source_location": "L245",
       "id": "tests_test_aggression_carry_forward_test_base_price",
-      "community": 4,
+      "community": 1,
       "norm_label": "_base_price()"
     },
     {
@@ -3654,7 +3717,7 @@
       "source_file": "tests/test_aggression_carry_config.py",
       "source_location": "L1",
       "id": "tests_test_aggression_carry_config_py",
-      "community": 9,
+      "community": 8,
       "norm_label": "test_aggression_carry_config.py"
     },
     {
@@ -3663,7 +3726,7 @@
       "source_file": "tests/test_aggression_carry_config.py",
       "source_location": "L8",
       "id": "tests_test_aggression_carry_config_test_volume_alpha_controls_load_from_yaml",
-      "community": 9,
+      "community": 8,
       "norm_label": "test_volume_alpha_controls_load_from_yaml()"
     },
     {
@@ -3728,6 +3791,15 @@
       "id": "tests_test_aggression_carry_cli_test_cli_fixture_pipeline_end_to_end",
       "community": 10,
       "norm_label": "test_cli_fixture_pipeline_end_to_end()"
+    },
+    {
+      "label": "test_cli_parses_forward_sleeves_alias()",
+      "file_type": "code",
+      "source_file": "tests/test_aggression_carry_cli.py",
+      "source_location": "L65",
+      "id": "tests_test_aggression_carry_cli_test_cli_parses_forward_sleeves_alias",
+      "community": 10,
+      "norm_label": "test_cli_parses_forward_sleeves_alias()"
     },
     {
       "label": "run_volume_bucket_sweep.py",
@@ -4539,8 +4611,8 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L96",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_signal_date_window",
-      "_tgt": "aggression_carry_ingestion_generate_fixture_data",
+      "_src": "aggression_carry_ingestion_generate_fixture_data",
+      "_tgt": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_signal_date_window",
       "source": "aggression_carry_ingestion_generate_fixture_data",
       "target": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_signal_date_window"
     },
@@ -5739,8 +5811,8 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L98",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_signal_date_window",
-      "_tgt": "aggression_carry_volume_backtest_run_volume_trade_backtest",
+      "_src": "aggression_carry_volume_backtest_run_volume_trade_backtest",
+      "_tgt": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_signal_date_window",
       "source": "aggression_carry_volume_backtest_run_volume_trade_backtest",
       "target": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_signal_date_window"
     },
@@ -7983,8 +8055,8 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L100",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_signal_date_window",
-      "_tgt": "aggression_carry_config_volumebacktestconfig",
+      "_src": "aggression_carry_config_volumebacktestconfig",
+      "_tgt": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_signal_date_window",
       "source": "aggression_carry_config_volumebacktestconfig",
       "target": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_signal_date_window"
     },
@@ -12177,6 +12249,18 @@
       "target": "aggression_carry_forward_test_run_forward_once"
     },
     {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L253",
+      "weight": 1.0,
+      "_src": "aggression_carry_forward_test_run_forward_sleeves",
+      "_tgt": "aggression_carry_telegram_send_telegram_message",
+      "source": "aggression_carry_telegram_send_telegram_message",
+      "target": "aggression_carry_forward_test_run_forward_sleeves"
+    },
+    {
       "relation": "rationale_for",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/__init__.py",
@@ -12231,6 +12315,30 @@
       "source_location": "L175",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
+      "_tgt": "aggression_carry_forward_test_run_forward_sleeves",
+      "source": "aggression_carry_forward_test_py",
+      "target": "aggression_carry_forward_test_run_forward_sleeves",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L257",
+      "weight": 1.0,
+      "_src": "aggression_carry_forward_test_py",
+      "_tgt": "aggression_carry_forward_test_default_forward_sleeves",
+      "source": "aggression_carry_forward_test_py",
+      "target": "aggression_carry_forward_test_default_forward_sleeves",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L296",
+      "weight": 1.0,
+      "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_run_forward_report",
       "source": "aggression_carry_forward_test_py",
       "target": "aggression_carry_forward_test_run_forward_report",
@@ -12240,7 +12348,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L195",
+      "source_location": "L316",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_build_forward_universe",
@@ -12252,7 +12360,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L237",
+      "source_location": "L358",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_build_forward_scan_features",
@@ -12264,7 +12372,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L327",
+      "source_location": "L448",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_open_forward_paper_trades",
@@ -12276,7 +12384,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L381",
+      "source_location": "L502",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_mark_forward_open_trades",
@@ -12288,7 +12396,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L428",
+      "source_location": "L549",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_summarize_forward_paper_baskets",
@@ -12300,7 +12408,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L452",
+      "source_location": "L573",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_summarize_forward_paper_trades",
@@ -12312,7 +12420,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L484",
+      "source_location": "L605",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_format_forward_scan_report",
@@ -12324,7 +12432,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L522",
+      "source_location": "L643",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_format_forward_run_report",
@@ -12336,7 +12444,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L565",
+      "source_location": "L686",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_format_forward_run_message",
@@ -12348,7 +12456,31 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L579",
+      "source_location": "L700",
+      "weight": 1.0,
+      "_src": "aggression_carry_forward_test_py",
+      "_tgt": "aggression_carry_forward_test_format_forward_sleeves_report",
+      "source": "aggression_carry_forward_test_py",
+      "target": "aggression_carry_forward_test_format_forward_sleeves_report",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L747",
+      "weight": 1.0,
+      "_src": "aggression_carry_forward_test_py",
+      "_tgt": "aggression_carry_forward_test_format_forward_sleeves_message",
+      "source": "aggression_carry_forward_test_py",
+      "target": "aggression_carry_forward_test_format_forward_sleeves_message",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L758",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_fetch_forward_bars",
@@ -12360,7 +12492,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L635",
+      "source_location": "L814",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_fetch_symbol_klines",
@@ -12372,7 +12504,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L642",
+      "source_location": "L821",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_normalize_live_instruments",
@@ -12384,7 +12516,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L658",
+      "source_location": "L837",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_normalize_live_tickers",
@@ -12396,7 +12528,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L674",
+      "source_location": "L853",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_normalize_klines",
@@ -12408,7 +12540,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L693",
+      "source_location": "L872",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_signal_feature_frame",
@@ -12420,7 +12552,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L728",
+      "source_location": "L907",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_latest_realized_vol",
@@ -12432,7 +12564,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L750",
+      "source_location": "L929",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_latest_baseline_liquidity",
@@ -12444,7 +12576,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L772",
+      "source_location": "L951",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_minute_frame",
@@ -12456,7 +12588,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L782",
+      "source_location": "L961",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_new_paper_trade",
@@ -12468,7 +12600,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L876",
+      "source_location": "L1055",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_mark_trade_from_bars",
@@ -12480,7 +12612,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1050",
+      "source_location": "L1229",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_trade_number",
@@ -12492,7 +12624,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1060",
+      "source_location": "L1239",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_write_forward_scan_outputs",
@@ -12504,7 +12636,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1077",
+      "source_location": "L1256",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_write_forward_trade_outputs",
@@ -12516,7 +12648,19 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1099",
+      "source_location": "L1278",
+      "weight": 1.0,
+      "_src": "aggression_carry_forward_test_py",
+      "_tgt": "aggression_carry_forward_test_write_forward_sleeves_outputs",
+      "source": "aggression_carry_forward_test_py",
+      "target": "aggression_carry_forward_test_write_forward_sleeves_outputs",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L1287",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_replace_dataset",
@@ -12528,7 +12672,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1106",
+      "source_location": "L1294",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_merge_trade_frames",
@@ -12540,7 +12684,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1113",
+      "source_location": "L1301",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_basket_already_opened",
@@ -12552,7 +12696,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1117",
+      "source_location": "L1305",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_count_status",
@@ -12564,7 +12708,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1121",
+      "source_location": "L1309",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_count_reason",
@@ -12576,7 +12720,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1125",
+      "source_location": "L1313",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_scan_status",
@@ -12588,7 +12732,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1135",
+      "source_location": "L1323",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_scan_id",
@@ -12600,7 +12744,19 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1139",
+      "source_location": "L1327",
+      "weight": 1.0,
+      "_src": "aggression_carry_forward_test_py",
+      "_tgt": "aggression_carry_forward_test_safe_sleeve_name",
+      "source": "aggression_carry_forward_test_py",
+      "target": "aggression_carry_forward_test_safe_sleeve_name",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L1332",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_signal_ts_ms",
@@ -12612,7 +12768,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1144",
+      "source_location": "L1337",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_day_start_ms",
@@ -12624,7 +12780,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1149",
+      "source_location": "L1342",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_floor_minute_ms",
@@ -12636,7 +12792,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1153",
+      "source_location": "L1346",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_ms_from_dt",
@@ -12648,7 +12804,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1157",
+      "source_location": "L1350",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_dt_from_ms",
@@ -12660,7 +12816,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1161",
+      "source_location": "L1354",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_as_utc",
@@ -12672,7 +12828,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1165",
+      "source_location": "L1358",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_concat",
@@ -12684,7 +12840,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1169",
+      "source_location": "L1362",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_empty_universe",
@@ -12696,7 +12852,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1182",
+      "source_location": "L1375",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_float_or_none",
@@ -12708,7 +12864,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1186",
+      "source_location": "L1379",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_int_or_none",
@@ -12720,7 +12876,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1190",
+      "source_location": "L1383",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_py",
       "_tgt": "aggression_carry_forward_test_bool_value",
@@ -13042,6 +13198,18 @@
     },
     {
       "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L198",
+      "weight": 1.0,
+      "_src": "aggression_carry_forward_test_run_forward_sleeves",
+      "_tgt": "aggression_carry_forward_test_run_forward_once",
+      "source": "aggression_carry_forward_test_run_forward_once",
+      "target": "aggression_carry_forward_test_run_forward_sleeves",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
       "confidence": "INFERRED",
       "confidence_score": 0.8,
       "source_file": "aggression_carry/forward_test.py",
@@ -13116,7 +13284,115 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L181",
+      "source_location": "L189",
+      "weight": 1.0,
+      "_src": "aggression_carry_forward_test_run_forward_sleeves",
+      "_tgt": "aggression_carry_forward_test_as_utc",
+      "source": "aggression_carry_forward_test_run_forward_sleeves",
+      "target": "aggression_carry_forward_test_as_utc",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L190",
+      "weight": 1.0,
+      "_src": "aggression_carry_forward_test_run_forward_sleeves",
+      "_tgt": "aggression_carry_forward_test_default_forward_sleeves",
+      "source": "aggression_carry_forward_test_run_forward_sleeves",
+      "target": "aggression_carry_forward_test_default_forward_sleeves",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L196",
+      "weight": 1.0,
+      "_src": "aggression_carry_forward_test_run_forward_sleeves",
+      "_tgt": "aggression_carry_forward_test_safe_sleeve_name",
+      "source": "aggression_carry_forward_test_run_forward_sleeves",
+      "target": "aggression_carry_forward_test_safe_sleeve_name",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L208",
+      "weight": 1.0,
+      "_src": "aggression_carry_forward_test_run_forward_sleeves",
+      "_tgt": "aggression_carry_forward_test_summarize_forward_paper_trades",
+      "source": "aggression_carry_forward_test_run_forward_sleeves",
+      "target": "aggression_carry_forward_test_summarize_forward_paper_trades",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L251",
+      "weight": 1.0,
+      "_src": "aggression_carry_forward_test_run_forward_sleeves",
+      "_tgt": "aggression_carry_forward_test_write_forward_sleeves_outputs",
+      "source": "aggression_carry_forward_test_run_forward_sleeves",
+      "target": "aggression_carry_forward_test_write_forward_sleeves_outputs",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L253",
+      "weight": 1.0,
+      "_src": "aggression_carry_forward_test_run_forward_sleeves",
+      "_tgt": "aggression_carry_forward_test_format_forward_sleeves_message",
+      "source": "aggression_carry_forward_test_run_forward_sleeves",
+      "target": "aggression_carry_forward_test_format_forward_sleeves_message",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L208",
+      "weight": 1.0,
+      "_src": "aggression_carry_forward_test_run_forward_sleeves",
+      "_tgt": "aggression_carry_storage_read_dataset",
+      "source": "aggression_carry_forward_test_run_forward_sleeves",
+      "target": "aggression_carry_storage_read_dataset"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "aggression_carry/cli.py",
+      "source_location": "L462",
+      "weight": 1.0,
+      "_src": "aggression_carry_cli_main",
+      "_tgt": "aggression_carry_forward_test_run_forward_sleeves",
+      "source": "aggression_carry_forward_test_run_forward_sleeves",
+      "target": "aggression_carry_cli_main"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "tests/test_aggression_carry_forward_test.py",
+      "source_location": "L103",
+      "weight": 1.0,
+      "_src": "tests_test_aggression_carry_forward_test_test_forward_sleeves_use_isolated_roots_and_reports",
+      "_tgt": "aggression_carry_forward_test_run_forward_sleeves",
+      "source": "aggression_carry_forward_test_run_forward_sleeves",
+      "target": "tests_test_aggression_carry_forward_test_test_forward_sleeves_use_isolated_roots_and_reports"
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L302",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_run_forward_report",
       "_tgt": "aggression_carry_forward_test_summarize_forward_paper_baskets",
@@ -13128,7 +13404,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L185",
+      "source_location": "L306",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_run_forward_report",
       "_tgt": "aggression_carry_forward_test_count_status",
@@ -13140,7 +13416,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L189",
+      "source_location": "L310",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_run_forward_report",
       "_tgt": "aggression_carry_forward_test_summarize_forward_paper_trades",
@@ -13152,7 +13428,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L191",
+      "source_location": "L312",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_run_forward_report",
       "_tgt": "aggression_carry_forward_test_write_forward_trade_outputs",
@@ -13188,7 +13464,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L204",
+      "source_location": "L325",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_build_forward_universe",
       "_tgt": "aggression_carry_forward_test_normalize_live_instruments",
@@ -13200,7 +13476,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L205",
+      "source_location": "L326",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_build_forward_universe",
       "_tgt": "aggression_carry_forward_test_normalize_live_tickers",
@@ -13212,7 +13488,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L207",
+      "source_location": "L328",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_build_forward_universe",
       "_tgt": "aggression_carry_forward_test_empty_universe",
@@ -13224,7 +13500,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L248",
+      "source_location": "L369",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_build_forward_scan_features",
       "_tgt": "aggression_carry_forward_test_minute_frame",
@@ -13236,7 +13512,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L249",
+      "source_location": "L370",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_build_forward_scan_features",
       "_tgt": "aggression_carry_forward_test_signal_feature_frame",
@@ -13248,7 +13524,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L253",
+      "source_location": "L374",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_build_forward_scan_features",
       "_tgt": "aggression_carry_forward_test_latest_realized_vol",
@@ -13260,7 +13536,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L255",
+      "source_location": "L376",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_build_forward_scan_features",
       "_tgt": "aggression_carry_forward_test_latest_baseline_liquidity",
@@ -13272,7 +13548,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L340",
+      "source_location": "L461",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_open_forward_paper_trades",
       "_tgt": "aggression_carry_forward_test_floor_minute_ms",
@@ -13284,7 +13560,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L340",
+      "source_location": "L461",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_open_forward_paper_trades",
       "_tgt": "aggression_carry_forward_test_ms_from_dt",
@@ -13296,7 +13572,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L340",
+      "source_location": "L461",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_open_forward_paper_trades",
       "_tgt": "aggression_carry_forward_test_as_utc",
@@ -13308,7 +13584,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L347",
+      "source_location": "L468",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_open_forward_paper_trades",
       "_tgt": "aggression_carry_forward_test_dt_from_ms",
@@ -13320,7 +13596,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L348",
+      "source_location": "L469",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_open_forward_paper_trades",
       "_tgt": "aggression_carry_forward_test_basket_already_opened",
@@ -13332,7 +13608,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L356",
+      "source_location": "L477",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_open_forward_paper_trades",
       "_tgt": "aggression_carry_forward_test_fetch_symbol_klines",
@@ -13344,7 +13620,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L366",
+      "source_location": "L487",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_open_forward_paper_trades",
       "_tgt": "aggression_carry_forward_test_new_paper_trade",
@@ -13356,7 +13632,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L377",
+      "source_location": "L498",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_open_forward_paper_trades",
       "_tgt": "aggression_carry_forward_test_mark_trade_from_bars",
@@ -13368,7 +13644,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L393",
+      "source_location": "L514",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_mark_forward_open_trades",
       "_tgt": "aggression_carry_forward_test_floor_minute_ms",
@@ -13380,7 +13656,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L393",
+      "source_location": "L514",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_mark_forward_open_trades",
       "_tgt": "aggression_carry_forward_test_ms_from_dt",
@@ -13392,7 +13668,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L393",
+      "source_location": "L514",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_mark_forward_open_trades",
       "_tgt": "aggression_carry_forward_test_as_utc",
@@ -13404,7 +13680,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L408",
+      "source_location": "L529",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_mark_forward_open_trades",
       "_tgt": "aggression_carry_forward_test_fetch_symbol_klines",
@@ -13416,7 +13692,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L415",
+      "source_location": "L536",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_mark_forward_open_trades",
       "_tgt": "aggression_carry_forward_test_trade_number",
@@ -13428,7 +13704,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L417",
+      "source_location": "L538",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_mark_forward_open_trades",
       "_tgt": "aggression_carry_forward_test_mark_trade_from_bars",
@@ -13440,7 +13716,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L469",
+      "source_location": "L590",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_summarize_forward_paper_trades",
       "_tgt": "aggression_carry_forward_test_summarize_forward_paper_baskets",
@@ -13452,7 +13728,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L464",
+      "source_location": "L585",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_summarize_forward_paper_trades",
       "_tgt": "aggression_carry_forward_test_count_status",
@@ -13464,7 +13740,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L474",
+      "source_location": "L595",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_summarize_forward_paper_trades",
       "_tgt": "aggression_carry_forward_test_count_reason",
@@ -13476,7 +13752,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1086",
+      "source_location": "L1265",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_write_forward_trade_outputs",
       "_tgt": "aggression_carry_forward_test_summarize_forward_paper_trades",
@@ -13488,7 +13764,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1071",
+      "source_location": "L1250",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_write_forward_scan_outputs",
       "_tgt": "aggression_carry_forward_test_format_forward_scan_report",
@@ -13500,7 +13776,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1090",
+      "source_location": "L1269",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_write_forward_trade_outputs",
       "_tgt": "aggression_carry_forward_test_format_forward_run_report",
@@ -13512,7 +13788,19 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L632",
+      "source_location": "L1281",
+      "weight": 1.0,
+      "_src": "aggression_carry_forward_test_write_forward_sleeves_outputs",
+      "_tgt": "aggression_carry_forward_test_format_forward_sleeves_report",
+      "source": "aggression_carry_forward_test_format_forward_sleeves_report",
+      "target": "aggression_carry_forward_test_write_forward_sleeves_outputs",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "aggression_carry/forward_test.py",
+      "source_location": "L811",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_fetch_forward_bars",
       "_tgt": "aggression_carry_forward_test_concat",
@@ -13524,7 +13812,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L639",
+      "source_location": "L818",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_fetch_symbol_klines",
       "_tgt": "aggression_carry_forward_test_normalize_klines",
@@ -13536,7 +13824,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L651",
+      "source_location": "L830",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_normalize_live_instruments",
       "_tgt": "aggression_carry_forward_test_int_or_none",
@@ -13548,7 +13836,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L652",
+      "source_location": "L831",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_normalize_live_instruments",
       "_tgt": "aggression_carry_forward_test_bool_value",
@@ -13560,7 +13848,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L655",
+      "source_location": "L834",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_normalize_live_instruments",
       "_tgt": "aggression_carry_forward_test_empty_universe",
@@ -13572,7 +13860,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L664",
+      "source_location": "L843",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_normalize_live_tickers",
       "_tgt": "aggression_carry_forward_test_float_or_none",
@@ -13584,7 +13872,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L797",
+      "source_location": "L976",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_new_paper_trade",
       "_tgt": "aggression_carry_forward_test_dt_from_ms",
@@ -13596,7 +13884,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L888",
+      "source_location": "L1067",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_mark_trade_from_bars",
       "_tgt": "aggression_carry_forward_test_trade_number",
@@ -13608,7 +13896,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1006",
+      "source_location": "L1185",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_mark_trade_from_bars",
       "_tgt": "aggression_carry_forward_test_dt_from_ms",
@@ -13620,7 +13908,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1074",
+      "source_location": "L1253",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_write_forward_scan_outputs",
       "_tgt": "aggression_carry_forward_test_replace_dataset",
@@ -13632,7 +13920,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1095",
+      "source_location": "L1274",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_write_forward_trade_outputs",
       "_tgt": "aggression_carry_forward_test_replace_dataset",
@@ -13668,7 +13956,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1136",
+      "source_location": "L1324",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_scan_id",
       "_tgt": "aggression_carry_forward_test_dt_from_ms",
@@ -13680,7 +13968,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1141",
+      "source_location": "L1334",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_signal_ts_ms",
       "_tgt": "aggression_carry_forward_test_ms_from_dt",
@@ -13692,7 +13980,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/forward_test.py",
-      "source_location": "L1146",
+      "source_location": "L1339",
       "weight": 1.0,
       "_src": "aggression_carry_forward_test_day_start_ms",
       "_tgt": "aggression_carry_forward_test_ms_from_dt",
@@ -13968,7 +14256,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L253",
+      "source_location": "L262",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_main",
@@ -13980,7 +14268,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L464",
+      "source_location": "L491",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_close_fade_config_from_args",
@@ -13992,7 +14280,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L543",
+      "source_location": "L570",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_close_fade_base_from_grid_args",
@@ -14004,7 +14292,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L566",
+      "source_location": "L593",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_close_fade_grid_config_from_args",
@@ -14016,7 +14304,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L606",
+      "source_location": "L633",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_backtest_config_from_args",
@@ -14028,7 +14316,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L641",
+      "source_location": "L668",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_grid_config_from_args",
@@ -14040,7 +14328,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L655",
+      "source_location": "L682",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_universe_config_from_args",
@@ -14052,7 +14340,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L674",
+      "source_location": "L701",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_add_universe_backtest_args",
@@ -14064,7 +14352,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L683",
+      "source_location": "L710",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_add_forward_fade_args",
@@ -14076,7 +14364,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L728",
+      "source_location": "L755",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_add_forward_runtime_args",
@@ -14088,7 +14376,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L739",
+      "source_location": "L766",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_forward_config_from_args",
@@ -14100,7 +14388,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L756",
+      "source_location": "L783",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_apply_universe_backtest_args",
@@ -14112,7 +14400,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L773",
+      "source_location": "L800",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_exclude_symbols_from_args",
@@ -14124,7 +14412,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L780",
+      "source_location": "L807",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_close_fade_exclusions",
@@ -14136,7 +14424,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L785",
+      "source_location": "L812",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_signal_minute",
@@ -14148,7 +14436,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L797",
+      "source_location": "L824",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_csv_signal_minutes",
@@ -14160,7 +14448,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L803",
+      "source_location": "L830",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_csv_str",
@@ -14172,7 +14460,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L809",
+      "source_location": "L836",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_csv_int",
@@ -14184,7 +14472,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L813",
+      "source_location": "L840",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_csv_float",
@@ -14196,7 +14484,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L817",
+      "source_location": "L844",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_csv_bool",
@@ -14208,7 +14496,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L826",
+      "source_location": "L853",
       "weight": 1.0,
       "_src": "aggression_carry_cli_py",
       "_tgt": "aggression_carry_cli_parse_now",
@@ -14268,7 +14556,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L254",
+      "source_location": "L263",
       "weight": 1.0,
       "_src": "aggression_carry_cli_main",
       "_tgt": "aggression_carry_cli_build_parser",
@@ -14278,9 +14566,21 @@
     },
     {
       "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "tests/test_aggression_carry_cli.py",
+      "source_location": "L66",
+      "weight": 1.0,
+      "_src": "tests_test_aggression_carry_cli_test_cli_parses_forward_sleeves_alias",
+      "_tgt": "aggression_carry_cli_build_parser",
+      "source": "aggression_carry_cli_build_parser",
+      "target": "tests_test_aggression_carry_cli_test_cli_parses_forward_sleeves_alias"
+    },
+    {
+      "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L282",
+      "source_location": "L291",
       "weight": 1.0,
       "_src": "aggression_carry_cli_main",
       "_tgt": "aggression_carry_cli_universe_config_from_args",
@@ -14292,7 +14592,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L294",
+      "source_location": "L303",
       "weight": 1.0,
       "_src": "aggression_carry_cli_main",
       "_tgt": "aggression_carry_cli_csv_str",
@@ -14304,7 +14604,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L340",
+      "source_location": "L349",
       "weight": 1.0,
       "_src": "aggression_carry_cli_main",
       "_tgt": "aggression_carry_cli_backtest_config_from_args",
@@ -14316,7 +14616,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L351",
+      "source_location": "L360",
       "weight": 1.0,
       "_src": "aggression_carry_cli_main",
       "_tgt": "aggression_carry_cli_grid_config_from_args",
@@ -14328,7 +14628,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L352",
+      "source_location": "L361",
       "weight": 1.0,
       "_src": "aggression_carry_cli_main",
       "_tgt": "aggression_carry_cli_apply_universe_backtest_args",
@@ -14340,7 +14640,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L371",
+      "source_location": "L380",
       "weight": 1.0,
       "_src": "aggression_carry_cli_main",
       "_tgt": "aggression_carry_cli_close_fade_config_from_args",
@@ -14352,7 +14652,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L382",
+      "source_location": "L391",
       "weight": 1.0,
       "_src": "aggression_carry_cli_main",
       "_tgt": "aggression_carry_cli_close_fade_base_from_grid_args",
@@ -14364,7 +14664,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L383",
+      "source_location": "L392",
       "weight": 1.0,
       "_src": "aggression_carry_cli_main",
       "_tgt": "aggression_carry_cli_close_fade_grid_config_from_args",
@@ -14376,7 +14676,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L414",
+      "source_location": "L423",
       "weight": 1.0,
       "_src": "aggression_carry_cli_main",
       "_tgt": "aggression_carry_cli_forward_config_from_args",
@@ -14388,7 +14688,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L420",
+      "source_location": "L429",
       "weight": 1.0,
       "_src": "aggression_carry_cli_main",
       "_tgt": "aggression_carry_cli_parse_now",
@@ -14424,7 +14724,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L466",
+      "source_location": "L493",
       "weight": 1.0,
       "_src": "aggression_carry_cli_close_fade_config_from_args",
       "_tgt": "aggression_carry_cli_signal_minute",
@@ -14436,7 +14736,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L538",
+      "source_location": "L565",
       "weight": 1.0,
       "_src": "aggression_carry_cli_close_fade_config_from_args",
       "_tgt": "aggression_carry_cli_close_fade_exclusions",
@@ -14448,7 +14748,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L561",
+      "source_location": "L588",
       "weight": 1.0,
       "_src": "aggression_carry_cli_close_fade_base_from_grid_args",
       "_tgt": "aggression_carry_cli_close_fade_exclusions",
@@ -14460,7 +14760,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L568",
+      "source_location": "L595",
       "weight": 1.0,
       "_src": "aggression_carry_cli_close_fade_grid_config_from_args",
       "_tgt": "aggression_carry_cli_csv_signal_minutes",
@@ -14472,7 +14772,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L569",
+      "source_location": "L596",
       "weight": 1.0,
       "_src": "aggression_carry_cli_close_fade_grid_config_from_args",
       "_tgt": "aggression_carry_cli_csv_int",
@@ -14484,7 +14784,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L571",
+      "source_location": "L598",
       "weight": 1.0,
       "_src": "aggression_carry_cli_close_fade_grid_config_from_args",
       "_tgt": "aggression_carry_cli_csv_float",
@@ -14496,7 +14796,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L572",
+      "source_location": "L599",
       "weight": 1.0,
       "_src": "aggression_carry_cli_close_fade_grid_config_from_args",
       "_tgt": "aggression_carry_cli_csv_str",
@@ -14508,7 +14808,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L635",
+      "source_location": "L662",
       "weight": 1.0,
       "_src": "aggression_carry_cli_backtest_config_from_args",
       "_tgt": "aggression_carry_cli_csv_str",
@@ -14520,7 +14820,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L636",
+      "source_location": "L663",
       "weight": 1.0,
       "_src": "aggression_carry_cli_backtest_config_from_args",
       "_tgt": "aggression_carry_cli_exclude_symbols_from_args",
@@ -14532,7 +14832,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L643",
+      "source_location": "L670",
       "weight": 1.0,
       "_src": "aggression_carry_cli_grid_config_from_args",
       "_tgt": "aggression_carry_cli_csv_str",
@@ -14544,7 +14844,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L644",
+      "source_location": "L671",
       "weight": 1.0,
       "_src": "aggression_carry_cli_grid_config_from_args",
       "_tgt": "aggression_carry_cli_csv_float",
@@ -14556,7 +14856,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L645",
+      "source_location": "L672",
       "weight": 1.0,
       "_src": "aggression_carry_cli_grid_config_from_args",
       "_tgt": "aggression_carry_cli_csv_int",
@@ -14568,7 +14868,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L648",
+      "source_location": "L675",
       "weight": 1.0,
       "_src": "aggression_carry_cli_grid_config_from_args",
       "_tgt": "aggression_carry_cli_csv_bool",
@@ -14580,7 +14880,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L670",
+      "source_location": "L697",
       "weight": 1.0,
       "_src": "aggression_carry_cli_universe_config_from_args",
       "_tgt": "aggression_carry_cli_csv_str",
@@ -14592,7 +14892,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L768",
+      "source_location": "L795",
       "weight": 1.0,
       "_src": "aggression_carry_cli_apply_universe_backtest_args",
       "_tgt": "aggression_carry_cli_csv_str",
@@ -14604,7 +14904,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L769",
+      "source_location": "L796",
       "weight": 1.0,
       "_src": "aggression_carry_cli_apply_universe_backtest_args",
       "_tgt": "aggression_carry_cli_exclude_symbols_from_args",
@@ -14616,7 +14916,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L774",
+      "source_location": "L801",
       "weight": 1.0,
       "_src": "aggression_carry_cli_exclude_symbols_from_args",
       "_tgt": "aggression_carry_cli_csv_str",
@@ -14628,7 +14928,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L782",
+      "source_location": "L809",
       "weight": 1.0,
       "_src": "aggression_carry_cli_close_fade_exclusions",
       "_tgt": "aggression_carry_cli_csv_str",
@@ -14640,7 +14940,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L800",
+      "source_location": "L827",
       "weight": 1.0,
       "_src": "aggression_carry_cli_csv_signal_minutes",
       "_tgt": "aggression_carry_cli_signal_minute",
@@ -14652,7 +14952,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L800",
+      "source_location": "L827",
       "weight": 1.0,
       "_src": "aggression_carry_cli_csv_signal_minutes",
       "_tgt": "aggression_carry_cli_csv_str",
@@ -14664,7 +14964,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L810",
+      "source_location": "L837",
       "weight": 1.0,
       "_src": "aggression_carry_cli_csv_int",
       "_tgt": "aggression_carry_cli_csv_str",
@@ -14676,7 +14976,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L814",
+      "source_location": "L841",
       "weight": 1.0,
       "_src": "aggression_carry_cli_csv_float",
       "_tgt": "aggression_carry_cli_csv_str",
@@ -14688,7 +14988,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "aggression_carry/cli.py",
-      "source_location": "L821",
+      "source_location": "L848",
       "weight": 1.0,
       "_src": "aggression_carry_cli_csv_bool",
       "_tgt": "aggression_carry_cli_csv_str",
@@ -15015,8 +15315,8 @@
       "source_file": "tests/test_aggression_carry_volume_alpha.py",
       "source_location": "L109",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_signal_date_window",
-      "_tgt": "aggression_carry_storage_read_dataset",
+      "_src": "aggression_carry_storage_read_dataset",
+      "_tgt": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_signal_date_window",
       "source": "aggression_carry_storage_read_dataset",
       "target": "tests_test_aggression_carry_volume_alpha_test_volume_backtest_can_filter_signal_date_window"
     },
@@ -15307,6 +15607,18 @@
       "_tgt": "tests_test_aggression_carry_forward_test_test_forward_open_trade_uses_stored_exit_config_after_config_change",
       "source": "aggression_carry_storage_read_dataset",
       "target": "tests_test_aggression_carry_forward_test_test_forward_open_trade_uses_stored_exit_config_after_config_change"
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "tests/test_aggression_carry_forward_test.py",
+      "source_location": "L105",
+      "weight": 1.0,
+      "_src": "tests_test_aggression_carry_forward_test_test_forward_sleeves_use_isolated_roots_and_reports",
+      "_tgt": "aggression_carry_storage_read_dataset",
+      "source": "aggression_carry_storage_read_dataset",
+      "target": "tests_test_aggression_carry_forward_test_test_forward_sleeves_use_isolated_roots_and_reports"
     },
     {
       "relation": "contains",
@@ -16728,7 +17040,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L13",
+      "source_location": "L14",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_py",
       "_tgt": "tests_test_aggression_carry_forward_test_test_forward_scan_uses_live_universe_filters_and_pump_selection",
@@ -16740,7 +17052,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L29",
+      "source_location": "L30",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_py",
       "_tgt": "tests_test_aggression_carry_forward_test_test_forward_run_opens_paper_trades_without_orders",
@@ -16752,7 +17064,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L42",
+      "source_location": "L43",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_py",
       "_tgt": "tests_test_aggression_carry_forward_test_test_forward_run_marks_short_stop_with_linear_pnl",
@@ -16764,7 +17076,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L60",
+      "source_location": "L61",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_py",
       "_tgt": "tests_test_aggression_carry_forward_test_test_forward_run_marks_short_take_profit_with_linear_pnl",
@@ -16776,7 +17088,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L74",
+      "source_location": "L75",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_py",
       "_tgt": "tests_test_aggression_carry_forward_test_test_forward_open_trade_uses_stored_exit_config_after_config_change",
@@ -16788,7 +17100,19 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L88",
+      "source_location": "L89",
+      "weight": 1.0,
+      "_src": "tests_test_aggression_carry_forward_test_py",
+      "_tgt": "tests_test_aggression_carry_forward_test_test_forward_sleeves_use_isolated_roots_and_reports",
+      "source": "tests_test_aggression_carry_forward_test_py",
+      "target": "tests_test_aggression_carry_forward_test_test_forward_sleeves_use_isolated_roots_and_reports",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_aggression_carry_forward_test.py",
+      "source_location": "L116",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_py",
       "_tgt": "tests_test_aggression_carry_forward_test_research_config",
@@ -16800,7 +17124,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L114",
+      "source_location": "L142",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_py",
       "_tgt": "tests_test_aggression_carry_forward_test_fakebybit",
@@ -16812,7 +17136,7 @@
       "relation": "contains",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L217",
+      "source_location": "L245",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_py",
       "_tgt": "tests_test_aggression_carry_forward_test_base_price",
@@ -16824,7 +17148,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L15",
+      "source_location": "L16",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_test_forward_scan_uses_live_universe_filters_and_pump_selection",
       "_tgt": "tests_test_aggression_carry_forward_test_research_config",
@@ -16836,23 +17160,11 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L16",
+      "source_location": "L17",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_test_forward_scan_uses_live_universe_filters_and_pump_selection",
       "_tgt": "tests_test_aggression_carry_forward_test_fakebybit",
       "source": "tests_test_aggression_carry_forward_test_test_forward_scan_uses_live_universe_filters_and_pump_selection",
-      "target": "tests_test_aggression_carry_forward_test_fakebybit",
-      "confidence_score": 1.0
-    },
-    {
-      "relation": "calls",
-      "confidence": "EXTRACTED",
-      "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L31",
-      "weight": 1.0,
-      "_src": "tests_test_aggression_carry_forward_test_test_forward_run_opens_paper_trades_without_orders",
-      "_tgt": "tests_test_aggression_carry_forward_test_fakebybit",
-      "source": "tests_test_aggression_carry_forward_test_test_forward_run_opens_paper_trades_without_orders",
       "target": "tests_test_aggression_carry_forward_test_fakebybit",
       "confidence_score": 1.0
     },
@@ -16863,6 +17175,18 @@
       "source_location": "L32",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_test_forward_run_opens_paper_trades_without_orders",
+      "_tgt": "tests_test_aggression_carry_forward_test_fakebybit",
+      "source": "tests_test_aggression_carry_forward_test_test_forward_run_opens_paper_trades_without_orders",
+      "target": "tests_test_aggression_carry_forward_test_fakebybit",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_aggression_carry_forward_test.py",
+      "source_location": "L33",
+      "weight": 1.0,
+      "_src": "tests_test_aggression_carry_forward_test_test_forward_run_opens_paper_trades_without_orders",
       "_tgt": "tests_test_aggression_carry_forward_test_research_config",
       "source": "tests_test_aggression_carry_forward_test_test_forward_run_opens_paper_trades_without_orders",
       "target": "tests_test_aggression_carry_forward_test_research_config",
@@ -16872,7 +17196,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L43",
+      "source_location": "L44",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_test_forward_run_marks_short_stop_with_linear_pnl",
       "_tgt": "tests_test_aggression_carry_forward_test_research_config",
@@ -16884,7 +17208,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L45",
+      "source_location": "L46",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_test_forward_run_marks_short_stop_with_linear_pnl",
       "_tgt": "tests_test_aggression_carry_forward_test_fakebybit",
@@ -16896,7 +17220,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L61",
+      "source_location": "L62",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_test_forward_run_marks_short_take_profit_with_linear_pnl",
       "_tgt": "tests_test_aggression_carry_forward_test_research_config",
@@ -16908,7 +17232,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L63",
+      "source_location": "L64",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_test_forward_run_marks_short_take_profit_with_linear_pnl",
       "_tgt": "tests_test_aggression_carry_forward_test_fakebybit",
@@ -16920,7 +17244,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L75",
+      "source_location": "L76",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_test_forward_open_trade_uses_stored_exit_config_after_config_change",
       "_tgt": "tests_test_aggression_carry_forward_test_research_config",
@@ -16932,11 +17256,35 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L77",
+      "source_location": "L78",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_test_forward_open_trade_uses_stored_exit_config_after_config_change",
       "_tgt": "tests_test_aggression_carry_forward_test_fakebybit",
       "source": "tests_test_aggression_carry_forward_test_test_forward_open_trade_uses_stored_exit_config_after_config_change",
+      "target": "tests_test_aggression_carry_forward_test_fakebybit",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_aggression_carry_forward_test.py",
+      "source_location": "L91",
+      "weight": 1.0,
+      "_src": "tests_test_aggression_carry_forward_test_test_forward_sleeves_use_isolated_roots_and_reports",
+      "_tgt": "tests_test_aggression_carry_forward_test_research_config",
+      "source": "tests_test_aggression_carry_forward_test_test_forward_sleeves_use_isolated_roots_and_reports",
+      "target": "tests_test_aggression_carry_forward_test_research_config",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_aggression_carry_forward_test.py",
+      "source_location": "L103",
+      "weight": 1.0,
+      "_src": "tests_test_aggression_carry_forward_test_test_forward_sleeves_use_isolated_roots_and_reports",
+      "_tgt": "tests_test_aggression_carry_forward_test_fakebybit",
+      "source": "tests_test_aggression_carry_forward_test_test_forward_sleeves_use_isolated_roots_and_reports",
       "target": "tests_test_aggression_carry_forward_test_fakebybit",
       "confidence_score": 1.0
     },
@@ -16944,7 +17292,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L115",
+      "source_location": "L143",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_fakebybit",
       "_tgt": "tests_test_aggression_carry_forward_test_fakebybit_init",
@@ -16956,7 +17304,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L120",
+      "source_location": "L148",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_fakebybit",
       "_tgt": "tests_test_aggression_carry_forward_test_fakebybit_create_order",
@@ -16968,7 +17316,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L125",
+      "source_location": "L153",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_fakebybit",
       "_tgt": "tests_test_aggression_carry_forward_test_fakebybit_get_instruments_info",
@@ -16980,7 +17328,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L147",
+      "source_location": "L175",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_fakebybit",
       "_tgt": "tests_test_aggression_carry_forward_test_fakebybit_get_tickers",
@@ -16992,7 +17340,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L160",
+      "source_location": "L188",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_fakebybit",
       "_tgt": "tests_test_aggression_carry_forward_test_fakebybit_get_klines",
@@ -17004,7 +17352,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L166",
+      "source_location": "L194",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_fakebybit",
       "_tgt": "tests_test_aggression_carry_forward_test_fakebybit_daily_klines",
@@ -17016,7 +17364,7 @@
       "relation": "method",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L180",
+      "source_location": "L208",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_fakebybit",
       "_tgt": "tests_test_aggression_carry_forward_test_fakebybit_minute_klines",
@@ -17028,7 +17376,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L163",
+      "source_location": "L191",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_fakebybit_get_klines",
       "_tgt": "tests_test_aggression_carry_forward_test_fakebybit_daily_klines",
@@ -17040,7 +17388,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L164",
+      "source_location": "L192",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_fakebybit_get_klines",
       "_tgt": "tests_test_aggression_carry_forward_test_fakebybit_minute_klines",
@@ -17052,7 +17400,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L170",
+      "source_location": "L198",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_fakebybit_daily_klines",
       "_tgt": "tests_test_aggression_carry_forward_test_base_price",
@@ -17064,7 +17412,7 @@
       "relation": "calls",
       "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_forward_test.py",
-      "source_location": "L187",
+      "source_location": "L215",
       "weight": 1.0,
       "_src": "tests_test_aggression_carry_forward_test_fakebybit_minute_klines",
       "_tgt": "tests_test_aggression_carry_forward_test_base_price",
@@ -17142,6 +17490,18 @@
       "_tgt": "tests_test_aggression_carry_cli_test_cli_fixture_pipeline_end_to_end",
       "source": "tests_test_aggression_carry_cli_py",
       "target": "tests_test_aggression_carry_cli_test_cli_fixture_pipeline_end_to_end",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_aggression_carry_cli.py",
+      "source_location": "L65",
+      "weight": 1.0,
+      "_src": "tests_test_aggression_carry_cli_py",
+      "_tgt": "tests_test_aggression_carry_cli_test_cli_parses_forward_sleeves_alias",
+      "source": "tests_test_aggression_carry_cli_py",
+      "target": "tests_test_aggression_carry_cli_test_cli_parses_forward_sleeves_alias",
       "confidence_score": 1.0
     },
     {

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import polars as pl
 
 from aggression_carry.config import CostConfig, DailyCloseFadeConfig, ForwardTestConfig, ResearchConfig
-from aggression_carry.forward_test import run_forward_once, run_forward_scan
+from aggression_carry.forward_test import run_forward_once, run_forward_scan, run_forward_sleeves
 from aggression_carry.storage import read_dataset
 
 
@@ -83,6 +84,33 @@ def test_forward_open_trade_uses_stored_exit_config_after_config_change(tmp_path
 
     assert trades["status"].to_list() == ["closed", "closed"]
     assert trades["exit_reason"].to_list() == ["take_profit", "take_profit"]
+
+
+def test_forward_sleeves_use_isolated_roots_and_reports(tmp_path: Path) -> None:
+    now = datetime(2026, 1, 15, 22, 16, tzinfo=UTC)
+    config = _research_config(tmp_path)
+    sleeves = {
+        "core": replace(config.daily_close_fade, liquidity_rank_min=1, liquidity_rank_max=10),
+        "control": replace(
+            config.daily_close_fade,
+            liquidity_rank_min=1,
+            liquidity_rank_max=10,
+            gross_exposure=0.5,
+            exclude_symbols=(),
+        ),
+    }
+
+    payload = run_forward_sleeves(tmp_path, config=config, now=now, client=_FakeBybit(now), sleeves=sleeves)
+
+    core_trades = read_dataset(tmp_path / "forward_sleeves" / "core", "forward_paper_trades")
+    control_trades = read_dataset(tmp_path / "forward_sleeves" / "control", "forward_paper_trades")
+    assert payload["rows"]["sleeves"] == 2
+    assert {row["sleeve"] for row in payload["results"]} == {"core", "control"}
+    assert core_trades.height == 2
+    assert control_trades.height >= 2
+    assert (tmp_path / "reports" / "forward_sleeves_report.md").exists()
+    assert (tmp_path / "reports" / "forward_sleeves" / "core" / "forward_paper_report.md").exists()
+    assert (tmp_path / "reports" / "forward_sleeves" / "control" / "forward_paper_report.md").exists()
 
 
 def _research_config(tmp_path: Path, *, take_profit_pct: float = 0.0, stop_delay_minutes: int = 15) -> ResearchConfig:
