@@ -67,12 +67,16 @@ This does not download Bybit data. It proves the local volume-alpha path works.
 ```powershell
 .\.venv\Scripts\python.exe -m aggression_carry --data-root .tmp/volume-fixture download-data --fixture
 .\.venv\Scripts\python.exe -m aggression_carry --data-root .tmp/volume-fixture volume-alpha
+.\.venv\Scripts\python.exe -m aggression_carry --data-root .tmp/volume-fixture volume-backtest --hold-days 1 --rebalance-days 1
+.\.venv\Scripts\python.exe -m aggression_carry --data-root .tmp/volume-fixture volume-grid --hold-days 1 --quantiles 0.5 --fixed-stops "0,0.001" --vol-stops "" --rank-exits "false,true" --workers 2
 ```
 
 Report:
 
 ```text
 .tmp/volume-fixture/reports/volume_alpha_report.md
+.tmp/volume-fixture/reports/volume_backtest_report.md
+.tmp/volume-fixture/reports/volume_grid_report.md
 ```
 
 ## 5. Run The 3-Month Bybit Test
@@ -88,18 +92,44 @@ Manual equivalent:
 ```powershell
 .\.venv\Scripts\python.exe -m aggression_carry --data-root data/agc-bybit-3m --config configs/volume_alpha.default.yaml download-data --symbols "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,APTUSDT,BNBUSDT,ADAUSDT,DOTUSDT,LTCUSDT,NEARUSDT,OPUSDT,ARBUSDT,INJUSDT" --start "2025-01-01" --end "2025-04-01" --datasets "instruments,klines_1h"
 .\.venv\Scripts\python.exe -m aggression_carry --data-root data/agc-bybit-3m --config configs/volume_alpha.default.yaml volume-alpha
+.\.venv\Scripts\python.exe -m aggression_carry --data-root data/agc-bybit-3m --config configs/volume_alpha.default.yaml volume-backtest
+.\.venv\Scripts\python.exe -m aggression_carry --data-root data/agc-bybit-3m --config configs/volume_alpha.default.yaml volume-grid --workers 0
 ```
 
-Report:
+Reports:
 
 ```text
 data/agc-bybit-3m/reports/volume_alpha_report.md
+data/agc-bybit-3m/reports/volume_backtest_report.md
+data/agc-bybit-3m/reports/volume_backtest_trades.csv
+data/agc-bybit-3m/reports/volume_grid_report.md
+data/agc-bybit-3m/reports/volume_grid_results.csv
+```
+
+## 6. Run The One-Year Concurrent Grid
+
+On a 5950X:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_agc_1y_grid.ps1 -Workers 32
+```
+
+If the machine starts swapping or RAM pressure gets high:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_agc_1y_grid.ps1 -Workers 16
 ```
 
 ## Notes
 
 - The current official path is volume-only. It does not download Bybit public
   trade archives.
+- `volume-alpha` is the statistical sweep. `volume-backtest` is the trade ledger
+  with entries, exits, exit reasons, stops, costs, and symbol/month attribution.
+- `volume-grid` runs parameter variants concurrently with process workers.
+- The RTX GPU is not used by this path. The current bottleneck is Python trade
+  simulation across independent variants, so CPU process parallelism is the
+  correct optimization before any CUDA rewrite.
 - The old `build-features`, `alpha-report`, `portfolio-backtest`, and
   `research-sweep` commands were removed with the old composite stack.
 - This is a research backtest path only. It does not place live orders.

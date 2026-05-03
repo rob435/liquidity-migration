@@ -1,7 +1,8 @@
 param(
-    [string]$DataRoot = "data/agc-bybit-3m",
-    [string]$Start = "2025-01-01",
-    [string]$End = "2025-04-01",
+    [string]$DataRoot = "data/agc-bybit-1y",
+    [string]$Start = "2025-05-01",
+    [string]$End = "2026-05-01",
+    [int]$Workers = 0,
     [string[]]$Symbols = @(
         "BTCUSDT",
         "ETHUSDT",
@@ -52,29 +53,21 @@ Invoke-Checked "Checking virtualenv Python version" {
 $SymbolCsv = $Symbols -join ","
 $Datasets = "instruments,klines_1h"
 $Config = "configs/volume_alpha.default.yaml"
-$DownloadArgs = @(
-    "-m", "aggression_carry",
-    "--data-root", $DataRoot,
-    "--config", $Config,
-    "download-data",
-    "--symbols", $SymbolCsv,
-    "--start", $Start,
-    "--end", $End,
-    "--datasets", $Datasets
-)
 
-Invoke-Checked "Downloading Bybit research data into $DataRoot" {
-    & $Python @DownloadArgs
+Invoke-Checked "Downloading one-year Bybit research data into $DataRoot" {
+    & $Python -m aggression_carry --data-root $DataRoot --config $Config download-data --symbols $SymbolCsv --start $Start --end $End --datasets $Datasets
 }
-Invoke-Checked "Writing volume alpha report" {
+
+Invoke-Checked "Writing one-year volume alpha sweep" {
     & $Python -m aggression_carry --data-root $DataRoot --config $Config volume-alpha
 }
-Invoke-Checked "Writing detailed volume trade backtest" {
-    & $Python -m aggression_carry --data-root $DataRoot --config $Config volume-backtest
+
+Invoke-Checked "Writing one-year concurrent volume grid" {
+    & $Python -m aggression_carry --data-root $DataRoot --config $Config volume-grid --workers $Workers --include-reverse
 }
 
 Write-Host ""
 Write-Host "Done."
 Write-Host "Volume alpha report: $DataRoot/reports/volume_alpha_report.md"
-Write-Host "Volume trade backtest: $DataRoot/reports/volume_backtest_report.md"
-Write-Host "Trade ledger CSV: $DataRoot/reports/volume_backtest_trades.csv"
+Write-Host "Grid report: $DataRoot/reports/volume_grid_report.md"
+Write-Host "Grid CSV: $DataRoot/reports/volume_grid_results.csv"

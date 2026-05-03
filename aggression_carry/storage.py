@@ -15,9 +15,16 @@ DATASETS = {
     "funding",
     "open_interest",
     "ticker_snapshots",
+    "universe_current",
     "volume_alpha_features",
     "volume_alpha_metrics",
     "volume_alpha_portfolios",
+    "volume_backtest_trades",
+    "volume_backtest_baskets",
+    "volume_backtest_equity",
+    "volume_backtest_equity_vs_btc",
+    "volume_backtest_monthly",
+    "volume_backtest_grid",
 }
 
 DATASET_KEYS = {
@@ -30,9 +37,16 @@ DATASET_KEYS = {
     "funding": ("ts_ms", "symbol"),
     "open_interest": ("ts_ms", "symbol"),
     "ticker_snapshots": ("ts_ms", "symbol"),
+    "universe_current": ("snapshot_ts_ms", "symbol"),
     "volume_alpha_features": ("ts_ms", "symbol"),
     "volume_alpha_metrics": ("signal", "horizon_d"),
     "volume_alpha_portfolios": ("score", "scenario", "hold_days", "quantile"),
+    "volume_backtest_trades": ("trade_id",),
+    "volume_backtest_baskets": ("basket_id",),
+    "volume_backtest_equity": ("ts_ms",),
+    "volume_backtest_equity_vs_btc": ("ts_ms",),
+    "volume_backtest_monthly": ("month",),
+    "volume_backtest_grid": ("grid_id",),
 }
 
 

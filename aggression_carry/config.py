@@ -12,6 +12,11 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only in missing depe
 
 DEFAULT_VOLUME_HORIZONS_D = (1, 3, 7)
 DEFAULT_VOLUME_QUANTILES = (0.20, 0.30, 0.50)
+DEFAULT_GRID_HOLD_DAYS = (3, 7, 14)
+DEFAULT_GRID_QUANTILES = (0.30, 0.50)
+DEFAULT_GRID_FIXED_STOPS = (0.0, 0.12, 0.20, 0.30)
+DEFAULT_GRID_VOL_STOPS = (3.0, 4.0)
+DEFAULT_MAJOR_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT")
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +37,57 @@ class TradeFlowConfig:
 class VolumeAlphaConfig:
     horizons_d: tuple[int, ...] = DEFAULT_VOLUME_HORIZONS_D
     quantiles: tuple[float, ...] = DEFAULT_VOLUME_QUANTILES
+
+
+@dataclass(frozen=True, slots=True)
+class VolumeBacktestConfig:
+    score: str = "dollar_volume_rank"
+    quantile: float = 0.50
+    hold_days: int = 7
+    rebalance_days: int = 7
+    gross_exposure: float = 1.0
+    entry_delay_hours: int = 1
+    stop_mode: str = "fixed"
+    stop_loss_pct: float = 0.08
+    vol_stop_multiplier: float = 3.0
+    vol_stop_lookback_days: int = 20
+    min_stop_loss_pct: float = 0.0
+    max_stop_loss_pct: float = 0.0
+    take_profit_pct: float = 0.0
+    min_symbols: int = 4
+    cost_multiplier: float = 1.0
+    side_mode: str = "long_high_short_low"
+    rank_exit_enabled: bool = False
+    rank_exit_threshold: float = 0.50
+    universe_rank_min: int = 1
+    universe_rank_max: int = 0
+    universe_min_daily_turnover: float = 0.0
+    include_symbols: tuple[str, ...] = ()
+    exclude_symbols: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class VolumeGridConfig:
+    scores: tuple[str, ...] = ("dollar_volume_rank",)
+    quantiles: tuple[float, ...] = DEFAULT_GRID_QUANTILES
+    hold_days: tuple[int, ...] = DEFAULT_GRID_HOLD_DAYS
+    fixed_stop_loss_pcts: tuple[float, ...] = DEFAULT_GRID_FIXED_STOPS
+    vol_stop_multipliers: tuple[float, ...] = DEFAULT_GRID_VOL_STOPS
+    rank_exit_modes: tuple[bool, ...] = (False, True)
+    include_reverse_side: bool = False
+    take_profit_pcts: tuple[float, ...] = (0.0,)
+    cost_multipliers: tuple[float, ...] = (1.0,)
+
+
+@dataclass(frozen=True, slots=True)
+class UniverseConfig:
+    min_turnover_24h: float = 2_000_000.0
+    min_age_days: int = 30
+    max_age_days: int = 0
+    rank_start: int = 1
+    rank_end: int = 120
+    max_symbols: int = 120
+    exclude_symbols: tuple[str, ...] = DEFAULT_MAJOR_SYMBOLS
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +114,9 @@ class ResearchConfig:
     exchange: ExchangeConfig = field(default_factory=ExchangeConfig)
     trade_flow: TradeFlowConfig = field(default_factory=TradeFlowConfig)
     volume_alpha: VolumeAlphaConfig = field(default_factory=VolumeAlphaConfig)
+    volume_backtest: VolumeBacktestConfig = field(default_factory=VolumeBacktestConfig)
+    volume_grid: VolumeGridConfig = field(default_factory=VolumeGridConfig)
+    universe: UniverseConfig = field(default_factory=UniverseConfig)
     costs: CostConfig = field(default_factory=CostConfig)
     data_root: Path = Path("data/volume_alpha")
 
@@ -72,6 +131,79 @@ def _merge_volume_alpha_config(payload: dict[str, Any] | None) -> VolumeAlphaCon
     horizons = tuple(int(item) for item in payload.get("horizons_d", DEFAULT_VOLUME_HORIZONS_D))
     quantiles = tuple(float(item) for item in payload.get("quantiles", DEFAULT_VOLUME_QUANTILES))
     return VolumeAlphaConfig(horizons_d=horizons, quantiles=quantiles)
+
+
+def _merge_volume_backtest_config(payload: dict[str, Any] | None) -> VolumeBacktestConfig:
+    payload = dict(payload or {})
+    return VolumeBacktestConfig(
+        score=str(payload.get("score", "dollar_volume_rank")),
+        quantile=float(payload.get("quantile", 0.50)),
+        hold_days=int(payload.get("hold_days", 7)),
+        rebalance_days=int(payload.get("rebalance_days", payload.get("hold_days", 7))),
+        gross_exposure=float(payload.get("gross_exposure", 1.0)),
+        entry_delay_hours=int(payload.get("entry_delay_hours", 1)),
+        stop_mode=str(payload.get("stop_mode", "fixed")),
+        stop_loss_pct=float(payload.get("stop_loss_pct", 0.08)),
+        vol_stop_multiplier=float(payload.get("vol_stop_multiplier", 3.0)),
+        vol_stop_lookback_days=int(payload.get("vol_stop_lookback_days", 20)),
+        min_stop_loss_pct=float(payload.get("min_stop_loss_pct", 0.0)),
+        max_stop_loss_pct=float(payload.get("max_stop_loss_pct", 0.0)),
+        take_profit_pct=float(payload.get("take_profit_pct", 0.0)),
+        min_symbols=int(payload.get("min_symbols", 4)),
+        cost_multiplier=float(payload.get("cost_multiplier", 1.0)),
+        side_mode=str(payload.get("side_mode", "long_high_short_low")),
+        rank_exit_enabled=bool(payload.get("rank_exit_enabled", False)),
+        rank_exit_threshold=float(payload.get("rank_exit_threshold", 0.50)),
+        universe_rank_min=int(payload.get("universe_rank_min", 1)),
+        universe_rank_max=int(payload.get("universe_rank_max", 0)),
+        universe_min_daily_turnover=float(payload.get("universe_min_daily_turnover", 0.0)),
+        include_symbols=_tuple_str(payload, "include_symbols", ()),
+        exclude_symbols=_tuple_str(payload, "exclude_symbols", ()),
+    )
+
+
+def _tuple_str(payload: dict[str, Any], key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    return tuple(str(item) for item in payload.get(key, default))
+
+
+def _tuple_int(payload: dict[str, Any], key: str, default: tuple[int, ...]) -> tuple[int, ...]:
+    return tuple(int(item) for item in payload.get(key, default))
+
+
+def _tuple_float(payload: dict[str, Any], key: str, default: tuple[float, ...]) -> tuple[float, ...]:
+    return tuple(float(item) for item in payload.get(key, default))
+
+
+def _tuple_bool(payload: dict[str, Any], key: str, default: tuple[bool, ...]) -> tuple[bool, ...]:
+    return tuple(bool(item) for item in payload.get(key, default))
+
+
+def _merge_volume_grid_config(payload: dict[str, Any] | None) -> VolumeGridConfig:
+    payload = dict(payload or {})
+    return VolumeGridConfig(
+        scores=_tuple_str(payload, "scores", ("dollar_volume_rank",)),
+        quantiles=_tuple_float(payload, "quantiles", DEFAULT_GRID_QUANTILES),
+        hold_days=_tuple_int(payload, "hold_days", DEFAULT_GRID_HOLD_DAYS),
+        fixed_stop_loss_pcts=_tuple_float(payload, "fixed_stop_loss_pcts", DEFAULT_GRID_FIXED_STOPS),
+        vol_stop_multipliers=_tuple_float(payload, "vol_stop_multipliers", DEFAULT_GRID_VOL_STOPS),
+        rank_exit_modes=_tuple_bool(payload, "rank_exit_modes", (False, True)),
+        include_reverse_side=bool(payload.get("include_reverse_side", False)),
+        take_profit_pcts=_tuple_float(payload, "take_profit_pcts", (0.0,)),
+        cost_multipliers=_tuple_float(payload, "cost_multipliers", (1.0,)),
+    )
+
+
+def _merge_universe_config(payload: dict[str, Any] | None) -> UniverseConfig:
+    payload = dict(payload or {})
+    return UniverseConfig(
+        min_turnover_24h=float(payload.get("min_turnover_24h", 2_000_000.0)),
+        min_age_days=int(payload.get("min_age_days", 30)),
+        max_age_days=int(payload.get("max_age_days", 0)),
+        rank_start=int(payload.get("rank_start", 1)),
+        rank_end=int(payload.get("rank_end", 120)),
+        max_symbols=int(payload.get("max_symbols", 120)),
+        exclude_symbols=_tuple_str(payload, "exclude_symbols", DEFAULT_MAJOR_SYMBOLS),
+    )
 
 
 def load_config(path: str | Path | None = None, *, data_root: str | Path | None = None) -> ResearchConfig:
@@ -91,6 +223,9 @@ def load_config(path: str | Path | None = None, *, data_root: str | Path | None 
         exchange=_merge_dataclass(ExchangeConfig, raw.get("exchange")),
         trade_flow=_merge_dataclass(TradeFlowConfig, raw.get("trade_flow")),
         volume_alpha=_merge_volume_alpha_config(raw.get("volume_alpha")),
+        volume_backtest=_merge_volume_backtest_config(raw.get("volume_backtest")),
+        volume_grid=_merge_volume_grid_config(raw.get("volume_grid")),
+        universe=_merge_universe_config(raw.get("universe")),
         costs=_merge_dataclass(CostConfig, raw.get("cost_model")),
         data_root=root,
     )

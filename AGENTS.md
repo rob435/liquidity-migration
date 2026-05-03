@@ -8,6 +8,7 @@
 - Do not rebuild the deleted legacy live runtime or blended signal stack unless explicitly requested.
 - Do not add live execution, alerts, kill switches, deployment, or exchange order submission.
 - Do not combine signals until each alpha clears costs standalone.
+- Use `volume-alpha` for signal sweeps, `volume-backtest` for trade-ledger testing, and `volume-grid` for concurrent parameter sweeps.
 
 ## graphify
 

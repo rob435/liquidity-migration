@@ -10,5 +10,30 @@ def test_cli_fixture_pipeline_end_to_end(tmp_path: Path) -> None:
 
     assert main(["--data-root", str(data_root), "download-data", "--fixture"]) == 0
     assert main(["--data-root", str(data_root), "volume-alpha"]) == 0
+    assert main(["--data-root", str(data_root), "volume-backtest", "--hold-days", "1", "--rebalance-days", "1"]) == 0
+    assert (
+        main(
+            [
+                "--data-root",
+                str(data_root),
+                "volume-grid",
+                "--hold-days",
+                "1",
+                "--quantiles",
+                "0.5",
+                "--fixed-stops",
+                "0,0.001",
+                "--vol-stops",
+                "",
+                "--rank-exits",
+                "false",
+                "--workers",
+                "1",
+            ]
+        )
+        == 0
+    )
 
     assert (data_root / "reports" / "volume_alpha_report.md").exists()
+    assert (data_root / "reports" / "volume_backtest_report.md").exists()
+    assert (data_root / "reports" / "volume_grid_report.md").exists()

@@ -129,6 +129,7 @@ def build_volume_features(klines: pl.DataFrame) -> pl.DataFrame:
         "dollar_volume_rank_raw",
     ):
         df = _add_cross_sectional_z(df, raw_col, raw_col.replace("_raw", "_z"))
+    df = _add_liquidity_rank(df)
     return df.with_columns(
         (
             0.35 * pl.col("volume_change_1d_z").fill_nan(0.0)
@@ -373,6 +374,23 @@ def _add_cross_sectional_z(df: pl.DataFrame, input_col: str, output_col: str) ->
             if scale > 1e-12:
                 z[finite] = np.clip((values[finite] - center) / scale, -3.0, 3.0)
         frames.append(part.with_columns(pl.Series(output_col, z)))
+    return pl.concat(frames).sort(["ts_ms", "symbol"]) if frames else df
+
+
+def _add_liquidity_rank(df: pl.DataFrame) -> pl.DataFrame:
+    frames = []
+    for part in df.partition_by("ts_ms", maintain_order=True):
+        ranked = (
+            part.sort("log_turnover", descending=True)
+            .with_row_index("liquidity_rank", offset=1)
+            .with_columns(
+                [
+                    pl.lit(part.height).alias("universe_count"),
+                    (pl.col("liquidity_rank") / pl.lit(float(part.height))).alias("liquidity_rank_pct"),
+                ]
+            )
+        )
+        frames.append(ranked)
     return pl.concat(frames).sort(["ts_ms", "symbol"]) if frames else df
 
 
