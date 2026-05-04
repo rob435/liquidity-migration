@@ -9,7 +9,8 @@ param(
     [string]$Start = "2023-05-03",
     [string]$End = "2026-05-03",
     [int]$Workers = 8,
-    [switch]$SkipDownload
+    [switch]$SkipDownload,
+    [switch]$NoTranscript
 )
 
 $ErrorActionPreference = "Stop"
@@ -84,7 +85,11 @@ $Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
 $LogPath = Join-Path $LogDir "overnight_sweep_$Preset`_$Stamp.log"
 $Grid = Get-PresetConfig $Preset
 
-Start-Transcript -Path $LogPath -Append | Out-Null
+$TranscriptStarted = $false
+if (-not $NoTranscript) {
+    Start-Transcript -Path $LogPath -Append | Out-Null
+    $TranscriptStarted = $true
+}
 try {
     Write-Host "Repo: $RepoRoot"
     Write-Host "Preset: $Preset"
@@ -170,5 +175,7 @@ try {
     Write-Host "Log: $LogPath"
 }
 finally {
-    Stop-Transcript | Out-Null
+    if ($TranscriptStarted) {
+        Stop-Transcript | Out-Null
+    }
 }

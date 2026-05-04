@@ -614,7 +614,7 @@ python -m aggression_carry \
   archive-download-klines \
   --start 2023-05-03 \
   --end 2026-05-03 \
-  --workers 32
+  --workers 16
 ```
 
 For long PIT builds, use bounded batches:
@@ -678,7 +678,7 @@ python -m aggression_carry \
   --data-root data/daily-close-fade-1m-3m \
   --config configs/volume_alpha.default.yaml \
   daily-close-fade-grid \
-  --workers 32
+  --workers 8
 ```
 
 Run the same TP/SL/adaptive-exit grid across fixed train/validation/OOS splits:
@@ -709,19 +709,20 @@ This command exits with code `2` when no variant passes both gates. That is
 intentional. A stable exit grid is not enough if the raw entry score does not
 also clear costs across splits.
 
-Windows runner:
+Windows consolidated research runner:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_daily_close_fade_1m.ps1 -Workers 32
+powershell -ExecutionPolicy Bypass -File .\scripts\run_research_overnight_suite.ps1 `
+  -Suite daily-close `
+  -Workers 8
 ```
 
 Outputs:
 
 ```text
-data/daily-close-fade-1m-3m/reports/daily_close_fade_report.md
-data/daily-close-fade-1m-3m/reports/daily_close_fade_trades.csv
-data/daily-close-fade-1m-3m/reports/daily_close_fade_grid_report.md
-data/daily-close-fade-1m-3m/reports/daily_close_fade_grid_results.csv
+data/research_reports/risk_on_breadth_sizing_5950x/daily_close_fade_sizing_sweep.md
+data/research_reports/risk_on_breadth_sizing_5950x/daily_close_fade_sizing_sweep_summary.csv
+data/research_reports/risk_on_breadth_sizing_5950x/daily_close_fade_sizing_sweep_results.csv
 ```
 
 Run the three-sleeve comparison:

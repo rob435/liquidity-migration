@@ -268,12 +268,12 @@ python -m aggression_carry \
   --data-root data/agc-bybit-1y \
   --config configs/volume_alpha.default.yaml \
   volume-grid \
-  --workers 32 \
+  --workers 8 \
   --include-reverse
 ```
 
-`--workers 0` means auto-select CPU count minus one. On a 5950X, use
-`--workers 32` only if RAM is comfortable; otherwise use `--workers 16`.
+Use `--workers 8` for large Windows runs. Higher values can trigger worker
+spawn or memory failures on multi-year grids.
 
 The current grid tests:
 
@@ -349,7 +349,10 @@ the volume-alpha feature report, then runs large bucketed grids with reverse
 side enabled.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_volume_overnight_sweep.ps1 -Preset deep -Workers 32
+powershell -ExecutionPolicy Bypass -File .\scripts\run_research_overnight_suite.ps1 `
+  -Suite volume `
+  -VolumePreset insane `
+  -Workers 8
 ```
 
 Presets:
@@ -367,17 +370,13 @@ data/agc-bybit-3y-auto150-20230503-20260503/logs/
 The download stage uses `_download_markers/`, so rerunning the same script skips
 symbols already fetched for the same date range.
 
-## One-Year Run
+## Legacy One-Year Run
 
-Windows:
+The old fixed-symbol one-year Windows wrapper has been removed. Use the
+universe-discovery overnight runner above for current research. If you need a
+small manual smoke test, run the CLI directly:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_agc_1y_grid.ps1 -Workers 32
-```
-
-Manual equivalent:
-
-```bash
 python -m aggression_carry \
   --data-root data/agc-bybit-1y \
   --config configs/volume_alpha.default.yaml \
@@ -388,7 +387,7 @@ python -m aggression_carry \
   --datasets instruments,klines_1h
 
 python -m aggression_carry --data-root data/agc-bybit-1y --config configs/volume_alpha.default.yaml volume-alpha
-python -m aggression_carry --data-root data/agc-bybit-1y --config configs/volume_alpha.default.yaml volume-grid --workers 32 --include-reverse
+python -m aggression_carry --data-root data/agc-bybit-1y --config configs/volume_alpha.default.yaml volume-grid --workers 8 --include-reverse
 ```
 
 ## Interpretation Rule

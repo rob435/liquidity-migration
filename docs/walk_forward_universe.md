@@ -80,7 +80,7 @@ python -m aggression_carry \
   archive-download-klines \
   --start 2023-05-03 \
   --end 2026-05-03 \
-  --workers 32
+  --workers 16
 ```
 
 For long overnight jobs, prefer the bounded batch runner. It repeatedly calls

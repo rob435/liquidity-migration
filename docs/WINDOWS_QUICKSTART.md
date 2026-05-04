@@ -79,66 +79,47 @@ Report:
 .tmp/volume-fixture/reports/volume_grid_report.md
 ```
 
-## 5. Run The 3-Month Bybit Test
+## 5. Run The Current Overnight Research Suite
 
-Preferred:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_agc_3m.ps1
-```
-
-Manual equivalent:
+This is the current preferred Windows path. It runs git pull, setup, the
+daily-close breadth/sizing research, then the volume-alpha overnight sweep.
+Use 8 workers on the 5950X; higher worker counts have caused Windows/Python
+memory and process-spawn failures on multi-year grids.
 
 ```powershell
-.\.venv\Scripts\python.exe -m aggression_carry --data-root data/agc-bybit-3m --config configs/volume_alpha.default.yaml download-data --symbols "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,APTUSDT,BNBUSDT,ADAUSDT,DOTUSDT,LTCUSDT,NEARUSDT,OPUSDT,ARBUSDT,INJUSDT" --start "2025-01-01" --end "2025-04-01" --datasets "instruments,klines_1h"
-.\.venv\Scripts\python.exe -m aggression_carry --data-root data/agc-bybit-3m --config configs/volume_alpha.default.yaml volume-alpha
-.\.venv\Scripts\python.exe -m aggression_carry --data-root data/agc-bybit-3m --config configs/volume_alpha.default.yaml volume-backtest
-.\.venv\Scripts\python.exe -m aggression_carry --data-root data/agc-bybit-3m --config configs/volume_alpha.default.yaml volume-grid --workers 0
+powershell -ExecutionPolicy Bypass -File .\scripts\run_research_overnight_suite.ps1 `
+  -Suite both `
+  -Workers 8
 ```
 
 Reports:
 
 ```text
-data/agc-bybit-3m/reports/volume_alpha_report.md
-data/agc-bybit-3m/reports/volume_backtest_report.md
-data/agc-bybit-3m/reports/volume_backtest_trades.csv
-data/agc-bybit-3m/reports/volume_grid_report.md
-data/agc-bybit-3m/reports/volume_grid_results.csv
+data/research_reports/risk_on_breadth_sizing_5950x/daily_close_fade_sizing_sweep.md
+data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_bucket_sweep_summary.md
+```
+
+If the 3-year volume data is already downloaded and you only want to rerun the
+grids:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_research_overnight_suite.ps1 `
+  -Suite both `
+  -Workers 8 `
+  -SkipVolumeDownload
+```
+
+Run only one side:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_research_overnight_suite.ps1 -Suite daily-close -Workers 8
+powershell -ExecutionPolicy Bypass -File .\scripts\run_research_overnight_suite.ps1 -Suite volume -Workers 8
 ```
 
 Large Bybit downloads are resumable. The downloader prints one line per
 symbol/dataset and writes completed chunks immediately. If PowerShell is stopped
 with Ctrl+C or a network timeout kills the command, rerun the same command; rows
 already completed will show as `cached`.
-
-## 6. Run The One-Year Concurrent Grid
-
-On a 5950X:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_agc_1y_grid.ps1 -Workers 8
-```
-
-If the machine starts swapping or RAM pressure gets high:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_agc_1y_grid.ps1 -Workers 4
-```
-
-## 7. Run The 1m Daily-Close Fade Grid
-
-This is a separate short-only top-gainer fade test. It downloads 1m klines, so
-start with the default 3-month window before trying a full year.
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_daily_close_fade_1m.ps1 -Workers 8
-```
-
-If RAM pressure gets high:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_daily_close_fade_1m.ps1 -Workers 4
-```
 
 ## Notes
 

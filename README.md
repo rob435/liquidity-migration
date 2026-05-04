@@ -39,7 +39,8 @@ license to rebuild the old composite stack.
   Bybit archive path for point-in-time symbol/date membership and
   trade-derived 1m bars.
 - `configs/volume_alpha.default.yaml`: current research config.
-- `scripts/run_agc_3m.ps1`: Windows 3-month volume-alpha run.
+- `scripts/run_research_overnight_suite.ps1`: current Windows runner for
+  daily-close breadth/sizing research plus the volume overnight sweep.
 - `scripts/run_volume_bucket_sweep.py`: daily liquidity-rank bucket grid runner.
 
 ## What Was Removed
@@ -327,10 +328,10 @@ python -m aggression_carry \
   --workers 0
 ```
 
-`--workers 0` uses CPU count minus one. On a 5950X, `--workers 32` is valid if
-RAM is comfortable; use `--workers 16` if memory pressure shows up. The RTX GPU
-is not used yet because this backtester is a CPU process-parallel trade
-simulation, not a vectorized CUDA workload.
+Use `--workers 8` for large Windows runs. Higher counts can be faster on paper,
+but they have already caused Windows/Python memory and process-spawn failures on
+multi-year Polars grids. The RTX GPU is not used yet because this backtester is
+a CPU trade simulation, not a vectorized CUDA workload.
 
 The detailed `volume-backtest` report includes every trade, exit reasons,
 monthly strategy performance versus BTC, BTC up/down regime summaries, and SVG
@@ -434,7 +435,7 @@ python -m aggression_carry \
   archive-download-klines \
   --start 2023-05-03 \
   --end 2026-05-03 \
-  --workers 32
+  --workers 16
 ```
 
 The full point-in-time run must download archive-derived 1m bars for every
@@ -467,16 +468,10 @@ The microcap sleeve starts at baseline liquidity rank 151+, top 3 names, 0.50x
 gross, turnover floors, and capacity caps. Treat it as experimental until it
 survives point-in-time archive data and paper forward fills.
 
-Windows 1m runner:
+Windows consolidated research runner:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_daily_close_fade_1m.ps1 -Workers 32
-```
-
-One-year grid on Windows:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_agc_1y_grid.ps1 -Workers 32
+powershell -ExecutionPolicy Bypass -File .\scripts\run_research_overnight_suite.ps1 -Suite both -Workers 8
 ```
 
 ## Research Rule
