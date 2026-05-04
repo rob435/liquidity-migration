@@ -323,6 +323,92 @@ automatically hostile to this fade. Keep the baseline live/demo paper logic
 unchanged until a regime rule proves it improves risk-adjusted results without
 over-pruning the trade stream.
 
+## Day Audit Pattern Research
+
+Use the day audit when we need to understand *why* the close-fade setup wins or
+loses without immediately turning observations into trading rules. It produces
+day-by-day PnL, selected symbols, exit mix, monthly performance, market breadth,
+BTC intraday context, dispersion, selected excess-pump context, and winning-vs-
+losing day contrasts.
+
+Run the current setup audit:
+
+```bash
+python scripts/run_daily_close_fade_day_audit.py \
+  --data-root data/daily-close-fade-1m-3y-current-top160-20230503-20260503 \
+  --config configs/volume_alpha.default.yaml \
+  --start 2023-05-03 \
+  --end 2026-05-03 \
+  --signal-time 22:15 \
+  --top-n 5 \
+  --hold-minutes 180 \
+  --pump-filter pump \
+  --score vol_adjusted_day_return \
+  --liquidity-rank-min 31 \
+  --liquidity-rank-max 150 \
+  --stop-loss-pct 0.20 \
+  --take-profit-pct 0 \
+  --vol-trailing-stop-mult 0.25 \
+  --mfe-giveback-activation-pct 0.01 \
+  --mfe-giveback-pct 0.20
+```
+
+Result from the 2026-05-04 3-year current-top-160 day audit:
+
+| Metric | Value |
+|---|---:|
+| Trading days | 877 |
+| Trades | 3,056 |
+| Total return | 249.03% |
+| Hit rate | 55.87% |
+| Sharpe-like | 2.92 |
+| Max drawdown | -8.08% |
+| Worst day | -4.53% |
+| Best day | 8.62% |
+| Positive months | 30 / 37 |
+
+Observed patterns:
+
+- Broad BTC/market green days are weaker, but still profitable. This confirms
+  the BTC EMA result: do not add a blunt bullish-regime kill switch.
+- BTC down days were best. The lowest BTC day-return quintile returned 98.88%
+  compounded with a 63.64% hit rate.
+- The strongest useful pre-signal clue is not regime, it is **excess pump**.
+  Winning days had higher selected excess versus market, tradeable universe,
+  and BTC. The low selected-excess buckets were much weaker.
+- Low late-volume acceleration was bad. The lowest selected late-volume-ratio
+  bucket compounded -8.47%; higher late-volume buckets were materially better.
+- Higher VWAP extension was better. The top selected-VWAP-extension bucket
+  compounded 85.94% with a 58.29% hit rate.
+- Broad uniform rallies were not ideal. Very high market-positive-rate days
+  remained positive, but much weaker than broad red/dispersion days.
+- Single-symbol baskets had high average return but the worst tail. Requiring
+  at least two symbols sharply reduced the worst split-day loss, but gave up
+  too much total return to promote immediately.
+
+Candidate follow-up tests, not current live rules:
+
+```text
+selected_excess_vs_market > 8%
+selected_avg_vwap_extension > 3.5%
+selected_avg_late_volume_ratio > 1.0x
+min_symbols >= 2 as a risk sleeve, not as the main return-max sleeve
+```
+
+Quick split check from the day audit, before any dedicated promotion test:
+
+| Candidate | Train | Validation | OOS | Comment |
+|---|---:|---:|---:|---|
+| baseline | 23.86% | 27.38% | 121.22% | Keep as current demo logic |
+| excess market > 8% | 26.57% | 21.50% | 112.34% | Higher average day, lower activity |
+| VWAP extension > 3.5% | 16.28% | 25.04% | 106.36% | Cleaner pump shape, lower return |
+| late volume > 1.0x | 22.05% | 27.03% | 98.55% | Removes weak late-volume days |
+| min symbols >= 2 | 20.79% | 13.20% | 79.59% | Risk control candidate, not return-max |
+
+Conclusion: the next serious research should be an excess-pump / pump-quality
+filter sweep, not another broad market regime filter. Do not promote these
+filters until they pass a proper split/promotion report.
+
 Build a public-archive symbol/date manifest for walk-forward universe research:
 
 ```bash
