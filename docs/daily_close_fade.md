@@ -295,6 +295,17 @@ python scripts/report_archive_pit_coverage.py \
   --min-bars-per-day 1200
 ```
 
+On Windows, the combined PIT bootstrap is:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_archive_pit_bootstrap.ps1 `
+  -DataRoot data\daily-close-fade-pit-20230503-20260503 `
+  -Start 2023-05-03 `
+  -End 2026-05-03 `
+  -ManifestWorkers 16 `
+  -DownloadWorkers 16
+```
+
 Run a manifest-gated backtest once the archive-derived 1m bars are present:
 
 ```bash

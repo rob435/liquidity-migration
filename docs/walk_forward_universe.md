@@ -100,6 +100,21 @@ By default it also requires the next UTC date partition, because a daily-close
 trade entered around 22:15-23:15 UTC may exit after midnight. Rows that lack the
 next-day partition are not counted as usable for close-fade validation.
 
+On Windows, use the bootstrap wrapper to run the manifest, resumable archive
+download, and coverage audit in one transcripted job:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_archive_pit_bootstrap.ps1 `
+  -DataRoot data\daily-close-fade-pit-20230503-20260503 `
+  -Start 2023-05-03 `
+  -End 2026-05-03 `
+  -ManifestWorkers 16 `
+  -DownloadWorkers 16
+```
+
+For a first smoke run, add `-MaxSymbols 5 -MaxRows 50`. For the real PIT build,
+leave both at `0` so the downloader consumes all missing manifest rows.
+
 `daily-close-fade --require-archive-membership` forces the strategy to select
 only symbol/date pairs present in the archive manifest.
 

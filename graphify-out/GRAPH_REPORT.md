@@ -1,11 +1,11 @@
 # Graph Report - MODEL050426  (2026-05-04)
 
 ## Corpus Check
-- 43 files · ~67,528 words
+- 44 files · ~67,976 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 674 nodes · 1831 edges · 16 communities detected
+- 676 nodes · 1832 edges · 16 communities detected
 - Extraction: 74% EXTRACTED · 26% INFERRED · 0% AMBIGUOUS · INFERRED: 482 edges (avg confidence: 0.77)
 - Token cost: 0 input · 0 output
 
@@ -54,8 +54,8 @@
 ## Communities
 
 ### Community 0 - "Community 0"
-Cohesion: 0.05
-Nodes (82): download_archive_bytes(), download_public_trade_archive(), ArchiveKlineDownloadConfig, ArchiveManifestConfig, build_archive_trade_manifest(), _download_one_archive_kline(), _download_result(), _empty_download_results() (+74 more)
+Cohesion: 0.04
+Nodes (83): download_archive_bytes(), download_public_trade_archive(), ArchiveKlineDownloadConfig, ArchiveManifestConfig, build_archive_trade_manifest(), _download_one_archive_kline(), _download_result(), _empty_download_results() (+75 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.05
@@ -66,16 +66,16 @@ Cohesion: 0.08
 Nodes (62): _apply_basket_stop_to_rows(), apply_close_fade_basket_stop(), _attach_archive_membership(), _attach_instrument_age(), backtest_daily_close_fade(), _baseline_liquidity_filter_expr(), _baseline_liquidity_rank(), build_close_fade_diagnostic_observations() (+54 more)
 
 ### Community 3 - "Community 3"
-Cohesion: 0.08
-Nodes (40): _as_utc(), _compact_token(), _demo_cycle_lock(), _demo_sync_compat_context(), _demo_sync_supports_entry_pause(), DemoCycleConfig, _existing_active_state(), _failed_sleeve_result() (+32 more)
+Cohesion: 0.09
+Nodes (52): _as_utc(), _basket_already_opened(), _bool_value(), build_forward_scan_features(), build_forward_universe(), _concat(), _count_reason(), _count_status() (+44 more)
 
 ### Community 4 - "Community 4"
 Cohesion: 0.09
 Nodes (51): _as_utc(), build_demo_sync_orders(), _build_limit_order(), _build_probe_order(), cancel_stale_demo_orders(), _candidate_order_row(), _cap_candidate_order_rows(), _capped_order_qty() (+43 more)
 
 ### Community 5 - "Community 5"
-Cohesion: 0.1
-Nodes (50): _as_utc(), _basket_already_opened(), _bool_value(), build_forward_scan_features(), build_forward_universe(), _concat(), _count_reason(), _count_status() (+42 more)
+Cohesion: 0.08
+Nodes (37): _as_utc(), _compact_token(), _demo_cycle_lock(), _demo_sync_compat_context(), _demo_sync_supports_entry_pause(), DemoCycleConfig, _existing_active_state(), _failed_sleeve_result() (+29 more)
 
 ### Community 6 - "Community 6"
 Cohesion: 0.18
@@ -128,10 +128,10 @@ _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `main()` connect `Community 8` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 9`, `Community 11`, `Community 13`?**
   _High betweenness centrality (0.111) - this node is a cross-community bridge._
-- **Why does `ResearchConfig` connect `Community 6` to `Community 0`, `Community 9`, `Community 3`, `Community 7`?**
-  _High betweenness centrality (0.078) - this node is a cross-community bridge._
+- **Why does `ResearchConfig` connect `Community 6` to `Community 0`, `Community 9`, `Community 5`, `Community 7`?**
+  _High betweenness centrality (0.077) - this node is a cross-community bridge._
 - **Why does `read_dataset()` connect `Community 7` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 5`, `Community 6`, `Community 11`, `Community 12`?**
-  _High betweenness centrality (0.078) - this node is a cross-community bridge._
+  _High betweenness centrality (0.077) - this node is a cross-community bridge._
 - **Are the 31 inferred relationships involving `main()` (e.g. with `load_config()` and `generate_fixture_data()`) actually correct?**
   _`main()` has 31 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 44 inferred relationships involving `read_dataset()` (e.g. with `run_volume_trade_backtest()` and `run_volume_grid()`) actually correct?**
