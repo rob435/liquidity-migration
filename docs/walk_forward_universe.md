@@ -106,7 +106,8 @@ python scripts/report_archive_pit_coverage.py \
   --data-root data/daily-close-fade-pit \
   --start 2023-05-03 \
   --end 2026-05-03 \
-  --min-bars-per-day 1200
+  --min-bars-per-day 1200 \
+  --min-usable-rate 0.95
 ```
 
 The coverage report writes `archive_pit_coverage_rows.csv`,
@@ -114,6 +115,8 @@ The coverage report writes `archive_pit_coverage_rows.csv`,
 By default it also requires the next UTC date partition, because a daily-close
 trade entered around 22:15-23:15 UTC may exit after midnight. Rows that lack the
 next-day partition are not counted as usable for close-fade validation.
+When `--min-coverage-rate` or `--min-usable-rate` is set, the command exits
+with code `2` if the data root is not ready.
 
 On Windows, use the bootstrap wrapper to run the manifest, resumable archive
 download, and coverage audit in one transcripted job:

@@ -304,7 +304,8 @@ python scripts/report_archive_pit_coverage.py \
   --data-root data/daily-close-fade-pit \
   --start 2023-05-03 \
   --end 2026-05-03 \
-  --min-bars-per-day 1200
+  --min-bars-per-day 1200 \
+  --min-usable-rate 0.95
 ```
 
 On Windows, the combined PIT bootstrap is:

@@ -47,6 +47,8 @@ def main() -> int:
         "symbols_filter": list(_csv_symbols(args.symbols)),
         "min_bars_per_day": args.min_bars_per_day,
         "require_next_day": not args.no_require_next_day,
+        "min_coverage_rate": args.min_coverage_rate,
+        "min_usable_rate": args.min_usable_rate,
         "rows": coverage.height,
         "summary": _payload_summary(coverage),
     }
@@ -65,6 +67,8 @@ def main() -> int:
         f"usable_rate={payload['summary']['usable_rate']:.2%} "
         f"path={output_dir / 'archive_pit_coverage_report.md'}"
     )
+    if not _coverage_thresholds_pass(payload["summary"], min_coverage_rate=args.min_coverage_rate, min_usable_rate=args.min_usable_rate):
+        return 2
     return 0
 
 
@@ -77,6 +81,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--symbols", default="", help="Optional comma-separated symbol allowlist.")
     parser.add_argument("--max-rows", type=int, default=0, help="Maximum manifest rows to audit; 0 disables.")
     parser.add_argument("--min-bars-per-day", type=int, default=1200, help="Minimum 1m bars for a partition to count covered.")
+    parser.add_argument("--min-coverage-rate", type=float, default=0.0, help="Exit 2 if covered-row rate is below this fraction.")
+    parser.add_argument("--min-usable-rate", type=float, default=0.0, help="Exit 2 if close-fade usable-row rate is below this fraction.")
     parser.add_argument(
         "--no-require-next-day",
         action="store_true",
@@ -155,6 +161,8 @@ def format_archive_pit_coverage_report(
         f"Date filter: {payload.get('start') or 'all'} to {payload.get('end') or 'all'}",
         f"Min bars/day: {payload['min_bars_per_day']}",
         f"Require next-day partition: {payload['require_next_day']}",
+        f"Minimum coverage gate: {payload.get('min_coverage_rate', 0.0):.2%}",
+        f"Minimum usable gate: {payload.get('min_usable_rate', 0.0):.2%}",
         "",
         "## Summary",
         "",
@@ -271,6 +279,18 @@ def _payload_summary(coverage: pl.DataFrame) -> dict[str, Any]:
         .row(0, named=True)
     )
     return {key: int(value) if isinstance(value, int) else float(value) for key, value in row.items()}
+
+
+def _coverage_thresholds_pass(
+    summary: dict[str, Any],
+    *,
+    min_coverage_rate: float,
+    min_usable_rate: float,
+) -> bool:
+    return (
+        float(summary.get("coverage_rate", 0.0)) + 1e-12 >= min_coverage_rate
+        and float(summary.get("usable_rate", 0.0)) + 1e-12 >= min_usable_rate
+    )
 
 
 def _partition_bar_rows(data_root: str | Path, *, symbol: str, date: str) -> int:

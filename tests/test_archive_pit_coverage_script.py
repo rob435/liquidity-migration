@@ -117,3 +117,11 @@ def test_archive_pit_coverage_allows_same_day_only_mode(tmp_path: Path) -> None:
     )
 
     assert coverage.row(0, named=True)["usable_for_close_fade"] is True
+
+
+def test_archive_pit_coverage_threshold_gate() -> None:
+    summary = {"coverage_rate": 0.80, "usable_rate": 0.60}
+
+    assert coverage_script._coverage_thresholds_pass(summary, min_coverage_rate=0.80, min_usable_rate=0.60)
+    assert not coverage_script._coverage_thresholds_pass(summary, min_coverage_rate=0.90, min_usable_rate=0.60)
+    assert not coverage_script._coverage_thresholds_pass(summary, min_coverage_rate=0.80, min_usable_rate=0.70)
