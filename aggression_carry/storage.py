@@ -38,6 +38,7 @@ DATASETS = {
     "forward_scan_features",
     "forward_paper_trades",
     "forward_paper_baskets",
+    "demo_execution_orders",
 }
 
 DATASET_KEYS = {
@@ -73,6 +74,7 @@ DATASET_KEYS = {
     "forward_scan_features": ("scan_id", "symbol"),
     "forward_paper_trades": ("trade_id",),
     "forward_paper_baskets": ("basket_id",),
+    "demo_execution_orders": ("order_link_id",),
 }
 
 

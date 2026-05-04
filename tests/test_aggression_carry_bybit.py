@@ -15,6 +15,20 @@ def test_bybit_market_data_constructs_with_slotted_client(monkeypatch) -> None:
     assert client._client.testnet is True
 
 
+def test_bybit_private_client_constructs_demo_session(monkeypatch) -> None:
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+
+    assert client._client.kwargs["demo"] is True
+    assert client._client.kwargs["api_key"] == "key"
+    assert client._client.kwargs["api_secret"] == "secret"
+
+
 def test_kline_download_chunks_full_range_when_bybit_returns_newest_first(monkeypatch) -> None:
     interval_ms = bybit.INTERVAL_MS["60"]
     timestamps = [index * interval_ms for index in range(10)]

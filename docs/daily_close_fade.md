@@ -297,7 +297,9 @@ The live observation path is documented in `docs/forward_testing.md`.
 It scans the full current Bybit USDT-linear public universe, applies the same
 daily-close fade candidate logic, opens paper shorts only, tracks exits, and can
 send Telegram notifications. It does not use Bybit private keys and does not
-submit demo or live orders.
+submit demo or live strategy orders. The separate `bybit-demo-probe` command is
+only for tiny demo auth/order create/cancel checks, and `bybit-demo-sync` can
+mirror an existing paper ledger into its own capped demo execution ledger.
 
 Use the sleeve runner for the current paper-forward campaign:
 

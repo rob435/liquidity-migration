@@ -18,6 +18,7 @@ from .config import (
     load_config,
 )
 from .daily_close_fade import run_daily_close_fade, run_daily_close_fade_grid, run_daily_close_fade_sleeves
+from .demo_execution import DemoProbeConfig, DemoSyncConfig, run_bybit_demo_probe, run_bybit_demo_sync
 from .downloaders import download_market_data, parse_date_ms
 from .forward_test import run_forward_once, run_forward_report, run_forward_scan, run_forward_sleeves
 from .ingestion import generate_fixture_data
@@ -255,6 +256,60 @@ def build_parser() -> argparse.ArgumentParser:
     _add_forward_runtime_args(forward_sleeves)
     forward_sleeves.add_argument("--telegram", action="store_true", help="Send one Telegram summary for all paper sleeves.")
 
+    demo_probe = subparsers.add_parser(
+        "bybit-demo-probe",
+        help="Probe Bybit demo auth/order plumbing with one tiny post-only order.",
+    )
+    demo_probe.add_argument("--symbol", default="XRPUSDT", help="Symbol to probe, default XRPUSDT.")
+    demo_probe.add_argument("--side", default="Sell", help="Probe side: Sell/short or Buy/long.")
+    demo_probe.add_argument("--notional", type=float, default=5.0, help="Target probe notional in USDT.")
+    demo_probe.add_argument("--max-notional", type=float, default=10.0, help="Hard maximum allowed probe notional.")
+    demo_probe.add_argument(
+        "--price-offset-bps",
+        type=float,
+        default=500.0,
+        help="Distance from top of book. Sell probes go above ask; Buy probes go below bid.",
+    )
+    demo_probe.add_argument("--place-order", action="store_true", help="Actually submit the Bybit demo order.")
+    demo_probe.add_argument("--leave-open", action="store_true", help="Do not request immediate cancellation after placement.")
+    demo_probe.add_argument(
+        "--i-understand-demo-order",
+        action="store_true",
+        help="Required with --place-order. Confirms this will hit Bybit demo private order endpoints.",
+    )
+
+    demo_sync = subparsers.add_parser(
+        "bybit-demo-sync",
+        help="Mirror forward_paper_trades into a tiny capped Bybit demo execution ledger.",
+    )
+    demo_sync.add_argument("--max-order-notional", type=float, default=10.0, help="Hard cap per demo order in USDT.")
+    demo_sync.add_argument("--max-new-orders", type=int, default=5, help="Maximum new demo orders this run.")
+    demo_sync.add_argument(
+        "--max-total-new-notional",
+        type=float,
+        default=50.0,
+        help="Hard cap across all new demo orders this run.",
+    )
+    demo_sync.add_argument(
+        "--price-offset-bps",
+        type=float,
+        default=2.0,
+        help="Post-only entry distance from touch. Shorts place above ask; longs below bid.",
+    )
+    demo_sync.add_argument(
+        "--cancel-stale-minutes",
+        type=int,
+        default=5,
+        help="Cancel stale open entry orders after this many minutes. 0 cancels on the next sync; negative disables.",
+    )
+    demo_sync.add_argument("--submit-orders", action="store_true", help="Actually submit capped demo orders.")
+    demo_sync.add_argument("--no-market-exit", action="store_true", help="Do not submit reduce-only market exits for detected demo positions.")
+    demo_sync.add_argument(
+        "--i-understand-demo-sync",
+        action="store_true",
+        help="Required with --submit-orders. Confirms this will hit Bybit demo private order endpoints.",
+    )
+
     subparsers.add_parser("forward-report", help="Write a report from the paper forward-test ledger.")
     return parser
 
@@ -471,6 +526,49 @@ def main(argv: list[str] | None = None) -> int:
             "forward sleeves "
             f"sleeves={payload['rows']['sleeves']} "
             f"path={data_root / 'reports' / 'forward_sleeves_report.md'}"
+        )
+        return 0
+
+    if args.command == "bybit-demo-probe":
+        probe_config = DemoProbeConfig(
+            symbol=args.symbol,
+            side=args.side,
+            notional=args.notional,
+            max_notional=args.max_notional,
+            price_offset_bps=args.price_offset_bps,
+            place_order=args.place_order,
+            cancel_order=not args.leave_open,
+            confirmed=args.i_understand_demo_order,
+        )
+        payload = run_bybit_demo_probe(data_root, config=config, probe_config=probe_config)
+        print(
+            "bybit demo probe "
+            f"status={payload['status']} "
+            f"symbol={payload['symbol']} "
+            f"order_link_id={payload['order']['request']['orderLinkId']} "
+            f"path={data_root / 'reports' / 'bybit_demo_probe_report.md'}"
+        )
+        return 0
+
+    if args.command == "bybit-demo-sync":
+        sync_config = DemoSyncConfig(
+            max_order_notional=args.max_order_notional,
+            max_new_orders=args.max_new_orders,
+            max_total_new_notional=args.max_total_new_notional,
+            price_offset_bps=args.price_offset_bps,
+            cancel_stale_minutes=args.cancel_stale_minutes,
+            submit_orders=args.submit_orders,
+            confirmed=args.i_understand_demo_sync,
+            allow_market_exit=not args.no_market_exit,
+        )
+        payload = run_bybit_demo_sync(data_root, config=config, sync_config=sync_config)
+        print(
+            "bybit demo sync "
+            f"new_orders={payload['rows']['new_orders']} "
+            f"ledger_orders={payload['rows']['ledger_orders']} "
+            f"placed={payload['summary']['placed']} "
+            f"dry_run={payload['summary']['dry_run']} "
+            f"path={data_root / 'reports' / 'bybit_demo_sync_report.md'}"
         )
         return 0
 

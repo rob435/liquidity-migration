@@ -28,6 +28,9 @@ license to rebuild the old composite stack.
 - `aggression_carry/forward_test.py`: public-data paper forward tester for the
   daily-close fade. It scans the live Bybit universe and writes a paper ledger;
   it never submits exchange orders.
+- `bybit-demo-probe` and `bybit-demo-sync`: isolated Bybit demo-only order
+  plumbing. The probe tests auth/place/cancel. The sync mirrors an existing
+  paper ledger into tiny capped demo orders and its own execution ledger.
 - `archive-manifest` and `download-data --datasets archive_klines_1m`: public
   Bybit archive path for point-in-time symbol/date membership and
   trade-derived 1m bars.
@@ -147,8 +150,47 @@ python -m aggression_carry \
   --telegram
 ```
 
-The forward tester uses public market data only. No Bybit private keys, demo
-orders, or live orders are implemented.
+The forward tester uses public market data only. It does not use Bybit private
+keys and does not submit orders.
+
+Bybit demo probe:
+
+```bash
+export BYBIT_DEMO_API_KEY="..."
+export BYBIT_DEMO_API_SECRET="..."
+
+python -m aggression_carry \
+  --data-root data/forward-paper \
+  --config configs/volume_alpha.default.yaml \
+  bybit-demo-probe \
+  --symbol XRPUSDT \
+  --side Sell \
+  --notional 5 \
+  --place-order \
+  --i-understand-demo-order
+```
+
+Bybit demo sync for the core paper sleeve:
+
+```bash
+python -m aggression_carry \
+  --data-root data/forward-paper/forward_sleeves/core_31_150 \
+  --config configs/volume_alpha.default.yaml \
+  bybit-demo-sync \
+  --submit-orders \
+  --i-understand-demo-sync
+```
+
+Demo sync writes:
+
+```text
+data/.../reports/bybit_demo_sync_report.md
+data/.../reports/bybit_demo_execution_orders.csv
+data/.../demo_execution_orders/
+```
+
+These are demo-only plumbing checks. They do not prove the alpha and they are
+not live execution.
 
 Microcap paper mode is a separate sleeve, not the default core book:
 

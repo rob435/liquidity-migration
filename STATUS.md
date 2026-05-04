@@ -20,12 +20,15 @@
 - Paper forward testing is implemented for the daily-close fade path via
   `forward-scan`, `forward-run`, and `forward-report`. It uses public Bybit
   data only and writes a paper ledger.
+- Bybit demo order plumbing is isolated in `bybit-demo-probe` and
+  `bybit-demo-sync`. These commands are hard-capped demo-only paths with their
+  own reports/ledger; they are not called by the paper forward runner.
 - Daily-close fade now has a three-sleeve comparison path:
   `major_control` ranks 1-30, `core` ranks 31-150, and experimental `microcap`
   ranks 151+ with turnover floors and capacity-limited sizing.
-- No live execution, kill switches, production deployment, or exchange order
-  submission exist in the active code. Telegram is notification-only for paper
-  forward testing.
+- No live execution, kill switches, production deployment, or real-money
+  exchange order submission exist in the active code. Telegram is
+  notification-only for paper forward testing.
 
 ## Active Path
 
@@ -106,6 +109,9 @@
   claimed increasing-volume alpha.
 - Funding, borrow constraints, squeezes, and live execution are intentionally out
   of scope until the standalone alpha is proven.
+- Demo execution proves authentication/order plumbing only. It does not validate
+  the alpha, and it can still produce unrealistic fills compared with real
+  liquidity.
 - Overlapping baskets are intentionally blocked for now; hold period and
   rebalance period should match until the simple lifecycle is understood.
 - GPU acceleration is intentionally not implemented; this workload is currently

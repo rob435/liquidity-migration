@@ -76,3 +76,41 @@ def test_cli_parses_forward_sleeves_alias(tmp_path: Path) -> None:
 
     assert args.command == "forward-sleeves"
     assert args.telegram is True
+
+
+def test_cli_parses_bybit_demo_probe(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "bybit-demo-probe",
+            "--symbol",
+            "ETHUSDT",
+            "--place-order",
+            "--i-understand-demo-order",
+        ]
+    )
+
+    assert args.command == "bybit-demo-probe"
+    assert args.symbol == "ETHUSDT"
+    assert args.place_order is True
+    assert args.i_understand_demo_order is True
+
+
+def test_cli_parses_bybit_demo_sync(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "bybit-demo-sync",
+            "--submit-orders",
+            "--i-understand-demo-sync",
+            "--max-order-notional",
+            "7",
+        ]
+    )
+
+    assert args.command == "bybit-demo-sync"
+    assert args.submit_orders is True
+    assert args.i_understand_demo_sync is True
+    assert args.max_order_notional == 7

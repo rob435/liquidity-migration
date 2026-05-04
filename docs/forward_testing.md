@@ -2,21 +2,32 @@
 
 This is the live-observation path for the daily-close fade alpha. It scans the
 current Bybit public universe, records paper trades, and can send Telegram
-notifications. It does not submit exchange orders.
+notifications. The strategy forward path does not submit exchange orders.
 
 ## Contract
 
 - public Bybit market data only
-- no API keys for Bybit
-- no private account/order endpoints
-- no demo or live order submission
+- no API keys for the strategy paper runner
+- no private account/order endpoints inside `forward-run` or
+  `forward-run-sleeves`
+- no demo or live strategy order submission
 - no old live runtime rebuild
 - Telegram is notification-only
 
-Demo exchange execution is intentionally not implemented yet. It tests plumbing
-more than alpha and can create false confidence from unrealistic fills. The
-first useful forward test is whether the system would have selected good names
-from the full live universe without hindsight.
+Demo exchange execution is intentionally separate from the strategy runner. It
+tests plumbing more than alpha and can create false confidence from unrealistic
+fills. The first useful forward test is still whether the system would have
+selected good names from the full live universe without hindsight.
+
+There is a separate `bybit-demo-probe` command for order-path checks. It can
+authenticate to Bybit demo, submit one tiny far-from-touch post-only order, and
+request immediate cancellation. It does not consume alpha candidates, open
+strategy trades, manage fills, or alter the paper ledger.
+
+There is also a separate `bybit-demo-sync` command for demo execution shadowing.
+It reads `forward_paper_trades`, mirrors capped demo orders into its own
+`demo_execution_orders` ledger, and reconciles open orders/positions. It is not
+called by `forward-run` or `forward-run-sleeves`.
 
 ## Signal
 
@@ -192,6 +203,128 @@ The message includes scan status, candidate count, new paper trades, open
 trades, closed trades, and the top candidates. The sleeve runner sends one
 aggregate message instead of one message per sleeve. Missing env vars make
 Telegram a no-op.
+
+## Bybit Demo Probe
+
+Use this only to verify API key, order create, and cancel plumbing. It is not a
+performance test and it is not live trading.
+
+Set demo credentials as environment variables. Do not put keys in the command:
+
+```bash
+export BYBIT_DEMO_API_KEY="..."
+export BYBIT_DEMO_API_SECRET="..."
+```
+
+Dry-run the probe first. This uses public market data and writes the proposed
+order without touching private endpoints:
+
+```bash
+python -m aggression_carry \
+  --data-root data/forward-paper \
+  --config configs/volume_alpha.default.yaml \
+  bybit-demo-probe \
+  --symbol XRPUSDT \
+  --side Sell \
+  --notional 5
+```
+
+Actually place and immediately cancel one tiny demo order:
+
+```bash
+python -m aggression_carry \
+  --data-root data/forward-paper \
+  --config configs/volume_alpha.default.yaml \
+  bybit-demo-probe \
+  --symbol XRPUSDT \
+  --side Sell \
+  --notional 5 \
+  --place-order \
+  --i-understand-demo-order
+```
+
+Safety rules:
+
+- default target notional is 5 USDT and default max notional is 10 USDT
+- default order is `PostOnly`
+- default sell probe is placed far above the ask; default buy probe is placed
+  far below the bid
+- default behavior requests cancellation immediately after placement
+- use `--leave-open` only if you are intentionally inspecting open-order state
+
+Report output:
+
+```text
+data/forward-paper/reports/bybit_demo_probe_report.md
+data/forward-paper/reports/bybit_demo_probe_report.json
+```
+
+## Bybit Demo Sync
+
+This mirrors the paper ledger into tiny capped Bybit demo orders. It is the
+next step after the probe, but it is still not live trading and it still does
+not validate alpha by itself.
+
+The command reads whichever `forward_paper_trades` ledger lives under
+`--data-root`. To shadow only the core sleeve, point `--data-root` at the core
+sleeve root:
+
+```text
+data/forward-paper/forward_sleeves/core_31_150
+```
+
+Dry-run first:
+
+```bash
+python -m aggression_carry \
+  --data-root data/forward-paper/forward_sleeves/core_31_150 \
+  --config configs/volume_alpha.default.yaml \
+  bybit-demo-sync
+```
+
+Submit capped demo orders:
+
+```bash
+python -m aggression_carry \
+  --data-root data/forward-paper/forward_sleeves/core_31_150 \
+  --config configs/volume_alpha.default.yaml \
+  bybit-demo-sync \
+  --submit-orders \
+  --i-understand-demo-sync
+```
+
+Safety rules:
+
+- reads paper trades only; it does not run candidate selection
+- default per-order cap is 10 USDT
+- default max new orders per run is 5
+- default total new notional cap per run is 50 USDT
+- entry orders are `PostOnly`
+- duplicate paper trades are de-duped by deterministic `orderLinkId`
+- stale open entry orders are cancelled after 5 minutes by default
+- set `--cancel-stale-minutes 0` to cancel any still-open entry order on the
+  next sync; set it negative to disable stale cancellation
+- if a paper trade closes and a demo position is detected, the exit order is
+  reduce-only
+- market exits are allowed by default only for reduce-only demo exits; use
+  `--no-market-exit` to disable them
+
+Reports:
+
+```text
+data/.../reports/bybit_demo_sync_report.md
+data/.../reports/bybit_demo_sync_report.json
+data/.../reports/bybit_demo_execution_orders.csv
+data/.../demo_execution_orders/
+```
+
+Suggested schedule for demo shadowing the core sleeve:
+
+- 22:16 UTC: `forward-run-sleeves --telegram`
+- immediately after: `bybit-demo-sync --submit-orders --i-understand-demo-sync`
+  using `data/forward-paper/forward_sleeves/core_31_150`
+- every 5-15 minutes until flat: run both commands again so paper exits and
+  demo reconciliation stay current
 
 ## Scheduling
 
