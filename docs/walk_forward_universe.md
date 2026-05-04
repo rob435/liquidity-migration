@@ -83,6 +83,21 @@ python -m aggression_carry \
   --workers 32
 ```
 
+For long overnight jobs, prefer the bounded batch runner. It repeatedly calls
+the manifest downloader with `missing_only=True`, writes a batch summary, audits
+coverage, and stops if a batch makes no progress because every selected row
+failed:
+
+```bash
+python scripts/run_archive_pit_batches.py \
+  --data-root data/daily-close-fade-pit \
+  --start 2023-05-03 \
+  --end 2026-05-03 \
+  --batch-rows 1000 \
+  --workers 16 \
+  --coverage-every 1
+```
+
 Audit manifest and 1m partition coverage before trusting any walk-forward
 result:
 
@@ -109,11 +124,14 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_archive_pit_bootstrap.ps1
   -Start 2023-05-03 `
   -End 2026-05-03 `
   -ManifestWorkers 16 `
-  -DownloadWorkers 16
+  -DownloadWorkers 16 `
+  -BatchRows 1000
 ```
 
-For a first smoke run, add `-MaxSymbols 5 -MaxRows 50`. For the real PIT build,
-leave both at `0` so the downloader consumes all missing manifest rows.
+For a first smoke run, add `-MaxSymbols 5 -BatchRows 50 -MaxBatches 1`. For the
+real PIT build, leave `-MaxSymbols` and `-MaxBatches` at `0` so the batch runner
+keeps consuming missing manifest rows until complete or until a no-progress
+failure batch is hit.
 
 `daily-close-fade --require-archive-membership` forces the strategy to select
 only symbol/date pairs present in the archive manifest.

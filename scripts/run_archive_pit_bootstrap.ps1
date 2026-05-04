@@ -6,7 +6,9 @@ param(
     [int]$ManifestWorkers = 16,
     [int]$DownloadWorkers = 16,
     [int]$MaxSymbols = 0,
-    [int]$MaxRows = 0,
+    [int]$BatchRows = 1000,
+    [int]$MaxBatches = 0,
+    [int]$CoverageEvery = 1,
     [int]$MinBarsPerDay = 1200,
     [string]$Symbols = "",
     [switch]$SkipManifest,
@@ -53,7 +55,9 @@ try {
     Write-Host "Manifest workers: $ManifestWorkers"
     Write-Host "Download workers: $DownloadWorkers"
     Write-Host "Max symbols: $MaxSymbols"
-    Write-Host "Max rows: $MaxRows"
+    Write-Host "Batch rows: $BatchRows"
+    Write-Host "Max batches: $MaxBatches"
+    Write-Host "Coverage every: $CoverageEvery"
     Write-Host "Log: $LogPath"
 
     Invoke-Checked "Checking virtualenv Python version" {
@@ -80,17 +84,19 @@ try {
     }
 
     if (-not $SkipDownload) {
-        Invoke-Checked "Downloading archive-derived 1m klines" {
-            & $Python -m aggression_carry `
+        Invoke-Checked "Downloading archive-derived 1m klines in batches" {
+            & $Python .\scripts\run_archive_pit_batches.py `
                 --data-root $DataRoot `
                 --config $Config `
-                archive-download-klines `
                 --name "pit_klines" `
                 --start $Start `
                 --end $End `
                 --symbols $Symbols `
-                --max-rows $MaxRows `
-                --workers $DownloadWorkers
+                --batch-rows $BatchRows `
+                --max-batches $MaxBatches `
+                --workers $DownloadWorkers `
+                --coverage-every $CoverageEvery `
+                --min-bars-per-day $MinBarsPerDay
         }
     }
     else {
@@ -108,8 +114,8 @@ try {
     Write-Host ""
     Write-Host "Done."
     Write-Host "Coverage: $DataRoot/reports/archive_pit_coverage_report.md"
+    Write-Host "Batch summary: $DataRoot/reports/archive_pit_batches/archive_pit_batch_summary.md"
     Write-Host "Manifest: $DataRoot/reports/archive_manifest_pit_manifest.md"
-    Write-Host "Download: $DataRoot/reports/archive_klines_pit_klines.md"
     Write-Host "Log: $LogPath"
 }
 finally {

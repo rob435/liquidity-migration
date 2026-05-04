@@ -285,6 +285,18 @@ python -m aggression_carry \
   --workers 32
 ```
 
+For long PIT builds, use bounded batches:
+
+```bash
+python scripts/run_archive_pit_batches.py \
+  --data-root data/daily-close-fade-pit \
+  --start 2023-05-03 \
+  --end 2026-05-03 \
+  --batch-rows 1000 \
+  --workers 16 \
+  --coverage-every 1
+```
+
 Audit archive PIT coverage before running the backtest:
 
 ```bash
@@ -303,7 +315,8 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_archive_pit_bootstrap.ps1
   -Start 2023-05-03 `
   -End 2026-05-03 `
   -ManifestWorkers 16 `
-  -DownloadWorkers 16
+  -DownloadWorkers 16 `
+  -BatchRows 1000
 ```
 
 Run a manifest-gated backtest once the archive-derived 1m bars are present:
