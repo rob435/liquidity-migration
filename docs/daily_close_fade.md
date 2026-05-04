@@ -205,6 +205,67 @@ split. Conclusion: the per-coin gate improves candidate quality, but the large
 return improvement depends on accepting concentration into fewer shorts. Do not
 promote it to demo/live until concentration caps and PIT validation are handled.
 
+## Sizing And Concentration Research
+
+Kelly sizing is not appropriate yet. We do not have enough independent
+out-of-sample evidence, and the current benchmark still uses a current top-160
+universe. Full Kelly would be a disguised overfit. The safer research path is:
+
+```text
+1. Keep gross exposure fixed.
+2. Filter individual coins for pump quality.
+3. Test whether score-tilted weights help.
+4. Cap max single-coin basket weight.
+5. Leave unused exposure in cash when the cap binds.
+```
+
+The sizing sweep tests:
+
+```text
+fixed_slot: each passing coin gets gross_exposure / top_n
+reallocate_equal: passing coins split full gross exposure equally
+capped_equal: equal weights, capped per coin
+capped_score: weights proportional to score, capped per coin
+```
+
+Result from the 2026-05-04 current-top-160 3-year benchmark:
+
+| Candidate | Train | Validation | OOS | Avg Sharpe | Worst DD | Worst day | Avg max coin |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Baseline current demo logic | 23.86% | 27.38% | 121.22% | 2.72 | -8.08% | -4.53% | 43.10% |
+| Exact 5/2.5/0.75 per-coin, reallocate equal | 44.98% | 46.29% | 146.98% | 3.32 | -11.14% | -4.53% | 50.59% |
+| Strict 8/3.5/1.0 per-coin, reallocate equal | 60.47% | 53.29% | 190.77% | 3.51 | -9.70% | -5.00% | 36.54% |
+| Strict 8/3.5/1.0 per-coin, capped score 70% | 39.87% | 41.43% | 161.79% | 3.77 | -10.28% | -3.50% | 30.94% |
+| Strict 8/3.5/1.0 per-coin, capped score 80% | 49.78% | 44.98% | 190.36% | 3.79 | -9.15% | -4.00% | 34.01% |
+
+Interpretation:
+
+- Score-dependent sizing helps only when the cap is loose enough. Caps at
+  `25%-50%` left too much exposure unused and failed to beat baseline across
+  all splits.
+- The best capped research candidate is `coin_excess >= 8%`,
+  `coin_vwap_extension >= 3.5%`, `coin_late_volume_ratio >= 1.0x`, with
+  `capped_score max=80% power=1`.
+- The 80% cap sounds aggressive, but average max coin weight was about 34%.
+  The cap mainly catches the rare one-name or two-name concentration cases.
+- The 70% cap is the more conservative alternative. It gave up return but cut
+  the worst single day to about `-3.50%`.
+- Do not promote either sizing rule to demo orders until PIT/walk-forward
+  universe validation catches up. For now this is a research candidate, not the
+  live trading contract.
+
+Run the sizing sweep:
+
+```bash
+python scripts/run_daily_close_fade_sizing_sweep.py \
+  --data-root data/daily-close-fade-1m-3y-current-top160-20230503-20260503 \
+  --config configs/volume_alpha.default.yaml \
+  --max-weights 0.55,0.60,0.70,0.80 \
+  --score-powers 0.5,1.0 \
+  --include-uncapped \
+  --report-dir data/daily-close-fade-1m-3y-current-top160-20230503-20260503/reports/daily_close_fade_sizing_sweep_high_caps
+```
+
 The diagnostic path deliberately ignores TP, SL, trailing stops, basket stops,
 and compounding. It writes:
 
