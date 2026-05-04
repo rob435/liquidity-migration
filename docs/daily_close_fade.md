@@ -364,6 +364,19 @@ variants by split survival, minimum split return, and a stability score. Use it
 to reject fragile TP/SL settings. It still does not prove alpha by itself; the
 raw score diagnostics and PIT universe coverage have to agree first.
 
+Join the raw split diagnostics with the split-grid exit results before
+promoting a candidate:
+
+```bash
+python scripts/evaluate_close_fade_promotion.py \
+  --diagnostic-summary data/daily-close-fade-1m-3y-current-top160-20230503-20260503/reports/daily_close_fade_splits/daily_close_fade_split_diagnostics_summary.csv \
+  --grid-summary data/daily-close-fade-1m-3y-current-top160-20230503-20260503/reports/daily_close_fade_grid_splits/daily_close_fade_grid_split_summary.csv
+```
+
+This command exits with code `2` when no variant passes both gates. That is
+intentional. A stable exit grid is not enough if the raw entry score does not
+also clear costs across splits.
+
 Windows runner:
 
 ```powershell

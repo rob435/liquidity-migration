@@ -1,11 +1,11 @@
 # Graph Report - MODEL050426  (2026-05-04)
 
 ## Corpus Check
-- 48 files · ~70,522 words
+- 50 files · ~71,688 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 713 nodes · 1916 edges · 18 communities detected
+- 730 nodes · 1944 edges · 19 communities detected
 - Extraction: 74% EXTRACTED · 26% INFERRED · 0% AMBIGUOUS · INFERRED: 501 edges (avg confidence: 0.77)
 - Token cost: 0 input · 0 output
 
@@ -25,9 +25,10 @@
 - [[_COMMUNITY_Community 12|Community 12]]
 - [[_COMMUNITY_Community 13|Community 13]]
 - [[_COMMUNITY_Community 14|Community 14]]
-- [[_COMMUNITY_Community 16|Community 16]]
+- [[_COMMUNITY_Community 15|Community 15]]
 - [[_COMMUNITY_Community 17|Community 17]]
-- [[_COMMUNITY_Community 19|Community 19]]
+- [[_COMMUNITY_Community 18|Community 18]]
+- [[_COMMUNITY_Community 20|Community 20]]
 
 ## God Nodes (most connected - your core abstractions)
 1. `read_dataset()` - 47 edges
@@ -57,19 +58,19 @@
 
 ### Community 0 - "Community 0"
 Cohesion: 0.04
-Nodes (90): download_archive_bytes(), download_public_trade_archive(), ArchiveKlineDownloadConfig, ArchiveManifestConfig, build_archive_trade_manifest(), _download_one_archive_kline(), _download_result(), _empty_download_results() (+82 more)
+Nodes (91): download_archive_bytes(), download_public_trade_archive(), ArchiveKlineDownloadConfig, ArchiveManifestConfig, build_archive_trade_manifest(), _download_one_archive_kline(), _download_result(), _empty_download_results() (+83 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.05
-Nodes (87): VolumeBacktestConfig, VolumeGridConfig, generate_fixture_data(), _attribution_rows(), backtest_volume_trades(), _bar_at_close(), _bar_excursion(), _bar_exit_hits() (+79 more)
+Nodes (88): VolumeBacktestConfig, VolumeGridConfig, FixtureSpec, generate_fixture_data(), _attribution_rows(), backtest_volume_trades(), _bar_at_close(), _bar_excursion() (+80 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.07
 Nodes (64): _apply_basket_stop_to_rows(), apply_close_fade_basket_stop(), _attach_archive_membership(), _attach_instrument_age(), backtest_daily_close_fade(), _baseline_liquidity_filter_expr(), _baseline_liquidity_rank(), build_close_fade_diagnostic_observations() (+56 more)
 
 ### Community 3 - "Community 3"
-Cohesion: 0.08
-Nodes (53): _as_utc(), build_demo_sync_orders(), _build_limit_order(), _build_probe_order(), cancel_stale_demo_orders(), _candidate_order_row(), _cap_candidate_order_rows(), _capped_order_qty() (+45 more)
+Cohesion: 0.09
+Nodes (51): _as_utc(), build_demo_sync_orders(), _build_limit_order(), _build_probe_order(), cancel_stale_demo_orders(), _candidate_order_row(), _cap_candidate_order_rows(), _capped_order_qty() (+43 more)
 
 ### Community 4 - "Community 4"
 Cohesion: 0.08
@@ -89,7 +90,7 @@ Nodes (31): ResearchConfig, DemoCancelAllConfig, DemoFlattenConfig, DemoProbeCon
 
 ### Community 8 - "Community 8"
 Cohesion: 0.14
-Nodes (33): _add_forward_fade_args(), _add_forward_runtime_args(), _add_universe_backtest_args(), _apply_universe_backtest_args(), _backtest_config_from_args(), build_parser(), _close_fade_base_from_diagnostics_args(), _close_fade_base_from_grid_args() (+25 more)
+Nodes (32): _add_forward_fade_args(), _add_forward_runtime_args(), _add_universe_backtest_args(), _apply_universe_backtest_args(), _backtest_config_from_args(), build_parser(), _close_fade_base_from_diagnostics_args(), _close_fade_base_from_grid_args() (+24 more)
 
 ### Community 9 - "Community 9"
 Cohesion: 0.16
@@ -104,46 +105,50 @@ Cohesion: 0.15
 Nodes (4): BybitDataError, BybitMarketData, BybitPrivateClient, _demo_executor()
 
 ### Community 12 - "Community 12"
+Cohesion: 0.18
+Nodes (21): _base_config(), _csv_int(), _csv_signal_minutes(), _csv_str(), _format_signal_minute(), format_split_summary(), main(), _num() (+13 more)
+
+### Community 13 - "Community 13"
 Cohesion: 0.2
 Nodes (18): ExchangeConfig, ForwardTestConfig, load_config(), _merge_daily_close_fade_config(), _merge_daily_close_fade_grid_config(), _merge_dataclass(), _merge_forward_test_config(), _merge_universe_config() (+10 more)
 
-### Community 13 - "Community 13"
+### Community 14 - "Community 14"
 Cohesion: 0.3
 Nodes (14): _base_config(), _csv_float(), _csv_int(), _csv_signal_minutes(), _csv_str(), format_grid_split_summary(), _format_signal_minute(), _grid_config() (+6 more)
 
-### Community 14 - "Community 14"
-Cohesion: 0.35
-Nodes (12): _base_config(), _csv_int(), _csv_signal_minutes(), _csv_str(), _format_signal_minute(), format_split_summary(), main(), _num() (+4 more)
-
-### Community 16 - "Community 16"
-Cohesion: 0.47
-Nodes (8): _csv_bool(), _csv_float(), _csv_int(), _csv_str(), _format_summary(), main(), parse_args(), _parse_buckets()
+### Community 15 - "Community 15"
+Cohesion: 0.29
+Nodes (12): build_promotion_table(), _empty_promotion_table(), format_promotion_report(), _format_signal_minute(), main(), _num(), _number(), parse_args() (+4 more)
 
 ### Community 17 - "Community 17"
+Cohesion: 0.83
+Nodes (3): _diagnostic(), _grid(), test_promotion_requires_raw_and_exit_split_survival()
+
+### Community 18 - "Community 18"
 Cohesion: 0.67
 Nodes (2): _scenario(), test_split_summary_prefers_scenarios_that_survive_every_split()
 
-### Community 19 - "Community 19"
+### Community 20 - "Community 20"
 Cohesion: 1.0
 Nodes (2): test_grid_split_summary_prefers_stable_variants(), _variant()
 
 ## Knowledge Gaps
 - **2 isolated node(s):** `ExchangeConfig`, `Bybit volume-alpha research package.  This package is the stripped-down rebuild`
   These have ≤1 connection - possible missing edges or undocumented components.
-- **Thin community `Community 17`** (4 nodes): `test_daily_close_fade_split_diagnostics_script.py`, `_scenario()`, `test_parse_splits_requires_ordered_windows()`, `test_split_summary_prefers_scenarios_that_survive_every_split()`
+- **Thin community `Community 18`** (4 nodes): `test_daily_close_fade_split_diagnostics_script.py`, `_scenario()`, `test_parse_splits_requires_ordered_windows()`, `test_split_summary_prefers_scenarios_that_survive_every_split()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 19`** (3 nodes): `test_daily_close_fade_grid_splits_script.py`, `test_grid_split_summary_prefers_stable_variants()`, `_variant()`
+- **Thin community `Community 20`** (3 nodes): `test_daily_close_fade_grid_splits_script.py`, `test_grid_split_summary_prefers_stable_variants()`, `_variant()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `main()` connect `Community 8` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 10`, `Community 12`?**
-  _High betweenness centrality (0.122) - this node is a cross-community bridge._
+- **Why does `main()` connect `Community 8` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 10`, `Community 13`?**
+  _High betweenness centrality (0.117) - this node is a cross-community bridge._
 - **Why does `read_dataset()` connect `Community 6` to `Community 0`, `Community 1`, `Community 2`, `Community 4`, `Community 5`, `Community 7`, `Community 9`, `Community 10`?**
-  _High betweenness centrality (0.088) - this node is a cross-community bridge._
-- **Why does `ResearchConfig` connect `Community 7` to `Community 0`, `Community 12`, `Community 4`, `Community 6`?**
-  _High betweenness centrality (0.074) - this node is a cross-community bridge._
+  _High betweenness centrality (0.084) - this node is a cross-community bridge._
+- **Why does `ResearchConfig` connect `Community 7` to `Community 0`, `Community 4`, `Community 13`, `Community 6`?**
+  _High betweenness centrality (0.070) - this node is a cross-community bridge._
 - **Are the 45 inferred relationships involving `read_dataset()` (e.g. with `run_volume_trade_backtest()` and `run_volume_grid()`) actually correct?**
   _`read_dataset()` has 45 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 31 inferred relationships involving `main()` (e.g. with `load_config()` and `generate_fixture_data()`) actually correct?**

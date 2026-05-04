@@ -18,7 +18,7 @@
       "source_file": "aggression_carry/ingestion.py",
       "source_location": "L20",
       "id": "aggression_carry_ingestion_fixturespec",
-      "community": 0,
+      "community": 1,
       "norm_label": "fixturespec"
     },
     {
@@ -1224,7 +1224,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L1",
       "id": "aggression_carry_config_py",
-      "community": 12,
+      "community": 13,
       "norm_label": "config.py"
     },
     {
@@ -1233,7 +1233,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L26",
       "id": "aggression_carry_config_exchangeconfig",
-      "community": 12,
+      "community": 13,
       "norm_label": "exchangeconfig"
     },
     {
@@ -1251,7 +1251,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L40",
       "id": "aggression_carry_config_volumealphaconfig",
-      "community": 12,
+      "community": 13,
       "norm_label": "volumealphaconfig"
     },
     {
@@ -1296,7 +1296,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L157",
       "id": "aggression_carry_config_forwardtestconfig",
-      "community": 12,
+      "community": 13,
       "norm_label": "forwardtestconfig"
     },
     {
@@ -1305,7 +1305,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L169",
       "id": "aggression_carry_config_universeconfig",
-      "community": 12,
+      "community": 13,
       "norm_label": "universeconfig"
     },
     {
@@ -1323,7 +1323,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L188",
       "id": "aggression_carry_config_base_entry_exit_cost_bps",
-      "community": 12,
+      "community": 13,
       "norm_label": "base_entry_exit_cost_bps()"
     },
     {
@@ -1341,7 +1341,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L213",
       "id": "aggression_carry_config_merge_dataclass",
-      "community": 12,
+      "community": 13,
       "norm_label": "_merge_dataclass()"
     },
     {
@@ -1350,7 +1350,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L218",
       "id": "aggression_carry_config_merge_volume_alpha_config",
-      "community": 12,
+      "community": 13,
       "norm_label": "_merge_volume_alpha_config()"
     },
     {
@@ -1359,7 +1359,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L225",
       "id": "aggression_carry_config_merge_volume_backtest_config",
-      "community": 12,
+      "community": 13,
       "norm_label": "_merge_volume_backtest_config()"
     },
     {
@@ -1368,7 +1368,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L256",
       "id": "aggression_carry_config_tuple_str",
-      "community": 12,
+      "community": 13,
       "norm_label": "_tuple_str()"
     },
     {
@@ -1377,7 +1377,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L260",
       "id": "aggression_carry_config_tuple_int",
-      "community": 12,
+      "community": 13,
       "norm_label": "_tuple_int()"
     },
     {
@@ -1386,7 +1386,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L264",
       "id": "aggression_carry_config_tuple_float",
-      "community": 12,
+      "community": 13,
       "norm_label": "_tuple_float()"
     },
     {
@@ -1395,7 +1395,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L268",
       "id": "aggression_carry_config_tuple_bool",
-      "community": 12,
+      "community": 13,
       "norm_label": "_tuple_bool()"
     },
     {
@@ -1404,7 +1404,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L272",
       "id": "aggression_carry_config_merge_volume_grid_config",
-      "community": 12,
+      "community": 13,
       "norm_label": "_merge_volume_grid_config()"
     },
     {
@@ -1413,7 +1413,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L287",
       "id": "aggression_carry_config_merge_daily_close_fade_config",
-      "community": 12,
+      "community": 13,
       "norm_label": "_merge_daily_close_fade_config()"
     },
     {
@@ -1422,7 +1422,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L329",
       "id": "aggression_carry_config_merge_daily_close_fade_grid_config",
-      "community": 12,
+      "community": 13,
       "norm_label": "_merge_daily_close_fade_grid_config()"
     },
     {
@@ -1431,7 +1431,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L366",
       "id": "aggression_carry_config_merge_forward_test_config",
-      "community": 12,
+      "community": 13,
       "norm_label": "_merge_forward_test_config()"
     },
     {
@@ -1440,7 +1440,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L380",
       "id": "aggression_carry_config_merge_universe_config",
-      "community": 12,
+      "community": 13,
       "norm_label": "_merge_universe_config()"
     },
     {
@@ -1449,7 +1449,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L393",
       "id": "aggression_carry_config_load_config",
-      "community": 12,
+      "community": 13,
       "norm_label": "load_config()"
     },
     {
@@ -2403,7 +2403,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L472",
       "id": "aggression_carry_demo_execution_format_demo_sync_report",
-      "community": 3,
+      "community": 0,
       "norm_label": "format_demo_sync_report()"
     },
     {
@@ -2529,7 +2529,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1019",
       "id": "aggression_carry_demo_execution_write_demo_sync_outputs",
-      "community": 3,
+      "community": 0,
       "norm_label": "_write_demo_sync_outputs()"
     },
     {
@@ -4261,12 +4261,48 @@
       "norm_label": "test_iter_grid_configs_preserves_universe_bucket()"
     },
     {
+      "label": "test_close_fade_promotion_script.py",
+      "file_type": "code",
+      "source_file": "tests/test_close_fade_promotion_script.py",
+      "source_location": "L1",
+      "id": "tests_test_close_fade_promotion_script_py",
+      "community": 17,
+      "norm_label": "test_close_fade_promotion_script.py"
+    },
+    {
+      "label": "test_promotion_requires_raw_and_exit_split_survival()",
+      "file_type": "code",
+      "source_file": "tests/test_close_fade_promotion_script.py",
+      "source_location": "L13",
+      "id": "tests_test_close_fade_promotion_script_test_promotion_requires_raw_and_exit_split_survival",
+      "community": 17,
+      "norm_label": "test_promotion_requires_raw_and_exit_split_survival()"
+    },
+    {
+      "label": "_diagnostic()",
+      "file_type": "code",
+      "source_file": "tests/test_close_fade_promotion_script.py",
+      "source_location": "L43",
+      "id": "tests_test_close_fade_promotion_script_diagnostic",
+      "community": 17,
+      "norm_label": "_diagnostic()"
+    },
+    {
+      "label": "_grid()",
+      "file_type": "code",
+      "source_file": "tests/test_close_fade_promotion_script.py",
+      "source_location": "L59",
+      "id": "tests_test_close_fade_promotion_script_grid",
+      "community": 17,
+      "norm_label": "_grid()"
+    },
+    {
       "label": "test_daily_close_fade_split_diagnostics_script.py",
       "file_type": "code",
       "source_file": "tests/test_daily_close_fade_split_diagnostics_script.py",
       "source_location": "L1",
       "id": "tests_test_daily_close_fade_split_diagnostics_script_py",
-      "community": 17,
+      "community": 18,
       "norm_label": "test_daily_close_fade_split_diagnostics_script.py"
     },
     {
@@ -4275,7 +4311,7 @@
       "source_file": "tests/test_daily_close_fade_split_diagnostics_script.py",
       "source_location": "L13",
       "id": "tests_test_daily_close_fade_split_diagnostics_script_test_parse_splits_requires_ordered_windows",
-      "community": 17,
+      "community": 18,
       "norm_label": "test_parse_splits_requires_ordered_windows()"
     },
     {
@@ -4284,7 +4320,7 @@
       "source_file": "tests/test_daily_close_fade_split_diagnostics_script.py",
       "source_location": "L19",
       "id": "tests_test_daily_close_fade_split_diagnostics_script_test_split_summary_prefers_scenarios_that_survive_every_split",
-      "community": 17,
+      "community": 18,
       "norm_label": "test_split_summary_prefers_scenarios_that_survive_every_split()"
     },
     {
@@ -4293,7 +4329,7 @@
       "source_file": "tests/test_daily_close_fade_split_diagnostics_script.py",
       "source_location": "L37",
       "id": "tests_test_daily_close_fade_split_diagnostics_script_scenario",
-      "community": 17,
+      "community": 18,
       "norm_label": "_scenario()"
     },
     {
@@ -4302,7 +4338,7 @@
       "source_file": "tests/conftest.py",
       "source_location": "L1",
       "id": "tests_conftest_py",
-      "community": 26,
+      "community": 27,
       "norm_label": "conftest.py"
     },
     {
@@ -4950,7 +4986,7 @@
       "source_file": "tests/test_aggression_carry_config.py",
       "source_location": "L1",
       "id": "tests_test_aggression_carry_config_py",
-      "community": 12,
+      "community": 13,
       "norm_label": "test_aggression_carry_config.py"
     },
     {
@@ -4959,7 +4995,7 @@
       "source_file": "tests/test_aggression_carry_config.py",
       "source_location": "L8",
       "id": "tests_test_aggression_carry_config_test_volume_alpha_controls_load_from_yaml",
-      "community": 12,
+      "community": 13,
       "norm_label": "test_volume_alpha_controls_load_from_yaml()"
     },
     {
@@ -5301,7 +5337,7 @@
       "source_file": "tests/test_archive_pit_batches_script.py",
       "source_location": "L1",
       "id": "tests_test_archive_pit_batches_script_py",
-      "community": 18,
+      "community": 19,
       "norm_label": "test_archive_pit_batches_script.py"
     },
     {
@@ -5310,7 +5346,7 @@
       "source_file": "tests/test_archive_pit_batches_script.py",
       "source_location": "L11",
       "id": "tests_test_archive_pit_batches_script_test_archive_pit_batches_stops_when_complete",
-      "community": 18,
+      "community": 19,
       "norm_label": "test_archive_pit_batches_stops_when_complete()"
     },
     {
@@ -5319,7 +5355,7 @@
       "source_file": "tests/test_archive_pit_batches_script.py",
       "source_location": "L36",
       "id": "tests_test_archive_pit_batches_script_test_archive_pit_batches_stops_on_no_progress_failure",
-      "community": 18,
+      "community": 19,
       "norm_label": "test_archive_pit_batches_stops_on_no_progress_failure()"
     },
     {
@@ -5328,7 +5364,7 @@
       "source_file": "tests/test_aggression_carry_bybit.py",
       "source_location": "L1",
       "id": "tests_test_aggression_carry_bybit_py",
-      "community": 15,
+      "community": 16,
       "norm_label": "test_aggression_carry_bybit.py"
     },
     {
@@ -5337,7 +5373,7 @@
       "source_file": "tests/test_aggression_carry_bybit.py",
       "source_location": "L6",
       "id": "tests_test_aggression_carry_bybit_test_bybit_market_data_constructs_with_slotted_client",
-      "community": 15,
+      "community": 16,
       "norm_label": "test_bybit_market_data_constructs_with_slotted_client()"
     },
     {
@@ -5346,7 +5382,7 @@
       "source_file": "tests/test_aggression_carry_bybit.py",
       "source_location": "L18",
       "id": "tests_test_aggression_carry_bybit_test_bybit_private_client_constructs_demo_session",
-      "community": 15,
+      "community": 16,
       "norm_label": "test_bybit_private_client_constructs_demo_session()"
     },
     {
@@ -5355,7 +5391,7 @@
       "source_file": "tests/test_aggression_carry_bybit.py",
       "source_location": "L32",
       "id": "tests_test_aggression_carry_bybit_test_bybit_private_client_refuses_non_demo_session",
-      "community": 15,
+      "community": 16,
       "norm_label": "test_bybit_private_client_refuses_non_demo_session()"
     },
     {
@@ -5364,7 +5400,7 @@
       "source_file": "tests/test_aggression_carry_bybit.py",
       "source_location": "L53",
       "id": "tests_test_aggression_carry_bybit_test_bybit_private_client_wraps_order_and_trade_history",
-      "community": 15,
+      "community": 16,
       "norm_label": "test_bybit_private_client_wraps_order_and_trade_history()"
     },
     {
@@ -5373,7 +5409,7 @@
       "source_file": "tests/test_aggression_carry_bybit.py",
       "source_location": "L84",
       "id": "tests_test_aggression_carry_bybit_test_bybit_private_client_wraps_cancel_all_and_positions_by_settle",
-      "community": 15,
+      "community": 16,
       "norm_label": "test_bybit_private_client_wraps_cancel_all_and_positions_by_settle()"
     },
     {
@@ -5382,7 +5418,7 @@
       "source_file": "tests/test_aggression_carry_bybit.py",
       "source_location": "L111",
       "id": "tests_test_aggression_carry_bybit_test_kline_download_chunks_full_range_when_bybit_returns_newest_first",
-      "community": 15,
+      "community": 16,
       "norm_label": "test_kline_download_chunks_full_range_when_bybit_returns_newest_first()"
     },
     {
@@ -5391,7 +5427,7 @@
       "source_file": "tests/test_aggression_carry_bybit.py",
       "source_location": "L141",
       "id": "tests_test_aggression_carry_bybit_test_time_range_download_pages_backward_when_bybit_returns_newest_first",
-      "community": 15,
+      "community": 16,
       "norm_label": "test_time_range_download_pages_backward_when_bybit_returns_newest_first()"
     },
     {
@@ -5400,7 +5436,7 @@
       "source_file": "tests/test_aggression_carry_bybit.py",
       "source_location": "L169",
       "id": "tests_test_aggression_carry_bybit_newest_first_page",
-      "community": 15,
+      "community": 16,
       "norm_label": "_newest_first_page()"
     },
     {
@@ -5418,7 +5454,7 @@
       "source_file": "tests/test_aggression_carry_cli.py",
       "source_location": "L8",
       "id": "tests_test_aggression_carry_cli_test_cli_fixture_pipeline_end_to_end",
-      "community": 8,
+      "community": 12,
       "norm_label": "test_cli_fixture_pipeline_end_to_end()"
     },
     {
@@ -5490,7 +5526,7 @@
       "source_file": "tests/test_daily_close_fade_grid_splits_script.py",
       "source_location": "L1",
       "id": "tests_test_daily_close_fade_grid_splits_script_py",
-      "community": 19,
+      "community": 20,
       "norm_label": "test_daily_close_fade_grid_splits_script.py"
     },
     {
@@ -5499,7 +5535,7 @@
       "source_file": "tests/test_daily_close_fade_grid_splits_script.py",
       "source_location": "L13",
       "id": "tests_test_daily_close_fade_grid_splits_script_test_grid_split_summary_prefers_stable_variants",
-      "community": 19,
+      "community": 20,
       "norm_label": "test_grid_split_summary_prefers_stable_variants()"
     },
     {
@@ -5508,7 +5544,7 @@
       "source_file": "tests/test_daily_close_fade_grid_splits_script.py",
       "source_location": "L31",
       "id": "tests_test_daily_close_fade_grid_splits_script_variant",
-      "community": 19,
+      "community": 20,
       "norm_label": "_variant()"
     },
     {
@@ -5706,7 +5742,7 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L1",
       "id": "scripts_run_volume_bucket_sweep_py",
-      "community": 16,
+      "community": 12,
       "norm_label": "run_volume_bucket_sweep.py"
     },
     {
@@ -5715,7 +5751,7 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L19",
       "id": "scripts_run_volume_bucket_sweep_main",
-      "community": 16,
+      "community": 12,
       "norm_label": "main()"
     },
     {
@@ -5724,7 +5760,7 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L79",
       "id": "scripts_run_volume_bucket_sweep_parse_args",
-      "community": 16,
+      "community": 12,
       "norm_label": "parse_args()"
     },
     {
@@ -5733,7 +5769,7 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L96",
       "id": "scripts_run_volume_bucket_sweep_parse_buckets",
-      "community": 16,
+      "community": 12,
       "norm_label": "_parse_buckets()"
     },
     {
@@ -5742,7 +5778,7 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L109",
       "id": "scripts_run_volume_bucket_sweep_csv_int",
-      "community": 16,
+      "community": 12,
       "norm_label": "_csv_int()"
     },
     {
@@ -5751,7 +5787,7 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L113",
       "id": "scripts_run_volume_bucket_sweep_csv_float",
-      "community": 16,
+      "community": 12,
       "norm_label": "_csv_float()"
     },
     {
@@ -5760,7 +5796,7 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L117",
       "id": "scripts_run_volume_bucket_sweep_csv_bool",
-      "community": 16,
+      "community": 12,
       "norm_label": "_csv_bool()"
     },
     {
@@ -5769,7 +5805,7 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L121",
       "id": "scripts_run_volume_bucket_sweep_csv_str",
-      "community": 16,
+      "community": 12,
       "norm_label": "_csv_str()"
     },
     {
@@ -5778,7 +5814,7 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L125",
       "id": "scripts_run_volume_bucket_sweep_format_summary",
-      "community": 16,
+      "community": 12,
       "norm_label": "_format_summary()"
     },
     {
@@ -5787,7 +5823,7 @@
       "source_file": "scripts/run_daily_close_fade_1m.ps1",
       "source_location": "L1",
       "id": "scripts_run_daily_close_fade_1m_ps1",
-      "community": 22,
+      "community": 23,
       "norm_label": "run_daily_close_fade_1m.ps1"
     },
     {
@@ -5796,7 +5832,7 @@
       "source_file": "scripts/run_daily_close_fade_1m.ps1",
       "source_location": "L18",
       "id": "scripts_run_daily_close_fade_1m_invoke_checked",
-      "community": 22,
+      "community": 23,
       "norm_label": "invoke-checked()"
     },
     {
@@ -5805,7 +5841,7 @@
       "source_file": "scripts/run_agc_3m.ps1",
       "source_location": "L1",
       "id": "scripts_run_agc_3m_ps1",
-      "community": 23,
+      "community": 24,
       "norm_label": "run_agc_3m.ps1"
     },
     {
@@ -5814,7 +5850,7 @@
       "source_file": "scripts/run_agc_3m.ps1",
       "source_location": "L30",
       "id": "scripts_run_agc_3m_invoke_checked",
-      "community": 23,
+      "community": 24,
       "norm_label": "invoke-checked()"
     },
     {
@@ -5967,7 +6003,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L1",
       "id": "scripts_run_daily_close_fade_grid_splits_py",
-      "community": 13,
+      "community": 14,
       "norm_label": "run_daily_close_fade_grid_splits.py"
     },
     {
@@ -5976,7 +6012,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L62",
       "id": "scripts_run_daily_close_fade_grid_splits_main",
-      "community": 13,
+      "community": 14,
       "norm_label": "main()"
     },
     {
@@ -5985,7 +6021,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L126",
       "id": "scripts_run_daily_close_fade_grid_splits_parse_args",
-      "community": 13,
+      "community": 14,
       "norm_label": "parse_args()"
     },
     {
@@ -5994,7 +6030,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L167",
       "id": "scripts_run_daily_close_fade_grid_splits_summarize_grid_splits",
-      "community": 13,
+      "community": 14,
       "norm_label": "summarize_grid_splits()"
     },
     {
@@ -6003,7 +6039,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L210",
       "id": "scripts_run_daily_close_fade_grid_splits_format_grid_split_summary",
-      "community": 13,
+      "community": 14,
       "norm_label": "format_grid_split_summary()"
     },
     {
@@ -6012,7 +6048,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L277",
       "id": "scripts_run_daily_close_fade_grid_splits_base_config",
-      "community": 13,
+      "community": 14,
       "norm_label": "_base_config()"
     },
     {
@@ -6021,7 +6057,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L297",
       "id": "scripts_run_daily_close_fade_grid_splits_grid_config",
-      "community": 13,
+      "community": 14,
       "norm_label": "_grid_config()"
     },
     {
@@ -6030,7 +6066,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L328",
       "id": "scripts_run_daily_close_fade_grid_splits_parse_splits",
-      "community": 13,
+      "community": 14,
       "norm_label": "_parse_splits()"
     },
     {
@@ -6039,7 +6075,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L342",
       "id": "scripts_run_daily_close_fade_grid_splits_csv_signal_minutes",
-      "community": 13,
+      "community": 14,
       "norm_label": "_csv_signal_minutes()"
     },
     {
@@ -6048,7 +6084,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L350",
       "id": "scripts_run_daily_close_fade_grid_splits_csv_int",
-      "community": 13,
+      "community": 14,
       "norm_label": "_csv_int()"
     },
     {
@@ -6057,7 +6093,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L354",
       "id": "scripts_run_daily_close_fade_grid_splits_csv_float",
-      "community": 13,
+      "community": 14,
       "norm_label": "_csv_float()"
     },
     {
@@ -6066,7 +6102,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L358",
       "id": "scripts_run_daily_close_fade_grid_splits_csv_str",
-      "community": 13,
+      "community": 14,
       "norm_label": "_csv_str()"
     },
     {
@@ -6075,7 +6111,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L362",
       "id": "scripts_run_daily_close_fade_grid_splits_pct",
-      "community": 13,
+      "community": 14,
       "norm_label": "_pct()"
     },
     {
@@ -6084,7 +6120,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L368",
       "id": "scripts_run_daily_close_fade_grid_splits_num",
-      "community": 13,
+      "community": 14,
       "norm_label": "_num()"
     },
     {
@@ -6093,7 +6129,124 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L374",
       "id": "scripts_run_daily_close_fade_grid_splits_format_signal_minute",
-      "community": 13,
+      "community": 14,
+      "norm_label": "_format_signal_minute()"
+    },
+    {
+      "label": "evaluate_close_fade_promotion.py",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L1",
+      "id": "scripts_evaluate_close_fade_promotion_py",
+      "community": 15,
+      "norm_label": "evaluate_close_fade_promotion.py"
+    },
+    {
+      "label": "main()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L14",
+      "id": "scripts_evaluate_close_fade_promotion_main",
+      "community": 15,
+      "norm_label": "main()"
+    },
+    {
+      "label": "parse_args()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L69",
+      "id": "scripts_evaluate_close_fade_promotion_parse_args",
+      "community": 15,
+      "norm_label": "parse_args()"
+    },
+    {
+      "label": "build_promotion_table()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L116",
+      "id": "scripts_evaluate_close_fade_promotion_build_promotion_table",
+      "community": 15,
+      "norm_label": "build_promotion_table()"
+    },
+    {
+      "label": "format_promotion_report()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L191",
+      "id": "scripts_evaluate_close_fade_promotion_format_promotion_report",
+      "community": 15,
+      "norm_label": "format_promotion_report()"
+    },
+    {
+      "label": "_promotion_reason()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L239",
+      "id": "scripts_evaluate_close_fade_promotion_promotion_reason",
+      "community": 15,
+      "norm_label": "_promotion_reason()"
+    },
+    {
+      "label": "_read_csv()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L264",
+      "id": "scripts_evaluate_close_fade_promotion_read_csv",
+      "community": 15,
+      "norm_label": "_read_csv()"
+    },
+    {
+      "label": "_require_columns()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L272",
+      "id": "scripts_evaluate_close_fade_promotion_require_columns",
+      "community": 15,
+      "norm_label": "_require_columns()"
+    },
+    {
+      "label": "_empty_promotion_table()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L278",
+      "id": "scripts_evaluate_close_fade_promotion_empty_promotion_table",
+      "community": 15,
+      "norm_label": "_empty_promotion_table()"
+    },
+    {
+      "label": "_number()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L289",
+      "id": "scripts_evaluate_close_fade_promotion_number",
+      "community": 15,
+      "norm_label": "_number()"
+    },
+    {
+      "label": "_pct()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L298",
+      "id": "scripts_evaluate_close_fade_promotion_pct",
+      "community": 15,
+      "norm_label": "_pct()"
+    },
+    {
+      "label": "_num()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L304",
+      "id": "scripts_evaluate_close_fade_promotion_num",
+      "community": 15,
+      "norm_label": "_num()"
+    },
+    {
+      "label": "_format_signal_minute()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L310",
+      "id": "scripts_evaluate_close_fade_promotion_format_signal_minute",
+      "community": 15,
       "norm_label": "_format_signal_minute()"
     },
     {
@@ -6210,7 +6363,7 @@
       "source_file": "scripts/run_archive_pit_bootstrap.ps1",
       "source_location": "L1",
       "id": "scripts_run_archive_pit_bootstrap_ps1",
-      "community": 24,
+      "community": 25,
       "norm_label": "run_archive_pit_bootstrap.ps1"
     },
     {
@@ -6219,7 +6372,7 @@
       "source_file": "scripts/run_archive_pit_bootstrap.ps1",
       "source_location": "L23",
       "id": "scripts_run_archive_pit_bootstrap_invoke_checked",
-      "community": 24,
+      "community": 25,
       "norm_label": "invoke-checked()"
     },
     {
@@ -6228,7 +6381,7 @@
       "source_file": "scripts/windows_setup.ps1",
       "source_location": "L1",
       "id": "scripts_windows_setup_ps1",
-      "community": 20,
+      "community": 21,
       "norm_label": "windows_setup.ps1"
     },
     {
@@ -6237,7 +6390,7 @@
       "source_file": "scripts/windows_setup.ps1",
       "source_location": "L6",
       "id": "scripts_windows_setup_invoke_checked",
-      "community": 20,
+      "community": 21,
       "norm_label": "invoke-checked()"
     },
     {
@@ -6246,7 +6399,7 @@
       "source_file": "scripts/windows_setup.ps1",
       "source_location": "L19",
       "id": "scripts_windows_setup_get_compatiblepython",
-      "community": 20,
+      "community": 21,
       "norm_label": "get-compatiblepython()"
     },
     {
@@ -6255,7 +6408,7 @@
       "source_file": "scripts/run_daily_close_fade_oos_splits.ps1",
       "source_location": "L1",
       "id": "scripts_run_daily_close_fade_oos_splits_ps1",
-      "community": 27,
+      "community": 28,
       "norm_label": "run_daily_close_fade_oos_splits.ps1"
     },
     {
@@ -6264,7 +6417,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L1",
       "id": "scripts_run_daily_close_fade_split_diagnostics_py",
-      "community": 14,
+      "community": 12,
       "norm_label": "run_daily_close_fade_split_diagnostics.py"
     },
     {
@@ -6273,7 +6426,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L27",
       "id": "scripts_run_daily_close_fade_split_diagnostics_main",
-      "community": 14,
+      "community": 12,
       "norm_label": "main()"
     },
     {
@@ -6282,7 +6435,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L101",
       "id": "scripts_run_daily_close_fade_split_diagnostics_parse_args",
-      "community": 14,
+      "community": 12,
       "norm_label": "parse_args()"
     },
     {
@@ -6291,7 +6444,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L129",
       "id": "scripts_run_daily_close_fade_split_diagnostics_summarize_split_scenarios",
-      "community": 14,
+      "community": 12,
       "norm_label": "summarize_split_scenarios()"
     },
     {
@@ -6300,7 +6453,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L174",
       "id": "scripts_run_daily_close_fade_split_diagnostics_format_split_summary",
-      "community": 14,
+      "community": 12,
       "norm_label": "format_split_summary()"
     },
     {
@@ -6309,7 +6462,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L239",
       "id": "scripts_run_daily_close_fade_split_diagnostics_base_config",
-      "community": 14,
+      "community": 12,
       "norm_label": "_base_config()"
     },
     {
@@ -6318,7 +6471,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L267",
       "id": "scripts_run_daily_close_fade_split_diagnostics_parse_splits",
-      "community": 14,
+      "community": 12,
       "norm_label": "_parse_splits()"
     },
     {
@@ -6327,7 +6480,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L281",
       "id": "scripts_run_daily_close_fade_split_diagnostics_csv_signal_minutes",
-      "community": 14,
+      "community": 12,
       "norm_label": "_csv_signal_minutes()"
     },
     {
@@ -6336,7 +6489,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L289",
       "id": "scripts_run_daily_close_fade_split_diagnostics_csv_int",
-      "community": 14,
+      "community": 12,
       "norm_label": "_csv_int()"
     },
     {
@@ -6345,7 +6498,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L293",
       "id": "scripts_run_daily_close_fade_split_diagnostics_csv_str",
-      "community": 14,
+      "community": 12,
       "norm_label": "_csv_str()"
     },
     {
@@ -6354,7 +6507,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L297",
       "id": "scripts_run_daily_close_fade_split_diagnostics_pct",
-      "community": 14,
+      "community": 12,
       "norm_label": "_pct()"
     },
     {
@@ -6363,7 +6516,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L304",
       "id": "scripts_run_daily_close_fade_split_diagnostics_num",
-      "community": 14,
+      "community": 12,
       "norm_label": "_num()"
     },
     {
@@ -6372,7 +6525,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L310",
       "id": "scripts_run_daily_close_fade_split_diagnostics_format_signal_minute",
-      "community": 14,
+      "community": 12,
       "norm_label": "_format_signal_minute()"
     },
     {
@@ -6381,7 +6534,7 @@
       "source_file": "scripts/run_agc_1y_grid.ps1",
       "source_location": "L1",
       "id": "scripts_run_agc_1y_grid_ps1",
-      "community": 25,
+      "community": 26,
       "norm_label": "run_agc_1y_grid.ps1"
     },
     {
@@ -6390,7 +6543,7 @@
       "source_file": "scripts/run_agc_1y_grid.ps1",
       "source_location": "L31",
       "id": "scripts_run_agc_1y_grid_invoke_checked",
-      "community": 25,
+      "community": 26,
       "norm_label": "invoke-checked()"
     },
     {
@@ -6399,7 +6552,7 @@
       "source_file": "scripts/run_volume_overnight_sweep.ps1",
       "source_location": "L1",
       "id": "scripts_run_volume_overnight_sweep_ps1",
-      "community": 21,
+      "community": 22,
       "norm_label": "run_volume_overnight_sweep.ps1"
     },
     {
@@ -6408,7 +6561,7 @@
       "source_file": "scripts/run_volume_overnight_sweep.ps1",
       "source_location": "L20",
       "id": "scripts_run_volume_overnight_sweep_invoke_checked",
-      "community": 21,
+      "community": 22,
       "norm_label": "invoke-checked()"
     },
     {
@@ -6417,7 +6570,7 @@
       "source_file": "scripts/run_volume_overnight_sweep.ps1",
       "source_location": "L34",
       "id": "scripts_run_volume_overnight_sweep_get_presetconfig",
-      "community": 21,
+      "community": 22,
       "norm_label": "get-presetconfig()"
     }
   ],
@@ -11949,8 +12102,8 @@
       "source_file": "tests/test_aggression_carry_daily_close_fade.py",
       "source_location": "L288",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_daily_close_fade_test_daily_close_fade_grid_supports_date_splits",
-      "_tgt": "aggression_carry_config_dailyclosefadeconfig",
+      "_src": "aggression_carry_config_dailyclosefadeconfig",
+      "_tgt": "tests_test_aggression_carry_daily_close_fade_test_daily_close_fade_grid_supports_date_splits",
       "source": "aggression_carry_config_dailyclosefadeconfig",
       "target": "tests_test_aggression_carry_daily_close_fade_test_daily_close_fade_grid_supports_date_splits"
     },
@@ -12117,8 +12270,8 @@
       "source_file": "tests/test_aggression_carry_daily_close_fade.py",
       "source_location": "L289",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_daily_close_fade_test_daily_close_fade_grid_supports_date_splits",
-      "_tgt": "aggression_carry_config_dailyclosefadegridconfig",
+      "_src": "aggression_carry_config_dailyclosefadegridconfig",
+      "_tgt": "tests_test_aggression_carry_daily_close_fade_test_daily_close_fade_grid_supports_date_splits",
       "source": "aggression_carry_config_dailyclosefadegridconfig",
       "target": "tests_test_aggression_carry_daily_close_fade_test_daily_close_fade_grid_supports_date_splits"
     },
@@ -12405,8 +12558,8 @@
       "source_file": "tests/test_aggression_carry_daily_close_fade.py",
       "source_location": "L303",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_daily_close_fade_test_daily_close_fade_grid_supports_date_splits",
-      "_tgt": "aggression_carry_config_costconfig",
+      "_src": "aggression_carry_config_costconfig",
+      "_tgt": "tests_test_aggression_carry_daily_close_fade_test_daily_close_fade_grid_supports_date_splits",
       "source": "aggression_carry_config_costconfig",
       "target": "tests_test_aggression_carry_daily_close_fade_test_daily_close_fade_grid_supports_date_splits"
     },
@@ -13257,8 +13410,8 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L65",
       "weight": 1.0,
-      "_src": "scripts_run_daily_close_fade_grid_splits_main",
-      "_tgt": "aggression_carry_config_load_config",
+      "_src": "aggression_carry_config_load_config",
+      "_tgt": "scripts_run_daily_close_fade_grid_splits_main",
       "source": "aggression_carry_config_load_config",
       "target": "scripts_run_daily_close_fade_grid_splits_main"
     },
@@ -14805,8 +14958,8 @@
       "source_file": "tests/test_aggression_carry_daily_close_fade.py",
       "source_location": "L286",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_daily_close_fade_test_daily_close_fade_grid_supports_date_splits",
-      "_tgt": "aggression_carry_daily_close_fade_run_daily_close_fade_grid",
+      "_src": "aggression_carry_daily_close_fade_run_daily_close_fade_grid",
+      "_tgt": "tests_test_aggression_carry_daily_close_fade_test_daily_close_fade_grid_supports_date_splits",
       "source": "aggression_carry_daily_close_fade_run_daily_close_fade_grid",
       "target": "tests_test_aggression_carry_daily_close_fade_test_daily_close_fade_grid_supports_date_splits"
     },
@@ -14829,8 +14982,8 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L77",
       "weight": 1.0,
-      "_src": "scripts_run_daily_close_fade_grid_splits_main",
-      "_tgt": "aggression_carry_daily_close_fade_run_daily_close_fade_grid",
+      "_src": "aggression_carry_daily_close_fade_run_daily_close_fade_grid",
+      "_tgt": "scripts_run_daily_close_fade_grid_splits_main",
       "source": "aggression_carry_daily_close_fade_run_daily_close_fade_grid",
       "target": "scripts_run_daily_close_fade_grid_splits_main"
     },
@@ -22473,8 +22626,8 @@
       "source_file": "tests/test_aggression_carry_cli.py",
       "source_location": "L128",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_cli_test_cli_parses_daily_close_fade_grid_dates",
-      "_tgt": "aggression_carry_cli_build_parser",
+      "_src": "aggression_carry_cli_build_parser",
+      "_tgt": "tests_test_aggression_carry_cli_test_cli_parses_daily_close_fade_grid_dates",
       "source": "aggression_carry_cli_build_parser",
       "target": "tests_test_aggression_carry_cli_test_cli_parses_daily_close_fade_grid_dates"
     },
@@ -24201,8 +24354,8 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L76",
       "weight": 1.0,
-      "_src": "scripts_run_daily_close_fade_grid_splits_main",
-      "_tgt": "aggression_carry_downloaders_parse_date_ms",
+      "_src": "aggression_carry_downloaders_parse_date_ms",
+      "_tgt": "scripts_run_daily_close_fade_grid_splits_main",
       "source": "aggression_carry_downloaders_parse_date_ms",
       "target": "scripts_run_daily_close_fade_grid_splits_main"
     },
@@ -24213,8 +24366,8 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L334",
       "weight": 1.0,
-      "_src": "scripts_run_daily_close_fade_grid_splits_parse_splits",
-      "_tgt": "aggression_carry_downloaders_parse_date_ms",
+      "_src": "aggression_carry_downloaders_parse_date_ms",
+      "_tgt": "scripts_run_daily_close_fade_grid_splits_parse_splits",
       "source": "aggression_carry_downloaders_parse_date_ms",
       "target": "scripts_run_daily_close_fade_grid_splits_parse_splits"
     },
@@ -24696,6 +24849,66 @@
       "_tgt": "tests_test_aggression_carry_volume_alpha_test_iter_grid_configs_preserves_universe_bucket",
       "source": "tests_test_aggression_carry_volume_alpha_py",
       "target": "tests_test_aggression_carry_volume_alpha_test_iter_grid_configs_preserves_universe_bucket",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_close_fade_promotion_script.py",
+      "source_location": "L13",
+      "weight": 1.0,
+      "_src": "tests_test_close_fade_promotion_script_py",
+      "_tgt": "tests_test_close_fade_promotion_script_test_promotion_requires_raw_and_exit_split_survival",
+      "source": "tests_test_close_fade_promotion_script_py",
+      "target": "tests_test_close_fade_promotion_script_test_promotion_requires_raw_and_exit_split_survival",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_close_fade_promotion_script.py",
+      "source_location": "L43",
+      "weight": 1.0,
+      "_src": "tests_test_close_fade_promotion_script_py",
+      "_tgt": "tests_test_close_fade_promotion_script_diagnostic",
+      "source": "tests_test_close_fade_promotion_script_py",
+      "target": "tests_test_close_fade_promotion_script_diagnostic",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_close_fade_promotion_script.py",
+      "source_location": "L59",
+      "weight": 1.0,
+      "_src": "tests_test_close_fade_promotion_script_py",
+      "_tgt": "tests_test_close_fade_promotion_script_grid",
+      "source": "tests_test_close_fade_promotion_script_py",
+      "target": "tests_test_close_fade_promotion_script_grid",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_close_fade_promotion_script.py",
+      "source_location": "L16",
+      "weight": 1.0,
+      "_src": "tests_test_close_fade_promotion_script_test_promotion_requires_raw_and_exit_split_survival",
+      "_tgt": "tests_test_close_fade_promotion_script_diagnostic",
+      "source": "tests_test_close_fade_promotion_script_test_promotion_requires_raw_and_exit_split_survival",
+      "target": "tests_test_close_fade_promotion_script_diagnostic",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_close_fade_promotion_script.py",
+      "source_location": "L22",
+      "weight": 1.0,
+      "_src": "tests_test_close_fade_promotion_script_test_promotion_requires_raw_and_exit_split_survival",
+      "_tgt": "tests_test_close_fade_promotion_script_grid",
+      "source": "tests_test_close_fade_promotion_script_test_promotion_requires_raw_and_exit_split_survival",
+      "target": "tests_test_close_fade_promotion_script_grid",
       "confidence_score": 1.0
     },
     {
@@ -28764,6 +28977,282 @@
       "_tgt": "scripts_run_daily_close_fade_grid_splits_csv_str",
       "source": "scripts_run_daily_close_fade_grid_splits_csv_float",
       "target": "scripts_run_daily_close_fade_grid_splits_csv_str",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L14",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_py",
+      "_tgt": "scripts_evaluate_close_fade_promotion_main",
+      "source": "scripts_evaluate_close_fade_promotion_py",
+      "target": "scripts_evaluate_close_fade_promotion_main",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L69",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_py",
+      "_tgt": "scripts_evaluate_close_fade_promotion_parse_args",
+      "source": "scripts_evaluate_close_fade_promotion_py",
+      "target": "scripts_evaluate_close_fade_promotion_parse_args",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L116",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_py",
+      "_tgt": "scripts_evaluate_close_fade_promotion_build_promotion_table",
+      "source": "scripts_evaluate_close_fade_promotion_py",
+      "target": "scripts_evaluate_close_fade_promotion_build_promotion_table",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L191",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_py",
+      "_tgt": "scripts_evaluate_close_fade_promotion_format_promotion_report",
+      "source": "scripts_evaluate_close_fade_promotion_py",
+      "target": "scripts_evaluate_close_fade_promotion_format_promotion_report",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L239",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_py",
+      "_tgt": "scripts_evaluate_close_fade_promotion_promotion_reason",
+      "source": "scripts_evaluate_close_fade_promotion_py",
+      "target": "scripts_evaluate_close_fade_promotion_promotion_reason",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L264",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_py",
+      "_tgt": "scripts_evaluate_close_fade_promotion_read_csv",
+      "source": "scripts_evaluate_close_fade_promotion_py",
+      "target": "scripts_evaluate_close_fade_promotion_read_csv",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L272",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_py",
+      "_tgt": "scripts_evaluate_close_fade_promotion_require_columns",
+      "source": "scripts_evaluate_close_fade_promotion_py",
+      "target": "scripts_evaluate_close_fade_promotion_require_columns",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L278",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_py",
+      "_tgt": "scripts_evaluate_close_fade_promotion_empty_promotion_table",
+      "source": "scripts_evaluate_close_fade_promotion_py",
+      "target": "scripts_evaluate_close_fade_promotion_empty_promotion_table",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L289",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_py",
+      "_tgt": "scripts_evaluate_close_fade_promotion_number",
+      "source": "scripts_evaluate_close_fade_promotion_py",
+      "target": "scripts_evaluate_close_fade_promotion_number",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L298",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_py",
+      "_tgt": "scripts_evaluate_close_fade_promotion_pct",
+      "source": "scripts_evaluate_close_fade_promotion_py",
+      "target": "scripts_evaluate_close_fade_promotion_pct",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L304",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_py",
+      "_tgt": "scripts_evaluate_close_fade_promotion_num",
+      "source": "scripts_evaluate_close_fade_promotion_py",
+      "target": "scripts_evaluate_close_fade_promotion_num",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L310",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_py",
+      "_tgt": "scripts_evaluate_close_fade_promotion_format_signal_minute",
+      "source": "scripts_evaluate_close_fade_promotion_py",
+      "target": "scripts_evaluate_close_fade_promotion_format_signal_minute",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L15",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_main",
+      "_tgt": "scripts_evaluate_close_fade_promotion_parse_args",
+      "source": "scripts_evaluate_close_fade_promotion_main",
+      "target": "scripts_evaluate_close_fade_promotion_parse_args",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L21",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_main",
+      "_tgt": "scripts_evaluate_close_fade_promotion_read_csv",
+      "source": "scripts_evaluate_close_fade_promotion_main",
+      "target": "scripts_evaluate_close_fade_promotion_read_csv",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L23",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_main",
+      "_tgt": "scripts_evaluate_close_fade_promotion_build_promotion_table",
+      "source": "scripts_evaluate_close_fade_promotion_main",
+      "target": "scripts_evaluate_close_fade_promotion_build_promotion_table",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L58",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_main",
+      "_tgt": "scripts_evaluate_close_fade_promotion_format_promotion_report",
+      "source": "scripts_evaluate_close_fade_promotion_main",
+      "target": "scripts_evaluate_close_fade_promotion_format_promotion_report",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L127",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_build_promotion_table",
+      "_tgt": "scripts_evaluate_close_fade_promotion_empty_promotion_table",
+      "source": "scripts_evaluate_close_fade_promotion_build_promotion_table",
+      "target": "scripts_evaluate_close_fade_promotion_empty_promotion_table",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L128",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_build_promotion_table",
+      "_tgt": "scripts_evaluate_close_fade_promotion_require_columns",
+      "source": "scripts_evaluate_close_fade_promotion_build_promotion_table",
+      "target": "scripts_evaluate_close_fade_promotion_require_columns",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L135",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_build_promotion_table",
+      "_tgt": "scripts_evaluate_close_fade_promotion_number",
+      "source": "scripts_evaluate_close_fade_promotion_build_promotion_table",
+      "target": "scripts_evaluate_close_fade_promotion_number",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L155",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_build_promotion_table",
+      "_tgt": "scripts_evaluate_close_fade_promotion_promotion_reason",
+      "source": "scripts_evaluate_close_fade_promotion_build_promotion_table",
+      "target": "scripts_evaluate_close_fade_promotion_promotion_reason",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L206",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_format_promotion_report",
+      "_tgt": "scripts_evaluate_close_fade_promotion_pct",
+      "source": "scripts_evaluate_close_fade_promotion_format_promotion_report",
+      "target": "scripts_evaluate_close_fade_promotion_pct",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L227",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_format_promotion_report",
+      "_tgt": "scripts_evaluate_close_fade_promotion_format_signal_minute",
+      "source": "scripts_evaluate_close_fade_promotion_format_promotion_report",
+      "target": "scripts_evaluate_close_fade_promotion_format_signal_minute",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_close_fade_promotion.py",
+      "source_location": "L230",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_close_fade_promotion_format_promotion_report",
+      "_tgt": "scripts_evaluate_close_fade_promotion_num",
+      "source": "scripts_evaluate_close_fade_promotion_format_promotion_report",
+      "target": "scripts_evaluate_close_fade_promotion_num",
       "confidence_score": 1.0
     },
     {
