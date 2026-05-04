@@ -15,7 +15,6 @@ from . import demo_execution as demo_execution_module
 from .config import DailyCloseFadeConfig, ForwardTestConfig, ResearchConfig
 from .demo_execution import DemoSyncConfig
 from .forward_test import default_forward_sleeves, run_forward_sleeves
-from .telegram import send_telegram_message
 
 
 DEMO_CYCLE_SLEEVES = ("control_top_1_30", "core_31_150", "microcap_151_plus")
@@ -205,10 +204,13 @@ def _run_bybit_demo_cycle_unlocked(
         "summary": summary,
         "sleeves": results,
     }
+    if cycle.send_telegram or forward.send_telegram:
+        payload["telegram"] = {
+            "enabled": True,
+            "sent": False,
+            "reason": "cycle_summary_disabled_use_forward_audit",
+        }
     _write_demo_cycle_outputs(base_root, payload)
-
-    telegram_enabled = cycle.send_telegram or forward.send_telegram
-    send_telegram_message(format_demo_cycle_message(payload), enabled=telegram_enabled)
     return payload
 
 
@@ -310,35 +312,6 @@ def format_demo_cycle_report(payload: dict[str, Any]) -> str:
         )
     else:
         lines.append("")
-    return "\n".join(lines)
-
-
-def format_demo_cycle_message(payload: dict[str, Any]) -> str:
-    pause = payload.get("paused", {})
-    summary = payload.get("summary", {})
-    active = payload.get("active_window", {})
-    lines = [
-        "Bybit demo cycle",
-        f"now: {payload.get('now')}",
-        (
-            f"paused: {bool(pause.get('paused'))} "
-            f"window={bool(active.get('inside'))} "
-            f"entries_paused={bool(active.get('entries_paused'))} "
-            f"submit={bool(payload.get('config', {}).get('submit_orders'))}"
-        ),
-        (
-            f"new={summary.get('new_orders', 0)} placed={summary.get('placed', 0)} "
-            f"dry={summary.get('dry_run', 0)} skipped={summary.get('skipped', 0)} "
-            f"failed_sleeves={summary.get('failed_sleeves', 0)}"
-        ),
-    ]
-    for row in payload.get("sleeves", []):
-        sleeve_summary = row.get("summary", {})
-        sleeve_rows = row.get("rows", {})
-        lines.append(
-            f"{row.get('sleeve')}: {row.get('status')} new={sleeve_rows.get('new_orders', 0)} "
-            f"placed={sleeve_summary.get('placed', 0)} dry={sleeve_summary.get('dry_run', 0)}"
-        )
     return "\n".join(lines)
 
 

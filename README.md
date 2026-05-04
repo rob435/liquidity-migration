@@ -207,8 +207,7 @@ python -m aggression_carry \
   --i-understand-demo-sync \
   --use-wallet-balance \
   --max-order-notional 0 \
-  --max-total-new-notional 0 \
-  --telegram
+  --max-total-new-notional 0
 ```
 
 The cycle runs `forward-run-sleeves`, then syncs `control_top_1_30`,
@@ -224,6 +223,18 @@ weight. On a 10,000 USDT demo account, one qualifying coin can therefore size
 up to about 8,000 USDT notional before exchange rounding. `--max-order-notional
 0` and `--max-total-new-notional 0` mean the dynamic wallet caps are the active
 caps, not the old 10/50 USDT smoke-test caps.
+
+Telegram for the demo runtime is owned by the audit layer, not the 5-minute
+cycle. This avoids timer spam. It sends only position-entry fills,
+position-exit fills, and one end-of-day PnL message:
+
+```bash
+python -m aggression_carry \
+  --data-root data/forward-paper \
+  --config configs/volume_alpha.default.yaml \
+  forward-audit \
+  --telegram
+```
 
 To pause new demo entries without blocking reduce-only exits:
 

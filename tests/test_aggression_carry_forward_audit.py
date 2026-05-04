@@ -68,12 +68,36 @@ def test_forward_demo_audit_joins_paper_and_demo_ledgers_by_sleeve(tmp_path: Pat
     assert (data_root / "reports" / "forward_demo_audit_report.md").exists()
 
 
-def test_forward_demo_audit_sends_deduped_telegram_summary(tmp_path: Path, monkeypatch) -> None:
+def test_forward_demo_audit_sends_deduped_telegram_events(tmp_path: Path, monkeypatch) -> None:
     data_root = tmp_path / "forward-paper"
     sleeve_root = data_root / "forward_sleeves" / "core_31_150"
     _write_paper_trades(
         sleeve_root,
-        [_paper_trade("paper-1", status="open", weighted_net_return=-0.001)],
+        [_paper_trade("paper-1", status="closed", exit_price=98.0, weighted_net_return=0.003)],
+    )
+    _write_demo_orders(
+        sleeve_root,
+        [
+            _demo_order(
+                "core-entry-1",
+                paper_trade_id="paper-1",
+                action="entry",
+                side="Sell",
+                price="100.2",
+                filled_qty=0.05,
+                filled_value=4.975,
+            ),
+            _demo_order(
+                "core-exit-1",
+                paper_trade_id="paper-1",
+                action="exit",
+                side="Buy",
+                price="",
+                filled_qty=0.05,
+                filled_value=4.94,
+                reduce_only=True,
+            ),
+        ],
     )
     messages: list[str] = []
 
@@ -84,14 +108,41 @@ def test_forward_demo_audit_sends_deduped_telegram_summary(tmp_path: Path, monke
 
     monkeypatch.setattr("aggression_carry.forward_audit.send_telegram_message", fake_send)
 
-    first = run_forward_demo_audit(data_root, send_telegram=True)
-    second = run_forward_demo_audit(data_root, send_telegram=True)
+    audit_now = datetime(2026, 1, 16, 3, 0, tzinfo=UTC)
+    first = run_forward_demo_audit(data_root, send_telegram=True, now=audit_now)
+    second = run_forward_demo_audit(data_root, send_telegram=True, now=audit_now)
 
     assert first["telegram"]["sent"] is True
-    assert second["telegram"]["reason"] == "unchanged"
+    assert first["telegram"]["events"] == 3
+    assert second["telegram"]["reason"] == "no_trade_signal"
     assert len(messages) == 1
-    assert "Forward demo audit" in messages[0]
-    assert "entry_order_missing" in messages[0]
+    assert "Positions entered:" in messages[0]
+    assert "Positions exited:" in messages[0]
+    assert "End-of-day PnL:" in messages[0]
+    assert "entry_order_missing" not in messages[0]
+
+
+def test_forward_demo_audit_telegram_ignores_pending_and_missing_rows(tmp_path: Path, monkeypatch) -> None:
+    data_root = tmp_path / "forward-paper"
+    sleeve_root = data_root / "forward_sleeves" / "core_31_150"
+    _write_paper_trades(
+        sleeve_root,
+        [_paper_trade("paper-1", status="open", weighted_net_return=-0.001)],
+    )
+    messages: list[str] = []
+    monkeypatch.setattr(
+        "aggression_carry.forward_audit.send_telegram_message",
+        lambda text, *, enabled=True, config=None: messages.append(text) or True,
+    )
+
+    payload = run_forward_demo_audit(
+        data_root,
+        send_telegram=True,
+        now=datetime(2026, 1, 15, 23, 0, tzinfo=UTC),
+    )
+
+    assert payload["telegram"]["reason"] == "no_trade_signal"
+    assert messages == []
 
 
 def test_forward_demo_audit_skips_telegram_when_empty(tmp_path: Path, monkeypatch) -> None:

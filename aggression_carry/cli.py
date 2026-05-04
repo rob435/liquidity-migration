@@ -380,7 +380,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Required with --submit-orders. Confirms this will hit Bybit demo private order endpoints.",
     )
-    demo_cycle.add_argument("--telegram", action="store_true", help="Send one Telegram summary for the demo cycle.")
+    demo_cycle.add_argument(
+        "--telegram",
+        action="store_true",
+        help="Accepted for compatibility; routine cycle Telegram is disabled. Use forward-audit --telegram for entries, exits, and EOD PnL.",
+    )
     demo_cycle.add_argument("--max-order-notional", type=float, default=10.0, help="Hard cap per demo order in USDT.")
     demo_cycle.add_argument("--max-new-orders", type=int, default=5, help="Maximum new demo orders per sleeve this run.")
     demo_cycle.add_argument(
@@ -428,7 +432,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("forward-report", help="Write a report from the paper forward-test ledger.")
     forward_audit = subparsers.add_parser("forward-audit", help="Join paper forward-test trades to Bybit demo execution orders.")
-    forward_audit.add_argument("--telegram", action="store_true", help="Send deduped important audit changes to Telegram.")
+    forward_audit.add_argument(
+        "--telegram",
+        action="store_true",
+        help="Send deduped entry fills, exit fills, and EOD PnL to Telegram.",
+    )
     return parser
 
 

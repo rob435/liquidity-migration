@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from hashlib import blake2b
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,9 @@ from .demo_cycle import DEMO_CYCLE_SLEEVES
 from .storage import read_dataset
 from .telegram import send_telegram_message
 
+
+TELEGRAM_EVENT_LOOKBACK_HOURS = 36
+TELEGRAM_EOD_READY_MINUTE = 2 * 60 + 35
 
 TRADE_AUDIT_SCHEMA = {
     "sleeve": pl.String,
@@ -74,9 +78,11 @@ def run_forward_demo_audit(
     report_dir: str | Path | None = None,
     sleeves: tuple[str, ...] = DEMO_CYCLE_SLEEVES,
     send_telegram: bool = False,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     base_root = Path(data_root).expanduser()
     output_dir = Path(report_dir or base_root / "reports")
+    now_dt = _as_utc(now or datetime.now(tz=UTC))
     rows: list[dict[str, Any]] = []
     for sleeve in sleeves:
         sleeve_root = base_root / "forward_sleeves" / sleeve
@@ -88,6 +94,7 @@ def run_forward_demo_audit(
     daily = build_forward_demo_daily_summary(trades)
     summary = summarize_forward_demo_audit(trades, daily)
     payload = {
+        "now": now_dt.isoformat(),
         "rows": {
             "sleeves": len(sleeves),
             "trade_audit_rows": trades.height,
@@ -98,10 +105,10 @@ def run_forward_demo_audit(
     }
     payload["telegram"] = _maybe_send_forward_demo_audit_telegram(
         output_dir,
-        payload,
         trades,
         daily,
         enabled=send_telegram,
+        now=now_dt,
     )
     _write_forward_demo_audit_outputs(output_dir, payload, trades, daily)
     return payload
@@ -289,35 +296,39 @@ def format_forward_demo_audit_report(payload: dict[str, Any], trades: pl.DataFra
     return "\n".join(lines)
 
 
-def format_forward_demo_audit_message(payload: dict[str, Any], trades: pl.DataFrame, daily: pl.DataFrame) -> str:
-    summary = payload.get("summary", {})
-    lines = [
-        "Forward demo audit",
-        f"paper: trades={summary.get('paper_trades', 0)} closed={summary.get('paper_closed_trades', 0)} net={_pct(summary.get('paper_weighted_net_return'))}",
-        f"demo: entry_fills={summary.get('demo_entries_filled', 0)}/{summary.get('demo_entry_orders', 0)} "
-        f"exit_fills={summary.get('demo_exits_filled', 0)} pnl={_money(summary.get('demo_realized_pnl_usdt'))} "
-        f"ret={_pct(summary.get('demo_realized_return'))}",
-        f"missed/pending: {summary.get('demo_missed_entries', 0)}",
-    ]
-    if not daily.is_empty():
-        lines.append("daily:")
-        for row in daily.sort(["date", "sleeve"], descending=[True, False]).head(6).to_dicts():
+def format_forward_demo_audit_message(events: list[dict[str, Any]]) -> str:
+    lines = ["Forward audit events"]
+    entries = [event for event in events if event.get("kind") == "entry"]
+    exits = [event for event in events if event.get("kind") == "exit"]
+    eod = [event for event in events if event.get("kind") == "eod"]
+    if entries:
+        lines.append("Positions entered:")
+        for event in entries:
             lines.append(
-                f"- {row.get('date', '')} {row.get('sleeve', '')}: "
-                f"paper={_pct(row.get('paper_weighted_net_return'))} "
-                f"demo_pnl={_money(row.get('demo_realized_pnl_usdt'))} "
-                f"fills={row.get('demo_entries_filled', 0)}/{row.get('demo_entry_orders', 0)} "
-                f"miss={row.get('demo_missed_entries', 0)}"
+                f"- {event.get('sleeve')} {event.get('symbol')} {event.get('side')} "
+                f"qty={_qty(event.get('qty'))} fill={_price(event.get('fill_price'))} "
+                f"paper={_price(event.get('paper_price'))} slip={_num_text(event.get('slippage_bps'))}bps"
             )
-    issues = _recent_issue_rows(trades)
-    if issues:
-        lines.append("issues:")
-        for row in issues[:8]:
-            reason = str(row.get("missed_reason") or row.get("order_error") or "")
+    if exits:
+        lines.append("Positions exited:")
+        for event in exits:
             lines.append(
-                f"- {row.get('sleeve', '')} {row.get('symbol', '')}: {reason[:90]} "
-                f"entry={row.get('entry_fill_status', '')} exit={row.get('exit_fill_status', '')}"
+                f"- {event.get('sleeve')} {event.get('symbol')} {event.get('exit_reason')} "
+                f"qty={_qty(event.get('qty'))} fill={_price(event.get('fill_price'))} "
+                f"pnl={_money(event.get('pnl_usdt'))} slip={_num_text(event.get('slippage_bps'))}bps"
             )
+    if eod:
+        lines.append("End-of-day PnL:")
+        for event in eod:
+            lines.append(
+                f"- {event.get('date')} total demo={_money(event.get('demo_pnl_usdt'))} "
+                f"paper={_pct(event.get('paper_return'))}"
+            )
+            for sleeve in event.get("sleeves", []):
+                lines.append(
+                    f"  {sleeve.get('sleeve')}: demo={_money(sleeve.get('demo_pnl_usdt'))} "
+                    f"paper={_pct(sleeve.get('paper_return'))}"
+                )
     return "\n".join(lines)
 
 
@@ -339,21 +350,24 @@ def _write_forward_demo_audit_outputs(
 
 def _maybe_send_forward_demo_audit_telegram(
     output_dir: Path,
-    payload: dict[str, Any],
     trades: pl.DataFrame,
     daily: pl.DataFrame,
     *,
     enabled: bool,
+    now: datetime,
 ) -> dict[str, Any]:
     if not enabled:
         return {"enabled": False, "sent": False, "reason": "disabled"}
-    if not _audit_has_telegram_signal(payload, trades):
-        return {"enabled": True, "sent": False, "reason": "no_trade_signal"}
     output_dir.mkdir(parents=True, exist_ok=True)
-    text = format_forward_demo_audit_message(payload, trades, daily)
-    signature = blake2b(text.encode("utf-8"), digest_size=16).hexdigest()
     state_path = output_dir / "forward_demo_audit_telegram_state.json"
     previous = _read_json(state_path)
+    sent_event_ids = set(previous.get("sent_event_ids") or [])
+    events = _forward_demo_audit_telegram_events(trades, daily, now=now)
+    new_events = [event for event in events if str(event.get("id") or "") not in sent_event_ids]
+    if not new_events:
+        return {"enabled": True, "sent": False, "reason": "no_trade_signal", "events": 0}
+    text = format_forward_demo_audit_message(new_events)
+    signature = blake2b(text.encode("utf-8"), digest_size=16).hexdigest()
     if previous.get("signature") == signature:
         return {"enabled": True, "sent": False, "reason": "unchanged", "signature": signature}
     try:
@@ -362,33 +376,127 @@ def _maybe_send_forward_demo_audit_telegram(
         return {"enabled": True, "sent": False, "reason": f"send_failed: {exc}", "signature": signature}
     if not sent:
         return {"enabled": True, "sent": False, "reason": "not_configured_or_rejected", "signature": signature}
-    state_path.write_text(json.dumps({"signature": signature}, indent=2), encoding="utf-8")
-    return {"enabled": True, "sent": True, "reason": "sent", "signature": signature}
+    updated_ids = sorted((sent_event_ids | {str(event["id"]) for event in new_events}))[-1000:]
+    state_path.write_text(
+        json.dumps({"signature": signature, "sent_event_ids": updated_ids}, indent=2),
+        encoding="utf-8",
+    )
+    return {"enabled": True, "sent": True, "reason": "sent", "signature": signature, "events": len(new_events)}
 
 
-def _audit_has_telegram_signal(payload: dict[str, Any], trades: pl.DataFrame) -> bool:
-    summary = payload.get("summary", {})
-    if int(summary.get("paper_trades") or 0) <= 0:
+def _forward_demo_audit_telegram_events(
+    trades: pl.DataFrame,
+    daily: pl.DataFrame,
+    *,
+    now: datetime,
+) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    if not trades.is_empty():
+        for row in trades.sort(["date", "sleeve", "paper_entry_time"]).to_dicts():
+            entry_time = _parse_dt(row.get("paper_entry_time"))
+            if _recent_enough(entry_time, now):
+                filled_qty = _num(row.get("entry_filled_qty"))
+                order_link_id = str(row.get("entry_order_link_id") or "")
+                if filled_qty > 0.0 and order_link_id:
+                    events.append(
+                        {
+                            "id": f"entry:{row.get('sleeve')}:{row.get('paper_trade_id')}:{order_link_id}",
+                            "kind": "entry",
+                            "sleeve": row.get("sleeve"),
+                            "symbol": row.get("symbol"),
+                            "side": row.get("side"),
+                            "qty": filled_qty,
+                            "fill_price": row.get("entry_avg_fill_price"),
+                            "paper_price": row.get("paper_entry_price"),
+                            "slippage_bps": row.get("entry_slippage_bps"),
+                        }
+                    )
+            exit_time = _parse_dt(row.get("paper_exit_time"))
+            if _recent_enough(exit_time, now):
+                filled_qty = _num(row.get("exit_filled_qty"))
+                order_link_id = str(row.get("exit_order_link_id") or "")
+                if filled_qty > 0.0 and order_link_id:
+                    events.append(
+                        {
+                            "id": f"exit:{row.get('sleeve')}:{row.get('paper_trade_id')}:{order_link_id}",
+                            "kind": "exit",
+                            "sleeve": row.get("sleeve"),
+                            "symbol": row.get("symbol"),
+                            "exit_reason": row.get("paper_exit_reason"),
+                            "qty": filled_qty,
+                            "fill_price": row.get("exit_avg_fill_price"),
+                            "pnl_usdt": row.get("demo_realized_pnl_usdt"),
+                            "slippage_bps": row.get("exit_slippage_bps"),
+                        }
+                    )
+    events.extend(_eod_telegram_events(daily, now=now))
+    return events
+
+
+def _eod_telegram_events(daily: pl.DataFrame, *, now: datetime) -> list[dict[str, Any]]:
+    if daily.is_empty():
+        return []
+    rows = daily.to_dicts()
+    ready_dates = sorted({str(row.get("date") or "") for row in rows if _eod_ready(str(row.get("date") or ""), now)})
+    if not ready_dates:
+        return []
+    latest_date = ready_dates[-1]
+    day_rows = [row for row in rows if str(row.get("date") or "") == latest_date]
+    entry_fills = sum(int(_num(row.get("demo_entries_filled"))) for row in day_rows)
+    exit_fills = sum(int(_num(row.get("demo_exits_filled"))) for row in day_rows)
+    if entry_fills <= 0 and exit_fills <= 0:
+        return []
+    if entry_fills > exit_fills:
+        return []
+    sleeves = [
+        {
+            "sleeve": row.get("sleeve"),
+            "demo_pnl_usdt": row.get("demo_realized_pnl_usdt"),
+            "paper_return": row.get("paper_weighted_net_return"),
+        }
+        for row in sorted(day_rows, key=lambda item: str(item.get("sleeve") or ""))
+    ]
+    return [
+        {
+            "id": f"eod:{latest_date}",
+            "kind": "eod",
+            "date": latest_date,
+            "demo_pnl_usdt": sum(_num(row.get("demo_realized_pnl_usdt")) for row in day_rows),
+            "paper_return": sum(_num(row.get("paper_weighted_net_return")) for row in day_rows),
+            "sleeves": sleeves,
+        }
+    ]
+
+
+def _eod_ready(value: str, now: datetime) -> bool:
+    try:
+        day = datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
         return False
-    return any(
-        int(summary.get(key) or 0) > 0
-        for key in (
-            "demo_entry_orders",
-            "demo_entries_filled",
-            "demo_exits_filled",
-            "demo_missed_entries",
-            "paper_closed_trades",
-        )
-    ) or not trades.is_empty()
+    today = now.date()
+    if day >= today:
+        return False
+    if (today - day).days > 2:
+        return False
+    if (today - day).days > 1:
+        return True
+    return now.hour * 60 + now.minute >= TELEGRAM_EOD_READY_MINUTE
 
 
-def _recent_issue_rows(trades: pl.DataFrame) -> list[dict[str, Any]]:
-    if trades.is_empty():
-        return []
-    issues = trades.filter((pl.col("missed_reason") != "") | (pl.col("order_error") != ""))
-    if issues.is_empty():
-        return []
-    return issues.sort(["date", "sleeve", "paper_entry_time"], descending=[True, False, True]).to_dicts()
+def _recent_enough(value: datetime | None, now: datetime) -> bool:
+    if value is None:
+        return False
+    return now - timedelta(hours=TELEGRAM_EVENT_LOOKBACK_HOURS) <= value <= now + timedelta(minutes=5)
+
+
+def _parse_dt(value: Any) -> datetime | None:
+    text = str(value or "")
+    if not text:
+        return None
+    try:
+        return _as_utc(datetime.fromisoformat(text.replace("Z", "+00:00")))
+    except ValueError:
+        return None
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -569,3 +677,21 @@ def _num_text(value: Any) -> str:
     if value is None:
         return "n/a"
     return f"{_num(value):.2f}"
+
+
+def _price(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    return f"{_num(value):.8g}"
+
+
+def _qty(value: Any) -> str:
+    if value is None:
+        return "n/a"
+    return f"{_num(value):.8g}"
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
