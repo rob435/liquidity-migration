@@ -96,6 +96,7 @@ try {
     Write-Host "Data root: $DataRoot"
     Write-Host "Log: $LogPath"
     Write-Host "Workers: $Workers"
+    Write-Host "Download workers: $Workers"
     Write-Host "Buckets: $($Grid.Buckets)"
     Write-Host "Quantiles: $($Grid.Quantiles)"
     Write-Host "Hold days: $($Grid.HoldDays)"
@@ -138,7 +139,8 @@ try {
                 --symbols $SymbolCsv `
                 --start $Start `
                 --end $End `
-                --datasets "instruments,klines_1h"
+                --datasets "instruments,klines_1h" `
+                --workers $Workers
         }
     }
     else {

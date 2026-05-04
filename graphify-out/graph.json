@@ -27045,8 +27045,8 @@
       "source_file": "tests/test_aggression_carry_cli.py",
       "source_location": "L91",
       "weight": 1.0,
-      "_src": "tests_test_aggression_carry_cli_test_cli_parses_daily_close_fade_entry_risk_knobs",
-      "_tgt": "aggression_carry_cli_build_parser",
+      "_src": "aggression_carry_cli_build_parser",
+      "_tgt": "tests_test_aggression_carry_cli_test_cli_parses_daily_close_fade_entry_risk_knobs",
       "source": "aggression_carry_cli_build_parser",
       "target": "tests_test_aggression_carry_cli_test_cli_parses_daily_close_fade_entry_risk_knobs"
     },
