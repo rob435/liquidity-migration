@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR
 from hashlib import blake2b
@@ -35,6 +35,11 @@ class DemoSyncConfig:
     max_order_notional: float = 10.0
     max_new_orders: int = 5
     max_total_new_notional: float = 50.0
+    use_wallet_balance: bool = False
+    wallet_balance_fraction: float = 1.0
+    max_order_notional_pct_equity: float = 0.80
+    max_total_new_notional_pct_equity: float = 1.0
+    account_equity_override: float = 0.0
     price_offset_bps: float = 2.0
     cancel_stale_minutes: int = 5
     submit_orders: bool = False
@@ -76,10 +81,7 @@ def run_bybit_demo_sync(
     api_key: str | None = None,
     api_secret: str | None = None,
 ) -> dict[str, Any]:
-    if sync_config.max_order_notional <= 0.0:
-        raise ValueError("max_order_notional must be positive")
-    if sync_config.max_total_new_notional <= 0.0:
-        raise ValueError("max_total_new_notional must be positive")
+    _validate_demo_sync_config(sync_config)
     if sync_config.submit_orders and not sync_config.confirmed:
         raise RuntimeError("Refusing demo sync order submission without --i-understand-demo-sync")
 
@@ -89,15 +91,24 @@ def run_bybit_demo_sync(
     existing = read_dataset(data_root, "demo_execution_orders")
     market = market_client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
     executor = _demo_executor(config, sync_config, execution_client, api_key, api_secret)
+    wallet: dict[str, Any] | None = None
+    effective_sync = sync_config
+    if sync_config.use_wallet_balance:
+        wallet, effective_sync = _wallet_adjusted_sync_config(
+            sync_config,
+            executor=executor,
+            account_type=sync_config.account_type,
+            coin=config.exchange.settle_coin,
+        )
     instruments = {str(row.get("symbol", "")).upper(): row for row in market.get_instruments_info()}
 
     reconciled = reconcile_demo_orders(existing, now=now_dt, execution_client=executor) if executor is not None else existing
-    reconciled = cancel_stale_demo_orders(reconciled, now=now_dt, sync_config=sync_config, execution_client=executor)
+    reconciled = cancel_stale_demo_orders(reconciled, now=now_dt, sync_config=effective_sync, execution_client=executor)
     new_orders = build_demo_sync_orders(
         trades,
         existing_orders=reconciled,
         instruments=instruments,
-        sync_config=sync_config,
+        sync_config=effective_sync,
         now_ms=now_ms,
         market_client=market,
         execution_client=executor,
@@ -113,11 +124,89 @@ def run_bybit_demo_sync(
             "ledger_orders": ledger.height,
         },
         "summary": summary,
-        "config": asdict(sync_config),
+        "config": asdict(effective_sync),
+        "requested_config": asdict(sync_config),
+        "wallet": wallet or {},
         "new_orders": new_orders.to_dicts() if not new_orders.is_empty() else [],
     }
     _write_demo_sync_outputs(data_root, ledger, payload=payload)
     return payload
+
+
+def _validate_demo_sync_config(sync_config: DemoSyncConfig) -> None:
+    if sync_config.max_order_notional < 0.0:
+        raise ValueError("max_order_notional must be non-negative")
+    if sync_config.max_total_new_notional < 0.0:
+        raise ValueError("max_total_new_notional must be non-negative")
+    if not sync_config.use_wallet_balance and sync_config.max_order_notional <= 0.0:
+        raise ValueError("max_order_notional must be positive unless --use-wallet-balance is enabled")
+    if not sync_config.use_wallet_balance and sync_config.max_total_new_notional <= 0.0:
+        raise ValueError("max_total_new_notional must be positive unless --use-wallet-balance is enabled")
+    if not 0.0 < sync_config.wallet_balance_fraction <= 1.0:
+        raise ValueError("wallet_balance_fraction must be in (0, 1]")
+    if sync_config.max_order_notional_pct_equity < 0.0:
+        raise ValueError("max_order_notional_pct_equity must be non-negative")
+    if sync_config.max_total_new_notional_pct_equity < 0.0:
+        raise ValueError("max_total_new_notional_pct_equity must be non-negative")
+
+
+def _wallet_adjusted_sync_config(
+    sync_config: DemoSyncConfig,
+    *,
+    executor: Any | None,
+    account_type: str,
+    coin: str,
+) -> tuple[dict[str, Any] | None, DemoSyncConfig]:
+    if executor is None:
+        if sync_config.max_order_notional <= 0.0 or sync_config.max_total_new_notional <= 0.0:
+            raise RuntimeError("wallet-balance sizing with zero static caps requires --submit-orders and demo credentials")
+        return None, sync_config
+
+    wallet = executor.get_wallet_balance(account_type=account_type, coin=coin)
+    wallet_equity = _wallet_equity(wallet, coin=coin)
+    if wallet_equity <= 0.0:
+        raise RuntimeError("Bybit wallet balance did not contain positive equity")
+    effective_equity = wallet_equity * sync_config.wallet_balance_fraction
+    max_order_notional = sync_config.max_order_notional
+    max_total_new_notional = sync_config.max_total_new_notional
+    if sync_config.max_order_notional_pct_equity > 0.0:
+        dynamic_order_cap = effective_equity * sync_config.max_order_notional_pct_equity
+        max_order_notional = dynamic_order_cap if max_order_notional <= 0.0 else min(max_order_notional, dynamic_order_cap)
+    if sync_config.max_total_new_notional_pct_equity > 0.0:
+        dynamic_total_cap = effective_equity * sync_config.max_total_new_notional_pct_equity
+        max_total_new_notional = dynamic_total_cap if max_total_new_notional <= 0.0 else min(max_total_new_notional, dynamic_total_cap)
+    if max_order_notional <= 0.0 or max_total_new_notional <= 0.0:
+        raise RuntimeError("wallet-balance sizing produced non-positive demo order caps")
+    return wallet, replace(
+        sync_config,
+        account_equity_override=effective_equity,
+        max_order_notional=max_order_notional,
+        max_total_new_notional=max_total_new_notional,
+    )
+
+
+def _wallet_equity(wallet: dict[str, Any], *, coin: str) -> float:
+    rows = wallet.get("list") if isinstance(wallet, dict) else None
+    if isinstance(rows, list) and rows:
+        account = rows[0]
+        for key in ("totalEquity", "totalWalletBalance", "totalMarginBalance"):
+            value = _float(account.get(key))
+            if value > 0.0:
+                return value
+        coin_rows = account.get("coin")
+        if isinstance(coin_rows, list):
+            for coin_row in coin_rows:
+                if str(coin_row.get("coin") or "").upper() != coin.upper():
+                    continue
+                for key in ("equity", "walletBalance", "availableToWithdraw"):
+                    value = _float(coin_row.get(key))
+                    if value > 0.0:
+                        return value
+    for key in ("totalEquity", "equity", "walletBalance", "balance"):
+        value = _float(wallet.get(key) if isinstance(wallet, dict) else None)
+        if value > 0.0:
+            return value
+    return 0.0
 
 
 def run_bybit_demo_cancel_all(
@@ -728,7 +817,10 @@ def _entry_order_row(
 ) -> dict[str, Any]:
     symbol = str(trade["symbol"]).upper()
     side = "Sell" if str(trade.get("side", "short")).lower() == "short" else "Buy"
-    notional = min(_paper_notional(trade), sync_config.max_order_notional)
+    notional = min(
+        _paper_notional(trade, account_equity_override=sync_config.account_equity_override),
+        sync_config.max_order_notional,
+    )
     if notional <= 0.0:
         return _skip_row(
             trade,
@@ -1270,7 +1362,14 @@ def _normalized_order_status(value: Any) -> str:
     return str(value or "").replace("_", "").replace("-", "").strip().lower()
 
 
-def _paper_notional(trade: dict[str, Any]) -> float:
+def _paper_notional(trade: dict[str, Any], *, account_equity_override: float = 0.0) -> float:
+    if account_equity_override > 0.0:
+        try:
+            weight = float(trade.get("weight") or 0.0)
+        except (TypeError, ValueError):
+            weight = 0.0
+        if weight > 0.0:
+            return weight * account_equity_override
     for key in ("actual_notional", "target_notional"):
         value = trade.get(key)
         if value is not None:

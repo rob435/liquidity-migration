@@ -32,6 +32,10 @@ class DemoCycleConfig:
     max_order_notional: float = 10.0
     max_new_orders: int = 5
     max_total_new_notional: float = 50.0
+    use_wallet_balance: bool = False
+    wallet_balance_fraction: float = 1.0
+    max_order_notional_pct_equity: float = 0.80
+    max_total_new_notional_pct_equity: float = 1.0
     cancel_stale_minutes: int = 5
     price_offset_bps: float = 2.0
     submit_orders: bool = False
@@ -346,12 +350,22 @@ def _write_demo_cycle_outputs(data_root: str | Path, payload: dict[str, Any]) ->
 
 
 def _validate_cycle_config(config: DemoCycleConfig) -> None:
-    if config.max_order_notional <= 0.0:
-        raise ValueError("max_order_notional must be positive")
+    if config.max_order_notional < 0.0:
+        raise ValueError("max_order_notional must be non-negative")
+    if not config.use_wallet_balance and config.max_order_notional <= 0.0:
+        raise ValueError("max_order_notional must be positive unless wallet balance sizing is enabled")
     if config.max_new_orders < 0:
         raise ValueError("max_new_orders cannot be negative")
-    if config.max_total_new_notional <= 0.0:
-        raise ValueError("max_total_new_notional must be positive")
+    if config.max_total_new_notional < 0.0:
+        raise ValueError("max_total_new_notional must be non-negative")
+    if not config.use_wallet_balance and config.max_total_new_notional <= 0.0:
+        raise ValueError("max_total_new_notional must be positive unless wallet balance sizing is enabled")
+    if not 0.0 < config.wallet_balance_fraction <= 1.0:
+        raise ValueError("wallet_balance_fraction must be in (0, 1]")
+    if config.max_order_notional_pct_equity < 0.0:
+        raise ValueError("max_order_notional_pct_equity cannot be negative")
+    if config.max_total_new_notional_pct_equity < 0.0:
+        raise ValueError("max_total_new_notional_pct_equity cannot be negative")
     if not 0 <= config.active_start_minute < 24 * 60:
         raise ValueError("active_start_minute must be inside one UTC day")
     if not 0 <= config.active_end_minute < 24 * 60:
@@ -431,6 +445,10 @@ def _sync_config_from_cycle(
         "max_order_notional": cycle.max_order_notional,
         "max_new_orders": cycle.max_new_orders,
         "max_total_new_notional": cycle.max_total_new_notional,
+        "use_wallet_balance": cycle.use_wallet_balance,
+        "wallet_balance_fraction": cycle.wallet_balance_fraction,
+        "max_order_notional_pct_equity": cycle.max_order_notional_pct_equity,
+        "max_total_new_notional_pct_equity": cycle.max_total_new_notional_pct_equity,
         "price_offset_bps": cycle.price_offset_bps,
         "cancel_stale_minutes": cycle.cancel_stale_minutes,
         "submit_orders": cycle.submit_orders,

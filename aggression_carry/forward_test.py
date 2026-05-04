@@ -15,6 +15,7 @@ from .config import DailyCloseFadeConfig, ForwardTestConfig, ResearchConfig
 from .daily_close_fade import (
     MS_PER_DAY,
     MS_PER_MINUTE,
+    attach_close_fade_coin_market_context,
     _close_fade_position_weight,
     _mfe_giveback_stop_price,
     _short_return,
@@ -263,7 +264,7 @@ def default_forward_sleeves(base: DailyCloseFadeConfig) -> dict[str, DailyCloseF
             exclude_symbols=(),
             top_n=5,
             gross_exposure=min(base.gross_exposure, 0.25),
-            max_position_weight=0.0,
+            max_position_weight=base.max_position_weight,
             max_trade_notional_pct_of_day_turnover=0.0,
             max_trade_notional_pct_of_baseline_turnover=0.0,
         ),
@@ -273,7 +274,7 @@ def default_forward_sleeves(base: DailyCloseFadeConfig) -> dict[str, DailyCloseF
             liquidity_rank_max=150,
             top_n=5,
             gross_exposure=base.gross_exposure,
-            max_position_weight=0.0,
+            max_position_weight=base.max_position_weight,
             max_trade_notional_pct_of_day_turnover=0.0,
             max_trade_notional_pct_of_baseline_turnover=0.0,
         ),
@@ -443,6 +444,7 @@ def build_forward_scan_features(
         )
         .sort(["signal_ts_ms", "symbol"])
     )
+    return attach_close_fade_coin_market_context(features, fade_config)
 
 
 def open_forward_paper_trades(
@@ -1008,6 +1010,8 @@ def _new_paper_trade(
         "pump_like": bool(row.get("pump_like")),
         "late_volume_ratio": float(row.get("late_volume_ratio") or 0.0),
         "vwap_extension": float(row.get("vwap_extension") or 0.0),
+        "market_median_day_return": float(row.get("market_median_day_return") or 0.0),
+        "coin_excess_vs_market": float(row.get("coin_excess_vs_market") or 0.0),
         "intraday_vwap": float(row.get("intraday_vwap") or 0.0),
         "realized_vol": float(row.get("realized_vol") or 0.0),
         "baseline_liquidity_turnover": float(row.get("baseline_liquidity_turnover") or 0.0),
@@ -1047,6 +1051,11 @@ def _new_paper_trade(
         "liquidity_rank_min": fade_config.liquidity_rank_min,
         "liquidity_rank_max": fade_config.liquidity_rank_max,
         "min_baseline_turnover": fade_config.min_baseline_turnover,
+        "position_sizing": fade_config.position_sizing,
+        "score_weight_power": fade_config.score_weight_power,
+        "coin_excess_vs_market_min": fade_config.coin_excess_vs_market_min,
+        "coin_vwap_extension_min": fade_config.coin_vwap_extension_min,
+        "coin_late_volume_ratio_min": fade_config.coin_late_volume_ratio_min,
         "round_trip_cost_bps": round_trip_cost_bps,
         "last_error": None,
     }

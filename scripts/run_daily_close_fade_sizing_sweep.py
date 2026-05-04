@@ -55,7 +55,14 @@ def main() -> int:
     args = parse_args()
     data_root = Path(args.data_root)
     config = load_config(args.config, data_root=data_root)
-    base = replace(config.daily_close_fade)
+    base = replace(
+        config.daily_close_fade,
+        coin_excess_vs_market_min=0.0,
+        coin_vwap_extension_min=0.0,
+        coin_late_volume_ratio_min=0.0,
+        position_sizing="equal",
+        max_position_weight=0.0,
+    )
     start_ms = parse_date_ms(args.start) if args.start else 0
     end_ms = parse_date_ms(args.end) if args.end else 0
     split_specs = _parse_splits(args.splits)

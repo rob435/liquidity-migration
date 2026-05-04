@@ -166,6 +166,11 @@ def build_parser() -> argparse.ArgumentParser:
     close_fade.add_argument("--min-baseline-turnover", type=float, default=None, help="Minimum prior baseline quote turnover.")
     close_fade.add_argument("--account-equity", type=float, default=None, help="Account equity assumption for capacity caps.")
     close_fade.add_argument("--max-position-weight", type=float, default=None, help="Per-symbol portfolio weight cap; 0 disables.")
+    close_fade.add_argument("--coin-excess-vs-market-min", type=float, default=None, help="Require coin day return minus market median to exceed this value.")
+    close_fade.add_argument("--coin-vwap-extension-min", type=float, default=None, help="Require signal price extension above intraday VWAP.")
+    close_fade.add_argument("--coin-late-volume-ratio-min", type=float, default=None, help="Require last-60m turnover versus average day-to-date hourly turnover.")
+    close_fade.add_argument("--position-sizing", default=None, help="Position sizing mode: equal or score_capped.")
+    close_fade.add_argument("--score-weight-power", type=float, default=None, help="Power applied to score for score_capped sizing.")
     close_fade.add_argument(
         "--max-trade-notional-pct-day-turnover",
         type=float,
@@ -339,6 +344,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=50.0,
         help="Hard cap across all new demo orders this run.",
     )
+    demo_sync.add_argument("--use-wallet-balance", action="store_true", help="Scale demo order notional from current Bybit demo wallet equity.")
+    demo_sync.add_argument("--wallet-balance-fraction", type=float, default=1.0, help="Fraction of wallet equity used as sizing base.")
+    demo_sync.add_argument("--max-order-notional-pct-equity", type=float, default=0.80, help="Dynamic per-order cap as fraction of wallet sizing equity.")
+    demo_sync.add_argument("--max-total-new-notional-pct-equity", type=float, default=1.0, help="Dynamic total-new-entry cap as fraction of wallet sizing equity.")
     demo_sync.add_argument(
         "--price-offset-bps",
         type=float,
@@ -380,6 +389,10 @@ def build_parser() -> argparse.ArgumentParser:
         default=50.0,
         help="Hard cap across all new demo orders per sleeve this run.",
     )
+    demo_cycle.add_argument("--use-wallet-balance", action="store_true", help="Scale demo order notional from current Bybit demo wallet equity.")
+    demo_cycle.add_argument("--wallet-balance-fraction", type=float, default=1.0, help="Fraction of wallet equity used as sizing base.")
+    demo_cycle.add_argument("--max-order-notional-pct-equity", type=float, default=0.80, help="Dynamic per-order cap as fraction of wallet sizing equity.")
+    demo_cycle.add_argument("--max-total-new-notional-pct-equity", type=float, default=1.0, help="Dynamic total-new-entry cap as fraction of wallet sizing equity.")
     demo_cycle.add_argument(
         "--cancel-stale-minutes",
         type=int,
@@ -677,6 +690,10 @@ def main(argv: list[str] | None = None) -> int:
             max_order_notional=args.max_order_notional,
             max_new_orders=args.max_new_orders,
             max_total_new_notional=args.max_total_new_notional,
+            use_wallet_balance=args.use_wallet_balance,
+            wallet_balance_fraction=args.wallet_balance_fraction,
+            max_order_notional_pct_equity=args.max_order_notional_pct_equity,
+            max_total_new_notional_pct_equity=args.max_total_new_notional_pct_equity,
             price_offset_bps=args.price_offset_bps,
             cancel_stale_minutes=args.cancel_stale_minutes,
             submit_orders=args.submit_orders,
@@ -701,6 +718,10 @@ def main(argv: list[str] | None = None) -> int:
             max_order_notional=args.max_order_notional,
             max_new_orders=args.max_new_orders,
             max_total_new_notional=args.max_total_new_notional,
+            use_wallet_balance=args.use_wallet_balance,
+            wallet_balance_fraction=args.wallet_balance_fraction,
+            max_order_notional_pct_equity=args.max_order_notional_pct_equity,
+            max_total_new_notional_pct_equity=args.max_total_new_notional_pct_equity,
             cancel_stale_minutes=args.cancel_stale_minutes,
             price_offset_bps=args.price_offset_bps,
             submit_orders=args.submit_orders,
@@ -810,6 +831,31 @@ def _close_fade_config_from_args(base: DailyCloseFadeConfig, args: argparse.Name
         account_equity=args.account_equity if args.account_equity is not None else base.account_equity,
         max_position_weight=(
             args.max_position_weight if args.max_position_weight is not None else base.max_position_weight
+        ),
+        coin_excess_vs_market_min=(
+            getattr(args, "coin_excess_vs_market_min", None)
+            if getattr(args, "coin_excess_vs_market_min", None) is not None
+            else base.coin_excess_vs_market_min
+        ),
+        coin_vwap_extension_min=(
+            getattr(args, "coin_vwap_extension_min", None)
+            if getattr(args, "coin_vwap_extension_min", None) is not None
+            else base.coin_vwap_extension_min
+        ),
+        coin_late_volume_ratio_min=(
+            getattr(args, "coin_late_volume_ratio_min", None)
+            if getattr(args, "coin_late_volume_ratio_min", None) is not None
+            else base.coin_late_volume_ratio_min
+        ),
+        position_sizing=(
+            getattr(args, "position_sizing", None)
+            if getattr(args, "position_sizing", None) is not None
+            else base.position_sizing
+        ),
+        score_weight_power=(
+            getattr(args, "score_weight_power", None)
+            if getattr(args, "score_weight_power", None) is not None
+            else base.score_weight_power
         ),
         max_trade_notional_pct_of_day_turnover=(
             args.max_trade_notional_pct_day_turnover
@@ -1062,6 +1108,11 @@ def _add_forward_fade_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--min-baseline-turnover", type=float, default=None, help="Minimum prior baseline quote turnover.")
     parser.add_argument("--account-equity", type=float, default=None, help="Account equity assumption for capacity caps.")
     parser.add_argument("--max-position-weight", type=float, default=None, help="Per-symbol portfolio weight cap; 0 disables.")
+    parser.add_argument("--coin-excess-vs-market-min", type=float, default=None, help="Require coin day return minus market median to exceed this value.")
+    parser.add_argument("--coin-vwap-extension-min", type=float, default=None, help="Require signal price extension above intraday VWAP.")
+    parser.add_argument("--coin-late-volume-ratio-min", type=float, default=None, help="Require last-60m turnover versus average day-to-date hourly turnover.")
+    parser.add_argument("--position-sizing", default=None, help="Position sizing mode: equal or score_capped.")
+    parser.add_argument("--score-weight-power", type=float, default=None, help="Power applied to score for score_capped sizing.")
     parser.add_argument(
         "--max-trade-notional-pct-day-turnover",
         type=float,

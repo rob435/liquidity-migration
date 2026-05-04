@@ -205,6 +205,9 @@ python -m aggression_carry \
   bybit-demo-cycle \
   --submit-orders \
   --i-understand-demo-sync \
+  --use-wallet-balance \
+  --max-order-notional 0 \
+  --max-total-new-notional 0 \
   --telegram
 ```
 
@@ -212,7 +215,17 @@ The cycle runs `forward-run-sleeves`, then syncs `control_top_1_30`,
 `core_31_150`, and `microcap_151_plus` separately. It only opens new entries
 inside the default `22:05-02:30 UTC` operating window, keeps reconciling while
 paper/demo state is active, and uses a process lock to prevent overlapping
-timer runs. To pause new demo entries without blocking reduce-only exits:
+timer runs.
+
+With `--use-wallet-balance`, paper trade weights are multiplied by current
+Bybit demo wallet equity. The current promoted close-fade config uses the
+strict pump-quality gate and `score_capped` sizing with an 80% max single-coin
+weight. On a 10,000 USDT demo account, one qualifying coin can therefore size
+up to about 8,000 USDT notional before exchange rounding. `--max-order-notional
+0` and `--max-total-new-notional 0` mean the dynamic wallet caps are the active
+caps, not the old 10/50 USDT smoke-test caps.
+
+To pause new demo entries without blocking reduce-only exits:
 
 ```bash
 touch data/forward-paper/DEMO_PAUSED

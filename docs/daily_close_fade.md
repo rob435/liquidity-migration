@@ -254,6 +254,24 @@ Interpretation:
   universe validation catches up. For now this is a research candidate, not the
   live trading contract.
 
+2026-05-04 forward-test decision: use the 80% capped-score candidate in Bybit
+demo forward testing only. This is still not real-money approval. The default
+config now applies:
+
+```text
+coin_excess_vs_market_min: 0.08
+coin_vwap_extension_min: 0.035
+coin_late_volume_ratio_min: 1.0
+position_sizing: score_capped
+score_weight_power: 1.0
+max_position_weight: 0.80
+```
+
+Demo order notional can be scaled from current Bybit demo wallet equity with
+`bybit-demo-cycle --use-wallet-balance --max-order-notional 0
+--max-total-new-notional 0`. On a 10,000 USDT demo wallet, an 80% selected
+weight targets about 8,000 USDT notional before quantity-step rounding.
+
 Run the sizing sweep:
 
 ```bash

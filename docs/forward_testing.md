@@ -378,6 +378,9 @@ python -m aggression_carry \
   bybit-demo-cycle \
   --submit-orders \
   --i-understand-demo-sync \
+  --use-wallet-balance \
+  --max-order-notional 0 \
+  --max-total-new-notional 0 \
   --telegram
 ```
 
@@ -386,8 +389,13 @@ Cycle safety:
 - demo-only private client; no live-money API path
 - all sleeves shadowed separately: `control_top_1_30`, `core_31_150`,
   `microcap_151_plus`
-- default caps are 10 USDT per order, 5 new orders per sleeve, and 50 USDT
-  total new notional per sleeve per cycle
+- without `--use-wallet-balance`, default smoke-test caps are 10 USDT per
+  order, 5 new orders per sleeve, and 50 USDT total new notional per sleeve per
+  cycle
+- with `--use-wallet-balance`, paper weights use current Bybit demo wallet
+  equity; `--max-order-notional 0 --max-total-new-notional 0` means dynamic
+  wallet caps are active, with the default per-order cap at 80% of sizing
+  equity and total new-entry cap at 100%
 - reduce-only exits are prioritized before new entries
 - `max_new_orders` is enforced before every private `place_order` call; exits
   get priority, while `max_total_new_notional` only caps new entry exposure
@@ -399,6 +407,22 @@ Cycle safety:
   overlapping timer runs
 - the default active window is `22:05-02:30 UTC`; outside that window the
   cycle skips public scans/syncs unless paper or demo state is still active
+
+Current promoted forward sizing candidate:
+
+```text
+coin_excess_vs_market_min = 0.08
+coin_vwap_extension_min = 0.035
+coin_late_volume_ratio_min = 1.0
+position_sizing = score_capped
+score_weight_power = 1.0
+max_position_weight = 0.80
+```
+
+In plain terms: only coins that are pumping hard versus the market, extended
+above VWAP, and supported by late volume can be selected. Selected coins are
+then sized by signal score, capped at 80% of the wallet sizing equity. Missing
+exposure stays unused.
 
 Emergency demo commands:
 

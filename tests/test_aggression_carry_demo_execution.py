@@ -116,6 +116,36 @@ def test_demo_sync_dry_run_writes_capped_entry_without_private_calls(tmp_path: P
     assert (tmp_path / "reports" / "bybit_demo_sync_report.md").exists()
 
 
+def test_demo_sync_wallet_balance_sizes_from_paper_weight(tmp_path: Path) -> None:
+    _write_paper_trades(tmp_path, [_paper_trade(status="open", weight=0.80)])
+    execution = _FakeExecution(wallet_equity=10_000.0)
+
+    payload = run_bybit_demo_sync(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        sync_config=DemoSyncConfig(
+            submit_orders=True,
+            confirmed=True,
+            use_wallet_balance=True,
+            max_order_notional=0.0,
+            max_total_new_notional=0.0,
+            max_order_notional_pct_equity=0.80,
+            max_total_new_notional_pct_equity=1.0,
+        ),
+        now=datetime(2026, 1, 15, 22, 16, tzinfo=UTC),
+        market_client=_FakeMarket(),
+        execution_client=execution,
+    )
+    orders = read_dataset(tmp_path, "demo_execution_orders")
+
+    assert payload["config"]["account_equity_override"] == 10_000.0
+    assert payload["config"]["max_order_notional"] == 8_000.0
+    assert payload["config"]["max_total_new_notional"] == 10_000.0
+    assert orders.row(0, named=True)["status"] == "accepted"
+    assert orders.row(0, named=True)["estimated_notional"] > 7_900.0
+    assert float(execution.placed[0]["qty"]) > 70.0
+
+
 def test_demo_sync_dry_run_does_not_block_later_submit(tmp_path: Path) -> None:
     _write_paper_trade(tmp_path, status="open")
     config = ResearchConfig(data_root=tmp_path)
@@ -562,6 +592,7 @@ def _paper_trade(
     trade_id: str = "paper-1",
     symbol: str = "BTCUSDT",
     exit_price: float | None = None,
+    weight: float = 0.20,
 ) -> dict:
     return {
         "trade_id": trade_id,
@@ -577,6 +608,8 @@ def _paper_trade(
         "exit_reason": "max_hold" if status == "closed" else "open",
         "actual_notional": 2_000.0,
         "target_notional": 2_000.0,
+        "weight": weight,
+        "account_equity": 10_000.0,
     }
 
 
@@ -629,6 +662,7 @@ class _FakeExecution:
         position_value: float = 0.0,
         open_order_link_id: str = "",
         fail_place_times: int = 0,
+        wallet_equity: float = 10_000.0,
     ) -> None:
         self.placed: list[dict] = []
         self.place_attempts: list[dict] = []
@@ -638,9 +672,18 @@ class _FakeExecution:
         self.position_value = position_value
         self.open_order_link_id = open_order_link_id
         self.fail_place_times = fail_place_times
+        self.wallet_equity = wallet_equity
 
     def get_wallet_balance(self, *, account_type: str, coin: str) -> dict:
-        return {"accountType": account_type, "coin": coin}
+        return {
+            "accountType": account_type,
+            "list": [
+                {
+                    "totalEquity": str(self.wallet_equity),
+                    "coin": [{"coin": coin, "equity": str(self.wallet_equity)}],
+                }
+            ],
+        }
 
     def place_order(self, **params):
         self.place_attempts.append(params)

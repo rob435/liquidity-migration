@@ -180,6 +180,7 @@ def test_cli_parses_bybit_demo_sync(tmp_path: Path) -> None:
             "--i-understand-demo-sync",
             "--max-order-notional",
             "7",
+            "--use-wallet-balance",
         ]
     )
 
@@ -187,6 +188,7 @@ def test_cli_parses_bybit_demo_sync(tmp_path: Path) -> None:
     assert args.submit_orders is True
     assert args.i_understand_demo_sync is True
     assert args.max_order_notional == 7
+    assert args.use_wallet_balance is True
 
 
 def test_cli_parses_bybit_demo_cycle(tmp_path: Path) -> None:
@@ -201,11 +203,18 @@ def test_cli_parses_bybit_demo_cycle(tmp_path: Path) -> None:
             "--i-understand-demo-sync",
             "--telegram",
             "--max-order-notional",
-            "7",
+            "0",
             "--max-new-orders",
             "2",
             "--max-total-new-notional",
-            "14",
+            "0",
+            "--use-wallet-balance",
+            "--wallet-balance-fraction",
+            "0.5",
+            "--max-order-notional-pct-equity",
+            "0.8",
+            "--max-total-new-notional-pct-equity",
+            "1.0",
             "--cancel-stale-minutes",
             "0",
             "--price-offset-bps",
@@ -224,9 +233,13 @@ def test_cli_parses_bybit_demo_cycle(tmp_path: Path) -> None:
     assert args.submit_orders is True
     assert args.i_understand_demo_sync is True
     assert args.telegram is True
-    assert args.max_order_notional == 7
+    assert args.max_order_notional == 0
     assert args.max_new_orders == 2
-    assert args.max_total_new_notional == 14
+    assert args.max_total_new_notional == 0
+    assert args.use_wallet_balance is True
+    assert args.wallet_balance_fraction == 0.5
+    assert args.max_order_notional_pct_equity == 0.8
+    assert args.max_total_new_notional_pct_equity == 1.0
     assert args.cancel_stale_minutes == 0
     assert args.price_offset_bps == 3
     assert args.no_market_exit is True

@@ -36,6 +36,11 @@ daily_close_fade:
   max_position_weight: 0.20
   max_trade_notional_pct_of_day_turnover: 0.002
   max_trade_notional_pct_of_baseline_turnover: 0.005
+  coin_excess_vs_market_min: 0.08
+  coin_vwap_extension_min: 0.035
+  coin_late_volume_ratio_min: 1.0
+  position_sizing: score_capped
+  score_weight_power: 1.0
   stop_loss_pct: 0.20
   take_profit_pct: 0.05
   vol_trailing_stop_mult: 0.5
@@ -97,6 +102,11 @@ cost_model:
     assert config.daily_close_fade.max_position_weight == 0.20
     assert config.daily_close_fade.max_trade_notional_pct_of_day_turnover == 0.002
     assert config.daily_close_fade.max_trade_notional_pct_of_baseline_turnover == 0.005
+    assert config.daily_close_fade.coin_excess_vs_market_min == 0.08
+    assert config.daily_close_fade.coin_vwap_extension_min == 0.035
+    assert config.daily_close_fade.coin_late_volume_ratio_min == 1.0
+    assert config.daily_close_fade.position_sizing == "score_capped"
+    assert config.daily_close_fade.score_weight_power == 1.0
     assert config.daily_close_fade.stop_loss_pct == 0.20
     assert config.daily_close_fade.take_profit_pct == 0.05
     assert config.daily_close_fade.vol_trailing_stop_mult == 0.5

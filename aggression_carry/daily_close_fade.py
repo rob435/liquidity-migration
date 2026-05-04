@@ -348,7 +348,7 @@ def close_fade_sleeve_configs(base: DailyCloseFadeConfig | None = None) -> tuple
         min_baseline_turnover=0.0,
         min_day_turnover=0.0,
         min_last_60m_turnover=0.0,
-        max_position_weight=0.0,
+        max_position_weight=base_config.max_position_weight,
         max_trade_notional_pct_of_day_turnover=0.0,
         max_trade_notional_pct_of_baseline_turnover=0.0,
         exclude_symbols=(),
@@ -361,7 +361,7 @@ def close_fade_sleeve_configs(base: DailyCloseFadeConfig | None = None) -> tuple
         min_baseline_turnover=max(base_config.min_baseline_turnover, 0.0),
         min_day_turnover=max(base_config.min_day_turnover, 0.0),
         min_last_60m_turnover=max(base_config.min_last_60m_turnover, 0.0),
-        max_position_weight=0.0,
+        max_position_weight=base_config.max_position_weight,
         max_trade_notional_pct_of_day_turnover=0.0,
         max_trade_notional_pct_of_baseline_turnover=0.0,
     )
@@ -455,7 +455,7 @@ def build_daily_close_fade_features(
         )
         .sort(["signal_ts_ms", "symbol"])
     )
-    return features
+    return attach_close_fade_coin_market_context(features, config)
 
 
 def backtest_daily_close_fade(
@@ -470,8 +470,6 @@ def backtest_daily_close_fade(
     if selected.is_empty():
         return pl.DataFrame()
     partition_cache: dict[tuple[str, str], pl.DataFrame] = {}
-    selected_counts = selected.group_by("signal_ts_ms").len(name="selected_count")
-    selected = selected.join(selected_counts, on="signal_ts_ms", how="left")
     rows = []
     for row in selected.to_dicts():
         trade = _simulate_short_trade(
@@ -510,15 +508,120 @@ def select_close_fade_candidates(features: pl.DataFrame, config: DailyCloseFadeC
         df = df.filter(~pl.col("pump_like"))
     elif config.pump_filter != "all":
         raise ValueError(f"Unknown pump_filter: {config.pump_filter}")
+    df = _filter_coin_quality(df, config)
     if df.is_empty():
         return df
-    return (
+    selected = (
         df.with_columns(pl.col(config.score).rank("ordinal", descending=True).over("signal_ts_ms").alias("entry_rank"))
         .filter(pl.col("entry_rank") <= config.top_n)
         .with_columns(pl.len().over("signal_ts_ms").alias("candidate_count"))
         .filter(pl.col("candidate_count") >= config.min_symbols)
         .sort(["signal_ts_ms", "entry_rank"])
     )
+    return attach_close_fade_position_sizing(selected, config)
+
+
+def attach_close_fade_coin_market_context(features: pl.DataFrame, config: DailyCloseFadeConfig) -> pl.DataFrame:
+    if features.is_empty():
+        return features
+    if "bar_coverage" not in features.columns:
+        return features.with_columns(
+            [
+                pl.lit(None, dtype=pl.Float64).alias("market_median_day_return"),
+                pl.lit(None, dtype=pl.Float64).alias("coin_excess_vs_market"),
+            ]
+        )
+    market = (
+        features.filter((pl.col("signal_minute") == config.signal_minute) & (pl.col("bar_coverage") >= 0.95))
+        .group_by(["date", "signal_ts_ms"], maintain_order=True)
+        .agg(pl.col("day_return").median().alias("market_median_day_return"))
+    )
+    return features.join(market, on=["date", "signal_ts_ms"], how="left").with_columns(
+        (pl.col("day_return") - pl.col("market_median_day_return")).alias("coin_excess_vs_market")
+    )
+
+
+def attach_close_fade_position_sizing(selected: pl.DataFrame, config: DailyCloseFadeConfig) -> pl.DataFrame:
+    if selected.is_empty():
+        return selected
+    selected_counts = selected.group_by("signal_ts_ms").len(name="selected_count")
+    selected = selected.drop("selected_count", strict=False).join(selected_counts, on="signal_ts_ms", how="left")
+    sizing = config.position_sizing.strip().lower()
+    if sizing == "equal":
+        return selected.with_columns((pl.lit(config.gross_exposure) / pl.col("selected_count")).alias("position_target_weight"))
+    if sizing != "score_capped":
+        raise ValueError(f"Unknown daily close fade position_sizing: {config.position_sizing}")
+
+    rows: list[dict[str, Any]] = []
+    for _, group in selected.sort(["signal_ts_ms", "entry_rank"]).group_by("signal_ts_ms", maintain_order=True):
+        group_rows = group.to_dicts()
+        scores = [
+            max(float(row.get(config.score) or row.get("score") or 0.0), EPSILON) ** config.score_weight_power
+            for row in group_rows
+        ]
+        weights = capped_proportional_weights(
+            scores,
+            gross_exposure=config.gross_exposure,
+            max_weight=config.max_position_weight,
+        )
+        for row, weight in zip(group_rows, weights, strict=True):
+            row["position_target_weight"] = weight
+            rows.append(row)
+    return pl.DataFrame(rows, infer_schema_length=None).sort(["signal_ts_ms", "entry_rank"])
+
+
+def capped_proportional_weights(scores: list[float], *, gross_exposure: float, max_weight: float) -> list[float]:
+    if not scores:
+        return []
+    if max_weight <= 0.0:
+        total = sum(max(score, EPSILON) for score in scores)
+        return [gross_exposure * max(score, EPSILON) / total for score in scores]
+
+    weights = [0.0] * len(scores)
+    remaining = set(range(len(scores)))
+    remaining_exposure = gross_exposure
+    while remaining and remaining_exposure > EPSILON:
+        total_score = sum(max(scores[index], EPSILON) for index in remaining)
+        proposed = {
+            index: remaining_exposure * max(scores[index], EPSILON) / total_score
+            for index in remaining
+        } if total_score > EPSILON else {
+            index: remaining_exposure / len(remaining)
+            for index in remaining
+        }
+        capped = [index for index, value in proposed.items() if value > max_weight]
+        if not capped:
+            for index, value in proposed.items():
+                weights[index] = value
+            break
+        for index in capped:
+            weights[index] = max_weight
+            remaining_exposure -= max_weight
+            remaining.remove(index)
+        if len(capped) == len(proposed):
+            break
+    return weights
+
+
+def _filter_coin_quality(df: pl.DataFrame, config: DailyCloseFadeConfig) -> pl.DataFrame:
+    filters: list[pl.Expr] = []
+    if config.coin_excess_vs_market_min > 0.0:
+        _require_feature_column(df, "coin_excess_vs_market", "coin_excess_vs_market_min")
+        filters.append(pl.col("coin_excess_vs_market").fill_null(-999.0) >= config.coin_excess_vs_market_min)
+    if config.coin_vwap_extension_min > 0.0:
+        _require_feature_column(df, "vwap_extension", "coin_vwap_extension_min")
+        filters.append(pl.col("vwap_extension").fill_null(-999.0) >= config.coin_vwap_extension_min)
+    if config.coin_late_volume_ratio_min > 0.0:
+        _require_feature_column(df, "late_volume_ratio", "coin_late_volume_ratio_min")
+        filters.append(pl.col("late_volume_ratio").fill_null(-999.0) >= config.coin_late_volume_ratio_min)
+    for expr in filters:
+        df = df.filter(expr)
+    return df
+
+
+def _require_feature_column(df: pl.DataFrame, column: str, knob: str) -> None:
+    if column not in df.columns:
+        raise ValueError(f"{knob} requires feature column {column!r}")
 
 
 def build_close_fade_diagnostic_observations(
@@ -1171,6 +1274,16 @@ def _validate_close_fade_config(config: DailyCloseFadeConfig) -> None:
         raise ValueError("daily close fade entry_delay_minutes must be non-negative")
     if config.gross_exposure <= 0.0:
         raise ValueError("daily close fade gross_exposure must be positive")
+    if config.coin_excess_vs_market_min < 0.0:
+        raise ValueError("daily close fade coin_excess_vs_market_min must be non-negative")
+    if config.coin_vwap_extension_min < 0.0:
+        raise ValueError("daily close fade coin_vwap_extension_min must be non-negative")
+    if config.coin_late_volume_ratio_min < 0.0:
+        raise ValueError("daily close fade coin_late_volume_ratio_min must be non-negative")
+    if config.position_sizing.strip().lower() not in {"equal", "score_capped"}:
+        raise ValueError("daily close fade position_sizing must be equal or score_capped")
+    if config.score_weight_power < 0.0:
+        raise ValueError("daily close fade score_weight_power must be non-negative")
     if config.stop_loss_pct < 0.0:
         raise ValueError("daily close fade stop_loss_pct must be non-negative")
     if not 0.0 <= config.take_profit_pct < 1.0:
@@ -2237,6 +2350,8 @@ def _simulate_short_trade(
         "pump_like": bool(row.get("pump_like")),
         "late_volume_ratio": float(row.get("late_volume_ratio") or 0.0),
         "vwap_extension": float(row.get("vwap_extension") or 0.0),
+        "market_median_day_return": float(row.get("market_median_day_return") or 0.0),
+        "coin_excess_vs_market": float(row.get("coin_excess_vs_market") or 0.0),
         "baseline_liquidity_turnover": float(row.get("baseline_liquidity_turnover") or 0.0),
         "baseline_liquidity_rank": int(row.get("baseline_liquidity_rank") or 0),
         "age_days": float(row.get("age_days") or 0.0),
@@ -2275,6 +2390,11 @@ def _simulate_short_trade(
         "liquidity_rank_max": config.liquidity_rank_max,
         "min_baseline_turnover": config.min_baseline_turnover,
         "max_position_weight": config.max_position_weight,
+        "position_sizing": config.position_sizing,
+        "score_weight_power": config.score_weight_power,
+        "coin_excess_vs_market_min": config.coin_excess_vs_market_min,
+        "coin_vwap_extension_min": config.coin_vwap_extension_min,
+        "coin_late_volume_ratio_min": config.coin_late_volume_ratio_min,
         "max_trade_notional_pct_of_day_turnover": config.max_trade_notional_pct_of_day_turnover,
         "max_trade_notional_pct_of_baseline_turnover": config.max_trade_notional_pct_of_baseline_turnover,
         "top_n": config.top_n,
@@ -2287,7 +2407,7 @@ def _close_fade_position_weight(
     config: DailyCloseFadeConfig,
     selected_count: int,
 ) -> dict[str, Any]:
-    target_weight = config.gross_exposure / max(selected_count, 1)
+    target_weight = float(row.get("position_target_weight") or (config.gross_exposure / max(selected_count, 1)))
     caps: list[tuple[float, str]] = [(target_weight, "target")]
     if config.max_position_weight > 0.0:
         caps.append((config.max_position_weight, "max_position_weight"))

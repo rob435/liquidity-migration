@@ -68,10 +68,15 @@ daily_close_fade:
   liquidity_rank_max: 150
   min_baseline_turnover: 0.0
   account_equity: 10000.0
-  max_position_weight: 0.0
+  max_position_weight: 0.80
   max_trade_notional_pct_of_day_turnover: 0.0
   max_trade_notional_pct_of_baseline_turnover: 0.0
   gross_exposure: 1.0
+  coin_excess_vs_market_min: 0.08
+  coin_vwap_extension_min: 0.035
+  coin_late_volume_ratio_min: 1.0
+  position_sizing: score_capped
+  score_weight_power: 1.0
   stop_loss_pct: 0.20
   take_profit_pct: 0.0
   basket_stop_loss_pct: 0.0

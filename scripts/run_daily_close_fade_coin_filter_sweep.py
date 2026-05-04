@@ -142,6 +142,7 @@ def build_coin_filter_specs(
 def attach_coin_market_context(features: pl.DataFrame, config: DailyCloseFadeConfig) -> pl.DataFrame:
     if features.is_empty():
         return features
+    features = features.drop(["market_median_day_return", "coin_excess_vs_market"], strict=False)
     market = (
         features.filter((pl.col("signal_minute") == config.signal_minute) & (pl.col("bar_coverage") >= 0.95))
         .group_by(["date", "signal_ts_ms"], maintain_order=True)
@@ -446,7 +447,15 @@ def format_coin_filter_sweep_report(payload: dict[str, Any], results: pl.DataFra
 
 
 def _base_config(base: DailyCloseFadeConfig, args: argparse.Namespace) -> DailyCloseFadeConfig:
-    return replace(base)
+    del args
+    return replace(
+        base,
+        coin_excess_vs_market_min=0.0,
+        coin_vwap_extension_min=0.0,
+        coin_late_volume_ratio_min=0.0,
+        position_sizing="equal",
+        max_position_weight=0.0,
+    )
 
 
 def _filter_signal_window(df: pl.DataFrame, start_ms: int, end_ms: int) -> pl.DataFrame:

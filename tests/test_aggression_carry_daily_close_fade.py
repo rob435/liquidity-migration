@@ -13,6 +13,7 @@ from aggression_carry.daily_close_fade import (
     run_daily_close_fade_diagnostics,
     run_daily_close_fade_grid,
     run_daily_close_fade_sleeves,
+    select_close_fade_candidates,
 )
 from aggression_carry.storage import read_dataset, write_dataset
 
@@ -492,6 +493,40 @@ def test_daily_close_fade_capacity_caps_trade_weight(tmp_path) -> None:
     assert payload["summary"]["capacity_limited_trades"] == 2
 
 
+def test_daily_close_fade_score_capped_sizing_weights_selected_pumps() -> None:
+    features = pl.DataFrame(
+        [
+            _feature_candidate("AAAUSDT", 0.24, 0.12, 0.050, 1.6),
+            _feature_candidate("BBBUSDT", 0.12, 0.10, 0.040, 1.3),
+            _feature_candidate("CCCUSDT", 0.06, 0.04, 0.040, 1.4),
+        ],
+        infer_schema_length=None,
+    )
+
+    selected = select_close_fade_candidates(
+        features,
+        DailyCloseFadeConfig(
+            signal_minute=23 * 60,
+            top_n=5,
+            gross_exposure=1.0,
+            score="vol_adjusted_day_return",
+            pump_filter="pump",
+            coin_excess_vs_market_min=0.08,
+            coin_vwap_extension_min=0.035,
+            coin_late_volume_ratio_min=1.0,
+            position_sizing="score_capped",
+            max_position_weight=0.80,
+            score_weight_power=1.0,
+            exclude_symbols=(),
+        ),
+    ).sort("entry_rank")
+
+    assert selected["symbol"].to_list() == ["AAAUSDT", "BBBUSDT"]
+    weights = selected["position_target_weight"].to_list()
+    assert round(weights[0], 6) == round(0.24 / 0.36, 6)
+    assert round(weights[1], 6) == round(0.12 / 0.36, 6)
+
+
 def test_daily_close_fade_sleeves_compare_major_core_microcap(tmp_path) -> None:
     _write_close_fade_liquidity_fixture(tmp_path)
 
@@ -519,6 +554,30 @@ def test_daily_close_fade_sleeves_compare_major_core_microcap(tmp_path) -> None:
     assert set(trades["sleeve"].to_list()) == {"major_control"}
     assert results.filter(pl.col("sleeve") == "core")["trade_count"].item() == 0
     assert results.filter(pl.col("sleeve") == "microcap")["trade_count"].item() == 0
+
+
+def _feature_candidate(
+    symbol: str,
+    score: float,
+    coin_excess: float,
+    vwap_extension: float,
+    late_volume_ratio: float,
+) -> dict:
+    return {
+        "symbol": symbol,
+        "date": "2026-01-01",
+        "signal_ts_ms": 1_000,
+        "signal_minute": 23 * 60,
+        "eligible": True,
+        "pump_like": True,
+        "vol_adjusted_day_return": score,
+        "day_return": score / 10.0,
+        "day_turnover": 1_000_000.0,
+        "last_60m_turnover": 100_000.0,
+        "coin_excess_vs_market": coin_excess,
+        "vwap_extension": vwap_extension,
+        "late_volume_ratio": late_volume_ratio,
+    }
 
 
 def _write_close_fade_liquidity_fixture(tmp_path) -> None:

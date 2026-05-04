@@ -105,6 +105,11 @@ class DailyCloseFadeConfig:
     max_trade_notional_pct_of_day_turnover: float = 0.0
     max_trade_notional_pct_of_baseline_turnover: float = 0.0
     gross_exposure: float = 1.0
+    coin_excess_vs_market_min: float = 0.0
+    coin_vwap_extension_min: float = 0.0
+    coin_late_volume_ratio_min: float = 0.0
+    position_sizing: str = "equal"
+    score_weight_power: float = 1.0
     stop_loss_pct: float = 0.0
     take_profit_pct: float = 0.0
     basket_stop_loss_pct: float = 0.0
@@ -308,6 +313,11 @@ def _merge_daily_close_fade_config(payload: dict[str, Any] | None) -> DailyClose
             payload.get("max_trade_notional_pct_of_baseline_turnover", 0.0)
         ),
         gross_exposure=float(payload.get("gross_exposure", 1.0)),
+        coin_excess_vs_market_min=float(payload.get("coin_excess_vs_market_min", 0.0)),
+        coin_vwap_extension_min=float(payload.get("coin_vwap_extension_min", 0.0)),
+        coin_late_volume_ratio_min=float(payload.get("coin_late_volume_ratio_min", 0.0)),
+        position_sizing=str(payload.get("position_sizing", "equal")),
+        score_weight_power=float(payload.get("score_weight_power", 1.0)),
         stop_loss_pct=float(payload.get("stop_loss_pct", 0.0)),
         take_profit_pct=float(payload.get("take_profit_pct", 0.0)),
         basket_stop_loss_pct=float(payload.get("basket_stop_loss_pct", 0.0)),
