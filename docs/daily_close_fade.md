@@ -219,6 +219,33 @@ Use the wider `22:15,22:45,23:00` by `1,15,60,120` by `30,60,120,180`
 diagnostic only as a batch job. On the 3-year 1m current top-160 dataset it is
 large enough to be annoying on a laptop.
 
+Run fixed train/validation/OOS split diagnostics:
+
+```bash
+python scripts/run_daily_close_fade_split_diagnostics.py \
+  --data-root data/daily-close-fade-1m-3y-current-top160-20230503-20260503 \
+  --config configs/volume_alpha.default.yaml \
+  --splits train_2023_2024:2023-05-03:2024-05-03,validation_2024_2025:2024-05-03:2025-05-03,oos_2025_2026:2025-05-03:2026-05-03 \
+  --signal-times 22:15 \
+  --entry-delays 1,15,60 \
+  --horizons 60,180 \
+  --scores vol_adjusted_day_return,day_return,late_volume_ratio,vwap_extension,pump_score \
+  --top-ns 3,5,10 \
+  --pump-filter pump \
+  --liquidity-rank-min 31 \
+  --liquidity-rank-max 150
+```
+
+On Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_daily_close_fade_oos_splits.ps1
+```
+
+The split runner is intentionally conservative. It ranks scenarios by whether
+they survive each split after costs, not by the single best historical return.
+That is the right way to use it before touching TP/SL rules.
+
 Build a public-archive symbol/date manifest for walk-forward universe research:
 
 ```bash
@@ -418,6 +445,12 @@ Corrected current-universe benchmarks, still survivorship-biased:
   That is below the configured round-trip cost model. The matching costed
   trade-ledger check with 20% disaster stop and no adaptive exit returned
   -49.50%. So the naked entry is not tradable as-is.
+- split diagnostics are even stricter. On the same current top-160 sample split
+  into 2023-2024 train, 2024-2025 validation, and 2025-2026 OOS windows, no raw
+  diagnostic scenario passed costs in all three windows. The strongest 2025-2026
+  `pump_score` setups were positive after costs, but they failed in the older
+  windows. This means the current adaptive-exit result is not enough by itself;
+  promotion needs point-in-time universe work and stronger entry conditioning.
 - research artifacts are under
   `data/research_reports/liquidity_rank_filter/`.
 
