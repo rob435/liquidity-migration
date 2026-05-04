@@ -100,12 +100,15 @@ data/research_reports/risk_on_breadth_sizing_5950x/daily_close_fade_sizing_sweep
 data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_bucket_sweep_summary.md
 data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_promotion_splits/<bucket>/volume_grid_split_summary.md
 data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_promotion_splits/<bucket>/promotion/volume_promotion_report.md
+data/research_reports/research_log/research_log.md
 ```
 
 The volume leg defaults to `-VolumePreset promotion`. That preset tests
 `dollar_volume_rank`, `volume_change_1d`, `volume_change_3d`,
 `volume_persistence`, and `volume_composite`, then applies fixed train,
 validation, and OOS promotion gates by liquidity bucket.
+It also writes a research run record with git metadata, data roots, config
+hashes, artifact hashes, bias labels, and promotion-gate summaries.
 
 The daily-close data root is large 1m kline data and is not part of the volume
 download. If it is missing, `-Suite both` warns, skips daily-close, and continues

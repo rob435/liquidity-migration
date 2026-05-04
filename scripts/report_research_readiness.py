@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 from pathlib import Path
 from typing import Any
 
 
-DEFAULT_VOLUME_PROMOTION = (
-    "data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_grid_splits/volume_promotion_report.json"
+DEFAULT_VOLUME_PROMOTION_GLOB = (
+    "data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_promotion_splits/*/promotion/"
+    "volume_promotion_report.json"
 )
 DEFAULT_CLOSE_FADE_PROMOTION = (
     "data/daily-close-fade-1m-3y-current-top160-20230503-20260503/reports/"
@@ -18,9 +20,14 @@ DEFAULT_PIT_COVERAGE = "data/daily-close-fade-pit-20230503-20260503/reports/arch
 
 def main() -> int:
     args = parse_args()
+    volume_paths = _promotion_paths(args.volume_promotion, args.volume_promotion_glob)
     checks = [
         evaluate_pit_coverage(Path(args.pit_coverage)),
-        evaluate_promotion(Path(args.volume_promotion), name="volume_promotion"),
+        *(
+            [evaluate_promotion(path, name=f"volume_promotion:{_promotion_label(path)}") for path in volume_paths]
+            if volume_paths
+            else [_missing_check("volume_promotion", Path(args.volume_promotion_glob))]
+        ),
         evaluate_promotion(Path(args.close_fade_promotion), name="close_fade_promotion"),
     ]
     payload = {
@@ -43,7 +50,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Summarize alpha-research coverage and promotion-gate readiness.")
     parser.add_argument("--output-dir", default="data/research_reports/readiness")
     parser.add_argument("--pit-coverage", default=DEFAULT_PIT_COVERAGE)
-    parser.add_argument("--volume-promotion", default=DEFAULT_VOLUME_PROMOTION)
+    parser.add_argument(
+        "--volume-promotion",
+        action="append",
+        help="Explicit volume promotion report JSON. Can be repeated. Overrides the default glob when provided.",
+    )
+    parser.add_argument("--volume-promotion-glob", default=DEFAULT_VOLUME_PROMOTION_GLOB)
     parser.add_argument("--close-fade-promotion", default=DEFAULT_CLOSE_FADE_PROMOTION)
     parser.add_argument(
         "--strict",
@@ -104,6 +116,18 @@ def overall_status(checks: list[dict[str, Any]], *, strict: bool) -> str:
     if hard_failures:
         return "fail"
     return "pass"
+
+
+def _promotion_paths(explicit_paths: list[str] | None, pattern: str) -> list[Path]:
+    if explicit_paths:
+        return [Path(item) for item in explicit_paths]
+    return [Path(item) for item in sorted(glob.glob(pattern))]
+
+
+def _promotion_label(path: Path) -> str:
+    if path.parent.name == "promotion":
+        return path.parent.parent.name
+    return path.stem
 
 
 def format_readiness_report(payload: dict[str, Any]) -> str:

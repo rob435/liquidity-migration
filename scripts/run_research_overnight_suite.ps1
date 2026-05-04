@@ -19,7 +19,8 @@ param(
     [string]$VolumeUniverseName = "top160-current",
     [string]$VolumeScores = "",
     [string]$VolumeSplitBuckets = "",
-    [switch]$SkipVolumeSplitPromotion
+    [switch]$SkipVolumeSplitPromotion,
+    [switch]$SkipResearchLog
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,6 +37,24 @@ function Invoke-Checked {
     Write-Host ""
     Write-Host "==> $Name"
     & $Command
+    if ($LASTEXITCODE -ne 0) {
+        throw "$Name failed with exit code $LASTEXITCODE."
+    }
+}
+
+function Invoke-AllowGateFailure {
+    param(
+        [string]$Name,
+        [scriptblock]$Command
+    )
+
+    Write-Host ""
+    Write-Host "==> $Name"
+    & $Command
+    if ($LASTEXITCODE -eq 2) {
+        Write-Warning "$Name completed with failing or missing gates. Continuing so the run can be logged."
+        return
+    }
     if ($LASTEXITCODE -ne 0) {
         throw "$Name failed with exit code $LASTEXITCODE."
     }
@@ -150,6 +169,57 @@ try {
         }
     }
 
+    if (-not $SkipResearchLog) {
+        Invoke-AllowGateFailure "Writing research readiness report" {
+            & $Python .\scripts\report_research_readiness.py
+        }
+
+        $ArtifactArgs = @(
+            ".\scripts\write_research_run_record.py",
+            "--name", "overnight-research-suite",
+            "--strategy", $Suite,
+            "--status", "benchmark",
+            "--bias", "current_universe_biased",
+            "--intent", "Automated overnight research sweep with explicit artifacts, gates, and hashes.",
+            "--decision", "Do not promote from headline return alone; inspect split gates and artifact manifests.",
+            "--next-step", "Review research_log.md, promotion reports, and any failing gates before changing config.",
+            "--constraint", "Use 8 workers on Windows to avoid Python process-spawn and memory failures.",
+            "--constraint", "Current-top universe results remain biased until point-in-time archive validation exists.",
+            "--tag", "overnight",
+            "--config", $Config,
+            "--artifact", "data/research_reports/readiness/research_readiness_report.json",
+            "--artifact", "data/research_reports/readiness/research_readiness_report.md"
+        )
+        if ($Suite -eq "both" -or $Suite -eq "daily-close") {
+            $ArtifactArgs += @(
+                "--data-root", $DailyCloseDataRoot,
+                "--artifact", "$DailyCloseReportDir/daily_close_fade_sizing_sweep.md",
+                "--artifact", "$DailyCloseReportDir/daily_close_fade_sizing_sweep.csv"
+            )
+        }
+        if ($Suite -eq "both" -or $Suite -eq "volume") {
+            $ArtifactArgs += @(
+                "--data-root", $VolumeDataRoot,
+                "--artifact", "$VolumeDataRoot/reports/volume_alpha_report.json",
+                "--artifact", "$VolumeDataRoot/reports/volume_alpha_report.md",
+                "--artifact", "$VolumeDataRoot/reports/volume_bucket_sweep_summary.csv",
+                "--artifact", "$VolumeDataRoot/reports/volume_bucket_sweep_summary.md",
+                "--artifact-glob", "$VolumeDataRoot/reports/volume_promotion_splits/*/volume_grid_split_summary.csv",
+                "--artifact-glob", "$VolumeDataRoot/reports/volume_promotion_splits/*/volume_grid_split_summary.md",
+                "--artifact-glob", "$VolumeDataRoot/reports/volume_promotion_splits/*/promotion/volume_promotion_report.json",
+                "--artifact-glob", "$VolumeDataRoot/reports/volume_promotion_splits/*/promotion/volume_promotion_report.md",
+                "--artifact-glob", "$VolumeDataRoot/reports/volume_promotion_splits/*/promotion/volume_promotion_candidates.csv"
+            )
+        }
+
+        Invoke-Checked "Writing research run record" {
+            & $Python @ArtifactArgs
+        }
+    }
+    else {
+        Write-Host "Skipping research log because -SkipResearchLog was provided."
+    }
+
     Write-Host ""
     Write-Host "Done."
     if ($DailyCloseWasRun) {
@@ -160,6 +230,9 @@ try {
     }
     if ($Suite -eq "both" -or $Suite -eq "volume") {
         Write-Host "Volume report: $VolumeDataRoot/reports/volume_bucket_sweep_summary.md"
+    }
+    if (-not $SkipResearchLog) {
+        Write-Host "Research log: data/research_reports/research_log/research_log.md"
     }
     Write-Host "Log: $LogPath"
 }

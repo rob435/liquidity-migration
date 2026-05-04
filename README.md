@@ -122,6 +122,15 @@ volume-change scores plus dollar-volume rank, then runs train/validation/OOS
 promotion gates by liquidity bucket. It is slower than the old headline grid,
 but much more useful.
 
+Each overnight suite also writes an auditable research record:
+
+```text
+data/research_reports/research_log/research_log.md
+data/research_reports/research_log/runs/<run_id>.md
+```
+
+Review that log before changing promoted configs or rerunning a similar idea.
+
 ## Point-In-Time Proof
 
 Do not promote the TWAP result to real money until:

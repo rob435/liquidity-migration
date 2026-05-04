@@ -11,7 +11,7 @@ Default inputs:
 
 ```text
 data/daily-close-fade-pit-20230503-20260503/reports/archive_pit_coverage_report.json
-data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_grid_splits/volume_promotion_report.json
+data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_promotion_splits/*/promotion/volume_promotion_report.json
 data/daily-close-fade-1m-3y-current-top160-20230503-20260503/reports/daily_close_fade_grid_splits/daily_close_fade_promotion_report.json
 ```
 
@@ -55,3 +55,33 @@ data/research_reports/manifest/research_artifact_manifest.json
 Use `--strict` when missing artifacts should fail the command. You can include
 extra files with repeated `--artifact path/to/file` or `--artifact-glob
 'data/.../reports/*.csv'` arguments.
+
+## Research Run Log
+
+Every serious overnight run should append a research run record:
+
+```bash
+python scripts/write_research_run_record.py \
+  --name "overnight-research-suite" \
+  --strategy volume \
+  --status benchmark \
+  --bias current_universe_biased \
+  --intent "Automated overnight volume promotion sweep." \
+  --config configs/volume_alpha.default.yaml \
+  --data-root data/agc-bybit-3y-auto150-20230503-20260503 \
+  --artifact-glob 'data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_promotion_splits/*/promotion/volume_promotion_report.json'
+```
+
+Output:
+
+```text
+data/research_reports/research_log/research_log.md
+data/research_reports/research_log/research_log.jsonl
+data/research_reports/research_log/runs/<run_id>.md
+data/research_reports/research_log/runs/<run_id>.json
+```
+
+The Windows overnight suite writes this automatically. The point is not
+bureaucracy; it is to preserve intent, constraints, config hashes, artifact
+hashes, bias labels, and promotion decisions before we are tempted by a pretty
+equity curve.

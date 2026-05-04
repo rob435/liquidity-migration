@@ -47,3 +47,14 @@ def test_research_readiness_fails_existing_bad_gate(tmp_path: Path) -> None:
 
     assert check["status"] == "fail"
     assert readiness.overall_status([check], strict=False) == "fail"
+
+
+def test_research_readiness_expands_volume_promotion_glob(tmp_path: Path) -> None:
+    path = tmp_path / "reports" / "tail" / "promotion" / "volume_promotion_report.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"rows": 10, "promotable_rows": 1}), encoding="utf-8")
+
+    paths = readiness._promotion_paths(None, str(tmp_path / "reports" / "*" / "promotion" / "*.json"))
+
+    assert paths == [path]
+    assert readiness._promotion_label(path) == "tail"

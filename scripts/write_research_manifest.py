@@ -14,8 +14,15 @@ DEFAULT_ARTIFACTS = (
     "data/research_reports/readiness/research_readiness_report.json",
     "data/research_reports/readiness/research_readiness_report.md",
     "data/daily-close-fade-pit-20230503-20260503/reports/archive_pit_coverage_report.json",
-    "data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_grid_splits/volume_promotion_report.json",
+    "data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_promotion_splits/core/promotion/volume_promotion_report.json",
+    "data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_promotion_splits/mid/promotion/volume_promotion_report.json",
+    "data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_promotion_splits/tail/promotion/volume_promotion_report.json",
+    "data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_promotion_splits/broad/promotion/volume_promotion_report.json",
     "data/daily-close-fade-1m-3y-current-top160-20230503-20260503/reports/daily_close_fade_grid_splits/daily_close_fade_promotion_report.json",
+)
+DEFAULT_ARTIFACT_GLOBS = (
+    "data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_promotion_splits/*/promotion/volume_promotion_report.json",
+    "data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_promotion_splits/*/promotion/volume_promotion_report.md",
 )
 
 
@@ -26,7 +33,7 @@ def main() -> int:
     manifest = build_research_manifest(
         repo_root=repo_root,
         artifact_paths=artifacts,
-        artifact_globs=args.artifact_glob or (),
+        artifact_globs=tuple(DEFAULT_ARTIFACT_GLOBS) + tuple(args.artifact_glob or ()),
     )
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
