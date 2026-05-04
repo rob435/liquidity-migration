@@ -200,6 +200,18 @@ def build_parser() -> argparse.ArgumentParser:
     close_fade.add_argument("--mfe-giveback-pct", type=float, default=None, help="Fraction of max favorable excursion allowed to give back; 0 disables.")
     close_fade.add_argument("--vwap-reversion-pct", type=float, default=None, help="Fraction of entry-to-intraday-VWAP gap to target; 0 disables.")
     close_fade.add_argument("--stop-delay-minutes", type=int, default=None, help="Minutes before stops can trigger.")
+    close_fade.add_argument(
+        "--profit-protection-delay-minutes",
+        type=int,
+        default=None,
+        help="Minutes after final entry fill before adaptive profit exits can trigger. Defaults to stop delay.",
+    )
+    close_fade.add_argument(
+        "--twap-stop-adding-pct",
+        type=float,
+        default=None,
+        help="During TWAP, stop adding future slices if price moves this far against the short. 0 disables.",
+    )
     close_fade.add_argument("--cost-multiplier", type=float, default=None, help="Multiplier on configured round-trip costs.")
     close_fade.add_argument("--exclude-symbols", default=None, help="Comma-separated static symbol blocklist.")
     close_fade.add_argument("--include-majors", action="store_true", help="Do not exclude BTC/ETH/SOL/BNB.")
@@ -917,6 +929,16 @@ def _close_fade_config_from_args(base: DailyCloseFadeConfig, args: argparse.Name
             args.vwap_reversion_pct if args.vwap_reversion_pct is not None else base.vwap_reversion_pct
         ),
         stop_delay_minutes=args.stop_delay_minutes if args.stop_delay_minutes is not None else base.stop_delay_minutes,
+        profit_protection_delay_minutes=(
+            getattr(args, "profit_protection_delay_minutes", None)
+            if getattr(args, "profit_protection_delay_minutes", None) is not None
+            else base.profit_protection_delay_minutes
+        ),
+        twap_stop_adding_pct=(
+            getattr(args, "twap_stop_adding_pct", None)
+            if getattr(args, "twap_stop_adding_pct", None) is not None
+            else base.twap_stop_adding_pct
+        ),
         cost_multiplier=args.cost_multiplier if args.cost_multiplier is not None else base.cost_multiplier,
         min_symbols=base.min_symbols,
         exclude_symbols=_close_fade_exclusions(args, base.exclude_symbols),
@@ -1153,6 +1175,18 @@ def _add_forward_fade_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mfe-giveback-pct", type=float, default=None, help="Fraction of max favorable excursion allowed to give back; 0 disables.")
     parser.add_argument("--vwap-reversion-pct", type=float, default=None, help="Fraction of entry-to-intraday-VWAP gap to target; 0 disables.")
     parser.add_argument("--stop-delay-minutes", type=int, default=None, help="Minutes before stops can trigger.")
+    parser.add_argument(
+        "--profit-protection-delay-minutes",
+        type=int,
+        default=None,
+        help="Minutes after final entry fill before adaptive profit exits can trigger. Defaults to stop delay.",
+    )
+    parser.add_argument(
+        "--twap-stop-adding-pct",
+        type=float,
+        default=None,
+        help="During TWAP, stop adding future slices if price moves this far against the short. 0 disables.",
+    )
     parser.add_argument("--cost-multiplier", type=float, default=None, help="Multiplier on configured round-trip costs.")
     parser.add_argument("--exclude-symbols", default=None, help="Comma-separated static symbol blocklist.")
     parser.add_argument("--include-majors", action="store_true", help="Do not exclude BTC/ETH/SOL/BNB.")

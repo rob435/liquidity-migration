@@ -87,6 +87,27 @@ def test_cli_parses_forward_audit_telegram(tmp_path: Path) -> None:
     assert args.telegram is True
 
 
+def test_cli_parses_daily_close_fade_entry_risk_knobs(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "daily-close-fade",
+            "--stop-delay-minutes",
+            "0",
+            "--profit-protection-delay-minutes",
+            "15",
+            "--twap-stop-adding-pct",
+            "0.05",
+        ]
+    )
+
+    assert args.command == "daily-close-fade"
+    assert args.stop_delay_minutes == 0
+    assert args.profit_protection_delay_minutes == 15
+    assert args.twap_stop_adding_pct == 0.05
+
+
 def test_cli_parses_daily_close_fade_diagnostics(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [

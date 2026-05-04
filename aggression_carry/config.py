@@ -122,6 +122,8 @@ class DailyCloseFadeConfig:
     mfe_giveback_pct: float = 0.0
     vwap_reversion_pct: float = 0.0
     stop_delay_minutes: int = 15
+    profit_protection_delay_minutes: int | None = None
+    twap_stop_adding_pct: float = 0.0
     cost_multiplier: float = 1.0
     min_symbols: int = 1
     exclude_symbols: tuple[str, ...] = DEFAULT_MAJOR_SYMBOLS
@@ -174,9 +176,11 @@ ACTIVE_DAILY_CLOSE_FADE_DEFAULT = DailyCloseFadeConfig(
     coin_late_volume_ratio_min=1.0,
     position_sizing="score_capped",
     stop_loss_pct=0.20,
+    stop_delay_minutes=0,
     vol_trailing_stop_mult=0.25,
     mfe_giveback_activation_pct=0.01,
     mfe_giveback_pct=0.20,
+    profit_protection_delay_minutes=15,
 )
 
 
@@ -360,6 +364,12 @@ def _merge_daily_close_fade_config(payload: dict[str, Any] | None) -> DailyClose
         mfe_giveback_pct=float(payload.get("mfe_giveback_pct", default.mfe_giveback_pct)),
         vwap_reversion_pct=float(payload.get("vwap_reversion_pct", default.vwap_reversion_pct)),
         stop_delay_minutes=int(payload.get("stop_delay_minutes", default.stop_delay_minutes)),
+        profit_protection_delay_minutes=(
+            int(payload["profit_protection_delay_minutes"])
+            if payload.get("profit_protection_delay_minutes") is not None
+            else default.profit_protection_delay_minutes
+        ),
+        twap_stop_adding_pct=float(payload.get("twap_stop_adding_pct", default.twap_stop_adding_pct)),
         cost_multiplier=float(payload.get("cost_multiplier", default.cost_multiplier)),
         min_symbols=int(payload.get("min_symbols", default.min_symbols)),
         exclude_symbols=_tuple_str(payload, "exclude_symbols", default.exclude_symbols),

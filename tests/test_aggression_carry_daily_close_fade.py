@@ -227,6 +227,73 @@ def test_daily_close_fade_twap_averages_entry_and_delays_profit_protection(tmp_p
     assert trade["post_twap_hold_minutes"] <= 60.0
 
 
+def test_daily_close_fade_twap_hard_stop_can_be_active_from_first_fill(tmp_path) -> None:
+    _write_twap_risk_fixture(tmp_path, spike_minute=5, spike_high=121.0)
+
+    run_daily_close_fade(
+        tmp_path,
+        fade_config=DailyCloseFadeConfig(
+            signal_minute=22 * 60,
+            top_n=1,
+            hold_minutes=60,
+            entry_delay_minutes=0,
+            entry_twap_minutes=60,
+            score="day_return",
+            pump_filter="all",
+            min_age_days=10,
+            stop_loss_pct=0.20,
+            stop_delay_minutes=0,
+            profit_protection_delay_minutes=15,
+            exclude_symbols=(),
+        ),
+        cost_config=CostConfig(maker_fee_bps=0, taker_fee_bps=0, maker_adverse_selection_bps=0, taker_slippage_bps_liquid=0),
+    )
+
+    trade = read_dataset(tmp_path, "daily_close_fade_trades").row(0, named=True)
+
+    assert trade["exit_reason"] == "stop_loss"
+    assert trade["entry_fill_count"] == 6
+    assert trade["entry_fill_fraction"] == 0.10
+    assert trade["stop_active_time"] == "2025-01-15T22:00:00+00:00"
+    assert trade["exit_time"] == "2025-01-15T22:05:00+00:00"
+    assert round(trade["gross_return"], 6) == -0.20
+
+
+def test_daily_close_fade_twap_stop_adding_guard_freezes_partial_entry(tmp_path) -> None:
+    _write_twap_risk_fixture(tmp_path, spike_minute=10, spike_high=109.0, fade_after_spike=True)
+
+    run_daily_close_fade(
+        tmp_path,
+        fade_config=DailyCloseFadeConfig(
+            signal_minute=22 * 60,
+            top_n=1,
+            hold_minutes=60,
+            entry_delay_minutes=0,
+            entry_twap_minutes=60,
+            score="day_return",
+            pump_filter="all",
+            min_age_days=10,
+            stop_loss_pct=0.20,
+            stop_delay_minutes=0,
+            profit_protection_delay_minutes=15,
+            twap_stop_adding_pct=0.08,
+            exclude_symbols=(),
+        ),
+        cost_config=CostConfig(maker_fee_bps=0, taker_fee_bps=0, maker_adverse_selection_bps=0, taker_slippage_bps_liquid=0),
+    )
+
+    trade = read_dataset(tmp_path, "daily_close_fade_trades").row(0, named=True)
+
+    assert trade["twap_stopped_adding"] is True
+    assert trade["twap_stop_adding_time"] == "2025-01-15T22:10:00+00:00"
+    assert trade["entry_complete_time"] == "2025-01-15T22:10:00+00:00"
+    assert trade["profit_protection_active_time"] == "2025-01-15T22:25:00+00:00"
+    assert trade["entry_fill_count"] == 11
+    assert round(trade["entry_fill_fraction"], 6) == round(11 / 60, 6)
+    assert trade["exit_reason"] == "max_hold"
+    assert trade["exit_time"] == "2025-01-15T23:10:00+00:00"
+
+
 def test_daily_close_fade_can_require_archive_membership(tmp_path) -> None:
     _write_close_fade_fixture(tmp_path)
     write_dataset(
@@ -776,6 +843,69 @@ def _write_close_fade_fixture(
                 }
             )
             previous = close
+
+    write_dataset(pl.DataFrame(instruments), tmp_path, "instruments")
+    write_dataset(pl.DataFrame(klines), tmp_path, "klines_1m")
+
+
+def _write_twap_risk_fixture(
+    tmp_path,
+    *,
+    spike_minute: int,
+    spike_high: float,
+    fade_after_spike: bool = False,
+) -> None:
+    start = datetime(2025, 1, 15, tzinfo=UTC)
+    start_ms = int(start.timestamp() * 1000)
+    symbol = "RISKUSDT"
+    instruments = [
+        {
+            "ts_ms": start_ms,
+            "symbol": symbol,
+            "category": "linear",
+            "contract_type": "LinearPerpetual",
+            "status": "Trading",
+            "settle_coin": "USDT",
+            "launch_time_ms": int((start - timedelta(days=40)).timestamp() * 1000),
+            "tick_size": 0.001,
+            "qty_step": 0.001,
+            "min_order_qty": 0.001,
+            "min_notional_value": 5.0,
+            "funding_interval_min": 480,
+            "is_prelisting": False,
+        }
+    ]
+    klines = []
+    previous = 80.0
+    signal_minute = 22 * 60
+    spike_absolute_minute = signal_minute + spike_minute
+    for minute in range(24 * 60 + 240):
+        ts_ms = start_ms + minute * 60_000
+        if minute <= signal_minute:
+            close = 80.0 + 20.0 * minute / signal_minute
+        elif fade_after_spike and minute > spike_absolute_minute:
+            close = 100.0 - 2.0 * min((minute - spike_absolute_minute) / 60.0, 1.0)
+        else:
+            close = 100.0
+        open_price = previous
+        high = max(open_price, close) * 1.001
+        low = min(open_price, close) * 0.999
+        if minute == spike_absolute_minute:
+            high = spike_high
+        klines.append(
+            {
+                "ts_ms": ts_ms,
+                "symbol": symbol,
+                "open": open_price,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume_base": 100.0,
+                "turnover_quote": 100.0 * close,
+                "source": "fixture",
+            }
+        )
+        previous = close
 
     write_dataset(pl.DataFrame(instruments), tmp_path, "instruments")
     write_dataset(pl.DataFrame(klines), tmp_path, "klines_1m")

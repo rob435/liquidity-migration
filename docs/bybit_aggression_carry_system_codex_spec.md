@@ -23,7 +23,7 @@ Signal: 22:00 UTC
 Ranking: day-to-date vol-adjusted return using only data available at 22:00
 Entry: 60 equal 1m slices over [22:00, 23:00)
 Entry price: average filled slice price
-Stop: 20% above average entry, active from first fill + 15m
+Stop: 20% above average entry, active immediately from first fill
 Adaptive exits: active from final add + 15m
 Exit: flatten whole symbol
 Re-entry: none in the same symbol/date

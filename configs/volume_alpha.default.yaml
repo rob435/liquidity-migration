@@ -88,7 +88,9 @@ daily_close_fade:
   mfe_giveback_activation_pct: 0.01
   mfe_giveback_pct: 0.20
   vwap_reversion_pct: 0.0
-  stop_delay_minutes: 15
+  stop_delay_minutes: 0
+  profit_protection_delay_minutes: 15
+  twap_stop_adding_pct: 0.0
   cost_multiplier: 1.0
   min_symbols: 1
   exclude_symbols: [BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT]

@@ -24,7 +24,7 @@ Add slice-level paper/demo execution:
 22:00 UTC: rank candidates from data available at 22:00
 22:00-22:59: submit/record equal 1m entry slices
 entry_price: running average fill price
-first fill + 15m onward: 20% disaster stop on average entry
+first fill onward: 20% disaster stop on average entry
 23:15 onward: vol trail and MFE giveback can flatten the whole symbol
 max hold: 180m after final add
 no same-symbol re-entry that day

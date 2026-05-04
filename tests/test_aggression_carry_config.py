@@ -49,6 +49,9 @@ daily_close_fade:
   mfe_giveback_activation_pct: 0.03
   mfe_giveback_pct: 0.40
   vwap_reversion_pct: 0.50
+  stop_delay_minutes: 0
+  profit_protection_delay_minutes: 15
+  twap_stop_adding_pct: 0.08
 daily_close_fade_grid:
   stop_loss_pcts: [0.0, 0.20]
   take_profit_pcts: [0.0, 0.03, 0.05]
@@ -116,6 +119,9 @@ cost_model:
     assert config.daily_close_fade.mfe_giveback_activation_pct == 0.03
     assert config.daily_close_fade.mfe_giveback_pct == 0.40
     assert config.daily_close_fade.vwap_reversion_pct == 0.50
+    assert config.daily_close_fade.stop_delay_minutes == 0
+    assert config.daily_close_fade.profit_protection_delay_minutes == 15
+    assert config.daily_close_fade.twap_stop_adding_pct == 0.08
     assert config.daily_close_fade_grid.stop_loss_pcts == (0.0, 0.20)
     assert config.daily_close_fade_grid.take_profit_pcts == (0.0, 0.03, 0.05)
     assert config.daily_close_fade_grid.vol_trailing_stop_mults == (0.0, 0.5)

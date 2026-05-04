@@ -1324,8 +1324,18 @@ def _validate_close_fade_config(config: DailyCloseFadeConfig) -> None:
         raise ValueError("daily close fade vwap_reversion_pct must be in [0, 1]")
     if config.stop_delay_minutes < 0:
         raise ValueError("daily close fade stop_delay_minutes must be non-negative")
+    if config.profit_protection_delay_minutes is not None and config.profit_protection_delay_minutes < 0:
+        raise ValueError("daily close fade profit_protection_delay_minutes must be non-negative")
+    if config.twap_stop_adding_pct < 0.0:
+        raise ValueError("daily close fade twap_stop_adding_pct must be non-negative")
     if config.cost_multiplier < 0.0:
         raise ValueError("daily close fade cost_multiplier must be non-negative")
+
+
+def _profit_protection_delay_minutes(config: DailyCloseFadeConfig) -> int:
+    if config.profit_protection_delay_minutes is None:
+        return config.stop_delay_minutes
+    return config.profit_protection_delay_minutes
 
 
 def summarize_close_fade_baskets(trades: pl.DataFrame) -> pl.DataFrame:
@@ -1611,6 +1621,9 @@ def summarize_close_fade(
         "mfe_giveback_activation_pct": config.mfe_giveback_activation_pct,
         "mfe_giveback_pct": config.mfe_giveback_pct,
         "vwap_reversion_pct": config.vwap_reversion_pct,
+        "stop_delay_minutes": config.stop_delay_minutes,
+        "profit_protection_delay_minutes": _profit_protection_delay_minutes(config),
+        "twap_stop_adding_pct": config.twap_stop_adding_pct,
         "cost_multiplier": config.cost_multiplier,
     }
     for reason, count in trades.group_by("exit_reason").len().iter_rows():
@@ -1906,6 +1919,9 @@ def format_close_fade_diagnostics_report(
 def format_close_fade_report(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     config = payload["config"]
+    profit_delay = config.get("profit_protection_delay_minutes")
+    if profit_delay is None:
+        profit_delay = config.get("stop_delay_minutes", 15)
     lines = [
         "# Daily Close Fade Report",
         "",
@@ -1934,6 +1950,9 @@ def format_close_fade_report(payload: dict[str, Any]) -> str:
         f"baseline_turnover_cap={config.get('max_trade_notional_pct_of_baseline_turnover', 0.0):.2%}",
         f"- require_archive_membership: {config.get('require_archive_membership', False)}",
         f"- stop_loss_pct: {config['stop_loss_pct']:.2%}",
+        f"- stop_delay_minutes: {config.get('stop_delay_minutes', 15)}",
+        f"- profit_protection_delay_minutes: {profit_delay}",
+        f"- twap_stop_adding_pct: {config.get('twap_stop_adding_pct', 0.0):.2%}",
         f"- take_profit_pct: {config.get('take_profit_pct', 0.0):.2%}",
         f"- basket_stop_loss_pct: {config.get('basket_stop_loss_pct', 0.0):.2%}",
         f"- trailing_stop_pct: {config['trailing_stop_pct']:.2%}",
@@ -2231,7 +2250,8 @@ def _simulate_short_trade(
     exit_price = float(bars[-1]["close"])
     exit_reason = "max_hold" if exit_ts_ms >= target_exit_ts_ms else "data_end"
     stop_active_ts_ms = entry_start_ts_ms + config.stop_delay_minutes * MS_PER_MINUTE
-    profit_active_ts_ms = entry_complete_ts_ms + config.stop_delay_minutes * MS_PER_MINUTE
+    profit_delay_minutes = _profit_protection_delay_minutes(config)
+    profit_active_ts_ms = entry_complete_ts_ms + profit_delay_minutes * MS_PER_MINUTE
     realized_vol = max(float(row.get("realized_vol") or 0.0), 0.0)
     vol_trailing_stop_pct = realized_vol * config.vol_trailing_stop_mult if config.vol_trailing_stop_mult > 0.0 else 0.0
     vol_trailing_activation_pct = (
@@ -2247,6 +2267,8 @@ def _simulate_short_trade(
     best_price: float | None = None
     max_favorable = 0.0
     max_adverse = 0.0
+    twap_stopped_adding = False
+    twap_stop_adding_ts_ms: int | None = None
 
     for bar in bars:
         ts_ms = int(bar["ts_ms"])
@@ -2260,8 +2282,8 @@ def _simulate_short_trade(
             best_price = entry_price
             entry_complete_ts_ms = ts_ms
             target_exit_ts_ms = entry_complete_ts_ms + config.hold_minutes * MS_PER_MINUTE
-            profit_active_ts_ms = entry_complete_ts_ms + config.stop_delay_minutes * MS_PER_MINUTE
-        elif twap_minutes > 0 and entry_start_ts_ms <= ts_ms < entry_complete_ts_ms:
+            profit_active_ts_ms = entry_complete_ts_ms + profit_delay_minutes * MS_PER_MINUTE
+        elif twap_minutes > 0 and not twap_stopped_adding and entry_start_ts_ms <= ts_ms < entry_complete_ts_ms:
             entry_fill_sum += float(bar["open"])
             entry_fill_count += 1
             entry_price = entry_fill_sum / entry_fill_count
@@ -2285,7 +2307,21 @@ def _simulate_short_trade(
             exit_reason = "stop_loss"
             break
 
-        profit_exits_active = ts_ms >= profit_active_ts_ms and entry_fill_count >= required_fills
+        if (
+            twap_minutes > 0
+            and not twap_stopped_adding
+            and config.twap_stop_adding_pct > 0.0
+            and entry_fill_count < required_fills
+            and high >= entry_price * (1.0 + config.twap_stop_adding_pct)
+        ):
+            twap_stopped_adding = True
+            twap_stop_adding_ts_ms = ts_ms
+            entry_complete_ts_ms = ts_ms
+            target_exit_ts_ms = entry_complete_ts_ms + config.hold_minutes * MS_PER_MINUTE
+            profit_active_ts_ms = entry_complete_ts_ms + profit_delay_minutes * MS_PER_MINUTE
+
+        entry_is_complete = twap_minutes <= 0 or entry_fill_count >= required_fills or twap_stopped_adding
+        profit_exits_active = ts_ms >= profit_active_ts_ms and entry_is_complete
         if profit_exits_active:
             protective_exits: list[tuple[float, str]] = []
             if trailing_active and config.trailing_stop_pct > 0.0:
@@ -2343,7 +2379,7 @@ def _simulate_short_trade(
 
     if entry_fill_count <= 0:
         return None
-    if twap_minutes > 0 and entry_fill_count < required_fills and exit_reason != "stop_loss":
+    if twap_minutes > 0 and entry_fill_count < required_fills and exit_reason != "stop_loss" and not twap_stopped_adding:
         return None
 
     gross_return = _short_return(entry_price, exit_price)
@@ -2385,8 +2421,15 @@ def _simulate_short_trade(
         "entry_twap_minutes": config.entry_twap_minutes,
         "entry_fill_count": entry_fill_count,
         "entry_fill_fraction": fill_fraction,
+        "stop_active_ts_ms": stop_active_ts_ms,
+        "stop_active_time": _dt_from_ms(stop_active_ts_ms).isoformat(),
         "profit_protection_active_ts_ms": profit_active_ts_ms,
         "profit_protection_active_time": _dt_from_ms(profit_active_ts_ms).isoformat(),
+        "profit_protection_delay_minutes": profit_delay_minutes,
+        "twap_stop_adding_pct": config.twap_stop_adding_pct,
+        "twap_stopped_adding": twap_stopped_adding,
+        "twap_stop_adding_ts_ms": int(twap_stop_adding_ts_ms or 0),
+        "twap_stop_adding_time": _dt_from_ms(twap_stop_adding_ts_ms).isoformat() if twap_stop_adding_ts_ms else "",
         "exit_ts_ms": exit_ts_ms,
         "exit_time": exit_dt.isoformat(),
         "entry_price": entry_price,
@@ -2436,6 +2479,7 @@ def _simulate_short_trade(
         "mfe_giveback_activation_pct": config.mfe_giveback_activation_pct,
         "mfe_giveback_pct": config.mfe_giveback_pct,
         "vwap_reversion_pct": config.vwap_reversion_pct,
+        "stop_delay_minutes": config.stop_delay_minutes,
         "cost_multiplier": config.cost_multiplier,
         "pump_filter": config.pump_filter,
         "liquidity_lookback_days": config.liquidity_lookback_days,
