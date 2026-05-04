@@ -18,6 +18,9 @@
 ## graphify
 
 This project has a graphify knowledge graph at graphify-out/.
+`graphify-out/GRAPH_REPORT.md` is tracked as the lightweight navigation report.
+`graphify-out/graph.json` is generated locally and intentionally ignored to keep
+the repo light.
 
 Rules:
 - Before answering architecture or codebase questions, read graphify-out/GRAPH_REPORT.md for god nodes and community structure
