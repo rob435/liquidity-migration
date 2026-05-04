@@ -150,6 +150,22 @@ python -m aggression_carry \
   forward-report
 ```
 
+Write the paper-vs-demo audit after demo cycles have run:
+
+```bash
+python -m aggression_carry \
+  --data-root data/forward-paper \
+  --config configs/volume_alpha.default.yaml \
+  forward-audit
+```
+
+The audit joins each sleeve's `forward_paper_trades` to its
+`demo_execution_orders` by paper trade ID. It reports paper expected trade,
+demo entry/exit order state, fill status, entry/exit slippage, missed-trade
+reason, sleeve attribution, and daily paper-vs-demo PnL. Accepted Bybit demo
+order acknowledgements are not treated as fills; slippage and demo PnL require
+reconciled filled quantity/value.
+
 Override the locked-in daily-close settings:
 
 ```bash
@@ -334,7 +350,8 @@ Suggested schedule for demo shadowing the core sleeve:
 
 The cycle command is the preferred demo-shadow runtime. It keeps sleeves
 separate, prefixes demo order IDs by sleeve, and writes one cycle report plus
-per-sleeve demo execution reports.
+per-sleeve demo execution reports. The VPS `systemd` installer also runs
+`forward-audit` after each cycle so the paper-vs-demo audit stays current.
 
 Dry-run:
 
@@ -450,6 +467,7 @@ Useful schedule:
 - 22:16 UTC: `forward-run` to enter paper trades after the 22:15 signal
 - every 5-15 minutes until flat: `forward-run` to mark stops/exits
 - after the window: `forward-report`
+- after demo shadowing: `forward-audit`
 
 For the three-sleeve observation run, replace `forward-run` with
 `forward-run-sleeves` at the same times.
@@ -464,6 +482,9 @@ data/forward-paper/reports/forward_paper_trades.csv
 data/forward-paper/reports/forward_paper_baskets.csv
 data/forward-paper/reports/forward_sleeves_report.md
 data/forward-paper/reports/forward_sleeves_results.csv
+data/forward-paper/reports/forward_demo_audit_report.md
+data/forward-paper/reports/forward_demo_audit_trades.csv
+data/forward-paper/reports/forward_demo_audit_daily.csv
 data/forward-paper/reports/forward_sleeves/<sleeve>/forward_scan_report.md
 data/forward-paper/reports/forward_sleeves/<sleeve>/forward_paper_report.md
 data/forward-paper/forward_scan_features

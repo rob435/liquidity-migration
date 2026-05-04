@@ -47,6 +47,7 @@ Group=$SERVICE_GROUP
 WorkingDirectory=$REPO_ROOT
 EnvironmentFile=$ENV_FILE
 ExecStart=$PYTHON_BIN -m aggression_carry --data-root $DATA_ROOT --config $CONFIG_PATH bybit-demo-cycle --submit-orders --i-understand-demo-sync --telegram
+ExecStart=$PYTHON_BIN -m aggression_carry --data-root $DATA_ROOT --config $CONFIG_PATH forward-audit
 Nice=5
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7

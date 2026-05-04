@@ -60,6 +60,8 @@ def test_cli_fixture_pipeline_end_to_end(tmp_path: Path) -> None:
     assert (data_root / "reports" / "volume_grid_report.md").exists()
     assert main(["--data-root", str(data_root), "forward-report"]) == 0
     assert (data_root / "reports" / "forward_paper_report.md").exists()
+    assert main(["--data-root", str(data_root), "forward-audit"]) == 0
+    assert (data_root / "reports" / "forward_demo_audit_report.md").exists()
 
 
 def test_cli_parses_forward_sleeves_alias(tmp_path: Path) -> None:
