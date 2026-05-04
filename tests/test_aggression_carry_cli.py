@@ -96,6 +96,12 @@ def test_cli_parses_daily_close_fade_diagnostics(tmp_path: Path) -> None:
             "3,5",
             "--buckets",
             "5",
+            "--start",
+            "2025-01-01",
+            "--end",
+            "2025-02-01",
+            "--cost-multiplier",
+            "2",
             "--pump-filter",
             "pump",
             "--liquidity-rank-min",
@@ -110,6 +116,9 @@ def test_cli_parses_daily_close_fade_diagnostics(tmp_path: Path) -> None:
     assert args.entry_delays == "1,15,60"
     assert args.horizons == "60,180"
     assert args.buckets == 5
+    assert args.start == "2025-01-01"
+    assert args.end == "2025-02-01"
+    assert args.cost_multiplier == 2
     assert args.pump_filter == "pump"
     assert args.liquidity_rank_min == 31
     assert args.liquidity_rank_max == 150

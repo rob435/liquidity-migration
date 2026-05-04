@@ -139,7 +139,15 @@ daily_close_fade_diagnostic_buckets.csv
 daily_close_fade_diagnostic_top_baskets.csv
 daily_close_fade_diagnostic_ic.csv
 daily_close_fade_diagnostic_scenarios.csv
+daily_close_fade_diagnostic_monthly.csv
+daily_close_fade_diagnostic_month_consistency.csv
 ```
+
+The report treats cost-adjusted evidence as first-class. A scenario can look
+directionally correct before costs but still fail the `cost_edge_pass` check if
+the average top-basket edge is negative after the configured round-trip cost or
+if fewer than half of the tested months are positive after cost. Use `--start`
+and `--end` for in-sample/out-of-sample splits before promoting an exit rule.
 
 `basket_stop` is a research-level portfolio loss cap. It marks the open basket
 minute by minute using 1m closes and closes still-open trades once aggregate
@@ -199,6 +207,9 @@ python -m aggression_carry \
   --scores vol_adjusted_day_return,day_return,late_volume_ratio,vwap_extension,pump_score \
   --top-ns 3,5,10 \
   --buckets 10 \
+  --cost-multiplier 1 \
+  --start 2026-02-03 \
+  --end 2026-05-03 \
   --pump-filter pump \
   --liquidity-rank-min 31 \
   --liquidity-rank-max 150

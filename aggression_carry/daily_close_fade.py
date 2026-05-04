@@ -37,6 +37,8 @@ class DailyCloseFadeDiagnosticsConfig:
     top_ns: tuple[int, ...] = (3, 5, 10)
     buckets: int = 10
     min_obs_per_bucket: int = 5
+    start_ms: int = 0
+    end_ms: int = 0
 
 
 def run_daily_close_fade(
@@ -86,14 +88,18 @@ def run_daily_close_fade_diagnostics(
     *,
     diagnostics_config: DailyCloseFadeDiagnosticsConfig | None = None,
     base_fade_config: DailyCloseFadeConfig | None = None,
+    cost_config: CostConfig | None = None,
     report_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     diagnostics = diagnostics_config or DailyCloseFadeDiagnosticsConfig()
     base = base_fade_config or DailyCloseFadeConfig()
+    costs = cost_config or CostConfig()
     _validate_close_fade_config(base)
     _validate_close_fade_diagnostics_config(diagnostics)
+    round_trip_cost_bps = costs.base_entry_exit_cost_bps * base.cost_multiplier
 
     features = build_daily_close_fade_features(data_root, config=base, signal_minutes=diagnostics.signal_minutes)
+    features = _filter_signal_window(features, diagnostics.start_ms, diagnostics.end_ms)
     observations = build_close_fade_diagnostic_observations(
         data_root,
         features,
@@ -101,20 +107,39 @@ def run_daily_close_fade_diagnostics(
         diagnostics_config=diagnostics,
     )
     bucket_rows = summarize_close_fade_diagnostic_buckets(observations, diagnostics_config=diagnostics)
-    top_rows = summarize_close_fade_diagnostic_top_baskets(observations, diagnostics_config=diagnostics)
+    top_rows = summarize_close_fade_diagnostic_top_baskets(
+        observations,
+        diagnostics_config=diagnostics,
+        round_trip_cost_bps=round_trip_cost_bps,
+    )
     ic_rows = summarize_close_fade_diagnostic_ic(observations)
-    scenario_rows = summarize_close_fade_diagnostic_scenarios(bucket_rows, top_rows, ic_rows, diagnostics_config=diagnostics)
+    monthly_rows = summarize_close_fade_diagnostic_monthly(
+        observations,
+        diagnostics_config=diagnostics,
+        round_trip_cost_bps=round_trip_cost_bps,
+    )
+    consistency_rows = summarize_close_fade_diagnostic_month_consistency(monthly_rows)
+    scenario_rows = summarize_close_fade_diagnostic_scenarios(
+        bucket_rows,
+        top_rows,
+        ic_rows,
+        consistency_rows,
+        diagnostics_config=diagnostics,
+    )
     payload = {
         "config": {
             "base_fade": asdict(base),
             "diagnostics": asdict(diagnostics),
         },
+        "round_trip_cost_bps": round_trip_cost_bps,
         "rows": {
             "features": features.height,
             "observations": observations.height,
             "bucket_rows": bucket_rows.height,
             "top_baskets": top_rows.height,
             "ic_rows": ic_rows.height,
+            "monthly_rows": monthly_rows.height,
+            "consistency_rows": consistency_rows.height,
             "scenarios": scenario_rows.height,
         },
         "date_range": _date_range(features, "signal_ts_ms"),
@@ -125,7 +150,7 @@ def run_daily_close_fade_diagnostics(
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "daily_close_fade_diagnostics_report.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     (output_dir / "daily_close_fade_diagnostics_report.md").write_text(
-        format_close_fade_diagnostics_report(payload, bucket_rows, top_rows, ic_rows, scenario_rows),
+        format_close_fade_diagnostics_report(payload, bucket_rows, top_rows, ic_rows, monthly_rows, scenario_rows),
         encoding="utf-8",
     )
     if not observations.is_empty():
@@ -138,10 +163,21 @@ def run_daily_close_fade_diagnostics(
         ic_rows.write_csv(output_dir / "daily_close_fade_diagnostic_ic.csv")
     if not scenario_rows.is_empty():
         scenario_rows.write_csv(output_dir / "daily_close_fade_diagnostic_scenarios.csv")
+    if not monthly_rows.is_empty():
+        monthly_rows.write_csv(output_dir / "daily_close_fade_diagnostic_monthly.csv")
+    if not consistency_rows.is_empty():
+        consistency_rows.write_csv(output_dir / "daily_close_fade_diagnostic_month_consistency.csv")
 
     _replace_dataset(bucket_rows, data_root, "daily_close_fade_diagnostic_buckets", partition_by=("score", "signal_minute"))
     _replace_dataset(top_rows, data_root, "daily_close_fade_diagnostic_top_baskets", partition_by=("score", "signal_minute"))
     _replace_dataset(ic_rows, data_root, "daily_close_fade_diagnostic_ic", partition_by=("score", "signal_minute"))
+    _replace_dataset(monthly_rows, data_root, "daily_close_fade_diagnostic_monthly", partition_by=("score", "signal_minute", "month"))
+    _replace_dataset(
+        consistency_rows,
+        data_root,
+        "daily_close_fade_diagnostic_month_consistency",
+        partition_by=("score", "signal_minute"),
+    )
     return payload
 
 
@@ -685,10 +721,12 @@ def summarize_close_fade_diagnostic_top_baskets(
     observations: pl.DataFrame,
     *,
     diagnostics_config: DailyCloseFadeDiagnosticsConfig,
+    round_trip_cost_bps: float,
 ) -> pl.DataFrame:
     if observations.is_empty():
         return pl.DataFrame()
     scenario_cols = ["score", "signal_minute", "entry_delay_minutes", "horizon_minutes"]
+    cost_return = round_trip_cost_bps / 10_000.0
     frames = []
     for top_n in diagnostics_config.top_ns:
         ranked = observations.with_columns(
@@ -707,6 +745,7 @@ def summarize_close_fade_diagnostic_top_baskets(
                 ]
             )
             .with_columns(pl.lit(top_n).alias("top_n"))
+            .with_columns((pl.col("basket_short_return") - cost_return).alias("basket_cost_adjusted_short_return"))
         )
         frames.append(
             baskets.group_by([*scenario_cols, "top_n"], maintain_order=True)
@@ -718,11 +757,100 @@ def summarize_close_fade_diagnostic_top_baskets(
                     pl.col("basket_short_return").mean().alias("mean_basket_short_return"),
                     pl.col("basket_short_return").median().alias("median_basket_short_return"),
                     (pl.col("basket_short_return") > 0.0).mean().alias("basket_hit_rate"),
+                    pl.col("basket_cost_adjusted_short_return").mean().alias("mean_basket_cost_adjusted_short_return"),
+                    pl.col("basket_cost_adjusted_short_return").median().alias(
+                        "median_basket_cost_adjusted_short_return"
+                    ),
+                    (pl.col("basket_cost_adjusted_short_return") > 0.0).mean().alias("cost_adjusted_basket_hit_rate"),
                     pl.col("basket_entry_drift_short_return").mean().alias("mean_entry_drift_short_return"),
                 ]
             )
         )
     return _concat_frames(frames).sort([*scenario_cols, "top_n"]) if frames else pl.DataFrame()
+
+
+def summarize_close_fade_diagnostic_monthly(
+    observations: pl.DataFrame,
+    *,
+    diagnostics_config: DailyCloseFadeDiagnosticsConfig,
+    round_trip_cost_bps: float,
+) -> pl.DataFrame:
+    if observations.is_empty():
+        return pl.DataFrame()
+    scenario_cols = ["score", "signal_minute", "entry_delay_minutes", "horizon_minutes"]
+    cost_return = round_trip_cost_bps / 10_000.0
+    frames = []
+    for top_n in diagnostics_config.top_ns:
+        ranked = observations.with_columns(
+            pl.col("score_value").rank("ordinal", descending=True).over([*scenario_cols, "signal_ts_ms"]).alias("entry_rank")
+        ).filter(pl.col("entry_rank") <= top_n)
+        if ranked.is_empty():
+            continue
+        baskets = (
+            ranked.group_by([*scenario_cols, "signal_ts_ms"], maintain_order=True)
+            .agg(
+                [
+                    pl.col("date").first().alias("date"),
+                    pl.len().alias("selection_count"),
+                    pl.col("forward_short_return").mean().alias("basket_short_return"),
+                    pl.col("entry_drift_short_return").mean().alias("basket_entry_drift_short_return"),
+                ]
+            )
+            .with_columns(
+                [
+                    pl.lit(top_n).alias("top_n"),
+                    pl.col("date").str.slice(0, 7).alias("month"),
+                    (pl.col("basket_short_return") - cost_return).alias("basket_cost_adjusted_short_return"),
+                ]
+            )
+        )
+        frames.append(
+            baskets.group_by([*scenario_cols, "top_n", "month"], maintain_order=True)
+            .agg(
+                [
+                    pl.len().alias("baskets"),
+                    pl.col("selection_count").sum().alias("obs"),
+                    pl.col("selection_count").mean().alias("avg_selection_count"),
+                    pl.col("basket_short_return").mean().alias("mean_basket_short_return"),
+                    pl.col("basket_short_return").median().alias("median_basket_short_return"),
+                    (pl.col("basket_short_return") > 0.0).mean().alias("basket_hit_rate"),
+                    pl.col("basket_cost_adjusted_short_return").mean().alias("mean_basket_cost_adjusted_short_return"),
+                    (pl.col("basket_cost_adjusted_short_return") > 0.0).mean().alias("cost_adjusted_basket_hit_rate"),
+                    pl.col("basket_entry_drift_short_return").mean().alias("mean_entry_drift_short_return"),
+                ]
+            )
+        )
+    return _concat_frames(frames).sort([*scenario_cols, "top_n", "month"]) if frames else pl.DataFrame()
+
+
+def summarize_close_fade_diagnostic_month_consistency(monthly_rows: pl.DataFrame) -> pl.DataFrame:
+    if monthly_rows.is_empty():
+        return pl.DataFrame()
+    scenario_cols = ["score", "signal_minute", "entry_delay_minutes", "horizon_minutes", "top_n"]
+    return (
+        monthly_rows.group_by(scenario_cols, maintain_order=True)
+        .agg(
+            [
+                (pl.col("mean_basket_short_return") > 0.0).sum().alias("positive_months"),
+                (pl.col("mean_basket_cost_adjusted_short_return") > 0.0).sum().alias("cost_positive_months"),
+                pl.len().alias("total_months"),
+                pl.col("mean_basket_short_return").min().alias("worst_month_short_return"),
+                pl.col("mean_basket_short_return").max().alias("best_month_short_return"),
+                pl.col("mean_basket_cost_adjusted_short_return").min().alias("worst_month_cost_adjusted_short_return"),
+                pl.col("mean_basket_cost_adjusted_short_return").max().alias("best_month_cost_adjusted_short_return"),
+            ]
+        )
+        .with_columns(
+            [
+                (pl.col("positive_months") / pl.col("total_months")).alias("positive_month_rate"),
+                (pl.col("cost_positive_months") / pl.col("total_months")).alias("cost_positive_month_rate"),
+            ]
+        )
+        .sort(
+            ["cost_positive_month_rate", "positive_month_rate", "best_month_cost_adjusted_short_return"],
+            descending=[True, True, True],
+        )
+    )
 
 
 def summarize_close_fade_diagnostic_ic(observations: pl.DataFrame) -> pl.DataFrame:
@@ -800,6 +928,7 @@ def summarize_close_fade_diagnostic_scenarios(
     bucket_rows: pl.DataFrame,
     top_rows: pl.DataFrame,
     ic_rows: pl.DataFrame,
+    consistency_rows: pl.DataFrame,
     *,
     diagnostics_config: DailyCloseFadeDiagnosticsConfig,
 ) -> pl.DataFrame:
@@ -832,6 +961,8 @@ def summarize_close_fade_diagnostic_scenarios(
         output = output.join(edge_frame, on=scenario_cols, how="left")
     if not ic_rows.is_empty():
         output = output.join(ic_rows, on=scenario_cols, how="left")
+    if not consistency_rows.is_empty():
+        output = output.join(consistency_rows, on=[*scenario_cols, "top_n"], how="left")
     optional_columns = {
         "high_minus_low": pl.Float64,
         "mean_ic": pl.Float64,
@@ -839,6 +970,12 @@ def summarize_close_fade_diagnostic_scenarios(
         "positive_ic_rate": pl.Float64,
         "signal_count": pl.Int64,
         "ic_obs": pl.Int64,
+        "mean_basket_cost_adjusted_short_return": pl.Float64,
+        "cost_adjusted_basket_hit_rate": pl.Float64,
+        "positive_month_rate": pl.Float64,
+        "cost_positive_month_rate": pl.Float64,
+        "total_months": pl.Int64,
+        "worst_month_cost_adjusted_short_return": pl.Float64,
     }
     missing_columns = [
         pl.lit(None, dtype=dtype).alias(name)
@@ -855,9 +992,24 @@ def summarize_close_fade_diagnostic_scenarios(
                 & (pl.col("mean_ic").fill_null(0.0) > 0.0)
             ).alias("robust_direction_pass")
         )
+        .with_columns(
+            (
+                pl.col("robust_direction_pass")
+                & (pl.col("mean_basket_cost_adjusted_short_return").fill_null(-1.0) > 0.0)
+                & (pl.col("cost_positive_month_rate").fill_null(0.0) >= 0.5)
+            ).alias("cost_edge_pass")
+        )
         .sort(
-            ["robust_direction_pass", "mean_basket_short_return", "high_minus_low", "mean_ic"],
-            descending=[True, True, True, True],
+            [
+                "cost_edge_pass",
+                "robust_direction_pass",
+                "mean_basket_cost_adjusted_short_return",
+                "cost_positive_month_rate",
+                "mean_basket_short_return",
+                "high_minus_low",
+                "mean_ic",
+            ],
+            descending=[True, True, True, True, True, True, True],
         )
     )
 
@@ -877,6 +1029,17 @@ def _diagnostic_candidate_universe(features: pl.DataFrame, config: DailyCloseFad
     elif config.pump_filter != "all":
         raise ValueError(f"Unknown pump_filter: {config.pump_filter}")
     return df.sort(["signal_ts_ms", "symbol"])
+
+
+def _filter_signal_window(df: pl.DataFrame, start_ms: int, end_ms: int) -> pl.DataFrame:
+    if df.is_empty():
+        return df
+    output = df
+    if start_ms:
+        output = output.filter(pl.col("signal_ts_ms") >= start_ms)
+    if end_ms:
+        output = output.filter(pl.col("signal_ts_ms") < end_ms)
+    return output
 
 
 def _diagnostic_forward_return_row(
@@ -959,6 +1122,8 @@ def _validate_close_fade_diagnostics_config(config: DailyCloseFadeDiagnosticsCon
         raise ValueError("daily close fade diagnostics buckets must be at least 2")
     if config.min_obs_per_bucket < 1:
         raise ValueError("daily close fade diagnostics min_obs_per_bucket must be positive")
+    if config.start_ms and config.end_ms and config.end_ms <= config.start_ms:
+        raise ValueError("daily close fade diagnostics end_ms must be after start_ms")
 
 
 def _empty_diagnostic_observations() -> pl.DataFrame:
@@ -1468,6 +1633,7 @@ def format_close_fade_diagnostics_report(
     bucket_rows: pl.DataFrame,
     top_rows: pl.DataFrame,
     ic_rows: pl.DataFrame,
+    monthly_rows: pl.DataFrame,
     scenario_rows: pl.DataFrame,
 ) -> str:
     base = payload.get("config", {}).get("base_fade", {})
@@ -1482,6 +1648,7 @@ def format_close_fade_diagnostics_report(
         f"observations={payload.get('rows', {}).get('observations', 0)} "
         f"scenarios={payload.get('rows', {}).get('scenarios', 0)}",
         f"Date range: {payload.get('date_range', {}).get('start')} to {payload.get('date_range', {}).get('end')}",
+        f"Round-trip cost assumption: {_num(payload.get('round_trip_cost_bps'), 2)} bps",
         "",
         "## Candidate Filters",
         "",
@@ -1502,16 +1669,22 @@ def format_close_fade_diagnostics_report(
         f"- scores: {', '.join(diagnostics.get('scores', ())) or 'none'}",
         f"- top_ns: {', '.join(str(item) for item in diagnostics.get('top_ns', ())) or 'none'}",
         f"- buckets: {diagnostics.get('buckets', 0)}",
+        f"- start: {_dt_from_ms(int(diagnostics['start_ms'])).isoformat() if diagnostics.get('start_ms') else 'unbounded'}",
+        f"- end: {_dt_from_ms(int(diagnostics['end_ms'])).isoformat() if diagnostics.get('end_ms') else 'unbounded'}",
         "",
-        "## Best Raw Direction Scenarios",
+        "## Best Cost-Aware Direction Scenarios",
         "",
-        "| Rank | Pass | Mean Basket Short | High-Low Bucket | Mean IC | IC t-stat | Signal | Delay | Horizon | Top N | Score | Baskets | Obs |",
-        "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|",
+        "| Rank | Cost Pass | Raw Pass | Mean Gross | Mean Cost Adj | Cost+ Months | Worst Cost Month | High-Low Bucket | Mean IC | IC t-stat | Signal | Delay | Horizon | Top N | Score | Baskets | Obs |",
+        "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|",
     ]
     for index, row in enumerate(scenario_rows.head(25).to_dicts() if not scenario_rows.is_empty() else [], start=1):
         lines.append(
-            f"| {index} | {row.get('robust_direction_pass', False)} | "
-            f"{_pct(row.get('mean_basket_short_return'))} | {_pct(row.get('high_minus_low'))} | "
+            f"| {index} | {row.get('cost_edge_pass', False)} | {row.get('robust_direction_pass', False)} | "
+            f"{_pct(row.get('mean_basket_short_return'))} | "
+            f"{_pct(row.get('mean_basket_cost_adjusted_short_return'))} | "
+            f"{_pct(row.get('cost_positive_month_rate'))} | "
+            f"{_pct(row.get('worst_month_cost_adjusted_short_return'))} | "
+            f"{_pct(row.get('high_minus_low'))} | "
             f"{_num(row.get('mean_ic'), 4)} | {_num(row.get('ic_t_stat'), 2)} | "
             f"{_format_signal_minute(int(row.get('signal_minute', 0)))} | "
             f"{row.get('entry_delay_minutes', 0)} | {row.get('horizon_minutes', 0)} | "
@@ -1519,7 +1692,7 @@ def format_close_fade_diagnostics_report(
             f"{row.get('baskets', 0)} | {row.get('obs', 0)} |"
         )
     if scenario_rows.is_empty():
-        lines.append("|  |  |  |  |  |  |  |  |  |  |  |  |  |")
+        lines.append("|  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |")
 
     lines.extend(
         [
@@ -1537,6 +1710,38 @@ def format_close_fade_diagnostics_report(
             f"{_num(row.get('mean_ic'), 4)} | {_num(row.get('ic_t_stat'), 2)} | "
             f"{_pct(row.get('positive_ic_rate'))} | {row.get('signal_count', 0)} | {row.get('ic_obs', 0)} |"
         )
+
+    lines.extend(
+        [
+            "",
+            "## Monthly Consistency",
+            "",
+            "This table shows the same top-basket raw edge split by month. A scenario that only wins in one cluster is weaker than one that survives several months.",
+            "",
+            "| Month | Signal | Delay | Horizon | Top N | Score | Mean Gross | Mean Cost Adj | Cost Hit | Baskets | Obs |",
+            "|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+    if not monthly_rows.is_empty():
+        top_keys = (
+            scenario_rows.head(5)
+            .select(["score", "signal_minute", "entry_delay_minutes", "horizon_minutes", "top_n"])
+            .with_columns(pl.lit(True).alias("_top_scenario"))
+        )
+        selected = monthly_rows.join(
+            top_keys,
+            on=["score", "signal_minute", "entry_delay_minutes", "horizon_minutes", "top_n"],
+            how="inner",
+        )
+        for row in selected.sort(["score", "signal_minute", "entry_delay_minutes", "horizon_minutes", "top_n", "month"]).to_dicts():
+            lines.append(
+                f"| {row.get('month', '')} | {_format_signal_minute(int(row.get('signal_minute', 0)))} | "
+                f"{row.get('entry_delay_minutes', 0)} | {row.get('horizon_minutes', 0)} | {row.get('top_n', 0)} | "
+                f"{row.get('score', '')} | {_pct(row.get('mean_basket_short_return'))} | "
+                f"{_pct(row.get('mean_basket_cost_adjusted_short_return'))} | "
+                f"{_pct(row.get('cost_adjusted_basket_hit_rate'))} | "
+                f"{row.get('baskets', 0)} | {row.get('obs', 0)} |"
+            )
 
     lines.extend(
         [
@@ -1571,6 +1776,8 @@ def format_close_fade_diagnostics_report(
             "daily_close_fade_diagnostic_top_baskets.csv",
             "daily_close_fade_diagnostic_ic.csv",
             "daily_close_fade_diagnostic_scenarios.csv",
+            "daily_close_fade_diagnostic_monthly.csv",
+            "daily_close_fade_diagnostic_month_consistency.csv",
             "```",
             "",
         ]

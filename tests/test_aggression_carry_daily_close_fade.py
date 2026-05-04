@@ -306,13 +306,20 @@ def test_daily_close_fade_diagnostics_reports_raw_score_shape(tmp_path) -> None:
     buckets = read_dataset(tmp_path, "daily_close_fade_diagnostic_buckets").sort("bucket")
     top_baskets = read_dataset(tmp_path, "daily_close_fade_diagnostic_top_baskets")
     ic = read_dataset(tmp_path, "daily_close_fade_diagnostic_ic")
+    monthly = read_dataset(tmp_path, "daily_close_fade_diagnostic_monthly")
+    consistency = read_dataset(tmp_path, "daily_close_fade_diagnostic_month_consistency")
 
     assert payload["rows"]["observations"] == 3
+    assert payload["rows"]["monthly_rows"] == 2
+    assert payload["rows"]["consistency_rows"] == 2
     assert buckets.height == 2
     assert buckets.filter(pl.col("bucket") == 2)["mean_short_return"].item() > buckets.filter(pl.col("bucket") == 1)[
         "mean_short_return"
     ].item()
     assert top_baskets["mean_basket_short_return"].max() > 0.0
+    assert "mean_basket_cost_adjusted_short_return" in top_baskets.columns
+    assert monthly["month"].to_list() == ["2025-01", "2025-01"]
+    assert consistency["cost_positive_month_rate"].max() > 0.0
     assert ic["mean_ic"].item() > 0.0
     assert (tmp_path / "reports" / "daily_close_fade_diagnostics_report.md").exists()
 
@@ -336,7 +343,32 @@ def test_daily_close_fade_diagnostics_handles_sparse_bucket_grid(tmp_path) -> No
 
     assert payload["rows"]["scenarios"] == 1
     assert payload["top_scenarios"][0]["robust_direction_pass"] is False
+    assert payload["top_scenarios"][0]["cost_edge_pass"] is False
     assert payload["top_scenarios"][0]["high_minus_low"] is None
+
+
+def test_daily_close_fade_diagnostics_supports_date_splits(tmp_path) -> None:
+    _write_close_fade_fixture(tmp_path)
+
+    payload = run_daily_close_fade_diagnostics(
+        tmp_path,
+        base_fade_config=DailyCloseFadeConfig(min_age_days=10, exclude_symbols=()),
+        diagnostics_config=DailyCloseFadeDiagnosticsConfig(
+            signal_minutes=(23 * 60,),
+            entry_delay_minutes=(1,),
+            horizon_minutes=(60,),
+            scores=("day_return",),
+            top_ns=(1,),
+            buckets=2,
+            min_obs_per_bucket=1,
+            start_ms=int(datetime(2025, 1, 17, tzinfo=UTC).timestamp() * 1000),
+            end_ms=int(datetime(2025, 1, 18, tzinfo=UTC).timestamp() * 1000),
+        ),
+    )
+
+    assert payload["rows"]["features"] == 0
+    assert payload["rows"]["observations"] == 0
+    assert payload["rows"]["scenarios"] == 0
 
 
 def test_daily_close_fade_grid_uses_thread_backend_on_windows(tmp_path, monkeypatch) -> None:

@@ -254,6 +254,9 @@ def build_parser() -> argparse.ArgumentParser:
     close_diagnostics.add_argument("--top-ns", default=None, help="Comma-separated top basket sizes, e.g. 3,5,10.")
     close_diagnostics.add_argument("--buckets", type=int, default=None, help="Number of score buckets/centiles.")
     close_diagnostics.add_argument("--min-obs-per-bucket", type=int, default=None, help="Minimum observations before a bucket is trusted.")
+    close_diagnostics.add_argument("--start", default=None, help="Optional inclusive signal date/time start for split diagnostics.")
+    close_diagnostics.add_argument("--end", default=None, help="Optional exclusive signal date/time end for split diagnostics.")
+    close_diagnostics.add_argument("--cost-multiplier", type=float, default=None, help="Override the base close-fade cost multiplier.")
     close_diagnostics.add_argument("--pump-filter", default=None, help="all, pump, or non_pump.")
     close_diagnostics.add_argument("--min-age-days", type=int, default=None, help="Minimum listing age; default is 10.")
     close_diagnostics.add_argument("--min-day-turnover", type=float, default=None, help="Minimum day-to-date quote turnover at signal.")
@@ -566,6 +569,7 @@ def main(argv: list[str] | None = None) -> int:
             data_root,
             diagnostics_config=diagnostics_config,
             base_fade_config=base_fade_config,
+            cost_config=config.costs,
         )
         print(
             "daily close fade diagnostics "
@@ -881,6 +885,7 @@ def _close_fade_base_from_diagnostics_args(base: DailyCloseFadeConfig, args: arg
         min_baseline_turnover=(
             args.min_baseline_turnover if args.min_baseline_turnover is not None else base.min_baseline_turnover
         ),
+        cost_multiplier=args.cost_multiplier if args.cost_multiplier is not None else base.cost_multiplier,
         exclude_symbols=_close_fade_exclusions(args, base.exclude_symbols),
         require_archive_membership=args.require_archive_membership or base.require_archive_membership,
     )
@@ -898,6 +903,8 @@ def _close_fade_diagnostics_config_from_args(args: argparse.Namespace) -> DailyC
         min_obs_per_bucket=(
             args.min_obs_per_bucket if args.min_obs_per_bucket is not None else base.min_obs_per_bucket
         ),
+        start_ms=parse_date_ms(args.start) if args.start else base.start_ms,
+        end_ms=parse_date_ms(args.end) if args.end else base.end_ms,
     )
 
 
