@@ -307,6 +307,22 @@ daily_close_fade_regime_sweep.json
 daily_close_fade_regime_sweep.md
 ```
 
+Result from the 2026-05-04 3-year current-top-160 benchmark:
+
+| Rule | Split survival | Min return | Avg return | Worst DD | Avg calendar Sharpe | Active days |
+|---|---:|---:|---:|---:|---:|---:|
+| all | 3/3 | 23.86% | 57.49% | -8.08% | 2.48 | 80.03% |
+| BTC > EMA200 -5% | 3/3 | 20.98% | 32.49% | -10.30% | 1.85 | 60.68% |
+| BTC <= EMA100 | 3/3 | 6.07% | 24.40% | -6.48% | 1.94 | 31.58% |
+| BTC <= EMA100 -2% | 3/3 | 5.70% | 22.01% | -5.95% | 1.92 | 27.75% |
+
+Conclusion: do **not** promote a BTC EMA on/off filter yet. The below/near-EMA
+filters reduce activity and drawdown, but they give up too much return. The
+sanity-check side was also profitable, which means BTC above EMA is not
+automatically hostile to this fade. Keep the baseline live/demo paper logic
+unchanged until a regime rule proves it improves risk-adjusted results without
+over-pruning the trade stream.
+
 Build a public-archive symbol/date manifest for walk-forward universe research:
 
 ```bash
