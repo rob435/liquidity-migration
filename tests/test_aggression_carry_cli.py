@@ -80,6 +80,13 @@ def test_cli_parses_forward_sleeves_alias(tmp_path: Path) -> None:
     assert args.telegram is True
 
 
+def test_cli_parses_forward_audit_telegram(tmp_path: Path) -> None:
+    args = build_parser().parse_args(["--data-root", str(tmp_path), "forward-audit", "--telegram"])
+
+    assert args.command == "forward-audit"
+    assert args.telegram is True
+
+
 def test_cli_parses_daily_close_fade_diagnostics(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [

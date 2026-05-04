@@ -166,6 +166,9 @@ reason, sleeve attribution, and daily paper-vs-demo PnL. Accepted Bybit demo
 order acknowledgements are not treated as fills; slippage and demo PnL require
 reconciled filled quantity/value.
 
+Add `--telegram` to send the important audit summary. It is deduped by message
+signature, so the 5-minute VPS timer does not resend unchanged audit state.
+
 Override the locked-in daily-close settings:
 
 ```bash
@@ -222,7 +225,9 @@ python -m aggression_carry \
 The message includes scan status, candidate count, new paper trades, open
 trades, closed trades, and the top candidates. The sleeve runner sends one
 aggregate message instead of one message per sleeve. Missing env vars make
-Telegram a no-op.
+Telegram a no-op. `forward-audit --telegram` sends paper-vs-demo fill counts,
+missed/pending reasons, daily paper/demo PnL, and recent audit issues only when
+that audit state changes.
 
 ## Bybit Demo Probe
 
@@ -351,7 +356,8 @@ Suggested schedule for demo shadowing the core sleeve:
 The cycle command is the preferred demo-shadow runtime. It keeps sleeves
 separate, prefixes demo order IDs by sleeve, and writes one cycle report plus
 per-sleeve demo execution reports. The VPS `systemd` installer also runs
-`forward-audit` after each cycle so the paper-vs-demo audit stays current.
+`forward-audit --telegram` after each cycle so the paper-vs-demo audit stays
+current and important audit changes reach Telegram.
 
 Dry-run:
 

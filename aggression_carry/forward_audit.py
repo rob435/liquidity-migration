@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import blake2b
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ import polars as pl
 
 from .demo_cycle import DEMO_CYCLE_SLEEVES
 from .storage import read_dataset
+from .telegram import send_telegram_message
 
 
 TRADE_AUDIT_SCHEMA = {
@@ -71,8 +73,10 @@ def run_forward_demo_audit(
     *,
     report_dir: str | Path | None = None,
     sleeves: tuple[str, ...] = DEMO_CYCLE_SLEEVES,
+    send_telegram: bool = False,
 ) -> dict[str, Any]:
     base_root = Path(data_root).expanduser()
+    output_dir = Path(report_dir or base_root / "reports")
     rows: list[dict[str, Any]] = []
     for sleeve in sleeves:
         sleeve_root = base_root / "forward_sleeves" / sleeve
@@ -92,7 +96,14 @@ def run_forward_demo_audit(
         "summary": summary,
         "sleeves": list(sleeves),
     }
-    _write_forward_demo_audit_outputs(base_root, payload, trades, daily, report_dir=report_dir)
+    payload["telegram"] = _maybe_send_forward_demo_audit_telegram(
+        output_dir,
+        payload,
+        trades,
+        daily,
+        enabled=send_telegram,
+    )
+    _write_forward_demo_audit_outputs(output_dir, payload, trades, daily)
     return payload
 
 
@@ -278,15 +289,44 @@ def format_forward_demo_audit_report(payload: dict[str, Any], trades: pl.DataFra
     return "\n".join(lines)
 
 
+def format_forward_demo_audit_message(payload: dict[str, Any], trades: pl.DataFrame, daily: pl.DataFrame) -> str:
+    summary = payload.get("summary", {})
+    lines = [
+        "Forward demo audit",
+        f"paper: trades={summary.get('paper_trades', 0)} closed={summary.get('paper_closed_trades', 0)} net={_pct(summary.get('paper_weighted_net_return'))}",
+        f"demo: entry_fills={summary.get('demo_entries_filled', 0)}/{summary.get('demo_entry_orders', 0)} "
+        f"exit_fills={summary.get('demo_exits_filled', 0)} pnl={_money(summary.get('demo_realized_pnl_usdt'))} "
+        f"ret={_pct(summary.get('demo_realized_return'))}",
+        f"missed/pending: {summary.get('demo_missed_entries', 0)}",
+    ]
+    if not daily.is_empty():
+        lines.append("daily:")
+        for row in daily.sort(["date", "sleeve"], descending=[True, False]).head(6).to_dicts():
+            lines.append(
+                f"- {row.get('date', '')} {row.get('sleeve', '')}: "
+                f"paper={_pct(row.get('paper_weighted_net_return'))} "
+                f"demo_pnl={_money(row.get('demo_realized_pnl_usdt'))} "
+                f"fills={row.get('demo_entries_filled', 0)}/{row.get('demo_entry_orders', 0)} "
+                f"miss={row.get('demo_missed_entries', 0)}"
+            )
+    issues = _recent_issue_rows(trades)
+    if issues:
+        lines.append("issues:")
+        for row in issues[:8]:
+            reason = str(row.get("missed_reason") or row.get("order_error") or "")
+            lines.append(
+                f"- {row.get('sleeve', '')} {row.get('symbol', '')}: {reason[:90]} "
+                f"entry={row.get('entry_fill_status', '')} exit={row.get('exit_fill_status', '')}"
+            )
+    return "\n".join(lines)
+
+
 def _write_forward_demo_audit_outputs(
-    data_root: Path,
+    output_dir: Path,
     payload: dict[str, Any],
     trades: pl.DataFrame,
     daily: pl.DataFrame,
-    *,
-    report_dir: str | Path | None,
 ) -> None:
-    output_dir = Path(report_dir or data_root / "reports")
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "forward_demo_audit_report.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     (output_dir / "forward_demo_audit_report.md").write_text(
@@ -295,6 +335,69 @@ def _write_forward_demo_audit_outputs(
     )
     trades.write_csv(output_dir / "forward_demo_audit_trades.csv")
     daily.write_csv(output_dir / "forward_demo_audit_daily.csv")
+
+
+def _maybe_send_forward_demo_audit_telegram(
+    output_dir: Path,
+    payload: dict[str, Any],
+    trades: pl.DataFrame,
+    daily: pl.DataFrame,
+    *,
+    enabled: bool,
+) -> dict[str, Any]:
+    if not enabled:
+        return {"enabled": False, "sent": False, "reason": "disabled"}
+    if not _audit_has_telegram_signal(payload, trades):
+        return {"enabled": True, "sent": False, "reason": "no_trade_signal"}
+    output_dir.mkdir(parents=True, exist_ok=True)
+    text = format_forward_demo_audit_message(payload, trades, daily)
+    signature = blake2b(text.encode("utf-8"), digest_size=16).hexdigest()
+    state_path = output_dir / "forward_demo_audit_telegram_state.json"
+    previous = _read_json(state_path)
+    if previous.get("signature") == signature:
+        return {"enabled": True, "sent": False, "reason": "unchanged", "signature": signature}
+    try:
+        sent = send_telegram_message(text, enabled=True)
+    except Exception as exc:  # noqa: BLE001 - Telegram must not break audit persistence
+        return {"enabled": True, "sent": False, "reason": f"send_failed: {exc}", "signature": signature}
+    if not sent:
+        return {"enabled": True, "sent": False, "reason": "not_configured_or_rejected", "signature": signature}
+    state_path.write_text(json.dumps({"signature": signature}, indent=2), encoding="utf-8")
+    return {"enabled": True, "sent": True, "reason": "sent", "signature": signature}
+
+
+def _audit_has_telegram_signal(payload: dict[str, Any], trades: pl.DataFrame) -> bool:
+    summary = payload.get("summary", {})
+    if int(summary.get("paper_trades") or 0) <= 0:
+        return False
+    return any(
+        int(summary.get(key) or 0) > 0
+        for key in (
+            "demo_entry_orders",
+            "demo_entries_filled",
+            "demo_exits_filled",
+            "demo_missed_entries",
+            "paper_closed_trades",
+        )
+    ) or not trades.is_empty()
+
+
+def _recent_issue_rows(trades: pl.DataFrame) -> list[dict[str, Any]]:
+    if trades.is_empty():
+        return []
+    issues = trades.filter((pl.col("missed_reason") != "") | (pl.col("order_error") != ""))
+    if issues.is_empty():
+        return []
+    return issues.sort(["date", "sleeve", "paper_entry_time"], descending=[True, False, True]).to_dicts()
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
 def _latest_order(rows: list[dict[str, Any]], trade_id: str, action: str) -> dict[str, Any] | None:

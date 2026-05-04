@@ -68,6 +68,45 @@ def test_forward_demo_audit_joins_paper_and_demo_ledgers_by_sleeve(tmp_path: Pat
     assert (data_root / "reports" / "forward_demo_audit_report.md").exists()
 
 
+def test_forward_demo_audit_sends_deduped_telegram_summary(tmp_path: Path, monkeypatch) -> None:
+    data_root = tmp_path / "forward-paper"
+    sleeve_root = data_root / "forward_sleeves" / "core_31_150"
+    _write_paper_trades(
+        sleeve_root,
+        [_paper_trade("paper-1", status="open", weighted_net_return=-0.001)],
+    )
+    messages: list[str] = []
+
+    def fake_send(text: str, *, enabled: bool = True, config=None) -> bool:
+        del enabled, config
+        messages.append(text)
+        return True
+
+    monkeypatch.setattr("aggression_carry.forward_audit.send_telegram_message", fake_send)
+
+    first = run_forward_demo_audit(data_root, send_telegram=True)
+    second = run_forward_demo_audit(data_root, send_telegram=True)
+
+    assert first["telegram"]["sent"] is True
+    assert second["telegram"]["reason"] == "unchanged"
+    assert len(messages) == 1
+    assert "Forward demo audit" in messages[0]
+    assert "entry_order_missing" in messages[0]
+
+
+def test_forward_demo_audit_skips_telegram_when_empty(tmp_path: Path, monkeypatch) -> None:
+    messages: list[str] = []
+    monkeypatch.setattr(
+        "aggression_carry.forward_audit.send_telegram_message",
+        lambda text, *, enabled=True, config=None: messages.append(text) or True,
+    )
+
+    payload = run_forward_demo_audit(tmp_path / "forward-paper", send_telegram=True)
+
+    assert payload["telegram"]["reason"] == "no_trade_signal"
+    assert messages == []
+
+
 def _write_paper_trades(data_root: Path, rows: list[dict]) -> None:
     write_dataset(
         pl.DataFrame(rows, infer_schema_length=None),

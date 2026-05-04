@@ -414,7 +414,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers.add_parser("forward-report", help="Write a report from the paper forward-test ledger.")
-    subparsers.add_parser("forward-audit", help="Join paper forward-test trades to Bybit demo execution orders.")
+    forward_audit = subparsers.add_parser("forward-audit", help="Join paper forward-test trades to Bybit demo execution orders.")
+    forward_audit.add_argument("--telegram", action="store_true", help="Send deduped important audit changes to Telegram.")
     return parser
 
 
@@ -766,13 +767,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "forward-audit":
-        payload = run_forward_demo_audit(data_root)
+        payload = run_forward_demo_audit(data_root, send_telegram=args.telegram)
         print(
             "forward demo audit "
             f"trades={payload['rows']['trade_audit_rows']} "
             f"daily={payload['rows']['daily_rows']} "
             f"demo_entries_filled={payload['summary']['demo_entries_filled']} "
             f"missed={payload['summary']['demo_missed_entries']} "
+            f"telegram={payload['telegram']['reason']} "
             f"path={data_root / 'reports' / 'forward_demo_audit_report.md'}"
         )
         return 0
