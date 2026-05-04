@@ -5,7 +5,8 @@ import math
 import os
 import shutil
 import statistics
-from concurrent.futures import ProcessPoolExecutor
+import sys
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from itertools import product
@@ -89,6 +90,7 @@ def run_daily_close_fade_grid(
         for index, config in enumerate(variants, start=1)
     ]
     workers = _resolve_workers(max_workers, len(tasks))
+    backend = _grid_backend(workers)
     if workers <= 1:
         rows = [
             _evaluate_grid_variant(
@@ -100,6 +102,16 @@ def run_daily_close_fade_grid(
             )
             for grid_id, config, round_trip_cost_bps in tasks
         ]
+    elif backend == "thread":
+        _init_grid_worker(str(Path(data_root)), features, costs.base_entry_exit_cost_bps)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            rows = list(
+                executor.map(
+                    _evaluate_grid_variant_worker,
+                    tasks,
+                    chunksize=_grid_chunksize(len(tasks), workers),
+                )
+            )
     else:
         with ProcessPoolExecutor(
             max_workers=workers,
@@ -114,6 +126,7 @@ def run_daily_close_fade_grid(
     payload = {
         "rows": results.height,
         "workers": workers,
+        "worker_backend": backend,
         "date_range": _date_range(features, "signal_ts_ms"),
         "best_total_return": results.head(1).to_dicts()[0] if not results.is_empty() else {},
         "best_sharpe_like": results.sort("sharpe_like", descending=True).head(1).to_dicts()[0] if not results.is_empty() else {},
@@ -1503,6 +1516,14 @@ def _resolve_workers(max_workers: int | None, task_count: int) -> int:
 
 def _grid_chunksize(task_count: int, workers: int) -> int:
     return max(1, math.ceil(task_count / (workers * 4)))
+
+
+def _grid_backend(workers: int) -> str:
+    if workers <= 1:
+        return "serial"
+    if sys.platform.startswith("win"):
+        return "thread"
+    return "process"
 
 
 def _concat_frames(frames: list[pl.DataFrame]) -> pl.DataFrame:

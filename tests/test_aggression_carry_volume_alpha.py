@@ -8,6 +8,7 @@ from aggression_carry.config import VolumeBacktestConfig, VolumeGridConfig
 from aggression_carry.ingestion import generate_fixture_data
 from aggression_carry.storage import read_dataset
 from aggression_carry.volume_alpha import build_volume_features, run_volume_alpha
+from aggression_carry import volume_backtest as volume_backtest_module
 from aggression_carry.volume_backtest import (
     _side_return,
     _simulate_trade,
@@ -260,6 +261,27 @@ def test_volume_grid_runs_parallel_fixture(tmp_path: Path) -> None:
     assert (tmp_path / "reports" / "volume_grid_report.md").exists()
     assert (tmp_path / "reports" / "volume_grid_results.csv").exists()
     assert (tmp_path / "volume_backtest_grid").exists()
+
+
+def test_volume_grid_uses_thread_backend_on_windows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(volume_backtest_module.sys, "platform", "win32")
+    generate_fixture_data(tmp_path)
+
+    payload = run_volume_grid(
+        tmp_path,
+        grid_config=VolumeGridConfig(
+            quantiles=(0.50,),
+            hold_days=(1,),
+            fixed_stop_loss_pcts=(0.0, 0.0001),
+            vol_stop_multipliers=(),
+            rank_exit_modes=(False,),
+        ),
+        base_backtest_config=VolumeBacktestConfig(hold_days=1, rebalance_days=1),
+        max_workers=2,
+    )
+
+    assert payload["worker_backend"] == "thread"
+    assert payload["rows"] == 2
 
 
 def test_iter_grid_configs_includes_fixed_vol_and_rank_variants() -> None:

@@ -4,7 +4,8 @@ import json
 import math
 import os
 import shutil
-from concurrent.futures import ProcessPoolExecutor
+import sys
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import UTC, datetime
 from html import escape
@@ -128,6 +129,7 @@ def run_volume_grid(
         for index, config in enumerate(variants, start=1)
     ]
     workers = _resolve_workers(max_workers, len(tasks))
+    backend = _grid_backend(workers)
     if workers <= 1:
         rows = [
             _evaluate_grid_variant(
@@ -140,6 +142,16 @@ def run_volume_grid(
             )
             for grid_id, config, round_trip_cost_bps in tasks
         ]
+    elif backend == "thread":
+        _init_grid_worker(features, klines, all_features)
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            rows = list(
+                executor.map(
+                    _evaluate_grid_variant_worker,
+                    tasks,
+                    chunksize=_grid_chunksize(len(tasks), workers),
+                )
+            )
     else:
         with ProcessPoolExecutor(
             max_workers=workers,
@@ -152,6 +164,7 @@ def run_volume_grid(
     payload = {
         "rows": results.height,
         "workers": workers,
+        "worker_backend": backend,
         "date_range": _date_range(features),
         "best_total_return": results.head(1).to_dicts()[0] if not results.is_empty() else {},
         "best_sharpe_like": results.sort("sharpe_like", descending=True).head(1).to_dicts()[0] if not results.is_empty() else {},
@@ -181,6 +194,14 @@ def _resolve_workers(max_workers: int | None, task_count: int) -> int:
 
 def _grid_chunksize(task_count: int, workers: int) -> int:
     return max(1, math.ceil(task_count / (workers * 4)))
+
+
+def _grid_backend(workers: int) -> str:
+    if workers <= 1:
+        return "serial"
+    if sys.platform.startswith("win"):
+        return "thread"
+    return "process"
 
 
 def _init_grid_worker(features: pl.DataFrame, klines: pl.DataFrame, rank_features: pl.DataFrame) -> None:

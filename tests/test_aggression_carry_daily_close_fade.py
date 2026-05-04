@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import polars as pl
 
+from aggression_carry import daily_close_fade as daily_close_fade_module
 from aggression_carry.config import CostConfig, DailyCloseFadeConfig, DailyCloseFadeGridConfig
 from aggression_carry.daily_close_fade import (
     _short_return,
@@ -275,6 +276,33 @@ def test_daily_close_fade_grid_runs_small_fixture(tmp_path) -> None:
     assert payload["rows"] == 8
     assert grid.height == 8
     assert grid["total_return"].max() > 0.0
+
+
+def test_daily_close_fade_grid_uses_thread_backend_on_windows(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(daily_close_fade_module.sys, "platform", "win32")
+    _write_close_fade_fixture(tmp_path)
+
+    payload = run_daily_close_fade_grid(
+        tmp_path,
+        base_fade_config=DailyCloseFadeConfig(min_age_days=10, exclude_symbols=()),
+        grid_config=DailyCloseFadeGridConfig(
+            signal_minutes=(23 * 60,),
+            top_ns=(1, 2),
+            hold_minutes=(60,),
+            scores=("day_return",),
+            pump_filters=("all",),
+            stop_loss_pcts=(0.0,),
+            take_profit_pcts=(0.0,),
+            trailing_stop_pcts=(0.0,),
+            trailing_activation_pcts=(0.0,),
+            cost_multipliers=(1.0,),
+        ),
+        cost_config=CostConfig(maker_fee_bps=0, taker_fee_bps=0, maker_adverse_selection_bps=0, taker_slippage_bps_liquid=0),
+        max_workers=2,
+    )
+
+    assert payload["worker_backend"] == "thread"
+    assert payload["rows"] == 2
 
 
 def test_daily_close_fade_filters_top_baseline_liquidity_rank(tmp_path) -> None:

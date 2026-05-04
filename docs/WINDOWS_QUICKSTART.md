@@ -148,10 +148,18 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_daily_close_fade_1m.ps1 -
   with entries, exits, exit reasons, stops, costs, and symbol/month attribution.
 - `daily-close-fade-grid` tests the 1m UTC close-window short fade with top-N,
   pump-tag, stop, trailing-stop, hold-time, and cost sensitivity.
-- `volume-grid` runs parameter variants concurrently with process workers.
+- `volume-grid` and `daily-close-fade-grid` run parameter variants
+  concurrently. On Windows they use thread workers to avoid `spawn` trying to
+  pickle multi-year Polars datasets into every child process. On macOS/Linux
+  they still use process workers.
+- If a large 3-year sweep fails with pickle, memory allocation, or worker spawn
+  errors, pull the latest code and rerun the same command. The data cache should
+  prevent redownloading completed market data. If RAM pressure is still high,
+  rerun with `--workers 8`, then `--workers 4`, then `--workers 1` as the
+  conservative fallback.
 - The RTX GPU is not used by this path. The current bottleneck is Python trade
-  simulation across independent variants, so CPU process parallelism is the
-  correct optimization before any CUDA rewrite.
+  simulation across independent variants. CPU concurrency is the correct
+  optimization before any CUDA rewrite.
 - The old `build-features`, `alpha-report`, `portfolio-backtest`, and
   `research-sweep` commands were removed with the old composite stack.
 - This is a research backtest path only. It does not place live orders.
