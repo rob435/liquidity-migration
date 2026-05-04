@@ -12,11 +12,14 @@ param(
     [string]$DailyCloseFilters = "8:0.035:1.0:1,8:0.035:1.0:2,8:0.035:1.0:3,8:0.035:1.0:4,5:0.025:0.75:3,5:0.025:0.75:4,5:0.025:0.75:5",
     [string]$DailyCloseMaxWeights = "0.25,0.30,0.35,0.40,0.50,0.80",
     [string]$DailyCloseScorePowers = "0.5,1.0",
-    [ValidateSet("deep", "tail", "insane")]
-    [string]$VolumePreset = "insane",
+    [ValidateSet("promotion", "deep", "tail", "insane")]
+    [string]$VolumePreset = "promotion",
     [string]$VolumeDataRoot = "data/agc-bybit-3y-auto150-20230503-20260503",
     [string]$VolumeUniverseRoot = "data/universe-research",
-    [string]$VolumeUniverseName = "top160-current"
+    [string]$VolumeUniverseName = "top160-current",
+    [string]$VolumeScores = "",
+    [string]$VolumeSplitBuckets = "",
+    [switch]$SkipVolumeSplitPromotion
 )
 
 $ErrorActionPreference = "Stop"
@@ -139,7 +142,10 @@ try {
                 -UniverseRoot $VolumeUniverseRoot `
                 -UniverseName $VolumeUniverseName `
                 -Workers $Workers `
+                -Scores $VolumeScores `
+                -SplitBuckets $VolumeSplitBuckets `
                 -SkipDownload:$SkipVolumeDownload `
+                -SkipSplitPromotion:$SkipVolumeSplitPromotion `
                 -NoTranscript
         }
     }

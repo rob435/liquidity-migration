@@ -14,6 +14,7 @@ from aggression_carry.volume_backtest import run_volume_grid
 
 
 DEFAULT_BUCKETS = "core:1-20,mid:21-80,tail:81-150"
+DEFAULT_SCORES = "dollar_volume_rank,volume_change_1d,volume_change_3d,volume_persistence,volume_composite"
 
 
 def main() -> int:
@@ -21,7 +22,7 @@ def main() -> int:
     data_root = Path(args.data_root)
     config = load_config(args.config, data_root=data_root)
     grid = VolumeGridConfig(
-        scores=("dollar_volume_rank",),
+        scores=_csv_str(args.scores),
         quantiles=_csv_float(args.quantiles),
         hold_days=_csv_int(args.hold_days),
         fixed_stop_loss_pcts=_csv_float(args.fixed_stops),
@@ -64,7 +65,7 @@ def main() -> int:
             f"{name}: rows={payload['rows']} workers={payload['workers']} "
             f"best_return={best.get('total_return', 0.0):.2%} "
             f"sharpe={best.get('sharpe_like', 0.0):.2f} "
-            f"side={best.get('side_mode')} hold={best.get('hold_days')} "
+            f"score={best.get('score')} side={best.get('side_mode')} hold={best.get('hold_days')} "
             f"q={best.get('quantile')} rank_exit={best.get('rank_exit_enabled')}"
         )
 
@@ -82,6 +83,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=None)
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--buckets", default=DEFAULT_BUCKETS, help="Comma-separated name:min-max specs.")
+    parser.add_argument("--scores", default=DEFAULT_SCORES)
     parser.add_argument("--quantiles", default="0.2,0.3,0.5")
     parser.add_argument("--hold-days", default="3,7,14")
     parser.add_argument("--fixed-stops", default="0")
@@ -126,12 +128,13 @@ def _format_summary(rows: list[dict]) -> str:
     lines = [
         "# Volume Bucket Sweep",
         "",
-        "| Bucket | Ranks | Return | Sharpe | Max DD | Hold | Quantile | Rank Exit | Cost | Side | Long | Short |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|",
+        "| Bucket | Ranks | Score | Return | Sharpe | Max DD | Hold | Quantile | Rank Exit | Cost | Side | Long | Short |",
+        "|---|---:|---|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|",
     ]
     for row in rows:
         lines.append(
             f"| {row['bucket']} | {row['rank_min']}-{row['rank_max']} | "
+            f"{row.get('score', '')} | "
             f"{row.get('total_return', 0.0):.2%} | {row.get('sharpe_like', 0.0):.2f} | "
             f"{row.get('max_drawdown', 0.0):.2%} | {row.get('hold_days')}d | "
             f"{row.get('quantile', 0.0):.0%} | {row.get('rank_exit_enabled')} | "

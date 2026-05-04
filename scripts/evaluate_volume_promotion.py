@@ -200,12 +200,13 @@ def format_volume_promotion_report(table: pl.DataFrame, metadata: dict[str, Any]
         "",
         "## Top Rows",
         "",
-        "| Rank | Promote | Reason | Pos Splits | Min Return | Avg Return | Stability | Worst DD | Avg Sharpe | Ranks | Hold | Quantile | Stop | Rank Exit | Side | Cost | Trades |",
-        "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---:|---:|",
+        "| Rank | Score | Promote | Reason | Pos Splits | Min Return | Avg Return | Stability | Worst DD | Avg Sharpe | Ranks | Hold | Quantile | Stop | Rank Exit | Side | Cost | Trades |",
+        "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---:|---:|",
     ]
     for index, row in enumerate(table.head(50).to_dicts() if not table.is_empty() else [], start=1):
         lines.append(
-            f"| {index} | {row.get('promotion_gate_pass', False)} | {row.get('promotion_reason', '')} | "
+            f"| {index} | {row.get('score', '')} | {row.get('promotion_gate_pass', False)} | "
+            f"{row.get('promotion_reason', '')} | "
             f"{row.get('positive_return_splits', 0)}/{row.get('splits_seen', 0)} | "
             f"{_pct(row.get('min_total_return'))} | {_pct(row.get('avg_total_return'))} | "
             f"{_pct(row.get('stability_score'))} | {_pct(row.get('worst_max_drawdown'))} | "
@@ -216,7 +217,7 @@ def format_volume_promotion_report(table: pl.DataFrame, metadata: dict[str, Any]
             f"{_num(row.get('cost_multiplier'), 1)}x | {row.get('trade_count', 0)} |"
         )
     if table.is_empty():
-        lines.append("|  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |")
+        lines.append("|  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |")
     lines.append("")
     return "\n".join(lines)
 

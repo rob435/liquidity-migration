@@ -2,13 +2,16 @@
 
 This is secondary research. It is not the current default strategy.
 
-## Hypothesis
+## Hypotheses
 
-Test whether daily dollar-volume rank contains predictive information:
+Test whether daily volume information contains predictive information:
 
 ```text
-core names: high volume can trend
-mid/tail names: high volume can fade
+dollar_volume_rank: absolute liquidity / size effect
+volume_change_1d: one-day turnover expansion
+volume_change_3d: three-day turnover expansion
+volume_persistence: persistent turnover above baseline
+volume_composite: simple blend of the above
 ```
 
 This is separate from the daily-close fade. Do not blend the two until both are
@@ -32,6 +35,12 @@ Ranks 1-20: high-volume names behaved more like trend/liquidity winners.
 Ranks 21-80: high-volume names more often faded.
 Ranks 81-160: high-volume fade was promising but recent-listing heavy.
 ```
+
+Important: the older bucket sweep outputs only tested `dollar_volume_rank`.
+They were useful for liquidity-bucket behavior, but they did not fully test the
+podcast-style “rising volume predicts future price” claim. The current
+`promotion` preset tests all volume score families and then applies fixed split
+promotion gates.
 
 ## Commands
 
@@ -69,8 +78,18 @@ Windows overnight suite:
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\run_research_overnight_suite.ps1 `
   -Suite volume `
-  -VolumePreset insane `
+  -VolumePreset promotion `
   -Workers 8
+```
+
+The `promotion` preset runs:
+
+```text
+scores: dollar_volume_rank, volume_change_1d, volume_change_3d,
+  volume_persistence, volume_composite
+buckets: core 1-20, mid 21-80, tail 81-160, broad 1-160
+splits: 2023-2024 train, 2024-2025 validation, 2025-2026 OOS
+promotion gates: positive split survival, drawdown <= 35%, avg Sharpe >= 0.5
 ```
 
 ## Backtest Accounting
@@ -106,6 +125,8 @@ reports/volume_backtest_equity_curve.svg
 reports/volume_grid_report.md
 reports/volume_grid_results.csv
 reports/volume_bucket_sweep_summary.md
+reports/volume_promotion_splits/<bucket>/volume_grid_split_summary.md
+reports/volume_promotion_splits/<bucket>/promotion/volume_promotion_report.md
 ```
 
 Large data and report outputs stay under `data/` and are not git artifacts.

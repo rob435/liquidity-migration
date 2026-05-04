@@ -36,6 +36,14 @@ def test_volume_grid_split_summary_prefers_stable_variants() -> None:
     assert summary.row(1, named=True)["score"] == "fragile"
     assert summary.row(1, named=True)["all_splits_positive"] is False
 
+    report = volume_splits.format_volume_grid_split_summary(
+        summary,
+        run_rows=[],
+        split_specs=[("train", "2025-01-01", "2025-02-01"), ("oos", "2025-02-01", "2025-03-01")],
+    )
+    assert "| Rank | Score |" in report
+    assert "| 1 | stable | True |" in report
+
 
 def _variant(score: str, split: str, total_return: float, sharpe: float) -> dict:
     return {

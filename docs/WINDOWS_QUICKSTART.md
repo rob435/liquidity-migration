@@ -83,7 +83,7 @@ Report:
 
 This is the current preferred Windows path. It runs git pull, setup, the
 daily-close breadth/sizing research when the separate 1m data root exists, then
-the volume-alpha overnight sweep. Use 8 workers on the 5950X; higher worker
+the volume-alpha promotion sweep. Use 8 workers on the 5950X; higher worker
 counts have caused Windows/Python memory and process-spawn failures on
 multi-year grids.
 
@@ -98,7 +98,14 @@ Reports:
 ```text
 data/research_reports/risk_on_breadth_sizing_5950x/daily_close_fade_sizing_sweep.md
 data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_bucket_sweep_summary.md
+data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_promotion_splits/<bucket>/volume_grid_split_summary.md
+data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_promotion_splits/<bucket>/promotion/volume_promotion_report.md
 ```
+
+The volume leg defaults to `-VolumePreset promotion`. That preset tests
+`dollar_volume_rank`, `volume_change_1d`, `volume_change_3d`,
+`volume_persistence`, and `volume_composite`, then applies fixed train,
+validation, and OOS promotion gates by liquidity bucket.
 
 The daily-close data root is large 1m kline data and is not part of the volume
 download. If it is missing, `-Suite both` warns, skips daily-close, and continues

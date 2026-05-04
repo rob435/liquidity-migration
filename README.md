@@ -16,7 +16,7 @@ Entry: equal 1m TWAP from 22:00 through 22:59
 Entry price: average fill price
 Exit: whole-symbol flatten, no same-symbol re-entry that day
 Max hold: 180m after TWAP completes
-Disaster stop: 20% above average entry, active from first fill + 15m
+Disaster stop: 20% above average entry, active immediately from first fill
 Adaptive protection: 0.25x daily-vol trail plus 20% MFE giveback after +1% MFE,
   active only after final add + 15m
 Sizing: score-capped, max 80% basket weight per symbol
@@ -30,8 +30,8 @@ The latest local current-top-160 benchmark is deliberately labeled as biased:
 ```text
 Data: current top-160 Bybit symbols, 2023-05-15 to 2026-05-02
 Trades: 750
-Total return: +16,896.41%
-Sharpe-like: 10.63
+Total return: +16,991.58%
+Sharpe-like: 10.65
 Max drawdown: -15.39%
 Worst day: -12.84%
 Report: data/research_reports/daily_close_twap_2200_2300_current_top160_20260504/
@@ -116,6 +116,11 @@ powershell -ExecutionPolicy Bypass -File .\scripts\run_research_overnight_suite.
 If the daily-close 1m dataset is missing, `-Suite both` skips that leg and still
 runs the volume sweep. Use `-Suite daily-close` when missing 1m data should be a
 hard failure.
+
+The volume leg now defaults to the `promotion` preset. That preset tests actual
+volume-change scores plus dollar-volume rank, then runs train/validation/OOS
+promotion gates by liquidity bucket. It is slower than the old headline grid,
+but much more useful.
 
 ## Point-In-Time Proof
 

@@ -36,6 +36,23 @@ def test_volume_promotion_requires_split_survival_and_drawdown() -> None:
     assert drawdown["promotion_gate_pass"] is False
     assert drawdown["promotion_reason"] == "drawdown_fail"
 
+    report = promotion.format_volume_promotion_report(
+        table,
+        {
+            "split_summary": "summary.csv",
+            "require_complete_splits": True,
+            "min_positive_splits": 0,
+            "min_worst_split_return": 0.0,
+            "min_stability_score": 0.0,
+            "max_worst_drawdown": -0.35,
+            "min_avg_sharpe": 0.5,
+            "rows": table.height,
+            "promotable_rows": 1,
+        },
+    )
+    assert "| Rank | Score |" in report
+    assert "| 1 | stable | True | pass |" in report
+
 
 def _candidate(
     score: str,

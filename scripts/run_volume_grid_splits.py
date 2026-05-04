@@ -215,13 +215,13 @@ def format_volume_grid_split_summary(
             "",
             "## Most Stable Variants",
             "",
-            "| Rank | All Positive | Pos Splits | Min Return | Avg Return | Return Std | Stability | Worst DD | Avg Sharpe | Ranks | Hold | Quantile | Stop | Rank Exit | Side | Cost | Long | Short | Trades |",
-            "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---:|---:|---:|---:|",
+            "| Rank | Score | All Positive | Pos Splits | Min Return | Avg Return | Return Std | Stability | Worst DD | Avg Sharpe | Ranks | Hold | Quantile | Stop | Rank Exit | Side | Cost | Long | Short | Trades |",
+            "|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---:|---:|---:|---:|",
         ]
     )
     for index, row in enumerate(summary.head(50).to_dicts() if not summary.is_empty() else [], start=1):
         lines.append(
-            f"| {index} | {row.get('all_splits_positive', False)} | "
+            f"| {index} | {row.get('score', '')} | {row.get('all_splits_positive', False)} | "
             f"{row.get('positive_return_splits', 0)}/{row.get('splits_seen', 0)} | "
             f"{_pct(row.get('min_total_return'))} | {_pct(row.get('avg_total_return'))} | "
             f"{_pct(row.get('total_return_std'))} | {_pct(row.get('stability_score'))} | "
@@ -233,7 +233,7 @@ def format_volume_grid_split_summary(
             f"{_pct(row.get('avg_short_return'))} | {row.get('trade_count', 0)} |"
         )
     if summary.is_empty():
-        lines.append("|  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |")
+        lines.append("|  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |")
 
     lines.extend(
         [
