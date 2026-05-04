@@ -168,6 +168,43 @@ Do not treat this as live proof yet. The next validation step is to rerun the
 same gate on the point-in-time/walk-forward universe and on any fuller Bybit
 archive universe, without changing the thresholds after seeing those results.
 
+An individual-coin version of the same idea has also been tested. This gates
+each candidate before top-N selection instead of requiring only the selected
+basket average to pass. That is a stricter and more realistic entry rule, but it
+changes concentration because some baskets end up with fewer than five names.
+
+Exact per-coin version of the promoted basket filter:
+
+```text
+coin_excess_vs_market >= 5%
+coin_vwap_extension >= 2.5%
+coin_late_volume_ratio >= 0.75x
+min_symbols >= 1
+```
+
+Under the current backtest contract, unused basket weight is reallocated across
+the remaining selected names. With that contract, the per-coin filter beat
+baseline in all three splits:
+
+| Split | Baseline return | Per-coin return | Delta | Per-coin Sharpe | Active days |
+|---|---:|---:|---:|---:|---:|
+| 2023-05-03 to 2024-05-03 | 23.86% | 44.98% | 21.12% | 2.71 | 158 |
+| 2024-05-03 to 2025-05-03 | 27.38% | 46.29% | 18.91% | 2.69 | 183 |
+| 2025-05-03 to 2026-05-03 | 121.22% | 146.98% | 25.77% | 4.57 | 285 |
+
+The best reallocated sweep candidates were stricter, around
+`coin_excess >= 8%`, `coin_vwap >= 1.5%-3.5%`, and
+`coin_late_volume_ratio >= 0.75x-1.0x`. These improved returns materially, but
+they are more concentrated.
+
+The fixed-slot companion test is the honesty check: each passing coin gets
+`gross_exposure / top_n`, and missing slots stay in cash. In that mode, no tested
+per-coin filter beat baseline across all three splits. The exact per-coin filter
+was positive in all three periods, but beat fixed-slot baseline in only one
+split. Conclusion: the per-coin gate improves candidate quality, but the large
+return improvement depends on accepting concentration into fewer shorts. Do not
+promote it to demo/live until concentration caps and PIT validation are handled.
+
 The diagnostic path deliberately ignores TP, SL, trailing stops, basket stops,
 and compounding. It writes:
 
@@ -262,6 +299,14 @@ Run the context filter promotion sweep after a day-audit report exists:
 ```bash
 python scripts/run_daily_close_fade_filter_sweep.py \
   --data-root data/daily-close-fade-1m-3y-current-top160-20230503-20260503
+```
+
+Run the individual-coin filter sweep:
+
+```bash
+python scripts/run_daily_close_fade_coin_filter_sweep.py \
+  --data-root data/daily-close-fade-1m-3y-current-top160-20230503-20260503 \
+  --config configs/volume_alpha.default.yaml
 ```
 
 Run fixed train/validation/OOS split diagnostics:
