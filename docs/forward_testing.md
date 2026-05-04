@@ -29,6 +29,10 @@ It reads `forward_paper_trades`, mirrors capped demo orders into its own
 `demo_execution_orders` ledger, and reconciles open orders/positions. It is not
 called by `forward-run` or `forward-run-sleeves`.
 
+`bybit-demo-cycle` is the only scheduled demo-shadow command. It runs
+`forward-run-sleeves` first, then syncs each sleeve into its own demo ledger.
+It is still demo-only. It does not add real-money live execution.
+
 ## Signal
 
 The paper tester uses the same daily-close fade rules as the backtester:
@@ -325,6 +329,114 @@ Suggested schedule for demo shadowing the core sleeve:
   using `data/forward-paper/forward_sleeves/core_31_150`
 - every 5-15 minutes until flat: run both commands again so paper exits and
   demo reconciliation stay current
+
+## Bybit Demo Cycle
+
+The cycle command is the preferred demo-shadow runtime. It keeps sleeves
+separate, prefixes demo order IDs by sleeve, and writes one cycle report plus
+per-sleeve demo execution reports.
+
+Dry-run:
+
+```bash
+python -m aggression_carry \
+  --data-root data/forward-paper \
+  --config configs/volume_alpha.default.yaml \
+  bybit-demo-cycle \
+  --telegram
+```
+
+Submit capped demo orders:
+
+```bash
+python -m aggression_carry \
+  --data-root data/forward-paper \
+  --config configs/volume_alpha.default.yaml \
+  bybit-demo-cycle \
+  --submit-orders \
+  --i-understand-demo-sync \
+  --telegram
+```
+
+Cycle safety:
+
+- demo-only private client; no live-money API path
+- all sleeves shadowed separately: `control_top_1_30`, `core_31_150`,
+  `microcap_151_plus`
+- default caps are 10 USDT per order, 5 new orders per sleeve, and 50 USDT
+  total new notional per sleeve per cycle
+- reduce-only exits are prioritized before new entries
+- `max_new_orders` is enforced before every private `place_order` call; exits
+  get priority, while `max_total_new_notional` only caps new entry exposure
+- dry-runs do not block later real demo submission
+- `dry_run`, `skipped`, and `place_failed` states are retryable
+- `data/forward-paper/DEMO_PAUSED` blocks new entries but still permits
+  reduce-only exits and reconciliation
+- a process lock at `data/forward-paper/.bybit_demo_cycle.lock` blocks
+  overlapping timer runs
+- the default active window is `22:05-02:30 UTC`; outside that window the
+  cycle skips public scans/syncs unless paper or demo state is still active
+
+Emergency demo commands:
+
+```bash
+python -m aggression_carry \
+  --data-root data/forward-paper \
+  --config configs/volume_alpha.default.yaml \
+  bybit-demo-cancel-all
+
+python -m aggression_carry \
+  --data-root data/forward-paper \
+  --config configs/volume_alpha.default.yaml \
+  bybit-demo-flatten \
+  --i-understand-demo-flatten
+```
+
+These emergency commands are demo-only and should be used when the demo ledger
+or Bybit demo account is out of sync.
+
+## VPS systemd Timer
+
+Install the demo-only 5-minute timer from the VPS repo checkout:
+
+```bash
+scripts/install_bybit_demo_systemd.sh
+```
+
+The installer creates:
+
+```text
+/etc/model050426/bybit-demo.env
+/etc/systemd/system/model050426-bybit-demo.service
+/etc/systemd/system/model050426-bybit-demo.timer
+```
+
+Fill the env file on the VPS:
+
+```bash
+BYBIT_DEMO_API_KEY=...
+BYBIT_DEMO_API_SECRET=...
+TELEGRAM_BOT_TOKEN=...
+TELEGRAM_CHAT_ID=...
+```
+
+Start and inspect:
+
+```bash
+sudo systemctl start model050426-bybit-demo.timer
+systemctl list-timers model050426-bybit-demo.timer
+journalctl -u model050426-bybit-demo.service -f
+```
+
+Pause and resume new entries:
+
+```bash
+touch data/forward-paper/DEMO_PAUSED
+rm -f data/forward-paper/DEMO_PAUSED
+```
+
+The env file is intentionally outside the repo. Demo keys are throwaway, but
+they still must not be committed or printed in logs.
 
 ## Scheduling
 

@@ -40,7 +40,29 @@ class DemoSyncConfig:
     submit_orders: bool = False
     confirmed: bool = False
     allow_market_exit: bool = True
+    pause_new_entries: bool = False
+    order_link_prefix: str = ""
     account_type: str = "UNIFIED"
+
+
+@dataclass(frozen=True, slots=True)
+class DemoCancelAllConfig:
+    symbols: tuple[str, ...] = ()
+    account_type: str = "UNIFIED"
+
+
+@dataclass(frozen=True, slots=True)
+class DemoFlattenConfig:
+    confirmed: bool = False
+    account_type: str = "UNIFIED"
+
+
+_SUBMITTED_STATUSES = {"accepted", "placed", "submitted", "cancel_requested", "exit_submitted"}
+_BLOCKING_RECONCILED_STATUSES = {"accepted", "open_order_seen", "position_detected", "filled", "partial", "exit_submitted"}
+_TERMINAL_RECONCILED_STATUSES = {"cancelled", "missed_entry"}
+_ACTIVE_ORDER_STATUSES = {"new", "created", "untriggered", "triggered", "partiallyfilled"}
+_FILLED_ORDER_STATUSES = {"filled"}
+_CANCELLED_ORDER_STATUSES = {"cancelled", "rejected", "deactivated", "partiallyfilledcanceled"}
 
 
 def run_bybit_demo_sync(
@@ -98,6 +120,117 @@ def run_bybit_demo_sync(
     return payload
 
 
+def run_bybit_demo_cancel_all(
+    data_root: str | Path,
+    *,
+    config: ResearchConfig,
+    cancel_config: DemoCancelAllConfig | None = None,
+    now: datetime | None = None,
+    execution_client: Any | None = None,
+    api_key: str | None = None,
+    api_secret: str | None = None,
+) -> dict[str, Any]:
+    cancel = cancel_config or DemoCancelAllConfig()
+    now_dt = _as_utc(now or datetime.now(tz=UTC))
+    executor = _demo_private_executor(config, execution_client, api_key, api_secret)
+    symbols = tuple(symbol.strip().upper() for symbol in cancel.symbols if symbol.strip())
+    targets = symbols or ("*",)
+    results: list[dict[str, Any]] = []
+    for target in targets:
+        try:
+            result = executor.cancel_all_orders(
+                symbol=None if target == "*" else target,
+                settle_coin=config.exchange.settle_coin,
+            )
+            results.append({"target": target, "status": "cancel_requested", "result": result, "error": ""})
+        except Exception as exc:  # noqa: BLE001 - keep the emergency report complete
+            results.append({"target": target, "status": "cancel_failed", "result": {}, "error": str(exc)})
+    payload = {
+        "now": now_dt.isoformat(),
+        "command": "bybit-demo-cancel-all",
+        "config": asdict(cancel),
+        "rows": {"targets": len(targets), "cancel_requested": _count_payload_status(results, "cancel_requested")},
+        "results": results,
+    }
+    _write_demo_emergency_report(data_root, "bybit_demo_cancel_all_report", payload, format_demo_cancel_all_report(payload))
+    return payload
+
+
+def run_bybit_demo_flatten(
+    data_root: str | Path,
+    *,
+    config: ResearchConfig,
+    flatten_config: DemoFlattenConfig,
+    now: datetime | None = None,
+    execution_client: Any | None = None,
+    api_key: str | None = None,
+    api_secret: str | None = None,
+) -> dict[str, Any]:
+    if not flatten_config.confirmed:
+        raise RuntimeError("Refusing demo flatten without --i-understand-demo-flatten")
+    now_dt = _as_utc(now or datetime.now(tz=UTC))
+    now_ms = int(now_dt.timestamp() * 1000)
+    executor = _demo_private_executor(config, execution_client, api_key, api_secret)
+    positions = executor.get_positions(settle_coin=config.exchange.settle_coin)
+    results: list[dict[str, Any]] = []
+    for position in positions:
+        symbol = str(position.get("symbol") or "").upper()
+        side = str(position.get("side") or "")
+        size = Decimal(str(position.get("size") or "0"))
+        if not symbol or size <= 0:
+            continue
+        exit_side = "Buy" if side.lower() == "sell" else "Sell"
+        request = {
+            "symbol": symbol,
+            "side": exit_side,
+            "orderType": "Market",
+            "qty": _decimal_text(size),
+            "timeInForce": "IOC",
+            "positionIdx": int(position.get("positionIdx") or position.get("position_idx") or 0),
+            "reduceOnly": True,
+            "orderLinkId": _emergency_order_link_id("flat", symbol, now_ms),
+        }
+        try:
+            result = executor.place_order(**request)
+            results.append(
+                {
+                    "symbol": symbol,
+                    "position_side": side,
+                    "position_size": float(size),
+                    "status": "flatten_submitted",
+                    "request": request,
+                    "result": result,
+                    "error": "",
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - try the remaining positions
+            results.append(
+                {
+                    "symbol": symbol,
+                    "position_side": side,
+                    "position_size": float(size),
+                    "status": "flatten_failed",
+                    "request": request,
+                    "result": {},
+                    "error": str(exc),
+                }
+            )
+    payload = {
+        "now": now_dt.isoformat(),
+        "command": "bybit-demo-flatten",
+        "config": asdict(flatten_config),
+        "rows": {
+            "positions_seen": len(positions),
+            "positions_with_size": len(results),
+            "flatten_submitted": _count_payload_status(results, "flatten_submitted"),
+            "flatten_failed": _count_payload_status(results, "flatten_failed"),
+        },
+        "results": results,
+    }
+    _write_demo_emergency_report(data_root, "bybit_demo_flatten_report", payload, format_demo_flatten_report(payload))
+    return payload
+
+
 def build_demo_sync_orders(
     trades: pl.DataFrame,
     *,
@@ -110,41 +243,20 @@ def build_demo_sync_orders(
 ) -> pl.DataFrame:
     if trades.is_empty() or sync_config.max_new_orders <= 0:
         return pl.DataFrame()
-    rows: list[dict[str, Any]] = []
-    new_notional = 0.0
+    candidate_rows: list[dict[str, Any]] = []
     sorted_trades = trades.sort(["entry_ts_ms", "symbol"]) if "entry_ts_ms" in trades.columns else trades
-    for trade in sorted_trades.to_dicts():
+    trade_rows = sorted_trades.to_dicts()
+
+    for trade in trade_rows:
         trade_id = str(trade.get("trade_id") or "")
         symbol = str(trade.get("symbol") or "").upper()
         if not trade_id or not symbol:
             continue
-        if symbol not in instruments:
-            rows.append(_skip_row(trade, "entry", now_ms, "instrument_missing"))
-            continue
-        if trade.get("status") == "open" and not _has_action(existing_orders, trade_id, "entry"):
-            if len(rows) >= sync_config.max_new_orders:
-                break
-            try:
-                row = _entry_order_row(
-                    trade,
-                    instrument=instruments[symbol],
-                    sync_config=sync_config,
-                    now_ms=now_ms,
-                    market_client=market_client,
-                    execution_client=execution_client,
-                )
-            except Exception as exc:  # noqa: BLE001 - one bad symbol should not block the batch
-                row = _skip_row(trade, "entry", now_ms, f"build_failed: {exc}")
-            estimated_notional = float(row.get("estimated_notional") or 0.0)
-            if new_notional + estimated_notional > sync_config.max_total_new_notional:
-                row = _skip_row(trade, "entry", now_ms, "max_total_new_notional_exceeded")
-            rows.append(row)
-            new_notional += estimated_notional if row.get("status") != "skipped" else 0.0
-        elif trade.get("status") == "closed" and _has_action(existing_orders, trade_id, "entry") and not _has_action(
-            existing_orders, trade_id, "exit"
+        if (
+            trade.get("status") == "closed"
+            and _has_blocking_action(existing_orders, trade_id, "entry")
+            and not _has_blocking_action(existing_orders, trade_id, "exit")
         ):
-            if len(rows) >= sync_config.max_new_orders:
-                break
             try:
                 row = _exit_order_row(
                     trade,
@@ -154,12 +266,70 @@ def build_demo_sync_orders(
                     execution_client=execution_client,
                 )
             except Exception as exc:  # noqa: BLE001 - one bad symbol should not block the batch
-                row = _skip_row(trade, "exit", now_ms, f"build_failed: {exc}")
-            estimated_notional = float(row.get("estimated_notional") or 0.0)
-            if new_notional + estimated_notional > sync_config.max_total_new_notional:
-                row = _skip_row(trade, "exit", now_ms, "max_total_new_notional_exceeded")
-            rows.append(row)
-            new_notional += estimated_notional if row.get("status") != "skipped" else 0.0
+                row = _skip_row(
+                    trade,
+                    "exit",
+                    now_ms,
+                    f"build_failed: {exc}",
+                    order_link_prefix=sync_config.order_link_prefix,
+                )
+            candidate_rows.append(row)
+
+    for trade in trade_rows:
+        trade_id = str(trade.get("trade_id") or "")
+        symbol = str(trade.get("symbol") or "").upper()
+        if not trade_id or not symbol:
+            continue
+        if trade.get("status") != "open" or _has_blocking_action(existing_orders, trade_id, "entry"):
+            continue
+        if sync_config.pause_new_entries:
+            candidate_rows.append(
+                _skip_row(
+                    trade,
+                    "entry",
+                    now_ms,
+                    "new_entries_paused",
+                    order_link_prefix=sync_config.order_link_prefix,
+                )
+            )
+            continue
+        if symbol not in instruments:
+            candidate_rows.append(
+                _skip_row(
+                    trade,
+                    "entry",
+                    now_ms,
+                    "instrument_missing",
+                    order_link_prefix=sync_config.order_link_prefix,
+                )
+            )
+            continue
+        try:
+            row = _entry_order_row(
+                trade,
+                instrument=instruments[symbol],
+                sync_config=sync_config,
+                now_ms=now_ms,
+                market_client=market_client,
+                execution_client=execution_client,
+            )
+        except Exception as exc:  # noqa: BLE001 - one bad symbol should not block the batch
+            row = _skip_row(
+                trade,
+                "entry",
+                now_ms,
+                f"build_failed: {exc}",
+                order_link_prefix=sync_config.order_link_prefix,
+            )
+        candidate_rows.append(row)
+
+    capped_rows = _cap_candidate_order_rows(candidate_rows, sync_config=sync_config, now_ms=now_ms)
+    rows = [
+        _submit_pending_order_row(row, execution_client=execution_client)
+        if row.get("status") == "pending_submit"
+        else row
+        for row in capped_rows
+    ]
     return pl.DataFrame(rows, infer_schema_length=None) if rows else pl.DataFrame()
 
 
@@ -188,28 +358,52 @@ def reconcile_demo_orders(
         updated = dict(row)
         symbol = str(row.get("symbol") or "").upper()
         order_link_id = str(row.get("order_link_id") or "")
+        order_id = str(row.get("order_id") or "")
         open_orders = open_by_symbol.get(symbol, [])
         positions = positions_by_symbol.get(symbol, [])
+        order_history = _private_history_rows(
+            execution_client,
+            "get_order_history",
+            symbol=symbol,
+            order_link_id=order_link_id,
+        )
+        trade_history = _private_history_rows(
+            execution_client,
+            "get_trade_history",
+            symbol=symbol,
+            order_link_id=order_link_id,
+        )
         open_error = next((item["__error__"] for item in open_orders if "__error__" in item), None)
         position_error = next((item["__error__"] for item in positions if "__error__" in item), None)
-        open_match = next((item for item in open_orders if str(item.get("orderLinkId") or "") == order_link_id), None)
+        order_history_error = next((item["__error__"] for item in order_history if "__error__" in item), None)
+        trade_history_error = next((item["__error__"] for item in trade_history if "__error__" in item), None)
+        open_match = next((item for item in open_orders if _matches_order(item, order_link_id, order_id)), None)
+        order_matches = [item for item in order_history if _matches_order(item, order_link_id, order_id)]
+        trade_matches = [item for item in trade_history if _matches_order(item, order_link_id, order_id)]
         position = _symbol_position(positions, symbol)
+        history_status = _history_order_status(order_matches)
+        filled_qty, filled_value = _filled_totals(trade_matches)
         updated["reconcile_ts_ms"] = int(now.timestamp() * 1000)
         updated["reconcile_time"] = now.isoformat()
         updated["open_order_seen"] = bool(open_match)
         updated["open_order_status"] = str(open_match.get("orderStatus") or "") if open_match else ""
+        updated["order_history_seen"] = bool(order_matches)
+        updated["order_history_status"] = history_status
+        updated["trade_history_seen"] = bool(trade_matches)
+        updated["trade_count"] = len(trade_matches)
+        updated["filled_qty"] = filled_qty
+        updated["filled_value"] = filled_value
         updated["position_side"] = position["side"]
         updated["position_size"] = position["size"]
         updated["position_value"] = position["value"]
-        updated["reconcile_error"] = open_error or position_error
-        if updated.get("status") in {"placed", "cancel_requested"} and not open_match and not position["size"]:
-            updated["reconciled_status"] = "not_open_no_position"
-        elif updated.get("status") in {"placed", "cancel_requested"} and not open_match and position["size"]:
-            updated["reconciled_status"] = "position_detected"
-        elif open_match:
-            updated["reconciled_status"] = "open_order_seen"
-        else:
-            updated["reconciled_status"] = updated.get("reconciled_status") or ""
+        updated["reconcile_error"] = open_error or position_error or order_history_error or trade_history_error
+        updated["reconciled_status"] = _reconciled_status(
+            updated,
+            open_match=open_match,
+            position=position,
+            history_status=history_status,
+            filled_qty=filled_qty,
+        )
         rows.append(updated)
     return pl.DataFrame(rows, infer_schema_length=None)
 
@@ -229,7 +423,7 @@ def cancel_stale_demo_orders(
         updated = dict(row)
         status = str(updated.get("status") or "")
         if (
-            status == "placed"
+            status in {"accepted", "placed"}
             and bool(updated.get("open_order_seen"))
             and str(updated.get("action")) == "entry"
             and now_ms - int(updated.get("created_ts_ms") or now_ms) >= max(sync_config.cancel_stale_minutes, 0) * 60_000
@@ -255,6 +449,7 @@ def summarize_demo_sync_orders(orders: pl.DataFrame) -> dict[str, Any]:
         return {
             "orders": 0,
             "placed": 0,
+            "accepted": 0,
             "dry_run": 0,
             "skipped": 0,
             "cancel_requested": 0,
@@ -263,7 +458,8 @@ def summarize_demo_sync_orders(orders: pl.DataFrame) -> dict[str, Any]:
         }
     return {
         "orders": orders.height,
-        "placed": _count_status(orders, "placed"),
+        "placed": _count_status(orders, "placed") + _count_status(orders, "accepted"),
+        "accepted": _count_status(orders, "accepted"),
         "dry_run": _count_status(orders, "dry_run"),
         "skipped": _count_status(orders, "skipped"),
         "cancel_requested": _count_status(orders, "cancel_requested"),
@@ -288,6 +484,7 @@ def format_demo_sync_report(payload: dict[str, Any], orders: pl.DataFrame) -> st
         f"| New orders | {payload.get('rows', {}).get('new_orders', 0)} |",
         f"| Ledger orders | {summary.get('orders', 0)} |",
         f"| Placed | {summary.get('placed', 0)} |",
+        f"| Accepted | {summary.get('accepted', 0)} |",
         f"| Dry run | {summary.get('dry_run', 0)} |",
         f"| Skipped | {summary.get('skipped', 0)} |",
         f"| Cancel requested | {summary.get('cancel_requested', 0)} |",
@@ -308,6 +505,40 @@ def format_demo_sync_report(payload: dict[str, Any], orders: pl.DataFrame) -> st
                 f"{row.get('paper_trade_id', '')} | {row.get('reconciled_status', '')} | "
                 f"{str(row.get('error') or row.get('reconcile_error') or '')[:120]} |"
             )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def format_demo_cancel_all_report(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Bybit Demo Cancel All",
+        "",
+        f"Now: {payload.get('now')}",
+        "",
+        "| Target | Status | Error |",
+        "|---|---|---|",
+    ]
+    for row in payload.get("results", []):
+        lines.append(f"| {row.get('target')} | {row.get('status')} | {str(row.get('error') or '')[:160]} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def format_demo_flatten_report(payload: dict[str, Any]) -> str:
+    lines = [
+        "# Bybit Demo Flatten",
+        "",
+        f"Now: {payload.get('now')}",
+        "",
+        "| Symbol | Position Side | Position Size | Status | Order Link ID | Error |",
+        "|---|---|---:|---|---|---|",
+    ]
+    for row in payload.get("results", []):
+        request = row.get("request") or {}
+        lines.append(
+            f"| {row.get('symbol')} | {row.get('position_side')} | {float(row.get('position_size') or 0.0):.8f} | "
+            f"{row.get('status')} | {request.get('orderLinkId', '')} | {str(row.get('error') or '')[:160]} |"
+        )
     lines.append("")
     return "\n".join(lines)
 
@@ -499,7 +730,13 @@ def _entry_order_row(
     side = "Sell" if str(trade.get("side", "short")).lower() == "short" else "Buy"
     notional = min(_paper_notional(trade), sync_config.max_order_notional)
     if notional <= 0.0:
-        return _skip_row(trade, "entry", now_ms, "non_positive_notional")
+        return _skip_row(
+            trade,
+            "entry",
+            now_ms,
+            "non_positive_notional",
+            order_link_prefix=sync_config.order_link_prefix,
+        )
     quote = _top_of_book(market_client.get_orderbook(symbol, limit=1))
     order = _build_limit_order(
         symbol=symbol,
@@ -509,10 +746,14 @@ def _entry_order_row(
         price_offset_bps=sync_config.price_offset_bps,
         quote=quote,
         instrument=instrument,
-        order_link_id=_sync_order_link_id(str(trade["trade_id"]), "entry"),
+        order_link_id=_sync_order_link_id(
+            str(trade["trade_id"]),
+            "entry",
+            prefix=sync_config.order_link_prefix,
+        ),
         reduce_only=False,
     )
-    return _submit_or_dry_order_row(
+    return _candidate_order_row(
         trade,
         action="entry",
         order=order,
@@ -533,16 +774,34 @@ def _exit_order_row(
     symbol = str(trade["symbol"]).upper()
     position = _symbol_position(execution_client.get_positions(symbol=symbol) if execution_client is not None else [], symbol)
     if position["size"] <= 0.0:
-        return _skip_row(trade, "exit", now_ms, "no_demo_position_detected")
+        return _skip_row(
+            trade,
+            "exit",
+            now_ms,
+            "no_demo_position_detected",
+            order_link_prefix=sync_config.order_link_prefix,
+        )
     if not sync_config.allow_market_exit:
-        return _skip_row(trade, "exit", now_ms, "market_exit_disabled")
+        return _skip_row(
+            trade,
+            "exit",
+            now_ms,
+            "market_exit_disabled",
+            order_link_prefix=sync_config.order_link_prefix,
+        )
     entry = _entry_order_for_trade(existing_orders, str(trade["trade_id"]))
     entry_qty = Decimal(str(entry.get("qty") or "0")) if entry else Decimal("0")
     qty = min(Decimal(str(position["size"])), entry_qty) if entry_qty > 0 else Decimal(str(position["size"]))
     if qty <= 0:
-        return _skip_row(trade, "exit", now_ms, "non_positive_exit_qty")
+        return _skip_row(
+            trade,
+            "exit",
+            now_ms,
+            "non_positive_exit_qty",
+            order_link_prefix=sync_config.order_link_prefix,
+        )
     side = "Buy" if str(position["side"]).lower() == "sell" else "Sell"
-    order_link_id = _sync_order_link_id(str(trade["trade_id"]), "exit")
+    order_link_id = _sync_order_link_id(str(trade["trade_id"]), "exit", prefix=sync_config.order_link_prefix)
     request = {
         "symbol": symbol,
         "side": side,
@@ -555,11 +814,11 @@ def _exit_order_row(
     }
     order = {
         "request": request,
-        "estimated_notional": min(float(position["value"]), sync_config.max_order_notional),
+        "estimated_notional": float(position["value"]),
         "max_order_notional": sync_config.max_order_notional,
         "price_offset_bps": 0.0,
     }
-    return _submit_or_dry_order_row(
+    return _candidate_order_row(
         trade,
         action="exit",
         order=order,
@@ -633,7 +892,7 @@ def _build_limit_order(
     }
 
 
-def _submit_or_dry_order_row(
+def _candidate_order_row(
     trade: dict[str, Any],
     *,
     action: str,
@@ -643,19 +902,10 @@ def _submit_or_dry_order_row(
     execution_client: Any | None,
 ) -> dict[str, Any]:
     request = dict(order["request"])
-    status = status_if_dry
-    place_result: dict[str, Any] | None = None
-    error: str | None = None
-    if execution_client is not None:
-        try:
-            place_result = execution_client.place_order(**request)
-            status = "placed"
-        except Exception as exc:  # noqa: BLE001
-            status = "place_failed"
-            error = str(exc)
+    status = "pending_submit" if execution_client is not None else status_if_dry
     return {
         "order_link_id": request["orderLinkId"],
-        "order_id": str(place_result.get("orderId") or "") if place_result else "",
+        "order_id": "",
         "paper_trade_id": str(trade.get("trade_id") or ""),
         "basket_id": str(trade.get("basket_id") or ""),
         "date": str(trade.get("date") or _dt_from_ms(now_ms).date().isoformat()),
@@ -678,12 +928,18 @@ def _submit_or_dry_order_row(
         "paper_exit_price": float(trade.get("exit_price") or 0.0) if trade.get("exit_price") is not None else None,
         "paper_exit_reason": str(trade.get("exit_reason") or ""),
         "request": json.dumps(request, sort_keys=True),
-        "place_result": json.dumps(place_result, sort_keys=True) if place_result else "",
+        "place_result": "",
         "cancel_result": "",
         "cancel_ts_ms": None,
         "cancel_time": None,
         "open_order_seen": False,
         "open_order_status": "",
+        "order_history_seen": False,
+        "order_history_status": "",
+        "trade_history_seen": False,
+        "trade_count": 0,
+        "filled_qty": 0.0,
+        "filled_value": 0.0,
         "position_side": "",
         "position_size": 0.0,
         "position_value": 0.0,
@@ -691,8 +947,73 @@ def _submit_or_dry_order_row(
         "reconcile_ts_ms": None,
         "reconcile_time": None,
         "reconcile_error": None,
-        "error": error,
+        "error": None,
     }
+
+
+def _cap_candidate_order_rows(
+    rows: list[dict[str, Any]],
+    *,
+    sync_config: DemoSyncConfig,
+    now_ms: int,
+) -> list[dict[str, Any]]:
+    capped: list[dict[str, Any]] = []
+    new_orders = 0
+    new_notional = 0.0
+    for row in rows:
+        if not _row_has_order_request(row):
+            capped.append(row)
+            continue
+        estimated_notional = float(row.get("estimated_notional") or 0.0)
+        notional_for_cap = 0.0 if bool(row.get("reduce_only")) else estimated_notional
+        if new_orders >= sync_config.max_new_orders:
+            capped.append(_skip_candidate_row(row, now_ms=now_ms, reason="max_new_orders_exceeded"))
+            continue
+        if new_notional + notional_for_cap > sync_config.max_total_new_notional:
+            capped.append(_skip_candidate_row(row, now_ms=now_ms, reason="max_total_new_notional_exceeded"))
+            continue
+        capped.append(row)
+        new_orders += 1
+        new_notional += notional_for_cap
+    return capped
+
+
+def _row_has_order_request(row: dict[str, Any]) -> bool:
+    return str(row.get("status") or "") in {"dry_run", "pending_submit"} and bool(row.get("request"))
+
+
+def _skip_candidate_row(row: dict[str, Any], *, now_ms: int, reason: str) -> dict[str, Any]:
+    updated = dict(row)
+    updated["status"] = "skipped"
+    updated["estimated_notional"] = 0.0
+    updated["request"] = ""
+    updated["reconciled_status"] = ""
+    updated["error"] = reason
+    updated["created_ts_ms"] = now_ms
+    updated["created_time"] = _dt_from_ms(now_ms).isoformat()
+    return updated
+
+
+def _submit_pending_order_row(row: dict[str, Any], *, execution_client: Any | None) -> dict[str, Any]:
+    if execution_client is None:
+        return row
+    updated = dict(row)
+    try:
+        request = json.loads(str(updated.get("request") or "{}"))
+        if not request:
+            raise ValueError("missing order request")
+        place_result = execution_client.place_order(**request)
+        updated["status"] = "accepted"
+        updated["order_id"] = str(place_result.get("orderId") or "")
+        updated["place_result"] = json.dumps(place_result, sort_keys=True)
+        updated["reconciled_status"] = "exit_submitted" if str(updated.get("action")) == "exit" else "accepted"
+        updated["error"] = None
+    except Exception as exc:  # noqa: BLE001
+        updated["status"] = "place_failed"
+        updated["place_result"] = ""
+        updated["reconciled_status"] = ""
+        updated["error"] = str(exc)
+    return updated
 
 
 def _write_demo_sync_outputs(
@@ -711,6 +1032,13 @@ def _write_demo_sync_outputs(
     if path.exists():
         shutil.rmtree(path)
     write_dataset(ledger, data_root, "demo_execution_orders", partition_by=("date", "symbol"), append=False)
+
+
+def _write_demo_emergency_report(data_root: str | Path, stem: str, payload: dict[str, Any], markdown: str) -> None:
+    output_dir = Path(data_root) / "reports"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / f"{stem}.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    (output_dir / f"{stem}.md").write_text(markdown, encoding="utf-8")
 
 
 def _demo_executor(
@@ -736,8 +1064,34 @@ def _demo_executor(
     )
 
 
-def _skip_row(trade: dict[str, Any], action: str, now_ms: int, reason: str) -> dict[str, Any]:
-    order_link_id = _sync_order_link_id(str(trade.get("trade_id") or "missing"), action)
+def _demo_private_executor(
+    config: ResearchConfig,
+    execution_client: Any | None,
+    api_key: str | None,
+    api_secret: str | None,
+) -> Any:
+    if execution_client is not None:
+        return execution_client
+    key = api_key or os.environ.get("BYBIT_DEMO_API_KEY")
+    secret = api_secret or os.environ.get("BYBIT_DEMO_API_SECRET")
+    return BybitPrivateClient(
+        category=config.exchange.category,
+        testnet=config.exchange.testnet,
+        demo=True,
+        api_key=key,
+        api_secret=secret,
+    )
+
+
+def _skip_row(
+    trade: dict[str, Any],
+    action: str,
+    now_ms: int,
+    reason: str,
+    *,
+    order_link_prefix: str = "",
+) -> dict[str, Any]:
+    order_link_id = _sync_order_link_id(str(trade.get("trade_id") or "missing"), action, prefix=order_link_prefix)
     return {
         "order_link_id": order_link_id,
         "order_id": "",
@@ -769,6 +1123,12 @@ def _skip_row(trade: dict[str, Any], action: str, now_ms: int, reason: str) -> d
         "cancel_time": None,
         "open_order_seen": False,
         "open_order_status": "",
+        "order_history_seen": False,
+        "order_history_status": "",
+        "trade_history_seen": False,
+        "trade_count": 0,
+        "filled_qty": 0.0,
+        "filled_value": 0.0,
         "position_side": "",
         "position_size": 0.0,
         "position_value": 0.0,
@@ -778,6 +1138,22 @@ def _skip_row(trade: dict[str, Any], action: str, now_ms: int, reason: str) -> d
         "reconcile_error": None,
         "error": reason,
     }
+
+
+def _has_blocking_action(orders: pl.DataFrame, trade_id: str, action: str) -> bool:
+    if orders.is_empty() or {"paper_trade_id", "action"}.difference(set(orders.columns)):
+        return False
+    rows = orders.filter((pl.col("paper_trade_id") == trade_id) & (pl.col("action") == action)).to_dicts()
+    return any(_row_blocks_duplicate(row) for row in rows)
+
+
+def _row_blocks_duplicate(row: dict[str, Any]) -> bool:
+    reconciled_status = str(row.get("reconciled_status") or "").strip().lower()
+    if reconciled_status in _TERMINAL_RECONCILED_STATUSES:
+        return False
+    if reconciled_status in _BLOCKING_RECONCILED_STATUSES:
+        return True
+    return str(row.get("status") or "").strip().lower() in _SUBMITTED_STATUSES
 
 
 def _has_action(orders: pl.DataFrame, trade_id: str, action: str) -> bool:
@@ -792,7 +1168,8 @@ def _entry_order_for_trade(orders: pl.DataFrame, trade_id: str) -> dict[str, Any
     if orders.is_empty() or {"paper_trade_id", "action"}.difference(set(orders.columns)):
         return None
     rows = orders.filter((pl.col("paper_trade_id") == trade_id) & (pl.col("action") == "entry")).to_dicts()
-    return rows[-1] if rows else None
+    blocking_rows = [row for row in rows if _row_blocks_duplicate(row)]
+    return blocking_rows[-1] if blocking_rows else None
 
 
 def _merge_order_frames(left: pl.DataFrame, right: pl.DataFrame) -> pl.DataFrame:
@@ -802,6 +1179,95 @@ def _merge_order_frames(left: pl.DataFrame, right: pl.DataFrame) -> pl.DataFrame
     return pl.concat(frames, how="diagonal_relaxed").unique(subset=["order_link_id"], keep="last").sort(
         ["created_ts_ms", "symbol"]
     )
+
+
+def _private_history_rows(
+    execution_client: Any,
+    method_name: str,
+    *,
+    symbol: str,
+    order_link_id: str,
+) -> list[dict[str, Any]]:
+    method = getattr(execution_client, method_name, None)
+    if not callable(method) or not order_link_id:
+        return []
+    try:
+        rows = method(symbol=symbol or None, order_link_id=order_link_id)
+        if isinstance(rows, list):
+            return rows
+        if isinstance(rows, dict):
+            return rows.get("result", {}).get("list", [])
+        return []
+    except Exception as exc:  # noqa: BLE001
+        return [{"__error__": str(exc)}]
+
+
+def _matches_order(row: dict[str, Any], order_link_id: str, order_id: str) -> bool:
+    if "__error__" in row:
+        return False
+    row_link_id = str(row.get("orderLinkId") or row.get("order_link_id") or "")
+    row_order_id = str(row.get("orderId") or row.get("order_id") or "")
+    return bool((order_link_id and row_link_id == order_link_id) or (order_id and row_order_id == order_id))
+
+
+def _history_order_status(rows: list[dict[str, Any]]) -> str:
+    for row in rows:
+        status = str(row.get("orderStatus") or row.get("order_status") or "")
+        if status:
+            return status
+    return ""
+
+
+def _filled_totals(rows: list[dict[str, Any]]) -> tuple[float, float]:
+    qty = 0.0
+    value = 0.0
+    for row in rows:
+        if "__error__" in row:
+            continue
+        qty += _float(row.get("execQty", row.get("qty", row.get("exec_qty"))))
+        value += _float(row.get("execValue", row.get("exec_value", row.get("tradeValue"))))
+    return qty, value
+
+
+def _reconciled_status(
+    row: dict[str, Any],
+    *,
+    open_match: dict[str, Any] | None,
+    position: dict[str, Any],
+    history_status: str,
+    filled_qty: float,
+) -> str:
+    action = str(row.get("action") or "")
+    status = str(row.get("status") or "").strip().lower()
+    open_status = _normalized_order_status(open_match.get("orderStatus")) if open_match else ""
+    normalized_history_status = _normalized_order_status(history_status)
+    order_qty = _float(row.get("qty"))
+    has_position = bool(position["size"])
+    has_reconcile_error = bool(row.get("reconcile_error"))
+
+    if normalized_history_status in _FILLED_ORDER_STATUSES or (order_qty > 0.0 and filled_qty >= order_qty):
+        return "filled"
+    if filled_qty > 0.0 or open_status == "partiallyfilled" or normalized_history_status == "partiallyfilled":
+        return "partial"
+    if normalized_history_status in _CANCELLED_ORDER_STATUSES or open_status in _CANCELLED_ORDER_STATUSES:
+        return "missed_entry" if action == "entry" and not has_position else "cancelled"
+    if status == "cancel_requested":
+        return "cancel_requested"
+    if open_match and (not open_status or open_status in _ACTIVE_ORDER_STATUSES):
+        return "open_order_seen"
+    if action == "entry" and has_position:
+        return "position_detected"
+    if has_reconcile_error and status not in _SUBMITTED_STATUSES:
+        return "reconcile_error"
+    if action == "exit" and status in _SUBMITTED_STATUSES:
+        return "exit_submitted"
+    if status in _SUBMITTED_STATUSES:
+        return "accepted"
+    return str(row.get("reconciled_status") or "")
+
+
+def _normalized_order_status(value: Any) -> str:
+    return str(value or "").replace("_", "").replace("-", "").strip().lower()
 
 
 def _paper_notional(trade: dict[str, Any]) -> float:
@@ -834,13 +1300,19 @@ def _symbol_position(positions: list[dict[str, Any]], symbol: str) -> dict[str, 
     return {"side": "", "size": 0.0, "value": 0.0}
 
 
-def _sync_order_link_id(trade_id: str, action: str) -> str:
-    digest = blake2b(f"{trade_id}:{action}".encode("utf-8"), digest_size=8).hexdigest()
-    return f"agc{action[:1]}{digest}"[:36]
+def _sync_order_link_id(trade_id: str, action: str, *, prefix: str = "") -> str:
+    clean_prefix = "".join(char for char in prefix.lower() if char.isalnum())[:8]
+    action_key = "".join(char for char in action.lower() if char.isalnum())[:1] or "x"
+    digest = blake2b(f"{clean_prefix}:{trade_id}:{action}".encode("utf-8"), digest_size=8).hexdigest()
+    return f"agc{clean_prefix}{action_key}{digest}"[:36]
 
 
 def _count_status(orders: pl.DataFrame, status: str) -> int:
     return 0 if orders.is_empty() or "status" not in orders.columns else int((orders["status"] == status).sum())
+
+
+def _count_payload_status(rows: list[dict[str, Any]], status: str) -> int:
+    return sum(1 for row in rows if row.get("status") == status)
 
 
 def _float(value: Any) -> float:
@@ -925,6 +1397,13 @@ def _decimal_text(value: Decimal) -> str:
 def _order_link_id(symbol: str, timestamp_ms: int) -> str:
     suffix = "".join(char for char in symbol.upper() if char.isalnum())[:10]
     return f"agcdemo{timestamp_ms % 100000000000:011d}{suffix}"[:36]
+
+
+def _emergency_order_link_id(prefix: str, symbol: str, timestamp_ms: int) -> str:
+    clean_prefix = "".join(char for char in prefix.lower() if char.isalnum())[:8]
+    clean_symbol = "".join(char for char in symbol.upper() if char.isalnum())[:12].lower()
+    digest = blake2b(f"{prefix}:{symbol}:{timestamp_ms}".encode("utf-8"), digest_size=6).hexdigest()
+    return f"agc{clean_prefix}{clean_symbol}{digest}"[:36]
 
 
 def _side(value: str) -> str:

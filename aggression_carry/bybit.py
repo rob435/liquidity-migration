@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -169,6 +170,8 @@ class BybitPrivateClient:
     def __post_init__(self) -> None:
         if HTTP is None:
             raise RuntimeError("pybit is required for BybitPrivateClient")
+        if not self.demo:
+            raise RuntimeError("BybitPrivateClient is demo-only in this research repo; demo=False is refused")
         if not self.api_key or not self.api_secret:
             raise RuntimeError("Bybit demo execution requires API key and secret")
         self._client = HTTP(
@@ -192,6 +195,15 @@ class BybitPrivateClient:
         payload = self._call("cancel_order", category=self.category, symbol=symbol, orderLinkId=order_link_id)
         return payload.get("result", {})
 
+    def cancel_all_orders(self, *, symbol: str | None = None, settle_coin: str | None = "USDT") -> dict[str, Any]:
+        params: dict[str, Any] = {"category": self.category}
+        if symbol:
+            params["symbol"] = symbol
+        elif settle_coin:
+            params["settleCoin"] = settle_coin
+        payload = self._call("cancel_all_orders", **params)
+        return payload.get("result", {})
+
     def get_open_orders(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"category": self.category}
         if symbol:
@@ -199,12 +211,50 @@ class BybitPrivateClient:
         payload = self._call("get_open_orders", **params)
         return payload.get("result", {}).get("list", [])
 
-    def get_positions(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
+    def get_order_history(
+        self,
+        *,
+        symbol: str | None = None,
+        order_link_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"category": self.category, "limit": limit}
+        if symbol:
+            params["symbol"] = symbol
+        if order_link_id:
+            params["orderLinkId"] = order_link_id
+        payload = self._call_optional(("get_order_history",), **params)
+        return payload.get("result", {}).get("list", []) if payload else []
+
+    def get_trade_history(
+        self,
+        *,
+        symbol: str | None = None,
+        order_link_id: str | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"category": self.category, "limit": limit}
+        if symbol:
+            params["symbol"] = symbol
+        if order_link_id:
+            params["orderLinkId"] = order_link_id
+        payload = self._call_optional(("get_executions", "get_trade_history"), **params)
+        return payload.get("result", {}).get("list", []) if payload else []
+
+    def get_positions(self, *, symbol: str | None = None, settle_coin: str | None = None) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"category": self.category}
         if symbol:
             params["symbol"] = symbol
+        elif settle_coin:
+            params["settleCoin"] = settle_coin
         payload = self._call("get_positions", **params)
         return payload.get("result", {}).get("list", [])
+
+    def _call_optional(self, method_names: Iterable[str], **params: Any) -> dict[str, Any] | None:
+        for method_name in method_names:
+            if hasattr(self._client, method_name):
+                return self._call(method_name, **params)
+        return None
 
     def _call_once(self, method_name: str, **params: Any) -> dict[str, Any]:
         method = getattr(self._client, method_name)

@@ -114,3 +114,74 @@ def test_cli_parses_bybit_demo_sync(tmp_path: Path) -> None:
     assert args.submit_orders is True
     assert args.i_understand_demo_sync is True
     assert args.max_order_notional == 7
+
+
+def test_cli_parses_bybit_demo_cycle(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "bybit-demo-cycle",
+            "--now",
+            "2026-01-15T22:16:00+00:00",
+            "--submit-orders",
+            "--i-understand-demo-sync",
+            "--telegram",
+            "--max-order-notional",
+            "7",
+            "--max-new-orders",
+            "2",
+            "--max-total-new-notional",
+            "14",
+            "--cancel-stale-minutes",
+            "0",
+            "--price-offset-bps",
+            "3",
+            "--no-market-exit",
+            "--active-start",
+            "22:05",
+            "--active-end",
+            "02:30",
+            "--ignore-active-window",
+        ]
+    )
+
+    assert args.command == "bybit-demo-cycle"
+    assert args.now == "2026-01-15T22:16:00+00:00"
+    assert args.submit_orders is True
+    assert args.i_understand_demo_sync is True
+    assert args.telegram is True
+    assert args.max_order_notional == 7
+    assert args.max_new_orders == 2
+    assert args.max_total_new_notional == 14
+    assert args.cancel_stale_minutes == 0
+    assert args.price_offset_bps == 3
+    assert args.no_market_exit is True
+    assert args.active_start == "22:05"
+    assert args.active_end == "02:30"
+    assert args.ignore_active_window is True
+
+
+def test_cli_parses_bybit_demo_emergency_commands(tmp_path: Path) -> None:
+    cancel_args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "bybit-demo-cancel-all",
+            "--symbols",
+            "BTCUSDT,ETHUSDT",
+        ]
+    )
+    flatten_args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "bybit-demo-flatten",
+            "--i-understand-demo-flatten",
+        ]
+    )
+
+    assert cancel_args.command == "bybit-demo-cancel-all"
+    assert cancel_args.symbols == "BTCUSDT,ETHUSDT"
+    assert flatten_args.command == "bybit-demo-flatten"
+    assert flatten_args.i_understand_demo_flatten is True

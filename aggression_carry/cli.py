@@ -18,7 +18,17 @@ from .config import (
     load_config,
 )
 from .daily_close_fade import run_daily_close_fade, run_daily_close_fade_grid, run_daily_close_fade_sleeves
-from .demo_execution import DemoProbeConfig, DemoSyncConfig, run_bybit_demo_probe, run_bybit_demo_sync
+from .demo_cycle import DemoCycleConfig, run_bybit_demo_cycle
+from .demo_execution import (
+    DemoCancelAllConfig,
+    DemoFlattenConfig,
+    DemoProbeConfig,
+    DemoSyncConfig,
+    run_bybit_demo_cancel_all,
+    run_bybit_demo_flatten,
+    run_bybit_demo_probe,
+    run_bybit_demo_sync,
+)
 from .downloaders import download_market_data, parse_date_ms
 from .forward_test import run_forward_once, run_forward_report, run_forward_scan, run_forward_sleeves
 from .ingestion import generate_fixture_data
@@ -310,6 +320,60 @@ def build_parser() -> argparse.ArgumentParser:
         help="Required with --submit-orders. Confirms this will hit Bybit demo private order endpoints.",
     )
 
+    demo_cycle = subparsers.add_parser(
+        "bybit-demo-cycle",
+        help="Run forward paper sleeves, then sync each sleeve into an isolated Bybit demo ledger.",
+    )
+    _add_forward_fade_args(demo_cycle)
+    _add_forward_runtime_args(demo_cycle)
+    demo_cycle.add_argument("--submit-orders", action="store_true", help="Actually submit capped demo orders.")
+    demo_cycle.add_argument(
+        "--i-understand-demo-sync",
+        action="store_true",
+        help="Required with --submit-orders. Confirms this will hit Bybit demo private order endpoints.",
+    )
+    demo_cycle.add_argument("--telegram", action="store_true", help="Send one Telegram summary for the demo cycle.")
+    demo_cycle.add_argument("--max-order-notional", type=float, default=10.0, help="Hard cap per demo order in USDT.")
+    demo_cycle.add_argument("--max-new-orders", type=int, default=5, help="Maximum new demo orders per sleeve this run.")
+    demo_cycle.add_argument(
+        "--max-total-new-notional",
+        type=float,
+        default=50.0,
+        help="Hard cap across all new demo orders per sleeve this run.",
+    )
+    demo_cycle.add_argument(
+        "--cancel-stale-minutes",
+        type=int,
+        default=5,
+        help="Cancel stale open entry orders after this many minutes. 0 cancels on the next sync; negative disables.",
+    )
+    demo_cycle.add_argument(
+        "--price-offset-bps",
+        type=float,
+        default=2.0,
+        help="Post-only entry distance from touch. Shorts place above ask; longs below bid.",
+    )
+    demo_cycle.add_argument("--no-market-exit", action="store_true", help="Do not submit reduce-only market exits for detected demo positions.")
+    demo_cycle.add_argument("--active-start", default="22:05", help="UTC active-window start, default 22:05.")
+    demo_cycle.add_argument("--active-end", default="02:30", help="UTC active-window end, default 02:30.")
+    demo_cycle.add_argument("--ignore-active-window", action="store_true", help="Run scan/sync even outside the default active window.")
+
+    demo_cancel_all = subparsers.add_parser(
+        "bybit-demo-cancel-all",
+        help="Cancel all open Bybit demo orders for the configured settle coin or supplied symbols.",
+    )
+    demo_cancel_all.add_argument("--symbols", default="", help="Optional comma-separated symbols; empty cancels all USDT demo orders.")
+
+    demo_flatten = subparsers.add_parser(
+        "bybit-demo-flatten",
+        help="Submit reduce-only market orders to flatten all detected Bybit demo positions.",
+    )
+    demo_flatten.add_argument(
+        "--i-understand-demo-flatten",
+        action="store_true",
+        help="Required. Confirms this will hit Bybit demo private order endpoints.",
+    )
+
     subparsers.add_parser("forward-report", help="Write a report from the paper forward-test ledger.")
     return parser
 
@@ -571,6 +635,67 @@ def main(argv: list[str] | None = None) -> int:
             f"path={data_root / 'reports' / 'bybit_demo_sync_report.md'}"
         )
         return 0
+
+    if args.command == "bybit-demo-cycle":
+        fade_config = _close_fade_config_from_args(config.daily_close_fade, args)
+        forward_config = _forward_config_from_args(config.forward_test, args)
+        cycle_config = DemoCycleConfig(
+            max_order_notional=args.max_order_notional,
+            max_new_orders=args.max_new_orders,
+            max_total_new_notional=args.max_total_new_notional,
+            cancel_stale_minutes=args.cancel_stale_minutes,
+            price_offset_bps=args.price_offset_bps,
+            submit_orders=args.submit_orders,
+            confirmed=args.i_understand_demo_sync,
+            allow_market_exit=not args.no_market_exit,
+            send_telegram=args.telegram,
+            active_start_minute=_signal_minute(args.active_start),
+            active_end_minute=_signal_minute(args.active_end),
+            ignore_active_window=args.ignore_active_window,
+        )
+        payload = run_bybit_demo_cycle(
+            data_root,
+            config=config,
+            cycle_config=cycle_config,
+            fade_config=fade_config,
+            forward_config=forward_config,
+            now=_parse_now(args.now),
+        )
+        print(
+            "bybit demo cycle "
+            f"sleeves={payload['rows']['sleeves']} "
+            f"failed={payload['rows']['failed_sleeves']} "
+            f"new_orders={payload['rows']['new_orders']} "
+            f"ledger_orders={payload['rows']['ledger_orders']} "
+            f"placed={payload['summary']['placed']} "
+            f"dry_run={payload['summary']['dry_run']} "
+            f"paused={payload['paused']['paused']} "
+            f"path={data_root / 'reports' / 'bybit_demo_cycle_report.md'}"
+        )
+        return 1 if payload["summary"]["failed_sleeves"] else 0
+
+    if args.command == "bybit-demo-cancel-all":
+        cancel_config = DemoCancelAllConfig(symbols=_csv_str(args.symbols, ()))
+        payload = run_bybit_demo_cancel_all(data_root, config=config, cancel_config=cancel_config)
+        print(
+            "bybit demo cancel all "
+            f"targets={payload['rows']['targets']} "
+            f"cancel_requested={payload['rows']['cancel_requested']} "
+            f"path={data_root / 'reports' / 'bybit_demo_cancel_all_report.md'}"
+        )
+        return 0 if payload["rows"]["cancel_requested"] == payload["rows"]["targets"] else 1
+
+    if args.command == "bybit-demo-flatten":
+        flatten_config = DemoFlattenConfig(confirmed=args.i_understand_demo_flatten)
+        payload = run_bybit_demo_flatten(data_root, config=config, flatten_config=flatten_config)
+        print(
+            "bybit demo flatten "
+            f"positions={payload['rows']['positions_with_size']} "
+            f"submitted={payload['rows']['flatten_submitted']} "
+            f"failed={payload['rows']['flatten_failed']} "
+            f"path={data_root / 'reports' / 'bybit_demo_flatten_report.md'}"
+        )
+        return 0 if payload["rows"]["flatten_failed"] == 0 else 1
 
     if args.command == "forward-report":
         payload = run_forward_report(data_root)

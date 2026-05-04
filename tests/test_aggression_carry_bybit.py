@@ -29,6 +29,85 @@ def test_bybit_private_client_constructs_demo_session(monkeypatch) -> None:
     assert client._client.kwargs["api_secret"] == "secret"
 
 
+def test_bybit_private_client_refuses_non_demo_session(monkeypatch) -> None:
+    constructed = False
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            nonlocal constructed
+            constructed = True
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+
+    try:
+        bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=False)
+    except RuntimeError as exc:
+        assert "demo-only" in str(exc)
+    else:  # pragma: no cover - explicit failure branch
+        raise AssertionError("private client should fail closed outside demo mode")
+
+    assert constructed is False
+
+
+def test_bybit_private_client_wraps_order_and_trade_history(monkeypatch) -> None:
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.order_history_calls = []
+            self.execution_calls = []
+
+        def get_order_history(self, **params):
+            self.order_history_calls.append(params)
+            return {"retCode": 0, "result": {"list": [{"orderLinkId": params["orderLinkId"], "orderStatus": "Filled"}]}}
+
+        def get_executions(self, **params):
+            self.execution_calls.append(params)
+            return {"retCode": 0, "result": {"list": [{"orderLinkId": params["orderLinkId"], "execQty": "1"}]}}
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    orders = client.get_order_history(symbol="BTCUSDT", order_link_id="agc-link")
+    trades = client.get_trade_history(symbol="BTCUSDT", order_link_id="agc-link")
+
+    assert orders[0]["orderStatus"] == "Filled"
+    assert trades[0]["execQty"] == "1"
+    assert client._client.order_history_calls == [
+        {"category": "linear", "limit": 50, "symbol": "BTCUSDT", "orderLinkId": "agc-link"}
+    ]
+    assert client._client.execution_calls == [
+        {"category": "linear", "limit": 50, "symbol": "BTCUSDT", "orderLinkId": "agc-link"}
+    ]
+
+
+def test_bybit_private_client_wraps_cancel_all_and_positions_by_settle(monkeypatch) -> None:
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.cancel_all_calls = []
+            self.position_calls = []
+
+        def cancel_all_orders(self, **params):
+            self.cancel_all_calls.append(params)
+            return {"retCode": 0, "result": {"success": "1"}}
+
+        def get_positions(self, **params):
+            self.position_calls.append(params)
+            return {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT", "size": "1"}]}}
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+    cancelled = client.cancel_all_orders(settle_coin="USDT")
+    positions = client.get_positions(settle_coin="USDT")
+
+    assert cancelled["success"] == "1"
+    assert positions[0]["symbol"] == "BTCUSDT"
+    assert client._client.cancel_all_calls == [{"category": "linear", "settleCoin": "USDT"}]
+    assert client._client.position_calls == [{"category": "linear", "settleCoin": "USDT"}]
+
+
 def test_kline_download_chunks_full_range_when_bybit_returns_newest_first(monkeypatch) -> None:
     interval_ms = bybit.INTERVAL_MS["60"]
     timestamps = [index * interval_ms for index in range(10)]

@@ -23,12 +23,17 @@
 - Bybit demo order plumbing is isolated in `bybit-demo-probe` and
   `bybit-demo-sync`. These commands are hard-capped demo-only paths with their
   own reports/ledger; they are not called by the paper forward runner.
+- Bybit demo shadow orchestration targets `bybit-demo-cycle`: it runs all paper
+  sleeves, then mirrors each sleeve into a separate capped Bybit demo ledger.
+  The cycle has a process lock, a default `22:05-02:30 UTC` active window,
+  pause-file support, and demo-only emergency cancel/flatten commands. This
+  remains demo-only and real-money execution is not implemented.
 - Daily-close fade now has a three-sleeve comparison path:
   `major_control` ranks 1-30, `core` ranks 31-150, and experimental `microcap`
   ranks 151+ with turnover floors and capacity-limited sizing.
-- No live execution, kill switches, production deployment, or real-money
-  exchange order submission exist in the active code. Telegram is
-  notification-only for paper forward testing.
+- No real-money live execution, kill switches, or production exchange order
+  submission exist in the active code. Telegram is notification-only for paper
+  and demo-status reporting.
 
 ## Active Path
 
@@ -112,6 +117,9 @@
 - Demo execution proves authentication/order plumbing only. It does not validate
   the alpha, and it can still produce unrealistic fills compared with real
   liquidity.
+- Demo shadowing can diverge from paper when post-only entries miss, fills are
+  partial, or Bybit demo liquidity differs from real markets. Use the demo
+  ledger as execution plumbing evidence, not performance proof.
 - Overlapping baskets are intentionally blocked for now; hold period and
   rebalance period should match until the simple lifecycle is understood.
 - GPU acceleration is intentionally not implemented; this workload is currently

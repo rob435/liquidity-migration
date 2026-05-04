@@ -31,6 +31,9 @@ license to rebuild the old composite stack.
 - `bybit-demo-probe` and `bybit-demo-sync`: isolated Bybit demo-only order
   plumbing. The probe tests auth/place/cancel. The sync mirrors an existing
   paper ledger into tiny capped demo orders and its own execution ledger.
+- `bybit-demo-cycle`: demo-only shadow runner that runs all paper sleeves and
+  syncs each sleeve into its own capped Bybit demo ledger. It is not real-money
+  live trading.
 - `archive-manifest` and `download-data --datasets archive_klines_1m`: public
   Bybit archive path for point-in-time symbol/date membership and
   trade-derived 1m bars.
@@ -191,6 +194,45 @@ data/.../demo_execution_orders/
 
 These are demo-only plumbing checks. They do not prove the alpha and they are
 not live execution.
+
+Bybit demo shadow cycle for all sleeves:
+
+```bash
+python -m aggression_carry \
+  --data-root data/forward-paper \
+  --config configs/volume_alpha.default.yaml \
+  bybit-demo-cycle \
+  --submit-orders \
+  --i-understand-demo-sync \
+  --telegram
+```
+
+The cycle runs `forward-run-sleeves`, then syncs `control_top_1_30`,
+`core_31_150`, and `microcap_151_plus` separately. It only opens new entries
+inside the default `22:05-02:30 UTC` operating window, keeps reconciling while
+paper/demo state is active, and uses a process lock to prevent overlapping
+timer runs. To pause new demo entries without blocking reduce-only exits:
+
+```bash
+touch data/forward-paper/DEMO_PAUSED
+```
+
+Emergency demo-only cleanup commands:
+
+```bash
+python -m aggression_carry --data-root data/forward-paper bybit-demo-cancel-all
+python -m aggression_carry --data-root data/forward-paper bybit-demo-flatten --i-understand-demo-flatten
+```
+
+VPS `systemd` installer:
+
+```bash
+scripts/install_bybit_demo_systemd.sh
+```
+
+The installer creates an env-file template for demo keys and Telegram tokens.
+Do not commit filled env files. Demo keys can be throwaway, but the repo still
+keeps them out of logs, docs, and command arguments.
 
 Microcap paper mode is a separate sleeve, not the default core book:
 
