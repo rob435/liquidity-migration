@@ -2,7 +2,7 @@ param(
     [string]$DataRoot = "data/agc-bybit-1y",
     [string]$Start = "2025-05-01",
     [string]$End = "2026-05-01",
-    [int]$Workers = 0,
+    [int]$Workers = 8,
     [string[]]$Symbols = @(
         "BTCUSDT",
         "ETHUSDT",

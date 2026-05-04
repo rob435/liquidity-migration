@@ -4,7 +4,7 @@ param(
     [string]$UniverseName = "top160-current",
     [string]$Start = "2026-02-03",
     [string]$End = "2026-05-03",
-    [int]$Workers = 32,
+    [int]$Workers = 8,
     [int]$RankEnd = 160,
     [int]$MaxSymbols = 160,
     [switch]$SkipDownload

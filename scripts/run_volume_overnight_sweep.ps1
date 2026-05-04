@@ -8,7 +8,7 @@ param(
     [int]$MaxSymbols = 160,
     [string]$Start = "2023-05-03",
     [string]$End = "2026-05-03",
-    [int]$Workers = 32,
+    [int]$Workers = 8,
     [switch]$SkipDownload
 )
 

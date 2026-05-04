@@ -116,13 +116,13 @@ already completed will show as `cached`.
 On a 5950X:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_agc_1y_grid.ps1 -Workers 32
+powershell -ExecutionPolicy Bypass -File .\scripts\run_agc_1y_grid.ps1 -Workers 8
 ```
 
 If the machine starts swapping or RAM pressure gets high:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_agc_1y_grid.ps1 -Workers 16
+powershell -ExecutionPolicy Bypass -File .\scripts\run_agc_1y_grid.ps1 -Workers 4
 ```
 
 ## 7. Run The 1m Daily-Close Fade Grid
@@ -131,13 +131,13 @@ This is a separate short-only top-gainer fade test. It downloads 1m klines, so
 start with the default 3-month window before trying a full year.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_daily_close_fade_1m.ps1 -Workers 32
+powershell -ExecutionPolicy Bypass -File .\scripts\run_daily_close_fade_1m.ps1 -Workers 8
 ```
 
 If RAM pressure gets high:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_daily_close_fade_1m.ps1 -Workers 16
+powershell -ExecutionPolicy Bypass -File .\scripts\run_daily_close_fade_1m.ps1 -Workers 4
 ```
 
 ## Notes
