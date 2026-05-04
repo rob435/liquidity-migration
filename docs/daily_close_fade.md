@@ -246,6 +246,67 @@ The split runner is intentionally conservative. It ranks scenarios by whether
 they survive each split after costs, not by the single best historical return.
 That is the right way to use it before touching TP/SL rules.
 
+## BTC Regime Overlay Research
+
+This is a short-only system, so regime risk matters. The dangerous version of a
+regime filter is using the pumped coin's own trend state, because that overlaps
+with the entry signal and can become curve-fit fast. The cleaner first test is
+an external market regime:
+
+```text
+Use BTCUSDT only.
+Compute BTC prior completed UTC daily close versus EMA.
+For a 22:15 UTC signal on date D, use the close/EMA from date D-1.
+Never use same-day 00:00-24:00 BTC information for that signal.
+```
+
+The current research sweep tests both sides of each threshold but treats
+`btc_ema_distance_lte` as the candidate safety filter:
+
+```text
+btc_ema_distance_lte: trade only when prior BTC close is below/near EMA
+btc_ema_distance_gt: sanity check for strong bull / risk-on days
+all: baseline, no regime filter
+```
+
+Keep this as research until it survives train, validation, and OOS splits. If a
+filter only improves one window by skipping most trades, do not promote it. The
+report includes inactive calendar days as zero-return days so a low-activity
+filter cannot fake a high Sharpe by trading only a handful of baskets.
+
+Run the point-in-time regime sweep:
+
+```bash
+python scripts/run_daily_close_fade_regime_sweep.py \
+  --data-root data/daily-close-fade-1m-3y-current-top160-20230503-20260503 \
+  --config configs/volume_alpha.default.yaml \
+  --splits train_2023_2024:2023-05-03:2024-05-03,validation_2024_2025:2024-05-03:2025-05-03,oos_2025_2026:2025-05-03:2026-05-03 \
+  --regime-symbol BTCUSDT \
+  --ema-periods 50,100,200 \
+  --distance-thresholds=-0.05,-0.02,0,0.02,0.05 \
+  --signal-time 22:15 \
+  --top-n 5 \
+  --hold-minutes 180 \
+  --pump-filter pump \
+  --score vol_adjusted_day_return \
+  --liquidity-rank-min 31 \
+  --liquidity-rank-max 150 \
+  --stop-loss-pct 0.20 \
+  --take-profit-pct 0 \
+  --vol-trailing-stop-mult 0.25 \
+  --mfe-giveback-activation-pct 0.01 \
+  --mfe-giveback-pct 0.20
+```
+
+Outputs:
+
+```text
+daily_close_fade_regime_sweep.csv
+daily_close_fade_regime_stability.csv
+daily_close_fade_regime_sweep.json
+daily_close_fade_regime_sweep.md
+```
+
 Build a public-archive symbol/date manifest for walk-forward universe research:
 
 ```bash
