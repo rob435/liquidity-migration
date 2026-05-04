@@ -82,9 +82,10 @@ Report:
 ## 5. Run The Current Overnight Research Suite
 
 This is the current preferred Windows path. It runs git pull, setup, the
-daily-close breadth/sizing research, then the volume-alpha overnight sweep.
-Use 8 workers on the 5950X; higher worker counts have caused Windows/Python
-memory and process-spawn failures on multi-year grids.
+daily-close breadth/sizing research when the separate 1m data root exists, then
+the volume-alpha overnight sweep. Use 8 workers on the 5950X; higher worker
+counts have caused Windows/Python memory and process-spawn failures on
+multi-year grids.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\run_research_overnight_suite.ps1 `
@@ -98,6 +99,11 @@ Reports:
 data/research_reports/risk_on_breadth_sizing_5950x/daily_close_fade_sizing_sweep.md
 data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_bucket_sweep_summary.md
 ```
+
+The daily-close data root is large 1m kline data and is not part of the volume
+download. If it is missing, `-Suite both` warns, skips daily-close, and continues
+the volume sweep. Use `-Suite daily-close` when you specifically want that side
+to fail unless the 1m data is present.
 
 If the 3-year volume data is already downloaded and you only want to rerun the
 grids:

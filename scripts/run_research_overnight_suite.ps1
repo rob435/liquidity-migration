@@ -6,6 +6,7 @@ param(
     [switch]$SkipGitPull,
     [switch]$SkipSetup,
     [switch]$SkipVolumeDownload,
+    [switch]$RequireDailyCloseData,
     [string]$DailyCloseDataRoot = "data/daily-close-fade-1m-3y-current-top160-20230503-20260503",
     [string]$DailyCloseReportDir = "data/research_reports/risk_on_breadth_sizing_5950x",
     [string]$DailyCloseFilters = "8:0.035:1.0:1,8:0.035:1.0:2,8:0.035:1.0:3,8:0.035:1.0:4,5:0.025:0.75:3,5:0.025:0.75:4,5:0.025:0.75:5",
@@ -104,19 +105,29 @@ try {
         & $Python -c "import sys; print(sys.executable); print(sys.version); raise SystemExit(0 if sys.version_info >= (3, 11) else 1)"
     }
 
-    if ($Suite -eq "both" -or $Suite -eq "daily-close") {
+    $ShouldRunDailyClose = ($Suite -eq "both" -or $Suite -eq "daily-close")
+    $DailyCloseWasRun = $false
+
+    if ($ShouldRunDailyClose) {
         if (-not (Test-Path (Join-Path $RepoRoot $DailyCloseDataRoot))) {
-            throw "Daily-close data root not found: $DailyCloseDataRoot. Copy/download the 1m data before running the daily-close suite."
+            $DailyCloseMissingMessage = "Daily-close data root not found: $DailyCloseDataRoot. This is a separate 1m kline dataset and is not downloaded by the volume sweep."
+            if ($Suite -eq "daily-close" -or $RequireDailyCloseData) {
+                throw "$DailyCloseMissingMessage Copy/download the 1m data, pass -DailyCloseDataRoot, or run -Suite volume."
+            }
+            Write-Warning "$DailyCloseMissingMessage Skipping daily-close research and continuing with the volume suite."
         }
-        Invoke-Checked "Running daily-close fade breadth/sizing research" {
-            & $Python .\scripts\run_daily_close_fade_sizing_sweep.py `
-                --data-root $DailyCloseDataRoot `
-                --config $Config `
-                --filters $DailyCloseFilters `
-                --max-weights $DailyCloseMaxWeights `
-                --score-powers $DailyCloseScorePowers `
-                --include-uncapped `
-                --report-dir $DailyCloseReportDir
+        else {
+            Invoke-Checked "Running daily-close fade breadth/sizing research" {
+                & $Python .\scripts\run_daily_close_fade_sizing_sweep.py `
+                    --data-root $DailyCloseDataRoot `
+                    --config $Config `
+                    --filters $DailyCloseFilters `
+                    --max-weights $DailyCloseMaxWeights `
+                    --score-powers $DailyCloseScorePowers `
+                    --include-uncapped `
+                    --report-dir $DailyCloseReportDir
+            }
+            $DailyCloseWasRun = $true
         }
     }
 
@@ -135,8 +146,11 @@ try {
 
     Write-Host ""
     Write-Host "Done."
-    if ($Suite -eq "both" -or $Suite -eq "daily-close") {
+    if ($DailyCloseWasRun) {
         Write-Host "Daily-close report: $DailyCloseReportDir/daily_close_fade_sizing_sweep.md"
+    }
+    elseif ($ShouldRunDailyClose) {
+        Write-Host "Daily-close report: skipped because $DailyCloseDataRoot was not found."
     }
     if ($Suite -eq "both" -or $Suite -eq "volume") {
         Write-Host "Volume report: $VolumeDataRoot/reports/volume_bucket_sweep_summary.md"

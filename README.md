@@ -474,6 +474,11 @@ Windows consolidated research runner:
 powershell -ExecutionPolicy Bypass -File .\scripts\run_research_overnight_suite.ps1 -Suite both -Workers 8
 ```
 
+`-Suite both` runs daily-close only when the configured 1m data root already
+exists; otherwise it warns and continues with the volume sweep. Use
+`-Suite daily-close` or `-RequireDailyCloseData` when missing daily-close data
+should be a hard failure.
+
 ## Research Rule
 
 Do not combine signals until a single alpha clears costs standalone. The volume
