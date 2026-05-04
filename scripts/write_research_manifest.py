@@ -155,9 +155,9 @@ def _artifact_path_list(
 
 def _relative_path(repo_root: Path, path: Path) -> str:
     try:
-        return str(path.resolve().relative_to(repo_root.resolve()))
+        return path.resolve().relative_to(repo_root.resolve()).as_posix()
     except ValueError:
-        return str(path)
+        return path.as_posix()
 
 
 def _artifact_key(repo_root: Path, path: Path) -> str:

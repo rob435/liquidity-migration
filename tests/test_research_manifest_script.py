@@ -11,7 +11,7 @@ import write_research_manifest as manifest_script
 
 def test_research_manifest_hashes_present_and_missing_artifacts(tmp_path: Path) -> None:
     artifact = tmp_path / "report.json"
-    artifact.write_text('{"ok": true}\n', encoding="utf-8")
+    artifact.write_bytes(b'{"ok": true}\n')
 
     manifest = manifest_script.build_research_manifest(
         repo_root=tmp_path,
