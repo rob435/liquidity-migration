@@ -349,6 +349,21 @@ python -m aggression_carry \
   --workers 32
 ```
 
+Run the same TP/SL/adaptive-exit grid across fixed train/validation/OOS splits:
+
+```bash
+python scripts/run_daily_close_fade_grid_splits.py \
+  --data-root data/daily-close-fade-1m-3y-current-top160-20230503-20260503 \
+  --config configs/volume_alpha.default.yaml \
+  --splits train_2023_2024:2023-05-03:2024-05-03,validation_2024_2025:2024-05-03:2025-05-03,oos_2025_2026:2025-05-03:2026-05-03 \
+  --workers 8
+```
+
+The split grid writes `daily_close_fade_grid_split_summary.md` and ranks exit
+variants by split survival, minimum split return, and a stability score. Use it
+to reject fragile TP/SL settings. It still does not prove alpha by itself; the
+raw score diagnostics and PIT universe coverage have to agree first.
+
 Windows runner:
 
 ```powershell

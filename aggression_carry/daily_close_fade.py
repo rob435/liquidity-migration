@@ -195,6 +195,7 @@ def run_daily_close_fade_grid(
     _validate_close_fade_config(base)
     costs = cost_config or CostConfig()
     features = build_daily_close_fade_features(data_root, config=base, signal_minutes=grid.signal_minutes)
+    features = _filter_signal_window(features, grid.start_ms, grid.end_ms)
     variants = list(iter_close_fade_grid_configs(grid, base))
     tasks = [
         (f"close-fade-{index:04d}", config, costs.base_entry_exit_cost_bps * config.cost_multiplier)

@@ -199,6 +199,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     close_grid = subparsers.add_parser("daily-close-fade-grid", help="Run a parameter grid for the 1m daily-close fade.")
     close_grid.add_argument("--signal-times", default=None, help="Comma-separated UTC signal times, e.g. 22:45,23:00.")
+    close_grid.add_argument("--start", default=None, help="Inclusive UTC signal start date/timestamp for this grid.")
+    close_grid.add_argument("--end", default=None, help="Exclusive UTC signal end date/timestamp for this grid.")
     close_grid.add_argument("--top-ns", default=None, help="Comma-separated top-N values, e.g. 3,5,10.")
     close_grid.add_argument("--hold-minutes", default=None, help="Comma-separated hold minutes, e.g. 30,60,120,180.")
     close_grid.add_argument("--gross-exposures", default=None, help="Comma-separated basket gross exposures, e.g. 0.25,0.5,1.0.")
@@ -945,6 +947,8 @@ def _close_fade_grid_config_from_args(base: DailyCloseFadeGridConfig, args: argp
             base.max_trade_notional_pct_baseline_turnovers,
         ),
         cost_multipliers=_csv_float(args.cost_multipliers, base.cost_multipliers),
+        start_ms=parse_date_ms(args.start) if args.start else base.start_ms,
+        end_ms=parse_date_ms(args.end) if args.end else base.end_ms,
     )
 
 

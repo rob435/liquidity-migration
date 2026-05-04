@@ -280,6 +280,34 @@ def test_daily_close_fade_grid_runs_small_fixture(tmp_path) -> None:
     assert grid["total_return"].max() > 0.0
 
 
+def test_daily_close_fade_grid_supports_date_splits(tmp_path) -> None:
+    _write_close_fade_fixture(tmp_path)
+
+    payload = run_daily_close_fade_grid(
+        tmp_path,
+        base_fade_config=DailyCloseFadeConfig(min_age_days=10, exclude_symbols=()),
+        grid_config=DailyCloseFadeGridConfig(
+            signal_minutes=(23 * 60,),
+            top_ns=(1,),
+            hold_minutes=(60,),
+            scores=("day_return",),
+            pump_filters=("all",),
+            stop_loss_pcts=(0.0,),
+            take_profit_pcts=(0.0,),
+            trailing_stop_pcts=(0.0,),
+            trailing_activation_pcts=(0.0,),
+            cost_multipliers=(1.0,),
+            start_ms=int(datetime(2025, 1, 17, tzinfo=UTC).timestamp() * 1000),
+            end_ms=int(datetime(2025, 1, 18, tzinfo=UTC).timestamp() * 1000),
+        ),
+        cost_config=CostConfig(maker_fee_bps=0, taker_fee_bps=0, maker_adverse_selection_bps=0, taker_slippage_bps_liquid=0),
+        max_workers=1,
+    )
+
+    assert payload["rows"] == 1
+    assert payload["best_total_return"]["trade_count"] == 0
+
+
 def test_daily_close_fade_diagnostics_reports_raw_score_shape(tmp_path) -> None:
     _write_close_fade_fixture(tmp_path)
 

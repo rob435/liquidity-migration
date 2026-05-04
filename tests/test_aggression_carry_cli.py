@@ -124,6 +124,24 @@ def test_cli_parses_daily_close_fade_diagnostics(tmp_path: Path) -> None:
     assert args.liquidity_rank_max == 150
 
 
+def test_cli_parses_daily_close_fade_grid_dates(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "daily-close-fade-grid",
+            "--start",
+            "2025-01-01",
+            "--end",
+            "2025-02-01",
+        ]
+    )
+
+    assert args.command == "daily-close-fade-grid"
+    assert args.start == "2025-01-01"
+    assert args.end == "2025-02-01"
+
+
 def test_cli_parses_bybit_demo_probe(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [

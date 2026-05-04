@@ -149,6 +149,8 @@ class DailyCloseFadeGridConfig:
     max_trade_notional_pct_day_turnovers: tuple[float, ...] = (0.0,)
     max_trade_notional_pct_baseline_turnovers: tuple[float, ...] = (0.0,)
     cost_multipliers: tuple[float, ...] = (1.0, 2.0, 3.0)
+    start_ms: int = 0
+    end_ms: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,6 +358,8 @@ def _merge_daily_close_fade_grid_config(payload: dict[str, Any] | None) -> Daily
             payload, "max_trade_notional_pct_baseline_turnovers", (0.0,)
         ),
         cost_multipliers=_tuple_float(payload, "cost_multipliers", (1.0, 2.0, 3.0)),
+        start_ms=int(payload.get("start_ms", 0)),
+        end_ms=int(payload.get("end_ms", 0)),
     )
 
 
