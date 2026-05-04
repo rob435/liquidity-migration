@@ -756,7 +756,7 @@
       "source_file": "aggression_carry/volume_backtest.py",
       "source_location": "L1723",
       "id": "aggression_carry_volume_backtest_replace_dataset",
-      "community": 1,
+      "community": 0,
       "norm_label": "_replace_dataset()"
     },
     {
@@ -765,7 +765,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L1",
       "id": "aggression_carry_demo_cycle_py",
-      "community": 5,
+      "community": 4,
       "norm_label": "demo_cycle.py"
     },
     {
@@ -774,7 +774,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L31",
       "id": "aggression_carry_demo_cycle_democycleconfig",
-      "community": 5,
+      "community": 4,
       "norm_label": "democycleconfig"
     },
     {
@@ -783,7 +783,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L51",
       "id": "aggression_carry_demo_cycle_run_bybit_demo_cycle",
-      "community": 5,
+      "community": 4,
       "norm_label": "run_bybit_demo_cycle()"
     },
     {
@@ -792,7 +792,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L92",
       "id": "aggression_carry_demo_cycle_run_bybit_demo_cycle_unlocked",
-      "community": 5,
+      "community": 4,
       "norm_label": "_run_bybit_demo_cycle_unlocked()"
     },
     {
@@ -801,7 +801,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L211",
       "id": "aggression_carry_demo_cycle_read_demo_pause_state",
-      "community": 5,
+      "community": 4,
       "norm_label": "read_demo_pause_state()"
     },
     {
@@ -810,7 +810,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L222",
       "id": "aggression_carry_demo_cycle_summarize_demo_cycle_results",
-      "community": 5,
+      "community": 4,
       "norm_label": "summarize_demo_cycle_results()"
     },
     {
@@ -819,7 +819,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L249",
       "id": "aggression_carry_demo_cycle_format_demo_cycle_report",
-      "community": 5,
+      "community": 4,
       "norm_label": "format_demo_cycle_report()"
     },
     {
@@ -828,7 +828,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L312",
       "id": "aggression_carry_demo_cycle_format_demo_cycle_message",
-      "community": 5,
+      "community": 4,
       "norm_label": "format_demo_cycle_message()"
     },
     {
@@ -837,7 +837,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L341",
       "id": "aggression_carry_demo_cycle_write_demo_cycle_outputs",
-      "community": 5,
+      "community": 4,
       "norm_label": "_write_demo_cycle_outputs()"
     },
     {
@@ -846,7 +846,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L348",
       "id": "aggression_carry_demo_cycle_validate_cycle_config",
-      "community": 5,
+      "community": 4,
       "norm_label": "_validate_cycle_config()"
     },
     {
@@ -864,7 +864,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L388",
       "id": "aggression_carry_demo_cycle_is_active_window",
-      "community": 5,
+      "community": 4,
       "norm_label": "_is_active_window()"
     },
     {
@@ -873,7 +873,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L395",
       "id": "aggression_carry_demo_cycle_existing_active_state",
-      "community": 5,
+      "community": 4,
       "norm_label": "_existing_active_state()"
     },
     {
@@ -882,7 +882,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L417",
       "id": "aggression_carry_demo_cycle_safe_read_dataset",
-      "community": 5,
+      "community": 4,
       "norm_label": "_safe_read_dataset()"
     },
     {
@@ -891,7 +891,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L424",
       "id": "aggression_carry_demo_cycle_sync_config_from_cycle",
-      "community": 5,
+      "community": 4,
       "norm_label": "_sync_config_from_cycle()"
     },
     {
@@ -900,7 +900,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L450",
       "id": "aggression_carry_demo_cycle_demo_sync_supports_entry_pause",
-      "community": 5,
+      "community": 4,
       "norm_label": "_demo_sync_supports_entry_pause()"
     },
     {
@@ -909,7 +909,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L456",
       "id": "aggression_carry_demo_cycle_demo_sync_compat_context",
-      "community": 5,
+      "community": 4,
       "norm_label": "_demo_sync_compat_context()"
     },
     {
@@ -918,7 +918,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L491",
       "id": "aggression_carry_demo_cycle_sleeve_result",
-      "community": 5,
+      "community": 4,
       "norm_label": "_sleeve_result()"
     },
     {
@@ -927,7 +927,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L511",
       "id": "aggression_carry_demo_cycle_failed_sleeve_result",
-      "community": 5,
+      "community": 4,
       "norm_label": "_failed_sleeve_result()"
     },
     {
@@ -936,7 +936,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L540",
       "id": "aggression_carry_demo_cycle_inactive_sleeve_result",
-      "community": 5,
+      "community": 4,
       "norm_label": "_inactive_sleeve_result()"
     },
     {
@@ -945,7 +945,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L568",
       "id": "aggression_carry_demo_cycle_sleeve_roots",
-      "community": 5,
+      "community": 4,
       "norm_label": "_sleeve_roots()"
     },
     {
@@ -954,7 +954,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L578",
       "id": "aggression_carry_demo_cycle_scoped_order_link_id",
-      "community": 5,
+      "community": 4,
       "norm_label": "_scoped_order_link_id()"
     },
     {
@@ -963,7 +963,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L585",
       "id": "aggression_carry_demo_cycle_compact_token",
-      "community": 5,
+      "community": 4,
       "norm_label": "_compact_token()"
     },
     {
@@ -972,7 +972,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L589",
       "id": "aggression_carry_demo_cycle_without_retryable_demo_orders",
-      "community": 5,
+      "community": 4,
       "norm_label": "_without_retryable_demo_orders()"
     },
     {
@@ -981,7 +981,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L595",
       "id": "aggression_carry_demo_cycle_exit_only_forward_trades",
-      "community": 5,
+      "community": 4,
       "norm_label": "_exit_only_forward_trades()"
     },
     {
@@ -990,7 +990,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L601",
       "id": "aggression_carry_demo_cycle_same_path",
-      "community": 5,
+      "community": 4,
       "norm_label": "_same_path()"
     },
     {
@@ -999,7 +999,7 @@
       "source_file": "aggression_carry/demo_cycle.py",
       "source_location": "L605",
       "id": "aggression_carry_demo_cycle_as_utc",
-      "community": 5,
+      "community": 4,
       "norm_label": "_as_utc()"
     },
     {
@@ -1008,7 +1008,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L1",
       "id": "aggression_carry_volume_alpha_py",
-      "community": 11,
+      "community": 10,
       "norm_label": "volume_alpha.py"
     },
     {
@@ -1017,7 +1017,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L30",
       "id": "aggression_carry_volume_alpha_volumemetric",
-      "community": 11,
+      "community": 10,
       "norm_label": "volumemetric"
     },
     {
@@ -1026,7 +1026,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L41",
       "id": "aggression_carry_volume_alpha_run_volume_alpha",
-      "community": 11,
+      "community": 10,
       "norm_label": "run_volume_alpha()"
     },
     {
@@ -1035,7 +1035,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L96",
       "id": "aggression_carry_volume_alpha_build_volume_features",
-      "community": 11,
+      "community": 10,
       "norm_label": "build_volume_features()"
     },
     {
@@ -1044,7 +1044,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L145",
       "id": "aggression_carry_volume_alpha_attach_volume_forward_returns",
-      "community": 11,
+      "community": 10,
       "norm_label": "attach_volume_forward_returns()"
     },
     {
@@ -1053,7 +1053,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L175",
       "id": "aggression_carry_volume_alpha_compute_volume_metrics",
-      "community": 11,
+      "community": 10,
       "norm_label": "compute_volume_metrics()"
     },
     {
@@ -1062,7 +1062,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L209",
       "id": "aggression_carry_volume_alpha_run_volume_portfolio",
-      "community": 11,
+      "community": 10,
       "norm_label": "run_volume_portfolio()"
     },
     {
@@ -1071,7 +1071,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L288",
       "id": "aggression_carry_volume_alpha_format_volume_alpha_report",
-      "community": 11,
+      "community": 10,
       "norm_label": "format_volume_alpha_report()"
     },
     {
@@ -1080,7 +1080,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L341",
       "id": "aggression_carry_volume_alpha_daily_bars",
-      "community": 11,
+      "community": 10,
       "norm_label": "_daily_bars()"
     },
     {
@@ -1089,7 +1089,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L364",
       "id": "aggression_carry_volume_alpha_add_cross_sectional_z",
-      "community": 11,
+      "community": 10,
       "norm_label": "_add_cross_sectional_z()"
     },
     {
@@ -1098,7 +1098,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L380",
       "id": "aggression_carry_volume_alpha_add_liquidity_rank",
-      "community": 11,
+      "community": 10,
       "norm_label": "_add_liquidity_rank()"
     },
     {
@@ -1107,7 +1107,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L397",
       "id": "aggression_carry_volume_alpha_rolling_sum",
-      "community": 11,
+      "community": 10,
       "norm_label": "_rolling_sum()"
     },
     {
@@ -1116,7 +1116,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L404",
       "id": "aggression_carry_volume_alpha_rolling_mean",
-      "community": 11,
+      "community": 10,
       "norm_label": "_rolling_mean()"
     },
     {
@@ -1125,7 +1125,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L411",
       "id": "aggression_carry_volume_alpha_quantile_spread",
-      "community": 11,
+      "community": 10,
       "norm_label": "_quantile_spread()"
     },
     {
@@ -1134,7 +1134,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L417",
       "id": "aggression_carry_volume_alpha_cost_adjusted_spread",
-      "community": 11,
+      "community": 10,
       "norm_label": "_cost_adjusted_spread()"
     },
     {
@@ -1143,7 +1143,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L425",
       "id": "aggression_carry_volume_alpha_summarize_metric",
-      "community": 11,
+      "community": 10,
       "norm_label": "_summarize_metric()"
     },
     {
@@ -1152,7 +1152,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L449",
       "id": "aggression_carry_volume_alpha_best_base_portfolio",
-      "community": 11,
+      "community": 10,
       "norm_label": "_best_base_portfolio()"
     },
     {
@@ -1161,7 +1161,7 @@
       "source_file": "aggression_carry/volume_alpha.py",
       "source_location": "L454",
       "id": "aggression_carry_volume_alpha_date_range",
-      "community": 11,
+      "community": 10,
       "norm_label": "_date_range()"
     },
     {
@@ -1170,7 +1170,7 @@
       "source_file": "aggression_carry/math_utils.py",
       "source_location": "L1",
       "id": "aggression_carry_math_utils_py",
-      "community": 11,
+      "community": 10,
       "norm_label": "math_utils.py"
     },
     {
@@ -1179,7 +1179,7 @@
       "source_file": "aggression_carry/math_utils.py",
       "source_location": "L9",
       "id": "aggression_carry_math_utils_ema",
-      "community": 11,
+      "community": 10,
       "norm_label": "ema()"
     },
     {
@@ -1188,7 +1188,7 @@
       "source_file": "aggression_carry/math_utils.py",
       "source_location": "L26",
       "id": "aggression_carry_math_utils_rolling_median",
-      "community": 11,
+      "community": 10,
       "norm_label": "rolling_median()"
     },
     {
@@ -1197,7 +1197,7 @@
       "source_file": "aggression_carry/math_utils.py",
       "source_location": "L38",
       "id": "aggression_carry_math_utils_robust_z",
-      "community": 11,
+      "community": 10,
       "norm_label": "robust_z()"
     },
     {
@@ -1206,7 +1206,7 @@
       "source_file": "aggression_carry/math_utils.py",
       "source_location": "L54",
       "id": "aggression_carry_math_utils_rank_correlation",
-      "community": 11,
+      "community": 10,
       "norm_label": "rank_correlation()"
     },
     {
@@ -1215,7 +1215,7 @@
       "source_file": "aggression_carry/math_utils.py",
       "source_location": "L67",
       "id": "aggression_carry_math_utils_ordinal_rank",
-      "community": 11,
+      "community": 10,
       "norm_label": "_ordinal_rank()"
     },
     {
@@ -1224,7 +1224,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L1",
       "id": "aggression_carry_config_py",
-      "community": 12,
+      "community": 13,
       "norm_label": "config.py"
     },
     {
@@ -1233,7 +1233,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L26",
       "id": "aggression_carry_config_exchangeconfig",
-      "community": 12,
+      "community": 13,
       "norm_label": "exchangeconfig"
     },
     {
@@ -1251,7 +1251,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L40",
       "id": "aggression_carry_config_volumealphaconfig",
-      "community": 12,
+      "community": 13,
       "norm_label": "volumealphaconfig"
     },
     {
@@ -1296,7 +1296,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L157",
       "id": "aggression_carry_config_forwardtestconfig",
-      "community": 12,
+      "community": 13,
       "norm_label": "forwardtestconfig"
     },
     {
@@ -1305,7 +1305,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L169",
       "id": "aggression_carry_config_universeconfig",
-      "community": 12,
+      "community": 13,
       "norm_label": "universeconfig"
     },
     {
@@ -1323,7 +1323,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L188",
       "id": "aggression_carry_config_base_entry_exit_cost_bps",
-      "community": 12,
+      "community": 13,
       "norm_label": "base_entry_exit_cost_bps()"
     },
     {
@@ -1341,7 +1341,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L213",
       "id": "aggression_carry_config_merge_dataclass",
-      "community": 12,
+      "community": 13,
       "norm_label": "_merge_dataclass()"
     },
     {
@@ -1350,7 +1350,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L218",
       "id": "aggression_carry_config_merge_volume_alpha_config",
-      "community": 12,
+      "community": 13,
       "norm_label": "_merge_volume_alpha_config()"
     },
     {
@@ -1359,7 +1359,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L225",
       "id": "aggression_carry_config_merge_volume_backtest_config",
-      "community": 12,
+      "community": 13,
       "norm_label": "_merge_volume_backtest_config()"
     },
     {
@@ -1368,7 +1368,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L256",
       "id": "aggression_carry_config_tuple_str",
-      "community": 12,
+      "community": 13,
       "norm_label": "_tuple_str()"
     },
     {
@@ -1377,7 +1377,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L260",
       "id": "aggression_carry_config_tuple_int",
-      "community": 12,
+      "community": 13,
       "norm_label": "_tuple_int()"
     },
     {
@@ -1386,7 +1386,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L264",
       "id": "aggression_carry_config_tuple_float",
-      "community": 12,
+      "community": 13,
       "norm_label": "_tuple_float()"
     },
     {
@@ -1395,7 +1395,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L268",
       "id": "aggression_carry_config_tuple_bool",
-      "community": 12,
+      "community": 13,
       "norm_label": "_tuple_bool()"
     },
     {
@@ -1404,7 +1404,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L272",
       "id": "aggression_carry_config_merge_volume_grid_config",
-      "community": 12,
+      "community": 13,
       "norm_label": "_merge_volume_grid_config()"
     },
     {
@@ -1413,7 +1413,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L287",
       "id": "aggression_carry_config_merge_daily_close_fade_config",
-      "community": 12,
+      "community": 13,
       "norm_label": "_merge_daily_close_fade_config()"
     },
     {
@@ -1422,7 +1422,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L329",
       "id": "aggression_carry_config_merge_daily_close_fade_grid_config",
-      "community": 12,
+      "community": 13,
       "norm_label": "_merge_daily_close_fade_grid_config()"
     },
     {
@@ -1431,7 +1431,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L366",
       "id": "aggression_carry_config_merge_forward_test_config",
-      "community": 12,
+      "community": 13,
       "norm_label": "_merge_forward_test_config()"
     },
     {
@@ -1440,7 +1440,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L380",
       "id": "aggression_carry_config_merge_universe_config",
-      "community": 12,
+      "community": 13,
       "norm_label": "_merge_universe_config()"
     },
     {
@@ -1449,7 +1449,7 @@
       "source_file": "aggression_carry/config.py",
       "source_location": "L393",
       "id": "aggression_carry_config_load_config",
-      "community": 12,
+      "community": 13,
       "norm_label": "load_config()"
     },
     {
@@ -1593,7 +1593,7 @@
       "source_file": "aggression_carry/daily_close_fade.py",
       "source_location": "L857",
       "id": "aggression_carry_daily_close_fade_summarize_close_fade_diagnostic_ic",
-      "community": 11,
+      "community": 10,
       "norm_label": "summarize_close_fade_diagnostic_ic()"
     },
     {
@@ -2052,7 +2052,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L1",
       "id": "aggression_carry_bybit_py",
-      "community": 8,
+      "community": 11,
       "norm_label": "bybit.py"
     },
     {
@@ -2061,7 +2061,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L14",
       "id": "aggression_carry_bybit_bybitdataerror",
-      "community": 8,
+      "community": 11,
       "norm_label": "bybitdataerror"
     },
     {
@@ -2079,7 +2079,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L34",
       "id": "aggression_carry_bybit_bybitmarketdata",
-      "community": 8,
+      "community": 11,
       "norm_label": "bybitmarketdata"
     },
     {
@@ -2097,7 +2097,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L46",
       "id": "aggression_carry_bybit_bybitmarketdata_get_instruments_info",
-      "community": 8,
+      "community": 11,
       "norm_label": ".get_instruments_info()"
     },
     {
@@ -2106,7 +2106,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L60",
       "id": "aggression_carry_bybit_bybitmarketdata_get_klines",
-      "community": 8,
+      "community": 11,
       "norm_label": ".get_klines()"
     },
     {
@@ -2115,7 +2115,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L87",
       "id": "aggression_carry_bybit_bybitmarketdata_get_recent_trades",
-      "community": 8,
+      "community": 11,
       "norm_label": ".get_recent_trades()"
     },
     {
@@ -2124,7 +2124,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L91",
       "id": "aggression_carry_bybit_bybitmarketdata_get_funding_history",
-      "community": 8,
+      "community": 11,
       "norm_label": ".get_funding_history()"
     },
     {
@@ -2133,7 +2133,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L94",
       "id": "aggression_carry_bybit_bybitmarketdata_get_tickers",
-      "community": 8,
+      "community": 11,
       "norm_label": ".get_tickers()"
     },
     {
@@ -2142,7 +2142,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L98",
       "id": "aggression_carry_bybit_bybitmarketdata_get_orderbook",
-      "community": 8,
+      "community": 11,
       "norm_label": ".get_orderbook()"
     },
     {
@@ -2151,7 +2151,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L102",
       "id": "aggression_carry_bybit_bybitmarketdata_get_open_interest",
-      "community": 8,
+      "community": 11,
       "norm_label": ".get_open_interest()"
     },
     {
@@ -2160,7 +2160,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L113",
       "id": "aggression_carry_bybit_bybitmarketdata_paged_time_range",
-      "community": 8,
+      "community": 11,
       "norm_label": "._paged_time_range()"
     },
     {
@@ -2169,7 +2169,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L141",
       "id": "aggression_carry_bybit_bybitmarketdata_get",
-      "community": 8,
+      "community": 11,
       "norm_label": "._get()"
     },
     {
@@ -2178,7 +2178,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L160",
       "id": "aggression_carry_bybit_bybitprivateclient",
-      "community": 8,
+      "community": 11,
       "norm_label": "bybitprivateclient"
     },
     {
@@ -2196,7 +2196,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L184",
       "id": "aggression_carry_bybit_bybitprivateclient_get_wallet_balance",
-      "community": 8,
+      "community": 11,
       "norm_label": ".get_wallet_balance()"
     },
     {
@@ -2205,7 +2205,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L188",
       "id": "aggression_carry_bybit_bybitprivateclient_place_order",
-      "community": 8,
+      "community": 11,
       "norm_label": ".place_order()"
     },
     {
@@ -2214,7 +2214,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L194",
       "id": "aggression_carry_bybit_bybitprivateclient_cancel_order",
-      "community": 8,
+      "community": 11,
       "norm_label": ".cancel_order()"
     },
     {
@@ -2223,7 +2223,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L198",
       "id": "aggression_carry_bybit_bybitprivateclient_cancel_all_orders",
-      "community": 8,
+      "community": 11,
       "norm_label": ".cancel_all_orders()"
     },
     {
@@ -2232,7 +2232,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L207",
       "id": "aggression_carry_bybit_bybitprivateclient_get_open_orders",
-      "community": 8,
+      "community": 11,
       "norm_label": ".get_open_orders()"
     },
     {
@@ -2241,7 +2241,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L214",
       "id": "aggression_carry_bybit_bybitprivateclient_get_order_history",
-      "community": 8,
+      "community": 11,
       "norm_label": ".get_order_history()"
     },
     {
@@ -2250,7 +2250,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L229",
       "id": "aggression_carry_bybit_bybitprivateclient_get_trade_history",
-      "community": 8,
+      "community": 11,
       "norm_label": ".get_trade_history()"
     },
     {
@@ -2259,7 +2259,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L244",
       "id": "aggression_carry_bybit_bybitprivateclient_get_positions",
-      "community": 8,
+      "community": 11,
       "norm_label": ".get_positions()"
     },
     {
@@ -2268,7 +2268,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L253",
       "id": "aggression_carry_bybit_bybitprivateclient_call_optional",
-      "community": 8,
+      "community": 11,
       "norm_label": "._call_optional()"
     },
     {
@@ -2277,7 +2277,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L259",
       "id": "aggression_carry_bybit_bybitprivateclient_call_once",
-      "community": 8,
+      "community": 11,
       "norm_label": "._call_once()"
     },
     {
@@ -2286,7 +2286,7 @@
       "source_file": "aggression_carry/bybit.py",
       "source_location": "L270",
       "id": "aggression_carry_bybit_bybitprivateclient_call",
-      "community": 8,
+      "community": 11,
       "norm_label": "._call()"
     },
     {
@@ -2295,7 +2295,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1",
       "id": "aggression_carry_demo_execution_py",
-      "community": 4,
+      "community": 3,
       "norm_label": "demo_execution.py"
     },
     {
@@ -2349,7 +2349,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L123",
       "id": "aggression_carry_demo_execution_run_bybit_demo_cancel_all",
-      "community": 4,
+      "community": 3,
       "norm_label": "run_bybit_demo_cancel_all()"
     },
     {
@@ -2358,7 +2358,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L159",
       "id": "aggression_carry_demo_execution_run_bybit_demo_flatten",
-      "community": 4,
+      "community": 3,
       "norm_label": "run_bybit_demo_flatten()"
     },
     {
@@ -2367,7 +2367,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L234",
       "id": "aggression_carry_demo_execution_build_demo_sync_orders",
-      "community": 4,
+      "community": 3,
       "norm_label": "build_demo_sync_orders()"
     },
     {
@@ -2376,7 +2376,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L336",
       "id": "aggression_carry_demo_execution_reconcile_demo_orders",
-      "community": 4,
+      "community": 3,
       "norm_label": "reconcile_demo_orders()"
     },
     {
@@ -2385,7 +2385,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L411",
       "id": "aggression_carry_demo_execution_cancel_stale_demo_orders",
-      "community": 4,
+      "community": 3,
       "norm_label": "cancel_stale_demo_orders()"
     },
     {
@@ -2394,7 +2394,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L447",
       "id": "aggression_carry_demo_execution_summarize_demo_sync_orders",
-      "community": 4,
+      "community": 3,
       "norm_label": "summarize_demo_sync_orders()"
     },
     {
@@ -2412,7 +2412,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L512",
       "id": "aggression_carry_demo_execution_format_demo_cancel_all_report",
-      "community": 4,
+      "community": 3,
       "norm_label": "format_demo_cancel_all_report()"
     },
     {
@@ -2421,7 +2421,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L527",
       "id": "aggression_carry_demo_execution_format_demo_flatten_report",
-      "community": 4,
+      "community": 3,
       "norm_label": "format_demo_flatten_report()"
     },
     {
@@ -2430,7 +2430,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L546",
       "id": "aggression_carry_demo_execution_run_bybit_demo_probe",
-      "community": 4,
+      "community": 3,
       "norm_label": "run_bybit_demo_probe()"
     },
     {
@@ -2439,7 +2439,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L625",
       "id": "aggression_carry_demo_execution_format_demo_probe_report",
-      "community": 4,
+      "community": 3,
       "norm_label": "format_demo_probe_report()"
     },
     {
@@ -2448,7 +2448,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L653",
       "id": "aggression_carry_demo_execution_build_probe_order",
-      "community": 4,
+      "community": 3,
       "norm_label": "_build_probe_order()"
     },
     {
@@ -2457,7 +2457,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L720",
       "id": "aggression_carry_demo_execution_entry_order_row",
-      "community": 4,
+      "community": 3,
       "norm_label": "_entry_order_row()"
     },
     {
@@ -2466,7 +2466,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L766",
       "id": "aggression_carry_demo_execution_exit_order_row",
-      "community": 4,
+      "community": 3,
       "norm_label": "_exit_order_row()"
     },
     {
@@ -2475,7 +2475,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L831",
       "id": "aggression_carry_demo_execution_build_limit_order",
-      "community": 4,
+      "community": 3,
       "norm_label": "_build_limit_order()"
     },
     {
@@ -2484,7 +2484,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L895",
       "id": "aggression_carry_demo_execution_candidate_order_row",
-      "community": 4,
+      "community": 3,
       "norm_label": "_candidate_order_row()"
     },
     {
@@ -2493,7 +2493,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L954",
       "id": "aggression_carry_demo_execution_cap_candidate_order_rows",
-      "community": 4,
+      "community": 3,
       "norm_label": "_cap_candidate_order_rows()"
     },
     {
@@ -2502,7 +2502,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L981",
       "id": "aggression_carry_demo_execution_row_has_order_request",
-      "community": 4,
+      "community": 3,
       "norm_label": "_row_has_order_request()"
     },
     {
@@ -2511,7 +2511,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L985",
       "id": "aggression_carry_demo_execution_skip_candidate_row",
-      "community": 4,
+      "community": 3,
       "norm_label": "_skip_candidate_row()"
     },
     {
@@ -2520,7 +2520,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L997",
       "id": "aggression_carry_demo_execution_submit_pending_order_row",
-      "community": 4,
+      "community": 3,
       "norm_label": "_submit_pending_order_row()"
     },
     {
@@ -2538,7 +2538,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1037",
       "id": "aggression_carry_demo_execution_write_demo_emergency_report",
-      "community": 4,
+      "community": 3,
       "norm_label": "_write_demo_emergency_report()"
     },
     {
@@ -2547,7 +2547,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1044",
       "id": "aggression_carry_demo_execution_demo_executor",
-      "community": 8,
+      "community": 11,
       "norm_label": "_demo_executor()"
     },
     {
@@ -2556,7 +2556,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1067",
       "id": "aggression_carry_demo_execution_demo_private_executor",
-      "community": 4,
+      "community": 3,
       "norm_label": "_demo_private_executor()"
     },
     {
@@ -2565,7 +2565,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1086",
       "id": "aggression_carry_demo_execution_skip_row",
-      "community": 4,
+      "community": 3,
       "norm_label": "_skip_row()"
     },
     {
@@ -2574,7 +2574,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1143",
       "id": "aggression_carry_demo_execution_has_blocking_action",
-      "community": 4,
+      "community": 3,
       "norm_label": "_has_blocking_action()"
     },
     {
@@ -2583,7 +2583,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1150",
       "id": "aggression_carry_demo_execution_row_blocks_duplicate",
-      "community": 4,
+      "community": 3,
       "norm_label": "_row_blocks_duplicate()"
     },
     {
@@ -2592,7 +2592,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1159",
       "id": "aggression_carry_demo_execution_has_action",
-      "community": 4,
+      "community": 3,
       "norm_label": "_has_action()"
     },
     {
@@ -2601,7 +2601,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1167",
       "id": "aggression_carry_demo_execution_entry_order_for_trade",
-      "community": 4,
+      "community": 3,
       "norm_label": "_entry_order_for_trade()"
     },
     {
@@ -2610,7 +2610,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1175",
       "id": "aggression_carry_demo_execution_merge_order_frames",
-      "community": 4,
+      "community": 3,
       "norm_label": "_merge_order_frames()"
     },
     {
@@ -2619,7 +2619,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1184",
       "id": "aggression_carry_demo_execution_private_history_rows",
-      "community": 4,
+      "community": 3,
       "norm_label": "_private_history_rows()"
     },
     {
@@ -2628,7 +2628,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1205",
       "id": "aggression_carry_demo_execution_matches_order",
-      "community": 4,
+      "community": 3,
       "norm_label": "_matches_order()"
     },
     {
@@ -2637,7 +2637,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1213",
       "id": "aggression_carry_demo_execution_history_order_status",
-      "community": 4,
+      "community": 3,
       "norm_label": "_history_order_status()"
     },
     {
@@ -2646,7 +2646,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1221",
       "id": "aggression_carry_demo_execution_filled_totals",
-      "community": 4,
+      "community": 3,
       "norm_label": "_filled_totals()"
     },
     {
@@ -2655,7 +2655,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1232",
       "id": "aggression_carry_demo_execution_reconciled_status",
-      "community": 4,
+      "community": 3,
       "norm_label": "_reconciled_status()"
     },
     {
@@ -2664,7 +2664,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1269",
       "id": "aggression_carry_demo_execution_normalized_order_status",
-      "community": 4,
+      "community": 3,
       "norm_label": "_normalized_order_status()"
     },
     {
@@ -2673,7 +2673,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1273",
       "id": "aggression_carry_demo_execution_paper_notional",
-      "community": 4,
+      "community": 3,
       "norm_label": "_paper_notional()"
     },
     {
@@ -2682,7 +2682,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1286",
       "id": "aggression_carry_demo_execution_symbol_position",
-      "community": 4,
+      "community": 3,
       "norm_label": "_symbol_position()"
     },
     {
@@ -2691,7 +2691,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1303",
       "id": "aggression_carry_demo_execution_sync_order_link_id",
-      "community": 4,
+      "community": 3,
       "norm_label": "_sync_order_link_id()"
     },
     {
@@ -2700,7 +2700,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1310",
       "id": "aggression_carry_demo_execution_count_status",
-      "community": 4,
+      "community": 3,
       "norm_label": "_count_status()"
     },
     {
@@ -2709,7 +2709,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1314",
       "id": "aggression_carry_demo_execution_count_payload_status",
-      "community": 4,
+      "community": 3,
       "norm_label": "_count_payload_status()"
     },
     {
@@ -2718,7 +2718,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1318",
       "id": "aggression_carry_demo_execution_float",
-      "community": 4,
+      "community": 3,
       "norm_label": "_float()"
     },
     {
@@ -2727,7 +2727,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1325",
       "id": "aggression_carry_demo_execution_dt_from_ms",
-      "community": 4,
+      "community": 3,
       "norm_label": "_dt_from_ms()"
     },
     {
@@ -2736,7 +2736,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1329",
       "id": "aggression_carry_demo_execution_write_demo_probe_report",
-      "community": 4,
+      "community": 3,
       "norm_label": "_write_demo_probe_report()"
     },
     {
@@ -2745,7 +2745,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1336",
       "id": "aggression_carry_demo_execution_find_instrument",
-      "community": 4,
+      "community": 3,
       "norm_label": "_find_instrument()"
     },
     {
@@ -2754,7 +2754,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1343",
       "id": "aggression_carry_demo_execution_top_of_book",
-      "community": 4,
+      "community": 3,
       "norm_label": "_top_of_book()"
     },
     {
@@ -2763,7 +2763,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1355",
       "id": "aggression_carry_demo_execution_decimal_filter",
-      "community": 4,
+      "community": 3,
       "norm_label": "_decimal_filter()"
     },
     {
@@ -2772,7 +2772,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1360",
       "id": "aggression_carry_demo_execution_round_to_step",
-      "community": 4,
+      "community": 3,
       "norm_label": "_round_to_step()"
     },
     {
@@ -2781,7 +2781,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1366",
       "id": "aggression_carry_demo_execution_capped_order_qty",
-      "community": 4,
+      "community": 3,
       "norm_label": "_capped_order_qty()"
     },
     {
@@ -2790,7 +2790,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1393",
       "id": "aggression_carry_demo_execution_decimal_text",
-      "community": 4,
+      "community": 3,
       "norm_label": "_decimal_text()"
     },
     {
@@ -2799,7 +2799,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1397",
       "id": "aggression_carry_demo_execution_order_link_id",
-      "community": 4,
+      "community": 3,
       "norm_label": "_order_link_id()"
     },
     {
@@ -2808,7 +2808,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1402",
       "id": "aggression_carry_demo_execution_emergency_order_link_id",
-      "community": 4,
+      "community": 3,
       "norm_label": "_emergency_order_link_id()"
     },
     {
@@ -2817,7 +2817,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1409",
       "id": "aggression_carry_demo_execution_side",
-      "community": 4,
+      "community": 3,
       "norm_label": "_side()"
     },
     {
@@ -2826,7 +2826,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1418",
       "id": "aggression_carry_demo_execution_instrument_report",
-      "community": 4,
+      "community": 3,
       "norm_label": "_instrument_report()"
     },
     {
@@ -2835,7 +2835,7 @@
       "source_file": "aggression_carry/demo_execution.py",
       "source_location": "L1431",
       "id": "aggression_carry_demo_execution_as_utc",
-      "community": 4,
+      "community": 3,
       "norm_label": "_as_utc()"
     },
     {
@@ -3060,7 +3060,7 @@
       "source_file": "aggression_carry/telegram.py",
       "source_location": "L1",
       "id": "aggression_carry_telegram_py",
-      "community": 3,
+      "community": 4,
       "norm_label": "telegram.py"
     },
     {
@@ -3069,7 +3069,7 @@
       "source_file": "aggression_carry/telegram.py",
       "source_location": "L10",
       "id": "aggression_carry_telegram_telegramconfig",
-      "community": 3,
+      "community": 4,
       "norm_label": "telegramconfig"
     },
     {
@@ -3078,7 +3078,7 @@
       "source_file": "aggression_carry/telegram.py",
       "source_location": "L16",
       "id": "aggression_carry_telegram_telegram_configured",
-      "community": 3,
+      "community": 4,
       "norm_label": "telegram_configured()"
     },
     {
@@ -3087,7 +3087,7 @@
       "source_file": "aggression_carry/telegram.py",
       "source_location": "L21",
       "id": "aggression_carry_telegram_send_telegram_message",
-      "community": 3,
+      "community": 4,
       "norm_label": "send_telegram_message()"
     },
     {
@@ -3096,7 +3096,7 @@
       "source_file": "aggression_carry/__init__.py",
       "source_location": "L1",
       "id": "aggression_carry_init_py",
-      "community": 5,
+      "community": 4,
       "norm_label": "__init__.py"
     },
     {
@@ -3104,7 +3104,7 @@
       "file_type": "rationale",
       "source_file": "aggression_carry/__init__.py",
       "source_location": "L1",
-      "community": 5,
+      "community": 4,
       "norm_label": "bybit volume-alpha research package.  this package is the stripped-down rebuild",
       "id": "aggression_carry_init_rationale_1"
     },
@@ -3114,7 +3114,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1",
       "id": "aggression_carry_forward_test_py",
-      "community": 3,
+      "community": 5,
       "norm_label": "forward_test.py"
     },
     {
@@ -3123,7 +3123,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L31",
       "id": "aggression_carry_forward_test_run_forward_scan",
-      "community": 3,
+      "community": 5,
       "norm_label": "run_forward_scan()"
     },
     {
@@ -3132,7 +3132,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L102",
       "id": "aggression_carry_forward_test_run_forward_once",
-      "community": 3,
+      "community": 5,
       "norm_label": "run_forward_once()"
     },
     {
@@ -3141,7 +3141,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L175",
       "id": "aggression_carry_forward_test_run_forward_sleeves",
-      "community": 3,
+      "community": 5,
       "norm_label": "run_forward_sleeves()"
     },
     {
@@ -3150,7 +3150,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L257",
       "id": "aggression_carry_forward_test_default_forward_sleeves",
-      "community": 3,
+      "community": 5,
       "norm_label": "default_forward_sleeves()"
     },
     {
@@ -3159,7 +3159,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L296",
       "id": "aggression_carry_forward_test_run_forward_report",
-      "community": 3,
+      "community": 5,
       "norm_label": "run_forward_report()"
     },
     {
@@ -3168,7 +3168,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L316",
       "id": "aggression_carry_forward_test_build_forward_universe",
-      "community": 3,
+      "community": 5,
       "norm_label": "build_forward_universe()"
     },
     {
@@ -3177,7 +3177,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L358",
       "id": "aggression_carry_forward_test_build_forward_scan_features",
-      "community": 3,
+      "community": 5,
       "norm_label": "build_forward_scan_features()"
     },
     {
@@ -3186,7 +3186,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L448",
       "id": "aggression_carry_forward_test_open_forward_paper_trades",
-      "community": 3,
+      "community": 5,
       "norm_label": "open_forward_paper_trades()"
     },
     {
@@ -3195,7 +3195,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L502",
       "id": "aggression_carry_forward_test_mark_forward_open_trades",
-      "community": 3,
+      "community": 5,
       "norm_label": "mark_forward_open_trades()"
     },
     {
@@ -3204,7 +3204,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L549",
       "id": "aggression_carry_forward_test_summarize_forward_paper_baskets",
-      "community": 3,
+      "community": 5,
       "norm_label": "summarize_forward_paper_baskets()"
     },
     {
@@ -3213,7 +3213,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L573",
       "id": "aggression_carry_forward_test_summarize_forward_paper_trades",
-      "community": 3,
+      "community": 5,
       "norm_label": "summarize_forward_paper_trades()"
     },
     {
@@ -3222,7 +3222,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L605",
       "id": "aggression_carry_forward_test_format_forward_scan_report",
-      "community": 3,
+      "community": 5,
       "norm_label": "format_forward_scan_report()"
     },
     {
@@ -3231,7 +3231,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L643",
       "id": "aggression_carry_forward_test_format_forward_run_report",
-      "community": 3,
+      "community": 5,
       "norm_label": "format_forward_run_report()"
     },
     {
@@ -3240,7 +3240,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L686",
       "id": "aggression_carry_forward_test_format_forward_run_message",
-      "community": 3,
+      "community": 5,
       "norm_label": "format_forward_run_message()"
     },
     {
@@ -3249,7 +3249,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L700",
       "id": "aggression_carry_forward_test_format_forward_sleeves_report",
-      "community": 3,
+      "community": 5,
       "norm_label": "format_forward_sleeves_report()"
     },
     {
@@ -3258,7 +3258,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L747",
       "id": "aggression_carry_forward_test_format_forward_sleeves_message",
-      "community": 3,
+      "community": 5,
       "norm_label": "format_forward_sleeves_message()"
     },
     {
@@ -3267,7 +3267,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L758",
       "id": "aggression_carry_forward_test_fetch_forward_bars",
-      "community": 3,
+      "community": 5,
       "norm_label": "_fetch_forward_bars()"
     },
     {
@@ -3276,7 +3276,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L814",
       "id": "aggression_carry_forward_test_fetch_symbol_klines",
-      "community": 3,
+      "community": 5,
       "norm_label": "_fetch_symbol_klines()"
     },
     {
@@ -3285,7 +3285,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L821",
       "id": "aggression_carry_forward_test_normalize_live_instruments",
-      "community": 3,
+      "community": 5,
       "norm_label": "_normalize_live_instruments()"
     },
     {
@@ -3294,7 +3294,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L837",
       "id": "aggression_carry_forward_test_normalize_live_tickers",
-      "community": 3,
+      "community": 5,
       "norm_label": "_normalize_live_tickers()"
     },
     {
@@ -3303,7 +3303,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L853",
       "id": "aggression_carry_forward_test_normalize_klines",
-      "community": 3,
+      "community": 5,
       "norm_label": "_normalize_klines()"
     },
     {
@@ -3312,7 +3312,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L872",
       "id": "aggression_carry_forward_test_signal_feature_frame",
-      "community": 3,
+      "community": 5,
       "norm_label": "_signal_feature_frame()"
     },
     {
@@ -3321,7 +3321,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L907",
       "id": "aggression_carry_forward_test_latest_realized_vol",
-      "community": 3,
+      "community": 5,
       "norm_label": "_latest_realized_vol()"
     },
     {
@@ -3330,7 +3330,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L929",
       "id": "aggression_carry_forward_test_latest_baseline_liquidity",
-      "community": 3,
+      "community": 5,
       "norm_label": "_latest_baseline_liquidity()"
     },
     {
@@ -3339,7 +3339,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L951",
       "id": "aggression_carry_forward_test_minute_frame",
-      "community": 3,
+      "community": 5,
       "norm_label": "_minute_frame()"
     },
     {
@@ -3348,7 +3348,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L961",
       "id": "aggression_carry_forward_test_new_paper_trade",
-      "community": 3,
+      "community": 5,
       "norm_label": "_new_paper_trade()"
     },
     {
@@ -3357,7 +3357,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1055",
       "id": "aggression_carry_forward_test_mark_trade_from_bars",
-      "community": 3,
+      "community": 5,
       "norm_label": "_mark_trade_from_bars()"
     },
     {
@@ -3366,7 +3366,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1229",
       "id": "aggression_carry_forward_test_trade_number",
-      "community": 3,
+      "community": 5,
       "norm_label": "_trade_number()"
     },
     {
@@ -3375,7 +3375,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1239",
       "id": "aggression_carry_forward_test_write_forward_scan_outputs",
-      "community": 3,
+      "community": 5,
       "norm_label": "_write_forward_scan_outputs()"
     },
     {
@@ -3384,7 +3384,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1256",
       "id": "aggression_carry_forward_test_write_forward_trade_outputs",
-      "community": 3,
+      "community": 5,
       "norm_label": "_write_forward_trade_outputs()"
     },
     {
@@ -3393,7 +3393,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1278",
       "id": "aggression_carry_forward_test_write_forward_sleeves_outputs",
-      "community": 3,
+      "community": 5,
       "norm_label": "_write_forward_sleeves_outputs()"
     },
     {
@@ -3402,7 +3402,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1287",
       "id": "aggression_carry_forward_test_replace_dataset",
-      "community": 3,
+      "community": 5,
       "norm_label": "_replace_dataset()"
     },
     {
@@ -3411,7 +3411,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1294",
       "id": "aggression_carry_forward_test_merge_trade_frames",
-      "community": 3,
+      "community": 5,
       "norm_label": "_merge_trade_frames()"
     },
     {
@@ -3420,7 +3420,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1301",
       "id": "aggression_carry_forward_test_basket_already_opened",
-      "community": 3,
+      "community": 5,
       "norm_label": "_basket_already_opened()"
     },
     {
@@ -3429,7 +3429,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1305",
       "id": "aggression_carry_forward_test_count_status",
-      "community": 3,
+      "community": 5,
       "norm_label": "_count_status()"
     },
     {
@@ -3438,7 +3438,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1309",
       "id": "aggression_carry_forward_test_count_reason",
-      "community": 3,
+      "community": 5,
       "norm_label": "_count_reason()"
     },
     {
@@ -3447,7 +3447,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1313",
       "id": "aggression_carry_forward_test_scan_status",
-      "community": 3,
+      "community": 5,
       "norm_label": "_scan_status()"
     },
     {
@@ -3456,7 +3456,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1323",
       "id": "aggression_carry_forward_test_scan_id",
-      "community": 3,
+      "community": 5,
       "norm_label": "_scan_id()"
     },
     {
@@ -3465,7 +3465,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1327",
       "id": "aggression_carry_forward_test_safe_sleeve_name",
-      "community": 3,
+      "community": 5,
       "norm_label": "_safe_sleeve_name()"
     },
     {
@@ -3474,7 +3474,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1332",
       "id": "aggression_carry_forward_test_signal_ts_ms",
-      "community": 3,
+      "community": 5,
       "norm_label": "_signal_ts_ms()"
     },
     {
@@ -3483,7 +3483,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1337",
       "id": "aggression_carry_forward_test_day_start_ms",
-      "community": 3,
+      "community": 5,
       "norm_label": "_day_start_ms()"
     },
     {
@@ -3492,7 +3492,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1342",
       "id": "aggression_carry_forward_test_floor_minute_ms",
-      "community": 3,
+      "community": 5,
       "norm_label": "_floor_minute_ms()"
     },
     {
@@ -3501,7 +3501,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1346",
       "id": "aggression_carry_forward_test_ms_from_dt",
-      "community": 3,
+      "community": 5,
       "norm_label": "_ms_from_dt()"
     },
     {
@@ -3510,7 +3510,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1350",
       "id": "aggression_carry_forward_test_dt_from_ms",
-      "community": 3,
+      "community": 5,
       "norm_label": "_dt_from_ms()"
     },
     {
@@ -3519,7 +3519,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1354",
       "id": "aggression_carry_forward_test_as_utc",
-      "community": 3,
+      "community": 5,
       "norm_label": "_as_utc()"
     },
     {
@@ -3528,7 +3528,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1358",
       "id": "aggression_carry_forward_test_concat",
-      "community": 3,
+      "community": 5,
       "norm_label": "_concat()"
     },
     {
@@ -3537,7 +3537,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1362",
       "id": "aggression_carry_forward_test_empty_universe",
-      "community": 3,
+      "community": 5,
       "norm_label": "_empty_universe()"
     },
     {
@@ -3546,7 +3546,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1375",
       "id": "aggression_carry_forward_test_float_or_none",
-      "community": 3,
+      "community": 5,
       "norm_label": "_float_or_none()"
     },
     {
@@ -3555,7 +3555,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1379",
       "id": "aggression_carry_forward_test_int_or_none",
-      "community": 3,
+      "community": 5,
       "norm_label": "_int_or_none()"
     },
     {
@@ -3564,7 +3564,7 @@
       "source_file": "aggression_carry/forward_test.py",
       "source_location": "L1383",
       "id": "aggression_carry_forward_test_bool_value",
-      "community": 3,
+      "community": 5,
       "norm_label": "_bool_value()"
     },
     {
@@ -3573,7 +3573,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L1",
       "id": "aggression_carry_universe_py",
-      "community": 8,
+      "community": 0,
       "norm_label": "universe.py"
     },
     {
@@ -3582,7 +3582,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L19",
       "id": "aggression_carry_universe_run_discover_universe",
-      "community": 8,
+      "community": 0,
       "norm_label": "run_discover_universe()"
     },
     {
@@ -3591,7 +3591,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L60",
       "id": "aggression_carry_universe_build_current_universe_table",
-      "community": 8,
+      "community": 0,
       "norm_label": "build_current_universe_table()"
     },
     {
@@ -3600,7 +3600,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L130",
       "id": "aggression_carry_universe_format_universe_report",
-      "community": 8,
+      "community": 0,
       "norm_label": "format_universe_report()"
     },
     {
@@ -3609,7 +3609,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L171",
       "id": "aggression_carry_universe_empty_universe_table",
-      "community": 8,
+      "community": 0,
       "norm_label": "_empty_universe_table()"
     },
     {
@@ -3618,7 +3618,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L189",
       "id": "aggression_carry_universe_age_filter_label",
-      "community": 8,
+      "community": 0,
       "norm_label": "_age_filter_label()"
     },
     {
@@ -3627,7 +3627,7 @@
       "source_file": "aggression_carry/universe.py",
       "source_location": "L201",
       "id": "aggression_carry_universe_safe_name",
-      "community": 8,
+      "community": 0,
       "norm_label": "_safe_name()"
     },
     {
@@ -3636,7 +3636,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L1",
       "id": "aggression_carry_cli_py",
-      "community": 9,
+      "community": 8,
       "norm_label": "cli.py"
     },
     {
@@ -3645,7 +3645,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L46",
       "id": "aggression_carry_cli_build_parser",
-      "community": 9,
+      "community": 8,
       "norm_label": "build_parser()"
     },
     {
@@ -3654,7 +3654,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L419",
       "id": "aggression_carry_cli_main",
-      "community": 9,
+      "community": 8,
       "norm_label": "main()"
     },
     {
@@ -3663,7 +3663,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L769",
       "id": "aggression_carry_cli_close_fade_config_from_args",
-      "community": 9,
+      "community": 8,
       "norm_label": "_close_fade_config_from_args()"
     },
     {
@@ -3672,7 +3672,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L848",
       "id": "aggression_carry_cli_close_fade_base_from_grid_args",
-      "community": 9,
+      "community": 8,
       "norm_label": "_close_fade_base_from_grid_args()"
     },
     {
@@ -3681,7 +3681,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L871",
       "id": "aggression_carry_cli_close_fade_base_from_diagnostics_args",
-      "community": 9,
+      "community": 8,
       "norm_label": "_close_fade_base_from_diagnostics_args()"
     },
     {
@@ -3690,7 +3690,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L896",
       "id": "aggression_carry_cli_close_fade_diagnostics_config_from_args",
-      "community": 9,
+      "community": 8,
       "norm_label": "_close_fade_diagnostics_config_from_args()"
     },
     {
@@ -3699,7 +3699,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L913",
       "id": "aggression_carry_cli_close_fade_grid_config_from_args",
-      "community": 9,
+      "community": 8,
       "norm_label": "_close_fade_grid_config_from_args()"
     },
     {
@@ -3708,7 +3708,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L955",
       "id": "aggression_carry_cli_backtest_config_from_args",
-      "community": 9,
+      "community": 8,
       "norm_label": "_backtest_config_from_args()"
     },
     {
@@ -3717,7 +3717,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L990",
       "id": "aggression_carry_cli_grid_config_from_args",
-      "community": 9,
+      "community": 8,
       "norm_label": "_grid_config_from_args()"
     },
     {
@@ -3726,7 +3726,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L1004",
       "id": "aggression_carry_cli_universe_config_from_args",
-      "community": 9,
+      "community": 8,
       "norm_label": "_universe_config_from_args()"
     },
     {
@@ -3735,7 +3735,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L1023",
       "id": "aggression_carry_cli_add_universe_backtest_args",
-      "community": 9,
+      "community": 8,
       "norm_label": "_add_universe_backtest_args()"
     },
     {
@@ -3744,7 +3744,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L1032",
       "id": "aggression_carry_cli_add_forward_fade_args",
-      "community": 9,
+      "community": 8,
       "norm_label": "_add_forward_fade_args()"
     },
     {
@@ -3753,7 +3753,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L1077",
       "id": "aggression_carry_cli_add_forward_runtime_args",
-      "community": 9,
+      "community": 8,
       "norm_label": "_add_forward_runtime_args()"
     },
     {
@@ -3762,7 +3762,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L1088",
       "id": "aggression_carry_cli_forward_config_from_args",
-      "community": 9,
+      "community": 8,
       "norm_label": "_forward_config_from_args()"
     },
     {
@@ -3771,7 +3771,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L1105",
       "id": "aggression_carry_cli_apply_universe_backtest_args",
-      "community": 9,
+      "community": 8,
       "norm_label": "_apply_universe_backtest_args()"
     },
     {
@@ -3780,7 +3780,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L1122",
       "id": "aggression_carry_cli_exclude_symbols_from_args",
-      "community": 9,
+      "community": 8,
       "norm_label": "_exclude_symbols_from_args()"
     },
     {
@@ -3789,7 +3789,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L1129",
       "id": "aggression_carry_cli_close_fade_exclusions",
-      "community": 9,
+      "community": 8,
       "norm_label": "_close_fade_exclusions()"
     },
     {
@@ -3798,7 +3798,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L1134",
       "id": "aggression_carry_cli_signal_minute",
-      "community": 9,
+      "community": 8,
       "norm_label": "_signal_minute()"
     },
     {
@@ -3807,7 +3807,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L1146",
       "id": "aggression_carry_cli_csv_signal_minutes",
-      "community": 9,
+      "community": 8,
       "norm_label": "_csv_signal_minutes()"
     },
     {
@@ -3816,7 +3816,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L1152",
       "id": "aggression_carry_cli_csv_str",
-      "community": 9,
+      "community": 8,
       "norm_label": "_csv_str()"
     },
     {
@@ -3825,7 +3825,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L1158",
       "id": "aggression_carry_cli_csv_int",
-      "community": 9,
+      "community": 8,
       "norm_label": "_csv_int()"
     },
     {
@@ -3834,7 +3834,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L1162",
       "id": "aggression_carry_cli_csv_float",
-      "community": 9,
+      "community": 8,
       "norm_label": "_csv_float()"
     },
     {
@@ -3843,7 +3843,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L1166",
       "id": "aggression_carry_cli_csv_bool",
-      "community": 9,
+      "community": 8,
       "norm_label": "_csv_bool()"
     },
     {
@@ -3852,7 +3852,7 @@
       "source_file": "aggression_carry/cli.py",
       "source_location": "L1175",
       "id": "aggression_carry_cli_parse_now",
-      "community": 9,
+      "community": 8,
       "norm_label": "_parse_now()"
     },
     {
@@ -3969,7 +3969,7 @@
       "source_file": "aggression_carry/downloaders.py",
       "source_location": "L24",
       "id": "aggression_carry_downloaders_parse_date_ms",
-      "community": 9,
+      "community": 8,
       "norm_label": "parse_date_ms()"
     },
     {
@@ -4122,7 +4122,7 @@
       "source_file": "aggression_carry/__main__.py",
       "source_location": "L1",
       "id": "aggression_carry_main_py",
-      "community": 9,
+      "community": 8,
       "norm_label": "__main__.py"
     },
     {
@@ -4338,7 +4338,7 @@
       "source_file": "tests/conftest.py",
       "source_location": "L1",
       "id": "tests_conftest_py",
-      "community": 30,
+      "community": 31,
       "norm_label": "conftest.py"
     },
     {
@@ -4788,7 +4788,7 @@
       "source_file": "tests/test_aggression_carry_universe.py",
       "source_location": "L1",
       "id": "tests_test_aggression_carry_universe_py",
-      "community": 8,
+      "community": 0,
       "norm_label": "test_aggression_carry_universe.py"
     },
     {
@@ -4797,7 +4797,7 @@
       "source_file": "tests/test_aggression_carry_universe.py",
       "source_location": "L10",
       "id": "tests_test_aggression_carry_universe_test_current_universe_table_filters_and_ranks",
-      "community": 8,
+      "community": 0,
       "norm_label": "test_current_universe_table_filters_and_ranks()"
     },
     {
@@ -4806,7 +4806,7 @@
       "source_file": "tests/test_aggression_carry_universe.py",
       "source_location": "L49",
       "id": "tests_test_aggression_carry_universe_test_universe_report_contains_symbol_csv",
-      "community": 8,
+      "community": 0,
       "norm_label": "test_universe_report_contains_symbol_csv()"
     },
     {
@@ -4815,7 +4815,7 @@
       "source_file": "tests/test_aggression_carry_universe.py",
       "source_location": "L84",
       "id": "tests_test_aggression_carry_universe_instrument",
-      "community": 8,
+      "community": 0,
       "norm_label": "_instrument()"
     },
     {
@@ -4824,7 +4824,7 @@
       "source_file": "tests/test_aggression_carry_universe.py",
       "source_location": "L100",
       "id": "tests_test_aggression_carry_universe_ticker",
-      "community": 8,
+      "community": 0,
       "norm_label": "_ticker()"
     },
     {
@@ -4986,7 +4986,7 @@
       "source_file": "tests/test_aggression_carry_config.py",
       "source_location": "L1",
       "id": "tests_test_aggression_carry_config_py",
-      "community": 12,
+      "community": 13,
       "norm_label": "test_aggression_carry_config.py"
     },
     {
@@ -4995,7 +4995,7 @@
       "source_file": "tests/test_aggression_carry_config.py",
       "source_location": "L8",
       "id": "tests_test_aggression_carry_config_test_volume_alpha_controls_load_from_yaml",
-      "community": 12,
+      "community": 13,
       "norm_label": "test_volume_alpha_controls_load_from_yaml()"
     },
     {
@@ -5400,7 +5400,7 @@
       "source_file": "tests/test_aggression_carry_bybit.py",
       "source_location": "L1",
       "id": "tests_test_aggression_carry_bybit_py",
-      "community": 17,
+      "community": 18,
       "norm_label": "test_aggression_carry_bybit.py"
     },
     {
@@ -5409,7 +5409,7 @@
       "source_file": "tests/test_aggression_carry_bybit.py",
       "source_location": "L6",
       "id": "tests_test_aggression_carry_bybit_test_bybit_market_data_constructs_with_slotted_client",
-      "community": 17,
+      "community": 18,
       "norm_label": "test_bybit_market_data_constructs_with_slotted_client()"
     },
     {
@@ -5418,7 +5418,7 @@
       "source_file": "tests/test_aggression_carry_bybit.py",
       "source_location": "L18",
       "id": "tests_test_aggression_carry_bybit_test_bybit_private_client_constructs_demo_session",
-      "community": 17,
+      "community": 18,
       "norm_label": "test_bybit_private_client_constructs_demo_session()"
     },
     {
@@ -5427,7 +5427,7 @@
       "source_file": "tests/test_aggression_carry_bybit.py",
       "source_location": "L32",
       "id": "tests_test_aggression_carry_bybit_test_bybit_private_client_refuses_non_demo_session",
-      "community": 17,
+      "community": 18,
       "norm_label": "test_bybit_private_client_refuses_non_demo_session()"
     },
     {
@@ -5436,7 +5436,7 @@
       "source_file": "tests/test_aggression_carry_bybit.py",
       "source_location": "L53",
       "id": "tests_test_aggression_carry_bybit_test_bybit_private_client_wraps_order_and_trade_history",
-      "community": 17,
+      "community": 18,
       "norm_label": "test_bybit_private_client_wraps_order_and_trade_history()"
     },
     {
@@ -5445,7 +5445,7 @@
       "source_file": "tests/test_aggression_carry_bybit.py",
       "source_location": "L84",
       "id": "tests_test_aggression_carry_bybit_test_bybit_private_client_wraps_cancel_all_and_positions_by_settle",
-      "community": 17,
+      "community": 18,
       "norm_label": "test_bybit_private_client_wraps_cancel_all_and_positions_by_settle()"
     },
     {
@@ -5454,7 +5454,7 @@
       "source_file": "tests/test_aggression_carry_bybit.py",
       "source_location": "L111",
       "id": "tests_test_aggression_carry_bybit_test_kline_download_chunks_full_range_when_bybit_returns_newest_first",
-      "community": 17,
+      "community": 18,
       "norm_label": "test_kline_download_chunks_full_range_when_bybit_returns_newest_first()"
     },
     {
@@ -5463,7 +5463,7 @@
       "source_file": "tests/test_aggression_carry_bybit.py",
       "source_location": "L141",
       "id": "tests_test_aggression_carry_bybit_test_time_range_download_pages_backward_when_bybit_returns_newest_first",
-      "community": 17,
+      "community": 18,
       "norm_label": "test_time_range_download_pages_backward_when_bybit_returns_newest_first()"
     },
     {
@@ -5472,8 +5472,35 @@
       "source_file": "tests/test_aggression_carry_bybit.py",
       "source_location": "L169",
       "id": "tests_test_aggression_carry_bybit_newest_first_page",
-      "community": 17,
+      "community": 18,
       "norm_label": "_newest_first_page()"
+    },
+    {
+      "label": "test_volume_promotion_script.py",
+      "file_type": "code",
+      "source_file": "tests/test_volume_promotion_script.py",
+      "source_location": "L1",
+      "id": "tests_test_volume_promotion_script_py",
+      "community": 23,
+      "norm_label": "test_volume_promotion_script.py"
+    },
+    {
+      "label": "test_volume_promotion_requires_split_survival_and_drawdown()",
+      "file_type": "code",
+      "source_file": "tests/test_volume_promotion_script.py",
+      "source_location": "L13",
+      "id": "tests_test_volume_promotion_script_test_volume_promotion_requires_split_survival_and_drawdown",
+      "community": 23,
+      "norm_label": "test_volume_promotion_requires_split_survival_and_drawdown()"
+    },
+    {
+      "label": "_candidate()",
+      "file_type": "code",
+      "source_file": "tests/test_volume_promotion_script.py",
+      "source_location": "L40",
+      "id": "tests_test_volume_promotion_script_candidate",
+      "community": 23,
+      "norm_label": "_candidate()"
     },
     {
       "label": "test_aggression_carry_cli.py",
@@ -5481,7 +5508,7 @@
       "source_file": "tests/test_aggression_carry_cli.py",
       "source_location": "L1",
       "id": "tests_test_aggression_carry_cli_py",
-      "community": 9,
+      "community": 8,
       "norm_label": "test_aggression_carry_cli.py"
     },
     {
@@ -5490,7 +5517,7 @@
       "source_file": "tests/test_aggression_carry_cli.py",
       "source_location": "L8",
       "id": "tests_test_aggression_carry_cli_test_cli_fixture_pipeline_end_to_end",
-      "community": 9,
+      "community": 12,
       "norm_label": "test_cli_fixture_pipeline_end_to_end()"
     },
     {
@@ -5499,7 +5526,7 @@
       "source_file": "tests/test_aggression_carry_cli.py",
       "source_location": "L65",
       "id": "tests_test_aggression_carry_cli_test_cli_parses_forward_sleeves_alias",
-      "community": 9,
+      "community": 8,
       "norm_label": "test_cli_parses_forward_sleeves_alias()"
     },
     {
@@ -5508,7 +5535,7 @@
       "source_file": "tests/test_aggression_carry_cli.py",
       "source_location": "L81",
       "id": "tests_test_aggression_carry_cli_test_cli_parses_daily_close_fade_diagnostics",
-      "community": 9,
+      "community": 8,
       "norm_label": "test_cli_parses_daily_close_fade_diagnostics()"
     },
     {
@@ -5517,7 +5544,7 @@
       "source_file": "tests/test_aggression_carry_cli.py",
       "source_location": "L127",
       "id": "tests_test_aggression_carry_cli_test_cli_parses_daily_close_fade_grid_dates",
-      "community": 9,
+      "community": 8,
       "norm_label": "test_cli_parses_daily_close_fade_grid_dates()"
     },
     {
@@ -5526,7 +5553,7 @@
       "source_file": "tests/test_aggression_carry_cli.py",
       "source_location": "L145",
       "id": "tests_test_aggression_carry_cli_test_cli_parses_bybit_demo_probe",
-      "community": 9,
+      "community": 8,
       "norm_label": "test_cli_parses_bybit_demo_probe()"
     },
     {
@@ -5535,7 +5562,7 @@
       "source_file": "tests/test_aggression_carry_cli.py",
       "source_location": "L164",
       "id": "tests_test_aggression_carry_cli_test_cli_parses_bybit_demo_sync",
-      "community": 9,
+      "community": 8,
       "norm_label": "test_cli_parses_bybit_demo_sync()"
     },
     {
@@ -5544,7 +5571,7 @@
       "source_file": "tests/test_aggression_carry_cli.py",
       "source_location": "L183",
       "id": "tests_test_aggression_carry_cli_test_cli_parses_bybit_demo_cycle",
-      "community": 9,
+      "community": 8,
       "norm_label": "test_cli_parses_bybit_demo_cycle()"
     },
     {
@@ -5553,7 +5580,7 @@
       "source_file": "tests/test_aggression_carry_cli.py",
       "source_location": "L229",
       "id": "tests_test_aggression_carry_cli_test_cli_parses_bybit_demo_emergency_commands",
-      "community": 9,
+      "community": 8,
       "norm_label": "test_cli_parses_bybit_demo_emergency_commands()"
     },
     {
@@ -5562,7 +5589,7 @@
       "source_file": "tests/test_daily_close_fade_grid_splits_script.py",
       "source_location": "L1",
       "id": "tests_test_daily_close_fade_grid_splits_script_py",
-      "community": 23,
+      "community": 24,
       "norm_label": "test_daily_close_fade_grid_splits_script.py"
     },
     {
@@ -5571,7 +5598,7 @@
       "source_file": "tests/test_daily_close_fade_grid_splits_script.py",
       "source_location": "L13",
       "id": "tests_test_daily_close_fade_grid_splits_script_test_grid_split_summary_prefers_stable_variants",
-      "community": 23,
+      "community": 24,
       "norm_label": "test_grid_split_summary_prefers_stable_variants()"
     },
     {
@@ -5580,7 +5607,7 @@
       "source_file": "tests/test_daily_close_fade_grid_splits_script.py",
       "source_location": "L31",
       "id": "tests_test_daily_close_fade_grid_splits_script_variant",
-      "community": 23,
+      "community": 24,
       "norm_label": "_variant()"
     },
     {
@@ -5589,7 +5616,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L1",
       "id": "tests_test_aggression_carry_demo_cycle_py",
-      "community": 5,
+      "community": 4,
       "norm_label": "test_aggression_carry_demo_cycle.py"
     },
     {
@@ -5598,7 +5625,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L17",
       "id": "tests_test_aggression_carry_demo_cycle_test_demo_cycle_dry_run_syncs_all_default_sleeves_without_private_orders",
-      "community": 5,
+      "community": 4,
       "norm_label": "test_demo_cycle_dry_run_syncs_all_default_sleeves_without_private_orders()"
     },
     {
@@ -5607,7 +5634,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L44",
       "id": "tests_test_aggression_carry_demo_cycle_test_demo_cycle_requires_confirmation_before_submit",
-      "community": 5,
+      "community": 4,
       "norm_label": "test_demo_cycle_requires_confirmation_before_submit()"
     },
     {
@@ -5616,7 +5643,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L69",
       "id": "tests_test_aggression_carry_demo_cycle_test_demo_cycle_prefixes_order_link_ids_by_sleeve_on_submit",
-      "community": 5,
+      "community": 4,
       "norm_label": "test_demo_cycle_prefixes_order_link_ids_by_sleeve_on_submit()"
     },
     {
@@ -5625,7 +5652,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L91",
       "id": "tests_test_aggression_carry_demo_cycle_test_demo_cycle_pause_blocks_entries_but_allows_reduce_only_exits",
-      "community": 5,
+      "community": 4,
       "norm_label": "test_demo_cycle_pause_blocks_entries_but_allows_reduce_only_exits()"
     },
     {
@@ -5634,7 +5661,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L116",
       "id": "tests_test_aggression_carry_demo_cycle_test_demo_cycle_lock_blocks_overlapping_runs",
-      "community": 5,
+      "community": 4,
       "norm_label": "test_demo_cycle_lock_blocks_overlapping_runs()"
     },
     {
@@ -5643,7 +5670,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L135",
       "id": "tests_test_aggression_carry_demo_cycle_test_demo_cycle_outside_window_without_active_state_skips_public_scan_and_sync",
-      "community": 5,
+      "community": 4,
       "norm_label": "test_demo_cycle_outside_window_without_active_state_skips_public_scan_and_sync()"
     },
     {
@@ -5652,7 +5679,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L167",
       "id": "tests_test_aggression_carry_demo_cycle_forward_runner_open_trade",
-      "community": 5,
+      "community": 4,
       "norm_label": "_forward_runner_open_trade()"
     },
     {
@@ -5661,7 +5688,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L178",
       "id": "tests_test_aggression_carry_demo_cycle_forward_runner_open_and_closed_trades",
-      "community": 5,
+      "community": 4,
       "norm_label": "_forward_runner_open_and_closed_trades()"
     },
     {
@@ -5670,7 +5697,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L197",
       "id": "tests_test_aggression_carry_demo_cycle_write_forward_trades",
-      "community": 5,
+      "community": 4,
       "norm_label": "_write_forward_trades()"
     },
     {
@@ -5679,7 +5706,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L207",
       "id": "tests_test_aggression_carry_demo_cycle_write_existing_demo_entry",
-      "community": 5,
+      "community": 4,
       "norm_label": "_write_existing_demo_entry()"
     },
     {
@@ -5688,7 +5715,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L241",
       "id": "tests_test_aggression_carry_demo_cycle_paper_trade",
-      "community": 5,
+      "community": 4,
       "norm_label": "_paper_trade()"
     },
     {
@@ -5697,7 +5724,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L259",
       "id": "tests_test_aggression_carry_demo_cycle_fakemarket",
-      "community": 5,
+      "community": 4,
       "norm_label": "_fakemarket"
     },
     {
@@ -5706,7 +5733,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L260",
       "id": "tests_test_aggression_carry_demo_cycle_fakemarket_get_instruments_info",
-      "community": 5,
+      "community": 4,
       "norm_label": ".get_instruments_info()"
     },
     {
@@ -5715,7 +5742,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L274",
       "id": "tests_test_aggression_carry_demo_cycle_fakemarket_get_orderbook",
-      "community": 5,
+      "community": 4,
       "norm_label": ".get_orderbook()"
     },
     {
@@ -5724,7 +5751,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L279",
       "id": "tests_test_aggression_carry_demo_cycle_fakeexecution",
-      "community": 5,
+      "community": 4,
       "norm_label": "_fakeexecution"
     },
     {
@@ -5733,7 +5760,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L280",
       "id": "tests_test_aggression_carry_demo_cycle_fakeexecution_init",
-      "community": 5,
+      "community": 4,
       "norm_label": ".__init__()"
     },
     {
@@ -5742,7 +5769,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L286",
       "id": "tests_test_aggression_carry_demo_cycle_fakeexecution_place_order",
-      "community": 5,
+      "community": 4,
       "norm_label": ".place_order()"
     },
     {
@@ -5751,7 +5778,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L290",
       "id": "tests_test_aggression_carry_demo_cycle_fakeexecution_cancel_order",
-      "community": 5,
+      "community": 4,
       "norm_label": ".cancel_order()"
     },
     {
@@ -5760,7 +5787,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L294",
       "id": "tests_test_aggression_carry_demo_cycle_fakeexecution_get_open_orders",
-      "community": 5,
+      "community": 4,
       "norm_label": ".get_open_orders()"
     },
     {
@@ -5769,7 +5796,7 @@
       "source_file": "tests/test_aggression_carry_demo_cycle.py",
       "source_location": "L298",
       "id": "tests_test_aggression_carry_demo_cycle_fakeexecution_get_positions",
-      "community": 5,
+      "community": 4,
       "norm_label": ".get_positions()"
     },
     {
@@ -5778,7 +5805,7 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L1",
       "id": "scripts_run_volume_bucket_sweep_py",
-      "community": 18,
+      "community": 12,
       "norm_label": "run_volume_bucket_sweep.py"
     },
     {
@@ -5787,7 +5814,7 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L19",
       "id": "scripts_run_volume_bucket_sweep_main",
-      "community": 18,
+      "community": 12,
       "norm_label": "main()"
     },
     {
@@ -5796,7 +5823,7 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L79",
       "id": "scripts_run_volume_bucket_sweep_parse_args",
-      "community": 18,
+      "community": 12,
       "norm_label": "parse_args()"
     },
     {
@@ -5805,7 +5832,7 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L96",
       "id": "scripts_run_volume_bucket_sweep_parse_buckets",
-      "community": 18,
+      "community": 12,
       "norm_label": "_parse_buckets()"
     },
     {
@@ -5814,7 +5841,7 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L109",
       "id": "scripts_run_volume_bucket_sweep_csv_int",
-      "community": 18,
+      "community": 12,
       "norm_label": "_csv_int()"
     },
     {
@@ -5823,7 +5850,7 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L113",
       "id": "scripts_run_volume_bucket_sweep_csv_float",
-      "community": 18,
+      "community": 12,
       "norm_label": "_csv_float()"
     },
     {
@@ -5832,7 +5859,7 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L117",
       "id": "scripts_run_volume_bucket_sweep_csv_bool",
-      "community": 18,
+      "community": 12,
       "norm_label": "_csv_bool()"
     },
     {
@@ -5841,7 +5868,7 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L121",
       "id": "scripts_run_volume_bucket_sweep_csv_str",
-      "community": 18,
+      "community": 12,
       "norm_label": "_csv_str()"
     },
     {
@@ -5850,7 +5877,7 @@
       "source_file": "scripts/run_volume_bucket_sweep.py",
       "source_location": "L125",
       "id": "scripts_run_volume_bucket_sweep_format_summary",
-      "community": 18,
+      "community": 12,
       "norm_label": "_format_summary()"
     },
     {
@@ -5859,7 +5886,7 @@
       "source_file": "scripts/run_daily_close_fade_1m.ps1",
       "source_location": "L1",
       "id": "scripts_run_daily_close_fade_1m_ps1",
-      "community": 26,
+      "community": 27,
       "norm_label": "run_daily_close_fade_1m.ps1"
     },
     {
@@ -5868,7 +5895,7 @@
       "source_file": "scripts/run_daily_close_fade_1m.ps1",
       "source_location": "L18",
       "id": "scripts_run_daily_close_fade_1m_invoke_checked",
-      "community": 26,
+      "community": 27,
       "norm_label": "invoke-checked()"
     },
     {
@@ -5877,7 +5904,7 @@
       "source_file": "scripts/run_volume_grid_splits.py",
       "source_location": "L1",
       "id": "scripts_run_volume_grid_splits_py",
-      "community": 13,
+      "community": 14,
       "norm_label": "run_volume_grid_splits.py"
     },
     {
@@ -5886,7 +5913,7 @@
       "source_file": "scripts/run_volume_grid_splits.py",
       "source_location": "L51",
       "id": "scripts_run_volume_grid_splits_main",
-      "community": 13,
+      "community": 14,
       "norm_label": "main()"
     },
     {
@@ -5895,7 +5922,7 @@
       "source_file": "scripts/run_volume_grid_splits.py",
       "source_location": "L116",
       "id": "scripts_run_volume_grid_splits_parse_args",
-      "community": 13,
+      "community": 14,
       "norm_label": "parse_args()"
     },
     {
@@ -5904,7 +5931,7 @@
       "source_file": "scripts/run_volume_grid_splits.py",
       "source_location": "L142",
       "id": "scripts_run_volume_grid_splits_summarize_volume_grid_splits",
-      "community": 13,
+      "community": 14,
       "norm_label": "summarize_volume_grid_splits()"
     },
     {
@@ -5913,7 +5940,7 @@
       "source_file": "scripts/run_volume_grid_splits.py",
       "source_location": "L189",
       "id": "scripts_run_volume_grid_splits_format_volume_grid_split_summary",
-      "community": 13,
+      "community": 14,
       "norm_label": "format_volume_grid_split_summary()"
     },
     {
@@ -5922,7 +5949,7 @@
       "source_file": "scripts/run_volume_grid_splits.py",
       "source_location": "L255",
       "id": "scripts_run_volume_grid_splits_base_config",
-      "community": 13,
+      "community": 14,
       "norm_label": "_base_config()"
     },
     {
@@ -5931,7 +5958,7 @@
       "source_file": "scripts/run_volume_grid_splits.py",
       "source_location": "L272",
       "id": "scripts_run_volume_grid_splits_grid_config",
-      "community": 13,
+      "community": 14,
       "norm_label": "_grid_config()"
     },
     {
@@ -5940,7 +5967,7 @@
       "source_file": "scripts/run_volume_grid_splits.py",
       "source_location": "L286",
       "id": "scripts_run_volume_grid_splits_parse_splits",
-      "community": 13,
+      "community": 14,
       "norm_label": "_parse_splits()"
     },
     {
@@ -5949,7 +5976,7 @@
       "source_file": "scripts/run_volume_grid_splits.py",
       "source_location": "L300",
       "id": "scripts_run_volume_grid_splits_csv_int",
-      "community": 13,
+      "community": 14,
       "norm_label": "_csv_int()"
     },
     {
@@ -5958,7 +5985,7 @@
       "source_file": "scripts/run_volume_grid_splits.py",
       "source_location": "L304",
       "id": "scripts_run_volume_grid_splits_csv_float",
-      "community": 13,
+      "community": 14,
       "norm_label": "_csv_float()"
     },
     {
@@ -5967,7 +5994,7 @@
       "source_file": "scripts/run_volume_grid_splits.py",
       "source_location": "L308",
       "id": "scripts_run_volume_grid_splits_csv_bool",
-      "community": 13,
+      "community": 14,
       "norm_label": "_csv_bool()"
     },
     {
@@ -5976,7 +6003,7 @@
       "source_file": "scripts/run_volume_grid_splits.py",
       "source_location": "L312",
       "id": "scripts_run_volume_grid_splits_csv_str",
-      "community": 13,
+      "community": 14,
       "norm_label": "_csv_str()"
     },
     {
@@ -5985,7 +6012,7 @@
       "source_file": "scripts/run_volume_grid_splits.py",
       "source_location": "L316",
       "id": "scripts_run_volume_grid_splits_require_columns",
-      "community": 13,
+      "community": 14,
       "norm_label": "_require_columns()"
     },
     {
@@ -5994,7 +6021,7 @@
       "source_file": "scripts/run_volume_grid_splits.py",
       "source_location": "L322",
       "id": "scripts_run_volume_grid_splits_date_ms",
-      "community": 13,
+      "community": 14,
       "norm_label": "_date_ms()"
     },
     {
@@ -6003,7 +6030,7 @@
       "source_file": "scripts/run_volume_grid_splits.py",
       "source_location": "L331",
       "id": "scripts_run_volume_grid_splits_stop_label",
-      "community": 13,
+      "community": 14,
       "norm_label": "_stop_label()"
     },
     {
@@ -6012,7 +6039,7 @@
       "source_file": "scripts/run_volume_grid_splits.py",
       "source_location": "L340",
       "id": "scripts_run_volume_grid_splits_pct",
-      "community": 13,
+      "community": 14,
       "norm_label": "_pct()"
     },
     {
@@ -6021,7 +6048,7 @@
       "source_file": "scripts/run_volume_grid_splits.py",
       "source_location": "L346",
       "id": "scripts_run_volume_grid_splits_num",
-      "community": 13,
+      "community": 14,
       "norm_label": "_num()"
     },
     {
@@ -6030,7 +6057,7 @@
       "source_file": "scripts/run_agc_3m.ps1",
       "source_location": "L1",
       "id": "scripts_run_agc_3m_ps1",
-      "community": 27,
+      "community": 28,
       "norm_label": "run_agc_3m.ps1"
     },
     {
@@ -6039,7 +6066,7 @@
       "source_file": "scripts/run_agc_3m.ps1",
       "source_location": "L30",
       "id": "scripts_run_agc_3m_invoke_checked",
-      "community": 27,
+      "community": 28,
       "norm_label": "invoke-checked()"
     },
     {
@@ -6048,7 +6075,7 @@
       "source_file": "scripts/report_archive_pit_coverage.py",
       "source_location": "L1",
       "id": "scripts_report_archive_pit_coverage_py",
-      "community": 10,
+      "community": 9,
       "norm_label": "report_archive_pit_coverage.py"
     },
     {
@@ -6057,7 +6084,7 @@
       "source_file": "scripts/report_archive_pit_coverage.py",
       "source_location": "L18",
       "id": "scripts_report_archive_pit_coverage_main",
-      "community": 10,
+      "community": 9,
       "norm_label": "main()"
     },
     {
@@ -6066,7 +6093,7 @@
       "source_file": "scripts/report_archive_pit_coverage.py",
       "source_location": "L75",
       "id": "scripts_report_archive_pit_coverage_parse_args",
-      "community": 10,
+      "community": 9,
       "norm_label": "parse_args()"
     },
     {
@@ -6075,7 +6102,7 @@
       "source_file": "scripts/report_archive_pit_coverage.py",
       "source_location": "L94",
       "id": "scripts_report_archive_pit_coverage_build_archive_pit_coverage",
-      "community": 10,
+      "community": 9,
       "norm_label": "build_archive_pit_coverage()"
     },
     {
@@ -6084,7 +6111,7 @@
       "source_file": "scripts/report_archive_pit_coverage.py",
       "source_location": "L128",
       "id": "scripts_report_archive_pit_coverage_summarize_coverage_monthly",
-      "community": 10,
+      "community": 9,
       "norm_label": "summarize_coverage_monthly()"
     },
     {
@@ -6093,7 +6120,7 @@
       "source_file": "scripts/report_archive_pit_coverage.py",
       "source_location": "L139",
       "id": "scripts_report_archive_pit_coverage_summarize_coverage_symbols",
-      "community": 10,
+      "community": 9,
       "norm_label": "summarize_coverage_symbols()"
     },
     {
@@ -6102,7 +6129,7 @@
       "source_file": "scripts/report_archive_pit_coverage.py",
       "source_location": "L150",
       "id": "scripts_report_archive_pit_coverage_format_archive_pit_coverage_report",
-      "community": 10,
+      "community": 9,
       "norm_label": "format_archive_pit_coverage_report()"
     },
     {
@@ -6111,7 +6138,7 @@
       "source_file": "scripts/report_archive_pit_coverage.py",
       "source_location": "L225",
       "id": "scripts_report_archive_pit_coverage_filtered_manifest",
-      "community": 10,
+      "community": 9,
       "norm_label": "_filtered_manifest()"
     },
     {
@@ -6120,7 +6147,7 @@
       "source_file": "scripts/report_archive_pit_coverage.py",
       "source_location": "L247",
       "id": "scripts_report_archive_pit_coverage_coverage_aggs",
-      "community": 10,
+      "community": 9,
       "norm_label": "_coverage_aggs()"
     },
     {
@@ -6129,7 +6156,7 @@
       "source_file": "scripts/report_archive_pit_coverage.py",
       "source_location": "L258",
       "id": "scripts_report_archive_pit_coverage_coverage_rates",
-      "community": 10,
+      "community": 9,
       "norm_label": "_coverage_rates()"
     },
     {
@@ -6138,7 +6165,7 @@
       "source_file": "scripts/report_archive_pit_coverage.py",
       "source_location": "L265",
       "id": "scripts_report_archive_pit_coverage_payload_summary",
-      "community": 10,
+      "community": 9,
       "norm_label": "_payload_summary()"
     },
     {
@@ -6147,7 +6174,7 @@
       "source_file": "scripts/report_archive_pit_coverage.py",
       "source_location": "L284",
       "id": "scripts_report_archive_pit_coverage_coverage_thresholds_pass",
-      "community": 10,
+      "community": 9,
       "norm_label": "_coverage_thresholds_pass()"
     },
     {
@@ -6156,7 +6183,7 @@
       "source_file": "scripts/report_archive_pit_coverage.py",
       "source_location": "L296",
       "id": "scripts_report_archive_pit_coverage_partition_bar_rows",
-      "community": 10,
+      "community": 9,
       "norm_label": "_partition_bar_rows()"
     },
     {
@@ -6165,7 +6192,7 @@
       "source_file": "scripts/report_archive_pit_coverage.py",
       "source_location": "L306",
       "id": "scripts_report_archive_pit_coverage_coverage_status",
-      "community": 10,
+      "community": 9,
       "norm_label": "_coverage_status()"
     },
     {
@@ -6174,7 +6201,7 @@
       "source_file": "scripts/report_archive_pit_coverage.py",
       "source_location": "L314",
       "id": "scripts_report_archive_pit_coverage_next_date",
-      "community": 10,
+      "community": 9,
       "norm_label": "_next_date()"
     },
     {
@@ -6183,7 +6210,7 @@
       "source_file": "scripts/report_archive_pit_coverage.py",
       "source_location": "L318",
       "id": "scripts_report_archive_pit_coverage_csv_symbols",
-      "community": 10,
+      "community": 9,
       "norm_label": "_csv_symbols()"
     },
     {
@@ -6192,7 +6219,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L1",
       "id": "scripts_run_daily_close_fade_grid_splits_py",
-      "community": 14,
+      "community": 15,
       "norm_label": "run_daily_close_fade_grid_splits.py"
     },
     {
@@ -6201,7 +6228,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L62",
       "id": "scripts_run_daily_close_fade_grid_splits_main",
-      "community": 14,
+      "community": 15,
       "norm_label": "main()"
     },
     {
@@ -6210,7 +6237,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L126",
       "id": "scripts_run_daily_close_fade_grid_splits_parse_args",
-      "community": 14,
+      "community": 15,
       "norm_label": "parse_args()"
     },
     {
@@ -6219,7 +6246,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L167",
       "id": "scripts_run_daily_close_fade_grid_splits_summarize_grid_splits",
-      "community": 14,
+      "community": 15,
       "norm_label": "summarize_grid_splits()"
     },
     {
@@ -6228,7 +6255,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L210",
       "id": "scripts_run_daily_close_fade_grid_splits_format_grid_split_summary",
-      "community": 14,
+      "community": 15,
       "norm_label": "format_grid_split_summary()"
     },
     {
@@ -6237,7 +6264,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L277",
       "id": "scripts_run_daily_close_fade_grid_splits_base_config",
-      "community": 14,
+      "community": 15,
       "norm_label": "_base_config()"
     },
     {
@@ -6246,7 +6273,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L297",
       "id": "scripts_run_daily_close_fade_grid_splits_grid_config",
-      "community": 14,
+      "community": 15,
       "norm_label": "_grid_config()"
     },
     {
@@ -6255,7 +6282,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L328",
       "id": "scripts_run_daily_close_fade_grid_splits_parse_splits",
-      "community": 14,
+      "community": 15,
       "norm_label": "_parse_splits()"
     },
     {
@@ -6264,7 +6291,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L342",
       "id": "scripts_run_daily_close_fade_grid_splits_csv_signal_minutes",
-      "community": 14,
+      "community": 15,
       "norm_label": "_csv_signal_minutes()"
     },
     {
@@ -6273,7 +6300,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L350",
       "id": "scripts_run_daily_close_fade_grid_splits_csv_int",
-      "community": 14,
+      "community": 15,
       "norm_label": "_csv_int()"
     },
     {
@@ -6282,7 +6309,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L354",
       "id": "scripts_run_daily_close_fade_grid_splits_csv_float",
-      "community": 14,
+      "community": 15,
       "norm_label": "_csv_float()"
     },
     {
@@ -6291,7 +6318,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L358",
       "id": "scripts_run_daily_close_fade_grid_splits_csv_str",
-      "community": 14,
+      "community": 15,
       "norm_label": "_csv_str()"
     },
     {
@@ -6300,7 +6327,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L362",
       "id": "scripts_run_daily_close_fade_grid_splits_pct",
-      "community": 14,
+      "community": 15,
       "norm_label": "_pct()"
     },
     {
@@ -6309,7 +6336,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L368",
       "id": "scripts_run_daily_close_fade_grid_splits_num",
-      "community": 14,
+      "community": 15,
       "norm_label": "_num()"
     },
     {
@@ -6318,7 +6345,7 @@
       "source_file": "scripts/run_daily_close_fade_grid_splits.py",
       "source_location": "L374",
       "id": "scripts_run_daily_close_fade_grid_splits_format_signal_minute",
-      "community": 14,
+      "community": 15,
       "norm_label": "_format_signal_minute()"
     },
     {
@@ -6327,7 +6354,7 @@
       "source_file": "scripts/evaluate_close_fade_promotion.py",
       "source_location": "L1",
       "id": "scripts_evaluate_close_fade_promotion_py",
-      "community": 15,
+      "community": 16,
       "norm_label": "evaluate_close_fade_promotion.py"
     },
     {
@@ -6336,7 +6363,7 @@
       "source_file": "scripts/evaluate_close_fade_promotion.py",
       "source_location": "L14",
       "id": "scripts_evaluate_close_fade_promotion_main",
-      "community": 15,
+      "community": 16,
       "norm_label": "main()"
     },
     {
@@ -6345,7 +6372,7 @@
       "source_file": "scripts/evaluate_close_fade_promotion.py",
       "source_location": "L69",
       "id": "scripts_evaluate_close_fade_promotion_parse_args",
-      "community": 15,
+      "community": 16,
       "norm_label": "parse_args()"
     },
     {
@@ -6354,7 +6381,7 @@
       "source_file": "scripts/evaluate_close_fade_promotion.py",
       "source_location": "L116",
       "id": "scripts_evaluate_close_fade_promotion_build_promotion_table",
-      "community": 15,
+      "community": 16,
       "norm_label": "build_promotion_table()"
     },
     {
@@ -6363,7 +6390,7 @@
       "source_file": "scripts/evaluate_close_fade_promotion.py",
       "source_location": "L191",
       "id": "scripts_evaluate_close_fade_promotion_format_promotion_report",
-      "community": 15,
+      "community": 16,
       "norm_label": "format_promotion_report()"
     },
     {
@@ -6372,7 +6399,7 @@
       "source_file": "scripts/evaluate_close_fade_promotion.py",
       "source_location": "L239",
       "id": "scripts_evaluate_close_fade_promotion_promotion_reason",
-      "community": 15,
+      "community": 16,
       "norm_label": "_promotion_reason()"
     },
     {
@@ -6381,7 +6408,7 @@
       "source_file": "scripts/evaluate_close_fade_promotion.py",
       "source_location": "L264",
       "id": "scripts_evaluate_close_fade_promotion_read_csv",
-      "community": 15,
+      "community": 16,
       "norm_label": "_read_csv()"
     },
     {
@@ -6390,7 +6417,7 @@
       "source_file": "scripts/evaluate_close_fade_promotion.py",
       "source_location": "L272",
       "id": "scripts_evaluate_close_fade_promotion_require_columns",
-      "community": 15,
+      "community": 16,
       "norm_label": "_require_columns()"
     },
     {
@@ -6399,7 +6426,7 @@
       "source_file": "scripts/evaluate_close_fade_promotion.py",
       "source_location": "L278",
       "id": "scripts_evaluate_close_fade_promotion_empty_promotion_table",
-      "community": 15,
+      "community": 16,
       "norm_label": "_empty_promotion_table()"
     },
     {
@@ -6408,7 +6435,7 @@
       "source_file": "scripts/evaluate_close_fade_promotion.py",
       "source_location": "L289",
       "id": "scripts_evaluate_close_fade_promotion_number",
-      "community": 15,
+      "community": 16,
       "norm_label": "_number()"
     },
     {
@@ -6417,7 +6444,7 @@
       "source_file": "scripts/evaluate_close_fade_promotion.py",
       "source_location": "L298",
       "id": "scripts_evaluate_close_fade_promotion_pct",
-      "community": 15,
+      "community": 16,
       "norm_label": "_pct()"
     },
     {
@@ -6426,7 +6453,7 @@
       "source_file": "scripts/evaluate_close_fade_promotion.py",
       "source_location": "L304",
       "id": "scripts_evaluate_close_fade_promotion_num",
-      "community": 15,
+      "community": 16,
       "norm_label": "_num()"
     },
     {
@@ -6435,7 +6462,7 @@
       "source_file": "scripts/evaluate_close_fade_promotion.py",
       "source_location": "L310",
       "id": "scripts_evaluate_close_fade_promotion_format_signal_minute",
-      "community": 15,
+      "community": 16,
       "norm_label": "_format_signal_minute()"
     },
     {
@@ -6444,7 +6471,7 @@
       "source_file": "scripts/run_archive_pit_batches.py",
       "source_location": "L1",
       "id": "scripts_run_archive_pit_batches_py",
-      "community": 10,
+      "community": 9,
       "norm_label": "run_archive_pit_batches.py"
     },
     {
@@ -6453,7 +6480,7 @@
       "source_file": "scripts/run_archive_pit_batches.py",
       "source_location": "L32",
       "id": "scripts_run_archive_pit_batches_archivepitbatchconfig",
-      "community": 10,
+      "community": 9,
       "norm_label": "archivepitbatchconfig"
     },
     {
@@ -6462,7 +6489,7 @@
       "source_file": "scripts/run_archive_pit_batches.py",
       "source_location": "L45",
       "id": "scripts_run_archive_pit_batches_main",
-      "community": 10,
+      "community": 9,
       "norm_label": "main()"
     },
     {
@@ -6471,7 +6498,7 @@
       "source_file": "scripts/run_archive_pit_batches.py",
       "source_location": "L71",
       "id": "scripts_run_archive_pit_batches_parse_args",
-      "community": 10,
+      "community": 9,
       "norm_label": "parse_args()"
     },
     {
@@ -6480,7 +6507,7 @@
       "source_file": "scripts/run_archive_pit_batches.py",
       "source_location": "L89",
       "id": "scripts_run_archive_pit_batches_run_archive_pit_batches",
-      "community": 10,
+      "community": 9,
       "norm_label": "run_archive_pit_batches()"
     },
     {
@@ -6489,7 +6516,7 @@
       "source_file": "scripts/run_archive_pit_batches.py",
       "source_location": "L149",
       "id": "scripts_run_archive_pit_batches_batch_row",
-      "community": 10,
+      "community": 9,
       "norm_label": "_batch_row()"
     },
     {
@@ -6498,7 +6525,7 @@
       "source_file": "scripts/run_archive_pit_batches.py",
       "source_location": "L167",
       "id": "scripts_run_archive_pit_batches_summarize_batches",
-      "community": 10,
+      "community": 9,
       "norm_label": "_summarize_batches()"
     },
     {
@@ -6507,7 +6534,7 @@
       "source_file": "scripts/run_archive_pit_batches.py",
       "source_location": "L187",
       "id": "scripts_run_archive_pit_batches_write_batch_summary",
-      "community": 10,
+      "community": 9,
       "norm_label": "_write_batch_summary()"
     },
     {
@@ -6516,7 +6543,7 @@
       "source_file": "scripts/run_archive_pit_batches.py",
       "source_location": "L195",
       "id": "scripts_run_archive_pit_batches_format_batch_summary",
-      "community": 10,
+      "community": 9,
       "norm_label": "format_batch_summary()"
     },
     {
@@ -6525,7 +6552,7 @@
       "source_file": "scripts/run_archive_pit_batches.py",
       "source_location": "L245",
       "id": "scripts_run_archive_pit_batches_write_batch_coverage",
-      "community": 10,
+      "community": 9,
       "norm_label": "_write_batch_coverage()"
     },
     {
@@ -6534,7 +6561,7 @@
       "source_file": "scripts/run_archive_pit_batches.py",
       "source_location": "L284",
       "id": "scripts_run_archive_pit_batches_empty_batch_frame",
-      "community": 10,
+      "community": 9,
       "norm_label": "_empty_batch_frame()"
     },
     {
@@ -6543,7 +6570,7 @@
       "source_file": "scripts/run_archive_pit_batches.py",
       "source_location": "L300",
       "id": "scripts_run_archive_pit_batches_csv_symbols",
-      "community": 10,
+      "community": 9,
       "norm_label": "_csv_symbols()"
     },
     {
@@ -6552,7 +6579,7 @@
       "source_file": "scripts/run_archive_pit_bootstrap.ps1",
       "source_location": "L1",
       "id": "scripts_run_archive_pit_bootstrap_ps1",
-      "community": 28,
+      "community": 29,
       "norm_label": "run_archive_pit_bootstrap.ps1"
     },
     {
@@ -6561,7 +6588,7 @@
       "source_file": "scripts/run_archive_pit_bootstrap.ps1",
       "source_location": "L23",
       "id": "scripts_run_archive_pit_bootstrap_invoke_checked",
-      "community": 28,
+      "community": 29,
       "norm_label": "invoke-checked()"
     },
     {
@@ -6570,7 +6597,7 @@
       "source_file": "scripts/windows_setup.ps1",
       "source_location": "L1",
       "id": "scripts_windows_setup_ps1",
-      "community": 24,
+      "community": 25,
       "norm_label": "windows_setup.ps1"
     },
     {
@@ -6579,7 +6606,7 @@
       "source_file": "scripts/windows_setup.ps1",
       "source_location": "L6",
       "id": "scripts_windows_setup_invoke_checked",
-      "community": 24,
+      "community": 25,
       "norm_label": "invoke-checked()"
     },
     {
@@ -6588,7 +6615,7 @@
       "source_file": "scripts/windows_setup.ps1",
       "source_location": "L19",
       "id": "scripts_windows_setup_get_compatiblepython",
-      "community": 24,
+      "community": 25,
       "norm_label": "get-compatiblepython()"
     },
     {
@@ -6597,7 +6624,7 @@
       "source_file": "scripts/run_daily_close_fade_oos_splits.ps1",
       "source_location": "L1",
       "id": "scripts_run_daily_close_fade_oos_splits_ps1",
-      "community": 31,
+      "community": 32,
       "norm_label": "run_daily_close_fade_oos_splits.ps1"
     },
     {
@@ -6606,7 +6633,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L1",
       "id": "scripts_run_daily_close_fade_split_diagnostics_py",
-      "community": 16,
+      "community": 12,
       "norm_label": "run_daily_close_fade_split_diagnostics.py"
     },
     {
@@ -6615,7 +6642,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L27",
       "id": "scripts_run_daily_close_fade_split_diagnostics_main",
-      "community": 16,
+      "community": 12,
       "norm_label": "main()"
     },
     {
@@ -6624,7 +6651,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L101",
       "id": "scripts_run_daily_close_fade_split_diagnostics_parse_args",
-      "community": 16,
+      "community": 12,
       "norm_label": "parse_args()"
     },
     {
@@ -6633,7 +6660,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L129",
       "id": "scripts_run_daily_close_fade_split_diagnostics_summarize_split_scenarios",
-      "community": 16,
+      "community": 12,
       "norm_label": "summarize_split_scenarios()"
     },
     {
@@ -6642,7 +6669,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L174",
       "id": "scripts_run_daily_close_fade_split_diagnostics_format_split_summary",
-      "community": 16,
+      "community": 12,
       "norm_label": "format_split_summary()"
     },
     {
@@ -6651,7 +6678,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L239",
       "id": "scripts_run_daily_close_fade_split_diagnostics_base_config",
-      "community": 16,
+      "community": 12,
       "norm_label": "_base_config()"
     },
     {
@@ -6660,7 +6687,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L267",
       "id": "scripts_run_daily_close_fade_split_diagnostics_parse_splits",
-      "community": 16,
+      "community": 12,
       "norm_label": "_parse_splits()"
     },
     {
@@ -6669,7 +6696,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L281",
       "id": "scripts_run_daily_close_fade_split_diagnostics_csv_signal_minutes",
-      "community": 16,
+      "community": 12,
       "norm_label": "_csv_signal_minutes()"
     },
     {
@@ -6678,7 +6705,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L289",
       "id": "scripts_run_daily_close_fade_split_diagnostics_csv_int",
-      "community": 16,
+      "community": 12,
       "norm_label": "_csv_int()"
     },
     {
@@ -6687,7 +6714,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L293",
       "id": "scripts_run_daily_close_fade_split_diagnostics_csv_str",
-      "community": 16,
+      "community": 12,
       "norm_label": "_csv_str()"
     },
     {
@@ -6696,7 +6723,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L297",
       "id": "scripts_run_daily_close_fade_split_diagnostics_pct",
-      "community": 16,
+      "community": 12,
       "norm_label": "_pct()"
     },
     {
@@ -6705,7 +6732,7 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L304",
       "id": "scripts_run_daily_close_fade_split_diagnostics_num",
-      "community": 16,
+      "community": 12,
       "norm_label": "_num()"
     },
     {
@@ -6714,8 +6741,125 @@
       "source_file": "scripts/run_daily_close_fade_split_diagnostics.py",
       "source_location": "L310",
       "id": "scripts_run_daily_close_fade_split_diagnostics_format_signal_minute",
-      "community": 16,
+      "community": 12,
       "norm_label": "_format_signal_minute()"
+    },
+    {
+      "label": "evaluate_volume_promotion.py",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L1",
+      "id": "scripts_evaluate_volume_promotion_py",
+      "community": 17,
+      "norm_label": "evaluate_volume_promotion.py"
+    },
+    {
+      "label": "main()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L11",
+      "id": "scripts_evaluate_volume_promotion_main",
+      "community": 17,
+      "norm_label": "main()"
+    },
+    {
+      "label": "parse_args()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L62",
+      "id": "scripts_evaluate_volume_promotion_parse_args",
+      "community": 17,
+      "norm_label": "parse_args()"
+    },
+    {
+      "label": "build_volume_promotion_table()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L108",
+      "id": "scripts_evaluate_volume_promotion_build_volume_promotion_table",
+      "community": 17,
+      "norm_label": "build_volume_promotion_table()"
+    },
+    {
+      "label": "format_volume_promotion_report()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L179",
+      "id": "scripts_evaluate_volume_promotion_format_volume_promotion_report",
+      "community": 17,
+      "norm_label": "format_volume_promotion_report()"
+    },
+    {
+      "label": "_promotion_reason()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L224",
+      "id": "scripts_evaluate_volume_promotion_promotion_reason",
+      "community": 17,
+      "norm_label": "_promotion_reason()"
+    },
+    {
+      "label": "_read_csv()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L249",
+      "id": "scripts_evaluate_volume_promotion_read_csv",
+      "community": 17,
+      "norm_label": "_read_csv()"
+    },
+    {
+      "label": "_require_columns()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L257",
+      "id": "scripts_evaluate_volume_promotion_require_columns",
+      "community": 17,
+      "norm_label": "_require_columns()"
+    },
+    {
+      "label": "_empty_promotion_table()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L263",
+      "id": "scripts_evaluate_volume_promotion_empty_promotion_table",
+      "community": 17,
+      "norm_label": "_empty_promotion_table()"
+    },
+    {
+      "label": "_number()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L272",
+      "id": "scripts_evaluate_volume_promotion_number",
+      "community": 17,
+      "norm_label": "_number()"
+    },
+    {
+      "label": "_stop_label()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L281",
+      "id": "scripts_evaluate_volume_promotion_stop_label",
+      "community": 17,
+      "norm_label": "_stop_label()"
+    },
+    {
+      "label": "_pct()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L290",
+      "id": "scripts_evaluate_volume_promotion_pct",
+      "community": 17,
+      "norm_label": "_pct()"
+    },
+    {
+      "label": "_num()",
+      "file_type": "code",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L296",
+      "id": "scripts_evaluate_volume_promotion_num",
+      "community": 17,
+      "norm_label": "_num()"
     },
     {
       "label": "run_agc_1y_grid.ps1",
@@ -6723,7 +6867,7 @@
       "source_file": "scripts/run_agc_1y_grid.ps1",
       "source_location": "L1",
       "id": "scripts_run_agc_1y_grid_ps1",
-      "community": 29,
+      "community": 30,
       "norm_label": "run_agc_1y_grid.ps1"
     },
     {
@@ -6732,7 +6876,7 @@
       "source_file": "scripts/run_agc_1y_grid.ps1",
       "source_location": "L31",
       "id": "scripts_run_agc_1y_grid_invoke_checked",
-      "community": 29,
+      "community": 30,
       "norm_label": "invoke-checked()"
     },
     {
@@ -6741,7 +6885,7 @@
       "source_file": "scripts/run_volume_overnight_sweep.ps1",
       "source_location": "L1",
       "id": "scripts_run_volume_overnight_sweep_ps1",
-      "community": 25,
+      "community": 26,
       "norm_label": "run_volume_overnight_sweep.ps1"
     },
     {
@@ -6750,7 +6894,7 @@
       "source_file": "scripts/run_volume_overnight_sweep.ps1",
       "source_location": "L20",
       "id": "scripts_run_volume_overnight_sweep_invoke_checked",
-      "community": 25,
+      "community": 26,
       "norm_label": "invoke-checked()"
     },
     {
@@ -6759,7 +6903,7 @@
       "source_file": "scripts/run_volume_overnight_sweep.ps1",
       "source_location": "L34",
       "id": "scripts_run_volume_overnight_sweep_get_presetconfig",
-      "community": 25,
+      "community": 26,
       "norm_label": "get-presetconfig()"
     }
   ],
@@ -27575,6 +27719,42 @@
     {
       "relation": "contains",
       "confidence": "EXTRACTED",
+      "source_file": "tests/test_volume_promotion_script.py",
+      "source_location": "L13",
+      "weight": 1.0,
+      "_src": "tests_test_volume_promotion_script_py",
+      "_tgt": "tests_test_volume_promotion_script_test_volume_promotion_requires_split_survival_and_drawdown",
+      "source": "tests_test_volume_promotion_script_py",
+      "target": "tests_test_volume_promotion_script_test_volume_promotion_requires_split_survival_and_drawdown",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_volume_promotion_script.py",
+      "source_location": "L40",
+      "weight": 1.0,
+      "_src": "tests_test_volume_promotion_script_py",
+      "_tgt": "tests_test_volume_promotion_script_candidate",
+      "source": "tests_test_volume_promotion_script_py",
+      "target": "tests_test_volume_promotion_script_candidate",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "tests/test_volume_promotion_script.py",
+      "source_location": "L16",
+      "weight": 1.0,
+      "_src": "tests_test_volume_promotion_script_test_volume_promotion_requires_split_survival_and_drawdown",
+      "_tgt": "tests_test_volume_promotion_script_candidate",
+      "source": "tests_test_volume_promotion_script_test_volume_promotion_requires_split_survival_and_drawdown",
+      "target": "tests_test_volume_promotion_script_candidate",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
       "source_file": "tests/test_aggression_carry_cli.py",
       "source_location": "L8",
       "weight": 1.0,
@@ -27667,6 +27847,18 @@
       "source": "tests_test_aggression_carry_cli_py",
       "target": "tests_test_aggression_carry_cli_test_cli_parses_bybit_demo_emergency_commands",
       "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "INFERRED",
+      "confidence_score": 0.8,
+      "source_file": "tests/test_aggression_carry_cli.py",
+      "source_location": "L11",
+      "weight": 1.0,
+      "_src": "tests_test_aggression_carry_cli_test_cli_fixture_pipeline_end_to_end",
+      "_tgt": "scripts_evaluate_volume_promotion_main",
+      "source": "tests_test_aggression_carry_cli_test_cli_fixture_pipeline_end_to_end",
+      "target": "scripts_evaluate_volume_promotion_main"
     },
     {
       "relation": "calls",
@@ -30594,6 +30786,306 @@
       "_tgt": "scripts_run_daily_close_fade_split_diagnostics_csv_str",
       "source": "scripts_run_daily_close_fade_split_diagnostics_csv_int",
       "target": "scripts_run_daily_close_fade_split_diagnostics_csv_str",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L11",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_py",
+      "_tgt": "scripts_evaluate_volume_promotion_main",
+      "source": "scripts_evaluate_volume_promotion_py",
+      "target": "scripts_evaluate_volume_promotion_main",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L62",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_py",
+      "_tgt": "scripts_evaluate_volume_promotion_parse_args",
+      "source": "scripts_evaluate_volume_promotion_py",
+      "target": "scripts_evaluate_volume_promotion_parse_args",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L108",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_py",
+      "_tgt": "scripts_evaluate_volume_promotion_build_volume_promotion_table",
+      "source": "scripts_evaluate_volume_promotion_py",
+      "target": "scripts_evaluate_volume_promotion_build_volume_promotion_table",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L179",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_py",
+      "_tgt": "scripts_evaluate_volume_promotion_format_volume_promotion_report",
+      "source": "scripts_evaluate_volume_promotion_py",
+      "target": "scripts_evaluate_volume_promotion_format_volume_promotion_report",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L224",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_py",
+      "_tgt": "scripts_evaluate_volume_promotion_promotion_reason",
+      "source": "scripts_evaluate_volume_promotion_py",
+      "target": "scripts_evaluate_volume_promotion_promotion_reason",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L249",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_py",
+      "_tgt": "scripts_evaluate_volume_promotion_read_csv",
+      "source": "scripts_evaluate_volume_promotion_py",
+      "target": "scripts_evaluate_volume_promotion_read_csv",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L257",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_py",
+      "_tgt": "scripts_evaluate_volume_promotion_require_columns",
+      "source": "scripts_evaluate_volume_promotion_py",
+      "target": "scripts_evaluate_volume_promotion_require_columns",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L263",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_py",
+      "_tgt": "scripts_evaluate_volume_promotion_empty_promotion_table",
+      "source": "scripts_evaluate_volume_promotion_py",
+      "target": "scripts_evaluate_volume_promotion_empty_promotion_table",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L272",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_py",
+      "_tgt": "scripts_evaluate_volume_promotion_number",
+      "source": "scripts_evaluate_volume_promotion_py",
+      "target": "scripts_evaluate_volume_promotion_number",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L281",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_py",
+      "_tgt": "scripts_evaluate_volume_promotion_stop_label",
+      "source": "scripts_evaluate_volume_promotion_py",
+      "target": "scripts_evaluate_volume_promotion_stop_label",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L290",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_py",
+      "_tgt": "scripts_evaluate_volume_promotion_pct",
+      "source": "scripts_evaluate_volume_promotion_py",
+      "target": "scripts_evaluate_volume_promotion_pct",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "contains",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L296",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_py",
+      "_tgt": "scripts_evaluate_volume_promotion_num",
+      "source": "scripts_evaluate_volume_promotion_py",
+      "target": "scripts_evaluate_volume_promotion_num",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L12",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_main",
+      "_tgt": "scripts_evaluate_volume_promotion_parse_args",
+      "source": "scripts_evaluate_volume_promotion_main",
+      "target": "scripts_evaluate_volume_promotion_parse_args",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L17",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_main",
+      "_tgt": "scripts_evaluate_volume_promotion_read_csv",
+      "source": "scripts_evaluate_volume_promotion_main",
+      "target": "scripts_evaluate_volume_promotion_read_csv",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L18",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_main",
+      "_tgt": "scripts_evaluate_volume_promotion_build_volume_promotion_table",
+      "source": "scripts_evaluate_volume_promotion_main",
+      "target": "scripts_evaluate_volume_promotion_build_volume_promotion_table",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L51",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_main",
+      "_tgt": "scripts_evaluate_volume_promotion_format_volume_promotion_report",
+      "source": "scripts_evaluate_volume_promotion_main",
+      "target": "scripts_evaluate_volume_promotion_format_volume_promotion_report",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L119",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_build_volume_promotion_table",
+      "_tgt": "scripts_evaluate_volume_promotion_empty_promotion_table",
+      "source": "scripts_evaluate_volume_promotion_build_volume_promotion_table",
+      "target": "scripts_evaluate_volume_promotion_empty_promotion_table",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L120",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_build_volume_promotion_table",
+      "_tgt": "scripts_evaluate_volume_promotion_require_columns",
+      "source": "scripts_evaluate_volume_promotion_build_volume_promotion_table",
+      "target": "scripts_evaluate_volume_promotion_require_columns",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L134",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_build_volume_promotion_table",
+      "_tgt": "scripts_evaluate_volume_promotion_number",
+      "source": "scripts_evaluate_volume_promotion_build_volume_promotion_table",
+      "target": "scripts_evaluate_volume_promotion_number",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L155",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_build_volume_promotion_table",
+      "_tgt": "scripts_evaluate_volume_promotion_promotion_reason",
+      "source": "scripts_evaluate_volume_promotion_build_volume_promotion_table",
+      "target": "scripts_evaluate_volume_promotion_promotion_reason",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L191",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_format_volume_promotion_report",
+      "_tgt": "scripts_evaluate_volume_promotion_pct",
+      "source": "scripts_evaluate_volume_promotion_format_volume_promotion_report",
+      "target": "scripts_evaluate_volume_promotion_pct",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L194",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_format_volume_promotion_report",
+      "_tgt": "scripts_evaluate_volume_promotion_num",
+      "source": "scripts_evaluate_volume_promotion_format_volume_promotion_report",
+      "target": "scripts_evaluate_volume_promotion_num",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L214",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_format_volume_promotion_report",
+      "_tgt": "scripts_evaluate_volume_promotion_stop_label",
+      "source": "scripts_evaluate_volume_promotion_format_volume_promotion_report",
+      "target": "scripts_evaluate_volume_promotion_stop_label",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L286",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_stop_label",
+      "_tgt": "scripts_evaluate_volume_promotion_num",
+      "source": "scripts_evaluate_volume_promotion_stop_label",
+      "target": "scripts_evaluate_volume_promotion_num",
+      "confidence_score": 1.0
+    },
+    {
+      "relation": "calls",
+      "confidence": "EXTRACTED",
+      "source_file": "scripts/evaluate_volume_promotion.py",
+      "source_location": "L287",
+      "weight": 1.0,
+      "_src": "scripts_evaluate_volume_promotion_stop_label",
+      "_tgt": "scripts_evaluate_volume_promotion_pct",
+      "source": "scripts_evaluate_volume_promotion_stop_label",
+      "target": "scripts_evaluate_volume_promotion_pct",
       "confidence_score": 1.0
     },
     {

@@ -323,6 +323,19 @@ This writes `reports/volume_grid_splits/volume_grid_split_summary.md`. Prefer
 variants with positive return in every split and tolerable worst-split drawdown
 over variants that only win because one historical window was enormous.
 
+Apply an explicit promotion gate to the split summary:
+
+```bash
+python scripts/evaluate_volume_promotion.py \
+  --split-summary data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_grid_splits/volume_grid_split_summary.csv \
+  --max-worst-drawdown -0.35 \
+  --min-avg-sharpe 0.5
+```
+
+The command writes `volume_promotion_report.md` and exits with code `2` when no
+variant passes. That failure is useful; it means the grid found no candidate
+that survived the configured split, return, drawdown, and Sharpe gates.
+
 GPU note: this is not a CUDA workload yet. The bottleneck is independent Python
 trade simulation variants, so process-level CPU parallelism is the right first
 optimization. GPU work would require a separate cuDF/CuPy rewrite and only makes
