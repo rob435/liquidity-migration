@@ -36,3 +36,22 @@ Interpretation:
 
 This does not change any trading logic. It only prevents promotion decisions
 from being scattered across unrelated reports.
+
+## Artifact Manifest
+
+After the readiness report, write a hash manifest for the key research artifacts:
+
+```bash
+python scripts/write_research_manifest.py
+```
+
+Output:
+
+```text
+data/research_reports/manifest/research_artifact_manifest.md
+data/research_reports/manifest/research_artifact_manifest.json
+```
+
+Use `--strict` when missing artifacts should fail the command. You can include
+extra files with repeated `--artifact path/to/file` or `--artifact-glob
+'data/.../reports/*.csv'` arguments.
