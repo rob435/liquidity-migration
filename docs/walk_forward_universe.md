@@ -83,6 +83,23 @@ python -m aggression_carry \
   --workers 32
 ```
 
+Audit manifest and 1m partition coverage before trusting any walk-forward
+result:
+
+```bash
+python scripts/report_archive_pit_coverage.py \
+  --data-root data/daily-close-fade-pit \
+  --start 2023-05-03 \
+  --end 2026-05-03 \
+  --min-bars-per-day 1200
+```
+
+The coverage report writes `archive_pit_coverage_rows.csv`,
+`archive_pit_coverage_monthly.csv`, and `archive_pit_coverage_symbols.csv`.
+By default it also requires the next UTC date partition, because a daily-close
+trade entered around 22:15-23:15 UTC may exit after midnight. Rows that lack the
+next-day partition are not counted as usable for close-fade validation.
+
 `daily-close-fade --require-archive-membership` forces the strategy to select
 only symbol/date pairs present in the archive manifest.
 

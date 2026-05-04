@@ -285,6 +285,16 @@ python -m aggression_carry \
   --workers 32
 ```
 
+Audit archive PIT coverage before running the backtest:
+
+```bash
+python scripts/report_archive_pit_coverage.py \
+  --data-root data/daily-close-fade-pit \
+  --start 2023-05-03 \
+  --end 2026-05-03 \
+  --min-bars-per-day 1200
+```
+
 Run a manifest-gated backtest once the archive-derived 1m bars are present:
 
 ```bash
