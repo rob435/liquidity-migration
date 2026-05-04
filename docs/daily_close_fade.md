@@ -130,6 +130,44 @@ diagnostic command and check that the score itself has a stable cross-sectional
 relationship with forward short returns. If high score buckets do not beat low
 score buckets without exits, a good-looking TP/SL grid is probably overfit.
 
+## Promotion Tests
+
+The 3-year current top-160 day-audit report is the first pass at finding when
+the daily-close fade is strongest. It showed that broad BTC or market regime
+filters are too blunt: green BTC days and broad green market days are weaker,
+but still profitable enough that a kill switch would remove good trades.
+
+The reusable filter sweep tests pre-signal context filters against train,
+validation, and out-of-sample year splits. Skipped days are counted as flat
+calendar days, so a selective filter must beat the baseline after accounting for
+the days it sits out.
+
+Current promoted research candidate, pending point-in-time universe validation:
+
+```text
+selected_excess_vs_market >= 5%
+selected_avg_vwap_extension >= 2.5%
+selected_avg_late_volume_ratio >= 0.75x
+market_positive_rate <= 100%
+btc_day_return <= none
+min_trade_count >= 1
+```
+
+This is a pump-quality gate, not a bull/bear regime gate. It keeps the trade on
+when the chosen shorts are sufficiently extended versus the market, above VWAP,
+and supported by enough late-session volume. In the 6,000-spec sweep, it was the
+only tested filter that beat baseline in train, validation, and OOS:
+
+| Split | Baseline return | Filter return | Delta | Filter max DD | Filter active days |
+|---|---:|---:|---:|---:|---:|
+| 2023-05-03 to 2024-05-03 | 23.86% | 25.33% | 1.47% | -3.96% | 111 |
+| 2024-05-03 to 2025-05-03 | 27.38% | 33.52% | 6.14% | -7.33% | 143 |
+| 2025-05-03 to 2026-05-03 | 121.22% | 122.25% | 1.03% | -7.76% | 251 |
+
+Do not treat this as live proof yet. The next validation step is to rerun the
+same gate on the point-in-time/walk-forward universe and on any fuller Bybit
+archive universe, without changing the thresholds after seeing those results.
+
 The diagnostic path deliberately ignores TP, SL, trailing stops, basket stops,
 and compounding. It writes:
 
@@ -218,6 +256,13 @@ python -m aggression_carry \
 Use the wider `22:15,22:45,23:00` by `1,15,60,120` by `30,60,120,180`
 diagnostic only as a batch job. On the 3-year 1m current top-160 dataset it is
 large enough to be annoying on a laptop.
+
+Run the context filter promotion sweep after a day-audit report exists:
+
+```bash
+python scripts/run_daily_close_fade_filter_sweep.py \
+  --data-root data/daily-close-fade-1m-3y-current-top160-20230503-20260503
+```
 
 Run fixed train/validation/OOS split diagnostics:
 
