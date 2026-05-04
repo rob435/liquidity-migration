@@ -27,7 +27,8 @@ volume_grid:
   fixed_stop_loss_pcts: [0.0, 0.20]
   rank_exit_modes: [false, true]
 daily_close_fade:
-  signal_minute: 1335
+  signal_minute: 1320
+  entry_twap_minutes: 60
   liquidity_lookback_days: 9
   liquidity_rank_min: 31
   liquidity_rank_max: 150
@@ -93,7 +94,8 @@ cost_model:
     assert config.volume_grid.hold_days == (3, 7)
     assert config.volume_grid.fixed_stop_loss_pcts == (0.0, 0.20)
     assert config.volume_grid.rank_exit_modes == (False, True)
-    assert config.daily_close_fade.signal_minute == 1335
+    assert config.daily_close_fade.signal_minute == 1320
+    assert config.daily_close_fade.entry_twap_minutes == 60
     assert config.daily_close_fade.liquidity_lookback_days == 9
     assert config.daily_close_fade.liquidity_rank_min == 31
     assert config.daily_close_fade.liquidity_rank_max == 150

@@ -32,7 +32,7 @@ def _variant(score: str, split: str, total_return: float, sharpe: float) -> dict
     return {
         "score": score,
         "split": split,
-        "signal_minute": 1335,
+        "signal_minute": 1320,
         "top_n": 5,
         "hold_minutes": 180,
         "stop_loss_pct": 0.20,

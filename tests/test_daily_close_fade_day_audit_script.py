@@ -13,7 +13,7 @@ from aggression_carry.config import DailyCloseFadeConfig
 
 def test_day_audit_joins_pre_signal_context_without_using_post_trade_path() -> None:
     config = DailyCloseFadeConfig(
-        signal_minute=22 * 60 + 15,
+        signal_minute=22 * 60,
         top_n=2,
         pump_filter="pump",
         liquidity_rank_min=31,
@@ -35,17 +35,17 @@ def test_day_audit_joins_pre_signal_context_without_using_post_trade_path() -> N
     )
     trades = pl.DataFrame(
         [
-            _trade("1000-1335", "2026-01-01", 1000, "AUSDT", 0.12, 0.01),
-            _trade("1000-1335", "2026-01-01", 1000, "BUSDT", 0.08, 0.02),
-            _trade("2000-1335", "2026-01-02", 2000, "AUSDT", 0.04, -0.01),
-            _trade("2000-1335", "2026-01-02", 2000, "BUSDT", 0.03, -0.02),
+            _trade("1000-1320", "2026-01-01", 1000, "AUSDT", 0.12, 0.01),
+            _trade("1000-1320", "2026-01-01", 1000, "BUSDT", 0.08, 0.02),
+            _trade("2000-1320", "2026-01-02", 2000, "AUSDT", 0.04, -0.01),
+            _trade("2000-1320", "2026-01-02", 2000, "BUSDT", 0.03, -0.02),
         ],
         infer_schema_length=None,
     )
     baskets = pl.DataFrame(
         [
-            {"basket_id": "1000-1335", "date": "2026-01-01", "signal_ts_ms": 1000, "signal_minute": 1335, "trade_count": 2, "basket_return": 0.03},
-            {"basket_id": "2000-1335", "date": "2026-01-02", "signal_ts_ms": 2000, "signal_minute": 1335, "trade_count": 2, "basket_return": -0.03},
+            {"basket_id": "1000-1320", "date": "2026-01-01", "signal_ts_ms": 1000, "signal_minute": 1320, "trade_count": 2, "basket_return": 0.03},
+            {"basket_id": "2000-1320", "date": "2026-01-02", "signal_ts_ms": 2000, "signal_minute": 1320, "trade_count": 2, "basket_return": -0.03},
         ],
         infer_schema_length=None,
     )
@@ -106,7 +106,7 @@ def _feature(date: str, ts_ms: int, symbol: str, day_return: float, pump_like: b
     return {
         "date": date,
         "signal_ts_ms": ts_ms,
-        "signal_minute": 1335,
+        "signal_minute": 1320,
         "symbol": symbol,
         "bar_coverage": 1.0,
         "eligible": symbol != "BTCUSDT",

@@ -129,7 +129,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=None)
     parser.add_argument("--report-dir", default=None)
     parser.add_argument("--splits", default=DEFAULT_SPLITS, help="Comma-separated name:start:end specs.")
-    parser.add_argument("--signal-times", default="22:15")
+    parser.add_argument("--signal-times", default="22:00")
     parser.add_argument("--top-ns", default="5")
     parser.add_argument("--hold-minutes", default="180")
     parser.add_argument("--gross-exposures", default="1.0")

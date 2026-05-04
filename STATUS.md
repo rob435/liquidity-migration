@@ -1,135 +1,54 @@
 # Status
 
-## Current
+## Current State
 
-- The repo is now a stripped-down research lab, not a live trading bot.
-- Current implementation plan: `docs/volume_alpha.md`.
-- Bybit venue/data reference: `docs/bybit_aggression_carry_system_codex_spec.md`.
-- The active alpha paths are `volume-alpha` for statistical sweeps,
-  `volume-backtest` for trade-ledger testing, and `volume-grid` for concurrent
-  lifecycle parameter grids.
-- Universe tooling now exists: `discover-universe` builds current Bybit symbol
-  snapshots and the backtester/grid can filter daily liquidity-rank buckets.
-- Point-in-time universe groundwork now exists: `archive-manifest` scans Bybit's
-  public trading archive into symbol/date membership, and `archive_klines_1m`
-  plus `archive-download-klines` can build 1m bars directly from public trade
-  archives.
-- The old live runtime and old blended signal stack have been deleted.
-- Repo-local Codex hooks and AO/Composio helper installer files have been
-  deleted.
-- Paper forward testing is implemented for the daily-close fade path via
-  `forward-scan`, `forward-run`, and `forward-report`. It uses public Bybit
-  data only and writes a paper ledger.
-- Bybit demo order plumbing is isolated in `bybit-demo-probe` and
-  `bybit-demo-sync`. These commands are hard-capped demo-only paths with their
-  own reports/ledger; they are not called by the paper forward runner.
-- Bybit demo shadow orchestration targets `bybit-demo-cycle`: it runs all paper
-  sleeves, then mirrors each sleeve into a separate capped Bybit demo ledger.
-  The cycle has a process lock, a default `22:05-02:30 UTC` active window,
-  pause-file support, and demo-only emergency cancel/flatten commands. This
-  remains demo-only and real-money execution is not implemented.
-- Daily-close fade now has a three-sleeve comparison path:
-  `major_control` ranks 1-30, `core` ranks 31-150, and experimental `microcap`
-  ranks 151+ with turnover floors and capacity-limited sizing.
-- Daily-close fade now has an anti-overfit diagnostic path:
-  `daily-close-fade-diagnostics` tests score buckets, top-N baskets, IC, entry
-  delays, and horizons with no TP/SL/trailing/basket-stop logic.
-- No real-money live execution, kill switches, or production exchange order
-  submission exist in the active code. Telegram is notification-only for paper
-  and demo-status reporting.
+- Repo is a research lab, not a real-money live bot.
+- Active lead is the daily-close short fade with 22:00-23:00 TWAP entry.
+- Backtest TWAP is implemented.
+- Forward/demo TWAP slicing is intentionally blocked until slice accounting and
+  order execution are implemented.
+- Pre-TWAP reports are historical only and should not drive new decisions.
+- Volume-alpha remains a secondary research path, not the current default.
 
-## Active Path
+## Current Daily-Close Contract
 
-- Download Bybit public `instruments` and `klines_1h`.
-- Build daily volume-only features from 1h quote turnover.
-- Test 1d, 3d, and 7d forward returns.
-- Run long/short costed portfolios at configured quantiles.
-- Write `volume_alpha_report.md`, JSON report, feature Parquet, metrics Parquet,
-  and portfolio Parquet.
-- Run a detailed `dollar_volume_rank` trade backtest with entry timestamps,
-  exit timestamps, fixed stops, costs, exit reasons, basket returns, equity, and
-  symbol/month attribution.
-- Write `volume_backtest_report.md`, `volume_backtest_trades.csv`, and Parquet
-  datasets for trades, baskets, and equity.
-- Run concurrent process-pool grids over hold period, quantile, fixed/no/vol
-  stops, rank exits, side reversal, take profits, and cost multipliers.
-- Write `volume_grid_report.md`, `volume_grid_results.csv`, and
-  `volume_backtest_grid`.
-- Run bucket grids with `scripts/run_volume_bucket_sweep.py` for core ranks
-  1-20, mid ranks 21-80, and tail ranks 81-150.
+```text
+Signal: 22:00 UTC
+Entry: 60 equal 1m slices over [22:00, 23:00)
+Average entry: average filled opens
+Hard stop: 20% above average entry, active from first fill + 15m
+Profit protection: active from final add + 15m
+Adaptive exits: 0.25x daily-vol trail, 20% MFE giveback after +1% MFE
+Max hold: 180m after final add
+Universe bucket: prior 7d baseline liquidity ranks 31-150
+Sizing: score-capped, max 80% per symbol
+```
 
-## Current Research Read
+## Latest Benchmark
 
-- Increasing-volume variants failed the corrected 3-month sample.
-- `dollar_volume_rank` is the only promising lead so far.
-- The 3-year 16-symbol result is positive and balanced enough to keep studying,
-  but it still has survivorship and beta risks.
-- The first one-year current top-150 bucket sweep found a stronger tail-liquid
-  result with the direction reversed: ranks 81-150, `short_high_long_low`,
-  14-day hold, 20% buckets, no rank exit, +154.10%, Sharpe-like 2.08, max
-  drawdown -16.97%.
-- That tail result is a separate lead, not confirmation that the original
-  high-volume-long rule simply gets stronger in lower caps.
-- The detailed backtester now exists to test whether that lead survives actual
-  trade lifecycle assumptions instead of only forward-return buckets.
-- The next intended validation is a longer broad-universe run with point-in-time
-  universe improvements, plus funding/spread/impact stress on the tail bucket.
-- Daily-close fade current-universe results are promising only with adaptive
-  exits; final proof still requires the archive-based walk-forward path in
-  `docs/walk_forward_universe.md`.
-- Corrected daily-close short PnL to USDT-linear math. The simple 22:15 UTC
-  top-5 pump short with 180m hold, 20% stop, no fixed TP, and no adaptive exit
-  is not confirmed: +86.69% on the biased one-year current-universe sample but
-  -60.96% on the three-year current top-160 sample.
-- Current daily-close exit candidate: no fixed TP, baseline liquidity ranks
-  31-150, 20% disaster stop, `0.25x` daily-vol trailing stop active after the
-  15-minute stop delay, and 20% MFE giveback after a +1% favorable move. This
-  came from a biased current-universe grid, so it is not promoted until
-  `daily-close-fade-diagnostics` confirms the raw entry score has the right
-  bucket/IC shape. Current-universe reads for 31-150: +126.33% over 1y and
-  +249.03% over 3y current top-160, with 3y max drawdown -8.08%.
-- New raw diagnostic read: `pump_score`, 22:15 signal, 15-minute entry delay,
-  60-minute horizon, top 5 had the best simple direction at +0.036% gross mean
-  basket return, but that is too small for the configured round-trip costs. A
-  matching costed trade-ledger run with no adaptive exit returned -49.50% over
-  the 3y current top-160 sample. The naked entry is not confirmed.
-- Rank 151+ is now treated as a separate microcap sleeve, not a blind extension
-  of the core book. The first implementation requires prior baseline turnover,
-  day-to-date turnover, last-hour turnover, and position-size caps tied to a
-  configured account equity assumption.
-- Latest exit sweeps say fixed take-profits are not the answer yet. Daily-close
-  fixed TP and VWAP-reversion exits cut too much right tail; volume-alpha fixed
-  TP hurt the 3-year tail bucket. Daily-close adaptive exits are cost-sensitive:
-  the 31-150 3y current top-160 bucket is +249.03% at base costs, +50.51% at
-  2x costs, and -35.15% at 3x costs.
-- The 3-year current-universe volume tail bucket now points to
-  `long_high_short_low`, 7d hold, 50% quantile, 12% stop, no TP, no rank exit:
-  +120.10%, Sharpe-like 1.09, max drawdown -21.19%. The earlier 1-year
-  `short_high_long_low` tail reversal did not survive the 3-year side-mode
-  check.
+```text
+Dataset: current top-160 Bybit symbols
+Range: 2023-05-15 to 2026-05-02
+Trades: 750
+Return: +16,896.41%
+Sharpe-like: 10.63
+Max DD: -15.39%
+Worst day: -12.84%
+Artifact root: data/research_reports/daily_close_twap_2200_2300_current_top160_20260504
+```
 
-## Remaining Risks
+This is promising but not proof because it is current-universe biased.
 
-- Three months and 16 symbols is not enough evidence.
-- Current-universe discovery is survivorship-biased until delisted/dead
-  contracts are incorporated.
-- Current top-160 daily-close fade tests are explicitly biased benchmarks until
-  the archive manifest and archive-derived 1m bars cover every eligible
-  symbol/date.
-- Earlier daily-close fade reports from before the USDT-linear short PnL fix
-  are invalid and should not be used for decisions.
-- Bybit-only data may miss the venue where price discovery actually happens.
-- Dollar-volume rank may be a hidden size/liquidity effect, not the podcast's
-  claimed increasing-volume alpha.
-- Funding, borrow constraints, squeezes, and live execution are intentionally out
-  of scope until the standalone alpha is proven.
-- Demo execution proves authentication/order plumbing only. It does not validate
-  the alpha, and it can still produce unrealistic fills compared with real
-  liquidity.
-- Demo shadowing can diverge from paper when post-only entries miss, fills are
-  partial, or Bybit demo liquidity differs from real markets. Use the demo
-  ledger as execution plumbing evidence, not performance proof.
-- Overlapping baskets are intentionally blocked for now; hold period and
-  rebalance period should match until the simple lifecycle is understood.
-- GPU acceleration is intentionally not implemented; this workload is currently
-  CPU/process-parallel Python simulation, not a vectorized CUDA pipeline.
+## Next Work
+
+1. Build point-in-time archive universe coverage for the same TWAP contract.
+2. Add slice-level forward paper execution.
+3. Add slice-level Bybit demo sync.
+4. Audit expected slices versus demo orders/fills/slippage/PnL.
+5. Only then consider real-money design.
+
+## Removed Scope
+
+No legacy SignalEngine, old live runtime, blended composite stack, Telegram
+trading bot, real-money exchange submission, or repo-local agent tooling belongs
+in this repo.

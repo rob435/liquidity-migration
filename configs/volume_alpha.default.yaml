@@ -53,10 +53,11 @@ volume_grid:
   cost_multipliers: [1.0]
 
 daily_close_fade:
-  signal_minute: 1335
+  signal_minute: 1320
   top_n: 5
   hold_minutes: 180
-  entry_delay_minutes: 1
+  entry_delay_minutes: 0
+  entry_twap_minutes: 60
   score: vol_adjusted_day_return
   pump_filter: pump
   min_age_days: 10
@@ -94,7 +95,7 @@ daily_close_fade:
   require_archive_membership: false
 
 daily_close_fade_grid:
-  signal_minutes: [1320, 1335, 1350, 1365, 1380, 1395]
+  signal_minutes: [1320]
   top_ns: [3, 5, 10]
   hold_minutes: [30, 60, 90, 120, 180]
   gross_exposures: [1.0]

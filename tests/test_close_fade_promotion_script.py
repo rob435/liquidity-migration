@@ -43,7 +43,7 @@ def test_promotion_requires_raw_and_exit_split_survival() -> None:
 def _diagnostic(score: str, *, cost_pass_splits: int, all_cost_pass: bool) -> dict:
     return {
         "score": score,
-        "signal_minute": 1335,
+        "signal_minute": 1320,
         "entry_delay_minutes": 1,
         "horizon_minutes": 180,
         "top_n": 5,
@@ -59,7 +59,7 @@ def _diagnostic(score: str, *, cost_pass_splits: int, all_cost_pass: bool) -> di
 def _grid(score: str, *, positive_splits: int, min_return: float) -> dict:
     return {
         "score": score,
-        "signal_minute": 1335,
+        "signal_minute": 1320,
         "entry_delay_minutes": 1,
         "hold_minutes": 180,
         "top_n": 5,

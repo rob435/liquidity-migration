@@ -40,6 +40,19 @@ def test_forward_run_opens_paper_trades_without_orders(tmp_path: Path) -> None:
     assert fake.private_order_calls == 0
 
 
+def test_forward_run_does_not_fake_twap_as_one_fill(tmp_path: Path) -> None:
+    now = datetime(2026, 1, 15, 22, 16, tzinfo=UTC)
+    config = _research_config(tmp_path)
+    twap_config = replace(config, daily_close_fade=replace(config.daily_close_fade, entry_twap_minutes=60))
+
+    payload = run_forward_once(tmp_path, config=twap_config, now=now, client=_FakeBybit(now))
+    trades = read_dataset(tmp_path, "forward_paper_trades")
+
+    assert payload["scan"]["rows"]["candidates"] == 2
+    assert payload["rows"]["new_trades"] == 0
+    assert trades.is_empty()
+
+
 def test_forward_run_marks_short_stop_with_linear_pnl(tmp_path: Path) -> None:
     config = _research_config(tmp_path)
     first_now = datetime(2026, 1, 15, 22, 16, tzinfo=UTC)
@@ -115,10 +128,11 @@ def test_forward_sleeves_use_isolated_roots_and_reports(tmp_path: Path) -> None:
 
 def _research_config(tmp_path: Path, *, take_profit_pct: float = 0.0, stop_delay_minutes: int = 15) -> ResearchConfig:
     fade = DailyCloseFadeConfig(
-        signal_minute=22 * 60 + 15,
+        signal_minute=22 * 60,
         top_n=2,
         hold_minutes=180,
         entry_delay_minutes=1,
+        entry_twap_minutes=0,
         gross_exposure=1.0,
         score="vol_adjusted_day_return",
         pump_filter="pump",
@@ -211,7 +225,7 @@ class _FakeBybit:
         current = requested_start.replace(hour=0, minute=0, second=0, microsecond=0)
         last = datetime.fromtimestamp(end / 1000, tz=UTC)
         day = current.replace(hour=0, minute=0, second=0, microsecond=0)
-        signal_minute = 22 * 60 + 15
+        signal_minute = 22 * 60
         base = _base_price(symbol)
         pump = {
             "OLD1USDT": 0.30,

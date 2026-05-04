@@ -150,10 +150,16 @@ def build_parser() -> argparse.ArgumentParser:
     _add_universe_backtest_args(grid)
 
     close_fade = subparsers.add_parser("daily-close-fade", help="Run the 1m UTC daily-close top-gainer short fade.")
-    close_fade.add_argument("--signal-time", default=None, help="UTC signal time HH:MM or minute-of-day, e.g. 23:00.")
+    close_fade.add_argument("--signal-time", default=None, help="UTC signal time HH:MM or minute-of-day, e.g. 22:00.")
     close_fade.add_argument("--top-n", type=int, default=None, help="Number of top gainers to short.")
     close_fade.add_argument("--hold-minutes", type=int, default=None, help="Mechanical holding period in minutes.")
     close_fade.add_argument("--entry-delay-minutes", type=int, default=None, help="Minutes after signal bar before entry.")
+    close_fade.add_argument(
+        "--entry-twap-minutes",
+        type=int,
+        default=None,
+        help="Equal-weight 1m TWAP entry slice count. 0 disables TWAP and uses one fill.",
+    )
     close_fade.add_argument("--gross-exposure", type=float, default=None, help="Total basket gross exposure, e.g. 0.5.")
     close_fade.add_argument("--score", default=None, help="day_return or vol_adjusted_day_return.")
     close_fade.add_argument("--pump-filter", default=None, help="all, pump, or non_pump.")
@@ -204,7 +210,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     close_grid = subparsers.add_parser("daily-close-fade-grid", help="Run a parameter grid for the 1m daily-close fade.")
-    close_grid.add_argument("--signal-times", default=None, help="Comma-separated UTC signal times, e.g. 22:45,23:00.")
+    close_grid.add_argument("--signal-times", default=None, help="Comma-separated UTC signal times, e.g. 22:00.")
     close_grid.add_argument("--start", default=None, help="Inclusive UTC signal start date/timestamp for this grid.")
     close_grid.add_argument("--end", default=None, help="Exclusive UTC signal end date/timestamp for this grid.")
     close_grid.add_argument("--top-ns", default=None, help="Comma-separated top-N values, e.g. 3,5,10.")
@@ -255,8 +261,8 @@ def build_parser() -> argparse.ArgumentParser:
         "daily-close-fade-diagnostics",
         help="Test raw score-to-forward-return shape without TP/SL optimization.",
     )
-    close_diagnostics.add_argument("--signal-times", default=None, help="Comma-separated UTC signal times, e.g. 22:15,23:00.")
-    close_diagnostics.add_argument("--entry-delays", default=None, help="Comma-separated entry delays in minutes, e.g. 1,15,60.")
+    close_diagnostics.add_argument("--signal-times", default=None, help="Comma-separated UTC signal times, e.g. 22:00,23:00.")
+    close_diagnostics.add_argument("--entry-delays", default=None, help="Comma-separated entry delays in minutes, e.g. 0,15,60.")
     close_diagnostics.add_argument("--horizons", default=None, help="Comma-separated forward-return horizons in minutes.")
     close_diagnostics.add_argument("--scores", default=None, help="Comma-separated score columns to test.")
     close_diagnostics.add_argument("--top-ns", default=None, help="Comma-separated top basket sizes, e.g. 3,5,10.")
@@ -817,6 +823,9 @@ def _close_fade_config_from_args(base: DailyCloseFadeConfig, args: argparse.Name
         top_n=args.top_n if args.top_n is not None else base.top_n,
         hold_minutes=args.hold_minutes if args.hold_minutes is not None else base.hold_minutes,
         entry_delay_minutes=args.entry_delay_minutes if args.entry_delay_minutes is not None else base.entry_delay_minutes,
+        entry_twap_minutes=(
+            args.entry_twap_minutes if args.entry_twap_minutes is not None else base.entry_twap_minutes
+        ),
         gross_exposure=args.gross_exposure if args.gross_exposure is not None else base.gross_exposure,
         score=args.score if args.score is not None else base.score,
         pump_filter=args.pump_filter if args.pump_filter is not None else base.pump_filter,
@@ -1100,7 +1109,7 @@ def _add_universe_backtest_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_forward_fade_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--signal-time", default=None, help="UTC signal time HH:MM or minute-of-day, e.g. 22:15.")
+    parser.add_argument("--signal-time", default=None, help="UTC signal time HH:MM or minute-of-day, e.g. 22:00.")
     parser.add_argument("--top-n", type=int, default=None, help="Number of top gainers to paper-short.")
     parser.add_argument("--hold-minutes", type=int, default=None, help="Mechanical holding period in minutes.")
     parser.add_argument("--entry-delay-minutes", type=int, default=None, help="Minutes after signal bar before paper entry.")

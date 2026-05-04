@@ -17,7 +17,7 @@ DEFAULT_GRID_QUANTILES = (0.30, 0.50)
 DEFAULT_GRID_FIXED_STOPS = (0.0, 0.12, 0.20, 0.30)
 DEFAULT_GRID_VOL_STOPS = (3.0, 4.0)
 DEFAULT_MAJOR_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT")
-DEFAULT_CLOSE_FADE_SIGNAL_MINUTES = (22 * 60 + 45, 23 * 60)
+DEFAULT_CLOSE_FADE_SIGNAL_MINUTES = (22 * 60,)
 DEFAULT_CLOSE_FADE_TOP_NS = (3, 5)
 DEFAULT_CLOSE_FADE_HOLD_MINUTES = (60, 120, 180)
 
@@ -90,6 +90,7 @@ class DailyCloseFadeConfig:
     top_n: int = 3
     hold_minutes: int = 120
     entry_delay_minutes: int = 1
+    entry_twap_minutes: int = 0
     score: str = "vol_adjusted_day_return"
     pump_filter: str = "all"
     min_age_days: int = 10
@@ -156,6 +157,27 @@ class DailyCloseFadeGridConfig:
     cost_multipliers: tuple[float, ...] = (1.0, 2.0, 3.0)
     start_ms: int = 0
     end_ms: int = 0
+
+
+ACTIVE_DAILY_CLOSE_FADE_DEFAULT = DailyCloseFadeConfig(
+    signal_minute=22 * 60,
+    top_n=5,
+    hold_minutes=180,
+    entry_delay_minutes=0,
+    entry_twap_minutes=60,
+    pump_filter="pump",
+    liquidity_rank_min=31,
+    liquidity_rank_max=150,
+    max_position_weight=0.80,
+    coin_excess_vs_market_min=0.08,
+    coin_vwap_extension_min=0.035,
+    coin_late_volume_ratio_min=1.0,
+    position_sizing="score_capped",
+    stop_loss_pct=0.20,
+    vol_trailing_stop_mult=0.25,
+    mfe_giveback_activation_pct=0.01,
+    mfe_giveback_pct=0.20,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -291,48 +313,57 @@ def _merge_volume_grid_config(payload: dict[str, Any] | None) -> VolumeGridConfi
 
 def _merge_daily_close_fade_config(payload: dict[str, Any] | None) -> DailyCloseFadeConfig:
     payload = dict(payload or {})
+    default = ACTIVE_DAILY_CLOSE_FADE_DEFAULT
     return DailyCloseFadeConfig(
-        signal_minute=int(payload.get("signal_minute", 23 * 60)),
-        top_n=int(payload.get("top_n", 3)),
-        hold_minutes=int(payload.get("hold_minutes", 120)),
-        entry_delay_minutes=int(payload.get("entry_delay_minutes", 1)),
-        score=str(payload.get("score", "vol_adjusted_day_return")),
-        pump_filter=str(payload.get("pump_filter", "all")),
-        min_age_days=int(payload.get("min_age_days", 10)),
-        min_day_turnover=float(payload.get("min_day_turnover", 0.0)),
-        min_last_60m_turnover=float(payload.get("min_last_60m_turnover", 0.0)),
-        vol_lookback_days=int(payload.get("vol_lookback_days", 20)),
-        liquidity_lookback_days=int(payload.get("liquidity_lookback_days", 7)),
-        liquidity_rank_min=int(payload.get("liquidity_rank_min", 1)),
-        liquidity_rank_max=int(payload.get("liquidity_rank_max", 0)),
-        min_baseline_turnover=float(payload.get("min_baseline_turnover", 0.0)),
-        account_equity=float(payload.get("account_equity", 10_000.0)),
-        max_position_weight=float(payload.get("max_position_weight", 0.0)),
-        max_trade_notional_pct_of_day_turnover=float(payload.get("max_trade_notional_pct_of_day_turnover", 0.0)),
-        max_trade_notional_pct_of_baseline_turnover=float(
-            payload.get("max_trade_notional_pct_of_baseline_turnover", 0.0)
+        signal_minute=int(payload.get("signal_minute", default.signal_minute)),
+        top_n=int(payload.get("top_n", default.top_n)),
+        hold_minutes=int(payload.get("hold_minutes", default.hold_minutes)),
+        entry_delay_minutes=int(payload.get("entry_delay_minutes", default.entry_delay_minutes)),
+        entry_twap_minutes=int(payload.get("entry_twap_minutes", default.entry_twap_minutes)),
+        score=str(payload.get("score", default.score)),
+        pump_filter=str(payload.get("pump_filter", default.pump_filter)),
+        min_age_days=int(payload.get("min_age_days", default.min_age_days)),
+        min_day_turnover=float(payload.get("min_day_turnover", default.min_day_turnover)),
+        min_last_60m_turnover=float(payload.get("min_last_60m_turnover", default.min_last_60m_turnover)),
+        vol_lookback_days=int(payload.get("vol_lookback_days", default.vol_lookback_days)),
+        liquidity_lookback_days=int(payload.get("liquidity_lookback_days", default.liquidity_lookback_days)),
+        liquidity_rank_min=int(payload.get("liquidity_rank_min", default.liquidity_rank_min)),
+        liquidity_rank_max=int(payload.get("liquidity_rank_max", default.liquidity_rank_max)),
+        min_baseline_turnover=float(payload.get("min_baseline_turnover", default.min_baseline_turnover)),
+        account_equity=float(payload.get("account_equity", default.account_equity)),
+        max_position_weight=float(payload.get("max_position_weight", default.max_position_weight)),
+        max_trade_notional_pct_of_day_turnover=float(
+            payload.get("max_trade_notional_pct_of_day_turnover", default.max_trade_notional_pct_of_day_turnover)
         ),
-        gross_exposure=float(payload.get("gross_exposure", 1.0)),
-        coin_excess_vs_market_min=float(payload.get("coin_excess_vs_market_min", 0.0)),
-        coin_vwap_extension_min=float(payload.get("coin_vwap_extension_min", 0.0)),
-        coin_late_volume_ratio_min=float(payload.get("coin_late_volume_ratio_min", 0.0)),
-        position_sizing=str(payload.get("position_sizing", "equal")),
-        score_weight_power=float(payload.get("score_weight_power", 1.0)),
-        stop_loss_pct=float(payload.get("stop_loss_pct", 0.0)),
-        take_profit_pct=float(payload.get("take_profit_pct", 0.0)),
-        basket_stop_loss_pct=float(payload.get("basket_stop_loss_pct", 0.0)),
-        trailing_stop_pct=float(payload.get("trailing_stop_pct", 0.0)),
-        trailing_activation_pct=float(payload.get("trailing_activation_pct", 0.01)),
-        vol_trailing_stop_mult=float(payload.get("vol_trailing_stop_mult", 0.0)),
-        vol_trailing_activation_mult=float(payload.get("vol_trailing_activation_mult", 0.0)),
-        mfe_giveback_activation_pct=float(payload.get("mfe_giveback_activation_pct", 0.0)),
-        mfe_giveback_pct=float(payload.get("mfe_giveback_pct", 0.0)),
-        vwap_reversion_pct=float(payload.get("vwap_reversion_pct", 0.0)),
-        stop_delay_minutes=int(payload.get("stop_delay_minutes", 15)),
-        cost_multiplier=float(payload.get("cost_multiplier", 1.0)),
-        min_symbols=int(payload.get("min_symbols", 1)),
-        exclude_symbols=_tuple_str(payload, "exclude_symbols", DEFAULT_MAJOR_SYMBOLS),
-        require_archive_membership=bool(payload.get("require_archive_membership", False)),
+        max_trade_notional_pct_of_baseline_turnover=float(
+            payload.get(
+                "max_trade_notional_pct_of_baseline_turnover",
+                default.max_trade_notional_pct_of_baseline_turnover,
+            )
+        ),
+        gross_exposure=float(payload.get("gross_exposure", default.gross_exposure)),
+        coin_excess_vs_market_min=float(payload.get("coin_excess_vs_market_min", default.coin_excess_vs_market_min)),
+        coin_vwap_extension_min=float(payload.get("coin_vwap_extension_min", default.coin_vwap_extension_min)),
+        coin_late_volume_ratio_min=float(payload.get("coin_late_volume_ratio_min", default.coin_late_volume_ratio_min)),
+        position_sizing=str(payload.get("position_sizing", default.position_sizing)),
+        score_weight_power=float(payload.get("score_weight_power", default.score_weight_power)),
+        stop_loss_pct=float(payload.get("stop_loss_pct", default.stop_loss_pct)),
+        take_profit_pct=float(payload.get("take_profit_pct", default.take_profit_pct)),
+        basket_stop_loss_pct=float(payload.get("basket_stop_loss_pct", default.basket_stop_loss_pct)),
+        trailing_stop_pct=float(payload.get("trailing_stop_pct", default.trailing_stop_pct)),
+        trailing_activation_pct=float(payload.get("trailing_activation_pct", default.trailing_activation_pct)),
+        vol_trailing_stop_mult=float(payload.get("vol_trailing_stop_mult", default.vol_trailing_stop_mult)),
+        vol_trailing_activation_mult=float(payload.get("vol_trailing_activation_mult", default.vol_trailing_activation_mult)),
+        mfe_giveback_activation_pct=float(
+            payload.get("mfe_giveback_activation_pct", default.mfe_giveback_activation_pct)
+        ),
+        mfe_giveback_pct=float(payload.get("mfe_giveback_pct", default.mfe_giveback_pct)),
+        vwap_reversion_pct=float(payload.get("vwap_reversion_pct", default.vwap_reversion_pct)),
+        stop_delay_minutes=int(payload.get("stop_delay_minutes", default.stop_delay_minutes)),
+        cost_multiplier=float(payload.get("cost_multiplier", default.cost_multiplier)),
+        min_symbols=int(payload.get("min_symbols", default.min_symbols)),
+        exclude_symbols=_tuple_str(payload, "exclude_symbols", default.exclude_symbols),
+        require_archive_membership=bool(payload.get("require_archive_membership", default.require_archive_membership)),
     )
 
 

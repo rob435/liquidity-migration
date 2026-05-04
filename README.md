@@ -1,61 +1,64 @@
 # MODEL050426
 
-Bybit crypto research repo. This has been stripped down around isolated alpha
-research paths. The old live bot and blended signal stack are intentionally
-gone.
+Bybit crypto research repo. This is a stripped-down alpha lab, not a real-money
+trading bot.
 
-## Current Source Of Truth
+## Current Truth
 
-- Current implementation plan: [docs/volume_alpha.md](docs/volume_alpha.md)
-- Daily close fade plan: [docs/daily_close_fade.md](docs/daily_close_fade.md)
-- Paper forward testing: [docs/forward_testing.md](docs/forward_testing.md)
-- Walk-forward universe standard: [docs/walk_forward_universe.md](docs/walk_forward_universe.md)
-- Bybit data constraints/background: [docs/bybit_aggression_carry_system_codex_spec.md](docs/bybit_aggression_carry_system_codex_spec.md)
-- Windows setup: [docs/WINDOWS_QUICKSTART.md](docs/WINDOWS_QUICKSTART.md)
+Active research lead: **daily-close short fade with 22:00-23:00 TWAP entry**.
 
-The Bybit aggression-carry spec is still useful for venue/data details, especially
-the warning that taker aggression requires signed public trades. It is not a
-license to rebuild the old composite stack.
+Current promoted research contract:
 
-## What Exists
+```text
+Universe: Bybit USDT linear perps
+Ranking time: 22:00 UTC, using only data available at 22:00
+Entry: equal 1m TWAP from 22:00 through 22:59
+Entry price: average fill price
+Exit: whole-symbol flatten, no same-symbol re-entry that day
+Max hold: 180m after TWAP completes
+Disaster stop: 20% above average entry, active from first fill + 15m
+Adaptive protection: 0.25x daily-vol trail plus 20% MFE giveback after +1% MFE,
+  active only after final add + 15m
+Sizing: score-capped, max 80% basket weight per symbol
+Liquidity: prior 7d baseline quote-turnover ranks 31-150
+Candidate gate: coin excess vs market >= 8%, VWAP extension >= 3.5%,
+  late-volume ratio >= 1.0x
+```
 
-- `aggression_carry/`: public data download, Parquet storage, signed-flow parsing,
-  fixture data, isolated `volume-alpha` research sweep, and detailed
-  `volume-backtest` trade-ledger backtest.
-- `aggression_carry/daily_close_fade.py`: separate 1m UTC daily-close top-gainer
-  short-fade research path, including major/core/microcap sleeve comparison and
-  capacity-limited sizing for thin names. It also has raw diagnostics that test
-  score buckets, top baskets, and IC before TP/SL tuning.
-- `aggression_carry/forward_test.py`: public-data paper forward tester for the
-  daily-close fade. It scans the live Bybit universe and writes a paper ledger;
-  it never submits exchange orders.
-- `bybit-demo-probe` and `bybit-demo-sync`: isolated Bybit demo-only order
-  plumbing. The probe tests auth/place/cancel. The sync mirrors an existing
-  paper ledger into tiny capped demo orders and its own execution ledger.
-- `bybit-demo-cycle`: demo-only shadow runner that runs all paper sleeves and
-  syncs each sleeve into its own capped Bybit demo ledger. It is not real-money
-  live trading.
-- `archive-manifest` and `download-data --datasets archive_klines_1m`: public
-  Bybit archive path for point-in-time symbol/date membership and
-  trade-derived 1m bars.
-- `configs/volume_alpha.default.yaml`: current research config.
-- `scripts/run_research_overnight_suite.ps1`: current Windows runner for
-  daily-close breadth/sizing research plus the volume overnight sweep.
-- `scripts/run_volume_bucket_sweep.py`: daily liquidity-rank bucket grid runner.
+The latest local current-top-160 benchmark is deliberately labeled as biased:
 
-## What Was Removed
+```text
+Data: current top-160 Bybit symbols, 2023-05-15 to 2026-05-02
+Trades: 750
+Total return: +16,896.41%
+Sharpe-like: 10.63
+Max drawdown: -15.39%
+Worst day: -12.84%
+Report: data/research_reports/daily_close_twap_2200_2300_current_top160_20260504/
+```
 
-- Old live runtime: `main.py`, `execution.py`, `signal_engine.py`, `state.py`,
-  `runtime_monitor.py`, `runtime_validation.py`, `alerting.py`.
-- Old root research/backtest plumbing tied to that runtime.
-- Old blended aggression/carry/momentum/quality/OI feature/report/sweep modules.
-- Tests that only protected the deleted behavior.
-- Repo-local Codex hooks and AO/Composio helper installer files. Agent tooling
-  now lives outside the trading research repo.
+This is **not final alpha proof** because the current-top-160 universe is
+survivorship-biased. The point-in-time archive path is still the proof gate.
 
-## Commands
+## Important Boundary
 
-Install and test:
+Backtest TWAP is implemented. Forward/demo TWAP slicing is intentionally blocked
+until explicit per-slice paper and demo order accounting exists. The code must
+not fake this as one 22:00 or 23:00 fill.
+
+## Main Files
+
+- [configs/volume_alpha.default.yaml](configs/volume_alpha.default.yaml): active
+  research config.
+- [docs/daily_close_fade.md](docs/daily_close_fade.md): active strategy notes.
+- [docs/walk_forward_universe.md](docs/walk_forward_universe.md): PIT proof
+  standard.
+- [docs/forward_testing.md](docs/forward_testing.md): forward/demo boundary.
+- [docs/volume_alpha.md](docs/volume_alpha.md): secondary volume-alpha research.
+- [docs/bybit_aggression_carry_system_codex_spec.md](docs/bybit_aggression_carry_system_codex_spec.md):
+  compressed Bybit data/API reference; old composite spec is no longer active.
+
+## Setup
 
 ```bash
 python3 -m venv .venv
@@ -64,424 +67,68 @@ pip install -r requirements.txt
 pytest -q
 ```
 
-Tiny fixture run:
-
-```bash
-python -m aggression_carry --data-root .tmp/volume-fixture download-data --fixture
-python -m aggression_carry --data-root .tmp/volume-fixture volume-alpha
-python -m aggression_carry --data-root .tmp/volume-fixture volume-backtest --hold-days 1 --rebalance-days 1
-```
-
-Discover a current Bybit universe:
-
-```bash
-python -m aggression_carry \
-  --data-root data/universe-research \
-  --config configs/volume_alpha.default.yaml \
-  discover-universe \
-  --name top160-current \
-  --rank-start 1 \
-  --rank-end 160 \
-  --max-symbols 160 \
-  --min-turnover-24h 2000000 \
-  --min-age-days 30 \
-  --include-majors
-```
-
-3-month Bybit run:
-
-```bash
-python -m aggression_carry \
-  --data-root data/agc-bybit-3m \
-  --config configs/volume_alpha.default.yaml \
-  download-data \
-  --symbols BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,APTUSDT,BNBUSDT,ADAUSDT,DOTUSDT,LTCUSDT,NEARUSDT,OPUSDT,ARBUSDT,INJUSDT \
-  --start 2025-01-01 \
-  --end 2025-04-01 \
-  --datasets instruments,klines_1h
-
-python -m aggression_carry \
-  --data-root data/agc-bybit-3m \
-  --config configs/volume_alpha.default.yaml \
-  volume-alpha
-
-python -m aggression_carry \
-  --data-root data/agc-bybit-3m \
-  --config configs/volume_alpha.default.yaml \
-  volume-backtest
-```
-
-Reports:
-
-```text
-data/agc-bybit-3m/reports/volume_alpha_report.md
-data/agc-bybit-3m/reports/volume_backtest_report.md
-data/agc-bybit-3m/reports/volume_backtest_trades.csv
-data/agc-bybit-3m/reports/volume_backtest_equity_vs_btc.csv
-data/agc-bybit-3m/reports/volume_backtest_monthly_vs_btc.csv
-data/agc-bybit-3m/reports/volume_backtest_equity_curve.svg
-data/agc-bybit-3m/reports/volume_backtest_monthly_vs_btc.svg
-```
-
-Paper forward test:
-
-```bash
-python -m aggression_carry \
-  --data-root data/forward-paper \
-  --config configs/volume_alpha.default.yaml \
-  forward-scan
-
-python -m aggression_carry \
-  --data-root data/forward-paper \
-  --config configs/volume_alpha.default.yaml \
-  forward-run
-
-python -m aggression_carry \
-  --data-root data/forward-paper \
-  --config configs/volume_alpha.default.yaml \
-  forward-report
-```
-
-Telegram notification-only mode:
-
-```bash
-export TELEGRAM_BOT_TOKEN="123456:abc..."
-export TELEGRAM_CHAT_ID="123456789"
-
-python -m aggression_carry \
-  --data-root data/forward-paper \
-  --config configs/volume_alpha.default.yaml \
-  forward-run \
-  --telegram
-```
-
-The forward tester uses public market data only. It does not use Bybit private
-keys and does not submit orders.
-
-Bybit demo probe:
-
-```bash
-export BYBIT_DEMO_API_KEY="..."
-export BYBIT_DEMO_API_SECRET="..."
-
-python -m aggression_carry \
-  --data-root data/forward-paper \
-  --config configs/volume_alpha.default.yaml \
-  bybit-demo-probe \
-  --symbol XRPUSDT \
-  --side Sell \
-  --notional 5 \
-  --place-order \
-  --i-understand-demo-order
-```
-
-Bybit demo sync for the core paper sleeve:
-
-```bash
-python -m aggression_carry \
-  --data-root data/forward-paper/forward_sleeves/core_31_150 \
-  --config configs/volume_alpha.default.yaml \
-  bybit-demo-sync \
-  --submit-orders \
-  --i-understand-demo-sync
-```
-
-Demo sync writes:
-
-```text
-data/.../reports/bybit_demo_sync_report.md
-data/.../reports/bybit_demo_execution_orders.csv
-data/.../demo_execution_orders/
-```
-
-These are demo-only plumbing checks. They do not prove the alpha and they are
-not live execution.
-
-Bybit demo shadow cycle for all sleeves:
-
-```bash
-python -m aggression_carry \
-  --data-root data/forward-paper \
-  --config configs/volume_alpha.default.yaml \
-  bybit-demo-cycle \
-  --submit-orders \
-  --i-understand-demo-sync \
-  --use-wallet-balance \
-  --max-order-notional 0 \
-  --max-total-new-notional 0
-```
-
-The cycle runs `forward-run-sleeves`, then syncs `control_top_1_30`,
-`core_31_150`, and `microcap_151_plus` separately. It only opens new entries
-inside the default `22:05-02:30 UTC` operating window, keeps reconciling while
-paper/demo state is active, and uses a process lock to prevent overlapping
-timer runs.
-
-With `--use-wallet-balance`, paper trade weights are multiplied by current
-Bybit demo wallet equity. The current promoted close-fade config uses the
-strict pump-quality gate and `score_capped` sizing with an 80% max single-coin
-weight. On a 10,000 USDT demo account, one qualifying coin can therefore size
-up to about 8,000 USDT notional before exchange rounding. `--max-order-notional
-0` and `--max-total-new-notional 0` mean the dynamic wallet caps are the active
-caps, not the old 10/50 USDT smoke-test caps.
-
-Telegram for the demo runtime is owned by the audit layer, not the 5-minute
-cycle. This avoids timer spam. It sends only position-entry fills,
-position-exit fills, and one end-of-day PnL message:
-
-```bash
-python -m aggression_carry \
-  --data-root data/forward-paper \
-  --config configs/volume_alpha.default.yaml \
-  forward-audit \
-  --telegram
-```
-
-To pause new demo entries without blocking reduce-only exits:
-
-```bash
-touch data/forward-paper/DEMO_PAUSED
-```
-
-Emergency demo-only cleanup commands:
-
-```bash
-python -m aggression_carry --data-root data/forward-paper bybit-demo-cancel-all
-python -m aggression_carry --data-root data/forward-paper bybit-demo-flatten --i-understand-demo-flatten
-```
-
-VPS `systemd` installer:
-
-```bash
-scripts/install_bybit_demo_systemd.sh
-```
-
-The installer creates an env-file template for demo keys and Telegram tokens.
-Do not commit filled env files. Demo keys can be throwaway, but the repo still
-keeps them out of logs, docs, and command arguments.
-
-Microcap paper mode is a separate sleeve, not the default core book:
-
-```bash
-python -m aggression_carry \
-  --data-root data/forward-paper-microcap \
-  --config configs/volume_alpha.default.yaml \
-  forward-run \
-  --top-n 3 \
-  --gross-exposure 0.5 \
-  --liquidity-rank-min 151 \
-  --liquidity-rank-max 0 \
-  --min-baseline-turnover 250000 \
-  --min-day-turnover 750000 \
-  --min-last-60m-turnover 75000 \
-  --account-equity 10000 \
-  --max-position-weight 0.20 \
-  --max-trade-notional-pct-day-turnover 0.002 \
-  --max-trade-notional-pct-baseline-turnover 0.005 \
-  --min-turnover-24h 750000 \
-  --max-spread-bps 80
-```
-
-The detailed backtest uses the current lead by default:
-
-```text
-score=dollar_volume_rank
-quantile=50%
-hold_days=7
-rebalance_days=7
-gross_exposure=1.0x
-stop_loss_pct=8%
-take_profit_pct=0% disabled
-```
-
-Override knobs from the CLI, for example:
-
-```bash
-python -m aggression_carry \
-  --data-root data/agc-bybit-3m \
-  --config configs/volume_alpha.default.yaml \
-  volume-backtest \
-  --hold-days 3 \
-  --rebalance-days 3 \
-  --stop-loss-pct 0.05 \
-  --take-profit-pct 0.12
-```
-
-To check whether the fixed stop is helping or hurting, run the same backtest
-with stops disabled:
-
-```bash
-python -m aggression_carry \
-  --data-root data/agc-bybit-3m \
-  --config configs/volume_alpha.default.yaml \
-  volume-backtest \
-  --stop-loss-pct 0
-```
-
-Grid test lifecycle assumptions:
-
-```bash
-python -m aggression_carry \
-  --data-root data/agc-bybit-3m \
-  --config configs/volume_alpha.default.yaml \
-  volume-grid \
-  --workers 0
-```
-
-Use `--workers 8` for large Windows runs. Higher counts can be faster on paper,
-but they have already caused Windows/Python memory and process-spawn failures on
-multi-year Polars grids. The RTX GPU is not used yet because this backtester is
-a CPU trade simulation, not a vectorized CUDA workload.
-
-The detailed `volume-backtest` report includes every trade, exit reasons,
-monthly strategy performance versus BTC, BTC up/down regime summaries, and SVG
-charts for the equity curve and monthly returns.
-
-Bucket sweep after downloading a broad universe:
-
-```bash
-python scripts/run_volume_bucket_sweep.py \
-  --data-root data/agc-bybit-1y-auto150-20250503-20260503 \
-  --config configs/volume_alpha.default.yaml \
-  --workers 0 \
-  --include-reverse
-```
-
-This runs separate grids for daily liquidity-rank buckets: core `1-20`, mid
-`21-80`, and tail `81-150`.
-
-Daily close fade 1m grid:
-
-```bash
-python -m aggression_carry \
-  --data-root data/daily-close-fade-1m-3m \
-  --config configs/volume_alpha.default.yaml \
-  download-data \
-  --symbols BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,APTUSDT,BNBUSDT,ADAUSDT,DOTUSDT,LTCUSDT,NEARUSDT,OPUSDT,ARBUSDT,INJUSDT \
-  --start 2026-02-03 \
-  --end 2026-05-03 \
-  --datasets instruments,klines_1m
-
-python -m aggression_carry \
-  --data-root data/daily-close-fade-1m-3m \
-  --config configs/volume_alpha.default.yaml \
-  daily-close-fade-grid \
-  --signal-times 22:15 \
-  --top-ns 5 \
-  --hold-minutes 180 \
-  --pump-filters pump \
-  --liquidity-rank-mins 1,31,81,151 \
-  --liquidity-rank-maxs 30,80,150,300 \
-  --stop-loss-pcts 0.2 \
-  --take-profit-pcts 0 \
-  --trailing-stop-pcts 0 \
-  --vol-trailing-stop-mults 0,0.25 \
-  --vol-trailing-activation-mults 0,0.25,0.5 \
-  --mfe-giveback-activation-pcts 0,0.01,0.02 \
-  --mfe-giveback-pcts 0,0.20,0.33 \
-  --gross-exposures 0.25,0.5,1.0 \
-  --basket-stop-loss-pcts 0,0.05 \
-  --workers 0
-```
-
-Raw daily-close fade diagnostics, with exits deliberately disabled:
-
-```bash
-python -m aggression_carry \
-  --data-root data/daily-close-fade-1m-3m \
-  --config configs/volume_alpha.default.yaml \
-  daily-close-fade-diagnostics \
-  --signal-times 22:15 \
-  --entry-delays 1,15,60 \
-  --horizons 60,180 \
-  --scores vol_adjusted_day_return,day_return,late_volume_ratio,vwap_extension,pump_score \
-  --top-ns 3,5,10 \
-  --buckets 10 \
-  --pump-filter pump \
-  --liquidity-rank-min 31 \
-  --liquidity-rank-max 150
-```
-
-Use this before trusting TP/SL variants. If high score buckets do not earn more
-forward short return than low score buckets, a profitable exit grid is suspect.
-The wider all-time/all-horizon diagnostic is a batch job, not an interactive
-default.
-
-Point-in-time daily close fade setup:
-
-```bash
-python -m aggression_carry \
-  --data-root data/daily-close-fade-pit \
-  --config configs/volume_alpha.default.yaml \
-  archive-manifest \
-  --start 2023-05-03 \
-  --end 2026-05-03 \
-  --quote-suffix USDT \
-  --workers 16
-
-python -m aggression_carry \
-  --data-root data/daily-close-fade-pit \
-  --config configs/volume_alpha.default.yaml \
-  download-data \
-  --symbols BTCUSDT \
-  --start 2023-05-03 \
-  --end 2023-05-04 \
-  --datasets archive_klines_1m \
-  --archive-url-template 'https://public.bybit.com/trading/{symbol}/{symbol}{date}.csv.gz'
-
-python -m aggression_carry \
-  --data-root data/daily-close-fade-pit \
-  --config configs/volume_alpha.default.yaml \
-  archive-download-klines \
-  --start 2023-05-03 \
-  --end 2026-05-03 \
-  --workers 16
-```
-
-The full point-in-time run must download archive-derived 1m bars for every
-eligible symbol/date in the manifest, not just today's current universe, before
-results can be treated as real alpha evidence. For USDT linear shorts, the
-daily-close backtester now uses `(entry_price - exit_price) / entry_price`;
-earlier exploratory reports from before that correction should be ignored.
-
-Current daily-close paper-forward default is no fixed TP, 20% disaster stop,
-baseline liquidity ranks 31-150, `0.25x` daily-vol trailing after the 15-minute
-stop delay, and 20% MFE giveback after +1% favorable movement. In the current
-local 3-year top-160 benchmark, the simple no-adaptive entry lost money, while
-this adaptive 31-150 version returned +249.03% at base costs and +50.51% at 2x
-costs. At 3x costs it lost money, so execution cost is a gating risk.
-Current-universe results are still biased until the archive walk-forward path is
-complete.
-
-Compare the daily-close sleeves on any 1m dataset:
-
-```bash
-python -m aggression_carry \
-  --data-root data/daily-close-fade-1m-3m \
-  --config configs/volume_alpha.default.yaml \
-  daily-close-fade-sleeves
-```
-
-The sleeve command writes `daily_close_fade_sleeves_report.md`,
-`daily_close_fade_sleeves_results.csv`, and combined sleeve trade/basket CSVs.
-The microcap sleeve starts at baseline liquidity rank 151+, top 3 names, 0.50x
-gross, turnover floors, and capacity caps. Treat it as experimental until it
-survives point-in-time archive data and paper forward fills.
-
-Windows consolidated research runner:
+Windows:
 
 ```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\windows_setup.ps1
+```
+
+## Run Current Daily-Close TWAP Backtest
+
+Requires the 1m dataset:
+
+```text
+data/daily-close-fade-1m-3y-current-top160-20230503-20260503
+```
+
+Run:
+
+```bash
+python -m aggression_carry \
+  --data-root data/daily-close-fade-1m-3y-current-top160-20230503-20260503 \
+  --config configs/volume_alpha.default.yaml \
+  daily-close-fade
+```
+
+Core outputs:
+
+```text
+data/daily-close-fade-1m-3y-current-top160-20230503-20260503/reports/daily_close_fade_report.md
+data/daily-close-fade-1m-3y-current-top160-20230503-20260503/daily_close_fade_trades/
+data/daily-close-fade-1m-3y-current-top160-20230503-20260503/daily_close_fade_baskets/
+```
+
+Readable export from the latest run:
+
+```text
+data/research_reports/daily_close_twap_2200_2300_current_top160_20260504/trades_all.csv
+data/research_reports/daily_close_twap_2200_2300_current_top160_20260504/equity_curve.svg
+```
+
+## Windows Overnight Suite
+
+```powershell
+cd C:\Users\user\Desktop\MODEL05042026
+git pull --rebase --autostash
 powershell -ExecutionPolicy Bypass -File .\scripts\run_research_overnight_suite.ps1 -Suite both -Workers 8
 ```
 
-`-Suite both` runs daily-close only when the configured 1m data root already
-exists; otherwise it warns and continues with the volume sweep. Use
-`-Suite daily-close` or `-RequireDailyCloseData` when missing daily-close data
-should be a hard failure.
+If the daily-close 1m dataset is missing, `-Suite both` skips that leg and still
+runs the volume sweep. Use `-Suite daily-close` when missing 1m data should be a
+hard failure.
 
-## Research Rule
+## Point-In-Time Proof
 
-Do not combine signals until a single alpha clears costs standalone. The volume
-rank path and the daily-close fade path are separate systems for now. A future
-multistrat allocator only makes sense after each one has its own profitable,
-cost-adjusted trade ledger.
+Do not promote the TWAP result to real money until:
+
+1. Bybit archive symbol/date membership is complete.
+2. Archive-derived 1m bars cover all eligible symbols, not only current winners.
+3. The same TWAP contract survives train/validation/OOS splits.
+4. Forward paper/demo implements real TWAP slices and the audit shows acceptable
+   missed fills, slippage, and execution drift.
+
+## Removed
+
+The old live runtime, blended signal stack, Telegram trading bot behavior,
+legacy SignalEngine/execution/state/alerting modules, and repo-local agent
+tooling were intentionally removed. Do not rebuild them into this research repo.

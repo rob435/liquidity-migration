@@ -118,10 +118,10 @@ def parse_args() -> argparse.Namespace:
         choices=("all",),
         help="Baseline always trades every base basket. More rules should be researched explicitly.",
     )
-    parser.add_argument("--signal-time", default="22:15")
+    parser.add_argument("--signal-time", default="22:00")
     parser.add_argument("--top-n", type=int, default=5)
     parser.add_argument("--hold-minutes", type=int, default=180)
-    parser.add_argument("--entry-delay-minutes", type=int, default=1)
+    parser.add_argument("--entry-delay-minutes", type=int, default=0)
     parser.add_argument("--score", default="vol_adjusted_day_return")
     parser.add_argument("--pump-filter", default="pump")
     parser.add_argument("--gross-exposure", type=float, default=1.0)

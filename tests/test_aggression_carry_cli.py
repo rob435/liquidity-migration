@@ -71,7 +71,7 @@ def test_cli_parses_forward_sleeves_alias(tmp_path: Path) -> None:
             str(tmp_path),
             "forward-sleeves",
             "--now",
-            "2026-01-15T22:16:00+00:00",
+            "2026-01-15T22:06:00+00:00",
             "--telegram",
         ]
     )
@@ -94,9 +94,9 @@ def test_cli_parses_daily_close_fade_diagnostics(tmp_path: Path) -> None:
             str(tmp_path),
             "daily-close-fade-diagnostics",
             "--signal-times",
-            "22:15,23:00",
+            "22:00,23:00",
             "--entry-delays",
-            "1,15,60",
+            "0,15,60",
             "--horizons",
             "60,180",
             "--scores",
@@ -121,8 +121,8 @@ def test_cli_parses_daily_close_fade_diagnostics(tmp_path: Path) -> None:
     )
 
     assert args.command == "daily-close-fade-diagnostics"
-    assert args.signal_times == "22:15,23:00"
-    assert args.entry_delays == "1,15,60"
+    assert args.signal_times == "22:00,23:00"
+    assert args.entry_delays == "0,15,60"
     assert args.horizons == "60,180"
     assert args.buckets == 5
     assert args.start == "2025-01-01"
@@ -198,7 +198,7 @@ def test_cli_parses_bybit_demo_cycle(tmp_path: Path) -> None:
             str(tmp_path),
             "bybit-demo-cycle",
             "--now",
-            "2026-01-15T22:16:00+00:00",
+            "2026-01-15T22:06:00+00:00",
             "--submit-orders",
             "--i-understand-demo-sync",
             "--telegram",
@@ -229,7 +229,7 @@ def test_cli_parses_bybit_demo_cycle(tmp_path: Path) -> None:
     )
 
     assert args.command == "bybit-demo-cycle"
-    assert args.now == "2026-01-15T22:16:00+00:00"
+    assert args.now == "2026-01-15T22:06:00+00:00"
     assert args.submit_orders is True
     assert args.i_understand_demo_sync is True
     assert args.telegram is True

@@ -30,8 +30,8 @@ _GRID_COST_BPS: float | None = None
 
 @dataclass(frozen=True, slots=True)
 class DailyCloseFadeDiagnosticsConfig:
-    signal_minutes: tuple[int, ...] = (22 * 60 + 15,)
-    entry_delay_minutes: tuple[int, ...] = (1, 15, 60)
+    signal_minutes: tuple[int, ...] = (22 * 60,)
+    entry_delay_minutes: tuple[int, ...] = (0, 15, 60)
     horizon_minutes: tuple[int, ...] = (60, 180)
     scores: tuple[str, ...] = ("vol_adjusted_day_return", "day_return", "late_volume_ratio", "vwap_extension", "pump_score")
     top_ns: tuple[int, ...] = (3, 5, 10)
@@ -1272,6 +1272,8 @@ def _validate_close_fade_config(config: DailyCloseFadeConfig) -> None:
         raise ValueError("daily close fade hold_minutes must be positive")
     if config.entry_delay_minutes < 0:
         raise ValueError("daily close fade entry_delay_minutes must be non-negative")
+    if config.entry_twap_minutes < 0:
+        raise ValueError("daily close fade entry_twap_minutes must be non-negative")
     if config.gross_exposure <= 0.0:
         raise ValueError("daily close fade gross_exposure must be positive")
     if config.coin_excess_vs_market_min < 0.0:
@@ -1586,6 +1588,8 @@ def summarize_close_fade(
         "signal_minute": config.signal_minute,
         "top_n": config.top_n,
         "hold_minutes": config.hold_minutes,
+        "entry_delay_minutes": config.entry_delay_minutes,
+        "entry_twap_minutes": config.entry_twap_minutes,
         "gross_exposure": config.gross_exposure,
         "score": config.score,
         "pump_filter": config.pump_filter,
@@ -1913,6 +1917,7 @@ def format_close_fade_report(payload: dict[str, Any]) -> str:
         f"- signal: {_format_signal_minute(config['signal_minute'])} UTC",
         f"- top_n: {config['top_n']}",
         f"- hold_minutes: {config['hold_minutes']}",
+        f"- entry: delay={config.get('entry_delay_minutes', 0)}m twap={config.get('entry_twap_minutes', 0)}m",
         f"- gross_exposure: {config.get('gross_exposure', 1.0):.2f}x",
         f"- score: {config['score']}",
         f"- pump_filter: {config['pump_filter']}",
@@ -2210,27 +2215,23 @@ def _simulate_short_trade(
 ) -> dict[str, Any] | None:
     symbol = str(row["symbol"])
     signal_ts_ms = int(row["signal_ts_ms"])
-    entry_ts_ms = signal_ts_ms + config.entry_delay_minutes * MS_PER_MINUTE
-    target_exit_ts_ms = entry_ts_ms + config.hold_minutes * MS_PER_MINUTE
-    window = _load_trade_window(data_root, symbol, entry_ts_ms, target_exit_ts_ms, partition_cache)
+    entry_start_ts_ms = signal_ts_ms + config.entry_delay_minutes * MS_PER_MINUTE
+    twap_minutes = max(config.entry_twap_minutes, 0)
+    required_fills = max(twap_minutes, 1)
+    entry_complete_ts_ms = entry_start_ts_ms + twap_minutes * MS_PER_MINUTE
+    target_exit_ts_ms = entry_complete_ts_ms + config.hold_minutes * MS_PER_MINUTE
+    window = _load_trade_window(data_root, symbol, entry_start_ts_ms, target_exit_ts_ms, partition_cache)
     if window.is_empty():
         return None
-    entry_candidates = window.filter(pl.col("ts_ms") >= entry_ts_ms).sort("ts_ms")
-    if entry_candidates.is_empty():
-        return None
-    entry_bar = entry_candidates.row(0, named=True)
-    entry_price = float(entry_bar["open"])
-    bars = window.filter(pl.col("ts_ms") >= int(entry_bar["ts_ms"])).sort("ts_ms").to_dicts()
+    bars = window.filter(pl.col("ts_ms") >= entry_start_ts_ms).sort("ts_ms").to_dicts()
     if not bars:
         return None
 
     exit_ts_ms = int(bars[-1]["ts_ms"])
     exit_price = float(bars[-1]["close"])
     exit_reason = "max_hold" if exit_ts_ms >= target_exit_ts_ms else "data_end"
-    stop_active_ts_ms = entry_ts_ms + config.stop_delay_minutes * MS_PER_MINUTE
-    hard_stop_price = entry_price * (1.0 + config.stop_loss_pct) if config.stop_loss_pct > 0.0 else None
-    take_profit_price = entry_price * (1.0 - config.take_profit_pct) if config.take_profit_pct > 0.0 else None
-    vwap_exit_price = _vwap_reversion_exit_price(entry_price, row, config)
+    stop_active_ts_ms = entry_start_ts_ms + config.stop_delay_minutes * MS_PER_MINUTE
+    profit_active_ts_ms = entry_complete_ts_ms + config.stop_delay_minutes * MS_PER_MINUTE
     realized_vol = max(float(row.get("realized_vol") or 0.0), 0.0)
     vol_trailing_stop_pct = realized_vol * config.vol_trailing_stop_mult if config.vol_trailing_stop_mult > 0.0 else 0.0
     vol_trailing_activation_pct = (
@@ -2239,36 +2240,64 @@ def _simulate_short_trade(
     trailing_active = False
     vol_trailing_active = False
     mfe_giveback_active = False
-    best_price = entry_price
+    entry_price = 0.0
+    entry_fill_sum = 0.0
+    entry_fill_count = 0
+    entry_ts_ms: int | None = None
+    best_price: float | None = None
     max_favorable = 0.0
     max_adverse = 0.0
 
     for bar in bars:
         ts_ms = int(bar["ts_ms"])
+        if ts_ms < entry_start_ts_ms:
+            continue
+        if twap_minutes <= 0 and entry_fill_count == 0:
+            entry_fill_sum = float(bar["open"])
+            entry_fill_count = 1
+            entry_price = entry_fill_sum
+            entry_ts_ms = ts_ms
+            best_price = entry_price
+            entry_complete_ts_ms = ts_ms
+            target_exit_ts_ms = entry_complete_ts_ms + config.hold_minutes * MS_PER_MINUTE
+            profit_active_ts_ms = entry_complete_ts_ms + config.stop_delay_minutes * MS_PER_MINUTE
+        elif twap_minutes > 0 and entry_start_ts_ms <= ts_ms < entry_complete_ts_ms:
+            entry_fill_sum += float(bar["open"])
+            entry_fill_count += 1
+            entry_price = entry_fill_sum / entry_fill_count
+            if entry_ts_ms is None:
+                entry_ts_ms = ts_ms
+            best_price = entry_price if best_price is None else min(best_price, entry_price)
+
+        if entry_fill_count <= 0:
+            continue
+
         high = float(bar["high"])
         low = float(bar["low"])
         close = float(bar["close"])
         max_favorable = max(max_favorable, _short_return(entry_price, low))
         max_adverse = min(max_adverse, _short_return(entry_price, high))
 
+        hard_stop_price = entry_price * (1.0 + config.stop_loss_pct) if config.stop_loss_pct > 0.0 else None
         if ts_ms >= stop_active_ts_ms and hard_stop_price is not None and high >= hard_stop_price:
             exit_ts_ms = ts_ms
             exit_price = hard_stop_price
             exit_reason = "stop_loss"
             break
 
-        if ts_ms >= stop_active_ts_ms:
+        profit_exits_active = ts_ms >= profit_active_ts_ms and entry_fill_count >= required_fills
+        if profit_exits_active:
             protective_exits: list[tuple[float, str]] = []
             if trailing_active and config.trailing_stop_pct > 0.0:
-                trailing_stop = best_price * (1.0 + config.trailing_stop_pct)
+                trailing_stop = float(best_price) * (1.0 + config.trailing_stop_pct)
                 if high >= trailing_stop:
                     protective_exits.append((trailing_stop, "trailing_stop"))
             if vol_trailing_active and vol_trailing_stop_pct > 0.0:
-                vol_trailing_stop = best_price * (1.0 + vol_trailing_stop_pct)
+                vol_trailing_stop = float(best_price) * (1.0 + vol_trailing_stop_pct)
                 if high >= vol_trailing_stop:
                     protective_exits.append((vol_trailing_stop, "vol_trailing_stop"))
             if mfe_giveback_active and config.mfe_giveback_pct > 0.0:
-                mfe_stop = _mfe_giveback_stop_price(entry_price, best_price, config.mfe_giveback_pct)
+                mfe_stop = _mfe_giveback_stop_price(entry_price, float(best_price), config.mfe_giveback_pct)
                 if high >= mfe_stop:
                     protective_exits.append((mfe_stop, "mfe_giveback"))
             if protective_exits:
@@ -2276,23 +2305,25 @@ def _simulate_short_trade(
                 exit_ts_ms = ts_ms
                 break
 
-        if take_profit_price is not None and low <= take_profit_price:
+        take_profit_price = entry_price * (1.0 - config.take_profit_pct) if config.take_profit_pct > 0.0 else None
+        if profit_exits_active and take_profit_price is not None and low <= take_profit_price:
             exit_ts_ms = ts_ms
             exit_price = take_profit_price
             exit_reason = "take_profit"
             break
 
-        if vwap_exit_price is not None and low <= vwap_exit_price:
+        vwap_exit_price = _vwap_reversion_exit_price(entry_price, row, config)
+        if profit_exits_active and vwap_exit_price is not None and low <= vwap_exit_price:
             exit_ts_ms = ts_ms
             exit_price = vwap_exit_price
             exit_reason = "vwap_reversion"
             break
 
-        if low < best_price:
+        if best_price is None or low < best_price:
             best_price = low
 
-        if ts_ms >= stop_active_ts_ms:
-            best_return = _short_return(entry_price, best_price)
+        if profit_exits_active:
+            best_return = _short_return(entry_price, float(best_price))
             if config.trailing_stop_pct > 0.0 and not trailing_active and best_return >= config.trailing_activation_pct:
                 trailing_active = True
             if vol_trailing_stop_pct > 0.0 and not vol_trailing_active and best_return >= vol_trailing_activation_pct:
@@ -2310,15 +2341,27 @@ def _simulate_short_trade(
             exit_reason = "max_hold"
             break
 
+    if entry_fill_count <= 0:
+        return None
+    if twap_minutes > 0 and entry_fill_count < required_fills and exit_reason != "stop_loss":
+        return None
+
     gross_return = _short_return(entry_price, exit_price)
     cost_return = round_trip_cost_bps / 10_000.0
     net_return = gross_return - cost_return
     selected_count = max(int(row.get("selected_count") or config.top_n), 1)
     weight_info = _close_fade_position_weight(row, config=config, selected_count=selected_count)
+    fill_fraction = min(1.0, entry_fill_count / required_fills)
+    weight_info = {
+        **weight_info,
+        "weight": weight_info["weight"] * fill_fraction,
+        "actual_notional": weight_info["actual_notional"] * fill_fraction,
+    }
     weight = weight_info["weight"]
     if weight <= EPSILON:
         return None
-    entry_dt = _dt_from_ms(entry_ts_ms)
+    entry_dt = _dt_from_ms(int(entry_ts_ms))
+    entry_complete_dt = _dt_from_ms(entry_complete_ts_ms)
     exit_dt = _dt_from_ms(exit_ts_ms)
     signal_dt = _dt_from_ms(signal_ts_ms)
     trade_id = f"{signal_ts_ms}-{symbol}-{int(row.get('entry_rank', 0))}"
@@ -2333,14 +2376,24 @@ def _simulate_short_trade(
         "signal_ts_ms": signal_ts_ms,
         "signal_time": signal_dt.isoformat(),
         "signal_minute": config.signal_minute,
-        "entry_ts_ms": entry_ts_ms,
+        "entry_ts_ms": int(entry_ts_ms),
         "entry_time": entry_dt.isoformat(),
+        "entry_start_ts_ms": entry_start_ts_ms,
+        "entry_start_time": _dt_from_ms(entry_start_ts_ms).isoformat(),
+        "entry_complete_ts_ms": entry_complete_ts_ms,
+        "entry_complete_time": entry_complete_dt.isoformat(),
+        "entry_twap_minutes": config.entry_twap_minutes,
+        "entry_fill_count": entry_fill_count,
+        "entry_fill_fraction": fill_fraction,
+        "profit_protection_active_ts_ms": profit_active_ts_ms,
+        "profit_protection_active_time": _dt_from_ms(profit_active_ts_ms).isoformat(),
         "exit_ts_ms": exit_ts_ms,
         "exit_time": exit_dt.isoformat(),
         "entry_price": entry_price,
         "exit_price": exit_price,
         "exit_reason": exit_reason,
         "hold_minutes": (exit_ts_ms - entry_ts_ms) / MS_PER_MINUTE,
+        "post_twap_hold_minutes": (exit_ts_ms - entry_complete_ts_ms) / MS_PER_MINUTE,
         "entry_rank": int(row.get("entry_rank") or 0),
         "score": float(row.get(config.score) or 0.0),
         "score_name": config.score,

@@ -325,7 +325,7 @@ def test_demo_sync_closed_paper_trade_places_reduce_only_exit(tmp_path: Path) ->
                     "estimated_notional": 5.055,
                     "max_order_notional": 6.0,
                     "created_ts_ms": int(datetime(2026, 1, 15, 22, 16, tzinfo=UTC).timestamp() * 1000),
-                    "created_time": "2026-01-15T22:16:00+00:00",
+                    "created_time": "2026-01-15T22:06:00+00:00",
                 }
             ]
         ),
@@ -384,7 +384,7 @@ def test_demo_sync_prioritizes_reduce_only_exits_before_entries(tmp_path: Path) 
                     "estimated_notional": 5.055,
                     "max_order_notional": 6.0,
                     "created_ts_ms": int(datetime(2026, 1, 15, 22, 16, tzinfo=UTC).timestamp() * 1000),
-                    "created_time": "2026-01-15T22:16:00+00:00",
+                    "created_time": "2026-01-15T22:06:00+00:00",
                 }
             ]
         ),
@@ -437,7 +437,7 @@ def test_demo_sync_pause_new_entries_still_allows_exit(tmp_path: Path) -> None:
                     "estimated_notional": 5.055,
                     "max_order_notional": 6.0,
                     "created_ts_ms": int(datetime(2026, 1, 15, 22, 16, tzinfo=UTC).timestamp() * 1000),
-                    "created_time": "2026-01-15T22:16:00+00:00",
+                    "created_time": "2026-01-15T22:06:00+00:00",
                 }
             ]
         ),
@@ -489,7 +489,7 @@ def test_demo_sync_cancels_stale_open_entry_order(tmp_path: Path) -> None:
                     "estimated_notional": 5.055,
                     "max_order_notional": 10.0,
                     "created_ts_ms": int(datetime(2026, 1, 15, 22, 16, tzinfo=UTC).timestamp() * 1000),
-                    "created_time": "2026-01-15T22:16:00+00:00",
+                    "created_time": "2026-01-15T22:06:00+00:00",
                 }
             ]
         ),

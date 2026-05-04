@@ -48,7 +48,7 @@ def _trade(basket_id: str, score: float, net_return: float) -> dict:
         "basket_id": basket_id,
         "signal_ts_ms": 1_000,
         "date": "2026-01-01",
-        "signal_minute": 1335,
+        "signal_minute": 1320,
         "entry_rank": 1,
         "score": score,
         "gross_return": net_return + 0.001,

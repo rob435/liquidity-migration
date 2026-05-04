@@ -37,7 +37,7 @@ def test_split_summary_prefers_scenarios_that_survive_every_split() -> None:
 def _scenario(score: str, split: str, cost_pass: bool, cost_return: float, cost_month_rate: float) -> dict:
     return {
         "score": score,
-        "signal_minute": 1335,
+        "signal_minute": 1320,
         "entry_delay_minutes": 15,
         "horizon_minutes": 180,
         "top_n": 5,

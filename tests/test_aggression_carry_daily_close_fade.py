@@ -183,6 +183,50 @@ def test_daily_close_fade_vwap_reversion_exit_reason(tmp_path) -> None:
     assert trades["net_return"].item() > 0.0
 
 
+def test_daily_close_fade_twap_averages_entry_and_delays_profit_protection(tmp_path) -> None:
+    _write_close_fade_fixture(tmp_path)
+
+    run_daily_close_fade(
+        tmp_path,
+        fade_config=DailyCloseFadeConfig(
+            signal_minute=22 * 60,
+            top_n=1,
+            hold_minutes=60,
+            entry_delay_minutes=0,
+            entry_twap_minutes=60,
+            score="day_return",
+            pump_filter="all",
+            min_age_days=10,
+            stop_loss_pct=0.20,
+            vol_trailing_stop_mult=0.25,
+            mfe_giveback_activation_pct=0.01,
+            mfe_giveback_pct=0.20,
+            stop_delay_minutes=15,
+            exclude_symbols=(),
+        ),
+        cost_config=CostConfig(maker_fee_bps=0, taker_fee_bps=0, maker_adverse_selection_bps=0, taker_slippage_bps_liquid=0),
+    )
+
+    trades = read_dataset(tmp_path, "daily_close_fade_trades")
+    trade = trades.row(0, named=True)
+    klines = read_dataset(tmp_path, "klines_1m")
+    start_ms = int(datetime(2025, 1, 15, 22, 0, tzinfo=UTC).timestamp() * 1000)
+    end_ms = int(datetime(2025, 1, 15, 23, 0, tzinfo=UTC).timestamp() * 1000)
+    expected_entry = (
+        klines.filter((pl.col("symbol") == trade["symbol"]) & (pl.col("ts_ms") >= start_ms) & (pl.col("ts_ms") < end_ms))
+        .sort("ts_ms")["open"]
+        .mean()
+    )
+
+    assert trade["entry_fill_count"] == 60
+    assert trade["entry_fill_fraction"] == 1.0
+    assert trade["entry_time"] == "2025-01-15T22:00:00+00:00"
+    assert trade["entry_complete_time"] == "2025-01-15T23:00:00+00:00"
+    assert trade["profit_protection_active_time"] == "2025-01-15T23:15:00+00:00"
+    assert round(trade["entry_price"], 10) == round(expected_entry, 10)
+    assert trade["post_twap_hold_minutes"] <= 60.0
+
+
 def test_daily_close_fade_can_require_archive_membership(tmp_path) -> None:
     _write_close_fade_fixture(tmp_path)
     write_dataset(

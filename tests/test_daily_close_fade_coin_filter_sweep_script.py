@@ -21,7 +21,7 @@ def test_coin_market_context_adds_per_coin_excess_vs_market() -> None:
         infer_schema_length=None,
     )
 
-    output = coin_sweep.attach_coin_market_context(features, DailyCloseFadeConfig(signal_minute=1335))
+    output = coin_sweep.attach_coin_market_context(features, DailyCloseFadeConfig(signal_minute=1320))
 
     row = output.filter(pl.col("symbol") == "AAAUSDT").row(0, named=True)
     assert abs(row["market_median_day_return"] - 0.02) < 1e-12
@@ -86,7 +86,7 @@ def test_fixed_slot_baskets_leave_missing_top_n_weight_in_cash() -> None:
                 "basket_id": "a",
                 "signal_ts_ms": 1_000,
                 "date": "2026-01-01",
-                "signal_minute": 1335,
+                "signal_minute": 1320,
                 "gross_return": 0.10,
                 "cost_return": 0.01,
                 "net_return": 0.09,
@@ -97,7 +97,7 @@ def test_fixed_slot_baskets_leave_missing_top_n_weight_in_cash() -> None:
                 "basket_id": "a",
                 "signal_ts_ms": 1_000,
                 "date": "2026-01-01",
-                "signal_minute": 1335,
+                "signal_minute": 1320,
                 "gross_return": 0.05,
                 "cost_return": 0.01,
                 "net_return": 0.04,
@@ -121,7 +121,7 @@ def _feature(symbol: str, date: str, ts_ms: int, day_return: float) -> dict:
         "symbol": symbol,
         "date": date,
         "signal_ts_ms": ts_ms,
-        "signal_minute": 1335,
+        "signal_minute": 1320,
         "bar_coverage": 1.0,
         "day_return": day_return,
         "vwap_extension": 0.03,

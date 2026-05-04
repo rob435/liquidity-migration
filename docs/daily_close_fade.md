@@ -1,870 +1,124 @@
-# Daily Close Fade Research Path
+# Daily-Close Fade
 
-This is a separate alpha from the daily volume-rank system. Do not blend it into
-the volume system until it clears costs standalone.
+This is the active alpha lead.
 
 ## Hypothesis
 
-Near the UTC daily close, the strongest small/mid-cap perp gainers mean-revert.
-The first test shorts the top day-to-date gainers around 22:00-23:15 UTC and
-exits mechanically after 30-180 minutes.
+Near the UTC daily close, small/mid-cap perp gainers that are extended versus
+the market, above VWAP, and supported by late volume often mean-revert. The
+system shorts those names and exits mechanically.
 
-This is not a rolling 24h top-gainer test. The ranking is based on performance
-from 00:00 UTC to the signal minute because the claimed behavior is tied to the
-daily candle close.
-
-## Data
-
-Required datasets:
+## Current Research Contract
 
 ```text
-instruments
-klines_1m
+Signal time: 22:00 UTC
+Ranking: day-to-date vol-adjusted return using data available at 22:00
+Candidate side: short only
+Candidate filter: pump-like only
+Excluded majors: BTC, ETH, SOL, BNB
+Age filter: listed >= 10 days
+Liquidity bucket: prior 7d baseline quote-turnover ranks 31-150
+Per-coin quality gate:
+  coin_excess_vs_market >= 0.08
+  vwap_extension >= 0.035
+  late_volume_ratio >= 1.0
+Top N: 5
+Sizing: score_capped, score_weight_power=1.0, max_position_weight=0.80
+Entry: equal 1m TWAP over [22:00, 23:00)
+Entry price: average of all filled 1m opens
+Max hold: 180m after TWAP completes
+Hard stop: 20% above average entry
+Hard stop active: first fill + 15m
+Adaptive protection active: final add + 15m
+Adaptive protection:
+  vol_trailing_stop_mult = 0.25
+  mfe_giveback_activation_pct = 0.01
+  mfe_giveback_pct = 0.20
+No fixed TP
+No VWAP-reversion TP
+Exit: flatten whole symbol
+Re-entry: none in the same symbol/date
 ```
 
-`instruments` is required because the hard filter excludes symbols listed less
-than 10 days before the signal. For point-in-time archive tests,
-`archive_trade_manifest` can provide a conservative first-seen date for symbols
-that are no longer in Bybit's current instruments endpoint.
+Important: ranking at 23:00 and pretending to fill from 22:00 is lookahead. The
+implemented backtest ranks at 22:00.
 
-Current-universe tests are research benchmarks only. They are not acceptable as
-final evidence because they use symbols known today. The clean path is in
-`docs/walk_forward_universe.md`.
+## Backtest Semantics
 
-## Signal
-
-For each symbol and UTC date:
-
-- compute day-to-date return from the first 1m bar after 00:00 UTC
-- compute a vol-adjusted return using prior daily realized volatility
-- tag pump-like behavior using extreme return, late volume, VWAP extension,
-  late acceleration, and fresh-day-high evidence
-- exclude BTC/ETH/SOL/BNB by default
-- exclude symbols younger than 10 days
-- compute baseline liquidity from prior daily quote turnover, ranked
-  cross-sectionally by date
-- default to baseline liquidity ranks 31-150 so the system skips the largest
-  names without hand-maintaining a stale ignore list
-- optionally require `archive_trade_manifest` symbol/date membership so the
-  ranking only sees symbols with public archive coverage on that UTC day
-
-The pump tag is not a hand label. The grid tests `all`, `pump`, and `non_pump`
-candidate buckets separately.
-
-## Backtest
-
-The backtest is short-only:
-
-- select top N candidates at the signal minute
-- start from `gross_exposure / selected_count`
-- optionally cap actual weight by per-symbol weight, day-to-date turnover, and
-  prior baseline turnover so thin microcaps do not get fake full-size fills
-- enter after `entry_delay_minutes`
-- exit after `hold_minutes`, unless a stop, fixed TP, trailing stop,
-  volatility-scaled trail, MFE-giveback, or VWAP-reversion exit triggers
-- record every trade with score, rank, age, pump tags, MAE/MFE, costs, and exit
-  reason
-
-For Bybit USDT linear perps, short return is modeled as:
+For Bybit USDT linear perps, short return is:
 
 ```text
 (entry_price - exit_price) / entry_price
 ```
 
-Do not use inverse-contract math here. Earlier exploratory daily-close numbers
-from before this correction were too optimistic and are not evidence.
+The TWAP model:
 
-Exit reasons:
+- uses 60 equal slices from 22:00 through 22:59;
+- records `entry_fill_count`, `entry_fill_fraction`,
+  `entry_complete_time`, and `profit_protection_active_time`;
+- scales actual weight down if the disaster stop fires before all slices fill;
+- uses the current average entry for the disaster stop during accumulation;
+- activates all profit exits only after final add plus `stop_delay_minutes`.
 
-```text
-max_hold
-stop_loss
-take_profit
-basket_stop
-trailing_stop
-vol_trailing_stop
-mfe_giveback
-vwap_reversion
-data_end
-```
+Same-bar ambiguity remains conservative: if a stop and a profit exit are both
+eligible inside one 1m OHLC bar, the protective stop wins.
 
-Fixed TP is active immediately after entry. `stop_delay_minutes` delays only the
-hard stop, trailing stop, volatility trail, and MFE-giveback exit. If a stop and
-TP are both active and both touched inside the same 1m OHLC bar, the stop wins
-because the intrabar path is unknown.
+## Latest Current-Universe Benchmark
 
-Current best adaptive-exit candidate from the biased current-universe benchmark:
-
-- no fixed TP
-- 20% per-symbol disaster stop
-- baseline liquidity ranks 31-150 using prior 7-day average quote turnover
-- after the 15-minute stop delay, trail the short from best observed price by
-  `0.25 * prior_daily_realized_vol`
-- after a +1% favorable move, allow only 20% giveback of max favorable excursion
-- no VWAP-reversion exit
-
-Capacity controls are off for the core sleeve by default. They are available for
-microcap tests:
+This is a benchmark only, not proof.
 
 ```text
-account_equity
-max_position_weight
-max_trade_notional_pct_of_day_turnover
-max_trade_notional_pct_of_baseline_turnover
+Dataset: current top-160 Bybit symbols
+Range: 2023-05-15 to 2026-05-02
+Trades: 750
+Baskets: 435
+Total return: +16,896.41%
+Sharpe-like: 10.63
+Max drawdown: -15.39%
+Worst day: -12.84%
+Win rate: 82.27%
+Profit factor: 6.08
 ```
 
-If a cap is active, the trade ledger records `target_weight`, actual `weight`,
-`position_weight_cap`, `capacity_limited`, `capacity_cap_reason`,
-`target_notional`, and `actual_notional`. This makes lower-liquidity tests more
-honest: a rank-250 coin can still qualify, but it may only get a small sleeve
-weight if normal turnover cannot support the target notional.
-
-This is not the same as a fixed take-profit. It tries to leave room for large
-fades while cutting rebounds after the move has started.
-
-The baseline no-stop result is important. Stops are tested against it rather
-than assumed to help.
-
-Exit tuning is not alpha proof. Before promoting a TP/SL variant, run the raw
-diagnostic command and check that the score itself has a stable cross-sectional
-relationship with forward short returns. If high score buckets do not beat low
-score buckets without exits, a good-looking TP/SL grid is probably overfit.
-
-## Promotion Tests
-
-The 3-year current top-160 day-audit report is the first pass at finding when
-the daily-close fade is strongest. It showed that broad BTC or market regime
-filters are too blunt: green BTC days and broad green market days are weaker,
-but still profitable enough that a kill switch would remove good trades.
-
-The reusable filter sweep tests pre-signal context filters against train,
-validation, and out-of-sample year splits. Skipped days are counted as flat
-calendar days, so a selective filter must beat the baseline after accounting for
-the days it sits out.
-
-Current promoted research candidate, pending point-in-time universe validation:
+Artifacts:
 
 ```text
-selected_excess_vs_market >= 5%
-selected_avg_vwap_extension >= 2.5%
-selected_avg_late_volume_ratio >= 0.75x
-market_positive_rate <= 100%
-btc_day_return <= none
-min_trade_count >= 1
+data/research_reports/daily_close_twap_2200_2300_current_top160_20260504/
 ```
 
-This is a pump-quality gate, not a bull/bear regime gate. It keeps the trade on
-when the chosen shorts are sufficiently extended versus the market, above VWAP,
-and supported by enough late-session volume. In the 6,000-spec sweep, it was the
-only tested filter that beat baseline in train, validation, and OOS:
+Honest read: the result is extremely strong but still current-universe biased,
+and the worst day is large. Do not call this real-money proven.
 
-| Split | Baseline return | Filter return | Delta | Filter max DD | Filter active days |
-|---|---:|---:|---:|---:|---:|
-| 2023-05-03 to 2024-05-03 | 23.86% | 25.33% | 1.47% | -3.96% | 111 |
-| 2024-05-03 to 2025-05-03 | 27.38% | 33.52% | 6.14% | -7.33% | 143 |
-| 2025-05-03 to 2026-05-03 | 121.22% | 122.25% | 1.03% | -7.76% | 251 |
-
-Do not treat this as live proof yet. The next validation step is to rerun the
-same gate on the point-in-time/walk-forward universe and on any fuller Bybit
-archive universe, without changing the thresholds after seeing those results.
-
-An individual-coin version of the same idea has also been tested. This gates
-each candidate before top-N selection instead of requiring only the selected
-basket average to pass. That is a stricter and more realistic entry rule, but it
-changes concentration because some baskets end up with fewer than five names.
-
-Exact per-coin version of the promoted basket filter:
-
-```text
-coin_excess_vs_market >= 5%
-coin_vwap_extension >= 2.5%
-coin_late_volume_ratio >= 0.75x
-min_symbols >= 1
-```
-
-Under the current backtest contract, unused basket weight is reallocated across
-the remaining selected names. With that contract, the per-coin filter beat
-baseline in all three splits:
-
-| Split | Baseline return | Per-coin return | Delta | Per-coin Sharpe | Active days |
-|---|---:|---:|---:|---:|---:|
-| 2023-05-03 to 2024-05-03 | 23.86% | 44.98% | 21.12% | 2.71 | 158 |
-| 2024-05-03 to 2025-05-03 | 27.38% | 46.29% | 18.91% | 2.69 | 183 |
-| 2025-05-03 to 2026-05-03 | 121.22% | 146.98% | 25.77% | 4.57 | 285 |
-
-The best reallocated sweep candidates were stricter, around
-`coin_excess >= 8%`, `coin_vwap >= 1.5%-3.5%`, and
-`coin_late_volume_ratio >= 0.75x-1.0x`. These improved returns materially, but
-they are more concentrated.
-
-The fixed-slot companion test is the honesty check: each passing coin gets
-`gross_exposure / top_n`, and missing slots stay in cash. In that mode, no tested
-per-coin filter beat baseline across all three splits. The exact per-coin filter
-was positive in all three periods, but beat fixed-slot baseline in only one
-split. Conclusion: the per-coin gate improves candidate quality, but the large
-return improvement depends on accepting concentration into fewer shorts. Do not
-promote it to demo/live until concentration caps and PIT validation are handled.
-
-## Sizing And Concentration Research
-
-Kelly sizing is not appropriate yet. We do not have enough independent
-out-of-sample evidence, and the current benchmark still uses a current top-160
-universe. Full Kelly would be a disguised overfit. The safer research path is:
-
-```text
-1. Keep gross exposure fixed.
-2. Filter individual coins for pump quality.
-3. Test whether score-tilted weights help.
-4. Cap max single-coin basket weight.
-5. Leave unused exposure in cash when the cap binds.
-```
-
-The sizing sweep tests:
-
-```text
-fixed_slot: each passing coin gets gross_exposure / top_n
-reallocate_equal: passing coins split full gross exposure equally
-capped_equal: equal weights, capped per coin
-capped_score: weights proportional to score, capped per coin
-```
-
-Result from the 2026-05-04 current-top-160 3-year benchmark:
-
-| Candidate | Train | Validation | OOS | Avg Sharpe | Worst DD | Worst day | Avg max coin |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| Baseline current demo logic | 23.86% | 27.38% | 121.22% | 2.72 | -8.08% | -4.53% | 43.10% |
-| Exact 5/2.5/0.75 per-coin, reallocate equal | 44.98% | 46.29% | 146.98% | 3.32 | -11.14% | -4.53% | 50.59% |
-| Strict 8/3.5/1.0 per-coin, reallocate equal | 60.47% | 53.29% | 190.77% | 3.51 | -9.70% | -5.00% | 36.54% |
-| Strict 8/3.5/1.0 per-coin, capped score 70% | 39.87% | 41.43% | 161.79% | 3.77 | -10.28% | -3.50% | 30.94% |
-| Strict 8/3.5/1.0 per-coin, capped score 80% | 49.78% | 44.98% | 190.36% | 3.79 | -9.15% | -4.00% | 34.01% |
-
-Interpretation:
-
-- Score-dependent sizing helps only when the cap is loose enough. Caps at
-  `25%-50%` left too much exposure unused and failed to beat baseline across
-  all splits.
-- The best capped research candidate is `coin_excess >= 8%`,
-  `coin_vwap_extension >= 3.5%`, `coin_late_volume_ratio >= 1.0x`, with
-  `capped_score max=80% power=1`.
-- The 80% cap sounds aggressive, but average max coin weight was about 34%.
-  The cap mainly catches the rare one-name or two-name concentration cases.
-- The 70% cap is the more conservative alternative. It gave up return but cut
-  the worst single day to about `-3.50%`.
-- Do not promote either sizing rule to demo orders until PIT/walk-forward
-  universe validation catches up. For now this is a research candidate, not the
-  live trading contract.
-
-2026-05-04 forward-test decision: use the 80% capped-score candidate in Bybit
-demo forward testing only. This is still not real-money approval. The default
-config now applies:
-
-```text
-coin_excess_vs_market_min: 0.08
-coin_vwap_extension_min: 0.035
-coin_late_volume_ratio_min: 1.0
-position_sizing: score_capped
-score_weight_power: 1.0
-max_position_weight: 0.80
-```
-
-Demo order notional can be scaled from current Bybit demo wallet equity with
-`bybit-demo-cycle --use-wallet-balance --max-order-notional 0
---max-total-new-notional 0`. On a 10,000 USDT demo wallet, an 80% selected
-weight targets about 8,000 USDT notional before quantity-step rounding.
-
-Run the sizing sweep:
+## Run
 
 ```bash
-python scripts/run_daily_close_fade_sizing_sweep.py \
+python -m aggression_carry \
   --data-root data/daily-close-fade-1m-3y-current-top160-20230503-20260503 \
   --config configs/volume_alpha.default.yaml \
-  --max-weights 0.55,0.60,0.70,0.80 \
-  --score-powers 0.5,1.0 \
-  --include-uncapped \
-  --report-dir data/daily-close-fade-1m-3y-current-top160-20230503-20260503/reports/daily_close_fade_sizing_sweep_high_caps
+  daily-close-fade
 ```
 
-The diagnostic path deliberately ignores TP, SL, trailing stops, basket stops,
-and compounding. It writes:
+## Proof Gate
+
+Before promotion:
+
+1. Build point-in-time universe membership from Bybit public archives.
+2. Use archive-derived 1m bars for all eligible symbol/date pairs.
+3. Rerun the exact TWAP contract without threshold changes.
+4. Check train, validation, and OOS years.
+5. Implement forward/demo TWAP slicing and audit fill quality.
+
+## Forward/Demo Boundary
+
+Forward/demo currently refuses to fake TWAP as one synthetic fill. That is deliberate.
+The next engineering task is explicit slice-level paper/demo execution:
 
 ```text
-daily_close_fade_diagnostic_observations.csv
-daily_close_fade_diagnostic_buckets.csv
-daily_close_fade_diagnostic_top_baskets.csv
-daily_close_fade_diagnostic_ic.csv
-daily_close_fade_diagnostic_scenarios.csv
-daily_close_fade_diagnostic_monthly.csv
-daily_close_fade_diagnostic_month_consistency.csv
-```
-
-The report treats cost-adjusted evidence as first-class. A scenario can look
-directionally correct before costs but still fail the `cost_edge_pass` check if
-the average top-basket edge is negative after the configured round-trip cost or
-if fewer than half of the tested months are positive after cost. Use `--start`
-and `--end` for in-sample/out-of-sample splits before promoting an exit rule.
-
-`basket_stop` is a research-level portfolio loss cap. It marks the open basket
-minute by minute using 1m closes and closes still-open trades once aggregate
-basket PnL crosses `-basket_stop_loss_pct`. This is not a live kill switch; it
-exists so the trade ledger can show whether a portfolio-level cap helps or just
-cuts the alpha.
-
-## Commands
-
-Download 1m data for a 3-month first pass:
-
-```bash
-python -m aggression_carry \
-  --data-root data/daily-close-fade-1m-3m \
-  --config configs/volume_alpha.default.yaml \
-  download-data \
-  --symbols BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,DOGEUSDT,LINKUSDT,AVAXUSDT,APTUSDT,BNBUSDT,ADAUSDT,DOTUSDT,LTCUSDT,NEARUSDT,OPUSDT,ARBUSDT,INJUSDT \
-  --start 2026-02-03 \
-  --end 2026-05-03 \
-  --datasets instruments,klines_1m
-```
-
-Run one default backtest:
-
-```bash
-python -m aggression_carry \
-  --data-root data/daily-close-fade-1m-3m \
-  --config configs/volume_alpha.default.yaml \
-  daily-close-fade \
-  --signal-time 22:15 \
-  --top-n 5 \
-  --hold-minutes 180 \
-  --pump-filter pump \
-  --stop-loss-pct 0.20 \
-  --take-profit-pct 0 \
-  --liquidity-lookback-days 7 \
-  --liquidity-rank-min 31 \
-  --liquidity-rank-max 150 \
-  --account-equity 10000 \
-  --trailing-stop-pct 0 \
-  --vol-trailing-stop-mult 0.25 \
-  --vol-trailing-activation-mult 0 \
-  --mfe-giveback-activation-pct 0.01 \
-  --mfe-giveback-pct 0.20
-```
-
-Run raw anti-overfit diagnostics before trusting exit variants:
-
-```bash
-python -m aggression_carry \
-  --data-root data/daily-close-fade-1m-3m \
-  --config configs/volume_alpha.default.yaml \
-  daily-close-fade-diagnostics \
-  --signal-times 22:15 \
-  --entry-delays 1,15,60 \
-  --horizons 60,180 \
-  --scores vol_adjusted_day_return,day_return,late_volume_ratio,vwap_extension,pump_score \
-  --top-ns 3,5,10 \
-  --buckets 10 \
-  --cost-multiplier 1 \
-  --start 2026-02-03 \
-  --end 2026-05-03 \
-  --pump-filter pump \
-  --liquidity-rank-min 31 \
-  --liquidity-rank-max 150
-```
-
-Use the wider `22:15,22:45,23:00` by `1,15,60,120` by `30,60,120,180`
-diagnostic only as a batch job. On the 3-year 1m current top-160 dataset it is
-large enough to be annoying on a laptop.
-
-Run the context filter promotion sweep after a day-audit report exists:
-
-```bash
-python scripts/run_daily_close_fade_filter_sweep.py \
-  --data-root data/daily-close-fade-1m-3y-current-top160-20230503-20260503
-```
-
-Run the individual-coin filter sweep:
-
-```bash
-python scripts/run_daily_close_fade_coin_filter_sweep.py \
-  --data-root data/daily-close-fade-1m-3y-current-top160-20230503-20260503 \
-  --config configs/volume_alpha.default.yaml
-```
-
-Run fixed train/validation/OOS split diagnostics:
-
-```bash
-python scripts/run_daily_close_fade_split_diagnostics.py \
-  --data-root data/daily-close-fade-1m-3y-current-top160-20230503-20260503 \
-  --config configs/volume_alpha.default.yaml \
-  --splits train_2023_2024:2023-05-03:2024-05-03,validation_2024_2025:2024-05-03:2025-05-03,oos_2025_2026:2025-05-03:2026-05-03 \
-  --signal-times 22:15 \
-  --entry-delays 1,15,60 \
-  --horizons 60,180 \
-  --scores vol_adjusted_day_return,day_return,late_volume_ratio,vwap_extension,pump_score \
-  --top-ns 3,5,10 \
-  --pump-filter pump \
-  --liquidity-rank-min 31 \
-  --liquidity-rank-max 150
-```
-
-On Windows:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_daily_close_fade_oos_splits.ps1
-```
-
-The split runner is intentionally conservative. It ranks scenarios by whether
-they survive each split after costs, not by the single best historical return.
-That is the right way to use it before touching TP/SL rules.
-
-## BTC Regime Overlay Research
-
-This is a short-only system, so regime risk matters. The dangerous version of a
-regime filter is using the pumped coin's own trend state, because that overlaps
-with the entry signal and can become curve-fit fast. The cleaner first test is
-an external market regime:
-
-```text
-Use BTCUSDT only.
-Compute BTC prior completed UTC daily close versus EMA.
-For a 22:15 UTC signal on date D, use the close/EMA from date D-1.
-Never use same-day 00:00-24:00 BTC information for that signal.
-```
-
-The current research sweep tests both sides of each threshold but treats
-`btc_ema_distance_lte` as the candidate safety filter:
-
-```text
-btc_ema_distance_lte: trade only when prior BTC close is below/near EMA
-btc_ema_distance_gt: sanity check for strong bull / risk-on days
-all: baseline, no regime filter
-```
-
-Keep this as research until it survives train, validation, and OOS splits. If a
-filter only improves one window by skipping most trades, do not promote it. The
-report includes inactive calendar days as zero-return days so a low-activity
-filter cannot fake a high Sharpe by trading only a handful of baskets.
-
-Run the point-in-time regime sweep:
-
-```bash
-python scripts/run_daily_close_fade_regime_sweep.py \
-  --data-root data/daily-close-fade-1m-3y-current-top160-20230503-20260503 \
-  --config configs/volume_alpha.default.yaml \
-  --splits train_2023_2024:2023-05-03:2024-05-03,validation_2024_2025:2024-05-03:2025-05-03,oos_2025_2026:2025-05-03:2026-05-03 \
-  --regime-symbol BTCUSDT \
-  --ema-periods 50,100,200 \
-  --distance-thresholds=-0.05,-0.02,0,0.02,0.05 \
-  --signal-time 22:15 \
-  --top-n 5 \
-  --hold-minutes 180 \
-  --pump-filter pump \
-  --score vol_adjusted_day_return \
-  --liquidity-rank-min 31 \
-  --liquidity-rank-max 150 \
-  --stop-loss-pct 0.20 \
-  --take-profit-pct 0 \
-  --vol-trailing-stop-mult 0.25 \
-  --mfe-giveback-activation-pct 0.01 \
-  --mfe-giveback-pct 0.20
-```
-
-Outputs:
-
-```text
-daily_close_fade_regime_sweep.csv
-daily_close_fade_regime_stability.csv
-daily_close_fade_regime_sweep.json
-daily_close_fade_regime_sweep.md
-```
-
-Result from the 2026-05-04 3-year current-top-160 benchmark:
-
-| Rule | Split survival | Min return | Avg return | Worst DD | Avg calendar Sharpe | Active days |
-|---|---:|---:|---:|---:|---:|---:|
-| all | 3/3 | 23.86% | 57.49% | -8.08% | 2.48 | 80.03% |
-| BTC > EMA200 -5% | 3/3 | 20.98% | 32.49% | -10.30% | 1.85 | 60.68% |
-| BTC <= EMA100 | 3/3 | 6.07% | 24.40% | -6.48% | 1.94 | 31.58% |
-| BTC <= EMA100 -2% | 3/3 | 5.70% | 22.01% | -5.95% | 1.92 | 27.75% |
-
-Conclusion: do **not** promote a BTC EMA on/off filter yet. The below/near-EMA
-filters reduce activity and drawdown, but they give up too much return. The
-sanity-check side was also profitable, which means BTC above EMA is not
-automatically hostile to this fade. Keep the baseline live/demo paper logic
-unchanged until a regime rule proves it improves risk-adjusted results without
-over-pruning the trade stream.
-
-## Day Audit Pattern Research
-
-Use the day audit when we need to understand *why* the close-fade setup wins or
-loses without immediately turning observations into trading rules. It produces
-day-by-day PnL, selected symbols, exit mix, monthly performance, market breadth,
-BTC intraday context, dispersion, selected excess-pump context, and winning-vs-
-losing day contrasts.
-
-Run the current setup audit:
-
-```bash
-python scripts/run_daily_close_fade_day_audit.py \
-  --data-root data/daily-close-fade-1m-3y-current-top160-20230503-20260503 \
-  --config configs/volume_alpha.default.yaml \
-  --start 2023-05-03 \
-  --end 2026-05-03 \
-  --signal-time 22:15 \
-  --top-n 5 \
-  --hold-minutes 180 \
-  --pump-filter pump \
-  --score vol_adjusted_day_return \
-  --liquidity-rank-min 31 \
-  --liquidity-rank-max 150 \
-  --stop-loss-pct 0.20 \
-  --take-profit-pct 0 \
-  --vol-trailing-stop-mult 0.25 \
-  --mfe-giveback-activation-pct 0.01 \
-  --mfe-giveback-pct 0.20
-```
-
-Result from the 2026-05-04 3-year current-top-160 day audit:
-
-| Metric | Value |
-|---|---:|
-| Trading days | 877 |
-| Trades | 3,056 |
-| Total return | 249.03% |
-| Hit rate | 55.87% |
-| Sharpe-like | 2.92 |
-| Max drawdown | -8.08% |
-| Worst day | -4.53% |
-| Best day | 8.62% |
-| Positive months | 30 / 37 |
-
-Observed patterns:
-
-- Broad BTC/market green days are weaker, but still profitable. This confirms
-  the BTC EMA result: do not add a blunt bullish-regime kill switch.
-- BTC down days were best. The lowest BTC day-return quintile returned 98.88%
-  compounded with a 63.64% hit rate.
-- The strongest useful pre-signal clue is not regime, it is **excess pump**.
-  Winning days had higher selected excess versus market, tradeable universe,
-  and BTC. The low selected-excess buckets were much weaker.
-- Low late-volume acceleration was bad. The lowest selected late-volume-ratio
-  bucket compounded -8.47%; higher late-volume buckets were materially better.
-- Higher VWAP extension was better. The top selected-VWAP-extension bucket
-  compounded 85.94% with a 58.29% hit rate.
-- Broad uniform rallies were not ideal. Very high market-positive-rate days
-  remained positive, but much weaker than broad red/dispersion days.
-- Single-symbol baskets had high average return but the worst tail. Requiring
-  at least two symbols sharply reduced the worst split-day loss, but gave up
-  too much total return to promote immediately.
-
-Candidate follow-up tests, not current live rules:
-
-```text
-selected_excess_vs_market > 8%
-selected_avg_vwap_extension > 3.5%
-selected_avg_late_volume_ratio > 1.0x
-min_symbols >= 2 as a risk sleeve, not as the main return-max sleeve
-```
-
-Quick split check from the day audit, before any dedicated promotion test:
-
-| Candidate | Train | Validation | OOS | Comment |
-|---|---:|---:|---:|---|
-| baseline | 23.86% | 27.38% | 121.22% | Keep as current demo logic |
-| excess market > 8% | 26.57% | 21.50% | 112.34% | Higher average day, lower activity |
-| VWAP extension > 3.5% | 16.28% | 25.04% | 106.36% | Cleaner pump shape, lower return |
-| late volume > 1.0x | 22.05% | 27.03% | 98.55% | Removes weak late-volume days |
-| min symbols >= 2 | 20.79% | 13.20% | 79.59% | Risk control candidate, not return-max |
-
-Conclusion: the next serious research should be an excess-pump / pump-quality
-filter sweep, not another broad market regime filter. Do not promote these
-filters until they pass a proper split/promotion report.
-
-Build a public-archive symbol/date manifest for walk-forward universe research:
-
-```bash
-python -m aggression_carry \
-  --data-root data/daily-close-fade-pit \
-  --config configs/volume_alpha.default.yaml \
-  archive-manifest \
-  --start 2023-05-03 \
-  --end 2026-05-03 \
-  --quote-suffix USDT \
-  --workers 16
-```
-
-Download trade-derived 1m bars for a symbol from Bybit public archives:
-
-```bash
-python -m aggression_carry \
-  --data-root data/daily-close-fade-pit \
-  --config configs/volume_alpha.default.yaml \
-  download-data \
-  --symbols BTCUSDT \
-  --start 2023-05-03 \
-  --end 2023-05-04 \
-  --datasets archive_klines_1m \
-  --archive-url-template 'https://public.bybit.com/trading/{symbol}/{symbol}{date}.csv.gz'
-```
-
-Or consume the manifest directly and resume missing symbol/date rows:
-
-```bash
-python -m aggression_carry \
-  --data-root data/daily-close-fade-pit \
-  --config configs/volume_alpha.default.yaml \
-  archive-download-klines \
-  --start 2023-05-03 \
-  --end 2026-05-03 \
-  --workers 16
-```
-
-For long PIT builds, use bounded batches:
-
-```bash
-python scripts/run_archive_pit_batches.py \
-  --data-root data/daily-close-fade-pit \
-  --start 2023-05-03 \
-  --end 2026-05-03 \
-  --batch-rows 1000 \
-  --workers 16 \
-  --coverage-every 1
-```
-
-Audit archive PIT coverage before running the backtest:
-
-```bash
-python scripts/report_archive_pit_coverage.py \
-  --data-root data/daily-close-fade-pit \
-  --start 2023-05-03 \
-  --end 2026-05-03 \
-  --min-bars-per-day 1200 \
-  --min-usable-rate 0.95
-```
-
-On Windows, the combined PIT bootstrap is:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_archive_pit_bootstrap.ps1 `
-  -DataRoot data\daily-close-fade-pit-20230503-20260503 `
-  -Start 2023-05-03 `
-  -End 2026-05-03 `
-  -ManifestWorkers 16 `
-  -DownloadWorkers 16 `
-  -BatchRows 1000
-```
-
-Run a manifest-gated backtest once the archive-derived 1m bars are present:
-
-```bash
-python -m aggression_carry \
-  --data-root data/daily-close-fade-pit \
-  --config configs/volume_alpha.default.yaml \
-  daily-close-fade \
-  --signal-time 22:15 \
-  --top-n 5 \
-  --gross-exposure 1.0 \
-  --hold-minutes 180 \
-  --pump-filter pump \
-  --liquidity-rank-min 31 \
-  --liquidity-rank-max 150 \
-  --stop-loss-pct 0.20 \
-  --basket-stop-loss-pct 0 \
-  --require-archive-membership
-```
-
-Run the grid:
-
-```bash
-python -m aggression_carry \
-  --data-root data/daily-close-fade-1m-3m \
-  --config configs/volume_alpha.default.yaml \
-  daily-close-fade-grid \
-  --workers 8
-```
-
-Run the same TP/SL/adaptive-exit grid across fixed train/validation/OOS splits:
-
-```bash
-python scripts/run_daily_close_fade_grid_splits.py \
-  --data-root data/daily-close-fade-1m-3y-current-top160-20230503-20260503 \
-  --config configs/volume_alpha.default.yaml \
-  --splits train_2023_2024:2023-05-03:2024-05-03,validation_2024_2025:2024-05-03:2025-05-03,oos_2025_2026:2025-05-03:2026-05-03 \
-  --workers 8
-```
-
-The split grid writes `daily_close_fade_grid_split_summary.md` and ranks exit
-variants by split survival, minimum split return, and a stability score. Use it
-to reject fragile TP/SL settings. It still does not prove alpha by itself; the
-raw score diagnostics and PIT universe coverage have to agree first.
-
-Join the raw split diagnostics with the split-grid exit results before
-promoting a candidate:
-
-```bash
-python scripts/evaluate_close_fade_promotion.py \
-  --diagnostic-summary data/daily-close-fade-1m-3y-current-top160-20230503-20260503/reports/daily_close_fade_splits/daily_close_fade_split_diagnostics_summary.csv \
-  --grid-summary data/daily-close-fade-1m-3y-current-top160-20230503-20260503/reports/daily_close_fade_grid_splits/daily_close_fade_grid_split_summary.csv
-```
-
-This command exits with code `2` when no variant passes both gates. That is
-intentional. A stable exit grid is not enough if the raw entry score does not
-also clear costs across splits.
-
-Windows consolidated research runner:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_research_overnight_suite.ps1 `
-  -Suite daily-close `
-  -Workers 8
-```
-
-Outputs:
-
-```text
-data/research_reports/risk_on_breadth_sizing_5950x/daily_close_fade_sizing_sweep.md
-data/research_reports/risk_on_breadth_sizing_5950x/daily_close_fade_sizing_sweep_summary.csv
-data/research_reports/risk_on_breadth_sizing_5950x/daily_close_fade_sizing_sweep_results.csv
-```
-
-Run the three-sleeve comparison:
-
-```bash
-python -m aggression_carry \
-  --data-root data/daily-close-fade-1m-3m \
-  --config configs/volume_alpha.default.yaml \
-  daily-close-fade-sleeves
-```
-
-Sleeves:
-
-```text
-major_control: ranks 1-30, includes majors, no capacity caps
-core: ranks 31-150, top 5, no capacity caps
-microcap: ranks 151+, top 3, 0.50x gross, minimum turnover filters,
-          and capacity caps for a $10k account
-```
-
-Microcap starting assumptions:
-
-```text
-min_baseline_turnover = 250,000 quote/day
-min_day_turnover = 750,000 quote by signal time
-min_last_60m_turnover = 75,000 quote
-max_position_weight = 20%
-max_trade_notional_pct_of_day_turnover = 0.20%
-max_trade_notional_pct_of_baseline_turnover = 0.50%
-```
-
-Outputs:
-
-```text
-data/.../reports/daily_close_fade_sleeves_report.md
-data/.../reports/daily_close_fade_sleeves_results.csv
-data/.../reports/daily_close_fade_sleeves_trades.csv
-```
-
-## Paper Forward Test
-
-The live observation path is documented in `docs/forward_testing.md`.
-
-It scans the full current Bybit USDT-linear public universe, applies the same
-daily-close fade candidate logic, opens paper shorts only, tracks exits, and can
-send Telegram notifications. It does not use Bybit private keys and does not
-submit demo or live strategy orders. The separate `bybit-demo-probe` command is
-only for tiny demo auth/order create/cancel checks, and `bybit-demo-sync` can
-mirror an existing paper ledger into its own capped demo execution ledger.
-
-Use the sleeve runner for the current paper-forward campaign:
-
-```bash
-python -m aggression_carry \
-  --data-root data/forward-paper \
-  --config configs/volume_alpha.default.yaml \
-  forward-run-sleeves
-```
-
-This runs isolated ledgers for:
-
-```text
-control_top_1_30
-core_31_150
-microcap_151_plus
-```
-
-The aggregate report is:
-
-```text
-data/forward-paper/reports/forward_sleeves_report.md
-```
-
-## Current Caution
-
-One-minute data is much heavier than the 1h volume-rank path. Start with 3
-months, inspect the trade ledger, then scale to 1 year only if the signal clears
-costs and does not depend on one or two symbols.
-
-Do not treat current top-160 or current all-symbol tests as production-grade
-alpha proof. They miss delisted contracts and can overstate results by excluding
-dead symbols that a trader would have seen at the time.
-
-## Current Risk Read
-
-Corrected current-universe benchmarks, still survivorship-biased:
-
-- raw/simple setup: 22:15 UTC, short top 5 pump-like names,
-  `vol_adjusted_day_return`, 180m hold, 20% per-symbol stop, no fixed TP
-- one-year simple/no-adaptive result: +86.69%, Sharpe-like 1.39, max drawdown
-  -28.95%
-- three-year current-universe simple/no-adaptive result: -60.96%, Sharpe-like
-  -0.31, max drawdown -90.38%; the simple entry is not confirmed
-- fixed TP is rejected for now. It raises win rate but cuts too much right tail.
-  VWAP-reversion exits had the same problem.
-- best current default candidate: 22:15 UTC, top 5 pump-like shorts, baseline
-  liquidity ranks 31-150, 180m max hold, 20% disaster stop, no fixed TP, no
-  standard trailing stop, `0.25x` daily-vol trail active after the 15-minute
-  stop delay, and 20% MFE giveback after +1% favorable excursion.
-- liquidity bucket read:
-  - top ranks 1-30 were weaker: 3y +77.96%, Sharpe-like 1.31, max drawdown
-    -21.04%, and negative at 2x costs
-  - ranks 31-150 are the current default: 1y +126.33%, Sharpe-like 4.48, max
-    drawdown -6.48%; 3y +249.03%, Sharpe-like 2.92, max drawdown -8.08%
-  - ranks 151-300 failed on the current data; too few trades and negative
-    returns
-  - all ranks 1-300 still had the highest raw 3y return, +333.35%, but keeping
-    the big names violates the thesis and worsens the top-bucket risk profile
-- cost sensitivity matters. On the 3y current top-160 sample, this adaptive
-  31-150 candidate is +249.03% at base costs, +50.51% at 2x costs, and -35.15%
-  at 3x costs. It needs execution monitoring before risking money.
-- raw diagnostics are sobering. On the 3y current top-160 sample, the narrowed
-  diagnostic produced 256,830 observations across 90 scenarios. Best raw
-  direction was `pump_score`, 22:15 signal, 15-minute entry delay, 60-minute
-  horizon, top 5: mean basket short return +0.036% gross with IC t-stat 1.41.
-  That is below the configured round-trip cost model. The matching costed
-  trade-ledger check with 20% disaster stop and no adaptive exit returned
-  -49.50%. So the naked entry is not tradable as-is.
-- split diagnostics are even stricter. On the same current top-160 sample split
-  into 2023-2024 train, 2024-2025 validation, and 2025-2026 OOS windows, no raw
-  diagnostic scenario passed costs in all three windows. The strongest 2025-2026
-  `pump_score` setups were positive after costs, but they failed in the older
-  windows. This means the current adaptive-exit result is not enough by itself;
-  promotion needs point-in-time universe work and stronger entry conditioning.
-- research artifacts are under
-  `data/research_reports/liquidity_rank_filter/`.
-
-Honest read: the adaptive exit is promising, but it came from grid testing and
-must be treated as a candidate, not truth. The 31-150 liquidity filter better
-matches the pump-and-dump thesis, but the entry only deserves promotion if the
-diagnostic bucket/IC reports show that high scores predict future short returns
-without exit engineering at a size that can pay costs. The current raw
-diagnostic does not clear that bar. This is still not final alpha proof until
-the point-in-time archive universe is complete.
-
-Next research step: treat rank 151+ as a separate microcap sleeve, not as a
-blind extension of the core book. The live scanner will see more rank-151+
-symbols than the current top-160 historical sample, but that edge is only real
-if it survives turnover floors, spread checks, and capacity-limited sizing.
-
-Latest TP/exit sweep summary:
-
-```text
-data/daily-close-fade-1m-1y-20250503-20260503/reports/tp_exit_sweep_summary.md
+22:00 start slices
+update average entry as slices fill
+monitor disaster stop from first fill + 15m
+stop adding and flatten if disaster stop hits
+enable adaptive protection from 23:15
+flatten whole symbol on exit
+no same-symbol re-entry that day
 ```

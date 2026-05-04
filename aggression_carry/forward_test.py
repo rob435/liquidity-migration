@@ -460,6 +460,10 @@ def open_forward_paper_trades(
 ) -> pl.DataFrame:
     if candidates.is_empty():
         return pl.DataFrame()
+    if fade_config.entry_twap_minutes > 0:
+        # Do not fake a TWAP position as one paper fill. The order/ledger layer
+        # needs explicit slice accounting before forward/demo can trade this.
+        return pl.DataFrame()
     now_ms = _floor_minute_ms(_ms_from_dt(_as_utc(now)))
     signal_ts_ms = int(candidates["signal_ts_ms"].head(1).item())
     entry_due_ts_ms = signal_ts_ms + fade_config.entry_delay_minutes * MS_PER_MINUTE

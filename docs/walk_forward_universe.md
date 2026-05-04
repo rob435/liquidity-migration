@@ -1,45 +1,44 @@
 # Walk-Forward Universe Standard
 
-This is the standard for proving the daily-close fade alpha without universe
-selection bias.
+This is the proof path for the daily-close fade. Current-top-160 tests are
+biased benchmarks.
 
-## Problem
+## Bias To Remove
 
-The fast 1-year and 3-year runs that use `universe_top160-current_symbols.txt`
-are useful smoke tests, but they are biased:
+Current-universe runs leak information:
 
-- the symbols are selected from today's Bybit universe
-- delisted contracts are missing
-- current 24h turnover is not information a historical trader had
-- a dead coin that would have appeared in a top-gainer list may be absent
+```text
+today's listings
+today's liquidity ranks
+survivor symbols only
+no delisted/dead contracts
+no historical top-gainer membership
+```
 
-Those tests can say "the machinery works" and "the edge is worth deeper work."
-They cannot say "this is confirmed and tradeable."
+Those tests can show the machinery works. They cannot prove the alpha.
 
-## Correct Test
+## Correct Daily Process
 
-For each UTC day:
+For each UTC date:
 
-1. Build the eligible symbol set from data that existed on or before that day.
-2. Include delisted/dead contracts if they traded on Bybit that day.
-3. Exclude symbols younger than 10 days using launch time when available, or a
-   conservative archive first-seen date when launch time is unavailable.
-4. Use only intraday bars/trades from 00:00 UTC through the signal minute.
-5. Rank day-to-date top gainers at the signal minute.
-6. Apply the sleeve's baseline-liquidity bucket and turnover floors.
-7. Size selected shorts with any capacity caps that would have been known at
-   that time.
-8. Enter the selected shorts after the configured entry delay.
-9. Exit mechanically by max hold, stop, trailing stop, or data end.
-10. Record every trade, actual weight, capacity cap, and exit reason.
+1. Build tradable symbols from information available on or before that day.
+2. Include delisted symbols that traded on Bybit that day.
+3. Exclude symbols younger than 10 days.
+4. Use only bars/trades from 00:00 through 22:00 for ranking.
+5. Rank day-to-date vol-adjusted top gainers at 22:00.
+6. Apply the prior-liquidity bucket and pump-quality filters.
+7. Enter selected shorts with the fixed 22:00-23:00 1m TWAP model.
+8. Use average entry for PnL and the 20% disaster stop.
+9. Exit by whole-symbol flatten: disaster stop, adaptive protection, max hold,
+   or data end.
+10. Record every fill assumption, weight, exit reason, and daily PnL.
 
-No current rank, current turnover, current survivorship list, or future
-performance is allowed in the symbol-selection step.
+No current rank, future liquidity, future listing status, or future return is
+allowed in candidate selection.
 
-## Implemented Path
+## Archive Tooling
 
-`archive-manifest` scans the Bybit public trading archive and writes
-`archive_trade_manifest`, one row per symbol/date archive file.
+Build the Bybit public archive manifest:
 
 ```bash
 python -m aggression_carry \
@@ -52,26 +51,7 @@ python -m aggression_carry \
   --workers 16
 ```
 
-`download-data --datasets archive_klines_1m` downloads the public trade archive
-for the requested symbol/date range and builds `klines_1m` directly from trades.
-This is the route for delisted symbols that Bybit's current REST kline endpoint
-no longer returns.
-
-```bash
-python -m aggression_carry \
-  --data-root data/daily-close-fade-pit \
-  --config configs/volume_alpha.default.yaml \
-  download-data \
-  --symbols BTCUSDT \
-  --start 2023-05-03 \
-  --end 2023-05-04 \
-  --datasets archive_klines_1m \
-  --archive-url-template 'https://public.bybit.com/trading/{symbol}/{symbol}{date}.csv.gz'
-```
-
-For full walk-forward runs, prefer the manifest-driven downloader. It resumes by
-skipping existing `klines_1m/date=.../symbol=...` partitions and records failed
-symbol/date rows in a report instead of silently losing them.
+Download archive-derived 1m bars:
 
 ```bash
 python -m aggression_carry \
@@ -83,10 +63,7 @@ python -m aggression_carry \
   --workers 16
 ```
 
-For long overnight jobs, prefer the bounded batch runner. It repeatedly calls
-the manifest downloader with `missing_only=True`, writes a batch summary, audits
-coverage, and stops if a batch makes no progress because every selected row
-failed:
+For long jobs, use the resumable batch runner:
 
 ```bash
 python scripts/run_archive_pit_batches.py \
@@ -98,8 +75,7 @@ python scripts/run_archive_pit_batches.py \
   --coverage-every 1
 ```
 
-Audit manifest and 1m partition coverage before trusting any walk-forward
-result:
+Audit coverage:
 
 ```bash
 python scripts/report_archive_pit_coverage.py \
@@ -110,62 +86,32 @@ python scripts/report_archive_pit_coverage.py \
   --min-usable-rate 0.95
 ```
 
-The coverage report writes `archive_pit_coverage_rows.csv`,
-`archive_pit_coverage_monthly.csv`, and `archive_pit_coverage_symbols.csv`.
-By default it also requires the next UTC date partition, because a daily-close
-trade entered around 22:15-23:15 UTC may exit after midnight. Rows that lack the
-next-day partition are not counted as usable for close-fade validation.
-When `--min-coverage-rate` or `--min-usable-rate` is set, the command exits
-with code `2` if the data root is not ready.
+The audit should require next-date coverage because trades can exit after
+midnight UTC.
 
-On Windows, use the bootstrap wrapper to run the manifest, resumable archive
-download, and coverage audit in one transcripted job:
+## PIT Backtest Command
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_archive_pit_bootstrap.ps1 `
-  -DataRoot data\daily-close-fade-pit-20230503-20260503 `
-  -Start 2023-05-03 `
-  -End 2026-05-03 `
-  -ManifestWorkers 16 `
-  -DownloadWorkers 16 `
-  -BatchRows 1000
-```
-
-For a first smoke run, add `-MaxSymbols 5 -BatchRows 50 -MaxBatches 1`. For the
-real PIT build, leave `-MaxSymbols` and `-MaxBatches` at `0` so the batch runner
-keeps consuming missing manifest rows until complete or until a no-progress
-failure batch is hit.
-
-`daily-close-fade --require-archive-membership` forces the strategy to select
-only symbol/date pairs present in the archive manifest.
+After coverage is acceptable:
 
 ```bash
 python -m aggression_carry \
   --data-root data/daily-close-fade-pit \
   --config configs/volume_alpha.default.yaml \
   daily-close-fade \
-  --signal-time 23:00 \
-  --top-n 5 \
-  --hold-minutes 90 \
-  --pump-filter pump \
-  --stop-loss-pct 0.05 \
   --require-archive-membership
 ```
 
-## Remaining Work
+Do not change thresholds for the PIT test. The point is to test the frozen
+22:00-23:00 TWAP contract, not optimize again.
 
-The complete 3-year point-in-time test needs enough disk, network time, and CPU
-time to run `archive-download-klines` across every eligible USDT perp
-symbol/date. That will be much larger than the current REST survivor tests but
-is the correct evidence path.
+## Labels
 
-Until that finishes, label results as:
+Use precise labels in reports:
 
-- `current-top160`: biased benchmark
-- `current-all`: reduced ranking bias, still survivorship-biased
-- `archive-pit`: proper point-in-time candidate
+```text
+current-top160: current-listing benchmark, biased
+current-all: wider current-listing benchmark, still biased
+archive-pit: point-in-time candidate test
+```
 
-For rank 151+ microcaps, `archive-pit` is not enough by itself. The test must
-also preserve capacity-limited weights from prior baseline turnover and
-day-to-date turnover; otherwise it can overstate returns by giving full-size
-allocations to symbols that were technically listed but too thin to trade.
+Only `archive-pit` can support promotion.
