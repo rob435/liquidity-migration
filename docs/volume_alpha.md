@@ -306,6 +306,23 @@ python -m aggression_carry \
   --stop-loss-pct 0
 ```
 
+Run the same grid across fixed train/validation/OOS windows:
+
+```bash
+python scripts/run_volume_grid_splits.py \
+  --data-root data/agc-bybit-3y-auto150-20230503-20260503 \
+  --config configs/volume_alpha.default.yaml \
+  --splits train_2023_2024:2023-05-03:2024-05-03,validation_2024_2025:2024-05-03:2025-05-03,oos_2025_2026:2025-05-03:2026-05-03 \
+  --universe-rank-min 81 \
+  --universe-rank-max 160 \
+  --include-reverse \
+  --workers 8
+```
+
+This writes `reports/volume_grid_splits/volume_grid_split_summary.md`. Prefer
+variants with positive return in every split and tolerable worst-split drawdown
+over variants that only win because one historical window was enormous.
+
 GPU note: this is not a CUDA workload yet. The bottleneck is independent Python
 trade simulation variants, so process-level CPU parallelism is the right first
 optimization. GPU work would require a separate cuDF/CuPy rewrite and only makes
