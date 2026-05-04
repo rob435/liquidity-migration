@@ -17,7 +17,13 @@ from .config import (
     VolumeGridConfig,
     load_config,
 )
-from .daily_close_fade import run_daily_close_fade, run_daily_close_fade_grid, run_daily_close_fade_sleeves
+from .daily_close_fade import (
+    DailyCloseFadeDiagnosticsConfig,
+    run_daily_close_fade,
+    run_daily_close_fade_diagnostics,
+    run_daily_close_fade_grid,
+    run_daily_close_fade_sleeves,
+)
 from .demo_cycle import DemoCycleConfig, run_bybit_demo_cycle
 from .demo_execution import (
     DemoCancelAllConfig,
@@ -232,6 +238,33 @@ def build_parser() -> argparse.ArgumentParser:
     close_grid.add_argument("--exclude-symbols", default=None, help="Comma-separated static symbol blocklist.")
     close_grid.add_argument("--include-majors", action="store_true", help="Do not exclude BTC/ETH/SOL/BNB.")
     close_grid.add_argument(
+        "--require-archive-membership",
+        action="store_true",
+        help="Require symbol/date membership in archive_trade_manifest for point-in-time universe tests.",
+    )
+
+    close_diagnostics = subparsers.add_parser(
+        "daily-close-fade-diagnostics",
+        help="Test raw score-to-forward-return shape without TP/SL optimization.",
+    )
+    close_diagnostics.add_argument("--signal-times", default=None, help="Comma-separated UTC signal times, e.g. 22:15,23:00.")
+    close_diagnostics.add_argument("--entry-delays", default=None, help="Comma-separated entry delays in minutes, e.g. 1,15,60.")
+    close_diagnostics.add_argument("--horizons", default=None, help="Comma-separated forward-return horizons in minutes.")
+    close_diagnostics.add_argument("--scores", default=None, help="Comma-separated score columns to test.")
+    close_diagnostics.add_argument("--top-ns", default=None, help="Comma-separated top basket sizes, e.g. 3,5,10.")
+    close_diagnostics.add_argument("--buckets", type=int, default=None, help="Number of score buckets/centiles.")
+    close_diagnostics.add_argument("--min-obs-per-bucket", type=int, default=None, help="Minimum observations before a bucket is trusted.")
+    close_diagnostics.add_argument("--pump-filter", default=None, help="all, pump, or non_pump.")
+    close_diagnostics.add_argument("--min-age-days", type=int, default=None, help="Minimum listing age; default is 10.")
+    close_diagnostics.add_argument("--min-day-turnover", type=float, default=None, help="Minimum day-to-date quote turnover at signal.")
+    close_diagnostics.add_argument("--min-last-60m-turnover", type=float, default=None, help="Minimum last-60m quote turnover at signal.")
+    close_diagnostics.add_argument("--liquidity-lookback-days", type=int, default=None, help="Prior-day baseline liquidity lookback.")
+    close_diagnostics.add_argument("--liquidity-rank-min", type=int, default=None, help="Minimum baseline liquidity rank; 31 skips top 30.")
+    close_diagnostics.add_argument("--liquidity-rank-max", type=int, default=None, help="Maximum baseline liquidity rank; 0 disables ceiling.")
+    close_diagnostics.add_argument("--min-baseline-turnover", type=float, default=None, help="Minimum prior baseline quote turnover.")
+    close_diagnostics.add_argument("--exclude-symbols", default=None, help="Comma-separated static symbol blocklist.")
+    close_diagnostics.add_argument("--include-majors", action="store_true", help="Do not exclude BTC/ETH/SOL/BNB.")
+    close_diagnostics.add_argument(
         "--require-archive-membership",
         action="store_true",
         help="Require symbol/date membership in archive_trade_manifest for point-in-time universe tests.",
@@ -526,6 +559,22 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "daily-close-fade-diagnostics":
+        base_fade_config = _close_fade_base_from_diagnostics_args(config.daily_close_fade, args)
+        diagnostics_config = _close_fade_diagnostics_config_from_args(args)
+        payload = run_daily_close_fade_diagnostics(
+            data_root,
+            diagnostics_config=diagnostics_config,
+            base_fade_config=base_fade_config,
+        )
+        print(
+            "daily close fade diagnostics "
+            f"observations={payload['rows']['observations']} "
+            f"scenarios={payload['rows']['scenarios']} "
+            f"path={data_root / 'reports' / 'daily_close_fade_diagnostics_report.md'}"
+        )
+        return 0
+
     if args.command == "daily-close-fade-sleeves":
         fade_config = _close_fade_config_from_args(config.daily_close_fade, args)
         payload = run_daily_close_fade_sleeves(data_root, fade_config=fade_config, cost_config=config.costs)
@@ -810,6 +859,45 @@ def _close_fade_base_from_grid_args(base: DailyCloseFadeConfig, args: argparse.N
         max_trade_notional_pct_of_baseline_turnover=base.max_trade_notional_pct_of_baseline_turnover,
         exclude_symbols=_close_fade_exclusions(args, base.exclude_symbols),
         require_archive_membership=args.require_archive_membership or base.require_archive_membership,
+    )
+
+
+def _close_fade_base_from_diagnostics_args(base: DailyCloseFadeConfig, args: argparse.Namespace) -> DailyCloseFadeConfig:
+    return replace(
+        base,
+        pump_filter=args.pump_filter if args.pump_filter is not None else base.pump_filter,
+        min_age_days=args.min_age_days if args.min_age_days is not None else base.min_age_days,
+        min_day_turnover=args.min_day_turnover if args.min_day_turnover is not None else base.min_day_turnover,
+        min_last_60m_turnover=(
+            args.min_last_60m_turnover
+            if args.min_last_60m_turnover is not None
+            else base.min_last_60m_turnover
+        ),
+        liquidity_lookback_days=(
+            args.liquidity_lookback_days if args.liquidity_lookback_days is not None else base.liquidity_lookback_days
+        ),
+        liquidity_rank_min=args.liquidity_rank_min if args.liquidity_rank_min is not None else base.liquidity_rank_min,
+        liquidity_rank_max=args.liquidity_rank_max if args.liquidity_rank_max is not None else base.liquidity_rank_max,
+        min_baseline_turnover=(
+            args.min_baseline_turnover if args.min_baseline_turnover is not None else base.min_baseline_turnover
+        ),
+        exclude_symbols=_close_fade_exclusions(args, base.exclude_symbols),
+        require_archive_membership=args.require_archive_membership or base.require_archive_membership,
+    )
+
+
+def _close_fade_diagnostics_config_from_args(args: argparse.Namespace) -> DailyCloseFadeDiagnosticsConfig:
+    base = DailyCloseFadeDiagnosticsConfig()
+    return DailyCloseFadeDiagnosticsConfig(
+        signal_minutes=_csv_signal_minutes(args.signal_times, base.signal_minutes),
+        entry_delay_minutes=_csv_int(args.entry_delays, base.entry_delay_minutes),
+        horizon_minutes=_csv_int(args.horizons, base.horizon_minutes),
+        scores=_csv_str(args.scores, base.scores),
+        top_ns=_csv_int(args.top_ns, base.top_ns),
+        buckets=args.buckets if args.buckets is not None else base.buckets,
+        min_obs_per_bucket=(
+            args.min_obs_per_bucket if args.min_obs_per_bucket is not None else base.min_obs_per_bucket
+        ),
     )
 
 

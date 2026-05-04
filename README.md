@@ -24,7 +24,8 @@ license to rebuild the old composite stack.
   `volume-backtest` trade-ledger backtest.
 - `aggression_carry/daily_close_fade.py`: separate 1m UTC daily-close top-gainer
   short-fade research path, including major/core/microcap sleeve comparison and
-  capacity-limited sizing for thin names.
+  capacity-limited sizing for thin names. It also has raw diagnostics that test
+  score buckets, top baskets, and IC before TP/SL tuning.
 - `aggression_carry/forward_test.py`: public-data paper forward tester for the
   daily-close fade. It scans the live Bybit universe and writes a paper ledger;
   it never submits exchange orders.
@@ -357,6 +358,29 @@ python -m aggression_carry \
   --basket-stop-loss-pcts 0,0.05 \
   --workers 0
 ```
+
+Raw daily-close fade diagnostics, with exits deliberately disabled:
+
+```bash
+python -m aggression_carry \
+  --data-root data/daily-close-fade-1m-3m \
+  --config configs/volume_alpha.default.yaml \
+  daily-close-fade-diagnostics \
+  --signal-times 22:15 \
+  --entry-delays 1,15,60 \
+  --horizons 60,180 \
+  --scores vol_adjusted_day_return,day_return,late_volume_ratio,vwap_extension,pump_score \
+  --top-ns 3,5,10 \
+  --buckets 10 \
+  --pump-filter pump \
+  --liquidity-rank-min 31 \
+  --liquidity-rank-max 150
+```
+
+Use this before trusting TP/SL variants. If high score buckets do not earn more
+forward short return than low score buckets, a profitable exit grid is suspect.
+The wider all-time/all-horizon diagnostic is a batch job, not an interactive
+default.
 
 Point-in-time daily close fade setup:
 

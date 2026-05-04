@@ -93,7 +93,7 @@ hard stop, trailing stop, volatility trail, and MFE-giveback exit. If a stop and
 TP are both active and both touched inside the same 1m OHLC bar, the stop wins
 because the intrabar path is unknown.
 
-Current best adaptive-exit candidate:
+Current best adaptive-exit candidate from the biased current-universe benchmark:
 
 - no fixed TP
 - 20% per-symbol disaster stop
@@ -124,6 +124,22 @@ fades while cutting rebounds after the move has started.
 
 The baseline no-stop result is important. Stops are tested against it rather
 than assumed to help.
+
+Exit tuning is not alpha proof. Before promoting a TP/SL variant, run the raw
+diagnostic command and check that the score itself has a stable cross-sectional
+relationship with forward short returns. If high score buckets do not beat low
+score buckets without exits, a good-looking TP/SL grid is probably overfit.
+
+The diagnostic path deliberately ignores TP, SL, trailing stops, basket stops,
+and compounding. It writes:
+
+```text
+daily_close_fade_diagnostic_observations.csv
+daily_close_fade_diagnostic_buckets.csv
+daily_close_fade_diagnostic_top_baskets.csv
+daily_close_fade_diagnostic_ic.csv
+daily_close_fade_diagnostic_scenarios.csv
+```
 
 `basket_stop` is a research-level portfolio loss cap. It marks the open basket
 minute by minute using 1m closes and closes still-open trades once aggregate
@@ -169,6 +185,28 @@ python -m aggression_carry \
   --mfe-giveback-activation-pct 0.01 \
   --mfe-giveback-pct 0.20
 ```
+
+Run raw anti-overfit diagnostics before trusting exit variants:
+
+```bash
+python -m aggression_carry \
+  --data-root data/daily-close-fade-1m-3m \
+  --config configs/volume_alpha.default.yaml \
+  daily-close-fade-diagnostics \
+  --signal-times 22:15 \
+  --entry-delays 1,15,60 \
+  --horizons 60,180 \
+  --scores vol_adjusted_day_return,day_return,late_volume_ratio,vwap_extension,pump_score \
+  --top-ns 3,5,10 \
+  --buckets 10 \
+  --pump-filter pump \
+  --liquidity-rank-min 31 \
+  --liquidity-rank-max 150
+```
+
+Use the wider `22:15,22:45,23:00` by `1,15,60,120` by `30,60,120,180`
+diagnostic only as a batch job. On the 3-year 1m current top-160 dataset it is
+large enough to be annoying on a laptop.
 
 Build a public-archive symbol/date manifest for walk-forward universe research:
 
@@ -362,27 +400,28 @@ Corrected current-universe benchmarks, still survivorship-biased:
 - cost sensitivity matters. On the 3y current top-160 sample, this adaptive
   31-150 candidate is +249.03% at base costs, +50.51% at 2x costs, and -35.15%
   at 3x costs. It needs execution monitoring before risking money.
+- raw diagnostics are sobering. On the 3y current top-160 sample, the narrowed
+  diagnostic produced 256,830 observations across 90 scenarios. Best raw
+  direction was `pump_score`, 22:15 signal, 15-minute entry delay, 60-minute
+  horizon, top 5: mean basket short return +0.036% gross with IC t-stat 1.41.
+  That is below the configured round-trip cost model. The matching costed
+  trade-ledger check with 20% disaster stop and no adaptive exit returned
+  -49.50%. So the naked entry is not tradable as-is.
 - research artifacts are under
   `data/research_reports/liquidity_rank_filter/`.
 
-Honest read: the adaptive exit is promising; the raw daily-close entry is not.
-The 31-150 liquidity filter better matches the pump-and-dump thesis, but this
-is still not final alpha proof until the point-in-time archive universe is
-complete.
+Honest read: the adaptive exit is promising, but it came from grid testing and
+must be treated as a candidate, not truth. The 31-150 liquidity filter better
+matches the pump-and-dump thesis, but the entry only deserves promotion if the
+diagnostic bucket/IC reports show that high scores predict future short returns
+without exit engineering at a size that can pay costs. The current raw
+diagnostic does not clear that bar. This is still not final alpha proof until
+the point-in-time archive universe is complete.
 
 Next research step: treat rank 151+ as a separate microcap sleeve, not as a
 blind extension of the core book. The live scanner will see more rank-151+
 symbols than the current top-160 historical sample, but that edge is only real
 if it survives turnover floors, spread checks, and capacity-limited sizing.
-- at `0.25x` gross: +20.63%, Sharpe-like 1.39, max drawdown -7.82%
-
-The 5% stop lowers drawdown but damages the return profile. Basket stops at
-3-10% did not improve the current benchmark enough to justify making them the
-lead variant. The locked-in research default is the 20% per-symbol disaster
-stop plus no fixed TP. For paper forward testing, use the 1.5% trailing stop
-after +2% favorable excursion because it materially improved drawdown with a
-small raw-return give-up. Change gross exposure, not the disaster stop, when
-dialing risk down.
 
 Latest TP/exit sweep summary:
 

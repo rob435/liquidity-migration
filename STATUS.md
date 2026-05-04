@@ -31,6 +31,9 @@
 - Daily-close fade now has a three-sleeve comparison path:
   `major_control` ranks 1-30, `core` ranks 31-150, and experimental `microcap`
   ranks 151+ with turnover floors and capacity-limited sizing.
+- Daily-close fade now has an anti-overfit diagnostic path:
+  `daily-close-fade-diagnostics` tests score buckets, top-N baskets, IC, entry
+  delays, and horizons with no TP/SL/trailing/basket-stop logic.
 - No real-money live execution, kill switches, or production exchange order
   submission exist in the active code. Telegram is notification-only for paper
   and demo-status reporting.
@@ -78,12 +81,18 @@
   top-5 pump short with 180m hold, 20% stop, no fixed TP, and no adaptive exit
   is not confirmed: +86.69% on the biased one-year current-universe sample but
   -60.96% on the three-year current top-160 sample.
-- Current daily-close lead: no fixed TP, baseline liquidity ranks 31-150, 20%
-  disaster stop, `0.25x` daily-vol trailing stop active after the 15-minute
-  stop delay, and 20% MFE giveback after a +1% favorable move. The liquidity
-  filter uses prior 7-day average quote turnover, not same-day pump volume.
-  Current-universe reads for 31-150: +126.33% over 1y and +249.03% over 3y
-  current top-160, with 3y max drawdown -8.08%.
+- Current daily-close exit candidate: no fixed TP, baseline liquidity ranks
+  31-150, 20% disaster stop, `0.25x` daily-vol trailing stop active after the
+  15-minute stop delay, and 20% MFE giveback after a +1% favorable move. This
+  came from a biased current-universe grid, so it is not promoted until
+  `daily-close-fade-diagnostics` confirms the raw entry score has the right
+  bucket/IC shape. Current-universe reads for 31-150: +126.33% over 1y and
+  +249.03% over 3y current top-160, with 3y max drawdown -8.08%.
+- New raw diagnostic read: `pump_score`, 22:15 signal, 15-minute entry delay,
+  60-minute horizon, top 5 had the best simple direction at +0.036% gross mean
+  basket return, but that is too small for the configured round-trip costs. A
+  matching costed trade-ledger run with no adaptive exit returned -49.50% over
+  the 3y current top-160 sample. The naked entry is not confirmed.
 - Rank 151+ is now treated as a separate microcap sleeve, not a blind extension
   of the core book. The first implementation requires prior baseline turnover,
   day-to-date turnover, last-hour turnover, and position-size caps tied to a

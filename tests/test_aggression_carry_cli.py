@@ -78,6 +78,43 @@ def test_cli_parses_forward_sleeves_alias(tmp_path: Path) -> None:
     assert args.telegram is True
 
 
+def test_cli_parses_daily_close_fade_diagnostics(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "daily-close-fade-diagnostics",
+            "--signal-times",
+            "22:15,23:00",
+            "--entry-delays",
+            "1,15,60",
+            "--horizons",
+            "60,180",
+            "--scores",
+            "day_return,vol_adjusted_day_return",
+            "--top-ns",
+            "3,5",
+            "--buckets",
+            "5",
+            "--pump-filter",
+            "pump",
+            "--liquidity-rank-min",
+            "31",
+            "--liquidity-rank-max",
+            "150",
+        ]
+    )
+
+    assert args.command == "daily-close-fade-diagnostics"
+    assert args.signal_times == "22:15,23:00"
+    assert args.entry_delays == "1,15,60"
+    assert args.horizons == "60,180"
+    assert args.buckets == 5
+    assert args.pump_filter == "pump"
+    assert args.liquidity_rank_min == 31
+    assert args.liquidity_rank_max == 150
+
+
 def test_cli_parses_bybit_demo_probe(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [

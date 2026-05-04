@@ -7,7 +7,7 @@ import shutil
 import statistics
 import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from itertools import product
 from pathlib import Path
@@ -26,6 +26,17 @@ EPSILON = 1e-12
 _GRID_FEATURES: pl.DataFrame | None = None
 _GRID_DATA_ROOT: str | None = None
 _GRID_COST_BPS: float | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DailyCloseFadeDiagnosticsConfig:
+    signal_minutes: tuple[int, ...] = (22 * 60 + 15,)
+    entry_delay_minutes: tuple[int, ...] = (1, 15, 60)
+    horizon_minutes: tuple[int, ...] = (60, 180)
+    scores: tuple[str, ...] = ("vol_adjusted_day_return", "day_return", "late_volume_ratio", "vwap_extension", "pump_score")
+    top_ns: tuple[int, ...] = (3, 5, 10)
+    buckets: int = 10
+    min_obs_per_bucket: int = 5
 
 
 def run_daily_close_fade(
@@ -67,6 +78,70 @@ def run_daily_close_fade(
     _replace_dataset(features, data_root, "daily_close_fade_features", partition_by=("date", "signal_minute"))
     _replace_dataset(trades, data_root, "daily_close_fade_trades", partition_by=("entry_date", "symbol"))
     _replace_dataset(baskets, data_root, "daily_close_fade_baskets", partition_by=("date",))
+    return payload
+
+
+def run_daily_close_fade_diagnostics(
+    data_root: str | Path,
+    *,
+    diagnostics_config: DailyCloseFadeDiagnosticsConfig | None = None,
+    base_fade_config: DailyCloseFadeConfig | None = None,
+    report_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    diagnostics = diagnostics_config or DailyCloseFadeDiagnosticsConfig()
+    base = base_fade_config or DailyCloseFadeConfig()
+    _validate_close_fade_config(base)
+    _validate_close_fade_diagnostics_config(diagnostics)
+
+    features = build_daily_close_fade_features(data_root, config=base, signal_minutes=diagnostics.signal_minutes)
+    observations = build_close_fade_diagnostic_observations(
+        data_root,
+        features,
+        base_config=base,
+        diagnostics_config=diagnostics,
+    )
+    bucket_rows = summarize_close_fade_diagnostic_buckets(observations, diagnostics_config=diagnostics)
+    top_rows = summarize_close_fade_diagnostic_top_baskets(observations, diagnostics_config=diagnostics)
+    ic_rows = summarize_close_fade_diagnostic_ic(observations)
+    scenario_rows = summarize_close_fade_diagnostic_scenarios(bucket_rows, top_rows, ic_rows, diagnostics_config=diagnostics)
+    payload = {
+        "config": {
+            "base_fade": asdict(base),
+            "diagnostics": asdict(diagnostics),
+        },
+        "rows": {
+            "features": features.height,
+            "observations": observations.height,
+            "bucket_rows": bucket_rows.height,
+            "top_baskets": top_rows.height,
+            "ic_rows": ic_rows.height,
+            "scenarios": scenario_rows.height,
+        },
+        "date_range": _date_range(features, "signal_ts_ms"),
+        "top_scenarios": scenario_rows.head(25).to_dicts() if not scenario_rows.is_empty() else [],
+    }
+
+    output_dir = Path(report_dir or Path(data_root) / "reports")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "daily_close_fade_diagnostics_report.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    (output_dir / "daily_close_fade_diagnostics_report.md").write_text(
+        format_close_fade_diagnostics_report(payload, bucket_rows, top_rows, ic_rows, scenario_rows),
+        encoding="utf-8",
+    )
+    if not observations.is_empty():
+        observations.write_csv(output_dir / "daily_close_fade_diagnostic_observations.csv")
+    if not bucket_rows.is_empty():
+        bucket_rows.write_csv(output_dir / "daily_close_fade_diagnostic_buckets.csv")
+    if not top_rows.is_empty():
+        top_rows.write_csv(output_dir / "daily_close_fade_diagnostic_top_baskets.csv")
+    if not ic_rows.is_empty():
+        ic_rows.write_csv(output_dir / "daily_close_fade_diagnostic_ic.csv")
+    if not scenario_rows.is_empty():
+        scenario_rows.write_csv(output_dir / "daily_close_fade_diagnostic_scenarios.csv")
+
+    _replace_dataset(bucket_rows, data_root, "daily_close_fade_diagnostic_buckets", partition_by=("score", "signal_minute"))
+    _replace_dataset(top_rows, data_root, "daily_close_fade_diagnostic_top_baskets", partition_by=("score", "signal_minute"))
+    _replace_dataset(ic_rows, data_root, "daily_close_fade_diagnostic_ic", partition_by=("score", "signal_minute"))
     return payload
 
 
@@ -406,6 +481,518 @@ def select_close_fade_candidates(features: pl.DataFrame, config: DailyCloseFadeC
         .with_columns(pl.len().over("signal_ts_ms").alias("candidate_count"))
         .filter(pl.col("candidate_count") >= config.min_symbols)
         .sort(["signal_ts_ms", "entry_rank"])
+    )
+
+
+def build_close_fade_diagnostic_observations(
+    data_root: str | Path,
+    features: pl.DataFrame,
+    *,
+    base_config: DailyCloseFadeConfig,
+    diagnostics_config: DailyCloseFadeDiagnosticsConfig,
+) -> pl.DataFrame:
+    if features.is_empty():
+        return _empty_diagnostic_observations()
+    frames: list[pl.DataFrame] = []
+    params = pl.DataFrame(
+        [
+            {"entry_delay_minutes": entry_delay, "horizon_minutes": horizon}
+            for entry_delay in diagnostics_config.entry_delay_minutes
+            for horizon in diagnostics_config.horizon_minutes
+        ],
+        infer_schema_length=None,
+    )
+    bars = _scan_klines_1m(data_root).select(
+        [
+            "symbol",
+            "ts_ms",
+            pl.col("open").cast(pl.Float64).alias("_entry_open"),
+            pl.col("close").cast(pl.Float64).alias("_exit_close"),
+        ]
+    )
+    entry_prices = bars.select(
+        [
+            "symbol",
+            pl.col("ts_ms").alias("_entry_target_ts_ms"),
+            pl.col("_entry_open").alias("entry_price"),
+        ]
+    )
+    exit_prices = bars.select(
+        [
+            "symbol",
+            pl.col("ts_ms").alias("_exit_target_ts_ms"),
+            pl.col("_exit_close").alias("exit_price"),
+        ]
+    )
+    for score in diagnostics_config.scores:
+        if score not in features.columns:
+            raise ValueError(f"Unknown daily close fade diagnostic score: {score}")
+    for signal_minute in diagnostics_config.signal_minutes:
+        scenario_config = replace(base_config, signal_minute=signal_minute)
+        candidates = _diagnostic_candidate_universe(features, scenario_config)
+        if candidates.is_empty():
+            continue
+        score_frames = [
+            candidates.with_columns(
+                [
+                    pl.lit(score).alias("score"),
+                    pl.col(score).cast(pl.Float64).alias("score_value"),
+                ]
+            ).filter(pl.col("score_value").is_not_null())
+            for score in diagnostics_config.scores
+        ]
+        scored_candidates = _concat_frames(score_frames)
+        if scored_candidates.is_empty():
+            continue
+        frame = (
+            scored_candidates.lazy()
+                .join(params.lazy(), how="cross")
+                .with_columns(
+                    [
+                        (
+                            pl.col("signal_ts_ms")
+                            + pl.col("entry_delay_minutes").cast(pl.Int64) * MS_PER_MINUTE
+                        ).alias("entry_target_ts_ms"),
+                        (
+                            pl.col("signal_ts_ms")
+                            + (pl.col("entry_delay_minutes").cast(pl.Int64) + pl.col("horizon_minutes").cast(pl.Int64))
+                            * MS_PER_MINUTE
+                        ).alias("exit_target_ts_ms"),
+                    ]
+                )
+                .join(
+                    entry_prices,
+                    left_on=["symbol", "entry_target_ts_ms"],
+                    right_on=["symbol", "_entry_target_ts_ms"],
+                    how="inner",
+                )
+                .join(
+                    exit_prices,
+                    left_on=["symbol", "exit_target_ts_ms"],
+                    right_on=["symbol", "_exit_target_ts_ms"],
+                    how="inner",
+                )
+                .filter((pl.col("entry_price") > 0.0) & (pl.col("exit_price") > 0.0))
+                .with_columns(
+                    [
+                        pl.col("entry_target_ts_ms").alias("entry_ts_ms"),
+                        pl.col("exit_target_ts_ms").alias("exit_ts_ms"),
+                        ((pl.col("exit_target_ts_ms") - pl.col("entry_target_ts_ms")) / MS_PER_MINUTE).alias(
+                            "actual_horizon_minutes"
+                        ),
+                        ((pl.col("entry_price") - pl.col("exit_price")) / pl.col("entry_price")).alias(
+                            "forward_short_return"
+                        ),
+                        pl.when(pl.col("signal_close") > 0.0)
+                        .then((pl.col("signal_close") - pl.col("entry_price")) / pl.col("signal_close"))
+                        .otherwise(0.0)
+                        .alias("entry_drift_short_return"),
+                        (pl.col("exit_price") < pl.col("entry_price")).alias("hit"),
+                        pl.col("baseline_liquidity_rank").fill_null(0).cast(pl.Int64),
+                        pl.col("baseline_liquidity_turnover").fill_null(0.0),
+                        pl.col("day_turnover").fill_null(0.0),
+                        pl.col("last_60m_turnover").fill_null(0.0),
+                        pl.col("age_days").fill_null(0.0),
+                    ]
+                )
+                .select(
+                    [
+                        "score",
+                        "score_value",
+                        "signal_minute",
+                        "entry_delay_minutes",
+                        "horizon_minutes",
+                        "symbol",
+                        "date",
+                        "signal_ts_ms",
+                        "entry_ts_ms",
+                        "exit_ts_ms",
+                        "actual_horizon_minutes",
+                        "signal_close",
+                        "entry_price",
+                        "exit_price",
+                        "forward_short_return",
+                        "entry_drift_short_return",
+                        "hit",
+                        "day_return",
+                        "vol_adjusted_day_return",
+                        "late_volume_ratio",
+                        "vwap_extension",
+                        "pump_score",
+                        "pump_like",
+                        "baseline_liquidity_rank",
+                        "baseline_liquidity_turnover",
+                        "day_turnover",
+                        "last_60m_turnover",
+                        "age_days",
+                    ]
+                )
+                .collect()
+        )
+        if not frame.is_empty():
+            frames.append(frame)
+    if not frames:
+        return _empty_diagnostic_observations()
+    return _concat_frames(frames).sort(
+        ["score", "signal_minute", "entry_delay_minutes", "horizon_minutes", "signal_ts_ms", "symbol"]
+    )
+
+
+def summarize_close_fade_diagnostic_buckets(
+    observations: pl.DataFrame,
+    *,
+    diagnostics_config: DailyCloseFadeDiagnosticsConfig,
+) -> pl.DataFrame:
+    if observations.is_empty():
+        return pl.DataFrame()
+    scenario_cols = ["score", "signal_minute", "entry_delay_minutes", "horizon_minutes"]
+    ranked = (
+        observations.with_columns(
+            [
+                pl.col("score_value").rank("ordinal").over([*scenario_cols, "signal_ts_ms"]).alias("_score_rank"),
+                pl.len().over([*scenario_cols, "signal_ts_ms"]).alias("_score_count"),
+            ]
+        )
+        .with_columns(
+            (
+                ((pl.col("_score_rank") - 1) * diagnostics_config.buckets / pl.col("_score_count"))
+                .floor()
+                .cast(pl.Int64)
+                + 1
+            ).alias("bucket")
+        )
+        .with_columns(pl.col("bucket").clip(lower_bound=1, upper_bound=diagnostics_config.buckets))
+    )
+    return (
+        ranked.group_by([*scenario_cols, "bucket"], maintain_order=True)
+        .agg(
+            [
+                pl.len().alias("obs"),
+                pl.col("forward_short_return").mean().alias("mean_short_return"),
+                pl.col("forward_short_return").median().alias("median_short_return"),
+                (pl.col("forward_short_return") > 0.0).mean().alias("hit_rate"),
+                pl.col("score_value").mean().alias("mean_score"),
+                pl.col("entry_drift_short_return").mean().alias("mean_entry_drift_short_return"),
+                pl.col("baseline_liquidity_rank").mean().alias("avg_baseline_liquidity_rank"),
+            ]
+        )
+        .with_columns((pl.col("obs") >= diagnostics_config.min_obs_per_bucket).alias("enough_obs"))
+        .sort([*scenario_cols, "bucket"])
+    )
+
+
+def summarize_close_fade_diagnostic_top_baskets(
+    observations: pl.DataFrame,
+    *,
+    diagnostics_config: DailyCloseFadeDiagnosticsConfig,
+) -> pl.DataFrame:
+    if observations.is_empty():
+        return pl.DataFrame()
+    scenario_cols = ["score", "signal_minute", "entry_delay_minutes", "horizon_minutes"]
+    frames = []
+    for top_n in diagnostics_config.top_ns:
+        ranked = observations.with_columns(
+            pl.col("score_value").rank("ordinal", descending=True).over([*scenario_cols, "signal_ts_ms"]).alias("entry_rank")
+        ).filter(pl.col("entry_rank") <= top_n)
+        if ranked.is_empty():
+            continue
+        baskets = (
+            ranked.group_by([*scenario_cols, "signal_ts_ms"], maintain_order=True)
+            .agg(
+                [
+                    pl.col("date").first().alias("date"),
+                    pl.len().alias("selection_count"),
+                    pl.col("forward_short_return").mean().alias("basket_short_return"),
+                    pl.col("entry_drift_short_return").mean().alias("basket_entry_drift_short_return"),
+                ]
+            )
+            .with_columns(pl.lit(top_n).alias("top_n"))
+        )
+        frames.append(
+            baskets.group_by([*scenario_cols, "top_n"], maintain_order=True)
+            .agg(
+                [
+                    pl.len().alias("baskets"),
+                    pl.col("selection_count").sum().alias("obs"),
+                    pl.col("selection_count").mean().alias("avg_selection_count"),
+                    pl.col("basket_short_return").mean().alias("mean_basket_short_return"),
+                    pl.col("basket_short_return").median().alias("median_basket_short_return"),
+                    (pl.col("basket_short_return") > 0.0).mean().alias("basket_hit_rate"),
+                    pl.col("basket_entry_drift_short_return").mean().alias("mean_entry_drift_short_return"),
+                ]
+            )
+        )
+    return _concat_frames(frames).sort([*scenario_cols, "top_n"]) if frames else pl.DataFrame()
+
+
+def summarize_close_fade_diagnostic_ic(observations: pl.DataFrame) -> pl.DataFrame:
+    if observations.is_empty():
+        return pl.DataFrame()
+    scenario_cols = ["score", "signal_minute", "entry_delay_minutes", "horizon_minutes"]
+    group_cols = [*scenario_cols, "signal_ts_ms"]
+    ranked = observations.with_columns(
+        [
+            pl.col("score_value").rank("average").over(group_cols).alias("_score_rank"),
+            pl.col("forward_short_return").rank("average").over(group_cols).alias("_return_rank"),
+        ]
+    )
+    per_signal = (
+        ranked.group_by(group_cols, maintain_order=True)
+        .agg(
+            [
+                pl.col("date").first().alias("date"),
+                pl.len().alias("obs"),
+                pl.col("_score_rank").sum().alias("_sum_x"),
+                pl.col("_return_rank").sum().alias("_sum_y"),
+                (pl.col("_score_rank") * pl.col("_score_rank")).sum().alias("_sum_x2"),
+                (pl.col("_return_rank") * pl.col("_return_rank")).sum().alias("_sum_y2"),
+                (pl.col("_score_rank") * pl.col("_return_rank")).sum().alias("_sum_xy"),
+            ]
+        )
+        .with_columns(
+            [
+                (
+                    pl.col("obs") * pl.col("_sum_xy") - pl.col("_sum_x") * pl.col("_sum_y")
+                ).alias("_corr_num"),
+                (
+                    (
+                        pl.col("obs") * pl.col("_sum_x2") - pl.col("_sum_x") * pl.col("_sum_x")
+                    )
+                    * (
+                        pl.col("obs") * pl.col("_sum_y2") - pl.col("_sum_y") * pl.col("_sum_y")
+                    )
+                ).sqrt().alias("_corr_den"),
+            ]
+        )
+        .with_columns(
+            pl.when(pl.col("_corr_den") > EPSILON)
+            .then(pl.col("_corr_num") / pl.col("_corr_den"))
+            .otherwise(None)
+            .alias("ic")
+        )
+        .filter(pl.col("ic").is_not_null() & pl.col("ic").is_finite())
+        .select([*group_cols, "date", "ic", "obs"])
+    )
+    if per_signal.is_empty():
+        return pl.DataFrame()
+    return (
+        per_signal.group_by(scenario_cols, maintain_order=True)
+        .agg(
+            [
+                pl.len().alias("signal_count"),
+                pl.col("obs").sum().alias("ic_obs"),
+                pl.col("ic").mean().alias("mean_ic"),
+                pl.col("ic").std().alias("ic_std"),
+                (pl.col("ic") > 0.0).mean().alias("positive_ic_rate"),
+            ]
+        )
+        .with_columns(
+            pl.when(pl.col("ic_std").fill_null(0.0) > EPSILON)
+            .then(pl.col("mean_ic") / (pl.col("ic_std") / pl.col("signal_count").sqrt()))
+            .otherwise(0.0)
+            .alias("ic_t_stat")
+        )
+        .sort(scenario_cols)
+    )
+
+
+def summarize_close_fade_diagnostic_scenarios(
+    bucket_rows: pl.DataFrame,
+    top_rows: pl.DataFrame,
+    ic_rows: pl.DataFrame,
+    *,
+    diagnostics_config: DailyCloseFadeDiagnosticsConfig,
+) -> pl.DataFrame:
+    if top_rows.is_empty():
+        return pl.DataFrame()
+    scenario_cols = ["score", "signal_minute", "entry_delay_minutes", "horizon_minutes"]
+    edge_rows: list[dict[str, Any]] = []
+    if not bucket_rows.is_empty():
+        for key, part in bucket_rows.group_by(scenario_cols, maintain_order=True):
+            key_values = key if isinstance(key, tuple) else (key,)
+            low = part.filter(pl.col("bucket") == 1)
+            high = part.filter(pl.col("bucket") == diagnostics_config.buckets)
+            if low.is_empty() or high.is_empty():
+                continue
+            low_row = low.row(0, named=True)
+            high_row = high.row(0, named=True)
+            edge_rows.append(
+                {
+                    **dict(zip(scenario_cols, key_values, strict=True)),
+                    "low_bucket_mean": float(low_row["mean_short_return"]),
+                    "high_bucket_mean": float(high_row["mean_short_return"]),
+                    "high_minus_low": float(high_row["mean_short_return"]) - float(low_row["mean_short_return"]),
+                    "low_bucket_obs": int(low_row["obs"]),
+                    "high_bucket_obs": int(high_row["obs"]),
+                }
+            )
+    edge_frame = pl.DataFrame(edge_rows, infer_schema_length=None) if edge_rows else pl.DataFrame()
+    output = top_rows
+    if not edge_frame.is_empty():
+        output = output.join(edge_frame, on=scenario_cols, how="left")
+    if not ic_rows.is_empty():
+        output = output.join(ic_rows, on=scenario_cols, how="left")
+    optional_columns = {
+        "high_minus_low": pl.Float64,
+        "mean_ic": pl.Float64,
+        "ic_t_stat": pl.Float64,
+        "positive_ic_rate": pl.Float64,
+        "signal_count": pl.Int64,
+        "ic_obs": pl.Int64,
+    }
+    missing_columns = [
+        pl.lit(None, dtype=dtype).alias(name)
+        for name, dtype in optional_columns.items()
+        if name not in output.columns
+    ]
+    if missing_columns:
+        output = output.with_columns(missing_columns)
+    return (
+        output.with_columns(
+            (
+                (pl.col("mean_basket_short_return") > 0.0)
+                & (pl.col("high_minus_low").fill_null(0.0) > 0.0)
+                & (pl.col("mean_ic").fill_null(0.0) > 0.0)
+            ).alias("robust_direction_pass")
+        )
+        .sort(
+            ["robust_direction_pass", "mean_basket_short_return", "high_minus_low", "mean_ic"],
+            descending=[True, True, True, True],
+        )
+    )
+
+
+def _diagnostic_candidate_features(features: pl.DataFrame, config: DailyCloseFadeConfig) -> pl.DataFrame:
+    df = _diagnostic_candidate_universe(features, config)
+    return df.filter(pl.col(config.score).is_not_null()).sort(["signal_ts_ms", "symbol"])
+
+
+def _diagnostic_candidate_universe(features: pl.DataFrame, config: DailyCloseFadeConfig) -> pl.DataFrame:
+    df = features.filter((pl.col("eligible")) & (pl.col("signal_minute") == config.signal_minute))
+    df = df.filter(_candidate_liquidity_filter_expr(config))
+    if config.pump_filter == "pump":
+        df = df.filter(pl.col("pump_like"))
+    elif config.pump_filter == "non_pump":
+        df = df.filter(~pl.col("pump_like"))
+    elif config.pump_filter != "all":
+        raise ValueError(f"Unknown pump_filter: {config.pump_filter}")
+    return df.sort(["signal_ts_ms", "symbol"])
+
+
+def _diagnostic_forward_return_row(
+    data_root: str | Path,
+    feature: dict[str, Any],
+    *,
+    score: str,
+    entry_delay_minutes: int,
+    horizon_minutes: int,
+    partition_cache: dict[tuple[str, str], pl.DataFrame],
+) -> dict[str, Any] | None:
+    symbol = str(feature["symbol"])
+    signal_ts_ms = int(feature["signal_ts_ms"])
+    entry_target_ts_ms = signal_ts_ms + entry_delay_minutes * MS_PER_MINUTE
+    exit_target_ts_ms = entry_target_ts_ms + horizon_minutes * MS_PER_MINUTE
+    window = _load_trade_window(data_root, symbol, entry_target_ts_ms, exit_target_ts_ms, partition_cache)
+    if window.is_empty():
+        return None
+    ordered = window.sort("ts_ms")
+    entry_candidates = ordered.filter(pl.col("ts_ms") >= entry_target_ts_ms)
+    if entry_candidates.is_empty():
+        return None
+    entry_bar = entry_candidates.row(0, named=True)
+    exit_candidates = ordered.filter(pl.col("ts_ms") >= int(entry_bar["ts_ms"]))
+    if exit_candidates.is_empty():
+        return None
+    exit_bar = exit_candidates.tail(1).row(0, named=True)
+    actual_minutes = (int(exit_bar["ts_ms"]) - int(entry_bar["ts_ms"])) / MS_PER_MINUTE
+    if actual_minutes <= 0.0 or actual_minutes + EPSILON < horizon_minutes * 0.8:
+        return None
+    entry_price = float(entry_bar["open"])
+    exit_price = float(exit_bar["close"])
+    if entry_price <= 0.0 or exit_price <= 0.0:
+        return None
+    signal_close = float(feature.get("signal_close") or 0.0)
+    return {
+        "score": score,
+        "score_value": float(feature.get(score) or 0.0),
+        "signal_minute": int(feature["signal_minute"]),
+        "entry_delay_minutes": entry_delay_minutes,
+        "horizon_minutes": horizon_minutes,
+        "symbol": symbol,
+        "date": str(feature["date"]),
+        "signal_ts_ms": signal_ts_ms,
+        "entry_ts_ms": int(entry_bar["ts_ms"]),
+        "exit_ts_ms": int(exit_bar["ts_ms"]),
+        "actual_horizon_minutes": actual_minutes,
+        "signal_close": signal_close,
+        "entry_price": entry_price,
+        "exit_price": exit_price,
+        "forward_short_return": _short_return(entry_price, exit_price),
+        "entry_drift_short_return": _short_return(signal_close, entry_price) if signal_close > 0.0 else 0.0,
+        "hit": exit_price < entry_price,
+        "day_return": float(feature.get("day_return") or 0.0),
+        "vol_adjusted_day_return": float(feature.get("vol_adjusted_day_return") or 0.0),
+        "late_volume_ratio": float(feature.get("late_volume_ratio") or 0.0),
+        "vwap_extension": float(feature.get("vwap_extension") or 0.0),
+        "pump_score": int(feature.get("pump_score") or 0),
+        "pump_like": bool(feature.get("pump_like")),
+        "baseline_liquidity_rank": int(feature.get("baseline_liquidity_rank") or 0),
+        "baseline_liquidity_turnover": float(feature.get("baseline_liquidity_turnover") or 0.0),
+        "day_turnover": float(feature.get("day_turnover") or 0.0),
+        "last_60m_turnover": float(feature.get("last_60m_turnover") or 0.0),
+        "age_days": float(feature.get("age_days") or 0.0),
+    }
+
+
+def _validate_close_fade_diagnostics_config(config: DailyCloseFadeDiagnosticsConfig) -> None:
+    if not config.signal_minutes:
+        raise ValueError("daily close fade diagnostics need at least one signal minute")
+    if not config.entry_delay_minutes or any(item < 0 for item in config.entry_delay_minutes):
+        raise ValueError("daily close fade diagnostics entry delays must be non-negative")
+    if not config.horizon_minutes or any(item <= 0 for item in config.horizon_minutes):
+        raise ValueError("daily close fade diagnostics horizons must be positive")
+    if not config.scores:
+        raise ValueError("daily close fade diagnostics need at least one score")
+    if not config.top_ns or any(item <= 0 for item in config.top_ns):
+        raise ValueError("daily close fade diagnostics top_ns must be positive")
+    if config.buckets < 2:
+        raise ValueError("daily close fade diagnostics buckets must be at least 2")
+    if config.min_obs_per_bucket < 1:
+        raise ValueError("daily close fade diagnostics min_obs_per_bucket must be positive")
+
+
+def _empty_diagnostic_observations() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "score": pl.Series([], dtype=pl.String),
+            "score_value": pl.Series([], dtype=pl.Float64),
+            "signal_minute": pl.Series([], dtype=pl.Int64),
+            "entry_delay_minutes": pl.Series([], dtype=pl.Int64),
+            "horizon_minutes": pl.Series([], dtype=pl.Int64),
+            "symbol": pl.Series([], dtype=pl.String),
+            "date": pl.Series([], dtype=pl.String),
+            "signal_ts_ms": pl.Series([], dtype=pl.Int64),
+            "entry_ts_ms": pl.Series([], dtype=pl.Int64),
+            "exit_ts_ms": pl.Series([], dtype=pl.Int64),
+            "actual_horizon_minutes": pl.Series([], dtype=pl.Float64),
+            "signal_close": pl.Series([], dtype=pl.Float64),
+            "entry_price": pl.Series([], dtype=pl.Float64),
+            "exit_price": pl.Series([], dtype=pl.Float64),
+            "forward_short_return": pl.Series([], dtype=pl.Float64),
+            "entry_drift_short_return": pl.Series([], dtype=pl.Float64),
+            "hit": pl.Series([], dtype=pl.Boolean),
+            "day_return": pl.Series([], dtype=pl.Float64),
+            "vol_adjusted_day_return": pl.Series([], dtype=pl.Float64),
+            "late_volume_ratio": pl.Series([], dtype=pl.Float64),
+            "vwap_extension": pl.Series([], dtype=pl.Float64),
+            "pump_score": pl.Series([], dtype=pl.Int64),
+            "pump_like": pl.Series([], dtype=pl.Boolean),
+            "baseline_liquidity_rank": pl.Series([], dtype=pl.Int64),
+            "baseline_liquidity_turnover": pl.Series([], dtype=pl.Float64),
+            "day_turnover": pl.Series([], dtype=pl.Float64),
+            "last_60m_turnover": pl.Series([], dtype=pl.Float64),
+            "age_days": pl.Series([], dtype=pl.Float64),
+        }
     )
 
 
@@ -874,6 +1461,121 @@ def iter_close_fade_grid_configs(
             )
         )
     return configs
+
+
+def format_close_fade_diagnostics_report(
+    payload: dict[str, Any],
+    bucket_rows: pl.DataFrame,
+    top_rows: pl.DataFrame,
+    ic_rows: pl.DataFrame,
+    scenario_rows: pl.DataFrame,
+) -> str:
+    base = payload.get("config", {}).get("base_fade", {})
+    diagnostics = payload.get("config", {}).get("diagnostics", {})
+    lines = [
+        "# Daily Close Fade Diagnostics",
+        "",
+        "This report tests whether high daily-close pump scores predict later short returns.",
+        "It intentionally ignores TP, SL, trailing stops, basket stops, and compounding.",
+        "",
+        f"Rows: features={payload.get('rows', {}).get('features', 0)} "
+        f"observations={payload.get('rows', {}).get('observations', 0)} "
+        f"scenarios={payload.get('rows', {}).get('scenarios', 0)}",
+        f"Date range: {payload.get('date_range', {}).get('start')} to {payload.get('date_range', {}).get('end')}",
+        "",
+        "## Candidate Filters",
+        "",
+        f"- pump_filter: {base.get('pump_filter', 'all')}",
+        f"- min_age_days: {base.get('min_age_days', 10)}",
+        f"- baseline_liquidity: lookback={base.get('liquidity_lookback_days', 7)}d "
+        f"rank={base.get('liquidity_rank_min', 1)}-{base.get('liquidity_rank_max', 0) or 'unbounded'}",
+        f"- turnover_filters: day>={base.get('min_day_turnover', 0.0):,.0f} "
+        f"last_60m>={base.get('min_last_60m_turnover', 0.0):,.0f} "
+        f"baseline>={base.get('min_baseline_turnover', 0.0):,.0f}",
+        f"- require_archive_membership: {base.get('require_archive_membership', False)}",
+        "",
+        "## Diagnostic Grid",
+        "",
+        f"- signal_times: {', '.join(_format_signal_minute(item) for item in diagnostics.get('signal_minutes', ())) or 'none'} UTC",
+        f"- entry_delays_minutes: {', '.join(str(item) for item in diagnostics.get('entry_delay_minutes', ())) or 'none'}",
+        f"- horizons_minutes: {', '.join(str(item) for item in diagnostics.get('horizon_minutes', ())) or 'none'}",
+        f"- scores: {', '.join(diagnostics.get('scores', ())) or 'none'}",
+        f"- top_ns: {', '.join(str(item) for item in diagnostics.get('top_ns', ())) or 'none'}",
+        f"- buckets: {diagnostics.get('buckets', 0)}",
+        "",
+        "## Best Raw Direction Scenarios",
+        "",
+        "| Rank | Pass | Mean Basket Short | High-Low Bucket | Mean IC | IC t-stat | Signal | Delay | Horizon | Top N | Score | Baskets | Obs |",
+        "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|",
+    ]
+    for index, row in enumerate(scenario_rows.head(25).to_dicts() if not scenario_rows.is_empty() else [], start=1):
+        lines.append(
+            f"| {index} | {row.get('robust_direction_pass', False)} | "
+            f"{_pct(row.get('mean_basket_short_return'))} | {_pct(row.get('high_minus_low'))} | "
+            f"{_num(row.get('mean_ic'), 4)} | {_num(row.get('ic_t_stat'), 2)} | "
+            f"{_format_signal_minute(int(row.get('signal_minute', 0)))} | "
+            f"{row.get('entry_delay_minutes', 0)} | {row.get('horizon_minutes', 0)} | "
+            f"{row.get('top_n', 0)} | {row.get('score', '')} | "
+            f"{row.get('baskets', 0)} | {row.get('obs', 0)} |"
+        )
+    if scenario_rows.is_empty():
+        lines.append("|  |  |  |  |  |  |  |  |  |  |  |  |  |")
+
+    lines.extend(
+        [
+            "",
+            "## IC Summary",
+            "",
+            "| Signal | Delay | Horizon | Score | Mean IC | IC t-stat | Positive IC Rate | Signal Count | Obs |",
+            "|---:|---:|---:|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in ic_rows.sort(["mean_ic", "ic_t_stat"], descending=[True, True]).head(25).to_dicts() if not ic_rows.is_empty() else []:
+        lines.append(
+            f"| {_format_signal_minute(int(row.get('signal_minute', 0)))} | "
+            f"{row.get('entry_delay_minutes', 0)} | {row.get('horizon_minutes', 0)} | {row.get('score', '')} | "
+            f"{_num(row.get('mean_ic'), 4)} | {_num(row.get('ic_t_stat'), 2)} | "
+            f"{_pct(row.get('positive_ic_rate'))} | {row.get('signal_count', 0)} | {row.get('ic_obs', 0)} |"
+        )
+
+    lines.extend(
+        [
+            "",
+            "## Bucket Check",
+            "",
+            "High score buckets should have higher short returns than low score buckets. If that shape is absent, TP/SL optimization is probably fitting noise.",
+            "",
+            "| Signal | Delay | Horizon | Score | Bucket | Mean Short | Hit Rate | Obs | Enough Obs |",
+            "|---:|---:|---:|---|---:|---:|---:|---:|---|",
+        ]
+    )
+    if not bucket_rows.is_empty():
+        buckets = diagnostics.get("buckets", 10)
+        extreme = bucket_rows.filter(pl.col("bucket").is_in([1, int(buckets)]))
+        for row in extreme.sort(["score", "signal_minute", "entry_delay_minutes", "horizon_minutes", "bucket"]).head(60).to_dicts():
+            lines.append(
+                f"| {_format_signal_minute(int(row.get('signal_minute', 0)))} | "
+                f"{row.get('entry_delay_minutes', 0)} | {row.get('horizon_minutes', 0)} | {row.get('score', '')} | "
+                f"{row.get('bucket', 0)} | {_pct(row.get('mean_short_return'))} | {_pct(row.get('hit_rate'))} | "
+                f"{row.get('obs', 0)} | {row.get('enough_obs', False)} |"
+            )
+
+    lines.extend(
+        [
+            "",
+            "## Output Files",
+            "",
+            "```text",
+            "daily_close_fade_diagnostic_observations.csv",
+            "daily_close_fade_diagnostic_buckets.csv",
+            "daily_close_fade_diagnostic_top_baskets.csv",
+            "daily_close_fade_diagnostic_ic.csv",
+            "daily_close_fade_diagnostic_scenarios.csv",
+            "```",
+            "",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def format_close_fade_report(payload: dict[str, Any]) -> str:
@@ -1558,6 +2260,20 @@ def _format_grid_row(row: dict[str, Any]) -> list[str]:
         f"- MFE giveback: {row.get('mfe_giveback_pct', 0.0):.2%} after {row.get('mfe_giveback_activation_pct', 0.0):.2%}",
         f"- VWAP reversion: {row.get('vwap_reversion_pct', 0.0):.2%}",
     ]
+
+
+def _num(value: Any, digits: int = 2) -> str:
+    number = float(value) if value is not None else 0.0
+    if not math.isfinite(number):
+        return "n/a"
+    return f"{number:.{digits}f}"
+
+
+def _pct(value: Any) -> str:
+    number = float(value) if value is not None else 0.0
+    if not math.isfinite(number):
+        return "n/a"
+    return f"{number:.2%}"
 
 
 def _format_signal_minute(value: int) -> str:

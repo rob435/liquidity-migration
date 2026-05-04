@@ -7,8 +7,10 @@ import polars as pl
 from aggression_carry import daily_close_fade as daily_close_fade_module
 from aggression_carry.config import CostConfig, DailyCloseFadeConfig, DailyCloseFadeGridConfig
 from aggression_carry.daily_close_fade import (
+    DailyCloseFadeDiagnosticsConfig,
     _short_return,
     run_daily_close_fade,
+    run_daily_close_fade_diagnostics,
     run_daily_close_fade_grid,
     run_daily_close_fade_sleeves,
 )
@@ -276,6 +278,65 @@ def test_daily_close_fade_grid_runs_small_fixture(tmp_path) -> None:
     assert payload["rows"] == 8
     assert grid.height == 8
     assert grid["total_return"].max() > 0.0
+
+
+def test_daily_close_fade_diagnostics_reports_raw_score_shape(tmp_path) -> None:
+    _write_close_fade_fixture(tmp_path)
+
+    payload = run_daily_close_fade_diagnostics(
+        tmp_path,
+        base_fade_config=DailyCloseFadeConfig(
+            signal_minute=23 * 60,
+            score="day_return",
+            pump_filter="all",
+            min_age_days=10,
+            exclude_symbols=(),
+        ),
+        diagnostics_config=DailyCloseFadeDiagnosticsConfig(
+            signal_minutes=(23 * 60,),
+            entry_delay_minutes=(1,),
+            horizon_minutes=(60,),
+            scores=("day_return",),
+            top_ns=(1, 2),
+            buckets=2,
+            min_obs_per_bucket=1,
+        ),
+    )
+
+    buckets = read_dataset(tmp_path, "daily_close_fade_diagnostic_buckets").sort("bucket")
+    top_baskets = read_dataset(tmp_path, "daily_close_fade_diagnostic_top_baskets")
+    ic = read_dataset(tmp_path, "daily_close_fade_diagnostic_ic")
+
+    assert payload["rows"]["observations"] == 3
+    assert buckets.height == 2
+    assert buckets.filter(pl.col("bucket") == 2)["mean_short_return"].item() > buckets.filter(pl.col("bucket") == 1)[
+        "mean_short_return"
+    ].item()
+    assert top_baskets["mean_basket_short_return"].max() > 0.0
+    assert ic["mean_ic"].item() > 0.0
+    assert (tmp_path / "reports" / "daily_close_fade_diagnostics_report.md").exists()
+
+
+def test_daily_close_fade_diagnostics_handles_sparse_bucket_grid(tmp_path) -> None:
+    _write_close_fade_fixture(tmp_path)
+
+    payload = run_daily_close_fade_diagnostics(
+        tmp_path,
+        base_fade_config=DailyCloseFadeConfig(min_age_days=10, exclude_symbols=()),
+        diagnostics_config=DailyCloseFadeDiagnosticsConfig(
+            signal_minutes=(23 * 60,),
+            entry_delay_minutes=(1,),
+            horizon_minutes=(60,),
+            scores=("day_return",),
+            top_ns=(2,),
+            buckets=10,
+            min_obs_per_bucket=1,
+        ),
+    )
+
+    assert payload["rows"]["scenarios"] == 1
+    assert payload["top_scenarios"][0]["robust_direction_pass"] is False
+    assert payload["top_scenarios"][0]["high_minus_low"] is None
 
 
 def test_daily_close_fade_grid_uses_thread_backend_on_windows(tmp_path, monkeypatch) -> None:
