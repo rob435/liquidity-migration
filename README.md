@@ -5,27 +5,29 @@ trading bot.
 
 ## Current Truth
 
-Active research lead: **daily-close short fade with 22:00-23:00 TWAP entry**.
+Active research lead: **daily-close short fade with 22:01-23:00 TWAP entry**.
 
 Current promoted research contract:
 
 ```text
 Universe: Bybit USDT linear perps
-Ranking time: 22:00 UTC, using only data available at 22:00
-Entry: equal 1m TWAP from 22:00 through 22:59
+Ranking time: 22:00 UTC, using only bars ended by 22:00
+Entry: 60 equal 1m TWAP slices from 22:01 through 23:00
 Entry price: average fill price
 Exit: whole-symbol flatten, no same-symbol re-entry that day
 Max hold: 180m after TWAP completes
 Disaster stop: 20% above average entry, active immediately from first fill
 Adaptive protection: 0.25x daily-vol trail plus 20% MFE giveback after +1% MFE,
-  active only after final add + 15m
+  active only after final scheduled add + 15m
 Sizing: score-capped, max 80% basket weight per symbol
-Liquidity: prior 7d baseline quote-turnover ranks 31-150
+Liquidity: prior 7d baseline quote-turnover ranks 31+; top 30 excluded
 Candidate gate: coin excess vs market >= 8%, VWAP extension >= 3.5%,
   late-volume ratio >= 1.0x
 ```
 
-The latest local current-top-160 benchmark is deliberately labeled as biased:
+The latest local current-top-160 benchmark is deliberately labeled as biased
+and should be rerun before comparison under the strict 22:00 bar-availability
+convention:
 
 ```text
 Data: current top-160 Bybit symbols, 2023-05-15 to 2026-05-02
@@ -42,17 +44,16 @@ survivorship-biased. The point-in-time archive path is still the proof gate.
 
 ## Important Boundary
 
-Backtest TWAP is implemented. Forward/demo TWAP slicing is intentionally blocked
-until explicit per-slice paper and demo order accounting exists. The code must
-not fake this as one 22:00 or 23:00 fill.
+Backtest, forward paper, and Bybit demo shadowing now use explicit TWAP child
+slices. The code must not fake this as one 22:00 or 23:00 fill. The 22:00 rank
+uses only minute-open bars that have ended by 22:00; the first entry child is
+still the 22:01 open.
 
 ## Main Files
 
 - [configs/volume_alpha.default.yaml](configs/volume_alpha.default.yaml): active
   research config.
 - [docs/daily_close_fade.md](docs/daily_close_fade.md): active strategy notes.
-- [docs/walk_forward_universe.md](docs/walk_forward_universe.md): PIT proof
-  standard.
 - [docs/forward_testing.md](docs/forward_testing.md): forward/demo boundary.
 - [docs/volume_alpha.md](docs/volume_alpha.md): secondary volume-alpha research.
 - [docs/bybit_aggression_carry_system_codex_spec.md](docs/bybit_aggression_carry_system_codex_spec.md):
@@ -65,12 +66,6 @@ python3 -m venv .venv
 . .venv/bin/activate
 pip install -r requirements.txt
 pytest -q
-```
-
-Windows:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\windows_setup.ps1
 ```
 
 ## Run Current Daily-Close TWAP Backtest
@@ -95,6 +90,7 @@ Core outputs:
 ```text
 data/daily-close-fade-1m-3y-current-top160-20230503-20260503/reports/daily_close_fade_report.md
 data/daily-close-fade-1m-3y-current-top160-20230503-20260503/daily_close_fade_trades/
+data/daily-close-fade-1m-3y-current-top160-20230503-20260503/daily_close_fade_entry_fills/
 data/daily-close-fade-1m-3y-current-top160-20230503-20260503/daily_close_fade_baskets/
 ```
 
@@ -105,31 +101,19 @@ data/research_reports/daily_close_twap_2200_2300_current_top160_20260504/trades_
 data/research_reports/daily_close_twap_2200_2300_current_top160_20260504/equity_curve.svg
 ```
 
-## Windows Overnight Suite
+## Active Helper Scripts
 
-```powershell
-cd C:\Users\user\Desktop\MODEL05042026
-git pull --rebase --autostash
-powershell -ExecutionPolicy Bypass -File .\scripts\run_research_overnight_suite.ps1 -Suite both -Workers 8
-```
-
-If the daily-close 1m dataset is missing, `-Suite both` skips that leg and still
-runs the volume sweep. Use `-Suite daily-close` when missing 1m data should be a
-hard failure.
-
-The volume leg now defaults to the `promotion` preset. That preset tests actual
-volume-change scores plus dollar-volume rank, then runs train/validation/OOS
-promotion gates by liquidity bucket. It is slower than the old headline grid,
-but much more useful.
-
-Each overnight suite also writes an auditable research record:
+Only the current runtime and volume-alpha helpers are kept:
 
 ```text
-data/research_reports/research_log/research_log.md
-data/research_reports/research_log/runs/<run_id>.md
+scripts/install_bybit_demo_systemd.sh
+scripts/run_bybit_demo_engine.sh
+scripts/run_bybit_demo_cycle_with_audit.sh
+scripts/run_forward_signal_with_audit.sh
+scripts/run_volume_bucket_sweep.py
+scripts/run_volume_grid_splits.py
+scripts/evaluate_volume_promotion.py
 ```
-
-Review that log before changing promoted configs or rerunning a similar idea.
 
 ## Point-In-Time Proof
 

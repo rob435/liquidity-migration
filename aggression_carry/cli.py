@@ -22,9 +22,8 @@ from .daily_close_fade import (
     run_daily_close_fade,
     run_daily_close_fade_diagnostics,
     run_daily_close_fade_grid,
-    run_daily_close_fade_sleeves,
 )
-from .demo_cycle import DemoCycleConfig, run_bybit_demo_cycle
+from .demo_cycle import DEMO_CYCLE_SLEEVES, DemoCycleConfig, run_bybit_demo_cycle
 from .demo_execution import (
     DemoCancelAllConfig,
     DemoFlattenConfig,
@@ -37,7 +36,7 @@ from .demo_execution import (
 )
 from .downloaders import download_market_data, parse_date_ms
 from .forward_audit import run_forward_demo_audit
-from .forward_test import run_forward_once, run_forward_report, run_forward_scan, run_forward_sleeves
+from .forward_test import default_forward_sleeves, run_forward_once, run_forward_report, run_forward_scan, run_forward_sleeves
 from .ingestion import generate_fixture_data
 from .universe import run_discover_universe
 from .volume_alpha import run_volume_alpha
@@ -113,6 +112,17 @@ def build_parser() -> argparse.ArgumentParser:
     archive_klines.add_argument("--max-rows", type=int, default=0, help="Maximum symbol/date manifest rows to process; 0 disables.")
     archive_klines.add_argument("--workers", type=int, default=8, help="Concurrent archive download workers.")
     archive_klines.add_argument("--include-existing", action="store_true", help="Rebuild rows even when the kline partition already exists.")
+    archive_klines.add_argument(
+        "--min-existing-bars",
+        type=int,
+        default=1440,
+        help="With missing-only mode, rebuild partitions with fewer than this many 1m bars; default requires a dense UTC day.",
+    )
+    archive_klines.add_argument(
+        "--discard-archives-after-success",
+        action="store_true",
+        help="Delete locally downloaded raw trade archives after dense 1m klines are written successfully.",
+    )
 
     subparsers.add_parser("volume-alpha", help="Run isolated daily volume-only alpha research sweep.")
 
@@ -274,7 +284,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Test raw score-to-forward-return shape without TP/SL optimization.",
     )
     close_diagnostics.add_argument("--signal-times", default=None, help="Comma-separated UTC signal times, e.g. 22:00,23:00.")
-    close_diagnostics.add_argument("--entry-delays", default=None, help="Comma-separated entry delays in minutes, e.g. 0,15,60.")
+    close_diagnostics.add_argument("--entry-delays", default=None, help="Comma-separated entry delays in minutes, e.g. 1,15,60.")
     close_diagnostics.add_argument("--horizons", default=None, help="Comma-separated forward-return horizons in minutes.")
     close_diagnostics.add_argument("--scores", default=None, help="Comma-separated score columns to test.")
     close_diagnostics.add_argument("--top-ns", default=None, help="Comma-separated top basket sizes, e.g. 3,5,10.")
@@ -299,17 +309,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Require symbol/date membership in archive_trade_manifest for point-in-time universe tests.",
     )
 
-    close_sleeves = subparsers.add_parser(
-        "daily-close-fade-sleeves",
-        help="Compare major-control, core, and microcap daily-close fade sleeves.",
-    )
-    _add_forward_fade_args(close_sleeves)
-    close_sleeves.add_argument(
-        "--require-archive-membership",
-        action="store_true",
-        help="Require symbol/date membership in archive_trade_manifest for point-in-time universe tests.",
-    )
-
     forward_scan = subparsers.add_parser("forward-scan", help="Scan the live Bybit universe for paper daily-close candidates.")
     _add_forward_fade_args(forward_scan)
     _add_forward_runtime_args(forward_scan)
@@ -317,16 +316,40 @@ def build_parser() -> argparse.ArgumentParser:
     forward_run = subparsers.add_parser("forward-run", help="Run one public-data paper forward-test cycle.")
     _add_forward_fade_args(forward_run)
     _add_forward_runtime_args(forward_run)
-    forward_run.add_argument("--telegram", action="store_true", help="Send a Telegram paper-test update if env vars are configured.")
+    forward_run.add_argument(
+        "--telegram",
+        action="store_true",
+        help="Accepted for compatibility; routine paper updates are disabled. Use forward-audit --telegram for entries, exits, EOD PnL, and critical errors.",
+    )
 
     forward_sleeves = subparsers.add_parser(
         "forward-run-sleeves",
         aliases=["forward-sleeves"],
-        help="Run core, microcap, and control paper forward-test sleeves.",
+        help="Run the canonical paper forward-test sleeve.",
     )
     _add_forward_fade_args(forward_sleeves)
     _add_forward_runtime_args(forward_sleeves)
-    forward_sleeves.add_argument("--telegram", action="store_true", help="Send one Telegram summary for all paper sleeves.")
+    forward_sleeves.add_argument(
+        "--telegram",
+        action="store_true",
+        help="Accepted for compatibility; routine sleeve summaries are disabled. Use forward-audit --telegram for entries, exits, EOD PnL, and critical errors.",
+    )
+    forward_sleeves.add_argument(
+        "--forward-mode",
+        choices=("scan", "mark-only", "open-from-scan"),
+        default="scan",
+        help="Forward sleeve lifecycle mode. scan ranks from public data; open-from-scan uses cached 22:00 candidates; mark-only only updates existing paper trades.",
+    )
+    forward_sleeves.add_argument(
+        "--require-first-slice",
+        action="store_true",
+        help="Only open cached-scan paper trades at the first scheduled TWAP slice.",
+    )
+    forward_sleeves.add_argument(
+        "--sleeves",
+        default=None,
+        help="Comma-separated forward sleeves to run. Only rank_31_plus is canonical.",
+    )
 
     demo_probe = subparsers.add_parser(
         "bybit-demo-probe",
@@ -352,20 +375,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     demo_sync = subparsers.add_parser(
         "bybit-demo-sync",
-        help="Mirror forward_paper_trades into a tiny capped Bybit demo execution ledger.",
+        help="Mirror forward_paper_trades into a Bybit demo execution ledger.",
     )
-    demo_sync.add_argument("--max-order-notional", type=float, default=10.0, help="Hard cap per demo order in USDT.")
     demo_sync.add_argument("--max-new-orders", type=int, default=5, help="Maximum new demo orders this run.")
-    demo_sync.add_argument(
-        "--max-total-new-notional",
-        type=float,
-        default=50.0,
-        help="Hard cap across all new demo orders this run.",
-    )
-    demo_sync.add_argument("--use-wallet-balance", action="store_true", help="Scale demo order notional from current Bybit demo wallet equity.")
-    demo_sync.add_argument("--wallet-balance-fraction", type=float, default=1.0, help="Fraction of wallet equity used as sizing base.")
-    demo_sync.add_argument("--max-order-notional-pct-equity", type=float, default=0.80, help="Dynamic per-order cap as fraction of wallet sizing equity.")
-    demo_sync.add_argument("--max-total-new-notional-pct-equity", type=float, default=1.0, help="Dynamic total-new-entry cap as fraction of wallet sizing equity.")
     demo_sync.add_argument(
         "--price-offset-bps",
         type=float,
@@ -378,7 +390,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=5,
         help="Cancel stale open entry orders after this many minutes. 0 cancels on the next sync; negative disables.",
     )
-    demo_sync.add_argument("--submit-orders", action="store_true", help="Actually submit capped demo orders.")
+    demo_sync.add_argument("--submit-orders", action="store_true", help="Actually submit demo orders.")
     demo_sync.add_argument("--no-market-exit", action="store_true", help="Do not submit reduce-only market exits for detected demo positions.")
     demo_sync.add_argument(
         "--i-understand-demo-sync",
@@ -390,9 +402,8 @@ def build_parser() -> argparse.ArgumentParser:
         "bybit-demo-cycle",
         help="Run forward paper sleeves, then sync each sleeve into an isolated Bybit demo ledger.",
     )
-    _add_forward_fade_args(demo_cycle)
-    _add_forward_runtime_args(demo_cycle)
-    demo_cycle.add_argument("--submit-orders", action="store_true", help="Actually submit capped demo orders.")
+    demo_cycle.add_argument("--now", default=None, help="Override current UTC time for deterministic tests, ISO format.")
+    demo_cycle.add_argument("--submit-orders", action="store_true", help="Actually submit demo orders.")
     demo_cycle.add_argument(
         "--i-understand-demo-sync",
         action="store_true",
@@ -401,20 +412,9 @@ def build_parser() -> argparse.ArgumentParser:
     demo_cycle.add_argument(
         "--telegram",
         action="store_true",
-        help="Accepted for compatibility; routine cycle Telegram is disabled. Use forward-audit --telegram for entries, exits, and EOD PnL.",
+        help="Accepted for compatibility; routine cycle Telegram is disabled. Use forward-audit --telegram for entries, exits, EOD PnL, and critical errors.",
     )
-    demo_cycle.add_argument("--max-order-notional", type=float, default=10.0, help="Hard cap per demo order in USDT.")
     demo_cycle.add_argument("--max-new-orders", type=int, default=5, help="Maximum new demo orders per sleeve this run.")
-    demo_cycle.add_argument(
-        "--max-total-new-notional",
-        type=float,
-        default=50.0,
-        help="Hard cap across all new demo orders per sleeve this run.",
-    )
-    demo_cycle.add_argument("--use-wallet-balance", action="store_true", help="Scale demo order notional from current Bybit demo wallet equity.")
-    demo_cycle.add_argument("--wallet-balance-fraction", type=float, default=1.0, help="Fraction of wallet equity used as sizing base.")
-    demo_cycle.add_argument("--max-order-notional-pct-equity", type=float, default=0.80, help="Dynamic per-order cap as fraction of wallet sizing equity.")
-    demo_cycle.add_argument("--max-total-new-notional-pct-equity", type=float, default=1.0, help="Dynamic total-new-entry cap as fraction of wallet sizing equity.")
     demo_cycle.add_argument(
         "--cancel-stale-minutes",
         type=int,
@@ -428,15 +428,44 @@ def build_parser() -> argparse.ArgumentParser:
         help="Post-only entry distance from touch. Shorts place above ask; longs below bid.",
     )
     demo_cycle.add_argument("--no-market-exit", action="store_true", help="Do not submit reduce-only market exits for detected demo positions.")
-    demo_cycle.add_argument("--active-start", default="22:05", help="UTC active-window start, default 22:05.")
+    demo_cycle.add_argument(
+        "--demo-entry-sleeves",
+        default=None,
+        help="Comma-separated sleeves allowed to submit new demo entries. Default: rank_31_plus. Use 'all' for all research sleeves or empty for exits-only.",
+    )
+    demo_cycle.add_argument("--entry-leverage", type=float, default=1.0, help="Bybit demo entry leverage to enforce before entry orders. 0 disables.")
+    demo_cycle.add_argument("--active-start", default="22:00", help="UTC active-window start, default 22:00.")
     demo_cycle.add_argument("--active-end", default="02:30", help="UTC active-window end, default 02:30.")
     demo_cycle.add_argument("--ignore-active-window", action="store_true", help="Run scan/sync even outside the default active window.")
+    demo_cycle.add_argument(
+        "--forward-mode",
+        choices=("scan", "mark-only", "open-from-scan"),
+        default="open-from-scan",
+        help="Forward lifecycle mode before demo sync. Demo timers should use open-from-scan, not scan, so minute-order sync is not blocked by full-universe ranking.",
+    )
+    demo_cycle.add_argument(
+        "--require-first-slice",
+        action="store_true",
+        default=True,
+        help="In open-from-scan mode, refuse to open paper trades unless now is exactly the first 22:01 TWAP slice.",
+    )
+    demo_cycle.add_argument(
+        "--allow-noncontiguous-twap",
+        action="store_true",
+        help="Allow later demo entry slices even if an earlier slice has no demo order attempt. Default refuses late-start partial TWAPs.",
+    )
+    demo_cycle.add_argument("--fast-protection-seconds", type=float, default=0.0, help=argparse.SUPPRESS)
 
     demo_cancel_all = subparsers.add_parser(
         "bybit-demo-cancel-all",
         help="Cancel all open Bybit demo orders for the configured settle coin or supplied symbols.",
     )
     demo_cancel_all.add_argument("--symbols", default="", help="Optional comma-separated symbols; empty cancels all USDT demo orders.")
+    demo_cancel_all.add_argument(
+        "--i-understand-demo-cancel-all",
+        action="store_true",
+        help="Required. Confirms this will cancel open Bybit demo orders.",
+    )
 
     demo_flatten = subparsers.add_parser(
         "bybit-demo-flatten",
@@ -450,6 +479,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("forward-report", help="Write a report from the paper forward-test ledger.")
     forward_audit = subparsers.add_parser("forward-audit", help="Join paper forward-test trades to Bybit demo execution orders.")
+    forward_audit.add_argument("--now", default=None, help="Override current UTC time for replay/testing.")
     forward_audit.add_argument(
         "--telegram",
         action="store_true",
@@ -521,6 +551,8 @@ def main(argv: list[str] | None = None) -> int:
             max_rows=args.max_rows,
             workers=args.workers,
             missing_only=not args.include_existing,
+            min_existing_bars=args.min_existing_bars,
+            discard_archives_after_success=args.discard_archives_after_success,
             name=args.name,
         )
         payload = run_archive_klines_download(data_root, config=kline_config)
@@ -529,6 +561,7 @@ def main(argv: list[str] | None = None) -> int:
             f"rows={payload['rows']} "
             f"downloaded={payload['downloaded']} "
             f"cached={payload['cached']} "
+            f"archives_deleted={payload.get('archives_deleted', 0)} "
             f"failed={payload['failures']} "
             f"path={data_root / 'reports' / ('archive_klines_' + args.name + '.md')}"
         )
@@ -623,20 +656,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
-    if args.command == "daily-close-fade-sleeves":
-        fade_config = _close_fade_config_from_args(config.daily_close_fade, args)
-        payload = run_daily_close_fade_sleeves(data_root, fade_config=fade_config, cost_config=config.costs)
-        print(
-            "daily close fade sleeves "
-            f"rows={payload['rows']['results']} "
-            f"trades={payload['rows']['trades']} "
-            f"path={data_root / 'reports' / 'daily_close_fade_sleeves_report.md'}"
-        )
-        return 0
-
     if args.command == "forward-scan":
-        fade_config = _close_fade_config_from_args(config.daily_close_fade, args)
-        forward_config = _forward_config_from_args(config.forward_test, args)
+        fade_config = config.daily_close_fade
+        forward_config = config.forward_test
         payload = run_forward_scan(
             data_root,
             config=config,
@@ -682,6 +704,9 @@ def main(argv: list[str] | None = None) -> int:
             forward_config=forward_config,
             now=_parse_now(args.now),
             send_telegram=args.telegram or forward_config.send_telegram,
+            sleeves=_forward_sleeves_arg(args.sleeves, fade_config),
+            mode=_forward_mode(args.forward_mode),
+            require_first_slice=args.require_first_slice,
         )
         print(
             "forward sleeves "
@@ -713,13 +738,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "bybit-demo-sync":
         sync_config = DemoSyncConfig(
-            max_order_notional=args.max_order_notional,
             max_new_orders=args.max_new_orders,
-            max_total_new_notional=args.max_total_new_notional,
-            use_wallet_balance=args.use_wallet_balance,
-            wallet_balance_fraction=args.wallet_balance_fraction,
-            max_order_notional_pct_equity=args.max_order_notional_pct_equity,
-            max_total_new_notional_pct_equity=args.max_total_new_notional_pct_equity,
             price_offset_bps=args.price_offset_bps,
             cancel_stale_minutes=args.cancel_stale_minutes,
             submit_orders=args.submit_orders,
@@ -741,22 +760,22 @@ def main(argv: list[str] | None = None) -> int:
         fade_config = _close_fade_config_from_args(config.daily_close_fade, args)
         forward_config = _forward_config_from_args(config.forward_test, args)
         cycle_config = DemoCycleConfig(
-            max_order_notional=args.max_order_notional,
             max_new_orders=args.max_new_orders,
-            max_total_new_notional=args.max_total_new_notional,
-            use_wallet_balance=args.use_wallet_balance,
-            wallet_balance_fraction=args.wallet_balance_fraction,
-            max_order_notional_pct_equity=args.max_order_notional_pct_equity,
-            max_total_new_notional_pct_equity=args.max_total_new_notional_pct_equity,
             cancel_stale_minutes=args.cancel_stale_minutes,
             price_offset_bps=args.price_offset_bps,
             submit_orders=args.submit_orders,
             confirmed=args.i_understand_demo_sync,
             allow_market_exit=not args.no_market_exit,
             send_telegram=args.telegram,
+            entry_sleeves=_demo_entry_sleeves(args.demo_entry_sleeves),
+            entry_leverage=args.entry_leverage,
             active_start_minute=_signal_minute(args.active_start),
             active_end_minute=_signal_minute(args.active_end),
             ignore_active_window=args.ignore_active_window,
+            forward_mode=_forward_mode(args.forward_mode),
+            require_first_slice=args.require_first_slice,
+            require_contiguous_twap=not args.allow_noncontiguous_twap,
+            fast_protection_seconds=args.fast_protection_seconds,
         )
         payload = run_bybit_demo_cycle(
             data_root,
@@ -780,7 +799,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if payload["summary"]["failed_sleeves"] else 0
 
     if args.command == "bybit-demo-cancel-all":
-        cancel_config = DemoCancelAllConfig(symbols=_csv_str(args.symbols, ()))
+        cancel_config = DemoCancelAllConfig(
+            symbols=_csv_str(args.symbols, ()),
+            confirmed=args.i_understand_demo_cancel_all,
+        )
         payload = run_bybit_demo_cancel_all(data_root, config=config, cancel_config=cancel_config)
         print(
             "bybit demo cancel all "
@@ -814,13 +836,15 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "forward-audit":
-        payload = run_forward_demo_audit(data_root, send_telegram=args.telegram)
+        payload = run_forward_demo_audit(data_root, send_telegram=args.telegram, now=_parse_now(args.now))
         print(
             "forward demo audit "
             f"trades={payload['rows']['trade_audit_rows']} "
             f"daily={payload['rows']['daily_rows']} "
             f"demo_entries_filled={payload['summary']['demo_entries_filled']} "
+            f"slice_fill_rate={payload['summary']['demo_slice_fill_rate'] or 0.0:.2%} "
             f"missed={payload['summary']['demo_missed_entries']} "
+            f"slice_missed={payload['summary']['demo_slices_missing']} "
             f"telegram={payload['telegram']['reason']} "
             f"path={data_root / 'reports' / 'forward_demo_audit_report.md'}"
         )
@@ -830,116 +854,87 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _close_fade_config_from_args(base: DailyCloseFadeConfig, args: argparse.Namespace) -> DailyCloseFadeConfig:
+    signal_time = getattr(args, "signal_time", None)
     return DailyCloseFadeConfig(
-        signal_minute=_signal_minute(args.signal_time) if args.signal_time is not None else base.signal_minute,
-        top_n=args.top_n if args.top_n is not None else base.top_n,
-        hold_minutes=args.hold_minutes if args.hold_minutes is not None else base.hold_minutes,
-        entry_delay_minutes=args.entry_delay_minutes if args.entry_delay_minutes is not None else base.entry_delay_minutes,
+        signal_minute=_signal_minute(signal_time) if signal_time is not None else base.signal_minute,
+        top_n=_arg(args, "top_n", base.top_n),
+        hold_minutes=_arg(args, "hold_minutes", base.hold_minutes),
+        entry_delay_minutes=_arg(args, "entry_delay_minutes", base.entry_delay_minutes),
         entry_twap_minutes=(
-            args.entry_twap_minutes if args.entry_twap_minutes is not None else base.entry_twap_minutes
+            _arg(args, "entry_twap_minutes", base.entry_twap_minutes)
         ),
-        gross_exposure=args.gross_exposure if args.gross_exposure is not None else base.gross_exposure,
-        score=args.score if args.score is not None else base.score,
-        pump_filter=args.pump_filter if args.pump_filter is not None else base.pump_filter,
-        min_age_days=args.min_age_days if args.min_age_days is not None else base.min_age_days,
-        min_day_turnover=args.min_day_turnover if args.min_day_turnover is not None else base.min_day_turnover,
+        gross_exposure=_arg(args, "gross_exposure", base.gross_exposure),
+        score=_arg(args, "score", base.score),
+        pump_filter=_arg(args, "pump_filter", base.pump_filter),
+        min_age_days=_arg(args, "min_age_days", base.min_age_days),
+        min_day_turnover=_arg(args, "min_day_turnover", base.min_day_turnover),
         min_last_60m_turnover=(
-            args.min_last_60m_turnover
-            if args.min_last_60m_turnover is not None
-            else base.min_last_60m_turnover
+            _arg(args, "min_last_60m_turnover", base.min_last_60m_turnover)
         ),
         vol_lookback_days=base.vol_lookback_days,
         liquidity_lookback_days=(
-            args.liquidity_lookback_days if args.liquidity_lookback_days is not None else base.liquidity_lookback_days
+            _arg(args, "liquidity_lookback_days", base.liquidity_lookback_days)
         ),
-        liquidity_rank_min=args.liquidity_rank_min if args.liquidity_rank_min is not None else base.liquidity_rank_min,
-        liquidity_rank_max=args.liquidity_rank_max if args.liquidity_rank_max is not None else base.liquidity_rank_max,
+        liquidity_rank_min=_arg(args, "liquidity_rank_min", base.liquidity_rank_min),
+        liquidity_rank_max=_arg(args, "liquidity_rank_max", base.liquidity_rank_max),
         min_baseline_turnover=(
-            args.min_baseline_turnover if args.min_baseline_turnover is not None else base.min_baseline_turnover
+            _arg(args, "min_baseline_turnover", base.min_baseline_turnover)
         ),
-        account_equity=args.account_equity if args.account_equity is not None else base.account_equity,
+        account_equity=_arg(args, "account_equity", base.account_equity),
         max_position_weight=(
-            args.max_position_weight if args.max_position_weight is not None else base.max_position_weight
+            _arg(args, "max_position_weight", base.max_position_weight)
         ),
         coin_excess_vs_market_min=(
-            getattr(args, "coin_excess_vs_market_min", None)
-            if getattr(args, "coin_excess_vs_market_min", None) is not None
-            else base.coin_excess_vs_market_min
+            _arg(args, "coin_excess_vs_market_min", base.coin_excess_vs_market_min)
         ),
         coin_vwap_extension_min=(
-            getattr(args, "coin_vwap_extension_min", None)
-            if getattr(args, "coin_vwap_extension_min", None) is not None
-            else base.coin_vwap_extension_min
+            _arg(args, "coin_vwap_extension_min", base.coin_vwap_extension_min)
         ),
         coin_late_volume_ratio_min=(
-            getattr(args, "coin_late_volume_ratio_min", None)
-            if getattr(args, "coin_late_volume_ratio_min", None) is not None
-            else base.coin_late_volume_ratio_min
+            _arg(args, "coin_late_volume_ratio_min", base.coin_late_volume_ratio_min)
         ),
         position_sizing=(
-            getattr(args, "position_sizing", None)
-            if getattr(args, "position_sizing", None) is not None
-            else base.position_sizing
+            _arg(args, "position_sizing", base.position_sizing)
         ),
         score_weight_power=(
-            getattr(args, "score_weight_power", None)
-            if getattr(args, "score_weight_power", None) is not None
-            else base.score_weight_power
+            _arg(args, "score_weight_power", base.score_weight_power)
         ),
         max_trade_notional_pct_of_day_turnover=(
-            args.max_trade_notional_pct_day_turnover
-            if args.max_trade_notional_pct_day_turnover is not None
-            else base.max_trade_notional_pct_of_day_turnover
+            _arg(args, "max_trade_notional_pct_day_turnover", base.max_trade_notional_pct_of_day_turnover)
         ),
         max_trade_notional_pct_of_baseline_turnover=(
-            args.max_trade_notional_pct_baseline_turnover
-            if args.max_trade_notional_pct_baseline_turnover is not None
-            else base.max_trade_notional_pct_of_baseline_turnover
+            _arg(args, "max_trade_notional_pct_baseline_turnover", base.max_trade_notional_pct_of_baseline_turnover)
         ),
-        stop_loss_pct=args.stop_loss_pct if args.stop_loss_pct is not None else base.stop_loss_pct,
-        take_profit_pct=args.take_profit_pct if args.take_profit_pct is not None else base.take_profit_pct,
+        stop_loss_pct=_arg(args, "stop_loss_pct", base.stop_loss_pct),
+        take_profit_pct=_arg(args, "take_profit_pct", base.take_profit_pct),
         basket_stop_loss_pct=(
-            args.basket_stop_loss_pct
-            if args.basket_stop_loss_pct is not None
-            else base.basket_stop_loss_pct
+            _arg(args, "basket_stop_loss_pct", base.basket_stop_loss_pct)
         ),
-        trailing_stop_pct=args.trailing_stop_pct if args.trailing_stop_pct is not None else base.trailing_stop_pct,
+        trailing_stop_pct=_arg(args, "trailing_stop_pct", base.trailing_stop_pct),
         trailing_activation_pct=(
-            args.trailing_activation_pct
-            if args.trailing_activation_pct is not None
-            else base.trailing_activation_pct
+            _arg(args, "trailing_activation_pct", base.trailing_activation_pct)
         ),
         vol_trailing_stop_mult=(
-            args.vol_trailing_stop_mult
-            if args.vol_trailing_stop_mult is not None
-            else base.vol_trailing_stop_mult
+            _arg(args, "vol_trailing_stop_mult", base.vol_trailing_stop_mult)
         ),
         vol_trailing_activation_mult=(
-            args.vol_trailing_activation_mult
-            if args.vol_trailing_activation_mult is not None
-            else base.vol_trailing_activation_mult
+            _arg(args, "vol_trailing_activation_mult", base.vol_trailing_activation_mult)
         ),
         mfe_giveback_activation_pct=(
-            args.mfe_giveback_activation_pct
-            if args.mfe_giveback_activation_pct is not None
-            else base.mfe_giveback_activation_pct
+            _arg(args, "mfe_giveback_activation_pct", base.mfe_giveback_activation_pct)
         ),
-        mfe_giveback_pct=args.mfe_giveback_pct if args.mfe_giveback_pct is not None else base.mfe_giveback_pct,
+        mfe_giveback_pct=_arg(args, "mfe_giveback_pct", base.mfe_giveback_pct),
         vwap_reversion_pct=(
-            args.vwap_reversion_pct if args.vwap_reversion_pct is not None else base.vwap_reversion_pct
+            _arg(args, "vwap_reversion_pct", base.vwap_reversion_pct)
         ),
-        stop_delay_minutes=args.stop_delay_minutes if args.stop_delay_minutes is not None else base.stop_delay_minutes,
+        stop_delay_minutes=_arg(args, "stop_delay_minutes", base.stop_delay_minutes),
         profit_protection_delay_minutes=(
-            getattr(args, "profit_protection_delay_minutes", None)
-            if getattr(args, "profit_protection_delay_minutes", None) is not None
-            else base.profit_protection_delay_minutes
+            _arg(args, "profit_protection_delay_minutes", base.profit_protection_delay_minutes)
         ),
         twap_stop_adding_pct=(
-            getattr(args, "twap_stop_adding_pct", None)
-            if getattr(args, "twap_stop_adding_pct", None) is not None
-            else base.twap_stop_adding_pct
+            _arg(args, "twap_stop_adding_pct", base.twap_stop_adding_pct)
         ),
-        cost_multiplier=args.cost_multiplier if args.cost_multiplier is not None else base.cost_multiplier,
+        cost_multiplier=_arg(args, "cost_multiplier", base.cost_multiplier),
         min_symbols=base.min_symbols,
         exclude_symbols=_close_fade_exclusions(args, base.exclude_symbols),
         require_archive_membership=getattr(args, "require_archive_membership", False) or base.require_archive_membership,
@@ -1135,6 +1130,12 @@ def _add_forward_fade_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--top-n", type=int, default=None, help="Number of top gainers to paper-short.")
     parser.add_argument("--hold-minutes", type=int, default=None, help="Mechanical holding period in minutes.")
     parser.add_argument("--entry-delay-minutes", type=int, default=None, help="Minutes after signal bar before paper entry.")
+    parser.add_argument(
+        "--entry-twap-minutes",
+        type=int,
+        default=None,
+        help="Equal-weight 1m TWAP entry slice count. 0 disables TWAP and uses one fill.",
+    )
     parser.add_argument("--gross-exposure", type=float, default=None, help="Total paper basket gross exposure.")
     parser.add_argument("--score", default=None, help="day_return or vol_adjusted_day_return.")
     parser.add_argument("--pump-filter", default=None, help="all, pump, or non_pump.")
@@ -1205,19 +1206,38 @@ def _add_forward_runtime_args(parser: argparse.ArgumentParser) -> None:
 
 def _forward_config_from_args(base: ForwardTestConfig, args: argparse.Namespace) -> ForwardTestConfig:
     return ForwardTestConfig(
-        name=args.name if args.name is not None else base.name,
-        min_turnover_24h=args.min_turnover_24h if args.min_turnover_24h is not None else base.min_turnover_24h,
-        max_spread_bps=args.max_spread_bps if args.max_spread_bps is not None else base.max_spread_bps,
-        min_open_interest_value=(
-            args.min_open_interest_value if args.min_open_interest_value is not None else base.min_open_interest_value
-        ),
-        max_symbols=args.max_symbols if args.max_symbols is not None else base.max_symbols,
-        workers=args.workers if args.workers is not None else base.workers,
-        max_entry_lag_minutes=(
-            args.max_entry_lag_minutes if args.max_entry_lag_minutes is not None else base.max_entry_lag_minutes
-        ),
+        name=_arg(args, "name", base.name),
+        min_turnover_24h=_arg(args, "min_turnover_24h", base.min_turnover_24h),
+        max_spread_bps=_arg(args, "max_spread_bps", base.max_spread_bps),
+        min_open_interest_value=_arg(args, "min_open_interest_value", base.min_open_interest_value),
+        max_symbols=_arg(args, "max_symbols", base.max_symbols),
+        workers=_arg(args, "workers", base.workers),
+        max_entry_lag_minutes=_arg(args, "max_entry_lag_minutes", base.max_entry_lag_minutes),
         send_telegram=getattr(args, "telegram", False) or base.send_telegram,
     )
+
+
+def _forward_mode(value: str) -> str:
+    return value.replace("-", "_")
+
+
+def _arg(args: argparse.Namespace, name: str, default):
+    value = getattr(args, name, None)
+    return default if value is None else value
+
+
+def _forward_sleeves_arg(value: str | None, fade: DailyCloseFadeConfig) -> dict[str, DailyCloseFadeConfig] | None:
+    if value is None:
+        return None
+    text = value.strip()
+    if not text or text.lower() == "all":
+        return None
+    names = _csv_str(text, ())
+    available = default_forward_sleeves(fade)
+    invalid = sorted(set(names).difference(available))
+    if invalid:
+        raise ValueError(f"unknown forward sleeve(s): {', '.join(invalid)}")
+    return {name: available[name] for name in names}
 
 
 def _apply_universe_backtest_args(base: VolumeBacktestConfig, args: argparse.Namespace) -> VolumeBacktestConfig:
@@ -1238,7 +1258,7 @@ def _apply_universe_backtest_args(base: VolumeBacktestConfig, args: argparse.Nam
 
 
 def _exclude_symbols_from_args(args: argparse.Namespace, default: tuple[str, ...]) -> tuple[str, ...]:
-    symbols = _csv_str(args.exclude_symbols, default)
+    symbols = _csv_str(getattr(args, "exclude_symbols", None), default)
     if getattr(args, "exclude_majors", False):
         symbols = tuple(dict.fromkeys((*symbols, *DEFAULT_MAJOR_SYMBOLS)))
     return symbols
@@ -1246,7 +1266,7 @@ def _exclude_symbols_from_args(args: argparse.Namespace, default: tuple[str, ...
 
 def _close_fade_exclusions(args: argparse.Namespace, default: tuple[str, ...]) -> tuple[str, ...]:
     base = () if getattr(args, "include_majors", False) else default
-    return _csv_str(args.exclude_symbols, base)
+    return _csv_str(getattr(args, "exclude_symbols", None), base)
 
 
 def _signal_minute(value: str) -> int:
@@ -1271,6 +1291,17 @@ def _csv_str(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
     if value is None:
         return default
     return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def _demo_entry_sleeves(value: str | None) -> tuple[str, ...]:
+    if value is None:
+        return ("rank_31_plus",)
+    text = value.strip()
+    if not text:
+        return ()
+    if text.lower() == "all":
+        return DEMO_CYCLE_SLEEVES
+    return _csv_str(text, ())
 
 
 def _csv_int(value: str | None, default: tuple[int, ...]) -> tuple[int, ...]:

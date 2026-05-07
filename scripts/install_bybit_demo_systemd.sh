@@ -10,6 +10,8 @@ ENV_FILE="${ENV_FILE:-$ENV_DIR/bybit-demo.env}"
 PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
 DATA_ROOT="${DATA_ROOT:-data/forward-paper}"
 CONFIG_PATH="${CONFIG_PATH:-configs/volume_alpha.default.yaml}"
+RUNNER="$REPO_ROOT/scripts/run_bybit_demo_engine.sh"
+SIGNAL_RUNNER="$REPO_ROOT/scripts/run_forward_signal_with_audit.sh"
 
 if [[ ! -x "$PYTHON_BIN" ]]; then
   echo "Python not found or not executable: $PYTHON_BIN" >&2
@@ -17,6 +19,14 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
+if [[ ! -x "$RUNNER" ]]; then
+  echo "Runner not found or not executable: $RUNNER" >&2
+  chmod +x "$RUNNER"
+fi
+if [[ ! -x "$SIGNAL_RUNNER" ]]; then
+  echo "Signal runner not found or not executable: $SIGNAL_RUNNER" >&2
+  chmod +x "$SIGNAL_RUNNER"
+fi
 sudo install -d -m 0750 -o root -g "$SERVICE_GROUP" "$ENV_DIR"
 
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -27,27 +37,73 @@ BYBIT_DEMO_API_KEY=
 BYBIT_DEMO_API_SECRET=
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
+DEMO_ENTRY_SLEEVES=rank_31_plus
+DEMO_ENTRY_LEVERAGE=1
+FORWARD_SIGNAL_SLEEVES=rank_31_plus
+FORWARD_WORKERS=
 EOF
   sudo chown root:"$SERVICE_GROUP" "$ENV_FILE"
   sudo chmod 0640 "$ENV_FILE"
   echo "Created env template: $ENV_FILE"
-  echo "Edit it before starting the timer."
+  echo "Edit it before starting the service."
+fi
+
+ensure_env_default() {
+  local key="$1"
+  local value="$2"
+  if ! sudo grep -q "^${key}=" "$ENV_FILE"; then
+    printf '%s=%s\n' "$key" "$value" | sudo tee -a "$ENV_FILE" >/dev/null
+  fi
+}
+
+remove_env_regex() {
+  local pattern="$1"
+  sudo sed -i.bak -E "/^(${pattern})=/d" "$ENV_FILE"
+}
+
+ensure_env_default DEMO_ENTRY_SLEEVES rank_31_plus
+ensure_env_default DEMO_ENTRY_LEVERAGE 1
+ensure_env_default FORWARD_SIGNAL_SLEEVES rank_31_plus
+remove_env_regex 'DEMO_(SIZING_MODE|USE_WALLET_BALANCE|MAX_(ORDER|TOTAL_NEW)_NOTIONAL|WALLET_BALANCE_FRACTION|MAX_(ORDER|TOTAL_NEW)_NOTIONAL_PCT_EQUITY)'
+remove_env_regex 'PROFIT_PROTECTOR_.*'
+remove_env_regex 'HOURLY_FUNCTIONAL_.*'
+
+env_value() {
+  local key="$1"
+  sudo awk -F= -v key="$key" '$1 == key {print substr($0, index($0, "=") + 1); exit}' "$ENV_FILE"
+}
+
+missing_env=()
+for required_key in BYBIT_DEMO_API_KEY BYBIT_DEMO_API_SECRET TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID; do
+  if [[ -z "$(env_value "$required_key")" ]]; then
+    missing_env+=("$required_key")
+  fi
+done
+if [[ "${#missing_env[@]}" -gt 0 ]]; then
+  echo "Refusing to install enabled demo runtime; missing env value(s): ${missing_env[*]}" >&2
+  echo "Edit $ENV_FILE, then rerun this installer." >&2
+  exit 1
 fi
 
 sudo tee "/etc/systemd/system/$SERVICE_NAME.service" >/dev/null <<EOF
 [Unit]
-Description=MODEL050426 Bybit demo-only shadow cycle
+Description=MODEL050426 Bybit demo engine with fast protection
 Wants=network-online.target
 After=network-online.target
 
 [Service]
-Type=oneshot
+Type=simple
 User=$SERVICE_USER
 Group=$SERVICE_GROUP
 WorkingDirectory=$REPO_ROOT
 EnvironmentFile=$ENV_FILE
-ExecStart=$PYTHON_BIN -m aggression_carry --data-root $DATA_ROOT --config $CONFIG_PATH bybit-demo-cycle --submit-orders --i-understand-demo-sync --use-wallet-balance --max-order-notional 0 --max-total-new-notional 0 --max-order-notional-pct-equity 0.80 --max-total-new-notional-pct-equity 1.0
-ExecStart=$PYTHON_BIN -m aggression_carry --data-root $DATA_ROOT --config $CONFIG_PATH forward-audit --telegram
+Environment=PYTHON_BIN=$PYTHON_BIN
+Environment=DATA_ROOT=$DATA_ROOT
+Environment=CONFIG_PATH=$CONFIG_PATH
+ExecStart=$RUNNER
+Restart=always
+RestartSec=60
+KillMode=control-group
 Nice=5
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
@@ -61,34 +117,81 @@ ReadWritePaths=$REPO_ROOT
 WantedBy=multi-user.target
 EOF
 
-sudo tee "/etc/systemd/system/$SERVICE_NAME.timer" >/dev/null <<EOF
+sudo tee "/etc/systemd/system/$SERVICE_NAME-signal.service" >/dev/null <<EOF
 [Unit]
-Description=Run MODEL050426 Bybit demo-only shadow cycle every 5 minutes
+Description=MODEL050426 forward paper signal scan
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=$SERVICE_USER
+Group=$SERVICE_GROUP
+WorkingDirectory=$REPO_ROOT
+EnvironmentFile=$ENV_FILE
+Environment=PYTHON_BIN=$PYTHON_BIN
+Environment=DATA_ROOT=$DATA_ROOT
+Environment=CONFIG_PATH=$CONFIG_PATH
+ExecStart=$SIGNAL_RUNNER
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=$REPO_ROOT
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo tee "/etc/systemd/system/$SERVICE_NAME-signal.timer" >/dev/null <<EOF
+[Unit]
+Description=Run MODEL050426 forward paper signal scan at 22:00 UTC
 
 [Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
-AccuracySec=30s
+OnCalendar=*-*-* 22:00:00 UTC
+AccuracySec=1s
 Persistent=false
-Unit=$SERVICE_NAME.service
+Unit=$SERVICE_NAME-signal.service
 
 [Install]
 WantedBy=timers.target
 EOF
 
 sudo systemctl daemon-reload
-sudo systemctl enable "$SERVICE_NAME.timer"
+LEGACY_UNITS=(
+  "$SERVICE_NAME.timer"
+  "model050426-forward-paper.timer"
+  "model050426-forward-paper.service"
+  "model050426-forward-audit.timer"
+  "model050426-forward-audit.service"
+  "model050426-hourly-functional.timer"
+  "model050426-hourly-functional.service"
+  "model050426-profit-protector.timer"
+  "model050426-profit-protector.service"
+)
+for legacy_unit in "${LEGACY_UNITS[@]}"; do
+  sudo systemctl disable --now "$legacy_unit" >/dev/null 2>&1 || true
+  sudo rm -f "/etc/systemd/system/$legacy_unit"
+done
+sudo systemctl daemon-reload
+sudo systemctl enable "$SERVICE_NAME.service"
+sudo systemctl enable "$SERVICE_NAME-signal.timer"
 
 cat <<EOF
 Installed:
   /etc/systemd/system/$SERVICE_NAME.service
-  /etc/systemd/system/$SERVICE_NAME.timer
+  /etc/systemd/system/$SERVICE_NAME-signal.service
+  /etc/systemd/system/$SERVICE_NAME-signal.timer
   $ENV_FILE
 
 Next:
   sudo nano $ENV_FILE
-  sudo systemctl start $SERVICE_NAME.timer
-  systemctl list-timers $SERVICE_NAME.timer
+  sudo systemctl start $SERVICE_NAME.service
+  sudo systemctl start $SERVICE_NAME-signal.timer
+  systemctl list-timers $SERVICE_NAME-signal.timer
   journalctl -u $SERVICE_NAME.service -f
 
 Pause new entries:

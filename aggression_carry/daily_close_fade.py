@@ -28,10 +28,23 @@ _GRID_DATA_ROOT: str | None = None
 _GRID_COST_BPS: float | None = None
 
 
+def close_fade_entry_child_schedule_ts_ms(signal_ts_ms: int, config: DailyCloseFadeConfig) -> list[int]:
+    """Return canonical entry child timestamps for the daily-close fade."""
+    first_ts_ms = int(signal_ts_ms) + int(config.entry_delay_minutes) * MS_PER_MINUTE
+    twap_minutes = max(int(config.entry_twap_minutes), 0)
+    if twap_minutes <= 0:
+        return [first_ts_ms]
+    return [first_ts_ms + index * MS_PER_MINUTE for index in range(twap_minutes)]
+
+
+def close_fade_entry_complete_ts_ms(signal_ts_ms: int, config: DailyCloseFadeConfig) -> int:
+    return close_fade_entry_child_schedule_ts_ms(signal_ts_ms, config)[-1]
+
+
 @dataclass(frozen=True, slots=True)
 class DailyCloseFadeDiagnosticsConfig:
     signal_minutes: tuple[int, ...] = (22 * 60,)
-    entry_delay_minutes: tuple[int, ...] = (0, 15, 60)
+    entry_delay_minutes: tuple[int, ...] = (1, 15, 60)
     horizon_minutes: tuple[int, ...] = (60, 180)
     scores: tuple[str, ...] = ("vol_adjusted_day_return", "day_return", "late_volume_ratio", "vwap_extension", "pump_score")
     top_ns: tuple[int, ...] = (3, 5, 10)
@@ -58,13 +71,19 @@ def run_daily_close_fade(
         config=config,
         round_trip_cost_bps=costs.base_entry_exit_cost_bps * config.cost_multiplier,
     )
+    entry_fills = build_close_fade_entry_fills(trades)
     baskets = summarize_close_fade_baskets(trades)
     equity = build_close_fade_equity(baskets)
     summary = summarize_close_fade(trades, baskets, equity, config=config)
     payload = {
         "config": asdict(config),
         "summary": summary,
-        "rows": {"features": features.height, "trades": trades.height, "baskets": baskets.height},
+        "rows": {
+            "features": features.height,
+            "trades": trades.height,
+            "entry_fills": entry_fills.height,
+            "baskets": baskets.height,
+        },
         "date_range": _date_range(features, "signal_ts_ms"),
     }
 
@@ -74,11 +93,14 @@ def run_daily_close_fade(
     (output_dir / "daily_close_fade_report.md").write_text(format_close_fade_report(payload), encoding="utf-8")
     if not trades.is_empty():
         trades.write_csv(output_dir / "daily_close_fade_trades.csv")
+    if not entry_fills.is_empty():
+        entry_fills.write_csv(output_dir / "daily_close_fade_entry_fills.csv")
     if not baskets.is_empty():
         baskets.write_csv(output_dir / "daily_close_fade_baskets.csv")
 
     _replace_dataset(features, data_root, "daily_close_fade_features", partition_by=("date", "signal_minute"))
     _replace_dataset(trades, data_root, "daily_close_fade_trades", partition_by=("entry_date", "symbol"))
+    _replace_dataset(entry_fills, data_root, "daily_close_fade_entry_fills", partition_by=("date", "symbol"))
     _replace_dataset(baskets, data_root, "daily_close_fade_baskets", partition_by=("date",))
     return payload
 
@@ -255,134 +277,6 @@ def run_daily_close_fade_grid(
     return payload
 
 
-def run_daily_close_fade_sleeves(
-    data_root: str | Path,
-    *,
-    fade_config: DailyCloseFadeConfig | None = None,
-    cost_config: CostConfig | None = None,
-    report_dir: str | Path | None = None,
-) -> dict[str, Any]:
-    base = fade_config or DailyCloseFadeConfig()
-    _validate_close_fade_config(base)
-    costs = cost_config or CostConfig()
-    sleeves = close_fade_sleeve_configs(base)
-    features = build_daily_close_fade_features(
-        data_root,
-        config=base,
-        signal_minutes=tuple(dict.fromkeys(config.signal_minute for _, config in sleeves)),
-    )
-
-    result_rows: list[dict[str, Any]] = []
-    trade_frames: list[pl.DataFrame] = []
-    basket_frames: list[pl.DataFrame] = []
-    equity_frames: list[pl.DataFrame] = []
-    for sleeve_name, config in sleeves:
-        _validate_close_fade_config(config)
-        round_trip_cost_bps = costs.base_entry_exit_cost_bps * config.cost_multiplier
-        trades = backtest_daily_close_fade(
-            data_root,
-            features,
-            config=config,
-            round_trip_cost_bps=round_trip_cost_bps,
-        )
-        baskets = summarize_close_fade_baskets(trades)
-        equity = build_close_fade_equity(baskets)
-        summary = summarize_close_fade(trades, baskets, equity, config=config)
-        config_row = asdict(config)
-        config_row["exclude_symbols"] = ",".join(config.exclude_symbols)
-        result_rows.append(
-            {
-                "sleeve": sleeve_name,
-                "round_trip_cost_bps": round_trip_cost_bps,
-                **config_row,
-                **summary,
-            }
-        )
-        if not trades.is_empty():
-            trade_frames.append(trades.with_columns(pl.lit(sleeve_name).alias("sleeve")))
-        if not baskets.is_empty():
-            basket_frames.append(baskets.with_columns(pl.lit(sleeve_name).alias("sleeve")))
-        if not equity.is_empty():
-            equity_frames.append(equity.with_columns(pl.lit(sleeve_name).alias("sleeve")))
-
-    results = pl.DataFrame(result_rows, infer_schema_length=None)
-    trades_all = _concat_frames(trade_frames)
-    baskets_all = _concat_frames(basket_frames)
-    equity_all = _concat_frames(equity_frames)
-    if not results.is_empty():
-        results = results.sort(["total_return", "sharpe_like"], descending=[True, True])
-    payload = {
-        "rows": {
-            "features": features.height,
-            "results": results.height,
-            "trades": trades_all.height,
-            "baskets": baskets_all.height,
-        },
-        "date_range": _date_range(features, "signal_ts_ms"),
-        "results": results.to_dicts(),
-    }
-
-    output_dir = Path(report_dir or Path(data_root) / "reports")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    (output_dir / "daily_close_fade_sleeves_report.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    (output_dir / "daily_close_fade_sleeves_report.md").write_text(format_close_fade_sleeves_report(payload), encoding="utf-8")
-    if not results.is_empty():
-        results.write_csv(output_dir / "daily_close_fade_sleeves_results.csv")
-    if not trades_all.is_empty():
-        trades_all.write_csv(output_dir / "daily_close_fade_sleeves_trades.csv")
-    if not baskets_all.is_empty():
-        baskets_all.write_csv(output_dir / "daily_close_fade_sleeves_baskets.csv")
-    _replace_dataset(results, data_root, "daily_close_fade_sleeves", partition_by=("sleeve",))
-    _replace_dataset(trades_all, data_root, "daily_close_fade_sleeve_trades", partition_by=("sleeve", "entry_date", "symbol"))
-    _replace_dataset(baskets_all, data_root, "daily_close_fade_sleeve_baskets", partition_by=("sleeve", "date"))
-    _replace_dataset(equity_all, data_root, "daily_close_fade_sleeve_equity", partition_by=("sleeve", "date"))
-    return payload
-
-
-def close_fade_sleeve_configs(base: DailyCloseFadeConfig | None = None) -> tuple[tuple[str, DailyCloseFadeConfig], ...]:
-    base_config = base or DailyCloseFadeConfig()
-    major = replace(
-        base_config,
-        liquidity_rank_min=1,
-        liquidity_rank_max=30,
-        min_baseline_turnover=0.0,
-        min_day_turnover=0.0,
-        min_last_60m_turnover=0.0,
-        max_position_weight=base_config.max_position_weight,
-        max_trade_notional_pct_of_day_turnover=0.0,
-        max_trade_notional_pct_of_baseline_turnover=0.0,
-        exclude_symbols=(),
-    )
-    core = replace(
-        base_config,
-        top_n=5,
-        liquidity_rank_min=31,
-        liquidity_rank_max=150,
-        min_baseline_turnover=max(base_config.min_baseline_turnover, 0.0),
-        min_day_turnover=max(base_config.min_day_turnover, 0.0),
-        min_last_60m_turnover=max(base_config.min_last_60m_turnover, 0.0),
-        max_position_weight=base_config.max_position_weight,
-        max_trade_notional_pct_of_day_turnover=0.0,
-        max_trade_notional_pct_of_baseline_turnover=0.0,
-    )
-    microcap = replace(
-        base_config,
-        top_n=min(base_config.top_n, 3),
-        gross_exposure=min(base_config.gross_exposure, 0.50),
-        liquidity_rank_min=151,
-        liquidity_rank_max=0,
-        min_baseline_turnover=max(base_config.min_baseline_turnover, 250_000.0),
-        min_day_turnover=max(base_config.min_day_turnover, 750_000.0),
-        min_last_60m_turnover=max(base_config.min_last_60m_turnover, 75_000.0),
-        max_position_weight=base_config.max_position_weight or 0.20,
-        max_trade_notional_pct_of_day_turnover=base_config.max_trade_notional_pct_of_day_turnover or 0.002,
-        max_trade_notional_pct_of_baseline_turnover=(
-            base_config.max_trade_notional_pct_of_baseline_turnover or 0.005
-        ),
-    )
-    return (("major_control", major), ("core", core), ("microcap", microcap))
-
-
 def build_daily_close_fade_features(
     data_root: str | Path,
     *,
@@ -419,13 +313,24 @@ def build_daily_close_fade_features(
                 .then(pl.col("day_turnover") / pl.col("day_volume_base"))
                 .otherwise(None)
                 .alias("intraday_vwap"),
-                (pl.col("bar_count") / (pl.col("signal_minute") + 1)).alias("bar_coverage"),
+                (
+                    pl.col("bar_count")
+                    / pl.when(pl.col("signal_minute") > 0).then(pl.col("signal_minute")).otherwise(1)
+                ).alias("bar_coverage"),
             ]
         )
         .with_columns(
             [
                 (pl.col("signal_close") / pl.col("intraday_vwap") - 1.0).fill_null(0.0).alias("vwap_extension"),
-                (pl.col("last_60m_turnover") / (pl.col("day_turnover") / ((pl.col("signal_minute") + 1) / 60.0)).clip(EPSILON))
+                (
+                    pl.col("last_60m_turnover")
+                    / (
+                        pl.col("day_turnover")
+                        / pl.when(pl.col("signal_minute") > 0)
+                        .then(pl.col("signal_minute") / 60.0)
+                        .otherwise(1.0)
+                    ).clip(EPSILON)
+                )
                 .fill_null(0.0)
                 .alias("late_volume_ratio"),
                 (pl.col("signal_close") >= pl.col("day_high") * 0.995).alias("fresh_day_high"),
@@ -493,6 +398,33 @@ def backtest_daily_close_fade(
             partition_cache=partition_cache,
         )
     return trades.sort(["entry_ts_ms", "symbol"])
+
+
+def build_close_fade_entry_fills(trades: pl.DataFrame) -> pl.DataFrame:
+    rows: list[dict[str, Any]] = []
+    if trades.is_empty() or "entry_fills_json" not in trades.columns:
+        return pl.DataFrame()
+    for trade in trades.to_dicts():
+        try:
+            fills = json.loads(str(trade.get("entry_fills_json") or "[]"))
+        except json.JSONDecodeError:
+            fills = []
+        for fill in fills:
+            fill_row = {
+                "trade_id": str(trade.get("trade_id") or ""),
+                "basket_id": str(trade.get("basket_id") or ""),
+                "symbol": str(trade.get("symbol") or ""),
+                "date": str(trade.get("date") or ""),
+                "side": str(trade.get("side") or "short"),
+                "signal_ts_ms": int(trade.get("signal_ts_ms") or 0),
+                "signal_time": str(trade.get("signal_time") or ""),
+                "exit_ts_ms": int(trade.get("exit_ts_ms") or 0),
+                "exit_time": str(trade.get("exit_time") or ""),
+                "exit_reason": str(trade.get("exit_reason") or ""),
+                **fill,
+            }
+            rows.append(fill_row)
+    return pl.DataFrame(rows, infer_schema_length=None).sort(["scheduled_ts_ms", "symbol"]) if rows else pl.DataFrame()
 
 
 def select_close_fade_candidates(features: pl.DataFrame, config: DailyCloseFadeConfig) -> pl.DataFrame:
@@ -1979,34 +1911,6 @@ def format_close_fade_report(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def format_close_fade_sleeves_report(payload: dict[str, Any]) -> str:
-    rows = payload.get("results", [])
-    lines = [
-        "# Daily Close Fade Sleeve Comparison",
-        "",
-        f"Rows: features={payload.get('rows', {}).get('features', 0)} "
-        f"trades={payload.get('rows', {}).get('trades', 0)} "
-        f"baskets={payload.get('rows', {}).get('baskets', 0)}",
-        f"Date range: {payload.get('date_range', {}).get('start')} to {payload.get('date_range', {}).get('end')}",
-        "",
-        "| Sleeve | Return | Sharpe | Max DD | Avg Gross | Trades | Cap-Limited | Liq Rank | Top N | Min DTD Turnover | Weight Cap | Day Cap | Baseline Cap |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
-    ]
-    for row in rows:
-        lines.append(
-            f"| {row.get('sleeve')} | {row.get('total_return', 0.0):.2%} | {row.get('sharpe_like', 0.0):.2f} | "
-            f"{row.get('max_drawdown', 0.0):.2%} | {row.get('avg_basket_gross_exposure', 0.0):.2%} | "
-            f"{row.get('trade_count', 0)} | {row.get('capacity_limited_trades', 0)} | "
-            f"{row.get('liquidity_rank_min', 1)}-{row.get('liquidity_rank_max', 0) or '∞'} | "
-            f"{row.get('top_n', 0)} | {row.get('min_day_turnover', 0.0):,.0f} | "
-            f"{row.get('max_position_weight', 0.0):.1%} | "
-            f"{row.get('max_trade_notional_pct_of_day_turnover', 0.0):.2%} | "
-            f"{row.get('max_trade_notional_pct_of_baseline_turnover', 0.0):.2%} |"
-        )
-    lines.append("")
-    return "\n".join(lines)
-
-
 def format_close_fade_grid_report(payload: dict[str, Any]) -> str:
     rows = payload.get("results", [])
     lines = [
@@ -2049,13 +1953,15 @@ def format_close_fade_grid_report(payload: dict[str, Any]) -> str:
 
 
 def _signal_feature_frame(base: pl.LazyFrame, signal_minute: int) -> pl.LazyFrame:
-    subset = base.filter(pl.col("minute_of_day") <= signal_minute).sort(["symbol", "date", "ts_ms"])
-    avg_hours = max((signal_minute + 1) / 60.0, 1.0)
+    subset = base.filter(pl.col("bar_end_minute_of_day") <= signal_minute).sort(["symbol", "date", "ts_ms"])
+    avg_hours = max(signal_minute / 60.0, 1.0)
     return (
         subset.group_by(["symbol", "date"], maintain_order=True)
         .agg(
             [
-                pl.col("ts_ms").last().alias("signal_ts_ms"),
+                (pl.col("day_start_ts_ms").first() + signal_minute * MS_PER_MINUTE).alias("signal_ts_ms"),
+                pl.col("ts_ms").last().alias("last_available_bar_ts_ms"),
+                pl.col("bar_end_ts_ms").last().alias("last_available_bar_end_ts_ms"),
                 pl.col("open").first().alias("day_open"),
                 pl.col("close").last().alias("signal_close"),
                 pl.col("high").max().alias("day_high"),
@@ -2063,9 +1969,18 @@ def _signal_feature_frame(base: pl.LazyFrame, signal_minute: int) -> pl.LazyFram
                 pl.col("turnover_quote").sum().alias("day_turnover"),
                 pl.col("volume_base").sum().alias("day_volume_base"),
                 pl.len().alias("bar_count"),
-                pl.col("turnover_quote").filter(pl.col("minute_of_day") > signal_minute - 60).sum().alias("last_60m_turnover"),
-                pl.col("close").filter(pl.col("minute_of_day") <= signal_minute - 15).last().alias("close_15m_ago"),
-                pl.col("close").filter(pl.col("minute_of_day") <= signal_minute - 60).last().alias("close_60m_ago"),
+                pl.col("turnover_quote")
+                .filter(pl.col("bar_end_minute_of_day") > signal_minute - 60)
+                .sum()
+                .alias("last_60m_turnover"),
+                pl.col("close")
+                .filter(pl.col("bar_end_minute_of_day") <= signal_minute - 15)
+                .last()
+                .alias("close_15m_ago"),
+                pl.col("close")
+                .filter(pl.col("bar_end_minute_of_day") <= signal_minute - 60)
+                .last()
+                .alias("close_60m_ago"),
             ]
         )
         .with_columns(
@@ -2173,10 +2088,14 @@ def _scan_klines_1m(data_root: str | Path) -> pl.LazyFrame:
 
 def _minute_frame(lf: pl.LazyFrame) -> pl.LazyFrame:
     dt = pl.from_epoch(pl.col("ts_ms"), time_unit="ms")
+    minute_of_day = dt.dt.hour().cast(pl.Int16) * 60 + dt.dt.minute().cast(pl.Int16)
     return lf.with_columns(
         [
             dt.dt.strftime("%Y-%m-%d").alias("date"),
-            (dt.dt.hour().cast(pl.Int16) * 60 + dt.dt.minute().cast(pl.Int16)).alias("minute_of_day"),
+            (pl.col("ts_ms") - (pl.col("ts_ms") % MS_PER_DAY)).alias("day_start_ts_ms"),
+            minute_of_day.alias("minute_of_day"),
+            (minute_of_day + 1).alias("bar_end_minute_of_day"),
+            (pl.col("ts_ms") + MS_PER_MINUTE).alias("bar_end_ts_ms"),
         ]
     )
 
@@ -2234,10 +2153,13 @@ def _simulate_short_trade(
 ) -> dict[str, Any] | None:
     symbol = str(row["symbol"])
     signal_ts_ms = int(row["signal_ts_ms"])
-    entry_start_ts_ms = signal_ts_ms + config.entry_delay_minutes * MS_PER_MINUTE
+    entry_schedule_ts_ms = close_fade_entry_child_schedule_ts_ms(signal_ts_ms, config)
+    entry_schedule_set = set(entry_schedule_ts_ms)
+    entry_schedule_index = {ts_ms: index for index, ts_ms in enumerate(entry_schedule_ts_ms, start=1)}
+    entry_start_ts_ms = entry_schedule_ts_ms[0]
     twap_minutes = max(config.entry_twap_minutes, 0)
-    required_fills = max(twap_minutes, 1)
-    entry_complete_ts_ms = entry_start_ts_ms + twap_minutes * MS_PER_MINUTE
+    required_fills = len(entry_schedule_ts_ms)
+    entry_complete_ts_ms = entry_schedule_ts_ms[-1]
     target_exit_ts_ms = entry_complete_ts_ms + config.hold_minutes * MS_PER_MINUTE
     window = _load_trade_window(data_root, symbol, entry_start_ts_ms, target_exit_ts_ms, partition_cache)
     if window.is_empty():
@@ -2264,32 +2186,43 @@ def _simulate_short_trade(
     entry_fill_sum = 0.0
     entry_fill_count = 0
     entry_ts_ms: int | None = None
+    entry_fill_rows: list[dict[str, Any]] = []
     best_price: float | None = None
     max_favorable = 0.0
     max_adverse = 0.0
     twap_stopped_adding = False
     twap_stop_adding_ts_ms: int | None = None
+    trade_id = f"{signal_ts_ms}-{symbol}-{int(row.get('entry_rank', 0))}"
 
     for bar in bars:
         ts_ms = int(bar["ts_ms"])
         if ts_ms < entry_start_ts_ms:
             continue
-        if twap_minutes <= 0 and entry_fill_count == 0:
-            entry_fill_sum = float(bar["open"])
-            entry_fill_count = 1
-            entry_price = entry_fill_sum
-            entry_ts_ms = ts_ms
-            best_price = entry_price
-            entry_complete_ts_ms = ts_ms
-            target_exit_ts_ms = entry_complete_ts_ms + config.hold_minutes * MS_PER_MINUTE
-            profit_active_ts_ms = entry_complete_ts_ms + profit_delay_minutes * MS_PER_MINUTE
-        elif twap_minutes > 0 and not twap_stopped_adding and entry_start_ts_ms <= ts_ms < entry_complete_ts_ms:
-            entry_fill_sum += float(bar["open"])
+        if not twap_stopped_adding and ts_ms in entry_schedule_set:
+            fill_price = float(bar["open"])
+            entry_fill_sum += fill_price
             entry_fill_count += 1
             entry_price = entry_fill_sum / entry_fill_count
             if entry_ts_ms is None:
                 entry_ts_ms = ts_ms
             best_price = entry_price if best_price is None else min(best_price, entry_price)
+            if twap_minutes <= 0:
+                entry_complete_ts_ms = ts_ms
+                target_exit_ts_ms = entry_complete_ts_ms + config.hold_minutes * MS_PER_MINUTE
+                profit_active_ts_ms = entry_complete_ts_ms + profit_delay_minutes * MS_PER_MINUTE
+            entry_fill_rows.append(
+                {
+                    "slice_index": entry_schedule_index[ts_ms],
+                    "scheduled_ts_ms": ts_ms,
+                    "scheduled_time": _dt_from_ms(ts_ms).isoformat(),
+                    "fill_ts_ms": ts_ms,
+                    "fill_time": _dt_from_ms(ts_ms).isoformat(),
+                    "status": "filled",
+                    "fill_price": fill_price,
+                    "avg_entry_price": entry_price,
+                    "stop_price": entry_price * (1.0 + config.stop_loss_pct) if config.stop_loss_pct > 0.0 else None,
+                }
+            )
 
         if entry_fill_count <= 0:
             continue
@@ -2303,7 +2236,7 @@ def _simulate_short_trade(
         hard_stop_price = entry_price * (1.0 + config.stop_loss_pct) if config.stop_loss_pct > 0.0 else None
         if ts_ms >= stop_active_ts_ms and hard_stop_price is not None and high >= hard_stop_price:
             exit_ts_ms = ts_ms
-            exit_price = hard_stop_price
+            exit_price = _short_stop_execution_price(hard_stop_price, bar)
             exit_reason = "stop_loss"
             break
 
@@ -2320,7 +2253,12 @@ def _simulate_short_trade(
             target_exit_ts_ms = entry_complete_ts_ms + config.hold_minutes * MS_PER_MINUTE
             profit_active_ts_ms = entry_complete_ts_ms + profit_delay_minutes * MS_PER_MINUTE
 
-        entry_is_complete = twap_minutes <= 0 or entry_fill_count >= required_fills or twap_stopped_adding
+        entry_is_complete = (
+            twap_minutes <= 0
+            or entry_fill_count >= required_fills
+            or twap_stopped_adding
+            or ts_ms >= entry_schedule_ts_ms[-1]
+        )
         profit_exits_active = ts_ms >= profit_active_ts_ms and entry_is_complete
         if profit_exits_active:
             protective_exits: list[tuple[float, str]] = []
@@ -2337,21 +2275,22 @@ def _simulate_short_trade(
                 if high >= mfe_stop:
                     protective_exits.append((mfe_stop, "mfe_giveback"))
             if protective_exits:
-                exit_price, exit_reason = max(protective_exits, key=lambda item: item[0])
+                stop_price, exit_reason = max(protective_exits, key=lambda item: item[0])
+                exit_price = _short_stop_execution_price(stop_price, bar)
                 exit_ts_ms = ts_ms
                 break
 
         take_profit_price = entry_price * (1.0 - config.take_profit_pct) if config.take_profit_pct > 0.0 else None
         if profit_exits_active and take_profit_price is not None and low <= take_profit_price:
             exit_ts_ms = ts_ms
-            exit_price = take_profit_price
+            exit_price = _short_limit_execution_price(take_profit_price, bar)
             exit_reason = "take_profit"
             break
 
         vwap_exit_price = _vwap_reversion_exit_price(entry_price, row, config)
         if profit_exits_active and vwap_exit_price is not None and low <= vwap_exit_price:
             exit_ts_ms = ts_ms
-            exit_price = vwap_exit_price
+            exit_price = _short_limit_execution_price(vwap_exit_price, bar)
             exit_reason = "vwap_reversion"
             break
 
@@ -2379,9 +2318,6 @@ def _simulate_short_trade(
 
     if entry_fill_count <= 0:
         return None
-    if twap_minutes > 0 and entry_fill_count < required_fills and exit_reason != "stop_loss" and not twap_stopped_adding:
-        return None
-
     gross_return = _short_return(entry_price, exit_price)
     cost_return = round_trip_cost_bps / 10_000.0
     net_return = gross_return - cost_return
@@ -2400,7 +2336,30 @@ def _simulate_short_trade(
     entry_complete_dt = _dt_from_ms(entry_complete_ts_ms)
     exit_dt = _dt_from_ms(exit_ts_ms)
     signal_dt = _dt_from_ms(signal_ts_ms)
-    trade_id = f"{signal_ts_ms}-{symbol}-{int(row.get('entry_rank', 0))}"
+    filled_schedule = {int(fill["scheduled_ts_ms"]) for fill in entry_fill_rows}
+    for index, scheduled_ts_ms in enumerate(entry_schedule_ts_ms, start=1):
+        if scheduled_ts_ms in filled_schedule:
+            continue
+        if twap_stopped_adding and twap_stop_adding_ts_ms is not None and scheduled_ts_ms > twap_stop_adding_ts_ms:
+            status = "cancelled_stop_adding"
+        elif exit_ts_ms <= scheduled_ts_ms:
+            status = "cancelled_after_exit"
+        else:
+            status = "missed_no_bar"
+        entry_fill_rows.append(
+            {
+                "slice_index": index,
+                "scheduled_ts_ms": scheduled_ts_ms,
+                "scheduled_time": _dt_from_ms(scheduled_ts_ms).isoformat(),
+                "fill_ts_ms": None,
+                "fill_time": "",
+                "status": status,
+                "fill_price": None,
+                "avg_entry_price": entry_price,
+                "stop_price": entry_price * (1.0 + config.stop_loss_pct) if config.stop_loss_pct > 0.0 else None,
+            }
+        )
+    entry_fill_rows = sorted(entry_fill_rows, key=lambda item: int(item["slice_index"]))
     return {
         "trade_id": trade_id,
         "basket_id": f"{signal_ts_ms}-{config.signal_minute}",
@@ -2420,7 +2379,9 @@ def _simulate_short_trade(
         "entry_complete_time": entry_complete_dt.isoformat(),
         "entry_twap_minutes": config.entry_twap_minutes,
         "entry_fill_count": entry_fill_count,
+        "child_fill_count": entry_fill_count,
         "entry_fill_fraction": fill_fraction,
+        "entry_fills_json": json.dumps(entry_fill_rows, separators=(",", ":")),
         "stop_active_ts_ms": stop_active_ts_ms,
         "stop_active_time": _dt_from_ms(stop_active_ts_ms).isoformat(),
         "profit_protection_active_ts_ms": profit_active_ts_ms,
@@ -2433,6 +2394,7 @@ def _simulate_short_trade(
         "exit_ts_ms": exit_ts_ms,
         "exit_time": exit_dt.isoformat(),
         "entry_price": entry_price,
+        "avg_entry_price": entry_price,
         "exit_price": exit_price,
         "exit_reason": exit_reason,
         "hold_minutes": (exit_ts_ms - entry_ts_ms) / MS_PER_MINUTE,
@@ -2461,6 +2423,7 @@ def _simulate_short_trade(
         "account_equity": config.account_equity,
         "target_notional": weight_info["target_notional"],
         "actual_notional": weight_info["actual_notional"],
+        "pnl_usdt": net_return * weight_info["actual_notional"],
         "gross_return": gross_return,
         "cost_return": cost_return,
         "net_return": net_return,
@@ -2545,6 +2508,27 @@ def _vwap_reversion_exit_price(entry_price: float, row: dict[str, Any], config: 
         return None
     pct = min(config.vwap_reversion_pct, 1.0)
     return entry_price - (entry_price - vwap) * pct
+
+
+def _short_stop_execution_price(stop_price: float, bar: dict[str, Any]) -> float:
+    open_price = _bar_open(bar)
+    if open_price <= 0.0:
+        return stop_price
+    return max(stop_price, open_price)
+
+
+def _short_limit_execution_price(limit_price: float, bar: dict[str, Any]) -> float:
+    open_price = _bar_open(bar)
+    if open_price <= 0.0:
+        return limit_price
+    return min(limit_price, open_price)
+
+
+def _bar_open(bar: dict[str, Any]) -> float:
+    try:
+        return float(bar.get("open") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _mfe_giveback_stop_price(entry_price: float, best_price: float, giveback_pct: float) -> float:

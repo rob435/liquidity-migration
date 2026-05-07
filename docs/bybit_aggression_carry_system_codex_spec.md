@@ -21,13 +21,13 @@ The active contract is:
 Strategy: daily-close short fade
 Signal: 22:00 UTC
 Ranking: day-to-date vol-adjusted return using only data available at 22:00
-Entry: 60 equal 1m slices over [22:00, 23:00)
+Entry: 60 equal 1m slices from 22:01 through 23:00
 Entry price: average filled slice price
 Stop: 20% above average entry, active immediately from first fill
-Adaptive exits: active from final add + 15m
+Adaptive exits: active from final scheduled add + 15m
 Exit: flatten whole symbol
 Re-entry: none in the same symbol/date
-Universe: Bybit USDT linear perps, prior-liquidity ranks 31-150
+Universe: Bybit USDT linear perps, prior-liquidity ranks 31+; top 30 excluded
 Mode: research/backtest first, not real-money live trading
 ```
 
@@ -83,7 +83,16 @@ public trades, not candles alone.
 For the current daily-close fade, 1m klines are sufficient to test the
 top-gainer ranking, TWAP entry model, and exit lifecycle. The proof-grade path
 should derive those 1m bars from Bybit public trade archives so delisted
-symbols and historical symbol/date membership are preserved.
+symbols and historical symbol/date membership are preserved. Archive-derived
+klines must be dense 1m candles: minutes without public trades carry forward
+the last known price and have zero volume/turnover, rather than disappearing
+from the bar dataset. Pre-first-trade minutes may only be seeded from the prior
+UTC day's close; they must not be backfilled from a later same-day trade.
+
+Timestamp convention: Bybit REST klines and archive-derived 1m bars are stored
+with minute-open timestamps. A 22:00 signal must therefore use only bars with
+`bar_end_ts_ms <= 22:00`; in the active setup the last input 1m bar has open
+timestamp 21:59. The first entry slice remains the 22:01 open.
 
 ## Data Layout
 
@@ -106,8 +115,8 @@ Do not call the alpha confirmed until:
 
 1. Point-in-time Bybit archive membership is complete.
 2. Archive-derived 1m bars cover the eligible universe for each day.
-3. The unchanged 22:00-23:00 TWAP contract survives train, validation, and OOS
-   windows.
+3. The unchanged 22:00 signal / 22:01-23:00 TWAP contract survives train,
+   validation, and OOS windows.
 4. Forward paper/demo implements real slice-level TWAP accounting.
 5. Forward audit compares expected slices, demo orders, fills, slippage, missed
    trades, sleeve attribution, and daily PnL.

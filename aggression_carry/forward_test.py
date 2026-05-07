@@ -16,14 +16,16 @@ from .daily_close_fade import (
     MS_PER_DAY,
     MS_PER_MINUTE,
     attach_close_fade_coin_market_context,
+    close_fade_entry_child_schedule_ts_ms,
     _close_fade_position_weight,
     _mfe_giveback_stop_price,
+    _short_limit_execution_price,
     _short_return,
+    _short_stop_execution_price,
     _vwap_reversion_exit_price,
     select_close_fade_candidates,
 )
 from .storage import dataset_path, read_dataset, write_dataset
-from .telegram import send_telegram_message
 
 
 EPSILON = 1e-12
@@ -60,7 +62,7 @@ def run_forward_scan(
     if forward.max_symbols > 0 and not universe.is_empty():
         universe = universe.head(forward.max_symbols)
 
-    klines_1m, daily_klines, failures = _fetch_forward_bars(
+    klines_1m, daily_klines, failures, api_stats = _fetch_forward_bars(
         universe["symbol"].to_list() if not universe.is_empty() else [],
         config=config,
         client=market if client is not None else None,
@@ -79,6 +81,8 @@ def run_forward_scan(
         scan_id=scan_id,
     )
     candidates = select_close_fade_candidates(features, fade) if not features.is_empty() else pl.DataFrame()
+    if now_ms < signal_ts_ms:
+        candidates = pl.DataFrame()
 
     payload = {
         "scan_id": scan_id,
@@ -92,7 +96,9 @@ def run_forward_scan(
             "features": features.height,
             "candidates": candidates.height,
             "fetch_failures": len(failures),
+            "api_backoff_events": int(api_stats.get("backoff_events", 0) or 0),
         },
+        "api": api_stats,
         "candidates": candidates.to_dicts() if not candidates.is_empty() else [],
         "fetch_failures": failures,
     }
@@ -134,7 +140,7 @@ def run_forward_once(
         fade_config=fade,
         forward_config=forward,
         now=now_dt,
-        client=market,
+        client=client,
         report_dir=report_dir,
     )
 
@@ -151,6 +157,7 @@ def run_forward_once(
     )
 
     all_trades = _merge_trade_frames(marked_existing, new_trades)
+    paper_slices = build_forward_paper_slices(all_trades)
     baskets = summarize_forward_paper_baskets(all_trades)
     payload = {
         "now": now_dt.isoformat(),
@@ -159,6 +166,7 @@ def run_forward_once(
             "existing_trades": existing.height,
             "new_trades": new_trades.height,
             "total_trades": all_trades.height,
+            "paper_slices": paper_slices.height,
             "open_trades": _count_status(all_trades, "open"),
             "closed_trades": _count_status(all_trades, "closed"),
             "baskets": baskets.height,
@@ -166,10 +174,143 @@ def run_forward_once(
         "new_trades": new_trades.to_dicts() if not new_trades.is_empty() else [],
         "open_trades": all_trades.filter(pl.col("status") == "open").to_dicts() if not all_trades.is_empty() else [],
     }
-    _write_forward_trade_outputs(data_root, payload, all_trades, baskets, report_dir=report_dir)
+    _write_forward_trade_outputs(data_root, payload, all_trades, baskets, paper_slices, report_dir=report_dir)
 
     telegram_enabled = forward.send_telegram if send_telegram is None else send_telegram
-    send_telegram_message(format_forward_run_message(payload), enabled=telegram_enabled)
+    if telegram_enabled:
+        payload["telegram"] = {"enabled": True, "sent": False, "reason": "routine_updates_disabled_use_forward_audit"}
+    return payload
+
+
+def run_forward_mark_only(
+    data_root: str | Path,
+    *,
+    config: ResearchConfig,
+    fade_config: DailyCloseFadeConfig | None = None,
+    forward_config: ForwardTestConfig | None = None,
+    now: datetime | None = None,
+    client: Any | None = None,
+    report_dir: str | Path | None = None,
+    send_telegram: bool | None = None,
+) -> dict[str, Any]:
+    fade = fade_config or config.daily_close_fade
+    forward = forward_config or config.forward_test
+    now_dt = _as_utc(now or datetime.now(tz=UTC))
+    market = client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
+
+    existing = read_dataset(data_root, "forward_paper_trades")
+    marked_existing = mark_forward_open_trades(
+        existing,
+        config=config,
+        fade_config=fade,
+        forward_config=forward,
+        now=now_dt,
+        client=market,
+    )
+    paper_slices = build_forward_paper_slices(marked_existing)
+    baskets = summarize_forward_paper_baskets(marked_existing)
+    payload = {
+        "now": now_dt.isoformat(),
+        "scan": _synthetic_forward_scan(now_dt, fade, status="mark_only"),
+        "rows": {
+            "existing_trades": existing.height,
+            "new_trades": 0,
+            "total_trades": marked_existing.height,
+            "paper_slices": paper_slices.height,
+            "open_trades": _count_status(marked_existing, "open"),
+            "closed_trades": _count_status(marked_existing, "closed"),
+            "baskets": baskets.height,
+        },
+        "new_trades": [],
+        "open_trades": marked_existing.filter(pl.col("status") == "open").to_dicts()
+        if not marked_existing.is_empty()
+        else [],
+    }
+    _write_forward_trade_outputs(data_root, payload, marked_existing, baskets, paper_slices, report_dir=report_dir)
+
+    telegram_enabled = forward.send_telegram if send_telegram is None else send_telegram
+    if telegram_enabled:
+        payload["telegram"] = {"enabled": True, "sent": False, "reason": "routine_updates_disabled_use_forward_audit"}
+    return payload
+
+
+def run_forward_from_latest_scan(
+    data_root: str | Path,
+    *,
+    config: ResearchConfig,
+    fade_config: DailyCloseFadeConfig | None = None,
+    forward_config: ForwardTestConfig | None = None,
+    now: datetime | None = None,
+    client: Any | None = None,
+    report_dir: str | Path | None = None,
+    send_telegram: bool | None = None,
+    require_first_slice: bool = False,
+) -> dict[str, Any]:
+    fade = fade_config or config.daily_close_fade
+    forward = forward_config or config.forward_test
+    now_dt = _as_utc(now or datetime.now(tz=UTC))
+    now_ms = _floor_minute_ms(_ms_from_dt(now_dt))
+    market = client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
+    round_trip_cost_bps = config.costs.base_entry_exit_cost_bps * fade.cost_multiplier
+
+    existing = read_dataset(data_root, "forward_paper_trades")
+    marked_existing = mark_forward_open_trades(
+        existing,
+        config=config,
+        fade_config=fade,
+        forward_config=forward,
+        now=now_dt,
+        client=market,
+    )
+    cached = _latest_forward_scan_candidates(data_root, now=now_dt, fade_config=fade)
+    candidates = cached["candidates"]
+    scan_status = cached["status"]
+    if require_first_slice and not candidates.is_empty():
+        signal_ts_ms = int(candidates["signal_ts_ms"].head(1).item())
+        first_slice_ts_ms = close_fade_entry_child_schedule_ts_ms(signal_ts_ms, fade)[0]
+        if now_ms != first_slice_ts_ms:
+            candidates = pl.DataFrame()
+            scan_status = "cached_scan_not_first_slice_due"
+    new_trades = open_forward_paper_trades(
+        candidates,
+        existing_trades=marked_existing,
+        config=config,
+        fade_config=fade,
+        forward_config=forward,
+        now=now_dt,
+        client=market,
+        round_trip_cost_bps=round_trip_cost_bps,
+    )
+
+    all_trades = _merge_trade_frames(marked_existing, new_trades)
+    paper_slices = build_forward_paper_slices(all_trades)
+    baskets = summarize_forward_paper_baskets(all_trades)
+    payload = {
+        "now": now_dt.isoformat(),
+        "scan": _synthetic_forward_scan(
+            now_dt,
+            fade,
+            status=scan_status,
+            candidates=candidates,
+            source=str(cached.get("source") or ""),
+        ),
+        "rows": {
+            "existing_trades": existing.height,
+            "new_trades": new_trades.height,
+            "total_trades": all_trades.height,
+            "paper_slices": paper_slices.height,
+            "open_trades": _count_status(all_trades, "open"),
+            "closed_trades": _count_status(all_trades, "closed"),
+            "baskets": baskets.height,
+        },
+        "new_trades": new_trades.to_dicts() if not new_trades.is_empty() else [],
+        "open_trades": all_trades.filter(pl.col("status") == "open").to_dicts() if not all_trades.is_empty() else [],
+    }
+    _write_forward_trade_outputs(data_root, payload, all_trades, baskets, paper_slices, report_dir=report_dir)
+
+    telegram_enabled = forward.send_telegram if send_telegram is None else send_telegram
+    if telegram_enabled:
+        payload["telegram"] = {"enabled": True, "sent": False, "reason": "routine_updates_disabled_use_forward_audit"}
     return payload
 
 
@@ -184,6 +325,8 @@ def run_forward_sleeves(
     report_dir: str | Path | None = None,
     send_telegram: bool | None = None,
     sleeves: dict[str, DailyCloseFadeConfig] | None = None,
+    mode: str = "scan",
+    require_first_slice: bool = False,
 ) -> dict[str, Any]:
     fade = fade_config or config.daily_close_fade
     forward = forward_config or config.forward_test
@@ -196,16 +339,42 @@ def run_forward_sleeves(
     for name, sleeve_fade in sleeve_configs.items():
         sleeve_root = sleeve_root_base / _safe_sleeve_name(name)
         sleeve_report_dir = output_dir / "forward_sleeves" / _safe_sleeve_name(name)
-        payload = run_forward_once(
-            sleeve_root,
-            config=config,
-            fade_config=sleeve_fade,
-            forward_config=forward,
-            now=now_dt,
-            client=client,
-            report_dir=sleeve_report_dir,
-            send_telegram=False,
-        )
+        if mode == "scan":
+            payload = run_forward_once(
+                sleeve_root,
+                config=config,
+                fade_config=sleeve_fade,
+                forward_config=forward,
+                now=now_dt,
+                client=client,
+                report_dir=sleeve_report_dir,
+                send_telegram=False,
+            )
+        elif mode == "mark_only":
+            payload = run_forward_mark_only(
+                sleeve_root,
+                config=config,
+                fade_config=sleeve_fade,
+                forward_config=forward,
+                now=now_dt,
+                client=client,
+                report_dir=sleeve_report_dir,
+                send_telegram=False,
+            )
+        elif mode == "open_from_scan":
+            payload = run_forward_from_latest_scan(
+                sleeve_root,
+                config=config,
+                fade_config=sleeve_fade,
+                forward_config=forward,
+                now=now_dt,
+                client=client,
+                report_dir=sleeve_report_dir,
+                send_telegram=False,
+                require_first_slice=require_first_slice,
+            )
+        else:
+            raise ValueError(f"unknown forward sleeve mode: {mode}")
         summary = payload.get("summary") or summarize_forward_paper_trades(read_dataset(sleeve_root, "forward_paper_trades"))
         results.append(
             {
@@ -246,50 +415,27 @@ def run_forward_sleeves(
     payload = {
         "now": now_dt.isoformat(),
         "rows": {"sleeves": len(results)},
-        "config": {"forward": asdict(forward)},
+        "config": {"forward": asdict(forward), "mode": mode, "require_first_slice": require_first_slice},
         "results": results,
     }
     _write_forward_sleeves_outputs(payload, output_dir=output_dir)
     telegram_enabled = forward.send_telegram if send_telegram is None else send_telegram
-    send_telegram_message(format_forward_sleeves_message(payload), enabled=telegram_enabled)
+    if telegram_enabled:
+        payload["telegram"] = {"enabled": True, "sent": False, "reason": "routine_updates_disabled_use_forward_audit"}
     return payload
 
 
 def default_forward_sleeves(base: DailyCloseFadeConfig) -> dict[str, DailyCloseFadeConfig]:
     return {
-        "control_top_1_30": replace(
-            base,
-            liquidity_rank_min=1,
-            liquidity_rank_max=30,
-            exclude_symbols=(),
-            top_n=5,
-            gross_exposure=min(base.gross_exposure, 0.25),
-            max_position_weight=base.max_position_weight,
-            max_trade_notional_pct_of_day_turnover=0.0,
-            max_trade_notional_pct_of_baseline_turnover=0.0,
-        ),
-        "core_31_150": replace(
+        "rank_31_plus": replace(
             base,
             liquidity_rank_min=31,
-            liquidity_rank_max=150,
-            top_n=5,
+            liquidity_rank_max=0,
+            top_n=base.top_n,
             gross_exposure=base.gross_exposure,
             max_position_weight=base.max_position_weight,
-            max_trade_notional_pct_of_day_turnover=0.0,
-            max_trade_notional_pct_of_baseline_turnover=0.0,
-        ),
-        "microcap_151_plus": replace(
-            base,
-            liquidity_rank_min=151,
-            liquidity_rank_max=0,
-            top_n=3,
-            gross_exposure=min(base.gross_exposure, 0.5),
-            min_baseline_turnover=max(base.min_baseline_turnover, 250_000.0),
-            min_day_turnover=max(base.min_day_turnover, 750_000.0),
-            min_last_60m_turnover=max(base.min_last_60m_turnover, 75_000.0),
-            max_position_weight=base.max_position_weight or 0.20,
-            max_trade_notional_pct_of_day_turnover=base.max_trade_notional_pct_of_day_turnover or 0.002,
-            max_trade_notional_pct_of_baseline_turnover=base.max_trade_notional_pct_of_baseline_turnover or 0.005,
+            max_trade_notional_pct_of_day_turnover=base.max_trade_notional_pct_of_day_turnover,
+            max_trade_notional_pct_of_baseline_turnover=base.max_trade_notional_pct_of_baseline_turnover,
         ),
     }
 
@@ -300,6 +446,7 @@ def run_forward_report(
     report_dir: str | Path | None = None,
 ) -> dict[str, Any]:
     trades = read_dataset(data_root, "forward_paper_trades")
+    paper_slices = read_dataset(data_root, "forward_paper_slices")
     baskets = summarize_forward_paper_baskets(trades)
     payload = {
         "rows": {
@@ -310,7 +457,7 @@ def run_forward_report(
         },
         "summary": summarize_forward_paper_trades(trades),
     }
-    _write_forward_trade_outputs(data_root, payload, trades, baskets, report_dir=report_dir)
+    _write_forward_trade_outputs(data_root, payload, trades, baskets, paper_slices, report_dir=report_dir)
     return payload
 
 
@@ -399,7 +546,7 @@ def build_forward_scan_features(
 
     median_vol = features.select(pl.col("realized_vol").median()).item()
     fallback_vol = float(median_vol) if median_vol is not None and median_vol > EPSILON else 0.03
-    return (
+    features = (
         features.with_columns(
             [
                 pl.lit(scan_id).alias("scan_id"),
@@ -411,13 +558,24 @@ def build_forward_scan_features(
                 .then(pl.col("day_turnover") / pl.col("day_volume_base"))
                 .otherwise(None)
                 .alias("intraday_vwap"),
-                (pl.col("bar_count") / (signal_minute + 1)).alias("bar_coverage"),
+                (
+                    pl.col("bar_count")
+                    / pl.when(pl.col("signal_minute") > 0).then(pl.col("signal_minute")).otherwise(1)
+                ).alias("bar_coverage"),
             ]
         )
         .with_columns(
             [
                 (pl.col("signal_close") / pl.col("intraday_vwap") - 1.0).fill_null(0.0).alias("vwap_extension"),
-                (pl.col("last_60m_turnover") / (pl.col("day_turnover") / ((signal_minute + 1) / 60.0)).clip(EPSILON))
+                (
+                    pl.col("last_60m_turnover")
+                    / (
+                        pl.col("day_turnover")
+                        / pl.when(pl.col("signal_minute") > 0)
+                        .then(pl.col("signal_minute") / 60.0)
+                        .otherwise(1.0)
+                    ).clip(EPSILON)
+                )
                 .fill_null(0.0)
                 .alias("late_volume_ratio"),
                 (pl.col("signal_close") >= pl.col("day_high") * 0.995).alias("fresh_day_high"),
@@ -460,16 +618,16 @@ def open_forward_paper_trades(
 ) -> pl.DataFrame:
     if candidates.is_empty():
         return pl.DataFrame()
-    if fade_config.entry_twap_minutes > 0:
-        # Do not fake a TWAP position as one paper fill. The order/ledger layer
-        # needs explicit slice accounting before forward/demo can trade this.
-        return pl.DataFrame()
     now_ms = _floor_minute_ms(_ms_from_dt(_as_utc(now)))
     signal_ts_ms = int(candidates["signal_ts_ms"].head(1).item())
-    entry_due_ts_ms = signal_ts_ms + fade_config.entry_delay_minutes * MS_PER_MINUTE
+    entry_schedule = close_fade_entry_child_schedule_ts_ms(signal_ts_ms, fade_config)
+    entry_due_ts_ms = entry_schedule[0]
+    final_entry_ts_ms = entry_schedule[-1]
     if now_ms < entry_due_ts_ms:
         return pl.DataFrame()
-    if now_ms > entry_due_ts_ms + forward_config.max_entry_lag_minutes * MS_PER_MINUTE:
+    if fade_config.entry_twap_minutes > 0 and now_ms != entry_due_ts_ms:
+        return pl.DataFrame()
+    if now_ms > final_entry_ts_ms + forward_config.max_entry_lag_minutes * MS_PER_MINUTE:
         return pl.DataFrame()
     basket_id = f"{_dt_from_ms(signal_ts_ms).date().isoformat()}-{fade_config.signal_minute}"
     if _basket_already_opened(existing_trades, basket_id):
@@ -488,6 +646,20 @@ def open_forward_paper_trades(
             continue
         entry_candidates = frame.filter(pl.col("ts_ms") >= entry_due_ts_ms).sort("ts_ms")
         if entry_candidates.is_empty():
+            continue
+        if fade_config.entry_twap_minutes > 0:
+            trade = _new_twap_paper_trade(
+                row,
+                basket_id=basket_id,
+                bars=entry_candidates,
+                now_ms=now_ms,
+                selected_count=selected_count,
+                fade_config=fade_config,
+                round_trip_cost_bps=round_trip_cost_bps,
+            )
+            if trade is None:
+                continue
+            rows.append(trade)
             continue
         entry_bar = entry_candidates.row(0, named=True)
         trade = _new_paper_trade(
@@ -529,10 +701,11 @@ def mark_forward_open_trades(
             rows.append(row)
             continue
         symbol = str(row["symbol"])
-        start_ms = int(row["entry_ts_ms"])
+        start_ms = _trade_entry_schedule_ts_ms(row, fade_config)[0] if int(float(row.get("entry_twap_minutes") or 0)) > 0 else int(row["entry_ts_ms"])
         target_exit_ms = min(int(row["target_exit_ts_ms"]), now_ms)
+        fetch_end_ms = max(target_exit_ms, now_ms)
         try:
-            bars = _fetch_symbol_klines(client, symbol, "1", start_ms, target_exit_ms)
+            bars = _fetch_symbol_klines(client, symbol, "1", start_ms, fetch_end_ms)
         except Exception as exc:  # noqa: BLE001 - keep the paper ledger alive for other symbols
             updated = dict(row)
             updated["last_error"] = str(exc)
@@ -540,8 +713,9 @@ def mark_forward_open_trades(
             continue
         frame = pl.DataFrame(bars, infer_schema_length=None)
         row_round_trip_cost_bps = _trade_number(row, "round_trip_cost_bps", default_round_trip_cost_bps)
+        marker = _mark_twap_trade_from_bars if int(float(row.get("entry_twap_minutes") or 0)) > 0 else _mark_trade_from_bars
         rows.append(
-            _mark_trade_from_bars(
+            marker(
                 row,
                 frame,
                 now_ms=now_ms,
@@ -550,6 +724,40 @@ def mark_forward_open_trades(
             )
         )
     return pl.DataFrame(rows, infer_schema_length=None) if rows else trades
+
+
+def build_forward_paper_slices(
+    trades: pl.DataFrame,
+) -> pl.DataFrame:
+    rows: list[dict[str, Any]] = []
+    if trades.is_empty() or "entry_fills_json" not in trades.columns:
+        return pl.DataFrame()
+    for trade in trades.to_dicts():
+        try:
+            slices = json.loads(str(trade.get("entry_fills_json") or "[]"))
+        except json.JSONDecodeError:
+            slices = []
+        for item in slices:
+            rows.append(
+                {
+                    "trade_id": str(trade.get("trade_id") or ""),
+                    "basket_id": str(trade.get("basket_id") or ""),
+                    "symbol": str(trade.get("symbol") or ""),
+                    "date": str(trade.get("date") or ""),
+                    "side": str(trade.get("side") or "short"),
+                    "signal_ts_ms": int(trade.get("signal_ts_ms") or 0),
+                    "signal_time": str(trade.get("signal_time") or ""),
+                    "paper_status": str(trade.get("status") or ""),
+                    "paper_entry_price": float(trade.get("entry_price") or 0.0),
+                    "paper_exit_price": float(trade.get("exit_price") or 0.0) if trade.get("exit_price") is not None else None,
+                    "paper_exit_reason": str(trade.get("exit_reason") or ""),
+                    "target_notional": float(trade.get("target_notional") or 0.0),
+                    "actual_notional": float(trade.get("actual_notional") or 0.0),
+                    "entry_twap_minutes": int(float(trade.get("entry_twap_minutes") or 0)),
+                    **item,
+                }
+            )
+    return pl.DataFrame(rows, infer_schema_length=None).sort(["scheduled_ts_ms", "symbol"]) if rows else pl.DataFrame()
 
 
 def summarize_forward_paper_baskets(trades: pl.DataFrame) -> pl.DataFrame:
@@ -610,6 +818,7 @@ def summarize_forward_paper_trades(trades: pl.DataFrame) -> dict[str, Any]:
 
 def format_forward_scan_report(payload: dict[str, Any]) -> str:
     score_name = payload.get("config", {}).get("fade", {}).get("score", "score")
+    api = payload.get("api", {}) or {}
     lines = [
         "# Forward Scan Report",
         "",
@@ -627,6 +836,18 @@ def format_forward_scan_report(payload: dict[str, Any]) -> str:
         f"| Features | {payload['rows']['features']} |",
         f"| Candidates | {payload['rows']['candidates']} |",
         f"| Fetch failures | {payload['rows']['fetch_failures']} |",
+        f"| API/backoff events | {payload['rows'].get('api_backoff_events', 0)} |",
+        "",
+        "## API Runtime",
+        "",
+        "| Metric | Value |",
+        "|---|---:|",
+        f"| Logical calls | {api.get('logical_calls', 0)} |",
+        f"| HTTP calls | {api.get('http_calls', 0)} |",
+        f"| Retry events | {api.get('retry_events', 0)} |",
+        f"| Rate-limit events | {api.get('rate_limit_events', 0)} |",
+        f"| Slow calls | {api.get('slow_calls', 0)} |",
+        f"| Total call ms | {float(api.get('total_call_ms', 0.0) or 0.0):.1f} |",
         "",
         "## Candidates",
         "",
@@ -660,6 +881,7 @@ def format_forward_run_report(payload: dict[str, Any]) -> str:
         "|---|---:|",
         f"| Total trades | {rows.get('total_trades', rows.get('trades', 0))} |",
         f"| New trades | {rows.get('new_trades', 0)} |",
+        f"| Paper slices | {rows.get('paper_slices', 0)} |",
         f"| Open trades | {rows.get('open_trades', 0)} |",
         f"| Closed trades | {rows.get('closed_trades', 0)} |",
         f"| Baskets | {rows.get('baskets', 0)} |",
@@ -771,9 +993,9 @@ def _fetch_forward_bars(
     daily_start_ms: int,
     daily_end_ms: int,
     workers: int,
-) -> tuple[pl.DataFrame, pl.DataFrame, list[dict[str, Any]]]:
+) -> tuple[pl.DataFrame, pl.DataFrame, list[dict[str, Any]], dict[str, Any]]:
     if not symbols:
-        return pl.DataFrame(), pl.DataFrame(), []
+        return pl.DataFrame(), pl.DataFrame(), [], _empty_api_stats()
     frames_1m: list[pl.DataFrame] = []
     frames_daily: list[pl.DataFrame] = []
     failures: list[dict[str, Any]] = []
@@ -792,18 +1014,24 @@ def _fetch_forward_bars(
     if client is not None or workers <= 1:
         local_client = client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
         results = [fetch_with(local_client, symbol) for symbol in symbols]
+        api_stats = _market_client_stats(local_client)
     else:
         max_workers = max(1, min(workers, len(symbols)))
+        worker_stats: list[dict[str, Any]] = []
+
+        def fetch_with_fresh_client(symbol: str) -> tuple[str, list[dict[str, Any]], list[dict[str, Any]], str | None, dict[str, Any]]:
+            local_client = BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
+            symbol_result = fetch_with(local_client, symbol)
+            return (*symbol_result, _market_client_stats(local_client))
+
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(
-                    fetch_with,
-                    BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet),
-                    symbol,
-                ): symbol
-                for symbol in symbols
-            }
-            results = [future.result() for future in as_completed(futures)]
+            futures = {executor.submit(fetch_with_fresh_client, symbol): symbol for symbol in symbols}
+            results = []
+            for future in as_completed(futures):
+                symbol, rows_1m, rows_daily, error, stats = future.result()
+                results.append((symbol, rows_1m, rows_daily, error))
+                worker_stats.append(stats)
+        api_stats = _merge_api_stats(worker_stats)
 
     for symbol, rows_1m, rows_daily, error in results:
         if error:
@@ -814,7 +1042,81 @@ def _fetch_forward_bars(
         if rows_daily:
             frames_daily.append(pl.DataFrame(rows_daily, infer_schema_length=None))
 
-    return _concat(frames_1m), _concat(frames_daily), failures
+    failure_backoffs = sum(1 for row in failures if _looks_like_rate_limit(row.get("error")))
+    if failure_backoffs:
+        api_stats = dict(api_stats)
+        api_stats["backoff_events"] = int(api_stats.get("backoff_events", 0) or 0) + failure_backoffs
+        api_stats["rate_limit_events"] = int(api_stats.get("rate_limit_events", 0) or 0) + failure_backoffs
+    return _concat(frames_1m), _concat(frames_daily), failures, api_stats
+
+
+def _market_client_stats(client: Any) -> dict[str, Any]:
+    stats_fn = getattr(client, "stats", None)
+    if not callable(stats_fn):
+        return _empty_api_stats()
+    try:
+        return _normalize_api_stats(stats_fn())
+    except Exception:  # noqa: BLE001 - scan reporting must not fail because stats collection failed
+        return _empty_api_stats()
+
+
+def _merge_api_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    merged = _empty_api_stats()
+    for row in rows:
+        stats = _normalize_api_stats(row)
+        for key in (
+            "logical_calls",
+            "http_calls",
+            "retry_events",
+            "rate_limit_events",
+            "error_events",
+            "slow_calls",
+            "backoff_events",
+        ):
+            merged[key] += int(stats.get(key, 0) or 0)
+        for key in ("total_call_ms", "slow_call_ms"):
+            merged[key] += float(stats.get(key, 0.0) or 0.0)
+        if stats.get("last_error"):
+            merged["last_error"] = str(stats["last_error"])
+    merged["total_call_ms"] = round(float(merged["total_call_ms"]), 3)
+    merged["slow_call_ms"] = round(float(merged["slow_call_ms"]), 3)
+    return merged
+
+
+def _normalize_api_stats(stats: dict[str, Any]) -> dict[str, Any]:
+    normalized = _empty_api_stats()
+    for key in normalized:
+        if key not in stats:
+            continue
+        if key == "last_error":
+            normalized[key] = str(stats.get(key) or "")[:500]
+        elif key in {"total_call_ms", "slow_call_ms"}:
+            normalized[key] = round(float(stats.get(key) or 0.0), 3)
+        else:
+            normalized[key] = int(float(stats.get(key) or 0))
+    if not normalized["backoff_events"]:
+        normalized["backoff_events"] = normalized["retry_events"] + normalized["rate_limit_events"] + normalized["slow_calls"]
+    return normalized
+
+
+def _empty_api_stats() -> dict[str, Any]:
+    return {
+        "logical_calls": 0,
+        "http_calls": 0,
+        "retry_events": 0,
+        "rate_limit_events": 0,
+        "error_events": 0,
+        "slow_calls": 0,
+        "total_call_ms": 0.0,
+        "slow_call_ms": 0.0,
+        "backoff_events": 0,
+        "last_error": "",
+    }
+
+
+def _looks_like_rate_limit(value: Any) -> bool:
+    text = str(value or "").lower()
+    return "10006" in text or "rate limit" in text or "too many visits" in text
 
 
 def _fetch_symbol_klines(client: Any, symbol: str, interval: str, start_ms: int, end_ms: int) -> list[dict[str, Any]]:
@@ -876,15 +1178,17 @@ def _normalize_klines(symbol: str, rows: list, *, source: str) -> list[dict[str,
 
 
 def _signal_feature_frame(base: pl.DataFrame, signal_minute: int) -> pl.DataFrame:
-    subset = base.filter(pl.col("minute_of_day") <= signal_minute).sort(["symbol", "date", "ts_ms"])
+    subset = base.filter(pl.col("bar_end_minute_of_day") <= signal_minute).sort(["symbol", "date", "ts_ms"])
     if subset.is_empty():
         return pl.DataFrame()
-    avg_hours = max((signal_minute + 1) / 60.0, 1.0)
+    avg_hours = max(signal_minute / 60.0, 1.0)
     return (
         subset.group_by(["symbol", "date"], maintain_order=True)
         .agg(
             [
-                pl.col("ts_ms").last().alias("signal_ts_ms"),
+                (pl.col("day_start_ts_ms").first() + signal_minute * MS_PER_MINUTE).alias("signal_ts_ms"),
+                pl.col("ts_ms").last().alias("last_available_bar_ts_ms"),
+                pl.col("bar_end_ts_ms").last().alias("last_available_bar_end_ts_ms"),
                 pl.col("open").first().alias("day_open"),
                 pl.col("close").last().alias("signal_close"),
                 pl.col("high").max().alias("day_high"),
@@ -892,9 +1196,18 @@ def _signal_feature_frame(base: pl.DataFrame, signal_minute: int) -> pl.DataFram
                 pl.col("turnover_quote").sum().alias("day_turnover"),
                 pl.col("volume_base").sum().alias("day_volume_base"),
                 pl.len().alias("bar_count"),
-                pl.col("turnover_quote").filter(pl.col("minute_of_day") > signal_minute - 60).sum().alias("last_60m_turnover"),
-                pl.col("close").filter(pl.col("minute_of_day") <= signal_minute - 15).last().alias("close_15m_ago"),
-                pl.col("close").filter(pl.col("minute_of_day") <= signal_minute - 60).last().alias("close_60m_ago"),
+                pl.col("turnover_quote")
+                .filter(pl.col("bar_end_minute_of_day") > signal_minute - 60)
+                .sum()
+                .alias("last_60m_turnover"),
+                pl.col("close")
+                .filter(pl.col("bar_end_minute_of_day") <= signal_minute - 15)
+                .last()
+                .alias("close_15m_ago"),
+                pl.col("close")
+                .filter(pl.col("bar_end_minute_of_day") <= signal_minute - 60)
+                .last()
+                .alias("close_60m_ago"),
             ]
         )
         .with_columns(
@@ -956,10 +1269,14 @@ def _latest_baseline_liquidity(daily_klines: pl.DataFrame, *, lookback_days: int
 
 def _minute_frame(df: pl.DataFrame) -> pl.DataFrame:
     dt = pl.from_epoch(pl.col("ts_ms"), time_unit="ms")
+    minute_of_day = dt.dt.hour().cast(pl.Int16) * 60 + dt.dt.minute().cast(pl.Int16)
     return df.with_columns(
         [
             dt.dt.strftime("%Y-%m-%d").alias("date"),
-            (dt.dt.hour().cast(pl.Int16) * 60 + dt.dt.minute().cast(pl.Int16)).alias("minute_of_day"),
+            (pl.col("ts_ms") - (pl.col("ts_ms") % MS_PER_DAY)).alias("day_start_ts_ms"),
+            minute_of_day.alias("minute_of_day"),
+            (minute_of_day + 1).alias("bar_end_minute_of_day"),
+            (pl.col("ts_ms") + MS_PER_MINUTE).alias("bar_end_ts_ms"),
         ]
     )
 
@@ -975,7 +1292,11 @@ def _new_paper_trade(
     round_trip_cost_bps: float,
 ) -> dict[str, Any]:
     signal_ts_ms = int(row["signal_ts_ms"])
-    target_exit_ts_ms = entry_ts_ms + fade_config.hold_minutes * MS_PER_MINUTE
+    entry_complete_ts_ms = entry_ts_ms
+    target_exit_ts_ms = entry_complete_ts_ms + fade_config.hold_minutes * MS_PER_MINUTE
+    stop_active_ts_ms = entry_ts_ms + fade_config.stop_delay_minutes * MS_PER_MINUTE
+    profit_delay_minutes = _profit_protection_delay_minutes(fade_config)
+    profit_active_ts_ms = entry_complete_ts_ms + profit_delay_minutes * MS_PER_MINUTE
     weight_info = _close_fade_position_weight(row, config=fade_config, selected_count=selected_count)
     weight = weight_info["weight"]
     trade_id = f"paper-{signal_ts_ms}-{row['symbol']}-{int(row.get('entry_rank', 0))}"
@@ -995,6 +1316,35 @@ def _new_paper_trade(
         "entry_ts_ms": entry_ts_ms,
         "entry_time": entry_dt.isoformat(),
         "entry_price": entry_price,
+        "avg_entry_price": entry_price,
+        "entry_complete_ts_ms": entry_complete_ts_ms,
+        "entry_complete_time": entry_dt.isoformat(),
+        "entry_twap_minutes": fade_config.entry_twap_minutes,
+        "entry_delay_minutes": fade_config.entry_delay_minutes,
+        "entry_fill_count": 1,
+        "child_fill_count": 1,
+        "entry_fill_fraction": 1.0,
+        "stop_active_ts_ms": stop_active_ts_ms,
+        "stop_active_time": _dt_from_ms(stop_active_ts_ms).isoformat(),
+        "profit_protection_active_ts_ms": profit_active_ts_ms,
+        "profit_protection_active_time": _dt_from_ms(profit_active_ts_ms).isoformat(),
+        "profit_protection_delay_minutes": profit_delay_minutes,
+        "entry_fills_json": json.dumps(
+            [
+                {
+                    "slice_index": 1,
+                    "scheduled_ts_ms": entry_ts_ms,
+                    "scheduled_time": entry_dt.isoformat(),
+                    "fill_ts_ms": entry_ts_ms,
+                    "fill_time": entry_dt.isoformat(),
+                    "status": "filled",
+                    "fill_price": entry_price,
+                    "avg_entry_price": entry_price,
+                    "stop_price": entry_price * (1.0 + fade_config.stop_loss_pct) if fade_config.stop_loss_pct > 0.0 else None,
+                }
+            ],
+            separators=(",", ":"),
+        ),
         "target_exit_ts_ms": target_exit_ts_ms,
         "target_exit_time": _dt_from_ms(target_exit_ts_ms).isoformat(),
         "exit_ts_ms": None,
@@ -1031,6 +1381,7 @@ def _new_paper_trade(
         "account_equity": fade_config.account_equity,
         "target_notional": weight_info["target_notional"],
         "actual_notional": weight_info["actual_notional"],
+        "pnl_usdt": -(round_trip_cost_bps / 10_000.0) * weight_info["actual_notional"],
         "gross_return": 0.0,
         "cost_return": round_trip_cost_bps / 10_000.0,
         "net_return": -(round_trip_cost_bps / 10_000.0),
@@ -1050,6 +1401,7 @@ def _new_paper_trade(
         "mfe_giveback_pct": fade_config.mfe_giveback_pct,
         "vwap_reversion_pct": fade_config.vwap_reversion_pct,
         "stop_delay_minutes": fade_config.stop_delay_minutes,
+        "twap_stop_adding_pct": fade_config.twap_stop_adding_pct,
         "cost_multiplier": fade_config.cost_multiplier,
         "liquidity_lookback_days": fade_config.liquidity_lookback_days,
         "liquidity_rank_min": fade_config.liquidity_rank_min,
@@ -1063,6 +1415,318 @@ def _new_paper_trade(
         "round_trip_cost_bps": round_trip_cost_bps,
         "last_error": None,
     }
+
+
+def _new_twap_paper_trade(
+    row: dict[str, Any],
+    *,
+    basket_id: str,
+    bars: pl.DataFrame,
+    now_ms: int,
+    selected_count: int,
+    fade_config: DailyCloseFadeConfig,
+    round_trip_cost_bps: float,
+) -> dict[str, Any] | None:
+    signal_ts_ms = int(row["signal_ts_ms"])
+    schedule = close_fade_entry_child_schedule_ts_ms(signal_ts_ms, fade_config)
+    due_bars = bars.filter(pl.col("ts_ms").is_in(schedule) & (pl.col("ts_ms") <= now_ms)).sort("ts_ms")
+    if due_bars.is_empty():
+        return None
+    fill_prices = [float(item) for item in due_bars["open"].to_list()]
+    avg_entry = sum(fill_prices) / len(fill_prices)
+    entry_ts_ms = int(due_bars["ts_ms"].head(1).item())
+    trade = _new_paper_trade(
+        row,
+        basket_id=basket_id,
+        entry_ts_ms=entry_ts_ms,
+        entry_price=avg_entry,
+        selected_count=selected_count,
+        fade_config=fade_config,
+        round_trip_cost_bps=round_trip_cost_bps,
+    )
+    return _mark_twap_trade_from_bars(
+        trade,
+        bars,
+        now_ms=now_ms,
+        fade_config=fade_config,
+        round_trip_cost_bps=round_trip_cost_bps,
+    )
+
+
+def _mark_twap_trade_from_bars(
+    trade: dict[str, Any],
+    bars: pl.DataFrame,
+    *,
+    now_ms: int,
+    fade_config: DailyCloseFadeConfig,
+    round_trip_cost_bps: float,
+) -> dict[str, Any]:
+    updated = dict(trade)
+    signal_ts_ms = int(updated["signal_ts_ms"])
+    schedule = _trade_entry_schedule_ts_ms(updated, fade_config)
+    schedule_index = {ts_ms: index for index, ts_ms in enumerate(schedule, start=1)}
+    required_fills = len(schedule)
+    final_add_ts_ms = schedule[-1]
+    entry_delay_minutes = int(_trade_number(updated, "entry_delay_minutes", float(fade_config.entry_delay_minutes)))
+    entry_twap_minutes = int(_trade_number(updated, "entry_twap_minutes", float(fade_config.entry_twap_minutes)))
+    profit_delay_minutes = _trade_number(updated, "profit_protection_delay_minutes", _profit_protection_delay_minutes(fade_config))
+    stop_delay_minutes = int(_trade_number(updated, "stop_delay_minutes", float(fade_config.stop_delay_minutes)))
+    stop_loss_pct = _trade_number(updated, "stop_loss_pct", fade_config.stop_loss_pct)
+    take_profit_pct = _trade_number(updated, "take_profit_pct", fade_config.take_profit_pct)
+    trailing_stop_pct = _trade_number(updated, "trailing_stop_pct", fade_config.trailing_stop_pct)
+    trailing_activation_pct = _trade_number(updated, "trailing_activation_pct", fade_config.trailing_activation_pct)
+    vol_trailing_stop_mult = _trade_number(updated, "vol_trailing_stop_mult", fade_config.vol_trailing_stop_mult)
+    vol_trailing_activation_mult = _trade_number(
+        updated,
+        "vol_trailing_activation_mult",
+        fade_config.vol_trailing_activation_mult,
+    )
+    mfe_giveback_activation_pct = _trade_number(
+        updated,
+        "mfe_giveback_activation_pct",
+        fade_config.mfe_giveback_activation_pct,
+    )
+    mfe_giveback_pct = _trade_number(updated, "mfe_giveback_pct", fade_config.mfe_giveback_pct)
+    vwap_reversion_pct = _trade_number(updated, "vwap_reversion_pct", fade_config.vwap_reversion_pct)
+    twap_stop_adding_pct = _trade_number(updated, "twap_stop_adding_pct", fade_config.twap_stop_adding_pct)
+    realized_vol = max(_trade_number(updated, "realized_vol", 0.0), 0.0)
+    vol_trailing_stop_pct = realized_vol * vol_trailing_stop_mult if vol_trailing_stop_mult > 0.0 else 0.0
+    vol_trailing_activation_pct = (
+        realized_vol * vol_trailing_activation_mult if vol_trailing_stop_mult > 0.0 else 0.0
+    )
+    bar_rows = {int(row["ts_ms"]): row for row in bars.sort("ts_ms").to_dicts()} if not bars.is_empty() else {}
+    entry_fill_sum = 0.0
+    entry_fill_count = 0
+    entry_price = 0.0
+    entry_ts_ms: int | None = None
+    entry_rows: list[dict[str, Any]] = []
+    exit_ts_ms: int | None = None
+    exit_price: float | None = None
+    exit_reason = "open"
+    mark_ts_ms = int(updated.get("mark_ts_ms") or schedule[0])
+    mark_price = float(updated.get("mark_price") or updated.get("entry_price") or 0.0)
+    best_price: float | None = None
+    trailing_active = False
+    vol_trailing_active = False
+    mfe_giveback_active = False
+    max_favorable = 0.0
+    max_adverse = 0.0
+    stored_entry_complete_ts_ms = int(_trade_number(updated, "entry_complete_ts_ms", float(final_add_ts_ms)))
+    stored_target_exit_ts_ms = int(
+        _trade_number(
+            updated,
+            "target_exit_ts_ms",
+            float(final_add_ts_ms + int(fade_config.hold_minutes) * MS_PER_MINUTE),
+        )
+    )
+    hold_duration_ms = max(stored_target_exit_ts_ms - stored_entry_complete_ts_ms, MS_PER_MINUTE)
+    entry_complete_ts_ms = final_add_ts_ms
+    target_exit_ts_ms = entry_complete_ts_ms + hold_duration_ms
+    stop_active_ts_ms = schedule[0] + stop_delay_minutes * MS_PER_MINUTE
+    profit_active_ts_ms = final_add_ts_ms + int(profit_delay_minutes) * MS_PER_MINUTE
+    cost_return = round_trip_cost_bps / 10_000.0
+    twap_stopped_adding = False
+    twap_stop_adding_ts_ms: int | None = None
+
+    for ts_ms in sorted(ts for ts in bar_rows if ts >= schedule[0] and ts <= now_ms):
+        bar = bar_rows[ts_ms]
+        if ts_ms in schedule and exit_ts_ms is None and not twap_stopped_adding:
+            fill_price = float(bar["open"])
+            entry_fill_sum += fill_price
+            entry_fill_count += 1
+            entry_price = entry_fill_sum / entry_fill_count
+            if entry_ts_ms is None:
+                entry_ts_ms = ts_ms
+            best_price = entry_price if best_price is None else min(best_price, entry_price)
+            entry_rows.append(
+                {
+                    "slice_index": schedule_index[ts_ms],
+                    "scheduled_ts_ms": ts_ms,
+                    "scheduled_time": _dt_from_ms(ts_ms).isoformat(),
+                    "fill_ts_ms": ts_ms,
+                    "fill_time": _dt_from_ms(ts_ms).isoformat(),
+                    "status": "filled",
+                    "fill_price": fill_price,
+                    "avg_entry_price": entry_price,
+                    "stop_price": entry_price * (1.0 + stop_loss_pct) if stop_loss_pct > 0.0 else None,
+                }
+            )
+        if entry_fill_count <= 0:
+            continue
+
+        high = float(bar["high"])
+        low = float(bar["low"])
+        close = float(bar["close"])
+        mark_ts_ms = ts_ms
+        mark_price = close
+        max_favorable = max(max_favorable, _short_return(entry_price, low))
+        max_adverse = min(max_adverse, _short_return(entry_price, high))
+
+        hard_stop = entry_price * (1.0 + stop_loss_pct) if stop_loss_pct > 0.0 else None
+        if ts_ms >= stop_active_ts_ms and hard_stop is not None and high >= hard_stop:
+            exit_ts_ms = ts_ms
+            exit_price = _short_stop_execution_price(hard_stop, bar)
+            exit_reason = "stop_loss"
+            break
+
+        if (
+            not twap_stopped_adding
+            and twap_stop_adding_pct > 0.0
+            and entry_fill_count < required_fills
+            and high >= entry_price * (1.0 + twap_stop_adding_pct)
+        ):
+            twap_stopped_adding = True
+            twap_stop_adding_ts_ms = ts_ms
+            entry_complete_ts_ms = ts_ms
+            target_exit_ts_ms = entry_complete_ts_ms + hold_duration_ms
+            profit_active_ts_ms = entry_complete_ts_ms + int(profit_delay_minutes) * MS_PER_MINUTE
+
+        entry_is_complete = entry_fill_count >= required_fills or twap_stopped_adding or ts_ms >= final_add_ts_ms
+        profit_exits_active = entry_is_complete and ts_ms >= profit_active_ts_ms
+        if profit_exits_active:
+            protective_exits: list[tuple[float, str]] = []
+            if trailing_active and trailing_stop_pct > 0.0 and best_price is not None:
+                trailing_stop = best_price * (1.0 + trailing_stop_pct)
+                if high >= trailing_stop:
+                    protective_exits.append((trailing_stop, "trailing_stop"))
+            if vol_trailing_active and vol_trailing_stop_pct > 0.0 and best_price is not None:
+                vol_trailing_stop = best_price * (1.0 + vol_trailing_stop_pct)
+                if high >= vol_trailing_stop:
+                    protective_exits.append((vol_trailing_stop, "vol_trailing_stop"))
+            if mfe_giveback_active and mfe_giveback_pct > 0.0 and best_price is not None:
+                mfe_stop = _mfe_giveback_stop_price(entry_price, best_price, mfe_giveback_pct)
+                if high >= mfe_stop:
+                    protective_exits.append((mfe_stop, "mfe_giveback"))
+            if protective_exits:
+                stop_price, exit_reason = max(protective_exits, key=lambda item: item[0])
+                exit_price = _short_stop_execution_price(stop_price, bar)
+                exit_ts_ms = ts_ms
+                break
+
+        take_profit = entry_price * (1.0 - take_profit_pct) if take_profit_pct > 0.0 else None
+        if profit_exits_active and take_profit is not None and low <= take_profit:
+            exit_ts_ms = ts_ms
+            exit_price = _short_limit_execution_price(take_profit, bar)
+            exit_reason = "take_profit"
+            break
+
+        vwap_exit = _vwap_reversion_exit_price(entry_price, updated, replace(fade_config, vwap_reversion_pct=vwap_reversion_pct))
+        if profit_exits_active and vwap_exit is not None and low <= vwap_exit:
+            exit_ts_ms = ts_ms
+            exit_price = _short_limit_execution_price(vwap_exit, bar)
+            exit_reason = "vwap_reversion"
+            break
+
+        if best_price is None or low < best_price:
+            best_price = low
+
+        if profit_exits_active and best_price is not None:
+            best_return = _short_return(entry_price, best_price)
+            if trailing_stop_pct > 0.0 and not trailing_active and best_return >= trailing_activation_pct:
+                trailing_active = True
+            if vol_trailing_stop_pct > 0.0 and not vol_trailing_active and best_return >= vol_trailing_activation_pct:
+                vol_trailing_active = True
+            if (
+                mfe_giveback_pct > 0.0
+                and not mfe_giveback_active
+                and best_return >= mfe_giveback_activation_pct
+            ):
+                mfe_giveback_active = True
+
+        if ts_ms >= target_exit_ts_ms:
+            exit_ts_ms = ts_ms
+            exit_price = close
+            exit_reason = "max_hold"
+            break
+
+    if entry_fill_count <= 0:
+        return updated
+
+    filled_schedule = {int(row["scheduled_ts_ms"]) for row in entry_rows}
+    for index, scheduled_ts_ms in enumerate(schedule, start=1):
+        if scheduled_ts_ms in filled_schedule:
+            continue
+        if twap_stopped_adding and twap_stop_adding_ts_ms is not None and scheduled_ts_ms > twap_stop_adding_ts_ms:
+            status = "cancelled_stop_adding"
+        elif exit_ts_ms is not None and scheduled_ts_ms >= exit_ts_ms:
+            status = "cancelled_after_exit"
+        elif scheduled_ts_ms <= now_ms:
+            status = "missed_no_bar"
+        else:
+            status = "pending"
+        entry_rows.append(
+            {
+                "slice_index": index,
+                "scheduled_ts_ms": scheduled_ts_ms,
+                "scheduled_time": _dt_from_ms(scheduled_ts_ms).isoformat(),
+                "fill_ts_ms": None,
+                "fill_time": "",
+                "status": status,
+                "fill_price": None,
+                "avg_entry_price": entry_price,
+                "stop_price": entry_price * (1.0 + stop_loss_pct) if stop_loss_pct > 0.0 else None,
+            }
+        )
+    entry_rows = sorted(entry_rows, key=lambda item: int(item["slice_index"]))
+    fill_fraction = min(1.0, entry_fill_count / required_fills)
+    target_weight = float(updated.get("target_weight") or updated.get("weight") or 0.0)
+    target_notional = float(updated.get("target_notional") or 0.0)
+    weight = target_weight * fill_fraction
+    actual_notional = target_notional * fill_fraction if target_notional > 0.0 else float(updated.get("actual_notional") or 0.0)
+    gross_return = _short_return(entry_price, float(exit_price if exit_price is not None else mark_price))
+    net_return = gross_return - cost_return
+    entry_dt = _dt_from_ms(int(entry_ts_ms))
+    mark_dt = _dt_from_ms(int(exit_ts_ms if exit_ts_ms is not None else mark_ts_ms))
+    updated.update(
+        {
+            "status": "closed" if exit_ts_ms is not None else "open",
+            "entry_ts_ms": int(entry_ts_ms),
+            "entry_time": entry_dt.isoformat(),
+            "entry_price": entry_price,
+            "avg_entry_price": entry_price,
+            "entry_complete_ts_ms": entry_complete_ts_ms,
+            "entry_complete_time": _dt_from_ms(entry_complete_ts_ms).isoformat(),
+            "entry_due_ts_ms": schedule[0],
+            "entry_twap_minutes": entry_twap_minutes,
+            "entry_delay_minutes": entry_delay_minutes,
+            "entry_fill_count": entry_fill_count,
+            "child_fill_count": entry_fill_count,
+            "entry_fill_fraction": fill_fraction,
+            "entry_fills_json": json.dumps(entry_rows, separators=(",", ":")),
+            "stop_active_ts_ms": stop_active_ts_ms,
+            "stop_active_time": _dt_from_ms(stop_active_ts_ms).isoformat(),
+            "profit_protection_active_ts_ms": profit_active_ts_ms,
+            "profit_protection_active_time": _dt_from_ms(profit_active_ts_ms).isoformat(),
+            "profit_protection_delay_minutes": profit_delay_minutes,
+            "twap_stop_adding_pct": twap_stop_adding_pct,
+            "twap_stopped_adding": twap_stopped_adding,
+            "twap_stop_adding_ts_ms": int(twap_stop_adding_ts_ms or 0),
+            "twap_stop_adding_time": _dt_from_ms(twap_stop_adding_ts_ms).isoformat() if twap_stop_adding_ts_ms else "",
+            "target_exit_ts_ms": target_exit_ts_ms,
+            "target_exit_time": _dt_from_ms(target_exit_ts_ms).isoformat(),
+            "exit_ts_ms": exit_ts_ms,
+            "exit_time": mark_dt.isoformat() if exit_ts_ms is not None else None,
+            "exit_price": float(exit_price) if exit_price is not None else None,
+            "exit_reason": exit_reason,
+            "mark_ts_ms": int(exit_ts_ms if exit_ts_ms is not None else mark_ts_ms),
+            "mark_time": mark_dt.isoformat(),
+            "mark_price": float(exit_price if exit_price is not None else mark_price),
+            "hold_minutes": ((exit_ts_ms if exit_ts_ms is not None else mark_ts_ms) - int(entry_ts_ms)) / MS_PER_MINUTE,
+            "weight": weight,
+            "actual_notional": actual_notional,
+            "gross_return": gross_return,
+            "cost_return": cost_return,
+            "net_return": net_return,
+            "weighted_gross_return": gross_return * weight,
+            "weighted_cost_return": cost_return * weight,
+            "weighted_net_return": net_return * weight,
+            "pnl_usdt": net_return * actual_notional,
+            "mae": min(float(updated.get("mae") or 0.0), max_adverse),
+            "mfe": max(float(updated.get("mfe") or 0.0), max_favorable),
+            "round_trip_cost_bps": round_trip_cost_bps,
+        }
+    )
+    return updated
 
 
 def _mark_trade_from_bars(
@@ -1129,7 +1793,7 @@ def _mark_trade_from_bars(
 
             if ts_ms >= stop_active_ts_ms and hard_stop is not None and high >= hard_stop:
                 exit_ts_ms = ts_ms
-                exit_price = hard_stop
+                exit_price = _short_stop_execution_price(hard_stop, bar)
                 exit_reason = "stop_loss"
                 break
 
@@ -1148,19 +1812,20 @@ def _mark_trade_from_bars(
                     if high >= mfe_stop:
                         protective_exits.append((mfe_stop, "mfe_giveback"))
                 if protective_exits:
-                    exit_price, exit_reason = max(protective_exits, key=lambda item: item[0])
+                    stop_price, exit_reason = max(protective_exits, key=lambda item: item[0])
+                    exit_price = _short_stop_execution_price(stop_price, bar)
                     exit_ts_ms = ts_ms
                     break
 
             if take_profit is not None and low <= take_profit:
                 exit_ts_ms = ts_ms
-                exit_price = take_profit
+                exit_price = _short_limit_execution_price(take_profit, bar)
                 exit_reason = "take_profit"
                 break
 
             if vwap_exit is not None and low <= vwap_exit:
                 exit_ts_ms = ts_ms
-                exit_price = vwap_exit
+                exit_price = _short_limit_execution_price(vwap_exit, bar)
                 exit_reason = "vwap_reversion"
                 break
 
@@ -1249,6 +1914,23 @@ def _trade_number(row: dict[str, Any], key: str, default: float) -> float:
         return default
 
 
+def _trade_entry_schedule_ts_ms(trade: dict[str, Any], fade_config: DailyCloseFadeConfig) -> list[int]:
+    entry_delay_minutes = int(_trade_number(trade, "entry_delay_minutes", float(fade_config.entry_delay_minutes)))
+    entry_twap_minutes = int(_trade_number(trade, "entry_twap_minutes", float(fade_config.entry_twap_minutes)))
+    schedule_config = replace(
+        fade_config,
+        entry_delay_minutes=entry_delay_minutes,
+        entry_twap_minutes=entry_twap_minutes,
+    )
+    return close_fade_entry_child_schedule_ts_ms(int(trade["signal_ts_ms"]), schedule_config)
+
+
+def _profit_protection_delay_minutes(config: DailyCloseFadeConfig) -> int:
+    if config.profit_protection_delay_minutes is None:
+        return config.stop_delay_minutes
+    return config.profit_protection_delay_minutes
+
+
 def _write_forward_scan_outputs(
     data_root: str | Path,
     payload: dict[str, Any],
@@ -1261,9 +1943,13 @@ def _write_forward_scan_outputs(
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "forward_scan_report.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     (output_dir / "forward_scan_report.md").write_text(format_forward_scan_report(payload), encoding="utf-8")
+    candidates_csv = output_dir / "forward_scan_candidates.csv"
     if not candidates.is_empty():
-        candidates.write_csv(output_dir / "forward_scan_candidates.csv")
+        candidates.write_csv(candidates_csv)
+    elif candidates_csv.exists():
+        candidates_csv.unlink()
     _replace_dataset(features, data_root, "forward_scan_features", partition_by=("date", "scan_id"))
+    _replace_dataset(candidates, data_root, "forward_scan_candidates", partition_by=("date", "scan_id"))
 
 
 def _write_forward_trade_outputs(
@@ -1271,6 +1957,7 @@ def _write_forward_trade_outputs(
     payload: dict[str, Any],
     trades: pl.DataFrame,
     baskets: pl.DataFrame,
+    paper_slices: pl.DataFrame,
     *,
     report_dir: str | Path | None,
 ) -> None:
@@ -1282,9 +1969,12 @@ def _write_forward_trade_outputs(
     (output_dir / "forward_paper_report.md").write_text(format_forward_run_report(payload), encoding="utf-8")
     if not trades.is_empty():
         trades.write_csv(output_dir / "forward_paper_trades.csv")
+    if not paper_slices.is_empty():
+        paper_slices.write_csv(output_dir / "forward_paper_slices.csv")
     if not baskets.is_empty():
         baskets.write_csv(output_dir / "forward_paper_baskets.csv")
     _replace_dataset(trades, data_root, "forward_paper_trades", partition_by=("date", "symbol"))
+    _replace_dataset(paper_slices, data_root, "forward_paper_slices", partition_by=("date", "symbol"))
     _replace_dataset(baskets, data_root, "forward_paper_baskets", partition_by=("date",))
 
 
@@ -1309,6 +1999,71 @@ def _merge_trade_frames(left: pl.DataFrame, right: pl.DataFrame) -> pl.DataFrame
     if not frames:
         return pl.DataFrame()
     return pl.concat(frames, how="diagonal_relaxed").unique(subset=["trade_id"], keep="last").sort(["entry_ts_ms", "symbol"])
+
+
+def _latest_forward_scan_candidates(
+    data_root: str | Path,
+    *,
+    now: datetime,
+    fade_config: DailyCloseFadeConfig,
+) -> dict[str, Any]:
+    signal_ts_ms = _signal_ts_ms(now, fade_config.signal_minute)
+    candidates = read_dataset(data_root, "forward_scan_candidates")
+    source = dataset_path(data_root, "forward_scan_candidates")
+    if candidates.is_empty():
+        csv_path = Path(data_root) / "reports" / "forward_scan_candidates.csv"
+        if csv_path.exists():
+            try:
+                candidates = pl.read_csv(csv_path, infer_schema_length=None)
+                source = csv_path
+            except Exception:  # noqa: BLE001 - report CSV fallback should not break the minute loop
+                candidates = pl.DataFrame()
+    if candidates.is_empty() or "signal_ts_ms" not in candidates.columns:
+        return {"status": "no_cached_scan_candidates", "candidates": pl.DataFrame(), "source": str(source)}
+    filtered = candidates.filter(pl.col("signal_ts_ms").cast(pl.Int64) == int(signal_ts_ms))
+    if filtered.is_empty():
+        return {"status": "cached_scan_wrong_signal_time", "candidates": pl.DataFrame(), "source": str(source)}
+    if "last_available_bar_end_ts_ms" in filtered.columns:
+        filtered = filtered.filter(pl.col("last_available_bar_end_ts_ms").cast(pl.Int64) >= int(signal_ts_ms))
+        if filtered.is_empty():
+            return {"status": "cached_scan_before_signal_complete", "candidates": pl.DataFrame(), "source": str(source)}
+    if "scan_id" in filtered.columns:
+        expected_scan_id = _scan_id(signal_ts_ms, fade_config.signal_minute)
+        filtered = filtered.filter(pl.col("scan_id").cast(pl.String) == expected_scan_id)
+        if filtered.is_empty():
+            return {"status": "cached_scan_wrong_scan_id", "candidates": pl.DataFrame(), "source": str(source)}
+    if "entry_rank" in filtered.columns:
+        filtered = filtered.sort("entry_rank")
+    return {"status": "cached_scan_candidates_ready", "candidates": filtered, "source": str(source)}
+
+
+def _synthetic_forward_scan(
+    now: datetime,
+    fade_config: DailyCloseFadeConfig,
+    *,
+    status: str,
+    candidates: pl.DataFrame | None = None,
+    source: str = "",
+) -> dict[str, Any]:
+    candidate_frame = candidates if candidates is not None else pl.DataFrame()
+    signal_ts_ms = _signal_ts_ms(now, fade_config.signal_minute)
+    return {
+        "scan_id": _scan_id(signal_ts_ms, fade_config.signal_minute),
+        "now": now.isoformat(),
+        "scan_end": _dt_from_ms(signal_ts_ms).isoformat(),
+        "signal_time": _dt_from_ms(signal_ts_ms).isoformat(),
+        "status": status,
+        "source": source,
+        "config": {"fade": asdict(fade_config)},
+        "rows": {
+            "universe": 0,
+            "features": 0,
+            "candidates": candidate_frame.height,
+            "fetch_failures": 0,
+        },
+        "candidates": candidate_frame.to_dicts() if not candidate_frame.is_empty() else [],
+        "fetch_failures": [],
+    }
 
 
 def _basket_already_opened(trades: pl.DataFrame, basket_id: str) -> bool:

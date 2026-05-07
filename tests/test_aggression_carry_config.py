@@ -2,7 +2,23 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from aggression_carry.config import load_config
+from aggression_carry.config import DailyCloseFadeConfig, DailyCloseFadeGridConfig, load_config
+
+
+def test_daily_close_fade_dataclass_defaults_are_canonical_twap_schedule() -> None:
+    config = DailyCloseFadeConfig()
+    grid = DailyCloseFadeGridConfig()
+
+    assert config.signal_minute == 22 * 60
+    assert config.entry_delay_minutes == 1
+    assert config.entry_twap_minutes == 60
+    assert config.liquidity_rank_min == 31
+    assert config.liquidity_rank_max == 0
+    assert grid.liquidity_rank_mins == (31,)
+    assert grid.liquidity_rank_maxs == (0,)
+    assert config.stop_loss_pct == 0.20
+    assert config.stop_delay_minutes == 0
+    assert config.profit_protection_delay_minutes == 15
 
 
 def test_volume_alpha_controls_load_from_yaml(tmp_path: Path) -> None:

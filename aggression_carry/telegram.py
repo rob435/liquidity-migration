@@ -13,11 +13,6 @@ class TelegramConfig:
     timeout_seconds: float = 10.0
 
 
-def telegram_configured(config: TelegramConfig | None = None) -> bool:
-    cfg = config or TelegramConfig()
-    return bool(os.environ.get(cfg.token_env) and os.environ.get(cfg.chat_id_env))
-
-
 def send_telegram_message(
     text: str,
     *,

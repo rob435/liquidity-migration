@@ -8,14 +8,37 @@ from aggression_carry import daily_close_fade as daily_close_fade_module
 from aggression_carry.config import CostConfig, DailyCloseFadeConfig, DailyCloseFadeGridConfig
 from aggression_carry.daily_close_fade import (
     DailyCloseFadeDiagnosticsConfig,
+    build_daily_close_fade_features,
+    close_fade_entry_child_schedule_ts_ms,
     _short_return,
     run_daily_close_fade,
     run_daily_close_fade_diagnostics,
     run_daily_close_fade_grid,
-    run_daily_close_fade_sleeves,
     select_close_fade_candidates,
 )
 from aggression_carry.storage import read_dataset, write_dataset
+
+
+def _neutral_fade_config(**overrides) -> DailyCloseFadeConfig:
+    defaults = {
+        "entry_twap_minutes": 0,
+        "pump_filter": "all",
+        "liquidity_rank_min": 1,
+        "liquidity_rank_max": 0,
+        "max_position_weight": 0.0,
+        "coin_excess_vs_market_min": 0.0,
+        "coin_vwap_extension_min": 0.0,
+        "coin_late_volume_ratio_min": 0.0,
+        "position_sizing": "equal",
+        "stop_loss_pct": 0.0,
+        "stop_delay_minutes": 15,
+        "profit_protection_delay_minutes": None,
+        "vol_trailing_stop_mult": 0.0,
+        "mfe_giveback_activation_pct": 0.0,
+        "mfe_giveback_pct": 0.0,
+    }
+    defaults.update(overrides)
+    return DailyCloseFadeConfig(**defaults)
 
 
 def test_daily_close_fade_excludes_young_pumps_and_writes_trade_ledger(tmp_path) -> None:
@@ -23,7 +46,7 @@ def test_daily_close_fade_excludes_young_pumps_and_writes_trade_ledger(tmp_path)
 
     payload = run_daily_close_fade(
         tmp_path,
-        fade_config=DailyCloseFadeConfig(
+        fade_config=_neutral_fade_config(
             signal_minute=23 * 60,
             top_n=2,
             hold_minutes=60,
@@ -54,12 +77,55 @@ def test_daily_close_fade_uses_linear_usdt_short_returns() -> None:
     assert _short_return(100.0, 115.0) == -0.15
 
 
+def test_daily_close_fade_canonical_twap_schedule_is_2201_through_2300() -> None:
+    signal_ts_ms = int(datetime(2025, 1, 15, 22, 0, tzinfo=UTC).timestamp() * 1000)
+    schedule = close_fade_entry_child_schedule_ts_ms(
+        signal_ts_ms,
+        DailyCloseFadeConfig(signal_minute=22 * 60, entry_delay_minutes=1, entry_twap_minutes=60),
+    )
+
+    assert len(schedule) == 60
+    assert datetime.fromtimestamp(schedule[0] / 1000, tz=UTC).isoformat() == "2025-01-15T22:01:00+00:00"
+    assert datetime.fromtimestamp(schedule[-1] / 1000, tz=UTC).isoformat() == "2025-01-15T23:00:00+00:00"
+
+
+def test_daily_close_fade_2200_ranking_uses_only_bars_available_at_2200(tmp_path) -> None:
+    _write_close_fade_fixture(tmp_path)
+    before = build_daily_close_fade_features(
+        tmp_path,
+        config=_neutral_fade_config(signal_minute=22 * 60, min_age_days=10, exclude_symbols=()),
+        signal_minutes=(22 * 60,),
+    ).filter(pl.col("date") == "2025-01-15").sort("symbol")
+    klines = read_dataset(tmp_path, "klines_1m").with_columns(
+        pl.when(pl.col("ts_ms") >= int(datetime(2025, 1, 15, 22, 0, tzinfo=UTC).timestamp() * 1000))
+        .then(pl.col("close") * 100.0)
+        .otherwise(pl.col("close"))
+        .alias("close")
+    )
+    write_dataset(klines, tmp_path, "klines_1m", append=False)
+    after = build_daily_close_fade_features(
+        tmp_path,
+        config=_neutral_fade_config(signal_minute=22 * 60, min_age_days=10, exclude_symbols=()),
+        signal_minutes=(22 * 60,),
+    ).filter(pl.col("date") == "2025-01-15").sort("symbol")
+
+    assert before.select(["symbol", "signal_ts_ms", "signal_close", "day_return"]).to_dicts() == after.select(
+        ["symbol", "signal_ts_ms", "signal_close", "day_return"]
+    ).to_dicts()
+    assert before["signal_ts_ms"].unique().to_list() == [
+        int(datetime(2025, 1, 15, 22, 0, tzinfo=UTC).timestamp() * 1000)
+    ]
+    assert before["last_available_bar_ts_ms"].unique().to_list() == [
+        int(datetime(2025, 1, 15, 21, 59, tzinfo=UTC).timestamp() * 1000)
+    ]
+
+
 def test_daily_close_fade_trailing_stop_exit_reason(tmp_path) -> None:
     _write_close_fade_fixture(tmp_path, rebound=True)
 
     payload = run_daily_close_fade(
         tmp_path,
-        fade_config=DailyCloseFadeConfig(
+        fade_config=_neutral_fade_config(
             signal_minute=23 * 60,
             top_n=1,
             hold_minutes=60,
@@ -87,7 +153,7 @@ def test_daily_close_fade_take_profit_exit_reason(tmp_path) -> None:
 
     payload = run_daily_close_fade(
         tmp_path,
-        fade_config=DailyCloseFadeConfig(
+        fade_config=_neutral_fade_config(
             signal_minute=23 * 60,
             top_n=1,
             hold_minutes=60,
@@ -114,7 +180,7 @@ def test_daily_close_fade_stop_wins_when_same_bar_hits_stop_and_take_profit(tmp_
 
     run_daily_close_fade(
         tmp_path,
-        fade_config=DailyCloseFadeConfig(
+        fade_config=_neutral_fade_config(
             signal_minute=23 * 60,
             top_n=1,
             hold_minutes=60,
@@ -134,12 +200,36 @@ def test_daily_close_fade_stop_wins_when_same_bar_hits_stop_and_take_profit(tmp_
     assert round(trades["gross_return"].item(), 6) == -0.20
 
 
+def test_daily_close_fade_stop_gap_fills_at_bar_open(tmp_path) -> None:
+    _write_close_fade_fixture(tmp_path, gap_stop=True)
+
+    run_daily_close_fade(
+        tmp_path,
+        fade_config=_neutral_fade_config(
+            signal_minute=23 * 60,
+            top_n=1,
+            hold_minutes=60,
+            score="day_return",
+            min_age_days=10,
+            stop_loss_pct=0.20,
+            stop_delay_minutes=1,
+            exclude_symbols=(),
+        ),
+        cost_config=CostConfig(maker_fee_bps=0, taker_fee_bps=0, maker_adverse_selection_bps=0, taker_slippage_bps_liquid=0),
+    )
+
+    trade = read_dataset(tmp_path, "daily_close_fade_trades").row(0, named=True)
+
+    assert trade["exit_reason"] == "stop_loss"
+    assert round(trade["gross_return"], 6) == -0.30
+
+
 def test_daily_close_fade_mfe_giveback_exit_reason(tmp_path) -> None:
     _write_close_fade_fixture(tmp_path, rebound=True)
 
     run_daily_close_fade(
         tmp_path,
-        fade_config=DailyCloseFadeConfig(
+        fade_config=_neutral_fade_config(
             signal_minute=23 * 60,
             top_n=1,
             hold_minutes=60,
@@ -164,7 +254,7 @@ def test_daily_close_fade_vwap_reversion_exit_reason(tmp_path) -> None:
 
     run_daily_close_fade(
         tmp_path,
-        fade_config=DailyCloseFadeConfig(
+        fade_config=_neutral_fade_config(
             signal_minute=23 * 60,
             top_n=1,
             hold_minutes=60,
@@ -188,11 +278,11 @@ def test_daily_close_fade_twap_averages_entry_and_delays_profit_protection(tmp_p
 
     run_daily_close_fade(
         tmp_path,
-        fade_config=DailyCloseFadeConfig(
+        fade_config=_neutral_fade_config(
             signal_minute=22 * 60,
             top_n=1,
             hold_minutes=60,
-            entry_delay_minutes=0,
+            entry_delay_minutes=1,
             entry_twap_minutes=60,
             score="day_return",
             pump_filter="all",
@@ -210,17 +300,17 @@ def test_daily_close_fade_twap_averages_entry_and_delays_profit_protection(tmp_p
     trades = read_dataset(tmp_path, "daily_close_fade_trades")
     trade = trades.row(0, named=True)
     klines = read_dataset(tmp_path, "klines_1m")
-    start_ms = int(datetime(2025, 1, 15, 22, 0, tzinfo=UTC).timestamp() * 1000)
+    start_ms = int(datetime(2025, 1, 15, 22, 1, tzinfo=UTC).timestamp() * 1000)
     end_ms = int(datetime(2025, 1, 15, 23, 0, tzinfo=UTC).timestamp() * 1000)
     expected_entry = (
-        klines.filter((pl.col("symbol") == trade["symbol"]) & (pl.col("ts_ms") >= start_ms) & (pl.col("ts_ms") < end_ms))
+        klines.filter((pl.col("symbol") == trade["symbol"]) & (pl.col("ts_ms") >= start_ms) & (pl.col("ts_ms") <= end_ms))
         .sort("ts_ms")["open"]
         .mean()
     )
 
     assert trade["entry_fill_count"] == 60
     assert trade["entry_fill_fraction"] == 1.0
-    assert trade["entry_time"] == "2025-01-15T22:00:00+00:00"
+    assert trade["entry_time"] == "2025-01-15T22:01:00+00:00"
     assert trade["entry_complete_time"] == "2025-01-15T23:00:00+00:00"
     assert trade["profit_protection_active_time"] == "2025-01-15T23:15:00+00:00"
     assert round(trade["entry_price"], 10) == round(expected_entry, 10)
@@ -228,15 +318,50 @@ def test_daily_close_fade_twap_averages_entry_and_delays_profit_protection(tmp_p
 
 
 def test_daily_close_fade_twap_hard_stop_can_be_active_from_first_fill(tmp_path) -> None:
-    _write_twap_risk_fixture(tmp_path, spike_minute=5, spike_high=121.0)
+    _write_twap_risk_fixture(tmp_path, spike_minute=1, spike_high=121.0)
 
     run_daily_close_fade(
         tmp_path,
-        fade_config=DailyCloseFadeConfig(
+        fade_config=_neutral_fade_config(
             signal_minute=22 * 60,
             top_n=1,
             hold_minutes=60,
-            entry_delay_minutes=0,
+            entry_delay_minutes=1,
+            entry_twap_minutes=60,
+            score="day_return",
+            pump_filter="all",
+            min_age_days=10,
+            stop_loss_pct=0.20,
+            stop_delay_minutes=0,
+            profit_protection_delay_minutes=15,
+            exclude_symbols=(),
+        ),
+        cost_config=CostConfig(maker_fee_bps=0, taker_fee_bps=0, maker_adverse_selection_bps=0, taker_slippage_bps_liquid=0),
+    )
+
+    trade = read_dataset(tmp_path, "daily_close_fade_trades").row(0, named=True)
+    fills = read_dataset(tmp_path, "daily_close_fade_entry_fills")
+
+    assert trade["exit_reason"] == "stop_loss"
+    assert trade["entry_fill_count"] == 1
+    assert round(trade["entry_fill_fraction"], 6) == round(1 / 60, 6)
+    assert trade["stop_active_time"] == "2025-01-15T22:01:00+00:00"
+    assert trade["exit_time"] == "2025-01-15T22:01:00+00:00"
+    assert round(trade["gross_return"], 6) == -0.20
+    assert fills.filter(pl.col("status") == "filled").height == 1
+    assert fills.filter(pl.col("status") == "cancelled_after_exit").height == 59
+
+
+def test_daily_close_fade_twap_stop_uses_current_average_entry(tmp_path) -> None:
+    _write_twap_average_stop_fixture(tmp_path)
+
+    run_daily_close_fade(
+        tmp_path,
+        fade_config=_neutral_fade_config(
+            signal_minute=22 * 60,
+            top_n=1,
+            hold_minutes=60,
+            entry_delay_minutes=1,
             entry_twap_minutes=60,
             score="day_return",
             pump_filter="all",
@@ -251,12 +376,44 @@ def test_daily_close_fade_twap_hard_stop_can_be_active_from_first_fill(tmp_path)
 
     trade = read_dataset(tmp_path, "daily_close_fade_trades").row(0, named=True)
 
-    assert trade["exit_reason"] == "stop_loss"
-    assert trade["entry_fill_count"] == 6
-    assert trade["entry_fill_fraction"] == 0.10
-    assert trade["stop_active_time"] == "2025-01-15T22:00:00+00:00"
-    assert trade["exit_time"] == "2025-01-15T22:05:00+00:00"
-    assert round(trade["gross_return"], 6) == -0.20
+    assert trade["entry_fill_count"] == 60
+    assert trade["exit_reason"] == "max_hold"
+    assert round(trade["entry_price"], 6) > 100.0
+
+
+def test_daily_close_fade_twap_tracks_missed_child_slice(tmp_path) -> None:
+    _write_twap_risk_fixture(tmp_path, spike_minute=999, spike_high=100.0)
+    missed_ts_ms = int(datetime(2025, 1, 15, 22, 30, tzinfo=UTC).timestamp() * 1000)
+    klines = read_dataset(tmp_path, "klines_1m").filter(pl.col("ts_ms") != missed_ts_ms)
+    write_dataset(klines, tmp_path, "klines_1m", append=False)
+
+    run_daily_close_fade(
+        tmp_path,
+        fade_config=_neutral_fade_config(
+            signal_minute=22 * 60,
+            top_n=1,
+            hold_minutes=60,
+            entry_delay_minutes=1,
+            entry_twap_minutes=60,
+            score="day_return",
+            pump_filter="all",
+            min_age_days=10,
+            stop_loss_pct=0.20,
+            stop_delay_minutes=0,
+            profit_protection_delay_minutes=15,
+            exclude_symbols=(),
+        ),
+        cost_config=CostConfig(maker_fee_bps=0, taker_fee_bps=0, maker_adverse_selection_bps=0, taker_slippage_bps_liquid=0),
+    )
+
+    trade = read_dataset(tmp_path, "daily_close_fade_trades").row(0, named=True)
+    fills = read_dataset(tmp_path, "daily_close_fade_entry_fills").sort("slice_index")
+
+    assert trade["entry_fill_count"] == 59
+    assert round(trade["entry_fill_fraction"], 6) == round(59 / 60, 6)
+    assert fills.filter(pl.col("status") == "filled").height == 59
+    missed = fills.filter(pl.col("scheduled_ts_ms") == missed_ts_ms).row(0, named=True)
+    assert missed["status"] == "missed_no_bar"
 
 
 def test_daily_close_fade_twap_stop_adding_guard_freezes_partial_entry(tmp_path) -> None:
@@ -264,11 +421,11 @@ def test_daily_close_fade_twap_stop_adding_guard_freezes_partial_entry(tmp_path)
 
     run_daily_close_fade(
         tmp_path,
-        fade_config=DailyCloseFadeConfig(
+        fade_config=_neutral_fade_config(
             signal_minute=22 * 60,
             top_n=1,
             hold_minutes=60,
-            entry_delay_minutes=0,
+            entry_delay_minutes=1,
             entry_twap_minutes=60,
             score="day_return",
             pump_filter="all",
@@ -288,8 +445,8 @@ def test_daily_close_fade_twap_stop_adding_guard_freezes_partial_entry(tmp_path)
     assert trade["twap_stop_adding_time"] == "2025-01-15T22:10:00+00:00"
     assert trade["entry_complete_time"] == "2025-01-15T22:10:00+00:00"
     assert trade["profit_protection_active_time"] == "2025-01-15T22:25:00+00:00"
-    assert trade["entry_fill_count"] == 11
-    assert round(trade["entry_fill_fraction"], 6) == round(11 / 60, 6)
+    assert trade["entry_fill_count"] == 10
+    assert round(trade["entry_fill_fraction"], 6) == round(10 / 60, 6)
     assert trade["exit_reason"] == "max_hold"
     assert trade["exit_time"] == "2025-01-15T23:10:00+00:00"
 
@@ -314,7 +471,7 @@ def test_daily_close_fade_can_require_archive_membership(tmp_path) -> None:
 
     payload = run_daily_close_fade(
         tmp_path,
-        fade_config=DailyCloseFadeConfig(
+        fade_config=_neutral_fade_config(
             signal_minute=23 * 60,
             top_n=2,
             hold_minutes=60,
@@ -340,7 +497,7 @@ def test_daily_close_fade_basket_stop_exits_open_basket(tmp_path) -> None:
 
     payload = run_daily_close_fade(
         tmp_path,
-        fade_config=DailyCloseFadeConfig(
+        fade_config=_neutral_fade_config(
             signal_minute=23 * 60,
             top_n=2,
             hold_minutes=60,
@@ -368,7 +525,7 @@ def test_daily_close_fade_grid_runs_small_fixture(tmp_path) -> None:
 
     payload = run_daily_close_fade_grid(
         tmp_path,
-        base_fade_config=DailyCloseFadeConfig(min_age_days=10, exclude_symbols=()),
+        base_fade_config=_neutral_fade_config(min_age_days=10, exclude_symbols=()),
         grid_config=DailyCloseFadeGridConfig(
             signal_minutes=(23 * 60,),
             top_ns=(1, 2),
@@ -379,6 +536,8 @@ def test_daily_close_fade_grid_runs_small_fixture(tmp_path) -> None:
             take_profit_pcts=(0.0, 0.05),
             trailing_stop_pcts=(0.0,),
             trailing_activation_pcts=(0.0,),
+            liquidity_rank_mins=(1,),
+            liquidity_rank_maxs=(0,),
             cost_multipliers=(1.0,),
         ),
         cost_config=CostConfig(maker_fee_bps=0, taker_fee_bps=0, maker_adverse_selection_bps=0, taker_slippage_bps_liquid=0),
@@ -397,7 +556,7 @@ def test_daily_close_fade_grid_supports_date_splits(tmp_path) -> None:
 
     payload = run_daily_close_fade_grid(
         tmp_path,
-        base_fade_config=DailyCloseFadeConfig(min_age_days=10, exclude_symbols=()),
+        base_fade_config=_neutral_fade_config(min_age_days=10, exclude_symbols=()),
         grid_config=DailyCloseFadeGridConfig(
             signal_minutes=(23 * 60,),
             top_ns=(1,),
@@ -425,7 +584,7 @@ def test_daily_close_fade_diagnostics_reports_raw_score_shape(tmp_path) -> None:
 
     payload = run_daily_close_fade_diagnostics(
         tmp_path,
-        base_fade_config=DailyCloseFadeConfig(
+        base_fade_config=_neutral_fade_config(
             signal_minute=23 * 60,
             score="day_return",
             pump_filter="all",
@@ -469,7 +628,7 @@ def test_daily_close_fade_diagnostics_handles_sparse_bucket_grid(tmp_path) -> No
 
     payload = run_daily_close_fade_diagnostics(
         tmp_path,
-        base_fade_config=DailyCloseFadeConfig(min_age_days=10, exclude_symbols=()),
+        base_fade_config=_neutral_fade_config(min_age_days=10, exclude_symbols=()),
         diagnostics_config=DailyCloseFadeDiagnosticsConfig(
             signal_minutes=(23 * 60,),
             entry_delay_minutes=(1,),
@@ -492,7 +651,7 @@ def test_daily_close_fade_diagnostics_supports_date_splits(tmp_path) -> None:
 
     payload = run_daily_close_fade_diagnostics(
         tmp_path,
-        base_fade_config=DailyCloseFadeConfig(min_age_days=10, exclude_symbols=()),
+        base_fade_config=_neutral_fade_config(min_age_days=10, exclude_symbols=()),
         diagnostics_config=DailyCloseFadeDiagnosticsConfig(
             signal_minutes=(23 * 60,),
             entry_delay_minutes=(1,),
@@ -517,7 +676,7 @@ def test_daily_close_fade_grid_uses_thread_backend_on_windows(tmp_path, monkeypa
 
     payload = run_daily_close_fade_grid(
         tmp_path,
-        base_fade_config=DailyCloseFadeConfig(min_age_days=10, exclude_symbols=()),
+        base_fade_config=_neutral_fade_config(min_age_days=10, exclude_symbols=()),
         grid_config=DailyCloseFadeGridConfig(
             signal_minutes=(23 * 60,),
             top_ns=(1, 2),
@@ -543,7 +702,7 @@ def test_daily_close_fade_filters_top_baseline_liquidity_rank(tmp_path) -> None:
 
     payload = run_daily_close_fade(
         tmp_path,
-        fade_config=DailyCloseFadeConfig(
+        fade_config=_neutral_fade_config(
             signal_minute=23 * 60,
             top_n=3,
             hold_minutes=60,
@@ -575,7 +734,7 @@ def test_daily_close_fade_capacity_caps_trade_weight(tmp_path) -> None:
 
     payload = run_daily_close_fade(
         tmp_path,
-        fade_config=DailyCloseFadeConfig(
+        fade_config=_neutral_fade_config(
             signal_minute=23 * 60,
             top_n=2,
             hold_minutes=60,
@@ -628,6 +787,8 @@ def test_daily_close_fade_score_capped_sizing_weights_selected_pumps() -> None:
             position_sizing="score_capped",
             max_position_weight=0.80,
             score_weight_power=1.0,
+            liquidity_rank_min=1,
+            liquidity_rank_max=0,
             exclude_symbols=(),
         ),
     ).sort("entry_rank")
@@ -636,35 +797,6 @@ def test_daily_close_fade_score_capped_sizing_weights_selected_pumps() -> None:
     weights = selected["position_target_weight"].to_list()
     assert round(weights[0], 6) == round(0.24 / 0.36, 6)
     assert round(weights[1], 6) == round(0.12 / 0.36, 6)
-
-
-def test_daily_close_fade_sleeves_compare_major_core_microcap(tmp_path) -> None:
-    _write_close_fade_liquidity_fixture(tmp_path)
-
-    payload = run_daily_close_fade_sleeves(
-        tmp_path,
-        fade_config=DailyCloseFadeConfig(
-            signal_minute=23 * 60,
-            top_n=3,
-            hold_minutes=60,
-            score="day_return",
-            pump_filter="pump",
-            min_age_days=10,
-            liquidity_lookback_days=1,
-            stop_loss_pct=0.0,
-            exclude_symbols=(),
-        ),
-        cost_config=CostConfig(maker_fee_bps=0, taker_fee_bps=0, maker_adverse_selection_bps=0, taker_slippage_bps_liquid=0),
-    )
-
-    results = read_dataset(tmp_path, "daily_close_fade_sleeves")
-    trades = read_dataset(tmp_path, "daily_close_fade_sleeve_trades")
-
-    assert payload["rows"]["results"] == 3
-    assert set(results["sleeve"].to_list()) == {"major_control", "core", "microcap"}
-    assert set(trades["sleeve"].to_list()) == {"major_control"}
-    assert results.filter(pl.col("sleeve") == "core")["trade_count"].item() == 0
-    assert results.filter(pl.col("sleeve") == "microcap")["trade_count"].item() == 0
 
 
 def _feature_candidate(
@@ -772,6 +904,7 @@ def _write_close_fade_fixture(
     rebound: bool = False,
     adverse_reversal: bool = False,
     same_bar_stop_and_tp: bool = False,
+    gap_stop: bool = False,
 ) -> None:
     start = datetime(2025, 1, 15, tzinfo=UTC)
     start_ms = int(start.timestamp() * 1000)
@@ -820,6 +953,8 @@ def _write_close_fade_fixture(
                         close = entry_price * 0.94
                     elif minutes_after >= 3:
                         close = entry_price * 0.985
+                if gap_stop and symbol == "OLD1USDT" and minutes_after >= 1:
+                    close = entry_price * 1.30
             open_price = previous
             high = max(open_price, close) * 1.001
             low = min(open_price, close) * 0.999
@@ -892,6 +1027,64 @@ def _write_twap_risk_fixture(
         low = min(open_price, close) * 0.999
         if minute == spike_absolute_minute:
             high = spike_high
+        klines.append(
+            {
+                "ts_ms": ts_ms,
+                "symbol": symbol,
+                "open": open_price,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume_base": 100.0,
+                "turnover_quote": 100.0 * close,
+                "source": "fixture",
+            }
+        )
+        previous = close
+
+    write_dataset(pl.DataFrame(instruments), tmp_path, "instruments")
+    write_dataset(pl.DataFrame(klines), tmp_path, "klines_1m")
+
+
+def _write_twap_average_stop_fixture(tmp_path) -> None:
+    start = datetime(2025, 1, 15, tzinfo=UTC)
+    start_ms = int(start.timestamp() * 1000)
+    symbol = "AVGUSDT"
+    instruments = [
+        {
+            "ts_ms": start_ms,
+            "symbol": symbol,
+            "category": "linear",
+            "contract_type": "LinearPerpetual",
+            "status": "Trading",
+            "settle_coin": "USDT",
+            "launch_time_ms": int((start - timedelta(days=40)).timestamp() * 1000),
+            "tick_size": 0.001,
+            "qty_step": 0.001,
+            "min_order_qty": 0.001,
+            "min_notional_value": 5.0,
+            "funding_interval_min": 480,
+            "is_prelisting": False,
+        }
+    ]
+    signal_minute = 22 * 60
+    previous = 80.0
+    klines = []
+    for minute in range(24 * 60 + 240):
+        ts_ms = start_ms + minute * 60_000
+        if minute <= signal_minute:
+            close = 80.0 + 20.0 * minute / signal_minute
+        elif minute == signal_minute + 1:
+            close = 110.0
+        elif minute <= signal_minute + 60:
+            close = 110.0
+        else:
+            close = 108.0
+        open_price = previous
+        high = max(open_price, close) * 1.001
+        if minute == signal_minute + 2:
+            high = 125.0
+        low = min(open_price, close) * 0.999
         klines.append(
             {
                 "ts_ms": ts_ms,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -141,6 +141,58 @@ def aggregate_trade_klines_1m(trades: pl.DataFrame) -> pl.DataFrame:
         .sort(["symbol", "ts_ms"])
     )
     return bars
+
+
+def densify_trade_klines_1m(
+    klines: pl.DataFrame,
+    *,
+    archive_date: str,
+    initial_price: float | None = None,
+) -> pl.DataFrame:
+    if klines.is_empty():
+        return klines
+    symbols = klines["symbol"].unique().sort().to_list()
+    if len(symbols) != 1:
+        frames = [
+            densify_trade_klines_1m(
+                klines.filter(pl.col("symbol") == symbol),
+                archive_date=archive_date,
+                initial_price=initial_price,
+            )
+            for symbol in symbols
+        ]
+        return pl.concat(frames, how="diagonal_relaxed").sort(["symbol", "ts_ms"]) if frames else klines
+
+    symbol = str(symbols[0])
+    day_start = datetime.combine(date.fromisoformat(archive_date[:10]), datetime.min.time(), tzinfo=UTC)
+    day_start_ms = int(day_start.timestamp() * 1000)
+    grid = pl.DataFrame(
+        {
+            "ts_ms": [day_start_ms + minute * MS_PER_MINUTE for minute in range(24 * 60)],
+            "symbol": [symbol] * (24 * 60),
+        }
+    )
+    carry_price = pl.col("close").forward_fill()
+    if initial_price is not None and math.isfinite(float(initial_price)) and float(initial_price) > 0.0:
+        carry_price = carry_price.fill_null(float(initial_price))
+    dense = (
+        grid.join(klines.drop("source") if "source" in klines.columns else klines, on=["ts_ms", "symbol"], how="left")
+        .with_columns(carry_price.alias("_fill_price"))
+        .with_columns(
+            [
+                pl.when(pl.col("open").is_null()).then(pl.col("_fill_price")).otherwise(pl.col("open")).alias("open"),
+                pl.when(pl.col("high").is_null()).then(pl.col("_fill_price")).otherwise(pl.col("high")).alias("high"),
+                pl.when(pl.col("low").is_null()).then(pl.col("_fill_price")).otherwise(pl.col("low")).alias("low"),
+                pl.when(pl.col("close").is_null()).then(pl.col("_fill_price")).otherwise(pl.col("close")).alias("close"),
+                pl.col("volume_base").fill_null(0.0).alias("volume_base"),
+                pl.col("turnover_quote").fill_null(0.0).alias("turnover_quote"),
+                pl.lit("bybit_public_trades").alias("source"),
+            ]
+        )
+        .drop("_fill_price")
+        .sort(["symbol", "ts_ms"])
+    )
+    return dense
 
 
 def _parse_bool(value: Any) -> bool:

@@ -56,7 +56,7 @@ daily_close_fade:
   signal_minute: 1320
   top_n: 5
   hold_minutes: 180
-  entry_delay_minutes: 0
+  entry_delay_minutes: 1
   entry_twap_minutes: 60
   score: vol_adjusted_day_return
   pump_filter: pump
@@ -66,7 +66,7 @@ daily_close_fade:
   vol_lookback_days: 20
   liquidity_lookback_days: 7
   liquidity_rank_min: 31
-  liquidity_rank_max: 150
+  liquidity_rank_max: 0
   min_baseline_turnover: 0.0
   account_equity: 10000.0
   max_position_weight: 0.80
@@ -115,7 +115,7 @@ daily_close_fade_grid:
   vwap_reversion_pcts: [0.0]
   liquidity_lookback_days: [7]
   liquidity_rank_mins: [31]
-  liquidity_rank_maxs: [150]
+  liquidity_rank_maxs: [0]
   min_baseline_turnovers: [0.0]
   account_equities: [10000.0]
   max_position_weights: [0.0]

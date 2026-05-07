@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import aggression_carry.cli as cli_module
 from aggression_carry.cli import build_parser, main
 
 
@@ -72,19 +73,49 @@ def test_cli_parses_forward_sleeves_alias(tmp_path: Path) -> None:
             "forward-sleeves",
             "--now",
             "2026-01-15T22:06:00+00:00",
+            "--forward-mode",
+            "open-from-scan",
+            "--require-first-slice",
+            "--sleeves",
+            "rank_31_plus",
             "--telegram",
         ]
     )
 
     assert args.command == "forward-sleeves"
+    assert args.forward_mode == "open-from-scan"
+    assert args.require_first_slice is True
+    assert args.sleeves == "rank_31_plus"
     assert args.telegram is True
 
 
 def test_cli_parses_forward_audit_telegram(tmp_path: Path) -> None:
-    args = build_parser().parse_args(["--data-root", str(tmp_path), "forward-audit", "--telegram"])
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "forward-audit",
+            "--now",
+            "2026-01-16T03:00:00+00:00",
+            "--telegram",
+        ]
+    )
 
     assert args.command == "forward-audit"
+    assert args.now == "2026-01-16T03:00:00+00:00"
     assert args.telegram is True
+
+
+def test_cli_archive_kline_default_requires_dense_utc_day(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "archive-download-klines",
+        ]
+    )
+
+    assert args.min_existing_bars == 1440
 
 
 def test_cli_parses_daily_close_fade_entry_risk_knobs(tmp_path: Path) -> None:
@@ -117,7 +148,7 @@ def test_cli_parses_daily_close_fade_diagnostics(tmp_path: Path) -> None:
             "--signal-times",
             "22:00,23:00",
             "--entry-delays",
-            "0,15,60",
+            "1,15,60",
             "--horizons",
             "60,180",
             "--scores",
@@ -143,7 +174,7 @@ def test_cli_parses_daily_close_fade_diagnostics(tmp_path: Path) -> None:
 
     assert args.command == "daily-close-fade-diagnostics"
     assert args.signal_times == "22:00,23:00"
-    assert args.entry_delays == "0,15,60"
+    assert args.entry_delays == "1,15,60"
     assert args.horizons == "60,180"
     assert args.buckets == 5
     assert args.start == "2025-01-01"
@@ -199,17 +230,15 @@ def test_cli_parses_bybit_demo_sync(tmp_path: Path) -> None:
             "bybit-demo-sync",
             "--submit-orders",
             "--i-understand-demo-sync",
-            "--max-order-notional",
-            "7",
-            "--use-wallet-balance",
+            "--max-new-orders",
+            "2",
         ]
     )
 
     assert args.command == "bybit-demo-sync"
     assert args.submit_orders is True
     assert args.i_understand_demo_sync is True
-    assert args.max_order_notional == 7
-    assert args.use_wallet_balance is True
+    assert args.max_new_orders == 2
 
 
 def test_cli_parses_bybit_demo_cycle(tmp_path: Path) -> None:
@@ -223,29 +252,26 @@ def test_cli_parses_bybit_demo_cycle(tmp_path: Path) -> None:
             "--submit-orders",
             "--i-understand-demo-sync",
             "--telegram",
-            "--max-order-notional",
-            "0",
             "--max-new-orders",
             "2",
-            "--max-total-new-notional",
-            "0",
-            "--use-wallet-balance",
-            "--wallet-balance-fraction",
-            "0.5",
-            "--max-order-notional-pct-equity",
-            "0.8",
-            "--max-total-new-notional-pct-equity",
-            "1.0",
             "--cancel-stale-minutes",
             "0",
             "--price-offset-bps",
             "3",
             "--no-market-exit",
+            "--demo-entry-sleeves",
+            "rank_31_plus",
+            "--entry-leverage",
+            "1",
             "--active-start",
-            "22:05",
+            "21:55",
             "--active-end",
             "02:30",
             "--ignore-active-window",
+            "--forward-mode",
+            "open-from-scan",
+            "--require-first-slice",
+            "--allow-noncontiguous-twap",
         ]
     )
 
@@ -254,19 +280,50 @@ def test_cli_parses_bybit_demo_cycle(tmp_path: Path) -> None:
     assert args.submit_orders is True
     assert args.i_understand_demo_sync is True
     assert args.telegram is True
-    assert args.max_order_notional == 0
     assert args.max_new_orders == 2
-    assert args.max_total_new_notional == 0
-    assert args.use_wallet_balance is True
-    assert args.wallet_balance_fraction == 0.5
-    assert args.max_order_notional_pct_equity == 0.8
-    assert args.max_total_new_notional_pct_equity == 1.0
     assert args.cancel_stale_minutes == 0
     assert args.price_offset_bps == 3
     assert args.no_market_exit is True
-    assert args.active_start == "22:05"
+    assert args.demo_entry_sleeves == "rank_31_plus"
+    assert args.entry_leverage == 1
+    assert args.active_start == "21:55"
     assert args.active_end == "02:30"
     assert args.ignore_active_window is True
+    assert args.forward_mode == "open-from-scan"
+    assert args.require_first_slice is True
+    assert args.allow_noncontiguous_twap is True
+
+
+def test_cli_bybit_demo_cycle_uses_config_defaults_without_research_args(tmp_path: Path, monkeypatch) -> None:
+    calls: list[dict] = []
+
+    def fake_cycle(data_root: Path, **kwargs):
+        calls.append({"data_root": data_root, **kwargs})
+        return {
+            "rows": {"sleeves": 1, "failed_sleeves": 0, "new_orders": 0, "ledger_orders": 0},
+            "summary": {"failed_sleeves": 0, "placed": 0, "dry_run": True},
+            "paused": {"paused": False},
+        }
+
+    monkeypatch.setattr(cli_module, "run_bybit_demo_cycle", fake_cycle)
+
+    assert (
+        cli_module.main(
+            [
+                "--data-root",
+                str(tmp_path),
+                "bybit-demo-cycle",
+                "--now",
+                "2026-01-15T22:06:00+00:00",
+                "--ignore-active-window",
+            ]
+        )
+        == 0
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["forward_config"].name
+    assert calls[0]["fade_config"].exclude_symbols is not None
 
 
 def test_cli_parses_bybit_demo_emergency_commands(tmp_path: Path) -> None:
@@ -277,6 +334,7 @@ def test_cli_parses_bybit_demo_emergency_commands(tmp_path: Path) -> None:
             "bybit-demo-cancel-all",
             "--symbols",
             "BTCUSDT,ETHUSDT",
+            "--i-understand-demo-cancel-all",
         ]
     )
     flatten_args = build_parser().parse_args(
@@ -290,5 +348,6 @@ def test_cli_parses_bybit_demo_emergency_commands(tmp_path: Path) -> None:
 
     assert cancel_args.command == "bybit-demo-cancel-all"
     assert cancel_args.symbols == "BTCUSDT,ETHUSDT"
+    assert cancel_args.i_understand_demo_cancel_all is True
     assert flatten_args.command == "bybit-demo-flatten"
     assert flatten_args.i_understand_demo_flatten is True

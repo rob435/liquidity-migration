@@ -4,7 +4,6 @@ import json
 import math
 import os
 import shutil
-import sys
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from dataclasses import asdict
 from datetime import UTC, datetime
@@ -199,9 +198,10 @@ def _grid_chunksize(task_count: int, workers: int) -> int:
 def _grid_backend(workers: int) -> str:
     if workers <= 1:
         return "serial"
-    if sys.platform.startswith("win"):
-        return "thread"
-    return "process"
+    backend = os.environ.get("VOLUME_GRID_BACKEND", "thread").strip().lower()
+    if backend in {"process", "processes", "process_pool"}:
+        return "process"
+    return "thread"
 
 
 def _init_grid_worker(features: pl.DataFrame, klines: pl.DataFrame, rank_features: pl.DataFrame) -> None:
