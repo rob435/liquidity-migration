@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import subprocess
 from pathlib import Path
 
 
@@ -57,3 +59,37 @@ def test_signal_runner_opens_first_twap_slice_after_scan() -> None:
     assert "--submit-orders" in runner
     assert "--use-wallet-balance" in runner
     assert "DEMO_MAX_ORDER_NOTIONAL_PCT_EQUITY" in runner
+
+
+def test_signal_runner_executes_scan_cycle_audit_in_order(tmp_path: Path) -> None:
+    repo = Path(__file__).resolve().parents[1]
+    runner = repo / "scripts" / "run_forward_signal_with_audit.sh"
+    command_log = tmp_path / "commands.log"
+    fake_python = tmp_path / "python"
+    fake_python.write_text(
+        "#!/usr/bin/env bash\n"
+        "printf '%s\\n' \"$*\" >> \"$COMMAND_LOG\"\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    fake_python.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "PYTHON_BIN": str(fake_python),
+            "COMMAND_LOG": str(command_log),
+            "DATA_ROOT": str(tmp_path / "data"),
+            "CONFIG_PATH": str(tmp_path / "config.yaml"),
+            "FORWARD_SIGNAL_SLEEVES": "stage4_selected",
+            "DEMO_ENTRY_SLEEVES": "stage4_selected",
+        }
+    )
+    subprocess.run([str(runner)], check=True, env=env)
+
+    commands = command_log.read_text(encoding="utf-8").splitlines()
+    assert len(commands) == 3
+    assert "forward-run-sleeves --forward-mode scan" in commands[0]
+    assert "bybit-demo-cycle --submit-orders" in commands[1]
+    assert "--forward-mode open-from-scan --require-first-slice" in commands[1]
+    assert "forward-audit --telegram" in commands[2]
