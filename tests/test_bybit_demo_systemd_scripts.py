@@ -42,3 +42,18 @@ def test_demo_engine_locks_canonical_forward_mode_and_fast_protection() -> None:
     assert "--fast-protection-seconds" in runner
     assert "FAST_PROTECTION_SECONDS=55" in runner
     assert "sleep_to_next_minute" in runner
+
+
+def test_signal_runner_opens_first_twap_slice_after_scan() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    runner = (repo / "scripts" / "run_forward_signal_with_audit.sh").read_text(encoding="utf-8")
+    compact = " ".join(runner.split())
+
+    assert "forward-run-sleeves" in runner
+    assert "--forward-mode scan" in compact
+    assert "bybit-demo-cycle" in runner
+    assert "--forward-mode open-from-scan" in compact
+    assert "--require-first-slice" in runner
+    assert "--submit-orders" in runner
+    assert "--use-wallet-balance" in runner
+    assert "DEMO_MAX_ORDER_NOTIONAL_PCT_EQUITY" in runner

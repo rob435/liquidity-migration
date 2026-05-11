@@ -4,7 +4,7 @@ Forward/demo is now the execution path for the selected Stage 4 daily-close shor
 
 ## Runtime Contract
 
-- 23:00 UTC: scan the live Bybit USDT perp universe and cache the selected Stage 4 candidate.
+- 23:00 UTC: scan the live Bybit USDT perp universe, cache the selected Stage 4 candidate, and immediately hand it to the demo cycle for the first TWAP slice.
 - 23:00-23:59 UTC: open the paper trade as 60 one-minute TWAP child slices and submit matching Bybit demo entry orders.
 - 00:00 UTC onward: stop adding, keep marking the paper trade, reconcile demo orders, and submit reduce-only exits when the paper exit model closes.
 - 02:00 UTC onward: the time-decay TP can start working after the 120-minute profit-protection delay.
@@ -62,7 +62,7 @@ Run audit:
 python -m aggression_carry --data-root data/forward-paper --config configs/volume_alpha.default.yaml forward-audit --telegram
 ```
 
-Install the long-running demo service and 23:00 UTC signal timer:
+Install the long-running demo service and 23:00 UTC signal timer. The timer runner performs scan, first-slice demo handoff, then audit; the always-on engine continues later TWAP slices and exits.
 
 ```bash
 scripts/install_bybit_demo_systemd.sh

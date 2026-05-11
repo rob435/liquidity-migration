@@ -83,4 +83,4 @@ rm -f data/forward-paper/DEMO_PAUSED
 - `aggression_carry/demo_cycle.py`: minute-loop orchestration
 - `aggression_carry/forward_audit.py`: paper/demo slice audit
 - `scripts/run_bybit_demo_engine.sh`: continuously runs demo cycle plus audit
-- `scripts/run_forward_signal_with_audit.sh`: 23:00 signal scan plus audit
+- `scripts/run_forward_signal_with_audit.sh`: 23:00 signal scan, immediate first-slice demo handoff, plus audit

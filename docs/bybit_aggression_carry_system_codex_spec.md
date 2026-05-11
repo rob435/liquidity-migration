@@ -45,7 +45,7 @@ The demo runtime is sleeve-based. The active sleeve is `stage4_selected`.
 Flow:
 
 1. `forward-run-sleeves --forward-mode scan --sleeves stage4_selected` caches the 23:00 candidate.
-2. `bybit-demo-cycle --forward-mode open-from-scan --require-first-slice` opens and marks paper trades.
+2. The signal runner immediately calls `bybit-demo-cycle --forward-mode open-from-scan --require-first-slice` so the first TWAP slice does not depend on the background minute loop racing the scan.
 3. `forward_paper_slices` defines the expected TWAP child orders.
 4. `bybit-demo-sync` submits due demo entry slices and reduce-only exits.
 5. `forward-audit` reconciles paper trades, child slices, demo orders, fills, misses, and PnL drift.
