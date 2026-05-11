@@ -50,6 +50,7 @@ SCENARIO_COLS = [
     "mfe_giveback_activation_pct",
     "mfe_giveback_pct",
     "vwap_reversion_pct",
+    "profit_protection_delay_minutes",
     "stop_delay_minutes",
     "cost_multiplier",
     "round_trip_cost_bps",
@@ -145,6 +146,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mfe-giveback-activation-pcts", default="0,0.01")
     parser.add_argument("--mfe-giveback-pcts", default="0,0.2")
     parser.add_argument("--vwap-reversion-pcts", default="0")
+    parser.add_argument("--profit-protection-delay-minutes", default="15")
     parser.add_argument("--liquidity-lookback-days", default="7")
     parser.add_argument("--liquidity-rank-mins", default="31")
     parser.add_argument("--liquidity-rank-maxs", default="150")
@@ -216,6 +218,7 @@ def format_grid_split_summary(
         "# Daily Close Fade Grid Split Summary",
         "",
         "This compares TP/SL and adaptive-exit grid variants across fixed time splits.",
+        "Adaptive profit protection uses corrected non-warm-start state.",
         "It is an overfit guard, not alpha proof. Prefer variants that survive",
         "every split over variants with one spectacular historical window.",
         "",
@@ -237,8 +240,8 @@ def format_grid_split_summary(
             "",
             "## Most Stable Variants",
             "",
-            "| Rank | All Positive | Pos Splits | Min Return | Avg Return | Return Std | Stability | Worst DD | Avg Sharpe | Signal | Hold | Top N | Stop | TP | Vol Trail | MFE GB | VWAP | Cost | Trades |",
-            "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| Rank | All Positive | Pos Splits | Min Return | Avg Return | Return Std | Stability | Worst DD | Avg Sharpe | Signal | Hold | Profit Delay | Top N | Stop | TP | Vol Trail | MFE GB | VWAP | Cost | Trades |",
+            "|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for index, row in enumerate(summary.head(40).to_dicts() if not summary.is_empty() else [], start=1):
@@ -249,13 +252,14 @@ def format_grid_split_summary(
             f"{_pct(row.get('total_return_std'))} | {_pct(row.get('stability_score'))} | "
             f"{_pct(row.get('worst_max_drawdown'))} | {_num(row.get('avg_sharpe_like'), 2)} | "
             f"{_format_signal_minute(row.get('signal_minute', 0))} | {row.get('hold_minutes', 0)} | "
+            f"{row.get('profit_protection_delay_minutes', 0)} | "
             f"{row.get('top_n', 0)} | {_pct(row.get('stop_loss_pct'))} | {_pct(row.get('take_profit_pct'))} | "
             f"{_num(row.get('vol_trailing_stop_mult'), 2)}x | {_pct(row.get('mfe_giveback_pct'))} | "
             f"{_pct(row.get('vwap_reversion_pct'))} | {_num(row.get('cost_multiplier'), 1)}x | "
             f"{row.get('trade_count', 0)} |"
         )
     if summary.is_empty():
-        lines.append("|  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |")
+        lines.append("|  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |")
 
     lines.extend(
         [
@@ -313,6 +317,7 @@ def _grid_config(args: argparse.Namespace, base: DailyCloseFadeGridConfig) -> Da
         mfe_giveback_activation_pcts=_csv_float(args.mfe_giveback_activation_pcts),
         mfe_giveback_pcts=_csv_float(args.mfe_giveback_pcts),
         vwap_reversion_pcts=_csv_float(args.vwap_reversion_pcts),
+        profit_protection_delay_minutes=_csv_int(args.profit_protection_delay_minutes),
         liquidity_lookback_days=_csv_int(args.liquidity_lookback_days),
         liquidity_rank_mins=_csv_int(args.liquidity_rank_mins),
         liquidity_rank_maxs=_csv_int(args.liquidity_rank_maxs),

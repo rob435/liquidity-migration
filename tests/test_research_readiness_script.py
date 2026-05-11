@@ -29,7 +29,7 @@ def test_research_readiness_summarizes_pass_and_missing(tmp_path: Path) -> None:
     checks = [
         readiness.evaluate_pit_coverage(pit_path),
         readiness.evaluate_promotion(volume_path, name="volume_promotion"),
-        readiness.evaluate_promotion(missing_path, name="close_fade_promotion"),
+        readiness.evaluate_close_fade_profit_protection(missing_path, name="close_fade_profit_protection"),
     ]
 
     assert checks[0]["status"] == "pass"
@@ -47,6 +47,45 @@ def test_research_readiness_fails_existing_bad_gate(tmp_path: Path) -> None:
 
     assert check["status"] == "fail"
     assert readiness.overall_status([check], strict=False) == "fail"
+
+
+def test_research_readiness_fails_close_fade_profit_protection_without_split_survival(tmp_path: Path) -> None:
+    recheck_path = tmp_path / "corrected_profit_protection_summary.json"
+    recheck_path.write_text(
+        json.dumps(
+            {
+                "rows": 216,
+                "positive_all_splits": 0,
+                "best": {"min_split_return": -0.2287},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    check = readiness.evaluate_close_fade_profit_protection(recheck_path, name="close_fade_profit_protection")
+
+    assert check["status"] == "fail"
+    assert check["positive_all_splits"] == 0
+    assert "0/216" in check["message"]
+
+
+def test_research_readiness_passes_close_fade_profit_protection_with_split_survival(tmp_path: Path) -> None:
+    recheck_path = tmp_path / "corrected_profit_protection_summary.json"
+    recheck_path.write_text(
+        json.dumps(
+            {
+                "rows": 216,
+                "positive_all_splits": 2,
+                "best": {"min_split_return": 0.04},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    check = readiness.evaluate_close_fade_profit_protection(recheck_path, name="close_fade_profit_protection")
+
+    assert check["status"] == "pass"
+    assert check["positive_all_splits"] == 2
 
 
 def test_research_readiness_expands_volume_promotion_glob(tmp_path: Path) -> None:

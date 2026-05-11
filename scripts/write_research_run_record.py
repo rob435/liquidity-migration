@@ -295,13 +295,43 @@ def _gate_rows(repo_root: Path, artifacts: list[dict[str, Any]]) -> list[dict[st
         if row.get("status") != "present":
             continue
         path = repo_root / str(row.get("path"))
-        if not path.name.endswith(".json") or "promotion" not in path.name and "readiness" not in path.name:
+        recognized_json = (
+            path.name == "daily_close_fade_sharpe_target.json"
+            or path.name == "daily_close_fade_report.json"
+            or "promotion" in path.name
+            or "readiness" in path.name
+        )
+        if not path.name.endswith(".json") or not recognized_json:
             continue
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             continue
-        if "promotable_rows" in payload:
+        if path.name == "daily_close_fade_sharpe_target.json":
+            rows_payload = payload.get("rows", {})
+            candidates = payload.get("candidates", [])
+            rows.append(
+                {
+                    "name": "daily_close_fade_sharpe_target",
+                    "path": row.get("path"),
+                    "status": "pass" if payload.get("status") == "target_hit" and candidates else "fail",
+                    "rows": int(float(rows_payload.get("grid") or 0)) if isinstance(rows_payload, dict) else "",
+                    "promotable_rows": len(candidates) if isinstance(candidates, list) else 0,
+                }
+            )
+        elif path.name == "daily_close_fade_report.json" and "backtest_validity" in payload:
+            validity = payload.get("backtest_validity", {})
+            rows_payload = payload.get("rows", {})
+            rows.append(
+                {
+                    "name": path.parent.name,
+                    "path": row.get("path"),
+                    "status": "pass" if validity.get("label") == "candidate" else "fail",
+                    "rows": int(float(rows_payload.get("trades") or 0)) if isinstance(rows_payload, dict) else "",
+                    "promotable_rows": 1 if validity.get("can_support_promotion") else 0,
+                }
+            )
+        elif "promotable_rows" in payload:
             rows.append(
                 {
                     "name": path.parent.name if path.parent.name != "promotion" else path.parent.parent.name,

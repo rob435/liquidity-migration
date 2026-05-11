@@ -40,6 +40,7 @@ def _variant(score: str, split: str, total_return: float, sharpe: float) -> dict
         "vol_trailing_stop_mult": 0.25,
         "mfe_giveback_pct": 0.20,
         "vwap_reversion_pct": 0.0,
+        "profit_protection_delay_minutes": 15,
         "cost_multiplier": 1.0,
         "round_trip_cost_bps": 12.0,
         "total_return": total_return,

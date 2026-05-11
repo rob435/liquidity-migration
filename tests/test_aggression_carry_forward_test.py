@@ -7,7 +7,7 @@ from pathlib import Path
 import polars as pl
 
 from aggression_carry.config import CostConfig, DailyCloseFadeConfig, ForwardTestConfig, ResearchConfig
-from aggression_carry.forward_test import run_forward_once, run_forward_scan, run_forward_sleeves
+from aggression_carry.forward_test import _mark_trade_from_bars, run_forward_once, run_forward_scan, run_forward_sleeves
 from aggression_carry.storage import read_dataset
 
 
@@ -23,8 +23,11 @@ def test_forward_scan_uses_live_universe_filters_and_pump_selection(tmp_path: Pa
     assert symbols == ["OLD1USDT", "OLD2USDT"]
     assert "YOUNGUSDT" not in symbols
     assert "BTCUSDT" not in symbols
-    assert features.filter(pl.col("symbol") == "OLD1USDT").row(0, named=True)["eligible"] is True
-    assert features.filter(pl.col("symbol") == "OLD1USDT").row(0, named=True)["bar_coverage"] == 1.0
+    old1 = features.filter(pl.col("symbol") == "OLD1USDT").row(0, named=True)
+    assert old1["eligible"] is True
+    assert old1["bar_coverage"] == 1.0
+    assert old1["signal_ts_ms"] == int(datetime(2026, 1, 15, 22, 0, tzinfo=UTC).timestamp() * 1000)
+    assert old1["signal_close"] < 130.0
 
 
 def test_forward_run_opens_paper_trades_without_orders(tmp_path: Path) -> None:
@@ -97,6 +100,58 @@ def test_forward_open_trade_uses_stored_exit_config_after_config_change(tmp_path
 
     assert trades["status"].to_list() == ["closed", "closed"]
     assert trades["exit_reason"].to_list() == ["take_profit", "take_profit"]
+
+
+def test_forward_marker_profit_protection_does_not_warm_start_before_activation() -> None:
+    entry = datetime(2026, 1, 15, 22, 0, tzinfo=UTC)
+    entry_ts_ms = int(entry.timestamp() * 1000)
+    target_exit_ts_ms = int((entry + timedelta(minutes=60)).timestamp() * 1000)
+    trade = {
+        "entry_price": 100.0,
+        "entry_ts_ms": entry_ts_ms,
+        "target_exit_ts_ms": target_exit_ts_ms,
+        "stop_delay_minutes": 15,
+        "stop_loss_pct": 0.20,
+        "take_profit_pct": 0.0,
+        "trailing_stop_pct": 0.0,
+        "trailing_activation_pct": 0.0,
+        "vol_trailing_stop_mult": 0.0,
+        "vol_trailing_activation_mult": 0.0,
+        "mfe_giveback_activation_pct": 0.01,
+        "mfe_giveback_pct": 0.20,
+        "vwap_reversion_pct": 0.0,
+        "realized_vol": 0.0,
+        "intraday_vwap": 0.0,
+        "weight": 1.0,
+    }
+    bars = []
+    for minute in range(61):
+        ts_ms = entry_ts_ms + minute * 60_000
+        if minute == 5:
+            low = 90.0
+            high = 100.0
+            close = 90.0
+        elif minute < 15:
+            low = 100.0
+            high = 101.0
+            close = 101.0
+        else:
+            low = 100.5
+            high = 101.0
+            close = 101.0
+        bars.append({"ts_ms": ts_ms, "high": high, "low": low, "close": close})
+
+    marked = _mark_trade_from_bars(
+        trade,
+        pl.DataFrame(bars),
+        now_ms=target_exit_ts_ms,
+        fade_config=DailyCloseFadeConfig(stop_delay_minutes=15, mfe_giveback_activation_pct=0.01, mfe_giveback_pct=0.20),
+        round_trip_cost_bps=0.0,
+    )
+
+    assert marked["status"] == "closed"
+    assert marked["exit_reason"] == "max_hold"
+    assert marked["exit_ts_ms"] == target_exit_ts_ms
 
 
 def test_forward_sleeves_use_isolated_roots_and_reports(tmp_path: Path) -> None:

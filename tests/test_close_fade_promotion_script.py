@@ -78,5 +78,6 @@ def _grid(score: str, *, positive_splits: int, min_return: float) -> dict:
         "take_profit_pct": 0.0,
         "vol_trailing_stop_mult": 0.25,
         "mfe_giveback_pct": 0.20,
+        "profit_protection_delay_minutes": 15,
         "cost_multiplier": 1.0,
     }

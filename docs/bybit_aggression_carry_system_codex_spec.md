@@ -12,27 +12,45 @@ The active alpha lead is documented in:
 
 ```text
 docs/daily_close_fade.md
+docs/profit_protection_audit_20260508.md
+docs/backtesting_errors_we_never_repeat.md
 configs/volume_alpha.default.yaml
 ```
 
 The active contract is:
 
 ```text
-Strategy: daily-close short fade
-Signal: 22:00 UTC
-Ranking: day-to-date vol-adjusted return using only data available at 22:00
-Entry: 60 equal 1m slices over [22:00, 23:00)
+Strategy: full-listing daily-close low-cap scam-tail short fade
+Signal: 23:00 UTC
+Ranking: day-to-date return using only completed bars available at 23:00
+Entry: 60 equal 1m slices over [23:00, 00:00)
 Entry price: average filled slice price
-Stop: 20% above average entry, active immediately from first fill
-Adaptive exits: active from final add + 15m
+Stop: 8% above average entry, active immediately from first fill
+Take profit: 10% below average entry
+Adaptive exits: active from final add + 240m
+Adaptive state: starts at activation, not from pre-activation lows/MFE
+MFE giveback: after 3% favorable excursion, give back 50% from active-state MFE
 Exit: flatten whole symbol
 Re-entry: none in the same symbol/date
-Universe: Bybit USDT linear perps, prior-liquidity ranks 31-150
+Universe: point-in-time Bybit public-trade archive listing manifest, prior 7d
+  liquidity ranks 226+, excluding current top-cap/category-leader alpha coins
 Mode: research/backtest first, not real-money live trading
 ```
 
-Current-top-universe backtests are benchmarks only. Promotion requires
-point-in-time archive validation.
+Current-top-universe backtests are benchmarks only. The old +16k current-top
+benchmark used legacy warm-started profit protection and is not promotable.
+Promotion requires point-in-time archive validation and corrected exit
+semantics.
+It also requires passing the permanent backtesting-error standard in
+`docs/backtesting_errors_we_never_repeat.md`.
+
+Current selected full-listing artifacts:
+
+```text
+Config: configs/daily_close_fade.lowcap_scam_tail_selected.yaml
+Report: data/volume_alpha/reports/daily_close_fade_full_listing_scam_tail_stage4_time_decay_selected/
+Write-up: docs/daily_close_fade_full_listing_scam_tail_stage4_20260510.md
+```
 
 ## Deprecated Scope
 
@@ -46,6 +64,7 @@ alerting.py live Telegram bot behavior
 runtime_monitor.py / runtime_validation.py
 old aggression/carry/momentum/OI composite stack
 real-money exchange submission
+systemd/cron/deployment wrappers for demo or live order submission
 ```
 
 Bybit demo plumbing may exist for execution testing, but demo fills are not

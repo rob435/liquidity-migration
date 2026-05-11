@@ -18,6 +18,25 @@ def test_research_run_record_captures_context_and_gate_rows(tmp_path: Path) -> N
     report_dir.mkdir(parents=True)
     promotion = report_dir / "volume_promotion_report.json"
     promotion.write_text(json.dumps({"rows": 12, "promotable_rows": 2}), encoding="utf-8")
+    target_dir = tmp_path / "reports" / "daily-target"
+    target_dir.mkdir(parents=True)
+    target = target_dir / "daily_close_fade_sharpe_target.json"
+    target.write_text(
+        json.dumps({"status": "target_hit", "rows": {"grid": 144}, "candidates": [{"grid_id": "ok"}]}),
+        encoding="utf-8",
+    )
+    candidate_dir = tmp_path / "reports" / "candidate"
+    candidate_dir.mkdir(parents=True)
+    candidate = candidate_dir / "daily_close_fade_report.json"
+    candidate.write_text(
+        json.dumps(
+            {
+                "rows": {"trades": 63},
+                "backtest_validity": {"label": "candidate", "can_support_promotion": False},
+            }
+        ),
+        encoding="utf-8",
+    )
 
     record = run_record.build_research_run_record(
         repo_root=tmp_path,
@@ -34,15 +53,16 @@ def test_research_run_record_captures_context_and_gate_rows(tmp_path: Path) -> N
         data_roots=("data-root",),
         config_paths=("config.yaml",),
         artifact_paths=(),
-        artifact_globs=("reports/*/promotion/volume_promotion_report.json",),
+        artifact_globs=("reports/**/*.json",),
     )
 
     assert record["run_id"].endswith("tail-volume-sweep")
     assert record["configs"][0]["status"] == "present"
     assert record["data_roots"][0]["status"] == "present"
-    assert record["artifacts"][0]["path"] == "reports/tail/promotion/volume_promotion_report.json"
-    assert record["gates"][0]["name"] == "tail"
-    assert record["gates"][0]["status"] == "pass"
+    assert any(row["path"] == "reports/tail/promotion/volume_promotion_report.json" for row in record["artifacts"])
+    assert any(row["name"] == "tail" and row["status"] == "pass" for row in record["gates"])
+    assert any(row["name"] == "daily_close_fade_sharpe_target" and row["promotable_rows"] == 1 for row in record["gates"])
+    assert any(row["name"] == "candidate" and row["promotable_rows"] == 0 for row in record["gates"])
 
     output_dir = tmp_path / "log"
     run_record.write_research_run_record(record, output_dir=output_dir)

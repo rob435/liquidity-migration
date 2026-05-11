@@ -110,6 +110,51 @@ class BybitMarketData:
             limit=limit,
         )
 
+    def get_mark_price_klines(self, symbol: str, interval: str, start: int, end: int, limit: int = 1000) -> list[dict[str, Any]]:
+        return self._get_price_index_klines("get_mark_price_kline", symbol, interval, start, end, limit=limit)
+
+    def get_index_price_klines(self, symbol: str, interval: str, start: int, end: int, limit: int = 1000) -> list[dict[str, Any]]:
+        return self._get_price_index_klines("get_index_price_kline", symbol, interval, start, end, limit=limit)
+
+    def get_premium_index_klines(self, symbol: str, interval: str, start: int, end: int, limit: int = 1000) -> list[dict[str, Any]]:
+        return self._get_price_index_klines("get_premium_index_price_kline", symbol, interval, start, end, limit=limit)
+
+    def _get_price_index_klines(
+        self,
+        method_name: str,
+        symbol: str,
+        interval: str,
+        start: int,
+        end: int,
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        interval_ms = INTERVAL_MS[interval] if interval in INTERVAL_MS else int(interval) * 60_000
+        rows_by_ts: dict[int, Any] = {}
+        cursor = start
+        window_span_ms = interval_ms * max(limit - 1, 1)
+        while cursor <= end:
+            window_end = min(end, cursor + window_span_ms)
+            payload = self._get(
+                method_name,
+                category=self.category,
+                symbol=symbol,
+                interval=interval,
+                start=cursor,
+                end=window_end,
+                limit=limit,
+            )
+            batch = payload.get("result", {}).get("list", [])
+            for item in batch:
+                ts = int(item[0])
+                if start <= ts <= end:
+                    rows_by_ts[ts] = item
+            if window_end >= end:
+                break
+            next_cursor = window_end
+            cursor = next_cursor if next_cursor > cursor else cursor + interval_ms
+        return [rows_by_ts[ts] for ts in sorted(rows_by_ts)]
+
     def _paged_time_range(self, method_name: str, timestamp_key: str, **params: Any) -> list[dict[str, Any]]:
         rows_by_ts: dict[int, dict[str, Any]] = {}
         start = int(params["startTime"])

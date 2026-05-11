@@ -29,8 +29,8 @@ For each UTC date:
 6. Apply the prior-liquidity bucket and pump-quality filters.
 7. Enter selected shorts with the fixed 22:00-23:00 1m TWAP model.
 8. Use average entry for PnL and the 20% disaster stop.
-9. Exit by whole-symbol flatten: disaster stop, adaptive protection, max hold,
-   or data end.
+9. Exit by whole-symbol flatten: disaster stop, corrected non-warm-start
+   adaptive protection, max hold, or data end.
 10. Record every fill assumption, weight, exit reason, and daily PnL.
 
 No current rank, future liquidity, future listing status, or future return is
@@ -51,7 +51,7 @@ python -m aggression_carry \
   --workers 16
 ```
 
-Download archive-derived 1m bars:
+Download archive-derived 1m bars and signed-flow context:
 
 ```bash
 python -m aggression_carry \
@@ -60,6 +60,7 @@ python -m aggression_carry \
   archive-download-klines \
   --start 2023-05-03 \
   --end 2026-05-03 \
+  --include-flow \
   --workers 16
 ```
 
@@ -72,8 +73,14 @@ python scripts/run_archive_pit_batches.py \
   --end 2026-05-03 \
   --batch-rows 1000 \
   --workers 16 \
+  --include-flow \
   --coverage-every 1
 ```
+
+The batch runner defaults to discarding compressed public trade archives after
+the derived `klines_1m`, `signed_flow_1m`, and `signed_flow_1h` parquet outputs
+are written. Use `--keep-archives` only for a small forensic slice; keeping all
+raw compressed archive files for a one-year universe can consume hundreds of GB.
 
 Audit coverage:
 
@@ -115,3 +122,7 @@ archive-pit: point-in-time candidate test
 ```
 
 Only `archive-pit` can support promotion.
+
+Legacy current-top daily-close reports generated before the 2026-05-08
+profit-protection fix are invalid promotion evidence. They may be used only for
+forensic comparison.

@@ -411,13 +411,13 @@ def build_forward_scan_features(
                 .then(pl.col("day_turnover") / pl.col("day_volume_base"))
                 .otherwise(None)
                 .alias("intraday_vwap"),
-                (pl.col("bar_count") / (signal_minute + 1)).alias("bar_coverage"),
+                (pl.col("bar_count") / pl.col("expected_bar_count")).alias("bar_coverage"),
             ]
         )
         .with_columns(
             [
                 (pl.col("signal_close") / pl.col("intraday_vwap") - 1.0).fill_null(0.0).alias("vwap_extension"),
-                (pl.col("last_60m_turnover") / (pl.col("day_turnover") / ((signal_minute + 1) / 60.0)).clip(EPSILON))
+                (pl.col("last_60m_turnover") / (pl.col("day_turnover") / (pl.col("expected_bar_count") / 60.0)).clip(EPSILON))
                 .fill_null(0.0)
                 .alias("late_volume_ratio"),
                 (pl.col("signal_close") >= pl.col("day_high") * 0.995).alias("fresh_day_high"),
@@ -876,15 +876,16 @@ def _normalize_klines(symbol: str, rows: list, *, source: str) -> list[dict[str,
 
 
 def _signal_feature_frame(base: pl.DataFrame, signal_minute: int) -> pl.DataFrame:
-    subset = base.filter(pl.col("minute_of_day") <= signal_minute).sort(["symbol", "date", "ts_ms"])
+    subset = base.filter(pl.col("minute_of_day") < signal_minute).sort(["symbol", "date", "ts_ms"])
     if subset.is_empty():
         return pl.DataFrame()
-    avg_hours = max((signal_minute + 1) / 60.0, 1.0)
+    avg_hours = max(signal_minute / 60.0, 1.0)
+    expected_bars = max(signal_minute, 1)
     return (
         subset.group_by(["symbol", "date"], maintain_order=True)
         .agg(
             [
-                pl.col("ts_ms").last().alias("signal_ts_ms"),
+                (pl.col("day_start_ts_ms").first() + signal_minute * MS_PER_MINUTE).alias("signal_ts_ms"),
                 pl.col("open").first().alias("day_open"),
                 pl.col("close").last().alias("signal_close"),
                 pl.col("high").max().alias("day_high"),
@@ -892,14 +893,18 @@ def _signal_feature_frame(base: pl.DataFrame, signal_minute: int) -> pl.DataFram
                 pl.col("turnover_quote").sum().alias("day_turnover"),
                 pl.col("volume_base").sum().alias("day_volume_base"),
                 pl.len().alias("bar_count"),
-                pl.col("turnover_quote").filter(pl.col("minute_of_day") > signal_minute - 60).sum().alias("last_60m_turnover"),
-                pl.col("close").filter(pl.col("minute_of_day") <= signal_minute - 15).last().alias("close_15m_ago"),
-                pl.col("close").filter(pl.col("minute_of_day") <= signal_minute - 60).last().alias("close_60m_ago"),
+                pl.col("turnover_quote")
+                .filter((pl.col("minute_of_day") >= signal_minute - 60) & (pl.col("minute_of_day") < signal_minute))
+                .sum()
+                .alias("last_60m_turnover"),
+                pl.col("close").filter(pl.col("minute_of_day") < signal_minute - 15).last().alias("close_15m_ago"),
+                pl.col("close").filter(pl.col("minute_of_day") < signal_minute - 60).last().alias("close_60m_ago"),
             ]
         )
         .with_columns(
             [
                 pl.lit(signal_minute).alias("signal_minute"),
+                pl.lit(expected_bars).alias("expected_bar_count"),
                 (pl.col("signal_close") / pl.col("day_open") - 1.0).alias("day_return"),
                 (pl.col("signal_close").log() - pl.col("day_open").log()).alias("day_log_return"),
                 (pl.col("signal_close") / pl.col("close_15m_ago") - 1.0).alias("last_15m_return"),
@@ -959,6 +964,7 @@ def _minute_frame(df: pl.DataFrame) -> pl.DataFrame:
     return df.with_columns(
         [
             dt.dt.strftime("%Y-%m-%d").alias("date"),
+            (pl.col("ts_ms").cast(pl.Int64) - (pl.col("ts_ms").cast(pl.Int64) % MS_PER_DAY)).alias("day_start_ts_ms"),
             (dt.dt.hour().cast(pl.Int16) * 60 + dt.dt.minute().cast(pl.Int16)).alias("minute_of_day"),
         ]
     )
@@ -1059,7 +1065,17 @@ def _new_paper_trade(
         "score_weight_power": fade_config.score_weight_power,
         "coin_excess_vs_market_min": fade_config.coin_excess_vs_market_min,
         "coin_vwap_extension_min": fade_config.coin_vwap_extension_min,
+        "coin_vwap_extension_max": fade_config.coin_vwap_extension_max,
         "coin_late_volume_ratio_min": fade_config.coin_late_volume_ratio_min,
+        "market_median_day_return_max": fade_config.market_median_day_return_max,
+        "organic_move_score_max": fade_config.organic_move_score_max,
+        "manipulation_risk_score_min": fade_config.manipulation_risk_score_min,
+        "squeeze_risk_score_max": fade_config.squeeze_risk_score_max,
+        "require_funding_context": fade_config.require_funding_context,
+        "require_open_interest_context": fade_config.require_open_interest_context,
+        "require_premium_context": fade_config.require_premium_context,
+        "require_trade_flow_context": fade_config.require_trade_flow_context,
+        "require_all_context": fade_config.require_all_context,
         "round_trip_cost_bps": round_trip_cost_bps,
         "last_error": None,
     }
@@ -1105,6 +1121,7 @@ def _mark_trade_from_bars(
         realized_vol * vol_trailing_activation_mult if vol_trailing_stop_mult > 0.0 else 0.0
     )
     best_price = entry_price
+    protection_best_price: float | None = None
     trailing_active = False
     vol_trailing_active = False
     mfe_giveback_active = False
@@ -1135,18 +1152,19 @@ def _mark_trade_from_bars(
 
             if ts_ms >= stop_active_ts_ms:
                 protective_exits: list[tuple[float, str]] = []
-                if trailing_active and trailing_stop_pct > 0.0:
-                    trailing_stop = best_price * (1.0 + trailing_stop_pct)
-                    if high >= trailing_stop:
-                        protective_exits.append((trailing_stop, "trailing_stop"))
-                if vol_trailing_active and vol_trailing_stop_pct > 0.0:
-                    vol_trailing_stop = best_price * (1.0 + vol_trailing_stop_pct)
-                    if high >= vol_trailing_stop:
-                        protective_exits.append((vol_trailing_stop, "vol_trailing_stop"))
-                if mfe_giveback_active and mfe_giveback_pct > 0.0:
-                    mfe_stop = _mfe_giveback_stop_price(entry_price, best_price, mfe_giveback_pct)
-                    if high >= mfe_stop:
-                        protective_exits.append((mfe_stop, "mfe_giveback"))
+                if protection_best_price is not None:
+                    if trailing_active and trailing_stop_pct > 0.0:
+                        trailing_stop = protection_best_price * (1.0 + trailing_stop_pct)
+                        if high >= trailing_stop:
+                            protective_exits.append((trailing_stop, "trailing_stop"))
+                    if vol_trailing_active and vol_trailing_stop_pct > 0.0:
+                        vol_trailing_stop = protection_best_price * (1.0 + vol_trailing_stop_pct)
+                        if high >= vol_trailing_stop:
+                            protective_exits.append((vol_trailing_stop, "vol_trailing_stop"))
+                    if mfe_giveback_active and mfe_giveback_pct > 0.0:
+                        mfe_stop = _mfe_giveback_stop_price(entry_price, protection_best_price, mfe_giveback_pct)
+                        if high >= mfe_stop:
+                            protective_exits.append((mfe_stop, "mfe_giveback"))
                 if protective_exits:
                     exit_price, exit_reason = max(protective_exits, key=lambda item: item[0])
                     exit_ts_ms = ts_ms
@@ -1168,7 +1186,9 @@ def _mark_trade_from_bars(
                 best_price = low
 
             if ts_ms >= stop_active_ts_ms:
-                best_return = _short_return(entry_price, best_price)
+                if protection_best_price is None or low < protection_best_price:
+                    protection_best_price = low
+                best_return = _short_return(entry_price, protection_best_price)
                 if trailing_stop_pct > 0.0 and not trailing_active and best_return >= trailing_activation_pct:
                     trailing_active = True
                 if vol_trailing_stop_pct > 0.0 and not vol_trailing_active and best_return >= vol_trailing_activation_pct:

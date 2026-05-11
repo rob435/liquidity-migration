@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from .backtest_audit import volume_backtest_audit
 from .config import CostConfig, VolumeBacktestConfig, VolumeGridConfig
 from .storage import dataset_path, read_dataset, write_dataset
 from .volume_alpha import MS_PER_DAY, MS_PER_HOUR, VOLUME_SCORE_COLUMNS, build_volume_features
@@ -24,6 +25,7 @@ from .volume_alpha import MS_PER_DAY, MS_PER_HOUR, VOLUME_SCORE_COLUMNS, build_v
 _GRID_FEATURES: pl.DataFrame | None = None
 _GRID_KLINES: pl.DataFrame | None = None
 _GRID_RANK_FEATURES: pl.DataFrame | None = None
+_GRID_FUNDING: pl.DataFrame | None = None
 
 
 def run_volume_trade_backtest(
@@ -43,12 +45,15 @@ def run_volume_trade_backtest(
 
     all_features = build_volume_features(klines)
     features = _filter_signal_window(all_features, config)
+    funding = read_dataset(data_root, "funding")
+    round_trip_cost_bps = costs.base_entry_exit_cost_bps * config.cost_multiplier
     trades = backtest_volume_trades(
         features,
         klines,
         config=config,
-        round_trip_cost_bps=costs.base_entry_exit_cost_bps * config.cost_multiplier,
+        round_trip_cost_bps=round_trip_cost_bps,
         rank_features=all_features,
+        funding=funding,
     )
     baskets = summarize_baskets(trades, config=config)
     equity = build_equity_curve(baskets)
@@ -56,13 +61,15 @@ def run_volume_trade_backtest(
     equity_vs_btc = build_equity_vs_btc(equity, klines)
     regime_summary = summarize_btc_regimes(monthly_vs_btc)
     summary = summarize_trade_backtest(trades, baskets, equity, config=config)
+    split_metrics = summarize_volume_splits(baskets, config=config)
+    cost_model = {
+        **asdict(costs),
+        "round_trip_cost_bps": round_trip_cost_bps,
+    }
 
     payload = {
         "config": asdict(config),
-        "cost_model": {
-            **asdict(costs),
-            "round_trip_cost_bps": costs.base_entry_exit_cost_bps * config.cost_multiplier,
-        },
+        "cost_model": cost_model,
         "rows": {
             "features": features.height,
             "trades": trades.height,
@@ -70,6 +77,7 @@ def run_volume_trade_backtest(
         },
         "date_range": _date_range(features),
         "summary": summary,
+        "split_metrics": split_metrics,
         "exit_reasons": _exit_reason_rows(trades),
         "symbol_attribution": _attribution_rows(trades, "symbol"),
         "monthly_attribution": _attribution_rows(trades, "exit_month"),
@@ -82,6 +90,14 @@ def run_volume_trade_backtest(
         "trades": trades.to_dicts(),
         "baskets": baskets.to_dicts(),
     }
+    payload["backtest_validity"] = volume_backtest_audit(
+        config=config,
+        summary=summary,
+        rows=payload["rows"],
+        cost_model=cost_model,
+        split_metrics=split_metrics,
+        data_root=data_root,
+    )
 
     output_dir = Path(report_dir or Path(data_root) / "reports")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -120,6 +136,7 @@ def run_volume_grid(
     klines = read_dataset(data_root, "klines_1h")
     if klines.is_empty():
         raise RuntimeError("klines_1h is empty; run download-data first")
+    funding = read_dataset(data_root, "funding")
 
     all_features = build_volume_features(klines)
     features = _filter_signal_window(all_features, base)
@@ -139,11 +156,12 @@ def run_volume_grid(
                 config=config,
                 round_trip_cost_bps=round_trip_cost_bps,
                 rank_features=all_features,
+                funding=funding,
             )
             for grid_id, config, round_trip_cost_bps in tasks
         ]
     elif backend == "thread":
-        _init_grid_worker(features, klines, all_features)
+        _init_grid_worker(features, klines, all_features, funding)
         with ThreadPoolExecutor(max_workers=workers) as executor:
             rows = list(
                 executor.map(
@@ -156,7 +174,7 @@ def run_volume_grid(
         with ProcessPoolExecutor(
             max_workers=workers,
             initializer=_init_grid_worker,
-            initargs=(features, klines, all_features),
+            initargs=(features, klines, all_features, funding),
         ) as executor:
             rows = list(executor.map(_evaluate_grid_variant_worker, tasks, chunksize=_grid_chunksize(len(tasks), workers)))
 
@@ -204,11 +222,17 @@ def _grid_backend(workers: int) -> str:
     return "process"
 
 
-def _init_grid_worker(features: pl.DataFrame, klines: pl.DataFrame, rank_features: pl.DataFrame) -> None:
-    global _GRID_FEATURES, _GRID_KLINES, _GRID_RANK_FEATURES
+def _init_grid_worker(
+    features: pl.DataFrame,
+    klines: pl.DataFrame,
+    rank_features: pl.DataFrame,
+    funding: pl.DataFrame | None = None,
+) -> None:
+    global _GRID_FEATURES, _GRID_KLINES, _GRID_RANK_FEATURES, _GRID_FUNDING
     _GRID_FEATURES = features
     _GRID_KLINES = klines
     _GRID_RANK_FEATURES = rank_features
+    _GRID_FUNDING = funding if funding is not None else pl.DataFrame()
 
 
 def _evaluate_grid_variant_worker(task: tuple[str, VolumeBacktestConfig, float]) -> dict[str, Any]:
@@ -222,6 +246,7 @@ def _evaluate_grid_variant_worker(task: tuple[str, VolumeBacktestConfig, float])
         config=config,
         round_trip_cost_bps=round_trip_cost_bps,
         rank_features=_GRID_RANK_FEATURES,
+        funding=_GRID_FUNDING,
     )
 
 
@@ -233,6 +258,7 @@ def _evaluate_grid_variant(
     config: VolumeBacktestConfig,
     round_trip_cost_bps: float,
     rank_features: pl.DataFrame | None = None,
+    funding: pl.DataFrame | None = None,
 ) -> dict[str, Any]:
     trades = backtest_volume_trades(
         features,
@@ -240,6 +266,7 @@ def _evaluate_grid_variant(
         config=config,
         round_trip_cost_bps=round_trip_cost_bps,
         rank_features=rank_features,
+        funding=funding,
     )
     baskets = summarize_baskets(trades, config=config)
     equity = build_equity_curve(baskets)
@@ -330,6 +357,7 @@ def backtest_volume_trades(
     config: VolumeBacktestConfig,
     round_trip_cost_bps: float,
     rank_features: pl.DataFrame | None = None,
+    funding: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     _validate_config(config)
     score_col = _score_column(config.score)
@@ -339,6 +367,7 @@ def backtest_volume_trades(
         raise RuntimeError(f"score column {score_col!r} is missing from volume features")
 
     bars = _price_bars_by_symbol(klines)
+    funding_lookup = _funding_lookup(funding)
     stop_lookup = _volatility_stop_lookup(klines, lookback_days=config.vol_stop_lookback_days)
     rank_lookup = _rank_lookup(
         rank_features if rank_features is not None else features,
@@ -396,6 +425,7 @@ def backtest_volume_trades(
                     stop_lookup=stop_lookup,
                 ),
                 rank_lookup=rank_lookup,
+                funding_lookup=funding_lookup,
             )
             if trade is not None:
                 rows.append(trade)
@@ -418,6 +448,7 @@ def summarize_baskets(trades: pl.DataFrame, *, config: VolumeBacktestConfig) -> 
                 pl.col("net_return").sum().alias("basket_return"),
                 pl.col("gross_return").sum().alias("gross_return"),
                 pl.col("cost_return").sum().alias("cost_return"),
+                pl.col("funding_return").sum().alias("funding_return"),
                 pl.when(pl.col("side") == "long").then(pl.col("net_return")).otherwise(0.0).sum().alias("long_return"),
                 pl.when(pl.col("side") == "short").then(pl.col("net_return")).otherwise(0.0).sum().alias("short_return"),
                 pl.len().alias("trades"),
@@ -611,6 +642,11 @@ def summarize_trade_backtest(
             "long_return": 0.0,
             "short_return": 0.0,
             "cost_return": 0.0,
+            "funding_return": 0.0,
+            "funding_mode": "missing",
+            "funding_event_count": 0,
+            "worst_basket_return": 0.0,
+            "worst_day_return": 0.0,
         }
     basket_returns = np.asarray(baskets["basket_return"].to_list(), dtype=float)
     mean_return = float(np.mean(basket_returns)) if basket_returns.size else 0.0
@@ -634,12 +670,86 @@ def summarize_trade_backtest(
         "short_return": float(trades.filter(pl.col("side") == "short")["net_return"].sum()),
         "gross_return": float(trades["gross_return"].sum()),
         "cost_return": float(trades["cost_return"].sum()),
+        "funding_return": float(trades["funding_return"].sum()) if "funding_return" in trades.columns else 0.0,
+        "funding_mode": _funding_mode_summary(trades),
+        "funding_event_count": int(trades["funding_event_count"].sum()) if "funding_event_count" in trades.columns else 0,
+        "worst_basket_return": float(basket_returns.min()) if basket_returns.size else 0.0,
+        "worst_day_return": _worst_volume_day_return(baskets),
+    }
+
+
+def _funding_mode_summary(trades: pl.DataFrame) -> str:
+    if trades.is_empty() or "funding_mode" not in trades.columns:
+        return "missing"
+    modes = set(str(item) for item in trades["funding_mode"].to_list())
+    if modes == {"modeled"}:
+        return "modeled"
+    if "modeled" in modes:
+        return "partial"
+    return "missing"
+
+
+def _worst_volume_day_return(baskets: pl.DataFrame) -> float:
+    if baskets.is_empty() or "exit_date" not in baskets.columns:
+        return 0.0
+    daily = baskets.group_by("exit_date").agg(((pl.col("basket_return") + 1.0).product() - 1.0).alias("day_return"))
+    return float(daily["day_return"].min()) if not daily.is_empty() else 0.0
+
+
+def summarize_volume_splits(baskets: pl.DataFrame, *, config: VolumeBacktestConfig) -> list[dict[str, Any]]:
+    if baskets.is_empty():
+        return []
+    ordered = baskets.sort("entry_ts_ms")
+    rows = ordered.to_dicts()
+    split_count = min(3, len(rows))
+    split_size = math.ceil(len(rows) / split_count)
+    output = []
+    for index in range(split_count):
+        chunk = rows[index * split_size : (index + 1) * split_size]
+        if chunk:
+            output.append(_summarize_volume_basket_chunk(chunk, name=f"chronological_{index + 1}_of_{split_count}", config=config))
+    if ordered.height:
+        latest_ts = int(ordered["entry_ts_ms"].max())
+        trailing = ordered.filter(pl.col("entry_ts_ms") >= latest_ts - 365 * MS_PER_DAY).to_dicts()
+        if trailing and len(trailing) < len(rows):
+            output.append(_summarize_volume_basket_chunk(trailing, name="trailing_365d", config=config))
+    return output
+
+
+def _summarize_volume_basket_chunk(
+    rows: list[dict[str, Any]],
+    *,
+    name: str,
+    config: VolumeBacktestConfig,
+) -> dict[str, Any]:
+    returns = [float(row["basket_return"]) for row in rows]
+    equity = 1.0
+    peak = 1.0
+    max_dd = 0.0
+    for value in returns:
+        equity *= 1.0 + value
+        peak = max(peak, equity)
+        max_dd = min(max_dd, equity / peak - 1.0)
+    mean_return = float(np.mean(returns)) if returns else 0.0
+    stdev = float(np.std(returns, ddof=1)) if len(returns) > 1 else 0.0
+    annual_periods = 365.0 / config.rebalance_days
+    return {
+        "name": name,
+        "start": str(rows[0].get("exit_date", "")),
+        "end": str(rows[-1].get("exit_date", "")),
+        "basket_count": len(rows),
+        "total_return": float(equity - 1.0),
+        "sharpe_like": float(mean_return / stdev * math.sqrt(annual_periods)) if stdev > 1e-12 else 0.0,
+        "max_drawdown": float(max_dd),
+        "worst_basket_return": float(min(returns)) if returns else 0.0,
+        "avg_basket_return": float(mean_return),
     }
 
 
 def format_volume_backtest_report(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     config = payload["config"]
+    validity = payload.get("backtest_validity", {})
     lines = [
         "# Volume Trade Backtest",
         "",
@@ -647,6 +757,18 @@ def format_volume_backtest_report(payload: dict[str, Any]) -> str:
         f"Feature rows: {payload['rows']['features']}",
         f"Trades: {payload['rows']['trades']}",
         f"Baskets: {payload['rows']['baskets']}",
+        f"Validity label: `{validity.get('label', 'unknown')}`",
+        f"Can support promotion: `{validity.get('can_support_promotion', False)}`",
+        "",
+        "## Rule Gates",
+        "",
+        "| Gate | Status | Severity | Detail |",
+        "|---|---|---|---|",
+    ]
+    for item in validity.get("gates", []):
+        lines.append(f"| {item.get('name')} | {item.get('status')} | {item.get('severity')} | {item.get('detail')} |")
+    lines.extend(
+        [
         "",
         "## Trading Logic",
         "",
@@ -678,12 +800,34 @@ def format_volume_backtest_report(payload: dict[str, Any]) -> str:
         f"| Long contribution | {summary['long_return']:.2%} |",
         f"| Short contribution | {summary['short_return']:.2%} |",
         f"| Costs | {summary['cost_return']:.2%} |",
+        f"| Funding | {summary.get('funding_return', 0.0):.2%} |",
+        f"| Funding mode | {summary.get('funding_mode', 'missing')} |",
+        f"| Funding events | {summary.get('funding_event_count', 0)} |",
+        f"| Worst basket | {summary.get('worst_basket_return', 0.0):.2%} |",
+        f"| Worst day | {summary.get('worst_day_return', 0.0):.2%} |",
+        "",
+        "## Split Metrics",
+        "",
+        "| Split | Start | End | Return | Sharpe | Max DD | Baskets | Worst Basket |",
+        "|---|---|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in payload.get("split_metrics", []):
+        lines.append(
+            f"| {row.get('name')} | {row.get('start')} | {row.get('end')} | "
+            f"{row.get('total_return', 0.0):.2%} | {row.get('sharpe_like', 0.0):.2f} | "
+            f"{row.get('max_drawdown', 0.0):.2%} | {row.get('basket_count', 0)} | "
+            f"{row.get('worst_basket_return', 0.0):.2%} |"
+        )
+    lines.extend(
+        [
         "",
         "## Exit Reasons",
         "",
         "| Reason | Trades | Net return | Avg trade |",
         "|---|---:|---:|---:|",
-    ]
+        ]
+    )
     for item in payload["exit_reasons"]:
         lines.append(
             f"| {item['exit_reason']} | {item['trades']} | {item['net_return']:.2%} | {item['avg_trade_return']:.3%} |"
@@ -1333,6 +1477,7 @@ def _simulate_trade(
     round_trip_cost_bps: float,
     stop_pct: float | None,
     rank_lookup: dict[tuple[str, int], float],
+    funding_lookup: dict[str, list[tuple[int, float]]] | None,
 ) -> dict[str, Any] | None:
     entry_ts_ms = int(entry_bar["bar_end_ts_ms"])
     entry_price = float(entry_bar["close"])
@@ -1399,9 +1544,17 @@ def _simulate_trade(
             exit_reason = "data_end"
 
     gross_trade_return = _side_return(entry_price, exit_price, side=side)
+    raw_funding_return, funding_mode, funding_event_count = _perp_funding_return(
+        funding_lookup,
+        symbol=symbol,
+        side=side,
+        entry_ts_ms=entry_ts_ms,
+        exit_ts_ms=int(exit_ts_ms),
+    )
+    funding_return = abs(notional_weight) * raw_funding_return
     cost_return = -abs(notional_weight) * round_trip_cost_bps / 10_000.0
     gross_return = abs(notional_weight) * gross_trade_return
-    net_return = gross_return + cost_return
+    net_return = gross_return + cost_return + funding_return
     trade_id = f"{basket_id}-{side[0]}-{symbol}"
     return {
         "trade_id": trade_id,
@@ -1426,12 +1579,50 @@ def _simulate_trade(
         "gross_trade_return": gross_trade_return,
         "gross_return": gross_return,
         "cost_return": cost_return,
+        "funding_return": funding_return,
+        "funding_mode": funding_mode,
+        "funding_event_count": funding_event_count,
         "net_return": net_return,
         "mae": mae,
         "mfe": mfe,
         "bars_held": bars_held,
         "hold_hours": (int(exit_ts_ms) - entry_ts_ms) / MS_PER_HOUR,
     }
+
+
+def _funding_lookup(funding: pl.DataFrame | None) -> dict[str, list[tuple[int, float]]] | None:
+    if funding is None or funding.is_empty() or "symbol" not in funding.columns or "ts_ms" not in funding.columns:
+        return None
+    rate_col = "funding_rate" if "funding_rate" in funding.columns else "funding_rate_8h_equiv"
+    if rate_col not in funding.columns:
+        return None
+    output: dict[str, list[tuple[int, float]]] = {}
+    rows = funding.select(["symbol", "ts_ms", rate_col]).drop_nulls(["symbol", "ts_ms"]).sort(["symbol", "ts_ms"])
+    for key, part in rows.partition_by("symbol", as_dict=True, maintain_order=True).items():
+        symbol = str(key[0] if isinstance(key, tuple) else key)
+        output[symbol] = [(int(row["ts_ms"]), float(row[rate_col])) for row in part.to_dicts()]
+    return output
+
+
+def _perp_funding_return(
+    funding_lookup: dict[str, list[tuple[int, float]]] | None,
+    *,
+    symbol: str,
+    side: str,
+    entry_ts_ms: int,
+    exit_ts_ms: int,
+) -> tuple[float, str, int]:
+    if funding_lookup is None:
+        return 0.0, "missing", 0
+    events = [
+        rate
+        for ts_ms, rate in funding_lookup.get(symbol, [])
+        if entry_ts_ms < ts_ms <= exit_ts_ms
+    ]
+    if not events:
+        return 0.0, "modeled", 0
+    signed = sum(events)
+    return (float(-signed) if side == "long" else float(signed)), "modeled", len(events)
 
 
 def _price_bars_by_symbol(klines: pl.DataFrame) -> dict[str, list[dict[str, Any]]]:
@@ -1563,6 +1754,9 @@ def _empty_trades() -> pl.DataFrame:
             "gross_trade_return": pl.Series([], dtype=pl.Float64),
             "gross_return": pl.Series([], dtype=pl.Float64),
             "cost_return": pl.Series([], dtype=pl.Float64),
+            "funding_return": pl.Series([], dtype=pl.Float64),
+            "funding_mode": pl.Series([], dtype=pl.String),
+            "funding_event_count": pl.Series([], dtype=pl.Int64),
             "net_return": pl.Series([], dtype=pl.Float64),
             "mae": pl.Series([], dtype=pl.Float64),
             "mfe": pl.Series([], dtype=pl.Float64),
@@ -1582,6 +1776,7 @@ def _empty_baskets() -> pl.DataFrame:
             "basket_return": pl.Series([], dtype=pl.Float64),
             "gross_return": pl.Series([], dtype=pl.Float64),
             "cost_return": pl.Series([], dtype=pl.Float64),
+            "funding_return": pl.Series([], dtype=pl.Float64),
             "long_return": pl.Series([], dtype=pl.Float64),
             "short_return": pl.Series([], dtype=pl.Float64),
             "trades": pl.Series([], dtype=pl.Int64),

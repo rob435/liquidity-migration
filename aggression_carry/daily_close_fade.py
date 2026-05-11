@@ -15,11 +15,13 @@ from typing import Any
 
 import polars as pl
 
+from .backtest_audit import close_fade_audit
 from .config import CostConfig, DailyCloseFadeConfig, DailyCloseFadeGridConfig
 from .storage import dataset_path, read_dataset, write_dataset
 
 
 MS_PER_MINUTE = 60_000
+MS_PER_HOUR = 60 * MS_PER_MINUTE
 MS_PER_DAY = 86_400_000
 EPSILON = 1e-12
 
@@ -33,7 +35,14 @@ class DailyCloseFadeDiagnosticsConfig:
     signal_minutes: tuple[int, ...] = (22 * 60,)
     entry_delay_minutes: tuple[int, ...] = (0, 15, 60)
     horizon_minutes: tuple[int, ...] = (60, 180)
-    scores: tuple[str, ...] = ("vol_adjusted_day_return", "day_return", "late_volume_ratio", "vwap_extension", "pump_score")
+    scores: tuple[str, ...] = (
+        "vol_adjusted_day_return",
+        "context_fade_score",
+        "day_return",
+        "late_volume_ratio",
+        "vwap_extension",
+        "pump_score",
+    )
     top_ns: tuple[int, ...] = (3, 5, 10)
     buckets: int = 10
     min_obs_per_bucket: int = 5
@@ -51,22 +60,38 @@ def run_daily_close_fade(
     config = fade_config or DailyCloseFadeConfig()
     _validate_close_fade_config(config)
     costs = cost_config or CostConfig()
+    round_trip_cost_bps = costs.base_entry_exit_cost_bps * config.cost_multiplier
     features = build_daily_close_fade_features(data_root, config=config, signal_minutes=(config.signal_minute,))
     trades = backtest_daily_close_fade(
         data_root,
         features,
         config=config,
-        round_trip_cost_bps=costs.base_entry_exit_cost_bps * config.cost_multiplier,
+        round_trip_cost_bps=round_trip_cost_bps,
     )
     baskets = summarize_close_fade_baskets(trades)
     equity = build_close_fade_equity(baskets)
     summary = summarize_close_fade(trades, baskets, equity, config=config)
+    split_metrics = summarize_close_fade_splits(baskets)
+    cost_model = {
+        **asdict(costs),
+        "round_trip_cost_bps": round_trip_cost_bps,
+    }
     payload = {
         "config": asdict(config),
+        "cost_model": cost_model,
         "summary": summary,
+        "split_metrics": split_metrics,
         "rows": {"features": features.height, "trades": trades.height, "baskets": baskets.height},
         "date_range": _date_range(features, "signal_ts_ms"),
     }
+    payload["backtest_validity"] = close_fade_audit(
+        config=config,
+        summary=summary,
+        rows=payload["rows"],
+        cost_model=cost_model,
+        split_metrics=split_metrics,
+        data_root=data_root,
+    )
 
     output_dir = Path(report_dir or Path(data_root) / "reports")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -76,6 +101,12 @@ def run_daily_close_fade(
         trades.write_csv(output_dir / "daily_close_fade_trades.csv")
     if not baskets.is_empty():
         baskets.write_csv(output_dir / "daily_close_fade_baskets.csv")
+    if not equity.is_empty():
+        equity.write_csv(output_dir / "daily_close_fade_equity.csv")
+        (output_dir / "daily_close_fade_equity_curve.svg").write_text(
+            _render_close_fade_equity_curve_svg(equity),
+            encoding="utf-8",
+        )
 
     _replace_dataset(features, data_root, "daily_close_fade_features", partition_by=("date", "signal_minute"))
     _replace_dataset(trades, data_root, "daily_close_fade_trades", partition_by=("entry_date", "symbol"))
@@ -289,6 +320,7 @@ def run_daily_close_fade_sleeves(
         equity = build_close_fade_equity(baskets)
         summary = summarize_close_fade(trades, baskets, equity, config=config)
         config_row = asdict(config)
+        config_row["include_symbols"] = ",".join(config.include_symbols)
         config_row["exclude_symbols"] = ",".join(config.exclude_symbols)
         result_rows.append(
             {
@@ -391,6 +423,9 @@ def build_daily_close_fade_features(
 ) -> pl.DataFrame:
     lf = _scan_klines_1m(data_root)
     base = _minute_frame(lf)
+    include_symbols = tuple(symbol.upper() for symbol in config.include_symbols)
+    if include_symbols:
+        base = base.filter(pl.col("symbol").is_in(include_symbols))
     frames = [_signal_feature_frame(base, signal_minute).collect() for signal_minute in tuple(dict.fromkeys(signal_minutes))]
     if not frames:
         return pl.DataFrame()
@@ -419,13 +454,13 @@ def build_daily_close_fade_features(
                 .then(pl.col("day_turnover") / pl.col("day_volume_base"))
                 .otherwise(None)
                 .alias("intraday_vwap"),
-                (pl.col("bar_count") / (pl.col("signal_minute") + 1)).alias("bar_coverage"),
+                (pl.col("bar_count") / pl.col("expected_bar_count")).alias("bar_coverage"),
             ]
         )
         .with_columns(
             [
                 (pl.col("signal_close") / pl.col("intraday_vwap") - 1.0).fill_null(0.0).alias("vwap_extension"),
-                (pl.col("last_60m_turnover") / (pl.col("day_turnover") / ((pl.col("signal_minute") + 1) / 60.0)).clip(EPSILON))
+                (pl.col("last_60m_turnover") / (pl.col("day_turnover") / (pl.col("expected_bar_count") / 60.0)).clip(EPSILON))
                 .fill_null(0.0)
                 .alias("late_volume_ratio"),
                 (pl.col("signal_close") >= pl.col("day_high") * 0.995).alias("fresh_day_high"),
@@ -455,7 +490,8 @@ def build_daily_close_fade_features(
         )
         .sort(["signal_ts_ms", "symbol"])
     )
-    return attach_close_fade_coin_market_context(features, config)
+    features = attach_close_fade_coin_market_context(features, config)
+    return attach_close_fade_optional_context(data_root, features)
 
 
 def backtest_daily_close_fade(
@@ -541,6 +577,361 @@ def attach_close_fade_coin_market_context(features: pl.DataFrame, config: DailyC
     )
 
 
+def attach_close_fade_optional_context(data_root: str | Path, features: pl.DataFrame) -> pl.DataFrame:
+    if features.is_empty():
+        return features
+    enriched = _attach_funding_context(data_root, features)
+    enriched = _attach_open_interest_context(data_root, enriched)
+    enriched = _attach_premium_context(data_root, enriched)
+    enriched = _attach_signed_flow_context(data_root, enriched)
+    return _derive_context_scores(enriched)
+
+
+def _attach_funding_context(data_root: str | Path, features: pl.DataFrame) -> pl.DataFrame:
+    funding = read_dataset(data_root, "funding")
+    if funding.is_empty() or "funding_rate" not in funding.columns:
+        return features.with_columns(
+            [
+                pl.lit(None, dtype=pl.Float64).alias("funding_rate_8h_equiv"),
+                pl.lit(None, dtype=pl.Int64).alias("funding_ts_ms"),
+            ]
+        )
+    rate_col = "funding_rate_8h_equiv" if "funding_rate_8h_equiv" in funding.columns else "funding_rate"
+    source = (
+        funding.select(
+            [
+                "symbol",
+                pl.col("ts_ms").cast(pl.Int64).alias("funding_ts_ms"),
+                pl.col(rate_col).cast(pl.Float64).alias("funding_rate_8h_equiv"),
+            ]
+        )
+        .drop_nulls(["symbol", "funding_ts_ms"])
+        .sort(["symbol", "funding_ts_ms"])
+    )
+    if source.is_empty():
+        return features.with_columns(
+            [
+                pl.lit(None, dtype=pl.Float64).alias("funding_rate_8h_equiv"),
+                pl.lit(None, dtype=pl.Int64).alias("funding_ts_ms"),
+            ]
+        )
+    return (
+        features.sort(["symbol", "signal_ts_ms"])
+        .join_asof(
+            source,
+            left_on="signal_ts_ms",
+            right_on="funding_ts_ms",
+            by="symbol",
+            strategy="backward",
+        )
+        .sort(["signal_ts_ms", "symbol"])
+    )
+
+
+def _attach_open_interest_context(data_root: str | Path, features: pl.DataFrame) -> pl.DataFrame:
+    open_interest = read_dataset(data_root, "open_interest")
+    missing_cols = [
+        pl.lit(None, dtype=pl.Float64).alias("open_interest_value"),
+        pl.lit(None, dtype=pl.Float64).alias("open_interest_value_1h_ago"),
+        pl.lit(None, dtype=pl.Float64).alias("open_interest_value_24h_ago"),
+        pl.lit(None, dtype=pl.Float64).alias("oi_change_1h"),
+        pl.lit(None, dtype=pl.Float64).alias("oi_change_24h"),
+        pl.lit(None, dtype=pl.Int64).alias("open_interest_ts_ms"),
+    ]
+    if open_interest.is_empty() or not {"symbol", "ts_ms"}.issubset(open_interest.columns):
+        return features.with_columns(missing_cols)
+    value_col = "open_interest_value" if "open_interest_value" in open_interest.columns else "open_interest"
+    if value_col not in open_interest.columns:
+        return features.with_columns(missing_cols)
+    source = (
+        open_interest.select(
+            [
+                "symbol",
+                pl.col("ts_ms").cast(pl.Int64).alias("open_interest_ts_ms"),
+                pl.col(value_col).cast(pl.Float64).alias("open_interest_value"),
+            ]
+        )
+        .drop_nulls(["symbol", "open_interest_ts_ms"])
+        .sort(["symbol", "open_interest_ts_ms"])
+    )
+    if source.is_empty():
+        return features.with_columns(missing_cols)
+    current = (
+        features.sort(["symbol", "signal_ts_ms"])
+        .join_asof(
+            source,
+            left_on="signal_ts_ms",
+            right_on="open_interest_ts_ms",
+            by="symbol",
+            strategy="backward",
+        )
+    )
+    lag_source_1h = source.rename(
+        {
+            "open_interest_ts_ms": "open_interest_1h_ts_ms",
+            "open_interest_value": "open_interest_value_1h_ago",
+        }
+    )
+    lag_source_24h = source.rename(
+        {
+            "open_interest_ts_ms": "open_interest_24h_ts_ms",
+            "open_interest_value": "open_interest_value_24h_ago",
+        }
+    )
+    joined = (
+        current.with_columns(
+            [
+                (pl.col("signal_ts_ms") - MS_PER_MINUTE * 60).alias("_oi_target_1h_ts_ms"),
+                (pl.col("signal_ts_ms") - MS_PER_DAY).alias("_oi_target_24h_ts_ms"),
+            ]
+        )
+        .sort(["symbol", "_oi_target_1h_ts_ms"])
+        .join_asof(
+            lag_source_1h,
+            left_on="_oi_target_1h_ts_ms",
+            right_on="open_interest_1h_ts_ms",
+            by="symbol",
+            strategy="backward",
+        )
+        .sort(["symbol", "_oi_target_24h_ts_ms"])
+        .join_asof(
+            lag_source_24h,
+            left_on="_oi_target_24h_ts_ms",
+            right_on="open_interest_24h_ts_ms",
+            by="symbol",
+            strategy="backward",
+        )
+        .drop(["_oi_target_1h_ts_ms", "_oi_target_24h_ts_ms"], strict=False)
+        .with_columns(
+            [
+                _safe_log_ratio("open_interest_value", "open_interest_value_1h_ago").alias("oi_change_1h"),
+                _safe_log_ratio("open_interest_value", "open_interest_value_24h_ago").alias("oi_change_24h"),
+            ]
+        )
+    )
+    return joined.sort(["signal_ts_ms", "symbol"])
+
+
+def _attach_premium_context(data_root: str | Path, features: pl.DataFrame) -> pl.DataFrame:
+    source = _premium_context_source(data_root)
+    missing_cols = [
+        pl.lit(None, dtype=pl.Float64).alias("premium_index_close"),
+        pl.lit(None, dtype=pl.Float64).alias("premium_index_close_1h_ago"),
+        pl.lit(None, dtype=pl.Float64).alias("premium_change_1h"),
+        pl.lit(None, dtype=pl.Int64).alias("premium_ts_ms"),
+    ]
+    if source.is_empty():
+        return features.with_columns(missing_cols)
+    current = (
+        features.sort(["symbol", "signal_ts_ms"])
+        .join_asof(
+            source,
+            left_on="signal_ts_ms",
+            right_on="premium_available_ts_ms",
+            by="symbol",
+            strategy="backward",
+        )
+    )
+    lag_source = source.rename(
+        {
+            "premium_ts_ms": "premium_1h_ts_ms",
+            "premium_available_ts_ms": "premium_1h_available_ts_ms",
+            "premium_index_close": "premium_index_close_1h_ago",
+        }
+    ).sort(["symbol", "premium_1h_available_ts_ms"])
+    return (
+        current.with_columns((pl.col("signal_ts_ms") - MS_PER_MINUTE * 60).alias("_premium_target_1h_ts_ms"))
+        .sort(["symbol", "_premium_target_1h_ts_ms"])
+        .join_asof(
+            lag_source,
+            left_on="_premium_target_1h_ts_ms",
+            right_on="premium_1h_available_ts_ms",
+            by="symbol",
+            strategy="backward",
+        )
+        .drop("_premium_target_1h_ts_ms")
+        .with_columns((pl.col("premium_index_close") - pl.col("premium_index_close_1h_ago")).alias("premium_change_1h"))
+        .sort(["signal_ts_ms", "symbol"])
+    )
+
+
+def _premium_context_source(data_root: str | Path) -> pl.DataFrame:
+    premium = read_dataset(data_root, "premium_index_1h")
+    if not premium.is_empty() and {"symbol", "ts_ms", "close"}.issubset(premium.columns):
+        return (
+            premium.select(
+                [
+                    "symbol",
+                    pl.col("ts_ms").cast(pl.Int64).alias("premium_ts_ms"),
+                    (pl.col("ts_ms").cast(pl.Int64) + MS_PER_HOUR).alias("premium_available_ts_ms"),
+                    pl.col("close").cast(pl.Float64).alias("premium_index_close"),
+                ]
+            )
+            .drop_nulls(["symbol", "premium_ts_ms"])
+            .sort(["symbol", "premium_available_ts_ms"])
+        )
+    mark = read_dataset(data_root, "mark_price_1h")
+    index = read_dataset(data_root, "index_price_1h")
+    required = {"symbol", "ts_ms", "close"}
+    if mark.is_empty() or index.is_empty() or not required.issubset(mark.columns) or not required.issubset(index.columns):
+        return pl.DataFrame()
+    mark_source = mark.select(["symbol", "ts_ms", pl.col("close").cast(pl.Float64).alias("mark_close")])
+    index_source = index.select(["symbol", "ts_ms", pl.col("close").cast(pl.Float64).alias("index_close")])
+    return (
+        mark_source.join(index_source, on=["symbol", "ts_ms"], how="inner")
+        .filter((pl.col("mark_close") > 0.0) & (pl.col("index_close") > 0.0))
+        .with_columns(
+            [
+                pl.col("ts_ms").cast(pl.Int64).alias("premium_ts_ms"),
+                (pl.col("ts_ms").cast(pl.Int64) + MS_PER_HOUR).alias("premium_available_ts_ms"),
+                (pl.col("mark_close") / pl.col("index_close") - 1.0).alias("premium_index_close"),
+            ]
+        )
+        .select(["symbol", "premium_ts_ms", "premium_available_ts_ms", "premium_index_close"])
+        .sort(["symbol", "premium_available_ts_ms"])
+    )
+
+
+def _attach_signed_flow_context(data_root: str | Path, features: pl.DataFrame) -> pl.DataFrame:
+    flow = read_dataset(data_root, "signed_flow_1h")
+    missing_cols = [
+        pl.lit(None, dtype=pl.Float64).alias("flow_imbalance_60m"),
+        pl.lit(None, dtype=pl.Float64).alias("flow_signed_quote_60m"),
+        pl.lit(None, dtype=pl.Float64).alias("flow_total_quote_60m"),
+        pl.lit(None, dtype=pl.Int64).alias("flow_trade_count_60m"),
+        pl.lit(None, dtype=pl.Int64).alias("flow_ts_ms"),
+    ]
+    required = {"symbol", "ts_ms", "imbalance", "signed_quote", "total_quote", "trade_count"}
+    if flow.is_empty() or not required.issubset(flow.columns):
+        return features.with_columns(missing_cols)
+    source = (
+        flow.select(
+            [
+                "symbol",
+                pl.col("ts_ms").cast(pl.Int64).alias("flow_ts_ms"),
+                pl.col("imbalance").cast(pl.Float64).alias("flow_imbalance_60m"),
+                pl.col("signed_quote").cast(pl.Float64).alias("flow_signed_quote_60m"),
+                pl.col("total_quote").cast(pl.Float64).alias("flow_total_quote_60m"),
+                pl.col("trade_count").cast(pl.Int64).alias("flow_trade_count_60m"),
+            ]
+        )
+        .drop_nulls(["symbol", "flow_ts_ms"])
+        .sort(["symbol", "flow_ts_ms"])
+    )
+    if source.is_empty():
+        return features.with_columns(missing_cols)
+    return (
+        features.with_columns((pl.col("signal_ts_ms") - MS_PER_MINUTE * 60).alias("_flow_target_ts_ms"))
+        .sort(["symbol", "_flow_target_ts_ms"])
+        .join_asof(
+            source,
+            left_on="_flow_target_ts_ms",
+            right_on="flow_ts_ms",
+            by="symbol",
+            strategy="backward",
+        )
+        .drop("_flow_target_ts_ms")
+        .sort(["signal_ts_ms", "symbol"])
+    )
+
+
+def _derive_context_scores(features: pl.DataFrame) -> pl.DataFrame:
+    df = features
+    for column in (
+        "funding_rate_8h_equiv",
+        "oi_change_1h",
+        "oi_change_24h",
+        "flow_imbalance_60m",
+        "flow_trade_count_60m",
+        "premium_index_close",
+        "premium_change_1h",
+        "market_median_day_return",
+        "coin_excess_vs_market",
+        "vwap_extension",
+        "late_volume_ratio",
+        "last_60m_return",
+    ):
+        if column not in df.columns:
+            df = df.with_columns(pl.lit(None, dtype=pl.Float64).alias(column))
+    df = df.with_columns(
+        [
+            pl.col("flow_trade_count_60m").cast(pl.Float64).log1p().alias("_flow_trade_count_log"),
+            pl.col("funding_rate_8h_equiv").is_not_null().alias("has_funding_context"),
+            pl.col("oi_change_1h").is_not_null().alias("has_open_interest_context"),
+            pl.col("premium_index_close").is_not_null().alias("has_premium_context"),
+            pl.col("flow_imbalance_60m").is_not_null().alias("has_trade_flow_context"),
+        ]
+    )
+    z_cols = {
+        "funding_rate_z": "funding_rate_8h_equiv",
+        "oi_change_1h_z": "oi_change_1h",
+        "oi_change_24h_z": "oi_change_24h",
+        "flow_imbalance_60m_z": "flow_imbalance_60m",
+        "flow_trade_count_60m_z": "_flow_trade_count_log",
+        "premium_index_z": "premium_index_close",
+        "premium_change_1h_z": "premium_change_1h",
+        "market_alt_momentum_z": "market_median_day_return",
+        "coin_excess_vs_market_z": "coin_excess_vs_market",
+        "vwap_extension_z": "vwap_extension",
+        "late_volume_ratio_z": "late_volume_ratio",
+        "last_60m_return_z": "last_60m_return",
+    }
+    df = df.with_columns([_cross_sectional_z(input_col).alias(output_col) for output_col, input_col in z_cols.items()])
+    df = df.with_columns(
+        [
+            (
+                0.35 * pl.col("flow_imbalance_60m_z")
+                + 0.25 * pl.col("oi_change_1h_z")
+                + 0.20 * pl.col("flow_trade_count_60m_z")
+                + 0.20 * pl.col("market_alt_momentum_z")
+            )
+            .clip(-3.0, 3.0)
+            .alias("organic_move_score"),
+            (
+                0.35 * pl.col("vwap_extension_z")
+                + 0.25 * pl.col("late_volume_ratio_z")
+                + 0.25 * pl.col("coin_excess_vs_market_z")
+                - 0.15 * pl.col("flow_trade_count_60m_z")
+            )
+            .clip(-3.0, 3.0)
+            .alias("manipulation_risk_score"),
+            (
+                0.35 * pl.col("market_alt_momentum_z")
+                + 0.20 * pl.col("last_60m_return_z")
+                + 0.25 * pl.col("oi_change_1h_z")
+                + 0.15 * pl.col("premium_index_z")
+                + 0.10 * pl.col("premium_change_1h_z")
+                - 0.05 * pl.col("funding_rate_z")
+            )
+            .clip(-3.0, 3.0)
+            .alias("squeeze_risk_score"),
+        ]
+    )
+    return df.with_columns(
+        (
+            pl.col("vol_adjusted_day_return").fill_null(0.0)
+            + 0.35 * pl.col("manipulation_risk_score")
+            - 0.30 * pl.col("organic_move_score")
+            - 0.30 * pl.col("squeeze_risk_score")
+        )
+        .clip(-10.0, 10.0)
+        .alias("context_fade_score")
+    ).drop("_flow_trade_count_log", strict=False)
+
+
+def _safe_log_ratio(numerator_col: str, denominator_col: str) -> pl.Expr:
+    numerator = pl.col(numerator_col)
+    denominator = pl.col(denominator_col)
+    return pl.when((numerator > 0.0) & (denominator > 0.0)).then(numerator.log() - denominator.log()).otherwise(None)
+
+
+def _cross_sectional_z(column: str) -> pl.Expr:
+    value = pl.col(column).cast(pl.Float64)
+    median = value.median().over("signal_ts_ms")
+    std = value.std().over("signal_ts_ms")
+    return pl.when(std > EPSILON).then(((value - median) / std).clip(-3.0, 3.0)).otherwise(0.0).fill_null(0.0)
+
+
 def attach_close_fade_position_sizing(selected: pl.DataFrame, config: DailyCloseFadeConfig) -> pl.DataFrame:
     if selected.is_empty():
         return selected
@@ -611,9 +1002,42 @@ def _filter_coin_quality(df: pl.DataFrame, config: DailyCloseFadeConfig) -> pl.D
     if config.coin_vwap_extension_min > 0.0:
         _require_feature_column(df, "vwap_extension", "coin_vwap_extension_min")
         filters.append(pl.col("vwap_extension").fill_null(-999.0) >= config.coin_vwap_extension_min)
+    if config.coin_vwap_extension_max > 0.0:
+        _require_feature_column(df, "vwap_extension", "coin_vwap_extension_max")
+        filters.append(pl.col("vwap_extension").fill_null(999.0) <= config.coin_vwap_extension_max)
     if config.coin_late_volume_ratio_min > 0.0:
         _require_feature_column(df, "late_volume_ratio", "coin_late_volume_ratio_min")
         filters.append(pl.col("late_volume_ratio").fill_null(-999.0) >= config.coin_late_volume_ratio_min)
+    if config.market_median_day_return_max > 0.0:
+        _require_feature_column(df, "market_median_day_return", "market_median_day_return_max")
+        filters.append(pl.col("market_median_day_return").fill_null(999.0) <= config.market_median_day_return_max)
+    if config.organic_move_score_max > 0.0:
+        _require_feature_column(df, "organic_move_score", "organic_move_score_max")
+        filters.append(pl.col("organic_move_score").fill_null(999.0) <= config.organic_move_score_max)
+    if config.manipulation_risk_score_min > 0.0:
+        _require_feature_column(df, "manipulation_risk_score", "manipulation_risk_score_min")
+        filters.append(pl.col("manipulation_risk_score").fill_null(-999.0) >= config.manipulation_risk_score_min)
+    if config.squeeze_risk_score_max > 0.0:
+        _require_feature_column(df, "squeeze_risk_score", "squeeze_risk_score_max")
+        filters.append(pl.col("squeeze_risk_score").fill_null(999.0) <= config.squeeze_risk_score_max)
+    context_filters = [
+        (config.require_funding_context or config.require_all_context, "has_funding_context", "require_funding_context"),
+        (
+            config.require_open_interest_context or config.require_all_context,
+            "has_open_interest_context",
+            "require_open_interest_context",
+        ),
+        (config.require_premium_context or config.require_all_context, "has_premium_context", "require_premium_context"),
+        (
+            config.require_trade_flow_context or config.require_all_context,
+            "has_trade_flow_context",
+            "require_trade_flow_context",
+        ),
+    ]
+    for enabled, column, knob in context_filters:
+        if enabled:
+            _require_feature_column(df, column, knob)
+            filters.append(pl.col(column).fill_null(False))
     for expr in filters:
         df = df.filter(expr)
     return df
@@ -1266,6 +1690,8 @@ def _empty_diagnostic_observations() -> pl.DataFrame:
 
 
 def _validate_close_fade_config(config: DailyCloseFadeConfig) -> None:
+    if not 1 <= config.signal_minute <= 1439:
+        raise ValueError("daily close fade signal_minute must be in [1, 1439] so at least one completed 1m bar is available")
     if config.top_n <= 0:
         raise ValueError("daily close fade top_n must be positive")
     if config.hold_minutes <= 0:
@@ -1280,8 +1706,20 @@ def _validate_close_fade_config(config: DailyCloseFadeConfig) -> None:
         raise ValueError("daily close fade coin_excess_vs_market_min must be non-negative")
     if config.coin_vwap_extension_min < 0.0:
         raise ValueError("daily close fade coin_vwap_extension_min must be non-negative")
+    if config.coin_vwap_extension_max < 0.0:
+        raise ValueError("daily close fade coin_vwap_extension_max must be non-negative")
+    if config.coin_vwap_extension_max > 0.0 and config.coin_vwap_extension_min > config.coin_vwap_extension_max:
+        raise ValueError("daily close fade coin_vwap_extension_min cannot exceed coin_vwap_extension_max")
     if config.coin_late_volume_ratio_min < 0.0:
         raise ValueError("daily close fade coin_late_volume_ratio_min must be non-negative")
+    if config.market_median_day_return_max < 0.0:
+        raise ValueError("daily close fade market_median_day_return_max must be non-negative")
+    if config.organic_move_score_max < 0.0:
+        raise ValueError("daily close fade organic_move_score_max must be non-negative")
+    if config.manipulation_risk_score_min < 0.0:
+        raise ValueError("daily close fade manipulation_risk_score_min must be non-negative")
+    if config.squeeze_risk_score_max < 0.0:
+        raise ValueError("daily close fade squeeze_risk_score_max must be non-negative")
     if config.position_sizing.strip().lower() not in {"equal", "score_capped"}:
         raise ValueError("daily close fade position_sizing must be equal or score_capped")
     if config.score_weight_power < 0.0:
@@ -1290,6 +1728,17 @@ def _validate_close_fade_config(config: DailyCloseFadeConfig) -> None:
         raise ValueError("daily close fade stop_loss_pct must be non-negative")
     if not 0.0 <= config.take_profit_pct < 1.0:
         raise ValueError("daily close fade take_profit_pct must be in [0, 1)")
+    if not 0.0 <= config.time_decay_take_profit_floor_pct < 1.0:
+        raise ValueError("daily close fade time_decay_take_profit_floor_pct must be in [0, 1)")
+    if config.time_decay_take_profit_minutes < 0:
+        raise ValueError("daily close fade time_decay_take_profit_minutes must be non-negative")
+    if config.time_decay_take_profit_floor_pct > 0.0:
+        if config.take_profit_pct <= 0.0:
+            raise ValueError("daily close fade time decay take-profit requires take_profit_pct > 0")
+        if config.time_decay_take_profit_minutes <= 0:
+            raise ValueError("daily close fade time decay take-profit requires positive minutes")
+        if config.time_decay_take_profit_floor_pct >= config.take_profit_pct:
+            raise ValueError("daily close fade time decay take-profit floor must be below take_profit_pct")
     if config.basket_stop_loss_pct < 0.0:
         raise ValueError("daily close fade basket_stop_loss_pct must be non-negative")
     if config.trailing_stop_pct < 0.0:
@@ -1314,6 +1763,8 @@ def _validate_close_fade_config(config: DailyCloseFadeConfig) -> None:
         raise ValueError("daily close fade max_trade_notional_pct_of_day_turnover must be non-negative")
     if config.max_trade_notional_pct_of_baseline_turnover < 0.0:
         raise ValueError("daily close fade max_trade_notional_pct_of_baseline_turnover must be non-negative")
+    if config.market_impact_bps_per_1pct_turnover < 0.0:
+        raise ValueError("daily close fade market impact must be non-negative")
     if config.vol_trailing_stop_mult < 0.0 or config.vol_trailing_activation_mult < 0.0:
         raise ValueError("daily close fade vol trailing multipliers must be non-negative")
     if config.mfe_giveback_activation_pct < 0.0:
@@ -1338,9 +1789,31 @@ def _profit_protection_delay_minutes(config: DailyCloseFadeConfig) -> int:
     return config.profit_protection_delay_minutes
 
 
+def _time_decay_take_profit_pct(
+    config: DailyCloseFadeConfig,
+    *,
+    ts_ms: int,
+    profit_active_ts_ms: int,
+) -> float | None:
+    if (
+        config.take_profit_pct <= 0.0
+        or config.time_decay_take_profit_floor_pct <= 0.0
+        or config.time_decay_take_profit_minutes <= 0
+    ):
+        return None
+    elapsed_minutes = max(0.0, (ts_ms - profit_active_ts_ms) / MS_PER_MINUTE)
+    progress = min(1.0, elapsed_minutes / config.time_decay_take_profit_minutes)
+    spread = config.take_profit_pct - config.time_decay_take_profit_floor_pct
+    return config.take_profit_pct - spread * progress
+
+
 def summarize_close_fade_baskets(trades: pl.DataFrame) -> pl.DataFrame:
     if trades.is_empty():
         return pl.DataFrame()
+    if "weighted_funding_return" not in trades.columns:
+        trades = trades.with_columns(pl.lit(0.0).alias("weighted_funding_return"))
+    if "weighted_market_impact_cost_return" not in trades.columns:
+        trades = trades.with_columns(pl.lit(0.0).alias("weighted_market_impact_cost_return"))
     baskets = (
         trades.group_by(["basket_id", "signal_ts_ms", "date", "signal_minute"], maintain_order=True)
         .agg(
@@ -1349,6 +1822,8 @@ def summarize_close_fade_baskets(trades: pl.DataFrame) -> pl.DataFrame:
                 pl.col("weighted_net_return").sum().alias("basket_return"),
                 pl.col("weighted_gross_return").sum().alias("basket_gross_return"),
                 pl.col("weighted_cost_return").sum().alias("basket_cost_return"),
+                pl.col("weighted_market_impact_cost_return").sum().alias("basket_market_impact_cost_return"),
+                pl.col("weighted_funding_return").sum().alias("basket_funding_return"),
                 pl.col("target_weight").sum().alias("target_gross_exposure"),
                 pl.col("weight").sum().alias("basket_gross_exposure"),
                 pl.col("capacity_limited").sum().alias("capacity_limited_count"),
@@ -1443,7 +1918,8 @@ def _apply_basket_stop_to_rows(
                 continue
 
             gross_return = _short_return(float(row["entry_price"]), last_price[symbol])
-            basket_mark_return += (gross_return - cost_return) * float(row["weight"])
+            trade_cost_return = float(row.get("cost_return", cost_return))
+            basket_mark_return += (gross_return - trade_cost_return) * float(row["weight"])
 
         if basket_mark_return <= -config.basket_stop_loss_pct:
             stop_ts_ms = ts_ms
@@ -1486,7 +1962,15 @@ def _rewrite_trade_exit(
 ) -> dict[str, Any]:
     updated = dict(row)
     gross_return = _short_return(float(row["entry_price"]), exit_price)
-    net_return = gross_return - cost_return
+    funding_return, funding_mode, funding_event_count = _short_funding_return(
+        data_root,
+        str(row["symbol"]),
+        entry_ts_ms=int(row["entry_ts_ms"]),
+        exit_ts_ms=exit_ts_ms,
+        partition_cache=partition_cache,
+    )
+    trade_cost_return = float(row.get("cost_return", cost_return))
+    net_return = gross_return - trade_cost_return + funding_return
     weight = float(row["weight"])
     mae, mfe = _trade_excursion(
         data_root,
@@ -1506,10 +1990,14 @@ def _rewrite_trade_exit(
             "exit_reason": exit_reason,
             "hold_minutes": (exit_ts_ms - int(row["entry_ts_ms"])) / MS_PER_MINUTE,
             "gross_return": gross_return,
-            "cost_return": cost_return,
+            "cost_return": trade_cost_return,
+            "funding_return": funding_return,
+            "funding_mode": funding_mode,
+            "funding_event_count": funding_event_count,
             "net_return": net_return,
             "weighted_gross_return": gross_return * weight,
-            "weighted_cost_return": cost_return * weight,
+            "weighted_cost_return": trade_cost_return * weight,
+            "weighted_funding_return": funding_return * weight,
             "weighted_net_return": net_return * weight,
             "mae": mae,
             "mfe": mfe,
@@ -1536,6 +2024,72 @@ def _trade_excursion(
     return max_adverse, max_favorable
 
 
+def _short_funding_return(
+    data_root: str | Path,
+    symbol: str,
+    *,
+    entry_ts_ms: int,
+    exit_ts_ms: int,
+    partition_cache: dict[tuple[str, str], pl.DataFrame],
+) -> tuple[float, str, int]:
+    funding = _load_symbol_funding(data_root, symbol, partition_cache)
+    if funding.is_empty():
+        return 0.0, "missing", 0
+    rate_col = "funding_rate" if "funding_rate" in funding.columns else "funding_rate_8h_equiv"
+    if rate_col not in funding.columns:
+        return 0.0, "missing", 0
+    events = funding.filter((pl.col("ts_ms") > entry_ts_ms) & (pl.col("ts_ms") <= exit_ts_ms))
+    expected_events = _expected_funding_event_times(entry_ts_ms, exit_ts_ms)
+    if expected_events:
+        event_times = set(int(item) for item in events["ts_ms"].to_list())
+        if any(ts_ms not in event_times for ts_ms in expected_events):
+            return 0.0, "missing_expected", int(events.height)
+    if events.height < len(expected_events):
+        return 0.0, "missing_expected", int(events.height)
+    if events.is_empty():
+        return 0.0, "modeled", 0
+    return float(events[rate_col].sum()), "modeled", events.height
+
+
+def _expected_funding_event_count(entry_ts_ms: int, exit_ts_ms: int, *, interval_ms: int = 8 * MS_PER_HOUR) -> int:
+    return len(_expected_funding_event_times(entry_ts_ms, exit_ts_ms, interval_ms=interval_ms))
+
+
+def _expected_funding_event_times(entry_ts_ms: int, exit_ts_ms: int, *, interval_ms: int = 8 * MS_PER_HOUR) -> list[int]:
+    if exit_ts_ms <= entry_ts_ms or interval_ms <= 0:
+        return []
+    first = ((entry_ts_ms // interval_ms) + 1) * interval_ms
+    if first > exit_ts_ms:
+        return []
+    return list(range(first, exit_ts_ms + 1, interval_ms))
+
+
+def _load_symbol_funding(
+    data_root: str | Path,
+    symbol: str,
+    partition_cache: dict[tuple[str, str], pl.DataFrame],
+) -> pl.DataFrame:
+    cache_key = ("funding", symbol)
+    if cache_key in partition_cache:
+        return partition_cache[cache_key]
+    symbol_path = dataset_path(data_root, "funding")
+    files = sorted(symbol_path.glob(f"date=*/symbol={symbol}/part.parquet"))
+    if files:
+        frame = pl.scan_parquet([str(file) for file in files]).collect().sort("ts_ms")
+    else:
+        funding = read_dataset(data_root, "funding")
+        if funding.is_empty() or "symbol" not in funding.columns:
+            frame = pl.DataFrame()
+        else:
+            frame = funding.filter(pl.col("symbol") == symbol).sort("ts_ms")
+    if frame.is_empty() or "symbol" not in frame.columns:
+        frame = pl.DataFrame()
+    else:
+        frame = frame.filter(pl.col("symbol") == symbol).sort("ts_ms")
+    partition_cache[cache_key] = frame
+    return frame
+
+
 def build_close_fade_equity(baskets: pl.DataFrame) -> pl.DataFrame:
     if baskets.is_empty():
         return pl.DataFrame()
@@ -1545,6 +2099,83 @@ def build_close_fade_equity(baskets: pl.DataFrame) -> pl.DataFrame:
         .with_columns((pl.col("equity") / pl.col("equity").cum_max() - 1.0).alias("drawdown"))
     )
     return equity
+
+
+def _render_close_fade_equity_curve_svg(equity: pl.DataFrame) -> str:
+    width = 1100
+    height = 460
+    margin_left = 72
+    margin_right = 36
+    margin_top = 58
+    margin_bottom = 72
+    plot_width = width - margin_left - margin_right
+    plot_height = height - margin_top - margin_bottom
+    if equity.is_empty() or "equity" not in equity.columns:
+        return _empty_close_fade_svg(width, height, "No equity data")
+
+    rows = equity.sort("signal_ts_ms").to_dicts()
+    ts_values = [int(row["signal_ts_ms"]) for row in rows]
+    equity_values = [float(row["equity"]) for row in rows]
+    drawdowns = [float(row.get("drawdown", 0.0) or 0.0) for row in rows]
+    y_min = min(equity_values + [1.0])
+    y_max = max(equity_values + [1.0])
+    padding = max((y_max - y_min) * 0.10, 0.02)
+    y_min -= padding
+    y_max += padding
+    ts_min = min(ts_values)
+    ts_max = max(ts_values)
+
+    def x_pos(ts_ms: int) -> float:
+        if ts_max == ts_min:
+            return margin_left + plot_width / 2.0
+        return margin_left + (ts_ms - ts_min) / (ts_max - ts_min) * plot_width
+
+    def y_pos(value: float) -> float:
+        if y_max == y_min:
+            return margin_top + plot_height / 2.0
+        return margin_top + (y_max - value) / (y_max - y_min) * plot_height
+
+    points = " ".join(f"{x_pos(int(row['signal_ts_ms'])):.1f},{y_pos(float(row['equity'])):.1f}" for row in rows)
+    grid_lines = []
+    for index in range(5):
+        value = y_min + (y_max - y_min) * index / 4.0
+        y = y_pos(value)
+        grid_lines.append(
+            f'<line x1="{margin_left}" y1="{y:.1f}" x2="{margin_left + plot_width}" y2="{y:.1f}" stroke="#e5e7eb" />'
+        )
+        grid_lines.append(
+            f'<text x="{margin_left - 10}" y="{y + 4:.1f}" text-anchor="end" font-size="12" fill="#475569">{value:.2f}x</text>'
+        )
+    x_labels = []
+    for row in (rows[0], rows[len(rows) // 2], rows[-1]):
+        x = x_pos(int(row["signal_ts_ms"]))
+        label = _dt_from_ms(int(row["signal_ts_ms"])).strftime("%Y-%m-%d")
+        x_labels.append(
+            f'<text x="{x:.1f}" y="{margin_top + plot_height + 32}" text-anchor="middle" font-size="12" fill="#475569">{label}</text>'
+        )
+    final_return = equity_values[-1] - 1.0
+    max_drawdown = min(drawdowns) if drawdowns else 0.0
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="Daily close fade equity curve">
+<rect width="100%" height="100%" fill="#ffffff" />
+<text x="{margin_left}" y="32" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700" fill="#0f172a">Daily Close Fade Equity Curve</text>
+<text x="{margin_left}" y="52" font-family="Inter, Arial, sans-serif" font-size="13" fill="#475569">Final return {final_return:.2%}; max drawdown {max_drawdown:.2%}</text>
+<g font-family="Inter, Arial, sans-serif">
+{''.join(grid_lines)}
+<line x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" y2="{margin_top + plot_height}" stroke="#94a3b8" />
+<line x1="{margin_left}" y1="{margin_top + plot_height}" x2="{margin_left + plot_width}" y2="{margin_top + plot_height}" stroke="#94a3b8" />
+<polyline points="{points}" fill="none" stroke="#0f766e" stroke-width="3" stroke-linejoin="round" stroke-linecap="round" />
+{''.join(x_labels)}
+</g>
+</svg>
+"""
+
+
+def _empty_close_fade_svg(width: int, height: int, message: str) -> str:
+    return f"""<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="{message}">
+<rect width="100%" height="100%" fill="#ffffff" />
+<text x="{width / 2:.1f}" y="{height / 2:.1f}" text-anchor="middle" font-family="Inter, Arial, sans-serif" font-size="18" fill="#475569">{message}</text>
+</svg>
+"""
 
 
 def summarize_close_fade(
@@ -1569,6 +2200,17 @@ def summarize_close_fade(
             "avg_basket_gross_exposure": 0.0,
             "capacity_limited_trades": 0,
             "capacity_limited_rate": 0.0,
+            "worst_basket_return": 0.0,
+            "worst_day_return": 0.0,
+            "funding_return": 0.0,
+            "funding_mode": "missing",
+            "funding_event_count": 0,
+            "market_impact_cost_return": 0.0,
+            "funding_context_rate": 0.0,
+            "open_interest_context_rate": 0.0,
+            "premium_context_rate": 0.0,
+            "trade_flow_context_rate": 0.0,
+            "all_context_rate": 0.0,
         }
     basket_returns = baskets["basket_return"].to_list()
     trade_returns = trades["net_return"].to_list()
@@ -1591,10 +2233,23 @@ def summarize_close_fade(
         "avg_basket_gross_exposure": float(statistics.fmean(baskets["basket_gross_exposure"].to_list()))
         if "basket_gross_exposure" in baskets.columns
         else config.gross_exposure,
+        "worst_basket_return": float(min(basket_returns)) if basket_returns else 0.0,
+        "worst_day_return": _worst_close_fade_day_return(baskets),
         "capacity_limited_trades": int(trades["capacity_limited"].sum()) if "capacity_limited" in trades.columns else 0,
         "capacity_limited_rate": float(trades["capacity_limited"].sum() / trades.height)
         if "capacity_limited" in trades.columns and trades.height
         else 0.0,
+        "funding_return": float(trades["weighted_funding_return"].sum()) if "weighted_funding_return" in trades.columns else 0.0,
+        "funding_mode": _funding_mode_summary(trades),
+        "funding_event_count": int(trades["funding_event_count"].sum()) if "funding_event_count" in trades.columns else 0,
+        "market_impact_cost_return": float(trades["weighted_market_impact_cost_return"].sum())
+        if "weighted_market_impact_cost_return" in trades.columns
+        else 0.0,
+        "funding_context_rate": _context_flag_rate(trades, "has_funding_context"),
+        "open_interest_context_rate": _context_flag_rate(trades, "has_open_interest_context"),
+        "premium_context_rate": _context_flag_rate(trades, "has_premium_context"),
+        "trade_flow_context_rate": _context_flag_rate(trades, "has_trade_flow_context"),
+        "all_context_rate": _all_context_rate(trades),
         "signal_minute": config.signal_minute,
         "top_n": config.top_n,
         "hold_minutes": config.hold_minutes,
@@ -1607,12 +2262,25 @@ def summarize_close_fade(
         "liquidity_rank_min": config.liquidity_rank_min,
         "liquidity_rank_max": config.liquidity_rank_max,
         "min_baseline_turnover": config.min_baseline_turnover,
+        "coin_vwap_extension_max": config.coin_vwap_extension_max,
+        "market_median_day_return_max": config.market_median_day_return_max,
+        "organic_move_score_max": config.organic_move_score_max,
+        "manipulation_risk_score_min": config.manipulation_risk_score_min,
+        "squeeze_risk_score_max": config.squeeze_risk_score_max,
+        "require_funding_context": config.require_funding_context,
+        "require_open_interest_context": config.require_open_interest_context,
+        "require_premium_context": config.require_premium_context,
+        "require_trade_flow_context": config.require_trade_flow_context,
+        "require_all_context": config.require_all_context,
         "account_equity": config.account_equity,
         "max_position_weight": config.max_position_weight,
         "max_trade_notional_pct_of_day_turnover": config.max_trade_notional_pct_of_day_turnover,
         "max_trade_notional_pct_of_baseline_turnover": config.max_trade_notional_pct_of_baseline_turnover,
+        "market_impact_bps_per_1pct_turnover": config.market_impact_bps_per_1pct_turnover,
         "stop_loss_pct": config.stop_loss_pct,
         "take_profit_pct": config.take_profit_pct,
+        "time_decay_take_profit_floor_pct": config.time_decay_take_profit_floor_pct,
+        "time_decay_take_profit_minutes": config.time_decay_take_profit_minutes,
         "basket_stop_loss_pct": config.basket_stop_loss_pct,
         "trailing_stop_pct": config.trailing_stop_pct,
         "trailing_activation_pct": config.trailing_activation_pct,
@@ -1626,9 +2294,128 @@ def summarize_close_fade(
         "twap_stop_adding_pct": config.twap_stop_adding_pct,
         "cost_multiplier": config.cost_multiplier,
     }
+    if "post_twap_hold_minutes" in trades.columns:
+        timing = trades.select(
+            [
+                (pl.col("post_twap_hold_minutes") <= 16).sum().alias("post_twap_exit_le16"),
+                (pl.col("post_twap_hold_minutes") <= 20).sum().alias("post_twap_exit_le20"),
+                (pl.col("post_twap_hold_minutes") <= 30).sum().alias("post_twap_exit_le30"),
+                pl.col("post_twap_hold_minutes").median().alias("median_post_twap_hold_minutes"),
+                pl.col("post_twap_hold_minutes").quantile(0.9).alias("p90_post_twap_hold_minutes"),
+                pl.col("post_twap_hold_minutes").max().alias("max_post_twap_hold_minutes"),
+            ]
+        ).to_dicts()[0]
+        summary.update(
+            {
+                key: int(value) if key.startswith("post_twap_exit_") else float(value)
+                for key, value in timing.items()
+            }
+        )
     for reason, count in trades.group_by("exit_reason").len().iter_rows():
         summary[f"exit_{reason}"] = int(count)
     return summary
+
+
+def _worst_close_fade_day_return(baskets: pl.DataFrame) -> float:
+    if baskets.is_empty() or "date" not in baskets.columns:
+        return 0.0
+    daily = baskets.group_by("date").agg(((pl.col("basket_return") + 1.0).product() - 1.0).alias("day_return"))
+    return float(daily["day_return"].min()) if not daily.is_empty() else 0.0
+
+
+def _context_flag_rate(trades: pl.DataFrame, column: str) -> float:
+    if trades.is_empty() or column not in trades.columns:
+        return 0.0
+    return float(trades.select(pl.col(column).cast(pl.Float64).mean()).item() or 0.0)
+
+
+def _all_context_rate(trades: pl.DataFrame) -> float:
+    columns = ("has_funding_context", "has_open_interest_context", "has_premium_context", "has_trade_flow_context")
+    if trades.is_empty() or any(column not in trades.columns for column in columns):
+        return 0.0
+    return float(trades.select(pl.all_horizontal([pl.col(column) for column in columns]).cast(pl.Float64).mean()).item() or 0.0)
+
+
+def _funding_mode_summary(trades: pl.DataFrame) -> str:
+    if trades.is_empty() or "funding_mode" not in trades.columns:
+        return "missing"
+    modes = set(str(item) for item in trades["funding_mode"].to_list())
+    if modes == {"modeled"}:
+        return "modeled"
+    if "modeled" in modes:
+        return "partial"
+    return "missing"
+
+
+def summarize_close_fade_splits(baskets: pl.DataFrame) -> list[dict[str, Any]]:
+    if baskets.is_empty():
+        return []
+    ordered = baskets.sort("signal_ts_ms" if "signal_ts_ms" in baskets.columns else "date")
+    rows = ordered.to_dicts()
+    if not rows:
+        return []
+    split_count = min(3, len(rows))
+    split_size = math.ceil(len(rows) / split_count)
+    output = []
+    for index in range(split_count):
+        chunk = rows[index * split_size : (index + 1) * split_size]
+        if chunk:
+            output.append(_summarize_basket_chunk(chunk, name=f"chronological_{index + 1}_of_{split_count}"))
+    if "signal_ts_ms" in ordered.columns and ordered.height:
+        latest_ts = int(ordered["signal_ts_ms"].max())
+        trailing = ordered.filter(pl.col("signal_ts_ms") >= latest_ts - 365 * MS_PER_DAY).to_dicts()
+        if trailing and len(trailing) < len(rows):
+            output.append(_summarize_basket_chunk(trailing, name="trailing_365d"))
+    return output
+
+
+def _summarize_basket_chunk(rows: list[dict[str, Any]], *, name: str) -> dict[str, Any]:
+    returns = [float(row["basket_return"]) for row in rows]
+    equity = 1.0
+    peak = 1.0
+    max_dd = 0.0
+    for value in returns:
+        equity *= 1.0 + value
+        peak = max(peak, equity)
+        max_dd = min(max_dd, equity / peak - 1.0)
+    mean_return = statistics.fmean(returns) if returns else 0.0
+    stdev = statistics.stdev(returns) if len(returns) > 1 else 0.0
+    return {
+        "name": name,
+        "start": str(rows[0].get("date", "")),
+        "end": str(rows[-1].get("date", "")),
+        "basket_count": len(rows),
+        "total_return": float(equity - 1.0),
+        "sharpe_like": float((mean_return / stdev) * math.sqrt(365.0)) if stdev > EPSILON else 0.0,
+        "max_drawdown": float(max_dd),
+        "worst_basket_return": float(min(returns)) if returns else 0.0,
+        "avg_basket_return": float(mean_return),
+    }
+
+
+def _summarize_grid_split_metrics(split_metrics: list[dict[str, Any]]) -> dict[str, Any]:
+    if not split_metrics:
+        return {
+            "split_count": 0,
+            "positive_split_count": 0,
+            "all_splits_positive": False,
+            "min_split_return": 0.0,
+            "min_split_sharpe_like": 0.0,
+        }
+    positive = [
+        item
+        for item in split_metrics
+        if int(item.get("basket_count", 0) or 0) > 0
+        and float(item.get("total_return", 0.0) or 0.0) > 0.0
+        and math.isfinite(float(item.get("sharpe_like", 0.0) or 0.0))
+    ]
+    return {
+        "split_count": len(split_metrics),
+        "positive_split_count": len(positive),
+        "all_splits_positive": len(positive) == len(split_metrics),
+        "min_split_return": min(float(item.get("total_return", 0.0) or 0.0) for item in split_metrics),
+        "min_split_sharpe_like": min(float(item.get("sharpe_like", 0.0) or 0.0) for item in split_metrics),
+    }
 
 
 def iter_close_fade_grid_configs(
@@ -1647,6 +2434,8 @@ def iter_close_fade_grid_configs(
         pump_filter,
         stop_loss_pct,
         take_profit_pct,
+        time_decay_take_profit_floor_pct,
+        time_decay_take_profit_minutes,
         basket_stop_loss_pct,
         trailing_stop_pct,
         activation,
@@ -1655,14 +2444,23 @@ def iter_close_fade_grid_configs(
         mfe_giveback_activation_pct,
         mfe_giveback_pct,
         vwap_reversion_pct,
+        profit_protection_delay_minutes,
         liquidity_lookback_days,
         liquidity_rank_min,
         liquidity_rank_max,
         min_baseline_turnover,
+        coin_vwap_extension_max,
+        market_median_day_return_max,
+        organic_move_score_max,
+        manipulation_risk_score_min,
+        squeeze_risk_score_max,
+        require_open_interest_context,
+        require_all_context,
         account_equity,
         max_position_weight,
         max_trade_notional_pct_of_day_turnover,
         max_trade_notional_pct_of_baseline_turnover,
+        market_impact_bps_per_1pct_turnover,
         cost_multiplier,
     ) in product(
         grid.signal_minutes,
@@ -1673,6 +2471,8 @@ def iter_close_fade_grid_configs(
         grid.pump_filters,
         grid.stop_loss_pcts,
         grid.take_profit_pcts,
+        grid.time_decay_take_profit_floor_pcts,
+        grid.time_decay_take_profit_minutes,
         grid.basket_stop_loss_pcts,
         grid.trailing_stop_pcts,
         grid.trailing_activation_pcts,
@@ -1681,19 +2481,35 @@ def iter_close_fade_grid_configs(
         grid.mfe_giveback_activation_pcts,
         grid.mfe_giveback_pcts,
         grid.vwap_reversion_pcts,
+        grid.profit_protection_delay_minutes,
         grid.liquidity_lookback_days,
         grid.liquidity_rank_mins,
         grid.liquidity_rank_maxs,
         grid.min_baseline_turnovers,
+        grid.coin_vwap_extension_maxs,
+        grid.market_median_day_return_maxs,
+        grid.organic_move_score_maxs,
+        grid.manipulation_risk_score_mins,
+        grid.squeeze_risk_score_maxs,
+        grid.require_open_interest_contexts,
+        grid.require_all_contexts,
         grid.account_equities,
         grid.max_position_weights,
         grid.max_trade_notional_pct_day_turnovers,
         grid.max_trade_notional_pct_baseline_turnovers,
+        grid.market_impact_bps_per_1pct_turnovers,
         grid.cost_multipliers,
     ):
         normalized_activation = 0.0 if trailing_stop_pct <= 0.0 else activation
         normalized_vol_activation = 0.0 if vol_trailing_stop_mult <= 0.0 else vol_trailing_activation_mult
         normalized_mfe_activation = 0.0 if mfe_giveback_pct <= 0.0 else mfe_giveback_activation_pct
+        decay_enabled = (
+            take_profit_pct > 0.0
+            and 0.0 < time_decay_take_profit_floor_pct < take_profit_pct
+            and time_decay_take_profit_minutes > 0
+        )
+        normalized_decay_floor_pct = time_decay_take_profit_floor_pct if decay_enabled else 0.0
+        normalized_decay_minutes = time_decay_take_profit_minutes if decay_enabled else 0
         if liquidity_rank_max > 0 and liquidity_rank_max < liquidity_rank_min:
             continue
         key = (
@@ -1705,6 +2521,8 @@ def iter_close_fade_grid_configs(
             pump_filter,
             stop_loss_pct,
             take_profit_pct,
+            normalized_decay_floor_pct,
+            normalized_decay_minutes,
             basket_stop_loss_pct,
             trailing_stop_pct,
             normalized_activation,
@@ -1713,14 +2531,23 @@ def iter_close_fade_grid_configs(
             normalized_mfe_activation,
             mfe_giveback_pct,
             vwap_reversion_pct,
+            profit_protection_delay_minutes,
             liquidity_lookback_days,
             liquidity_rank_min,
             liquidity_rank_max,
             min_baseline_turnover,
+            coin_vwap_extension_max,
+            market_median_day_return_max,
+            organic_move_score_max,
+            manipulation_risk_score_min,
+            squeeze_risk_score_max,
+            require_open_interest_context,
+            require_all_context,
             account_equity,
             max_position_weight,
             max_trade_notional_pct_of_day_turnover,
             max_trade_notional_pct_of_baseline_turnover,
+            market_impact_bps_per_1pct_turnover,
             cost_multiplier,
         )
         if key in seen:
@@ -1737,6 +2564,8 @@ def iter_close_fade_grid_configs(
                 pump_filter=pump_filter,
                 stop_loss_pct=stop_loss_pct,
                 take_profit_pct=take_profit_pct,
+                time_decay_take_profit_floor_pct=normalized_decay_floor_pct,
+                time_decay_take_profit_minutes=normalized_decay_minutes,
                 basket_stop_loss_pct=basket_stop_loss_pct,
                 trailing_stop_pct=trailing_stop_pct,
                 trailing_activation_pct=normalized_activation,
@@ -1745,14 +2574,23 @@ def iter_close_fade_grid_configs(
                 mfe_giveback_activation_pct=normalized_mfe_activation,
                 mfe_giveback_pct=mfe_giveback_pct,
                 vwap_reversion_pct=vwap_reversion_pct,
+                profit_protection_delay_minutes=profit_protection_delay_minutes,
                 liquidity_lookback_days=liquidity_lookback_days,
                 liquidity_rank_min=liquidity_rank_min,
                 liquidity_rank_max=liquidity_rank_max,
                 min_baseline_turnover=min_baseline_turnover,
+                coin_vwap_extension_max=coin_vwap_extension_max,
+                market_median_day_return_max=market_median_day_return_max,
+                organic_move_score_max=organic_move_score_max,
+                manipulation_risk_score_min=manipulation_risk_score_min,
+                squeeze_risk_score_max=squeeze_risk_score_max,
+                require_open_interest_context=require_open_interest_context,
+                require_all_context=require_all_context,
                 account_equity=account_equity,
                 max_position_weight=max_position_weight,
                 max_trade_notional_pct_of_day_turnover=max_trade_notional_pct_of_day_turnover,
                 max_trade_notional_pct_of_baseline_turnover=max_trade_notional_pct_of_baseline_turnover,
+                market_impact_bps_per_1pct_turnover=market_impact_bps_per_1pct_turnover,
                 cost_multiplier=cost_multiplier,
             )
         )
@@ -1919,6 +2757,7 @@ def format_close_fade_diagnostics_report(
 def format_close_fade_report(payload: dict[str, Any]) -> str:
     summary = payload["summary"]
     config = payload["config"]
+    validity = payload.get("backtest_validity", {})
     profit_delay = config.get("profit_protection_delay_minutes")
     if profit_delay is None:
         profit_delay = config.get("stop_delay_minutes", 15)
@@ -1927,6 +2766,18 @@ def format_close_fade_report(payload: dict[str, Any]) -> str:
         "",
         f"Rows: features={payload['rows']['features']} trades={payload['rows']['trades']} baskets={payload['rows']['baskets']}",
         f"Date range: {payload['date_range'].get('start')} to {payload['date_range'].get('end')}",
+        f"Validity label: `{validity.get('label', 'unknown')}`",
+        f"Can support promotion: `{validity.get('can_support_promotion', False)}`",
+        "",
+        "## Rule Gates",
+        "",
+        "| Gate | Status | Severity | Detail |",
+        "|---|---|---|---|",
+    ]
+    for item in validity.get("gates", []):
+        lines.append(f"| {item.get('name')} | {item.get('status')} | {item.get('severity')} | {item.get('detail')} |")
+    lines.extend(
+        [
         "",
         "## Config",
         "",
@@ -1954,6 +2805,8 @@ def format_close_fade_report(payload: dict[str, Any]) -> str:
         f"- profit_protection_delay_minutes: {profit_delay}",
         f"- twap_stop_adding_pct: {config.get('twap_stop_adding_pct', 0.0):.2%}",
         f"- take_profit_pct: {config.get('take_profit_pct', 0.0):.2%}",
+        f"- time_decay_take_profit: floor={config.get('time_decay_take_profit_floor_pct', 0.0):.2%} "
+        f"minutes={config.get('time_decay_take_profit_minutes', 0)}",
         f"- basket_stop_loss_pct: {config.get('basket_stop_loss_pct', 0.0):.2%}",
         f"- trailing_stop_pct: {config['trailing_stop_pct']:.2%}",
         f"- vol_trailing_stop_mult: {config.get('vol_trailing_stop_mult', 0.0):.2f}x daily vol",
@@ -1972,10 +2825,65 @@ def format_close_fade_report(payload: dict[str, Any]) -> str:
         f"| Win rate | {summary.get('win_rate', 0.0):.2%} |",
         f"| Profit factor | {summary.get('profit_factor', 0.0):.2f} |",
         f"| Avg basket return | {summary.get('avg_basket_return', 0.0):.4%} |",
+        f"| Worst basket return | {summary.get('worst_basket_return', 0.0):.2%} |",
+        f"| Worst day return | {summary.get('worst_day_return', 0.0):.2%} |",
         f"| Avg basket gross exposure | {summary.get('avg_basket_gross_exposure', 0.0):.2%} |",
         f"| Capacity-limited trades | {summary.get('capacity_limited_trades', 0)} |",
+        f"| Market impact cost | {summary.get('market_impact_cost_return', 0.0):.4%} |",
+        f"| Funding return | {summary.get('funding_return', 0.0):.4%} |",
+        f"| Funding mode | {summary.get('funding_mode', 'missing')} |",
+        f"| Funding events | {summary.get('funding_event_count', 0)} |",
         "",
-    ]
+        "## Split Metrics",
+        "",
+        "| Split | Start | End | Return | Sharpe | Max DD | Baskets | Worst Basket |",
+        "|---|---|---|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in payload.get("split_metrics", []):
+        lines.append(
+            f"| {row.get('name')} | {row.get('start')} | {row.get('end')} | "
+            f"{row.get('total_return', 0.0):.2%} | {row.get('sharpe_like', 0.0):.2f} | "
+            f"{row.get('max_drawdown', 0.0):.2%} | {row.get('basket_count', 0)} | "
+            f"{row.get('worst_basket_return', 0.0):.2%} |"
+        )
+    lines.extend(
+        [
+        "",
+        "## Exit Diagnostics",
+        "",
+        "| Metric | Value |",
+        "|---|---:|",
+        f"| Exits <= final add + 16m | {summary.get('post_twap_exit_le16', 0)} |",
+        f"| Exits <= final add + 20m | {summary.get('post_twap_exit_le20', 0)} |",
+        f"| Exits <= final add + 30m | {summary.get('post_twap_exit_le30', 0)} |",
+        f"| Median post-TWAP hold | {summary.get('median_post_twap_hold_minutes', 0.0):.1f}m |",
+        f"| P90 post-TWAP hold | {summary.get('p90_post_twap_hold_minutes', 0.0):.1f}m |",
+        f"| Max post-TWAP hold | {summary.get('max_post_twap_hold_minutes', 0.0):.1f}m |",
+        "",
+        "## Exit Reasons",
+        "",
+        "| Reason | Trades |",
+        "|---|---:|",
+        ]
+    )
+    for key, value in sorted(summary.items()):
+        if key.startswith("exit_") and isinstance(value, int):
+            lines.append(f"| {key.removeprefix('exit_')} | {value} |")
+    lines.extend(
+        [
+            "",
+            "## Output Files",
+            "",
+            "```text",
+            "daily_close_fade_trades.csv",
+            "daily_close_fade_baskets.csv",
+            "daily_close_fade_equity.csv",
+            "daily_close_fade_equity_curve.svg",
+            "```",
+            "",
+        ]
+    )
     return "\n".join(lines)
 
 
@@ -2012,6 +2920,8 @@ def format_close_fade_grid_report(payload: dict[str, Any]) -> str:
     lines = [
         "# Daily Close Fade Grid",
         "",
+        "Adaptive profit exits use corrected non-warm-start state.",
+        "",
         f"Rows: {payload.get('rows', 0)}",
         f"Workers: {payload.get('workers', 0)}",
         f"Date range: {payload.get('date_range', {}).get('start')} to {payload.get('date_range', {}).get('end')}",
@@ -2027,8 +2937,8 @@ def format_close_fade_grid_report(payload: dict[str, Any]) -> str:
             "",
             "## Top 25",
             "",
-            "| Rank | Return | Sharpe | Max DD | Signal | Top N | Gross | Hold | Score | Pump | Liq Rank | Stop | TP | Basket Stop | Trail | Vol Trail | MFE GB | VWAP | Cost | Trades | Win |",
-            "|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "| Rank | Return | Sharpe | Max DD | Signal | Top N | Gross | Hold | Profit Delay | Score | Pump | Liq Rank | Stop | TP | Time TP | Basket Stop | Trail | Vol Trail | MFE GB | VWAP | Cost | Trades | Win |",
+            "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for index, row in enumerate(rows[:25], start=1):
@@ -2036,9 +2946,11 @@ def format_close_fade_grid_report(payload: dict[str, Any]) -> str:
             f"| {index} | {row.get('total_return', 0.0):.2%} | {row.get('sharpe_like', 0.0):.2f} | "
             f"{row.get('max_drawdown', 0.0):.2%} | {_format_signal_minute(row.get('signal_minute', 0))} | "
             f"{row.get('top_n')} | {row.get('gross_exposure', 1.0):.2f}x | {row.get('hold_minutes')} | "
+            f"{row.get('profit_protection_delay_minutes', 0)} | "
             f"{row.get('score')} | {row.get('pump_filter')} | "
             f"{row.get('liquidity_rank_min', 1)}-{row.get('liquidity_rank_max', 0) or '∞'} | "
             f"{row.get('stop_loss_pct', 0.0):.1%} | {row.get('take_profit_pct', 0.0):.1%} | "
+            f"{row.get('time_decay_take_profit_floor_pct', 0.0):.1%}/{row.get('time_decay_take_profit_minutes', 0)}m | "
             f"{row.get('basket_stop_loss_pct', 0.0):.1%} | "
             f"{row.get('trailing_stop_pct', 0.0):.1%} | {row.get('vol_trailing_stop_mult', 0.0):.2f}x | "
             f"{row.get('mfe_giveback_pct', 0.0):.0%} | {row.get('vwap_reversion_pct', 0.0):.0%} | "
@@ -2049,13 +2961,14 @@ def format_close_fade_grid_report(payload: dict[str, Any]) -> str:
 
 
 def _signal_feature_frame(base: pl.LazyFrame, signal_minute: int) -> pl.LazyFrame:
-    subset = base.filter(pl.col("minute_of_day") <= signal_minute).sort(["symbol", "date", "ts_ms"])
-    avg_hours = max((signal_minute + 1) / 60.0, 1.0)
+    subset = base.filter(pl.col("minute_of_day") < signal_minute).sort(["symbol", "date", "ts_ms"])
+    avg_hours = max(signal_minute / 60.0, 1.0)
+    expected_bars = max(signal_minute, 1)
     return (
         subset.group_by(["symbol", "date"], maintain_order=True)
         .agg(
             [
-                pl.col("ts_ms").last().alias("signal_ts_ms"),
+                (pl.col("day_start_ts_ms").first() + signal_minute * MS_PER_MINUTE).alias("signal_ts_ms"),
                 pl.col("open").first().alias("day_open"),
                 pl.col("close").last().alias("signal_close"),
                 pl.col("high").max().alias("day_high"),
@@ -2063,14 +2976,18 @@ def _signal_feature_frame(base: pl.LazyFrame, signal_minute: int) -> pl.LazyFram
                 pl.col("turnover_quote").sum().alias("day_turnover"),
                 pl.col("volume_base").sum().alias("day_volume_base"),
                 pl.len().alias("bar_count"),
-                pl.col("turnover_quote").filter(pl.col("minute_of_day") > signal_minute - 60).sum().alias("last_60m_turnover"),
-                pl.col("close").filter(pl.col("minute_of_day") <= signal_minute - 15).last().alias("close_15m_ago"),
-                pl.col("close").filter(pl.col("minute_of_day") <= signal_minute - 60).last().alias("close_60m_ago"),
+                pl.col("turnover_quote")
+                .filter((pl.col("minute_of_day") >= signal_minute - 60) & (pl.col("minute_of_day") < signal_minute))
+                .sum()
+                .alias("last_60m_turnover"),
+                pl.col("close").filter(pl.col("minute_of_day") < signal_minute - 15).last().alias("close_15m_ago"),
+                pl.col("close").filter(pl.col("minute_of_day") < signal_minute - 60).last().alias("close_60m_ago"),
             ]
         )
         .with_columns(
             [
                 pl.lit(signal_minute).alias("signal_minute"),
+                pl.lit(expected_bars).alias("expected_bar_count"),
                 (pl.col("signal_close") / pl.col("day_open") - 1.0).alias("day_return"),
                 (pl.col("signal_close").log() - pl.col("day_open").log()).alias("day_log_return"),
                 (pl.col("signal_close") / pl.col("close_15m_ago") - 1.0).alias("last_15m_return"),
@@ -2176,6 +3093,7 @@ def _minute_frame(lf: pl.LazyFrame) -> pl.LazyFrame:
     return lf.with_columns(
         [
             dt.dt.strftime("%Y-%m-%d").alias("date"),
+            (pl.col("ts_ms").cast(pl.Int64) - (pl.col("ts_ms").cast(pl.Int64) % MS_PER_DAY)).alias("day_start_ts_ms"),
             (dt.dt.hour().cast(pl.Int16) * 60 + dt.dt.minute().cast(pl.Int16)).alias("minute_of_day"),
         ]
     )
@@ -2265,6 +3183,7 @@ def _simulate_short_trade(
     entry_fill_count = 0
     entry_ts_ms: int | None = None
     best_price: float | None = None
+    protection_best_price: float | None = None
     max_favorable = 0.0
     max_adverse = 0.0
     twap_stopped_adding = False
@@ -2324,18 +3243,19 @@ def _simulate_short_trade(
         profit_exits_active = ts_ms >= profit_active_ts_ms and entry_is_complete
         if profit_exits_active:
             protective_exits: list[tuple[float, str]] = []
-            if trailing_active and config.trailing_stop_pct > 0.0:
-                trailing_stop = float(best_price) * (1.0 + config.trailing_stop_pct)
-                if high >= trailing_stop:
-                    protective_exits.append((trailing_stop, "trailing_stop"))
-            if vol_trailing_active and vol_trailing_stop_pct > 0.0:
-                vol_trailing_stop = float(best_price) * (1.0 + vol_trailing_stop_pct)
-                if high >= vol_trailing_stop:
-                    protective_exits.append((vol_trailing_stop, "vol_trailing_stop"))
-            if mfe_giveback_active and config.mfe_giveback_pct > 0.0:
-                mfe_stop = _mfe_giveback_stop_price(entry_price, float(best_price), config.mfe_giveback_pct)
-                if high >= mfe_stop:
-                    protective_exits.append((mfe_stop, "mfe_giveback"))
+            if protection_best_price is not None:
+                if trailing_active and config.trailing_stop_pct > 0.0:
+                    trailing_stop = protection_best_price * (1.0 + config.trailing_stop_pct)
+                    if high >= trailing_stop:
+                        protective_exits.append((trailing_stop, "trailing_stop"))
+                if vol_trailing_active and vol_trailing_stop_pct > 0.0:
+                    vol_trailing_stop = protection_best_price * (1.0 + vol_trailing_stop_pct)
+                    if high >= vol_trailing_stop:
+                        protective_exits.append((vol_trailing_stop, "vol_trailing_stop"))
+                if mfe_giveback_active and config.mfe_giveback_pct > 0.0:
+                    mfe_stop = _mfe_giveback_stop_price(entry_price, protection_best_price, config.mfe_giveback_pct)
+                    if high >= mfe_stop:
+                        protective_exits.append((mfe_stop, "mfe_giveback"))
             if protective_exits:
                 exit_price, exit_reason = max(protective_exits, key=lambda item: item[0])
                 exit_ts_ms = ts_ms
@@ -2346,6 +3266,20 @@ def _simulate_short_trade(
             exit_ts_ms = ts_ms
             exit_price = take_profit_price
             exit_reason = "take_profit"
+            break
+
+        decayed_take_profit_pct = _time_decay_take_profit_pct(
+            config,
+            ts_ms=ts_ms,
+            profit_active_ts_ms=profit_active_ts_ms,
+        )
+        decayed_take_profit_price = (
+            entry_price * (1.0 - decayed_take_profit_pct) if decayed_take_profit_pct is not None else None
+        )
+        if profit_exits_active and decayed_take_profit_price is not None and low <= decayed_take_profit_price:
+            exit_ts_ms = ts_ms
+            exit_price = decayed_take_profit_price
+            exit_reason = "time_decay_take_profit"
             break
 
         vwap_exit_price = _vwap_reversion_exit_price(entry_price, row, config)
@@ -2359,7 +3293,9 @@ def _simulate_short_trade(
             best_price = low
 
         if profit_exits_active:
-            best_return = _short_return(entry_price, float(best_price))
+            if protection_best_price is None or low < protection_best_price:
+                protection_best_price = low
+            best_return = _short_return(entry_price, protection_best_price)
             if config.trailing_stop_pct > 0.0 and not trailing_active and best_return >= config.trailing_activation_pct:
                 trailing_active = True
             if vol_trailing_stop_pct > 0.0 and not vol_trailing_active and best_return >= vol_trailing_activation_pct:
@@ -2383,8 +3319,13 @@ def _simulate_short_trade(
         return None
 
     gross_return = _short_return(entry_price, exit_price)
-    cost_return = round_trip_cost_bps / 10_000.0
-    net_return = gross_return - cost_return
+    funding_return, funding_mode, funding_event_count = _short_funding_return(
+        data_root,
+        symbol,
+        entry_ts_ms=int(entry_ts_ms),
+        exit_ts_ms=exit_ts_ms,
+        partition_cache=partition_cache,
+    )
     selected_count = max(int(row.get("selected_count") or config.top_n), 1)
     weight_info = _close_fade_position_weight(row, config=config, selected_count=selected_count)
     fill_fraction = min(1.0, entry_fill_count / required_fills)
@@ -2396,6 +3337,9 @@ def _simulate_short_trade(
     weight = weight_info["weight"]
     if weight <= EPSILON:
         return None
+    impact_cost_bps = _close_fade_market_impact_bps(row, weight_info, config)
+    cost_return = (round_trip_cost_bps + impact_cost_bps) / 10_000.0
+    net_return = gross_return - cost_return + funding_return
     entry_dt = _dt_from_ms(int(entry_ts_ms))
     entry_complete_dt = _dt_from_ms(entry_complete_ts_ms)
     exit_dt = _dt_from_ms(exit_ts_ms)
@@ -2448,6 +3392,22 @@ def _simulate_short_trade(
         "vwap_extension": float(row.get("vwap_extension") or 0.0),
         "market_median_day_return": float(row.get("market_median_day_return") or 0.0),
         "coin_excess_vs_market": float(row.get("coin_excess_vs_market") or 0.0),
+        "organic_move_score": float(row.get("organic_move_score") or 0.0),
+        "manipulation_risk_score": float(row.get("manipulation_risk_score") or 0.0),
+        "squeeze_risk_score": float(row.get("squeeze_risk_score") or 0.0),
+        "context_fade_score": float(row.get("context_fade_score") or 0.0),
+        "funding_rate_8h_equiv": float(row.get("funding_rate_8h_equiv") or 0.0),
+        "open_interest_value": float(row.get("open_interest_value") or 0.0),
+        "oi_change_1h": float(row.get("oi_change_1h") or 0.0),
+        "oi_change_24h": float(row.get("oi_change_24h") or 0.0),
+        "premium_index_close": float(row.get("premium_index_close") or 0.0),
+        "premium_change_1h": float(row.get("premium_change_1h") or 0.0),
+        "flow_imbalance_60m": float(row.get("flow_imbalance_60m") or 0.0),
+        "flow_trade_count_60m": int(row.get("flow_trade_count_60m") or 0),
+        "has_funding_context": bool(row.get("has_funding_context")),
+        "has_open_interest_context": bool(row.get("has_open_interest_context")),
+        "has_premium_context": bool(row.get("has_premium_context")),
+        "has_trade_flow_context": bool(row.get("has_trade_flow_context")),
         "baseline_liquidity_turnover": float(row.get("baseline_liquidity_turnover") or 0.0),
         "baseline_liquidity_rank": int(row.get("baseline_liquidity_rank") or 0),
         "age_days": float(row.get("age_days") or 0.0),
@@ -2463,14 +3423,24 @@ def _simulate_short_trade(
         "actual_notional": weight_info["actual_notional"],
         "gross_return": gross_return,
         "cost_return": cost_return,
+        "base_round_trip_cost_bps": round_trip_cost_bps,
+        "market_impact_cost_bps": impact_cost_bps,
+        "market_impact_cost_return": impact_cost_bps / 10_000.0,
+        "funding_return": funding_return,
+        "funding_mode": funding_mode,
+        "funding_event_count": funding_event_count,
         "net_return": net_return,
         "weighted_gross_return": gross_return * weight,
         "weighted_cost_return": cost_return * weight,
+        "weighted_market_impact_cost_return": impact_cost_bps / 10_000.0 * weight,
+        "weighted_funding_return": funding_return * weight,
         "weighted_net_return": net_return * weight,
         "mae": max_adverse,
         "mfe": max_favorable,
         "stop_loss_pct": config.stop_loss_pct,
         "take_profit_pct": config.take_profit_pct,
+        "time_decay_take_profit_floor_pct": config.time_decay_take_profit_floor_pct,
+        "time_decay_take_profit_minutes": config.time_decay_take_profit_minutes,
         "basket_stop_loss_pct": config.basket_stop_loss_pct,
         "trailing_stop_pct": config.trailing_stop_pct,
         "trailing_activation_pct": config.trailing_activation_pct,
@@ -2491,7 +3461,17 @@ def _simulate_short_trade(
         "score_weight_power": config.score_weight_power,
         "coin_excess_vs_market_min": config.coin_excess_vs_market_min,
         "coin_vwap_extension_min": config.coin_vwap_extension_min,
+        "coin_vwap_extension_max": config.coin_vwap_extension_max,
         "coin_late_volume_ratio_min": config.coin_late_volume_ratio_min,
+        "market_median_day_return_max": config.market_median_day_return_max,
+        "organic_move_score_max": config.organic_move_score_max,
+        "manipulation_risk_score_min": config.manipulation_risk_score_min,
+        "squeeze_risk_score_max": config.squeeze_risk_score_max,
+        "require_funding_context": config.require_funding_context,
+        "require_open_interest_context": config.require_open_interest_context,
+        "require_premium_context": config.require_premium_context,
+        "require_trade_flow_context": config.require_trade_flow_context,
+        "require_all_context": config.require_all_context,
         "max_trade_notional_pct_of_day_turnover": config.max_trade_notional_pct_of_day_turnover,
         "max_trade_notional_pct_of_baseline_turnover": config.max_trade_notional_pct_of_baseline_turnover,
         "top_n": config.top_n,
@@ -2535,6 +3515,26 @@ def _close_fade_position_weight(
         "target_notional": target_weight * config.account_equity,
         "actual_notional": weight * config.account_equity,
     }
+
+
+def _close_fade_market_impact_bps(
+    row: dict[str, Any],
+    weight_info: dict[str, Any],
+    config: DailyCloseFadeConfig,
+) -> float:
+    coefficient = config.market_impact_bps_per_1pct_turnover
+    if coefficient <= 0.0:
+        return 0.0
+    actual_notional = max(float(weight_info.get("actual_notional") or 0.0), 0.0)
+    turnover_refs = [
+        float(row.get("day_turnover") or 0.0),
+        float(row.get("baseline_liquidity_turnover") or 0.0),
+    ]
+    usable_turnover = min([value for value in turnover_refs if value > EPSILON], default=0.0)
+    if actual_notional <= EPSILON or usable_turnover <= EPSILON:
+        return 0.0
+    participation_pct = actual_notional / usable_turnover * 100.0
+    return 2.0 * coefficient * participation_pct
 
 
 def _vwap_reversion_exit_price(entry_price: float, row: dict[str, Any], config: DailyCloseFadeConfig) -> float | None:
@@ -2600,13 +3600,16 @@ def _evaluate_grid_variant(
     baskets = summarize_close_fade_baskets(trades)
     equity = build_close_fade_equity(baskets)
     summary = summarize_close_fade(trades, baskets, equity, config=config)
+    split_metrics = summarize_close_fade_splits(baskets)
     config_row = asdict(config)
+    config_row["include_symbols"] = ",".join(config.include_symbols)
     config_row["exclude_symbols"] = ",".join(config.exclude_symbols)
     return {
         "grid_id": grid_id,
         **config_row,
         "round_trip_cost_bps": round_trip_cost_bps,
         **summary,
+        **_summarize_grid_split_metrics(split_metrics),
     }
 
 
@@ -2679,11 +3682,14 @@ def _format_grid_row(row: dict[str, Any]) -> list[str]:
         f"over {row.get('liquidity_lookback_days', 7)}d baseline",
         f"- Stop: {row.get('stop_loss_pct', 0.0):.2%}",
         f"- Take profit: {row.get('take_profit_pct', 0.0):.2%}",
+        f"- Time-decay take profit: floor {row.get('time_decay_take_profit_floor_pct', 0.0):.2%} "
+        f"over {row.get('time_decay_take_profit_minutes', 0)} minutes",
         f"- Basket stop: {row.get('basket_stop_loss_pct', 0.0):.2%}",
         f"- Trail: {row.get('trailing_stop_pct', 0.0):.2%} after {row.get('trailing_activation_pct', 0.0):.2%}",
         f"- Vol trail: {row.get('vol_trailing_stop_mult', 0.0):.2f}x after {row.get('vol_trailing_activation_mult', 0.0):.2f}x daily vol",
         f"- MFE giveback: {row.get('mfe_giveback_pct', 0.0):.2%} after {row.get('mfe_giveback_activation_pct', 0.0):.2%}",
         f"- VWAP reversion: {row.get('vwap_reversion_pct', 0.0):.2%}",
+        f"- Profit protection delay: {row.get('profit_protection_delay_minutes', 0)} minutes",
     ]
 
 

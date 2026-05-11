@@ -16,8 +16,30 @@ from .ingestion import aggregate_signed_flow_1h, aggregate_signed_flow_1m, aggre
 from .storage import dataset_path, write_dataset
 
 
-REST_DATASETS = {"instruments", "klines_1m", "klines_1h", "klines_5m", "funding", "open_interest", "ticker_snapshots", "recent_trades"}
-PER_SYMBOL_REST_DATASETS = {"klines_1m", "klines_1h", "klines_5m", "funding", "open_interest", "recent_trades"}
+REST_DATASETS = {
+    "instruments",
+    "klines_1m",
+    "klines_1h",
+    "klines_5m",
+    "funding",
+    "open_interest",
+    "mark_price_1h",
+    "index_price_1h",
+    "premium_index_1h",
+    "ticker_snapshots",
+    "recent_trades",
+}
+PER_SYMBOL_REST_DATASETS = {
+    "klines_1m",
+    "klines_1h",
+    "klines_5m",
+    "funding",
+    "open_interest",
+    "mark_price_1h",
+    "index_price_1h",
+    "premium_index_1h",
+    "recent_trades",
+}
 MARKER_DIR = "_download_markers"
 
 
@@ -222,6 +244,51 @@ def _download_rest_symbol_datasets(
             end_ms=end_ms,
             fetch=lambda: _normalize_open_interest(symbol, local_client.get_open_interest(symbol, "1h", start_ms, end_ms)),
         )
+    if "mark_price_1h" in datasets:
+        outputs["mark_price_1h"] = _download_symbol_dataset(
+            data_root,
+            dataset="mark_price_1h",
+            symbol=symbol,
+            index=index,
+            total=total,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            fetch=lambda: _normalize_price_index_klines(
+                symbol,
+                local_client.get_mark_price_klines(symbol, "60", start_ms, end_ms),
+                source="bybit_mark_price",
+            ),
+        )
+    if "index_price_1h" in datasets:
+        outputs["index_price_1h"] = _download_symbol_dataset(
+            data_root,
+            dataset="index_price_1h",
+            symbol=symbol,
+            index=index,
+            total=total,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            fetch=lambda: _normalize_price_index_klines(
+                symbol,
+                local_client.get_index_price_klines(symbol, "60", start_ms, end_ms),
+                source="bybit_index_price",
+            ),
+        )
+    if "premium_index_1h" in datasets:
+        outputs["premium_index_1h"] = _download_symbol_dataset(
+            data_root,
+            dataset="premium_index_1h",
+            symbol=symbol,
+            index=index,
+            total=total,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            fetch=lambda: _normalize_price_index_klines(
+                symbol,
+                local_client.get_premium_index_klines(symbol, "60", start_ms, end_ms),
+                source="bybit_premium_index",
+            ),
+        )
     if "recent_trades" in datasets:
         print(f"recent_trades: {index}/{total} {symbol} downloading", flush=True)
         trades = trades_to_frame(local_client.get_recent_trades(symbol))
@@ -296,6 +363,23 @@ def _normalize_klines(symbol: str, rows: list, *, source: str) -> list[dict]:
                 "close": float(row[4]),
                 "volume_base": float(row[5]),
                 "turnover_quote": float(row[6]),
+                "source": source,
+            }
+        )
+    return sorted(output, key=lambda item: item["ts_ms"])
+
+
+def _normalize_price_index_klines(symbol: str, rows: list, *, source: str) -> list[dict]:
+    output = []
+    for row in rows:
+        output.append(
+            {
+                "ts_ms": int(row[0]),
+                "symbol": symbol,
+                "open": float(row[1]),
+                "high": float(row[2]),
+                "low": float(row[3]),
+                "close": float(row[4]),
                 "source": source,
             }
         )

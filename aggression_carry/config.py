@@ -105,14 +105,27 @@ class DailyCloseFadeConfig:
     max_position_weight: float = 0.0
     max_trade_notional_pct_of_day_turnover: float = 0.0
     max_trade_notional_pct_of_baseline_turnover: float = 0.0
+    market_impact_bps_per_1pct_turnover: float = 1.0
     gross_exposure: float = 1.0
     coin_excess_vs_market_min: float = 0.0
     coin_vwap_extension_min: float = 0.0
+    coin_vwap_extension_max: float = 0.0
     coin_late_volume_ratio_min: float = 0.0
+    market_median_day_return_max: float = 0.0
+    organic_move_score_max: float = 0.0
+    manipulation_risk_score_min: float = 0.0
+    squeeze_risk_score_max: float = 0.0
+    require_funding_context: bool = False
+    require_open_interest_context: bool = False
+    require_premium_context: bool = False
+    require_trade_flow_context: bool = False
+    require_all_context: bool = False
     position_sizing: str = "equal"
     score_weight_power: float = 1.0
     stop_loss_pct: float = 0.0
     take_profit_pct: float = 0.0
+    time_decay_take_profit_floor_pct: float = 0.0
+    time_decay_take_profit_minutes: int = 0
     basket_stop_loss_pct: float = 0.0
     trailing_stop_pct: float = 0.0
     trailing_activation_pct: float = 0.01
@@ -126,6 +139,7 @@ class DailyCloseFadeConfig:
     twap_stop_adding_pct: float = 0.0
     cost_multiplier: float = 1.0
     min_symbols: int = 1
+    include_symbols: tuple[str, ...] = ()
     exclude_symbols: tuple[str, ...] = DEFAULT_MAJOR_SYMBOLS
     require_archive_membership: bool = False
 
@@ -136,10 +150,12 @@ class DailyCloseFadeGridConfig:
     top_ns: tuple[int, ...] = DEFAULT_CLOSE_FADE_TOP_NS
     hold_minutes: tuple[int, ...] = DEFAULT_CLOSE_FADE_HOLD_MINUTES
     gross_exposures: tuple[float, ...] = (1.0,)
-    scores: tuple[str, ...] = ("vol_adjusted_day_return", "day_return")
+    scores: tuple[str, ...] = ("vol_adjusted_day_return", "context_fade_score", "day_return")
     pump_filters: tuple[str, ...] = ("all", "pump", "non_pump")
     stop_loss_pcts: tuple[float, ...] = (0.0, 0.03, 0.05, 0.08)
     take_profit_pcts: tuple[float, ...] = (0.0,)
+    time_decay_take_profit_floor_pcts: tuple[float, ...] = (0.0,)
+    time_decay_take_profit_minutes: tuple[int, ...] = (0,)
     basket_stop_loss_pcts: tuple[float, ...] = (0.0,)
     trailing_stop_pcts: tuple[float, ...] = (0.0, 0.015, 0.025)
     trailing_activation_pcts: tuple[float, ...] = (0.01, 0.02)
@@ -148,14 +164,23 @@ class DailyCloseFadeGridConfig:
     mfe_giveback_activation_pcts: tuple[float, ...] = (0.0,)
     mfe_giveback_pcts: tuple[float, ...] = (0.0,)
     vwap_reversion_pcts: tuple[float, ...] = (0.0,)
+    profit_protection_delay_minutes: tuple[int, ...] = (15,)
     liquidity_lookback_days: tuple[int, ...] = (7,)
     liquidity_rank_mins: tuple[int, ...] = (1,)
     liquidity_rank_maxs: tuple[int, ...] = (0,)
     min_baseline_turnovers: tuple[float, ...] = (0.0,)
+    coin_vwap_extension_maxs: tuple[float, ...] = (0.0,)
+    market_median_day_return_maxs: tuple[float, ...] = (0.0,)
+    organic_move_score_maxs: tuple[float, ...] = (0.0,)
+    manipulation_risk_score_mins: tuple[float, ...] = (0.0,)
+    squeeze_risk_score_maxs: tuple[float, ...] = (0.0,)
+    require_open_interest_contexts: tuple[bool, ...] = (False,)
+    require_all_contexts: tuple[bool, ...] = (False,)
     account_equities: tuple[float, ...] = (10_000.0,)
     max_position_weights: tuple[float, ...] = (0.0,)
     max_trade_notional_pct_day_turnovers: tuple[float, ...] = (0.0,)
     max_trade_notional_pct_baseline_turnovers: tuple[float, ...] = (0.0,)
+    market_impact_bps_per_1pct_turnovers: tuple[float, ...] = (1.0,)
     cost_multipliers: tuple[float, ...] = (1.0, 2.0, 3.0)
     start_ms: int = 0
     end_ms: int = 0
@@ -167,20 +192,28 @@ ACTIVE_DAILY_CLOSE_FADE_DEFAULT = DailyCloseFadeConfig(
     hold_minutes=180,
     entry_delay_minutes=0,
     entry_twap_minutes=60,
+    score="context_fade_score",
     pump_filter="pump",
-    liquidity_rank_min=31,
-    liquidity_rank_max=150,
-    max_position_weight=0.80,
+    liquidity_rank_min=11,
+    liquidity_rank_max=50,
+    max_position_weight=0.0,
+    max_trade_notional_pct_of_day_turnover=0.002,
+    max_trade_notional_pct_of_baseline_turnover=0.005,
+    market_impact_bps_per_1pct_turnover=1.0,
     coin_excess_vs_market_min=0.08,
     coin_vwap_extension_min=0.035,
+    coin_vwap_extension_max=0.15,
     coin_late_volume_ratio_min=1.0,
+    require_open_interest_context=True,
+    require_all_context=True,
     position_sizing="score_capped",
-    stop_loss_pct=0.20,
+    stop_loss_pct=0.05,
+    take_profit_pct=0.02,
     stop_delay_minutes=0,
-    vol_trailing_stop_mult=0.25,
+    vol_trailing_stop_mult=0.0,
     mfe_giveback_activation_pct=0.01,
-    mfe_giveback_pct=0.20,
-    profit_protection_delay_minutes=15,
+    mfe_giveback_pct=0.35,
+    profit_protection_delay_minutes=30,
 )
 
 
@@ -345,14 +378,41 @@ def _merge_daily_close_fade_config(payload: dict[str, Any] | None) -> DailyClose
                 default.max_trade_notional_pct_of_baseline_turnover,
             )
         ),
+        market_impact_bps_per_1pct_turnover=float(
+            payload.get("market_impact_bps_per_1pct_turnover", default.market_impact_bps_per_1pct_turnover)
+        ),
         gross_exposure=float(payload.get("gross_exposure", default.gross_exposure)),
         coin_excess_vs_market_min=float(payload.get("coin_excess_vs_market_min", default.coin_excess_vs_market_min)),
         coin_vwap_extension_min=float(payload.get("coin_vwap_extension_min", default.coin_vwap_extension_min)),
+        coin_vwap_extension_max=float(payload.get("coin_vwap_extension_max", default.coin_vwap_extension_max)),
         coin_late_volume_ratio_min=float(payload.get("coin_late_volume_ratio_min", default.coin_late_volume_ratio_min)),
+        market_median_day_return_max=float(
+            payload.get("market_median_day_return_max", default.market_median_day_return_max)
+        ),
+        organic_move_score_max=float(payload.get("organic_move_score_max", default.organic_move_score_max)),
+        manipulation_risk_score_min=float(
+            payload.get("manipulation_risk_score_min", default.manipulation_risk_score_min)
+        ),
+        squeeze_risk_score_max=float(payload.get("squeeze_risk_score_max", default.squeeze_risk_score_max)),
+        require_funding_context=bool(payload.get("require_funding_context", default.require_funding_context)),
+        require_open_interest_context=bool(
+            payload.get("require_open_interest_context", default.require_open_interest_context)
+        ),
+        require_premium_context=bool(payload.get("require_premium_context", default.require_premium_context)),
+        require_trade_flow_context=bool(
+            payload.get("require_trade_flow_context", default.require_trade_flow_context)
+        ),
+        require_all_context=bool(payload.get("require_all_context", default.require_all_context)),
         position_sizing=str(payload.get("position_sizing", default.position_sizing)),
         score_weight_power=float(payload.get("score_weight_power", default.score_weight_power)),
         stop_loss_pct=float(payload.get("stop_loss_pct", default.stop_loss_pct)),
         take_profit_pct=float(payload.get("take_profit_pct", default.take_profit_pct)),
+        time_decay_take_profit_floor_pct=float(
+            payload.get("time_decay_take_profit_floor_pct", default.time_decay_take_profit_floor_pct)
+        ),
+        time_decay_take_profit_minutes=int(
+            payload.get("time_decay_take_profit_minutes", default.time_decay_take_profit_minutes)
+        ),
         basket_stop_loss_pct=float(payload.get("basket_stop_loss_pct", default.basket_stop_loss_pct)),
         trailing_stop_pct=float(payload.get("trailing_stop_pct", default.trailing_stop_pct)),
         trailing_activation_pct=float(payload.get("trailing_activation_pct", default.trailing_activation_pct)),
@@ -372,6 +432,7 @@ def _merge_daily_close_fade_config(payload: dict[str, Any] | None) -> DailyClose
         twap_stop_adding_pct=float(payload.get("twap_stop_adding_pct", default.twap_stop_adding_pct)),
         cost_multiplier=float(payload.get("cost_multiplier", default.cost_multiplier)),
         min_symbols=int(payload.get("min_symbols", default.min_symbols)),
+        include_symbols=_tuple_str(payload, "include_symbols", default.include_symbols),
         exclude_symbols=_tuple_str(payload, "exclude_symbols", default.exclude_symbols),
         require_archive_membership=bool(payload.get("require_archive_membership", default.require_archive_membership)),
     )
@@ -384,10 +445,12 @@ def _merge_daily_close_fade_grid_config(payload: dict[str, Any] | None) -> Daily
         top_ns=_tuple_int(payload, "top_ns", DEFAULT_CLOSE_FADE_TOP_NS),
         hold_minutes=_tuple_int(payload, "hold_minutes", DEFAULT_CLOSE_FADE_HOLD_MINUTES),
         gross_exposures=_tuple_float(payload, "gross_exposures", (1.0,)),
-        scores=_tuple_str(payload, "scores", ("vol_adjusted_day_return", "day_return")),
+        scores=_tuple_str(payload, "scores", ("vol_adjusted_day_return", "context_fade_score", "day_return")),
         pump_filters=_tuple_str(payload, "pump_filters", ("all", "pump", "non_pump")),
         stop_loss_pcts=_tuple_float(payload, "stop_loss_pcts", (0.0, 0.03, 0.05, 0.08)),
         take_profit_pcts=_tuple_float(payload, "take_profit_pcts", (0.0,)),
+        time_decay_take_profit_floor_pcts=_tuple_float(payload, "time_decay_take_profit_floor_pcts", (0.0,)),
+        time_decay_take_profit_minutes=_tuple_int(payload, "time_decay_take_profit_minutes", (0,)),
         basket_stop_loss_pcts=_tuple_float(payload, "basket_stop_loss_pcts", (0.0,)),
         trailing_stop_pcts=_tuple_float(payload, "trailing_stop_pcts", (0.0, 0.015, 0.025)),
         trailing_activation_pcts=_tuple_float(payload, "trailing_activation_pcts", (0.01, 0.02)),
@@ -396,10 +459,18 @@ def _merge_daily_close_fade_grid_config(payload: dict[str, Any] | None) -> Daily
         mfe_giveback_activation_pcts=_tuple_float(payload, "mfe_giveback_activation_pcts", (0.0,)),
         mfe_giveback_pcts=_tuple_float(payload, "mfe_giveback_pcts", (0.0,)),
         vwap_reversion_pcts=_tuple_float(payload, "vwap_reversion_pcts", (0.0,)),
+        profit_protection_delay_minutes=_tuple_int(payload, "profit_protection_delay_minutes", (15,)),
         liquidity_lookback_days=_tuple_int(payload, "liquidity_lookback_days", (7,)),
         liquidity_rank_mins=_tuple_int(payload, "liquidity_rank_mins", (1,)),
         liquidity_rank_maxs=_tuple_int(payload, "liquidity_rank_maxs", (0,)),
         min_baseline_turnovers=_tuple_float(payload, "min_baseline_turnovers", (0.0,)),
+        coin_vwap_extension_maxs=_tuple_float(payload, "coin_vwap_extension_maxs", (0.0,)),
+        market_median_day_return_maxs=_tuple_float(payload, "market_median_day_return_maxs", (0.0,)),
+        organic_move_score_maxs=_tuple_float(payload, "organic_move_score_maxs", (0.0,)),
+        manipulation_risk_score_mins=_tuple_float(payload, "manipulation_risk_score_mins", (0.0,)),
+        squeeze_risk_score_maxs=_tuple_float(payload, "squeeze_risk_score_maxs", (0.0,)),
+        require_open_interest_contexts=_tuple_bool(payload, "require_open_interest_contexts", (False,)),
+        require_all_contexts=_tuple_bool(payload, "require_all_contexts", (False,)),
         account_equities=_tuple_float(payload, "account_equities", (10_000.0,)),
         max_position_weights=_tuple_float(payload, "max_position_weights", (0.0,)),
         max_trade_notional_pct_day_turnovers=_tuple_float(
@@ -407,6 +478,9 @@ def _merge_daily_close_fade_grid_config(payload: dict[str, Any] | None) -> Daily
         ),
         max_trade_notional_pct_baseline_turnovers=_tuple_float(
             payload, "max_trade_notional_pct_baseline_turnovers", (0.0,)
+        ),
+        market_impact_bps_per_1pct_turnovers=_tuple_float(
+            payload, "market_impact_bps_per_1pct_turnovers", (1.0,)
         ),
         cost_multipliers=_tuple_float(payload, "cost_multipliers", (1.0, 2.0, 3.0)),
         start_ms=int(payload.get("start_ms", 0)),

@@ -204,7 +204,7 @@ def build_btc_signal_context(
                 ).alias("minute_of_day"),
             ]
         )
-        .filter(pl.col("minute_of_day") <= signal_minute)
+        .filter(pl.col("minute_of_day") < signal_minute)
         .sort(["date", "ts_ms"])
         .group_by("date", maintain_order=True)
         .agg(
@@ -212,8 +212,8 @@ def build_btc_signal_context(
                 pl.col("ts_ms").last().alias("btc_signal_ts_ms"),
                 pl.col("open").first().alias("btc_day_open"),
                 pl.col("close").last().alias("btc_signal_close"),
-                pl.col("close").filter(pl.col("minute_of_day") <= signal_minute - 60).last().alias("btc_close_60m_ago"),
-                pl.col("close").filter(pl.col("minute_of_day") <= signal_minute - 240).last().alias("btc_close_240m_ago"),
+                pl.col("close").filter(pl.col("minute_of_day") < signal_minute - 60).last().alias("btc_close_60m_ago"),
+                pl.col("close").filter(pl.col("minute_of_day") < signal_minute - 240).last().alias("btc_close_240m_ago"),
             ]
         )
         .with_columns(

@@ -16,6 +16,11 @@ forward-run and bybit-demo-cycle must not fake TWAP as one fill.
 The current code blocks new paper entries when `entry_twap_minutes > 0`. This
 is intentional and safer than pretending the demo account traded a TWAP.
 
+Do not install timers, cron jobs, or systemd wrappers for demo order submission
+from this repo. Forward/demo commands are manual execution tests only until
+slice-level TWAP exists and the audit reconciles expected slices to actual
+orders and fills.
+
 ## Next Implementation Target
 
 Add slice-level paper/demo execution:
@@ -26,6 +31,7 @@ Add slice-level paper/demo execution:
 entry_price: running average fill price
 first fill onward: 20% disaster stop on average entry
 23:15 onward: vol trail and MFE giveback can flatten the whole symbol
+23:15 onward: adaptive state starts fresh; do not seed it from pre-23:15 lows
 max hold: 180m after final add
 no same-symbol re-entry that day
 ```
@@ -75,17 +81,6 @@ python -m aggression_carry \
   --notional 5 \
   --place-order \
   --i-understand-demo-order
-```
-
-Demo shadow cycle:
-
-```bash
-python -m aggression_carry \
-  --data-root data/forward-paper \
-  --config configs/volume_alpha.default.yaml \
-  bybit-demo-cycle \
-  --submit-orders \
-  --i-understand-demo-sync
 ```
 
 With the current TWAP config, the shadow cycle should not open new entries until

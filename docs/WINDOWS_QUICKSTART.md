@@ -115,6 +115,11 @@ download. If it is missing, `-Suite both` warns, skips daily-close, and continue
 the volume sweep. Use `-Suite daily-close` when you specifically want that side
 to fail unless the 1m data is present.
 
+Daily-close reports generated before the 2026-05-08 profit-protection fix are
+forensic artifacts only. Use the corrected readiness gate and
+`docs/profit_protection_audit_20260508.md` before treating any close-fade result
+as a candidate.
+
 If the 3-year volume data is already downloaded and you only want to rerun the
 grids:
 
@@ -144,7 +149,8 @@ already completed will show as `cached`.
 - `volume-alpha` is the statistical sweep. `volume-backtest` is the trade ledger
   with entries, exits, exit reasons, stops, costs, and symbol/month attribution.
 - `daily-close-fade-grid` tests the 1m UTC close-window short fade with top-N,
-  pump-tag, stop, trailing-stop, hold-time, and cost sensitivity.
+  pump-tag, stop, corrected adaptive protection, hold-time, profit-protection
+  delay, and cost sensitivity.
 - `volume-grid` and `daily-close-fade-grid` run parameter variants
   concurrently. On Windows they use thread workers to avoid `spawn` trying to
   pickle multi-year Polars datasets into every child process. On macOS/Linux

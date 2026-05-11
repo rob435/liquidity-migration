@@ -39,11 +39,20 @@ daily_close_fade:
   max_trade_notional_pct_of_baseline_turnover: 0.005
   coin_excess_vs_market_min: 0.08
   coin_vwap_extension_min: 0.035
+  coin_vwap_extension_max: 0.15
   coin_late_volume_ratio_min: 1.0
+  market_median_day_return_max: 0.05
+  organic_move_score_max: 1.5
+  manipulation_risk_score_min: 0.25
+  squeeze_risk_score_max: 1.0
+  require_open_interest_context: true
+  require_all_context: true
   position_sizing: score_capped
   score_weight_power: 1.0
   stop_loss_pct: 0.20
   take_profit_pct: 0.05
+  time_decay_take_profit_floor_pct: 0.02
+  time_decay_take_profit_minutes: 120
   vol_trailing_stop_mult: 0.5
   vol_trailing_activation_mult: 1.0
   mfe_giveback_activation_pct: 0.03
@@ -55,15 +64,25 @@ daily_close_fade:
 daily_close_fade_grid:
   stop_loss_pcts: [0.0, 0.20]
   take_profit_pcts: [0.0, 0.03, 0.05]
+  time_decay_take_profit_floor_pcts: [0.0, 0.02]
+  time_decay_take_profit_minutes: [0, 120]
   vol_trailing_stop_mults: [0.0, 0.5]
   vol_trailing_activation_mults: [0.0, 1.0]
   mfe_giveback_activation_pcts: [0.0, 0.03]
   mfe_giveback_pcts: [0.0, 0.40]
   vwap_reversion_pcts: [0.0, 0.50]
+  profit_protection_delay_minutes: [0, 15, 30]
   liquidity_lookback_days: [7, 14]
   liquidity_rank_mins: [31, 81]
   liquidity_rank_maxs: [80, 150]
   min_baseline_turnovers: [0.0, 1000000.0]
+  coin_vwap_extension_maxs: [0.0, 0.15]
+  market_median_day_return_maxs: [0.0, 0.05]
+  organic_move_score_maxs: [0.0, 1.5]
+  manipulation_risk_score_mins: [0.0, 0.25]
+  squeeze_risk_score_maxs: [0.0, 1.0]
+  require_open_interest_contexts: [false, true]
+  require_all_contexts: [false, true]
   account_equities: [10000.0, 25000.0]
   max_position_weights: [0.0, 0.20]
   max_trade_notional_pct_day_turnovers: [0.0, 0.002]
@@ -109,11 +128,20 @@ cost_model:
     assert config.daily_close_fade.max_trade_notional_pct_of_baseline_turnover == 0.005
     assert config.daily_close_fade.coin_excess_vs_market_min == 0.08
     assert config.daily_close_fade.coin_vwap_extension_min == 0.035
+    assert config.daily_close_fade.coin_vwap_extension_max == 0.15
     assert config.daily_close_fade.coin_late_volume_ratio_min == 1.0
+    assert config.daily_close_fade.market_median_day_return_max == 0.05
+    assert config.daily_close_fade.organic_move_score_max == 1.5
+    assert config.daily_close_fade.manipulation_risk_score_min == 0.25
+    assert config.daily_close_fade.squeeze_risk_score_max == 1.0
+    assert config.daily_close_fade.require_open_interest_context is True
+    assert config.daily_close_fade.require_all_context is True
     assert config.daily_close_fade.position_sizing == "score_capped"
     assert config.daily_close_fade.score_weight_power == 1.0
     assert config.daily_close_fade.stop_loss_pct == 0.20
     assert config.daily_close_fade.take_profit_pct == 0.05
+    assert config.daily_close_fade.time_decay_take_profit_floor_pct == 0.02
+    assert config.daily_close_fade.time_decay_take_profit_minutes == 120
     assert config.daily_close_fade.vol_trailing_stop_mult == 0.5
     assert config.daily_close_fade.vol_trailing_activation_mult == 1.0
     assert config.daily_close_fade.mfe_giveback_activation_pct == 0.03
@@ -124,15 +152,25 @@ cost_model:
     assert config.daily_close_fade.twap_stop_adding_pct == 0.08
     assert config.daily_close_fade_grid.stop_loss_pcts == (0.0, 0.20)
     assert config.daily_close_fade_grid.take_profit_pcts == (0.0, 0.03, 0.05)
+    assert config.daily_close_fade_grid.time_decay_take_profit_floor_pcts == (0.0, 0.02)
+    assert config.daily_close_fade_grid.time_decay_take_profit_minutes == (0, 120)
     assert config.daily_close_fade_grid.vol_trailing_stop_mults == (0.0, 0.5)
     assert config.daily_close_fade_grid.vol_trailing_activation_mults == (0.0, 1.0)
     assert config.daily_close_fade_grid.mfe_giveback_activation_pcts == (0.0, 0.03)
     assert config.daily_close_fade_grid.mfe_giveback_pcts == (0.0, 0.40)
     assert config.daily_close_fade_grid.vwap_reversion_pcts == (0.0, 0.50)
+    assert config.daily_close_fade_grid.profit_protection_delay_minutes == (0, 15, 30)
     assert config.daily_close_fade_grid.liquidity_lookback_days == (7, 14)
     assert config.daily_close_fade_grid.liquidity_rank_mins == (31, 81)
     assert config.daily_close_fade_grid.liquidity_rank_maxs == (80, 150)
     assert config.daily_close_fade_grid.min_baseline_turnovers == (0.0, 1_000_000.0)
+    assert config.daily_close_fade_grid.coin_vwap_extension_maxs == (0.0, 0.15)
+    assert config.daily_close_fade_grid.market_median_day_return_maxs == (0.0, 0.05)
+    assert config.daily_close_fade_grid.organic_move_score_maxs == (0.0, 1.5)
+    assert config.daily_close_fade_grid.manipulation_risk_score_mins == (0.0, 0.25)
+    assert config.daily_close_fade_grid.squeeze_risk_score_maxs == (0.0, 1.0)
+    assert config.daily_close_fade_grid.require_open_interest_contexts == (False, True)
+    assert config.daily_close_fade_grid.require_all_contexts == (False, True)
     assert config.daily_close_fade_grid.account_equities == (10_000.0, 25_000.0)
     assert config.daily_close_fade_grid.max_position_weights == (0.0, 0.20)
     assert config.daily_close_fade_grid.max_trade_notional_pct_day_turnovers == (0.0, 0.002)

@@ -18,7 +18,8 @@ DEFAULT_ARTIFACTS = (
     "data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_promotion_splits/mid/promotion/volume_promotion_report.json",
     "data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_promotion_splits/tail/promotion/volume_promotion_report.json",
     "data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_promotion_splits/broad/promotion/volume_promotion_report.json",
-    "data/daily-close-fade-1m-3y-current-top160-20230503-20260503/reports/daily_close_fade_grid_splits/daily_close_fade_promotion_report.json",
+    "data/research_reports/profit_protection_recheck_20260508/corrected_profit_protection_summary.json",
+    "data/research_reports/profit_protection_recheck_20260508/corrected_profit_protection_grid.csv",
 )
 DEFAULT_ARTIFACT_GLOBS = (
     "data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_promotion_splits/*/promotion/volume_promotion_report.json",

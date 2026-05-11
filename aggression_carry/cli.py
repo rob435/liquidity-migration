@@ -53,12 +53,17 @@ def build_parser() -> argparse.ArgumentParser:
     download = subparsers.add_parser("download-data", help="Download or create research datasets.")
     download.add_argument("--fixture", action="store_true", help="Create deterministic tiny fixture data instead of calling Bybit.")
     download.add_argument("--symbols", default="", help="Comma-separated symbols for real Bybit downloads.")
+    download.add_argument("--symbols-file", default="", help="Optional file containing comma- or newline-separated symbols.")
     download.add_argument("--start", default=None, help="ISO start timestamp/date for real Bybit downloads.")
     download.add_argument("--end", default=None, help="ISO end timestamp/date for real Bybit downloads.")
     download.add_argument(
         "--datasets",
         default="instruments,klines_1h",
-        help="Comma-separated datasets: instruments, klines_1m, klines_1h, klines_5m, funding, open_interest, ticker_snapshots, recent_trades, archive_trades, archive_klines_1m.",
+        help=(
+            "Comma-separated datasets: instruments, klines_1m, klines_1h, klines_5m, funding, "
+            "open_interest, mark_price_1h, index_price_1h, premium_index_1h, ticker_snapshots, "
+            "recent_trades, archive_trades, archive_klines_1m."
+        ),
     )
     download.add_argument(
         "--archive-url-template",
@@ -97,6 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     archive_manifest.add_argument("--base-url", default=None, help="Public archive base URL.")
     archive_manifest.add_argument("--quote-suffix", default="USDT", help="Symbol suffix to include, default USDT.")
     archive_manifest.add_argument("--symbols", default="", help="Optional comma-separated symbol allowlist.")
+    archive_manifest.add_argument("--symbols-file", default="", help="Optional file containing comma- or newline-separated symbol allowlist.")
     archive_manifest.add_argument("--start", default=None, help="Inclusive archive start date YYYY-MM-DD.")
     archive_manifest.add_argument("--end", default=None, help="Inclusive archive end date YYYY-MM-DD.")
     archive_manifest.add_argument("--max-symbols", type=int, default=0, help="Maximum symbols to scan; 0 disables.")
@@ -108,11 +114,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     archive_klines.add_argument("--name", default="bybit-public-trading-klines", help="Name used for download report files.")
     archive_klines.add_argument("--symbols", default="", help="Optional comma-separated symbol allowlist.")
+    archive_klines.add_argument("--symbols-file", default="", help="Optional file containing comma- or newline-separated symbol allowlist.")
     archive_klines.add_argument("--start", default=None, help="Inclusive archive start date YYYY-MM-DD.")
     archive_klines.add_argument("--end", default=None, help="Inclusive archive end date YYYY-MM-DD.")
     archive_klines.add_argument("--max-rows", type=int, default=0, help="Maximum symbol/date manifest rows to process; 0 disables.")
     archive_klines.add_argument("--workers", type=int, default=8, help="Concurrent archive download workers.")
     archive_klines.add_argument("--include-existing", action="store_true", help="Rebuild rows even when the kline partition already exists.")
+    archive_klines.add_argument("--include-flow", action="store_true", help="Also build signed_flow_1m and signed_flow_1h from each archive file.")
+    archive_klines.add_argument("--discard-archives", action="store_true", help="Delete compressed trade archive files after derived parquet outputs are written.")
 
     subparsers.add_parser("volume-alpha", help="Run isolated daily volume-only alpha research sweep.")
 
@@ -174,7 +183,14 @@ def build_parser() -> argparse.ArgumentParser:
     close_fade.add_argument("--max-position-weight", type=float, default=None, help="Per-symbol portfolio weight cap; 0 disables.")
     close_fade.add_argument("--coin-excess-vs-market-min", type=float, default=None, help="Require coin day return minus market median to exceed this value.")
     close_fade.add_argument("--coin-vwap-extension-min", type=float, default=None, help="Require signal price extension above intraday VWAP.")
+    close_fade.add_argument("--coin-vwap-extension-max", type=float, default=None, help="Reject coins too extended above intraday VWAP; 0 disables.")
     close_fade.add_argument("--coin-late-volume-ratio-min", type=float, default=None, help="Require last-60m turnover versus average day-to-date hourly turnover.")
+    close_fade.add_argument("--market-median-day-return-max", type=float, default=None, help="Reject baskets when same-day alt market median return is too hot; 0 disables.")
+    close_fade.add_argument("--organic-move-score-max", type=float, default=None, help="Reject moves that look too organic; 0 disables.")
+    close_fade.add_argument("--manipulation-risk-score-min", type=float, default=None, help="Require a minimum manipulation-risk score; 0 disables.")
+    close_fade.add_argument("--squeeze-risk-score-max", type=float, default=None, help="Reject high squeeze-risk candidates; 0 disables.")
+    close_fade.add_argument("--require-open-interest-context", action="store_true", default=None, help="Only trade candidates with causal open-interest context.")
+    close_fade.add_argument("--require-all-context", action="store_true", default=None, help="Only trade candidates with funding, OI, premium, and trade-flow context.")
     close_fade.add_argument("--position-sizing", default=None, help="Position sizing mode: equal or score_capped.")
     close_fade.add_argument("--score-weight-power", type=float, default=None, help="Power applied to score for score_capped sizing.")
     close_fade.add_argument(
@@ -189,8 +205,26 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Cap trade notional as a fraction of prior baseline turnover; 0 disables.",
     )
+    close_fade.add_argument(
+        "--market-impact-bps-per-1pct-turnover",
+        type=float,
+        default=None,
+        help="Round-trip impact bps charged per 1% participation in the smaller of day/baseline turnover.",
+    )
     close_fade.add_argument("--stop-loss-pct", type=float, default=None, help="Hard short stop as decimal; 0 disables.")
     close_fade.add_argument("--take-profit-pct", type=float, default=None, help="Fixed short take-profit as decimal; 0 disables.")
+    close_fade.add_argument(
+        "--time-decay-take-profit-floor-pct",
+        type=float,
+        default=None,
+        help="Smallest short take-profit target after time decay. Requires take-profit-pct and minutes > 0.",
+    )
+    close_fade.add_argument(
+        "--time-decay-take-profit-minutes",
+        type=int,
+        default=None,
+        help="Minutes after profit protection activation to decay take-profit down to the floor. 0 disables.",
+    )
     close_fade.add_argument("--basket-stop-loss-pct", type=float, default=None, help="Basket marked-loss stop as decimal; 0 disables.")
     close_fade.add_argument("--trailing-stop-pct", type=float, default=None, help="Trailing stop distance as decimal; 0 disables.")
     close_fade.add_argument("--trailing-activation-pct", type=float, default=None, help="Profit threshold before trailing activates.")
@@ -232,6 +266,16 @@ def build_parser() -> argparse.ArgumentParser:
     close_grid.add_argument("--pump-filters", default=None, help="Comma-separated filters: all,pump,non_pump.")
     close_grid.add_argument("--stop-loss-pcts", default=None, help="Comma-separated hard stop pcts; include 0 for no stop.")
     close_grid.add_argument("--take-profit-pcts", default=None, help="Comma-separated fixed take-profit pcts; include 0 to disable.")
+    close_grid.add_argument(
+        "--time-decay-take-profit-floor-pcts",
+        default=None,
+        help="Comma-separated take-profit floor pcts for time decay; include 0 to disable.",
+    )
+    close_grid.add_argument(
+        "--time-decay-take-profit-minutes",
+        default=None,
+        help="Comma-separated minutes for take-profit decay after profit protection activation; include 0 to disable.",
+    )
     close_grid.add_argument("--basket-stop-loss-pcts", default=None, help="Comma-separated basket marked-loss stops; include 0 to disable.")
     close_grid.add_argument("--trailing-stop-pcts", default=None, help="Comma-separated trailing stop pcts; include 0 to disable.")
     close_grid.add_argument("--trailing-activation-pcts", default=None, help="Comma-separated trailing activation pcts.")
@@ -240,10 +284,22 @@ def build_parser() -> argparse.ArgumentParser:
     close_grid.add_argument("--mfe-giveback-activation-pcts", default=None, help="Comma-separated MFE giveback activation pcts.")
     close_grid.add_argument("--mfe-giveback-pcts", default=None, help="Comma-separated MFE giveback fractions; include 0 to disable.")
     close_grid.add_argument("--vwap-reversion-pcts", default=None, help="Comma-separated entry-to-VWAP gap fractions; include 0 to disable.")
+    close_grid.add_argument(
+        "--profit-protection-delay-minutes",
+        default=None,
+        help="Comma-separated minutes after final entry fill before adaptive exits can trigger.",
+    )
     close_grid.add_argument("--liquidity-lookback-days", default=None, help="Comma-separated baseline liquidity lookbacks.")
     close_grid.add_argument("--liquidity-rank-mins", default=None, help="Comma-separated baseline liquidity rank floors.")
     close_grid.add_argument("--liquidity-rank-maxs", default=None, help="Comma-separated baseline liquidity rank ceilings; 0 disables.")
     close_grid.add_argument("--min-baseline-turnovers", default=None, help="Comma-separated minimum prior baseline quote turnover filters.")
+    close_grid.add_argument("--coin-vwap-extension-maxs", default=None, help="Comma-separated max VWAP-extension filters; 0 disables.")
+    close_grid.add_argument("--market-median-day-return-maxs", default=None, help="Comma-separated market-momentum caps; 0 disables.")
+    close_grid.add_argument("--organic-move-score-maxs", default=None, help="Comma-separated organic-score caps; 0 disables.")
+    close_grid.add_argument("--manipulation-risk-score-mins", default=None, help="Comma-separated manipulation-risk minimums; 0 disables.")
+    close_grid.add_argument("--squeeze-risk-score-maxs", default=None, help="Comma-separated squeeze-risk caps; 0 disables.")
+    close_grid.add_argument("--require-open-interest-contexts", default=None, help="Comma-separated booleans for requiring OI context.")
+    close_grid.add_argument("--require-all-contexts", default=None, help="Comma-separated booleans for requiring all causal context feeds.")
     close_grid.add_argument("--account-equities", default=None, help="Comma-separated account equity assumptions for capacity caps.")
     close_grid.add_argument("--max-position-weights", default=None, help="Comma-separated per-symbol weight caps; 0 disables.")
     close_grid.add_argument(
@@ -255,6 +311,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--max-trade-notional-pct-baseline-turnovers",
         default=None,
         help="Comma-separated prior baseline turnover notional caps; 0 disables.",
+    )
+    close_grid.add_argument(
+        "--market-impact-bps-per-1pct-turnovers",
+        default=None,
+        help="Comma-separated round-trip impact bps per 1% turnover participation.",
     )
     close_grid.add_argument("--cost-multipliers", default=None, help="Comma-separated cost multipliers.")
     close_grid.add_argument("--workers", type=int, default=0, help="Parallel worker processes. 0 uses CPU count minus one; 1 is serial.")
@@ -467,12 +528,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.fixture:
             outputs = generate_fixture_data(data_root)
         else:
-            if not args.symbols or not args.start or not args.end:
+            symbols = _symbols_from_cli(args.symbols, args.symbols_file)
+            if not symbols or not args.start or not args.end:
                 raise RuntimeError("Real downloads require --symbols, --start, and --end")
             outputs = download_market_data(
                 data_root,
                 config=config,
-                symbols=[item.strip().upper() for item in args.symbols.split(",") if item.strip()],
+                symbols=symbols,
                 start_ms=parse_date_ms(args.start),
                 end_ms=parse_date_ms(args.end),
                 datasets={item.strip() for item in args.datasets.split(",") if item.strip()},
@@ -499,7 +561,7 @@ def main(argv: list[str] | None = None) -> int:
             quote_suffix=args.quote_suffix,
             start=args.start,
             end=args.end,
-            symbols=_csv_str(args.symbols, ()),
+            symbols=_symbols_from_cli(args.symbols, args.symbols_file),
             max_symbols=args.max_symbols,
             workers=args.workers,
             name=args.name,
@@ -517,10 +579,12 @@ def main(argv: list[str] | None = None) -> int:
         kline_config = ArchiveKlineDownloadConfig(
             start=args.start,
             end=args.end,
-            symbols=_csv_str(args.symbols, ()),
+            symbols=_symbols_from_cli(args.symbols, args.symbols_file),
             max_rows=args.max_rows,
             workers=args.workers,
             missing_only=not args.include_existing,
+            include_flow=args.include_flow,
+            keep_archives=not args.discard_archives,
             name=args.name,
         )
         payload = run_archive_klines_download(data_root, config=kline_config)
@@ -871,10 +935,45 @@ def _close_fade_config_from_args(base: DailyCloseFadeConfig, args: argparse.Name
             if getattr(args, "coin_vwap_extension_min", None) is not None
             else base.coin_vwap_extension_min
         ),
+        coin_vwap_extension_max=(
+            getattr(args, "coin_vwap_extension_max", None)
+            if getattr(args, "coin_vwap_extension_max", None) is not None
+            else base.coin_vwap_extension_max
+        ),
         coin_late_volume_ratio_min=(
             getattr(args, "coin_late_volume_ratio_min", None)
             if getattr(args, "coin_late_volume_ratio_min", None) is not None
             else base.coin_late_volume_ratio_min
+        ),
+        market_median_day_return_max=(
+            getattr(args, "market_median_day_return_max", None)
+            if getattr(args, "market_median_day_return_max", None) is not None
+            else base.market_median_day_return_max
+        ),
+        organic_move_score_max=(
+            getattr(args, "organic_move_score_max", None)
+            if getattr(args, "organic_move_score_max", None) is not None
+            else base.organic_move_score_max
+        ),
+        manipulation_risk_score_min=(
+            getattr(args, "manipulation_risk_score_min", None)
+            if getattr(args, "manipulation_risk_score_min", None) is not None
+            else base.manipulation_risk_score_min
+        ),
+        squeeze_risk_score_max=(
+            getattr(args, "squeeze_risk_score_max", None)
+            if getattr(args, "squeeze_risk_score_max", None) is not None
+            else base.squeeze_risk_score_max
+        ),
+        require_open_interest_context=(
+            getattr(args, "require_open_interest_context", None)
+            if getattr(args, "require_open_interest_context", None) is not None
+            else base.require_open_interest_context
+        ),
+        require_all_context=(
+            getattr(args, "require_all_context", None)
+            if getattr(args, "require_all_context", None) is not None
+            else base.require_all_context
         ),
         position_sizing=(
             getattr(args, "position_sizing", None)
@@ -896,8 +995,23 @@ def _close_fade_config_from_args(base: DailyCloseFadeConfig, args: argparse.Name
             if args.max_trade_notional_pct_baseline_turnover is not None
             else base.max_trade_notional_pct_of_baseline_turnover
         ),
+        market_impact_bps_per_1pct_turnover=(
+            args.market_impact_bps_per_1pct_turnover
+            if getattr(args, "market_impact_bps_per_1pct_turnover", None) is not None
+            else base.market_impact_bps_per_1pct_turnover
+        ),
         stop_loss_pct=args.stop_loss_pct if args.stop_loss_pct is not None else base.stop_loss_pct,
         take_profit_pct=args.take_profit_pct if args.take_profit_pct is not None else base.take_profit_pct,
+        time_decay_take_profit_floor_pct=(
+            getattr(args, "time_decay_take_profit_floor_pct", None)
+            if getattr(args, "time_decay_take_profit_floor_pct", None) is not None
+            else base.time_decay_take_profit_floor_pct
+        ),
+        time_decay_take_profit_minutes=(
+            getattr(args, "time_decay_take_profit_minutes", None)
+            if getattr(args, "time_decay_take_profit_minutes", None) is not None
+            else base.time_decay_take_profit_minutes
+        ),
         basket_stop_loss_pct=(
             args.basket_stop_loss_pct
             if args.basket_stop_loss_pct is not None
@@ -964,6 +1078,7 @@ def _close_fade_base_from_grid_args(base: DailyCloseFadeConfig, args: argparse.N
         max_position_weight=base.max_position_weight,
         max_trade_notional_pct_of_day_turnover=base.max_trade_notional_pct_of_day_turnover,
         max_trade_notional_pct_of_baseline_turnover=base.max_trade_notional_pct_of_baseline_turnover,
+        market_impact_bps_per_1pct_turnover=base.market_impact_bps_per_1pct_turnover,
         exclude_symbols=_close_fade_exclusions(args, base.exclude_symbols),
         require_archive_membership=args.require_archive_membership or base.require_archive_membership,
     )
@@ -1021,6 +1136,14 @@ def _close_fade_grid_config_from_args(base: DailyCloseFadeGridConfig, args: argp
         pump_filters=_csv_str(args.pump_filters, base.pump_filters),
         stop_loss_pcts=_csv_float(args.stop_loss_pcts, base.stop_loss_pcts),
         take_profit_pcts=_csv_float(args.take_profit_pcts, base.take_profit_pcts),
+        time_decay_take_profit_floor_pcts=_csv_float(
+            args.time_decay_take_profit_floor_pcts,
+            base.time_decay_take_profit_floor_pcts,
+        ),
+        time_decay_take_profit_minutes=_csv_int(
+            args.time_decay_take_profit_minutes,
+            base.time_decay_take_profit_minutes,
+        ),
         basket_stop_loss_pcts=_csv_float(args.basket_stop_loss_pcts, base.basket_stop_loss_pcts),
         trailing_stop_pcts=_csv_float(args.trailing_stop_pcts, base.trailing_stop_pcts),
         trailing_activation_pcts=_csv_float(args.trailing_activation_pcts, base.trailing_activation_pcts),
@@ -1033,10 +1156,30 @@ def _close_fade_grid_config_from_args(base: DailyCloseFadeGridConfig, args: argp
         ),
         mfe_giveback_pcts=_csv_float(args.mfe_giveback_pcts, base.mfe_giveback_pcts),
         vwap_reversion_pcts=_csv_float(args.vwap_reversion_pcts, base.vwap_reversion_pcts),
+        profit_protection_delay_minutes=_csv_int(
+            args.profit_protection_delay_minutes,
+            base.profit_protection_delay_minutes,
+        ),
         liquidity_lookback_days=_csv_int(args.liquidity_lookback_days, base.liquidity_lookback_days),
         liquidity_rank_mins=_csv_int(args.liquidity_rank_mins, base.liquidity_rank_mins),
         liquidity_rank_maxs=_csv_int(args.liquidity_rank_maxs, base.liquidity_rank_maxs),
         min_baseline_turnovers=_csv_float(args.min_baseline_turnovers, base.min_baseline_turnovers),
+        coin_vwap_extension_maxs=_csv_float(args.coin_vwap_extension_maxs, base.coin_vwap_extension_maxs),
+        market_median_day_return_maxs=_csv_float(
+            args.market_median_day_return_maxs,
+            base.market_median_day_return_maxs,
+        ),
+        organic_move_score_maxs=_csv_float(args.organic_move_score_maxs, base.organic_move_score_maxs),
+        manipulation_risk_score_mins=_csv_float(
+            args.manipulation_risk_score_mins,
+            base.manipulation_risk_score_mins,
+        ),
+        squeeze_risk_score_maxs=_csv_float(args.squeeze_risk_score_maxs, base.squeeze_risk_score_maxs),
+        require_open_interest_contexts=_csv_bool(
+            args.require_open_interest_contexts,
+            base.require_open_interest_contexts,
+        ),
+        require_all_contexts=_csv_bool(args.require_all_contexts, base.require_all_contexts),
         account_equities=_csv_float(args.account_equities, base.account_equities),
         max_position_weights=_csv_float(args.max_position_weights, base.max_position_weights),
         max_trade_notional_pct_day_turnovers=_csv_float(
@@ -1046,6 +1189,10 @@ def _close_fade_grid_config_from_args(base: DailyCloseFadeGridConfig, args: argp
         max_trade_notional_pct_baseline_turnovers=_csv_float(
             args.max_trade_notional_pct_baseline_turnovers,
             base.max_trade_notional_pct_baseline_turnovers,
+        ),
+        market_impact_bps_per_1pct_turnovers=_csv_float(
+            args.market_impact_bps_per_1pct_turnovers,
+            base.market_impact_bps_per_1pct_turnovers,
         ),
         cost_multipliers=_csv_float(args.cost_multipliers, base.cost_multipliers),
         start_ms=parse_date_ms(args.start) if args.start else base.start_ms,
@@ -1149,7 +1296,14 @@ def _add_forward_fade_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-position-weight", type=float, default=None, help="Per-symbol portfolio weight cap; 0 disables.")
     parser.add_argument("--coin-excess-vs-market-min", type=float, default=None, help="Require coin day return minus market median to exceed this value.")
     parser.add_argument("--coin-vwap-extension-min", type=float, default=None, help="Require signal price extension above intraday VWAP.")
+    parser.add_argument("--coin-vwap-extension-max", type=float, default=None, help="Reject coins too extended above intraday VWAP; 0 disables.")
     parser.add_argument("--coin-late-volume-ratio-min", type=float, default=None, help="Require last-60m turnover versus average day-to-date hourly turnover.")
+    parser.add_argument("--market-median-day-return-max", type=float, default=None, help="Reject baskets when same-day alt market median return is too hot; 0 disables.")
+    parser.add_argument("--organic-move-score-max", type=float, default=None, help="Reject moves that look too organic; 0 disables.")
+    parser.add_argument("--manipulation-risk-score-min", type=float, default=None, help="Require a minimum manipulation-risk score; 0 disables.")
+    parser.add_argument("--squeeze-risk-score-max", type=float, default=None, help="Reject high squeeze-risk candidates; 0 disables.")
+    parser.add_argument("--require-open-interest-context", action="store_true", default=None, help="Only trade candidates with causal open-interest context.")
+    parser.add_argument("--require-all-context", action="store_true", default=None, help="Only trade candidates with funding, OI, premium, and trade-flow context.")
     parser.add_argument("--position-sizing", default=None, help="Position sizing mode: equal or score_capped.")
     parser.add_argument("--score-weight-power", type=float, default=None, help="Power applied to score for score_capped sizing.")
     parser.add_argument(
@@ -1271,6 +1425,14 @@ def _csv_str(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
     if value is None:
         return default
     return tuple(item.strip() for item in value.split(",") if item.strip())
+
+
+def _symbols_from_cli(symbols: str | None, symbols_file: str | None = None) -> tuple[str, ...]:
+    values = list(_csv_str(symbols, ()))
+    if symbols_file:
+        text = Path(symbols_file).expanduser().read_text(encoding="utf-8")
+        values.extend(_csv_str(text.replace("\n", ","), ()))
+    return tuple(dict.fromkeys(item.upper() for item in values if item.strip()))
 
 
 def _csv_int(value: str | None, default: tuple[int, ...]) -> tuple[int, ...]:

@@ -11,9 +11,9 @@ DEFAULT_VOLUME_PROMOTION_GLOB = (
     "data/agc-bybit-3y-auto150-20230503-20260503/reports/volume_promotion_splits/*/promotion/"
     "volume_promotion_report.json"
 )
-DEFAULT_CLOSE_FADE_PROMOTION = (
-    "data/daily-close-fade-1m-3y-current-top160-20230503-20260503/reports/"
-    "daily_close_fade_grid_splits/daily_close_fade_promotion_report.json"
+DEFAULT_CLOSE_FADE_PROFIT_PROTECTION = (
+    "data/research_reports/profit_protection_recheck_20260508/"
+    "corrected_profit_protection_summary.json"
 )
 DEFAULT_PIT_COVERAGE = "data/daily-close-fade-pit-20230503-20260503/reports/archive_pit_coverage_report.json"
 
@@ -28,7 +28,10 @@ def main() -> int:
             if volume_paths
             else [_missing_check("volume_promotion", Path(args.volume_promotion_glob))]
         ),
-        evaluate_promotion(Path(args.close_fade_promotion), name="close_fade_promotion"),
+        evaluate_close_fade_profit_protection(
+            Path(args.close_fade_profit_protection),
+            name="close_fade_profit_protection",
+        ),
     ]
     payload = {
         "strict": args.strict,
@@ -56,7 +59,7 @@ def parse_args() -> argparse.Namespace:
         help="Explicit volume promotion report JSON. Can be repeated. Overrides the default glob when provided.",
     )
     parser.add_argument("--volume-promotion-glob", default=DEFAULT_VOLUME_PROMOTION_GLOB)
-    parser.add_argument("--close-fade-promotion", default=DEFAULT_CLOSE_FADE_PROMOTION)
+    parser.add_argument("--close-fade-profit-protection", default=DEFAULT_CLOSE_FADE_PROFIT_PROTECTION)
     parser.add_argument(
         "--strict",
         action="store_true",
@@ -108,6 +111,29 @@ def evaluate_promotion(path: Path, *, name: str) -> dict[str, Any]:
     }
 
 
+def evaluate_close_fade_profit_protection(path: Path, *, name: str) -> dict[str, Any]:
+    payload = _read_json(path)
+    if payload is None:
+        return _missing_check(name, path)
+    rows = int(_number(payload.get("rows"), 0))
+    positive_all_splits = int(_number(payload.get("positive_all_splits"), 0))
+    best = payload.get("best", {})
+    min_split_return = _number(best.get("min_split_return"), 0.0) if isinstance(best, dict) else 0.0
+    passed = rows > 0 and positive_all_splits > 0
+    return {
+        "name": name,
+        "path": str(path),
+        "status": "pass" if passed else "fail",
+        "rows": rows,
+        "positive_all_splits": positive_all_splits,
+        "min_split_return": min_split_return,
+        "message": (
+            f"{positive_all_splits}/{rows} corrected variants positive in all splits; "
+            f"best min split return {min_split_return:.2%}"
+        ),
+    }
+
+
 def overall_status(checks: list[dict[str, Any]], *, strict: bool) -> str:
     statuses = [str(check.get("status")) for check in checks]
     if strict:
@@ -153,6 +179,7 @@ def format_readiness_report(payload: dict[str, Any]) -> str:
             "- `pass` means the artifact met its own configured gate.",
             "- `fail` means the artifact exists but rejected promotion/readiness.",
             "- `missing` means the required report has not been generated yet.",
+            "- Close-fade readiness uses corrected non-warm-start profit-protection artifacts; legacy warm-start promotion reports are invalid.",
             "- Use `--strict` in overnight jobs when missing artifacts should fail the run.",
             "",
         ]

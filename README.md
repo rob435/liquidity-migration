@@ -7,7 +7,7 @@ trading bot.
 
 Active research lead: **daily-close short fade with 22:00-23:00 TWAP entry**.
 
-Current promoted research contract:
+Current implementation contract:
 
 ```text
 Universe: Bybit USDT linear perps
@@ -19,13 +19,25 @@ Max hold: 180m after TWAP completes
 Disaster stop: 20% above average entry, active immediately from first fill
 Adaptive protection: 0.25x daily-vol trail plus 20% MFE giveback after +1% MFE,
   active only after final add + 15m
+Adaptive protection state: starts at activation time; it does not inherit
+  pre-activation lows from the TWAP/delay window
 Sizing: score-capped, max 80% basket weight per symbol
 Liquidity: prior 7d baseline quote-turnover ranks 31-150
 Candidate gate: coin excess vs market >= 8%, VWAP extension >= 3.5%,
   late-volume ratio >= 1.0x
 ```
 
-The latest local current-top-160 benchmark is deliberately labeled as biased:
+The 2026-05-08 profit-protection audit invalidated the old headline benchmark:
+
+```text
+Old +16,991.58% run: legacy warm-started adaptive protection
+Immediate-exit artifact: 647 / 750 trades exited by post-TWAP minute 16
+Basket clustering: 342 / 435 baskets had every trade exit by minute 16
+Corrected default rerun: -4.75%, Sharpe-like 0.22, max DD -53.15%
+Corrected 216-variant grid: 0 variants positive in all train/validation/OOS splits
+```
+
+The old local current-top-160 benchmark is retained only as a legacy artifact:
 
 ```text
 Data: current top-160 Bybit symbols, 2023-05-15 to 2026-05-02
@@ -37,8 +49,13 @@ Worst day: -12.84%
 Report: data/research_reports/daily_close_twap_2200_2300_current_top160_20260504/
 ```
 
-This is **not final alpha proof** because the current-top-160 universe is
-survivorship-biased. The point-in-time archive path is still the proof gate.
+This is **not final alpha proof** because it is current-universe biased and
+because its adaptive exits used the now-corrected warm-start behavior. The
+point-in-time archive path is still the proof gate.
+
+All future research claims must pass
+[docs/backtesting_errors_we_never_repeat.md](docs/backtesting_errors_we_never_repeat.md).
+If a run violates that document, it is not alpha evidence.
 
 ## Important Boundary
 
@@ -51,6 +68,10 @@ not fake this as one 22:00 or 23:00 fill.
 - [configs/volume_alpha.default.yaml](configs/volume_alpha.default.yaml): active
   research config.
 - [docs/daily_close_fade.md](docs/daily_close_fade.md): active strategy notes.
+- [docs/profit_protection_audit_20260508.md](docs/profit_protection_audit_20260508.md):
+  audit that invalidated the old close-fade headline benchmark.
+- [docs/backtesting_errors_we_never_repeat.md](docs/backtesting_errors_we_never_repeat.md):
+  permanent backtesting-error standard and promotion checklist.
 - [docs/walk_forward_universe.md](docs/walk_forward_universe.md): PIT proof
   standard.
 - [docs/forward_testing.md](docs/forward_testing.md): forward/demo boundary.
@@ -73,7 +94,7 @@ Windows:
 powershell -ExecutionPolicy Bypass -File .\scripts\windows_setup.ps1
 ```
 
-## Run Current Daily-Close TWAP Backtest
+## Reproduce Legacy Daily-Close Forensics
 
 Requires the 1m dataset:
 
@@ -90,6 +111,9 @@ python -m aggression_carry \
   daily-close-fade
 ```
 
+This reruns the corrected implementation on the old current-top-160 dataset.
+Use it for forensic comparison only; it is not a promotion path.
+
 Core outputs:
 
 ```text
@@ -98,7 +122,7 @@ data/daily-close-fade-1m-3y-current-top160-20230503-20260503/daily_close_fade_tr
 data/daily-close-fade-1m-3y-current-top160-20230503-20260503/daily_close_fade_baskets/
 ```
 
-Readable export from the latest run:
+Legacy readable export:
 
 ```text
 data/research_reports/daily_close_twap_2200_2300_current_top160_20260504/trades_all.csv
@@ -129,7 +153,7 @@ data/research_reports/research_log/research_log.md
 data/research_reports/research_log/runs/<run_id>.md
 ```
 
-Review that log before changing promoted configs or rerunning a similar idea.
+Review that log before changing research configs or rerunning a similar idea.
 
 ## Point-In-Time Proof
 
@@ -145,4 +169,5 @@ Do not promote the TWAP result to real money until:
 
 The old live runtime, blended signal stack, Telegram trading bot behavior,
 legacy SignalEngine/execution/state/alerting modules, and repo-local agent
-tooling were intentionally removed. Do not rebuild them into this research repo.
+tooling were intentionally removed. Demo deployment wrappers are also out of
+scope. Do not rebuild them into this research repo.

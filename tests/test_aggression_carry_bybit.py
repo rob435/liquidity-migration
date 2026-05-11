@@ -138,6 +138,43 @@ def test_kline_download_chunks_full_range_when_bybit_returns_newest_first(monkey
     assert max(int(call["end"]) - int(call["start"]) for call in client._client.calls) <= interval_ms * 2
 
 
+def test_price_index_kline_downloads_use_deduped_time_windows(monkeypatch) -> None:
+    interval_ms = bybit.INTERVAL_MS["60"]
+    timestamps = [index * interval_ms for index in range(6)]
+
+    class FakeHTTP:
+        def __init__(self, *, testnet: bool):
+            self.mark_calls = []
+            self.index_calls = []
+            self.premium_calls = []
+
+        def get_mark_price_kline(self, **params):
+            self.mark_calls.append(params)
+            return _kline_page(timestamps, params)
+
+        def get_index_price_kline(self, **params):
+            self.index_calls.append(params)
+            return _kline_page(timestamps, params)
+
+        def get_premium_index_price_kline(self, **params):
+            self.premium_calls.append(params)
+            return _kline_page(timestamps, params)
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+
+    client = bybit.BybitMarketData()
+    mark = client.get_mark_price_klines("BTCUSDT", "60", timestamps[0], timestamps[-1], limit=3)
+    index = client.get_index_price_klines("BTCUSDT", "60", timestamps[0], timestamps[-1], limit=3)
+    premium = client.get_premium_index_klines("BTCUSDT", "60", timestamps[0], timestamps[-1], limit=3)
+
+    assert [int(row[0]) for row in mark] == timestamps
+    assert [int(row[0]) for row in index] == timestamps
+    assert [int(row[0]) for row in premium] == timestamps
+    assert len(client._client.mark_calls) > 1
+    assert len(client._client.index_calls) > 1
+    assert len(client._client.premium_calls) > 1
+
+
 def test_time_range_download_pages_backward_when_bybit_returns_newest_first(monkeypatch) -> None:
     timestamps = [index * 1000 for index in range(10)]
 
@@ -171,4 +208,12 @@ def _newest_first_page(timestamps: list[int], params: dict, timestamp_key: str, 
     end = int(params["endTime"])
     limit = int(params[limit_key])
     rows = [{timestamp_key: str(ts), "fundingRate": "0.0001", "openInterest": "100"} for ts in timestamps if start <= ts <= end]
+    return {"retCode": 0, "result": {"list": list(reversed(rows))[:limit]}}
+
+
+def _kline_page(timestamps: list[int], params: dict) -> dict:
+    start = int(params["start"])
+    end = int(params["end"])
+    limit = int(params["limit"])
+    rows = [[str(ts), "1.0", "1.1", "0.9", "1.05"] for ts in timestamps if start <= ts <= end]
     return {"retCode": 0, "result": {"list": list(reversed(rows))[:limit]}}

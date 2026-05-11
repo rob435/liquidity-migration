@@ -9,6 +9,7 @@ from aggression_carry.config import CostConfig, DailyCloseFadeConfig, DailyClose
 from aggression_carry.daily_close_fade import (
     DailyCloseFadeDiagnosticsConfig,
     _short_return,
+    iter_close_fade_grid_configs,
     run_daily_close_fade,
     run_daily_close_fade_diagnostics,
     run_daily_close_fade_grid,
@@ -40,6 +41,11 @@ def test_daily_close_fade_excludes_young_pumps_and_writes_trade_ledger(tmp_path)
     features = read_dataset(tmp_path, "daily_close_fade_features")
 
     assert payload["rows"]["trades"] == 2
+    assert (tmp_path / "reports" / "daily_close_fade_equity.csv").exists()
+    assert (tmp_path / "reports" / "daily_close_fade_equity_curve.svg").exists()
+    assert payload["backtest_validity"]["label"] == "biased_benchmark"
+    assert payload["backtest_validity"]["can_support_promotion"] is False
+    assert payload["summary"]["funding_mode"] == "missing"
     assert trades["symbol"].to_list() == ["OLD1USDT", "OLD2USDT"]
     assert "YOUNGUSDT" not in trades["symbol"].to_list()
     assert set(trades["exit_reason"].to_list()) == {"max_hold"}
@@ -47,6 +53,244 @@ def test_daily_close_fade_excludes_young_pumps_and_writes_trade_ledger(tmp_path)
     young = features.filter(pl.col("symbol") == "YOUNGUSDT").row(0, named=True)
     assert young["eligible"] is False
     assert young["age_days"] < 10.0
+    assert "context_fade_score" in features.columns
+
+
+def test_daily_close_fade_include_symbols_limits_feature_universe(tmp_path) -> None:
+    _write_close_fade_fixture(tmp_path)
+
+    payload = run_daily_close_fade(
+        tmp_path,
+        fade_config=DailyCloseFadeConfig(
+            signal_minute=23 * 60,
+            top_n=2,
+            hold_minutes=60,
+            score="day_return",
+            min_age_days=10,
+            include_symbols=("OLD2USDT",),
+            exclude_symbols=(),
+        ),
+        cost_config=CostConfig(maker_fee_bps=0, taker_fee_bps=0, maker_adverse_selection_bps=0, taker_slippage_bps_liquid=0),
+    )
+
+    trades = read_dataset(tmp_path, "daily_close_fade_trades")
+    features = read_dataset(tmp_path, "daily_close_fade_features")
+
+    assert payload["rows"]["trades"] == 1
+    assert trades["symbol"].to_list() == ["OLD2USDT"]
+    assert features["symbol"].unique().to_list() == ["OLD2USDT"]
+
+
+def test_daily_close_fade_signal_features_ignore_open_signal_bar(tmp_path) -> None:
+    start = datetime(2025, 1, 15, tzinfo=UTC)
+    start_ms = int(start.timestamp() * 1000)
+    signal_minute = 22 * 60
+    symbol = "CAUSEUSDT"
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "ts_ms": start_ms,
+                    "symbol": symbol,
+                    "category": "linear",
+                    "contract_type": "LinearPerpetual",
+                    "status": "Trading",
+                    "settle_coin": "USDT",
+                    "launch_time_ms": int((start - timedelta(days=40)).timestamp() * 1000),
+                    "tick_size": 0.001,
+                    "qty_step": 0.001,
+                    "min_order_qty": 0.001,
+                    "min_notional_value": 5.0,
+                    "funding_interval_min": 480,
+                    "is_prelisting": False,
+                }
+            ]
+        ),
+        tmp_path,
+        "instruments",
+    )
+    rows = []
+    for minute in range(signal_minute + 2):
+        close = 100.0 + minute / 100.0
+        high = close
+        if minute == signal_minute:
+            close = 999.0
+            high = 999.0
+        rows.append(
+            {
+                "ts_ms": start_ms + minute * 60_000,
+                "symbol": symbol,
+                "open": close,
+                "high": high,
+                "low": close,
+                "close": close,
+                "volume_base": 100.0,
+                "turnover_quote": close * 100.0,
+                "source": "fixture",
+            }
+        )
+    write_dataset(pl.DataFrame(rows), tmp_path, "klines_1m")
+
+    features = daily_close_fade_module.build_daily_close_fade_features(
+        tmp_path,
+        config=DailyCloseFadeConfig(signal_minute=signal_minute, min_age_days=10, exclude_symbols=()),
+        signal_minutes=(signal_minute,),
+    )
+    row = features.row(0, named=True)
+
+    assert row["signal_ts_ms"] == start_ms + signal_minute * 60_000
+    assert row["bar_count"] == signal_minute
+    assert row["expected_bar_count"] == signal_minute
+    assert row["bar_coverage"] == 1.0
+    assert row["signal_close"] == 100.0 + (signal_minute - 1) / 100.0
+    assert row["day_high"] < 999.0
+
+
+def test_daily_close_fade_uses_optional_context_and_funding_carry(tmp_path) -> None:
+    _write_close_fade_fixture(tmp_path)
+    start = datetime(2025, 1, 15, tzinfo=UTC)
+    signal_ts_ms = int((start + timedelta(hours=23)).timestamp() * 1000)
+    entry_ts_ms = signal_ts_ms
+
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "ts_ms": signal_ts_ms - 8 * 60 * 60 * 1000,
+                    "symbol": "OLD1USDT",
+                    "funding_rate": 0.001,
+                    "funding_interval_min": 480,
+                },
+                {
+                    "ts_ms": entry_ts_ms + 60 * 60 * 1000,
+                    "symbol": "OLD1USDT",
+                    "funding_rate": 0.002,
+                    "funding_interval_min": 480,
+                },
+            ]
+        ),
+        tmp_path,
+        "funding",
+    )
+    write_dataset(
+        pl.DataFrame(
+            [
+                {"ts_ms": signal_ts_ms - 24 * 60 * 60 * 1000, "symbol": "OLD1USDT", "open_interest_value": 1_000_000.0},
+                {"ts_ms": signal_ts_ms - 60 * 60 * 1000, "symbol": "OLD1USDT", "open_interest_value": 1_200_000.0},
+                {"ts_ms": signal_ts_ms, "symbol": "OLD1USDT", "open_interest_value": 1_500_000.0},
+            ]
+        ),
+        tmp_path,
+        "open_interest",
+    )
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "ts_ms": signal_ts_ms - 60 * 60 * 1000,
+                    "symbol": "OLD1USDT",
+                    "buy_quote": 800_000.0,
+                    "sell_quote": 200_000.0,
+                    "buy_base": 8000.0,
+                    "sell_base": 2000.0,
+                    "trade_count_buy": 80,
+                    "trade_count_sell": 20,
+                    "total_quote": 1_000_000.0,
+                    "signed_quote": 600_000.0,
+                    "trade_count": 100,
+                    "imbalance": 0.6,
+                }
+            ]
+        ),
+        tmp_path,
+        "signed_flow_1h",
+    )
+    write_dataset(
+        pl.DataFrame(
+            [
+                {"ts_ms": signal_ts_ms - 2 * 60 * 60 * 1000, "symbol": "OLD1USDT", "open": 0.004, "high": 0.006, "low": 0.0, "close": 0.005},
+                {"ts_ms": signal_ts_ms - 60 * 60 * 1000, "symbol": "OLD1USDT", "open": 0.006, "high": 0.02, "low": 0.0, "close": 0.01},
+                {"ts_ms": signal_ts_ms, "symbol": "OLD1USDT", "open": 0.01, "high": 0.03, "low": 0.0, "close": 0.025},
+            ]
+        ),
+        tmp_path,
+        "premium_index_1h",
+    )
+
+    payload = run_daily_close_fade(
+        tmp_path,
+        fade_config=DailyCloseFadeConfig(
+            signal_minute=23 * 60,
+            top_n=1,
+            hold_minutes=60,
+            score="context_fade_score",
+            min_age_days=10,
+            stop_loss_pct=0.0,
+            trailing_stop_pct=0.0,
+            exclude_symbols=(),
+        ),
+        cost_config=CostConfig(maker_fee_bps=0, taker_fee_bps=0, maker_adverse_selection_bps=0, taker_slippage_bps_liquid=0),
+    )
+
+    features = read_dataset(tmp_path, "daily_close_fade_features").filter(pl.col("symbol") == "OLD1USDT").row(0, named=True)
+    trades = read_dataset(tmp_path, "daily_close_fade_trades")
+
+    assert features["funding_rate_8h_equiv"] == 0.001
+    assert features["has_open_interest_context"] is True
+    assert features["has_premium_context"] is True
+    assert features["has_trade_flow_context"] is True
+    assert features["oi_change_1h"] > 0.0
+    assert features["premium_index_close"] == 0.01
+    assert round(features["premium_change_1h"], 6) == 0.005
+    assert features["flow_imbalance_60m"] == 0.6
+    assert trades["funding_mode"].to_list() == ["modeled"]
+    assert trades["has_premium_context"].to_list() == [True]
+    assert trades["funding_event_count"].to_list() == [1]
+    assert round(trades["funding_return"].item(), 6) == 0.002
+    assert payload["summary"]["funding_mode"] == "modeled"
+    assert payload["summary"]["all_context_rate"] == 1.0
+
+
+def test_daily_close_fade_marks_missing_crossed_funding_event(tmp_path) -> None:
+    _write_close_fade_fixture(tmp_path)
+    start = datetime(2025, 1, 15, tzinfo=UTC)
+    signal_ts_ms = int((start + timedelta(hours=23)).timestamp() * 1000)
+
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "ts_ms": signal_ts_ms - 8 * 60 * 60 * 1000,
+                    "symbol": "OLD1USDT",
+                    "funding_rate": 0.001,
+                    "funding_interval_min": 480,
+                }
+            ]
+        ),
+        tmp_path,
+        "funding",
+    )
+
+    payload = run_daily_close_fade(
+        tmp_path,
+        fade_config=DailyCloseFadeConfig(
+            signal_minute=23 * 60,
+            top_n=1,
+            hold_minutes=60,
+            score="day_return",
+            min_age_days=10,
+            stop_loss_pct=0.0,
+            trailing_stop_pct=0.0,
+            exclude_symbols=(),
+        ),
+        cost_config=CostConfig(maker_fee_bps=0, taker_fee_bps=0, maker_adverse_selection_bps=0, taker_slippage_bps_liquid=0),
+    )
+
+    trades = read_dataset(tmp_path, "daily_close_fade_trades")
+
+    assert trades["funding_mode"].to_list() == ["missing_expected"]
+    assert trades["funding_event_count"].to_list() == [0]
+    assert payload["summary"]["funding_mode"] == "missing"
 
 
 def test_daily_close_fade_uses_linear_usdt_short_returns() -> None:
@@ -107,6 +351,35 @@ def test_daily_close_fade_take_profit_exit_reason(tmp_path) -> None:
     assert trades["exit_reason"].to_list() == ["take_profit"]
     assert trades["symbol"].to_list() == ["OLD1USDT"]
     assert round(trades["gross_return"].item(), 6) == 0.05
+
+
+def test_daily_close_fade_time_decay_take_profit_exits_before_max_hold(tmp_path) -> None:
+    _write_close_fade_fixture(tmp_path, rebound=True)
+
+    payload = run_daily_close_fade(
+        tmp_path,
+        fade_config=DailyCloseFadeConfig(
+            signal_minute=23 * 60,
+            top_n=1,
+            hold_minutes=60,
+            score="day_return",
+            min_age_days=10,
+            stop_loss_pct=0.20,
+            take_profit_pct=0.10,
+            time_decay_take_profit_floor_pct=0.05,
+            time_decay_take_profit_minutes=1,
+            stop_delay_minutes=0,
+            exclude_symbols=(),
+        ),
+        cost_config=CostConfig(maker_fee_bps=0, taker_fee_bps=0, maker_adverse_selection_bps=0, taker_slippage_bps_liquid=0),
+    )
+
+    trades = read_dataset(tmp_path, "daily_close_fade_trades")
+
+    assert payload["rows"]["trades"] == 1
+    assert trades["exit_reason"].to_list() == ["time_decay_take_profit"]
+    assert round(trades["gross_return"].item(), 6) == 0.05
+    assert trades["post_twap_hold_minutes"].item() < 60
 
 
 def test_daily_close_fade_stop_wins_when_same_bar_hits_stop_and_take_profit(tmp_path) -> None:
@@ -225,6 +498,40 @@ def test_daily_close_fade_twap_averages_entry_and_delays_profit_protection(tmp_p
     assert trade["profit_protection_active_time"] == "2025-01-15T23:15:00+00:00"
     assert round(trade["entry_price"], 10) == round(expected_entry, 10)
     assert trade["post_twap_hold_minutes"] <= 60.0
+
+
+def test_daily_close_fade_profit_protection_does_not_warm_start_before_activation(tmp_path) -> None:
+    _write_profit_protection_warm_start_fixture(tmp_path)
+
+    run_daily_close_fade(
+        tmp_path,
+        fade_config=DailyCloseFadeConfig(
+            signal_minute=22 * 60,
+            top_n=1,
+            hold_minutes=60,
+            entry_delay_minutes=0,
+            entry_twap_minutes=60,
+            score="day_return",
+            pump_filter="all",
+            min_age_days=10,
+            stop_loss_pct=0.20,
+            vol_trailing_stop_mult=0.0,
+            mfe_giveback_activation_pct=0.01,
+            mfe_giveback_pct=0.20,
+            stop_delay_minutes=0,
+            profit_protection_delay_minutes=15,
+            exclude_symbols=(),
+        ),
+        cost_config=CostConfig(maker_fee_bps=0, taker_fee_bps=0, maker_adverse_selection_bps=0, taker_slippage_bps_liquid=0),
+    )
+
+    trade = read_dataset(tmp_path, "daily_close_fade_trades").row(0, named=True)
+
+    assert trade["profit_protection_active_time"] == "2025-01-15T23:15:00+00:00"
+    assert trade["mfe"] > 0.05
+    assert trade["exit_reason"] == "max_hold"
+    assert trade["exit_time"] == "2025-01-16T00:00:00+00:00"
+    assert trade["post_twap_hold_minutes"] == 60.0
 
 
 def test_daily_close_fade_twap_hard_stop_can_be_active_from_first_fill(tmp_path) -> None:
@@ -379,6 +686,7 @@ def test_daily_close_fade_grid_runs_small_fixture(tmp_path) -> None:
             take_profit_pcts=(0.0, 0.05),
             trailing_stop_pcts=(0.0,),
             trailing_activation_pcts=(0.0,),
+            profit_protection_delay_minutes=(0, 15),
             cost_multipliers=(1.0,),
         ),
         cost_config=CostConfig(maker_fee_bps=0, taker_fee_bps=0, maker_adverse_selection_bps=0, taker_slippage_bps_liquid=0),
@@ -387,9 +695,46 @@ def test_daily_close_fade_grid_runs_small_fixture(tmp_path) -> None:
 
     grid = read_dataset(tmp_path, "daily_close_fade_grid")
 
-    assert payload["rows"] == 8
-    assert grid.height == 8
+    assert payload["rows"] == 16
+    assert grid.height == 16
+    assert set(grid["profit_protection_delay_minutes"].to_list()) == {0, 15}
     assert grid["total_return"].max() > 0.0
+
+
+def test_daily_close_fade_grid_deduplicates_disabled_time_decay_take_profit() -> None:
+    configs = iter_close_fade_grid_configs(
+        DailyCloseFadeGridConfig(
+            signal_minutes=(23 * 60,),
+            top_ns=(1,),
+            hold_minutes=(60,),
+            scores=("day_return",),
+            pump_filters=("all",),
+            stop_loss_pcts=(0.0,),
+            take_profit_pcts=(0.0, 0.10),
+            time_decay_take_profit_floor_pcts=(0.0, 0.05),
+            time_decay_take_profit_minutes=(0, 30),
+            basket_stop_loss_pcts=(0.0,),
+            trailing_stop_pcts=(0.0,),
+            trailing_activation_pcts=(0.0,),
+            vol_trailing_stop_mults=(0.0,),
+            vol_trailing_activation_mults=(0.0,),
+            mfe_giveback_activation_pcts=(0.0,),
+            mfe_giveback_pcts=(0.0,),
+            vwap_reversion_pcts=(0.0,),
+            profit_protection_delay_minutes=(0,),
+            liquidity_rank_mins=(1,),
+            liquidity_rank_maxs=(0,),
+            cost_multipliers=(1.0,),
+        ),
+        DailyCloseFadeConfig(min_age_days=10, exclude_symbols=()),
+    )
+
+    assert len(configs) == 3
+    assert {(item.take_profit_pct, item.time_decay_take_profit_floor_pct, item.time_decay_take_profit_minutes) for item in configs} == {
+        (0.0, 0.0, 0),
+        (0.10, 0.0, 0),
+        (0.10, 0.05, 30),
+    }
 
 
 def test_daily_close_fade_grid_supports_date_splits(tmp_path) -> None:
@@ -638,6 +983,78 @@ def test_daily_close_fade_score_capped_sizing_weights_selected_pumps() -> None:
     assert round(weights[1], 6) == round(0.12 / 0.36, 6)
 
 
+def test_daily_close_fade_context_quality_filters_reject_risky_candidates() -> None:
+    features = pl.DataFrame(
+        [
+            {
+                **_feature_candidate("GOODUSDT", 0.20, 0.12, 0.080, 1.4),
+                "market_median_day_return": 0.04,
+                "organic_move_score": 0.7,
+                "manipulation_risk_score": 0.6,
+                "squeeze_risk_score": 0.5,
+                "has_open_interest_context": True,
+                "has_funding_context": True,
+                "has_premium_context": True,
+                "has_trade_flow_context": True,
+            },
+            {
+                **_feature_candidate("HOTMKTUSDT", 0.22, 0.15, 0.070, 1.5),
+                "market_median_day_return": 0.09,
+                "organic_move_score": 0.7,
+                "manipulation_risk_score": 0.8,
+                "squeeze_risk_score": 0.5,
+                "has_open_interest_context": True,
+                "has_funding_context": True,
+                "has_premium_context": True,
+                "has_trade_flow_context": True,
+            },
+            {
+                **_feature_candidate("NOOIUSDT", 0.25, 0.16, 0.090, 1.6),
+                "market_median_day_return": 0.04,
+                "organic_move_score": 0.7,
+                "manipulation_risk_score": 0.8,
+                "squeeze_risk_score": 0.5,
+                "has_open_interest_context": False,
+                "has_funding_context": True,
+                "has_premium_context": True,
+                "has_trade_flow_context": True,
+            },
+            {
+                **_feature_candidate("SQUEEZEUSDT", 0.24, 0.16, 0.220, 1.6),
+                "market_median_day_return": 0.04,
+                "organic_move_score": 0.7,
+                "manipulation_risk_score": 0.8,
+                "squeeze_risk_score": 1.7,
+                "has_open_interest_context": True,
+                "has_funding_context": True,
+                "has_premium_context": True,
+                "has_trade_flow_context": True,
+            },
+        ],
+        infer_schema_length=None,
+    )
+
+    selected = select_close_fade_candidates(
+        features,
+        DailyCloseFadeConfig(
+            signal_minute=23 * 60,
+            top_n=5,
+            score="vol_adjusted_day_return",
+            pump_filter="pump",
+            coin_vwap_extension_min=0.035,
+            coin_vwap_extension_max=0.15,
+            market_median_day_return_max=0.05,
+            organic_move_score_max=1.5,
+            manipulation_risk_score_min=0.25,
+            squeeze_risk_score_max=1.0,
+            require_open_interest_context=True,
+            exclude_symbols=(),
+        ),
+    )
+
+    assert selected["symbol"].to_list() == ["GOODUSDT"]
+
+
 def test_daily_close_fade_sleeves_compare_major_core_microcap(tmp_path) -> None:
     _write_close_fade_liquidity_fixture(tmp_path)
 
@@ -843,6 +1260,64 @@ def _write_close_fade_fixture(
                 }
             )
             previous = close
+
+    write_dataset(pl.DataFrame(instruments), tmp_path, "instruments")
+    write_dataset(pl.DataFrame(klines), tmp_path, "klines_1m")
+
+
+def _write_profit_protection_warm_start_fixture(tmp_path) -> None:
+    start = datetime(2025, 1, 15, tzinfo=UTC)
+    start_ms = int(start.timestamp() * 1000)
+    symbol = "WARMUSDT"
+    instruments = [
+        {
+            "ts_ms": start_ms,
+            "symbol": symbol,
+            "category": "linear",
+            "contract_type": "LinearPerpetual",
+            "status": "Trading",
+            "settle_coin": "USDT",
+            "launch_time_ms": int((start - timedelta(days=40)).timestamp() * 1000),
+            "tick_size": 0.001,
+            "qty_step": 0.001,
+            "min_order_qty": 0.001,
+            "min_notional_value": 5.0,
+            "funding_interval_min": 480,
+            "is_prelisting": False,
+        }
+    ]
+    klines = []
+    previous = 100.0
+    signal_minute = 22 * 60
+    for minute in range(24 * 60 + 70):
+        ts_ms = start_ms + minute * 60_000
+        if minute <= signal_minute:
+            close = 100.0 + 20.0 * minute / signal_minute
+        elif minute < 23 * 60:
+            close = 120.0 - 5.0 * (minute - signal_minute) / 60.0
+        elif minute <= 23 * 60 + 5:
+            close = 115.0 - 7.0 * (minute - 23 * 60) / 5.0
+        elif minute <= 23 * 60 + 15:
+            close = 108.0 + 11.0 * (minute - (23 * 60 + 5)) / 10.0
+        else:
+            close = 119.0
+        open_price = previous
+        high = max(open_price, close) * 1.001
+        low = min(open_price, close) * 0.999
+        klines.append(
+            {
+                "ts_ms": ts_ms,
+                "symbol": symbol,
+                "open": open_price,
+                "high": high,
+                "low": low,
+                "close": close,
+                "volume_base": 100.0,
+                "turnover_quote": 100.0 * close,
+                "source": "fixture",
+            }
+        )
+        previous = close
 
     write_dataset(pl.DataFrame(instruments), tmp_path, "instruments")
     write_dataset(pl.DataFrame(klines), tmp_path, "klines_1m")

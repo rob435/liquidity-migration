@@ -21,11 +21,12 @@ def main() -> int:
     output_dir = Path(args.report_dir) if args.report_dir else data_root / "reports"
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    symbols = _symbol_filters(args.symbols, args.symbols_file)
     manifest = _filtered_manifest(
         read_dataset(data_root, "archive_trade_manifest"),
         start=args.start,
         end=args.end,
-        symbols=_csv_symbols(args.symbols),
+        symbols=symbols,
         max_rows=args.max_rows,
     )
     if manifest.is_empty():
@@ -36,16 +37,20 @@ def main() -> int:
         manifest,
         min_bars_per_day=args.min_bars_per_day,
         require_next_day=not args.no_require_next_day,
+        require_flow=args.require_flow,
+        min_flow_hours_per_day=args.min_flow_hours_per_day,
     )
     monthly = summarize_coverage_monthly(coverage)
-    symbols = summarize_coverage_symbols(coverage)
+    symbol_summary = summarize_coverage_symbols(coverage)
     payload = {
         "created_at": datetime.now().astimezone().isoformat(),
         "data_root": str(data_root),
         "start": args.start,
         "end": args.end,
-        "symbols_filter": list(_csv_symbols(args.symbols)),
+        "symbols_filter": list(symbols),
         "min_bars_per_day": args.min_bars_per_day,
+        "require_flow": args.require_flow,
+        "min_flow_hours_per_day": args.min_flow_hours_per_day,
         "require_next_day": not args.no_require_next_day,
         "min_coverage_rate": args.min_coverage_rate,
         "min_usable_rate": args.min_usable_rate,
@@ -55,10 +60,10 @@ def main() -> int:
 
     coverage.write_csv(output_dir / "archive_pit_coverage_rows.csv")
     monthly.write_csv(output_dir / "archive_pit_coverage_monthly.csv")
-    symbols.write_csv(output_dir / "archive_pit_coverage_symbols.csv")
+    symbol_summary.write_csv(output_dir / "archive_pit_coverage_symbols.csv")
     (output_dir / "archive_pit_coverage_report.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     (output_dir / "archive_pit_coverage_report.md").write_text(
-        format_archive_pit_coverage_report(payload, monthly, symbols),
+        format_archive_pit_coverage_report(payload, monthly, symbol_summary),
         encoding="utf-8",
     )
     print(
@@ -79,8 +84,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--start", default=None, help="Inclusive manifest date filter YYYY-MM-DD.")
     parser.add_argument("--end", default=None, help="Inclusive manifest date filter YYYY-MM-DD.")
     parser.add_argument("--symbols", default="", help="Optional comma-separated symbol allowlist.")
+    parser.add_argument("--symbols-file", default="", help="Optional file containing comma- or newline-separated symbol allowlist.")
     parser.add_argument("--max-rows", type=int, default=0, help="Maximum manifest rows to audit; 0 disables.")
     parser.add_argument("--min-bars-per-day", type=int, default=1200, help="Minimum 1m bars for a partition to count covered.")
+    parser.add_argument("--require-flow", action="store_true", help="Require same-day signed_flow_1h coverage for usable rows.")
+    parser.add_argument("--min-flow-hours-per-day", type=int, default=20, help="Minimum signed_flow_1h rows for a partition to count covered.")
     parser.add_argument("--min-coverage-rate", type=float, default=0.0, help="Exit 2 if covered-row rate is below this fraction.")
     parser.add_argument("--min-usable-rate", type=float, default=0.0, help="Exit 2 if close-fade usable-row rate is below this fraction.")
     parser.add_argument(
@@ -97,6 +105,8 @@ def build_archive_pit_coverage(
     *,
     min_bars_per_day: int = 1200,
     require_next_day: bool = True,
+    require_flow: bool = False,
+    min_flow_hours_per_day: int = 20,
 ) -> pl.DataFrame:
     rows: list[dict[str, Any]] = []
     for item in manifest.select(["symbol", "date", "url"]).sort(["date", "symbol"]).to_dicts():
@@ -107,7 +117,13 @@ def build_archive_pit_coverage(
         next_date = _next_date(archive_date)
         next_bar_rows = _partition_bar_rows(data_root, symbol=symbol, date=next_date)
         next_status = _coverage_status(next_bar_rows, min_bars_per_day=min_bars_per_day)
-        usable = status == "covered" and (not require_next_day or next_status == "covered")
+        flow_rows = _partition_dataset_rows(data_root, dataset="signed_flow_1h", symbol=symbol, date=archive_date)
+        flow_status = _coverage_status(flow_rows, min_bars_per_day=min_flow_hours_per_day)
+        usable = (
+            status == "covered"
+            and (not require_next_day or next_bar_rows > 0)
+            and (not require_flow or flow_rows >= min_flow_hours_per_day)
+        )
         rows.append(
             {
                 "symbol": symbol,
@@ -119,6 +135,8 @@ def build_archive_pit_coverage(
                 "next_date": next_date,
                 "next_bar_rows": next_bar_rows,
                 "next_status": next_status,
+                "flow_rows": flow_rows,
+                "flow_status": flow_status,
                 "usable_for_close_fade": usable,
             }
         )
@@ -161,6 +179,8 @@ def format_archive_pit_coverage_report(
         f"Date filter: {payload.get('start') or 'all'} to {payload.get('end') or 'all'}",
         f"Min bars/day: {payload['min_bars_per_day']}",
         f"Require next-day partition: {payload['require_next_day']}",
+        f"Require signed-flow coverage: {payload.get('require_flow', False)}",
+        f"Min signed-flow hours/day: {payload.get('min_flow_hours_per_day', 0)}",
         f"Minimum coverage gate: {payload.get('min_coverage_rate', 0.0):.2%}",
         f"Minimum usable gate: {payload.get('min_usable_rate', 0.0):.2%}",
         "",
@@ -169,23 +189,25 @@ def format_archive_pit_coverage_report(
         "| Metric | Value |",
         "|---|---:|",
         f"| Manifest rows | {summary['manifest_rows']} |",
+        f"| Processed rows | {summary.get('processed_rows', 0)} |",
         f"| Covered rows | {summary['covered_rows']} |",
         f"| Sparse rows | {summary['sparse_rows']} |",
         f"| Missing rows | {summary['missing_rows']} |",
         f"| Usable close-fade rows | {summary['usable_rows']} |",
+        f"| Processed rate | {summary.get('processed_rate', 0.0):.2%} |",
         f"| Coverage rate | {summary['coverage_rate']:.2%} |",
         f"| Usable rate | {summary['usable_rate']:.2%} |",
         "",
         "## Monthly Coverage",
         "",
-        "| Month | Manifest | Covered | Sparse | Missing | Usable | Coverage | Usable | Symbols |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Month | Manifest | Processed | Covered | Sparse | Missing | Usable | Processed | Dense | Usable | Symbols |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in monthly.to_dicts():
         lines.append(
-            f"| {row['month']} | {row['manifest_rows']} | {row['covered_rows']} | "
+            f"| {row['month']} | {row['manifest_rows']} | {row.get('processed_rows', 0)} | {row['covered_rows']} | "
             f"{row['sparse_rows']} | {row['missing_rows']} | {row['usable_rows']} | "
-            f"{row['coverage_rate']:.2%} | {row['usable_rate']:.2%} | {row['symbols']} |"
+            f"{row.get('processed_rate', 0.0):.2%} | {row['coverage_rate']:.2%} | {row['usable_rate']:.2%} | {row['symbols']} |"
         )
 
     lines.extend(
@@ -193,15 +215,15 @@ def format_archive_pit_coverage_report(
             "",
             "## Weakest Symbols",
             "",
-            "| Symbol | Manifest | Covered | Sparse | Missing | Usable | Coverage | Usable |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|",
+            "| Symbol | Manifest | Processed | Covered | Sparse | Missing | Usable | Processed | Dense | Usable |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for row in symbols.head(30).to_dicts() if not symbols.is_empty() else []:
         lines.append(
-            f"| {row['symbol']} | {row['manifest_rows']} | {row['covered_rows']} | "
+            f"| {row['symbol']} | {row['manifest_rows']} | {row.get('processed_rows', 0)} | {row['covered_rows']} | "
             f"{row['sparse_rows']} | {row['missing_rows']} | {row['usable_rows']} | "
-            f"{row['coverage_rate']:.2%} | {row['usable_rate']:.2%} |"
+            f"{row.get('processed_rate', 0.0):.2%} | {row['coverage_rate']:.2%} | {row['usable_rate']:.2%} |"
         )
 
     lines.extend(
@@ -247,6 +269,7 @@ def _filtered_manifest(
 def _coverage_aggs() -> list[pl.Expr]:
     return [
         pl.len().alias("manifest_rows"),
+        (pl.col("status") != "missing").sum().alias("processed_rows"),
         (pl.col("status") == "covered").sum().alias("covered_rows"),
         (pl.col("status") == "sparse").sum().alias("sparse_rows"),
         (pl.col("status") == "missing").sum().alias("missing_rows"),
@@ -257,6 +280,7 @@ def _coverage_aggs() -> list[pl.Expr]:
 
 def _coverage_rates() -> list[pl.Expr]:
     return [
+        (pl.col("processed_rows") / pl.col("manifest_rows")).alias("processed_rate"),
         (pl.col("covered_rows") / pl.col("manifest_rows")).alias("coverage_rate"),
         (pl.col("usable_rows") / pl.col("manifest_rows")).alias("usable_rate"),
     ]
@@ -266,10 +290,12 @@ def _payload_summary(coverage: pl.DataFrame) -> dict[str, Any]:
     if coverage.is_empty():
         return {
             "manifest_rows": 0,
+            "processed_rows": 0,
             "covered_rows": 0,
             "sparse_rows": 0,
             "missing_rows": 0,
             "usable_rows": 0,
+            "processed_rate": 0.0,
             "coverage_rate": 0.0,
             "usable_rate": 0.0,
         }
@@ -294,7 +320,11 @@ def _coverage_thresholds_pass(
 
 
 def _partition_bar_rows(data_root: str | Path, *, symbol: str, date: str) -> int:
-    part = dataset_path(data_root, "klines_1m") / f"date={date}" / f"symbol={symbol}" / "part.parquet"
+    return _partition_dataset_rows(data_root, dataset="klines_1m", symbol=symbol, date=date)
+
+
+def _partition_dataset_rows(data_root: str | Path, *, dataset: str, symbol: str, date: str) -> int:
+    part = dataset_path(data_root, dataset) / f"date={date}" / f"symbol={symbol}" / "part.parquet"
     if not part.exists() or part.stat().st_size <= 0:
         return 0
     try:
@@ -317,6 +347,17 @@ def _next_date(value: str) -> str:
 
 def _csv_symbols(value: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(item.strip().upper() for item in value.split(",") if item.strip()))
+
+
+def _symbol_filters(symbols: str, symbols_file: str) -> tuple[str, ...]:
+    values = list(_csv_symbols(symbols))
+    if symbols_file:
+        path = Path(symbols_file).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(f"symbols file not found: {path}")
+        text = path.read_text(encoding="utf-8")
+        values.extend(item.strip().upper() for chunk in text.splitlines() for item in chunk.split(",") if item.strip())
+    return tuple(dict.fromkeys(values))
 
 
 if __name__ == "__main__":

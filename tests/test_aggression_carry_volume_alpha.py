@@ -61,6 +61,9 @@ def test_volume_backtest_writes_trade_ledger(tmp_path: Path) -> None:
     equity = read_dataset(tmp_path, "volume_backtest_equity")
 
     assert payload["rows"]["trades"] > 0
+    assert payload["backtest_validity"]["label"] == "biased_benchmark"
+    assert payload["backtest_validity"]["can_support_promotion"] is False
+    assert payload["summary"]["funding_mode"] == "missing"
     assert {"entry_ts_ms", "exit_ts_ms", "exit_reason", "net_return"}.issubset(set(trades.columns))
     assert baskets.height > 0
     assert equity.height == baskets.height
@@ -174,6 +177,7 @@ def test_volume_backtest_stop_takes_precedence_when_stop_and_tp_hit_same_bar() -
         round_trip_cost_bps=0.0,
         stop_pct=0.20,
         rank_lookup={},
+        funding_lookup=None,
     )
 
     assert trade is not None
@@ -203,6 +207,7 @@ def test_volume_backtest_take_profit_is_symmetric_for_long_and_short() -> None:
         round_trip_cost_bps=0.0,
         stop_pct=0.20,
         rank_lookup={},
+        funding_lookup=None,
     )
     short_trade = _simulate_trade(
         symbol="TESTUSDT",
@@ -222,6 +227,7 @@ def test_volume_backtest_take_profit_is_symmetric_for_long_and_short() -> None:
         round_trip_cost_bps=0.0,
         stop_pct=0.20,
         rank_lookup={},
+        funding_lookup=None,
     )
 
     assert long_trade is not None

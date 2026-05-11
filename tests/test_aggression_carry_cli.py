@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from aggression_carry import cli as cli_module
 from aggression_carry.cli import build_parser, main
 
 
@@ -78,6 +79,45 @@ def test_cli_parses_forward_sleeves_alias(tmp_path: Path) -> None:
 
     assert args.command == "forward-sleeves"
     assert args.telegram is True
+
+
+def test_cli_reads_symbol_allowlist_file(tmp_path: Path) -> None:
+    symbols_file = tmp_path / "symbols.txt"
+    symbols_file.write_text("ethusdt\nSOLUSDT,btcusdt\n", encoding="utf-8")
+
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "download-data",
+            "--symbols",
+            "BTCUSDT",
+            "--symbols-file",
+            str(symbols_file),
+            "--start",
+            "2025-01-01",
+            "--end",
+            "2025-01-02",
+        ]
+    )
+
+    assert args.symbols_file == str(symbols_file)
+    assert cli_module._symbols_from_cli(args.symbols, args.symbols_file) == ("BTCUSDT", "ETHUSDT", "SOLUSDT")
+
+
+def test_cli_parses_archive_discard_archives(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "archive-download-klines",
+            "--include-flow",
+            "--discard-archives",
+        ]
+    )
+
+    assert args.include_flow is True
+    assert args.discard_archives is True
 
 
 def test_cli_parses_forward_audit_telegram(tmp_path: Path) -> None:
@@ -164,12 +204,15 @@ def test_cli_parses_daily_close_fade_grid_dates(tmp_path: Path) -> None:
             "2025-01-01",
             "--end",
             "2025-02-01",
+            "--profit-protection-delay-minutes",
+            "0,15,30",
         ]
     )
 
     assert args.command == "daily-close-fade-grid"
     assert args.start == "2025-01-01"
     assert args.end == "2025-02-01"
+    assert args.profit_protection_delay_minutes == "0,15,30"
 
 
 def test_cli_parses_bybit_demo_probe(tmp_path: Path) -> None:

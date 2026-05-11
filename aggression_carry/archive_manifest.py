@@ -16,7 +16,7 @@ import certifi
 import polars as pl
 
 from .archive import download_public_trade_archive, read_public_trade_archive
-from .ingestion import aggregate_trade_klines_1m
+from .ingestion import aggregate_signed_flow_1h, aggregate_signed_flow_1m, aggregate_trade_klines_1m
 from .storage import dataset_path, read_dataset, write_dataset
 
 
@@ -44,7 +44,10 @@ class ArchiveKlineDownloadConfig:
     max_rows: int = 0
     workers: int = 8
     missing_only: bool = True
+    include_flow: bool = False
+    keep_archives: bool = True
     name: str = "bybit-public-trading-klines"
+    exclude_keys: tuple[str, ...] = ()
 
 
 class _HrefParser(HTMLParser):
@@ -222,12 +225,27 @@ def run_archive_klines_download(
     rows = _select_manifest_rows(manifest, data_root=data_root, config=config)
     worker_count = max(1, min(config.workers, len(rows))) if rows else 1
     if worker_count == 1:
-        results = [_download_one_archive_kline(data_root, row, missing_only=config.missing_only) for row in rows]
+        results = [
+            _download_one_archive_kline(
+                data_root,
+                row,
+                missing_only=config.missing_only,
+                include_flow=config.include_flow,
+                keep_archive=config.keep_archives,
+            )
+            for row in rows
+        ]
     else:
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
             results = list(
                 executor.map(
-                    lambda row: _download_one_archive_kline(data_root, row, missing_only=config.missing_only),
+                    lambda row: _download_one_archive_kline(
+                        data_root,
+                        row,
+                        missing_only=config.missing_only,
+                        include_flow=config.include_flow,
+                        keep_archive=config.keep_archives,
+                    ),
                     rows,
                 )
             )
@@ -236,6 +254,9 @@ def run_archive_klines_download(
     downloaded = result_frame.filter(pl.col("status") == "downloaded").height if not result_frame.is_empty() else 0
     cached = result_frame.filter(pl.col("status") == "cached").height if not result_frame.is_empty() else 0
     empty = result_frame.filter(pl.col("status") == "empty").height if not result_frame.is_empty() else 0
+    bar_rows = int(result_frame["bar_rows"].sum()) if not result_frame.is_empty() and "bar_rows" in result_frame.columns else 0
+    flow_1m_rows = int(result_frame["flow_1m_rows"].sum()) if not result_frame.is_empty() and "flow_1m_rows" in result_frame.columns else 0
+    flow_1h_rows = int(result_frame["flow_1h_rows"].sum()) if not result_frame.is_empty() and "flow_1h_rows" in result_frame.columns else 0
     payload = {
         "name": config.name,
         "rows": len(rows),
@@ -244,13 +265,19 @@ def run_archive_klines_download(
         "cached": cached,
         "empty": empty,
         "failures": failures,
+        "bar_rows": bar_rows,
+        "flow_1m_rows": flow_1m_rows,
+        "flow_1h_rows": flow_1h_rows,
         "created_at": datetime.now(tz=UTC).isoformat(),
         "config": {
             "start": config.start,
             "end": config.end,
             "symbols": list(config.symbols),
+            "exclude_keys": len(config.exclude_keys),
             "max_rows": config.max_rows,
             "missing_only": config.missing_only,
+            "include_flow": config.include_flow,
+            "keep_archives": config.keep_archives,
         },
     }
 
@@ -297,6 +324,8 @@ def format_archive_klines_report(payload: dict[str, Any]) -> str:
         f"Created: {payload['created_at']}",
         f"Rows selected: {payload['rows']}",
         f"Workers: {payload['workers']}",
+        f"Include flow: {payload.get('config', {}).get('include_flow', False)}",
+        f"Keep archives: {payload.get('config', {}).get('keep_archives', True)}",
         "",
         "| Status | Count |",
         "|---|---:|",
@@ -304,6 +333,9 @@ def format_archive_klines_report(payload: dict[str, Any]) -> str:
         f"| Cached | {payload['cached']} |",
         f"| Empty | {payload['empty']} |",
         f"| Failed | {payload['failures']} |",
+        f"| Kline rows | {payload.get('bar_rows', 0)} |",
+        f"| Flow 1m rows | {payload.get('flow_1m_rows', 0)} |",
+        f"| Flow 1h rows | {payload.get('flow_1h_rows', 0)} |",
         "",
     ]
     return "\n".join(lines)
@@ -323,47 +355,114 @@ def _select_manifest_rows(
     symbols = tuple(dict.fromkeys(symbol.upper() for symbol in config.symbols if symbol.strip()))
     if symbols:
         frame = frame.filter(pl.col("symbol").is_in(symbols))
-    frame = frame.sort(["date", "symbol"])
+        order = pl.DataFrame({"symbol": list(symbols), "_symbol_order": list(range(len(symbols)))})
+        frame = frame.join(order, on="symbol", how="left").sort(["_symbol_order", "date"]).drop("_symbol_order")
+    else:
+        frame = frame.sort(["symbol", "date"])
+    if config.exclude_keys:
+        frame = (
+            frame.with_columns((pl.col("symbol") + "|" + pl.col("date")).alias("_manifest_key"))
+            .filter(~pl.col("_manifest_key").is_in(config.exclude_keys))
+            .drop("_manifest_key")
+        )
     rows = frame.to_dicts()
     if config.missing_only:
-        rows = [row for row in rows if not _kline_partition_exists(data_root, symbol=row["symbol"], date=row["date"])]
+        rows = [
+            row
+            for row in rows
+            if not _archive_outputs_ready(
+                data_root,
+                symbol=row["symbol"],
+                date=row["date"],
+                include_flow=config.include_flow,
+            )
+        ]
     if config.max_rows > 0:
         rows = rows[: config.max_rows]
     return rows
 
 
-def _download_one_archive_kline(data_root: str | Path, row: dict[str, Any], *, missing_only: bool) -> dict[str, Any]:
+def _download_one_archive_kline(
+    data_root: str | Path,
+    row: dict[str, Any],
+    *,
+    missing_only: bool,
+    include_flow: bool,
+    keep_archive: bool,
+) -> dict[str, Any]:
     symbol = str(row["symbol"])
     archive_date = str(row["date"])
     url = str(row["url"])
-    if missing_only and _kline_partition_exists(data_root, symbol=symbol, date=archive_date):
-        return _download_result(row, status="cached", bar_rows=0)
+    need_klines = not missing_only or not _partition_exists(data_root, dataset="klines_1m", symbol=symbol, date=archive_date)
+    need_flow = include_flow and (
+        not missing_only
+        or not _partition_exists(data_root, dataset="signed_flow_1m", symbol=symbol, date=archive_date)
+        or not _partition_exists(data_root, dataset="signed_flow_1h", symbol=symbol, date=archive_date)
+    )
+    if not need_klines and not need_flow:
+        return _download_result(row, status="cached", bar_rows=0, flow_1m_rows=0, flow_1h_rows=0)
     local_path = Path(data_root) / "archives" / symbol / Path(urlparse(url).path).name
     try:
         archive_path = download_public_trade_archive(url, local_path)
         trades = read_public_trade_archive(archive_path, symbol=symbol)
-        klines = aggregate_trade_klines_1m(trades)
-        if klines.is_empty():
-            return _download_result(row, status="empty", bar_rows=0)
-        write_dataset(klines, data_root, "klines_1m", append=False)
-        return _download_result(row, status="downloaded", bar_rows=klines.height)
+        bar_rows = 0
+        flow_1m_rows = 0
+        flow_1h_rows = 0
+        if need_klines:
+            klines = aggregate_trade_klines_1m(trades)
+            if not klines.is_empty():
+                write_dataset(klines, data_root, "klines_1m", append=False)
+                bar_rows = klines.height
+        if need_flow:
+            flow_1m = aggregate_signed_flow_1m(trades)
+            flow_1h = aggregate_signed_flow_1h(flow_1m)
+            if not flow_1m.is_empty():
+                write_dataset(flow_1m, data_root, "signed_flow_1m")
+                flow_1m_rows = flow_1m.height
+            if not flow_1h.is_empty():
+                write_dataset(flow_1h, data_root, "signed_flow_1h")
+                flow_1h_rows = flow_1h.height
+        if bar_rows == 0 and flow_1m_rows == 0 and flow_1h_rows == 0:
+            if not keep_archive:
+                archive_path.unlink(missing_ok=True)
+            return _download_result(row, status="empty", bar_rows=0, flow_1m_rows=0, flow_1h_rows=0)
+        if not keep_archive:
+            archive_path.unlink(missing_ok=True)
+        return _download_result(row, status="downloaded", bar_rows=bar_rows, flow_1m_rows=flow_1m_rows, flow_1h_rows=flow_1h_rows)
     except Exception as exc:  # noqa: BLE001 - archive failures must be reported per row
-        return _download_result(row, status="failed", bar_rows=0, error=str(exc))
+        return _download_result(row, status="failed", bar_rows=0, flow_1m_rows=0, flow_1h_rows=0, error=str(exc))
 
 
-def _download_result(row: dict[str, Any], *, status: str, bar_rows: int, error: str = "") -> dict[str, Any]:
+def _download_result(
+    row: dict[str, Any],
+    *,
+    status: str,
+    bar_rows: int,
+    flow_1m_rows: int = 0,
+    flow_1h_rows: int = 0,
+    error: str = "",
+) -> dict[str, Any]:
     return {
         "symbol": row["symbol"],
         "date": row["date"],
         "url": row["url"],
         "status": status,
         "bar_rows": bar_rows,
+        "flow_1m_rows": flow_1m_rows,
+        "flow_1h_rows": flow_1h_rows,
         "error": error,
     }
 
 
-def _kline_partition_exists(data_root: str | Path, *, symbol: str, date: str) -> bool:
-    part = dataset_path(data_root, "klines_1m") / f"date={date}" / f"symbol={symbol}" / "part.parquet"
+def _archive_outputs_ready(data_root: str | Path, *, symbol: str, date: str, include_flow: bool) -> bool:
+    required = ["klines_1m"]
+    if include_flow:
+        required.extend(["signed_flow_1m", "signed_flow_1h"])
+    return all(_partition_exists(data_root, dataset=dataset, symbol=symbol, date=date) for dataset in required)
+
+
+def _partition_exists(data_root: str | Path, *, dataset: str, symbol: str, date: str) -> bool:
+    part = dataset_path(data_root, dataset) / f"date={date}" / f"symbol={symbol}" / "part.parquet"
     return part.exists() and part.stat().st_size > 0
 
 

@@ -195,6 +195,8 @@ def format_promotion_report(table: pl.DataFrame, metadata: dict[str, Any]) -> st
         "This joins raw score split diagnostics with split-grid exit results.",
         "A variant should not be treated as promoted unless the raw entry edge",
         "and the exit behavior both pass their gates.",
+        "Exit results must come from corrected non-warm-start profit-protection",
+        "semantics; legacy warm-start reports are invalid.",
         "",
         "## Inputs",
         "",
@@ -213,8 +215,8 @@ def format_promotion_report(table: pl.DataFrame, metadata: dict[str, Any]) -> st
         "",
         "## Top Rows",
         "",
-        "| Rank | Promote | Raw OK | Exit OK | Reason | Raw Cost Splits | Grid Positive Splits | Grid Min Return | Grid Avg Return | Stability | Signal | Delay | Horizon | Top N | Score | Stop | TP | Vol Trail | MFE GB | Cost |",
-        "|---:|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|",
+        "| Rank | Promote | Raw OK | Exit OK | Reason | Raw Cost Splits | Grid Positive Splits | Grid Min Return | Grid Avg Return | Stability | Signal | Entry Delay | Horizon | Profit Delay | Top N | Score | Stop | TP | Vol Trail | MFE GB | Cost |",
+        "|---:|---|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---:|",
     ]
     for index, row in enumerate(table.head(50).to_dicts() if not table.is_empty() else [], start=1):
         lines.append(
@@ -226,12 +228,13 @@ def format_promotion_report(table: pl.DataFrame, metadata: dict[str, Any]) -> st
             f"{_pct(row.get('min_total_return'))} | {_pct(row.get('avg_total_return'))} | "
             f"{_pct(row.get('stability_score'))} | {_format_signal_minute(row.get('signal_minute', 0))} | "
             f"{row.get('entry_delay_minutes', 0)} | {row.get('horizon_minutes', 0)} | "
+            f"{row.get('profit_protection_delay_minutes', 0)} | "
             f"{row.get('top_n', 0)} | {row.get('score', '')} | {_pct(row.get('stop_loss_pct'))} | "
             f"{_pct(row.get('take_profit_pct'))} | {_num(row.get('vol_trailing_stop_mult'), 2)}x | "
             f"{_pct(row.get('mfe_giveback_pct'))} | {_num(row.get('cost_multiplier'), 1)}x |"
         )
     if table.is_empty():
-        lines.append("|  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |")
+        lines.append("|  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |")
     lines.append("")
     return "\n".join(lines)
 
