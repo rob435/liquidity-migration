@@ -19,8 +19,11 @@ from aggression_carry.archive_manifest import (
 from aggression_carry.config import ResearchConfig
 from aggression_carry import downloaders
 from aggression_carry.downloaders import _archive_filename, download_market_data
-from aggression_carry.storage import read_dataset
-from aggression_carry.storage import write_dataset
+from aggression_carry.storage import read_dataset, write_dataset
+
+
+def test_archive_kline_default_requires_dense_utc_day() -> None:
+    assert ArchiveKlineDownloadConfig().min_existing_bars == 1440
 
 
 def test_read_bybit_public_trade_csv_gz_archive(tmp_path) -> None:
@@ -106,51 +109,145 @@ def test_run_archive_manifest_writes_symbol_date_dataset(tmp_path, monkeypatch) 
     ]
 
 
-def test_archive_download_selects_contiguous_symbol_dates(tmp_path) -> None:
-    manifest = pl.DataFrame(
-        [
-            {"symbol": "AAAUSDT", "date": "2025-01-01", "url": "https://example.test/a1.csv.gz"},
-            {"symbol": "AAAUSDT", "date": "2025-01-02", "url": "https://example.test/a2.csv.gz"},
-            {"symbol": "BBBUSDT", "date": "2025-01-01", "url": "https://example.test/b1.csv.gz"},
-            {"symbol": "BBBUSDT", "date": "2025-01-02", "url": "https://example.test/b2.csv.gz"},
-        ]
-    )
-    write_dataset(manifest, tmp_path, "archive_trade_manifest", partition_by=("date",), append=False)
+def test_archive_manifest_fetches_requested_symbol_missing_from_root_listing(tmp_path, monkeypatch) -> None:
+    pages = {
+        "https://public.bybit.com/trading/": '<a href="BTCUSDT/">BTCUSDT/</a>',
+        "https://public.bybit.com/trading/SPKUSDT/": '<a href="SPKUSDT2025-07-21.csv.gz">file</a>',
+    }
 
-    rows = manifest_module._select_manifest_rows(
-        read_dataset(tmp_path, "archive_trade_manifest"),
-        data_root=tmp_path,
-        config=ArchiveKlineDownloadConfig(start="2025-01-01", end="2025-01-02", max_rows=3),
+    monkeypatch.setattr(manifest_module, "fetch_directory_html", lambda url, *, timeout_seconds=60: pages[url])
+
+    payload = run_archive_manifest(
+        tmp_path,
+        config=ArchiveManifestConfig(
+            start="2025-07-21",
+            end="2025-07-21",
+            symbols=("SPKUSDT",),
+            workers=1,
+            name="fixture",
+        ),
     )
 
-    assert [(row["symbol"], row["date"]) for row in rows] == [
-        ("AAAUSDT", "2025-01-01"),
-        ("AAAUSDT", "2025-01-02"),
-        ("BBBUSDT", "2025-01-01"),
+    manifest = read_dataset(tmp_path, "archive_trade_manifest")
+    assert payload["rows"] == 1
+    assert manifest.select(["symbol", "date", "url"]).to_dicts() == [
+        {
+            "symbol": "SPKUSDT",
+            "date": "2025-07-21",
+            "url": "https://public.bybit.com/trading/SPKUSDT/SPKUSDT2025-07-21.csv.gz",
+        }
     ]
 
 
-def test_archive_download_respects_ranked_symbols_order(tmp_path) -> None:
+def test_archive_kline_download_rebuilds_sparse_existing_partition(tmp_path, monkeypatch) -> None:
     manifest = pl.DataFrame(
         [
-            {"symbol": "AAAUSDT", "date": "2025-01-01", "url": "https://example.test/a1.csv.gz"},
-            {"symbol": "AAAUSDT", "date": "2025-01-02", "url": "https://example.test/a2.csv.gz"},
-            {"symbol": "BBBUSDT", "date": "2025-01-01", "url": "https://example.test/b1.csv.gz"},
-            {"symbol": "BBBUSDT", "date": "2025-01-02", "url": "https://example.test/b2.csv.gz"},
+            {
+                "symbol": "AAAUSDT",
+                "date": "2025-01-01",
+                "url": "https://public.bybit.com/trading/AAAUSDT/AAAUSDT2025-01-01.csv.gz",
+                "source": "test",
+            }
+        ]
+    )
+    sparse = pl.DataFrame(
+        [
+            {
+                "ts_ms": 1_735_689_600_000,
+                "symbol": "AAAUSDT",
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "volume_base": 1.0,
+                "turnover_quote": 1.0,
+                "source": "sparse",
+            }
         ]
     )
     write_dataset(manifest, tmp_path, "archive_trade_manifest", partition_by=("date",), append=False)
+    write_dataset(sparse, tmp_path, "klines_1m", partition_by=("date", "symbol"), append=False)
 
-    rows = manifest_module._select_manifest_rows(
-        read_dataset(tmp_path, "archive_trade_manifest"),
-        data_root=tmp_path,
-        config=ArchiveKlineDownloadConfig(start="2025-01-01", end="2025-01-02", symbols=("BBBUSDT", "AAAUSDT"), max_rows=3),
+    def fake_download(url, destination):
+        assert url == "https://public.bybit.com/trading/AAAUSDT/AAAUSDT2025-01-01.csv.gz"
+        return destination
+
+    def fake_read(_path, *, symbol=None):
+        assert symbol == "AAAUSDT"
+        return pl.DataFrame(
+            [
+                {
+                    "trade_id": "a",
+                    "seq": None,
+                    "ts_ms": 1_735_689_600_000,
+                    "symbol": "AAAUSDT",
+                    "side": "Buy",
+                    "price": 100.0,
+                    "size_base": 1.0,
+                    "quote_value": 100.0,
+                    "is_block_trade": False,
+                    "is_rpi_trade": False,
+                },
+                {
+                    "trade_id": "b",
+                    "seq": None,
+                    "ts_ms": 1_735_689_660_000,
+                    "symbol": "AAAUSDT",
+                    "side": "Buy",
+                    "price": 101.0,
+                    "size_base": 1.0,
+                    "quote_value": 101.0,
+                    "is_block_trade": False,
+                    "is_rpi_trade": False,
+                },
+            ]
+        )
+
+    monkeypatch.setattr(manifest_module, "download_public_trade_archive", fake_download)
+    monkeypatch.setattr(manifest_module, "read_public_trade_archive", fake_read)
+
+    payload = run_archive_klines_download(
+        tmp_path,
+        config=ArchiveKlineDownloadConfig(
+            start="2025-01-01",
+            end="2025-01-01",
+            symbols=("AAAUSDT",),
+            workers=1,
+            missing_only=True,
+            min_existing_bars=1440,
+            name="fixture",
+        ),
     )
 
-    assert [(row["symbol"], row["date"]) for row in rows] == [
-        ("BBBUSDT", "2025-01-01"),
-        ("BBBUSDT", "2025-01-02"),
-        ("AAAUSDT", "2025-01-01"),
+    assert payload["rows"] == 1
+    assert payload["downloaded"] == 1
+    bars = read_dataset(tmp_path, "klines_1m")
+    assert bars.height == 1440
+    assert bars.select(["ts_ms", "symbol", "open", "close", "volume_base", "source"]).head(3).to_dicts() == [
+        {
+            "ts_ms": 1_735_689_600_000,
+            "symbol": "AAAUSDT",
+            "open": 100.0,
+            "close": 100.0,
+            "volume_base": 1.0,
+            "source": "bybit_public_trades",
+        },
+        {
+            "ts_ms": 1_735_689_660_000,
+            "symbol": "AAAUSDT",
+            "open": 101.0,
+            "close": 101.0,
+            "volume_base": 1.0,
+            "source": "bybit_public_trades",
+        },
+        {
+            "ts_ms": 1_735_689_720_000,
+            "symbol": "AAAUSDT",
+            "open": 101.0,
+            "close": 101.0,
+            "volume_base": 0.0,
+            "source": "bybit_public_trades",
+        },
     ]
 
 
@@ -430,20 +527,42 @@ def test_archive_manifest_downloader_resumes_and_writes_klines(tmp_path, monkeyp
     assert payload["downloaded"] == 1
     assert payload["failures"] == 0
     assert cached_payload["rows"] == 0
-    assert read_dataset(tmp_path, "klines_1m").height == 1
+    klines = read_dataset(tmp_path, "klines_1m")
+    assert klines.height == 1440
+    assert klines.select(["open", "close", "volume_base"]).head(2).to_dicts() == [
+        {"open": 10.0, "close": 10.0, "volume_base": 1.0},
+        {"open": 10.0, "close": 10.0, "volume_base": 0.0},
+    ]
 
 
-def test_archive_manifest_downloader_can_write_signed_flow(tmp_path, monkeypatch) -> None:
-    pages = {
-        "https://public.bybit.com/trading/": '<a href="BTCUSDT/">BTCUSDT/</a>',
-        "https://public.bybit.com/trading/BTCUSDT/": '<a href="BTCUSDT2025-01-01.csv.gz">file</a>',
-    }
-
-    monkeypatch.setattr(manifest_module, "fetch_directory_html", lambda url, *, timeout_seconds=60: pages[url])
-    run_archive_manifest(
-        tmp_path,
-        config=ArchiveManifestConfig(start="2025-01-01", end="2025-01-01", workers=1, name="fixture"),
+def test_archive_manifest_downloader_seeds_dense_day_from_previous_close(tmp_path, monkeypatch) -> None:
+    manifest = pl.DataFrame(
+        [
+            {
+                "symbol": "AAAUSDT",
+                "date": "2025-01-02",
+                "url": "https://public.bybit.com/trading/AAAUSDT/AAAUSDT2025-01-02.csv.gz",
+                "source": "test",
+            }
+        ]
     )
+    previous_day = pl.DataFrame(
+        [
+            {
+                "ts_ms": 1_735_775_940_000,
+                "symbol": "AAAUSDT",
+                "open": 98.0,
+                "high": 100.0,
+                "low": 98.0,
+                "close": 99.0,
+                "volume_base": 1.0,
+                "turnover_quote": 99.0,
+                "source": "fixture",
+            }
+        ]
+    )
+    write_dataset(manifest, tmp_path, "archive_trade_manifest", partition_by=("date",), append=False)
+    write_dataset(previous_day, tmp_path, "klines_1m", partition_by=("date", "symbol"), append=False)
 
     monkeypatch.setattr(manifest_module, "download_public_trade_archive", lambda _url, destination: destination)
     monkeypatch.setattr(
@@ -454,7 +573,132 @@ def test_archive_manifest_downloader_can_write_signed_flow(tmp_path, monkeypatch
                 {
                     "trade_id": "1",
                     "seq": None,
-                    "ts_ms": 1_735_689_600_100,
+                    "ts_ms": 1_735_776_120_000,
+                    "symbol": symbol,
+                    "side": "Buy",
+                    "price": 105.0,
+                    "size_base": 1.0,
+                    "quote_value": 105.0,
+                    "is_block_trade": False,
+                    "is_rpi_trade": False,
+                }
+            ]
+        ),
+    )
+
+    payload = run_archive_klines_download(
+        tmp_path,
+        config=ArchiveKlineDownloadConfig(start="2025-01-02", end="2025-01-02", workers=1, name="fixture"),
+    )
+
+    assert payload["downloaded"] == 1
+    rows = read_dataset(tmp_path, "klines_1m").filter(pl.col("date") == "2025-01-02")
+    assert rows.height == 1440
+    assert rows.select(["ts_ms", "open", "close", "volume_base"]).head(3).to_dicts() == [
+        {"ts_ms": 1_735_776_000_000, "open": 99.0, "close": 99.0, "volume_base": 0.0},
+        {"ts_ms": 1_735_776_060_000, "open": 99.0, "close": 99.0, "volume_base": 0.0},
+        {"ts_ms": 1_735_776_120_000, "open": 105.0, "close": 105.0, "volume_base": 1.0},
+    ]
+
+
+def test_archive_manifest_downloader_processes_dates_in_order_for_previous_close_seed(tmp_path, monkeypatch) -> None:
+    manifest = pl.DataFrame(
+        [
+            {
+                "symbol": "AAAUSDT",
+                "date": "2025-01-01",
+                "url": "https://public.bybit.com/trading/AAAUSDT/AAAUSDT2025-01-01.csv.gz",
+                "source": "test",
+            },
+            {
+                "symbol": "AAAUSDT",
+                "date": "2025-01-02",
+                "url": "https://public.bybit.com/trading/AAAUSDT/AAAUSDT2025-01-02.csv.gz",
+                "source": "test",
+            },
+        ]
+    )
+    write_dataset(manifest, tmp_path, "archive_trade_manifest", partition_by=("date",), append=False)
+
+    monkeypatch.setattr(manifest_module, "download_public_trade_archive", lambda _url, destination: destination)
+
+    def fake_read(path, *, symbol=None):
+        if "2025-01-01" in str(path):
+            return pl.DataFrame(
+                [
+                    {
+                        "trade_id": "d1",
+                        "seq": None,
+                        "ts_ms": 1_735_775_940_000,
+                        "symbol": symbol,
+                        "side": "Buy",
+                        "price": 99.0,
+                        "size_base": 1.0,
+                        "quote_value": 99.0,
+                        "is_block_trade": False,
+                        "is_rpi_trade": False,
+                    }
+                ]
+            )
+        return pl.DataFrame(
+            [
+                {
+                    "trade_id": "d2",
+                    "seq": None,
+                    "ts_ms": 1_735_776_120_000,
+                    "symbol": symbol,
+                    "side": "Buy",
+                    "price": 105.0,
+                    "size_base": 1.0,
+                    "quote_value": 105.0,
+                    "is_block_trade": False,
+                    "is_rpi_trade": False,
+                }
+            ]
+        )
+
+    monkeypatch.setattr(manifest_module, "read_public_trade_archive", fake_read)
+
+    payload = run_archive_klines_download(
+        tmp_path,
+        config=ArchiveKlineDownloadConfig(start="2025-01-01", end="2025-01-02", workers=2, name="fixture"),
+    )
+
+    assert payload["downloaded"] == 2
+    day_two = read_dataset(tmp_path, "klines_1m").filter(pl.col("date") == "2025-01-02")
+    assert day_two.select(["ts_ms", "open", "close"]).head(1).to_dicts() == [
+        {"ts_ms": 1_735_776_000_000, "open": 99.0, "close": 99.0}
+    ]
+
+
+def test_archive_manifest_downloader_discards_local_archive_after_success(tmp_path, monkeypatch) -> None:
+    manifest = pl.DataFrame(
+        [
+            {
+                "symbol": "AAAUSDT",
+                "date": "2025-01-01",
+                "url": "https://public.bybit.com/trading/AAAUSDT/AAAUSDT2025-01-01.csv.gz",
+                "source": "test",
+            }
+        ]
+    )
+    write_dataset(manifest, tmp_path, "archive_trade_manifest", partition_by=("date",), append=False)
+
+    def fake_download(_url, destination):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"raw archive")
+        return destination
+
+    monkeypatch.setattr(manifest_module, "download_public_trade_archive", fake_download)
+    monkeypatch.setattr(
+        manifest_module,
+        "read_public_trade_archive",
+        lambda _path, *, symbol=None: pl.DataFrame(
+            [
+                {
+                    "trade_id": "1",
+                    "seq": None,
+                    "ts_ms": 1_735_689_600_000,
                     "symbol": symbol,
                     "side": "Buy",
                     "price": 10.0,
@@ -462,19 +706,7 @@ def test_archive_manifest_downloader_can_write_signed_flow(tmp_path, monkeypatch
                     "quote_value": 10.0,
                     "is_block_trade": False,
                     "is_rpi_trade": False,
-                },
-                {
-                    "trade_id": "2",
-                    "seq": None,
-                    "ts_ms": 1_735_689_601_100,
-                    "symbol": symbol,
-                    "side": "Sell",
-                    "price": 11.0,
-                    "size_base": 2.0,
-                    "quote_value": 22.0,
-                    "is_block_trade": False,
-                    "is_rpi_trade": False,
-                },
+                }
             ]
         ),
     )
@@ -485,26 +717,68 @@ def test_archive_manifest_downloader_can_write_signed_flow(tmp_path, monkeypatch
             start="2025-01-01",
             end="2025-01-01",
             workers=1,
-            include_flow=True,
-            name="fixture",
-        ),
-    )
-    cached_payload = run_archive_klines_download(
-        tmp_path,
-        config=ArchiveKlineDownloadConfig(
-            start="2025-01-01",
-            end="2025-01-01",
-            workers=1,
-            include_flow=True,
+            discard_archives_after_success=True,
             name="fixture",
         ),
     )
 
     assert payload["downloaded"] == 1
-    assert payload["failures"] == 0
-    assert cached_payload["rows"] == 0
-    assert read_dataset(tmp_path, "signed_flow_1m").height == 1
-    assert read_dataset(tmp_path, "signed_flow_1h").height == 1
+    assert payload["archives_deleted"] == 1
+    assert not (tmp_path / "archives" / "AAAUSDT" / "AAAUSDT2025-01-01.csv.gz").exists()
+
+
+def test_archive_manifest_downloader_does_not_delete_external_archive_cache(tmp_path, monkeypatch) -> None:
+    manifest = pl.DataFrame(
+        [
+            {
+                "symbol": "AAAUSDT",
+                "date": "2025-01-01",
+                "url": "https://public.bybit.com/trading/AAAUSDT/AAAUSDT2025-01-01.csv.gz",
+                "source": "test",
+            }
+        ]
+    )
+    external_archive = tmp_path.parent / "external-cache" / "AAAUSDT2025-01-01.csv.gz"
+    external_archive.parent.mkdir(parents=True, exist_ok=True)
+    external_archive.write_bytes(b"raw archive")
+    write_dataset(manifest, tmp_path, "archive_trade_manifest", partition_by=("date",), append=False)
+
+    monkeypatch.setattr(manifest_module, "download_public_trade_archive", lambda _url, _destination: external_archive)
+    monkeypatch.setattr(
+        manifest_module,
+        "read_public_trade_archive",
+        lambda _path, *, symbol=None: pl.DataFrame(
+            [
+                {
+                    "trade_id": "1",
+                    "seq": None,
+                    "ts_ms": 1_735_689_600_000,
+                    "symbol": symbol,
+                    "side": "Buy",
+                    "price": 10.0,
+                    "size_base": 1.0,
+                    "quote_value": 10.0,
+                    "is_block_trade": False,
+                    "is_rpi_trade": False,
+                }
+            ]
+        ),
+    )
+
+    payload = run_archive_klines_download(
+        tmp_path,
+        config=ArchiveKlineDownloadConfig(
+            start="2025-01-01",
+            end="2025-01-01",
+            workers=1,
+            discard_archives_after_success=True,
+            name="fixture",
+        ),
+    )
+
+    assert payload["downloaded"] == 1
+    assert payload["archives_deleted"] == 0
+    assert external_archive.exists()
 
 
 def test_rest_kline_download_writes_each_symbol_and_resumes(tmp_path, monkeypatch, capsys) -> None:

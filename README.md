@@ -1,173 +1,86 @@
 # MODEL050426
 
-Bybit crypto research repo. This is a stripped-down alpha lab, not a real-money
-trading bot.
+Bybit demo-account trading system for the daily-close short fade.
 
-## Current Truth
+## Current Objective
 
-Active research lead: **daily-close short fade with 22:00-23:00 TWAP entry**.
+The main objective is to get the selected Stage 4 strategy working properly on the Bybit demo account, then use forward/demo evidence to decide the next change. The repo now treats demo execution, slice reconciliation, and exit parity with backtests as first-class production work.
 
-Current implementation contract:
+The private Bybit client is still demo-only by design: `demo=False` is refused in code. Real-money trading requires a separate explicit implementation decision.
 
-```text
-Universe: Bybit USDT linear perps
-Ranking time: 22:00 UTC, using only data available at 22:00
-Entry: equal 1m TWAP from 22:00 through 22:59
-Entry price: average fill price
-Exit: whole-symbol flatten, no same-symbol re-entry that day
-Max hold: 180m after TWAP completes
-Disaster stop: 20% above average entry, active immediately from first fill
-Adaptive protection: 0.25x daily-vol trail plus 20% MFE giveback after +1% MFE,
-  active only after final add + 15m
-Adaptive protection state: starts at activation time; it does not inherit
-  pre-activation lows from the TWAP/delay window
-Sizing: score-capped, max 80% basket weight per symbol
-Liquidity: prior 7d baseline quote-turnover ranks 31-150
-Candidate gate: coin excess vs market >= 8%, VWAP extension >= 3.5%,
-  late-volume ratio >= 1.0x
-```
+## Active Strategy
 
-The 2026-05-08 profit-protection audit invalidated the old headline benchmark:
+Selected strategy: `configs/volume_alpha.default.yaml` and `configs/daily_close_fade.lowcap_scam_tail_stage4_selected.yaml`.
 
-```text
-Old +16,991.58% run: legacy warm-started adaptive protection
-Immediate-exit artifact: 647 / 750 trades exited by post-TWAP minute 16
-Basket clustering: 342 / 435 baskets had every trade exit by minute 16
-Corrected default rerun: -4.75%, Sharpe-like 0.22, max DD -53.15%
-Corrected 216-variant grid: 0 variants positive in all train/validation/OOS splits
-```
+Key parameters:
 
-The old local current-top-160 benchmark is retained only as a legacy artifact:
+- Signal: 23:00 UTC
+- Side: short only
+- Ranking: `day_return`
+- Selection: top 1 pump candidate, baseline liquidity rank 226+
+- Entry: 60 equal 1-minute TWAP slices from 23:00 through 23:59 UTC
+- Hold: 360 minutes after TWAP completion
+- Stop: 8%, active from first fill
+- Take profit: 10%, then time-decay floor to 4% over 120 minutes after profit protection activates
+- Profit protection delay: 120 minutes after final TWAP slice
+- Capacity: 0.05% same-day turnover and 0.10% baseline turnover caps
+- Impact model: 3 bps per 1% turnover participation
 
-```text
-Data: current top-160 Bybit symbols, 2023-05-15 to 2026-05-02
-Trades: 750
-Total return: +16,991.58%
-Sharpe-like: 10.65
-Max drawdown: -15.39%
-Worst day: -12.84%
-Report: data/research_reports/daily_close_twap_2200_2300_current_top160_20260504/
-```
+Reference backtest snapshot: `docs/daily_close_fade_full_listing_scam_tail_stage4_20260510.md` reported 11.48% return, 5.51 Sharpe-like score, -3.17% max drawdown, and 74 trades under point-in-time Bybit archive membership.
 
-This is **not final alpha proof** because it is current-universe biased and
-because its adaptive exits used the now-corrected warm-start behavior. The
-point-in-time archive path is still the proof gate.
+## Demo Runtime
 
-All future research claims must pass
-[docs/backtesting_errors_we_never_repeat.md](docs/backtesting_errors_we_never_repeat.md).
-If a run violates that document, it is not alpha evidence.
+The demo runtime uses slice-level paper trades and slice-level Bybit demo orders. It does not collapse the 60-minute TWAP into one fill.
 
-## Important Boundary
+Default demo sizing is wallet-aware:
 
-Backtest TWAP is implemented. Forward/demo TWAP slicing is intentionally blocked
-until explicit per-slice paper and demo order accounting exists. The code must
-not fake this as one 22:00 or 23:00 fill.
+- `--use-wallet-balance`
+- `--max-order-notional 0`
+- `--max-total-new-notional 0`
+- `--max-order-notional-pct-equity 0.10`
+- `--max-total-new-notional-pct-equity 1.0`
 
-## Main Files
+For TWAP entries, the 10% cap applies to the whole paper trade per coin, then the entry is divided across the 60 slices.
 
-- [configs/volume_alpha.default.yaml](configs/volume_alpha.default.yaml): active
-  research config.
-- [docs/daily_close_fade.md](docs/daily_close_fade.md): active strategy notes.
-- [docs/profit_protection_audit_20260508.md](docs/profit_protection_audit_20260508.md):
-  audit that invalidated the old close-fade headline benchmark.
-- [docs/backtesting_errors_we_never_repeat.md](docs/backtesting_errors_we_never_repeat.md):
-  permanent backtesting-error standard and promotion checklist.
-- [docs/walk_forward_universe.md](docs/walk_forward_universe.md): PIT proof
-  standard.
-- [docs/forward_testing.md](docs/forward_testing.md): forward/demo boundary.
-- [docs/volume_alpha.md](docs/volume_alpha.md): secondary volume-alpha research.
-- [docs/bybit_aggression_carry_system_codex_spec.md](docs/bybit_aggression_carry_system_codex_spec.md):
-  compressed Bybit data/API reference; old composite spec is no longer active.
-
-## Setup
+Install the demo systemd units:
 
 ```bash
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-pytest -q
+scripts/install_bybit_demo_systemd.sh
 ```
 
-Windows:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\windows_setup.ps1
-```
-
-## Reproduce Legacy Daily-Close Forensics
-
-Requires the 1m dataset:
-
-```text
-data/daily-close-fade-1m-3y-current-top160-20230503-20260503
-```
-
-Run:
+Manual commands:
 
 ```bash
-python -m aggression_carry \
-  --data-root data/daily-close-fade-1m-3y-current-top160-20230503-20260503 \
-  --config configs/volume_alpha.default.yaml \
-  daily-close-fade
+python -m aggression_carry --config configs/volume_alpha.default.yaml --data-root data/forward-paper forward-run-sleeves --forward-mode scan --sleeves stage4_selected
+python -m aggression_carry --config configs/volume_alpha.default.yaml --data-root data/forward-paper bybit-demo-cycle --submit-orders --i-understand-demo-sync --use-wallet-balance --max-order-notional 0 --max-total-new-notional 0 --max-order-notional-pct-equity 0.10 --demo-entry-sleeves stage4_selected --forward-mode open-from-scan --require-first-slice
+python -m aggression_carry --config configs/volume_alpha.default.yaml --data-root data/forward-paper forward-audit --telegram
 ```
 
-This reruns the corrected implementation on the old current-top-160 dataset.
-Use it for forensic comparison only; it is not a promotion path.
+Emergency demo controls:
 
-Core outputs:
-
-```text
-data/daily-close-fade-1m-3y-current-top160-20230503-20260503/reports/daily_close_fade_report.md
-data/daily-close-fade-1m-3y-current-top160-20230503-20260503/daily_close_fade_trades/
-data/daily-close-fade-1m-3y-current-top160-20230503-20260503/daily_close_fade_baskets/
+```bash
+python -m aggression_carry --data-root data/forward-paper --config configs/volume_alpha.default.yaml bybit-demo-cancel-all --i-understand-demo-cancel-all
+python -m aggression_carry --data-root data/forward-paper --config configs/volume_alpha.default.yaml bybit-demo-flatten --i-understand-demo-flatten
 ```
 
-Legacy readable export:
+Pause new demo entries:
 
-```text
-data/research_reports/daily_close_twap_2200_2300_current_top160_20260504/trades_all.csv
-data/research_reports/daily_close_twap_2200_2300_current_top160_20260504/equity_curve.svg
+```bash
+touch data/forward-paper/DEMO_PAUSED
 ```
 
-## Windows Overnight Suite
+Resume:
 
-```powershell
-cd C:\Users\user\Desktop\MODEL05042026
-git pull --rebase --autostash
-powershell -ExecutionPolicy Bypass -File .\scripts\run_research_overnight_suite.ps1 -Suite both -Workers 8
+```bash
+rm -f data/forward-paper/DEMO_PAUSED
 ```
 
-If the daily-close 1m dataset is missing, `-Suite both` skips that leg and still
-runs the volume sweep. Use `-Suite daily-close` when missing 1m data should be a
-hard failure.
+## Useful Files
 
-The volume leg now defaults to the `promotion` preset. That preset tests actual
-volume-change scores plus dollar-volume rank, then runs train/validation/OOS
-promotion gates by liquidity bucket. It is slower than the old headline grid,
-but much more useful.
-
-Each overnight suite also writes an auditable research record:
-
-```text
-data/research_reports/research_log/research_log.md
-data/research_reports/research_log/runs/<run_id>.md
-```
-
-Review that log before changing research configs or rerunning a similar idea.
-
-## Point-In-Time Proof
-
-Do not promote the TWAP result to real money until:
-
-1. Bybit archive symbol/date membership is complete.
-2. Archive-derived 1m bars cover all eligible symbols, not only current winners.
-3. The same TWAP contract survives train/validation/OOS splits.
-4. Forward paper/demo implements real TWAP slices and the audit shows acceptable
-   missed fills, slippage, and execution drift.
-
-## Removed
-
-The old live runtime, blended signal stack, Telegram trading bot behavior,
-legacy SignalEngine/execution/state/alerting modules, and repo-local agent
-tooling were intentionally removed. Demo deployment wrappers are also out of
-scope. Do not rebuild them into this research repo.
+- `aggression_carry/daily_close_fade.py`: backtest strategy and exit model
+- `aggression_carry/forward_test.py`: live scan, paper TWAP slices, and paper marking
+- `aggression_carry/demo_execution.py`: Bybit demo order sync and reconciliation
+- `aggression_carry/demo_cycle.py`: minute-loop orchestration
+- `aggression_carry/forward_audit.py`: paper/demo slice audit
+- `scripts/run_bybit_demo_engine.sh`: continuously runs demo cycle plus audit
+- `scripts/run_forward_signal_with_audit.sh`: 23:00 signal scan plus audit

@@ -52,59 +52,114 @@ volume_grid:
   take_profit_pcts: [0.0]
   cost_multipliers: [1.0]
 
-# Research candidate only. The 2026-05-08 profit-protection audit invalidated
-# the old +16,991.58% headline benchmark. This default now uses corrected
-# non-warm-start semantics plus the 2026-05-09 PIT top-50 causal filters.
 daily_close_fade:
-  signal_minute: 1320
-  top_n: 5
-  hold_minutes: 180
+  signal_minute: 1380
+  top_n: 1
+  hold_minutes: 360
   entry_delay_minutes: 0
   entry_twap_minutes: 60
-  score: context_fade_score
+  score: day_return
   pump_filter: pump
   min_age_days: 10
   min_day_turnover: 0.0
   min_last_60m_turnover: 0.0
   vol_lookback_days: 20
   liquidity_lookback_days: 7
-  liquidity_rank_min: 11
-  liquidity_rank_max: 50
+  liquidity_rank_min: 226
+  liquidity_rank_max: 0
   min_baseline_turnover: 0.0
   account_equity: 10000.0
   max_position_weight: 0.0
-  max_trade_notional_pct_of_day_turnover: 0.002
-  max_trade_notional_pct_of_baseline_turnover: 0.005
-  market_impact_bps_per_1pct_turnover: 1.0
+  max_trade_notional_pct_of_day_turnover: 0.0005
+  max_trade_notional_pct_of_baseline_turnover: 0.001
+  market_impact_bps_per_1pct_turnover: 3.0
   gross_exposure: 1.0
-  coin_excess_vs_market_min: 0.08
-  coin_vwap_extension_min: 0.035
-  coin_vwap_extension_max: 0.15
-  coin_late_volume_ratio_min: 1.0
+  coin_excess_vs_market_min: 0.0
+  coin_vwap_extension_min: 0.0
+  coin_vwap_extension_max: 0.0
+  coin_late_volume_ratio_min: 0.0
   market_median_day_return_max: 0.0
   organic_move_score_max: 0.0
   manipulation_risk_score_min: 0.0
   squeeze_risk_score_max: 0.0
-  require_open_interest_context: true
-  require_all_context: true
+  require_funding_context: false
+  require_open_interest_context: false
+  require_premium_context: false
+  require_trade_flow_context: false
+  require_all_context: false
   position_sizing: score_capped
   score_weight_power: 1.0
-  stop_loss_pct: 0.05
-  take_profit_pct: 0.02
+  stop_loss_pct: 0.08
+  take_profit_pct: 0.10
+  time_decay_take_profit_floor_pct: 0.04
+  time_decay_take_profit_minutes: 120
   basket_stop_loss_pct: 0.0
   trailing_stop_pct: 0.0
   trailing_activation_pct: 0.0
   vol_trailing_stop_mult: 0.0
   vol_trailing_activation_mult: 0.0
-  mfe_giveback_activation_pct: 0.01
-  mfe_giveback_pct: 0.35
+  mfe_giveback_activation_pct: 0.0
+  mfe_giveback_pct: 0.0
   vwap_reversion_pct: 0.0
   stop_delay_minutes: 0
-  profit_protection_delay_minutes: 30
+  profit_protection_delay_minutes: 120
   twap_stop_adding_pct: 0.0
   cost_multiplier: 1.0
   min_symbols: 1
-  exclude_symbols: [BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT]
+  exclude_symbols:
+    - BTCUSDT
+    - ETHUSDT
+    - XRPUSDT
+    - BNBUSDT
+    - TRXUSDT
+    - SOLUSDT
+    - DOGEUSDT
+    - HYPEUSDT
+    - TONUSDT
+    - XMRUSDT
+    - LINKUSDT
+    - SUIUSDT
+    - ADAUSDT
+    - AVAXUSDT
+    - BCHUSDT
+    - XLMUSDT
+    - LTCUSDT
+    - HBARUSDT
+    - DOTUSDT
+    - SHIB1000USDT
+    - 1000PEPEUSDT
+    - APTUSDT
+    - NEARUSDT
+    - ETCUSDT
+    - ICPUSDT
+    - FILUSDT
+    - ATOMUSDT
+    - POLUSDT
+    - ALGOUSDT
+    - VETUSDT
+    - ARBUSDT
+    - OPUSDT
+    - INJUSDT
+    - AAVEUSDT
+    - UNIUSDT
+    - ONDOUSDT
+    - TAOUSDT
+    - RENDERUSDT
+    - KASUSDT
+    - MNTUSDT
+    - WIFUSDT
+    - 1000BONKUSDT
+    - 1000FLOKIUSDT
+    - FETUSDT
+    - SEIUSDT
+    - JUPUSDT
+    - PYTHUSDT
+    - TIAUSDT
+    - STXUSDT
+    - IMXUSDT
+    - ENAUSDT
+    - WLDUSDT
+    - ZECUSDT
   require_archive_membership: true
 
 daily_close_fade_grid:

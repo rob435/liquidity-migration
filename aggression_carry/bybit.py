@@ -6,9 +6,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 try:
-    from pybit.unified_trading import HTTP
+    from pybit.unified_trading import HTTP, WebSocket
 except ModuleNotFoundError:  # pragma: no cover - dependency may be absent before install
     HTTP = None
+    WebSocket = None
 
 
 class BybitDataError(RuntimeError):
@@ -36,6 +37,16 @@ class BybitMarketData:
     testnet: bool = False
     retries: int = 3
     retry_sleep_seconds: float = 0.5
+    slow_call_threshold_ms: float = 1000.0
+    logical_calls: int = field(init=False, default=0)
+    http_calls: int = field(init=False, default=0)
+    retry_events: int = field(init=False, default=0)
+    rate_limit_events: int = field(init=False, default=0)
+    error_events: int = field(init=False, default=0)
+    slow_calls: int = field(init=False, default=0)
+    total_call_ms: float = field(init=False, default=0.0)
+    slow_call_ms: float = field(init=False, default=0.0)
+    last_error: str = field(init=False, default="")
     _client: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -186,19 +197,66 @@ class BybitMarketData:
     def _get(self, method_name: str, **params: Any) -> dict[str, Any]:
         method = getattr(self._client, method_name)
         last_error: Exception | None = None
+        self.logical_calls += 1
         for attempt in range(self.retries):
+            started = time.perf_counter()
             try:
+                self.http_calls += 1
                 payload = method(**params)
+                elapsed_ms = (time.perf_counter() - started) * 1000.0
                 ret_code = payload.get("retCode")
                 if ret_code != 0:
+                    self._record_call(elapsed_ms, error_text=str(payload), rate_limited=_is_rate_limit(payload))
                     raise BybitDataError(f"Bybit {method_name} failed: {payload}")
+                self._record_call(elapsed_ms)
                 return payload
             except Exception as exc:  # noqa: BLE001 - pybit raises several transport types
+                if not isinstance(exc, BybitDataError):
+                    elapsed_ms = (time.perf_counter() - started) * 1000.0
+                    self._record_call(elapsed_ms, error_text=str(exc), rate_limited=_is_rate_limit(exc))
                 last_error = exc
                 if attempt + 1 >= self.retries:
                     break
+                self.retry_events += 1
                 time.sleep(self.retry_sleep_seconds * (2**attempt))
         raise BybitDataError(f"Bybit {method_name} failed after retries") from last_error
+
+    def _record_call(self, elapsed_ms: float, *, error_text: str = "", rate_limited: bool = False) -> None:
+        self.total_call_ms += elapsed_ms
+        if elapsed_ms >= self.slow_call_threshold_ms:
+            self.slow_calls += 1
+            self.slow_call_ms += elapsed_ms
+        if error_text:
+            self.error_events += 1
+            self.last_error = error_text[:500]
+        if rate_limited:
+            self.rate_limit_events += 1
+
+    def stats(self) -> dict[str, Any]:
+        backoff_events = self.retry_events + self.rate_limit_events + self.slow_calls
+        return {
+            "logical_calls": self.logical_calls,
+            "http_calls": self.http_calls,
+            "retry_events": self.retry_events,
+            "rate_limit_events": self.rate_limit_events,
+            "error_events": self.error_events,
+            "slow_calls": self.slow_calls,
+            "total_call_ms": round(self.total_call_ms, 3),
+            "slow_call_ms": round(self.slow_call_ms, 3),
+            "backoff_events": backoff_events,
+            "last_error": self.last_error,
+        }
+
+    def reset_stats(self) -> None:
+        self.logical_calls = 0
+        self.http_calls = 0
+        self.retry_events = 0
+        self.rate_limit_events = 0
+        self.error_events = 0
+        self.slow_calls = 0
+        self.total_call_ms = 0.0
+        self.slow_call_ms = 0.0
+        self.last_error = ""
 
 
 @dataclass(slots=True)
@@ -216,7 +274,7 @@ class BybitPrivateClient:
         if HTTP is None:
             raise RuntimeError("pybit is required for BybitPrivateClient")
         if not self.demo:
-            raise RuntimeError("BybitPrivateClient is demo-only in this research repo; demo=False is refused")
+            raise RuntimeError("BybitPrivateClient is wired for demo-only trading here; demo=False is refused")
         if not self.api_key or not self.api_secret:
             raise RuntimeError("Bybit demo execution requires API key and secret")
         self._client = HTTP(
@@ -249,10 +307,12 @@ class BybitPrivateClient:
         payload = self._call("cancel_all_orders", **params)
         return payload.get("result", {})
 
-    def get_open_orders(self, *, symbol: str | None = None) -> list[dict[str, Any]]:
+    def get_open_orders(self, *, symbol: str | None = None, settle_coin: str | None = "USDT") -> list[dict[str, Any]]:
         params: dict[str, Any] = {"category": self.category}
         if symbol:
             params["symbol"] = symbol
+        elif settle_coin:
+            params["settleCoin"] = settle_coin
         payload = self._call("get_open_orders", **params)
         return payload.get("result", {}).get("list", [])
 
@@ -295,6 +355,55 @@ class BybitPrivateClient:
         payload = self._call("get_positions", **params)
         return payload.get("result", {}).get("list", [])
 
+    def set_leverage(self, *, symbol: str, buy_leverage: float = 1.0, sell_leverage: float | None = None) -> dict[str, Any]:
+        if buy_leverage <= 0.0:
+            raise ValueError("buy_leverage must be positive")
+        effective_sell = buy_leverage if sell_leverage is None else sell_leverage
+        if effective_sell <= 0.0:
+            raise ValueError("sell_leverage must be positive")
+        try:
+            payload = self._call_once(
+                "set_leverage",
+                category=self.category,
+                symbol=symbol,
+                buyLeverage=_leverage_text(buy_leverage),
+                sellLeverage=_leverage_text(effective_sell),
+            )
+        except BybitDataError as exc:
+            message = str(exc).lower()
+            if "110043" in message or "not modified" in message:
+                return {"symbol": symbol, "buyLeverage": _leverage_text(buy_leverage), "sellLeverage": _leverage_text(effective_sell), "retCode": 110043}
+            raise
+        return payload.get("result", {})
+
+    def set_trading_stop(
+        self,
+        *,
+        symbol: str,
+        tpsl_mode: str = "Full",
+        position_idx: int = 0,
+        stop_loss: str | float | None = None,
+        trailing_stop: str | float | None = None,
+        active_price: str | float | None = None,
+        sl_trigger_by: str | None = "MarkPrice",
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "category": self.category,
+            "symbol": symbol,
+            "tpslMode": tpsl_mode,
+            "positionIdx": position_idx,
+        }
+        if stop_loss is not None:
+            params["stopLoss"] = str(stop_loss)
+        if trailing_stop is not None:
+            params["trailingStop"] = str(trailing_stop)
+        if active_price is not None:
+            params["activePrice"] = str(active_price)
+        if sl_trigger_by:
+            params["slTriggerBy"] = sl_trigger_by
+        payload = self._call_once("set_trading_stop", **params)
+        return payload.get("result", {})
+
     def _call_optional(self, method_names: Iterable[str], **params: Any) -> dict[str, Any] | None:
         for method_name in method_names:
             if hasattr(self._client, method_name):
@@ -309,8 +418,10 @@ class BybitPrivateClient:
             if ret_code != 0:
                 raise BybitDataError(f"Bybit {method_name} failed: {payload}")
             return payload
+        except BybitDataError:
+            raise
         except Exception as exc:  # noqa: BLE001 - pybit raises several transport types
-            raise BybitDataError(f"Bybit {method_name} failed") from exc
+            raise BybitDataError(f"Bybit {method_name} failed: {exc}") from exc
 
     def _call(self, method_name: str, **params: Any) -> dict[str, Any]:
         method = getattr(self._client, method_name)
@@ -328,3 +439,40 @@ class BybitPrivateClient:
                     break
                 time.sleep(self.retry_sleep_seconds * (2**attempt))
         raise BybitDataError(f"Bybit {method_name} failed after retries") from last_error
+
+
+def _leverage_text(value: float) -> str:
+    if float(value).is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _is_rate_limit(value: Any) -> bool:
+    text = str(value).lower()
+    return "10006" in text or "rate limit" in text or "too many visits" in text
+
+
+@dataclass(slots=True)
+class BybitPublicTradeStream:
+    category: str = "linear"
+    testnet: bool = False
+    _client: Any = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if WebSocket is None:
+            raise RuntimeError("pybit is required for BybitPublicTradeStream")
+        self._client = WebSocket(testnet=self.testnet, channel_type=self.category)
+
+    def subscribe_public_trades(self, symbols: str | list[str], callback: Any) -> None:
+        if isinstance(symbols, str):
+            symbol_arg: str | list[str] = symbols
+        else:
+            symbol_arg = list(symbols)
+        self._client.trade_stream(symbol=symbol_arg, callback=callback)
+
+    def close(self) -> None:
+        for name in ("exit", "close", "stop"):
+            method = getattr(self._client, name, None)
+            if callable(method):
+                method()
+                return

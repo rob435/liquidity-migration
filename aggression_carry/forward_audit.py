@@ -9,12 +9,13 @@ from typing import Any
 import polars as pl
 
 from .demo_cycle import DEMO_CYCLE_SLEEVES
-from .storage import read_dataset
+from .storage import dataset_lock_path, exclusive_file_lock, read_dataset
 from .telegram import send_telegram_message
 
 
 TELEGRAM_EVENT_LOOKBACK_HOURS = 36
 TELEGRAM_EOD_READY_MINUTE = 2 * 60 + 35
+TELEGRAM_AUDIT_TITLE = "MODEL050426 forward audit events"
 
 TRADE_AUDIT_SCHEMA = {
     "sleeve": pl.String,
@@ -33,6 +34,8 @@ TRADE_AUDIT_SCHEMA = {
     "paper_net_return": pl.Float64,
     "paper_weighted_net_return": pl.Float64,
     "entry_order_link_id": pl.String,
+    "entry_order_count": pl.Int64,
+    "entry_fill_order_count": pl.Int64,
     "entry_order_status": pl.String,
     "entry_reconciled_status": pl.String,
     "entry_fill_status": pl.String,
@@ -42,6 +45,8 @@ TRADE_AUDIT_SCHEMA = {
     "entry_filled_value": pl.Float64,
     "entry_slippage_bps": pl.Float64,
     "exit_order_link_id": pl.String,
+    "exit_order_count": pl.Int64,
+    "exit_fill_order_count": pl.Int64,
     "exit_order_status": pl.String,
     "exit_reconciled_status": pl.String,
     "exit_fill_status": pl.String,
@@ -62,13 +67,57 @@ DAILY_AUDIT_SCHEMA = {
     "paper_closed_trades": pl.Int64,
     "paper_weighted_net_return": pl.Float64,
     "demo_entry_orders": pl.Int64,
+    "demo_entry_order_events": pl.Int64,
+    "demo_entry_fill_order_events": pl.Int64,
     "demo_entries_filled": pl.Int64,
+    "demo_exit_orders": pl.Int64,
+    "demo_exit_fill_order_events": pl.Int64,
     "demo_exits_filled": pl.Int64,
     "demo_missed_entries": pl.Int64,
     "demo_realized_pnl_usdt": pl.Float64,
     "demo_realized_return": pl.Float64,
     "avg_entry_slippage_bps": pl.Float64,
     "avg_exit_slippage_bps": pl.Float64,
+}
+
+SLICE_AUDIT_SCHEMA = {
+    "sleeve": pl.String,
+    "date": pl.String,
+    "paper_trade_id": pl.String,
+    "symbol": pl.String,
+    "side": pl.String,
+    "slice_index": pl.Int64,
+    "expected_slice_time": pl.String,
+    "expected_slice_status": pl.String,
+    "expected_slice_price": pl.Float64,
+    "demo_order_link_id": pl.String,
+    "demo_order_status": pl.String,
+    "demo_reconciled_status": pl.String,
+    "demo_fill_status": pl.String,
+    "demo_avg_fill_price": pl.Float64,
+    "demo_filled_qty": pl.Float64,
+    "demo_filled_value": pl.Float64,
+    "entry_slippage_bps": pl.Float64,
+    "missed_trade_reason": pl.String,
+    "order_error": pl.String,
+}
+
+SLICE_DAILY_AUDIT_SCHEMA = {
+    "date": pl.String,
+    "sleeve": pl.String,
+    "paper_slices": pl.Int64,
+    "due_paper_slices": pl.Int64,
+    "paper_slices_filled": pl.Int64,
+    "paper_slices_pending": pl.Int64,
+    "paper_slices_cancelled": pl.Int64,
+    "paper_slices_missed_no_bar": pl.Int64,
+    "demo_slice_orders": pl.Int64,
+    "demo_slices_filled": pl.Int64,
+    "demo_slices_partial": pl.Int64,
+    "demo_slices_open": pl.Int64,
+    "demo_slices_missing": pl.Int64,
+    "demo_slice_fill_rate": pl.Float64,
+    "avg_slice_entry_slippage_bps": pl.Float64,
 }
 
 
@@ -84,20 +133,28 @@ def run_forward_demo_audit(
     output_dir = Path(report_dir or base_root / "reports")
     now_dt = _as_utc(now or datetime.now(tz=UTC))
     rows: list[dict[str, Any]] = []
+    slice_rows: list[dict[str, Any]] = []
     for sleeve in sleeves:
         sleeve_root = base_root / "forward_sleeves" / sleeve
         paper = read_dataset(sleeve_root, "forward_paper_trades")
-        orders = read_dataset(sleeve_root, "demo_execution_orders")
+        paper_slices = read_dataset(sleeve_root, "forward_paper_slices")
+        with exclusive_file_lock(dataset_lock_path(sleeve_root, "demo_execution_orders")):
+            orders = read_dataset(sleeve_root, "demo_execution_orders")
         rows.extend(build_forward_demo_audit_rows(sleeve, paper, orders))
+        slice_rows.extend(build_forward_demo_audit_slice_rows(sleeve, paper_slices, orders))
 
     trades = _frame(rows, TRADE_AUDIT_SCHEMA)
+    slices = _frame(slice_rows, SLICE_AUDIT_SCHEMA)
     daily = build_forward_demo_daily_summary(trades)
-    summary = summarize_forward_demo_audit(trades, daily)
+    slice_daily = build_forward_demo_slice_daily_summary(slices)
+    summary = summarize_forward_demo_audit(trades, daily, slices=slices, slice_daily=slice_daily)
     payload = {
         "now": now_dt.isoformat(),
         "rows": {
             "sleeves": len(sleeves),
             "trade_audit_rows": trades.height,
+            "slice_audit_rows": slices.height,
+            "slice_daily_rows": slice_daily.height,
             "daily_rows": daily.height,
         },
         "summary": summary,
@@ -110,19 +167,23 @@ def run_forward_demo_audit(
         enabled=send_telegram,
         now=now_dt,
     )
-    _write_forward_demo_audit_outputs(output_dir, payload, trades, daily)
+    _write_forward_demo_audit_outputs(output_dir, payload, trades, daily, slices, slice_daily)
     return payload
 
 
-def build_forward_demo_audit_rows(sleeve: str, paper: pl.DataFrame, orders: pl.DataFrame) -> list[dict[str, Any]]:
+def build_forward_demo_audit_rows(
+    sleeve: str,
+    paper: pl.DataFrame,
+    orders: pl.DataFrame,
+) -> list[dict[str, Any]]:
     if paper.is_empty():
         return []
     order_rows = orders.to_dicts() if not orders.is_empty() else []
     output: list[dict[str, Any]] = []
     for trade in paper.sort(["entry_ts_ms", "symbol"]).to_dicts():
         trade_id = str(trade.get("trade_id") or "")
-        entry = _latest_order(order_rows, trade_id, "entry")
-        exit_order = _latest_order(order_rows, trade_id, "exit")
+        entry = _aggregate_orders(_orders_for_trade(order_rows, trade_id, "entry"), action="entry")
+        exit_order = _aggregate_orders(_orders_for_trade(order_rows, trade_id, "exit"), action="exit")
         side = str(trade.get("side") or "short").lower()
         paper_entry = _num(trade.get("entry_price"))
         paper_exit = _num(trade.get("exit_price"))
@@ -146,6 +207,8 @@ def build_forward_demo_audit_rows(sleeve: str, paper: pl.DataFrame, orders: pl.D
             "paper_net_return": _num(trade.get("net_return")),
             "paper_weighted_net_return": _paper_weighted_net_return(trade),
             "entry_order_link_id": _str(entry, "order_link_id"),
+            "entry_order_count": int(_num(_order_value(entry, "order_count"))),
+            "entry_fill_order_count": int(_num(_order_value(entry, "fill_order_count"))),
             "entry_order_status": _str(entry, "status"),
             "entry_reconciled_status": _str(entry, "reconciled_status"),
             "entry_fill_status": _fill_status(entry),
@@ -155,6 +218,8 @@ def build_forward_demo_audit_rows(sleeve: str, paper: pl.DataFrame, orders: pl.D
             "entry_filled_value": _num(_order_value(entry, "filled_value")),
             "entry_slippage_bps": _entry_slippage_bps(side, paper_entry, entry_fill_price),
             "exit_order_link_id": _str(exit_order, "order_link_id"),
+            "exit_order_count": int(_num(_order_value(exit_order, "order_count"))),
+            "exit_fill_order_count": int(_num(_order_value(exit_order, "fill_order_count"))),
             "exit_order_status": _str(exit_order, "status"),
             "exit_reconciled_status": _str(exit_order, "reconciled_status"),
             "exit_fill_status": _fill_status(exit_order),
@@ -168,6 +233,43 @@ def build_forward_demo_audit_rows(sleeve: str, paper: pl.DataFrame, orders: pl.D
             "order_error": _order_errors(entry, exit_order),
         }
         output.append(row)
+    return output
+
+
+def build_forward_demo_audit_slice_rows(sleeve: str, paper_slices: pl.DataFrame, orders: pl.DataFrame) -> list[dict[str, Any]]:
+    if paper_slices.is_empty():
+        return []
+    order_rows = orders.to_dicts() if not orders.is_empty() else []
+    output: list[dict[str, Any]] = []
+    for paper_slice in paper_slices.sort(["scheduled_ts_ms", "symbol"]).to_dicts():
+        trade_id = str(paper_slice.get("trade_id") or "")
+        order = _order_for_slice(order_rows, trade_id, int(_num(paper_slice.get("scheduled_ts_ms"))), "entry")
+        side = str(paper_slice.get("side") or "short").lower()
+        expected_price = _num(paper_slice.get("fill_price"))
+        fill_price = _avg_fill_price(order)
+        output.append(
+            {
+                "sleeve": sleeve,
+                "date": str(paper_slice.get("date") or ""),
+                "paper_trade_id": trade_id,
+                "symbol": str(paper_slice.get("symbol") or ""),
+                "side": side,
+                "slice_index": int(_num(paper_slice.get("slice_index"))),
+                "expected_slice_time": str(paper_slice.get("scheduled_time") or ""),
+                "expected_slice_status": str(paper_slice.get("status") or ""),
+                "expected_slice_price": expected_price,
+                "demo_order_link_id": _str(order, "order_link_id"),
+                "demo_order_status": _str(order, "status"),
+                "demo_reconciled_status": _str(order, "reconciled_status"),
+                "demo_fill_status": _fill_status(order),
+                "demo_avg_fill_price": fill_price,
+                "demo_filled_qty": _num(_order_value(order, "filled_qty")),
+                "demo_filled_value": _num(_order_value(order, "filled_value")),
+                "entry_slippage_bps": _entry_slippage_bps(side, expected_price, fill_price),
+                "missed_trade_reason": _slice_missed_reason(paper_slice, order),
+                "order_error": _order_errors(order),
+            }
+        )
     return output
 
 
@@ -187,7 +289,11 @@ def build_forward_demo_daily_summary(trades: pl.DataFrame) -> pl.DataFrame:
                 "paper_closed_trades": int((frame["paper_status"] == "closed").sum()),
                 "paper_weighted_net_return": _sum_non_null(frame, "paper_weighted_net_return"),
                 "demo_entry_orders": int((frame["entry_order_link_id"] != "").sum()),
+                "demo_entry_order_events": int(_sum_non_null(frame, "entry_order_count")),
+                "demo_entry_fill_order_events": int(_sum_non_null(frame, "entry_fill_order_count")),
                 "demo_entries_filled": int((frame["entry_filled_qty"] > 0.0).sum()),
+                "demo_exit_orders": int(_sum_non_null(frame, "exit_order_count")),
+                "demo_exit_fill_order_events": int(_sum_non_null(frame, "exit_fill_order_count")),
                 "demo_exits_filled": int((frame["exit_filled_qty"] > 0.0).sum()),
                 "demo_missed_entries": int((frame["missed_reason"] != "").sum()),
                 "demo_realized_pnl_usdt": demo_pnl,
@@ -199,37 +305,117 @@ def build_forward_demo_daily_summary(trades: pl.DataFrame) -> pl.DataFrame:
     return _frame(rows, DAILY_AUDIT_SCHEMA).sort(["date", "sleeve"])
 
 
-def summarize_forward_demo_audit(trades: pl.DataFrame, daily: pl.DataFrame) -> dict[str, Any]:
+def build_forward_demo_slice_daily_summary(slices: pl.DataFrame) -> pl.DataFrame:
+    if slices.is_empty():
+        return _frame([], SLICE_DAILY_AUDIT_SCHEMA)
+    rows: list[dict[str, Any]] = []
+    for key, frame in slices.group_by(["date", "sleeve"], maintain_order=True):
+        date, sleeve = key
+        frame_rows = frame.to_dicts()
+        paper_slices = frame.height
+        paper_pending = _count_slice_expected_status(frame_rows, "pending")
+        paper_cancelled = _count_slice_expected_status(frame_rows, "cancelled_after_exit")
+        due_paper_slices = max(paper_slices - paper_pending - paper_cancelled, 0)
+        demo_slices_filled = sum(1 for row in frame_rows if _num(row.get("demo_filled_qty")) > 0.0)
+        rows.append(
+            {
+                "date": str(date),
+                "sleeve": str(sleeve),
+                "paper_slices": paper_slices,
+                "due_paper_slices": due_paper_slices,
+                "paper_slices_filled": _count_slice_expected_status(frame_rows, "filled"),
+                "paper_slices_pending": paper_pending,
+                "paper_slices_cancelled": paper_cancelled,
+                "paper_slices_missed_no_bar": _count_slice_expected_status(frame_rows, "missed_no_bar"),
+                "demo_slice_orders": sum(1 for row in frame_rows if str(row.get("demo_order_link_id") or "")),
+                "demo_slices_filled": demo_slices_filled,
+                "demo_slices_partial": sum(1 for row in frame_rows if str(row.get("demo_fill_status") or "") == "partial"),
+                "demo_slices_open": sum(1 for row in frame_rows if _is_open_slice_status(row.get("demo_fill_status"))),
+                "demo_slices_missing": sum(1 for row in frame_rows if _is_actionable_slice_miss(row)),
+                "demo_slice_fill_rate": demo_slices_filled / due_paper_slices if due_paper_slices > 0 else None,
+                "avg_slice_entry_slippage_bps": _mean_non_null(frame, "entry_slippage_bps"),
+            }
+        )
+    return _frame(rows, SLICE_DAILY_AUDIT_SCHEMA).sort(["date", "sleeve"])
+
+
+def summarize_forward_demo_audit(
+    trades: pl.DataFrame,
+    daily: pl.DataFrame,
+    *,
+    slices: pl.DataFrame | None = None,
+    slice_daily: pl.DataFrame | None = None,
+) -> dict[str, Any]:
     if trades.is_empty():
-        return {
+        summary = {
             "paper_trades": 0,
             "paper_closed_trades": 0,
             "demo_entry_orders": 0,
+            "demo_entry_order_events": 0,
+            "demo_entry_fill_order_events": 0,
             "demo_entries_filled": 0,
+            "demo_exit_orders": 0,
+            "demo_exit_fill_order_events": 0,
             "demo_exits_filled": 0,
             "demo_missed_entries": 0,
             "paper_weighted_net_return": 0.0,
             "demo_realized_pnl_usdt": 0.0,
             "demo_realized_return": None,
+            "critical_errors": 0,
         }
-    demo_entry_notional = _sum_non_null(trades, "entry_filled_value")
-    demo_pnl = _sum_non_null(trades, "demo_realized_pnl_usdt")
-    return {
-        "paper_trades": trades.height,
-        "paper_closed_trades": int((trades["paper_status"] == "closed").sum()),
-        "demo_entry_orders": int((trades["entry_order_link_id"] != "").sum()),
-        "demo_entries_filled": int((trades["entry_filled_qty"] > 0.0).sum()),
-        "demo_exits_filled": int((trades["exit_filled_qty"] > 0.0).sum()),
-        "demo_missed_entries": int((trades["missed_reason"] != "").sum()),
-        "paper_weighted_net_return": _sum_non_null(trades, "paper_weighted_net_return"),
-        "demo_realized_pnl_usdt": demo_pnl,
-        "demo_realized_return": demo_pnl / demo_entry_notional if demo_entry_notional > 0.0 else None,
-        "daily_rows": daily.height,
-    }
+    else:
+        demo_entry_notional = _sum_non_null(trades, "entry_filled_value")
+        demo_pnl = _sum_non_null(trades, "demo_realized_pnl_usdt")
+        summary = {
+            "paper_trades": trades.height,
+            "paper_closed_trades": int((trades["paper_status"] == "closed").sum()),
+            "demo_entry_orders": int((trades["entry_order_link_id"] != "").sum()),
+            "demo_entry_order_events": int(_sum_non_null(trades, "entry_order_count")),
+            "demo_entry_fill_order_events": int(_sum_non_null(trades, "entry_fill_order_count")),
+            "demo_entries_filled": int((trades["entry_filled_qty"] > 0.0).sum()),
+            "demo_exit_orders": int(_sum_non_null(trades, "exit_order_count")),
+            "demo_exit_fill_order_events": int(_sum_non_null(trades, "exit_fill_order_count")),
+            "demo_exits_filled": int((trades["exit_filled_qty"] > 0.0).sum()),
+            "demo_missed_entries": int((trades["missed_reason"] != "").sum()),
+            "paper_weighted_net_return": _sum_non_null(trades, "paper_weighted_net_return"),
+            "demo_realized_pnl_usdt": demo_pnl,
+            "demo_realized_return": demo_pnl / demo_entry_notional if demo_entry_notional > 0.0 else None,
+            "daily_rows": daily.height,
+            "critical_errors": _critical_error_count(trades),
+        }
+    slice_frame = slices if slices is not None else _frame([], SLICE_AUDIT_SCHEMA)
+    slice_daily_frame = slice_daily if slice_daily is not None else build_forward_demo_slice_daily_summary(slice_frame)
+    due_slices = int(_sum_non_null(slice_daily_frame, "due_paper_slices"))
+    filled_slices = int(_sum_non_null(slice_daily_frame, "demo_slices_filled"))
+    summary.update(
+        {
+            "paper_slices": slice_frame.height,
+            "due_paper_slices": due_slices,
+            "paper_slices_pending": int(_sum_non_null(slice_daily_frame, "paper_slices_pending")),
+            "paper_slices_cancelled": int(_sum_non_null(slice_daily_frame, "paper_slices_cancelled")),
+            "paper_slices_missed_no_bar": int(_sum_non_null(slice_daily_frame, "paper_slices_missed_no_bar")),
+            "demo_slice_orders": int(_sum_non_null(slice_daily_frame, "demo_slice_orders")),
+            "demo_slices_filled": filled_slices,
+            "demo_slices_partial": int(_sum_non_null(slice_daily_frame, "demo_slices_partial")),
+            "demo_slices_open": int(_sum_non_null(slice_daily_frame, "demo_slices_open")),
+            "demo_slices_missing": int(_sum_non_null(slice_daily_frame, "demo_slices_missing")),
+            "demo_slice_fill_rate": filled_slices / due_slices if due_slices > 0 else None,
+            "avg_slice_entry_slippage_bps": _mean_non_null(slice_frame, "entry_slippage_bps"),
+        }
+    )
+    return summary
 
 
-def format_forward_demo_audit_report(payload: dict[str, Any], trades: pl.DataFrame, daily: pl.DataFrame) -> str:
+def format_forward_demo_audit_report(
+    payload: dict[str, Any],
+    trades: pl.DataFrame,
+    daily: pl.DataFrame,
+    slices: pl.DataFrame | None = None,
+    slice_daily: pl.DataFrame | None = None,
+) -> str:
     summary = payload.get("summary", {})
+    slice_rows = slices if slices is not None else pl.DataFrame()
+    slice_daily_rows = slice_daily if slice_daily is not None else pl.DataFrame()
     lines = [
         "# Forward Demo Audit",
         "",
@@ -243,9 +429,19 @@ def format_forward_demo_audit_report(payload: dict[str, Any], trades: pl.DataFra
         f"| Paper trades | {summary.get('paper_trades', 0)} |",
         f"| Paper closed trades | {summary.get('paper_closed_trades', 0)} |",
         f"| Demo entry orders | {summary.get('demo_entry_orders', 0)} |",
+        f"| Demo entry order events | {summary.get('demo_entry_order_events', 0)} |",
         f"| Demo entries filled | {summary.get('demo_entries_filled', 0)} |",
+        f"| Demo exit orders | {summary.get('demo_exit_orders', 0)} |",
+        f"| Demo exit fill events | {summary.get('demo_exit_fill_order_events', 0)} |",
         f"| Demo exits filled | {summary.get('demo_exits_filled', 0)} |",
         f"| Demo missed/pending reasons | {summary.get('demo_missed_entries', 0)} |",
+        f"| Slice audit rows | {payload.get('rows', {}).get('slice_audit_rows', 0)} |",
+        f"| Due paper slices | {summary.get('due_paper_slices', 0)} |",
+        f"| Demo slice orders | {summary.get('demo_slice_orders', 0)} |",
+        f"| Demo slices filled | {summary.get('demo_slices_filled', 0)} |",
+        f"| Demo slices missing/actionable | {summary.get('demo_slices_missing', 0)} |",
+        f"| Demo slice fill rate | {_pct(summary.get('demo_slice_fill_rate'))} |",
+        f"| Avg slice entry slip bps | {_num_text(summary.get('avg_slice_entry_slippage_bps'))} |",
         f"| Paper weighted net | {_pct(summary.get('paper_weighted_net_return'))} |",
         f"| Demo realized PnL | {_money(summary.get('demo_realized_pnl_usdt'))} |",
         f"| Demo realized return | {_pct(summary.get('demo_realized_return'))} |",
@@ -264,6 +460,26 @@ def format_forward_demo_audit_report(payload: dict[str, Any], trades: pl.DataFra
             f"{_pct(row.get('demo_realized_return'))} | {_num_text(row.get('avg_entry_slippage_bps'))} | "
             f"{_num_text(row.get('avg_exit_slippage_bps'))} |"
         )
+    if not slice_daily_rows.is_empty():
+        lines.extend(
+            [
+                "",
+                "## Daily Slice Execution",
+                "",
+                "| Date | Sleeve | Due Slices | Demo Orders | Filled | Partial | Open | Missing | Fill Rate | Pending Paper | Cancelled Paper | Missed Paper Bars | Avg Slip bps |",
+                "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+            ]
+        )
+        for row in slice_daily_rows.sort(["date", "sleeve"]).to_dicts():
+            lines.append(
+                f"| {row.get('date', '')} | {row.get('sleeve', '')} | {row.get('due_paper_slices', 0)} | "
+                f"{row.get('demo_slice_orders', 0)} | {row.get('demo_slices_filled', 0)} | "
+                f"{row.get('demo_slices_partial', 0)} | {row.get('demo_slices_open', 0)} | "
+                f"{row.get('demo_slices_missing', 0)} | {_pct(row.get('demo_slice_fill_rate'))} | "
+                f"{row.get('paper_slices_pending', 0)} | {row.get('paper_slices_cancelled', 0)} | "
+                f"{row.get('paper_slices_missed_no_bar', 0)} | "
+                f"{_num_text(row.get('avg_slice_entry_slippage_bps'))} |"
+            )
     lines.extend(
         [
             "",
@@ -283,12 +499,32 @@ def format_forward_demo_audit_report(payload: dict[str, Any], trades: pl.DataFra
                 f"{row.get('paper_exit_reason', '')} | {_money(row.get('demo_realized_pnl_usdt'))} | "
                 f"{str(row.get('missed_reason') or row.get('order_error') or '')[:120]} |"
             )
+    if not slice_rows.is_empty():
+        lines.extend(
+            [
+                "",
+                "## Recent Slice Audit",
+                "",
+                "| Date | Sleeve | Symbol | Slice | Expected | Demo | Fill | Slip bps | Missed Reason |",
+                "|---|---|---|---:|---|---|---|---:|---|",
+            ]
+        )
+        for row in slice_rows.sort(["date", "sleeve", "expected_slice_time"], descending=[True, False, True]).head(100).to_dicts():
+            lines.append(
+                f"| {row.get('date', '')} | {row.get('sleeve', '')} | {row.get('symbol', '')} | "
+                f"{row.get('slice_index', 0)} | {row.get('expected_slice_status', '')} "
+                f"{_price(row.get('expected_slice_price'))} | {row.get('demo_order_status', '')} | "
+                f"{row.get('demo_fill_status', '')} | {_num_text(row.get('entry_slippage_bps'))} | "
+                f"{str(row.get('missed_trade_reason') or row.get('order_error') or '')[:120]} |"
+            )
     lines.extend(
         [
             "",
             "Files:",
             "",
             "- `reports/forward_demo_audit_trades.csv` has one row per paper trade with joined entry/exit demo state.",
+            "- `reports/forward_demo_audit_slices.csv` compares expected paper slices with demo child orders and fills.",
+            "- `reports/forward_demo_audit_slice_daily.csv` summarizes slice-level execution drift by sleeve/date.",
             "- `reports/forward_demo_audit_daily.csv` has sleeve/date paper-vs-demo PnL comparison.",
             "",
         ]
@@ -297,10 +533,11 @@ def format_forward_demo_audit_report(payload: dict[str, Any], trades: pl.DataFra
 
 
 def format_forward_demo_audit_message(events: list[dict[str, Any]]) -> str:
-    lines = ["Forward audit events"]
+    lines = [TELEGRAM_AUDIT_TITLE]
     entries = [event for event in events if event.get("kind") == "entry"]
     exits = [event for event in events if event.get("kind") == "exit"]
     eod = [event for event in events if event.get("kind") == "eod"]
+    critical = [event for event in events if event.get("kind") == "critical"]
     if entries:
         lines.append("Positions entered:")
         for event in entries:
@@ -329,6 +566,10 @@ def format_forward_demo_audit_message(events: list[dict[str, Any]]) -> str:
                     f"  {sleeve.get('sleeve')}: demo={_money(sleeve.get('demo_pnl_usdt'))} "
                     f"paper={_pct(sleeve.get('paper_return'))}"
                 )
+    if critical:
+        lines.append("Critical errors:")
+        for event in critical:
+            lines.append(f"- {event.get('sleeve')} {event.get('symbol')} {str(event.get('error') or '')[:160]}")
     return "\n".join(lines)
 
 
@@ -337,14 +578,18 @@ def _write_forward_demo_audit_outputs(
     payload: dict[str, Any],
     trades: pl.DataFrame,
     daily: pl.DataFrame,
+    slices: pl.DataFrame,
+    slice_daily: pl.DataFrame,
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "forward_demo_audit_report.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     (output_dir / "forward_demo_audit_report.md").write_text(
-        format_forward_demo_audit_report(payload, trades, daily),
+        format_forward_demo_audit_report(payload, trades, daily, slices, slice_daily),
         encoding="utf-8",
     )
     trades.write_csv(output_dir / "forward_demo_audit_trades.csv")
+    slices.write_csv(output_dir / "forward_demo_audit_slices.csv")
+    slice_daily.write_csv(output_dir / "forward_demo_audit_slice_daily.csv")
     daily.write_csv(output_dir / "forward_demo_audit_daily.csv")
 
 
@@ -400,7 +645,7 @@ def _forward_demo_audit_telegram_events(
                 if filled_qty > 0.0 and order_link_id:
                     events.append(
                         {
-                            "id": f"entry:{row.get('sleeve')}:{row.get('paper_trade_id')}:{order_link_id}",
+                            "id": f"entry:{row.get('sleeve')}:{row.get('paper_trade_id')}",
                             "kind": "entry",
                             "sleeve": row.get("sleeve"),
                             "symbol": row.get("symbol"),
@@ -418,7 +663,7 @@ def _forward_demo_audit_telegram_events(
                 if filled_qty > 0.0 and order_link_id:
                     events.append(
                         {
-                            "id": f"exit:{row.get('sleeve')}:{row.get('paper_trade_id')}:{order_link_id}",
+                            "id": f"exit:{row.get('sleeve')}:{row.get('paper_trade_id')}",
                             "kind": "exit",
                             "sleeve": row.get("sleeve"),
                             "symbol": row.get("symbol"),
@@ -429,6 +674,35 @@ def _forward_demo_audit_telegram_events(
                             "slippage_bps": row.get("exit_slippage_bps"),
                         }
                     )
+                missed_reason = str(row.get("missed_reason") or "")
+                entry_filled_qty = _num(row.get("entry_filled_qty"))
+                if entry_filled_qty > 0.0 and filled_qty <= 0.0 and missed_reason.startswith("exit_"):
+                    events.append(
+                        {
+                            "id": (
+                                f"critical-exit:{row.get('sleeve')}:{row.get('paper_trade_id')}:"
+                                f"{_stable_text_id(missed_reason)}"
+                            ),
+                            "kind": "critical",
+                            "sleeve": row.get("sleeve"),
+                            "symbol": row.get("symbol"),
+                            "error": (
+                                f"{missed_reason} paper_exit={_price(row.get('paper_exit_price'))} "
+                                f"order={order_link_id or 'missing'} status={row.get('exit_reconciled_status')}"
+                            ),
+                        }
+                    )
+            error = str(row.get("order_error") or "")
+            if error.lower().startswith("critical"):
+                events.append(
+                    {
+                        "id": f"critical:{row.get('sleeve')}:{row.get('paper_trade_id')}:{_stable_text_id(error)}",
+                        "kind": "critical",
+                        "sleeve": row.get("sleeve"),
+                        "symbol": row.get("symbol"),
+                        "error": error,
+                    }
+                )
     events.extend(_eod_telegram_events(daily, now=now))
     return events
 
@@ -508,15 +782,59 @@ def _read_json(path: Path) -> dict[str, Any]:
         return {}
 
 
-def _latest_order(rows: list[dict[str, Any]], trade_id: str, action: str) -> dict[str, Any] | None:
-    candidates = [
+def _stable_text_id(value: str) -> str:
+    return blake2b(value.encode("utf-8"), digest_size=8).hexdigest()
+
+
+def _orders_for_trade(rows: list[dict[str, Any]], trade_id: str, action: str) -> list[dict[str, Any]]:
+    return [
         row
         for row in rows
         if str(row.get("paper_trade_id") or "") == trade_id and str(row.get("action") or "") == action
     ]
+
+
+def _order_for_slice(rows: list[dict[str, Any]], trade_id: str, slice_ts_ms: int, action: str) -> dict[str, Any] | None:
+    candidates = [
+        row
+        for row in _orders_for_trade(rows, trade_id, action)
+        if int(_num(row.get("slice_ts_ms"))) == int(slice_ts_ms)
+    ]
     if not candidates:
         return None
     return max(candidates, key=lambda row: int(_num(row.get("created_ts_ms")) or 0))
+
+
+def _aggregate_orders(rows: list[dict[str, Any]], *, action: str) -> dict[str, Any] | None:
+    if not rows:
+        return None
+    ordered = sorted(rows, key=lambda row: int(_num(row.get("created_ts_ms")) or 0))
+    latest = dict(ordered[-1])
+    filled_qty = sum(_num(row.get("filled_qty")) for row in ordered)
+    filled_value = sum(_num(row.get("filled_value")) for row in ordered)
+    latest["filled_qty"] = filled_qty
+    latest["filled_value"] = filled_value
+    latest["order_count"] = len(ordered)
+    latest["fill_order_count"] = sum(1 for row in ordered if _num(row.get("filled_qty")) > 0.0)
+    latest["order_link_id"] = str(latest.get("order_link_id") or "") if len(ordered) == 1 else f"{len(ordered)} {action} orders"
+    latest["status"] = _aggregate_status(ordered, "status")
+    latest["reconciled_status"] = _aggregate_status(ordered, "reconciled_status")
+    return latest
+
+
+def _aggregate_status(rows: list[dict[str, Any]], key: str) -> str:
+    statuses = {str(row.get(key) or "") for row in rows if str(row.get(key) or "")}
+    if not statuses:
+        return ""
+    if statuses == {"filled"}:
+        return "filled"
+    if "partial" in statuses:
+        return "partial"
+    if "filled" in statuses:
+        return "partial"
+    if len(statuses) == 1:
+        return next(iter(statuses))
+    return "mixed"
 
 
 def _avg_fill_price(order: dict[str, Any] | None) -> float | None:
@@ -566,6 +884,43 @@ def _missed_reason(trade: dict[str, Any], entry: dict[str, Any] | None, exit_ord
                 return f"exit_{exit_reconciled}"
             return "exit_not_filled_yet"
     return ""
+
+
+def _slice_missed_reason(paper_slice: dict[str, Any], order: dict[str, Any] | None) -> str:
+    expected_status = str(paper_slice.get("status") or "")
+    if expected_status == "pending":
+        return "paper_slice_pending"
+    if expected_status == "cancelled_after_exit":
+        return "paper_slice_cancelled_after_exit"
+    if order is None:
+        return "demo_order_missing"
+    if _num(order.get("filled_qty")) > 0.0:
+        return ""
+    status = str(order.get("status") or "")
+    reconciled = str(order.get("reconciled_status") or "")
+    error = str(order.get("error") or order.get("reconcile_error") or "")
+    if status == "dry_run":
+        return "dry_run_not_submitted"
+    if status in {"skipped", "place_failed", "cancel_failed"}:
+        return error or status
+    if reconciled in {"cancelled", "missed_entry"}:
+        return reconciled
+    if status in {"accepted", "placed"} or reconciled in {"accepted", "open_order_seen"}:
+        return "entry_not_filled_yet"
+    return reconciled or status or "unknown"
+
+
+def _count_slice_expected_status(rows: list[dict[str, Any]], status: str) -> int:
+    return sum(1 for row in rows if str(row.get("expected_slice_status") or "") == status)
+
+
+def _is_open_slice_status(value: Any) -> bool:
+    return str(value or "") in {"accepted", "placed", "submitted", "pending_submit", "open_order_seen"}
+
+
+def _is_actionable_slice_miss(row: dict[str, Any]) -> bool:
+    reason = str(row.get("missed_trade_reason") or "")
+    return bool(reason) and reason not in {"paper_slice_pending", "paper_slice_cancelled_after_exit"}
 
 
 def _order_errors(*orders: dict[str, Any] | None) -> str:
@@ -653,6 +1008,12 @@ def _mean_non_null(frame: pl.DataFrame, column: str) -> float | None:
         return None
     values = [float(value) for value in frame[column].drop_nulls().to_list()]
     return sum(values) / len(values) if values else None
+
+
+def _critical_error_count(frame: pl.DataFrame) -> int:
+    if frame.is_empty() or "order_error" not in frame.columns:
+        return 0
+    return sum(1 for value in frame["order_error"].drop_nulls().to_list() if str(value).lower().startswith("critical"))
 
 
 def _frame(rows: list[dict[str, Any]], schema: dict[str, pl.DataType]) -> pl.DataFrame:

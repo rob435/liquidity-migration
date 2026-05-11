@@ -30,6 +30,21 @@ _GRID_DATA_ROOT: str | None = None
 _GRID_COST_BPS: float | None = None
 
 
+def close_fade_entry_child_schedule_ts_ms(signal_ts_ms: int, config: DailyCloseFadeConfig) -> list[int]:
+    """Return canonical entry child timestamps for the daily-close fade."""
+    first_ts_ms = int(signal_ts_ms) + int(config.entry_delay_minutes) * MS_PER_MINUTE
+    twap_minutes = max(int(config.entry_twap_minutes), 0)
+    if twap_minutes <= 0:
+        return [first_ts_ms]
+    return [first_ts_ms + minute * MS_PER_MINUTE for minute in range(twap_minutes)]
+
+
+def close_fade_entry_complete_ts_ms(signal_ts_ms: int, config: DailyCloseFadeConfig) -> int:
+    first_ts_ms = int(signal_ts_ms) + int(config.entry_delay_minutes) * MS_PER_MINUTE
+    twap_minutes = max(int(config.entry_twap_minutes), 0)
+    return first_ts_ms if twap_minutes <= 0 else first_ts_ms + twap_minutes * MS_PER_MINUTE
+
+
 @dataclass(frozen=True, slots=True)
 class DailyCloseFadeDiagnosticsConfig:
     signal_minutes: tuple[int, ...] = (22 * 60,)
@@ -3551,6 +3566,27 @@ def _mfe_giveback_stop_price(entry_price: float, best_price: float, giveback_pct
     max_favorable = max(_short_return(entry_price, best_price), 0.0)
     retained_return = max_favorable * max(0.0, 1.0 - giveback_pct)
     return entry_price * (1.0 - retained_return)
+
+
+def _short_stop_execution_price(stop_price: float, bar: dict[str, Any]) -> float:
+    open_price = _bar_open(bar)
+    if open_price <= 0.0:
+        return stop_price
+    return max(stop_price, open_price)
+
+
+def _short_limit_execution_price(limit_price: float, bar: dict[str, Any]) -> float:
+    open_price = _bar_open(bar)
+    if open_price <= 0.0:
+        return limit_price
+    return min(limit_price, open_price)
+
+
+def _bar_open(bar: dict[str, Any]) -> float:
+    try:
+        return float(bar.get("open") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _load_trade_window(

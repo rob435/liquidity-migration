@@ -4,8 +4,10 @@ import polars as pl
 
 from aggression_carry.config import TradeFlowConfig
 from aggression_carry.ingestion import (
+    aggregate_trade_klines_1m,
     aggregate_signed_flow_1h,
     aggregate_signed_flow_1m,
+    densify_trade_klines_1m,
     normalize_funding_history,
     trades_to_frame,
 )
@@ -98,6 +100,134 @@ def test_signed_flow_1h_fields() -> None:
     assert hourly["total_quote"][0] == 300.0
     assert hourly["signed_quote"][0] == 100.0
     assert hourly["imbalance"][0] == 100.0 / 300.0
+
+
+def test_trade_klines_densify_no_trade_minutes_with_carry_forward() -> None:
+    trades = trades_to_frame(
+        [
+            {"tradeId": "1", "time": 1_735_689_600_000, "symbol": "AAAUSDT", "side": "Buy", "price": "100", "size": "2"},
+            {"tradeId": "2", "time": 1_735_689_720_000, "symbol": "AAAUSDT", "side": "Sell", "price": "105", "size": "1"},
+        ]
+    )
+    sparse = aggregate_trade_klines_1m(trades)
+
+    dense = densify_trade_klines_1m(sparse, archive_date="2025-01-01")
+
+    assert dense.height == 1440
+    assert dense.select(["ts_ms", "open", "high", "low", "close", "volume_base", "turnover_quote"]).head(4).to_dicts() == [
+        {
+            "ts_ms": 1_735_689_600_000,
+            "open": 100.0,
+            "high": 100.0,
+            "low": 100.0,
+            "close": 100.0,
+            "volume_base": 2.0,
+            "turnover_quote": 200.0,
+        },
+        {
+            "ts_ms": 1_735_689_660_000,
+            "open": 100.0,
+            "high": 100.0,
+            "low": 100.0,
+            "close": 100.0,
+            "volume_base": 0.0,
+            "turnover_quote": 0.0,
+        },
+        {
+            "ts_ms": 1_735_689_720_000,
+            "open": 105.0,
+            "high": 105.0,
+            "low": 105.0,
+            "close": 105.0,
+            "volume_base": 1.0,
+            "turnover_quote": 105.0,
+        },
+        {
+            "ts_ms": 1_735_689_780_000,
+            "open": 105.0,
+            "high": 105.0,
+            "low": 105.0,
+            "close": 105.0,
+            "volume_base": 0.0,
+            "turnover_quote": 0.0,
+        },
+    ]
+
+
+def test_trade_klines_densify_does_not_backfill_from_future_trade() -> None:
+    trades = trades_to_frame(
+        [
+            {"tradeId": "1", "time": 1_735_689_720_000, "symbol": "AAAUSDT", "side": "Buy", "price": "105", "size": "1"},
+        ]
+    )
+    sparse = aggregate_trade_klines_1m(trades)
+
+    dense = densify_trade_klines_1m(sparse, archive_date="2025-01-01")
+
+    assert dense.select(["ts_ms", "open", "high", "low", "close", "volume_base"]).head(3).to_dicts() == [
+        {
+            "ts_ms": 1_735_689_600_000,
+            "open": None,
+            "high": None,
+            "low": None,
+            "close": None,
+            "volume_base": 0.0,
+        },
+        {
+            "ts_ms": 1_735_689_660_000,
+            "open": None,
+            "high": None,
+            "low": None,
+            "close": None,
+            "volume_base": 0.0,
+        },
+        {
+            "ts_ms": 1_735_689_720_000,
+            "open": 105.0,
+            "high": 105.0,
+            "low": 105.0,
+            "close": 105.0,
+            "volume_base": 1.0,
+        },
+    ]
+
+
+def test_trade_klines_densify_seeds_from_previous_close_when_available() -> None:
+    trades = trades_to_frame(
+        [
+            {"tradeId": "1", "time": 1_735_689_720_000, "symbol": "AAAUSDT", "side": "Buy", "price": "105", "size": "1"},
+        ]
+    )
+    sparse = aggregate_trade_klines_1m(trades)
+
+    dense = densify_trade_klines_1m(sparse, archive_date="2025-01-01", initial_price=99.0)
+
+    assert dense.select(["ts_ms", "open", "high", "low", "close", "volume_base"]).head(3).to_dicts() == [
+        {
+            "ts_ms": 1_735_689_600_000,
+            "open": 99.0,
+            "high": 99.0,
+            "low": 99.0,
+            "close": 99.0,
+            "volume_base": 0.0,
+        },
+        {
+            "ts_ms": 1_735_689_660_000,
+            "open": 99.0,
+            "high": 99.0,
+            "low": 99.0,
+            "close": 99.0,
+            "volume_base": 0.0,
+        },
+        {
+            "ts_ms": 1_735_689_720_000,
+            "open": 105.0,
+            "high": 105.0,
+            "low": 105.0,
+            "close": 105.0,
+            "volume_base": 1.0,
+        },
+    ]
 
 
 def test_funding_interval_normalization() -> None:

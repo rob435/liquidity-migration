@@ -1,105 +1,76 @@
-# Forward And Demo Testing
+# Forward And Demo Trading
 
-Forward/demo exists to test plumbing and execution drift. It is not alpha proof.
+Forward/demo is now the execution path for the selected Stage 4 daily-close short fade on the Bybit demo account.
 
-## Current Boundary
+## Runtime Contract
 
-The active research strategy uses a 22:00-23:00 TWAP entry. Backtest support
-exists. Forward/demo slice execution does **not** exist yet.
+- 23:00 UTC: scan the live Bybit USDT perp universe and cache the selected Stage 4 candidate.
+- 23:00-23:59 UTC: open the paper trade as 60 one-minute TWAP child slices and submit matching Bybit demo entry orders.
+- 00:00 UTC onward: stop adding, keep marking the paper trade, reconcile demo orders, and submit reduce-only exits when the paper exit model closes.
+- 02:00 UTC onward: the time-decay TP can start working after the 120-minute profit-protection delay.
+- 06:00 UTC target: max-hold exit if no stop or TP fired.
 
-Therefore:
+The forward ledger writes `forward_paper_trades`; the TWAP child schedule writes `forward_paper_slices`; demo orders write `demo_execution_orders`. `forward-audit` joins all three so missed slices, slippage, fill status, and paper/demo drift are visible.
 
-```text
-forward-run and bybit-demo-cycle must not fake TWAP as one fill.
-```
+## Strategy Defaults
 
-The current code blocks new paper entries when `entry_twap_minutes > 0`. This
-is intentional and safer than pretending the demo account traded a TWAP.
+The canonical sleeve is `stage4_selected`. It inherits `configs/volume_alpha.default.yaml`:
 
-Do not install timers, cron jobs, or systemd wrappers for demo order submission
-from this repo. Forward/demo commands are manual execution tests only until
-slice-level TWAP exists and the audit reconciles expected slices to actual
-orders and fills.
+- `signal_minute: 1380`
+- `top_n: 1`
+- `score: day_return`
+- `liquidity_rank_min: 226`
+- `entry_twap_minutes: 60`
+- `hold_minutes: 360`
+- `stop_loss_pct: 0.08`
+- `take_profit_pct: 0.10`
+- `time_decay_take_profit_floor_pct: 0.04`
+- `time_decay_take_profit_minutes: 120`
+- `profit_protection_delay_minutes: 120`
 
-## Next Implementation Target
+## Demo Sizing
 
-Add slice-level paper/demo execution:
-
-```text
-22:00 UTC: rank candidates from data available at 22:00
-22:00-22:59: submit/record equal 1m entry slices
-entry_price: running average fill price
-first fill onward: 20% disaster stop on average entry
-23:15 onward: vol trail and MFE giveback can flatten the whole symbol
-23:15 onward: adaptive state starts fresh; do not seed it from pre-23:15 lows
-max hold: 180m after final add
-no same-symbol re-entry that day
-```
-
-The audit layer must report:
-
-```text
-expected slice
-demo order
-fill status
-missed slice reason
-average entry slippage
-exit slippage
-symbol/day PnL
-sleeve attribution
-```
-
-## Existing Commands
-
-Public-data scan:
+Use wallet-aware sizing for demo order submission:
 
 ```bash
-python -m aggression_carry \
-  --data-root data/forward-paper \
-  --config configs/volume_alpha.default.yaml \
-  forward-scan
+--use-wallet-balance \
+--max-order-notional 0 \
+--max-total-new-notional 0 \
+--max-order-notional-pct-equity 0.10 \
+--max-total-new-notional-pct-equity 1.0
 ```
 
-Paper run:
+For a 60-minute TWAP, `max-order-notional-pct-equity=0.10` caps the whole coin position at 10% of current Bybit demo wallet equity, then divides that notional across the 60 slices.
+
+## Commands
+
+Run the signal scan:
 
 ```bash
-python -m aggression_carry \
-  --data-root data/forward-paper \
-  --config configs/volume_alpha.default.yaml \
-  forward-run
+python -m aggression_carry --data-root data/forward-paper --config configs/volume_alpha.default.yaml forward-run-sleeves --forward-mode scan --sleeves stage4_selected
 ```
 
-Demo probe:
+Run one demo cycle:
 
 ```bash
-python -m aggression_carry \
-  --data-root data/forward-paper \
-  --config configs/volume_alpha.default.yaml \
-  bybit-demo-probe \
-  --symbol XRPUSDT \
-  --side Sell \
-  --notional 5 \
-  --place-order \
-  --i-understand-demo-order
+python -m aggression_carry --data-root data/forward-paper --config configs/volume_alpha.default.yaml bybit-demo-cycle --submit-orders --i-understand-demo-sync --use-wallet-balance --max-order-notional 0 --max-total-new-notional 0 --max-order-notional-pct-equity 0.10 --demo-entry-sleeves stage4_selected --forward-mode open-from-scan --require-first-slice
 ```
 
-With the current TWAP config, the shadow cycle should not open new entries until
-slice execution is implemented. Existing demo emergency commands remain useful:
+Run audit:
 
 ```bash
-python -m aggression_carry --data-root data/forward-paper --config configs/volume_alpha.default.yaml bybit-demo-cancel-all
+python -m aggression_carry --data-root data/forward-paper --config configs/volume_alpha.default.yaml forward-audit --telegram
+```
+
+Install the long-running demo service and 23:00 UTC signal timer:
+
+```bash
+scripts/install_bybit_demo_systemd.sh
+```
+
+Emergency demo actions:
+
+```bash
+python -m aggression_carry --data-root data/forward-paper --config configs/volume_alpha.default.yaml bybit-demo-cancel-all --i-understand-demo-cancel-all
 python -m aggression_carry --data-root data/forward-paper --config configs/volume_alpha.default.yaml bybit-demo-flatten --i-understand-demo-flatten
 ```
-
-## Telegram
-
-Telegram should stay quiet:
-
-```text
-position entries
-position exits
-end-of-day PnL
-critical errors
-```
-
-No scan spam, no routine heartbeat spam.

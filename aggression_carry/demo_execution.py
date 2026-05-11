@@ -14,7 +14,7 @@ import polars as pl
 
 from .bybit import BybitMarketData, BybitPrivateClient
 from .config import ResearchConfig
-from .storage import dataset_path, read_dataset, write_dataset
+from .storage import dataset_lock_path, dataset_path, exclusive_file_lock, read_dataset, write_dataset
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,12 +32,12 @@ class DemoProbeConfig:
 
 @dataclass(frozen=True, slots=True)
 class DemoSyncConfig:
-    max_order_notional: float = 10.0
+    max_order_notional: float = 0.0
     max_new_orders: int = 5
-    max_total_new_notional: float = 50.0
+    max_total_new_notional: float = 0.0
     use_wallet_balance: bool = False
     wallet_balance_fraction: float = 1.0
-    max_order_notional_pct_equity: float = 0.80
+    max_order_notional_pct_equity: float = 0.10
     max_total_new_notional_pct_equity: float = 1.0
     account_equity_override: float = 0.0
     price_offset_bps: float = 2.0
@@ -45,7 +45,11 @@ class DemoSyncConfig:
     submit_orders: bool = False
     confirmed: bool = False
     allow_market_exit: bool = True
+    cancel_entries_before_exit: bool = True
+    exit_slippage_tolerance_bps: float = 50.0
     pause_new_entries: bool = False
+    entry_leverage: float = 1.0
+    require_contiguous_twap: bool = True
     order_link_prefix: str = ""
     account_type: str = "UNIFIED"
 
@@ -54,6 +58,7 @@ class DemoSyncConfig:
 class DemoCancelAllConfig:
     symbols: tuple[str, ...] = ()
     account_type: str = "UNIFIED"
+    confirmed: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,12 +67,22 @@ class DemoFlattenConfig:
     account_type: str = "UNIFIED"
 
 
-_SUBMITTED_STATUSES = {"accepted", "placed", "submitted", "cancel_requested", "exit_submitted"}
-_BLOCKING_RECONCILED_STATUSES = {"accepted", "open_order_seen", "position_detected", "filled", "partial", "exit_submitted"}
-_TERMINAL_RECONCILED_STATUSES = {"cancelled", "missed_entry"}
+_SUBMITTED_STATUSES = {"accepted", "placed", "submitted", "cancel_requested", "exit_submitted", "submit_unknown"}
+_BLOCKING_RECONCILED_STATUSES = {
+    "accepted",
+    "open_order_seen",
+    "position_detected",
+    "filled",
+    "partial",
+    "exit_submitted",
+    "submit_unknown",
+    "filled_pending_execs",
+}
+_TERMINAL_RECONCILED_STATUSES = {"cancelled", "missed_entry", "submit_not_found", "partial_cancelled"}
 _ACTIVE_ORDER_STATUSES = {"new", "created", "untriggered", "triggered", "partiallyfilled"}
 _FILLED_ORDER_STATUSES = {"filled"}
 _CANCELLED_ORDER_STATUSES = {"cancelled", "rejected", "deactivated", "partiallyfilledcanceled"}
+_SUBMIT_UNKNOWN_GRACE_MS = 60_000
 
 
 def run_bybit_demo_sync(
@@ -86,9 +101,9 @@ def run_bybit_demo_sync(
         raise RuntimeError("Refusing demo sync order submission without --i-understand-demo-sync")
 
     now_dt = _as_utc(now or datetime.now(tz=UTC))
-    now_ms = int(now_dt.timestamp() * 1000)
+    now_ms = _floor_minute_ms(int(now_dt.timestamp() * 1000))
     trades = read_dataset(data_root, "forward_paper_trades")
-    existing = read_dataset(data_root, "demo_execution_orders")
+    paper_slices = read_dataset(data_root, "forward_paper_slices")
     market = market_client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
     executor = _demo_executor(config, sync_config, execution_client, api_key, api_secret)
     wallet: dict[str, Any] | None = None
@@ -102,34 +117,46 @@ def run_bybit_demo_sync(
         )
     instruments = {str(row.get("symbol", "")).upper(): row for row in market.get_instruments_info()}
 
-    reconciled = reconcile_demo_orders(existing, now=now_dt, execution_client=executor) if executor is not None else existing
-    reconciled = cancel_stale_demo_orders(reconciled, now=now_dt, sync_config=effective_sync, execution_client=executor)
-    new_orders = build_demo_sync_orders(
-        trades,
-        existing_orders=reconciled,
-        instruments=instruments,
-        sync_config=effective_sync,
-        now_ms=now_ms,
-        market_client=market,
-        execution_client=executor,
-    )
-    ledger = _merge_order_frames(reconciled, new_orders)
-    summary = summarize_demo_sync_orders(ledger)
-    payload = {
-        "now": now_dt.isoformat(),
-        "rows": {
-            "paper_trades": trades.height,
-            "existing_orders": existing.height,
-            "new_orders": new_orders.height,
-            "ledger_orders": ledger.height,
-        },
-        "summary": summary,
-        "config": asdict(effective_sync),
-        "requested_config": asdict(sync_config),
-        "wallet": wallet or {},
-        "new_orders": new_orders.to_dicts() if not new_orders.is_empty() else [],
-    }
-    _write_demo_sync_outputs(data_root, ledger, payload=payload)
+    with exclusive_file_lock(dataset_lock_path(data_root, "demo_execution_orders")):
+        existing = read_dataset(data_root, "demo_execution_orders")
+        reconciled = reconcile_demo_orders(existing, now=now_dt, execution_client=executor) if executor is not None else existing
+        reconciled = cancel_stale_demo_orders(reconciled, now=now_dt, sync_config=effective_sync, execution_client=executor)
+        if executor is not None and effective_sync.cancel_entries_before_exit:
+            exit_symbols = _closed_trade_exit_symbols(trades, reconciled)
+            reconciled = _cancel_open_entry_orders_for_symbols(
+                reconciled,
+                symbols=exit_symbols,
+                now=now_dt,
+                execution_client=executor,
+            )
+        new_orders = build_demo_sync_orders(
+            trades,
+            paper_slices=paper_slices,
+            existing_orders=reconciled,
+            instruments=instruments,
+            sync_config=effective_sync,
+            now_ms=now_ms,
+            market_client=market,
+            execution_client=executor,
+        )
+        ledger = _merge_order_frames(reconciled, new_orders)
+        summary = summarize_demo_sync_orders(ledger)
+        payload = {
+            "now": now_dt.isoformat(),
+            "rows": {
+                "paper_trades": trades.height,
+                "paper_slices": paper_slices.height,
+                "existing_orders": existing.height,
+                "new_orders": new_orders.height,
+                "ledger_orders": ledger.height,
+            },
+            "summary": summary,
+            "config": asdict(effective_sync),
+            "requested_config": asdict(sync_config),
+            "wallet": wallet or {},
+            "new_orders": new_orders.to_dicts() if not new_orders.is_empty() else [],
+        }
+        _write_demo_sync_outputs(data_root, ledger, payload=payload)
     return payload
 
 
@@ -138,16 +165,18 @@ def _validate_demo_sync_config(sync_config: DemoSyncConfig) -> None:
         raise ValueError("max_order_notional must be non-negative")
     if sync_config.max_total_new_notional < 0.0:
         raise ValueError("max_total_new_notional must be non-negative")
-    if not sync_config.use_wallet_balance and sync_config.max_order_notional <= 0.0:
-        raise ValueError("max_order_notional must be positive unless --use-wallet-balance is enabled")
-    if not sync_config.use_wallet_balance and sync_config.max_total_new_notional <= 0.0:
-        raise ValueError("max_total_new_notional must be positive unless --use-wallet-balance is enabled")
     if not 0.0 < sync_config.wallet_balance_fraction <= 1.0:
         raise ValueError("wallet_balance_fraction must be in (0, 1]")
     if sync_config.max_order_notional_pct_equity < 0.0:
         raise ValueError("max_order_notional_pct_equity must be non-negative")
     if sync_config.max_total_new_notional_pct_equity < 0.0:
         raise ValueError("max_total_new_notional_pct_equity must be non-negative")
+    if sync_config.max_new_orders < 0:
+        raise ValueError("max_new_orders cannot be negative")
+    if sync_config.entry_leverage < 0.0:
+        raise ValueError("entry_leverage must be non-negative")
+    if sync_config.exit_slippage_tolerance_bps < 0.0:
+        raise ValueError("exit_slippage_tolerance_bps must be non-negative")
 
 
 def _wallet_adjusted_sync_config(
@@ -174,7 +203,9 @@ def _wallet_adjusted_sync_config(
         max_order_notional = dynamic_order_cap if max_order_notional <= 0.0 else min(max_order_notional, dynamic_order_cap)
     if sync_config.max_total_new_notional_pct_equity > 0.0:
         dynamic_total_cap = effective_equity * sync_config.max_total_new_notional_pct_equity
-        max_total_new_notional = dynamic_total_cap if max_total_new_notional <= 0.0 else min(max_total_new_notional, dynamic_total_cap)
+        max_total_new_notional = (
+            dynamic_total_cap if max_total_new_notional <= 0.0 else min(max_total_new_notional, dynamic_total_cap)
+        )
     if max_order_notional <= 0.0 or max_total_new_notional <= 0.0:
         raise RuntimeError("wallet-balance sizing produced non-positive demo order caps")
     return wallet, replace(
@@ -220,6 +251,8 @@ def run_bybit_demo_cancel_all(
     api_secret: str | None = None,
 ) -> dict[str, Any]:
     cancel = cancel_config or DemoCancelAllConfig()
+    if not cancel.confirmed:
+        raise RuntimeError("Refusing demo cancel-all without --i-understand-demo-cancel-all")
     now_dt = _as_utc(now or datetime.now(tz=UTC))
     executor = _demo_private_executor(config, execution_client, api_key, api_secret)
     symbols = tuple(symbol.strip().upper() for symbol in cancel.symbols if symbol.strip())
@@ -320,9 +353,82 @@ def run_bybit_demo_flatten(
     return payload
 
 
+def submit_demo_exit_for_trade(
+    data_root: str | Path,
+    trade: dict[str, Any],
+    *,
+    sync_config: DemoSyncConfig,
+    now: datetime,
+    execution_client: Any,
+    whole_position: bool = False,
+    instrument: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Submit one idempotent reduce-only exit through the shared demo ledger."""
+    now_dt = _as_utc(now)
+    now_ms = int(now_dt.timestamp() * 1000)
+    with exclusive_file_lock(dataset_lock_path(data_root, "demo_execution_orders")):
+        existing = read_dataset(data_root, "demo_execution_orders")
+        reconciled = reconcile_demo_orders(existing, now=now_dt, execution_client=execution_client)
+        trade_id = str(trade.get("trade_id") or "")
+        if _has_blocking_action(reconciled, trade_id, "exit"):
+            return {
+                "status": "blocked_duplicate_exit",
+                "row": {},
+                "ledger_orders": reconciled.height,
+                "order_link_id": _sync_order_link_id(trade_id, "exit", prefix=sync_config.order_link_prefix),
+            }
+        if sync_config.cancel_entries_before_exit:
+            reconciled = _cancel_open_entry_orders_for_symbols(
+                reconciled,
+                symbols={str(trade.get("symbol") or "").upper()},
+                now=now_dt,
+                execution_client=execution_client,
+            )
+        row = _exit_order_row(
+            trade,
+            existing_orders=reconciled,
+            sync_config=sync_config,
+            now_ms=now_ms,
+            execution_client=execution_client,
+            whole_position=whole_position,
+            instrument=instrument,
+        )
+        if row.get("status") == "pending_submit":
+            row = _submit_pending_order_row(
+                row,
+                execution_client=execution_client,
+                sync_config=sync_config,
+                leverage_guarded_symbols=set(),
+            )
+        new_orders = pl.DataFrame([row], infer_schema_length=None)
+        ledger = _merge_order_frames(reconciled, new_orders)
+        payload = {
+            "now": now_dt.isoformat(),
+            "rows": {
+                "paper_trades": 0,
+                "paper_slices": 0,
+                "existing_orders": existing.height,
+                "new_orders": 1,
+                "ledger_orders": ledger.height,
+            },
+            "summary": summarize_demo_sync_orders(ledger),
+            "config": asdict(sync_config),
+            "new_orders": [row],
+        }
+        _write_demo_sync_outputs(data_root, ledger, payload=payload)
+        return {
+            "status": str(row.get("status") or ""),
+            "reconciled_status": str(row.get("reconciled_status") or ""),
+            "row": row,
+            "ledger_orders": ledger.height,
+            "order_link_id": str(row.get("order_link_id") or ""),
+        }
+
+
 def build_demo_sync_orders(
     trades: pl.DataFrame,
     *,
+    paper_slices: pl.DataFrame | None = None,
     existing_orders: pl.DataFrame,
     instruments: dict[str, dict[str, Any]],
     sync_config: DemoSyncConfig,
@@ -332,6 +438,7 @@ def build_demo_sync_orders(
 ) -> pl.DataFrame:
     if trades.is_empty() or sync_config.max_new_orders <= 0:
         return pl.DataFrame()
+    slices_by_trade = _paper_slices_by_trade(paper_slices if paper_slices is not None else pl.DataFrame())
     candidate_rows: list[dict[str, Any]] = []
     sorted_trades = trades.sort(["entry_ts_ms", "symbol"]) if "entry_ts_ms" in trades.columns else trades
     trade_rows = sorted_trades.to_dicts()
@@ -353,6 +460,9 @@ def build_demo_sync_orders(
                     sync_config=sync_config,
                     now_ms=now_ms,
                     execution_client=execution_client,
+                    whole_position=True,
+                    instrument=instruments.get(symbol, {}),
+                    market_client=market_client,
                 )
             except Exception as exc:  # noqa: BLE001 - one bad symbol should not block the batch
                 row = _skip_row(
@@ -369,7 +479,7 @@ def build_demo_sync_orders(
         symbol = str(trade.get("symbol") or "").upper()
         if not trade_id or not symbol:
             continue
-        if trade.get("status") != "open" or _has_blocking_action(existing_orders, trade_id, "entry"):
+        if trade.get("status") != "open":
             continue
         if sync_config.pause_new_entries:
             candidate_rows.append(
@@ -393,6 +503,57 @@ def build_demo_sync_orders(
                 )
             )
             continue
+        trade_slices = slices_by_trade.get(trade_id, []) if int(_float(trade.get("entry_twap_minutes"))) > 0 else []
+        if trade_slices:
+            due_slices = _due_demo_entry_slices(trade_slices, now_ms=now_ms)
+            for slice_row in due_slices:
+                slice_ts_ms = int(slice_row.get("scheduled_ts_ms") or 0)
+                if _has_blocking_action(existing_orders, trade_id, "entry", slice_ts_ms=slice_ts_ms) or (
+                    not sync_config.submit_orders
+                    and _has_dry_run_action(existing_orders, trade_id, "entry", slice_ts_ms=slice_ts_ms)
+                ):
+                    continue
+                if sync_config.require_contiguous_twap and _has_missing_prior_twap_attempt(
+                    existing_orders,
+                    trade_id=trade_id,
+                    trade_slices=trade_slices,
+                    slice_ts_ms=slice_ts_ms,
+                    dry_run_counts=not sync_config.submit_orders,
+                ):
+                    candidate_rows.append(
+                        _skip_row(
+                            trade,
+                            "entry",
+                            now_ms,
+                            "missed_prior_twap_slice",
+                            order_link_prefix=sync_config.order_link_prefix,
+                            paper_slice=slice_row,
+                        )
+                    )
+                    continue
+                try:
+                    row = _entry_order_row(
+                        trade,
+                        instrument=instruments[symbol],
+                        sync_config=sync_config,
+                        now_ms=now_ms,
+                        market_client=market_client,
+                        execution_client=execution_client,
+                        paper_slice=slice_row,
+                    )
+                except Exception as exc:  # noqa: BLE001 - one bad symbol should not block the batch
+                    row = _skip_row(
+                        trade,
+                        "entry",
+                        now_ms,
+                        f"build_failed: {exc}",
+                        order_link_prefix=sync_config.order_link_prefix,
+                        paper_slice=slice_row,
+                    )
+                candidate_rows.append(row)
+            continue
+        if _has_blocking_action(existing_orders, trade_id, "entry"):
+            continue
         try:
             row = _entry_order_row(
                 trade,
@@ -413,8 +574,14 @@ def build_demo_sync_orders(
         candidate_rows.append(row)
 
     capped_rows = _cap_candidate_order_rows(candidate_rows, sync_config=sync_config, now_ms=now_ms)
+    leverage_guarded_symbols = _entry_leverage_guarded_symbols(existing_orders, date=_dt_from_ms(now_ms).date().isoformat())
     rows = [
-        _submit_pending_order_row(row, execution_client=execution_client)
+        _submit_pending_order_row(
+            row,
+            execution_client=execution_client,
+            sync_config=sync_config,
+            leverage_guarded_symbols=leverage_guarded_symbols,
+        )
         if row.get("status") == "pending_submit"
         else row
         for row in capped_rows
@@ -430,7 +597,11 @@ def reconcile_demo_orders(
 ) -> pl.DataFrame:
     if orders.is_empty():
         return orders
-    symbols = sorted({str(symbol).upper() for symbol in orders["symbol"].drop_nulls().to_list() if str(symbol)})
+    order_rows = orders.to_dicts()
+    rows_to_reconcile = [row for row in order_rows if _row_needs_reconcile(row)]
+    if not rows_to_reconcile:
+        return orders
+    symbols = sorted({str(row.get("symbol") or "").upper() for row in rows_to_reconcile if str(row.get("symbol") or "")})
     open_by_symbol: dict[str, list[dict[str, Any]]] = {}
     positions_by_symbol: dict[str, list[dict[str, Any]]] = {}
     for symbol in symbols:
@@ -443,7 +614,10 @@ def reconcile_demo_orders(
         except Exception as exc:  # noqa: BLE001
             positions_by_symbol[symbol] = [{"__error__": str(exc)}]
     rows = []
-    for row in orders.to_dicts():
+    for row in order_rows:
+        if not _row_needs_reconcile(row):
+            rows.append(row)
+            continue
         updated = dict(row)
         symbol = str(row.get("symbol") or "").upper()
         order_link_id = str(row.get("order_link_id") or "")
@@ -497,6 +671,26 @@ def reconcile_demo_orders(
     return pl.DataFrame(rows, infer_schema_length=None)
 
 
+def _row_needs_reconcile(row: dict[str, Any]) -> bool:
+    if _row_is_terminal_reconciled(row):
+        return False
+    status = str(row.get("status") or "").strip().lower()
+    if status in {"", "dry_run", "skipped", "place_failed", "cancel_failed"}:
+        return False
+    return bool(str(row.get("order_link_id") or "") or str(row.get("order_id") or ""))
+
+
+def _row_is_terminal_reconciled(row: dict[str, Any]) -> bool:
+    reconciled_status = str(row.get("reconciled_status") or "").strip().lower()
+    if reconciled_status in _TERMINAL_RECONCILED_STATUSES:
+        return True
+    return (
+        reconciled_status == "filled"
+        and _float(row.get("filled_qty")) > 0.0
+        and _float(row.get("filled_value")) > 0.0
+    )
+
+
 def cancel_stale_demo_orders(
     orders: pl.DataFrame,
     *,
@@ -512,10 +706,68 @@ def cancel_stale_demo_orders(
         updated = dict(row)
         status = str(updated.get("status") or "")
         if (
-            status in {"accepted", "placed"}
+            not _row_is_terminal_reconciled(updated)
+            and status in {"accepted", "placed"}
             and bool(updated.get("open_order_seen"))
             and str(updated.get("action")) == "entry"
             and now_ms - int(updated.get("created_ts_ms") or now_ms) >= max(sync_config.cancel_stale_minutes, 0) * 60_000
+        ):
+            try:
+                result = execution_client.cancel_order(
+                    symbol=str(updated["symbol"]),
+                    order_link_id=str(updated["order_link_id"]),
+                )
+                updated["status"] = "cancel_requested"
+                updated["cancel_result"] = json.dumps(result, sort_keys=True)
+                updated["cancel_ts_ms"] = now_ms
+                updated["cancel_time"] = now.isoformat()
+            except Exception as exc:  # noqa: BLE001
+                updated["status"] = "cancel_failed"
+                updated["error"] = str(exc)
+        rows.append(updated)
+    return pl.DataFrame(rows, infer_schema_length=None)
+
+
+def _closed_trade_exit_symbols(trades: pl.DataFrame, orders: pl.DataFrame) -> set[str]:
+    if trades.is_empty():
+        return set()
+    symbols: set[str] = set()
+    for trade in trades.to_dicts():
+        trade_id = str(trade.get("trade_id") or "")
+        symbol = str(trade.get("symbol") or "").upper()
+        if (
+            trade_id
+            and symbol
+            and str(trade.get("status") or "") == "closed"
+            and _has_blocking_action(orders, trade_id, "entry")
+            and not _has_blocking_action(orders, trade_id, "exit")
+        ):
+            symbols.add(symbol)
+    return symbols
+
+
+def _cancel_open_entry_orders_for_symbols(
+    orders: pl.DataFrame,
+    *,
+    symbols: set[str],
+    now: datetime,
+    execution_client: Any,
+) -> pl.DataFrame:
+    symbols = {symbol.upper() for symbol in symbols if symbol}
+    if orders.is_empty() or not symbols:
+        return orders
+    now_ms = int(now.timestamp() * 1000)
+    rows = []
+    for row in orders.to_dicts():
+        updated = dict(row)
+        symbol = str(updated.get("symbol") or "").upper()
+        if (
+            symbol in symbols
+            and str(updated.get("action") or "") == "entry"
+            and not bool(updated.get("reduce_only"))
+            and not _row_is_terminal_reconciled(updated)
+            and str(updated.get("status") or "").strip().lower() != "cancel_requested"
+            and bool(updated.get("open_order_seen"))
         ):
             try:
                 result = execution_client.cancel_order(
@@ -542,6 +794,7 @@ def summarize_demo_sync_orders(orders: pl.DataFrame) -> dict[str, Any]:
             "dry_run": 0,
             "skipped": 0,
             "cancel_requested": 0,
+            "submit_unknown": 0,
             "open_order_seen": 0,
             "estimated_notional": 0.0,
         }
@@ -553,6 +806,7 @@ def summarize_demo_sync_orders(orders: pl.DataFrame) -> dict[str, Any]:
         "skipped": _count_status(orders, "skipped"),
         "cancel_requested": _count_status(orders, "cancel_requested"),
         "place_failed": _count_status(orders, "place_failed"),
+        "submit_unknown": _count_status(orders, "submit_unknown"),
         "open_order_seen": int(orders["open_order_seen"].sum()) if "open_order_seen" in orders.columns else 0,
         "estimated_notional": float(orders["estimated_notional"].sum()) if "estimated_notional" in orders.columns else 0.0,
     }
@@ -570,6 +824,7 @@ def format_demo_sync_report(payload: dict[str, Any], orders: pl.DataFrame) -> st
         "| Metric | Value |",
         "|---|---:|",
         f"| Paper trades | {payload.get('rows', {}).get('paper_trades', 0)} |",
+        f"| Paper slices | {payload.get('rows', {}).get('paper_slices', 0)} |",
         f"| New orders | {payload.get('rows', {}).get('new_orders', 0)} |",
         f"| Ledger orders | {summary.get('orders', 0)} |",
         f"| Placed | {summary.get('placed', 0)} |",
@@ -577,18 +832,20 @@ def format_demo_sync_report(payload: dict[str, Any], orders: pl.DataFrame) -> st
         f"| Dry run | {summary.get('dry_run', 0)} |",
         f"| Skipped | {summary.get('skipped', 0)} |",
         f"| Cancel requested | {summary.get('cancel_requested', 0)} |",
+        f"| Submit unknown | {summary.get('submit_unknown', 0)} |",
         f"| Open order seen | {summary.get('open_order_seen', 0)} |",
         f"| Estimated notional | {summary.get('estimated_notional', 0.0):.2f} |",
         "",
         "## Recent Orders",
         "",
-        "| Time | Action | Symbol | Side | Status | Qty | Price | Notional | Paper Trade | Reconciled | Error |",
-        "|---|---|---|---|---|---:|---:|---:|---|---|---|",
+        "| Time | Action | Slice | Symbol | Side | Status | Qty | Price | Notional | Paper Trade | Reconciled | Error |",
+        "|---|---|---:|---|---|---|---:|---:|---:|---|---|---|",
     ]
     if not orders.is_empty():
         for row in orders.sort("created_ts_ms", descending=True).head(50).to_dicts():
             lines.append(
-                f"| {row.get('created_time', '')} | {row.get('action', '')} | {row.get('symbol', '')} | "
+                f"| {row.get('created_time', '')} | {row.get('action', '')} | {row.get('slice_time', '')} | "
+                f"{row.get('symbol', '')} | "
                 f"{row.get('side', '')} | {row.get('status', '')} | {row.get('qty', '')} | "
                 f"{row.get('price', '')} | {float(row.get('estimated_notional') or 0.0):.2f} | "
                 f"{row.get('paper_trade_id', '')} | {row.get('reconciled_status', '')} | "
@@ -739,6 +996,28 @@ def format_demo_probe_report(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _paper_slices_by_trade(paper_slices: pl.DataFrame) -> dict[str, list[dict[str, Any]]]:
+    if paper_slices.is_empty() or "trade_id" not in paper_slices.columns:
+        return {}
+    rows = paper_slices.sort(["trade_id", "slice_index"]).to_dicts()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row.get("trade_id") or ""), []).append(row)
+    return grouped
+
+
+def _due_demo_entry_slices(rows: list[dict[str, Any]], *, now_ms: int) -> list[dict[str, Any]]:
+    due = []
+    for row in rows:
+        scheduled_ts_ms = int(row.get("scheduled_ts_ms") or 0)
+        if scheduled_ts_ms != now_ms:
+            continue
+        status = str(row.get("status") or "")
+        if status in {"filled", "missed_no_bar", "pending"}:
+            due.append(row)
+    return due
+
+
 def _build_probe_order(
     *,
     symbol: str,
@@ -814,35 +1093,35 @@ def _entry_order_row(
     now_ms: int,
     market_client: Any,
     execution_client: Any | None,
+    paper_slice: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     symbol = str(trade["symbol"]).upper()
     side = "Sell" if str(trade.get("side", "short")).lower() == "short" else "Buy"
-    notional = min(
-        _paper_notional(trade, account_equity_override=sync_config.account_equity_override),
-        sync_config.max_order_notional,
+    planned_notional = _paper_slice_notional(
+        trade,
+        paper_slice,
+        account_equity_override=sync_config.account_equity_override,
+        max_trade_notional=sync_config.max_order_notional,
     )
-    if notional <= 0.0:
+    if planned_notional <= 0.0:
         return _skip_row(
             trade,
             "entry",
             now_ms,
             "non_positive_notional",
             order_link_prefix=sync_config.order_link_prefix,
+            paper_slice=paper_slice,
         )
     quote = _top_of_book(market_client.get_orderbook(symbol, limit=1))
     order = _build_limit_order(
         symbol=symbol,
         side=side,
-        notional=notional,
-        max_notional=sync_config.max_order_notional,
+        notional=planned_notional,
+        max_notional=planned_notional,
         price_offset_bps=sync_config.price_offset_bps,
         quote=quote,
         instrument=instrument,
-        order_link_id=_sync_order_link_id(
-            str(trade["trade_id"]),
-            "entry",
-            prefix=sync_config.order_link_prefix,
-        ),
+        order_link_id=_entry_order_link_id(trade, "entry", sync_config=sync_config, paper_slice=paper_slice),
         reduce_only=False,
     )
     return _candidate_order_row(
@@ -852,6 +1131,7 @@ def _entry_order_row(
         status_if_dry="dry_run",
         now_ms=now_ms,
         execution_client=execution_client,
+        paper_slice=paper_slice,
     )
 
 
@@ -862,6 +1142,9 @@ def _exit_order_row(
     sync_config: DemoSyncConfig,
     now_ms: int,
     execution_client: Any | None,
+    whole_position: bool = True,
+    instrument: dict[str, Any] | None = None,
+    market_client: Any | None = None,
 ) -> dict[str, Any]:
     symbol = str(trade["symbol"]).upper()
     position = _symbol_position(execution_client.get_positions(symbol=symbol) if execution_client is not None else [], symbol)
@@ -881,9 +1164,10 @@ def _exit_order_row(
             "market_exit_disabled",
             order_link_prefix=sync_config.order_link_prefix,
         )
-    entry = _entry_order_for_trade(existing_orders, str(trade["trade_id"]))
-    entry_qty = Decimal(str(entry.get("qty") or "0")) if entry else Decimal("0")
-    qty = min(Decimal(str(position["size"])), entry_qty) if entry_qty > 0 else Decimal(str(position["size"]))
+    entry_qty = _entry_qty_for_trade(existing_orders, str(trade["trade_id"]))
+    qty = Decimal(str(position["size"])) if whole_position else (
+        min(Decimal(str(position["size"])), entry_qty) if entry_qty > 0 else Decimal(str(position["size"]))
+    )
     if qty <= 0:
         return _skip_row(
             trade,
@@ -893,22 +1177,49 @@ def _exit_order_row(
             order_link_prefix=sync_config.order_link_prefix,
         )
     side = "Buy" if str(position["side"]).lower() == "sell" else "Sell"
-    order_link_id = _sync_order_link_id(str(trade["trade_id"]), "exit", prefix=sync_config.order_link_prefix)
+    order_link_id = _exit_order_link_id(
+        str(trade["trade_id"]),
+        existing_orders,
+        prefix=sync_config.order_link_prefix,
+    )
+    reference_price = _exit_reference_price(trade)
+    if market_client is not None and not _has_explicit_exit_execution_reference(trade):
+        try:
+            quote = _top_of_book(market_client.get_orderbook(symbol, limit=1))
+            live_reference = quote["ask"] if side == "Buy" else quote["bid"]
+            if live_reference > 0.0:
+                reference_price = live_reference
+        except Exception:  # noqa: BLE001 - use the paper/model reference if the live book is unavailable
+            pass
     request = {
         "symbol": symbol,
         "side": side,
-        "orderType": "Market" if sync_config.allow_market_exit else "Limit",
         "qty": _decimal_text(qty),
-        "timeInForce": "IOC" if sync_config.allow_market_exit else "PostOnly",
-        "positionIdx": 0,
+        "timeInForce": "IOC",
+        "positionIdx": position["idx"],
         "reduceOnly": True,
         "orderLinkId": order_link_id,
     }
+    if reference_price > 0.0 and sync_config.exit_slippage_tolerance_bps > 0.0:
+        request["orderType"] = "Limit"
+        request["price"] = _decimal_text(
+            _bounded_exit_limit_price(
+                side=side,
+                reference_price=reference_price,
+                slippage_bps=sync_config.exit_slippage_tolerance_bps,
+                instrument=instrument or {},
+            )
+        )
+    else:
+        request["orderType"] = "Market"
+        if sync_config.exit_slippage_tolerance_bps > 0.0:
+            request["slippageToleranceType"] = "Percent"
+            request["slippageTolerance"] = _slippage_tolerance_percent_text(sync_config.exit_slippage_tolerance_bps)
     order = {
         "request": request,
         "estimated_notional": float(position["value"]),
-        "max_order_notional": sync_config.max_order_notional,
-        "price_offset_bps": 0.0,
+        "max_order_notional": float(position["value"]),
+        "price_offset_bps": sync_config.exit_slippage_tolerance_bps if reference_price > 0.0 else 0.0,
     }
     return _candidate_order_row(
         trade,
@@ -992,9 +1303,12 @@ def _candidate_order_row(
     status_if_dry: str,
     now_ms: int,
     execution_client: Any | None,
+    paper_slice: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     request = dict(order["request"])
     status = "pending_submit" if execution_client is not None else status_if_dry
+    scheduled_ts_ms = int(paper_slice.get("scheduled_ts_ms") or 0) if paper_slice else 0
+    slice_index = int(paper_slice.get("slice_index") or 0) if paper_slice else 0
     return {
         "order_link_id": request["orderLinkId"],
         "order_id": "",
@@ -1002,6 +1316,10 @@ def _candidate_order_row(
         "basket_id": str(trade.get("basket_id") or ""),
         "date": str(trade.get("date") or _dt_from_ms(now_ms).date().isoformat()),
         "action": action,
+        "slice_index": slice_index,
+        "slice_ts_ms": scheduled_ts_ms or None,
+        "slice_time": _dt_from_ms(scheduled_ts_ms).isoformat() if scheduled_ts_ms else "",
+        "paper_slice_status": str(paper_slice.get("status") or "") if paper_slice else "",
         "status": status,
         "symbol": request["symbol"],
         "side": request["side"],
@@ -1021,6 +1339,7 @@ def _candidate_order_row(
         "paper_exit_reason": str(trade.get("exit_reason") or ""),
         "request": json.dumps(request, sort_keys=True),
         "place_result": "",
+        "leverage_result": "",
         "cancel_result": "",
         "cancel_ts_ms": None,
         "cancel_time": None,
@@ -1061,7 +1380,7 @@ def _cap_candidate_order_rows(
         if new_orders >= sync_config.max_new_orders:
             capped.append(_skip_candidate_row(row, now_ms=now_ms, reason="max_new_orders_exceeded"))
             continue
-        if new_notional + notional_for_cap > sync_config.max_total_new_notional:
+        if sync_config.max_total_new_notional > 0.0 and new_notional + notional_for_cap > sync_config.max_total_new_notional:
             capped.append(_skip_candidate_row(row, now_ms=now_ms, reason="max_total_new_notional_exceeded"))
             continue
         capped.append(row)
@@ -1086,7 +1405,13 @@ def _skip_candidate_row(row: dict[str, Any], *, now_ms: int, reason: str) -> dic
     return updated
 
 
-def _submit_pending_order_row(row: dict[str, Any], *, execution_client: Any | None) -> dict[str, Any]:
+def _submit_pending_order_row(
+    row: dict[str, Any],
+    *,
+    execution_client: Any | None,
+    sync_config: DemoSyncConfig,
+    leverage_guarded_symbols: set[str],
+) -> dict[str, Any]:
     if execution_client is None:
         return row
     updated = dict(row)
@@ -1094,6 +1419,23 @@ def _submit_pending_order_row(row: dict[str, Any], *, execution_client: Any | No
         request = json.loads(str(updated.get("request") or "{}"))
         if not request:
             raise ValueError("missing order request")
+        if _needs_entry_leverage_guard(updated, request, sync_config=sync_config):
+            symbol = str(request.get("symbol") or "")
+            if symbol and symbol not in leverage_guarded_symbols:
+                leverage_result = _set_entry_leverage(
+                    execution_client,
+                    symbol=symbol,
+                    leverage=sync_config.entry_leverage,
+                )
+                updated["leverage_result"] = json.dumps(leverage_result, sort_keys=True) if leverage_result else ""
+                leverage_guarded_symbols.add(symbol)
+    except Exception as exc:  # noqa: BLE001
+        updated["status"] = "place_failed"
+        updated["place_result"] = ""
+        updated["reconciled_status"] = ""
+        updated["error"] = str(exc)
+        return updated
+    try:
         place_result = execution_client.place_order(**request)
         updated["status"] = "accepted"
         updated["order_id"] = str(place_result.get("orderId") or "")
@@ -1101,11 +1443,26 @@ def _submit_pending_order_row(row: dict[str, Any], *, execution_client: Any | No
         updated["reconciled_status"] = "exit_submitted" if str(updated.get("action")) == "exit" else "accepted"
         updated["error"] = None
     except Exception as exc:  # noqa: BLE001
-        updated["status"] = "place_failed"
+        updated["status"] = "submit_unknown"
         updated["place_result"] = ""
-        updated["reconciled_status"] = ""
+        updated["reconciled_status"] = "submit_unknown"
         updated["error"] = str(exc)
     return updated
+
+
+def _needs_entry_leverage_guard(row: dict[str, Any], request: dict[str, Any], *, sync_config: DemoSyncConfig) -> bool:
+    return (
+        sync_config.entry_leverage > 0.0
+        and str(row.get("action") or "") == "entry"
+        and not bool(request.get("reduceOnly"))
+    )
+
+
+def _set_entry_leverage(execution_client: Any, *, symbol: str, leverage: float) -> dict[str, Any] | None:
+    setter = getattr(execution_client, "set_leverage", None)
+    if not callable(setter):
+        return None
+    return setter(symbol=symbol, buy_leverage=leverage, sell_leverage=leverage)
 
 
 def _write_demo_sync_outputs(
@@ -1182,8 +1539,16 @@ def _skip_row(
     reason: str,
     *,
     order_link_prefix: str = "",
+    paper_slice: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    order_link_id = _sync_order_link_id(str(trade.get("trade_id") or "missing"), action, prefix=order_link_prefix)
+    order_link_id = _entry_order_link_id(
+        trade,
+        action,
+        sync_config=DemoSyncConfig(order_link_prefix=order_link_prefix),
+        paper_slice=paper_slice,
+    )
+    scheduled_ts_ms = int(paper_slice.get("scheduled_ts_ms") or 0) if paper_slice else 0
+    slice_index = int(paper_slice.get("slice_index") or 0) if paper_slice else 0
     return {
         "order_link_id": order_link_id,
         "order_id": "",
@@ -1191,6 +1556,10 @@ def _skip_row(
         "basket_id": str(trade.get("basket_id") or ""),
         "date": str(trade.get("date") or _dt_from_ms(now_ms).date().isoformat()),
         "action": action,
+        "slice_index": slice_index,
+        "slice_ts_ms": scheduled_ts_ms or None,
+        "slice_time": _dt_from_ms(scheduled_ts_ms).isoformat() if scheduled_ts_ms else "",
+        "paper_slice_status": str(paper_slice.get("status") or "") if paper_slice else "",
         "status": "skipped",
         "symbol": str(trade.get("symbol") or ""),
         "side": "",
@@ -1210,6 +1579,7 @@ def _skip_row(
         "paper_exit_reason": str(trade.get("exit_reason") or ""),
         "request": "",
         "place_result": "",
+        "leverage_result": "",
         "cancel_result": "",
         "cancel_ts_ms": None,
         "cancel_time": None,
@@ -1232,11 +1602,119 @@ def _skip_row(
     }
 
 
-def _has_blocking_action(orders: pl.DataFrame, trade_id: str, action: str) -> bool:
+def _has_blocking_action(
+    orders: pl.DataFrame,
+    trade_id: str,
+    action: str,
+    *,
+    slice_ts_ms: int | None = None,
+) -> bool:
     if orders.is_empty() or {"paper_trade_id", "action"}.difference(set(orders.columns)):
         return False
-    rows = orders.filter((pl.col("paper_trade_id") == trade_id) & (pl.col("action") == action)).to_dicts()
+    frame = orders.filter((pl.col("paper_trade_id") == trade_id) & (pl.col("action") == action))
+    if slice_ts_ms is not None and "slice_ts_ms" in frame.columns:
+        frame = frame.filter(pl.col("slice_ts_ms").fill_null(0).cast(pl.Int64) == int(slice_ts_ms))
+    rows = frame.to_dicts()
     return any(_row_blocks_duplicate(row) for row in rows)
+
+
+def _has_dry_run_action(
+    orders: pl.DataFrame,
+    trade_id: str,
+    action: str,
+    *,
+    slice_ts_ms: int | None = None,
+) -> bool:
+    if orders.is_empty() or {"paper_trade_id", "action", "status"}.difference(set(orders.columns)):
+        return False
+    frame = orders.filter((pl.col("paper_trade_id") == trade_id) & (pl.col("action") == action))
+    if slice_ts_ms is not None and "slice_ts_ms" in frame.columns:
+        frame = frame.filter(pl.col("slice_ts_ms").fill_null(0).cast(pl.Int64) == int(slice_ts_ms))
+    rows = frame.to_dicts()
+    return any(str(row.get("status") or "").strip().lower() == "dry_run" for row in rows)
+
+
+def _has_missing_prior_twap_attempt(
+    orders: pl.DataFrame,
+    *,
+    trade_id: str,
+    trade_slices: list[dict[str, Any]],
+    slice_ts_ms: int,
+    dry_run_counts: bool,
+) -> bool:
+    prior_slice_times = sorted(
+        {
+            int(row.get("scheduled_ts_ms") or 0)
+            for row in trade_slices
+            if int(row.get("scheduled_ts_ms") or 0) and int(row.get("scheduled_ts_ms") or 0) < slice_ts_ms
+        }
+    )
+    if not prior_slice_times:
+        return False
+    return any(
+        not _has_entry_slice_attempt(
+            orders,
+            trade_id=trade_id,
+            slice_ts_ms=ts_ms,
+            dry_run_counts=dry_run_counts,
+        )
+        for ts_ms in prior_slice_times
+    )
+
+
+def _has_entry_slice_attempt(
+    orders: pl.DataFrame,
+    *,
+    trade_id: str,
+    slice_ts_ms: int,
+    dry_run_counts: bool,
+) -> bool:
+    if orders.is_empty() or {"paper_trade_id", "action", "slice_ts_ms", "status"}.difference(set(orders.columns)):
+        return False
+    frame = orders.filter(
+        (pl.col("paper_trade_id") == trade_id)
+        & (pl.col("action") == "entry")
+        & (pl.col("slice_ts_ms").fill_null(0).cast(pl.Int64) == int(slice_ts_ms))
+    )
+    if frame.is_empty():
+        return False
+    rows = frame.to_dicts()
+    return any(_row_counts_as_twap_attempt(row, dry_run_counts=dry_run_counts) for row in rows)
+
+
+def _row_counts_as_twap_attempt(row: dict[str, Any], *, dry_run_counts: bool) -> bool:
+    if dry_run_counts and str(row.get("status") or "").strip().lower() == "dry_run":
+        return True
+    status = str(row.get("status") or "").strip().lower()
+    if status == "place_failed" and bool(str(row.get("request") or "")):
+        return True
+    if status == "skipped" and str(row.get("error") or "") == "missed_prior_twap_slice":
+        return True
+    if str(row.get("reconciled_status") or "").strip().lower() in _TERMINAL_RECONCILED_STATUSES:
+        return True
+    return _row_blocks_duplicate(row)
+
+
+def _entry_leverage_guarded_symbols(orders: pl.DataFrame, *, date: str) -> set[str]:
+    if orders.is_empty() or {"action", "symbol", "status", "date"}.difference(set(orders.columns)):
+        return set()
+    frame = orders.filter((pl.col("action") == "entry") & (pl.col("date") == date))
+    if frame.is_empty():
+        return set()
+    symbols: set[str] = set()
+    for row in frame.to_dicts():
+        status = str(row.get("status") or "").strip().lower()
+        reconciled_status = str(row.get("reconciled_status") or "").strip().lower()
+        if (
+            status in _SUBMITTED_STATUSES
+            or reconciled_status in _BLOCKING_RECONCILED_STATUSES
+            or reconciled_status in _TERMINAL_RECONCILED_STATUSES
+            or reconciled_status == "filled"
+        ):
+            symbol = str(row.get("symbol") or "").upper()
+            if symbol:
+                symbols.add(symbol)
+    return symbols
 
 
 def _row_blocks_duplicate(row: dict[str, Any]) -> bool:
@@ -1262,6 +1740,17 @@ def _entry_order_for_trade(orders: pl.DataFrame, trade_id: str) -> dict[str, Any
     rows = orders.filter((pl.col("paper_trade_id") == trade_id) & (pl.col("action") == "entry")).to_dicts()
     blocking_rows = [row for row in rows if _row_blocks_duplicate(row)]
     return blocking_rows[-1] if blocking_rows else None
+
+
+def _entry_qty_for_trade(orders: pl.DataFrame, trade_id: str) -> Decimal:
+    if orders.is_empty() or {"paper_trade_id", "action"}.difference(set(orders.columns)):
+        return Decimal("0")
+    rows = orders.filter((pl.col("paper_trade_id") == trade_id) & (pl.col("action") == "entry")).to_dicts()
+    total = Decimal("0")
+    for row in rows:
+        if _row_blocks_duplicate(row):
+            total += Decimal(str(row.get("qty") or "0"))
+    return total
 
 
 def _merge_order_frames(left: pl.DataFrame, right: pl.DataFrame) -> pl.DataFrame:
@@ -1331,14 +1820,20 @@ def _reconciled_status(
 ) -> str:
     action = str(row.get("action") or "")
     status = str(row.get("status") or "").strip().lower()
+    prior_reconciled_status = str(row.get("reconciled_status") or "").strip().lower()
     open_status = _normalized_order_status(open_match.get("orderStatus")) if open_match else ""
     normalized_history_status = _normalized_order_status(history_status)
     order_qty = _float(row.get("qty"))
     has_position = bool(position["size"])
     has_reconcile_error = bool(row.get("reconcile_error"))
 
+    has_fill_value = _float(row.get("filled_value")) > 0.0
     if normalized_history_status in _FILLED_ORDER_STATUSES or (order_qty > 0.0 and filled_qty >= order_qty):
-        return "filled"
+        return "filled" if filled_qty > 0.0 and has_fill_value else "filled_pending_execs"
+    if action == "exit" and filled_qty > 0.0 and not has_position:
+        return "filled" if has_fill_value else "filled_pending_execs"
+    if action == "exit" and filled_qty > 0.0 and normalized_history_status in _CANCELLED_ORDER_STATUSES:
+        return "partial_cancelled"
     if filled_qty > 0.0 or open_status == "partiallyfilled" or normalized_history_status == "partiallyfilled":
         return "partial"
     if normalized_history_status in _CANCELLED_ORDER_STATUSES or open_status in _CANCELLED_ORDER_STATUSES:
@@ -1349,8 +1844,18 @@ def _reconciled_status(
         return "open_order_seen"
     if action == "entry" and has_position:
         return "position_detected"
+    if prior_reconciled_status in _TERMINAL_RECONCILED_STATUSES:
+        return prior_reconciled_status
     if has_reconcile_error and status not in _SUBMITTED_STATUSES:
         return "reconcile_error"
+    if status == "submit_unknown":
+        created_ts_ms = int(_float(row.get("created_ts_ms")))
+        reconcile_ts_ms = int(_float(row.get("reconcile_ts_ms")))
+        if has_reconcile_error or reconcile_ts_ms <= 0 or created_ts_ms <= 0:
+            return "submit_unknown"
+        if reconcile_ts_ms - created_ts_ms < _SUBMIT_UNKNOWN_GRACE_MS:
+            return "submit_unknown"
+        return "submit_not_found"
     if action == "exit" and status in _SUBMITTED_STATUSES:
         return "exit_submitted"
     if status in _SUBMITTED_STATUSES:
@@ -1382,6 +1887,41 @@ def _paper_notional(trade: dict[str, Any], *, account_equity_override: float = 0
     return 0.0
 
 
+def _exit_reference_price(trade: dict[str, Any]) -> float:
+    for key in ("execution_exit_price", "trigger_price", "fast_trigger_price", "model_exit_price", "exit_price", "paper_exit_price"):
+        value = _float(trade.get(key))
+        if value > 0.0:
+            return value
+    return 0.0
+
+
+def _has_explicit_exit_execution_reference(trade: dict[str, Any]) -> bool:
+    return any(_float(trade.get(key)) > 0.0 for key in ("execution_exit_price", "trigger_price", "fast_trigger_price"))
+
+
+def _paper_slice_notional(
+    trade: dict[str, Any],
+    paper_slice: dict[str, Any] | None,
+    *,
+    account_equity_override: float = 0.0,
+    max_trade_notional: float = 0.0,
+) -> float:
+    total = _paper_notional(trade, account_equity_override=account_equity_override)
+    if max_trade_notional > 0.0:
+        total = min(total, max_trade_notional)
+    if paper_slice is None:
+        return total
+    expected = int(_float(trade.get("entry_twap_minutes")) or _float(paper_slice.get("entry_twap_minutes")) or 0)
+    if expected <= 0:
+        return total
+    target_total = _float(trade.get("target_notional"))
+    if target_total > 0.0 and account_equity_override <= 0.0:
+        total = target_total
+        if max_trade_notional > 0.0:
+            total = min(total, max_trade_notional)
+    return total / expected if total > 0.0 else 0.0
+
+
 def _symbol_position(positions: list[dict[str, Any]], symbol: str) -> dict[str, Any]:
     for row in positions:
         if "__error__" in row:
@@ -1395,8 +1935,9 @@ def _symbol_position(positions: list[dict[str, Any]], symbol: str) -> dict[str, 
             "side": str(row.get("side") or ""),
             "size": size,
             "value": _float(row.get("positionValue", row.get("position_value"))),
+            "idx": int(_float(row.get("positionIdx", row.get("position_idx", 0)))),
         }
-    return {"side": "", "size": 0.0, "value": 0.0}
+    return {"side": "", "size": 0.0, "value": 0.0, "idx": 0}
 
 
 def _sync_order_link_id(trade_id: str, action: str, *, prefix: str = "") -> str:
@@ -1404,6 +1945,39 @@ def _sync_order_link_id(trade_id: str, action: str, *, prefix: str = "") -> str:
     action_key = "".join(char for char in action.lower() if char.isalnum())[:1] or "x"
     digest = blake2b(f"{clean_prefix}:{trade_id}:{action}".encode("utf-8"), digest_size=8).hexdigest()
     return f"agc{clean_prefix}{action_key}{digest}"[:36]
+
+
+def _exit_order_link_id(trade_id: str, existing_orders: pl.DataFrame, *, prefix: str = "") -> str:
+    attempt = _prior_exit_attempt_count(existing_orders, trade_id) + 1
+    return _sync_order_link_id(f"{trade_id}:attempt:{attempt}", "exit", prefix=prefix)
+
+
+def _prior_exit_attempt_count(existing_orders: pl.DataFrame, trade_id: str) -> int:
+    if existing_orders.is_empty() or {"paper_trade_id", "action"}.difference(set(existing_orders.columns)):
+        return 0
+    return existing_orders.filter((pl.col("paper_trade_id") == trade_id) & (pl.col("action") == "exit")).height
+
+
+def _entry_order_link_id(
+    trade: dict[str, Any],
+    action: str,
+    *,
+    sync_config: DemoSyncConfig,
+    paper_slice: dict[str, Any] | None = None,
+) -> str:
+    if paper_slice is None:
+        return _sync_order_link_id(str(trade.get("trade_id") or "missing"), action, prefix=sync_config.order_link_prefix)
+    prefix = "".join(char for char in sync_config.order_link_prefix.lower() if char.isalnum())[:5] or "slv"
+    action_key = "".join(char for char in action.lower() if char.isalnum())[:1] or "x"
+    symbol = "".join(char for char in str(trade.get("symbol") or "").lower() if char.isalnum())[:8] or "sym"
+    date_token = "".join(char for char in str(trade.get("date") or "").replace("-", "") if char.isdigit())[2:8] or "000000"
+    slice_ts_ms = int(paper_slice.get("scheduled_ts_ms") or 0)
+    slice_time = _dt_from_ms(slice_ts_ms).strftime("%H%M") if slice_ts_ms else "0000"
+    digest = blake2b(
+        f"{prefix}:{trade.get('trade_id')}:{action}:{symbol}:{date_token}:{slice_time}:{slice_ts_ms}".encode("utf-8"),
+        digest_size=4,
+    ).hexdigest()
+    return f"agc{prefix}{action_key}{symbol}{date_token}{slice_time}{digest}"[:36]
 
 
 def _count_status(orders: pl.DataFrame, status: str) -> int:
@@ -1462,6 +2036,30 @@ def _round_to_step(value: Decimal, step: Decimal, rounding: str) -> Decimal:
     return (value / step).to_integral_value(rounding=rounding) * step
 
 
+def _bounded_exit_limit_price(
+    *,
+    side: str,
+    reference_price: float,
+    slippage_bps: float,
+    instrument: dict[str, Any],
+) -> Decimal:
+    tick_size = _decimal_filter(instrument, "priceFilter", "tickSize", "0.0001")
+    reference = Decimal(str(reference_price))
+    offset = Decimal(str(slippage_bps)) / Decimal("10000")
+    if reference <= 0:
+        raise ValueError(f"non-positive bounded exit reference price: {reference}")
+    if side == "Buy":
+        price = reference * (Decimal("1") + offset)
+        return _round_to_step(price, tick_size, ROUND_CEILING)
+    if side == "Sell":
+        price = reference * (Decimal("1") - offset)
+        rounded = _round_to_step(price, tick_size, ROUND_FLOOR)
+        if rounded <= 0:
+            raise ValueError(f"computed non-positive bounded exit limit price: {rounded}")
+        return rounded
+    raise ValueError(f"unknown exit side: {side}")
+
+
 def _capped_order_qty(
     *,
     symbol: str,
@@ -1491,6 +2089,12 @@ def _capped_order_qty(
 
 def _decimal_text(value: Decimal) -> str:
     return format(value.normalize(), "f")
+
+
+def _slippage_tolerance_percent_text(slippage_bps: float) -> str:
+    percent = Decimal(str(slippage_bps)) / Decimal("100")
+    percent = max(Decimal("0.01"), min(percent, Decimal("10")))
+    return _decimal_text(percent.quantize(Decimal("0.01")))
 
 
 def _order_link_id(symbol: str, timestamp_ms: int) -> str:
@@ -1531,3 +2135,7 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _floor_minute_ms(ts_ms: int) -> int:
+    return ts_ms - (ts_ms % 60_000)

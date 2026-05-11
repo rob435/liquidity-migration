@@ -3,9 +3,8 @@ from __future__ import annotations
 import json
 import os
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
-from hashlib import blake2b
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
@@ -14,26 +13,24 @@ import polars as pl
 from . import demo_execution as demo_execution_module
 from .config import DailyCloseFadeConfig, ForwardTestConfig, ResearchConfig
 from .demo_execution import DemoSyncConfig
+from .demo_fast_protection import DemoFastProtectionConfig, run_demo_fast_protection
 from .forward_test import default_forward_sleeves, run_forward_sleeves
 
 
-DEMO_CYCLE_SLEEVES = ("control_top_1_30", "core_31_150", "microcap_151_plus")
+DEMO_CYCLE_SLEEVES = ("stage4_selected",)
 DEMO_CYCLE_ORDER_PREFIXES = {
-    "control_top_1_30": "ctl",
-    "core_31_150": "core",
-    "microcap_151_plus": "micro",
+    "stage4_selected": "stg4",
 }
-RETRYABLE_DEMO_STATUSES = ("dry_run", "skipped", "place_failed", "pending_submit")
 
 
 @dataclass(frozen=True, slots=True)
 class DemoCycleConfig:
-    max_order_notional: float = 10.0
+    max_order_notional: float = 0.0
     max_new_orders: int = 5
-    max_total_new_notional: float = 50.0
+    max_total_new_notional: float = 0.0
     use_wallet_balance: bool = False
     wallet_balance_fraction: float = 1.0
-    max_order_notional_pct_equity: float = 0.80
+    max_order_notional_pct_equity: float = 0.10
     max_total_new_notional_pct_equity: float = 1.0
     cancel_stale_minutes: int = 5
     price_offset_bps: float = 2.0
@@ -41,10 +38,17 @@ class DemoCycleConfig:
     confirmed: bool = False
     allow_market_exit: bool = True
     send_telegram: bool = False
-    active_start_minute: int = 22 * 60 + 5
-    active_end_minute: int = 2 * 60 + 30
+    entry_sleeves: tuple[str, ...] = ("stage4_selected",)
+    entry_leverage: float = 1.0
+    active_start_minute: int = 23 * 60
+    active_end_minute: int = 6 * 60 + 30
     ignore_active_window: bool = False
     lock_stale_minutes: int = 30
+    forward_mode: str = "open_from_scan"
+    require_first_slice: bool = True
+    require_contiguous_twap: bool = True
+    fast_protection_seconds: float = 0.0
+    fast_max_exit_submits_per_run: int = 5
 
 
 ForwardSleevesRunner = Callable[..., dict[str, Any]]
@@ -62,6 +66,7 @@ def run_bybit_demo_cycle(
     forward_client: Any | None = None,
     market_client: Any | None = None,
     execution_client: Any | None = None,
+    trade_stream: Any | None = None,
     api_key: str | None = None,
     api_secret: str | None = None,
     forward_runner: ForwardSleevesRunner | None = None,
@@ -85,6 +90,7 @@ def run_bybit_demo_cycle(
             forward_client=forward_client,
             market_client=market_client,
             execution_client=execution_client,
+            trade_stream=trade_stream,
             api_key=api_key,
             api_secret=api_secret,
             forward_runner=forward_runner,
@@ -103,6 +109,7 @@ def _run_bybit_demo_cycle_unlocked(
     forward_client: Any | None,
     market_client: Any | None,
     execution_client: Any | None,
+    trade_stream: Any | None,
     api_key: str | None,
     api_secret: str | None,
     forward_runner: ForwardSleevesRunner | None,
@@ -120,18 +127,46 @@ def _run_bybit_demo_cycle_unlocked(
     )
     existing_state = _existing_active_state(base_root)
     entries_paused = pause["paused"] or not inside_window
+    entry_sleeves = set(cycle.entry_sleeves)
+    should_run_forward = (inside_window and not entries_paused and bool(entry_sleeves)) or existing_state["paper_open"] > 0
+    pre_sync_fast_payloads = _run_pre_sync_fast_protection(
+        base_root,
+        config=config,
+        fade_config=fade,
+        cycle=cycle,
+        now=now_dt,
+        market_client=market_client,
+        execution_client=execution_client,
+        trade_stream=trade_stream,
+        api_key=api_key,
+        api_secret=api_secret,
+    )
 
-    if inside_window or existing_state["has_active_state"]:
-        forward_payload = (forward_runner or run_forward_sleeves)(
-            base_root,
-            config=config,
-            fade_config=fade,
-            forward_config=forward,
-            now=now_dt,
-            client=forward_client,
-            send_telegram=False,
-            sleeves=sleeve_configs,
-        )
+    if should_run_forward:
+        if forward_runner is not None:
+            forward_payload = forward_runner(
+                base_root,
+                config=config,
+                fade_config=fade,
+                forward_config=forward,
+                now=now_dt,
+                client=forward_client,
+                send_telegram=False,
+                sleeves=sleeve_configs,
+            )
+        else:
+            forward_payload = run_forward_sleeves(
+                base_root,
+                config=config,
+                fade_config=fade,
+                forward_config=forward,
+                now=now_dt,
+                client=forward_client,
+                send_telegram=False,
+                sleeves=sleeve_configs,
+                mode=cycle.forward_mode,
+                require_first_slice=cycle.require_first_slice,
+            )
     else:
         forward_payload = {
             "now": now_dt.isoformat(),
@@ -158,26 +193,31 @@ def _run_bybit_demo_cycle_unlocked(
         for sleeve in DEMO_CYCLE_SLEEVES:
             sleeve_root = sleeve_roots[sleeve]
             order_prefix = DEMO_CYCLE_ORDER_PREFIXES[sleeve]
-            sync_config = _sync_config_from_cycle(cycle, sleeve_prefix=order_prefix, entries_paused=entries_paused)
+            sleeve_entries_paused = entries_paused or sleeve not in entry_sleeves
+            sync_config = _sync_config_from_cycle(cycle, sleeve_prefix=order_prefix, entries_paused=sleeve_entries_paused)
             try:
-                with _demo_sync_compat_context(
-                    sleeve_root=sleeve_root,
-                    sleeve_prefix=order_prefix,
-                    filter_paused_entries=entries_paused and not _demo_sync_supports_entry_pause(),
-                ):
-                    sync_payload = (sync_runner or demo_execution_module.run_bybit_demo_sync)(
+                sync_payload = (sync_runner or demo_execution_module.run_bybit_demo_sync)(
+                    sleeve_root,
+                    config=config,
+                    sync_config=sync_config,
+                    now=now_dt,
+                    market_client=market_client,
+                    execution_client=execution_client,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                )
+                results.append(
+                    _sleeve_result(
+                        sleeve,
                         sleeve_root,
-                        config=config,
-                        sync_config=sync_config,
-                        now=now_dt,
-                        market_client=market_client,
-                        execution_client=execution_client,
-                        api_key=api_key,
-                        api_secret=api_secret,
+                        order_prefix,
+                        sleeve_entries_paused,
+                        sync_payload,
+                        fast_payload=pre_sync_fast_payloads.get(sleeve),
                     )
-                results.append(_sleeve_result(sleeve, sleeve_root, order_prefix, entries_paused, sync_payload))
+                )
             except Exception as exc:  # noqa: BLE001 - keep the cycle report useful if one sleeve fails
-                results.append(_failed_sleeve_result(sleeve, sleeve_root, order_prefix, entries_paused, str(exc)))
+                results.append(_failed_sleeve_result(sleeve, sleeve_root, order_prefix, sleeve_entries_paused, str(exc)))
 
     summary = summarize_demo_cycle_results(results)
     payload = {
@@ -186,6 +226,7 @@ def _run_bybit_demo_cycle_unlocked(
         "active_window": {
             "inside": inside_window,
             "entries_paused": entries_paused,
+            "entry_sleeves": list(cycle.entry_sleeves),
             "start_minute": cycle.active_start_minute,
             "end_minute": cycle.active_end_minute,
             "existing_active_state": existing_state,
@@ -263,6 +304,7 @@ def format_demo_cycle_report(payload: dict[str, Any]) -> str:
         f"Paused: `{bool(pause.get('paused'))}`",
         f"Inside active window: `{bool(active.get('inside'))}`",
         f"Entries paused: `{bool(active.get('entries_paused'))}`",
+        f"Entry sleeves: `{', '.join(payload.get('config', {}).get('entry_sleeves') or []) or 'none'}`",
         f"Submit orders: `{bool(payload.get('config', {}).get('submit_orders'))}`",
         "",
         "## Summary",
@@ -325,26 +367,33 @@ def _write_demo_cycle_outputs(data_root: str | Path, payload: dict[str, Any]) ->
 def _validate_cycle_config(config: DemoCycleConfig) -> None:
     if config.max_order_notional < 0.0:
         raise ValueError("max_order_notional must be non-negative")
-    if not config.use_wallet_balance and config.max_order_notional <= 0.0:
-        raise ValueError("max_order_notional must be positive unless wallet balance sizing is enabled")
     if config.max_new_orders < 0:
         raise ValueError("max_new_orders cannot be negative")
     if config.max_total_new_notional < 0.0:
         raise ValueError("max_total_new_notional must be non-negative")
-    if not config.use_wallet_balance and config.max_total_new_notional <= 0.0:
-        raise ValueError("max_total_new_notional must be positive unless wallet balance sizing is enabled")
     if not 0.0 < config.wallet_balance_fraction <= 1.0:
         raise ValueError("wallet_balance_fraction must be in (0, 1]")
     if config.max_order_notional_pct_equity < 0.0:
         raise ValueError("max_order_notional_pct_equity cannot be negative")
     if config.max_total_new_notional_pct_equity < 0.0:
         raise ValueError("max_total_new_notional_pct_equity cannot be negative")
+    invalid_sleeves = sorted(set(config.entry_sleeves).difference(DEMO_CYCLE_SLEEVES))
+    if invalid_sleeves:
+        raise ValueError(f"unknown demo entry sleeve(s): {', '.join(invalid_sleeves)}")
+    if config.entry_leverage < 0.0:
+        raise ValueError("entry_leverage cannot be negative")
+    if config.fast_protection_seconds < 0.0:
+        raise ValueError("fast_protection_seconds cannot be negative")
+    if config.fast_max_exit_submits_per_run < 0:
+        raise ValueError("fast_max_exit_submits_per_run cannot be negative")
     if not 0 <= config.active_start_minute < 24 * 60:
         raise ValueError("active_start_minute must be inside one UTC day")
     if not 0 <= config.active_end_minute < 24 * 60:
         raise ValueError("active_end_minute must be inside one UTC day")
     if config.lock_stale_minutes < 1:
         raise ValueError("lock_stale_minutes must be positive")
+    if config.forward_mode not in {"scan", "mark_only", "open_from_scan"}:
+        raise ValueError("forward_mode must be one of: scan, mark_only, open_from_scan")
 
 
 @contextmanager
@@ -359,7 +408,9 @@ def _demo_cycle_lock(data_root: Path, *, now: datetime, stale_minutes: int) -> I
             age_seconds = max(0.0, now.timestamp() - lock_path.stat().st_mtime)
         except OSError:
             age_seconds = 0.0
-        if age_seconds > stale_after_seconds:
+        owner_pid = _lock_owner_pid(lock_path)
+        owner_dead = owner_pid is not None and not _pid_is_running(owner_pid)
+        if owner_dead or age_seconds > stale_after_seconds:
             lock_path.unlink(missing_ok=True)
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         else:
@@ -370,6 +421,28 @@ def _demo_cycle_lock(data_root: Path, *, now: datetime, stale_minutes: int) -> I
         yield
     finally:
         lock_path.unlink(missing_ok=True)
+
+
+def _lock_owner_pid(lock_path: Path) -> int | None:
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    try:
+        pid = int(payload.get("pid") or 0)
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
+def _pid_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _is_active_window(now: datetime, *, start_minute: int, end_minute: int) -> bool:
@@ -427,56 +500,12 @@ def _sync_config_from_cycle(
         "submit_orders": cycle.submit_orders,
         "confirmed": cycle.confirmed,
         "allow_market_exit": cycle.allow_market_exit,
+        "entry_leverage": cycle.entry_leverage,
+        "require_contiguous_twap": cycle.require_contiguous_twap,
     }
-    known_fields = {field.name for field in fields(DemoSyncConfig)}
-    for name in ("order_link_prefix", "order_link_id_prefix", "sleeve_prefix"):
-        if name in known_fields:
-            kwargs[name] = sleeve_prefix
-    for name in ("entries_paused", "pause_new_entries", "new_entries_paused", "entry_pause"):
-        if name in known_fields:
-            kwargs[name] = entries_paused
-    return DemoSyncConfig(**{key: value for key, value in kwargs.items() if key in known_fields})
-
-
-def _demo_sync_supports_entry_pause() -> bool:
-    known_fields = {field.name for field in fields(DemoSyncConfig)}
-    return bool({"entries_paused", "pause_new_entries", "new_entries_paused", "entry_pause"} & known_fields)
-
-
-@contextmanager
-def _demo_sync_compat_context(
-    *,
-    sleeve_root: Path,
-    sleeve_prefix: str,
-    filter_paused_entries: bool,
-) -> Iterator[None]:
-    original_link = getattr(demo_execution_module, "_sync_order_link_id", None)
-    original_read = getattr(demo_execution_module, "read_dataset", None)
-
-    def scoped_order_link_id(trade_id: str, action: str, *, prefix: str = "") -> str:
-        return _scoped_order_link_id(prefix or sleeve_prefix, trade_id, action)
-
-    def read_dataset_compat(data_root: str | Path, dataset: str) -> pl.DataFrame:
-        frame = original_read(data_root, dataset)
-        if not _same_path(data_root, sleeve_root):
-            return frame
-        if dataset == "forward_paper_trades" and filter_paused_entries:
-            return _exit_only_forward_trades(frame)
-        if dataset == "demo_execution_orders":
-            return _without_retryable_demo_orders(frame)
-        return frame
-
-    if original_link is not None:
-        setattr(demo_execution_module, "_sync_order_link_id", scoped_order_link_id)
-    if original_read is not None:
-        setattr(demo_execution_module, "read_dataset", read_dataset_compat)
-    try:
-        yield
-    finally:
-        if original_link is not None:
-            setattr(demo_execution_module, "_sync_order_link_id", original_link)
-        if original_read is not None:
-            setattr(demo_execution_module, "read_dataset", original_read)
+    kwargs["order_link_prefix"] = sleeve_prefix
+    kwargs["pause_new_entries"] = entries_paused
+    return DemoSyncConfig(**kwargs)
 
 
 def _sleeve_result(
@@ -485,18 +514,111 @@ def _sleeve_result(
     order_prefix: str,
     paused: bool,
     sync_payload: dict[str, Any],
+    fast_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    fast_failed = bool(fast_payload and str(fast_payload.get("status") or "") == "failed")
     return {
         "sleeve": sleeve,
-        "status": "ok",
+        "status": "failed" if fast_failed else "ok",
         "data_root": str(sleeve_root),
         "order_link_prefix": order_prefix,
         "paused": paused,
         "rows": sync_payload.get("rows", {}),
         "summary": sync_payload.get("summary", {}),
         "sync": sync_payload,
-        "error": "",
+        "fast_protection": fast_payload or {},
+        "error": str((fast_payload or {}).get("error") or "") if fast_failed else "",
     }
+
+
+def _run_pre_sync_fast_protection(
+    base_root: Path,
+    *,
+    config: ResearchConfig,
+    fade_config: DailyCloseFadeConfig,
+    cycle: DemoCycleConfig,
+    now: datetime,
+    market_client: Any | None,
+    execution_client: Any | None,
+    trade_stream: Any | None,
+    api_key: str | None,
+    api_secret: str | None,
+) -> dict[str, dict[str, Any]]:
+    if cycle.fast_protection_seconds <= 0.0 or not cycle.submit_orders or not cycle.confirmed:
+        return {}
+    payloads: dict[str, dict[str, Any]] = {}
+    for sleeve in DEMO_CYCLE_SLEEVES:
+        order_prefix = DEMO_CYCLE_ORDER_PREFIXES[sleeve]
+        sleeve_root = base_root / "forward_sleeves" / sleeve
+        try:
+            payload = _run_fast_protection_for_sleeve(
+                sleeve_root,
+                config=config,
+                fade_config=fade_config,
+                cycle=cycle,
+                now=now,
+                order_prefix=order_prefix,
+                market_client=market_client,
+                execution_client=execution_client,
+                trade_stream=trade_stream,
+                api_key=api_key,
+                api_secret=api_secret,
+            )
+        except Exception as exc:  # noqa: BLE001 - sync/reconcile should still run and report the failure
+            payload = {
+                "now": now.isoformat(),
+                "status": "failed",
+                "rows": {
+                    "active_trades": 0,
+                    "symbols": 0,
+                    "trigger_events": 0,
+                    "submitted_or_unknown": 0,
+                    "duplicate_blocks": 0,
+                    "submit_blocks": 0,
+                    "callback_count": 0,
+                },
+                "summary": {},
+                "error": str(exc),
+            }
+        if payload is not None:
+            payloads[sleeve] = payload
+    return payloads
+
+
+def _run_fast_protection_for_sleeve(
+    sleeve_root: Path,
+    *,
+    config: ResearchConfig,
+    fade_config: DailyCloseFadeConfig,
+    cycle: DemoCycleConfig,
+    now: datetime,
+    order_prefix: str,
+    market_client: Any | None,
+    execution_client: Any | None,
+    trade_stream: Any | None,
+    api_key: str | None,
+    api_secret: str | None,
+) -> dict[str, Any] | None:
+    if cycle.fast_protection_seconds <= 0.0 or not cycle.submit_orders or not cycle.confirmed:
+        return None
+    return run_demo_fast_protection(
+        sleeve_root,
+        config=config,
+        fade_config=fade_config,
+        protection_config=DemoFastProtectionConfig(
+            runtime_seconds=cycle.fast_protection_seconds,
+            submit_exits=True,
+            confirmed=True,
+            order_link_prefix=order_prefix,
+            max_exit_submits_per_run=cycle.fast_max_exit_submits_per_run,
+        ),
+        now=now,
+        market_client=market_client,
+        execution_client=execution_client,
+        trade_stream=trade_stream,
+        api_key=api_key,
+        api_secret=api_secret,
+    )
 
 
 def _failed_sleeve_result(
@@ -564,33 +686,6 @@ def _sleeve_roots(data_root: Path, forward_payload: dict[str, Any]) -> dict[str,
         if sleeve in roots and root:
             roots[sleeve] = Path(str(root)).expanduser()
     return roots
-
-
-def _scoped_order_link_id(prefix: str, trade_id: str, action: str) -> str:
-    clean_prefix = _compact_token(prefix, max_len=8) or "s"
-    action_key = _compact_token(action, max_len=1) or "x"
-    digest = blake2b(f"{prefix}:{trade_id}:{action}".encode("utf-8"), digest_size=8).hexdigest()
-    return f"agc{clean_prefix}{action_key}{digest}"[:36]
-
-
-def _compact_token(value: str, *, max_len: int) -> str:
-    return "".join(char for char in value.lower() if char.isalnum())[:max_len]
-
-
-def _without_retryable_demo_orders(frame: pl.DataFrame) -> pl.DataFrame:
-    if frame.is_empty() or "status" not in frame.columns:
-        return frame
-    return frame.filter(~pl.col("status").is_in(RETRYABLE_DEMO_STATUSES))
-
-
-def _exit_only_forward_trades(frame: pl.DataFrame) -> pl.DataFrame:
-    if frame.is_empty() or "status" not in frame.columns:
-        return frame
-    return frame.filter(pl.col("status") != "open")
-
-
-def _same_path(left: str | Path, right: str | Path) -> bool:
-    return Path(left).expanduser() == Path(right).expanduser()
 
 
 def _as_utc(value: datetime) -> datetime:

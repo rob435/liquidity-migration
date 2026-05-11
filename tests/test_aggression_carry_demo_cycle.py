@@ -11,7 +11,7 @@ from aggression_carry.demo_cycle import DEMO_CYCLE_SLEEVES, DemoCycleConfig, run
 from aggression_carry.storage import read_dataset, write_dataset
 
 
-NOW = datetime(2026, 1, 15, 22, 16, tzinfo=UTC)
+NOW = datetime(2026, 1, 15, 23, 16, tzinfo=UTC)
 
 
 def test_demo_cycle_dry_run_syncs_all_default_sleeves_without_private_orders(tmp_path: Path) -> None:
@@ -20,25 +20,51 @@ def test_demo_cycle_dry_run_syncs_all_default_sleeves_without_private_orders(tmp
     payload = run_bybit_demo_cycle(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        cycle_config=DemoCycleConfig(max_order_notional=11.0),
+        cycle_config=DemoCycleConfig(),
         now=NOW,
         forward_runner=_forward_runner_open_trade,
         market_client=_FakeMarket(),
         execution_client=execution,
     )
 
-    assert payload["rows"]["sleeves"] == 3
-    assert payload["summary"]["dry_run"] == 3
+    assert payload["rows"]["sleeves"] == 1
+    assert payload["summary"]["dry_run"] == 1
+    assert payload["summary"]["skipped"] == 0
     assert payload["summary"]["placed"] == 0
+    assert payload["config"]["entry_sleeves"] == ("stage4_selected",)
     assert execution.placed == []
     for sleeve in DEMO_CYCLE_SLEEVES:
         sleeve_root = tmp_path / "forward_sleeves" / sleeve
         orders = read_dataset(sleeve_root, "demo_execution_orders")
         assert orders.height == 1
-        assert orders.row(0, named=True)["status"] == "dry_run"
+        row = orders.row(0, named=True)
+        if sleeve == "stage4_selected":
+            assert row["status"] == "dry_run"
+        else:
+            assert row["status"] == "skipped"
+            assert row["error"] == "new_entries_paused"
         assert (sleeve_root / "reports" / "bybit_demo_sync_report.md").exists()
     assert (tmp_path / "reports" / "bybit_demo_cycle_report.json").exists()
     assert (tmp_path / "reports" / "bybit_demo_cycle_report.md").exists()
+
+
+def test_demo_cycle_uses_paper_notional_without_demo_cap(tmp_path: Path) -> None:
+    payload = run_bybit_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        cycle_config=DemoCycleConfig(),
+        now=NOW,
+        forward_runner=_forward_runner_open_trade,
+        market_client=_FakeMarket(),
+        execution_client=_FakeExecution(),
+    )
+
+    sleeve_root = tmp_path / "forward_sleeves" / "stage4_selected"
+    row = read_dataset(sleeve_root, "demo_execution_orders").row(0, named=True)
+
+    assert payload["summary"]["dry_run"] == 1
+    assert row["estimated_notional"] > 10.0
+    assert row["max_order_notional"] == 2_000.0
 
 
 def test_demo_cycle_requires_confirmation_before_submit(tmp_path: Path) -> None:
@@ -66,13 +92,13 @@ def test_demo_cycle_requires_confirmation_before_submit(tmp_path: Path) -> None:
     assert called is False
 
 
-def test_demo_cycle_prefixes_order_link_ids_by_sleeve_on_submit(tmp_path: Path) -> None:
+def test_demo_cycle_default_submit_entries_are_stage4_selected_only(tmp_path: Path) -> None:
     execution = _FakeExecution()
 
     payload = run_bybit_demo_cycle(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        cycle_config=DemoCycleConfig(submit_orders=True, confirmed=True, max_order_notional=11.0),
+        cycle_config=DemoCycleConfig(submit_orders=True, confirmed=True),
         now=NOW,
         forward_runner=_forward_runner_open_trade,
         market_client=_FakeMarket(),
@@ -80,22 +106,39 @@ def test_demo_cycle_prefixes_order_link_ids_by_sleeve_on_submit(tmp_path: Path) 
     )
 
     order_link_ids = [order["orderLinkId"] for order in execution.placed]
-    assert payload["summary"]["placed"] == 3
-    assert len(order_link_ids) == 3
-    assert len(set(order_link_ids)) == 3
-    assert any(order_link_id.startswith("agcctle") for order_link_id in order_link_ids)
-    assert any(order_link_id.startswith("agccoree") for order_link_id in order_link_ids)
-    assert any(order_link_id.startswith("agcmicroe") for order_link_id in order_link_ids)
+    assert payload["summary"]["placed"] == 1
+    assert payload["summary"]["skipped"] == 0
+    assert len(order_link_ids) == 1
+    assert order_link_ids[0].startswith("agcstg4e")
+    assert execution.leverage_calls == [{"symbol": "BTCUSDT", "buy_leverage": 1.0, "sell_leverage": 1.0}]
+
+
+def test_demo_cycle_rejects_unknown_entry_sleeve(tmp_path: Path) -> None:
+    try:
+        run_bybit_demo_cycle(
+            tmp_path,
+            config=ResearchConfig(data_root=tmp_path),
+            cycle_config=DemoCycleConfig(entry_sleeves=("not_a_sleeve",)),
+            now=NOW,
+            forward_runner=_forward_runner_open_trade,
+            market_client=_FakeMarket(),
+            execution_client=_FakeExecution(),
+        )
+    except ValueError as exc:
+        assert "unknown demo entry sleeve" in str(exc)
+    else:  # pragma: no cover - explicit failure branch
+        raise AssertionError("unknown demo entry sleeve should be rejected")
 
 
 def test_demo_cycle_pause_blocks_entries_but_allows_reduce_only_exits(tmp_path: Path) -> None:
     (tmp_path / "DEMO_PAUSED").write_text("maintenance", encoding="utf-8")
+    _forward_runner_open_and_closed_trades(tmp_path)
     execution = _FakeExecution(position_size=0.05, position_value=5.0)
 
     payload = run_bybit_demo_cycle(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        cycle_config=DemoCycleConfig(submit_orders=True, confirmed=True, max_order_notional=11.0),
+        cycle_config=DemoCycleConfig(submit_orders=True, confirmed=True),
         now=NOW,
         forward_runner=_forward_runner_open_and_closed_trades,
         market_client=_FakeMarket(),
@@ -103,12 +146,13 @@ def test_demo_cycle_pause_blocks_entries_but_allows_reduce_only_exits(tmp_path: 
     )
 
     assert payload["paused"]["paused"] is True
-    assert payload["summary"]["new_orders"] == 6
-    assert payload["summary"]["accepted"] == 3
-    assert payload["summary"]["skipped"] == 3
+    assert payload["summary"]["new_orders"] == 2
+    assert payload["summary"]["accepted"] == 1
+    assert payload["summary"]["skipped"] == 1
     assert payload["summary"]["dry_run"] == 0
-    assert len(execution.placed) == 3
-    assert {order["orderType"] for order in execution.placed} == {"Market"}
+    assert len(execution.placed) == 1
+    assert {order["orderType"] for order in execution.placed} == {"Limit"}
+    assert {order["timeInForce"] for order in execution.placed} == {"IOC"}
     assert {order["reduceOnly"] for order in execution.placed} == {True}
     assert all(order["side"] == "Buy" for order in execution.placed)
 
@@ -130,6 +174,24 @@ def test_demo_cycle_lock_blocks_overlapping_runs(tmp_path: Path) -> None:
         assert "already running" in str(exc)
     else:  # pragma: no cover - explicit failure branch
         raise AssertionError("overlapping demo cycle should be blocked by lock")
+
+
+def test_demo_cycle_replaces_lock_when_recorded_pid_is_dead(tmp_path: Path, monkeypatch) -> None:
+    (tmp_path / ".bybit_demo_cycle.lock").write_text('{"pid": 123456, "started": "2026-01-15T22:00:00+00:00"}\n', encoding="utf-8")
+    monkeypatch.setattr("aggression_carry.demo_cycle._pid_is_running", lambda pid: False)
+
+    payload = run_bybit_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        cycle_config=DemoCycleConfig(),
+        now=NOW,
+        forward_runner=_forward_runner_open_trade,
+        market_client=_FakeMarket(),
+        execution_client=_FakeExecution(),
+    )
+
+    assert payload["rows"]["sleeves"] == 1
+    assert not (tmp_path / ".bybit_demo_cycle.lock").exists()
 
 
 def test_demo_cycle_outside_window_without_active_state_skips_public_scan_and_sync(tmp_path: Path) -> None:
@@ -162,6 +224,150 @@ def test_demo_cycle_outside_window_without_active_state_skips_public_scan_and_sy
     assert payload["active_window"]["inside"] is False
     assert payload["rows"]["failed_sleeves"] == 0
     assert {row["status"] for row in payload["sleeves"]} == {"inactive_window"}
+
+
+def test_demo_cycle_outside_window_with_demo_active_state_skips_scan_but_reconciles(tmp_path: Path) -> None:
+    _write_existing_demo_entry(tmp_path / "forward_sleeves" / "stage4_selected", "paper-entry-stage4")
+    forward_called = False
+    sync_calls = 0
+
+    def forward_runner(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal forward_called
+        forward_called = True
+        return _forward_runner_open_trade(*args, **kwargs)
+
+    def sync_runner(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal sync_calls
+        sync_calls += 1
+        return {"rows": {"new_orders": 0, "ledger_orders": 1}, "summary": {"placed": 1, "accepted": 1}}
+
+    payload = run_bybit_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        cycle_config=DemoCycleConfig(),
+        now=datetime(2026, 1, 15, 12, 0, tzinfo=UTC),
+        forward_runner=forward_runner,
+        sync_runner=sync_runner,
+        market_client=_FakeMarket(),
+        execution_client=_FakeExecution(),
+    )
+
+    assert forward_called is False
+    assert sync_calls == 1
+    assert payload["active_window"]["existing_active_state"]["demo_active"] == 1
+    assert payload["summary"]["ledger_orders"] == 1
+
+
+def test_demo_cycle_paused_active_window_with_demo_active_state_skips_scan_but_reconciles(tmp_path: Path) -> None:
+    (tmp_path / "DEMO_PAUSED").write_text("maintenance", encoding="utf-8")
+    _write_existing_demo_entry(tmp_path / "forward_sleeves" / "stage4_selected", "paper-entry-stage4")
+    forward_called = False
+    sync_calls = 0
+
+    def forward_runner(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal forward_called
+        forward_called = True
+        return _forward_runner_open_trade(*args, **kwargs)
+
+    def sync_runner(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal sync_calls
+        sync_calls += 1
+        return {"rows": {"new_orders": 0, "ledger_orders": 1}, "summary": {"placed": 1, "accepted": 1}}
+
+    payload = run_bybit_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        cycle_config=DemoCycleConfig(),
+        now=NOW,
+        forward_runner=forward_runner,
+        sync_runner=sync_runner,
+        market_client=_FakeMarket(),
+        execution_client=_FakeExecution(),
+    )
+
+    assert forward_called is False
+    assert sync_calls == 1
+    assert payload["active_window"]["inside"] is True
+    assert payload["active_window"]["entries_paused"] is True
+    assert payload["active_window"]["existing_active_state"]["demo_active"] == 1
+    assert payload["summary"]["ledger_orders"] == 1
+
+
+def test_demo_cycle_runs_fast_protection_before_forward_mark_and_sync(tmp_path: Path, monkeypatch) -> None:
+    sleeve_root = tmp_path / "forward_sleeves" / "stage4_selected"
+    _write_forward_trades(
+        sleeve_root,
+        [
+            {
+                **_paper_trade("paper-active", status="open"),
+                "profit_protection_active_ts_ms": int(NOW.timestamp() * 1000) - 60_000,
+            }
+        ],
+    )
+    _write_existing_demo_entry(sleeve_root, "paper-active")
+    calls: list[str] = []
+
+    def fake_fast(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        calls.append("fast")
+        return {"rows": {"active_trades": 1}, "summary": {}}
+
+    def forward_runner(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        calls.append("forward")
+        return _forward_runner_open_trade(*args, **kwargs)
+
+    def sync_runner(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        calls.append("sync")
+        return {"rows": {"new_orders": 0, "ledger_orders": 1}, "summary": {"placed": 0, "accepted": 0}}
+
+    monkeypatch.setattr("aggression_carry.demo_cycle.run_demo_fast_protection", fake_fast)
+
+    payload = run_bybit_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        cycle_config=DemoCycleConfig(submit_orders=True, confirmed=True, fast_protection_seconds=55),
+        now=NOW,
+        forward_runner=forward_runner,
+        sync_runner=sync_runner,
+        market_client=_FakeMarket(),
+        execution_client=_FakeExecution(position_size=0.05, position_value=5.0),
+    )
+
+    assert calls == ["fast", "forward", "sync"]
+    assert payload["sleeves"][0]["fast_protection"]["rows"]["active_trades"] == 1
+
+
+def test_demo_cycle_marks_fast_protection_failure_as_failed_sleeve(tmp_path: Path, monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_fast(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        calls.append("fast")
+        raise RuntimeError("stream down")
+
+    def sync_runner(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        calls.append("sync")
+        return {"rows": {"new_orders": 0, "ledger_orders": 1}, "summary": {"placed": 0, "accepted": 0}}
+
+    monkeypatch.setattr("aggression_carry.demo_cycle.run_demo_fast_protection", fake_fast)
+
+    payload = run_bybit_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        cycle_config=DemoCycleConfig(submit_orders=True, confirmed=True, fast_protection_seconds=55),
+        now=NOW,
+        forward_runner=_forward_runner_open_trade,
+        sync_runner=sync_runner,
+        market_client=_FakeMarket(),
+        execution_client=_FakeExecution(position_size=0.05, position_value=5.0),
+    )
+
+    assert calls == ["fast", "sync"]
+    assert payload["rows"]["failed_sleeves"] == 1
+    assert payload["sleeves"][0]["status"] == "failed"
+    assert payload["sleeves"][0]["error"] == "stream down"
 
 
 def _forward_runner_open_trade(data_root: str | Path, **kwargs: Any) -> dict[str, Any]:
@@ -280,8 +486,13 @@ class _FakeExecution:
     def __init__(self, *, position_size: float = 0.0, position_value: float = 0.0) -> None:
         self.placed: list[dict[str, Any]] = []
         self.cancelled: list[dict[str, Any]] = []
+        self.leverage_calls: list[dict[str, Any]] = []
         self.position_size = position_size
         self.position_value = position_value
+
+    def set_leverage(self, *, symbol: str, buy_leverage: float, sell_leverage: float) -> dict[str, Any]:
+        self.leverage_calls.append({"symbol": symbol, "buy_leverage": buy_leverage, "sell_leverage": sell_leverage})
+        return {"symbol": symbol, "buyLeverage": str(buy_leverage), "sellLeverage": str(sell_leverage)}
 
     def place_order(self, **params: Any) -> dict[str, Any]:
         self.placed.append(params)

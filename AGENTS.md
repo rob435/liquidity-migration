@@ -3,17 +3,17 @@
 - Be honest and call out wrong decisions directly.
 - Ask for exact intent, constraints, and success metrics when a request is vague.
 - Do not optimize for a vague goal; define the objective before expensive research.
-- This repo is a research lab, not a live trading runtime.
+- This repo's primary objective is a profitable Bybit demo-account trading system.
 - Current implementation plan: `docs/bybit_aggression_carry_system_codex_spec.md`.
 - Secondary volume-alpha research notes: `docs/volume_alpha.md`.
 - Bybit venue/data reference: `docs/bybit_aggression_carry_system_codex_spec.md`.
 - Before changing strategy, data ingestion, feature engineering, or backtesting logic, read both docs.
-- Do not rebuild the deleted legacy live runtime or blended signal stack unless explicitly requested.
-- Do not add live execution, kill switches, deployment, or exchange order submission.
-- Telegram is allowed only for paper forward-test notifications; it must not submit or approve orders.
-- Do not combine signals until each alpha clears costs standalone.
+- Demo-only Bybit order submission is in scope; the private client must keep refusing `demo=False` unless real-money support is explicitly requested.
+- Keep the active path on the selected Stage 4 daily-close short fade unless a change has clear forward/demo evidence.
+- Telegram may notify; it must not approve or submit orders.
+- Do not mix secondary signals into the demo stack without standalone cost-cleared evidence.
 - Use `volume-alpha` for signal sweeps, `volume-backtest` for trade-ledger testing, and `volume-grid` for concurrent parameter sweeps.
-- Every serious research run should leave a run record under `data/research_reports/research_log/`.
+- Serious strategy runs should leave enough report output to audit the decision.
 
 ## graphify
 

@@ -14,8 +14,8 @@ volume_persistence: persistent turnover above baseline
 volume_composite: simple blend of the above
 ```
 
-This is separate from the daily-close fade. Do not blend the two until both are
-validated standalone.
+This is separate from the daily-close fade. A volume sleeve becomes relevant to
+the demo stack only after it has standalone cost-cleared evidence.
 
 ## Current Honest Read
 
@@ -73,16 +73,19 @@ python -m aggression_carry \
   --include-reverse
 ```
 
-Windows overnight suite:
+Kept Python helper scripts:
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_research_overnight_suite.ps1 `
-  -Suite volume `
-  -VolumePreset promotion `
-  -Workers 8
+```bash
+python scripts/run_volume_bucket_sweep.py --data-root DATA_ROOT --workers 8
+python scripts/run_volume_grid_splits.py --data-root DATA_ROOT --workers 8
+python scripts/evaluate_volume_promotion.py --split-summary DATA_ROOT/reports/volume_grid_splits/volume_grid_split_summary.csv
 ```
 
-The `promotion` preset runs:
+Multi-worker volume grids default to a thread backend. Process-pool execution
+can hang on Polars-heavy grids on the VPS, so only opt into it deliberately with
+`VOLUME_GRID_BACKEND=process`.
+
+The split/promotion workflow tests:
 
 ```text
 scores: dollar_volume_rank, volume_change_1d, volume_change_3d,
@@ -133,7 +136,7 @@ Large data and report outputs stay under `data/` and are not git artifacts.
 
 ## Research Discipline
 
-Do not promote a volume sleeve from headline return alone. A candidate needs:
+A volume sleeve should not be promoted from headline return alone. A candidate needs:
 
 ```text
 positive split performance
