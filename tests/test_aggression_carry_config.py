@@ -11,7 +11,7 @@ def test_active_daily_close_fade_default_is_stage4_selected_twap_schedule() -> N
 
     assert config.signal_minute == 23 * 60
     assert config.entry_delay_minutes == 0
-    assert config.entry_twap_minutes == 60
+    assert config.entry_twap_minutes == 45
     assert config.liquidity_rank_min == 226
     assert config.liquidity_rank_max == 0
     assert grid.liquidity_rank_mins == (1,)
@@ -22,6 +22,7 @@ def test_active_daily_close_fade_default_is_stage4_selected_twap_schedule() -> N
     assert config.time_decay_take_profit_minutes == 120
     assert config.stop_delay_minutes == 0
     assert config.profit_protection_delay_minutes == 120
+    assert config.twap_stop_adding_pct == 0.06
 
 
 def test_volume_alpha_controls_load_from_yaml(tmp_path: Path) -> None:

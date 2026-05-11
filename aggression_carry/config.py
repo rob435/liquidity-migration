@@ -191,7 +191,7 @@ ACTIVE_DAILY_CLOSE_FADE_DEFAULT = DailyCloseFadeConfig(
     top_n=1,
     hold_minutes=360,
     entry_delay_minutes=0,
-    entry_twap_minutes=60,
+    entry_twap_minutes=45,
     score="day_return",
     pump_filter="pump",
     liquidity_rank_min=226,
@@ -210,6 +210,7 @@ ACTIVE_DAILY_CLOSE_FADE_DEFAULT = DailyCloseFadeConfig(
     mfe_giveback_activation_pct=0.0,
     mfe_giveback_pct=0.0,
     profit_protection_delay_minutes=120,
+    twap_stop_adding_pct=0.06,
     require_archive_membership=True,
     exclude_symbols=(
         "BTCUSDT",

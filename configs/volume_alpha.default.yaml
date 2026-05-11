@@ -57,7 +57,7 @@ daily_close_fade:
   top_n: 1
   hold_minutes: 360
   entry_delay_minutes: 0
-  entry_twap_minutes: 60
+  entry_twap_minutes: 45
   score: day_return
   pump_filter: pump
   min_age_days: 10
@@ -103,7 +103,7 @@ daily_close_fade:
   vwap_reversion_pct: 0.0
   stop_delay_minutes: 0
   profit_protection_delay_minutes: 120
-  twap_stop_adding_pct: 0.0
+  twap_stop_adding_pct: 0.06
   cost_multiplier: 1.0
   min_symbols: 1
   exclude_symbols:
