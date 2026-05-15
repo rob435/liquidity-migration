@@ -41,11 +41,10 @@ The reusable Python modules can stay until event-driven replacements exist:
 ```text
 aggression_carry/volume_alpha.py
 aggression_carry/volume_backtest.py
-scripts/evaluate_volume_promotion.py
 ```
 
-They still contain useful feature, cost, ledger, and reporting code, but their
-fixed-rebalance outputs are not the new research objective.
+They still contain useful feature, cost, ledger, and reporting code. The old
+standalone fixed-grid/promotion helper scripts have been removed.
 
 ## Event Definitions
 

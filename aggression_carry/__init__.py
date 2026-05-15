@@ -1,9 +1,4 @@
-"""Bybit volume-alpha research package.
-
-This package is the stripped-down rebuild path. It keeps public data loading,
-partitioned Parquet storage, isolated volume-alpha sweeps, and detailed
-trade-ledger backtests only.
-"""
+"""Bybit demo-account trading system package."""
 
 __all__ = ["__version__"]
 

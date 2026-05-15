@@ -10,7 +10,7 @@ The private Bybit client is still demo-only by design: `demo=False` is refused i
 
 ## Active Strategy
 
-Selected strategy: `configs/volume_alpha.default.yaml` and `configs/daily_close_fade.lowcap_scam_tail_stage4_selected.yaml`.
+Selected strategy: `configs/volume_alpha.default.yaml`.
 
 Key parameters:
 
