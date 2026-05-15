@@ -7,6 +7,7 @@ import pytest
 
 from aggression_carry.ingestion import generate_fixture_data
 from aggression_carry.volume_events import (
+    _attach_event_archive_membership,
     _event_decay_exit_hit,
     _event_filter,
     VolumeEventResearchConfig,
@@ -81,6 +82,50 @@ def test_volume_event_promotion_requires_pit_membership() -> None:
     assert fields["pre_pit_gate_pass"] is True
     assert fields["promotion_gate_pass"] is False
     assert "pit_membership_fail" in fields["promotion_reason"]
+    assert "full_pit_universe_fail" in fields["promotion_reason"]
+
+
+def test_volume_event_promotion_requires_full_pit_universe() -> None:
+    fields = _promotion_fields(
+        [
+            {"name": "train_2023_2024", "total_return": 0.10, "max_drawdown": -0.10, "sharpe_like": 1.0},
+            {"name": "validation_2024_2025", "total_return": 0.08, "max_drawdown": -0.12, "sharpe_like": 0.8},
+            {"name": "oos_2025_2026", "total_return": 0.03, "max_drawdown": -0.15, "sharpe_like": 0.7},
+        ],
+        config=VolumeEventResearchConfig(),
+        pit_membership_pass=True,
+        full_pit_universe_pass=False,
+    )
+
+    assert fields["pre_pit_gate_pass"] is True
+    assert fields["pit_membership_pass"] is True
+    assert fields["promotion_gate_pass"] is False
+    assert fields["promotion_reason"] == "full_pit_universe_fail"
+
+
+def test_attach_event_archive_membership_flags_symbol_dates() -> None:
+    features = pl.DataFrame(
+        [
+            {"symbol": "AAAUSDT", "ts_ms": 1_704_067_200_000},
+            {"symbol": "BBBUSDT", "ts_ms": 1_704_067_200_000},
+        ]
+    )
+    manifest = pl.DataFrame(
+        [
+            {
+                "symbol": "AAAUSDT",
+                "date": "2024-01-01",
+                "url": "https://public.bybit.com/trading/AAAUSDT/AAAUSDT2024-01-01.csv.gz",
+            }
+        ]
+    )
+
+    joined = _attach_event_archive_membership(features, manifest).sort("symbol")
+
+    assert joined.select(["symbol", "date", "tradable_membership_flag"]).to_dicts() == [
+        {"symbol": "AAAUSDT", "date": "2024-01-01", "tradable_membership_flag": True},
+        {"symbol": "BBBUSDT", "date": "2024-01-01", "tradable_membership_flag": False},
+    ]
 
 
 def test_event_decay_exit_fires_at_scenario_threshold() -> None:

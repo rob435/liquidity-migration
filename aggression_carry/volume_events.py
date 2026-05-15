@@ -112,11 +112,16 @@ def run_volume_event_research(
     if klines.is_empty():
         raise RuntimeError("klines_1h is empty; run download-data first")
     funding = read_dataset(root, "funding")
-    features = _filter_signal_window(_enriched_event_features(build_volume_features(klines), klines), _window_config(config))
+    archive_manifest = read_dataset(root, "archive_trade_manifest")
+    features = _filter_signal_window(
+        _enriched_event_features(build_volume_features(klines), klines, archive_manifest),
+        _window_config(config),
+    )
     bars = _indexed_price_bars_by_symbol(klines)
     funding_lookup = _funding_lookup(funding)
     rank_lookup_cache = _rank_lookup_cache(features, config=config)
     event_cache: dict[tuple[str, float], pl.DataFrame] = {}
+    full_pit_universe_pass = _full_pit_universe_pass(features, archive_manifest)
 
     scenario_rows = []
     best_payload: dict[str, Any] | None = None
@@ -129,6 +134,7 @@ def run_volume_event_research(
             base_cost_bps=costs.base_entry_exit_cost_bps,
             rank_lookup_cache=rank_lookup_cache,
             event_cache=event_cache,
+            full_pit_universe_pass=full_pit_universe_pass,
             scenario=scenario,
             config=config,
         )
@@ -172,13 +178,17 @@ def run_volume_event_research(
             "promotable": int(summary.filter(pl.col("promotion_gate_pass")).height) if not summary.is_empty() else 0,
         },
         "date_range": _date_range(features),
+        "pit_manifest": _pit_manifest_metadata(archive_manifest, features),
         "cost_model": {
             **asdict(costs),
             "base_round_trip_cost_bps": costs.base_entry_exit_cost_bps,
         },
         "best_scenario": summary.head(1).to_dicts()[0] if not summary.is_empty() else {},
-        "run_label": "biased_benchmark",
-        "promotion_note": "Current dataset lacks point-in-time membership; use this as event-shape research only.",
+        "run_label": _run_label(config=config, archive_manifest=archive_manifest, full_pit_universe_pass=full_pit_universe_pass),
+        "promotion_note": _promotion_note(
+            archive_manifest=archive_manifest,
+            full_pit_universe_pass=full_pit_universe_pass,
+        ),
     }
     (output_dir / "volume_event_research_report.json").write_text(
         json.dumps(
@@ -230,6 +240,7 @@ def _run_event_scenario(
     base_cost_bps: float,
     rank_lookup_cache: dict[str, dict[tuple[str, int], float]],
     event_cache: dict[tuple[str, float], pl.DataFrame],
+    full_pit_universe_pass: bool,
     scenario: EventScenario,
     config: VolumeEventResearchConfig,
 ) -> dict[str, Any]:
@@ -355,7 +366,12 @@ def _run_event_scenario(
         "skipped_capacity": skipped_capacity,
         "skipped_no_entry": skipped_no_entry,
         **summary,
-        **_promotion_fields(split_rows, config=config, pit_membership_pass=pit_membership_pass),
+        **_promotion_fields(
+            split_rows,
+            config=config,
+            pit_membership_pass=pit_membership_pass,
+            full_pit_universe_pass=full_pit_universe_pass,
+        ),
         **_exit_reason_fields(trades),
     }
     return {"row": row, "trades": trades, "baskets": baskets, "equity": equity, "monthly": monthly, "splits": split_rows}
@@ -562,6 +578,10 @@ def _event_filter(
     config: VolumeEventResearchConfig,
 ) -> pl.DataFrame:
     base = features.filter(pl.col(score_col).is_not_null() & pl.col(score_col).is_finite())
+    if config.require_pit_membership:
+        if "tradable_membership_flag" not in base.columns:
+            return base.head(0)
+        base = base.filter(pl.col("tradable_membership_flag"))
     if config.universe_min_daily_turnover > 0.0:
         base = base.filter(pl.col("turnover_quote") >= config.universe_min_daily_turnover)
     if config.universe_rank_min > 1:
@@ -603,7 +623,7 @@ def _event_decay_exit_hit(
     return rank_fraction is not None and rank_fraction < threshold
 
 
-def _enriched_event_features(features: pl.DataFrame, klines: pl.DataFrame) -> pl.DataFrame:
+def _enriched_event_features(features: pl.DataFrame, klines: pl.DataFrame, archive_manifest: pl.DataFrame) -> pl.DataFrame:
     if features.is_empty():
         return features
     enriched = features.join(_daily_return_frame(klines), on=["ts_ms", "symbol"], how="left")
@@ -637,10 +657,26 @@ def _enriched_event_features(features: pl.DataFrame, klines: pl.DataFrame) -> pl
             .over("symbol")
             .alias("prior3_volume_persistence_rank_min"),
             pl.col("liquidity_rank").shift(7).over("symbol").alias("prior7_liquidity_rank"),
-            pl.lit(False).alias("tradable_membership_flag"),
         ]
     )
-    return enriched.sort(["symbol", "ts_ms"]).with_columns(expressions).sort(["ts_ms", "symbol"])
+    return _attach_event_archive_membership(
+        enriched.sort(["symbol", "ts_ms"]).with_columns(expressions).sort(["ts_ms", "symbol"]),
+        archive_manifest,
+    )
+
+
+def _attach_event_archive_membership(features: pl.DataFrame, archive_manifest: pl.DataFrame) -> pl.DataFrame:
+    if features.is_empty():
+        return features.with_columns(pl.lit(False).alias("tradable_membership_flag"))
+    frame = features
+    if "date" not in frame.columns:
+        frame = frame.with_columns(pl.from_epoch(pl.col("ts_ms"), time_unit="ms").dt.strftime("%Y-%m-%d").alias("date"))
+    if archive_manifest.is_empty():
+        return frame.with_columns(pl.lit(False).alias("tradable_membership_flag"))
+    membership = archive_manifest.select(["symbol", "date"]).unique().with_columns(pl.lit(True).alias("tradable_membership_flag"))
+    return frame.join(membership, on=["symbol", "date"], how="left").with_columns(
+        pl.col("tradable_membership_flag").fill_null(False)
+    )
 
 
 def _daily_return_frame(klines: pl.DataFrame) -> pl.DataFrame:
@@ -693,6 +729,7 @@ def _promotion_fields(
     *,
     config: VolumeEventResearchConfig,
     pit_membership_pass: bool = False,
+    full_pit_universe_pass: bool = False,
 ) -> dict[str, Any]:
     returns = [float(row["total_return"]) for row in split_rows]
     sharpes = [float(row["sharpe_like"]) for row in split_rows]
@@ -709,7 +746,7 @@ def _promotion_fields(
         and worst_dd >= config.promotion_max_drawdown
         and avg_sharpe >= config.promotion_min_avg_sharpe
     )
-    gate_pass = pre_pit_gate_pass and pit_membership_pass
+    gate_pass = pre_pit_gate_pass and pit_membership_pass and full_pit_universe_pass
     return {
         "complete_splits": complete,
         "positive_splits": positive,
@@ -719,10 +756,20 @@ def _promotion_fields(
         "avg_split_sharpe": avg_sharpe,
         "pre_pit_gate_pass": pre_pit_gate_pass,
         "pit_membership_pass": pit_membership_pass,
+        "full_pit_universe_pass": full_pit_universe_pass,
         "promotion_gate_pass": gate_pass,
         "promotion_reason": "pass"
         if gate_pass
-        else _promotion_reason(complete, positive, min_return, worst_dd, avg_sharpe, pit_membership_pass, config),
+        else _promotion_reason(
+            complete,
+            positive,
+            min_return,
+            worst_dd,
+            avg_sharpe,
+            pit_membership_pass,
+            full_pit_universe_pass,
+            config,
+        ),
         **{f"{row['name']}_return": row["total_return"] for row in split_rows},
         **{f"{row['name']}_sharpe": row["sharpe_like"] for row in split_rows},
     }
@@ -820,6 +867,7 @@ def _promotion_reason(
     worst_dd: float,
     avg_sharpe: float,
     pit_membership_pass: bool,
+    full_pit_universe_pass: bool,
     config: VolumeEventResearchConfig,
 ) -> str:
     reasons = []
@@ -835,7 +883,58 @@ def _promotion_reason(
         reasons.append("avg_sharpe_fail")
     if not pit_membership_pass:
         reasons.append("pit_membership_fail")
+    if not full_pit_universe_pass:
+        reasons.append("full_pit_universe_fail")
     return ",".join(reasons) if reasons else "fail"
+
+
+def _pit_manifest_metadata(archive_manifest: pl.DataFrame, features: pl.DataFrame) -> dict[str, Any]:
+    manifest_symbols = _symbol_set(archive_manifest)
+    feature_symbols = _symbol_set(features)
+    return {
+        "rows": archive_manifest.height,
+        "symbols": len(manifest_symbols),
+        "feature_symbols": len(feature_symbols),
+        "feature_symbols_missing_from_manifest": len(feature_symbols - manifest_symbols),
+        "manifest_symbols_missing_from_features": len(manifest_symbols - feature_symbols),
+        "full_pit_universe_pass": _full_pit_universe_pass(features, archive_manifest),
+    }
+
+
+def _full_pit_universe_pass(features: pl.DataFrame, archive_manifest: pl.DataFrame) -> bool:
+    manifest_symbols = _symbol_set(archive_manifest)
+    feature_symbols = _symbol_set(features)
+    return bool(manifest_symbols) and manifest_symbols.issubset(feature_symbols)
+
+
+def _symbol_set(frame: pl.DataFrame) -> set[str]:
+    if frame.is_empty() or "symbol" not in frame.columns:
+        return set()
+    return {str(symbol) for symbol in frame["symbol"].unique().to_list()}
+
+
+def _run_label(
+    *,
+    config: VolumeEventResearchConfig,
+    archive_manifest: pl.DataFrame,
+    full_pit_universe_pass: bool,
+) -> str:
+    if archive_manifest.is_empty():
+        return "pit_required_missing_manifest" if config.require_pit_membership else "biased_benchmark"
+    if full_pit_universe_pass:
+        return "full_pit_universe"
+    return "pit_membership_filtered_current_universe"
+
+
+def _promotion_note(*, archive_manifest: pl.DataFrame, full_pit_universe_pass: bool) -> str:
+    if archive_manifest.is_empty():
+        return "No archive_trade_manifest is present; use this as event-shape research only."
+    if full_pit_universe_pass:
+        return "Archive membership is present and feature symbols cover the manifest symbol set."
+    return (
+        "Archive membership is present, but the feature universe does not cover every manifest symbol. "
+        "This is PIT-membership-filtered current-universe research, not full survivorship-free evidence."
+    )
 
 
 def _scenario_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
@@ -850,10 +949,11 @@ def _scenario_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) -> str:
+    pit = metadata.get("pit_manifest", {})
     lines = [
         "# Volume Event Research",
         "",
-        "Event-driven volume-alpha benchmark. This is not demo-ready evidence while point-in-time membership is missing.",
+        "Event-driven volume-alpha benchmark. This is not demo-ready evidence unless PIT membership and the full PIT universe are both present.",
         "",
         "## Inputs",
         "",
@@ -863,6 +963,11 @@ def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) 
         f"- Pre-PIT promotable rows: {metadata['rows']['pre_pit_promotable']}",
         f"- Promotable rows: {metadata['rows']['promotable']}",
         f"- Date range: {metadata['date_range']['start']} to {metadata['date_range']['end']}",
+        f"- PIT manifest rows: {pit.get('rows', 0)}",
+        f"- PIT manifest symbols: {pit.get('symbols', 0)}",
+        f"- Feature symbols: {pit.get('feature_symbols', 0)}",
+        f"- Full PIT universe pass: {pit.get('full_pit_universe_pass', False)}",
+        f"- Promotion note: {metadata.get('promotion_note', '')}",
         "",
         "## Top Scenarios",
         "",
