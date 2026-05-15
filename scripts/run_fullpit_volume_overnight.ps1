@@ -23,7 +23,16 @@ param(
     [string]$EventGridCostMultipliers = "1,3",
     [double]$EventGridGrossExposure = 0.5,
     [string]$EventGridMaxActiveList = "6,12",
-    [string]$EventGridCooldownList = "3,7"
+    [string]$EventGridCooldownList = "3,7",
+    [string]$EventGridEntryDelayList = "1,6,12",
+    [string]$EventGridRankExitThresholds = "0.5",
+    [int]$EventGridUniverseRankMin = 1,
+    [int]$EventGridUniverseRankMax = 0,
+    [double]$EventGridUniverseMinDailyTurnover = 0.0,
+    [int]$EventGridTailRankMin = 81,
+    [int]$EventGridTailRankMax = 160,
+    [int]$EventGridTailRankImprovementMin = 20,
+    [double]$EventGridExhaustionMinDayReturn = 0.03
 )
 
 $ErrorActionPreference = "Stop"
@@ -203,7 +212,7 @@ if missing:
     Invoke-Checked $VenvPython @($ValidationFile)
 
     $EventReportIndex = Join-Path (Join-Path $DataRoot "reports") ("fullpit_volume_event_runs_{0}.csv" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
-    Set-Content -Path $EventReportIndex -Value "run_type,max_active_symbols,cooldown_days,event_types,thresholds,hold_days,sides,stop_loss_pcts,cost_multipliers,gross_exposure,report_dir" -Encoding UTF8
+    Set-Content -Path $EventReportIndex -Value "run_type,max_active_symbols,cooldown_days,entry_delay_hours,rank_exit_threshold,event_types,thresholds,hold_days,sides,stop_loss_pcts,cost_multipliers,gross_exposure,report_dir" -Encoding UTF8
 
     if ($RunChampionBacktest) {
         Section "Run selected full PIT volume event backtest"
@@ -220,46 +229,64 @@ if missing:
             "--stop-loss-pcts", "0",
             "--cost-multipliers", "1,3",
             "--gross-exposure", "$ChampionGrossExposure",
+            "--entry-delay-hours", "1",
             "--max-active-symbols", "6",
             "--cooldown-days", "7",
+            "--rank-exit-threshold", "0.5",
             "--report-dir", $ChampionReportDir
         )
-        Add-Content -Path $EventReportIndex -Value "champion,6,7,persistent_volume_breakout,0.2,5,continuation,0,1|3,$ChampionGrossExposure,$ChampionReportDir"
+        Add-Content -Path $EventReportIndex -Value "champion,6,7,1,0.5,persistent_volume_breakout,0.2,5,continuation,0,1|3,$ChampionGrossExposure,$ChampionReportDir"
     }
 
     if ($RunEventGrid) {
         Section "Run full PIT event-driven feature grid"
         foreach ($MaxActive in (Split-Csv $EventGridMaxActiveList)) {
             foreach ($Cooldown in (Split-Csv $EventGridCooldownList)) {
-                $GridReportDir = Join-Path (Join-Path $DataRoot "reports") ("volume_event_research_fullpit_grid_ma{0}_cd{1}_{2}" -f $MaxActive, $Cooldown, ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
-                Write-Host "Starting event grid: max_active=$MaxActive cooldown=$Cooldown report=$GridReportDir"
-                Invoke-Checked $VenvPython @(
-                    "-m", "aggression_carry",
-                    "--data-root", $DataRoot,
-                    "--config", $ConfigPath,
-                    "volume-events",
-                    "--event-types", $EventGridEventTypes,
-                    "--thresholds", $EventGridThresholds,
-                    "--hold-days", $EventGridHoldDays,
-                    "--sides", $EventGridSides,
-                    "--stop-loss-pcts", $EventGridStopLossPcts,
-                    "--cost-multipliers", $EventGridCostMultipliers,
-                    "--gross-exposure", "$EventGridGrossExposure",
-                    "--max-active-symbols", "$MaxActive",
-                    "--cooldown-days", "$Cooldown",
-                    "--report-dir", $GridReportDir
-                )
-                Add-Content -Path $EventReportIndex -Value ("event_grid,{0},{1},{2},{3},{4},{5},{6},{7},{8},{9}" -f `
-                    $MaxActive, `
-                    $Cooldown, `
-                    $EventGridEventTypes.Replace(",", "|"), `
-                    $EventGridThresholds.Replace(",", "|"), `
-                    $EventGridHoldDays.Replace(",", "|"), `
-                    $EventGridSides.Replace(",", "|"), `
-                    $EventGridStopLossPcts.Replace(",", "|"), `
-                    $EventGridCostMultipliers.Replace(",", "|"), `
-                    $EventGridGrossExposure, `
-                    $GridReportDir)
+                foreach ($EntryDelay in (Split-Csv $EventGridEntryDelayList)) {
+                    foreach ($RankExitThreshold in (Split-Csv $EventGridRankExitThresholds)) {
+                        $RankTag = $RankExitThreshold.Replace(".", "p")
+                        $GridReportDir = Join-Path (Join-Path $DataRoot "reports") ("volume_event_research_fullpit_grid_ma{0}_cd{1}_ed{2}_rx{3}_{4}" -f $MaxActive, $Cooldown, $EntryDelay, $RankTag, ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
+                        Write-Host "Starting event grid: max_active=$MaxActive cooldown=$Cooldown entry_delay=$EntryDelay rank_exit=$RankExitThreshold report=$GridReportDir"
+                        Invoke-Checked $VenvPython @(
+                            "-m", "aggression_carry",
+                            "--data-root", $DataRoot,
+                            "--config", $ConfigPath,
+                            "volume-events",
+                            "--event-types", $EventGridEventTypes,
+                            "--thresholds", $EventGridThresholds,
+                            "--hold-days", $EventGridHoldDays,
+                            "--sides", $EventGridSides,
+                            "--stop-loss-pcts", $EventGridStopLossPcts,
+                            "--cost-multipliers", $EventGridCostMultipliers,
+                            "--gross-exposure", "$EventGridGrossExposure",
+                            "--entry-delay-hours", "$EntryDelay",
+                            "--max-active-symbols", "$MaxActive",
+                            "--cooldown-days", "$Cooldown",
+                            "--rank-exit-threshold", "$RankExitThreshold",
+                            "--universe-rank-min", "$EventGridUniverseRankMin",
+                            "--universe-rank-max", "$EventGridUniverseRankMax",
+                            "--universe-min-daily-turnover", "$EventGridUniverseMinDailyTurnover",
+                            "--tail-rank-min", "$EventGridTailRankMin",
+                            "--tail-rank-max", "$EventGridTailRankMax",
+                            "--tail-rank-improvement-min", "$EventGridTailRankImprovementMin",
+                            "--exhaustion-min-day-return", "$EventGridExhaustionMinDayReturn",
+                            "--report-dir", $GridReportDir
+                        )
+                        Add-Content -Path $EventReportIndex -Value ("event_grid,{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11}" -f `
+                            $MaxActive, `
+                            $Cooldown, `
+                            $EntryDelay, `
+                            $RankExitThreshold, `
+                            $EventGridEventTypes.Replace(",", "|"), `
+                            $EventGridThresholds.Replace(",", "|"), `
+                            $EventGridHoldDays.Replace(",", "|"), `
+                            $EventGridSides.Replace(",", "|"), `
+                            $EventGridStopLossPcts.Replace(",", "|"), `
+                            $EventGridCostMultipliers.Replace(",", "|"), `
+                            $EventGridGrossExposure, `
+                            $GridReportDir)
+                    }
+                }
             }
         }
     }

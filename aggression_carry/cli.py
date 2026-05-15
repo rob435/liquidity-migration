@@ -160,9 +160,18 @@ def build_parser() -> argparse.ArgumentParser:
     volume_events.add_argument("--cost-multipliers", default="1,3", help="Comma-separated cost multipliers.")
     volume_events.add_argument("--start", default="", help="Inclusive UTC signal start date/timestamp.")
     volume_events.add_argument("--end", default="", help="Exclusive UTC signal end date/timestamp.")
+    volume_events.add_argument("--entry-delay-hours", type=int, default=1, help="Hours after signal close before entry.")
     volume_events.add_argument("--gross-exposure", type=float, default=1.0, help="Portfolio gross exposure cap, e.g. 0.5.")
     volume_events.add_argument("--max-active-symbols", type=int, default=12)
     volume_events.add_argument("--cooldown-days", type=int, default=3)
+    volume_events.add_argument("--rank-exit-threshold", type=float, default=0.50, help="Exit after event score rank decays below this fraction.")
+    volume_events.add_argument("--universe-rank-min", type=int, default=1, help="Minimum liquidity rank to include; 1 disables lower bound.")
+    volume_events.add_argument("--universe-rank-max", type=int, default=0, help="Maximum liquidity rank to include; 0 disables upper bound.")
+    volume_events.add_argument("--universe-min-daily-turnover", type=float, default=0.0, help="Minimum daily quote turnover to include.")
+    volume_events.add_argument("--tail-rank-min", type=int, default=81, help="Tail-liquidity event lower liquidity-rank bound.")
+    volume_events.add_argument("--tail-rank-max", type=int, default=160, help="Tail-liquidity event upper liquidity-rank bound.")
+    volume_events.add_argument("--tail-rank-improvement-min", type=int, default=20, help="Minimum 7d liquidity-rank improvement for tail events.")
+    volume_events.add_argument("--exhaustion-min-day-return", type=float, default=0.03, help="Minimum same-day return for volume-exhaustion events.")
     volume_events.add_argument("--report-dir", default=None)
 
     backtest = subparsers.add_parser("volume-backtest", help="Run detailed trade-ledger backtest for the volume alpha.")
@@ -701,9 +710,18 @@ def main(argv: list[str] | None = None) -> int:
             cost_multipliers=_csv_float(args.cost_multipliers, (1.0, 3.0)),
             start_date=args.start,
             end_date=args.end,
+            entry_delay_hours=args.entry_delay_hours,
             gross_exposure=args.gross_exposure,
             max_active_symbols=args.max_active_symbols,
             cooldown_days=args.cooldown_days,
+            rank_exit_threshold=args.rank_exit_threshold,
+            universe_rank_min=args.universe_rank_min,
+            universe_rank_max=args.universe_rank_max,
+            universe_min_daily_turnover=args.universe_min_daily_turnover,
+            tail_rank_min=args.tail_rank_min,
+            tail_rank_max=args.tail_rank_max,
+            tail_rank_improvement_min=args.tail_rank_improvement_min,
+            exhaustion_min_day_return=args.exhaustion_min_day_return,
         )
         payload = run_volume_event_research(
             data_root,

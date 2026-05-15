@@ -150,10 +150,28 @@ def test_cli_parses_volume_events(tmp_path: Path) -> None:
             "1,3",
             "--gross-exposure",
             "0.5",
+            "--entry-delay-hours",
+            "6",
             "--max-active-symbols",
             "8",
             "--cooldown-days",
             "2",
+            "--rank-exit-threshold",
+            "0.6",
+            "--universe-rank-min",
+            "25",
+            "--universe-rank-max",
+            "175",
+            "--universe-min-daily-turnover",
+            "1000000",
+            "--tail-rank-min",
+            "120",
+            "--tail-rank-max",
+            "260",
+            "--tail-rank-improvement-min",
+            "40",
+            "--exhaustion-min-day-return",
+            "0.08",
         ]
     )
 
@@ -161,8 +179,17 @@ def test_cli_parses_volume_events(tmp_path: Path) -> None:
     assert args.event_types == "volume_exhaustion,persistent_volume_breakout"
     assert args.thresholds == "0.2"
     assert args.gross_exposure == 0.5
+    assert args.entry_delay_hours == 6
     assert args.max_active_symbols == 8
     assert args.cooldown_days == 2
+    assert args.rank_exit_threshold == 0.6
+    assert args.universe_rank_min == 25
+    assert args.universe_rank_max == 175
+    assert args.universe_min_daily_turnover == 1000000
+    assert args.tail_rank_min == 120
+    assert args.tail_rank_max == 260
+    assert args.tail_rank_improvement_min == 40
+    assert args.exhaustion_min_day_return == 0.08
 
 
 def test_cli_parses_daily_close_fade_entry_risk_knobs(tmp_path: Path) -> None:

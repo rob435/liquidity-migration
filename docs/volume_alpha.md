@@ -174,9 +174,16 @@ run the full event-driven feature grid
 The default event grid covers all active event families, top 20% and 30%
 thresholds, 3/5/7/14 day holds, continuation and reversal, fixed stops of
 0/3/5/8/12%, and 1x/3x cost multipliers. It repeats that grid for max-active
-6 and 12 with cooldowns of 3 and 7 days. Override the breadth with
+6 and 12 with cooldowns of 3 and 7 days, and entry delays of 1/6/12 hours.
+Override the breadth with
 `EVENT_GRID_*` environment variables in `scripts/run_fullpit_volume_overnight.sh`
 when a narrower or wider overnight run is needed.
+
+`volume-events` also exposes research controls for entry delay, rank-decay exit
+threshold, global liquidity filters, tail-liquidity rank bounds, tail rank
+improvement, and volume-exhaustion day-return threshold. Use these to test
+whether an edge is immediate, delayed, concentrated in tails, or only a pump
+exhaustion artifact.
 
 Full PIT data build for event research:
 

@@ -23,6 +23,15 @@ EVENT_GRID_COST_MULTIPLIERS="${EVENT_GRID_COST_MULTIPLIERS:-1,3}"
 EVENT_GRID_GROSS_EXPOSURE="${EVENT_GRID_GROSS_EXPOSURE:-0.5}"
 EVENT_GRID_MAX_ACTIVE_LIST="${EVENT_GRID_MAX_ACTIVE_LIST:-6,12}"
 EVENT_GRID_COOLDOWN_LIST="${EVENT_GRID_COOLDOWN_LIST:-3,7}"
+EVENT_GRID_ENTRY_DELAY_LIST="${EVENT_GRID_ENTRY_DELAY_LIST:-1,6,12}"
+EVENT_GRID_RANK_EXIT_THRESHOLDS="${EVENT_GRID_RANK_EXIT_THRESHOLDS:-0.5}"
+EVENT_GRID_UNIVERSE_RANK_MIN="${EVENT_GRID_UNIVERSE_RANK_MIN:-1}"
+EVENT_GRID_UNIVERSE_RANK_MAX="${EVENT_GRID_UNIVERSE_RANK_MAX:-0}"
+EVENT_GRID_UNIVERSE_MIN_DAILY_TURNOVER="${EVENT_GRID_UNIVERSE_MIN_DAILY_TURNOVER:-0}"
+EVENT_GRID_TAIL_RANK_MIN="${EVENT_GRID_TAIL_RANK_MIN:-81}"
+EVENT_GRID_TAIL_RANK_MAX="${EVENT_GRID_TAIL_RANK_MAX:-160}"
+EVENT_GRID_TAIL_RANK_IMPROVEMENT_MIN="${EVENT_GRID_TAIL_RANK_IMPROVEMENT_MIN:-20}"
+EVENT_GRID_EXHAUSTION_MIN_DAY_RETURN="${EVENT_GRID_EXHAUSTION_MIN_DAY_RETURN:-0.03}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel >/dev/null 2>&1; then
@@ -192,7 +201,7 @@ if missing:
 PY
 
 EVENT_REPORT_INDEX="$DATA_ROOT/reports/fullpit_volume_event_runs_$(date -u +%Y%m%dT%H%M%SZ).csv"
-echo "run_type,max_active_symbols,cooldown_days,event_types,thresholds,hold_days,sides,stop_loss_pcts,cost_multipliers,gross_exposure,report_dir" > "$EVENT_REPORT_INDEX"
+echo "run_type,max_active_symbols,cooldown_days,entry_delay_hours,rank_exit_threshold,event_types,thresholds,hold_days,sides,stop_loss_pcts,cost_multipliers,gross_exposure,report_dir" > "$EVENT_REPORT_INDEX"
 
 if [ "$RUN_CHAMPION_BACKTEST" != "0" ]; then
   section "Run selected full PIT volume event backtest"
@@ -208,38 +217,55 @@ if [ "$RUN_CHAMPION_BACKTEST" != "0" ]; then
     --stop-loss-pcts 0 \
     --cost-multipliers 1,3 \
     --gross-exposure "$CHAMPION_GROSS_EXPOSURE" \
+    --entry-delay-hours 1 \
     --max-active-symbols 6 \
     --cooldown-days 7 \
+    --rank-exit-threshold 0.5 \
     --report-dir "$CHAMPION_REPORT_DIR"
-  echo "champion,6,7,persistent_volume_breakout,0.2,5,continuation,0,1|3,$CHAMPION_GROSS_EXPOSURE,$CHAMPION_REPORT_DIR" >> "$EVENT_REPORT_INDEX"
+  echo "champion,6,7,1,0.5,persistent_volume_breakout,0.2,5,continuation,0,1|3,$CHAMPION_GROSS_EXPOSURE,$CHAMPION_REPORT_DIR" >> "$EVENT_REPORT_INDEX"
 fi
 
 if [ "$RUN_EVENT_GRID" != "0" ]; then
   section "Run full PIT event-driven feature grid"
   for max_active in ${EVENT_GRID_MAX_ACTIVE_LIST//,/ }; do
     for cooldown in ${EVENT_GRID_COOLDOWN_LIST//,/ }; do
-      max_active="${max_active//[[:space:]]/}"
-      cooldown="${cooldown//[[:space:]]/}"
-      if [ -z "$max_active" ] || [ -z "$cooldown" ]; then
-        continue
-      fi
-      GRID_REPORT_DIR="$DATA_ROOT/reports/volume_event_research_fullpit_grid_ma${max_active}_cd${cooldown}_$(date -u +%Y%m%dT%H%M%SZ)"
-      echo "Starting event grid: max_active=$max_active cooldown=$cooldown report=$GRID_REPORT_DIR"
-      python -m aggression_carry \
-        --data-root "$DATA_ROOT" \
-        --config "$CONFIG_PATH" \
-        volume-events \
-        --event-types "$EVENT_GRID_EVENT_TYPES" \
-        --thresholds "$EVENT_GRID_THRESHOLDS" \
-        --hold-days "$EVENT_GRID_HOLD_DAYS" \
-        --sides "$EVENT_GRID_SIDES" \
-        --stop-loss-pcts "$EVENT_GRID_STOP_LOSS_PCTS" \
-        --cost-multipliers "$EVENT_GRID_COST_MULTIPLIERS" \
-        --gross-exposure "$EVENT_GRID_GROSS_EXPOSURE" \
-        --max-active-symbols "$max_active" \
-        --cooldown-days "$cooldown" \
-        --report-dir "$GRID_REPORT_DIR"
-      echo "event_grid,$max_active,$cooldown,${EVENT_GRID_EVENT_TYPES//,/|},${EVENT_GRID_THRESHOLDS//,/|},${EVENT_GRID_HOLD_DAYS//,/|},${EVENT_GRID_SIDES//,/|},${EVENT_GRID_STOP_LOSS_PCTS//,/|},${EVENT_GRID_COST_MULTIPLIERS//,/|},$EVENT_GRID_GROSS_EXPOSURE,$GRID_REPORT_DIR" >> "$EVENT_REPORT_INDEX"
+      for entry_delay in ${EVENT_GRID_ENTRY_DELAY_LIST//,/ }; do
+        for rank_exit_threshold in ${EVENT_GRID_RANK_EXIT_THRESHOLDS//,/ }; do
+          max_active="${max_active//[[:space:]]/}"
+          cooldown="${cooldown//[[:space:]]/}"
+          entry_delay="${entry_delay//[[:space:]]/}"
+          rank_exit_threshold="${rank_exit_threshold//[[:space:]]/}"
+          if [ -z "$max_active" ] || [ -z "$cooldown" ] || [ -z "$entry_delay" ] || [ -z "$rank_exit_threshold" ]; then
+            continue
+          fi
+          GRID_REPORT_DIR="$DATA_ROOT/reports/volume_event_research_fullpit_grid_ma${max_active}_cd${cooldown}_ed${entry_delay}_rx${rank_exit_threshold//./p}_$(date -u +%Y%m%dT%H%M%SZ)"
+          echo "Starting event grid: max_active=$max_active cooldown=$cooldown entry_delay=$entry_delay rank_exit=$rank_exit_threshold report=$GRID_REPORT_DIR"
+          python -m aggression_carry \
+            --data-root "$DATA_ROOT" \
+            --config "$CONFIG_PATH" \
+            volume-events \
+            --event-types "$EVENT_GRID_EVENT_TYPES" \
+            --thresholds "$EVENT_GRID_THRESHOLDS" \
+            --hold-days "$EVENT_GRID_HOLD_DAYS" \
+            --sides "$EVENT_GRID_SIDES" \
+            --stop-loss-pcts "$EVENT_GRID_STOP_LOSS_PCTS" \
+            --cost-multipliers "$EVENT_GRID_COST_MULTIPLIERS" \
+            --gross-exposure "$EVENT_GRID_GROSS_EXPOSURE" \
+            --entry-delay-hours "$entry_delay" \
+            --max-active-symbols "$max_active" \
+            --cooldown-days "$cooldown" \
+            --rank-exit-threshold "$rank_exit_threshold" \
+            --universe-rank-min "$EVENT_GRID_UNIVERSE_RANK_MIN" \
+            --universe-rank-max "$EVENT_GRID_UNIVERSE_RANK_MAX" \
+            --universe-min-daily-turnover "$EVENT_GRID_UNIVERSE_MIN_DAILY_TURNOVER" \
+            --tail-rank-min "$EVENT_GRID_TAIL_RANK_MIN" \
+            --tail-rank-max "$EVENT_GRID_TAIL_RANK_MAX" \
+            --tail-rank-improvement-min "$EVENT_GRID_TAIL_RANK_IMPROVEMENT_MIN" \
+            --exhaustion-min-day-return "$EVENT_GRID_EXHAUSTION_MIN_DAY_RETURN" \
+            --report-dir "$GRID_REPORT_DIR"
+          echo "event_grid,$max_active,$cooldown,$entry_delay,$rank_exit_threshold,${EVENT_GRID_EVENT_TYPES//,/|},${EVENT_GRID_THRESHOLDS//,/|},${EVENT_GRID_HOLD_DAYS//,/|},${EVENT_GRID_SIDES//,/|},${EVENT_GRID_STOP_LOSS_PCTS//,/|},${EVENT_GRID_COST_MULTIPLIERS//,/|},$EVENT_GRID_GROSS_EXPOSURE,$GRID_REPORT_DIR" >> "$EVENT_REPORT_INDEX"
+        done
+      done
     done
   done
 fi

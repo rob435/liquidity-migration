@@ -14,6 +14,7 @@ from aggression_carry.volume_events import (
     _add_rank_fraction,
     _monthly_returns,
     _promotion_fields,
+    _validate_event_config,
     run_volume_event_research,
 )
 
@@ -52,6 +53,17 @@ def test_volume_event_research_writes_reports_on_fixture(tmp_path: Path) -> None
     assert payload["rows"]["scenarios"] == 1
     assert (tmp_path / "reports" / "volume_event_research" / "volume_event_research_report.md").exists()
     assert (tmp_path / "reports" / "volume_event_research" / "volume_event_scenario_summary.csv").exists()
+
+
+def test_volume_event_config_validates_new_research_knobs() -> None:
+    with pytest.raises(ValueError, match="entry_delay_hours"):
+        _validate_event_config(VolumeEventResearchConfig(entry_delay_hours=-1))
+
+    with pytest.raises(ValueError, match="rank_exit_threshold"):
+        _validate_event_config(VolumeEventResearchConfig(rank_exit_threshold=0.0))
+
+    with pytest.raises(ValueError, match="tail_rank_min"):
+        _validate_event_config(VolumeEventResearchConfig(tail_rank_min=200, tail_rank_max=100))
 
 
 def test_volume_event_promotion_requires_all_splits_positive() -> None:

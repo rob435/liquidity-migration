@@ -1026,6 +1026,24 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("max_active_symbols must be positive")
     if config.cooldown_days < 0:
         raise ValueError("cooldown_days must be non-negative")
+    if config.entry_delay_hours < 0:
+        raise ValueError("entry_delay_hours must be non-negative")
+    if not 0.0 < config.rank_exit_threshold <= 1.0:
+        raise ValueError("rank_exit_threshold must be in (0, 1]")
+    if config.universe_rank_min <= 0:
+        raise ValueError("universe_rank_min must be positive")
+    if config.universe_rank_max < 0:
+        raise ValueError("universe_rank_max must be non-negative")
+    if config.universe_min_daily_turnover < 0.0:
+        raise ValueError("universe_min_daily_turnover must be non-negative")
+    if config.tail_rank_min <= 0 or config.tail_rank_max <= 0:
+        raise ValueError("tail rank bounds must be positive")
+    if config.tail_rank_min > config.tail_rank_max:
+        raise ValueError("tail_rank_min must be <= tail_rank_max")
+    if config.tail_rank_improvement_min < 0:
+        raise ValueError("tail_rank_improvement_min must be non-negative")
+    if config.exhaustion_min_day_return < 0.0:
+        raise ValueError("exhaustion_min_day_return must be non-negative")
 
 
 def _window_config(config: VolumeEventResearchConfig) -> VolumeBacktestConfig:
