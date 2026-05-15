@@ -162,7 +162,15 @@ build/resume full Bybit USDT public archive manifest
 download/resume full PIT 1h klines with 64 workers
 validate manifest-to-parquet coverage
 run the selected persistent-volume-breakout event backtest
+run the full event-driven feature grid
 ```
+
+The default event grid covers all active event families, top 20% and 30%
+thresholds, 3/5/7/14 day holds, continuation and reversal, fixed stops of
+0/3/5/8/12%, and 1x/3x cost multipliers. It repeats that grid for max-active
+6 and 12 with cooldowns of 3 and 7 days. Override the breadth with
+`EVENT_GRID_*` environment variables in `scripts/run_fullpit_volume_overnight.sh`
+when a narrower or wider overnight run is needed.
 
 Full PIT data build for event research:
 

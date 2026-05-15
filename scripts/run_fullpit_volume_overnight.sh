@@ -11,6 +11,18 @@ DOWNLOAD_WORKERS="${DOWNLOAD_WORKERS:-64}"
 MIN_EXISTING_BARS="${MIN_EXISTING_BARS:-20}"
 RUN_TESTS="${RUN_TESTS:-1}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+RUN_CHAMPION_BACKTEST="${RUN_CHAMPION_BACKTEST:-1}"
+RUN_EVENT_GRID="${RUN_EVENT_GRID:-1}"
+CHAMPION_GROSS_EXPOSURE="${CHAMPION_GROSS_EXPOSURE:-0.5}"
+EVENT_GRID_EVENT_TYPES="${EVENT_GRID_EVENT_TYPES:-fresh_volume_spike,persistent_volume_breakout,tail_liquidity_jump,volume_exhaustion}"
+EVENT_GRID_THRESHOLDS="${EVENT_GRID_THRESHOLDS:-0.2,0.3}"
+EVENT_GRID_HOLD_DAYS="${EVENT_GRID_HOLD_DAYS:-3,5,7,14}"
+EVENT_GRID_SIDES="${EVENT_GRID_SIDES:-continuation,reversal}"
+EVENT_GRID_STOP_LOSS_PCTS="${EVENT_GRID_STOP_LOSS_PCTS:-0,0.03,0.05,0.08,0.12}"
+EVENT_GRID_COST_MULTIPLIERS="${EVENT_GRID_COST_MULTIPLIERS:-1,3}"
+EVENT_GRID_GROSS_EXPOSURE="${EVENT_GRID_GROSS_EXPOSURE:-0.5}"
+EVENT_GRID_MAX_ACTIVE_LIST="${EVENT_GRID_MAX_ACTIVE_LIST:-6,12}"
+EVENT_GRID_COOLDOWN_LIST="${EVENT_GRID_COOLDOWN_LIST:-3,7}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel >/dev/null 2>&1; then
@@ -160,25 +172,61 @@ if missing:
     sys.exit(1)
 PY
 
-section "Run best full PIT volume event backtest"
-REPORT_DIR="$DATA_ROOT/reports/volume_event_research_fullpit_pvb_q20_cont_h5_halfgross_$(date -u +%Y%m%dT%H%M%SZ)"
-python -m aggression_carry \
-  --data-root "$DATA_ROOT" \
-  --config "$CONFIG_PATH" \
-  volume-events \
-  --event-types persistent_volume_breakout \
-  --thresholds 0.2 \
-  --hold-days 5 \
-  --sides continuation \
-  --stop-loss-pcts 0 \
-  --cost-multipliers 1,3 \
-  --gross-exposure 0.5 \
-  --max-active-symbols 6 \
-  --cooldown-days 7 \
-  --report-dir "$REPORT_DIR"
+EVENT_REPORT_INDEX="$DATA_ROOT/reports/fullpit_volume_event_runs_$(date -u +%Y%m%dT%H%M%SZ).csv"
+echo "run_type,max_active_symbols,cooldown_days,event_types,thresholds,hold_days,sides,stop_loss_pcts,cost_multipliers,gross_exposure,report_dir" > "$EVENT_REPORT_INDEX"
+
+if [ "$RUN_CHAMPION_BACKTEST" != "0" ]; then
+  section "Run selected full PIT volume event backtest"
+  CHAMPION_REPORT_DIR="$DATA_ROOT/reports/volume_event_research_fullpit_pvb_q20_cont_h5_halfgross_$(date -u +%Y%m%dT%H%M%SZ)"
+  python -m aggression_carry \
+    --data-root "$DATA_ROOT" \
+    --config "$CONFIG_PATH" \
+    volume-events \
+    --event-types persistent_volume_breakout \
+    --thresholds 0.2 \
+    --hold-days 5 \
+    --sides continuation \
+    --stop-loss-pcts 0 \
+    --cost-multipliers 1,3 \
+    --gross-exposure "$CHAMPION_GROSS_EXPOSURE" \
+    --max-active-symbols 6 \
+    --cooldown-days 7 \
+    --report-dir "$CHAMPION_REPORT_DIR"
+  echo "champion,6,7,persistent_volume_breakout,0.2,5,continuation,0,1|3,$CHAMPION_GROSS_EXPOSURE,$CHAMPION_REPORT_DIR" >> "$EVENT_REPORT_INDEX"
+fi
+
+if [ "$RUN_EVENT_GRID" != "0" ]; then
+  section "Run full PIT event-driven feature grid"
+  for max_active in ${EVENT_GRID_MAX_ACTIVE_LIST//,/ }; do
+    for cooldown in ${EVENT_GRID_COOLDOWN_LIST//,/ }; do
+      max_active="${max_active//[[:space:]]/}"
+      cooldown="${cooldown//[[:space:]]/}"
+      if [ -z "$max_active" ] || [ -z "$cooldown" ]; then
+        continue
+      fi
+      GRID_REPORT_DIR="$DATA_ROOT/reports/volume_event_research_fullpit_grid_ma${max_active}_cd${cooldown}_$(date -u +%Y%m%dT%H%M%SZ)"
+      echo "Starting event grid: max_active=$max_active cooldown=$cooldown report=$GRID_REPORT_DIR"
+      python -m aggression_carry \
+        --data-root "$DATA_ROOT" \
+        --config "$CONFIG_PATH" \
+        volume-events \
+        --event-types "$EVENT_GRID_EVENT_TYPES" \
+        --thresholds "$EVENT_GRID_THRESHOLDS" \
+        --hold-days "$EVENT_GRID_HOLD_DAYS" \
+        --sides "$EVENT_GRID_SIDES" \
+        --stop-loss-pcts "$EVENT_GRID_STOP_LOSS_PCTS" \
+        --cost-multipliers "$EVENT_GRID_COST_MULTIPLIERS" \
+        --gross-exposure "$EVENT_GRID_GROSS_EXPOSURE" \
+        --max-active-symbols "$max_active" \
+        --cooldown-days "$cooldown" \
+        --report-dir "$GRID_REPORT_DIR"
+      echo "event_grid,$max_active,$cooldown,${EVENT_GRID_EVENT_TYPES//,/|},${EVENT_GRID_THRESHOLDS//,/|},${EVENT_GRID_HOLD_DAYS//,/|},${EVENT_GRID_SIDES//,/|},${EVENT_GRID_STOP_LOSS_PCTS//,/|},${EVENT_GRID_COST_MULTIPLIERS//,/|},$EVENT_GRID_GROSS_EXPOSURE,$GRID_REPORT_DIR" >> "$EVENT_REPORT_INDEX"
+    done
+  done
+fi
 
 section "Done"
 echo "Log: $LOG_FILE"
 echo "Data root: $DATA_ROOT"
-echo "Report dir: $REPORT_DIR"
-find "$REPORT_DIR" -maxdepth 1 -type f -print | sort
+echo "Event report index: $EVENT_REPORT_INDEX"
+cat "$EVENT_REPORT_INDEX"
