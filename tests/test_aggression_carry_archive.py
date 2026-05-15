@@ -7,7 +7,7 @@ import pytest
 
 from aggression_carry import archive as archive_module
 from aggression_carry import archive_manifest as manifest_module
-from aggression_carry.archive import download_public_trade_archive, read_public_trade_archive
+from aggression_carry.archive import download_public_trade_archive, read_public_trade_archive, read_public_trade_archive_klines_1h
 from aggression_carry.archive_manifest import (
     ArchiveHourlyKlineDownloadConfig,
     ArchiveKlineDownloadConfig,
@@ -49,6 +49,44 @@ def test_read_bybit_public_trade_csv_gz_archive(tmp_path) -> None:
     assert trades["trade_id"].to_list() == ["e807", "e808"]
     assert trades["ts_ms"].to_list() == [1_735_689_600_097, 1_735_689_600_144]
     assert trades["quote_value"].to_list() == pytest.approx([280.59, 187.062])
+
+
+def test_read_bybit_public_trade_archive_streams_1h_klines(tmp_path) -> None:
+    archive = tmp_path / "BTCUSDT2025-01-01.csv.gz"
+    csv_text = "\n".join(
+        [
+            "timestamp,symbol,side,size,price,tickDirection,trdMatchID,grossValue,homeNotional,foreignNotional",
+            "1735689600.0974,BTCUSDT,Sell,0.003,100.00,ZeroMinusTick,e807,30000000,0.003,0.3",
+            "1735689660.1446,BTCUSDT,Buy,0.002,110.00,PlusTick,e808,22000000,0.002,0.22",
+            "1735693200.0000,BTCUSDT,Buy,0.004,90.00,MinusTick,e809,36000000,0.004,0.36",
+        ]
+    )
+    archive.write_bytes(gzip.compress(csv_text.encode("utf-8")))
+
+    klines = read_public_trade_archive_klines_1h(archive)
+
+    assert klines.select(["ts_ms", "symbol", "open", "high", "low", "close", "volume_base", "turnover_quote"]).to_dicts() == [
+        {
+            "ts_ms": 1_735_689_600_000,
+            "symbol": "BTCUSDT",
+            "open": 100.0,
+            "high": 110.0,
+            "low": 100.0,
+            "close": 110.0,
+            "volume_base": 0.005,
+            "turnover_quote": 0.52,
+        },
+        {
+            "ts_ms": 1_735_693_200_000,
+            "symbol": "BTCUSDT",
+            "open": 90.0,
+            "high": 90.0,
+            "low": 90.0,
+            "close": 90.0,
+            "volume_base": 0.004,
+            "turnover_quote": 0.36,
+        },
+    ]
 
 
 def test_archive_filename_preserves_compression_suffix() -> None:
@@ -294,20 +332,19 @@ def test_archive_hourly_kline_download_writes_1h_partitions(tmp_path, monkeypatc
     monkeypatch.setattr(manifest_module, "download_public_trade_archive", fake_download)
     monkeypatch.setattr(
         manifest_module,
-        "read_public_trade_archive",
+        "read_public_trade_archive_klines_1h",
         lambda _path, *, symbol=None: pl.DataFrame(
             [
                 {
-                    "trade_id": "1",
-                    "seq": None,
                     "ts_ms": 1_735_783_200_000,
                     "symbol": symbol,
-                    "side": "Buy",
-                    "price": 105.0,
-                    "size_base": 2.0,
-                    "quote_value": 210.0,
-                    "is_block_trade": False,
-                    "is_rpi_trade": False,
+                    "open": 105.0,
+                    "high": 105.0,
+                    "low": 105.0,
+                    "close": 105.0,
+                    "volume_base": 2.0,
+                    "turnover_quote": 210.0,
+                    "source": "bybit_public_trades",
                 }
             ]
         ),
@@ -366,7 +403,7 @@ def test_archive_hourly_downloader_processes_each_symbol_in_date_order(tmp_path,
 
     def fake_read(path, *, symbol=None):
         if symbol == "AAAUSDT" and "2025-01-01" in str(path):
-            ts_ms, price = 1_735_775_940_000, 99.0
+            ts_ms, price = 1_735_772_400_000, 99.0
         elif symbol == "AAAUSDT":
             ts_ms, price = 1_735_783_200_000, 105.0
         else:
@@ -374,21 +411,20 @@ def test_archive_hourly_downloader_processes_each_symbol_in_date_order(tmp_path,
         return pl.DataFrame(
             [
                 {
-                    "trade_id": f"{symbol}-{ts_ms}",
-                    "seq": None,
                     "ts_ms": ts_ms,
                     "symbol": symbol,
-                    "side": "Buy",
-                    "price": price,
-                    "size_base": 1.0,
-                    "quote_value": price,
-                    "is_block_trade": False,
-                    "is_rpi_trade": False,
+                    "open": price,
+                    "high": price,
+                    "low": price,
+                    "close": price,
+                    "volume_base": 1.0,
+                    "turnover_quote": price,
+                    "source": "bybit_public_trades",
                 }
             ]
         )
 
-    monkeypatch.setattr(manifest_module, "read_public_trade_archive", fake_read)
+    monkeypatch.setattr(manifest_module, "read_public_trade_archive_klines_1h", fake_read)
 
     payload = run_archive_hourly_klines_download(
         tmp_path,

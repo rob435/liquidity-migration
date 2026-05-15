@@ -17,9 +17,8 @@ import certifi
 import polars as pl
 from pyarrow import parquet as pq
 
-from .archive import download_public_trade_archive, read_public_trade_archive
+from .archive import download_public_trade_archive, read_public_trade_archive, read_public_trade_archive_klines_1h
 from .ingestion import (
-    aggregate_trade_klines_1h,
     aggregate_trade_klines_1m,
     densify_trade_klines_1h,
     densify_trade_klines_1m,
@@ -592,8 +591,7 @@ def _download_one_archive_hourly_kline(
     local_path = Path(data_root) / "archives" / symbol / Path(urlparse(url).path).name
     try:
         archive_path = download_public_trade_archive(url, local_path)
-        trades = read_public_trade_archive(archive_path, symbol=symbol)
-        klines = aggregate_trade_klines_1h(trades)
+        klines = read_public_trade_archive_klines_1h(archive_path, symbol=symbol)
         if klines.is_empty():
             return _download_result(row, status="empty", bar_rows=0, valid_bar_rows=0, archive_path=str(archive_path))
         initial_price = previous_kline_close(data_root, symbol=symbol, archive_date=archive_date, dataset="klines_1h")

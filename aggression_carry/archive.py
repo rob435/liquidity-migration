@@ -9,13 +9,15 @@ import subprocess
 import tempfile
 import time
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 from urllib.request import urlopen
 
 import certifi
 import polars as pl
 
-from .ingestion import trades_to_frame
+from .ingestion import MS_PER_HOUR, aggregate_trade_klines_1h, trades_to_frame
 
 
 DEFAULT_TIMEOUT_SECONDS = 300
@@ -83,6 +85,51 @@ def read_public_trade_archive(path: str | Path, *, symbol: str | None = None) ->
     return trades_to_frame(list(reader), symbol=symbol)
 
 
+def read_public_trade_archive_klines_1h(path: str | Path, *, symbol: str | None = None) -> pl.DataFrame:
+    file_path = Path(path)
+    try:
+        with _public_trade_text_handle(file_path) as handle:
+            reader = csv.DictReader(handle)
+            if not {"timestamp", "size", "price", "trdMatchID"}.issubset(set(reader.fieldnames or ())):
+                raise ValueError("unsupported public trade archive schema")
+            bars: dict[tuple[int, str], dict[str, float | int | str]] = {}
+            for raw in reader:
+                raw_symbol = str(symbol or raw.get("symbol") or "").upper()
+                if not raw_symbol:
+                    raise ValueError("archive row is missing symbol")
+                ts_ms = int(float(raw["timestamp"]) * 1000.0)
+                hour_ms = ts_ms // MS_PER_HOUR * MS_PER_HOUR
+                price = float(raw["price"])
+                size_base = float(raw["size"])
+                quote_value = price * size_base
+                key = (hour_ms, raw_symbol)
+                bar = bars.get(key)
+                if bar is None:
+                    bars[key] = {
+                        "ts_ms": hour_ms,
+                        "symbol": raw_symbol,
+                        "open": price,
+                        "high": price,
+                        "low": price,
+                        "close": price,
+                        "volume_base": size_base,
+                        "turnover_quote": quote_value,
+                        "source": "bybit_public_trades",
+                    }
+                    continue
+                bar["high"] = max(float(bar["high"]), price)
+                bar["low"] = min(float(bar["low"]), price)
+                bar["close"] = price
+                bar["volume_base"] = float(bar["volume_base"]) + size_base
+                bar["turnover_quote"] = float(bar["turnover_quote"]) + quote_value
+            if not bars:
+                return pl.DataFrame()
+            return pl.DataFrame(list(bars.values())).sort(["symbol", "ts_ms"])
+    except Exception:
+        trades = read_public_trade_archive(file_path, symbol=symbol)
+        return aggregate_trade_klines_1h(trades)
+
+
 def download_public_trade_archive(
     url: str,
     destination: str | Path,
@@ -148,3 +195,25 @@ def _download_archive_to_path(url: str, output: Path, *, timeout_seconds: int) -
         )
         return
     output.write_bytes(download_archive_bytes(url, timeout_seconds=timeout_seconds))
+
+
+@contextmanager
+def _public_trade_text_handle(file_path: Path) -> Iterator[io.TextIOBase]:
+    if file_path.suffix == ".gz":
+        with gzip.open(file_path, mode="rt", encoding="utf-8", newline="") as handle:
+            yield handle
+        return
+    if file_path.suffix == ".zip":
+        with zipfile.ZipFile(file_path) as archive:
+            names = [name for name in archive.namelist() if not name.endswith("/")]
+            if len(names) != 1:
+                raise ValueError(f"Expected one file in archive, found {len(names)}")
+            with archive.open(names[0]) as raw_handle:
+                text_handle = io.TextIOWrapper(raw_handle, encoding="utf-8", newline="")
+                try:
+                    yield text_handle
+                finally:
+                    text_handle.detach()
+        return
+    with file_path.open("r", encoding="utf-8", newline="") as handle:
+        yield handle
