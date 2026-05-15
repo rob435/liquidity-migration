@@ -10,7 +10,7 @@ MANIFEST_WORKERS="${MANIFEST_WORKERS:-32}"
 DOWNLOAD_WORKERS="${DOWNLOAD_WORKERS:-64}"
 MIN_EXISTING_BARS="${MIN_EXISTING_BARS:-20}"
 RUN_TESTS="${RUN_TESTS:-1}"
-PYTHON_BIN="${PYTHON_BIN:-python3}"
+PYTHON_BIN="${PYTHON_BIN:-}"
 RUN_CHAMPION_BACKTEST="${RUN_CHAMPION_BACKTEST:-1}"
 RUN_EVENT_GRID="${RUN_EVENT_GRID:-1}"
 CHAMPION_GROSS_EXPOSURE="${CHAMPION_GROSS_EXPOSURE:-0.5}"
@@ -78,10 +78,29 @@ echo "Commit: $(git rev-parse --short HEAD)"
 git log --oneline -3
 
 section "Install runtime"
+if [ -z "$PYTHON_BIN" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    PYTHON_BIN="python3"
+  elif command -v python >/dev/null 2>&1; then
+    PYTHON_BIN="python"
+  else
+    echo "No python3 or python executable found on PATH."
+    exit 2
+  fi
+fi
+echo "Python bootstrap: $PYTHON_BIN"
+
 if [ ! -d ".venv" ]; then
   "$PYTHON_BIN" -m venv .venv
 fi
-source .venv/bin/activate
+if [ -f ".venv/bin/activate" ]; then
+  source .venv/bin/activate
+elif [ -f ".venv/Scripts/activate" ]; then
+  source .venv/Scripts/activate
+else
+  echo "Could not find venv activation script under .venv/bin or .venv/Scripts"
+  exit 2
+fi
 python -m pip install -U pip
 python -m pip install -e ".[dev]"
 

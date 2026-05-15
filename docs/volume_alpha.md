@@ -152,6 +152,12 @@ nohup bash scripts/run_fullpit_volume_overnight.sh > fullpit_volume_overnight.no
 tail -f fullpit_volume_overnight.nohup.log
 ```
 
+PowerShell runner:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_fullpit_volume_overnight.ps1
+```
+
 Default behavior:
 
 ```text

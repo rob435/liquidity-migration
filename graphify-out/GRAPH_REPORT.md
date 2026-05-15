@@ -1,11 +1,11 @@
 # Graph Report - MODEL050426  (2026-05-16)
 
 ## Corpus Check
-- 40 files · ~85,784 words
+- 41 files · ~86,592 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1032 nodes · 3175 edges · 14 communities detected
+- 1036 nodes · 3178 edges · 14 communities detected
 - Extraction: 72% EXTRACTED · 28% INFERRED · 0% AMBIGUOUS · INFERRED: 903 edges (avg confidence: 0.77)
 - Token cost: 0 input · 0 output
 
@@ -64,8 +64,8 @@ Cohesion: 0.03
 Nodes (119): download_archive_bytes(), _download_archive_to_path(), download_public_trade_archive(), _archive_kline_skip_rows(), ArchiveHourlyKlineDownloadConfig, ArchiveKlineDownloadConfig, ArchiveManifestConfig, build_archive_trade_manifest() (+111 more)
 
 ### Community 3 - "Community 3"
-Cohesion: 0.06
-Nodes (92): ForwardTestConfig, _bar_open(), close_fade_entry_child_schedule_ts_ms(), _short_limit_execution_price(), _short_stop_execution_price(), _vwap_reversion_exit_price(), _as_utc(), _basket_already_opened() (+84 more)
+Cohesion: 0.05
+Nodes (95): ForwardTestConfig, _bar_open(), close_fade_entry_child_schedule_ts_ms(), _short_limit_execution_price(), _short_stop_execution_price(), _vwap_reversion_exit_price(), _mfe_giveback_stop_price(), _short_return() (+87 more)
 
 ### Community 4 - "Community 4"
 Cohesion: 0.06
@@ -77,11 +77,11 @@ Nodes (54): ResearchConfig, DemoCancelAllConfig, DemoFlattenConfig, DemoProbeCon
 
 ### Community 6 - "Community 6"
 Cohesion: 0.09
-Nodes (53): BybitPublicTradeStream, _active_trade_states(), _arm_profit_protection(), _as_utc(), _clear_state(), DemoFastProtectionConfig, _dt_from_ms(), _entry_trade_ids_with_exposure() (+45 more)
+Nodes (63): _aggregate_orders(), _aggregate_status(), _as_utc(), _avg_fill_price(), build_forward_demo_audit_rows(), build_forward_demo_audit_slice_rows(), build_forward_demo_daily_summary(), build_forward_demo_slice_daily_summary() (+55 more)
 
 ### Community 7 - "Community 7"
-Cohesion: 0.09
-Nodes (63): _aggregate_orders(), _aggregate_status(), _as_utc(), _avg_fill_price(), build_forward_demo_audit_rows(), build_forward_demo_audit_slice_rows(), build_forward_demo_daily_summary(), build_forward_demo_slice_daily_summary() (+55 more)
+Cohesion: 0.1
+Nodes (50): BybitPublicTradeStream, _active_trade_states(), _arm_profit_protection(), _as_utc(), _clear_state(), DemoFastProtectionConfig, _dt_from_ms(), _entry_trade_ids_with_exposure() (+42 more)
 
 ### Community 8 - "Community 8"
 Cohesion: 0.1
@@ -115,11 +115,11 @@ Nodes (18): audit_label(), AuditGate, close_fade_audit(), close_fade_lifecycle()
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `read_dataset()` connect `Community 1` to `Community 0`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 8`, `Community 11`?**
-  _High betweenness centrality (0.121) - this node is a cross-community bridge._
-- **Why does `main()` connect `Community 9` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 7`, `Community 8`, `Community 11`, `Community 12`?**
-  _High betweenness centrality (0.091) - this node is a cross-community bridge._
-- **Why does `ResearchConfig` connect `Community 5` to `Community 2`, `Community 3`, `Community 4`, `Community 6`, `Community 8`, `Community 12`?**
-  _High betweenness centrality (0.079) - this node is a cross-community bridge._
+  _High betweenness centrality (0.114) - this node is a cross-community bridge._
+- **Why does `main()` connect `Community 9` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 8`, `Community 11`, `Community 12`?**
+  _High betweenness centrality (0.088) - this node is a cross-community bridge._
+- **Why does `ResearchConfig` connect `Community 5` to `Community 2`, `Community 3`, `Community 4`, `Community 7`, `Community 8`, `Community 12`?**
+  _High betweenness centrality (0.084) - this node is a cross-community bridge._
 - **Are the 99 inferred relationships involving `read_dataset()` (e.g. with `run_volume_trade_backtest()` and `run_volume_grid()`) actually correct?**
   _`read_dataset()` has 99 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 87 inferred relationships involving `ResearchConfig` (e.g. with `DemoCycleConfig` and `DemoProbeConfig`) actually correct?**
