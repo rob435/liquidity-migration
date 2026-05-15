@@ -47,6 +47,49 @@ SCENARIO_COLS = [
     "exclude_symbols",
 ]
 
+GRID_PRESETS = {
+    "smoke": {
+        "scores": "dollar_volume_rank",
+        "quantiles": "0.5",
+        "hold_days": "7",
+        "fixed_stops": "0,0.12",
+        "vol_stops": "",
+        "rank_exits": "false",
+        "take_profits": "0",
+        "cost_multipliers": "1",
+    },
+    "quick": {
+        "scores": "dollar_volume_rank,volume_change_1d,volume_change_3d,volume_persistence,volume_composite",
+        "quantiles": "0.5",
+        "hold_days": "7",
+        "fixed_stops": "0,0.12",
+        "vol_stops": "",
+        "rank_exits": "false",
+        "take_profits": "0",
+        "cost_multipliers": "1,3",
+    },
+    "promotion": {
+        "scores": "dollar_volume_rank,volume_change_1d,volume_change_3d,volume_persistence,volume_composite",
+        "quantiles": "0.3,0.5",
+        "hold_days": "7,14",
+        "fixed_stops": "0,0.12,0.2",
+        "vol_stops": "3",
+        "rank_exits": "false,true",
+        "take_profits": "0",
+        "cost_multipliers": "1,3",
+    },
+    "legacy": {
+        "scores": "dollar_volume_rank",
+        "quantiles": "0.2,0.3,0.5",
+        "hold_days": "3,5,7,10,14",
+        "fixed_stops": "0,0.12,0.2,0.3",
+        "vol_stops": "3,4",
+        "rank_exits": "false,true",
+        "take_profits": "0",
+        "cost_multipliers": "1,2,3",
+    },
+}
+
 
 def main() -> int:
     args = parse_args()
@@ -120,14 +163,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report-dir", default=None)
     parser.add_argument("--splits", default=DEFAULT_SPLITS, help="Comma-separated name:start:end specs.")
     parser.add_argument("--workers", type=int, default=1)
-    parser.add_argument("--scores", default="dollar_volume_rank")
-    parser.add_argument("--quantiles", default="0.2,0.3,0.5")
-    parser.add_argument("--hold-days", default="3,5,7,10,14")
-    parser.add_argument("--fixed-stops", default="0,0.12,0.2,0.3")
-    parser.add_argument("--vol-stops", default="3,4")
-    parser.add_argument("--rank-exits", default="false,true")
-    parser.add_argument("--take-profits", default="0")
-    parser.add_argument("--cost-multipliers", default="1,2,3")
+    parser.add_argument(
+        "--preset",
+        choices=tuple(GRID_PRESETS),
+        default="smoke",
+        help="Grid breadth. smoke is the default sanity run; legacy is the old overnight-sized default.",
+    )
+    parser.add_argument("--scores", default=None)
+    parser.add_argument("--quantiles", default=None)
+    parser.add_argument("--hold-days", default=None)
+    parser.add_argument("--fixed-stops", default=None)
+    parser.add_argument("--vol-stops", default=None)
+    parser.add_argument("--rank-exits", default=None)
+    parser.add_argument("--take-profits", default=None)
+    parser.add_argument("--cost-multipliers", default=None)
     parser.add_argument("--include-reverse", action="store_true")
     parser.add_argument("--gross-exposure", type=float, default=None)
     parser.add_argument("--entry-delay-hours", type=int, default=None)
@@ -271,16 +320,23 @@ def _base_config(base: VolumeBacktestConfig, args: argparse.Namespace) -> Volume
 
 def _grid_config(args: argparse.Namespace) -> VolumeGridConfig:
     return VolumeGridConfig(
-        scores=_csv_str(args.scores),
-        quantiles=_csv_float(args.quantiles),
-        hold_days=_csv_int(args.hold_days),
-        fixed_stop_loss_pcts=_csv_float(args.fixed_stops),
-        vol_stop_multipliers=_csv_float(args.vol_stops),
-        rank_exit_modes=_csv_bool(args.rank_exits),
+        scores=_csv_str(_grid_arg(args, "scores")),
+        quantiles=_csv_float(_grid_arg(args, "quantiles")),
+        hold_days=_csv_int(_grid_arg(args, "hold_days")),
+        fixed_stop_loss_pcts=_csv_float(_grid_arg(args, "fixed_stops")),
+        vol_stop_multipliers=_csv_float(_grid_arg(args, "vol_stops")),
+        rank_exit_modes=_csv_bool(_grid_arg(args, "rank_exits")),
         include_reverse_side=args.include_reverse,
-        take_profit_pcts=_csv_float(args.take_profits),
-        cost_multipliers=_csv_float(args.cost_multipliers),
+        take_profit_pcts=_csv_float(_grid_arg(args, "take_profits")),
+        cost_multipliers=_csv_float(_grid_arg(args, "cost_multipliers")),
     )
+
+
+def _grid_arg(args: argparse.Namespace, name: str) -> str:
+    value = getattr(args, name)
+    if value is not None:
+        return str(value)
+    return GRID_PRESETS[str(args.preset)][name]
 
 
 def _parse_splits(value: str) -> list[tuple[str, str, str]]:

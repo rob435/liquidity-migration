@@ -1,12 +1,12 @@
 # Graph Report - MODEL050426  (2026-05-15)
 
 ## Corpus Check
-- 49 files · ~88,710 words
+- 49 files · ~89,016 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1051 nodes · 3153 edges · 20 communities detected
-- Extraction: 73% EXTRACTED · 27% INFERRED · 0% AMBIGUOUS · INFERRED: 865 edges (avg confidence: 0.77)
+- 1055 nodes · 3161 edges · 18 communities detected
+- Extraction: 73% EXTRACTED · 27% INFERRED · 0% AMBIGUOUS · INFERRED: 868 edges (avg confidence: 0.77)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -24,12 +24,10 @@
 - [[_COMMUNITY_Community 11|Community 11]]
 - [[_COMMUNITY_Community 12|Community 12]]
 - [[_COMMUNITY_Community 13|Community 13]]
-- [[_COMMUNITY_Community 14|Community 14]]
+- [[_COMMUNITY_Community 15|Community 15]]
 - [[_COMMUNITY_Community 16|Community 16]]
 - [[_COMMUNITY_Community 17|Community 17]]
-- [[_COMMUNITY_Community 18|Community 18]]
-- [[_COMMUNITY_Community 20|Community 20]]
-- [[_COMMUNITY_Community 21|Community 21]]
+- [[_COMMUNITY_Community 19|Community 19]]
 
 ## God Nodes (most connected - your core abstractions)
 1. `read_dataset()` - 99 edges
@@ -48,30 +46,30 @@
   aggression_carry/config.py → tests/test_aggression_carry_config.py
 - `trades_to_frame()` --calls--> `test_trade_parser_handles_websocket_aliases_and_string_booleans()`  [INFERRED]
   aggression_carry/ingestion.py → tests/test_aggression_carry_ingestion.py
-- `run_volume_grid()` --calls--> `main()`  [INFERRED]
-  aggression_carry/volume_backtest.py → scripts/run_volume_bucket_sweep.py
+- `generate_fixture_data()` --calls--> `test_volume_alpha_isolated_daily_research_path()`  [INFERRED]
+  aggression_carry/ingestion.py → tests/test_aggression_carry_volume_alpha.py
 - `run_volume_grid()` --calls--> `main()`  [INFERRED]
   aggression_carry/volume_backtest.py → scripts/run_volume_grid_splits.py
-- `DemoCycleConfig` --calls--> `main()`  [INFERRED]
-  aggression_carry/demo_cycle.py → scripts/run_hourly_demo_full_system_test.py
+- `test_smoke_preset_keeps_default_split_grid_tiny()` --calls--> `iter_grid_configs()`  [INFERRED]
+  tests/test_volume_grid_splits_script.py → aggression_carry/volume_backtest.py
 
 ## Communities
 
 ### Community 0 - "Community 0"
-Cohesion: 0.05
-Nodes (134): CostConfig, DailyCloseFadeConfig, DailyCloseFadeGridConfig, _all_context_rate(), _apply_basket_stop_to_rows(), apply_close_fade_basket_stop(), _attach_archive_membership(), attach_close_fade_coin_market_context() (+126 more)
+Cohesion: 0.04
+Nodes (135): CostConfig, DailyCloseFadeConfig, DailyCloseFadeGridConfig, _all_context_rate(), _apply_basket_stop_to_rows(), apply_close_fade_basket_stop(), _attach_archive_membership(), attach_close_fade_coin_market_context() (+127 more)
 
 ### Community 1 - "Community 1"
-Cohesion: 0.03
-Nodes (114): download_archive_bytes(), _download_archive_to_path(), download_public_trade_archive(), _archive_kline_skip_rows(), ArchiveKlineDownloadConfig, ArchiveManifestConfig, build_archive_trade_manifest(), _delete_local_archive() (+106 more)
+Cohesion: 0.04
+Nodes (124): ExchangeConfig, load_config(), _merge_daily_close_fade_config(), _merge_daily_close_fade_grid_config(), _merge_dataclass(), _merge_forward_test_config(), _merge_universe_config(), _merge_volume_alpha_config() (+116 more)
 
 ### Community 2 - "Community 2"
-Cohesion: 0.06
-Nodes (92): ForwardTestConfig, _bar_open(), close_fade_entry_child_schedule_ts_ms(), _short_limit_execution_price(), _short_stop_execution_price(), _vwap_reversion_exit_price(), _as_utc(), _basket_already_opened() (+84 more)
+Cohesion: 0.04
+Nodes (100): download_archive_bytes(), _download_archive_to_path(), download_public_trade_archive(), _archive_kline_skip_rows(), ArchiveKlineDownloadConfig, ArchiveManifestConfig, build_archive_trade_manifest(), _delete_local_archive() (+92 more)
 
 ### Community 3 - "Community 3"
-Cohesion: 0.05
-Nodes (95): VolumeBacktestConfig, VolumeGridConfig, _evaluate_grid_variant_worker(), generate_fixture_data(), _attribution_rows(), backtest_volume_trades(), _bar_at_close(), _bar_excursion() (+87 more)
+Cohesion: 0.06
+Nodes (92): ForwardTestConfig, _bar_open(), close_fade_entry_child_schedule_ts_ms(), _short_limit_execution_price(), _short_stop_execution_price(), _vwap_reversion_exit_price(), _as_utc(), _basket_already_opened() (+84 more)
 
 ### Community 4 - "Community 4"
 Cohesion: 0.06
@@ -82,77 +80,67 @@ Cohesion: 0.12
 Nodes (54): ResearchConfig, DemoCancelAllConfig, DemoFlattenConfig, DemoProbeConfig, DemoSyncConfig, run_bybit_demo_sync(), write_dataset(), _CountingExecution (+46 more)
 
 ### Community 6 - "Community 6"
-Cohesion: 0.09
-Nodes (63): _aggregate_orders(), _aggregate_status(), _as_utc(), _avg_fill_price(), build_forward_demo_audit_rows(), build_forward_demo_audit_slice_rows(), build_forward_demo_daily_summary(), build_forward_demo_slice_daily_summary() (+55 more)
+Cohesion: 0.08
+Nodes (56): BybitPublicTradeStream, _active_trade_states(), _arm_profit_protection(), _as_utc(), _clear_state(), DemoFastProtectionConfig, _dt_from_ms(), _entry_trade_ids_with_exposure() (+48 more)
 
 ### Community 7 - "Community 7"
 Cohesion: 0.09
-Nodes (52): BybitPublicTradeStream, _active_trade_states(), _arm_profit_protection(), _as_utc(), _clear_state(), DemoFastProtectionConfig, _dt_from_ms(), _entry_trade_ids_with_exposure() (+44 more)
+Nodes (63): _aggregate_orders(), _aggregate_status(), _as_utc(), _avg_fill_price(), build_forward_demo_audit_rows(), build_forward_demo_audit_slice_rows(), build_forward_demo_daily_summary(), build_forward_demo_slice_daily_summary() (+55 more)
 
 ### Community 8 - "Community 8"
 Cohesion: 0.1
 Nodes (43): _as_utc(), _demo_cycle_lock(), DemoCycleConfig, _existing_active_state(), _failed_sleeve_result(), format_demo_cycle_report(), _inactive_sleeve_result(), _is_active_window() (+35 more)
 
 ### Community 9 - "Community 9"
+Cohesion: 0.07
+Nodes (16): BybitDataError, BybitMarketData, BybitPrivateClient, _is_rate_limit(), _leverage_text(), _demo_executor(), _age_filter_label(), build_current_universe_table() (+8 more)
+
+### Community 10 - "Community 10"
 Cohesion: 0.12
 Nodes (39): _add_forward_fade_args(), _add_forward_runtime_args(), _add_universe_backtest_args(), _apply_universe_backtest_args(), _arg(), _backtest_config_from_args(), build_parser(), _close_fade_base_from_diagnostics_args() (+31 more)
 
-### Community 10 - "Community 10"
-Cohesion: 0.09
-Nodes (6): BybitDataError, BybitMarketData, BybitPrivateClient, _is_rate_limit(), _leverage_text(), _demo_executor()
-
 ### Community 11 - "Community 11"
-Cohesion: 0.14
-Nodes (26): ExchangeConfig, load_config(), _merge_daily_close_fade_config(), _merge_daily_close_fade_grid_config(), _merge_dataclass(), _merge_forward_test_config(), _merge_universe_config(), _merge_volume_alpha_config() (+18 more)
+Cohesion: 0.17
+Nodes (20): _ordinal_rank(), rank_correlation(), _add_cross_sectional_z(), _add_liquidity_rank(), attach_volume_forward_returns(), _best_base_portfolio(), build_volume_features(), compute_volume_metrics() (+12 more)
 
 ### Community 12 - "Community 12"
-Cohesion: 0.18
-Nodes (19): _ordinal_rank(), rank_correlation(), _add_cross_sectional_z(), _add_liquidity_rank(), attach_volume_forward_returns(), _best_base_portfolio(), build_volume_features(), compute_volume_metrics() (+11 more)
-
-### Community 13 - "Community 13"
 Cohesion: 0.24
 Nodes (18): audit_label(), AuditGate, close_fade_audit(), close_fade_lifecycle(), config_hash(), _context_datasets_present(), data_identity(), _finite() (+10 more)
 
-### Community 14 - "Community 14"
-Cohesion: 0.28
-Nodes (16): _base_config(), _csv_bool(), _csv_float(), _csv_int(), _csv_str(), _date_ms(), format_volume_grid_split_summary(), _grid_config() (+8 more)
+### Community 13 - "Community 13"
+Cohesion: 0.26
+Nodes (17): _base_config(), _csv_bool(), _csv_float(), _csv_int(), _csv_str(), _date_ms(), format_volume_grid_split_summary(), _grid_arg() (+9 more)
 
-### Community 16 - "Community 16"
+### Community 15 - "Community 15"
 Cohesion: 0.25
 Nodes (12): _all_paper_trades_closed(), _append_event(), _candidate_count(), _compact(), _compact_sleeve(), _demo_execution_resolved(), main(), _signal_datetime() (+4 more)
 
-### Community 17 - "Community 17"
+### Community 16 - "Community 16"
 Cohesion: 0.29
 Nodes (13): build_volume_promotion_table(), _empty_promotion_table(), format_volume_promotion_report(), main(), _num(), _number(), parse_args(), _pct() (+5 more)
 
-### Community 18 - "Community 18"
+### Community 17 - "Community 17"
 Cohesion: 0.26
 Nodes (9): ArchiveLiquidityUniverseConfig, _csv_symbols(), _format_report(), main(), parse_args(), _rank_manifest_rows_by_content_length(), select_archive_liquidity_universe(), _start_date_manifest() (+1 more)
 
-### Community 20 - "Community 20"
-Cohesion: 0.67
-Nodes (2): test_volume_grid_split_summary_prefers_stable_variants(), _variant()
-
-### Community 21 - "Community 21"
+### Community 19 - "Community 19"
 Cohesion: 1.0
 Nodes (2): _candidate(), test_volume_promotion_requires_split_survival_and_drawdown()
 
 ## Knowledge Gaps
 - **2 isolated node(s):** `ExchangeConfig`, `Bybit volume-alpha research package.  This package is the stripped-down rebuild`
   These have ≤1 connection - possible missing edges or undocumented components.
-- **Thin community `Community 20`** (4 nodes): `test_volume_grid_splits_script.py`, `test_parse_splits_requires_ordered_windows()`, `test_volume_grid_split_summary_prefers_stable_variants()`, `_variant()`
-  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 21`** (3 nodes): `_candidate()`, `test_volume_promotion_script.py`, `test_volume_promotion_requires_split_survival_and_drawdown()`
+- **Thin community `Community 19`** (3 nodes): `_candidate()`, `test_volume_promotion_script.py`, `test_volume_promotion_requires_split_survival_and_drawdown()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `read_dataset()` connect `Community 0` to `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 8`, `Community 12`, `Community 18`?**
-  _High betweenness centrality (0.134) - this node is a cross-community bridge._
-- **Why does `main()` connect `Community 9` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 8`, `Community 11`, `Community 12`?**
-  _High betweenness centrality (0.089) - this node is a cross-community bridge._
-- **Why does `ResearchConfig` connect `Community 5` to `Community 1`, `Community 2`, `Community 4`, `Community 7`, `Community 8`, `Community 11`?**
+- **Why does `read_dataset()` connect `Community 0` to `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 8`, `Community 11`, `Community 17`?**
+  _High betweenness centrality (0.136) - this node is a cross-community bridge._
+- **Why does `main()` connect `Community 10` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 7`, `Community 8`, `Community 9`, `Community 11`?**
+  _High betweenness centrality (0.085) - this node is a cross-community bridge._
+- **Why does `ResearchConfig` connect `Community 5` to `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 6`, `Community 8`?**
   _High betweenness centrality (0.073) - this node is a cross-community bridge._
 - **Are the 97 inferred relationships involving `read_dataset()` (e.g. with `run_volume_trade_backtest()` and `run_volume_grid()`) actually correct?**
   _`read_dataset()` has 97 INFERRED edges - model-reasoned connections that need verification._

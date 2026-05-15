@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import sys
+from argparse import Namespace
 from pathlib import Path
 
 import polars as pl
 import pytest
+
+from aggression_carry.volume_backtest import iter_grid_configs
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
@@ -43,6 +46,65 @@ def test_volume_grid_split_summary_prefers_stable_variants() -> None:
     )
     assert "| Rank | Score |" in report
     assert "| 1 | stable | True |" in report
+
+
+def test_smoke_preset_keeps_default_split_grid_tiny() -> None:
+    args = Namespace(
+        preset="smoke",
+        scores=None,
+        quantiles=None,
+        hold_days=None,
+        fixed_stops=None,
+        vol_stops=None,
+        rank_exits=None,
+        include_reverse=False,
+        take_profits=None,
+        cost_multipliers=None,
+    )
+
+    grid = volume_splits._grid_config(args)
+
+    assert len(iter_grid_configs(grid)) == 2
+    assert grid.vol_stop_multipliers == ()
+
+
+def test_quick_preset_keeps_split_grid_small() -> None:
+    args = Namespace(
+        preset="quick",
+        scores=None,
+        quantiles=None,
+        hold_days=None,
+        fixed_stops=None,
+        vol_stops=None,
+        rank_exits=None,
+        include_reverse=False,
+        take_profits=None,
+        cost_multipliers=None,
+    )
+
+    grid = volume_splits._grid_config(args)
+
+    assert len(iter_grid_configs(grid)) == 20
+    assert grid.vol_stop_multipliers == ()
+
+
+def test_legacy_preset_preserves_old_split_grid_breadth() -> None:
+    args = Namespace(
+        preset="legacy",
+        scores=None,
+        quantiles=None,
+        hold_days=None,
+        fixed_stops=None,
+        vol_stops=None,
+        rank_exits=None,
+        include_reverse=False,
+        take_profits=None,
+        cost_multipliers=None,
+    )
+
+    grid = volume_splits._grid_config(args)
+
+    assert len(iter_grid_configs(grid)) == 540
 
 
 def _variant(score: str, split: str, total_return: float, sharpe: float) -> dict:

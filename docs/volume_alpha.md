@@ -78,8 +78,18 @@ Kept Python helper scripts:
 ```bash
 python scripts/run_volume_bucket_sweep.py --data-root DATA_ROOT --workers 8
 python scripts/run_volume_grid_splits.py --data-root DATA_ROOT --workers 8
+python scripts/run_volume_grid_splits.py --data-root DATA_ROOT --preset quick --workers 8
+python scripts/run_volume_grid_splits.py --data-root DATA_ROOT --preset promotion --workers 8
+python scripts/run_volume_grid_splits.py --data-root DATA_ROOT --preset legacy --workers 8
 python scripts/evaluate_volume_promotion.py --split-summary DATA_ROOT/reports/volume_grid_splits/volume_grid_split_summary.csv
 ```
+
+`run_volume_grid_splits.py` defaults to the `smoke` preset. That is deliberate:
+the old default grid evaluated 1,620 full trade-ledger variants across the three
+standard splits and can run overnight on a laptop. Use `--preset quick` for a
+small all-score triage pass, `--preset promotion` only after quick triage shows
+a live-relevant family worth deeper testing, and `--preset legacy` only when you
+explicitly want the old broad grid.
 
 Multi-worker volume grids default to a thread backend. Process-pool execution
 can hang on Polars-heavy grids on the VPS, so only opt into it deliberately with
