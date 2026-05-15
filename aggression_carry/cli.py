@@ -41,6 +41,7 @@ from .ingestion import generate_fixture_data
 from .universe import run_discover_universe
 from .volume_alpha import run_volume_alpha
 from .volume_backtest import run_volume_grid, run_volume_trade_backtest
+from .volume_events import EVENT_TYPES, SIDE_HYPOTHESES, VolumeEventResearchConfig, run_volume_event_research
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -125,6 +126,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers.add_parser("volume-alpha", help="Run isolated daily volume-only alpha research sweep.")
+
+    volume_events = subparsers.add_parser("volume-events", help="Run event-driven volume-alpha research.")
+    volume_events.add_argument("--event-types", default=",".join(EVENT_TYPES), help="Comma-separated event families.")
+    volume_events.add_argument("--thresholds", default="0.2,0.3", help="Comma-separated top-bucket thresholds.")
+    volume_events.add_argument("--hold-days", default="3,7", help="Comma-separated max holds in days.")
+    volume_events.add_argument("--sides", default=",".join(SIDE_HYPOTHESES), help="continuation,reversal, or both.")
+    volume_events.add_argument("--stop-loss-pcts", default="0,0.12", help="Comma-separated fixed stop pcts; 0 disables.")
+    volume_events.add_argument("--cost-multipliers", default="1,3", help="Comma-separated cost multipliers.")
+    volume_events.add_argument("--start", default="", help="Inclusive UTC signal start date/timestamp.")
+    volume_events.add_argument("--end", default="", help="Exclusive UTC signal end date/timestamp.")
+    volume_events.add_argument("--max-active-symbols", type=int, default=12)
+    volume_events.add_argument("--cooldown-days", type=int, default=3)
+    volume_events.add_argument("--report-dir", default=None)
 
     backtest = subparsers.add_parser("volume-backtest", help="Run detailed trade-ledger backtest for the volume alpha.")
     backtest.add_argument("--score", default=None, help="Volume score to trade, e.g. dollar_volume_rank.")
@@ -626,6 +640,35 @@ def main(argv: list[str] | None = None) -> int:
             cost_config=config.costs,
         )
         print(f"volume alpha rows={payload['rows']} path={data_root / 'reports' / 'volume_alpha_report.md'}")
+        return 0
+
+    if args.command == "volume-events":
+        event_config = VolumeEventResearchConfig(
+            event_types=_csv_str(args.event_types, EVENT_TYPES),
+            thresholds=_csv_float(args.thresholds, (0.20, 0.30)),
+            hold_days=_csv_int(args.hold_days, (3, 7)),
+            side_hypotheses=_csv_str(args.sides, SIDE_HYPOTHESES),
+            stop_loss_pcts=_csv_float(args.stop_loss_pcts, (0.0, 0.12)),
+            cost_multipliers=_csv_float(args.cost_multipliers, (1.0, 3.0)),
+            start_date=args.start,
+            end_date=args.end,
+            max_active_symbols=args.max_active_symbols,
+            cooldown_days=args.cooldown_days,
+        )
+        payload = run_volume_event_research(
+            data_root,
+            event_config=event_config,
+            cost_config=config.costs,
+            report_dir=args.report_dir,
+        )
+        best = payload.get("best_scenario", {})
+        print(
+            "volume events "
+            f"scenarios={payload['rows']['scenarios']} "
+            f"promotable={payload['rows']['promotable']} "
+            f"best_return={best.get('total_return', 0.0):.2%} "
+            f"path={Path(payload['report_dir']) / 'volume_event_research_report.md'}"
+        )
         return 0
 
     if args.command == "volume-backtest":

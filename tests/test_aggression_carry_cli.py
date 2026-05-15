@@ -118,6 +118,38 @@ def test_cli_archive_kline_default_requires_dense_utc_day(tmp_path: Path) -> Non
     assert args.min_existing_bars == 1440
 
 
+def test_cli_parses_volume_events(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "volume-events",
+            "--event-types",
+            "volume_exhaustion,persistent_volume_breakout",
+            "--thresholds",
+            "0.2",
+            "--hold-days",
+            "3",
+            "--sides",
+            "continuation",
+            "--stop-loss-pcts",
+            "0,0.12",
+            "--cost-multipliers",
+            "1,3",
+            "--max-active-symbols",
+            "8",
+            "--cooldown-days",
+            "2",
+        ]
+    )
+
+    assert args.command == "volume-events"
+    assert args.event_types == "volume_exhaustion,persistent_volume_breakout"
+    assert args.thresholds == "0.2"
+    assert args.max_active_symbols == 8
+    assert args.cooldown_days == 2
+
+
 def test_cli_parses_daily_close_fade_entry_risk_knobs(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [

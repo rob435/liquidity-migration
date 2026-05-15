@@ -136,6 +136,15 @@ no calendar-forced basket if no event fired
 cooldown and max-active-symbol logic included
 ```
 
+Current command:
+
+```bash
+python -m aggression_carry \
+  --data-root DATA_ROOT \
+  --config configs/volume_alpha.default.yaml \
+  volume-events
+```
+
 3. Add split evaluation:
 
 ```text
@@ -162,6 +171,10 @@ top failure reason
 ## Current Status
 
 Fixed-rebalance volume-alpha results are archived mentally as exploratory only.
-They are not the path forward. The next useful code change is an event-driven
-volume research runner with point-in-time membership support or, at minimum, a
-clearly labelled biased benchmark mode until PIT membership is implemented.
+They are not the path forward.
+
+The event-driven runner now exists as `volume-events`. It writes scenario
+summary, best-scenario trades, baskets, equity, monthly returns, JSON, and
+Markdown reports. Current runs are still biased benchmarks because
+point-in-time membership is not wired into the event table yet, and the
+machine-readable promotion gate hard-fails without that PIT proof.

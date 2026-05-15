@@ -1,0 +1,966 @@
+from __future__ import annotations
+
+import json
+import math
+from bisect import bisect_right
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from itertools import product
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import polars as pl
+
+from .config import CostConfig, VolumeBacktestConfig
+from .storage import read_dataset
+from .volume_alpha import MS_PER_DAY, MS_PER_HOUR, VOLUME_SCORE_COLUMNS, build_volume_features
+from .volume_backtest import (
+    _bar_excursion,
+    _bar_exit_hits,
+    _date_boundary_ms,
+    _empty_trades,
+    _exit_reason_rows,
+    _filter_signal_window,
+    _funding_lookup,
+    _perp_funding_return,
+    _price_bars_by_symbol,
+    _rank_exit_hit,
+    _rank_lookup,
+    _side_return,
+    _stop_price,
+    _take_profit_price,
+    build_equity_curve,
+    summarize_baskets,
+    summarize_trade_backtest,
+)
+
+
+EVENT_TYPES = (
+    "fresh_volume_spike",
+    "persistent_volume_breakout",
+    "tail_liquidity_jump",
+    "volume_exhaustion",
+)
+SIDE_HYPOTHESES = ("continuation", "reversal")
+SPLITS = (
+    ("train_2023_2024", "2023-05-03", "2024-05-03"),
+    ("validation_2024_2025", "2024-05-03", "2025-05-03"),
+    ("oos_2025_2026", "2025-05-03", "2026-05-03"),
+)
+
+
+@dataclass(frozen=True, slots=True)
+class VolumeEventResearchConfig:
+    event_types: tuple[str, ...] = EVENT_TYPES
+    thresholds: tuple[float, ...] = (0.20, 0.30)
+    hold_days: tuple[int, ...] = (3, 7)
+    side_hypotheses: tuple[str, ...] = SIDE_HYPOTHESES
+    stop_loss_pcts: tuple[float, ...] = (0.0, 0.12)
+    cost_multipliers: tuple[float, ...] = (1.0, 3.0)
+    start_date: str = ""
+    end_date: str = ""
+    entry_delay_hours: int = 1
+    gross_exposure: float = 1.0
+    max_active_symbols: int = 12
+    cooldown_days: int = 3
+    rank_exit_threshold: float = 0.50
+    require_pit_membership: bool = True
+    universe_rank_min: int = 1
+    universe_rank_max: int = 0
+    universe_min_daily_turnover: float = 0.0
+    tail_rank_min: int = 81
+    tail_rank_max: int = 160
+    tail_rank_improvement_min: int = 20
+    exhaustion_min_day_return: float = 0.03
+    promotion_max_drawdown: float = -0.35
+    promotion_min_avg_sharpe: float = 0.50
+
+
+@dataclass(frozen=True, slots=True)
+class EventScenario:
+    event_type: str
+    threshold: float
+    side_hypothesis: str
+    hold_days: int
+    stop_loss_pct: float
+    cost_multiplier: float
+
+    @property
+    def scenario_id(self) -> str:
+        stop = "none" if self.stop_loss_pct <= 0.0 else f"s{int(self.stop_loss_pct * 10000):04d}"
+        threshold = f"q{int(self.threshold * 100):02d}"
+        cost = f"c{self.cost_multiplier:g}".replace(".", "p")
+        return f"{self.event_type}-{threshold}-{self.side_hypothesis}-h{self.hold_days}-{stop}-{cost}"
+
+
+def run_volume_event_research(
+    data_root: str | Path,
+    *,
+    event_config: VolumeEventResearchConfig | None = None,
+    cost_config: CostConfig | None = None,
+    report_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    config = event_config or VolumeEventResearchConfig()
+    costs = cost_config or CostConfig()
+    _validate_event_config(config)
+    root = Path(data_root).expanduser()
+    output_dir = Path(report_dir) if report_dir else root / "reports" / "volume_event_research"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    klines = read_dataset(root, "klines_1h")
+    if klines.is_empty():
+        raise RuntimeError("klines_1h is empty; run download-data first")
+    funding = read_dataset(root, "funding")
+    features = _filter_signal_window(_enriched_event_features(build_volume_features(klines), klines), _window_config(config))
+    bars = _indexed_price_bars_by_symbol(klines)
+    funding_lookup = _funding_lookup(funding)
+    rank_lookup_cache = _rank_lookup_cache(features, config=config)
+    event_cache: dict[tuple[str, float], pl.DataFrame] = {}
+
+    scenario_rows = []
+    best_payload: dict[str, Any] | None = None
+    best_rank_key: tuple[Any, ...] | None = None
+    for scenario in _iter_scenarios(config):
+        payload = _run_event_scenario(
+            features,
+            bars,
+            funding_lookup=funding_lookup,
+            base_cost_bps=costs.base_entry_exit_cost_bps,
+            rank_lookup_cache=rank_lookup_cache,
+            event_cache=event_cache,
+            scenario=scenario,
+            config=config,
+        )
+        scenario_rows.append(payload["row"])
+        rank_key = _scenario_rank_key(payload["row"])
+        if best_rank_key is None or rank_key > best_rank_key:
+            best_rank_key = rank_key
+            best_payload = payload
+
+    summary = (
+        pl.DataFrame(scenario_rows, infer_schema_length=None).sort(
+            ["promotion_gate_pass", "min_split_return", "avg_split_sharpe", "total_return", "max_drawdown"],
+            descending=[True, True, True, True, True],
+        )
+        if scenario_rows
+        else pl.DataFrame()
+    )
+    if not summary.is_empty():
+        summary.write_csv(output_dir / "volume_event_scenario_summary.csv")
+
+    if best_payload is not None:
+        trades = best_payload["trades"]
+        baskets = best_payload["baskets"]
+        equity = best_payload["equity"]
+        monthly = best_payload["monthly"]
+        if not trades.is_empty():
+            trades.write_csv(output_dir / "volume_event_best_trades.csv")
+        if not baskets.is_empty():
+            baskets.write_csv(output_dir / "volume_event_best_baskets.csv")
+        if not equity.is_empty():
+            equity.write_csv(output_dir / "volume_event_best_equity.csv")
+        if not monthly.is_empty():
+            monthly.write_csv(output_dir / "volume_event_best_monthly.csv")
+
+    metadata = {
+        "config": asdict(config),
+        "rows": {
+            "features": features.height,
+            "scenarios": summary.height,
+            "pre_pit_promotable": int(summary.filter(pl.col("pre_pit_gate_pass")).height) if not summary.is_empty() else 0,
+            "promotable": int(summary.filter(pl.col("promotion_gate_pass")).height) if not summary.is_empty() else 0,
+        },
+        "date_range": _date_range(features),
+        "cost_model": {
+            **asdict(costs),
+            "base_round_trip_cost_bps": costs.base_entry_exit_cost_bps,
+        },
+        "best_scenario": summary.head(1).to_dicts()[0] if not summary.is_empty() else {},
+        "run_label": "biased_benchmark",
+        "promotion_note": "Current dataset lacks point-in-time membership; use this as event-shape research only.",
+    }
+    (output_dir / "volume_event_research_report.json").write_text(
+        json.dumps(
+            {
+                **metadata,
+                "top_rows": summary.head(50).to_dicts() if not summary.is_empty() else [],
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    (output_dir / "volume_event_research_report.md").write_text(
+        format_volume_event_report(summary, metadata),
+        encoding="utf-8",
+    )
+    return {
+        **metadata,
+        "summary": summary.to_dicts() if not summary.is_empty() else [],
+        "report_dir": str(output_dir),
+    }
+
+
+def _iter_scenarios(config: VolumeEventResearchConfig) -> list[EventScenario]:
+    return [
+        EventScenario(
+            event_type=event_type,
+            threshold=threshold,
+            side_hypothesis=side,
+            hold_days=hold_days,
+            stop_loss_pct=stop,
+            cost_multiplier=cost,
+        )
+        for event_type, threshold, side, hold_days, stop, cost in product(
+            config.event_types,
+            config.thresholds,
+            config.side_hypotheses,
+            config.hold_days,
+            config.stop_loss_pcts,
+            config.cost_multipliers,
+        )
+    ]
+
+
+def _run_event_scenario(
+    features: pl.DataFrame,
+    bars: dict[str, dict[str, Any]],
+    *,
+    funding_lookup: dict[str, list[tuple[int, float]]] | None,
+    base_cost_bps: float,
+    rank_lookup_cache: dict[str, dict[tuple[str, int], float]],
+    event_cache: dict[tuple[str, float], pl.DataFrame],
+    scenario: EventScenario,
+    config: VolumeEventResearchConfig,
+) -> dict[str, Any]:
+    score_name, score_col = _event_score(scenario.event_type)
+    side = "long" if scenario.side_hypothesis == "continuation" else "short"
+    side_mode = "long_high_short_low" if side == "long" else "short_high_long_low"
+    bt_config = VolumeBacktestConfig(
+        score=score_name,
+        hold_days=scenario.hold_days,
+        rebalance_days=scenario.hold_days,
+        gross_exposure=config.gross_exposure,
+        entry_delay_hours=config.entry_delay_hours,
+        stop_mode="none" if scenario.stop_loss_pct <= 0.0 else "fixed",
+        stop_loss_pct=max(scenario.stop_loss_pct, 0.0),
+        take_profit_pct=0.0,
+        min_symbols=4,
+        cost_multiplier=scenario.cost_multiplier,
+        side_mode=side_mode,
+        rank_exit_enabled=True,
+        rank_exit_threshold=config.rank_exit_threshold,
+        universe_rank_min=config.universe_rank_min,
+        universe_rank_max=config.universe_rank_max,
+        universe_min_daily_turnover=config.universe_min_daily_turnover,
+    )
+    event_key = (scenario.event_type, scenario.threshold)
+    events = event_cache.get(event_key)
+    if events is None:
+        events = _select_events(features, scenario=scenario, config=config, score_col=score_col)
+        event_cache[event_key] = events
+    rank_lookup = rank_lookup_cache.get(score_col, {})
+    rows = []
+    active_until: dict[str, int] = {}
+    cooldown_until: dict[str, int] = {}
+    skipped_active = 0
+    skipped_cooldown = 0
+    skipped_capacity = 0
+    skipped_no_entry = 0
+    notional_weight = config.gross_exposure / max(config.max_active_symbols, 1)
+    round_trip_cost_bps = base_cost_bps * scenario.cost_multiplier
+
+    for event in events.sort(["ts_ms", "symbol"]).to_dicts():
+        signal_ts_ms = int(event["ts_ms"])
+        active_until = {symbol: exit_ts for symbol, exit_ts in active_until.items() if exit_ts > signal_ts_ms}
+        symbol = str(event["symbol"])
+        if active_until.get(symbol, 0) > signal_ts_ms:
+            skipped_active += 1
+            continue
+        if cooldown_until.get(symbol, 0) > signal_ts_ms:
+            skipped_cooldown += 1
+            continue
+        if len(active_until) >= config.max_active_symbols:
+            skipped_capacity += 1
+            continue
+        entry_ts_ms = signal_ts_ms + config.entry_delay_hours * MS_PER_HOUR
+        planned_exit_ts_ms = entry_ts_ms + scenario.hold_days * MS_PER_DAY
+        symbol_bars = bars.get(symbol)
+        if symbol_bars is None:
+            skipped_no_entry += 1
+            continue
+        entry_bar = symbol_bars["by_end"].get(entry_ts_ms)
+        if entry_bar is None:
+            skipped_no_entry += 1
+            continue
+        basket_id = f"{scenario.scenario_id}-{_iso_date(signal_ts_ms)}-{symbol}"
+        trade = _simulate_indexed_trade(
+            symbol=symbol,
+            side=side,
+            score=float(event[score_col]),
+            rank=int(event.get("event_rank", 0) or 0),
+            basket_id=basket_id,
+            signal_ts_ms=signal_ts_ms,
+            entry_bar=entry_bar,
+            symbol_bars=symbol_bars,
+            planned_exit_ts_ms=planned_exit_ts_ms,
+            notional_weight=notional_weight,
+            config=bt_config,
+            round_trip_cost_bps=round_trip_cost_bps,
+            stop_pct=scenario.stop_loss_pct if scenario.stop_loss_pct > 0.0 else None,
+            rank_lookup=rank_lookup,
+            event_decay_threshold=1.0 - scenario.threshold,
+            funding_lookup=funding_lookup,
+        )
+        if trade is None:
+            skipped_no_entry += 1
+            continue
+        trade.update(
+            {
+                "scenario_id": scenario.scenario_id,
+                "event_type": scenario.event_type,
+                "threshold": scenario.threshold,
+                "side_hypothesis": scenario.side_hypothesis,
+                "cost_multiplier": scenario.cost_multiplier,
+                "liquidity_rank": int(event.get("liquidity_rank", 0) or 0),
+                "event_rank_fraction": float(event.get(f"{score_col}_rank_frac", float("nan"))),
+                "daily_return_1d": float(event.get("daily_return_1d", float("nan"))),
+                "tradable_membership_flag": bool(event.get("tradable_membership_flag", False)),
+            }
+        )
+        rows.append(trade)
+        active_until[symbol] = int(trade["exit_ts_ms"])
+        cooldown_until[symbol] = int(trade["exit_ts_ms"]) + config.cooldown_days * MS_PER_DAY
+
+    trades = pl.DataFrame(rows, infer_schema_length=None).sort(["entry_ts_ms", "symbol"]) if rows else _empty_trades()
+    baskets = summarize_baskets(trades, config=bt_config)
+    equity = build_equity_curve(baskets)
+    monthly = _monthly_returns(baskets)
+    summary = summarize_trade_backtest(trades, baskets, equity, config=bt_config)
+    split_rows = _split_rows(baskets, config=bt_config)
+    pit_membership_pass = _pit_membership_pass(trades, required=config.require_pit_membership)
+    row = {
+        "scenario_id": scenario.scenario_id,
+        "event_type": scenario.event_type,
+        "threshold": scenario.threshold,
+        "side_hypothesis": scenario.side_hypothesis,
+        "side": side,
+        "hold_days": scenario.hold_days,
+        "stop_loss_pct": scenario.stop_loss_pct,
+        "cost_multiplier": scenario.cost_multiplier,
+        "candidate_events": events.height,
+        "trades": trades.height,
+        "skipped_active": skipped_active,
+        "skipped_cooldown": skipped_cooldown,
+        "skipped_capacity": skipped_capacity,
+        "skipped_no_entry": skipped_no_entry,
+        **summary,
+        **_promotion_fields(split_rows, config=config, pit_membership_pass=pit_membership_pass),
+        **_exit_reason_fields(trades),
+    }
+    return {"row": row, "trades": trades, "baskets": baskets, "equity": equity, "monthly": monthly, "splits": split_rows}
+
+
+def _rank_lookup_cache(features: pl.DataFrame, *, config: VolumeEventResearchConfig) -> dict[str, dict[tuple[str, int], float]]:
+    output = {}
+    for score_col in sorted({_event_score(event_type)[1] for event_type in config.event_types}):
+        bt_config = VolumeBacktestConfig(
+            score=_score_name_for_column(score_col),
+            entry_delay_hours=config.entry_delay_hours,
+            universe_rank_min=config.universe_rank_min,
+            universe_rank_max=config.universe_rank_max,
+            universe_min_daily_turnover=config.universe_min_daily_turnover,
+        )
+        output[score_col] = _rank_lookup(features, score_col=score_col, entry_delay_hours=config.entry_delay_hours, config=bt_config)
+    return output
+
+
+def _score_name_for_column(score_col: str) -> str:
+    for score_name, candidate in VOLUME_SCORE_COLUMNS.items():
+        if candidate == score_col:
+            return score_name
+    return score_col
+
+
+def _indexed_price_bars_by_symbol(klines: pl.DataFrame) -> dict[str, dict[str, Any]]:
+    indexed = {}
+    for symbol, rows in _price_bars_by_symbol(klines).items():
+        ends = [int(row["bar_end_ts_ms"]) for row in rows]
+        indexed[symbol] = {
+            "rows": rows,
+            "ends": ends,
+            "by_end": {end: row for end, row in zip(ends, rows)},
+        }
+    return indexed
+
+
+def _simulate_indexed_trade(
+    *,
+    symbol: str,
+    side: str,
+    score: float,
+    rank: int,
+    basket_id: str,
+    signal_ts_ms: int,
+    entry_bar: dict[str, Any],
+    symbol_bars: dict[str, Any],
+    planned_exit_ts_ms: int,
+    notional_weight: float,
+    config: VolumeBacktestConfig,
+    round_trip_cost_bps: float,
+    stop_pct: float | None,
+    rank_lookup: dict[tuple[str, int], float],
+    event_decay_threshold: float,
+    funding_lookup: dict[str, list[tuple[int, float]]] | None,
+) -> dict[str, Any] | None:
+    entry_ts_ms = int(entry_bar["bar_end_ts_ms"])
+    entry_price = float(entry_bar["close"])
+    if entry_price <= 0.0:
+        return None
+    rows = symbol_bars["rows"]
+    ends = symbol_bars["ends"]
+    start = bisect_right(ends, entry_ts_ms)
+    end = bisect_right(ends, planned_exit_ts_ms)
+    future_bars = rows[start:end]
+    if not future_bars:
+        return None
+
+    stop_price = _stop_price(entry_price, side=side, stop_loss_pct=stop_pct or 0.0)
+    take_profit_price = _take_profit_price(entry_price, side=side, take_profit_pct=config.take_profit_pct)
+    exit_price = None
+    exit_ts_ms = None
+    exit_reason = "max_hold"
+    mae = 0.0
+    mfe = 0.0
+    bars_held = 0
+    for bar in future_bars:
+        bars_held += 1
+        adverse, favorable = _bar_excursion(entry_price, side=side, high=float(bar["high"]), low=float(bar["low"]))
+        mae = min(mae, adverse)
+        mfe = max(mfe, favorable)
+        stop_hit, take_profit_hit = _bar_exit_hits(
+            side=side,
+            high=float(bar["high"]),
+            low=float(bar["low"]),
+            stop_price=stop_price,
+            take_profit_price=take_profit_price,
+        )
+        if stop_hit:
+            exit_price = stop_price
+            exit_ts_ms = int(bar["bar_end_ts_ms"])
+            exit_reason = "stop_loss"
+            break
+        if take_profit_hit:
+            exit_price = take_profit_price
+            exit_ts_ms = int(bar["bar_end_ts_ms"])
+            exit_reason = "take_profit"
+            break
+        if _event_decay_exit_hit(
+            symbol=symbol,
+            bar_end_ts_ms=int(bar["bar_end_ts_ms"]),
+            rank_lookup=rank_lookup,
+            threshold=event_decay_threshold,
+        ):
+            exit_price = float(bar["close"])
+            exit_ts_ms = int(bar["bar_end_ts_ms"])
+            exit_reason = "event_decay"
+            break
+        if _rank_exit_hit(
+            symbol=symbol,
+            side=side,
+            side_mode=config.side_mode,
+            bar_end_ts_ms=int(bar["bar_end_ts_ms"]),
+            rank_lookup=rank_lookup,
+            enabled=config.rank_exit_enabled,
+            threshold=config.rank_exit_threshold,
+        ):
+            exit_price = float(bar["close"])
+            exit_ts_ms = int(bar["bar_end_ts_ms"])
+            exit_reason = "rank_exit"
+            break
+    if exit_price is None:
+        last = future_bars[-1]
+        exit_price = float(last["close"])
+        exit_ts_ms = int(last["bar_end_ts_ms"])
+        if exit_ts_ms < planned_exit_ts_ms:
+            exit_reason = "data_end"
+
+    gross_trade_return = _side_return(entry_price, exit_price, side=side)
+    raw_funding_return, funding_mode, funding_event_count = _perp_funding_return(
+        funding_lookup,
+        symbol=symbol,
+        side=side,
+        entry_ts_ms=entry_ts_ms,
+        exit_ts_ms=int(exit_ts_ms),
+    )
+    funding_return = abs(notional_weight) * raw_funding_return
+    cost_return = -abs(notional_weight) * round_trip_cost_bps / 10_000.0
+    gross_return = abs(notional_weight) * gross_trade_return
+    net_return = gross_return + cost_return + funding_return
+    trade_id = f"{basket_id}-{side[0]}-{symbol}"
+    return {
+        "trade_id": trade_id,
+        "basket_id": basket_id,
+        "entry_signal_ts_ms": signal_ts_ms,
+        "entry_ts_ms": entry_ts_ms,
+        "exit_ts_ms": int(exit_ts_ms),
+        "entry_date": _iso_date(entry_ts_ms),
+        "exit_date": _iso_date(int(exit_ts_ms)),
+        "exit_month": _iso_month(int(exit_ts_ms)),
+        "symbol": symbol,
+        "side": side,
+        "score": score,
+        "rank": rank,
+        "entry_price": entry_price,
+        "exit_price": float(exit_price),
+        "exit_reason": exit_reason,
+        "planned_exit_ts_ms": planned_exit_ts_ms,
+        "stop_price": stop_price,
+        "take_profit_price": take_profit_price,
+        "notional_weight": abs(notional_weight),
+        "gross_trade_return": gross_trade_return,
+        "gross_return": gross_return,
+        "cost_return": cost_return,
+        "funding_return": funding_return,
+        "funding_mode": funding_mode,
+        "funding_event_count": funding_event_count,
+        "net_return": net_return,
+        "mae": mae,
+        "mfe": mfe,
+        "bars_held": bars_held,
+        "hold_hours": (int(exit_ts_ms) - entry_ts_ms) / MS_PER_HOUR,
+    }
+
+
+def _select_events(
+    features: pl.DataFrame,
+    *,
+    scenario: EventScenario,
+    config: VolumeEventResearchConfig,
+    score_col: str,
+) -> pl.DataFrame:
+    if features.is_empty():
+        return features
+    rank_col = f"{score_col}_rank_frac"
+    top_cut = 1.0 - scenario.threshold
+    filtered = _event_filter(features, scenario.event_type, score_col=score_col, rank_col=rank_col, top_cut=top_cut, config=config)
+    if filtered.is_empty():
+        return filtered
+    return (
+        filtered.sort(["ts_ms", rank_col, "turnover_quote"], descending=[False, True, True])
+        .with_columns(pl.col(rank_col).rank("ordinal", descending=True).over("ts_ms").alias("event_rank"))
+    )
+
+
+def _event_filter(
+    features: pl.DataFrame,
+    event_type: str,
+    *,
+    score_col: str,
+    rank_col: str,
+    top_cut: float,
+    config: VolumeEventResearchConfig,
+) -> pl.DataFrame:
+    base = features.filter(pl.col(score_col).is_not_null() & pl.col(score_col).is_finite())
+    if config.universe_min_daily_turnover > 0.0:
+        base = base.filter(pl.col("turnover_quote") >= config.universe_min_daily_turnover)
+    if config.universe_rank_min > 1:
+        base = base.filter(pl.col("liquidity_rank") >= config.universe_rank_min)
+    if config.universe_rank_max > 0:
+        base = base.filter(pl.col("liquidity_rank") <= config.universe_rank_max)
+    if event_type == "fresh_volume_spike":
+        return base.filter((pl.col(rank_col) >= top_cut) & (pl.col(f"prior_{rank_col}") < top_cut))
+    if event_type == "persistent_volume_breakout":
+        return base.filter((pl.col(rank_col) >= top_cut) & (pl.col("prior3_volume_persistence_rank_min") < 0.50))
+    if event_type == "tail_liquidity_jump":
+        if "tradable_membership_flag" not in base.columns:
+            return base.head(0)
+        return base.filter(
+            pl.col("tradable_membership_flag")
+            & (pl.col("liquidity_rank") >= config.tail_rank_min)
+            & (pl.col("liquidity_rank") <= config.tail_rank_max)
+            & (pl.col(rank_col) >= top_cut)
+            & (pl.col(f"prior7_{rank_col}") < top_cut)
+            & ((pl.col("prior7_liquidity_rank") - pl.col("liquidity_rank")) >= config.tail_rank_improvement_min)
+        )
+    if event_type == "volume_exhaustion":
+        return base.filter(
+            (pl.col(rank_col) >= top_cut)
+            & (pl.col("daily_return_1d") >= config.exhaustion_min_day_return)
+            & (pl.col("daily_return_rank_frac") >= top_cut)
+        )
+    raise ValueError(f"Unknown event type: {event_type}")
+
+
+def _event_decay_exit_hit(
+    *,
+    symbol: str,
+    bar_end_ts_ms: int,
+    rank_lookup: dict[tuple[str, int], float],
+    threshold: float,
+) -> bool:
+    rank_fraction = rank_lookup.get((symbol, bar_end_ts_ms))
+    return rank_fraction is not None and rank_fraction < threshold
+
+
+def _enriched_event_features(features: pl.DataFrame, klines: pl.DataFrame) -> pl.DataFrame:
+    if features.is_empty():
+        return features
+    enriched = features.join(_daily_return_frame(klines), on=["ts_ms", "symbol"], how="left")
+    rank_inputs = {
+        "volume_change_1d_z": "volume_change_1d_z_rank_frac",
+        "volume_change_3d_z": "volume_change_3d_z_rank_frac",
+        "volume_persistence_z": "volume_persistence_z_rank_frac",
+        "dollar_volume_rank_z": "dollar_volume_rank_z_rank_frac",
+        "volume_composite": "volume_composite_rank_frac",
+        "daily_return_1d": "daily_return_rank_frac",
+    }
+    for source, alias in rank_inputs.items():
+        if source in enriched.columns:
+            enriched = _add_rank_fraction(enriched, source, alias)
+    shift_cols = [
+        "volume_change_1d_z_rank_frac",
+        "volume_persistence_z_rank_frac",
+        "dollar_volume_rank_z_rank_frac",
+        "volume_composite_rank_frac",
+    ]
+    expressions = []
+    for col in shift_cols:
+        if col in enriched.columns:
+            expressions.append(pl.col(col).shift(1).over("symbol").alias(f"prior_{col}"))
+            expressions.append(pl.col(col).shift(7).over("symbol").alias(f"prior7_{col}"))
+    expressions.extend(
+        [
+            pl.col("volume_persistence_z_rank_frac")
+            .shift(1)
+            .rolling_min(window_size=3, min_samples=1)
+            .over("symbol")
+            .alias("prior3_volume_persistence_rank_min"),
+            pl.col("liquidity_rank").shift(7).over("symbol").alias("prior7_liquidity_rank"),
+            pl.lit(False).alias("tradable_membership_flag"),
+        ]
+    )
+    return enriched.sort(["symbol", "ts_ms"]).with_columns(expressions).sort(["ts_ms", "symbol"])
+
+
+def _daily_return_frame(klines: pl.DataFrame) -> pl.DataFrame:
+    daily = (
+        klines.with_columns((pl.col("ts_ms") - (pl.col("ts_ms") % MS_PER_DAY)).alias("day_start_ms"))
+        .sort(["symbol", "ts_ms"])
+        .group_by(["symbol", "day_start_ms"], maintain_order=True)
+        .agg([pl.col("close").last().alias("close"), pl.len().alias("hourly_bars")])
+        .filter(pl.col("hourly_bars") >= 20)
+        .with_columns((pl.col("day_start_ms") + MS_PER_DAY).alias("ts_ms"))
+        .sort(["symbol", "ts_ms"])
+        .with_columns((pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias("daily_return_1d"))
+        .select(["ts_ms", "symbol", "daily_return_1d"])
+    )
+    return daily
+
+
+def _add_rank_fraction(frame: pl.DataFrame, source: str, alias: str) -> pl.DataFrame:
+    rank_col = f"_{alias}_rank"
+    count_col = f"_{alias}_count"
+    return (
+        frame.with_columns(
+            [
+                pl.col(source).rank("ordinal").over("ts_ms").alias(rank_col),
+                pl.col(source).count().over("ts_ms").alias(count_col),
+            ]
+        )
+        .with_columns(
+            pl.when(pl.col(count_col) > 1)
+            .then((pl.col(rank_col) - 1) / (pl.col(count_col) - 1))
+            .otherwise(None)
+            .alias(alias)
+        )
+        .drop([rank_col, count_col])
+    )
+
+
+def _event_score(event_type: str) -> tuple[str, str]:
+    if event_type in {"fresh_volume_spike", "volume_exhaustion"}:
+        return "volume_change_1d", VOLUME_SCORE_COLUMNS["volume_change_1d"]
+    if event_type == "persistent_volume_breakout":
+        return "volume_persistence", VOLUME_SCORE_COLUMNS["volume_persistence"]
+    if event_type == "tail_liquidity_jump":
+        return "dollar_volume_rank", VOLUME_SCORE_COLUMNS["dollar_volume_rank"]
+    raise ValueError(f"Unknown event type: {event_type}")
+
+
+def _promotion_fields(
+    split_rows: list[dict[str, Any]],
+    *,
+    config: VolumeEventResearchConfig,
+    pit_membership_pass: bool = False,
+) -> dict[str, Any]:
+    returns = [float(row["total_return"]) for row in split_rows]
+    sharpes = [float(row["sharpe_like"]) for row in split_rows]
+    drawdowns = [float(row["max_drawdown"]) for row in split_rows]
+    complete = len(split_rows) == len(SPLITS)
+    positive = sum(1 for value in returns if value > 0.0)
+    min_return = min(returns) if returns else 0.0
+    avg_sharpe = float(np.mean(sharpes)) if sharpes else 0.0
+    worst_dd = min(drawdowns) if drawdowns else 0.0
+    pre_pit_gate_pass = (
+        complete
+        and positive == len(SPLITS)
+        and min_return >= 0.0
+        and worst_dd >= config.promotion_max_drawdown
+        and avg_sharpe >= config.promotion_min_avg_sharpe
+    )
+    gate_pass = pre_pit_gate_pass and pit_membership_pass
+    return {
+        "complete_splits": complete,
+        "positive_splits": positive,
+        "min_split_return": min_return,
+        "avg_split_return": float(np.mean(returns)) if returns else 0.0,
+        "worst_split_drawdown": worst_dd,
+        "avg_split_sharpe": avg_sharpe,
+        "pre_pit_gate_pass": pre_pit_gate_pass,
+        "pit_membership_pass": pit_membership_pass,
+        "promotion_gate_pass": gate_pass,
+        "promotion_reason": "pass"
+        if gate_pass
+        else _promotion_reason(complete, positive, min_return, worst_dd, avg_sharpe, pit_membership_pass, config),
+        **{f"{row['name']}_return": row["total_return"] for row in split_rows},
+        **{f"{row['name']}_sharpe": row["sharpe_like"] for row in split_rows},
+    }
+
+
+def _split_rows(baskets: pl.DataFrame, *, config: VolumeBacktestConfig) -> list[dict[str, Any]]:
+    rows = []
+    for name, start, end in SPLITS:
+        start_ms = _date_ms(start)
+        end_ms = _date_ms(end)
+        part = baskets.filter((pl.col("entry_signal_ts_ms") >= start_ms) & (pl.col("entry_signal_ts_ms") < end_ms)) if not baskets.is_empty() else baskets
+        rows.append(_summarize_basket_split(part, name=name, config=config))
+    return rows
+
+
+def _summarize_basket_split(part: pl.DataFrame, *, name: str, config: VolumeBacktestConfig) -> dict[str, Any]:
+    if part.is_empty():
+        return {
+            "name": name,
+            "basket_count": 0,
+            "total_return": 0.0,
+            "sharpe_like": 0.0,
+            "max_drawdown": 0.0,
+        }
+    returns = np.asarray(part.sort("entry_signal_ts_ms")["basket_return"].to_list(), dtype=float)
+    equity = 1.0
+    peak = 1.0
+    max_dd = 0.0
+    for value in returns:
+        equity *= 1.0 + value
+        peak = max(peak, equity)
+        max_dd = min(max_dd, equity / peak - 1.0)
+    stdev = float(np.std(returns, ddof=1)) if returns.size > 1 else 0.0
+    mean = float(np.mean(returns)) if returns.size else 0.0
+    annual_periods = 365.0 / max(config.hold_days, 1)
+    return {
+        "name": name,
+        "basket_count": int(returns.size),
+        "total_return": float(equity - 1.0),
+        "sharpe_like": float(mean / stdev * math.sqrt(annual_periods)) if stdev > 1e-12 else 0.0,
+        "max_drawdown": float(max_dd),
+    }
+
+
+def _exit_reason_fields(trades: pl.DataFrame) -> dict[str, Any]:
+    fields = {f"exit_{row['exit_reason']}": int(row["trades"]) for row in _exit_reason_rows(trades)}
+    return fields
+
+
+def _pit_membership_pass(trades: pl.DataFrame, *, required: bool) -> bool:
+    if not required:
+        return True
+    if trades.is_empty() or "tradable_membership_flag" not in trades.columns:
+        return False
+    flags = trades["tradable_membership_flag"].to_list()
+    return bool(flags) and all(bool(flag) for flag in flags)
+
+
+def _monthly_returns(baskets: pl.DataFrame) -> pl.DataFrame:
+    if baskets.is_empty():
+        return pl.DataFrame(
+            {
+                "month": pl.Series([], dtype=pl.String),
+                "strategy_return": pl.Series([], dtype=pl.Float64),
+                "long_return": pl.Series([], dtype=pl.Float64),
+                "short_return": pl.Series([], dtype=pl.Float64),
+                "cost_return": pl.Series([], dtype=pl.Float64),
+                "funding_return": pl.Series([], dtype=pl.Float64),
+                "baskets": pl.Series([], dtype=pl.Int64),
+                "trades": pl.Series([], dtype=pl.Int64),
+            }
+        )
+    return (
+        baskets.with_columns(pl.from_epoch(pl.col("exit_ts_ms"), time_unit="ms").dt.strftime("%Y-%m").alias("month"))
+        .group_by("month")
+        .agg(
+            [
+                ((pl.col("basket_return") + 1.0).product() - 1.0).alias("strategy_return"),
+                pl.col("long_return").sum().alias("long_return"),
+                pl.col("short_return").sum().alias("short_return"),
+                pl.col("cost_return").sum().alias("cost_return"),
+                pl.col("funding_return").sum().alias("funding_return"),
+                pl.len().alias("baskets"),
+                pl.col("trades").sum().alias("trades"),
+            ]
+        )
+        .sort("month")
+    )
+
+
+def _promotion_reason(
+    complete: bool,
+    positive: int,
+    min_return: float,
+    worst_dd: float,
+    avg_sharpe: float,
+    pit_membership_pass: bool,
+    config: VolumeEventResearchConfig,
+) -> str:
+    reasons = []
+    if not complete:
+        reasons.append("incomplete_splits")
+    if positive < len(SPLITS):
+        reasons.append("positive_split_fail")
+    if min_return < 0.0:
+        reasons.append("worst_split_return_fail")
+    if worst_dd < config.promotion_max_drawdown:
+        reasons.append("drawdown_fail")
+    if avg_sharpe < config.promotion_min_avg_sharpe:
+        reasons.append("avg_sharpe_fail")
+    if not pit_membership_pass:
+        reasons.append("pit_membership_fail")
+    return ",".join(reasons) if reasons else "fail"
+
+
+def _scenario_rank_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        bool(row.get("promotion_gate_pass", False)),
+        float(row.get("min_split_return", 0.0)),
+        float(row.get("avg_split_sharpe", 0.0)),
+        float(row.get("total_return", 0.0)),
+        float(row.get("max_drawdown", 0.0)),
+        int(row.get("trades", 0)),
+    )
+
+
+def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) -> str:
+    lines = [
+        "# Volume Event Research",
+        "",
+        "Event-driven volume-alpha benchmark. This is not demo-ready evidence while point-in-time membership is missing.",
+        "",
+        "## Inputs",
+        "",
+        f"- Run label: `{metadata['run_label']}`",
+        f"- Feature rows: {metadata['rows']['features']}",
+        f"- Scenarios: {metadata['rows']['scenarios']}",
+        f"- Pre-PIT promotable rows: {metadata['rows']['pre_pit_promotable']}",
+        f"- Promotable rows: {metadata['rows']['promotable']}",
+        f"- Date range: {metadata['date_range']['start']} to {metadata['date_range']['end']}",
+        "",
+        "## Top Scenarios",
+        "",
+        "| Rank | Promote | Event | Side | Threshold | Hold | Stop | Cost | Trades | Return | Max DD | Sharpe | Pos Splits | Min Split | Avg Split Sharpe | Reason |",
+        "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+    ]
+    for index, row in enumerate(summary.head(50).to_dicts() if not summary.is_empty() else [], start=1):
+        lines.append(
+            f"| {index} | {row.get('promotion_gate_pass', False)} | {row.get('event_type', '')} | "
+            f"{row.get('side_hypothesis', '')} | {_pct(row.get('threshold'))} | {row.get('hold_days', 0)}d | "
+            f"{_pct(row.get('stop_loss_pct'))} | {row.get('cost_multiplier', 0):.1f}x | {row.get('trades', 0)} | "
+            f"{_pct(row.get('total_return'))} | {_pct(row.get('max_drawdown'))} | {_num(row.get('sharpe_like'))} | "
+            f"{row.get('positive_splits', 0)}/{len(SPLITS)} | {_pct(row.get('min_split_return'))} | "
+            f"{_num(row.get('avg_split_sharpe'))} | {row.get('promotion_reason', '')} |"
+        )
+    if summary.is_empty():
+        lines.append("|  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |")
+    lines.extend(
+        [
+            "",
+            "## Output Files",
+            "",
+            "```text",
+            "volume_event_scenario_summary.csv",
+            "volume_event_best_trades.csv",
+            "volume_event_best_baskets.csv",
+            "volume_event_best_equity.csv",
+            "volume_event_best_monthly.csv",
+            "volume_event_research_report.json",
+            "volume_event_research_report.md",
+            "```",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _validate_event_config(config: VolumeEventResearchConfig) -> None:
+    unknown_events = sorted(set(config.event_types) - set(EVENT_TYPES))
+    if unknown_events:
+        raise ValueError(f"Unknown event type(s): {unknown_events}")
+    unknown_sides = sorted(set(config.side_hypotheses) - set(SIDE_HYPOTHESES))
+    if unknown_sides:
+        raise ValueError(f"Unknown side hypothesis(es): {unknown_sides}")
+    if any(not 0.0 < item <= 0.5 for item in config.thresholds):
+        raise ValueError("thresholds must be in (0, 0.5]")
+    if any(item <= 0 for item in config.hold_days):
+        raise ValueError("hold days must be positive")
+    if any(item < 0.0 or item >= 1.0 for item in config.stop_loss_pcts):
+        raise ValueError("stop loss pcts must be in [0, 1)")
+    if any(item < 0.0 for item in config.cost_multipliers):
+        raise ValueError("cost multipliers must be non-negative")
+    if config.max_active_symbols <= 0:
+        raise ValueError("max_active_symbols must be positive")
+    if config.cooldown_days < 0:
+        raise ValueError("cooldown_days must be non-negative")
+
+
+def _window_config(config: VolumeEventResearchConfig) -> VolumeBacktestConfig:
+    return VolumeBacktestConfig(start_date=config.start_date, end_date=config.end_date, min_symbols=4)
+
+
+def _date_ms(value: str) -> int:
+    parsed = _date_boundary_ms(value)
+    if parsed is None:
+        raise ValueError(f"Invalid date: {value}")
+    return parsed
+
+
+def _date_range(df: pl.DataFrame) -> dict[str, str | None]:
+    if df.is_empty() or "ts_ms" not in df.columns:
+        return {"start": None, "end": None}
+    return {"start": _iso_date(int(df["ts_ms"].min())), "end": _iso_date(int(df["ts_ms"].max()))}
+
+
+def _iso_date(ts_ms: int) -> str:
+    return datetime.fromtimestamp(ts_ms / 1000, tz=UTC).date().isoformat()
+
+
+def _iso_month(ts_ms: int) -> str:
+    return datetime.fromtimestamp(ts_ms / 1000, tz=UTC).strftime("%Y-%m")
+
+
+def _pct(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not math.isfinite(number):
+        return ""
+    return f"{number:.2%}"
+
+
+def _num(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not math.isfinite(number):
+        return ""
+    return f"{number:.2f}"
