@@ -145,6 +145,25 @@ python -m aggression_carry \
   volume-events
 ```
 
+Overnight full-PIT runner:
+
+```bash
+nohup bash scripts/run_fullpit_volume_overnight.sh > fullpit_volume_overnight.nohup.log 2>&1 &
+tail -f fullpit_volume_overnight.nohup.log
+```
+
+Default behavior:
+
+```text
+sync repo to origin/main
+install/update local venv
+run focused smoke tests
+build/resume full Bybit USDT public archive manifest
+download/resume full PIT 1h klines with 64 workers
+validate manifest-to-parquet coverage
+run the selected persistent-volume-breakout event backtest
+```
+
 Full PIT data build for event research:
 
 ```bash
