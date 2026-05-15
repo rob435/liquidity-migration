@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import ssl
 from concurrent.futures import ThreadPoolExecutor
@@ -23,6 +24,7 @@ from .storage import dataset_path, read_dataset, write_dataset
 
 DEFAULT_BYBIT_PUBLIC_TRADING_URL = "https://public.bybit.com/trading/"
 DEFAULT_TIMEOUT_SECONDS = 60
+ARCHIVE_KLINE_SKIP_ROWS_ENV = "AGC_ARCHIVE_KLINE_SKIP_ROWS_PATH"
 
 
 @dataclass(frozen=True, slots=True)
@@ -355,17 +357,49 @@ def _select_manifest_rows(
     symbols = tuple(dict.fromkeys(symbol.upper() for symbol in config.symbols if symbol.strip()))
     if symbols:
         frame = frame.filter(pl.col("symbol").is_in(symbols))
+    skip_rows = _archive_kline_skip_rows()
+    if skip_rows:
+        skip_frame = pl.DataFrame(
+            [{"date": row_date, "symbol": symbol} for row_date, symbol in sorted(skip_rows)],
+            schema={"date": pl.Utf8, "symbol": pl.Utf8},
+        )
+        frame = frame.join(skip_frame, on=["date", "symbol"], how="anti")
     frame = frame.sort(["date", "symbol"])
     rows = frame.to_dicts()
     if config.missing_only:
+        min_existing_bars = max(int(config.min_existing_bars), 1)
+        existing_rows = _kline_partition_bar_rows if min_existing_bars <= 1 else _kline_partition_valid_bar_rows
         rows = [
             row
             for row in rows
-            if _kline_partition_valid_bar_rows(data_root, symbol=row["symbol"], date=row["date"])
-            < max(int(config.min_existing_bars), 1)
+            if existing_rows(data_root, symbol=row["symbol"], date=row["date"]) < min_existing_bars
         ]
     if config.max_rows > 0:
         rows = rows[: config.max_rows]
+    return rows
+
+
+def _archive_kline_skip_rows() -> set[tuple[str, str]]:
+    path_value = os.environ.get(ARCHIVE_KLINE_SKIP_ROWS_ENV, "").strip()
+    if not path_value:
+        return set()
+    path = Path(path_value).expanduser()
+    if not path.exists() or path.stat().st_size <= 0:
+        return set()
+
+    rows: set[tuple[str, str]] = set()
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        parts = [part.strip() for part in re.split(r"[\t,]", stripped)]
+        if len(parts) < 2:
+            continue
+        row_date, symbol = parts[0], parts[1].upper()
+        if row_date.lower() == "date" and symbol == "SYMBOL":
+            continue
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", row_date) and symbol:
+            rows.add((row_date, symbol))
     return rows
 
 
@@ -468,9 +502,38 @@ def _kline_partition_valid_bar_rows(data_root: str | Path, *, symbol: str, date:
     if not part.exists() or part.stat().st_size <= 0:
         return 0
     try:
+        metadata_count = _metadata_valid_price_rows(part)
+        if metadata_count is not None:
+            return metadata_count
         return _valid_price_rows(pl.read_parquet(part))
     except Exception:  # noqa: BLE001 - corrupted/suspicious partitions should be rebuilt by PIT repair
         return 0
+
+
+def _metadata_valid_price_rows(part: Path) -> int | None:
+    price_cols = {"open", "high", "low", "close"}
+    parquet = pq.ParquetFile(part)
+    if not price_cols.issubset(set(parquet.schema.names)):
+        return 0
+    total_nulls = {col: 0 for col in price_cols}
+    seen = set()
+    for row_group_index in range(parquet.metadata.num_row_groups):
+        row_group = parquet.metadata.row_group(row_group_index)
+        for column_index in range(row_group.num_columns):
+            column = row_group.column(column_index)
+            column_name = column.path_in_schema
+            if column_name not in price_cols:
+                continue
+            seen.add(column_name)
+            stats = column.statistics
+            if stats is None or stats.null_count is None:
+                return None
+            total_nulls[column_name] += int(stats.null_count)
+    if seen != price_cols:
+        return 0
+    if all(nulls == 0 for nulls in total_nulls.values()):
+        return int(parquet.metadata.num_rows)
+    return None
 
 
 def previous_kline_close(data_root: str | Path, *, symbol: str, archive_date: str) -> float | None:

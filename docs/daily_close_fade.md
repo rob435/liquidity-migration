@@ -1,7 +1,8 @@
 # Daily-Close Fade
 
-This is the active alpha lead. The current full-listing research candidate is
-documented in `docs/daily_close_fade_full_listing_scam_tail_stage4_20260510.md`.
+This is the active alpha lead. The current promoted research candidate is the
+23:15/20m TWAP top-result ledger under
+`data/research_reports/backtests/top_result_equity_trades_vwap10_m03_ex00_20260515T130424Z/`.
 
 ## Hypothesis
 
@@ -13,9 +14,9 @@ system shorts those names and exits mechanically.
 
 ```text
 Config: configs/daily_close_fade.lowcap_scam_tail_stage4_selected.yaml
-Signal time: 23:00 UTC
-Ranking: day_return using data available at 23:00
-Ranking bars: completed 1m bars strictly before 23:00, because Bybit klines are
+Signal time: 23:15 UTC
+Ranking: day_return using data available at 23:15
+Ranking bars: completed 1m bars strictly before 23:15, because Bybit klines are
   timestamped by candle `startTime`
 Candidate side: short only
 Candidate filter: pump-like only
@@ -23,8 +24,8 @@ Excluded alpha coins: current top-cap/category-leader majors and meme leaders,
   listed explicitly in the selected config
 Age filter: listed >= 10 days
 Liquidity bucket: prior 7d baseline quote-turnover ranks 226+
-Per-coin quality gate: none beyond pump-like, age, PIT archive membership, and
-  liquidity tail
+Per-coin quality gate: intraday VWAP extension <= 10%, market median day return
+  <= 3%, pump-like, age, PIT archive membership, and liquidity tail
 Required context: funding is modeled; OI, premium, and signed-flow columns are
   attached when available but are not hard eligibility gates for the low-cap
   tail because OI coverage is incomplete there
@@ -34,7 +35,7 @@ Capacity: cap notional at 0.05% of signal-time day turnover and 0.10% of
   prior baseline turnover
 Impact: charge participation-based market impact in addition to fixed
   round-trip fee/slippage bps
-Entry: equal 1m TWAP over [23:00, 00:00)
+Entry: equal 1m TWAP over [23:15, 23:35)
 Entry price: average of all filled 1m opens
 Max hold: 360m after TWAP completes
 Hard stop: 8% above average entry
@@ -43,23 +44,23 @@ Take profit: 10%
 Adaptive protection active: final add + 120m
 Time-decay take profit:
   start at 10% when adaptive protection activates
-  linearly decay to 4% over 120m
+  linearly decay to 5% over 120m
   exit whole symbol when the bar low touches the current decayed target
 Adaptive protection:
   vol_trailing_stop_mult = 0.0
   mfe_giveback_pct = 0.0
 Adaptive protection state: starts at activation time; it must not inherit
   pre-activation lows or MFE from the TWAP/delay window
-TWAP stop-adding guard: disabled in the current implementation
+TWAP stop-adding guard: stop future slices after a 2% adverse move during entry
 No VWAP-reversion TP
 Exit: flatten whole symbol
 Re-entry: none in the same symbol/date
 ```
 
-Important: ranking at 23:00 and pretending to fill before 23:00 is lookahead.
-Including the 23:00 1m bar in a 23:00 decision is also lookahead because that
-bar has just opened. The implemented backtest ranks at 23:00 using completed
-bars through 22:59 only.
+Important: ranking at 23:15 and pretending to fill before 23:15 is lookahead.
+Including the 23:15 1m bar in a 23:15 decision is also lookahead because that
+bar has just opened. The implemented backtest ranks at 23:15 using completed
+bars through 23:14 only.
 
 ## Backtest Semantics
 
@@ -71,7 +72,7 @@ For Bybit USDT linear perps, short return is:
 
 The TWAP model:
 
-- uses 60 equal slices from 22:00 through 22:59;
+- uses 20 equal slices from 23:15 through 23:34;
 - records `entry_fill_count`, `entry_fill_fraction`,
   `entry_complete_time`, `stop_active_time`, and
   `profit_protection_active_time`;
@@ -87,8 +88,8 @@ The TWAP model:
   conservative.
 - starts trailing/giveback state at `profit_protection_active_time`; pre-active
   MFE remains a diagnostic but must not arm a profit exit.
-- can optionally stop adding future TWAP slices after an adverse move, but that
-  is research-only until it survives out-of-sample validation.
+- stops adding future TWAP slices after a 2% adverse move in the active selected
+  configuration.
 
 Same-bar ambiguity remains conservative: if a stop and a profit exit are both
 eligible inside one 1m OHLC bar, the protective stop wins.

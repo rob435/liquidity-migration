@@ -15,26 +15,28 @@ The current private Bybit client is demo-only and refuses `demo=False`. Real-mon
 
 Canonical config: `configs/volume_alpha.default.yaml`.
 
-Selected benchmark: Full PIT Bybit Scam-Tail Stage 4, documented in `docs/daily_close_fade_full_listing_scam_tail_stage4_20260510.md`.
+Selected benchmark: Full PIT Bybit Scam-Tail Stage 4 top-result refinement, documented by `data/research_reports/backtests/top_result_equity_trades_vwap10_m03_ex00_20260515T130424Z/summary.json`.
 
 Backtest reference:
 
-- Return: 11.48%
-- Sharpe-like: 5.51
-- Max drawdown: -3.17%
-- Trades: 74
+- Return: 88.41%
+- Sharpe-like: 2.75
+- Max drawdown: -5.41%
+- Trades: 705
 
 Contract:
 
-- Signal at 23:00 UTC.
+- Signal at 23:15 UTC.
 - Short the top 1 pump candidate by `day_return`.
 - Require PIT Bybit archive membership.
 - Exclude major/high-liquidity symbols listed in the config.
 - Require baseline liquidity rank 226+.
-- Enter with 60 equal 1-minute TWAP slices.
+- Require intraday VWAP extension <= 10% and market median day return <= 3%.
+- Enter with 20 equal 1-minute TWAP slices.
+- Stop adding future TWAP slices if price moves 2% against the short during entry.
 - Stop at 8%, active from first fill.
 - Fixed TP at 10%.
-- Time-decay TP from 10% down to 4% over 120 minutes after profit protection activates.
+- Time-decay TP from 10% down to 5% over 120 minutes after profit protection activates.
 - Profit protection activates 120 minutes after the final TWAP slice.
 - Max hold is 360 minutes after TWAP completion.
 
@@ -44,7 +46,7 @@ The demo runtime is sleeve-based. The active sleeve is `stage4_selected`.
 
 Flow:
 
-1. `forward-run-sleeves --forward-mode scan --sleeves stage4_selected` caches the 23:00 candidate.
+1. `forward-run-sleeves --forward-mode scan --sleeves stage4_selected` caches the 23:15 candidate.
 2. The signal runner immediately calls `bybit-demo-cycle --forward-mode open-from-scan --require-first-slice` so the first TWAP slice does not depend on the background minute loop racing the scan.
 3. `forward_paper_slices` defines the expected TWAP child orders.
 4. `bybit-demo-sync` submits due demo entry slices and reduce-only exits.

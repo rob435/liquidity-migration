@@ -159,10 +159,10 @@ EOF
 
 sudo tee "/etc/systemd/system/$SERVICE_NAME-signal.timer" >/dev/null <<EOF
 [Unit]
-Description=Run MODEL050426 forward paper signal scan at 23:00 UTC
+Description=Run MODEL050426 forward paper signal scan at 23:15 UTC
 
 [Timer]
-OnCalendar=*-*-* 23:00:00 UTC
+OnCalendar=*-*-* 23:15:00 UTC
 AccuracySec=1s
 Persistent=false
 Unit=$SERVICE_NAME-signal.service

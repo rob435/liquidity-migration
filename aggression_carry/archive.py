@@ -3,7 +3,9 @@ from __future__ import annotations
 import csv
 import gzip
 import io
+import os
 import ssl
+import subprocess
 import tempfile
 import time
 import zipfile
@@ -18,6 +20,20 @@ from .ingestion import trades_to_frame
 
 DEFAULT_TIMEOUT_SECONDS = 300
 DEFAULT_RETRIES = 5
+ARCHIVE_RETRIES_ENV = "AGC_ARCHIVE_DOWNLOAD_RETRIES"
+ARCHIVE_TIMEOUT_ENV = "AGC_ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS"
+ARCHIVE_BACKEND_ENV = "AGC_ARCHIVE_DOWNLOAD_BACKEND"
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 
 def download_archive_bytes(url: str, *, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> bytes:
@@ -71,13 +87,19 @@ def download_public_trade_archive(
     url: str,
     destination: str | Path,
     *,
-    retries: int = DEFAULT_RETRIES,
-    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+    retries: int | None = None,
+    timeout_seconds: int | None = None,
 ) -> Path:
     output = Path(destination)
     if output.exists() and output.stat().st_size > 0:
         return output
     output.parent.mkdir(parents=True, exist_ok=True)
+    retries = retries if retries is not None else _positive_int_env(ARCHIVE_RETRIES_ENV, DEFAULT_RETRIES)
+    timeout_seconds = (
+        timeout_seconds
+        if timeout_seconds is not None
+        else _positive_int_env(ARCHIVE_TIMEOUT_ENV, DEFAULT_TIMEOUT_SECONDS)
+    )
 
     last_error: Exception | None = None
     for attempt in range(1, retries + 1):
@@ -89,7 +111,7 @@ def download_public_trade_archive(
         ) as temp_file:
             temp_output = Path(temp_file.name)
         try:
-            temp_output.write_bytes(download_archive_bytes(url, timeout_seconds=timeout_seconds))
+            _download_archive_to_path(url, temp_output, timeout_seconds=timeout_seconds)
             if output.exists() and output.stat().st_size > 0:
                 return output
             temp_output.replace(output)
@@ -102,3 +124,27 @@ def download_public_trade_archive(
         finally:
             temp_output.unlink(missing_ok=True)
     raise RuntimeError(f"Failed downloading archive after {retries} attempts: {url}") from last_error
+
+
+def _download_archive_to_path(url: str, output: Path, *, timeout_seconds: int) -> None:
+    backend = os.environ.get(ARCHIVE_BACKEND_ENV, "").strip().lower()
+    if backend == "curl":
+        subprocess.run(
+            [
+                "curl",
+                "-L",
+                "--fail",
+                "--silent",
+                "--show-error",
+                "--connect-timeout",
+                str(min(int(timeout_seconds), 15)),
+                "--max-time",
+                str(int(timeout_seconds)),
+                "--output",
+                str(output),
+                url,
+            ],
+            check=True,
+        )
+        return
+    output.write_bytes(download_archive_bytes(url, timeout_seconds=timeout_seconds))

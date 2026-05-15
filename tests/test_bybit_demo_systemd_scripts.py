@@ -16,6 +16,8 @@ def test_systemd_installer_has_single_demo_engine_and_signal_timer() -> None:
     assert "RestartSec=60" in installer
     assert 'rm -f "/etc/systemd/system/$legacy_unit"' in installer
     assert "$SERVICE_NAME-signal" in installer
+    assert "23:15 UTC" in installer
+    assert "OnCalendar=*-*-* 23:15:00 UTC" in installer
     assert "systemctl enable \"$SERVICE_NAME.service\"" in installer
     assert "model050426-hourly-functional.timer" in installer
     assert "model050426-profit-protector.service" in installer

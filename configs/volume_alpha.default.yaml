@@ -53,11 +53,11 @@ volume_grid:
   cost_multipliers: [1.0]
 
 daily_close_fade:
-  signal_minute: 1380
+  signal_minute: 1395
   top_n: 1
   hold_minutes: 360
   entry_delay_minutes: 0
-  entry_twap_minutes: 45
+  entry_twap_minutes: 20
   score: day_return
   pump_filter: pump
   min_age_days: 10
@@ -76,9 +76,9 @@ daily_close_fade:
   gross_exposure: 1.0
   coin_excess_vs_market_min: 0.0
   coin_vwap_extension_min: 0.0
-  coin_vwap_extension_max: 0.0
+  coin_vwap_extension_max: 0.10
   coin_late_volume_ratio_min: 0.0
-  market_median_day_return_max: 0.0
+  market_median_day_return_max: 0.03
   organic_move_score_max: 0.0
   manipulation_risk_score_min: 0.0
   squeeze_risk_score_max: 0.0
@@ -91,7 +91,7 @@ daily_close_fade:
   score_weight_power: 1.0
   stop_loss_pct: 0.08
   take_profit_pct: 0.10
-  time_decay_take_profit_floor_pct: 0.04
+  time_decay_take_profit_floor_pct: 0.05
   time_decay_take_profit_minutes: 120
   basket_stop_loss_pct: 0.0
   trailing_stop_pct: 0.0
@@ -103,7 +103,7 @@ daily_close_fade:
   vwap_reversion_pct: 0.0
   stop_delay_minutes: 0
   profit_protection_delay_minutes: 120
-  twap_stop_adding_pct: 0.06
+  twap_stop_adding_pct: 0.02
   cost_multiplier: 1.0
   min_symbols: 1
   exclude_symbols:

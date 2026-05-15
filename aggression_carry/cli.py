@@ -347,7 +347,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--forward-mode",
         choices=("scan", "mark-only", "open-from-scan"),
         default="scan",
-        help="Forward sleeve lifecycle mode. scan ranks from public data; open-from-scan uses cached 23:00 candidates; mark-only only updates existing paper trades.",
+        help="Forward sleeve lifecycle mode. scan ranks from public data; open-from-scan uses cached signal candidates; mark-only only updates existing paper trades.",
     )
     forward_sleeves.add_argument(
         "--require-first-slice",
@@ -485,7 +485,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Comma-separated sleeves allowed to submit new demo entries. Default: stage4_selected. Use 'all' for all sleeves or empty for exits-only.",
     )
     demo_cycle.add_argument("--entry-leverage", type=float, default=1.0, help="Bybit demo entry leverage to enforce before entry orders. 0 disables.")
-    demo_cycle.add_argument("--active-start", default="23:00", help="UTC active-window start, default 23:00.")
+    demo_cycle.add_argument("--active-start", default="23:15", help="UTC active-window start, default 23:15.")
     demo_cycle.add_argument("--active-end", default="06:30", help="UTC active-window end, default 06:30.")
     demo_cycle.add_argument("--ignore-active-window", action="store_true", help="Run scan/sync even outside the default active window.")
     demo_cycle.add_argument(
@@ -498,7 +498,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--require-first-slice",
         action="store_true",
         default=True,
-        help="In open-from-scan mode, refuse to open paper trades unless now is exactly the first 23:00 TWAP slice.",
+        help="In open-from-scan mode, refuse to open paper trades unless now is exactly the first scheduled TWAP slice.",
     )
     demo_cycle.add_argument(
         "--allow-noncontiguous-twap",

@@ -40,7 +40,7 @@ class DemoCycleConfig:
     send_telegram: bool = False
     entry_sleeves: tuple[str, ...] = ("stage4_selected",)
     entry_leverage: float = 1.0
-    active_start_minute: int = 23 * 60
+    active_start_minute: int = 23 * 60 + 15
     active_end_minute: int = 6 * 60 + 30
     ignore_active_window: bool = False
     lock_stale_minutes: int = 30
