@@ -12,7 +12,7 @@
 - Keep the active path on the selected Stage 4 daily-close short fade unless a change has clear forward/demo evidence.
 - Telegram may notify; it must not approve or submit orders.
 - Do not mix secondary signals into the demo stack without standalone cost-cleared evidence.
-- Use `volume-alpha` for signal sweeps, `volume-backtest` for trade-ledger testing, and `volume-grid` for concurrent parameter sweeps.
+- Volume-alpha research is being reset around event-driven entries; fixed-day rebalance grids are legacy benchmarks only.
 - Serious strategy runs should leave enough report output to audit the decision.
 
 ## graphify

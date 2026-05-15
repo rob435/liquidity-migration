@@ -1,170 +1,168 @@
-# Volume Alpha
+# Volume Alpha Research Plan
 
-This is secondary research. It is not the current default strategy.
+Volume alpha is being reset around event-driven behavior. The old fixed-day
+rebalance sweeps are deprecated as a research direction because they force
+calendar trades even when no useful volume event occurred.
 
-## Hypotheses
+## Objective
 
-Test whether daily volume information contains predictive information:
+Find whether Bybit perp volume events have standalone, cost-cleared forward
+edge that can later justify a demo sleeve.
 
-```text
-dollar_volume_rank: absolute liquidity / size effect
-volume_change_1d: one-day turnover expansion
-volume_change_3d: three-day turnover expansion
-volume_persistence: persistent turnover above baseline
-volume_composite: simple blend of the above
-```
+This remains secondary to the active daily-close fade system until it clears
+all gates below.
 
-This is separate from the daily-close fade. A volume sleeve becomes relevant to
-the demo stack only after it has standalone cost-cleared evidence.
+## Decision
 
-## Current Honest Read
-
-The 3-year current-top-160 tests were encouraging but not proof:
+The current priority is event-driven volume entries:
 
 ```text
-Universe: current Bybit top-160 snapshot
-Bias: survivorship and current-liquidity selection
-Weak period: 2024-2025 split
-Best next gate: point-in-time historical universe
+enter only when a symbol has a fresh volume event
+exit when the event decays, reverses, risk is hit, or max hold expires
+compare against a fixed-rebalance benchmark only as a control
 ```
 
-The broad result is not one universal rule. It changes by liquidity bucket:
+Do not promote headline backtest returns from current-universe tests. Those are
+biased benchmarks unless tradable membership is point-in-time.
+
+## Deprecated
+
+These workflows are intentionally removed from the active research path:
 
 ```text
-Ranks 1-20: high-volume names behaved more like trend/liquidity winners.
-Ranks 21-80: high-volume names more often faded.
-Ranks 81-160: high-volume fade was promising but recent-listing heavy.
+fixed 7d/14d split-grid helper scripts
+liquidity bucket sweep helper scripts
+5950X overnight fixed-grid runner
+old "run every combination overnight" workflow
 ```
 
-Important: the older bucket sweep outputs only tested `dollar_volume_rank`.
-They were useful for liquidity-bucket behavior, but they did not fully test the
-podcast-style “rising volume predicts future price” claim. The current
-`promotion` preset tests all volume score families and then applies fixed split
-promotion gates.
-
-## Commands
-
-Feature/IC report:
-
-```bash
-python -m aggression_carry \
-  --data-root data/agc-bybit-3y-auto150-20230503-20260503 \
-  --config configs/volume_alpha.default.yaml \
-  volume-alpha
-```
-
-Detailed ledger backtest:
-
-```bash
-python -m aggression_carry \
-  --data-root data/agc-bybit-3y-auto150-20230503-20260503 \
-  --config configs/volume_alpha.default.yaml \
-  volume-backtest
-```
-
-Grid:
-
-```bash
-python -m aggression_carry \
-  --data-root data/agc-bybit-3y-auto150-20230503-20260503 \
-  --config configs/volume_alpha.default.yaml \
-  volume-grid \
-  --workers 8 \
-  --include-reverse
-```
-
-Kept Python helper scripts:
-
-```bash
-python scripts/run_volume_bucket_sweep.py --data-root DATA_ROOT --workers 8
-python scripts/run_volume_grid_splits.py --data-root DATA_ROOT --workers 8
-python scripts/run_volume_grid_splits.py --data-root DATA_ROOT --preset quick --workers 8
-python scripts/run_volume_grid_splits.py --data-root DATA_ROOT --preset promotion --workers 8
-python scripts/run_volume_grid_splits.py --data-root DATA_ROOT --preset legacy --workers 8
-python scripts/evaluate_volume_promotion.py --split-summary DATA_ROOT/reports/volume_grid_splits/volume_grid_split_summary.csv
-```
-
-Windows 5950X overnight runner:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_volume_overnight_5950x.ps1
-```
-
-The runner pulls `origin/main`, uses `--preset promotion`, `--workers 16`,
-sets the Polars/Rayon/OMP/MKL thread caps to `1`, writes logs under the selected
-report directory, and runs the promotion gate after the grid completes.
-
-`run_volume_grid_splits.py` defaults to the `smoke` preset. That is deliberate:
-the old default grid evaluated 1,620 full trade-ledger variants across the three
-standard splits and can run overnight on a laptop. Use `--preset quick` for a
-small all-score triage pass, `--preset promotion` only after quick triage shows
-a live-relevant family worth deeper testing, and `--preset legacy` only when you
-explicitly want the old broad grid.
-
-Multi-worker volume grids default to a thread backend. Process-pool execution
-can hang on Polars-heavy grids on the VPS, so only opt into it deliberately with
-`VOLUME_GRID_BACKEND=process`.
-
-The split/promotion workflow tests:
+The reusable Python modules can stay until event-driven replacements exist:
 
 ```text
-scores: dollar_volume_rank, volume_change_1d, volume_change_3d,
-  volume_persistence, volume_composite
-buckets: core 1-20, mid 21-80, tail 81-160, broad 1-160
-splits: 2023-2024 train, 2024-2025 validation, 2025-2026 OOS
-promotion gates: positive split survival, drawdown <= 35%, avg Sharpe >= 0.5
+aggression_carry/volume_alpha.py
+aggression_carry/volume_backtest.py
+scripts/evaluate_volume_promotion.py
 ```
 
-## Backtest Accounting
+They still contain useful feature, cost, ledger, and reporting code, but their
+fixed-rebalance outputs are not the new research objective.
 
-Linear perp returns:
+## Event Definitions
+
+First implementation should test these event families separately:
 
 ```text
-long return  = exit / entry - 1
-short return = (entry - exit) / entry
+fresh_volume_spike:
+  volume_change_1d crosses into top 20% or 30%
+  previous day was outside that bucket
+
+persistent_volume_breakout:
+  volume_persistence crosses into top 20% or 30%
+  persistence was below median within the last 3 days
+
+tail_liquidity_jump:
+  symbol is in liquidity ranks 81-160
+  dollar_volume_rank improves sharply versus its 7d baseline
+  exclude symbols without point-in-time tradability proof
+
+volume_exhaustion:
+  extreme volume spike after strong price extension
+  test both continuation and reversal sides separately
 ```
 
-Stops and take-profits are side-aware:
+## Trade Lifecycle
+
+Each event-driven test needs a full trade ledger:
 
 ```text
-long stop: entry * (1 - stop_loss_pct)
-short stop: entry * (1 + stop_loss_pct)
-long TP: entry * (1 + take_profit_pct)
-short TP: entry * (1 - take_profit_pct)
+signal timestamp:
+  daily close after all inputs are known
+
+entry:
+  next available 1h bar after signal close, or configured delay
+  no duplicate entry while symbol already has exposure
+
+side:
+  test continuation and reversal as separate hypotheses
+
+exit:
+  event decay below threshold
+  rank reversal
+  fixed or volatility stop
+  max hold of 3, 7, or 14 days
+  optional cooldown before re-entry
+
+risk:
+  cap active symbols
+  cap gross exposure
+  account for fees, slippage, and funding
 ```
 
-If both stop and TP touch inside the same 1h OHLC bar, the stop wins. That is
-conservative because 1h bars do not reveal intrabar path.
+## Required Gates
 
-## Generated Outputs
-
-Typical report paths:
+A candidate is not demo-ready unless it passes:
 
 ```text
-reports/volume_alpha_report.md
-reports/volume_backtest_report.md
-reports/volume_backtest_trades.csv
-reports/volume_backtest_equity_curve.svg
-reports/volume_grid_report.md
-reports/volume_grid_results.csv
-reports/volume_bucket_sweep_summary.md
-reports/volume_promotion_splits/<bucket>/volume_grid_split_summary.md
-reports/volume_promotion_splits/<bucket>/promotion/volume_promotion_report.md
+point-in-time symbol membership
+no current-universe survivorship dependency
+positive train, validation, and OOS splits
+worst split return >= 0
+worst drawdown no worse than -35%
+average Sharpe-like >= 0.5
+cost multipliers of 1x and 3x reported
+trade ledger, equity curve, monthly table, and failure reasons saved
 ```
 
-Large data and report outputs stay under `data/` and are not git artifacts.
+## Implementation Order
 
-## Research Discipline
-
-A volume sleeve should not be promoted from headline return alone. A candidate needs:
+1. Add an event table builder:
 
 ```text
-positive split performance
-tolerable worst-split drawdown
-reasonable Sharpe-like metric
-clear liquidity bucket behavior
-no dependence on current-universe membership
+symbol
+signal_ts_ms
+event_type
+score
+side_hypothesis
+prior_rank
+current_rank
+liquidity_rank
+tradable_membership_flag
 ```
 
-The next serious step is point-in-time membership, not more optimized historical
-parameter searching.
+2. Add an event-driven ledger backtester:
+
+```text
+one row per actual event-triggered trade
+no calendar-forced basket if no event fired
+cooldown and max-active-symbol logic included
+```
+
+3. Add split evaluation:
+
+```text
+train:      2023-05-03 to 2024-05-03
+validation: 2024-05-03 to 2025-05-03
+OOS:        2025-05-03 to 2026-05-03
+```
+
+4. Add promotion report:
+
+```text
+event family
+side
+thresholds
+split returns
+drawdowns
+Sharpe-like
+trade count
+turnover
+fees/funding
+top failure reason
+```
+
+## Current Status
+
+Fixed-rebalance volume-alpha results are archived mentally as exploratory only.
+They are not the path forward. The next useful code change is an event-driven
+volume research runner with point-in-time membership support or, at minimum, a
+clearly labelled biased benchmark mode until PIT membership is implemented.

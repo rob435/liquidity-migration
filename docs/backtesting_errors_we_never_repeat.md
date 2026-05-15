@@ -197,7 +197,9 @@ For volume-alpha research:
 
 - Do not blend signals until each standalone signal clears costs and point-in-time
   validation.
-- Report promotion grids by full distribution and split stability, not by the
+- Event-driven entries are the active research path; fixed-day rebalance grids
+  are legacy benchmarks only.
+- Report promotion tests by full distribution and split stability, not by the
   best isolated parameter set.
 - Liquidity and universe filters must use prior data only.
 
