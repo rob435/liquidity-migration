@@ -84,6 +84,16 @@ python scripts/run_volume_grid_splits.py --data-root DATA_ROOT --preset legacy -
 python scripts/evaluate_volume_promotion.py --split-summary DATA_ROOT/reports/volume_grid_splits/volume_grid_split_summary.csv
 ```
 
+Windows 5950X overnight runner:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\run_volume_overnight_5950x.ps1
+```
+
+The runner pulls `origin/main`, uses `--preset promotion`, `--workers 16`,
+sets the Polars/Rayon/OMP/MKL thread caps to `1`, writes logs under the selected
+report directory, and runs the promotion gate after the grid completes.
+
 `run_volume_grid_splits.py` defaults to the `smoke` preset. That is deliberate:
 the old default grid evaluated 1,620 full trade-ledger variants across the three
 standard splits and can run overnight on a laptop. Use `--preset quick` for a
