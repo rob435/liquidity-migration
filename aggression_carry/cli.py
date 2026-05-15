@@ -6,7 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 
 from .archive_manifest import DEFAULT_BYBIT_PUBLIC_TRADING_URL, ArchiveManifestConfig, run_archive_manifest
-from .archive_manifest import ArchiveKlineDownloadConfig, run_archive_klines_download
+from .archive_manifest import ArchiveHourlyKlineDownloadConfig, ArchiveKlineDownloadConfig
+from .archive_manifest import run_archive_hourly_klines_download, run_archive_klines_download
 from .config import (
     DEFAULT_MAJOR_SYMBOLS,
     DailyCloseFadeConfig,
@@ -123,6 +124,29 @@ def build_parser() -> argparse.ArgumentParser:
         "--discard-archives-after-success",
         action="store_true",
         help="Delete locally downloaded raw trade archives after dense 1m klines are written successfully.",
+    )
+
+    archive_klines_1h = subparsers.add_parser(
+        "archive-download-klines-1h",
+        help="Download manifest rows and build 1h klines directly from Bybit public trade archives.",
+    )
+    archive_klines_1h.add_argument("--name", default="bybit-public-trading-klines-1h", help="Name used for download report files.")
+    archive_klines_1h.add_argument("--symbols", default="", help="Optional comma-separated symbol allowlist.")
+    archive_klines_1h.add_argument("--start", default=None, help="Inclusive archive start date YYYY-MM-DD.")
+    archive_klines_1h.add_argument("--end", default=None, help="Inclusive archive end date YYYY-MM-DD.")
+    archive_klines_1h.add_argument("--max-rows", type=int, default=0, help="Maximum symbol/date manifest rows to process; 0 disables.")
+    archive_klines_1h.add_argument("--workers", type=int, default=8, help="Concurrent archive download workers.")
+    archive_klines_1h.add_argument("--include-existing", action="store_true", help="Rebuild rows even when the 1h partition already exists.")
+    archive_klines_1h.add_argument(
+        "--min-existing-bars",
+        type=int,
+        default=1,
+        help="With missing-only mode, rebuild partitions with fewer than this many 1h bars; default treats any written partition as processed.",
+    )
+    archive_klines_1h.add_argument(
+        "--discard-archives-after-success",
+        action="store_true",
+        help="Delete locally downloaded raw trade archives after 1h klines are written successfully.",
     )
 
     subparsers.add_parser("volume-alpha", help="Run isolated daily volume-only alpha research sweep.")
@@ -630,6 +654,30 @@ def main(argv: list[str] | None = None) -> int:
             f"archives_deleted={payload.get('archives_deleted', 0)} "
             f"failed={payload['failures']} "
             f"path={data_root / 'reports' / ('archive_klines_' + args.name + '.md')}"
+        )
+        return 1 if payload["failures"] else 0
+
+    if args.command == "archive-download-klines-1h":
+        kline_config = ArchiveHourlyKlineDownloadConfig(
+            start=args.start,
+            end=args.end,
+            symbols=_csv_str(args.symbols, ()),
+            max_rows=args.max_rows,
+            workers=args.workers,
+            missing_only=not args.include_existing,
+            min_existing_bars=args.min_existing_bars,
+            discard_archives_after_success=args.discard_archives_after_success,
+            name=args.name,
+        )
+        payload = run_archive_hourly_klines_download(data_root, config=kline_config)
+        print(
+            "archive 1h klines "
+            f"rows={payload['rows']} "
+            f"downloaded={payload['downloaded']} "
+            f"cached={payload['cached']} "
+            f"archives_deleted={payload.get('archives_deleted', 0)} "
+            f"failed={payload['failures']} "
+            f"path={data_root / 'reports' / ('archive_klines_1h_' + args.name + '.md')}"
         )
         return 1 if payload["failures"] else 0
 

@@ -9,10 +9,12 @@ from aggression_carry import archive as archive_module
 from aggression_carry import archive_manifest as manifest_module
 from aggression_carry.archive import download_public_trade_archive, read_public_trade_archive
 from aggression_carry.archive_manifest import (
+    ArchiveHourlyKlineDownloadConfig,
     ArchiveKlineDownloadConfig,
     ArchiveManifestConfig,
     parse_symbol_directories,
     parse_trade_archive_entries,
+    run_archive_hourly_klines_download,
     run_archive_klines_download,
     run_archive_manifest,
 )
@@ -24,6 +26,10 @@ from aggression_carry.storage import read_dataset, write_dataset
 
 def test_archive_kline_default_requires_dense_utc_day() -> None:
     assert ArchiveKlineDownloadConfig().min_existing_bars == 1440
+
+
+def test_archive_hourly_kline_default_resumes_written_partitions() -> None:
+    assert ArchiveHourlyKlineDownloadConfig().min_existing_bars == 1
 
 
 def test_read_bybit_public_trade_csv_gz_archive(tmp_path) -> None:
@@ -249,6 +255,86 @@ def test_archive_kline_download_rebuilds_sparse_existing_partition(tmp_path, mon
             "source": "bybit_public_trades",
         },
     ]
+
+
+def test_archive_hourly_kline_download_writes_1h_partitions(tmp_path, monkeypatch) -> None:
+    manifest = pl.DataFrame(
+        [
+            {
+                "symbol": "AAAUSDT",
+                "date": "2025-01-02",
+                "url": "https://public.bybit.com/trading/AAAUSDT/AAAUSDT2025-01-02.csv.gz",
+                "source": "test",
+            }
+        ]
+    )
+    previous_day = pl.DataFrame(
+        [
+            {
+                "ts_ms": 1_735_775_940_000,
+                "symbol": "AAAUSDT",
+                "open": 98.0,
+                "high": 100.0,
+                "low": 98.0,
+                "close": 99.0,
+                "volume_base": 1.0,
+                "turnover_quote": 99.0,
+                "source": "fixture",
+            }
+        ]
+    )
+    write_dataset(manifest, tmp_path, "archive_trade_manifest", partition_by=("date",), append=False)
+    write_dataset(previous_day, tmp_path, "klines_1h", partition_by=("date", "symbol"), append=False)
+
+    def fake_download(_url, destination):
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(b"raw archive")
+        return destination
+
+    monkeypatch.setattr(manifest_module, "download_public_trade_archive", fake_download)
+    monkeypatch.setattr(
+        manifest_module,
+        "read_public_trade_archive",
+        lambda _path, *, symbol=None: pl.DataFrame(
+            [
+                {
+                    "trade_id": "1",
+                    "seq": None,
+                    "ts_ms": 1_735_783_200_000,
+                    "symbol": symbol,
+                    "side": "Buy",
+                    "price": 105.0,
+                    "size_base": 2.0,
+                    "quote_value": 210.0,
+                    "is_block_trade": False,
+                    "is_rpi_trade": False,
+                }
+            ]
+        ),
+    )
+
+    payload = run_archive_hourly_klines_download(
+        tmp_path,
+        config=ArchiveHourlyKlineDownloadConfig(
+            start="2025-01-02",
+            end="2025-01-02",
+            workers=1,
+            discard_archives_after_success=True,
+            name="fixture",
+        ),
+    )
+
+    assert payload["downloaded"] == 1
+    assert payload["archives_deleted"] == 1
+    rows = read_dataset(tmp_path, "klines_1h").filter(pl.col("date") == "2025-01-02")
+    assert rows.height == 24
+    assert rows.select(["ts_ms", "open", "close", "volume_base"]).head(3).to_dicts() == [
+        {"ts_ms": 1_735_776_000_000, "open": 99.0, "close": 99.0, "volume_base": 0.0},
+        {"ts_ms": 1_735_779_600_000, "open": 99.0, "close": 99.0, "volume_base": 0.0},
+        {"ts_ms": 1_735_783_200_000, "open": 105.0, "close": 105.0, "volume_base": 2.0},
+    ]
+    assert not (tmp_path / "archives" / "AAAUSDT" / "AAAUSDT2025-01-02.csv.gz").exists()
+    assert (tmp_path / "reports" / "archive_klines_1h_fixture.md").exists()
 
 
 def test_download_public_trade_archive_ignores_stale_fixed_temp_name(tmp_path, monkeypatch) -> None:

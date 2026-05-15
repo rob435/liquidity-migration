@@ -145,6 +145,29 @@ python -m aggression_carry \
   volume-events
 ```
 
+Full PIT data build for event research:
+
+```bash
+python -m aggression_carry \
+  --data-root DATA_ROOT \
+  --config configs/volume_alpha.default.yaml \
+  archive-manifest \
+  --name pit-all-usdt-20230503-20260503 \
+  --start 2023-05-03 \
+  --end 2026-05-03 \
+  --workers 32
+
+AGC_ARCHIVE_DOWNLOAD_BACKEND=curl python -m aggression_carry \
+  --data-root DATA_ROOT \
+  --config configs/volume_alpha.default.yaml \
+  archive-download-klines-1h \
+  --name fullpit-1h-all-usdt-20230503-20260503 \
+  --start 2023-05-03 \
+  --end 2026-05-03 \
+  --workers 32 \
+  --discard-archives-after-success
+```
+
 3. Add split evaluation:
 
 ```text
@@ -175,6 +198,8 @@ They are not the path forward.
 
 The event-driven runner now exists as `volume-events`. It writes scenario
 summary, best-scenario trades, baskets, equity, monthly returns, JSON, and
-Markdown reports. Current runs are still biased benchmarks because
-point-in-time membership is not wired into the event table yet, and the
-machine-readable promotion gate hard-fails without that PIT proof.
+Markdown reports. Promotion requires full point-in-time membership and full
+PIT universe coverage. Current-150 PIT-filtered tests are useful diagnostics
+only; the survivorship-free event run must use a data root whose `klines_1h`
+coverage was built from the full `archive_trade_manifest` with
+`archive-download-klines-1h`.

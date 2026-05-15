@@ -118,6 +118,18 @@ def test_cli_archive_kline_default_requires_dense_utc_day(tmp_path: Path) -> Non
     assert args.min_existing_bars == 1440
 
 
+def test_cli_archive_hourly_kline_default_resumes_written_partitions(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "archive-download-klines-1h",
+        ]
+    )
+
+    assert args.min_existing_bars == 1
+
+
 def test_cli_parses_volume_events(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [

@@ -18,7 +18,12 @@ import polars as pl
 from pyarrow import parquet as pq
 
 from .archive import download_public_trade_archive, read_public_trade_archive
-from .ingestion import aggregate_trade_klines_1m, densify_trade_klines_1m
+from .ingestion import (
+    aggregate_trade_klines_1h,
+    aggregate_trade_klines_1m,
+    densify_trade_klines_1h,
+    densify_trade_klines_1m,
+)
 from .storage import dataset_path, read_dataset, write_dataset
 
 
@@ -50,6 +55,19 @@ class ArchiveKlineDownloadConfig:
     min_existing_bars: int = 1440
     discard_archives_after_success: bool = False
     name: str = "bybit-public-trading-klines"
+
+
+@dataclass(frozen=True, slots=True)
+class ArchiveHourlyKlineDownloadConfig:
+    start: str | None = None
+    end: str | None = None
+    symbols: tuple[str, ...] = ()
+    max_rows: int = 0
+    workers: int = 8
+    missing_only: bool = True
+    min_existing_bars: int = 1
+    discard_archives_after_success: bool = False
+    name: str = "bybit-public-trading-klines-1h"
 
 
 class _HrefParser(HTMLParser):
@@ -226,7 +244,7 @@ def run_archive_klines_download(
     manifest = read_dataset(data_root, "archive_trade_manifest")
     if manifest.is_empty():
         raise RuntimeError("archive_trade_manifest is empty; run archive-manifest first")
-    rows = _select_manifest_rows(manifest, data_root=data_root, config=config)
+    rows = _select_manifest_rows(manifest, data_root=data_root, config=config, dataset="klines_1m")
     worker_count = max(1, min(config.workers, len(rows))) if rows else 1
     if worker_count == 1:
         results = [
@@ -297,6 +315,88 @@ def run_archive_klines_download(
     return payload
 
 
+def run_archive_hourly_klines_download(
+    data_root: str | Path,
+    *,
+    config: ArchiveHourlyKlineDownloadConfig,
+    report_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    manifest = read_dataset(data_root, "archive_trade_manifest")
+    if manifest.is_empty():
+        raise RuntimeError("archive_trade_manifest is empty; run archive-manifest first")
+    rows = _select_manifest_rows(manifest, data_root=data_root, config=config, dataset="klines_1h")
+    worker_count = max(1, min(config.workers, len(rows))) if rows else 1
+    if worker_count == 1:
+        results = [
+            _download_one_archive_hourly_kline(
+                data_root,
+                row,
+                missing_only=config.missing_only,
+                min_existing_bars=config.min_existing_bars,
+                discard_archives_after_success=config.discard_archives_after_success,
+            )
+            for row in rows
+        ]
+    else:
+        results = []
+        for date_rows in _rows_by_date(rows):
+            date_worker_count = max(1, min(worker_count, len(date_rows)))
+            with ThreadPoolExecutor(max_workers=date_worker_count) as executor:
+                results.extend(
+                    executor.map(
+                        lambda row: _download_one_archive_hourly_kline(
+                            data_root,
+                            row,
+                            missing_only=config.missing_only,
+                            min_existing_bars=config.min_existing_bars,
+                            discard_archives_after_success=config.discard_archives_after_success,
+                        ),
+                        date_rows,
+                    )
+                )
+    result_frame = pl.DataFrame(results, infer_schema_length=None) if results else _empty_download_results()
+    failures = result_frame.filter(pl.col("status") == "failed").height if not result_frame.is_empty() else 0
+    downloaded = result_frame.filter(pl.col("status") == "downloaded").height if not result_frame.is_empty() else 0
+    cached = result_frame.filter(pl.col("status") == "cached").height if not result_frame.is_empty() else 0
+    empty = result_frame.filter(pl.col("status") == "empty").height if not result_frame.is_empty() else 0
+    archives_deleted = (
+        result_frame.filter(pl.col("archive_deleted")).height
+        if not result_frame.is_empty() and "archive_deleted" in result_frame.columns
+        else 0
+    )
+    payload = {
+        "name": config.name,
+        "dataset": "klines_1h",
+        "interval": "1h",
+        "rows": len(rows),
+        "workers": worker_count,
+        "downloaded": downloaded,
+        "cached": cached,
+        "empty": empty,
+        "failures": failures,
+        "archives_deleted": archives_deleted,
+        "created_at": datetime.now(tz=UTC).isoformat(),
+        "config": {
+            "start": config.start,
+            "end": config.end,
+            "symbols": list(config.symbols),
+            "max_rows": config.max_rows,
+            "missing_only": config.missing_only,
+            "min_existing_bars": config.min_existing_bars,
+            "discard_archives_after_success": config.discard_archives_after_success,
+        },
+    }
+
+    output_dir = Path(report_dir or Path(data_root) / "reports")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_name(config.name)
+    (output_dir / f"archive_klines_1h_{safe_name}.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    (output_dir / f"archive_klines_1h_{safe_name}.md").write_text(format_archive_klines_report(payload), encoding="utf-8")
+    if not result_frame.is_empty():
+        result_frame.write_csv(output_dir / f"archive_klines_1h_{safe_name}.csv")
+    return payload
+
+
 def format_archive_manifest_report(payload: dict[str, Any]) -> str:
     symbols = payload.get("symbol_list", [])
     preview = ", ".join(symbols[:100])
@@ -324,10 +424,15 @@ def format_archive_manifest_report(payload: dict[str, Any]) -> str:
 
 
 def format_archive_klines_report(payload: dict[str, Any]) -> str:
+    dataset = payload.get("dataset")
+    interval = payload.get("interval")
+    title_suffix = f" {interval}" if interval else ""
+    dataset_line = [f"Dataset: {dataset}"] if dataset else []
     lines = [
-        f"# Archive Klines Download: {payload['name']}",
+        f"# Archive{title_suffix} Klines Download: {payload['name']}",
         "",
         f"Created: {payload['created_at']}",
+        *dataset_line,
         f"Rows selected: {payload['rows']}",
         f"Workers: {payload['workers']}",
         "",
@@ -347,7 +452,8 @@ def _select_manifest_rows(
     manifest: pl.DataFrame,
     *,
     data_root: str | Path,
-    config: ArchiveKlineDownloadConfig,
+    config: ArchiveKlineDownloadConfig | ArchiveHourlyKlineDownloadConfig,
+    dataset: str = "klines_1m",
 ) -> list[dict[str, Any]]:
     frame = manifest
     if config.start:
@@ -372,7 +478,7 @@ def _select_manifest_rows(
         rows = [
             row
             for row in rows
-            if existing_rows(data_root, symbol=row["symbol"], date=row["date"]) < min_existing_bars
+            if existing_rows(data_root, dataset=dataset, symbol=row["symbol"], date=row["date"]) < min_existing_bars
         ]
     if config.max_rows > 0:
         rows = rows[: config.max_rows]
@@ -426,8 +532,8 @@ def _download_one_archive_kline(
     symbol = str(row["symbol"])
     archive_date = str(row["date"])
     url = str(row["url"])
-    existing_bar_rows = _kline_partition_bar_rows(data_root, symbol=symbol, date=archive_date)
-    existing_valid_bar_rows = _kline_partition_valid_bar_rows(data_root, symbol=symbol, date=archive_date)
+    existing_bar_rows = _kline_partition_bar_rows(data_root, dataset="klines_1m", symbol=symbol, date=archive_date)
+    existing_valid_bar_rows = _kline_partition_valid_bar_rows(data_root, dataset="klines_1m", symbol=symbol, date=archive_date)
     if missing_only and existing_valid_bar_rows >= max(int(min_existing_bars), 1):
         return _download_result(row, status="cached", bar_rows=existing_bar_rows, valid_bar_rows=existing_valid_bar_rows)
     local_path = Path(data_root) / "archives" / symbol / Path(urlparse(url).path).name
@@ -437,9 +543,54 @@ def _download_one_archive_kline(
         klines = aggregate_trade_klines_1m(trades)
         if klines.is_empty():
             return _download_result(row, status="empty", bar_rows=0, valid_bar_rows=0, archive_path=str(archive_path))
-        initial_price = previous_kline_close(data_root, symbol=symbol, archive_date=archive_date)
+        initial_price = previous_kline_close(data_root, symbol=symbol, archive_date=archive_date, dataset="klines_1m")
         klines = densify_trade_klines_1m(klines, archive_date=archive_date, initial_price=initial_price)
         write_dataset(klines, data_root, "klines_1m", append=False)
+        archive_deleted = False
+        cleanup_error = ""
+        if discard_archives_after_success:
+            archive_deleted, cleanup_error = _delete_local_archive(Path(data_root), Path(archive_path))
+        valid_bar_rows = _valid_price_rows(klines)
+        return _download_result(
+            row,
+            status="downloaded",
+            bar_rows=klines.height,
+            valid_bar_rows=valid_bar_rows,
+            archive_path=str(archive_path),
+            archive_deleted=archive_deleted,
+            archive_cleanup_error=cleanup_error,
+        )
+    except Exception as exc:  # noqa: BLE001 - archive failures must be reported per row
+        return _download_result(row, status="failed", bar_rows=0, valid_bar_rows=0, error=str(exc))
+
+
+def _download_one_archive_hourly_kline(
+    data_root: str | Path,
+    row: dict[str, Any],
+    *,
+    missing_only: bool,
+    min_existing_bars: int,
+    discard_archives_after_success: bool,
+) -> dict[str, Any]:
+    symbol = str(row["symbol"])
+    archive_date = str(row["date"])
+    url = str(row["url"])
+    existing_bar_rows = _kline_partition_bar_rows(data_root, dataset="klines_1h", symbol=symbol, date=archive_date)
+    existing_valid_bar_rows = _kline_partition_valid_bar_rows(data_root, dataset="klines_1h", symbol=symbol, date=archive_date)
+    required_bars = max(int(min_existing_bars), 1)
+    existing_count = existing_bar_rows if required_bars <= 1 else existing_valid_bar_rows
+    if missing_only and existing_count >= required_bars:
+        return _download_result(row, status="cached", bar_rows=existing_bar_rows, valid_bar_rows=existing_valid_bar_rows)
+    local_path = Path(data_root) / "archives" / symbol / Path(urlparse(url).path).name
+    try:
+        archive_path = download_public_trade_archive(url, local_path)
+        trades = read_public_trade_archive(archive_path, symbol=symbol)
+        klines = aggregate_trade_klines_1h(trades)
+        if klines.is_empty():
+            return _download_result(row, status="empty", bar_rows=0, valid_bar_rows=0, archive_path=str(archive_path))
+        initial_price = previous_kline_close(data_root, symbol=symbol, archive_date=archive_date, dataset="klines_1h")
+        klines = densify_trade_klines_1h(klines, archive_date=archive_date, initial_price=initial_price)
+        write_dataset(klines, data_root, "klines_1h", append=False)
         archive_deleted = False
         cleanup_error = ""
         if discard_archives_after_success:
@@ -484,11 +635,11 @@ def _download_result(
 
 
 def _kline_partition_exists(data_root: str | Path, *, symbol: str, date: str) -> bool:
-    return _kline_partition_bar_rows(data_root, symbol=symbol, date=date) > 0
+    return _kline_partition_bar_rows(data_root, dataset="klines_1m", symbol=symbol, date=date) > 0
 
 
-def _kline_partition_bar_rows(data_root: str | Path, *, symbol: str, date: str) -> int:
-    part = dataset_path(data_root, "klines_1m") / f"date={date}" / f"symbol={symbol}" / "part.parquet"
+def _kline_partition_bar_rows(data_root: str | Path, *, dataset: str = "klines_1m", symbol: str, date: str) -> int:
+    part = dataset_path(data_root, dataset) / f"date={date}" / f"symbol={symbol}" / "part.parquet"
     if not part.exists() or part.stat().st_size <= 0:
         return 0
     try:
@@ -497,8 +648,8 @@ def _kline_partition_bar_rows(data_root: str | Path, *, symbol: str, date: str) 
         return 0
 
 
-def _kline_partition_valid_bar_rows(data_root: str | Path, *, symbol: str, date: str) -> int:
-    part = dataset_path(data_root, "klines_1m") / f"date={date}" / f"symbol={symbol}" / "part.parquet"
+def _kline_partition_valid_bar_rows(data_root: str | Path, *, dataset: str = "klines_1m", symbol: str, date: str) -> int:
+    part = dataset_path(data_root, dataset) / f"date={date}" / f"symbol={symbol}" / "part.parquet"
     if not part.exists() or part.stat().st_size <= 0:
         return 0
     try:
@@ -536,9 +687,9 @@ def _metadata_valid_price_rows(part: Path) -> int | None:
     return None
 
 
-def previous_kline_close(data_root: str | Path, *, symbol: str, archive_date: str) -> float | None:
+def previous_kline_close(data_root: str | Path, *, symbol: str, archive_date: str, dataset: str = "klines_1m") -> float | None:
     previous_date = (date.fromisoformat(archive_date[:10]) - timedelta(days=1)).isoformat()
-    part = dataset_path(data_root, "klines_1m") / f"date={previous_date}" / f"symbol={symbol}" / "part.parquet"
+    part = dataset_path(data_root, dataset) / f"date={previous_date}" / f"symbol={symbol}" / "part.parquet"
     if not part.exists() or part.stat().st_size <= 0:
         return None
     try:

@@ -4,9 +4,11 @@ import polars as pl
 
 from aggression_carry.config import TradeFlowConfig
 from aggression_carry.ingestion import (
+    aggregate_trade_klines_1h,
     aggregate_trade_klines_1m,
     aggregate_signed_flow_1h,
     aggregate_signed_flow_1m,
+    densify_trade_klines_1h,
     densify_trade_klines_1m,
     normalize_funding_history,
     trades_to_frame,
@@ -226,6 +228,58 @@ def test_trade_klines_densify_seeds_from_previous_close_when_available() -> None
             "low": 105.0,
             "close": 105.0,
             "volume_base": 1.0,
+        },
+    ]
+
+
+def test_trade_klines_1h_aggregates_and_densifies_utc_day() -> None:
+    trades = trades_to_frame(
+        [
+            {"tradeId": "1", "time": 1_735_689_600_000, "symbol": "AAAUSDT", "side": "Buy", "price": "100", "size": "2"},
+            {"tradeId": "2", "time": 1_735_689_630_000, "symbol": "AAAUSDT", "side": "Sell", "price": "105", "size": "1"},
+            {"tradeId": "3", "time": 1_735_696_800_000, "symbol": "AAAUSDT", "side": "Buy", "price": "110", "size": "3"},
+        ]
+    )
+
+    dense = densify_trade_klines_1h(aggregate_trade_klines_1h(trades), archive_date="2025-01-01")
+
+    assert dense.height == 24
+    assert dense.select(["ts_ms", "open", "high", "low", "close", "volume_base", "turnover_quote"]).head(4).to_dicts() == [
+        {
+            "ts_ms": 1_735_689_600_000,
+            "open": 100.0,
+            "high": 105.0,
+            "low": 100.0,
+            "close": 105.0,
+            "volume_base": 3.0,
+            "turnover_quote": 305.0,
+        },
+        {
+            "ts_ms": 1_735_693_200_000,
+            "open": 105.0,
+            "high": 105.0,
+            "low": 105.0,
+            "close": 105.0,
+            "volume_base": 0.0,
+            "turnover_quote": 0.0,
+        },
+        {
+            "ts_ms": 1_735_696_800_000,
+            "open": 110.0,
+            "high": 110.0,
+            "low": 110.0,
+            "close": 110.0,
+            "volume_base": 3.0,
+            "turnover_quote": 330.0,
+        },
+        {
+            "ts_ms": 1_735_700_400_000,
+            "open": 110.0,
+            "high": 110.0,
+            "low": 110.0,
+            "close": 110.0,
+            "volume_base": 0.0,
+            "turnover_quote": 0.0,
         },
     ]
 
