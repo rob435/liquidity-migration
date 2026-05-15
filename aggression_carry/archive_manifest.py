@@ -325,7 +325,8 @@ def run_archive_hourly_klines_download(
     if manifest.is_empty():
         raise RuntimeError("archive_trade_manifest is empty; run archive-manifest first")
     rows = _select_manifest_rows(manifest, data_root=data_root, config=config, dataset="klines_1h")
-    worker_count = max(1, min(config.workers, len(rows))) if rows else 1
+    symbol_rows = _rows_by_symbol(rows)
+    worker_count = max(1, min(config.workers, len(symbol_rows))) if symbol_rows else 1
     if worker_count == 1:
         results = [
             _download_one_archive_hourly_kline(
@@ -339,21 +340,21 @@ def run_archive_hourly_klines_download(
         ]
     else:
         results = []
-        for date_rows in _rows_by_date(rows):
-            date_worker_count = max(1, min(worker_count, len(date_rows)))
-            with ThreadPoolExecutor(max_workers=date_worker_count) as executor:
-                results.extend(
-                    executor.map(
-                        lambda row: _download_one_archive_hourly_kline(
-                            data_root,
-                            row,
-                            missing_only=config.missing_only,
-                            min_existing_bars=config.min_existing_bars,
-                            discard_archives_after_success=config.discard_archives_after_success,
-                        ),
-                        date_rows,
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            for symbol_results in executor.map(
+                lambda group: [
+                    _download_one_archive_hourly_kline(
+                        data_root,
+                        row,
+                        missing_only=config.missing_only,
+                        min_existing_bars=config.min_existing_bars,
+                        discard_archives_after_success=config.discard_archives_after_success,
                     )
-                )
+                    for row in group
+                ],
+                symbol_rows,
+            ):
+                results.extend(symbol_results)
     result_frame = pl.DataFrame(results, infer_schema_length=None) if results else _empty_download_results()
     failures = result_frame.filter(pl.col("status") == "failed").height if not result_frame.is_empty() else 0
     downloaded = result_frame.filter(pl.col("status") == "downloaded").height if not result_frame.is_empty() else 0
@@ -519,6 +520,13 @@ def _rows_by_date(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
             current_date = row_date
         groups[-1].append(row)
     return groups
+
+
+def _rows_by_symbol(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in sorted(rows, key=lambda value: (str(value["symbol"]), str(value["date"]))):
+        grouped.setdefault(str(row["symbol"]), []).append(row)
+    return list(grouped.values())
 
 
 def _download_one_archive_kline(

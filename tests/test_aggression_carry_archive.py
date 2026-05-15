@@ -337,6 +337,76 @@ def test_archive_hourly_kline_download_writes_1h_partitions(tmp_path, monkeypatc
     assert (tmp_path / "reports" / "archive_klines_1h_fixture.md").exists()
 
 
+def test_archive_hourly_downloader_processes_each_symbol_in_date_order(tmp_path, monkeypatch) -> None:
+    manifest = pl.DataFrame(
+        [
+            {
+                "symbol": "AAAUSDT",
+                "date": "2025-01-01",
+                "url": "https://public.bybit.com/trading/AAAUSDT/AAAUSDT2025-01-01.csv.gz",
+                "source": "test",
+            },
+            {
+                "symbol": "AAAUSDT",
+                "date": "2025-01-02",
+                "url": "https://public.bybit.com/trading/AAAUSDT/AAAUSDT2025-01-02.csv.gz",
+                "source": "test",
+            },
+            {
+                "symbol": "BBBUSDT",
+                "date": "2025-01-01",
+                "url": "https://public.bybit.com/trading/BBBUSDT/BBBUSDT2025-01-01.csv.gz",
+                "source": "test",
+            },
+        ]
+    )
+    write_dataset(manifest, tmp_path, "archive_trade_manifest", partition_by=("date",), append=False)
+
+    monkeypatch.setattr(manifest_module, "download_public_trade_archive", lambda _url, destination: destination)
+
+    def fake_read(path, *, symbol=None):
+        if symbol == "AAAUSDT" and "2025-01-01" in str(path):
+            ts_ms, price = 1_735_775_940_000, 99.0
+        elif symbol == "AAAUSDT":
+            ts_ms, price = 1_735_783_200_000, 105.0
+        else:
+            ts_ms, price = 1_735_689_600_000, 50.0
+        return pl.DataFrame(
+            [
+                {
+                    "trade_id": f"{symbol}-{ts_ms}",
+                    "seq": None,
+                    "ts_ms": ts_ms,
+                    "symbol": symbol,
+                    "side": "Buy",
+                    "price": price,
+                    "size_base": 1.0,
+                    "quote_value": price,
+                    "is_block_trade": False,
+                    "is_rpi_trade": False,
+                }
+            ]
+        )
+
+    monkeypatch.setattr(manifest_module, "read_public_trade_archive", fake_read)
+
+    payload = run_archive_hourly_klines_download(
+        tmp_path,
+        config=ArchiveHourlyKlineDownloadConfig(
+            start="2025-01-01",
+            end="2025-01-02",
+            workers=2,
+            name="fixture",
+        ),
+    )
+
+    assert payload["downloaded"] == 3
+    day_two = read_dataset(tmp_path, "klines_1h").filter((pl.col("date") == "2025-01-02") & (pl.col("symbol") == "AAAUSDT"))
+    assert day_two.select(["ts_ms", "open", "close"]).head(1).to_dicts() == [
+        {"ts_ms": 1_735_776_000_000, "open": 99.0, "close": 99.0}
+    ]
+
+
 def test_download_public_trade_archive_ignores_stale_fixed_temp_name(tmp_path, monkeypatch) -> None:
     destination = tmp_path / "BTCUSDT2025-01-23.csv.gz"
     stale_temp = tmp_path / "BTCUSDT2025-01-23.csv.gz.tmp"
