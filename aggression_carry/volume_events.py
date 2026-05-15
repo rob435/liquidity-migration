@@ -915,6 +915,8 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("stop loss pcts must be in [0, 1)")
     if any(item < 0.0 for item in config.cost_multipliers):
         raise ValueError("cost multipliers must be non-negative")
+    if config.gross_exposure <= 0.0:
+        raise ValueError("gross_exposure must be positive")
     if config.max_active_symbols <= 0:
         raise ValueError("max_active_symbols must be positive")
     if config.cooldown_days < 0:

@@ -136,6 +136,8 @@ def test_cli_parses_volume_events(tmp_path: Path) -> None:
             "0,0.12",
             "--cost-multipliers",
             "1,3",
+            "--gross-exposure",
+            "0.5",
             "--max-active-symbols",
             "8",
             "--cooldown-days",
@@ -146,6 +148,7 @@ def test_cli_parses_volume_events(tmp_path: Path) -> None:
     assert args.command == "volume-events"
     assert args.event_types == "volume_exhaustion,persistent_volume_breakout"
     assert args.thresholds == "0.2"
+    assert args.gross_exposure == 0.5
     assert args.max_active_symbols == 8
     assert args.cooldown_days == 2
 

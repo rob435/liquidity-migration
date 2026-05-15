@@ -136,6 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     volume_events.add_argument("--cost-multipliers", default="1,3", help="Comma-separated cost multipliers.")
     volume_events.add_argument("--start", default="", help="Inclusive UTC signal start date/timestamp.")
     volume_events.add_argument("--end", default="", help="Exclusive UTC signal end date/timestamp.")
+    volume_events.add_argument("--gross-exposure", type=float, default=1.0, help="Portfolio gross exposure cap, e.g. 0.5.")
     volume_events.add_argument("--max-active-symbols", type=int, default=12)
     volume_events.add_argument("--cooldown-days", type=int, default=3)
     volume_events.add_argument("--report-dir", default=None)
@@ -652,6 +653,7 @@ def main(argv: list[str] | None = None) -> int:
             cost_multipliers=_csv_float(args.cost_multipliers, (1.0, 3.0)),
             start_date=args.start,
             end_date=args.end,
+            gross_exposure=args.gross_exposure,
             max_active_symbols=args.max_active_symbols,
             cooldown_days=args.cooldown_days,
         )
