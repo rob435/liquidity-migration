@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from aggression_carry.config import DEFAULT_EXCLUDED_SYMBOLS
 from aggression_carry.cli import build_parser, main
 
 
@@ -105,6 +106,7 @@ def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Pa
     assert args.liquidity_migration_event_rank_fraction_max == 0.90
     assert args.stop_pressure_window_days == 14
     assert args.stop_pressure_stop_count == 12
+    assert args.exclude_symbols == ",".join(DEFAULT_EXCLUDED_SYMBOLS)
 
 
 def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:

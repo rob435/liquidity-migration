@@ -11,6 +11,25 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only in missing depe
 
 
 DEFAULT_MAJOR_SYMBOLS = ("BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT")
+DEFAULT_STABLECOIN_SYMBOLS = (
+    "BUSDUSDT",
+    "DAIUSDT",
+    "FDUSDUSDT",
+    "FRAXUSDT",
+    "GUSDUSDT",
+    "LUSDUSDT",
+    "PYUSDUSDT",
+    "SUSDUSDT",
+    "TUSDUSDT",
+    "USD1USDT",
+    "USDCUSDT",
+    "USDDUSDT",
+    "USDEUSDT",
+    "USDPUSDT",
+    "USDYUSDT",
+)
+DEFAULT_MANUAL_EXCLUDED_SYMBOLS = ("XRPUSDT", "TRXUSDT")
+DEFAULT_EXCLUDED_SYMBOLS = DEFAULT_MAJOR_SYMBOLS + DEFAULT_STABLECOIN_SYMBOLS + DEFAULT_MANUAL_EXCLUDED_SYMBOLS
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +83,7 @@ class UniverseConfig:
     rank_start: int = 1
     rank_end: int = 120
     max_symbols: int = 120
-    exclude_symbols: tuple[str, ...] = DEFAULT_MAJOR_SYMBOLS
+    exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +132,7 @@ def _merge_universe_config(payload: dict[str, Any] | None) -> UniverseConfig:
         rank_start=int(payload.get("rank_start", 1)),
         rank_end=int(payload.get("rank_end", 120)),
         max_symbols=int(payload.get("max_symbols", 120)),
-        exclude_symbols=_tuple_str(payload, "exclude_symbols", DEFAULT_MAJOR_SYMBOLS),
+        exclude_symbols=_tuple_str(payload, "exclude_symbols", DEFAULT_EXCLUDED_SYMBOLS),
     )
 
 

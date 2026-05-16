@@ -9,7 +9,7 @@ from .archive_manifest import ArchiveKlineDownloadConfig, ArchiveManifestConfig,
 from .archive_manifest import run_archive_hourly_klines_api_download, run_archive_hourly_klines_download
 from .archive_manifest import run_archive_klines_download
 from .config import (
-    DEFAULT_MAJOR_SYMBOLS,
+    DEFAULT_EXCLUDED_SYMBOLS,
     UniverseConfig,
     load_config,
 )
@@ -62,8 +62,8 @@ def build_parser() -> argparse.ArgumentParser:
     universe.add_argument("--min-age-days", type=int, default=None, help="Minimum listing age in days.")
     universe.add_argument("--max-age-days", type=int, default=None, help="Maximum listing age in days; 0 disables.")
     universe.add_argument("--exclude-symbols", default=None, help="Comma-separated symbols to exclude.")
-    universe.add_argument("--exclude-majors", action="store_true", help="Exclude BTC/ETH/SOL/BNB.")
-    universe.add_argument("--include-majors", action="store_true", help="Do not exclude majors from config.")
+    universe.add_argument("--exclude-majors", action="store_true", help="Use the default excluded-symbol list.")
+    universe.add_argument("--include-majors", action="store_true", help="Do not exclude default excluded symbols from config.")
 
     archive_manifest = subparsers.add_parser(
         "archive-manifest",
@@ -277,6 +277,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=event_defaults.dryup_prior_abs_day_return_max,
         help="Maximum prior 7d mean absolute daily return for dry-up reacceleration.",
+    )
+    volume_events.add_argument(
+        "--exclude-symbols",
+        default=",".join(event_defaults.exclude_symbols),
+        help="Comma-separated symbols excluded before event features and ranks are built.",
     )
     volume_events.add_argument(
         "--allow-partial-pit",
@@ -525,6 +530,7 @@ def main(argv: list[str] | None = None) -> int:
             absorption_max_abs_day_return=args.absorption_max_abs_day_return,
             dryup_prior_volume_rank_max=args.dryup_prior_volume_rank_max,
             dryup_prior_abs_day_return_max=args.dryup_prior_abs_day_return_max,
+            exclude_symbols=_csv_str(args.exclude_symbols, VolumeEventResearchConfig().exclude_symbols),
         )
         payload = run_volume_event_research(
             data_root,
@@ -557,3 +563,23 @@ def _csv_int(value: str | None, default: tuple[int, ...]) -> tuple[int, ...]:
 
 def _csv_float(value: str | None, default: tuple[float, ...]) -> tuple[float, ...]:
     return tuple(float(item) for item in _csv_str(value, tuple(str(item) for item in default)))
+
+
+def _universe_config_from_args(base: UniverseConfig, args: argparse.Namespace) -> UniverseConfig:
+    if args.exclude_symbols is not None:
+        exclude_symbols = _csv_str(args.exclude_symbols, ())
+    elif args.include_majors:
+        exclude_symbols = ()
+    elif args.exclude_majors:
+        exclude_symbols = DEFAULT_EXCLUDED_SYMBOLS
+    else:
+        exclude_symbols = base.exclude_symbols
+    return UniverseConfig(
+        min_turnover_24h=base.min_turnover_24h if args.min_turnover_24h is None else args.min_turnover_24h,
+        min_age_days=base.min_age_days if args.min_age_days is None else args.min_age_days,
+        max_age_days=base.max_age_days if args.max_age_days is None else args.max_age_days,
+        rank_start=base.rank_start if args.rank_start is None else args.rank_start,
+        rank_end=base.rank_end if args.rank_end is None else args.rank_end,
+        max_symbols=base.max_symbols if args.max_symbols is None else args.max_symbols,
+        exclude_symbols=exclude_symbols,
+    )

@@ -92,6 +92,51 @@ def test_full_pit_universe_error_reports_missing_symbols() -> None:
     assert "BBBUSDT" in message
 
 
+def test_event_filter_excludes_default_blocked_symbols() -> None:
+    features = pl.DataFrame(
+        [
+            {
+                "ts_ms": 1,
+                "symbol": "AAAUSDT",
+                "score": 1.0,
+                "score_rank_frac": 0.9,
+                "prior_score_rank_frac": 0.1,
+                "turnover_quote": 10_000_000.0,
+                "liquidity_rank": 40,
+            },
+            {
+                "ts_ms": 1,
+                "symbol": "XRPUSDT",
+                "score": 1.0,
+                "score_rank_frac": 0.9,
+                "prior_score_rank_frac": 0.1,
+                "turnover_quote": 10_000_000.0,
+                "liquidity_rank": 41,
+            },
+            {
+                "ts_ms": 1,
+                "symbol": "USDCUSDT",
+                "score": 1.0,
+                "score_rank_frac": 0.9,
+                "prior_score_rank_frac": 0.1,
+                "turnover_quote": 10_000_000.0,
+                "liquidity_rank": 42,
+            },
+        ]
+    )
+
+    filtered = _event_filter(
+        features,
+        "fresh_volume_spike",
+        score_col="score",
+        rank_col="score_rank_frac",
+        top_cut=0.7,
+        config=VolumeEventResearchConfig(require_pit_membership=False),
+    )
+
+    assert filtered["symbol"].to_list() == ["AAAUSDT"]
+
+
 def test_volume_event_config_validates_new_research_knobs() -> None:
     with pytest.raises(ValueError, match="entry_delay_hours"):
         _validate_event_config(VolumeEventResearchConfig(entry_delay_hours=-1))

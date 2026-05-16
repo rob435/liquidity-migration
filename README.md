@@ -22,6 +22,7 @@ The `volume-events` defaults are the selected strategy:
 - Side: reversal, which means short
 - Threshold: top 30% dollar-volume rank migration
 - Universe: point-in-time liquidity rank 31-150
+- Exclusions: BTC, ETH, SOL, BNB, stablecoin perps, XRP, and TRX
 - Rank improvement: at least 150 places versus the 7-day prior rank
 - Turnover expansion: current turnover / prior 7-day mean turnover at least 6.0
 - Overheat filter: event rank fraction no higher than 0.90

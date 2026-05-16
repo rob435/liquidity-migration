@@ -17,7 +17,28 @@ universe:
   rank_start: 1
   rank_end: 120
   max_symbols: 120
-  exclude_symbols: [BTCUSDT, ETHUSDT, SOLUSDT, BNBUSDT]
+  exclude_symbols:
+    - BTCUSDT
+    - ETHUSDT
+    - SOLUSDT
+    - BNBUSDT
+    - BUSDUSDT
+    - DAIUSDT
+    - FDUSDUSDT
+    - FRAXUSDT
+    - GUSDUSDT
+    - LUSDUSDT
+    - PYUSDUSDT
+    - SUSDUSDT
+    - TUSDUSDT
+    - USD1USDT
+    - USDCUSDT
+    - USDDUSDT
+    - USDEUSDT
+    - USDPUSDT
+    - USDYUSDT
+    - XRPUSDT
+    - TRXUSDT
 
 cost_model:
   maker_fee_bps: 2.0

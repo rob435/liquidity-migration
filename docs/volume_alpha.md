@@ -33,6 +33,11 @@ running on the completed full-PIT root with `--universe-rank-max 150`. That
 means top 150 by historical daily liquidity rank on each signal date, not the
 top 150 coins by today's turnover.
 
+The default tradable universe excludes BTC, ETH, SOL, BNB, stablecoin perps,
+XRP, and TRX before ranks/features are built. Backtests and live demo scans
+must use the same exclusion list unless a replacement has fresh full-PIT
+evidence.
+
 ## Retired
 
 These workflows are intentionally removed from the active research path:

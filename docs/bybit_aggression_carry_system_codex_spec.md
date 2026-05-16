@@ -31,6 +31,7 @@ event: liquidity_migration
 side: reversal / short
 threshold: top 30% dollar-volume rank migration
 PIT liquidity rank: 31-150
+excluded: BTC, ETH, SOL, BNB, stablecoin perps, XRP, TRX
 rank improvement: >= 150 versus prior 7d liquidity rank
 turnover expansion: current turnover / prior 7d mean >= 6.0
 event rank fraction cap: <= 0.90
@@ -102,12 +103,13 @@ SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 TELEGRAM_ENABLED=1 bash scripts/run_bybit_
 The runner loops every `INTERVAL_SECONDS=60` by default. Each cycle:
 
 1. Pulls the current Bybit USDT perpetual universe through rank 220 so the selected rank 31-150 strategy can be evaluated forward.
-2. Rebuilds recent 1h volume features from a 45-day lookback.
-3. Exits existing demo positions first on fixed-stop reconciliation, event decay, rank exit, or 1-day max hold.
-4. Enters accepted liquidity-migration events after the 1-hour signal delay, subject to max-active, cooldown, stop-pressure, and stale-entry gates. Stale entries are skipped after 15 minutes by default so demo fills stay close to the backtest entry timestamp.
-5. Sizes each accepted coin from the same weight used by the backtest: `gross_exposure / max_active_symbols`, currently `1.0 / 6 = 16.67%` of current Bybit demo USDT equity. `--max-order-notional-pct-equity` is only an explicit override.
-6. Sends Telegram status with wallet equity, Bybit demo open positions, position value, and unrealized PnL when Telegram is enabled.
-7. Writes expected/submitted order state into `event_demo_orders`, trade state into `event_demo_trades`, cycle telemetry into `event_demo_cycles`, and Markdown/JSON reports under `reports/event-demo`.
+2. Excludes BTC, ETH, SOL, BNB, stablecoin perps, XRP, and TRX before ranks/features are built.
+3. Rebuilds recent 1h volume features from a 45-day lookback.
+4. Exits existing demo positions first on fixed-stop reconciliation, event decay, rank exit, or 1-day max hold.
+5. Enters accepted liquidity-migration events after the 1-hour signal delay, subject to max-active, cooldown, stop-pressure, and stale-entry gates. Stale entries are skipped after 15 minutes by default so demo fills stay close to the backtest entry timestamp.
+6. Sizes each accepted coin from the same weight used by the backtest: `gross_exposure / max_active_symbols`, currently `1.0 / 6 = 16.67%` of current Bybit demo USDT equity. `--max-order-notional-pct-equity` is only an explicit override.
+7. Sends Telegram status with wallet equity, Bybit demo open positions, position value, and unrealized PnL when Telegram is enabled.
+8. Writes expected/submitted order state into `event_demo_orders`, trade state into `event_demo_trades`, cycle telemetry into `event_demo_cycles`, and Markdown/JSON reports under `reports/event-demo`.
 
 Order submission is still fail-closed: `--submit-orders` requires `--confirm-demo-orders`, `BYBIT_DEMO_API_KEY`, and `BYBIT_DEMO_API_SECRET`. Without those, the command is a dry-run scan.
 

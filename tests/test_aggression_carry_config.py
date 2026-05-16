@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from aggression_carry.config import load_config
+from aggression_carry.config import DEFAULT_EXCLUDED_SYMBOLS, load_config
 
 
 def test_active_system_config_loads_from_yaml(tmp_path: Path) -> None:
@@ -27,3 +27,12 @@ cost_model:
     assert config.universe.rank_end == 80
     assert config.universe.exclude_symbols == ("BTCUSDT", "ETHUSDT")
     assert config.costs.maker_fee_bps == 1.0
+
+
+def test_default_config_excludes_majors_stablecoins_xrp_and_trx() -> None:
+    config = load_config()
+
+    assert config.universe.exclude_symbols == DEFAULT_EXCLUDED_SYMBOLS
+    assert {"USDCUSDT", "USDEUSDT", "USD1USDT", "XRPUSDT", "TRXUSDT"}.issubset(
+        set(config.universe.exclude_symbols)
+    )

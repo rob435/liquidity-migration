@@ -12,7 +12,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from .config import CostConfig, TradeLifecycleConfig
+from .config import CostConfig, DEFAULT_EXCLUDED_SYMBOLS, TradeLifecycleConfig
 from .storage import read_dataset
 from .trade_lifecycle import (
     _bar_excursion,
@@ -95,6 +95,7 @@ class VolumeEventResearchConfig:
     absorption_max_abs_day_return: float = 0.015
     dryup_prior_volume_rank_max: float = 0.35
     dryup_prior_abs_day_return_max: float = 0.02
+    exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
     promotion_max_drawdown: float = -0.35
     promotion_min_avg_sharpe: float = 0.50
 
@@ -135,6 +136,9 @@ def run_volume_event_research(
         raise RuntimeError("klines_1h is empty; run download-data first")
     funding = read_dataset(root, "funding")
     archive_manifest = read_dataset(root, "archive_trade_manifest")
+    klines = _exclude_symbols(klines, config.exclude_symbols)
+    funding = _exclude_symbols(funding, config.exclude_symbols)
+    archive_manifest = _exclude_symbols(archive_manifest, config.exclude_symbols)
     features = _filter_signal_window(
         _enriched_event_features(build_volume_features(klines), klines, archive_manifest),
         _window_config(config),
@@ -288,6 +292,7 @@ def _run_event_scenario(
         universe_rank_min=config.universe_rank_min,
         universe_rank_max=config.universe_rank_max,
         universe_min_daily_turnover=config.universe_min_daily_turnover,
+        exclude_symbols=config.exclude_symbols,
     )
     event_key = (scenario.event_type, scenario.threshold)
     events = event_cache.get(event_key)
@@ -425,6 +430,7 @@ def _rank_lookup_cache(features: pl.DataFrame, *, config: VolumeEventResearchCon
             universe_rank_min=config.universe_rank_min,
             universe_rank_max=config.universe_rank_max,
             universe_min_daily_turnover=config.universe_min_daily_turnover,
+            exclude_symbols=config.exclude_symbols,
         )
         output[score_col] = _rank_lookup(features, score_col=score_col, entry_delay_hours=config.entry_delay_hours, config=bt_config)
     return output
@@ -639,6 +645,7 @@ def _event_filter(
     config: VolumeEventResearchConfig,
 ) -> pl.DataFrame:
     base = features.filter(pl.col(score_col).is_not_null() & pl.col(score_col).is_finite())
+    base = _exclude_symbols(base, config.exclude_symbols)
     if config.require_pit_membership:
         if "tradable_membership_flag" not in base.columns:
             return base.head(0)
@@ -731,6 +738,13 @@ def _event_filter(
 def _has_columns(frame: pl.DataFrame, *columns: str) -> bool:
     available = set(frame.columns)
     return all(column in available for column in columns)
+
+
+def _exclude_symbols(frame: pl.DataFrame, symbols: tuple[str, ...]) -> pl.DataFrame:
+    if frame.is_empty() or "symbol" not in frame.columns or not symbols:
+        return frame
+    excluded = {symbol.upper() for symbol in symbols}
+    return frame.filter(~pl.col("symbol").str.to_uppercase().is_in(sorted(excluded)))
 
 
 def _apply_market_context_filters(frame: pl.DataFrame, config: VolumeEventResearchConfig) -> pl.DataFrame:

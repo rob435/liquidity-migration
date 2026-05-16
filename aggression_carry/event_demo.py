@@ -14,7 +14,7 @@ from typing import Any
 import polars as pl
 
 from .bybit import BybitMarketData, BybitPrivateClient
-from .config import DEFAULT_MAJOR_SYMBOLS, ResearchConfig, UniverseConfig
+from .config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig, UniverseConfig
 from .downloaders import _normalize_instruments, _normalize_klines, _normalize_tickers
 from .storage import exclusive_file_lock, read_dataset, write_dataset
 from .telegram import send_telegram_message
@@ -660,7 +660,7 @@ def _build_demo_universe(
         rank_start=1,
         rank_end=config.universe_rank_end,
         max_symbols=config.universe_max_symbols,
-        exclude_symbols=DEFAULT_MAJOR_SYMBOLS,
+        exclude_symbols=DEFAULT_EXCLUDED_SYMBOLS,
     )
     return build_current_universe_table(
         instruments,
