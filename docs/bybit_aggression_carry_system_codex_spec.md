@@ -24,17 +24,18 @@ python -m aggression_carry \
   volume-events
 ```
 
-`volume-events` defaults are the selected full-PIT candidate:
+`volume-events` defaults are the selected full-PIT strategy:
 
 ```text
 event: liquidity_migration
 side: reversal / short
 threshold: top 30% dollar-volume rank migration
 PIT liquidity rank: 31-150
-excluded: BTC, ETH, SOL, BNB, stablecoin perps, XRP, TRX
+excluded: stable/peg perps only, including failed peg remnants such as USTCUSDT
 rank improvement: >= 150 versus prior 7d liquidity rank
 turnover expansion: current turnover / prior 7d mean >= 6.0
 event rank fraction cap: <= 0.90
+regime gate: market_pct_up_1d <= 0.60 OR coin daily_return_1d >= +20%
 entry delay: 1 hour after daily signal close
 max hold: 1 day
 stop: 12% fixed
@@ -49,26 +50,31 @@ The strategy is short-only because the best full-PIT evidence is in reversal aft
 
 ## Reference Evidence
 
-Selected report:
+Promoted full-PIT report after switching to stable/peg-only exclusions and the
+liquidity-migration OR regime gate:
 
 ```text
-data/agc-bybit-fullpit-1h-20230503-20260503/reports/SELECTED_liqmig_dd_repair_turn6_rank31_150_eventcap90_stoppressure_20260516
+data/agc-bybit-fullpit-1h-20230503-20260503/reports/research_20260516_promoted_default_stable_peg_or_gate
 ```
 
 Full-PIT result on `2023-05-03` to `2026-05-03`:
 
 ```text
-trades: 1,138
-total return: +466.57%
-max drawdown: -20.34%
-worst split return: +34.72%
-worst split drawdown: -21.06%
-average split Sharpe-like: 2.19
-train return: +34.72%
-validation return: +122.24%
-OOS return: +86.76%
+trades: 810
+total return: +344.73%
+max drawdown: -16.86%
+worst split return: +24.58%
+worst split drawdown: -15.43%
+average split Sharpe-like: 2.44
+train return: +24.58%
+validation return: +91.49%
+OOS return: +86.42%
 promotion gate: pass
 ```
+
+Top coins are no longer manually blacklisted. In the promotion comparison,
+BTC/ETH/SOL/BNB/XRP/TRX took no direct trades, but including them improved the
+point-in-time rank universe and market context used by the alpha.
 
 Funding is not modeled in that root because funding data is missing. Fees and slippage are stress-tested through the 3x cost multiplier; funding remains a required demo/forward parity item before real-money work.
 
@@ -103,7 +109,7 @@ SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 TELEGRAM_ENABLED=1 bash scripts/run_bybit_
 The runner loops every `INTERVAL_SECONDS=60` by default. Each cycle:
 
 1. Pulls the current Bybit USDT perpetual universe through rank 220 so the selected rank 31-150 strategy can be evaluated forward.
-2. Excludes BTC, ETH, SOL, BNB, stablecoin perps, XRP, and TRX before ranks/features are built.
+2. Excludes only stable/peg perps, including failed peg remnants such as USTCUSDT, before ranks/features are built.
 3. Rebuilds recent 1h volume features from a 45-day lookback.
 4. Exits existing demo positions first on fixed-stop reconciliation, event decay, rank exit, or 1-day max hold.
 5. Enters accepted liquidity-migration events after the 1-hour signal delay, subject to max-active, cooldown, stop-pressure, and stale-entry gates. Stale entries are skipped after 15 minutes by default so demo fills stay close to the backtest entry timestamp.

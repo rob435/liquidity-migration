@@ -62,8 +62,20 @@ def build_parser() -> argparse.ArgumentParser:
     universe.add_argument("--min-age-days", type=int, default=None, help="Minimum listing age in days.")
     universe.add_argument("--max-age-days", type=int, default=None, help="Maximum listing age in days; 0 disables.")
     universe.add_argument("--exclude-symbols", default=None, help="Comma-separated symbols to exclude.")
-    universe.add_argument("--exclude-majors", action="store_true", help="Use the default excluded-symbol list.")
-    universe.add_argument("--include-majors", action="store_true", help="Do not exclude default excluded symbols from config.")
+    universe.add_argument(
+        "--exclude-defaults",
+        dest="exclude_majors",
+        action="store_true",
+        help="Use the default stable/peg excluded-symbol list.",
+    )
+    universe.add_argument("--exclude-majors", dest="exclude_majors", action="store_true", help=argparse.SUPPRESS)
+    universe.add_argument(
+        "--include-excluded",
+        dest="include_majors",
+        action="store_true",
+        help="Do not exclude symbols from config.",
+    )
+    universe.add_argument("--include-majors", dest="include_majors", action="store_true", help=argparse.SUPPRESS)
 
     archive_manifest = subparsers.add_parser(
         "archive-manifest",
@@ -210,6 +222,30 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=event_defaults.liquidity_migration_score_max,
         help="Maximum dollar-volume rank z-score for liquidity-migration events; 0 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-day-return-min",
+        type=float,
+        default=event_defaults.liquidity_migration_day_return_min,
+        help="Minimum same-day return for liquidity-migration events; -1 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-day-return-max",
+        type=float,
+        default=event_defaults.liquidity_migration_day_return_max,
+        help="Maximum same-day return for liquidity-migration events; 10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-market-pct-up-max",
+        type=float,
+        default=event_defaults.liquidity_migration_market_pct_up_max,
+        help="Liquidity-migration-specific max fraction of PIT universe up; 1 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-hot-market-day-return-min",
+        type=float,
+        default=event_defaults.liquidity_migration_hot_market_day_return_min,
+        help="When market pct-up is above the liquidity-migration max, still allow events with at least this same-day coin return; 10 disables.",
     )
     volume_events.add_argument(
         "--market-median-return-1d-min",
@@ -518,6 +554,10 @@ def main(argv: list[str] | None = None) -> int:
             liquidity_migration_current_rank_max=args.liquidity_migration_current_rank_max,
             liquidity_migration_event_rank_fraction_max=args.liquidity_migration_event_rank_fraction_max,
             liquidity_migration_score_max=args.liquidity_migration_score_max,
+            liquidity_migration_day_return_min=args.liquidity_migration_day_return_min,
+            liquidity_migration_day_return_max=args.liquidity_migration_day_return_max,
+            liquidity_migration_market_pct_up_max=args.liquidity_migration_market_pct_up_max,
+            liquidity_migration_hot_market_day_return_min=args.liquidity_migration_hot_market_day_return_min,
             market_median_return_1d_min=args.market_median_return_1d_min,
             market_median_return_1d_max=args.market_median_return_1d_max,
             market_pct_up_1d_max=args.market_pct_up_1d_max,

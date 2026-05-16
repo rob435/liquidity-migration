@@ -104,6 +104,10 @@ def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Pa
     assert args.liquidity_migration_rank_improvement_min == 150
     assert args.liquidity_migration_turnover_ratio_min == 6.0
     assert args.liquidity_migration_event_rank_fraction_max == 0.90
+    assert args.liquidity_migration_day_return_min == -1.0
+    assert args.liquidity_migration_day_return_max == 10.0
+    assert args.liquidity_migration_market_pct_up_max == 0.60
+    assert args.liquidity_migration_hot_market_day_return_min == 0.20
     assert args.stop_pressure_window_days == 14
     assert args.stop_pressure_stop_count == 12
     assert args.exclude_symbols == ",".join(DEFAULT_EXCLUDED_SYMBOLS)
@@ -157,6 +161,14 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
             "120",
             "--liquidity-migration-current-rank-max",
             "80",
+            "--liquidity-migration-day-return-min",
+            "0.2",
+            "--liquidity-migration-day-return-max",
+            "0.8",
+            "--liquidity-migration-market-pct-up-max",
+            "0.6",
+            "--liquidity-migration-hot-market-day-return-min",
+            "0.15",
             "--exhaustion-min-day-return",
             "0.08",
             "--selloff-exhaustion-min-abs-day-return",
@@ -189,6 +201,10 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
     assert args.liquidity_migration_turnover_ratio_min == 2.5
     assert args.liquidity_migration_prior_rank_min == 120
     assert args.liquidity_migration_current_rank_max == 80
+    assert args.liquidity_migration_day_return_min == 0.2
+    assert args.liquidity_migration_day_return_max == 0.8
+    assert args.liquidity_migration_market_pct_up_max == 0.6
+    assert args.liquidity_migration_hot_market_day_return_min == 0.15
     assert args.exhaustion_min_day_return == 0.08
     assert args.selloff_exhaustion_min_abs_day_return == 0.09
     assert args.absorption_max_abs_day_return == 0.012

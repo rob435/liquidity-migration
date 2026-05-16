@@ -11,6 +11,7 @@ from aggression_carry.volume_events import (
     _event_decay_exit_hit,
     _event_filter,
     _execution_ordered_events,
+    _float_or_nan,
     _full_pit_universe_error,
     _stop_pressure_active,
     VolumeEventResearchConfig,
@@ -35,6 +36,12 @@ def test_add_rank_fraction_scales_cross_section_to_zero_one() -> None:
     ranked = _add_rank_fraction(frame, "score", "score_rank_frac").sort("symbol")
 
     assert ranked["score_rank_frac"].to_list() == pytest.approx([0.0, 0.5, 1.0])
+
+
+def test_float_or_nan_handles_missing_context_values() -> None:
+    assert _float_or_nan(None) != _float_or_nan(None)
+    assert _float_or_nan("bad") != _float_or_nan("bad")
+    assert _float_or_nan("0.25") == pytest.approx(0.25)
 
 
 def test_volume_event_research_writes_reports_on_fixture(tmp_path: Path) -> None:
@@ -92,7 +99,7 @@ def test_full_pit_universe_error_reports_missing_symbols() -> None:
     assert "BBBUSDT" in message
 
 
-def test_event_filter_excludes_default_blocked_symbols() -> None:
+def test_event_filter_excludes_default_stable_and_peg_symbols() -> None:
     features = pl.DataFrame(
         [
             {
@@ -134,7 +141,7 @@ def test_event_filter_excludes_default_blocked_symbols() -> None:
         config=VolumeEventResearchConfig(require_pit_membership=False),
     )
 
-    assert filtered["symbol"].to_list() == ["AAAUSDT"]
+    assert filtered["symbol"].to_list() == ["AAAUSDT", "XRPUSDT"]
 
 
 def test_volume_event_config_validates_new_research_knobs() -> None:
@@ -164,6 +171,14 @@ def test_volume_event_config_validates_new_research_knobs() -> None:
 
     with pytest.raises(ValueError, match="liquidity_migration_score_max"):
         _validate_event_config(VolumeEventResearchConfig(liquidity_migration_score_max=-0.1))
+    with pytest.raises(ValueError, match="liquidity_migration_day_return_min"):
+        _validate_event_config(
+            VolumeEventResearchConfig(liquidity_migration_day_return_min=0.2, liquidity_migration_day_return_max=0.1)
+        )
+    with pytest.raises(ValueError, match="liquidity_migration_market_pct_up_max"):
+        _validate_event_config(VolumeEventResearchConfig(liquidity_migration_market_pct_up_max=1.1))
+    with pytest.raises(ValueError, match="liquidity_migration_hot_market_day_return_min"):
+        _validate_event_config(VolumeEventResearchConfig(liquidity_migration_hot_market_day_return_min=-0.1))
 
     with pytest.raises(ValueError, match="market_median_return_1d_min"):
         _validate_event_config(
@@ -448,6 +463,8 @@ def test_creative_event_filters_select_distinct_pit_events() -> None:
         liquidity_migration_rank_improvement_min=50,
         liquidity_migration_turnover_ratio_min=0.0,
         liquidity_migration_event_rank_fraction_max=0.0,
+        liquidity_migration_market_pct_up_max=1.0,
+        liquidity_migration_hot_market_day_return_min=10.0,
         absorption_max_abs_day_return=0.015,
         dryup_prior_volume_rank_max=0.35,
         dryup_prior_abs_day_return_max=0.02,
@@ -559,10 +576,129 @@ def test_liquidity_migration_quality_controls_require_rank_and_turnover_expansio
             liquidity_migration_event_rank_fraction_max=0.0,
             liquidity_migration_prior_rank_min=150,
             liquidity_migration_current_rank_max=80,
+            liquidity_migration_market_pct_up_max=1.0,
+            liquidity_migration_hot_market_day_return_min=10.0,
         ),
     )
 
     assert migration["symbol"].to_list() == ["GOODUSDT"]
+
+
+def test_liquidity_migration_can_require_positive_event_day_return() -> None:
+    frame = pl.DataFrame(
+        [
+            {
+                "symbol": "GOODUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 3.0,
+                "dollar_volume_rank_z_rank_frac": 0.86,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 80,
+                "prior7_liquidity_rank": 240,
+                "turnover_quote": 3_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "daily_return_1d": 0.22,
+                "tradable_membership_flag": True,
+            },
+            {
+                "symbol": "TOOFLATUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 3.1,
+                "dollar_volume_rank_z_rank_frac": 0.87,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 75,
+                "prior7_liquidity_rank": 240,
+                "turnover_quote": 3_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "daily_return_1d": 0.05,
+                "tradable_membership_flag": True,
+            },
+        ]
+    )
+
+    migration = _event_filter(
+        frame,
+        "liquidity_migration",
+        score_col="dollar_volume_rank_z",
+        rank_col="dollar_volume_rank_z_rank_frac",
+        top_cut=0.80,
+        config=VolumeEventResearchConfig(
+            liquidity_migration_rank_improvement_min=100,
+            liquidity_migration_turnover_ratio_min=2.0,
+            liquidity_migration_event_rank_fraction_max=0.90,
+            liquidity_migration_day_return_min=0.20,
+            liquidity_migration_market_pct_up_max=1.0,
+            liquidity_migration_hot_market_day_return_min=10.0,
+        ),
+    )
+
+    assert migration["symbol"].to_list() == ["GOODUSDT"]
+
+
+def test_liquidity_migration_market_gate_allows_hot_coin_exception() -> None:
+    frame = pl.DataFrame(
+        [
+            {
+                "symbol": "COOLMKTUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 3.0,
+                "dollar_volume_rank_z_rank_frac": 0.86,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 80,
+                "prior7_liquidity_rank": 240,
+                "turnover_quote": 3_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "market_pct_up_1d": 0.55,
+                "daily_return_1d": 0.02,
+                "tradable_membership_flag": True,
+            },
+            {
+                "symbol": "BLOWOFFUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 3.1,
+                "dollar_volume_rank_z_rank_frac": 0.87,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 75,
+                "prior7_liquidity_rank": 240,
+                "turnover_quote": 3_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "market_pct_up_1d": 0.85,
+                "daily_return_1d": 0.18,
+                "tradable_membership_flag": True,
+            },
+            {
+                "symbol": "HOTFLATUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 3.2,
+                "dollar_volume_rank_z_rank_frac": 0.88,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 70,
+                "prior7_liquidity_rank": 240,
+                "turnover_quote": 3_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "market_pct_up_1d": 0.85,
+                "daily_return_1d": 0.06,
+                "tradable_membership_flag": True,
+            },
+        ]
+    )
+
+    migration = _event_filter(
+        frame,
+        "liquidity_migration",
+        score_col="dollar_volume_rank_z",
+        rank_col="dollar_volume_rank_z_rank_frac",
+        top_cut=0.80,
+        config=VolumeEventResearchConfig(
+            liquidity_migration_rank_improvement_min=100,
+            liquidity_migration_turnover_ratio_min=2.0,
+            liquidity_migration_event_rank_fraction_max=0.90,
+            liquidity_migration_market_pct_up_max=0.60,
+            liquidity_migration_hot_market_day_return_min=0.15,
+        ),
+    )
+
+    assert migration["symbol"].to_list() == ["COOLMKTUSDT", "BLOWOFFUSDT"]
 
 
 def test_liquidity_migration_overheated_and_regime_filters_are_pit_safe() -> None:
@@ -642,6 +778,8 @@ def test_liquidity_migration_overheated_and_regime_filters_are_pit_safe() -> Non
             liquidity_migration_turnover_ratio_min=2.0,
             liquidity_migration_event_rank_fraction_max=0.90,
             liquidity_migration_score_max=2.0,
+            liquidity_migration_market_pct_up_max=1.0,
+            liquidity_migration_hot_market_day_return_min=10.0,
             market_median_return_1d_max=0.03,
             market_pct_up_1d_max=0.70,
             btc_return_1d_max=0.05,

@@ -33,10 +33,10 @@ running on the completed full-PIT root with `--universe-rank-max 150`. That
 means top 150 by historical daily liquidity rank on each signal date, not the
 top 150 coins by today's turnover.
 
-The default tradable universe excludes BTC, ETH, SOL, BNB, stablecoin perps,
-XRP, and TRX before ranks/features are built. Backtests and live demo scans
-must use the same exclusion list unless a replacement has fresh full-PIT
-evidence.
+The default tradable universe excludes only stable/peg perps, including failed
+peg remnants such as `USTCUSDT`, before ranks/features are built. Do not
+manually blacklist top coins such as BTC, ETH, SOL, BNB, XRP, or TRX unless a
+fresh full-PIT run proves the blacklist improves the promoted objective.
 
 ## Retired
 
@@ -295,9 +295,8 @@ operations, not for historical promotion evidence.
 
 ## Selected Full-PIT Result
 
-Current selected candidate. The previous `turnover >= 1.75`,
-3-day-hold candidate is demoted because its `-34.72%` max drawdown was too
-close to the old drawdown gate.
+Promoted result after switching to stable/peg-only exclusions and activating
+the liquidity-migration OR regime gate:
 
 ```text
 event: liquidity_migration
@@ -308,6 +307,7 @@ filters:
   liquidity-rank improvement >= 150
   turnover / prior 7d mean >= 6.0
   event rank fraction <= 0.90
+  market_pct_up_1d <= 0.60 OR coin daily_return_1d >= +20%
 entry delay: 1 hour after signal close
 hold: 1 day max
 stop: 12% fixed
@@ -340,6 +340,8 @@ python -m aggression_carry \
   --liquidity-migration-rank-improvement-min 150 \
   --liquidity-migration-turnover-ratio-min 6.0 \
   --liquidity-migration-event-rank-fraction-max 0.90 \
+  --liquidity-migration-market-pct-up-max 0.60 \
+  --liquidity-migration-hot-market-day-return-min 0.20 \
   --stop-pressure-window-days 14 \
   --stop-pressure-stop-count 12
 ```
@@ -347,14 +349,20 @@ python -m aggression_carry \
 Full-PIT result on `2023-05-03` to `2026-05-03`:
 
 ```text
-trades: 1,138
-total return: +466.57%
-max drawdown: -20.34%
-worst split return: +34.72%
-worst split drawdown: -21.06%
-average split Sharpe-like: 2.19
-train return: +34.72%
-validation return: +122.24%
-OOS return: +86.76%
+report: data/agc-bybit-fullpit-1h-20230503-20260503/reports/research_20260516_promoted_default_stable_peg_or_gate
+trades: 810
+total return: +344.73%
+max drawdown: -16.86%
+worst split return: +24.58%
+worst split drawdown: -15.43%
+average split Sharpe-like: 2.44
+train return: +24.58%
+validation return: +91.49%
+OOS return: +86.42%
 promotion gate: pass
 ```
+
+In the promotion comparison, BTC/ETH/SOL/BNB/XRP/TRX took no direct trades, but
+including them improved the PIT rank map and market context. That is why the
+default exclusion rule is now stable/peg-only rather than a manual top-coin
+blacklist.

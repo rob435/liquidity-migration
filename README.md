@@ -22,10 +22,11 @@ The `volume-events` defaults are the selected strategy:
 - Side: reversal, which means short
 - Threshold: top 30% dollar-volume rank migration
 - Universe: point-in-time liquidity rank 31-150
-- Exclusions: BTC, ETH, SOL, BNB, stablecoin perps, XRP, and TRX
+- Exclusions: stable/peg perps only, including failed peg remnants such as `USTCUSDT`
 - Rank improvement: at least 150 places versus the 7-day prior rank
 - Turnover expansion: current turnover / prior 7-day mean turnover at least 6.0
 - Overheat filter: event rank fraction no higher than 0.90
+- Regime gate: `market_pct_up_1d <= 0.60 OR coin daily_return_1d >= +20%`
 - Entry: 1 hour after the daily signal close
 - Exit: event decay, 12% fixed stop, or 1-day max hold
 - Capacity: max 6 active symbols, 5-day symbol cooldown
@@ -33,20 +34,21 @@ The `volume-events` defaults are the selected strategy:
 - Cost model: 3x base round-trip costs
 - Gross exposure: 1.0, split across active capacity
 
-Latest full-PIT reference run, 2023-05-03 to 2026-05-03:
+Promoted full-PIT reference run, 2023-05-03 to 2026-05-03:
 
-- Trades: 1,138
-- Total return: +466.57%
-- Max drawdown: -20.34%
-- Worst split return: +34.72%
-- Worst split drawdown: -21.06%
-- Average split Sharpe-like: 2.19
+- Trades: 810
+- Total return: +344.73%
+- Max drawdown: -16.86%
+- Worst split return: +24.58%
+- Worst split drawdown: -15.43%
+- Average split Sharpe-like: 2.44
+- OOS return: +86.42%
 - Promotion gate: pass
 
 Reference report:
 
 ```text
-data/agc-bybit-fullpit-1h-20230503-20260503/reports/SELECTED_liqmig_dd_repair_turn6_rank31_150_eventcap90_stoppressure_20260516
+data/agc-bybit-fullpit-1h-20230503-20260503/reports/research_20260516_promoted_default_stable_peg_or_gate
 ```
 
 ## Full-PIT Runner

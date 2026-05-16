@@ -83,6 +83,10 @@ class VolumeEventResearchConfig:
     liquidity_migration_current_rank_max: int = 0
     liquidity_migration_event_rank_fraction_max: float = 0.90
     liquidity_migration_score_max: float = 0.0
+    liquidity_migration_day_return_min: float = -1.0
+    liquidity_migration_day_return_max: float = 10.0
+    liquidity_migration_market_pct_up_max: float = 0.60
+    liquidity_migration_hot_market_day_return_min: float = 0.20
     market_median_return_1d_min: float = -1.0
     market_median_return_1d_max: float = 1.0
     market_pct_up_1d_max: float = 1.0
@@ -368,11 +372,11 @@ def _run_event_scenario(
                 "side_hypothesis": scenario.side_hypothesis,
                 "cost_multiplier": scenario.cost_multiplier,
                 "liquidity_rank": int(event.get("liquidity_rank", 0) or 0),
-                "event_rank_fraction": float(event.get(f"{score_col}_rank_frac", float("nan"))),
-                "daily_return_1d": float(event.get("daily_return_1d", float("nan"))),
-                "market_median_return_1d": float(event.get("market_median_return_1d", float("nan"))),
-                "market_pct_up_1d": float(event.get("market_pct_up_1d", float("nan"))),
-                "btc_return_1d": float(event.get("btc_return_1d", float("nan"))),
+                "event_rank_fraction": _float_or_nan(event.get(f"{score_col}_rank_frac")),
+                "daily_return_1d": _float_or_nan(event.get("daily_return_1d")),
+                "market_median_return_1d": _float_or_nan(event.get("market_median_return_1d")),
+                "market_pct_up_1d": _float_or_nan(event.get("market_pct_up_1d")),
+                "btc_return_1d": _float_or_nan(event.get("btc_return_1d")),
                 "liquidity_migration_turnover_ratio": _safe_ratio(
                     event.get("turnover_quote"),
                     event.get("prior7_turnover_quote_mean"),
@@ -699,6 +703,12 @@ def _event_filter(
         required_cols = ["prior7_liquidity_rank", f"prior7_{rank_col}"]
         if config.liquidity_migration_turnover_ratio_min > 0.0:
             required_cols.append("prior7_turnover_quote_mean")
+        if config.liquidity_migration_day_return_min > -1.0 or config.liquidity_migration_day_return_max < 10.0:
+            required_cols.append("daily_return_1d")
+        if config.liquidity_migration_market_pct_up_max < 1.0:
+            required_cols.append("market_pct_up_1d")
+            if config.liquidity_migration_hot_market_day_return_min < 10.0:
+                required_cols.append("daily_return_1d")
         if not _has_columns(base, *required_cols):
             return base.head(0)
         predicate = (
@@ -723,6 +733,24 @@ def _event_filter(
             predicate = predicate & (pl.col(rank_col) <= config.liquidity_migration_event_rank_fraction_max)
         if config.liquidity_migration_score_max > 0.0:
             predicate = predicate & (pl.col(score_col) <= config.liquidity_migration_score_max)
+        if config.liquidity_migration_day_return_min > -1.0 or config.liquidity_migration_day_return_max < 10.0:
+            predicate = (
+                predicate
+                & pl.col("daily_return_1d").is_not_null()
+                & (pl.col("daily_return_1d") >= config.liquidity_migration_day_return_min)
+                & (pl.col("daily_return_1d") <= config.liquidity_migration_day_return_max)
+            )
+        if config.liquidity_migration_market_pct_up_max < 1.0:
+            market_ok = pl.col("market_pct_up_1d").is_not_null() & (
+                pl.col("market_pct_up_1d") <= config.liquidity_migration_market_pct_up_max
+            )
+            if config.liquidity_migration_hot_market_day_return_min < 10.0:
+                hot_coin_ok = pl.col("daily_return_1d").is_not_null() & (
+                    pl.col("daily_return_1d") >= config.liquidity_migration_hot_market_day_return_min
+                )
+                predicate = predicate & (market_ok | hot_coin_ok)
+            else:
+                predicate = predicate & market_ok
         return base.filter(predicate)
     if event_type == "selloff_exhaustion":
         if not _has_columns(base, "daily_return_1d", "daily_return_rank_frac"):
@@ -1115,6 +1143,15 @@ def _safe_ratio(numerator: Any, denominator: Any) -> float:
     return top / bottom
 
 
+def _float_or_nan(value: Any) -> float:
+    if value is None:
+        return float("nan")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
 def _pit_manifest_metadata(archive_manifest: pl.DataFrame, features: pl.DataFrame) -> dict[str, Any]:
     manifest_symbols = _symbol_set(archive_manifest)
     feature_symbols = _symbol_set(features)
@@ -1297,6 +1334,12 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("liquidity_migration_event_rank_fraction_max must be in [0, 1]")
     if config.liquidity_migration_score_max < 0.0:
         raise ValueError("liquidity_migration_score_max must be non-negative")
+    if config.liquidity_migration_day_return_min > config.liquidity_migration_day_return_max:
+        raise ValueError("liquidity_migration_day_return_min must be <= liquidity_migration_day_return_max")
+    if not 0.0 <= config.liquidity_migration_market_pct_up_max <= 1.0:
+        raise ValueError("liquidity_migration_market_pct_up_max must be in [0, 1]")
+    if config.liquidity_migration_hot_market_day_return_min < 0.0:
+        raise ValueError("liquidity_migration_hot_market_day_return_min must be non-negative")
     if config.market_median_return_1d_min > config.market_median_return_1d_max:
         raise ValueError("market_median_return_1d_min must be <= market_median_return_1d_max")
     if not 0.0 <= config.market_pct_up_1d_max <= 1.0:

@@ -29,10 +29,13 @@ cost_model:
     assert config.costs.maker_fee_bps == 1.0
 
 
-def test_default_config_excludes_majors_stablecoins_xrp_and_trx() -> None:
+def test_default_config_excludes_only_stable_and_peg_symbols() -> None:
     config = load_config()
 
     assert config.universe.exclude_symbols == DEFAULT_EXCLUDED_SYMBOLS
-    assert {"USDCUSDT", "USDEUSDT", "USD1USDT", "XRPUSDT", "TRXUSDT"}.issubset(
+    assert {"USDCUSDT", "USDEUSDT", "USD1USDT", "USTCUSDT"}.issubset(
+        set(config.universe.exclude_symbols)
+    )
+    assert {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "TRXUSDT"}.isdisjoint(
         set(config.universe.exclude_symbols)
     )

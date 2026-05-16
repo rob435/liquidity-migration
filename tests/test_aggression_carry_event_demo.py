@@ -209,6 +209,8 @@ def test_select_demo_entry_candidates_uses_selected_liquidity_migration_filters(
                 "prior7_liquidity_rank": 225,
                 "turnover_quote": 7_000_000.0,
                 "prior7_turnover_quote_mean": 1_000_000.0,
+                "daily_return_1d": 0.02,
+                "market_pct_up_1d": 0.55,
                 "tradable_membership_flag": False,
             },
             {
@@ -221,6 +223,8 @@ def test_select_demo_entry_candidates_uses_selected_liquidity_migration_filters(
                 "prior7_liquidity_rank": 230,
                 "turnover_quote": 8_000_000.0,
                 "prior7_turnover_quote_mean": 1_000_000.0,
+                "daily_return_1d": 0.02,
+                "market_pct_up_1d": 0.55,
                 "tradable_membership_flag": False,
             },
         ]
