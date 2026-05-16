@@ -1121,7 +1121,7 @@ def _write_equity_benchmark_chart(
     end = strategy[-1]["date"]
     btc = _normalised_price_series(_btc_daily_close_series(raw_klines, start=start, end=end))
     series = [
-        {"name": "Strategy", "color": (7, 14, 31), "alpha": 255, "width": 5, "points": strategy},
+        {"name": "Strategy", "color": (7, 14, 31), "alpha": 255, "width": 4, "points": strategy},
         {"name": "BTC", "color": (234, 88, 12), "alpha": 215, "width": 3, "points": btc},
     ]
     _remove_stale_chart_artifacts(output_dir)
