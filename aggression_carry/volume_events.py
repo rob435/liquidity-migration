@@ -105,7 +105,7 @@ class VolumeEventResearchConfig:
     dryup_prior_volume_rank_max: float = 0.35
     dryup_prior_abs_day_return_max: float = 0.02
     exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
-    promotion_max_drawdown: float = -0.35
+    promotion_max_drawdown: float = -0.25
     promotion_min_avg_sharpe: float = 0.50
 
 
@@ -154,9 +154,9 @@ def run_volume_event_research(
         _enriched_event_features(build_volume_features(klines), klines, archive_manifest),
         _window_config(config),
     )
-    full_pit_universe_pass = _full_pit_universe_pass(features, archive_manifest)
+    full_pit_universe_pass = _full_pit_universe_pass(klines, archive_manifest)
     if config.require_full_pit_universe and not full_pit_universe_pass:
-        raise RuntimeError(_full_pit_universe_error(features, archive_manifest))
+        raise RuntimeError(_full_pit_universe_error(klines, archive_manifest))
     bars = _indexed_price_bars_by_symbol(klines)
     funding_lookup = _funding_lookup(funding)
     rank_lookup_cache = _rank_lookup_cache(features, config=config)
@@ -219,7 +219,7 @@ def run_volume_event_research(
             "promotable": int(summary.filter(pl.col("promotion_gate_pass")).height) if not summary.is_empty() else 0,
         },
         "date_range": _date_range(features),
-        "pit_manifest": _pit_manifest_metadata(archive_manifest, features),
+        "pit_manifest": _pit_manifest_metadata(archive_manifest, features, klines),
         "cost_model": {
             **asdict(costs),
             "base_round_trip_cost_bps": costs.base_entry_exit_cost_bps,
@@ -1532,38 +1532,55 @@ def _float_or_nan(value: Any) -> float:
         return float("nan")
 
 
-def _pit_manifest_metadata(archive_manifest: pl.DataFrame, features: pl.DataFrame) -> dict[str, Any]:
+def _pit_manifest_metadata(archive_manifest: pl.DataFrame, features: pl.DataFrame, klines: pl.DataFrame) -> dict[str, Any]:
     manifest_symbols = _symbol_set(archive_manifest)
     feature_symbols = _symbol_set(features)
+    manifest_date_symbols = _date_symbol_set(archive_manifest)
+    kline_covered_date_symbols = _covered_kline_date_symbol_set(klines)
     return {
         "rows": archive_manifest.height,
         "symbols": len(manifest_symbols),
         "feature_symbols": len(feature_symbols),
         "feature_symbols_missing_from_manifest": len(feature_symbols - manifest_symbols),
         "manifest_symbols_missing_from_features": len(manifest_symbols - feature_symbols),
-        "full_pit_universe_pass": _full_pit_universe_pass(features, archive_manifest),
+        "manifest_date_symbols": len(manifest_date_symbols),
+        "kline_covered_date_symbols": len(kline_covered_date_symbols),
+        "manifest_date_symbols_missing_from_klines": len(manifest_date_symbols - kline_covered_date_symbols),
+        "full_pit_universe_pass": _full_pit_universe_pass(klines, archive_manifest),
     }
 
 
-def _full_pit_universe_pass(features: pl.DataFrame, archive_manifest: pl.DataFrame) -> bool:
+def _full_pit_universe_pass(klines: pl.DataFrame, archive_manifest: pl.DataFrame) -> bool:
     manifest_symbols = _symbol_set(archive_manifest)
-    feature_symbols = _symbol_set(features)
-    return bool(manifest_symbols) and manifest_symbols.issubset(feature_symbols)
+    kline_symbols = _symbol_set(klines)
+    manifest_date_symbols = _date_symbol_set(archive_manifest)
+    kline_covered_date_symbols = _covered_kline_date_symbol_set(klines)
+    return (
+        bool(manifest_symbols)
+        and manifest_symbols.issubset(kline_symbols)
+        and bool(manifest_date_symbols)
+        and manifest_date_symbols.issubset(kline_covered_date_symbols)
+    )
 
 
-def _full_pit_universe_error(features: pl.DataFrame, archive_manifest: pl.DataFrame) -> str:
+def _full_pit_universe_error(klines: pl.DataFrame, archive_manifest: pl.DataFrame) -> str:
     manifest_symbols = _symbol_set(archive_manifest)
-    feature_symbols = _symbol_set(features)
-    missing = sorted(manifest_symbols - feature_symbols)
+    kline_symbols = _symbol_set(klines)
+    missing_symbols = sorted(manifest_symbols - kline_symbols)
+    manifest_date_symbols = _date_symbol_set(archive_manifest)
+    kline_covered_date_symbols = _covered_kline_date_symbol_set(klines)
+    missing_date_symbols = sorted(manifest_date_symbols - kline_covered_date_symbols)
     if not manifest_symbols:
         return (
             "volume-events requires full PIT archive membership by default, but archive_trade_manifest is empty. "
             "Run archive-manifest and archive-download-klines-1h first, or pass --allow-partial-pit only for explicitly biased diagnostics."
         )
     return (
-        "volume-events requires a full PIT universe by default, but klines_1h does not cover every archive manifest symbol. "
-        f"manifest_symbols={len(manifest_symbols)} feature_symbols={len(feature_symbols)} missing_symbols={len(missing)} "
-        f"missing_sample={missing[:20]}. Finish archive-download-klines-1h before running real event backtests."
+        "volume-events requires a full PIT universe by default, but klines_1h does not cover every archive manifest symbol/date. "
+        f"manifest_symbols={len(manifest_symbols)} kline_symbols={len(kline_symbols)} missing_symbols={len(missing_symbols)} "
+        f"manifest_date_symbols={len(manifest_date_symbols)} kline_covered_date_symbols={len(kline_covered_date_symbols)} "
+        f"missing_date_symbols={len(missing_date_symbols)} missing_symbol_sample={missing_symbols[:20]} "
+        f"missing_date_symbol_sample={missing_date_symbols[:20]}. Finish archive-download-klines-1h before running real event backtests."
     )
 
 
@@ -1571,6 +1588,27 @@ def _symbol_set(frame: pl.DataFrame) -> set[str]:
     if frame.is_empty() or "symbol" not in frame.columns:
         return set()
     return {str(symbol) for symbol in frame["symbol"].unique().to_list()}
+
+
+def _date_symbol_set(frame: pl.DataFrame) -> set[tuple[str, str]]:
+    if frame.is_empty() or "symbol" not in frame.columns or "date" not in frame.columns:
+        return set()
+    return {
+        (str(row["date"]), str(row["symbol"]))
+        for row in frame.select(["date", "symbol"]).drop_nulls(["date", "symbol"]).unique().to_dicts()
+    }
+
+
+def _covered_kline_date_symbol_set(klines: pl.DataFrame, *, min_hourly_bars: int = 20) -> set[tuple[str, str]]:
+    if klines.is_empty() or not _has_columns(klines, "date", "symbol"):
+        return set()
+    covered = (
+        klines.group_by(["date", "symbol"])
+        .agg(pl.len().alias("hourly_bars"))
+        .filter(pl.col("hourly_bars") >= min_hourly_bars)
+        .select(["date", "symbol"])
+    )
+    return _date_symbol_set(covered)
 
 
 def _run_label(

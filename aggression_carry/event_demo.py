@@ -51,7 +51,7 @@ class EventDemoCycleConfig:
     fallback_equity_usdt: float = 10_000.0
     max_entry_lag_minutes: int = 15
     max_new_entries_per_cycle: int = 6
-    entry_leverage: float = 1.0
+    entry_leverage: float = 2.0
     entry_order_type: str = "Market"
     exit_order_type: str = "Market"
     submit_orders: bool = False
@@ -106,6 +106,7 @@ def run_event_demo_cycle(
         score_name, score_col = _event_score(strategy.event_types[0])
         scenario = _selected_scenario(strategy)
         order_notional_pct_equity = target_order_notional_pct_equity(demo, strategy)
+        order_initial_margin_pct_equity = target_initial_margin_pct_equity(demo, strategy)
         rank_lookup = _rank_lookup_cache(features, config=strategy).get(score_col, {})
         price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, klines)
         contract_by_symbol = _contract_lookup(universe)
@@ -203,6 +204,10 @@ def run_event_demo_cycle(
             "open_trades_after": _open_trades(all_trades).height,
             "equity_usdt": equity_usdt,
             "order_notional_pct_equity": order_notional_pct_equity,
+            "order_initial_margin_pct_equity": order_initial_margin_pct_equity,
+            "target_gross_exposure": order_notional_pct_equity * int(strategy.max_active_symbols),
+            "target_initial_margin_pct_equity": order_initial_margin_pct_equity * int(strategy.max_active_symbols),
+            "entry_leverage": demo.entry_leverage,
             "bybit_positions": bybit_position_summary["positions"],
             "bybit_position_value_usdt": bybit_position_summary["position_value_usdt"],
             "bybit_unrealized_pnl_usdt": bybit_position_summary["unrealized_pnl_usdt"],
@@ -459,6 +464,13 @@ def target_order_notional_pct_equity(
     return event_config.gross_exposure / max(event_config.max_active_symbols, 1)
 
 
+def target_initial_margin_pct_equity(
+    demo_config: EventDemoCycleConfig,
+    event_config: VolumeEventResearchConfig,
+) -> float:
+    return target_order_notional_pct_equity(demo_config, event_config) / demo_config.entry_leverage
+
+
 def build_position_pnl_snapshot(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for position in positions:
@@ -574,24 +586,27 @@ def format_event_demo_cycle_report(payload: dict[str, Any]) -> str:
         f"- Exits executed: {cycle['exits_executed']} / candidates {cycle['exit_candidates']}",
         f"- Open trades after: {cycle['open_trades_after']}",
         f"- Per-entry notional: {_float(cycle.get('order_notional_pct_equity')):.2%} of equity",
+        f"- Per-entry initial margin: {_float(cycle.get('order_initial_margin_pct_equity')):.2%} of equity at {_float(cycle.get('entry_leverage')):.2g}x",
+        f"- Target gross / initial margin: {_float(cycle.get('target_gross_exposure')):.2%} / {_float(cycle.get('target_initial_margin_pct_equity')):.2%} of equity",
         f"- Bybit positions: {cycle.get('bybit_positions', 0)} / uPnL ${_float(cycle.get('bybit_unrealized_pnl_usdt')):,.2f}",
         f"- Ledger positions: {cycle.get('ledger_positions', 0)} / uPnL ${_float(cycle.get('ledger_unrealized_pnl_usdt')):,.2f}",
         f"- Telegram sent: {cycle.get('telegram_sent', False)}",
         "",
         "## Entries",
         "",
-        "| Symbol | Side | Qty | Notional | Signal | Ready | Stop | TP | Mode |",
-        "|---|---|---:|---:|---|---|---:|---:|---|",
+        "| Symbol | Side | Qty | Notional | Init Margin | Lev | Signal | Ready | Stop | TP | Mode |",
+        "|---|---|---:|---:|---:|---:|---|---|---:|---:|---|",
     ]
     for row in payload.get("entries", []):
         lines.append(
             f"| {row.get('symbol', '')} | {row.get('side', '')} | {row.get('qty', '')} | "
-            f"${_float(row.get('notional_usdt')):,.2f} | {_iso_dt(row.get('signal_ts_ms'))} | "
+            f"${_float(row.get('notional_usdt')):,.2f} | ${_float(row.get('initial_margin_usdt')):,.2f} | "
+            f"{_float(row.get('entry_leverage')):.2g}x | {_iso_dt(row.get('signal_ts_ms'))} | "
             f"{_iso_dt(row.get('entry_ready_ts_ms'))} | {_float(row.get('stop_price')):.8g} | "
             f"{_float(row.get('take_profit_price')):.8g} | {row.get('submit_mode', '')} |"
         )
     if not payload.get("entries"):
-        lines.append("|  |  |  |  |  |  |  |  |  |")
+        lines.append("|  |  |  |  |  |  |  |  |  |  |  |")
     lines.extend(
         [
             "",
@@ -666,6 +681,8 @@ def _validate_demo_config(config: EventDemoCycleConfig) -> None:
         raise ValueError("wallet_balance_fraction must be in (0, 1]")
     if config.max_new_entries_per_cycle <= 0:
         raise ValueError("max_new_entries_per_cycle must be positive")
+    if config.entry_leverage <= 0.0:
+        raise ValueError("entry_leverage must be positive")
     if config.submit_orders and not config.confirm_demo_orders:
         raise RuntimeError("Refusing to submit demo orders without --confirm-demo-orders")
 
@@ -763,6 +780,7 @@ def _execute_entries(
         if quantity is None:
             continue
         qty, actual_notional = quantity
+        initial_margin_usdt = actual_notional / demo.entry_leverage
         side = str(candidate["side"])
         bybit_side = "Sell" if side == "short" else "Buy"
         stop_price = _stop_price_for_entry(
@@ -813,6 +831,10 @@ def _execute_entries(
             "qty": entry_qty,
             "notional_usdt": actual_notional,
             "equity_usdt": equity_usdt,
+            "target_notional_pct_equity": order_notional_pct_equity,
+            "entry_leverage": demo.entry_leverage,
+            "initial_margin_usdt": initial_margin_usdt,
+            "initial_margin_pct_equity": initial_margin_usdt / equity_usdt if equity_usdt > 0.0 else 0.0,
             "stop_price": stop_price,
             "take_profit_price": take_profit_price,
             "entry_order_link_id": entry_link,
@@ -836,6 +858,9 @@ def _execute_entries(
                 "submit_mode": submit_mode,
                 "avg_price": entry_price,
                 "notional_usdt": actual_notional,
+                "target_notional_pct_equity": order_notional_pct_equity,
+                "entry_leverage": demo.entry_leverage,
+                "initial_margin_usdt": initial_margin_usdt,
                 "status": "submitted" if demo.submit_orders else "planned",
             }
         )
@@ -1367,9 +1392,11 @@ def format_telegram_status_message(payload: dict[str, Any]) -> str:
     cycle = payload["cycle"]
     bybit_summary = payload.get("bybit_position_summary", {})
     ledger_summary = payload.get("ledger_position_summary", {})
+    reason = _telegram_notification_reason(payload)
     lines = [
         "AGC Bybit demo status",
         f"time={_iso_dt(cycle['ts_ms'])}",
+        f"reason={reason or 'manual_status'}",
         f"mode={cycle['mode']} equity=${_float(cycle['equity_usdt']):,.2f}",
         f"entries={cycle['entries_executed']}/{cycle['entry_candidates']} exits={cycle['exits_executed']}/{cycle['exit_candidates']}",
         f"bybit_positions={bybit_summary.get('positions', 0)} "
@@ -1408,9 +1435,24 @@ def format_telegram_status_message(payload: dict[str, Any]) -> str:
     return "\n".join(lines)[:3900]
 
 
+def _telegram_notification_reason(payload: dict[str, Any]) -> str:
+    cycle = payload.get("cycle", {})
+    if cycle.get("position_report_error"):
+        return "position_report_error"
+    if payload.get("reconciliations"):
+        return "position_reconciled"
+    if int(cycle.get("entries_executed") or 0) > 0:
+        return "entry_executed"
+    if int(cycle.get("exits_executed") or 0) > 0:
+        return "exit_executed"
+    return ""
+
+
 def _maybe_notify(payload: dict[str, Any], *, enabled: bool) -> tuple[bool, str]:
     if not enabled:
         return False, "disabled"
+    if not _telegram_notification_reason(payload):
+        return False, "quiet_no_material_event"
     text = format_telegram_status_message(payload)
     try:
         sent = send_telegram_message(text, enabled=True)

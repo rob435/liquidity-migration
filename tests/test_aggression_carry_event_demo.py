@@ -6,6 +6,9 @@ import pytest
 from aggression_carry.cli import build_parser
 from aggression_carry.event_demo import (
     EventDemoCycleConfig,
+    _execute_entries,
+    _maybe_notify,
+    _telegram_notification_reason,
     _validate_demo_config,
     build_ledger_position_pnl_snapshot,
     build_position_pnl_snapshot,
@@ -14,6 +17,7 @@ from aggression_carry.event_demo import (
     plan_demo_exits,
     select_demo_entry_candidates,
     summarize_position_pnl,
+    target_initial_margin_pct_equity,
     target_order_notional_pct_equity,
     wallet_equity_usdt,
 )
@@ -31,12 +35,16 @@ def test_event_demo_cli_defaults_to_frequent_demo_forward_cycle() -> None:
     assert args.max_order_notional_pct_equity == 0.0
     assert args.max_entry_lag_minutes == 15
     assert args.max_new_entries_per_cycle == 6
+    assert args.entry_leverage == 2.0
     assert args.submit_orders is False
     assert args.confirm_demo_orders is False
 
 
 def test_event_demo_default_sizing_matches_backtest_weight() -> None:
     assert target_order_notional_pct_equity(EventDemoCycleConfig(), VolumeEventResearchConfig()) == 1.25 / 6.0
+    assert target_initial_margin_pct_equity(EventDemoCycleConfig(), VolumeEventResearchConfig()) == pytest.approx(
+        1.25 / 6.0 / 2.0
+    )
     assert (
         target_order_notional_pct_equity(
             EventDemoCycleConfig(max_order_notional_pct_equity=0.10),
@@ -44,6 +52,38 @@ def test_event_demo_default_sizing_matches_backtest_weight() -> None:
         )
         == 0.10
     )
+
+
+def test_execute_entries_sizes_notional_before_leverage_margin() -> None:
+    candidates = [
+        {
+            "trade_id": "t1",
+            "symbol": "AAAUSDT",
+            "side": "short",
+            "signal_ts_ms": 1_700_000_000_000,
+            "stop_loss_pct": 0.12,
+            "take_profit_pct": 0.20,
+        }
+    ]
+
+    rows, orders = _execute_entries(
+        candidates,
+        trading_client=None,
+        demo=EventDemoCycleConfig(entry_leverage=2.0),
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.20,
+        price_by_symbol={"AAAUSDT": 100.0},
+        contract_by_symbol={"AAAUSDT": {"qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}},
+        now_ms=1_700_000_060_000,
+    )
+
+    assert rows[0]["qty"] == "20"
+    assert rows[0]["notional_usdt"] == 2_000.0
+    assert rows[0]["entry_leverage"] == 2.0
+    assert rows[0]["initial_margin_usdt"] == 1_000.0
+    assert rows[0]["initial_margin_pct_equity"] == 0.10
+    assert orders[0]["notional_usdt"] == 2_000.0
+    assert orders[0]["initial_margin_usdt"] == 1_000.0
 
 
 def test_wallet_equity_usdt_prefers_total_equity_then_coin_equity() -> None:
@@ -162,6 +202,48 @@ def test_telegram_status_message_includes_positions_and_pnl() -> None:
     assert "bybit_positions=1" in text
     assert "uPnL=$50.00" in text
     assert "AAAUSDT short" in text
+    assert "reason=entry_executed" in text
+
+
+def test_telegram_notify_only_for_material_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    sent: list[str] = []
+
+    def fake_send(text: str, *, enabled: bool) -> bool:
+        sent.append(text)
+        return enabled
+
+    monkeypatch.setattr("aggression_carry.event_demo.send_telegram_message", fake_send)
+    quiet_payload = {
+        "cycle": {
+            "ts_ms": 1_700_000_000_000,
+            "mode": "submit",
+            "equity_usdt": 10_000.0,
+            "entries_executed": 0,
+            "entry_candidates": 0,
+            "exits_executed": 0,
+            "exit_candidates": 0,
+            "position_report_error": "",
+        },
+        "bybit_position_summary": {},
+        "ledger_position_summary": {},
+    }
+
+    assert _telegram_notification_reason(quiet_payload) == ""
+    assert _maybe_notify(quiet_payload, enabled=True) == (False, "quiet_no_material_event")
+    assert sent == []
+
+    alert_payload = {
+        **quiet_payload,
+        "cycle": {
+            **quiet_payload["cycle"],
+            "entries_executed": 1,
+            "entry_candidates": 1,
+        },
+    }
+
+    assert _telegram_notification_reason(alert_payload) == "entry_executed"
+    assert _maybe_notify(alert_payload, enabled=True) == (True, "")
+    assert len(sent) == 1
 
 
 def test_order_quantity_for_notional_floors_to_qty_step_and_min_notional() -> None:
@@ -356,3 +438,8 @@ def test_submit_orders_requires_explicit_confirmation() -> None:
 
     with pytest.raises(RuntimeError, match="confirm-demo-orders"):
         _validate_demo_config(config)
+
+
+def test_event_demo_rejects_non_positive_entry_leverage() -> None:
+    with pytest.raises(ValueError, match="entry_leverage"):
+        _validate_demo_config(EventDemoCycleConfig(entry_leverage=0.0))

@@ -128,7 +128,7 @@ def test_volume_event_research_requires_full_pit_by_default(tmp_path: Path) -> N
 
 
 def test_full_pit_universe_error_reports_missing_symbols() -> None:
-    features = pl.DataFrame([{"symbol": "AAAUSDT", "ts_ms": 1}])
+    klines = pl.DataFrame([{"symbol": "AAAUSDT", "date": "2024-01-01"} for _ in range(24)])
     manifest = pl.DataFrame(
         [
             {"symbol": "AAAUSDT", "date": "2024-01-01"},
@@ -136,10 +136,26 @@ def test_full_pit_universe_error_reports_missing_symbols() -> None:
         ]
     )
 
-    message = _full_pit_universe_error(features, manifest)
+    message = _full_pit_universe_error(klines, manifest)
 
     assert "missing_symbols=1" in message
     assert "BBBUSDT" in message
+
+
+def test_full_pit_universe_error_reports_missing_symbol_dates() -> None:
+    klines = pl.DataFrame([{"symbol": "AAAUSDT", "date": "2024-01-01"} for _ in range(24)])
+    manifest = pl.DataFrame(
+        [
+            {"symbol": "AAAUSDT", "date": "2024-01-01"},
+            {"symbol": "AAAUSDT", "date": "2024-01-02"},
+        ]
+    )
+
+    message = _full_pit_universe_error(klines, manifest)
+
+    assert "missing_symbols=0" in message
+    assert "missing_date_symbols=1" in message
+    assert "2024-01-02" in message
 
 
 def test_event_filter_excludes_default_stable_and_peg_symbols() -> None:
@@ -309,6 +325,22 @@ def test_volume_event_promotion_requires_full_pit_universe() -> None:
     assert fields["pit_membership_pass"] is True
     assert fields["promotion_gate_pass"] is False
     assert fields["promotion_reason"] == "full_pit_universe_fail"
+
+
+def test_volume_event_promotion_uses_documented_drawdown_gate() -> None:
+    fields = _promotion_fields(
+        [
+            {"name": "train_2023_2024", "total_return": 0.10, "max_drawdown": -0.24, "sharpe_like": 1.0},
+            {"name": "validation_2024_2025", "total_return": 0.08, "max_drawdown": -0.26, "sharpe_like": 0.8},
+            {"name": "oos_2025_2026", "total_return": 0.03, "max_drawdown": -0.15, "sharpe_like": 0.7},
+        ],
+        config=VolumeEventResearchConfig(),
+        pit_membership_pass=True,
+        full_pit_universe_pass=True,
+    )
+
+    assert fields["promotion_gate_pass"] is False
+    assert "drawdown_fail" in fields["promotion_reason"]
 
 
 def test_attach_event_archive_membership_flags_symbol_dates() -> None:
