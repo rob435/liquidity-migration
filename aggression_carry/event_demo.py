@@ -113,7 +113,7 @@ def run_event_demo_cycle(
         all_orders = read_dataset(root, "event_demo_orders")
 
         trading_client = private_client
-        if demo.submit_orders and trading_client is None:
+        if trading_client is None and (demo.submit_orders or (demo.telegram and _private_credentials_present())):
             trading_client = _build_private_client(config)
         equity_usdt = _wallet_equity_usdt(trading_client, demo=demo) if trading_client is not None else demo.fallback_equity_usdt
 
@@ -183,6 +183,10 @@ def run_event_demo_cycle(
             if demo.submit_orders or demo.record_dry_run:
                 _write_order_rows(root, pl.DataFrame(entry_order_rows, infer_schema_length=None))
 
+        bybit_positions, bybit_position_error = _safe_bybit_position_snapshot(trading_client, demo=demo)
+        bybit_position_summary = summarize_position_pnl(bybit_positions)
+        ledger_positions = build_ledger_position_pnl_snapshot(_open_trades(all_trades), price_by_symbol)
+        ledger_position_summary = summarize_position_pnl(ledger_positions)
         cycle_row = {
             "cycle_id": cycle_id,
             "ts_ms": cycle_now_ms,
@@ -199,9 +203,19 @@ def run_event_demo_cycle(
             "open_trades_after": _open_trades(all_trades).height,
             "equity_usdt": equity_usdt,
             "order_notional_pct_equity": order_notional_pct_equity,
+            "bybit_positions": bybit_position_summary["positions"],
+            "bybit_position_value_usdt": bybit_position_summary["position_value_usdt"],
+            "bybit_unrealized_pnl_usdt": bybit_position_summary["unrealized_pnl_usdt"],
+            "bybit_position_pnl_pct": bybit_position_summary["pnl_pct"],
+            "ledger_positions": ledger_position_summary["positions"],
+            "ledger_position_value_usdt": ledger_position_summary["position_value_usdt"],
+            "ledger_unrealized_pnl_usdt": ledger_position_summary["unrealized_pnl_usdt"],
+            "ledger_position_pnl_pct": ledger_position_summary["pnl_pct"],
+            "position_report_error": bybit_position_error,
+            "telegram_sent": False,
+            "telegram_error": "",
             **{f"skipped_{key}": value for key, value in skip_counts.items()},
         }
-        write_dataset(pl.DataFrame([cycle_row]), root, "event_demo_cycles", partition_by=())
 
         payload = {
             "cycle": cycle_row,
@@ -219,14 +233,22 @@ def run_event_demo_cycle(
             "entry_orders": entry_order_rows,
             "exit_orders": exit_order_rows,
             "reconciliations": reconcile_rows,
+            "bybit_positions": bybit_positions,
+            "bybit_position_summary": bybit_position_summary,
+            "ledger_positions": ledger_positions,
+            "ledger_position_summary": ledger_position_summary,
             "bybit_public_stats": public.stats() if hasattr(public, "stats") else {},
             "report_dir": str(report_dir),
         }
+        telegram_sent, telegram_error = _maybe_notify(payload, enabled=demo.telegram)
+        cycle_row["telegram_sent"] = telegram_sent
+        cycle_row["telegram_error"] = telegram_error
+        payload["cycle"] = cycle_row
+        write_dataset(pl.DataFrame([cycle_row]), root, "event_demo_cycles", partition_by=())
         report_path = report_dir / f"event_demo_cycle_{cycle_id}.json"
         report_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         (report_dir / "latest_event_demo_cycle.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         (report_dir / "latest_event_demo_cycle.md").write_text(format_event_demo_cycle_report(payload), encoding="utf-8")
-        _maybe_notify(payload, enabled=demo.telegram)
         return payload
 
 
@@ -416,6 +438,81 @@ def target_order_notional_pct_equity(
     return event_config.gross_exposure / max(event_config.max_active_symbols, 1)
 
 
+def build_position_pnl_snapshot(positions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for position in positions:
+        symbol = str(position.get("symbol", ""))
+        size = _float(position.get("size"))
+        if not symbol or size <= 0.0:
+            continue
+        side = _normalized_position_side(position.get("side"))
+        avg_price = _first_float(position, ("avgPrice", "entryPrice", "sessionAvgPrice"))
+        mark_price = _first_float(position, ("markPrice", "liqPrice"))
+        position_value = _first_float(position, ("positionValue", "positionBalance"))
+        if position_value <= 0.0 and mark_price > 0.0:
+            position_value = size * mark_price
+        unrealized_pnl = _first_float(position, ("unrealisedPnl", "unrealizedPnl"))
+        pnl_pct = unrealized_pnl / position_value if position_value > 0.0 else 0.0
+        rows.append(
+            {
+                "symbol": symbol,
+                "side": side,
+                "qty": size,
+                "avg_price": avg_price,
+                "mark_price": mark_price,
+                "position_value_usdt": position_value,
+                "unrealized_pnl_usdt": unrealized_pnl,
+                "pnl_pct": pnl_pct,
+                "leverage": _first_float(position, ("leverage",)),
+            }
+        )
+    return sorted(rows, key=lambda row: abs(float(row["unrealized_pnl_usdt"])), reverse=True)
+
+
+def build_ledger_position_pnl_snapshot(open_trades: pl.DataFrame, price_by_symbol: dict[str, float]) -> list[dict[str, Any]]:
+    if open_trades.is_empty():
+        return []
+    rows: list[dict[str, Any]] = []
+    for trade in open_trades.to_dicts():
+        symbol = str(trade.get("symbol", ""))
+        side = str(trade.get("side", ""))
+        qty = _float(trade.get("qty"))
+        entry_price = _float(trade.get("entry_price"))
+        mark_price = price_by_symbol.get(symbol, 0.0)
+        if not symbol or qty <= 0.0 or entry_price <= 0.0 or mark_price <= 0.0:
+            continue
+        if side == "short":
+            unrealized_pnl = (entry_price - mark_price) * qty
+        else:
+            unrealized_pnl = (mark_price - entry_price) * qty
+        position_value = mark_price * qty
+        rows.append(
+            {
+                "symbol": symbol,
+                "side": side,
+                "qty": qty,
+                "avg_price": entry_price,
+                "mark_price": mark_price,
+                "position_value_usdt": position_value,
+                "unrealized_pnl_usdt": unrealized_pnl,
+                "pnl_pct": unrealized_pnl / position_value if position_value > 0.0 else 0.0,
+                "leverage": 0.0,
+            }
+        )
+    return sorted(rows, key=lambda row: abs(float(row["unrealized_pnl_usdt"])), reverse=True)
+
+
+def summarize_position_pnl(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    position_value = sum(_float(row.get("position_value_usdt")) for row in rows)
+    unrealized_pnl = sum(_float(row.get("unrealized_pnl_usdt")) for row in rows)
+    return {
+        "positions": len(rows),
+        "position_value_usdt": position_value,
+        "unrealized_pnl_usdt": unrealized_pnl,
+        "pnl_pct": unrealized_pnl / position_value if position_value > 0.0 else 0.0,
+    }
+
+
 def order_quantity_for_notional(
     *,
     notional_usdt: float,
@@ -456,6 +553,9 @@ def format_event_demo_cycle_report(payload: dict[str, Any]) -> str:
         f"- Exits executed: {cycle['exits_executed']} / candidates {cycle['exit_candidates']}",
         f"- Open trades after: {cycle['open_trades_after']}",
         f"- Per-entry notional: {_float(cycle.get('order_notional_pct_equity')):.2%} of equity",
+        f"- Bybit positions: {cycle.get('bybit_positions', 0)} / uPnL ${_float(cycle.get('bybit_unrealized_pnl_usdt')):,.2f}",
+        f"- Ledger positions: {cycle.get('ledger_positions', 0)} / uPnL ${_float(cycle.get('ledger_unrealized_pnl_usdt')):,.2f}",
+        f"- Telegram sent: {cycle.get('telegram_sent', False)}",
         "",
         "## Entries",
         "",
@@ -486,6 +586,21 @@ def format_event_demo_cycle_report(payload: dict[str, Any]) -> str:
         )
     if not payload.get("exits"):
         lines.append("|  |  |  |  |  |")
+    lines.extend(
+        [
+            "",
+            "## Bybit Positions",
+            "",
+            "| Symbol | Side | Qty | Value | uPnL | PnL % | Mark | Avg |",
+            "|---|---|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in payload.get("bybit_positions", [])[:20]:
+        lines.append(_position_markdown_row(row))
+    if not payload.get("bybit_positions"):
+        lines.append("|  |  |  |  |  |  |  |  |")
+    if payload["cycle"].get("position_report_error"):
+        lines.extend(["", f"Position report error: {payload['cycle']['position_report_error']}"])
     lines.extend([""])
     return "\n".join(lines)
 
@@ -815,6 +930,25 @@ def _wallet_equity_usdt(trading_client: Any, *, demo: EventDemoCycleConfig) -> f
     return equity
 
 
+def _safe_bybit_position_snapshot(
+    trading_client: Any | None,
+    *,
+    demo: EventDemoCycleConfig,
+) -> tuple[list[dict[str, Any]], str]:
+    if trading_client is None:
+        if demo.telegram:
+            return [], "Bybit private client unavailable; set BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET"
+        return [], ""
+    try:
+        return build_position_pnl_snapshot(trading_client.get_positions(settle_coin=demo.settle_coin)), ""
+    except Exception as exc:  # noqa: BLE001 - private API failures should be reported, not hidden
+        return [], str(exc)[:500]
+
+
+def _private_credentials_present() -> bool:
+    return bool(os.environ.get("BYBIT_DEMO_API_KEY") and os.environ.get("BYBIT_DEMO_API_SECRET"))
+
+
 def _build_private_client(config: ResearchConfig) -> BybitPrivateClient:
     api_key = os.environ.get("BYBIT_DEMO_API_KEY")
     api_secret = os.environ.get("BYBIT_DEMO_API_SECRET")
@@ -879,6 +1013,23 @@ def _position_size_by_symbol(positions: list[dict[str, Any]]) -> dict[str, float
         if symbol:
             output[symbol] = max(output.get(symbol, 0.0), size)
     return output
+
+
+def _normalized_position_side(value: Any) -> str:
+    text = str(value or "").lower()
+    if text in {"sell", "short"}:
+        return "short"
+    if text in {"buy", "long"}:
+        return "long"
+    return text
+
+
+def _first_float(row: dict[str, Any], keys: tuple[str, ...]) -> float:
+    for key in keys:
+        value = _float(row.get(key))
+        if value != 0.0:
+            return value
+    return 0.0
 
 
 def _open_trades(trades: pl.DataFrame) -> pl.DataFrame:
@@ -1130,19 +1281,67 @@ def _empty_trades() -> pl.DataFrame:
     )
 
 
-def _maybe_notify(payload: dict[str, Any], *, enabled: bool) -> None:
-    if not enabled:
-        return
-    cycle = payload["cycle"]
-    text = (
-        "AGC event demo cycle\n"
-        f"time={_iso_dt(cycle['ts_ms'])}\n"
-        f"mode={cycle['mode']}\n"
-        f"entries={cycle['entries_executed']}/{cycle['entry_candidates']} "
-        f"exits={cycle['exits_executed']}/{cycle['exit_candidates']}\n"
-        f"open={cycle['open_trades_after']} equity={cycle['equity_usdt']:.2f}"
+def _position_markdown_row(row: dict[str, Any]) -> str:
+    return (
+        f"| {row.get('symbol', '')} | {row.get('side', '')} | {_float(row.get('qty')):g} | "
+        f"${_float(row.get('position_value_usdt')):,.2f} | ${_float(row.get('unrealized_pnl_usdt')):,.2f} | "
+        f"{_float(row.get('pnl_pct')):.2%} | {_float(row.get('mark_price')):.8g} | {_float(row.get('avg_price')):.8g} |"
     )
+
+
+def format_telegram_status_message(payload: dict[str, Any]) -> str:
+    cycle = payload["cycle"]
+    bybit_summary = payload.get("bybit_position_summary", {})
+    ledger_summary = payload.get("ledger_position_summary", {})
+    lines = [
+        "AGC Bybit demo status",
+        f"time={_iso_dt(cycle['ts_ms'])}",
+        f"mode={cycle['mode']} equity=${_float(cycle['equity_usdt']):,.2f}",
+        f"entries={cycle['entries_executed']}/{cycle['entry_candidates']} exits={cycle['exits_executed']}/{cycle['exit_candidates']}",
+        f"bybit_positions={bybit_summary.get('positions', 0)} "
+        f"value=${_float(bybit_summary.get('position_value_usdt')):,.2f} "
+        f"uPnL=${_float(bybit_summary.get('unrealized_pnl_usdt')):,.2f} "
+        f"({_float(bybit_summary.get('pnl_pct')):.2%})",
+    ]
+    if cycle.get("position_report_error"):
+        lines.append(f"position_error={cycle['position_report_error']}")
+    bybit_rows = payload.get("bybit_positions", [])[:10]
+    if bybit_rows:
+        lines.append("Bybit positions:")
+        for row in bybit_rows:
+            lines.append(
+                f"{row['symbol']} {row['side']} qty={_float(row['qty']):g} "
+                f"value=${_float(row['position_value_usdt']):,.2f} "
+                f"uPnL=${_float(row['unrealized_pnl_usdt']):,.2f} "
+                f"({_float(row['pnl_pct']):.2%}) mark={_float(row['mark_price']):.8g} avg={_float(row['avg_price']):.8g}"
+            )
+    else:
+        lines.append("Bybit positions: none")
+    lines.append(
+        f"ledger_open={ledger_summary.get('positions', 0)} "
+        f"value=${_float(ledger_summary.get('position_value_usdt')):,.2f} "
+        f"uPnL=${_float(ledger_summary.get('unrealized_pnl_usdt')):,.2f} "
+        f"({_float(ledger_summary.get('pnl_pct')):.2%})"
+    )
+    ledger_rows = payload.get("ledger_positions", [])[:6]
+    if ledger_rows:
+        lines.append("Ledger positions:")
+        for row in ledger_rows:
+            lines.append(
+                f"{row['symbol']} {row['side']} qty={_float(row['qty']):g} "
+                f"uPnL=${_float(row['unrealized_pnl_usdt']):,.2f} ({_float(row['pnl_pct']):.2%})"
+            )
+    return "\n".join(lines)[:3900]
+
+
+def _maybe_notify(payload: dict[str, Any], *, enabled: bool) -> tuple[bool, str]:
+    if not enabled:
+        return False, "disabled"
+    text = format_telegram_status_message(payload)
     try:
-        send_telegram_message(text, enabled=True)
-    except Exception:
-        pass
+        sent = send_telegram_message(text, enabled=True)
+    except Exception as exc:  # noqa: BLE001 - notification failure is cycle telemetry
+        return False, str(exc)[:500]
+    if not sent:
+        return False, "telegram env missing or Telegram API returned false"
+    return True, ""

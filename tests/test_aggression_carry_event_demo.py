@@ -7,9 +7,13 @@ from aggression_carry.cli import build_parser
 from aggression_carry.event_demo import (
     EventDemoCycleConfig,
     _validate_demo_config,
+    build_ledger_position_pnl_snapshot,
+    build_position_pnl_snapshot,
+    format_telegram_status_message,
     order_quantity_for_notional,
     plan_demo_exits,
     select_demo_entry_candidates,
+    summarize_position_pnl,
     target_order_notional_pct_equity,
     wallet_equity_usdt,
 )
@@ -57,6 +61,107 @@ def test_wallet_equity_usdt_prefers_total_equity_then_coin_equity() -> None:
         )
         == 321.25
     )
+
+
+def test_bybit_position_snapshot_reports_unrealized_pnl() -> None:
+    positions = build_position_pnl_snapshot(
+        [
+            {
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "size": "10",
+                "avgPrice": "100",
+                "markPrice": "95",
+                "positionValue": "950",
+                "unrealisedPnl": "50",
+                "leverage": "1",
+            },
+            {"symbol": "EMPTYUSDT", "side": "Buy", "size": "0"},
+        ]
+    )
+    summary = summarize_position_pnl(positions)
+
+    assert positions == [
+        {
+            "symbol": "AAAUSDT",
+            "side": "short",
+            "qty": 10.0,
+            "avg_price": 100.0,
+            "mark_price": 95.0,
+            "position_value_usdt": 950.0,
+            "unrealized_pnl_usdt": 50.0,
+            "pnl_pct": 50.0 / 950.0,
+            "leverage": 1.0,
+        }
+    ]
+    assert summary["positions"] == 1
+    assert summary["unrealized_pnl_usdt"] == 50.0
+
+
+def test_ledger_position_snapshot_marks_short_pnl_from_current_price() -> None:
+    open_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "10",
+                "entry_price": 100.0,
+            }
+        ]
+    )
+
+    positions = build_ledger_position_pnl_snapshot(open_trades, {"AAAUSDT": 95.0})
+
+    assert positions[0]["unrealized_pnl_usdt"] == 50.0
+    assert positions[0]["position_value_usdt"] == 950.0
+
+
+def test_telegram_status_message_includes_positions_and_pnl() -> None:
+    payload = {
+        "cycle": {
+            "ts_ms": 1_700_000_000_000,
+            "mode": "submit",
+            "equity_usdt": 10_000.0,
+            "entries_executed": 1,
+            "entry_candidates": 1,
+            "exits_executed": 0,
+            "exit_candidates": 0,
+            "position_report_error": "",
+        },
+        "bybit_position_summary": {
+            "positions": 1,
+            "position_value_usdt": 950.0,
+            "unrealized_pnl_usdt": 50.0,
+            "pnl_pct": 50.0 / 950.0,
+        },
+        "bybit_positions": [
+            {
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "qty": 10.0,
+                "avg_price": 100.0,
+                "mark_price": 95.0,
+                "position_value_usdt": 950.0,
+                "unrealized_pnl_usdt": 50.0,
+                "pnl_pct": 50.0 / 950.0,
+            }
+        ],
+        "ledger_position_summary": {
+            "positions": 1,
+            "position_value_usdt": 950.0,
+            "unrealized_pnl_usdt": 50.0,
+            "pnl_pct": 50.0 / 950.0,
+        },
+        "ledger_positions": [],
+    }
+
+    text = format_telegram_status_message(payload)
+
+    assert "bybit_positions=1" in text
+    assert "uPnL=$50.00" in text
+    assert "AAAUSDT short" in text
 
 
 def test_order_quantity_for_notional_floors_to_qty_step_and_min_notional() -> None:

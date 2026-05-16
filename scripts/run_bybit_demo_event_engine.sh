@@ -19,6 +19,14 @@ FALLBACK_EQUITY_USDT="${FALLBACK_EQUITY_USDT:-10000}"
 
 telegram_args=()
 if [[ "${TELEGRAM_ENABLED:-1}" == "1" ]]; then
+    if [[ -z "${TELEGRAM_BOT_TOKEN:-}" || -z "${TELEGRAM_CHAT_ID:-}" ]]; then
+        echo "Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID when TELEGRAM_ENABLED=1." >&2
+        exit 2
+    fi
+    if [[ -z "${BYBIT_DEMO_API_KEY:-}" || -z "${BYBIT_DEMO_API_SECRET:-}" ]]; then
+        echo "Set BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET so Telegram can report positions and PnL." >&2
+        exit 2
+    fi
     telegram_args+=(--telegram)
 fi
 

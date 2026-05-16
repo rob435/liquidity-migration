@@ -93,6 +93,7 @@ Default forward-test behavior:
 - enters eligible events after the 1-hour signal delay, with stale entries skipped after 15 minutes by default
 - sizes each coin from the backtest weight: `gross_exposure / max_active_symbols`, currently `1.0 / 6 = 16.67%` of current Bybit demo USDT equity
 - exits first on every cycle using fixed stop reconciliation, event decay, rank exit, or 1-day max hold
+- sends Telegram status with Bybit demo wallet equity, open positions, position value, and unrealized PnL when `TELEGRAM_ENABLED=1`
 - writes ledgers under `event_demo_trades`, `event_demo_orders`, and `event_demo_cycles`
 
 ## Useful Files

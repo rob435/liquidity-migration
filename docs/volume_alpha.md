@@ -280,7 +280,8 @@ SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 TELEGRAM_ENABLED=1 bash scripts/run_bybit_
 
 The runner checks every 60 seconds by default, sizes each accepted coin from
 the backtest weight (`gross_exposure / max_active_symbols`, currently 16.67% of
-current Bybit demo USDT equity), exits before entries, and records
+current Bybit demo USDT equity), exits before entries, sends Telegram status
+with wallet equity/open positions/unrealized PnL when enabled, and records
 `event_demo_trades`, `event_demo_orders`, and `event_demo_cycles` ledgers. It is
 a current-universe forward tester, so it is allowed for demo evidence and
 operations, not for historical promotion evidence.
