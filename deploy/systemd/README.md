@@ -17,9 +17,11 @@ Required secrets live outside git in:
 /etc/model050426/bybit-demo.env
 ```
 
-That environment file must define the Bybit demo API credentials and Telegram
-credentials. The service submits demo orders only and uses the promoted
-`volume-events` defaults from the repo.
+That environment file must define the Bybit demo API credentials. Telegram is
+disabled by default for the continuous runner; only define Telegram credentials
+and set `TELEGRAM_ENABLED=1` if material event alerts are explicitly wanted.
+The service submits demo orders only and uses the promoted `volume-events`
+defaults from the repo.
 
 The retired `model050426-bybit-demo-signal.timer` / `.service` daily signal scan
 must stay disabled; the active runner is the event-driven loop above.
