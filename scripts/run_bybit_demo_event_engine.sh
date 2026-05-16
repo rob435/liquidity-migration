@@ -4,6 +4,10 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
+PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/.venv/bin/python}"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+    PYTHON_BIN="$(command -v python3 || command -v python)"
+fi
 CONFIG_PATH="${CONFIG_PATH:-configs/volume_alpha.default.yaml}"
 DATA_ROOT="${DATA_ROOT:-data/bybit-demo-event}"
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-60}"
@@ -45,7 +49,7 @@ echo "data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS submit_orders=${SU
 
 while true; do
     set +e
-    python -m aggression_carry \
+    "$PYTHON_BIN" -m aggression_carry \
         --config "$CONFIG_PATH" \
         --data-root "$DATA_ROOT" \
         event-demo-cycle \
