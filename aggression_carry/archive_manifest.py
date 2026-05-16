@@ -4,7 +4,7 @@ import json
 import os
 import re
 import ssl
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from html.parser import HTMLParser
@@ -326,34 +326,41 @@ def run_archive_hourly_klines_download(
     rows = _select_manifest_rows(manifest, data_root=data_root, config=config, dataset="klines_1h")
     symbol_rows = _rows_by_symbol(rows)
     worker_count = max(1, min(config.workers, len(symbol_rows))) if symbol_rows else 1
+    output_dir = Path(report_dir or Path(data_root) / "reports")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_name(config.name)
+    progress_path = output_dir / f"archive_klines_1h_{safe_name}.progress.json"
     if worker_count == 1:
-        results = [
-            _download_one_archive_hourly_kline(
-                data_root,
-                row,
-                missing_only=config.missing_only,
-                min_existing_bars=config.min_existing_bars,
-                discard_archives_after_success=config.discard_archives_after_success,
+        results = []
+        for row in rows:
+            results.append(
+                _download_one_archive_hourly_kline(
+                    data_root,
+                    row,
+                    missing_only=config.missing_only,
+                    min_existing_bars=config.min_existing_bars,
+                    discard_archives_after_success=config.discard_archives_after_success,
+                )
             )
-            for row in rows
-        ]
+            if len(results) % 100 == 0 or len(results) == len(rows):
+                _write_archive_download_progress(progress_path, results, total_rows=len(rows), workers=worker_count)
     else:
         results = []
         with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            for symbol_results in executor.map(
-                lambda group: [
-                    _download_one_archive_hourly_kline(
-                        data_root,
-                        row,
-                        missing_only=config.missing_only,
-                        min_existing_bars=config.min_existing_bars,
-                        discard_archives_after_success=config.discard_archives_after_success,
-                    )
-                    for row in group
-                ],
-                symbol_rows,
-            ):
-                results.extend(symbol_results)
+            futures = [
+                executor.submit(
+                    _download_archive_hourly_group,
+                    data_root,
+                    group,
+                    config.missing_only,
+                    config.min_existing_bars,
+                    config.discard_archives_after_success,
+                )
+                for group in symbol_rows
+            ]
+            for future in as_completed(futures):
+                results.extend(future.result())
+                _write_archive_download_progress(progress_path, results, total_rows=len(rows), workers=worker_count)
     result_frame = pl.DataFrame(results, infer_schema_length=None) if results else _empty_download_results()
     failures = result_frame.filter(pl.col("status") == "failed").height if not result_frame.is_empty() else 0
     downloaded = result_frame.filter(pl.col("status") == "downloaded").height if not result_frame.is_empty() else 0
@@ -387,14 +394,58 @@ def run_archive_hourly_klines_download(
         },
     }
 
-    output_dir = Path(report_dir or Path(data_root) / "reports")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    safe_name = _safe_name(config.name)
     (output_dir / f"archive_klines_1h_{safe_name}.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
     (output_dir / f"archive_klines_1h_{safe_name}.md").write_text(format_archive_klines_report(payload), encoding="utf-8")
     if not result_frame.is_empty():
         result_frame.write_csv(output_dir / f"archive_klines_1h_{safe_name}.csv")
     return payload
+
+
+def _download_archive_hourly_group(
+    data_root: str | Path,
+    rows: list[dict[str, Any]],
+    missing_only: bool,
+    min_existing_bars: int,
+    discard_archives_after_success: bool,
+) -> list[dict[str, Any]]:
+    return [
+        _download_one_archive_hourly_kline(
+            data_root,
+            row,
+            missing_only=missing_only,
+            min_existing_bars=min_existing_bars,
+            discard_archives_after_success=discard_archives_after_success,
+        )
+        for row in rows
+    ]
+
+
+def _write_archive_download_progress(
+    path: Path,
+    results: list[dict[str, Any]],
+    *,
+    total_rows: int,
+    workers: int,
+) -> None:
+    status_counts: dict[str, int] = {}
+    archives_deleted = 0
+    for row in results:
+        status = str(row.get("status", "unknown"))
+        status_counts[status] = status_counts.get(status, 0) + 1
+        if bool(row.get("archive_deleted", False)):
+            archives_deleted += 1
+    payload = {
+        "updated_at": datetime.now(tz=UTC).isoformat(),
+        "rows": total_rows,
+        "completed": len(results),
+        "remaining": max(total_rows - len(results), 0),
+        "workers": workers,
+        "status": status_counts,
+        "archives_deleted": archives_deleted,
+    }
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temp_path.replace(path)
 
 
 def format_archive_manifest_report(payload: dict[str, Any]) -> str:
@@ -590,8 +641,7 @@ def _download_one_archive_hourly_kline(
         return _download_result(row, status="cached", bar_rows=existing_bar_rows, valid_bar_rows=existing_valid_bar_rows)
     local_path = Path(data_root) / "archives" / symbol / Path(urlparse(url).path).name
     try:
-        archive_path = download_public_trade_archive(url, local_path)
-        klines = read_public_trade_archive_klines_1h(archive_path, symbol=symbol)
+        archive_path, klines = _download_and_read_hourly_archive(url, local_path, symbol=symbol)
         if klines.is_empty():
             return _download_result(row, status="empty", bar_rows=0, valid_bar_rows=0, archive_path=str(archive_path))
         initial_price = previous_kline_close(data_root, symbol=symbol, archive_date=archive_date, dataset="klines_1h")
@@ -613,6 +663,18 @@ def _download_one_archive_hourly_kline(
         )
     except Exception as exc:  # noqa: BLE001 - archive failures must be reported per row
         return _download_result(row, status="failed", bar_rows=0, valid_bar_rows=0, error=str(exc))
+
+
+def _download_and_read_hourly_archive(url: str, local_path: Path, *, symbol: str) -> tuple[Path, pl.DataFrame]:
+    archive_path = download_public_trade_archive(url, local_path)
+    try:
+        return archive_path, read_public_trade_archive_klines_1h(archive_path, symbol=symbol)
+    except Exception:
+        if Path(archive_path) == local_path and local_path.exists():
+            local_path.unlink(missing_ok=True)
+            archive_path = download_public_trade_archive(url, local_path)
+            return archive_path, read_public_trade_archive_klines_1h(archive_path, symbol=symbol)
+        raise
 
 
 def _download_result(

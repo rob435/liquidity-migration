@@ -240,4 +240,9 @@ def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> 
     sort_cols = [col for col in ("symbol", "ts_ms") if col in output.columns]
     if sort_cols:
         output = output.sort(sort_cols)
-    output.write_parquet(path)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        output.write_parquet(temp_path)
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)

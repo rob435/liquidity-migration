@@ -25,6 +25,7 @@ DEFAULT_RETRIES = 5
 ARCHIVE_RETRIES_ENV = "AGC_ARCHIVE_DOWNLOAD_RETRIES"
 ARCHIVE_TIMEOUT_ENV = "AGC_ARCHIVE_DOWNLOAD_TIMEOUT_SECONDS"
 ARCHIVE_BACKEND_ENV = "AGC_ARCHIVE_DOWNLOAD_BACKEND"
+ARCHIVE_VECTORIZE_1H_ENV = "AGC_ARCHIVE_VECTORIZE_1H"
 
 
 def _positive_int_env(name: str, default: int) -> int:
@@ -87,6 +88,11 @@ def read_public_trade_archive(path: str | Path, *, symbol: str | None = None) ->
 
 def read_public_trade_archive_klines_1h(path: str | Path, *, symbol: str | None = None) -> pl.DataFrame:
     file_path = Path(path)
+    if os.environ.get(ARCHIVE_VECTORIZE_1H_ENV, "").strip().lower() in {"1", "true", "yes"}:
+        try:
+            return _read_public_trade_archive_klines_1h_vectorized(file_path, symbol=symbol)
+        except Exception:
+            pass
     try:
         with _public_trade_text_handle(file_path) as handle:
             reader = csv.DictReader(handle)
@@ -128,6 +134,63 @@ def read_public_trade_archive_klines_1h(path: str | Path, *, symbol: str | None 
     except Exception:
         trades = read_public_trade_archive(file_path, symbol=symbol)
         return aggregate_trade_klines_1h(trades)
+
+
+def _read_public_trade_archive_klines_1h_vectorized(file_path: Path, *, symbol: str | None = None) -> pl.DataFrame:
+    header = pl.read_csv(file_path, n_rows=0)
+    columns = set(header.columns)
+    required = {"timestamp", "size", "price"}
+    if not required.issubset(columns):
+        raise ValueError("unsupported public trade archive schema")
+    selected = ["timestamp", "size", "price"]
+    has_symbol_column = "symbol" in columns
+    if has_symbol_column:
+        selected.append("symbol")
+    if symbol is None and not has_symbol_column:
+        raise ValueError("archive row is missing symbol")
+
+    frame = pl.read_csv(
+        file_path,
+        columns=selected,
+        row_index_name="_row_nr",
+        schema_overrides={
+            "timestamp": pl.Float64,
+            "size": pl.Float64,
+            "price": pl.Float64,
+            **({"symbol": pl.Utf8} if has_symbol_column else {}),
+        },
+    )
+    if frame.is_empty():
+        return pl.DataFrame()
+    symbol_expr = pl.lit(symbol.upper()) if symbol is not None else pl.col("symbol").cast(pl.Utf8).str.to_uppercase()
+    return (
+        frame.select(
+            [
+                pl.col("_row_nr"),
+                (pl.col("timestamp") * 1000.0).cast(pl.Int64).alias("trade_ts_ms"),
+                ((pl.col("timestamp") * 1000.0).cast(pl.Int64) // MS_PER_HOUR * MS_PER_HOUR).alias("ts_ms"),
+                symbol_expr.alias("symbol"),
+                pl.col("price").cast(pl.Float64),
+                pl.col("size").cast(pl.Float64).alias("size_base"),
+            ]
+        )
+        .with_columns((pl.col("price") * pl.col("size_base")).alias("quote_value"))
+        .sort(["symbol", "ts_ms", "trade_ts_ms", "_row_nr"])
+        .group_by(["symbol", "ts_ms"], maintain_order=True)
+        .agg(
+            [
+                pl.col("price").first().alias("open"),
+                pl.col("price").max().alias("high"),
+                pl.col("price").min().alias("low"),
+                pl.col("price").last().alias("close"),
+                pl.col("size_base").sum().alias("volume_base"),
+                pl.col("quote_value").sum().alias("turnover_quote"),
+            ]
+        )
+        .with_columns(pl.lit("bybit_public_trades").alias("source"))
+        .select(["ts_ms", "symbol", "open", "high", "low", "close", "volume_base", "turnover_quote", "source"])
+        .sort(["symbol", "ts_ms"])
+    )
 
 
 def download_public_trade_archive(

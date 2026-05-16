@@ -257,7 +257,7 @@ def _run_event_scenario(
     config: VolumeEventResearchConfig,
 ) -> dict[str, Any]:
     score_name, score_col = _event_score(scenario.event_type)
-    side = "long" if scenario.side_hypothesis == "continuation" else "short"
+    side = _scenario_side(scenario.event_type, scenario.side_hypothesis)
     side_mode = "long_high_short_low" if side == "long" else "short_high_long_low"
     bt_config = VolumeBacktestConfig(
         score=score_name,
@@ -795,6 +795,14 @@ def _event_score(event_type: str) -> tuple[str, str]:
     if event_type in {"tail_liquidity_jump", "liquidity_migration"}:
         return "dollar_volume_rank", VOLUME_SCORE_COLUMNS["dollar_volume_rank"]
     raise ValueError(f"Unknown event type: {event_type}")
+
+
+def _scenario_side(event_type: str, side_hypothesis: str) -> str:
+    if side_hypothesis not in SIDE_HYPOTHESES:
+        raise ValueError(f"Unknown side hypothesis: {side_hypothesis}")
+    if event_type == "selloff_exhaustion":
+        return "short" if side_hypothesis == "continuation" else "long"
+    return "long" if side_hypothesis == "continuation" else "short"
 
 
 def _promotion_fields(

@@ -15,6 +15,7 @@ from aggression_carry.volume_events import (
     _add_rank_fraction,
     _monthly_returns,
     _promotion_fields,
+    _scenario_side,
     _validate_event_config,
     run_volume_event_research,
 )
@@ -193,6 +194,13 @@ def test_event_decay_exit_fires_at_scenario_threshold() -> None:
         rank_lookup={("AAAUSDT", 2): 0.80},
         threshold=0.80,
     )
+
+
+def test_selloff_exhaustion_side_hypotheses_are_directional() -> None:
+    assert _scenario_side("volume_exhaustion", "continuation") == "long"
+    assert _scenario_side("volume_exhaustion", "reversal") == "short"
+    assert _scenario_side("selloff_exhaustion", "continuation") == "short"
+    assert _scenario_side("selloff_exhaustion", "reversal") == "long"
 
 
 def test_tail_liquidity_jump_requires_pit_membership_flag() -> None:
