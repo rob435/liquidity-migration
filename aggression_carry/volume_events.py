@@ -1128,11 +1128,11 @@ def _write_equity_benchmark_chart(
     spy: list[dict[str, Any]] = []
     if _series_span_days(strategy) >= 90:
         spy, spy_status = _spy_benchmark_series(root, start=start, end=end)
-    annotations = _equity_chart_annotations(strategy, equity)
+    annotations = _equity_chart_annotations(strategy)
     series = [
-        {"name": "Strategy", "color": (17, 24, 39), "alpha": 250, "width": 5, "points": strategy},
-        {"name": "BTC", "color": (217, 119, 6), "alpha": 145, "width": 3, "points": btc},
-        {"name": "SPY", "color": (37, 99, 235), "alpha": 130, "width": 3, "points": spy},
+        {"name": "Strategy", "color": (15, 23, 42), "alpha": 255, "width": 5, "points": strategy},
+        {"name": "BTC", "color": (180, 83, 9), "alpha": 118, "width": 3, "points": btc},
+        {"name": "SPY", "color": (37, 99, 235), "alpha": 108, "width": 3, "points": spy},
     ]
     _remove_stale_chart_artifacts(output_dir)
     png_path = output_dir / "volume_event_best_equity_btc_spy.png"
@@ -1198,75 +1198,69 @@ def _chart_visible_moves(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return moves
 
 
-def _equity_chart_annotations(strategy: list[dict[str, Any]], equity: pl.DataFrame) -> list[dict[str, Any]]:
+def _equity_chart_annotations(strategy: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not strategy:
         return []
-    value_by_date = _chart_value_by_date(strategy)
     moves = _chart_visible_moves(strategy)
-    rows = equity.sort("ts_ms").to_dicts() if not equity.is_empty() else []
     annotations: list[dict[str, Any]] = []
-    seen_dates: set[str] = set()
+    used_dates: set[str] = set()
 
-    if rows and _has_columns(equity, "date", "drawdown"):
-        max_dd = min(rows, key=lambda row: _float_or_nan(row.get("drawdown")))
-        day = str(max_dd.get("date", ""))
-        value = _float_or_nan(max_dd.get("drawdown"))
-        if day and math.isfinite(value):
+    def far_enough(day_text: str, selected_dates: list[date]) -> bool:
+        parsed = _parse_day(day_text)
+        if parsed is None:
+            return False
+        return all(abs((parsed - selected).days) >= 42 for selected in selected_dates)
+
+    def add_moves(kind: str, candidates: list[dict[str, Any]], *, color: str) -> None:
+        count = 0
+        selected_dates: list[date] = []
+        for move in candidates:
+            day = str(move["date"])
+            if day in used_dates:
+                continue
+            if not far_enough(day, selected_dates):
+                continue
+            parsed = _parse_day(day)
+            if parsed is None:
+                continue
+            selected_dates.append(parsed)
+            used_dates.add(day)
+            count += 1
             annotations.append(
                 {
                     "date": day,
-                    "label": "Max DD",
-                    "kind": "drawdown",
-                    "value": value,
-                    "equity": value_by_date.get(day, float("nan")),
-                    "display": f"{day} Max DD {_pct(value)}",
-                    "color": "#be123c",
+                    "label": f"{'Down' if kind == 'down' else 'Up'} {count}",
+                    "kind": kind,
+                    "value": move["change_pct"],
+                    "equity": move["equity"],
+                    "display": _signed_pct(move["change_pct"]),
+                    "color": color,
                 }
             )
-            seen_dates.add(day)
+            if count >= 5:
+                break
 
-    count = 0
-    for move in sorted((row for row in moves if row["change_value"] < 0.0), key=lambda row: row["change_value"]):
-        day = str(move["date"])
-        if day in seen_dates:
-            continue
-        seen_dates.add(day)
-        count += 1
-        annotations.append(
-            {
-                "date": day,
-                "label": f"Drop {count}",
-                "kind": "down",
-                "value": move["change_pct"],
-                "equity": move["equity"],
-                "display": f"{day} Drop {_pct(move['change_pct'])}",
-                "color": "#dc2626",
-            }
-        )
-        if count >= 3:
-            break
+    add_moves(
+        "down",
+        sorted((row for row in moves if row["change_value"] < 0.0), key=lambda row: row["change_value"]),
+        color="#dc2626",
+    )
+    add_moves(
+        "up",
+        sorted((row for row in moves if row["change_value"] > 0.0), key=lambda row: row["change_value"], reverse=True),
+        color="#059669",
+    )
+    return sorted(annotations, key=lambda row: str(row["date"]))
 
-    count = 0
-    for move in sorted((row for row in moves if row["change_value"] > 0.0), key=lambda row: row["change_value"], reverse=True):
-        day = str(move["date"])
-        if day in seen_dates:
-            continue
-        seen_dates.add(day)
-        count += 1
-        annotations.append(
-            {
-                "date": day,
-                "label": f"Jump {count}",
-                "kind": "up",
-                "value": move["change_pct"],
-                "equity": move["equity"],
-                "display": f"{day} Jump {_pct(move['change_pct'])}",
-                "color": "#047857",
-            }
-        )
-        if count >= 3:
-            break
-    return annotations
+
+def _signed_pct(value: Any) -> str:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if not math.isfinite(number):
+        return ""
+    return f"{number:+.2%}"
 
 
 def _write_equity_benchmark_png(
@@ -1284,15 +1278,15 @@ def _write_equity_benchmark_png(
 
     scale = 2
     width, height = 1600, 940
-    left, right, top, bottom = 120, 58, 158, 160
+    left, right, top, bottom = 120, 58, 150, 190
     plot_w = width - left - right
     plot_h = height - top - bottom
     image = Image.new("RGBA", (width * scale, height * scale), (255, 255, 255, 255))
     draw = ImageDraw.Draw(image, "RGBA")
     font_regular = _chart_font(ImageFont, 22 * scale)
-    font_small = _chart_font(ImageFont, 18 * scale)
-    font_tiny = _chart_font(ImageFont, 16 * scale)
-    font_title = _chart_font(ImageFont, 34 * scale, bold=True)
+    font_small = _chart_font(ImageFont, 17 * scale)
+    font_tiny = _chart_font(ImageFont, 14 * scale)
+    font_title = _chart_font(ImageFont, 32 * scale, bold=True)
 
     all_points = [point for item in series for point in item["points"]]
     if not all_points:
@@ -1304,7 +1298,7 @@ def _write_equity_benchmark_png(
     if max_day <= min_day:
         max_day = date.fromordinal(min_day.toordinal() + 1)
     values = [float(point["value"]) for point in all_points if math.isfinite(float(point["value"]))]
-    y_min, y_max, y_ticks = _nice_axis(min(values), max(values), target_ticks=8)
+    y_min, y_max, y_ticks = _nice_axis(min(values), max(values), target_ticks=12)
 
     def sx(value: float) -> int:
         return int(round(value * scale))
@@ -1331,6 +1325,17 @@ def _write_equity_benchmark_png(
     def text(x: float, y: float, content: str, fill: tuple[int, int, int, int], font: Any, anchor: str | None = None) -> None:
         draw.text((sx(x), sy(y)), content, fill=_chart_opaque_fill(fill), font=font, anchor=anchor)
 
+    def rotated_text(x: float, y: float, content: str, fill: tuple[int, int, int, int], font: Any) -> None:
+        bbox = draw.textbbox((0, 0), content, font=font)
+        pad = 4 * scale
+        label_w = int(math.ceil(bbox[2] - bbox[0])) + pad * 2
+        label_h = int(math.ceil(bbox[3] - bbox[1])) + pad * 2
+        label = Image.new("RGBA", (label_w, label_h), (255, 255, 255, 0))
+        label_draw = ImageDraw.Draw(label, "RGBA")
+        label_draw.text((pad - bbox[0], pad - bbox[1]), content, fill=_chart_opaque_fill(fill), font=font)
+        rotated = label.rotate(90, expand=True)
+        image.alpha_composite(rotated, (sx(x) - rotated.width // 2, sy(y)))
+
     def rect(bounds: tuple[float, float, float, float], fill: tuple[int, int, int, int], outline: tuple[int, int, int, int] | None = None, width_px: int = 1) -> None:
         scaled = tuple(sx(bounds[idx]) if idx % 2 == 0 else sy(bounds[idx]) for idx in range(4))
         draw.rectangle(
@@ -1355,7 +1360,7 @@ def _write_equity_benchmark_png(
     text(
         left,
         78,
-        "Growth of $1; benchmark lines are normalised to the strategy start date. Markers highlight visible strategy equity moves.",
+        "Growth of $1; benchmark lines are normalised to the strategy start date. Dots mark the largest spaced strategy moves.",
         (75, 85, 99, 255),
         font_small,
     )
@@ -1363,13 +1368,13 @@ def _write_equity_benchmark_png(
 
     for value in y_ticks:
         y = y_pos(value)
-        line([(left, y), (left + plot_w, y)], (226, 232, 240, 210), 1)
-        text(left - 14, y, f"{value:g}x", (100, 116, 139, 255), font_tiny, anchor="rm")
+        line([(left, y), (left + plot_w, y)], (226, 232, 240, 185), 1)
+        text(left - 14, y, f"{value:g}x", (71, 85, 105, 255), font_tiny, anchor="rm")
     x_ticks = _date_axis_ticks(min_day, max_day)
     for day in x_ticks:
         x = x_pos(day.isoformat())
-        line([(x, top), (x, top + plot_h)], (238, 242, 247, 185), 1)
-        text(x, top + plot_h + 28, day.strftime("%Y-%m"), (100, 116, 139, 255), font_tiny, anchor="mm")
+        line([(x, top), (x, top + plot_h)], (238, 242, 247, 150), 1)
+        rotated_text(x, top + plot_h + 12, day.strftime("%Y-%m"), (71, 85, 105, 255), font_tiny)
     line([(left, top), (left, top + plot_h), (left + plot_w, top + plot_h)], (148, 163, 184, 255), 1)
 
     for item in series:
@@ -1379,7 +1384,7 @@ def _write_equity_benchmark_png(
         line(coords, (rgb[0], rgb[1], rgb[2], int(item["alpha"])), int(item["width"]))
 
     strategy_by_date = _chart_value_by_date(next((item["points"] for item in series if item["name"] == "Strategy"), []))
-    _draw_chart_annotations(draw, annotations, strategy_by_date, x_pos=x_pos, y_pos=y_pos, scale=scale, plot=(left, top, plot_w, plot_h), fonts=(font_tiny, font_small))
+    _draw_chart_annotations(draw, annotations, strategy_by_date, x_pos=x_pos, y_pos=y_pos, scale=scale, plot=(left, top, plot_w, plot_h), font=font_tiny)
 
     legend_x = left
     finals = _chart_final_values(series)
@@ -1388,11 +1393,10 @@ def _write_equity_benchmark_png(
             continue
         rgb = tuple(item["color"])
         label = f"{item['name']} {finals.get(str(item['name']), 0.0):.2f}x"
-        line([(legend_x, height - 62), (legend_x + 42, height - 62)], (rgb[0], rgb[1], rgb[2], 230), 5)
-        text(legend_x + 54, height - 70, label, (17, 24, 39, 255), font_regular)
+        line([(legend_x, height - 56), (legend_x + 42, height - 56)], (rgb[0], rgb[1], rgb[2], 230), 5)
+        text(legend_x + 54, height - 64, label, (17, 24, 39, 255), font_regular)
         legend_x += 230
 
-    text(left, height - 28, "Date", (100, 116, 139, 255), font_tiny)
     text(22, top + plot_h / 2, "Growth", (100, 116, 139, 255), font_tiny)
 
     image = image.resize((width, height), Image.Resampling.LANCZOS).convert("RGB")
@@ -1443,14 +1447,9 @@ def _draw_chart_annotations(
     y_pos: Any,
     scale: int,
     plot: tuple[float, float, float, float],
-    fonts: tuple[Any, Any],
+    font: Any,
 ) -> None:
     left, top, plot_w, plot_h = plot
-    font_tiny, font_small = fonts
-    top_lanes = [top - 58, top - 32, top - 6]
-    bottom_lanes = [top + plot_h + 38, top + plot_h + 64, top + plot_h + 90]
-    top_count = 0
-    bottom_count = 0
 
     def scx(value: float) -> int:
         return int(round(value * scale))
@@ -1462,6 +1461,17 @@ def _draw_chart_annotations(
         raw = hex_color.lstrip("#")
         return (int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16), alpha)
 
+    def halo_text(x: float, y: float, label: str, color: tuple[int, int, int, int]) -> None:
+        for dx, dy in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, 1)):
+            draw.text(
+                (scx(x + dx), scy(y + dy)),
+                label,
+                fill=_chart_opaque_fill((255, 255, 255, 245)),
+                font=font,
+                anchor="mm",
+            )
+        draw.text((scx(x), scy(y)), label, fill=_chart_opaque_fill(color), font=font, anchor="mm")
+
     for annotation in sorted(annotations, key=lambda row: str(row["date"])):
         day = str(annotation["date"])
         equity_value = _float_or_nan(annotation.get("equity"))
@@ -1472,35 +1482,25 @@ def _draw_chart_annotations(
         x = x_pos(day)
         y = y_pos(equity_value)
         color = color_rgba(str(annotation.get("color", "#111827")), 255)
-        soft = color[:3] + (18,)
-        marker = color[:3] + (225,)
-        draw.rectangle((scx(x - 2), scy(top), scx(x + 2), scy(top + plot_h)), fill=_chart_opaque_fill(soft))
-        draw.rectangle((scx(x - 5), scy(y - 5), scx(x + 5), scy(y + 5)), fill=_chart_opaque_fill(marker))
-        draw.rectangle(
+        draw.ellipse(
             (scx(x - 7), scy(y - 7), scx(x + 7), scy(y + 7)),
-            outline=_chart_opaque_fill((255, 255, 255, 235)),
-            width=2 * scale,
+            fill=_chart_opaque_fill((255, 255, 255, 245)),
+        )
+        draw.ellipse(
+            (scx(x - 4.5), scy(y - 4.5), scx(x + 4.5), scy(y + 4.5)),
+            fill=_chart_opaque_fill(color),
         )
         label = str(annotation["display"]).replace("  ", " ")
         if annotation.get("kind") == "up":
-            lane = bottom_lanes[bottom_count % len(bottom_lanes)]
-            bottom_count += 1
+            label_y = y - 17
+            if label_y < top + 10:
+                label_y = y + 17
         else:
-            lane = top_lanes[top_count % len(top_lanes)]
-            top_count += 1
-        text_w = draw.textlength(label, font=font_tiny) / scale
-        box_w = text_w + 16
-        box_h = 22
-        box_x = max(left + 6, min(x - box_w / 2, left + plot_w - box_w - 6))
-        box_y = lane - box_h / 2
-        draw.rounded_rectangle(
-            (scx(box_x), scy(box_y), scx(box_x + box_w), scy(box_y + box_h)),
-            radius=8 * scale,
-            fill=_chart_opaque_fill((255, 255, 255, 238)),
-            outline=_chart_opaque_fill(color[:3] + (120,)),
-            width=scale,
-        )
-        draw.text((scx(box_x + 8), scy(box_y + 4)), label, fill=_chart_opaque_fill(color[:3] + (255,)), font=font_tiny)
+            label_y = y + 17
+            if label_y > top + plot_h - 10:
+                label_y = y - 17
+        label_x = max(left + 28, min(x, left + plot_w - 28))
+        halo_text(label_x, label_y, label, color)
 
 
 def _nice_axis(min_value: float, max_value: float, *, target_ticks: int) -> tuple[float, float, list[float]]:
@@ -1538,18 +1538,18 @@ def _nice_step(value: float) -> float:
 
 def _date_axis_ticks(start: date, end: date) -> list[date]:
     ticks = []
-    month = 1 if start.month <= 6 else 7
     year = start.year
+    month = start.month
     current = date(year, month, 1)
     if current < start:
-        month += 6
+        month += 1
         if month > 12:
             month -= 12
             year += 1
         current = date(year, month, 1)
     while current <= end:
         ticks.append(current)
-        month = current.month + 6
+        month = current.month + 1
         year = current.year
         if month > 12:
             month -= 12

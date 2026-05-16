@@ -360,7 +360,7 @@ average split Sharpe-like: 2.44
 train return: +24.58%
 validation return: +91.49%
 OOS return: +86.42%
-default chart: volume_event_best_equity_btc_spy.png
+default chart: volume_event_best_equity_btc_spy.png with BTC/SPY overlays and small red/green strategy return markers
 promotion gate: pass
 ```
 

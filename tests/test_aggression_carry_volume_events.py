@@ -104,9 +104,9 @@ def test_equity_benchmark_chart_writes_overlays_and_annotations(tmp_path: Path) 
     assert chart["series"]["strategy"] == 5
     assert chart["series"]["btc"] == 5
     displays = [row["display"] for row in chart["annotations"]]
-    assert any("2024-01-02 Max DD" in item for item in displays)
-    assert any("2024-01-04 Drop" in item for item in displays)
-    assert any("2024-01-03 Jump" in item for item in displays)
+    assert "-10.00%" in displays
+    assert "+20.00%" in displays
+    assert all("Max DD" not in item and "Drop" not in item and "Jump" not in item for item in displays)
 
 
 def test_volume_event_research_requires_full_pit_by_default(tmp_path: Path) -> None:
