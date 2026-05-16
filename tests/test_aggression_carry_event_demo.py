@@ -10,6 +10,7 @@ from aggression_carry.event_demo import (
     order_quantity_for_notional,
     plan_demo_exits,
     select_demo_entry_candidates,
+    target_order_notional_pct_equity,
     wallet_equity_usdt,
 )
 from aggression_carry.volume_alpha import MS_PER_HOUR
@@ -23,11 +24,22 @@ def test_event_demo_cli_defaults_to_frequent_demo_forward_cycle() -> None:
     assert args.lookback_days == 45
     assert args.universe_rank_end == 220
     assert args.universe_max_symbols == 220
-    assert args.max_order_notional_pct_equity == 0.10
-    assert args.max_entry_lag_minutes == 180
+    assert args.max_order_notional_pct_equity == 0.0
+    assert args.max_entry_lag_minutes == 15
     assert args.max_new_entries_per_cycle == 6
     assert args.submit_orders is False
     assert args.confirm_demo_orders is False
+
+
+def test_event_demo_default_sizing_matches_backtest_weight() -> None:
+    assert target_order_notional_pct_equity(EventDemoCycleConfig(), VolumeEventResearchConfig()) == 1.0 / 6.0
+    assert (
+        target_order_notional_pct_equity(
+            EventDemoCycleConfig(max_order_notional_pct_equity=0.10),
+            VolumeEventResearchConfig(),
+        )
+        == 0.10
+    )
 
 
 def test_wallet_equity_usdt_prefers_total_equity_then_coin_equity() -> None:

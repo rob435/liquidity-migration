@@ -46,10 +46,10 @@ class EventDemoCycleConfig:
     universe_max_symbols: int = 220
     universe_min_turnover_24h: float = 2_000_000.0
     workers: int = 8
-    max_order_notional_pct_equity: float = 0.10
+    max_order_notional_pct_equity: float = 0.0
     wallet_balance_fraction: float = 1.0
     fallback_equity_usdt: float = 10_000.0
-    max_entry_lag_minutes: int = 180
+    max_entry_lag_minutes: int = 15
     max_new_entries_per_cycle: int = 6
     entry_leverage: float = 1.0
     entry_order_type: str = "Market"
@@ -105,6 +105,7 @@ def run_event_demo_cycle(
         features = _build_demo_features(klines)
         score_name, score_col = _event_score(strategy.event_types[0])
         scenario = _selected_scenario(strategy)
+        order_notional_pct_equity = target_order_notional_pct_equity(demo, strategy)
         rank_lookup = _rank_lookup_cache(features, config=strategy).get(score_col, {})
         price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, klines)
         contract_by_symbol = _contract_lookup(universe)
@@ -168,6 +169,7 @@ def run_event_demo_cycle(
             trading_client=trading_client,
             demo=demo,
             equity_usdt=equity_usdt,
+            order_notional_pct_equity=order_notional_pct_equity,
             price_by_symbol=price_by_symbol,
             contract_by_symbol=contract_by_symbol,
             now_ms=cycle_now_ms,
@@ -196,6 +198,7 @@ def run_event_demo_cycle(
             "open_trades_before": refreshed_open.height,
             "open_trades_after": _open_trades(all_trades).height,
             "equity_usdt": equity_usdt,
+            "order_notional_pct_equity": order_notional_pct_equity,
             **{f"skipped_{key}": value for key, value in skip_counts.items()},
         }
         write_dataset(pl.DataFrame([cycle_row]), root, "event_demo_cycles", partition_by=())
@@ -404,6 +407,15 @@ def wallet_equity_usdt(wallet_payload: dict[str, Any]) -> float:
     return 0.0
 
 
+def target_order_notional_pct_equity(
+    demo_config: EventDemoCycleConfig,
+    event_config: VolumeEventResearchConfig,
+) -> float:
+    if demo_config.max_order_notional_pct_equity > 0.0:
+        return demo_config.max_order_notional_pct_equity
+    return event_config.gross_exposure / max(event_config.max_active_symbols, 1)
+
+
 def order_quantity_for_notional(
     *,
     notional_usdt: float,
@@ -443,6 +455,7 @@ def format_event_demo_cycle_report(payload: dict[str, Any]) -> str:
         f"- Entries executed: {cycle['entries_executed']} / candidates {cycle['entry_candidates']}",
         f"- Exits executed: {cycle['exits_executed']} / candidates {cycle['exit_candidates']}",
         f"- Open trades after: {cycle['open_trades_after']}",
+        f"- Per-entry notional: {_float(cycle.get('order_notional_pct_equity')):.2%} of equity",
         "",
         "## Entries",
         "",
@@ -509,8 +522,8 @@ def _validate_demo_config(config: EventDemoCycleConfig) -> None:
         raise ValueError("universe_rank_end must cover at least the selected rank 31-150 universe")
     if config.universe_max_symbols < 150:
         raise ValueError("universe_max_symbols must cover at least the selected rank 31-150 universe")
-    if not 0.0 < config.max_order_notional_pct_equity <= 1.0:
-        raise ValueError("max_order_notional_pct_equity must be in (0, 1]")
+    if not 0.0 <= config.max_order_notional_pct_equity <= 1.0:
+        raise ValueError("max_order_notional_pct_equity must be in [0, 1]")
     if not 0.0 < config.wallet_balance_fraction <= 1.0:
         raise ValueError("wallet_balance_fraction must be in (0, 1]")
     if config.max_new_entries_per_cycle <= 0:
@@ -588,6 +601,7 @@ def _execute_entries(
     trading_client: Any | None,
     demo: EventDemoCycleConfig,
     equity_usdt: float,
+    order_notional_pct_equity: float,
     price_by_symbol: dict[str, float],
     contract_by_symbol: dict[str, dict[str, Any]],
     now_ms: int,
@@ -600,7 +614,7 @@ def _execute_entries(
         contract = contract_by_symbol.get(symbol, {})
         if price is None or price <= 0.0:
             continue
-        capped_notional = equity_usdt * demo.wallet_balance_fraction * demo.max_order_notional_pct_equity
+        capped_notional = equity_usdt * demo.wallet_balance_fraction * order_notional_pct_equity
         quantity = order_quantity_for_notional(
             notional_usdt=capped_notional,
             price=price,

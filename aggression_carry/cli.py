@@ -295,7 +295,12 @@ def build_parser() -> argparse.ArgumentParser:
     event_demo.add_argument("--universe-max-symbols", type=int, default=demo_defaults.universe_max_symbols)
     event_demo.add_argument("--universe-min-turnover-24h", type=float, default=demo_defaults.universe_min_turnover_24h)
     event_demo.add_argument("--workers", type=int, default=demo_defaults.workers)
-    event_demo.add_argument("--max-order-notional-pct-equity", type=float, default=demo_defaults.max_order_notional_pct_equity)
+    event_demo.add_argument(
+        "--max-order-notional-pct-equity",
+        type=float,
+        default=demo_defaults.max_order_notional_pct_equity,
+        help="Optional per-entry equity cap. Default 0 derives backtest sizing as gross_exposure / max_active_symbols.",
+    )
     event_demo.add_argument("--wallet-balance-fraction", type=float, default=demo_defaults.wallet_balance_fraction)
     event_demo.add_argument("--fallback-equity-usdt", type=float, default=demo_defaults.fallback_equity_usdt)
     event_demo.add_argument("--max-entry-lag-minutes", type=int, default=demo_defaults.max_entry_lag_minutes)

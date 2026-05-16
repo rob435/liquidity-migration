@@ -99,13 +99,13 @@ python -m aggression_carry \
 SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 TELEGRAM_ENABLED=1 bash scripts/run_bybit_demo_event_engine.sh
 ```
 
-The runner loops every `INTERVAL_SECONDS=300` by default. Each cycle:
+The runner loops every `INTERVAL_SECONDS=60` by default. Each cycle:
 
 1. Pulls the current Bybit USDT perpetual universe through rank 220 so the selected rank 31-150 strategy can be evaluated forward.
 2. Rebuilds recent 1h volume features from a 45-day lookback.
 3. Exits existing demo positions first on fixed-stop reconciliation, event decay, rank exit, or 1-day max hold.
-4. Enters accepted liquidity-migration events after the 1-hour signal delay, subject to max-active, cooldown, stop-pressure, and stale-entry gates.
-5. Sizes each accepted coin at max 10% of current Bybit demo USDT equity.
+4. Enters accepted liquidity-migration events after the 1-hour signal delay, subject to max-active, cooldown, stop-pressure, and stale-entry gates. Stale entries are skipped after 15 minutes by default so demo fills stay close to the backtest entry timestamp.
+5. Sizes each accepted coin from the same weight used by the backtest: `gross_exposure / max_active_symbols`, currently `1.0 / 6 = 16.67%` of current Bybit demo USDT equity. `--max-order-notional-pct-equity` is only an explicit override.
 6. Writes expected/submitted order state into `event_demo_orders`, trade state into `event_demo_trades`, cycle telemetry into `event_demo_cycles`, and Markdown/JSON reports under `reports/event-demo`.
 
 Order submission is still fail-closed: `--submit-orders` requires `--confirm-demo-orders`, `BYBIT_DEMO_API_KEY`, and `BYBIT_DEMO_API_SECRET`. Without those, the command is a dry-run scan.

@@ -278,8 +278,9 @@ executor. The continuous runner is:
 SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 TELEGRAM_ENABLED=1 bash scripts/run_bybit_demo_event_engine.sh
 ```
 
-The runner checks every 5 minutes by default, sizes each accepted coin at max
-10% of current Bybit demo USDT equity, exits before entries, and records
+The runner checks every 60 seconds by default, sizes each accepted coin from
+the backtest weight (`gross_exposure / max_active_symbols`, currently 16.67% of
+current Bybit demo USDT equity), exits before entries, and records
 `event_demo_trades`, `event_demo_orders`, and `event_demo_cycles` ledgers. It is
 a current-universe forward tester, so it is allowed for demo evidence and
 operations, not for historical promotion evidence.

@@ -75,7 +75,7 @@ python -m aggression_carry \
   event-demo-cycle
 ```
 
-Continuous demo runner, checking every 5 minutes:
+Continuous demo runner, checking every 60 seconds:
 
 ```bash
 TELEGRAM_ENABLED=1 \
@@ -90,8 +90,8 @@ Default forward-test behavior:
 
 - pulls current Bybit USDT perp ranks 1-220, then applies the selected rank 31-150 liquidity-migration filter
 - rebuilds recent 1h volume features each cycle from a 45-day lookback
-- enters eligible events after the 1-hour signal delay, with stale entries skipped after 180 minutes
-- sizes each coin at max `10%` of current Bybit demo USDT equity
+- enters eligible events after the 1-hour signal delay, with stale entries skipped after 15 minutes by default
+- sizes each coin from the backtest weight: `gross_exposure / max_active_symbols`, currently `1.0 / 6 = 16.67%` of current Bybit demo USDT equity
 - exits first on every cycle using fixed stop reconciliation, event decay, rank exit, or 1-day max hold
 - writes ledgers under `event_demo_trades`, `event_demo_orders`, and `event_demo_cycles`
 
