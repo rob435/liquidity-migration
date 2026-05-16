@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-import html
 import json
 import math
 import ssl
@@ -1129,38 +1128,23 @@ def _write_equity_benchmark_chart(
     spy: list[dict[str, Any]] = []
     if _series_span_days(strategy) >= 90:
         spy, spy_status = _spy_benchmark_series(root, start=start, end=end)
-    annotations = _equity_chart_annotations(equity)
-    benchmark_rows = _benchmark_rows(
-        [
-            ("Strategy", strategy),
-            ("BTC", btc),
-            ("SPY", spy),
-        ]
-    )
-    benchmark_csv = output_dir / "volume_event_best_equity_benchmarks.csv"
-    if benchmark_rows:
-        pl.DataFrame(benchmark_rows, infer_schema_length=None).write_csv(benchmark_csv)
-    annotations_csv = output_dir / "volume_event_best_equity_annotations.csv"
-    if annotations:
-        pl.DataFrame(annotations, infer_schema_length=None).write_csv(annotations_csv)
-    svg_path = output_dir / "volume_event_best_equity_btc_spy.svg"
-    svg_path.write_text(
-        _equity_benchmark_svg(
-            [
-                {"name": "Strategy", "color": "#111827", "points": strategy},
-                {"name": "BTC", "color": "#f59e0b", "points": btc},
-                {"name": "SPY", "color": "#2563eb", "points": spy},
-            ],
-            annotations=annotations,
-            start=start,
-            end=end,
-        ),
-        encoding="utf-8",
+    annotations = _equity_chart_annotations(strategy, equity)
+    series = [
+        {"name": "Strategy", "color": (17, 24, 39), "alpha": 250, "width": 5, "points": strategy},
+        {"name": "BTC", "color": (217, 119, 6), "alpha": 145, "width": 3, "points": btc},
+        {"name": "SPY", "color": (37, 99, 235), "alpha": 130, "width": 3, "points": spy},
+    ]
+    _remove_stale_chart_artifacts(output_dir)
+    png_path = output_dir / "volume_event_best_equity_btc_spy.png"
+    _write_equity_benchmark_png(
+        png_path,
+        series=series,
+        annotations=annotations,
+        start=start,
+        end=end,
     )
     return {
-        "svg": str(svg_path),
-        "benchmarks_csv": str(benchmark_csv) if benchmark_rows else "",
-        "annotations_csv": str(annotations_csv) if annotations else "",
+        "png": str(png_path),
         "series": {
             "strategy": len(strategy),
             "btc": len(btc),
@@ -1169,6 +1153,409 @@ def _write_equity_benchmark_chart(
         "spy_status": spy_status,
         "annotations": annotations,
     }
+
+
+def _remove_stale_chart_artifacts(output_dir: Path) -> None:
+    for name in (
+        "volume_event_best_equity_btc_spy.svg",
+        "volume_event_best_equity_benchmarks.csv",
+        "volume_event_best_equity_annotations.csv",
+    ):
+        try:
+            (output_dir / name).unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _chart_final_values(series: list[dict[str, Any]]) -> dict[str, float]:
+    finals: dict[str, float] = {}
+    for item in series:
+        points = item["points"]
+        if points:
+            finals[str(item["name"])] = float(points[-1]["value"])
+    return finals
+
+
+def _chart_value_by_date(points: list[dict[str, Any]]) -> dict[str, float]:
+    return {str(point["date"]): float(point["value"]) for point in points}
+
+
+def _chart_visible_moves(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    moves = []
+    for prior, current in zip(points, points[1:]):
+        prior_value = float(prior["value"])
+        current_value = float(current["value"])
+        if not math.isfinite(prior_value) or not math.isfinite(current_value) or prior_value <= 0.0:
+            continue
+        moves.append(
+            {
+                "date": current["date"],
+                "equity": current_value,
+                "change_value": current_value - prior_value,
+                "change_pct": current_value / prior_value - 1.0,
+            }
+        )
+    return moves
+
+
+def _equity_chart_annotations(strategy: list[dict[str, Any]], equity: pl.DataFrame) -> list[dict[str, Any]]:
+    if not strategy:
+        return []
+    value_by_date = _chart_value_by_date(strategy)
+    moves = _chart_visible_moves(strategy)
+    rows = equity.sort("ts_ms").to_dicts() if not equity.is_empty() else []
+    annotations: list[dict[str, Any]] = []
+    seen_dates: set[str] = set()
+
+    if rows and _has_columns(equity, "date", "drawdown"):
+        max_dd = min(rows, key=lambda row: _float_or_nan(row.get("drawdown")))
+        day = str(max_dd.get("date", ""))
+        value = _float_or_nan(max_dd.get("drawdown"))
+        if day and math.isfinite(value):
+            annotations.append(
+                {
+                    "date": day,
+                    "label": "Max DD",
+                    "kind": "drawdown",
+                    "value": value,
+                    "equity": value_by_date.get(day, float("nan")),
+                    "display": f"{day} Max DD {_pct(value)}",
+                    "color": "#be123c",
+                }
+            )
+            seen_dates.add(day)
+
+    count = 0
+    for move in sorted((row for row in moves if row["change_value"] < 0.0), key=lambda row: row["change_value"]):
+        day = str(move["date"])
+        if day in seen_dates:
+            continue
+        seen_dates.add(day)
+        count += 1
+        annotations.append(
+            {
+                "date": day,
+                "label": f"Drop {count}",
+                "kind": "down",
+                "value": move["change_pct"],
+                "equity": move["equity"],
+                "display": f"{day} Drop {_pct(move['change_pct'])}",
+                "color": "#dc2626",
+            }
+        )
+        if count >= 3:
+            break
+
+    count = 0
+    for move in sorted((row for row in moves if row["change_value"] > 0.0), key=lambda row: row["change_value"], reverse=True):
+        day = str(move["date"])
+        if day in seen_dates:
+            continue
+        seen_dates.add(day)
+        count += 1
+        annotations.append(
+            {
+                "date": day,
+                "label": f"Jump {count}",
+                "kind": "up",
+                "value": move["change_pct"],
+                "equity": move["equity"],
+                "display": f"{day} Jump {_pct(move['change_pct'])}",
+                "color": "#047857",
+            }
+        )
+        if count >= 3:
+            break
+    return annotations
+
+
+def _write_equity_benchmark_png(
+    path: Path,
+    *,
+    series: list[dict[str, Any]],
+    annotations: list[dict[str, Any]],
+    start: str,
+    end: str,
+) -> None:
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except ModuleNotFoundError as exc:  # pragma: no cover - dependency guard
+        raise RuntimeError("Pillow is required to write PNG equity charts") from exc
+
+    scale = 2
+    width, height = 1600, 940
+    left, right, top, bottom = 120, 58, 158, 160
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+    image = Image.new("RGBA", (width * scale, height * scale), (255, 255, 255, 255))
+    draw = ImageDraw.Draw(image, "RGBA")
+    font_regular = _chart_font(ImageFont, 22 * scale)
+    font_small = _chart_font(ImageFont, 18 * scale)
+    font_tiny = _chart_font(ImageFont, 16 * scale)
+    font_title = _chart_font(ImageFont, 34 * scale, bold=True)
+
+    all_points = [point for item in series for point in item["points"]]
+    if not all_points:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        image.resize((width, height)).save(path)
+        return
+    min_day = _parse_day(start) or _parse_day(all_points[0]["date"]) or date.today()
+    max_day = _parse_day(end) or _parse_day(all_points[-1]["date"]) or min_day
+    if max_day <= min_day:
+        max_day = date.fromordinal(min_day.toordinal() + 1)
+    values = [float(point["value"]) for point in all_points if math.isfinite(float(point["value"]))]
+    y_min, y_max, y_ticks = _nice_axis(min(values), max(values), target_ticks=8)
+
+    def sx(value: float) -> int:
+        return int(round(value * scale))
+
+    def sy(value: float) -> int:
+        return int(round(value * scale))
+
+    def x_pos(day_text: str) -> float:
+        day = _parse_day(day_text) or min_day
+        return left + (day.toordinal() - min_day.toordinal()) / (max_day.toordinal() - min_day.toordinal()) * plot_w
+
+    def y_pos(value: float) -> float:
+        return top + (y_max - value) / (y_max - y_min) * plot_h
+
+    def line(points: list[tuple[float, float]], fill: tuple[int, int, int, int], width_px: int = 1) -> None:
+        if len(points) >= 2:
+            draw.line(
+                [(sx(x), sy(y)) for x, y in points],
+                fill=_chart_opaque_fill(fill),
+                width=max(1, width_px * scale),
+                joint="curve",
+            )
+
+    def text(x: float, y: float, content: str, fill: tuple[int, int, int, int], font: Any, anchor: str | None = None) -> None:
+        draw.text((sx(x), sy(y)), content, fill=_chart_opaque_fill(fill), font=font, anchor=anchor)
+
+    def rect(bounds: tuple[float, float, float, float], fill: tuple[int, int, int, int], outline: tuple[int, int, int, int] | None = None, width_px: int = 1) -> None:
+        scaled = tuple(sx(bounds[idx]) if idx % 2 == 0 else sy(bounds[idx]) for idx in range(4))
+        draw.rectangle(
+            scaled,
+            fill=_chart_opaque_fill(fill),
+            outline=_chart_opaque_fill(outline) if outline is not None else None,
+            width=max(1, width_px * scale),
+        )
+
+    def rounded(bounds: tuple[float, float, float, float], radius: float, fill: tuple[int, int, int, int], outline: tuple[int, int, int, int] | None = None) -> None:
+        scaled = tuple(sx(bounds[idx]) if idx % 2 == 0 else sy(bounds[idx]) for idx in range(4))
+        draw.rounded_rectangle(
+            scaled,
+            radius=sx(radius),
+            fill=_chart_opaque_fill(fill),
+            outline=_chart_opaque_fill(outline) if outline is not None else None,
+            width=scale,
+        )
+
+    rect((0, 0, width, height), (255, 255, 255, 255))
+    text(left, 46, "Strategy Equity vs BTC and SPY", (17, 24, 39, 255), font_title)
+    text(
+        left,
+        78,
+        "Growth of $1; benchmark lines are normalised to the strategy start date. Markers highlight visible strategy equity moves.",
+        (75, 85, 99, 255),
+        font_small,
+    )
+    rounded((left, top, left + plot_w, top + plot_h), 4, (249, 250, 251, 255), (229, 231, 235, 255))
+
+    for value in y_ticks:
+        y = y_pos(value)
+        line([(left, y), (left + plot_w, y)], (226, 232, 240, 210), 1)
+        text(left - 14, y, f"{value:g}x", (100, 116, 139, 255), font_tiny, anchor="rm")
+    x_ticks = _date_axis_ticks(min_day, max_day)
+    for day in x_ticks:
+        x = x_pos(day.isoformat())
+        line([(x, top), (x, top + plot_h)], (238, 242, 247, 185), 1)
+        text(x, top + plot_h + 28, day.strftime("%Y-%m"), (100, 116, 139, 255), font_tiny, anchor="mm")
+    line([(left, top), (left, top + plot_h), (left + plot_w, top + plot_h)], (148, 163, 184, 255), 1)
+
+    for item in series:
+        points = item["points"]
+        coords = [(x_pos(point["date"]), y_pos(float(point["value"]))) for point in points]
+        rgb = tuple(item["color"])
+        line(coords, (rgb[0], rgb[1], rgb[2], int(item["alpha"])), int(item["width"]))
+
+    strategy_by_date = _chart_value_by_date(next((item["points"] for item in series if item["name"] == "Strategy"), []))
+    _draw_chart_annotations(draw, annotations, strategy_by_date, x_pos=x_pos, y_pos=y_pos, scale=scale, plot=(left, top, plot_w, plot_h), fonts=(font_tiny, font_small))
+
+    legend_x = left
+    finals = _chart_final_values(series)
+    for item in series:
+        if not item["points"]:
+            continue
+        rgb = tuple(item["color"])
+        label = f"{item['name']} {finals.get(str(item['name']), 0.0):.2f}x"
+        line([(legend_x, height - 62), (legend_x + 42, height - 62)], (rgb[0], rgb[1], rgb[2], 230), 5)
+        text(legend_x + 54, height - 70, label, (17, 24, 39, 255), font_regular)
+        legend_x += 230
+
+    text(left, height - 28, "Date", (100, 116, 139, 255), font_tiny)
+    text(22, top + plot_h / 2, "Growth", (100, 116, 139, 255), font_tiny)
+
+    image = image.resize((width, height), Image.Resampling.LANCZOS).convert("RGB")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(path, format="PNG", optimize=True)
+
+
+def _chart_font(image_font: Any, size: int, *, bold: bool = False) -> Any:
+    names = (
+        [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/Library/Fonts/Arial Bold.ttf",
+        ]
+        if bold
+        else [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/Library/Fonts/Arial.ttf",
+        ]
+    )
+    for name in names:
+        try:
+            return image_font.truetype(name, size)
+        except OSError:
+            continue
+    return image_font.load_default()
+
+
+def _chart_opaque_fill(fill: tuple[int, ...]) -> tuple[int, int, int, int]:
+    if len(fill) < 4:
+        return (int(fill[0]), int(fill[1]), int(fill[2]), 255)
+    alpha = max(0, min(255, int(fill[3]))) / 255.0
+    return (
+        int(round(int(fill[0]) * alpha + 255 * (1.0 - alpha))),
+        int(round(int(fill[1]) * alpha + 255 * (1.0 - alpha))),
+        int(round(int(fill[2]) * alpha + 255 * (1.0 - alpha))),
+        255,
+    )
+
+
+def _draw_chart_annotations(
+    draw: Any,
+    annotations: list[dict[str, Any]],
+    strategy_by_date: dict[str, float],
+    *,
+    x_pos: Any,
+    y_pos: Any,
+    scale: int,
+    plot: tuple[float, float, float, float],
+    fonts: tuple[Any, Any],
+) -> None:
+    left, top, plot_w, plot_h = plot
+    font_tiny, font_small = fonts
+    top_lanes = [top - 58, top - 32, top - 6]
+    bottom_lanes = [top + plot_h + 38, top + plot_h + 64, top + plot_h + 90]
+    top_count = 0
+    bottom_count = 0
+
+    def scx(value: float) -> int:
+        return int(round(value * scale))
+
+    def scy(value: float) -> int:
+        return int(round(value * scale))
+
+    def color_rgba(hex_color: str, alpha: int) -> tuple[int, int, int, int]:
+        raw = hex_color.lstrip("#")
+        return (int(raw[0:2], 16), int(raw[2:4], 16), int(raw[4:6], 16), alpha)
+
+    for annotation in sorted(annotations, key=lambda row: str(row["date"])):
+        day = str(annotation["date"])
+        equity_value = _float_or_nan(annotation.get("equity"))
+        if not math.isfinite(equity_value):
+            equity_value = strategy_by_date.get(day, float("nan"))
+        if not math.isfinite(equity_value):
+            continue
+        x = x_pos(day)
+        y = y_pos(equity_value)
+        color = color_rgba(str(annotation.get("color", "#111827")), 255)
+        soft = color[:3] + (18,)
+        marker = color[:3] + (225,)
+        draw.rectangle((scx(x - 2), scy(top), scx(x + 2), scy(top + plot_h)), fill=_chart_opaque_fill(soft))
+        draw.rectangle((scx(x - 5), scy(y - 5), scx(x + 5), scy(y + 5)), fill=_chart_opaque_fill(marker))
+        draw.rectangle(
+            (scx(x - 7), scy(y - 7), scx(x + 7), scy(y + 7)),
+            outline=_chart_opaque_fill((255, 255, 255, 235)),
+            width=2 * scale,
+        )
+        label = str(annotation["display"]).replace("  ", " ")
+        if annotation.get("kind") == "up":
+            lane = bottom_lanes[bottom_count % len(bottom_lanes)]
+            bottom_count += 1
+        else:
+            lane = top_lanes[top_count % len(top_lanes)]
+            top_count += 1
+        text_w = draw.textlength(label, font=font_tiny) / scale
+        box_w = text_w + 16
+        box_h = 22
+        box_x = max(left + 6, min(x - box_w / 2, left + plot_w - box_w - 6))
+        box_y = lane - box_h / 2
+        draw.rounded_rectangle(
+            (scx(box_x), scy(box_y), scx(box_x + box_w), scy(box_y + box_h)),
+            radius=8 * scale,
+            fill=_chart_opaque_fill((255, 255, 255, 238)),
+            outline=_chart_opaque_fill(color[:3] + (120,)),
+            width=scale,
+        )
+        draw.text((scx(box_x + 8), scy(box_y + 4)), label, fill=_chart_opaque_fill(color[:3] + (255,)), font=font_tiny)
+
+
+def _nice_axis(min_value: float, max_value: float, *, target_ticks: int) -> tuple[float, float, list[float]]:
+    span = max(max_value - min_value, 1e-9)
+    step = _nice_step(span / max(target_ticks - 1, 1))
+    low = math.floor(max(0.0, min_value - span * 0.05) / step) * step
+    high = math.ceil((max_value + span * 0.06) / step) * step
+    ticks = []
+    value = low
+    for _ in range(20):
+        if value > high + step * 0.5:
+            break
+        ticks.append(round(value, 10))
+        value += step
+    return low, high, ticks
+
+
+def _nice_step(value: float) -> float:
+    if value <= 0.0 or not math.isfinite(value):
+        return 1.0
+    exponent = math.floor(math.log10(value))
+    fraction = value / 10**exponent
+    if fraction <= 1.0:
+        nice = 1.0
+    elif fraction <= 2.0:
+        nice = 2.0
+    elif fraction <= 2.5:
+        nice = 2.5
+    elif fraction <= 5.0:
+        nice = 5.0
+    else:
+        nice = 10.0
+    return nice * 10**exponent
+
+
+def _date_axis_ticks(start: date, end: date) -> list[date]:
+    ticks = []
+    month = 1 if start.month <= 6 else 7
+    year = start.year
+    current = date(year, month, 1)
+    if current < start:
+        month += 6
+        if month > 12:
+            month -= 12
+            year += 1
+        current = date(year, month, 1)
+    while current <= end:
+        ticks.append(current)
+        month = current.month + 6
+        year = current.year
+        if month > 12:
+            month -= 12
+            year += 1
+        current = date(year, month, 1)
+    return ticks
 
 
 def _strategy_equity_series(equity: pl.DataFrame) -> list[dict[str, Any]]:
@@ -1356,133 +1743,6 @@ def _sequence_float(values: Any, index: int) -> float:
         return _float_or_nan(values[index])
     except (TypeError, IndexError):
         return float("nan")
-
-
-def _benchmark_rows(series: list[tuple[str, list[dict[str, Any]]]]) -> list[dict[str, Any]]:
-    rows = []
-    for name, points in series:
-        for point in points:
-            rows.append({"date": point["date"], "series": name, "value": point["value"]})
-    return rows
-
-
-def _equity_chart_annotations(equity: pl.DataFrame) -> list[dict[str, Any]]:
-    if equity.is_empty() or not _has_columns(equity, "date", "drawdown", "basket_return"):
-        return []
-    rows = equity.sort("ts_ms").to_dicts()
-    candidates = [
-        ("Worst DD", min(rows, key=lambda row: _float_or_nan(row.get("drawdown"))), "drawdown", "#dc2626"),
-        ("Worst day", min(rows, key=lambda row: _float_or_nan(row.get("basket_return"))), "basket_return", "#991b1b"),
-        ("Best day", max(rows, key=lambda row: _float_or_nan(row.get("basket_return"))), "basket_return", "#047857"),
-    ]
-    output = []
-    seen: set[tuple[str, str]] = set()
-    for label, row, field, color in candidates:
-        day = str(row.get("date", ""))
-        value = _float_or_nan(row.get(field))
-        key = (label, day)
-        if not day or not math.isfinite(value) or key in seen:
-            continue
-        seen.add(key)
-        output.append(
-            {
-                "date": day,
-                "label": label,
-                "field": field,
-                "value": value,
-                "display": f"{day} {label} {_pct(value)}",
-                "color": color,
-            }
-        )
-    return output
-
-
-def _equity_benchmark_svg(
-    series: list[dict[str, Any]],
-    *,
-    annotations: list[dict[str, Any]],
-    start: str,
-    end: str,
-) -> str:
-    width = 1200
-    height = 680
-    left = 76
-    right = 34
-    top = 54
-    bottom = 86
-    plot_w = width - left - right
-    plot_h = height - top - bottom
-    all_points = [point for item in series for point in item["points"]]
-    if not all_points:
-        return "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1200\" height=\"680\" />\n"
-    min_day = _parse_day(start) or _parse_day(all_points[0]["date"]) or date.today()
-    max_day = _parse_day(end) or _parse_day(all_points[-1]["date"]) or min_day
-    if max_day <= min_day:
-        max_day = date.fromordinal(min_day.toordinal() + 1)
-    values = [float(point["value"]) for point in all_points if math.isfinite(float(point["value"]))]
-    y_min = max(0.0, min(values) * 0.94)
-    y_max = max(values) * 1.06
-    if y_max <= y_min:
-        y_max = y_min + 1.0
-
-    def x_pos(day_text: str) -> float:
-        day = _parse_day(day_text) or min_day
-        return left + (day.toordinal() - min_day.toordinal()) / (max_day.toordinal() - min_day.toordinal()) * plot_w
-
-    def y_pos(value: float) -> float:
-        return top + (y_max - value) / (y_max - y_min) * plot_h
-
-    lines = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img">',
-        "<title>Strategy Equity With BTC and SPY Overlays</title>",
-        '<rect width="1200" height="680" fill="#ffffff"/>',
-        f'<text x="{left}" y="32" fill="#111827" font-family="Arial, sans-serif" font-size="22" font-weight="700">Equity Curve vs BTC and SPY</text>',
-        f'<text x="{left}" y="52" fill="#4b5563" font-family="Arial, sans-serif" font-size="12">Normalised benchmarks; strategy equity shown in account-growth units. Highlighted rectangles mark the worst drawdown, worst day, and best day.</text>',
-        f'<rect x="{left}" y="{top}" width="{plot_w}" height="{plot_h}" fill="#f9fafb" stroke="#e5e7eb"/>',
-    ]
-    for tick in range(6):
-        value = y_min + (y_max - y_min) * tick / 5
-        y = y_pos(value)
-        lines.append(f'<line x1="{left}" x2="{left + plot_w}" y1="{y:.1f}" y2="{y:.1f}" stroke="#e5e7eb" stroke-width="1"/>')
-        lines.append(f'<text x="{left - 10}" y="{y + 4:.1f}" text-anchor="end" fill="#6b7280" font-family="Arial, sans-serif" font-size="11">{value:.2f}x</text>')
-    for tick in range(5):
-        ordinal = int(min_day.toordinal() + (max_day.toordinal() - min_day.toordinal()) * tick / 4)
-        day = date.fromordinal(ordinal)
-        x = x_pos(day.isoformat())
-        lines.append(f'<line x1="{x:.1f}" x2="{x:.1f}" y1="{top}" y2="{top + plot_h}" stroke="#eef2f7" stroke-width="1"/>')
-        lines.append(f'<text x="{x:.1f}" y="{top + plot_h + 24}" text-anchor="middle" fill="#6b7280" font-family="Arial, sans-serif" font-size="11">{day.isoformat()}</text>')
-
-    for idx, annotation in enumerate(annotations):
-        x = x_pos(str(annotation["date"]))
-        color = str(annotation["color"])
-        label = html.escape(str(annotation["display"]))
-        label_y = top + 18 + idx * 18
-        anchor = "start" if x < left + plot_w * 0.68 else "end"
-        text_x = x + 7 if anchor == "start" else x - 7
-        lines.append(f'<rect x="{x - 4:.1f}" y="{top}" width="8" height="{plot_h}" fill="{color}" opacity="0.12"/>')
-        lines.append(f'<line x1="{x:.1f}" x2="{x:.1f}" y1="{top}" y2="{top + plot_h}" stroke="{color}" stroke-width="1.2" stroke-dasharray="3 3"/>')
-        lines.append(f'<text x="{text_x:.1f}" y="{label_y}" text-anchor="{anchor}" fill="{color}" font-family="Arial, sans-serif" font-size="11" font-weight="700">{label}</text>')
-
-    legend_x = left
-    for item in series:
-        if not item["points"]:
-            continue
-        name = html.escape(str(item["name"]))
-        color = str(item["color"])
-        lines.append(f'<line x1="{legend_x}" x2="{legend_x + 28}" y1="{height - 34}" y2="{height - 34}" stroke="{color}" stroke-width="3"/>')
-        lines.append(f'<text x="{legend_x + 36}" y="{height - 30}" fill="#111827" font-family="Arial, sans-serif" font-size="12">{name}</text>')
-        legend_x += 125
-
-    for item in series:
-        points = item["points"]
-        if len(points) < 2:
-            continue
-        path = " ".join(f"{x_pos(point['date']):.1f},{y_pos(float(point['value'])):.1f}" for point in points)
-        lines.append(
-            f'<polyline fill="none" stroke="{item["color"]}" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" points="{path}"/>'
-        )
-    lines.append("</svg>")
-    return "\n".join(lines) + "\n"
 
 
 def _series_span_days(points: list[dict[str, Any]]) -> int:
@@ -1673,9 +1933,7 @@ def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) 
             "volume_event_best_trades.csv",
             "volume_event_best_baskets.csv",
             "volume_event_best_equity.csv",
-            "volume_event_best_equity_btc_spy.svg",
-            "volume_event_best_equity_benchmarks.csv",
-            "volume_event_best_equity_annotations.csv",
+            "volume_event_best_equity_btc_spy.png",
             "volume_event_best_monthly.csv",
             "volume_event_research_report.json",
             "volume_event_research_report.md",

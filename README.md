@@ -43,7 +43,7 @@ Promoted full-PIT reference run, 2023-05-03 to 2026-05-03:
 - Worst split drawdown: -15.43%
 - Average split Sharpe-like: 2.44
 - OOS return: +86.42%
-- Default chart: `volume_event_best_equity_btc_spy.svg`
+- Default chart: `volume_event_best_equity_btc_spy.png`
 - Promotion gate: pass
 
 Reference report:

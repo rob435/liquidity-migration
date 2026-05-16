@@ -70,6 +70,8 @@ def test_volume_event_research_writes_reports_on_fixture(tmp_path: Path) -> None
 
 
 def test_equity_benchmark_chart_writes_overlays_and_annotations(tmp_path: Path) -> None:
+    from PIL import Image
+
     output_dir = tmp_path / "reports"
     output_dir.mkdir()
     equity = pl.DataFrame(
@@ -77,6 +79,8 @@ def test_equity_benchmark_chart_writes_overlays_and_annotations(tmp_path: Path) 
             {"ts_ms": 1, "date": "2024-01-01", "equity": 1.0, "drawdown": 0.0, "basket_return": 0.0},
             {"ts_ms": 2, "date": "2024-01-02", "equity": 0.9, "drawdown": -0.10, "basket_return": -0.10},
             {"ts_ms": 3, "date": "2024-01-03", "equity": 1.08, "drawdown": 0.0, "basket_return": 0.20},
+            {"ts_ms": 4, "date": "2024-01-04", "equity": 1.0, "drawdown": -0.074, "basket_return": -0.074},
+            {"ts_ms": 5, "date": "2024-01-05", "equity": 1.14, "drawdown": 0.0, "basket_return": 0.14},
         ]
     )
     raw_klines = pl.DataFrame(
@@ -84,19 +88,25 @@ def test_equity_benchmark_chart_writes_overlays_and_annotations(tmp_path: Path) 
             {"ts_ms": 1, "date": "2024-01-01", "symbol": "BTCUSDT", "close": 100.0},
             {"ts_ms": 2, "date": "2024-01-02", "symbol": "BTCUSDT", "close": 110.0},
             {"ts_ms": 3, "date": "2024-01-03", "symbol": "BTCUSDT", "close": 120.0},
+            {"ts_ms": 4, "date": "2024-01-04", "symbol": "BTCUSDT", "close": 115.0},
+            {"ts_ms": 5, "date": "2024-01-05", "symbol": "BTCUSDT", "close": 122.0},
         ]
     )
 
     chart = _write_equity_benchmark_chart(output_dir, root=tmp_path, equity=equity, raw_klines=raw_klines)
 
-    svg = Path(chart["svg"]).read_text(encoding="utf-8")
-    assert "Equity Curve vs BTC and SPY" in svg
-    assert "2024-01-02 Worst DD" in svg
-    assert "2024-01-03 Best day" in svg
-    assert Path(chart["benchmarks_csv"]).exists()
-    assert Path(chart["annotations_csv"]).exists()
-    assert chart["series"]["strategy"] == 3
-    assert chart["series"]["btc"] == 3
+    assert Path(chart["png"]).exists()
+    with Image.open(chart["png"]) as image:
+        assert image.size == (1600, 940)
+    assert not (output_dir / "volume_event_best_equity_btc_spy.svg").exists()
+    assert not (output_dir / "volume_event_best_equity_benchmarks.csv").exists()
+    assert not (output_dir / "volume_event_best_equity_annotations.csv").exists()
+    assert chart["series"]["strategy"] == 5
+    assert chart["series"]["btc"] == 5
+    displays = [row["display"] for row in chart["annotations"]]
+    assert any("2024-01-02 Max DD" in item for item in displays)
+    assert any("2024-01-04 Drop" in item for item in displays)
+    assert any("2024-01-03 Jump" in item for item in displays)
 
 
 def test_volume_event_research_requires_full_pit_by_default(tmp_path: Path) -> None:
