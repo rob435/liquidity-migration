@@ -113,5 +113,6 @@ Default forward-test behavior:
 - `scripts/run_bybit_demo_event_engine.sh`: continuous Bybit demo forward runner
 - `scripts/run_fullpit_volume_overnight.sh`: selected full-PIT runner
 - `scripts/run_fullpit_volume_overnight.ps1`: PowerShell selected full-PIT runner
+- `deploy/systemd/model050426-bybit-demo.service`: VPS service definition for the active demo runner
 - `docs/volume_alpha.md`: strategy notes and current result
 - `docs/bybit_aggression_carry_system_codex_spec.md`: active system spec
