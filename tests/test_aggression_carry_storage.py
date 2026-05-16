@@ -47,15 +47,15 @@ def test_incremental_parquet_writes_replace_duplicate_keys(tmp_path: Path) -> No
     assert stored["buy_quote"][0] == 125.0
 
 
-def test_volume_backtest_trades_dedupe_by_trade_id(tmp_path: Path) -> None:
+def test_event_demo_trades_dedupe_by_trade_id(tmp_path: Path) -> None:
     trade = pl.DataFrame(
         [{"trade_id": "trade-1", "symbol": "BTCUSDT", "ts_ms": 1_700_000_000_000, "return": 0.01}]
     )
 
-    write_dataset(trade, tmp_path, "volume_backtest_trades")
-    write_dataset(trade.with_columns(pl.lit(0.02).alias("return")), tmp_path, "volume_backtest_trades")
+    write_dataset(trade, tmp_path, "event_demo_trades")
+    write_dataset(trade.with_columns(pl.lit(0.02).alias("return")), tmp_path, "event_demo_trades")
 
-    stored = read_dataset(tmp_path, "volume_backtest_trades")
+    stored = read_dataset(tmp_path, "event_demo_trades")
 
     assert stored.height == 1
     assert stored["return"][0] == 0.02
@@ -84,10 +84,10 @@ def test_read_dataset_handles_schema_evolution_across_partitions(tmp_path: Path)
         ]
     )
 
-    write_dataset(first, tmp_path, "volume_backtest_trades")
-    write_dataset(second, tmp_path, "volume_backtest_trades")
+    write_dataset(first, tmp_path, "event_demo_trades")
+    write_dataset(second, tmp_path, "event_demo_trades")
 
-    stored = read_dataset(tmp_path, "volume_backtest_trades")
+    stored = read_dataset(tmp_path, "event_demo_trades")
 
     assert stored.height == 2
     assert "trigger_price" in stored.columns

@@ -101,8 +101,8 @@ Default forward-test behavior:
 - `aggression_carry/volume_events.py`: active event-driven strategy, full-PIT gates, ledger, reports
 - `aggression_carry/event_demo.py`: Bybit demo forward-cycle runner for the selected event strategy
 - `aggression_carry/archive_manifest.py`: PIT manifest and 1h kline builders
-- `aggression_carry/volume_alpha.py`: reusable feature builder for event research
-- `aggression_carry/volume_backtest.py`: reusable trade/equity/cost helpers used by event research
+- `aggression_carry/volume_features.py`: active daily volume and liquidity-rank feature builder
+- `aggression_carry/trade_lifecycle.py`: active trade lifecycle, exit, basket, and equity helpers
 - `scripts/run_bybit_demo_event_engine.sh`: continuous Bybit demo forward runner
 - `scripts/run_fullpit_volume_overnight.sh`: selected full-PIT runner
 - `scripts/run_fullpit_volume_overnight.ps1`: PowerShell selected full-PIT runner

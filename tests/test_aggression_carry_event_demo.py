@@ -17,7 +17,7 @@ from aggression_carry.event_demo import (
     target_order_notional_pct_equity,
     wallet_equity_usdt,
 )
-from aggression_carry.volume_alpha import MS_PER_HOUR
+from aggression_carry.volume_features import MS_PER_HOUR
 from aggression_carry.volume_events import EventScenario, VolumeEventResearchConfig
 
 

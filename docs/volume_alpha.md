@@ -47,15 +47,17 @@ liquidity bucket sweep helper scripts
 old "run every combination overnight" workflow
 ```
 
-The reusable Python modules can stay until event-driven replacements exist:
+The legacy Python entrypoints are removed. The active shared code is now:
 
 ```text
-aggression_carry/volume_alpha.py
-aggression_carry/volume_backtest.py
+aggression_carry/volume_features.py
+aggression_carry/trade_lifecycle.py
 ```
 
-They still contain useful feature, cost, ledger, and reporting code. They are
-not the active strategy interface.
+`volume_features.py` builds the causal daily liquidity/volume features.
+`trade_lifecycle.py` contains the event strategy's exit, basket, and equity
+helpers. The old fixed-rebalance alpha/grid backtest APIs are no longer part of
+the repo surface.
 
 ## Event Definitions
 

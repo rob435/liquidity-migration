@@ -18,9 +18,9 @@ from .config import DEFAULT_MAJOR_SYMBOLS, ResearchConfig, UniverseConfig
 from .downloaders import _normalize_instruments, _normalize_klines, _normalize_tickers
 from .storage import exclusive_file_lock, read_dataset, write_dataset
 from .telegram import send_telegram_message
+from .trade_lifecycle import _rank_exit_hit
 from .universe import build_current_universe_table
-from .volume_alpha import MS_PER_DAY, MS_PER_HOUR, build_volume_features
-from .volume_backtest import _rank_exit_hit
+from .volume_features import MS_PER_DAY, MS_PER_HOUR, build_volume_features
 from .volume_events import (
     EventScenario,
     VolumeEventResearchConfig,

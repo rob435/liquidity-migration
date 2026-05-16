@@ -1,4 +1,4 @@
-data_root: data/volume_alpha
+data_root: data/liquidity_migration
 
 exchange:
   name: bybit

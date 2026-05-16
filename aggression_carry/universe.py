@@ -13,7 +13,7 @@ from .bybit import BybitMarketData
 from .config import ResearchConfig, UniverseConfig
 from .downloaders import _normalize_instruments, _normalize_tickers
 from .storage import write_dataset
-from .volume_alpha import MS_PER_DAY
+from .volume_features import MS_PER_DAY
 
 
 def run_discover_universe(

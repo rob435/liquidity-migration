@@ -12,10 +12,9 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from .config import CostConfig, VolumeBacktestConfig
+from .config import CostConfig, TradeLifecycleConfig
 from .storage import read_dataset
-from .volume_alpha import MS_PER_DAY, MS_PER_HOUR, VOLUME_SCORE_COLUMNS, build_volume_features
-from .volume_backtest import (
+from .trade_lifecycle import (
     _bar_excursion,
     _bar_exit_hits,
     _date_boundary_ms,
@@ -34,6 +33,7 @@ from .volume_backtest import (
     summarize_baskets,
     summarize_trade_backtest,
 )
+from .volume_features import MS_PER_DAY, MS_PER_HOUR, VOLUME_SCORE_COLUMNS, build_volume_features
 
 
 EVENT_TYPES = (
@@ -271,7 +271,7 @@ def _run_event_scenario(
     score_name, score_col = _event_score(scenario.event_type)
     side = _scenario_side(scenario.event_type, scenario.side_hypothesis)
     side_mode = "long_high_short_low" if side == "long" else "short_high_long_low"
-    bt_config = VolumeBacktestConfig(
+    bt_config = TradeLifecycleConfig(
         score=score_name,
         hold_days=scenario.hold_days,
         rebalance_days=scenario.hold_days,
@@ -419,7 +419,7 @@ def _run_event_scenario(
 def _rank_lookup_cache(features: pl.DataFrame, *, config: VolumeEventResearchConfig) -> dict[str, dict[tuple[str, int], float]]:
     output = {}
     for score_col in sorted({_event_score(event_type)[1] for event_type in config.event_types}):
-        bt_config = VolumeBacktestConfig(
+        bt_config = TradeLifecycleConfig(
             score=_score_name_for_column(score_col),
             entry_delay_hours=config.entry_delay_hours,
             universe_rank_min=config.universe_rank_min,
@@ -483,7 +483,7 @@ def _simulate_indexed_trade(
     symbol_bars: dict[str, Any],
     planned_exit_ts_ms: int,
     notional_weight: float,
-    config: VolumeBacktestConfig,
+    config: TradeLifecycleConfig,
     round_trip_cost_bps: float,
     stop_pct: float | None,
     rank_lookup: dict[tuple[str, int], float],
@@ -977,7 +977,7 @@ def _promotion_fields(
     }
 
 
-def _split_rows(baskets: pl.DataFrame, *, config: VolumeBacktestConfig) -> list[dict[str, Any]]:
+def _split_rows(baskets: pl.DataFrame, *, config: TradeLifecycleConfig) -> list[dict[str, Any]]:
     rows = []
     for name, start, end in SPLITS:
         start_ms = _date_ms(start)
@@ -987,7 +987,7 @@ def _split_rows(baskets: pl.DataFrame, *, config: VolumeBacktestConfig) -> list[
     return rows
 
 
-def _summarize_basket_split(part: pl.DataFrame, *, name: str, config: VolumeBacktestConfig) -> dict[str, Any]:
+def _summarize_basket_split(part: pl.DataFrame, *, name: str, config: TradeLifecycleConfig) -> dict[str, Any]:
     if part.is_empty():
         return {
             "name": name,
@@ -1305,8 +1305,8 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("dryup_prior_abs_day_return_max must be non-negative")
 
 
-def _window_config(config: VolumeEventResearchConfig) -> VolumeBacktestConfig:
-    return VolumeBacktestConfig(start_date=config.start_date, end_date=config.end_date, min_symbols=4)
+def _window_config(config: VolumeEventResearchConfig) -> TradeLifecycleConfig:
+    return TradeLifecycleConfig(start_date=config.start_date, end_date=config.end_date, min_symbols=4)
 
 
 def _date_ms(value: str) -> int:
