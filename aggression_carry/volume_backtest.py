@@ -955,7 +955,7 @@ def format_volume_grid_report(payload: dict[str, Any]) -> str:
             "## Output Files",
             "",
             "- `reports/volume_grid_results.csv` contains every tested parameter combination.",
-            "- Rerun promising rows with `volume-backtest` to inspect the full trade ledger.",
+            "- Inspect promising rows with the event ledger before promoting them.",
             "",
         ]
     )
@@ -1639,7 +1639,7 @@ def _price_bars_by_symbol(klines: pl.DataFrame) -> dict[str, list[dict[str, Any]
 
 
 def _volatility_stop_lookup(klines: pl.DataFrame, *, lookback_days: int) -> dict[tuple[str, int], float]:
-    daily = _daily_close_rows(klines)
+    daily = _daily_rows(klines)
     output: dict[tuple[str, int], float] = {}
     for key, part in daily.sort(["symbol", "ts_ms"]).partition_by("symbol", as_dict=True).items():
         symbol = str(key[0] if isinstance(key, tuple) else key)
@@ -1660,7 +1660,7 @@ def _volatility_stop_lookup(klines: pl.DataFrame, *, lookback_days: int) -> dict
     return output
 
 
-def _daily_close_rows(klines: pl.DataFrame) -> pl.DataFrame:
+def _daily_rows(klines: pl.DataFrame) -> pl.DataFrame:
     return (
         klines.with_columns((pl.col("ts_ms") - (pl.col("ts_ms") % MS_PER_DAY)).alias("day_start_ms"))
         .sort(["symbol", "ts_ms"])

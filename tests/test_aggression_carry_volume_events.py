@@ -401,6 +401,8 @@ def test_creative_event_filters_select_distinct_pit_events() -> None:
 
     config = VolumeEventResearchConfig(
         liquidity_migration_rank_improvement_min=50,
+        liquidity_migration_turnover_ratio_min=0.0,
+        liquidity_migration_event_rank_fraction_max=0.0,
         absorption_max_abs_day_return=0.015,
         dryup_prior_volume_rank_max=0.35,
         dryup_prior_abs_day_return_max=0.02,
@@ -509,6 +511,7 @@ def test_liquidity_migration_quality_controls_require_rank_and_turnover_expansio
         config=VolumeEventResearchConfig(
             liquidity_migration_rank_improvement_min=100,
             liquidity_migration_turnover_ratio_min=2.0,
+            liquidity_migration_event_rank_fraction_max=0.0,
             liquidity_migration_prior_rank_min=150,
             liquidity_migration_current_rank_max=80,
         ),

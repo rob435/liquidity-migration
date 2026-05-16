@@ -1,88 +1,76 @@
 # MODEL050426
 
-Bybit demo-account trading system for the daily-close short fade.
+Bybit demo-account research system for the selected full-PIT liquidity-migration short strategy.
 
 ## Current Objective
 
-The main objective is to get the selected Stage 4 strategy working properly on the Bybit demo account, then use forward/demo evidence to decide the next change. The repo now treats demo execution, slice reconciliation, and exit parity with backtests as first-class production work.
+The repo now has one strategy focus: event-driven PIT liquidity migration. The old fixed daily-close short-fade demo stack has been removed from the active code path so it cannot keep steering work back to calendar-clock entries.
 
-The private Bybit client is still demo-only by design: `demo=False` is refused in code. Real-money trading requires a separate explicit implementation decision.
+The private Bybit client remains demo-only by design: `demo=False` is refused in code. Real-money trading requires a separate explicit implementation decision.
 
 ## Active Strategy
 
-Selected strategy: `configs/volume_alpha.default.yaml`.
-
-Key parameters:
-
-- Signal: 23:15 UTC
-- Side: short only
-- Ranking: `day_return`
-- Selection: top 1 pump candidate, baseline liquidity rank 226+
-- Entry: 20 equal 1-minute TWAP slices from 23:15 through 23:34 UTC
-- TWAP stop-adding: stop future slices if price moves 2% against the short during entry
-- Hold: 360 minutes after TWAP completion
-- Stop: 8%, active from first fill
-- Quality gates: intraday VWAP extension <= 10% and market median day return <= 3%
-- Take profit: 10%, then time-decay floor to 5% over 120 minutes after profit protection activates
-- Profit protection delay: 120 minutes after final TWAP slice
-- Capacity: 0.05% same-day turnover and 0.10% baseline turnover caps
-- Impact model: 3 bps per 1% turnover participation
-
-Current research snapshot: `data/research_reports/backtests/top_result_equity_trades_vwap10_m03_ex00_20260515T130424Z/summary.json` reported 88.41% return, 2.75 Sharpe-like score, -5.41% max drawdown, and 705 trades under point-in-time Bybit archive membership. The market-wide filter is promoted with live parity monitoring because the live forward universe is not byte-for-byte identical to the historical archive universe.
-
-## Demo Runtime
-
-The demo runtime uses slice-level paper trades and slice-level Bybit demo orders. It does not collapse the 20-minute TWAP into one fill.
-
-Default demo sizing is wallet-aware:
-
-- `--use-wallet-balance`
-- `--max-order-notional 0`
-- `--max-total-new-notional 0`
-- `--max-order-notional-pct-equity 0.10`
-- `--max-total-new-notional-pct-equity 1.0`
-
-For TWAP entries, the 10% cap applies to the whole paper trade per coin, then the entry is divided across the scheduled slices.
-
-Install the demo systemd units:
+Command:
 
 ```bash
-scripts/install_bybit_demo_systemd.sh
+python -m aggression_carry --data-root DATA_ROOT --config configs/volume_alpha.default.yaml volume-events
 ```
 
-Manual commands:
+The `volume-events` defaults are the selected strategy:
+
+- Event: `liquidity_migration`
+- Side: reversal, which means short
+- Threshold: top 30% dollar-volume rank migration
+- Universe: point-in-time liquidity rank 31-150
+- Rank improvement: at least 150 places versus the 7-day prior rank
+- Turnover expansion: current turnover / prior 7-day mean turnover at least 6.0
+- Overheat filter: event rank fraction no higher than 0.90
+- Entry: 1 hour after the daily signal close
+- Exit: event decay, 12% fixed stop, or 1-day max hold
+- Capacity: max 6 active symbols, 5-day symbol cooldown
+- Stop-pressure throttle: pause new entries after 12 realized stops inside 14 days
+- Cost model: 3x base round-trip costs
+- Gross exposure: 1.0, split across active capacity
+
+Latest full-PIT reference run, 2023-05-03 to 2026-05-03:
+
+- Trades: 1,138
+- Total return: +466.57%
+- Max drawdown: -20.34%
+- Worst split return: +34.72%
+- Worst split drawdown: -21.06%
+- Average split Sharpe-like: 2.19
+- Promotion gate: pass
+
+Reference report:
+
+```text
+data/agc-bybit-fullpit-1h-20230503-20260503/reports/SELECTED_liqmig_dd_repair_turn6_rank31_150_eventcap90_stoppressure_20260516
+```
+
+## Full-PIT Runner
+
+Linux/macOS:
 
 ```bash
-python -m aggression_carry --config configs/volume_alpha.default.yaml --data-root data/forward-paper forward-run-sleeves --forward-mode scan --sleeves stage4_selected
-python -m aggression_carry --config configs/volume_alpha.default.yaml --data-root data/forward-paper bybit-demo-cycle --submit-orders --i-understand-demo-sync --use-wallet-balance --max-order-notional 0 --max-total-new-notional 0 --max-order-notional-pct-equity 0.10 --demo-entry-sleeves stage4_selected --forward-mode open-from-scan --require-first-slice
-python -m aggression_carry --config configs/volume_alpha.default.yaml --data-root data/forward-paper forward-audit --telegram
+bash scripts/run_fullpit_volume_overnight.sh
 ```
 
-Emergency demo controls:
+PowerShell:
 
-```bash
-python -m aggression_carry --data-root data/forward-paper --config configs/volume_alpha.default.yaml bybit-demo-cancel-all --i-understand-demo-cancel-all
-python -m aggression_carry --data-root data/forward-paper --config configs/volume_alpha.default.yaml bybit-demo-flatten --i-understand-demo-flatten
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\run_fullpit_volume_overnight.ps1
 ```
 
-Pause new demo entries:
-
-```bash
-touch data/forward-paper/DEMO_PAUSED
-```
-
-Resume:
-
-```bash
-rm -f data/forward-paper/DEMO_PAUSED
-```
+The runner syncs `main`, installs the local Python environment, runs smoke tests, builds/resumes the full Bybit public archive manifest, fills full PIT 1h klines from the Bybit v5 API, validates manifest coverage, then runs the selected liquidity-migration strategy.
 
 ## Useful Files
 
-- `aggression_carry/daily_close_fade.py`: backtest strategy and exit model
-- `aggression_carry/forward_test.py`: live scan, paper TWAP slices, and paper marking
-- `aggression_carry/demo_execution.py`: Bybit demo order sync and reconciliation
-- `aggression_carry/demo_cycle.py`: minute-loop orchestration
-- `aggression_carry/forward_audit.py`: paper/demo slice audit
-- `scripts/run_bybit_demo_engine.sh`: continuously runs demo cycle plus audit
-- `scripts/run_forward_signal_with_audit.sh`: 23:15 signal scan, immediate first-slice demo handoff, plus audit
+- `aggression_carry/volume_events.py`: active event-driven strategy, full-PIT gates, ledger, reports
+- `aggression_carry/archive_manifest.py`: PIT manifest and 1h kline builders
+- `aggression_carry/volume_alpha.py`: reusable feature builder for event research
+- `aggression_carry/volume_backtest.py`: reusable trade/equity/cost helpers used by event research
+- `scripts/run_fullpit_volume_overnight.sh`: selected full-PIT runner
+- `scripts/run_fullpit_volume_overnight.ps1`: PowerShell selected full-PIT runner
+- `docs/volume_alpha.md`: strategy notes and current result
+- `docs/bybit_aggression_carry_system_codex_spec.md`: active system spec

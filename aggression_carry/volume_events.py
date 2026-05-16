@@ -56,40 +56,40 @@ SPLITS = (
 
 @dataclass(frozen=True, slots=True)
 class VolumeEventResearchConfig:
-    event_types: tuple[str, ...] = EVENT_TYPES
-    thresholds: tuple[float, ...] = (0.20, 0.30)
-    hold_days: tuple[int, ...] = (3, 7)
-    side_hypotheses: tuple[str, ...] = SIDE_HYPOTHESES
-    stop_loss_pcts: tuple[float, ...] = (0.0, 0.12)
-    cost_multipliers: tuple[float, ...] = (1.0, 3.0)
+    event_types: tuple[str, ...] = ("liquidity_migration",)
+    thresholds: tuple[float, ...] = (0.30,)
+    hold_days: tuple[int, ...] = (1,)
+    side_hypotheses: tuple[str, ...] = ("reversal",)
+    stop_loss_pcts: tuple[float, ...] = (0.12,)
+    cost_multipliers: tuple[float, ...] = (3.0,)
     start_date: str = ""
     end_date: str = ""
     entry_delay_hours: int = 1
     gross_exposure: float = 1.0
-    max_active_symbols: int = 12
-    cooldown_days: int = 3
-    rank_exit_threshold: float = 0.50
+    max_active_symbols: int = 6
+    cooldown_days: int = 5
+    rank_exit_threshold: float = 0.55
     require_pit_membership: bool = True
     require_full_pit_universe: bool = True
-    universe_rank_min: int = 1
-    universe_rank_max: int = 0
+    universe_rank_min: int = 31
+    universe_rank_max: int = 150
     universe_min_daily_turnover: float = 0.0
     tail_rank_min: int = 81
     tail_rank_max: int = 160
     tail_rank_improvement_min: int = 20
-    liquidity_migration_rank_improvement_min: int = 50
-    liquidity_migration_turnover_ratio_min: float = 0.0
+    liquidity_migration_rank_improvement_min: int = 150
+    liquidity_migration_turnover_ratio_min: float = 6.0
     liquidity_migration_prior_rank_min: int = 0
     liquidity_migration_current_rank_max: int = 0
-    liquidity_migration_event_rank_fraction_max: float = 0.0
+    liquidity_migration_event_rank_fraction_max: float = 0.90
     liquidity_migration_score_max: float = 0.0
     market_median_return_1d_min: float = -1.0
     market_median_return_1d_max: float = 1.0
     market_pct_up_1d_max: float = 1.0
     btc_return_1d_min: float = -1.0
     btc_return_1d_max: float = 1.0
-    stop_pressure_window_days: int = 0
-    stop_pressure_stop_count: int = 0
+    stop_pressure_window_days: int = 14
+    stop_pressure_stop_count: int = 12
     exhaustion_min_day_return: float = 0.03
     selloff_exhaustion_min_abs_day_return: float = 0.03
     absorption_max_abs_day_return: float = 0.015
@@ -1132,7 +1132,7 @@ def _full_pit_universe_error(features: pl.DataFrame, archive_manifest: pl.DataFr
     return (
         "volume-events requires a full PIT universe by default, but klines_1h does not cover every archive manifest symbol. "
         f"manifest_symbols={len(manifest_symbols)} feature_symbols={len(feature_symbols)} missing_symbols={len(missing)} "
-        f"missing_sample={missing[:20]}. Finish archive-download-klines-1h before running real volume-alpha backtests."
+        f"missing_sample={missing[:20]}. Finish archive-download-klines-1h before running real event backtests."
     )
 
 
@@ -1182,7 +1182,7 @@ def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) 
     lines = [
         "# Volume Event Research",
         "",
-        "Event-driven volume-alpha benchmark. This is not demo-ready evidence unless PIT membership and the full PIT universe are both present.",
+        "Event-driven liquidity-migration benchmark. This is not demo-ready evidence unless PIT membership and the full PIT universe are both present.",
         "",
         "## Inputs",
         "",

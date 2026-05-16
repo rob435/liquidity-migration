@@ -1,4 +1,4 @@
-"""Bybit demo-account trading system package."""
+"""Bybit liquidity-migration research package."""
 
 __all__ = ["__version__"]
 

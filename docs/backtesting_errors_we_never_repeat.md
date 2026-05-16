@@ -130,8 +130,8 @@ not be called proof, candidate alpha, promotion evidence, or real-money support.
     this rule.
 
 16. **Same-code illusion.** A backtest function that cannot be mapped to the
-    forward-test order lifecycle is not proof. Backtest, paper, and demo must
-    agree on decision time, slice schedule, fill accounting, and exit state.
+    forward/demo order lifecycle is not proof. Backtest, paper, and demo must
+    agree on decision time, order timing, fill accounting, and exit state.
 
 17. **Parameter mining.** Sweeping until a curve looks good is not discovery
     unless the selection rule existed before the validation window. Every grid
@@ -174,40 +174,39 @@ not be called proof, candidate alpha, promotion evidence, or real-money support.
 
 ## Repo Application
 
-For the current daily-close TWAP fade:
+For the current liquidity-migration strategy:
 
-- Ranking at 22:00 UTC may use only data available at 22:00 UTC.
-- Candle rows timestamped by open time are not available at their open time.
-  A 22:00 decision may use 1m candles through 21:59 and hourly premium/mark
-  candles through the hour ending at 22:00, not the candle starting at 22:00.
-- Entry is 60 equal 1m slices over `[22:00, 23:00)`, not a single synthetic
-  close or open fill.
+- Signal features must use only data known at the daily signal close.
+- Entry is delayed by the configured 1h delay; the signal close is not an
+  executable fill.
 - Current-top Bybit universes are benchmarks only and must carry
   `current_universe_biased`.
 - Promotion requires archive-derived point-in-time symbol/date membership,
   including delisted instruments and historical status changes.
-- Profit protection must activate only at final add plus the configured delay.
-  Its MFE/trailing state starts at activation, not from pre-activation candles.
-- Same-minute or same-delay clustered exits must be reported and treated as an
-  anomaly until proven intentional and executable.
-- Corrected profit-protection semantics invalidated the old +16,991.58% run.
-  That number is not alpha evidence.
-
-For volume-alpha research:
-
-- Do not blend signals until each standalone signal clears costs and point-in-time
-  validation.
-- Event-driven entries are the active research path; fixed-day rebalance grids
-  are legacy benchmarks only.
+- `volume-events` must require full PIT universe coverage by default. Use
+  `--allow-partial-pit` only for explicitly biased diagnostics.
+- Liquidity rank, rank improvement, turnover expansion, and event-rank filters
+  must use prior/current data available at the event decision time.
+- Event-decay exits, max hold, cooldown, max-active, and stop-pressure state
+  must be initialized exactly as a forward/demo executor would initialize them.
+- Funding is still a known gap when the data root has no funding dataset. Mark
+  those runs as fee/slippage stressed but funding-missing.
 - Report promotion tests by full distribution and split stability, not by the
   best isolated parameter set.
-- Liquidity and universe filters must use prior data only.
+
+For retired paths:
+
+- The fixed daily-close short fade is no longer an active strategy.
+- Old daily-close profit-protection test results must not be cited as
+  promotion evidence for the current event-driven system.
+- Fixed-day volume rebalance grids are legacy benchmarks only, not the strategy
+  path.
 
 For paper/demo:
 
 - Telegram may notify, but it must not approve or submit orders.
 - Demo execution is execution evidence only. It is not alpha proof.
-- Forward audit must reconcile expected TWAP slices to actual orders, fills,
+- Forward audit must reconcile expected event orders to actual orders, fills,
   misses, slippage, fees, funding, and exit reasons.
 
 ## Required Run Labels

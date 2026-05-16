@@ -89,28 +89,6 @@ def summarize_gate_counts(gates: list[dict[str, str]]) -> dict[str, int]:
     }
 
 
-def close_fade_lifecycle(config: Any) -> dict[str, Any]:
-    profit_delay = (
-        config.profit_protection_delay_minutes
-        if config.profit_protection_delay_minutes is not None
-        else config.stop_delay_minutes
-    )
-    return {
-        "decision_ts": f"UTC day at minute {config.signal_minute}",
-        "data_available_ts": "same as decision_ts; features use only completed minute bars with minute_of_day < signal_minute",
-        "order_submit_ts": f"decision_ts + {config.entry_delay_minutes} minutes",
-        "fill_window": f"[order_submit_ts, order_submit_ts + {config.entry_twap_minutes} minutes)",
-        "exit_activation_ts": {
-            "hard_stop": f"first fill + {config.stop_delay_minutes} minutes",
-            "adaptive_profit_protection": f"final entry fill + {profit_delay} minutes",
-        },
-        "state_initialization_ts": {
-            "hard_stop": "first fill",
-            "adaptive_profit_protection": "profit_protection_active_ts",
-        },
-    }
-
-
 def volume_lifecycle(config: Any) -> dict[str, Any]:
     return {
         "decision_ts": "daily volume feature timestamp",
@@ -120,114 +98,6 @@ def volume_lifecycle(config: Any) -> dict[str, Any]:
         "exit_activation_ts": "entry through max hold, stop, take profit, or rank exit",
         "state_initialization_ts": "entry bar",
     }
-
-
-def close_fade_audit(
-    *,
-    config: Any,
-    summary: dict[str, Any],
-    rows: dict[str, int],
-    cost_model: dict[str, Any],
-    split_metrics: list[dict[str, Any]],
-    data_root: str | Path,
-) -> dict[str, Any]:
-    identity = data_identity(
-        data_root,
-        (
-            "klines_1m",
-            "instruments",
-            "archive_trade_manifest",
-            "funding",
-            "open_interest",
-            "signed_flow_1h",
-            "premium_index_1h",
-            "mark_price_1h",
-            "index_price_1h",
-        ),
-    )
-    gates: list[dict[str, str]] = [
-        gate("lifecycle_timestamps", "pass", HARD_FAIL, "Report declares decision, data, order, fill, exit, and state timing."),
-        gate("causal_signal_features", "pass", HARD_FAIL, "Daily-close features are built from completed bars before the signal minute."),
-        gate(
-            "point_in_time_universe",
-            "pass" if config.require_archive_membership else "fail",
-            HARD_FAIL,
-            "Archive membership is required." if config.require_archive_membership else "Current-listing/current-data universe benchmark; not promotion evidence.",
-        ),
-        gate(
-            "fees_and_slippage",
-            "pass" if float(cost_model.get("round_trip_cost_bps", 0.0)) > 0.0 else "fail",
-            HARD_FAIL,
-            "Round-trip cost is positive and recorded." if float(cost_model.get("round_trip_cost_bps", 0.0)) > 0.0 else "Round-trip cost is zero.",
-        ),
-        gate(
-            "funding_carry",
-            "pass" if summary.get("funding_mode") == "modeled" else "fail",
-            HARD_FAIL,
-            "Funding was modeled from funding events." if summary.get("funding_mode") == "modeled" else "Funding data missing or unused; carry is not proof-grade.",
-        ),
-        gate(
-            "context_datasets",
-            "pass" if _context_datasets_present(identity) else "fail",
-            HARD_FAIL,
-            "Open interest, signed flow, and premium context datasets are present."
-            if _context_datasets_present(identity)
-            else "One or more context datasets are missing: open_interest, signed_flow_1h, premium_index_1h or mark/index pair.",
-        ),
-        gate(
-            "capacity_limits",
-            "pass"
-            if config.max_trade_notional_pct_of_day_turnover > 0.0
-            or config.max_trade_notional_pct_of_baseline_turnover > 0.0
-            else "fail",
-            HARD_FAIL,
-            "Turnover participation caps are enabled." if (
-                config.max_trade_notional_pct_of_day_turnover > 0.0
-                or config.max_trade_notional_pct_of_baseline_turnover > 0.0
-            ) else "Turnover participation caps are disabled.",
-        ),
-        gate(
-            "market_impact",
-            "pass" if getattr(config, "market_impact_bps_per_1pct_turnover", 0.0) > 0.0 else "fail",
-            HARD_FAIL,
-            "Participation-based impact cost is enabled."
-            if getattr(config, "market_impact_bps_per_1pct_turnover", 0.0) > 0.0
-            else "Market impact cost is disabled.",
-        ),
-        gate("adaptive_state_tests", "pass", HARD_FAIL, "Profit-protection state starts at activation and has regression tests."),
-        gate("trade_ledger", "pass" if rows.get("trades", 0) > 0 else "fail", HARD_FAIL, "Trade ledger rows exist."),
-        gate("equity_and_drawdown", "pass", HARD_FAIL, "Equity and drawdown are computed from basket returns."),
-        gate(
-            "split_metrics",
-            "pass" if _split_metrics_pass(split_metrics) else "fail",
-            HARD_FAIL,
-            "All chronological splits are positive with finite Sharpe." if _split_metrics_pass(split_metrics) else "Split stability is missing or failed.",
-        ),
-        gate(
-            "synchronized_exit_anomaly",
-            "fail" if _post_twap_cluster_rate(summary, "post_twap_exit_le16") > 0.50 else "pass",
-            HARD_FAIL,
-            "More than half of trades exit by post-TWAP minute 16." if _post_twap_cluster_rate(summary, "post_twap_exit_le16") > 0.50 else "No majority post-TWAP minute-16 exit cluster.",
-        ),
-        gate(
-            "forward_twap_reconciliation",
-            "fail" if config.entry_twap_minutes > 0 else "warn",
-            SOFT_FAIL,
-            "Forward/demo slice-level TWAP is not implemented yet." if config.entry_twap_minutes > 0 else "Single-fill lifecycle still needs forward reconciliation.",
-        ),
-    ]
-    biased = not config.require_archive_membership
-    label = audit_label(gates, biased=biased)
-    return {
-        "label": label,
-        "can_support_promotion": promotion_allowed(gates, biased=biased),
-        "gate_counts": summarize_gate_counts(gates),
-        "gates": gates,
-        "config_hash": config_hash(config),
-        "lifecycle": close_fade_lifecycle(config),
-        "data_identity": identity,
-    }
-
 
 def volume_backtest_audit(
     *,
@@ -287,19 +157,6 @@ def _split_metrics_pass(split_metrics: list[dict[str, Any]]) -> bool:
     )
 
 
-def _context_datasets_present(identity: dict[str, Any]) -> bool:
-    rows = {str(row["dataset"]): row for row in identity.get("datasets", [])}
-    has_oi = _has_rows(rows.get("open_interest", {}))
-    has_flow = _has_rows(rows.get("signed_flow_1h", {}))
-    has_premium = _has_rows(rows.get("premium_index_1h", {}))
-    has_mark_index = _has_rows(rows.get("mark_price_1h", {})) and _has_rows(rows.get("index_price_1h", {}))
-    return has_oi and has_flow and (has_premium or has_mark_index)
-
-
-def _has_rows(row: dict[str, Any]) -> bool:
-    return int(row.get("parquet_files", 0) or 0) > 0 and int(row.get("row_count", 0) or 0) > 0
-
-
 def _parquet_identity_stats(files: list[Path]) -> dict[str, Any]:
     try:
         scan = pl.scan_parquet([str(file) for file in files])
@@ -330,13 +187,6 @@ def _parquet_identity_stats(files: list[Path]) -> dict[str, Any]:
         return {key: _jsonable(value) for key, value in stats.items()}
     except Exception as exc:  # pragma: no cover - audit metadata should never crash a run
         return {"scan_error": str(exc)}
-
-
-def _post_twap_cluster_rate(summary: dict[str, Any], key: str) -> float:
-    count = float(summary.get(key, 0) or 0)
-    total = float(summary.get("trade_count", 0) or 0)
-    return count / total if total > 0.0 else 0.0
-
 
 def _finite(value: float) -> bool:
     return value == value and value not in (float("inf"), float("-inf"))

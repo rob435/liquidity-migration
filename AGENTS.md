@@ -5,14 +5,15 @@
 - Do not optimize for a vague goal; define the objective before expensive research.
 - This repo's primary objective is a profitable Bybit demo-account trading system.
 - Current implementation plan: `docs/bybit_aggression_carry_system_codex_spec.md`.
-- Secondary volume-alpha research notes: `docs/volume_alpha.md`.
+- Active strategy notes: `docs/volume_alpha.md`.
 - Bybit venue/data reference: `docs/bybit_aggression_carry_system_codex_spec.md`.
 - Before changing strategy, data ingestion, feature engineering, or backtesting logic, read both docs.
 - Demo-only Bybit order submission is in scope; the private client must keep refusing `demo=False` unless real-money support is explicitly requested.
-- Keep the active path on the selected Stage 4 daily-close short fade unless a change has clear forward/demo evidence.
+- Keep the active path on the selected full-PIT liquidity-migration short strategy unless a replacement has better full-PIT and forward/demo evidence.
+- Do not revive the retired fixed daily-close short-fade path.
 - Telegram may notify; it must not approve or submit orders.
-- Do not mix secondary signals into the demo stack without standalone cost-cleared evidence.
-- Volume-alpha research is being reset around event-driven entries; fixed-day rebalance grids are legacy benchmarks only.
+- Do not mix secondary signals into the demo stack without standalone cost-cleared full-PIT evidence.
+- Event-driven entries are the strategy path; fixed-day rebalance grids are legacy benchmarks only.
 - Serious strategy runs should leave enough report output to audit the decision.
 
 ## graphify

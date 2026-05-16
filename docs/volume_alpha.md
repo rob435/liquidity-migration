@@ -1,16 +1,14 @@
-# Volume Alpha Research Plan
+# Liquidity-Migration Strategy Plan
 
-Volume alpha is being reset around event-driven behavior. The old fixed-day
-rebalance sweeps are deprecated as a research direction because they force
-calendar trades even when no useful volume event occurred.
+This repo is now focused on the event-driven full-PIT liquidity-migration
+strategy. The old fixed daily-close short fade is retired, and fixed-day
+volume rebalance sweeps are legacy benchmarks only.
 
 ## Objective
 
-Find whether Bybit perp volume events have standalone, cost-cleared forward
-edge that can later justify a demo sleeve.
-
-This remains secondary to the active daily-close fade system until it clears
-all gates below.
+Turn the selected Bybit perp liquidity-migration short strategy into a
+demo-account system with reproducible full-PIT backtests, clear reports, and
+event-lifecycle execution parity.
 
 ## Decision
 
@@ -35,11 +33,14 @@ running on the completed full-PIT root with `--universe-rank-max 150`. That
 means top 150 by historical daily liquidity rank on each signal date, not the
 top 150 coins by today's turnover.
 
-## Deprecated
+## Retired
 
 These workflows are intentionally removed from the active research path:
 
 ```text
+fixed daily-close short fade
+old daily candidate scan and sleeve runner
+old forward paper/demo executor
 fixed 7d/14d split-grid helper scripts
 liquidity bucket sweep helper scripts
 5950X overnight fixed-grid runner
@@ -53,8 +54,8 @@ aggression_carry/volume_alpha.py
 aggression_carry/volume_backtest.py
 ```
 
-They still contain useful feature, cost, ledger, and reporting code. The old
-standalone fixed-grid/promotion helper scripts have been removed.
+They still contain useful feature, cost, ledger, and reporting code. They are
+not the active strategy interface.
 
 ## Event Definitions
 
@@ -162,7 +163,7 @@ no calendar-forced basket if no event fired
 cooldown and max-active-symbol logic included
 ```
 
-Current command:
+Current command, using the selected strategy defaults:
 
 ```bash
 python -m aggression_carry \
@@ -258,13 +259,13 @@ top failure reason
 
 ## Current Status
 
-Fixed-rebalance volume-alpha results are archived mentally as exploratory only.
+Fixed-rebalance volume results are archived as exploratory only.
 They are not the path forward.
 
 The event-driven runner now exists as `volume-events`. It writes scenario
 summary, best-scenario trades, baskets, equity, monthly returns, JSON, and
 Markdown reports. Promotion requires full point-in-time membership and full
-PIT universe coverage. Do not use current-universe subsets for volume-alpha
+PIT universe coverage. Do not use current-universe subsets for strategy
 research decisions. The survivorship-free event run must use a data root whose
 `klines_1h` coverage was built from the full `archive_trade_manifest` with
 `archive-download-klines-1h-api`; raw trade archive repair remains the fallback
@@ -272,7 +273,7 @@ for any API gaps.
 
 ## Selected Full-PIT Result
 
-Current best volume-alpha candidate. The previous `turnover >= 1.75`,
+Current selected candidate. The previous `turnover >= 1.75`,
 3-day-hold candidate is demoted because its `-34.72%` max drawdown was too
 close to the old drawdown gate.
 
@@ -294,7 +295,7 @@ stop-pressure throttle: pause new entries after 12 realized stops inside 14 days
 cost: 3x base round-trip cost
 ```
 
-Command:
+Equivalent explicit command:
 
 ```bash
 python -m aggression_carry \
