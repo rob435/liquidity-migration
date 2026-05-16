@@ -77,6 +77,22 @@ tail_liquidity_jump:
 volume_exhaustion:
   extreme volume spike after strong price extension
   test both continuation and reversal sides separately
+
+volume_absorption:
+  volume spikes while same-day price movement stays muted
+  tests hidden absorption before a delayed continuation/reversal
+
+dryup_reacceleration:
+  volume re-accelerates after a low-persistence, quiet-price regime
+  tests coil-break behavior without forcing calendar rebalances
+
+liquidity_migration:
+  dollar-volume rank jumps sharply across the whole PIT universe
+  unlike tail_liquidity_jump, this is not restricted to ranks 81-160
+
+selloff_exhaustion:
+  extreme volume spike after a strong negative same-day move
+  tests panic continuation versus snapback separately
 ```
 
 ## Trade Lifecycle
@@ -158,8 +174,7 @@ python -m aggression_carry \
 Overnight full-PIT runner:
 
 ```bash
-nohup bash scripts/run_fullpit_volume_overnight.sh > fullpit_volume_overnight.nohup.log 2>&1 &
-tail -f fullpit_volume_overnight.nohup.log
+bash scripts/run_fullpit_volume_overnight.sh
 ```
 
 PowerShell runner:
@@ -168,19 +183,7 @@ PowerShell runner:
 powershell -ExecutionPolicy Bypass -File scripts\run_fullpit_volume_overnight.ps1
 ```
 
-Creative full-PIT-only research runner:
-
-```bash
-nohup bash scripts/run_fullpit_volume_creative_research.sh > fullpit_creative_volume.nohup.log 2>&1 &
-tail -f fullpit_creative_volume.nohup.log
-```
-
-This runner waits for full PIT coverage before running anything. It tests
-PIT top-150 liquidity universes, delayed breakout entries, volume-exhaustion
-continuation/reversal, tail-liquidity jumps, and an all-PIT continuation sanity
-grid. It never passes `--allow-partial-pit`.
-
-Default behavior:
+Default full-PIT runner behavior:
 
 ```text
 sync repo to origin/main
@@ -189,23 +192,19 @@ run focused smoke tests
 build/resume full Bybit USDT public archive manifest
 download/resume full PIT 1h klines with 64 workers
 validate manifest-to-parquet coverage
-run the selected persistent-volume-breakout event backtest
-run the full event-driven feature grid
+run the selected persistent-volume-breakout event backtest only
 ```
 
-The default event grid covers all active event families, top 20% and 30%
-thresholds, 3/5/7/14 day holds, continuation and reversal, fixed stops of
-0/3/5/8/12%, and 1x/3x cost multipliers. It repeats that grid for max-active
-6 and 12 with cooldowns of 3 and 7 days, and entry delays of 1/6/12 hours.
-Override the breadth with
-`EVENT_GRID_*` environment variables in `scripts/run_fullpit_volume_overnight.sh`
-when a narrower or wider overnight run is needed.
+The old background creative watcher and event-grid runner path are removed from
+the active workflow. New ideas should be run as named, foreground
+`volume-events` commands with explicit event families, parameters, and report
+directories.
 
 `volume-events` also exposes research controls for entry delay, rank-decay exit
-threshold, global liquidity filters, tail-liquidity rank bounds, tail rank
-improvement, and volume-exhaustion day-return threshold. Use these to test
-whether an edge is immediate, delayed, concentrated in tails, or only a pump
-exhaustion artifact.
+threshold, global liquidity filters, tail-liquidity rank bounds, rank
+improvement, absorption move caps, dry-up quiet-regime filters, and exhaustion
+day-return thresholds. Use these to test whether an edge is immediate, delayed,
+concentrated in tails, or only an exhaustion artifact.
 
 Full PIT data build for event research:
 

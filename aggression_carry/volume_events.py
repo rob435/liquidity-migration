@@ -41,6 +41,10 @@ EVENT_TYPES = (
     "persistent_volume_breakout",
     "tail_liquidity_jump",
     "volume_exhaustion",
+    "volume_absorption",
+    "dryup_reacceleration",
+    "liquidity_migration",
+    "selloff_exhaustion",
 )
 SIDE_HYPOTHESES = ("continuation", "reversal")
 SPLITS = (
@@ -73,7 +77,12 @@ class VolumeEventResearchConfig:
     tail_rank_min: int = 81
     tail_rank_max: int = 160
     tail_rank_improvement_min: int = 20
+    liquidity_migration_rank_improvement_min: int = 50
     exhaustion_min_day_return: float = 0.03
+    selloff_exhaustion_min_abs_day_return: float = 0.03
+    absorption_max_abs_day_return: float = 0.015
+    dryup_prior_volume_rank_max: float = 0.35
+    dryup_prior_abs_day_return_max: float = 0.02
     promotion_max_drawdown: float = -0.35
     promotion_min_avg_sharpe: float = 0.50
 
@@ -612,7 +621,49 @@ def _event_filter(
             & (pl.col("daily_return_1d") >= config.exhaustion_min_day_return)
             & (pl.col("daily_return_rank_frac") >= top_cut)
         )
+    if event_type == "volume_absorption":
+        if not _has_columns(base, "daily_return_1d"):
+            return base.head(0)
+        return base.filter(
+            (pl.col(rank_col) >= top_cut)
+            & pl.col("daily_return_1d").is_not_null()
+            & (pl.col("daily_return_1d").abs() <= config.absorption_max_abs_day_return)
+        )
+    if event_type == "dryup_reacceleration":
+        if not _has_columns(base, "prior7_volume_persistence_rank_max", "prior7_abs_daily_return_mean", f"prior_{rank_col}"):
+            return base.head(0)
+        return base.filter(
+            (pl.col(rank_col) >= top_cut)
+            & (pl.col(f"prior_{rank_col}") < top_cut)
+            & (pl.col("prior7_volume_persistence_rank_max") <= config.dryup_prior_volume_rank_max)
+            & (pl.col("prior7_abs_daily_return_mean") <= config.dryup_prior_abs_day_return_max)
+        )
+    if event_type == "liquidity_migration":
+        if not _has_columns(base, "prior7_liquidity_rank", f"prior7_{rank_col}"):
+            return base.head(0)
+        return base.filter(
+            (pl.col(rank_col) >= top_cut)
+            & (pl.col(f"prior7_{rank_col}") < top_cut)
+            & ((pl.col("prior7_liquidity_rank") - pl.col("liquidity_rank")) >= config.liquidity_migration_rank_improvement_min)
+        )
+    if event_type == "selloff_exhaustion":
+        if not _has_columns(base, "daily_return_1d", "daily_return_rank_frac"):
+            return base.head(0)
+        return base.filter(
+            (pl.col(rank_col) >= top_cut)
+            & (pl.col("daily_return_1d") <= -config.selloff_exhaustion_min_abs_day_return)
+            & (pl.col("daily_return_rank_frac") <= _bottom_cut_from_top_cut(top_cut))
+        )
     raise ValueError(f"Unknown event type: {event_type}")
+
+
+def _has_columns(frame: pl.DataFrame, *columns: str) -> bool:
+    available = set(frame.columns)
+    return all(column in available for column in columns)
+
+
+def _bottom_cut_from_top_cut(top_cut: float) -> float:
+    return 1.0 - top_cut
 
 
 def _event_decay_exit_hit(
@@ -630,6 +681,8 @@ def _enriched_event_features(features: pl.DataFrame, klines: pl.DataFrame, archi
     if features.is_empty():
         return features
     enriched = features.join(_daily_return_frame(klines), on=["ts_ms", "symbol"], how="left")
+    if "daily_return_1d" in enriched.columns:
+        enriched = enriched.with_columns(pl.col("daily_return_1d").abs().alias("abs_daily_return_1d"))
     rank_inputs = {
         "volume_change_1d_z": "volume_change_1d_z_rank_frac",
         "volume_change_3d_z": "volume_change_3d_z_rank_frac",
@@ -637,6 +690,7 @@ def _enriched_event_features(features: pl.DataFrame, klines: pl.DataFrame, archi
         "dollar_volume_rank_z": "dollar_volume_rank_z_rank_frac",
         "volume_composite": "volume_composite_rank_frac",
         "daily_return_1d": "daily_return_rank_frac",
+        "abs_daily_return_1d": "abs_daily_return_rank_frac",
     }
     for source, alias in rank_inputs.items():
         if source in enriched.columns:
@@ -659,6 +713,16 @@ def _enriched_event_features(features: pl.DataFrame, klines: pl.DataFrame, archi
             .rolling_min(window_size=3, min_samples=1)
             .over("symbol")
             .alias("prior3_volume_persistence_rank_min"),
+            pl.col("volume_persistence_z_rank_frac")
+            .shift(1)
+            .rolling_max(window_size=7, min_samples=1)
+            .over("symbol")
+            .alias("prior7_volume_persistence_rank_max"),
+            pl.col("abs_daily_return_1d")
+            .shift(1)
+            .rolling_mean(window_size=7, min_samples=1)
+            .over("symbol")
+            .alias("prior7_abs_daily_return_mean"),
             pl.col("liquidity_rank").shift(7).over("symbol").alias("prior7_liquidity_rank"),
         ]
     )
@@ -718,11 +782,17 @@ def _add_rank_fraction(frame: pl.DataFrame, source: str, alias: str) -> pl.DataF
 
 
 def _event_score(event_type: str) -> tuple[str, str]:
-    if event_type in {"fresh_volume_spike", "volume_exhaustion"}:
+    if event_type in {
+        "fresh_volume_spike",
+        "volume_exhaustion",
+        "volume_absorption",
+        "dryup_reacceleration",
+        "selloff_exhaustion",
+    }:
         return "volume_change_1d", VOLUME_SCORE_COLUMNS["volume_change_1d"]
     if event_type == "persistent_volume_breakout":
         return "volume_persistence", VOLUME_SCORE_COLUMNS["volume_persistence"]
-    if event_type == "tail_liquidity_jump":
+    if event_type in {"tail_liquidity_jump", "liquidity_migration"}:
         return "dollar_volume_rank", VOLUME_SCORE_COLUMNS["dollar_volume_rank"]
     raise ValueError(f"Unknown event type: {event_type}")
 
@@ -1061,8 +1131,18 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("tail_rank_min must be <= tail_rank_max")
     if config.tail_rank_improvement_min < 0:
         raise ValueError("tail_rank_improvement_min must be non-negative")
+    if config.liquidity_migration_rank_improvement_min < 0:
+        raise ValueError("liquidity_migration_rank_improvement_min must be non-negative")
     if config.exhaustion_min_day_return < 0.0:
         raise ValueError("exhaustion_min_day_return must be non-negative")
+    if config.selloff_exhaustion_min_abs_day_return < 0.0:
+        raise ValueError("selloff_exhaustion_min_abs_day_return must be non-negative")
+    if config.absorption_max_abs_day_return < 0.0:
+        raise ValueError("absorption_max_abs_day_return must be non-negative")
+    if not 0.0 <= config.dryup_prior_volume_rank_max <= 1.0:
+        raise ValueError("dryup_prior_volume_rank_max must be in [0, 1]")
+    if config.dryup_prior_abs_day_return_max < 0.0:
+        raise ValueError("dryup_prior_abs_day_return_max must be non-negative")
 
 
 def _window_config(config: VolumeEventResearchConfig) -> VolumeBacktestConfig:

@@ -171,7 +171,37 @@ def build_parser() -> argparse.ArgumentParser:
     volume_events.add_argument("--tail-rank-min", type=int, default=81, help="Tail-liquidity event lower liquidity-rank bound.")
     volume_events.add_argument("--tail-rank-max", type=int, default=160, help="Tail-liquidity event upper liquidity-rank bound.")
     volume_events.add_argument("--tail-rank-improvement-min", type=int, default=20, help="Minimum 7d liquidity-rank improvement for tail events.")
+    volume_events.add_argument(
+        "--liquidity-migration-rank-improvement-min",
+        type=int,
+        default=50,
+        help="Minimum 7d liquidity-rank improvement for whole-universe liquidity-migration events.",
+    )
     volume_events.add_argument("--exhaustion-min-day-return", type=float, default=0.03, help="Minimum same-day return for volume-exhaustion events.")
+    volume_events.add_argument(
+        "--selloff-exhaustion-min-abs-day-return",
+        type=float,
+        default=0.03,
+        help="Minimum absolute negative same-day return for selloff-exhaustion events.",
+    )
+    volume_events.add_argument(
+        "--absorption-max-abs-day-return",
+        type=float,
+        default=0.015,
+        help="Maximum absolute same-day return for volume-absorption events.",
+    )
+    volume_events.add_argument(
+        "--dryup-prior-volume-rank-max",
+        type=float,
+        default=0.35,
+        help="Maximum prior 7d volume-persistence rank fraction for dry-up reacceleration.",
+    )
+    volume_events.add_argument(
+        "--dryup-prior-abs-day-return-max",
+        type=float,
+        default=0.02,
+        help="Maximum prior 7d mean absolute daily return for dry-up reacceleration.",
+    )
     volume_events.add_argument(
         "--allow-partial-pit",
         action="store_true",
@@ -727,7 +757,12 @@ def main(argv: list[str] | None = None) -> int:
             tail_rank_min=args.tail_rank_min,
             tail_rank_max=args.tail_rank_max,
             tail_rank_improvement_min=args.tail_rank_improvement_min,
+            liquidity_migration_rank_improvement_min=args.liquidity_migration_rank_improvement_min,
             exhaustion_min_day_return=args.exhaustion_min_day_return,
+            selloff_exhaustion_min_abs_day_return=args.selloff_exhaustion_min_abs_day_return,
+            absorption_max_abs_day_return=args.absorption_max_abs_day_return,
+            dryup_prior_volume_rank_max=args.dryup_prior_volume_rank_max,
+            dryup_prior_abs_day_return_max=args.dryup_prior_abs_day_return_max,
         )
         payload = run_volume_event_research(
             data_root,

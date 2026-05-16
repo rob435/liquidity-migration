@@ -13,26 +13,7 @@ param(
     [string]$Python = "python",
     [bool]$RunTests = $true,
     [bool]$RunChampionBacktest = $true,
-    [bool]$RunEventGrid = $true,
-    [double]$ChampionGrossExposure = 0.5,
-    [string]$EventGridEventTypes = "fresh_volume_spike,persistent_volume_breakout,tail_liquidity_jump,volume_exhaustion",
-    [string]$EventGridThresholds = "0.2,0.3",
-    [string]$EventGridHoldDays = "3,5,7,14",
-    [string]$EventGridSides = "continuation,reversal",
-    [string]$EventGridStopLossPcts = "0,0.03,0.05,0.08,0.12",
-    [string]$EventGridCostMultipliers = "1,3",
-    [double]$EventGridGrossExposure = 0.5,
-    [string]$EventGridMaxActiveList = "6,12",
-    [string]$EventGridCooldownList = "3,7",
-    [string]$EventGridEntryDelayList = "1,6,12",
-    [string]$EventGridRankExitThresholds = "0.5",
-    [int]$EventGridUniverseRankMin = 1,
-    [int]$EventGridUniverseRankMax = 0,
-    [double]$EventGridUniverseMinDailyTurnover = 0.0,
-    [int]$EventGridTailRankMin = 81,
-    [int]$EventGridTailRankMax = 160,
-    [int]$EventGridTailRankImprovementMin = 20,
-    [double]$EventGridExhaustionMinDayReturn = 0.03
+    [double]$ChampionGrossExposure = 0.5
 )
 
 $ErrorActionPreference = "Stop"
@@ -54,11 +35,6 @@ function Invoke-Checked {
     if ($LASTEXITCODE -ne 0) {
         throw "$File failed with exit code $LASTEXITCODE"
     }
-}
-
-function Split-Csv {
-    param([string]$Value)
-    return @($Value.Split(",") | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" })
 }
 
 if ($Repo -eq "") {
@@ -236,59 +212,6 @@ if missing:
             "--report-dir", $ChampionReportDir
         )
         Add-Content -Path $EventReportIndex -Value "champion,6,7,1,0.5,persistent_volume_breakout,0.2,5,continuation,0,1|3,$ChampionGrossExposure,$ChampionReportDir"
-    }
-
-    if ($RunEventGrid) {
-        Section "Run full PIT event-driven feature grid"
-        foreach ($MaxActive in (Split-Csv $EventGridMaxActiveList)) {
-            foreach ($Cooldown in (Split-Csv $EventGridCooldownList)) {
-                foreach ($EntryDelay in (Split-Csv $EventGridEntryDelayList)) {
-                    foreach ($RankExitThreshold in (Split-Csv $EventGridRankExitThresholds)) {
-                        $RankTag = $RankExitThreshold.Replace(".", "p")
-                        $GridReportDir = Join-Path (Join-Path $DataRoot "reports") ("volume_event_research_fullpit_grid_ma{0}_cd{1}_ed{2}_rx{3}_{4}" -f $MaxActive, $Cooldown, $EntryDelay, $RankTag, ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
-                        Write-Host "Starting event grid: max_active=$MaxActive cooldown=$Cooldown entry_delay=$EntryDelay rank_exit=$RankExitThreshold report=$GridReportDir"
-                        Invoke-Checked $VenvPython @(
-                            "-m", "aggression_carry",
-                            "--data-root", $DataRoot,
-                            "--config", $ConfigPath,
-                            "volume-events",
-                            "--event-types", $EventGridEventTypes,
-                            "--thresholds", $EventGridThresholds,
-                            "--hold-days", $EventGridHoldDays,
-                            "--sides", $EventGridSides,
-                            "--stop-loss-pcts", $EventGridStopLossPcts,
-                            "--cost-multipliers", $EventGridCostMultipliers,
-                            "--gross-exposure", "$EventGridGrossExposure",
-                            "--entry-delay-hours", "$EntryDelay",
-                            "--max-active-symbols", "$MaxActive",
-                            "--cooldown-days", "$Cooldown",
-                            "--rank-exit-threshold", "$RankExitThreshold",
-                            "--universe-rank-min", "$EventGridUniverseRankMin",
-                            "--universe-rank-max", "$EventGridUniverseRankMax",
-                            "--universe-min-daily-turnover", "$EventGridUniverseMinDailyTurnover",
-                            "--tail-rank-min", "$EventGridTailRankMin",
-                            "--tail-rank-max", "$EventGridTailRankMax",
-                            "--tail-rank-improvement-min", "$EventGridTailRankImprovementMin",
-                            "--exhaustion-min-day-return", "$EventGridExhaustionMinDayReturn",
-                            "--report-dir", $GridReportDir
-                        )
-                        Add-Content -Path $EventReportIndex -Value ("event_grid,{0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11}" -f `
-                            $MaxActive, `
-                            $Cooldown, `
-                            $EntryDelay, `
-                            $RankExitThreshold, `
-                            $EventGridEventTypes.Replace(",", "|"), `
-                            $EventGridThresholds.Replace(",", "|"), `
-                            $EventGridHoldDays.Replace(",", "|"), `
-                            $EventGridSides.Replace(",", "|"), `
-                            $EventGridStopLossPcts.Replace(",", "|"), `
-                            $EventGridCostMultipliers.Replace(",", "|"), `
-                            $EventGridGrossExposure, `
-                            $GridReportDir)
-                    }
-                }
-            }
-        }
     }
 
     Section "Done"

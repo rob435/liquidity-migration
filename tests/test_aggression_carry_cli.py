@@ -170,8 +170,18 @@ def test_cli_parses_volume_events(tmp_path: Path) -> None:
             "260",
             "--tail-rank-improvement-min",
             "40",
+            "--liquidity-migration-rank-improvement-min",
+            "65",
             "--exhaustion-min-day-return",
             "0.08",
+            "--selloff-exhaustion-min-abs-day-return",
+            "0.09",
+            "--absorption-max-abs-day-return",
+            "0.012",
+            "--dryup-prior-volume-rank-max",
+            "0.25",
+            "--dryup-prior-abs-day-return-max",
+            "0.015",
             "--allow-partial-pit",
         ]
     )
@@ -190,7 +200,12 @@ def test_cli_parses_volume_events(tmp_path: Path) -> None:
     assert args.tail_rank_min == 120
     assert args.tail_rank_max == 260
     assert args.tail_rank_improvement_min == 40
+    assert args.liquidity_migration_rank_improvement_min == 65
     assert args.exhaustion_min_day_return == 0.08
+    assert args.selloff_exhaustion_min_abs_day_return == 0.09
+    assert args.absorption_max_abs_day_return == 0.012
+    assert args.dryup_prior_volume_rank_max == 0.25
+    assert args.dryup_prior_abs_day_return_max == 0.015
     assert args.allow_partial_pit is True
 
 
