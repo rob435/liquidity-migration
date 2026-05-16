@@ -69,6 +69,7 @@ average split Sharpe-like: 2.44
 train return: +24.58%
 validation return: +91.49%
 OOS return: +86.42%
+default chart: volume_event_best_equity_btc_spy.svg with BTC/SPY overlays and drawdown/drawup annotations
 promotion gate: pass
 ```
 
@@ -85,7 +86,7 @@ Serious strategy runs must use:
 - `archive_trade_manifest` as point-in-time symbol/date membership
 - `klines_1h` coverage for every manifest symbol/date in the run window
 - causal daily signal features, with entry delayed to the next configured 1h bar
-- full trade ledger, basket ledger, equity curve, monthly returns, JSON config, and Markdown report
+- full trade ledger, basket ledger, equity curve, BTC/SPY overlay chart, monthly returns, JSON config, and Markdown report
 
 `volume-events` requires full PIT coverage by default. `--allow-partial-pit` is only for explicitly biased diagnostics and must not be used as promotion evidence.
 

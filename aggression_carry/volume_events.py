@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import csv
+import html
 import json
 import math
+import ssl
+import urllib.error
+import urllib.request
 from bisect import bisect_right
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from itertools import product
 from pathlib import Path
 from typing import Any
@@ -135,12 +140,12 @@ def run_volume_event_research(
     output_dir = Path(report_dir) if report_dir else root / "reports" / "volume_event_research"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    klines = read_dataset(root, "klines_1h")
-    if klines.is_empty():
+    raw_klines = read_dataset(root, "klines_1h")
+    if raw_klines.is_empty():
         raise RuntimeError("klines_1h is empty; run download-data first")
     funding = read_dataset(root, "funding")
     archive_manifest = read_dataset(root, "archive_trade_manifest")
-    klines = _exclude_symbols(klines, config.exclude_symbols)
+    klines = _exclude_symbols(raw_klines, config.exclude_symbols)
     funding = _exclude_symbols(funding, config.exclude_symbols)
     archive_manifest = _exclude_symbols(archive_manifest, config.exclude_symbols)
     features = _filter_signal_window(
@@ -187,6 +192,7 @@ def run_volume_event_research(
     if not summary.is_empty():
         summary.write_csv(output_dir / "volume_event_scenario_summary.csv")
 
+    best_chart: dict[str, Any] = {}
     if best_payload is not None:
         trades = best_payload["trades"]
         baskets = best_payload["baskets"]
@@ -198,6 +204,7 @@ def run_volume_event_research(
             baskets.write_csv(output_dir / "volume_event_best_baskets.csv")
         if not equity.is_empty():
             equity.write_csv(output_dir / "volume_event_best_equity.csv")
+            best_chart = _write_equity_benchmark_chart(output_dir, root=root, equity=equity, raw_klines=raw_klines)
         if not monthly.is_empty():
             monthly.write_csv(output_dir / "volume_event_best_monthly.csv")
 
@@ -216,6 +223,7 @@ def run_volume_event_research(
             "base_round_trip_cost_bps": costs.base_entry_exit_cost_bps,
         },
         "best_scenario": summary.head(1).to_dicts()[0] if not summary.is_empty() else {},
+        "best_equity_chart": best_chart,
         "run_label": _run_label(config=config, archive_manifest=archive_manifest, full_pit_universe_pass=full_pit_universe_pass),
         "promotion_note": _promotion_note(
             archive_manifest=archive_manifest,
@@ -1104,6 +1112,396 @@ def _monthly_returns(baskets: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _write_equity_benchmark_chart(
+    output_dir: Path,
+    *,
+    root: Path,
+    equity: pl.DataFrame,
+    raw_klines: pl.DataFrame,
+) -> dict[str, Any]:
+    strategy = _strategy_equity_series(equity)
+    if not strategy:
+        return {}
+    start = strategy[0]["date"]
+    end = strategy[-1]["date"]
+    btc = _normalised_price_series(_btc_daily_close_series(raw_klines, start=start, end=end))
+    spy_status = "skipped_short_range"
+    spy: list[dict[str, Any]] = []
+    if _series_span_days(strategy) >= 90:
+        spy, spy_status = _spy_benchmark_series(root, start=start, end=end)
+    annotations = _equity_chart_annotations(equity)
+    benchmark_rows = _benchmark_rows(
+        [
+            ("Strategy", strategy),
+            ("BTC", btc),
+            ("SPY", spy),
+        ]
+    )
+    benchmark_csv = output_dir / "volume_event_best_equity_benchmarks.csv"
+    if benchmark_rows:
+        pl.DataFrame(benchmark_rows, infer_schema_length=None).write_csv(benchmark_csv)
+    annotations_csv = output_dir / "volume_event_best_equity_annotations.csv"
+    if annotations:
+        pl.DataFrame(annotations, infer_schema_length=None).write_csv(annotations_csv)
+    svg_path = output_dir / "volume_event_best_equity_btc_spy.svg"
+    svg_path.write_text(
+        _equity_benchmark_svg(
+            [
+                {"name": "Strategy", "color": "#111827", "points": strategy},
+                {"name": "BTC", "color": "#f59e0b", "points": btc},
+                {"name": "SPY", "color": "#2563eb", "points": spy},
+            ],
+            annotations=annotations,
+            start=start,
+            end=end,
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "svg": str(svg_path),
+        "benchmarks_csv": str(benchmark_csv) if benchmark_rows else "",
+        "annotations_csv": str(annotations_csv) if annotations else "",
+        "series": {
+            "strategy": len(strategy),
+            "btc": len(btc),
+            "spy": len(spy),
+        },
+        "spy_status": spy_status,
+        "annotations": annotations,
+    }
+
+
+def _strategy_equity_series(equity: pl.DataFrame) -> list[dict[str, Any]]:
+    if equity.is_empty() or not _has_columns(equity, "date", "equity"):
+        return []
+    rows = []
+    for row in equity.sort("ts_ms").select(["date", "equity"]).to_dicts():
+        value = _float_or_nan(row.get("equity"))
+        day = _parse_day(row.get("date"))
+        if day is not None and math.isfinite(value):
+            rows.append({"date": day.isoformat(), "value": value})
+    return rows
+
+
+def _btc_daily_close_series(raw_klines: pl.DataFrame, *, start: str, end: str) -> list[dict[str, Any]]:
+    if raw_klines.is_empty() or not _has_columns(raw_klines, "symbol", "date", "ts_ms", "close"):
+        return []
+    frame = (
+        raw_klines.filter(
+            (pl.col("symbol") == "BTCUSDT")
+            & (pl.col("date") >= start)
+            & (pl.col("date") <= end)
+            & pl.col("close").is_not_null()
+        )
+        .sort("ts_ms")
+        .group_by("date", maintain_order=True)
+        .agg(pl.col("close").last().alias("value"))
+        .sort("date")
+    )
+    return [
+        {"date": str(row["date"]), "value": float(row["value"])}
+        for row in frame.to_dicts()
+        if row.get("value") is not None and math.isfinite(float(row["value"]))
+    ]
+
+
+def _normalised_price_series(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cleaned = [
+        {"date": str(row["date"]), "value": float(row["value"])}
+        for row in rows
+        if row.get("value") is not None and math.isfinite(float(row["value"])) and float(row["value"]) > 0.0
+    ]
+    if not cleaned:
+        return []
+    base = cleaned[0]["value"]
+    return [{"date": row["date"], "value": row["value"] / base} for row in cleaned]
+
+
+def _spy_benchmark_series(root: Path, *, start: str, end: str) -> tuple[list[dict[str, Any]], str]:
+    cache = root / "benchmarks" / "spy_daily.csv"
+    frame = _read_spy_cache(cache)
+    status = "cache_hit" if not frame.is_empty() else "missing"
+    if frame.is_empty() or not _date_frame_overlaps(frame, start=start, end=end):
+        downloaded = _download_spy_daily(cache, start=start, end=end)
+        if not downloaded.is_empty():
+            frame = downloaded
+            status = "downloaded"
+        elif frame.is_empty():
+            return [], "unavailable"
+        else:
+            status = "cache_partial"
+    if frame.is_empty() or not _has_columns(frame, "Date", "Close"):
+        return [], "unavailable"
+    filtered = frame.filter((pl.col("Date") >= start) & (pl.col("Date") <= end) & pl.col("Close").is_not_null()).sort("Date")
+    rows = [{"date": str(row["Date"]), "value": float(row["Close"])} for row in filtered.to_dicts()]
+    return _normalised_price_series(rows), status
+
+
+def _read_spy_cache(path: Path) -> pl.DataFrame:
+    if not path.exists():
+        return pl.DataFrame()
+    try:
+        return pl.read_csv(path)
+    except Exception:
+        return pl.DataFrame()
+
+
+def _date_frame_overlaps(frame: pl.DataFrame, *, start: str, end: str) -> bool:
+    if frame.is_empty() or "Date" not in frame.columns:
+        return False
+    dates = [str(item) for item in frame["Date"].drop_nulls().to_list()]
+    return bool(dates) and max(dates) >= start and min(dates) <= end
+
+
+def _download_spy_daily(path: Path, *, start: str, end: str) -> pl.DataFrame:
+    yahoo = _download_spy_daily_yahoo(path, start=start, end=end)
+    if not yahoo.is_empty():
+        return yahoo
+    return _download_spy_daily_stooq(path, start=start, end=end)
+
+
+def _download_spy_daily_yahoo(path: Path, *, start: str, end: str) -> pl.DataFrame:
+    start_day = _parse_day(start)
+    end_day = _parse_day(end)
+    if start_day is None or end_day is None:
+        return pl.DataFrame()
+    period1 = int(datetime(start_day.year, start_day.month, start_day.day, tzinfo=UTC).timestamp())
+    period2 = int(datetime(end_day.year, end_day.month, end_day.day, tzinfo=UTC).timestamp()) + int(MS_PER_DAY / 1000)
+    url = (
+        "https://query1.finance.yahoo.com/v8/finance/chart/SPY"
+        f"?period1={period1}&period2={period2}&interval=1d&events=history&includeAdjustedClose=true"
+    )
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 MODEL050426/1.0"})
+    try:
+        import certifi
+
+        context = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        context = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(request, timeout=10, context=context) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError):
+        return pl.DataFrame()
+    try:
+        result = payload["chart"]["result"][0]
+        timestamps = result["timestamp"]
+        quote = result["indicators"]["quote"][0]
+    except (TypeError, KeyError, IndexError):
+        return pl.DataFrame()
+    rows = []
+    for idx, ts_value in enumerate(timestamps):
+        close = _sequence_float(quote.get("close"), idx)
+        if not math.isfinite(close):
+            continue
+        rows.append(
+            {
+                "Date": datetime.fromtimestamp(int(ts_value), UTC).date().isoformat(),
+                "Open": _sequence_float(quote.get("open"), idx),
+                "High": _sequence_float(quote.get("high"), idx),
+                "Low": _sequence_float(quote.get("low"), idx),
+                "Close": close,
+                "Volume": _sequence_float(quote.get("volume"), idx),
+            }
+        )
+    if not rows:
+        return pl.DataFrame()
+    frame = pl.DataFrame(rows, infer_schema_length=None)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame.write_csv(path)
+    return frame
+
+
+def _download_spy_daily_stooq(path: Path, *, start: str, end: str) -> pl.DataFrame:
+    d1 = start.replace("-", "")
+    d2 = end.replace("-", "")
+    url = f"https://stooq.com/q/d/l/?s=spy.us&i=d&d1={d1}&d2={d2}"
+    request = urllib.request.Request(url, headers={"User-Agent": "MODEL050426/1.0"})
+    try:
+        import certifi
+
+        context = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        context = ssl.create_default_context()
+    try:
+        with urllib.request.urlopen(request, timeout=10, context=context) as response:
+            text = response.read().decode("utf-8")
+    except (OSError, urllib.error.URLError, TimeoutError):
+        return pl.DataFrame()
+    parsed = list(csv.DictReader(text.splitlines()))
+    rows = [
+        {
+            "Date": row.get("Date", ""),
+            "Open": _float_or_nan(row.get("Open")),
+            "High": _float_or_nan(row.get("High")),
+            "Low": _float_or_nan(row.get("Low")),
+            "Close": _float_or_nan(row.get("Close")),
+            "Volume": _float_or_nan(row.get("Volume")),
+        }
+        for row in parsed
+        if row.get("Date")
+    ]
+    if not rows:
+        return pl.DataFrame()
+    frame = pl.DataFrame(rows, infer_schema_length=None).filter(pl.col("Close").is_not_null())
+    if frame.is_empty():
+        return pl.DataFrame()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame.write_csv(path)
+    return frame
+
+
+def _sequence_float(values: Any, index: int) -> float:
+    try:
+        return _float_or_nan(values[index])
+    except (TypeError, IndexError):
+        return float("nan")
+
+
+def _benchmark_rows(series: list[tuple[str, list[dict[str, Any]]]]) -> list[dict[str, Any]]:
+    rows = []
+    for name, points in series:
+        for point in points:
+            rows.append({"date": point["date"], "series": name, "value": point["value"]})
+    return rows
+
+
+def _equity_chart_annotations(equity: pl.DataFrame) -> list[dict[str, Any]]:
+    if equity.is_empty() or not _has_columns(equity, "date", "drawdown", "basket_return"):
+        return []
+    rows = equity.sort("ts_ms").to_dicts()
+    candidates = [
+        ("Worst DD", min(rows, key=lambda row: _float_or_nan(row.get("drawdown"))), "drawdown", "#dc2626"),
+        ("Worst day", min(rows, key=lambda row: _float_or_nan(row.get("basket_return"))), "basket_return", "#991b1b"),
+        ("Best day", max(rows, key=lambda row: _float_or_nan(row.get("basket_return"))), "basket_return", "#047857"),
+    ]
+    output = []
+    seen: set[tuple[str, str]] = set()
+    for label, row, field, color in candidates:
+        day = str(row.get("date", ""))
+        value = _float_or_nan(row.get(field))
+        key = (label, day)
+        if not day or not math.isfinite(value) or key in seen:
+            continue
+        seen.add(key)
+        output.append(
+            {
+                "date": day,
+                "label": label,
+                "field": field,
+                "value": value,
+                "display": f"{day} {label} {_pct(value)}",
+                "color": color,
+            }
+        )
+    return output
+
+
+def _equity_benchmark_svg(
+    series: list[dict[str, Any]],
+    *,
+    annotations: list[dict[str, Any]],
+    start: str,
+    end: str,
+) -> str:
+    width = 1200
+    height = 680
+    left = 76
+    right = 34
+    top = 54
+    bottom = 86
+    plot_w = width - left - right
+    plot_h = height - top - bottom
+    all_points = [point for item in series for point in item["points"]]
+    if not all_points:
+        return "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"1200\" height=\"680\" />\n"
+    min_day = _parse_day(start) or _parse_day(all_points[0]["date"]) or date.today()
+    max_day = _parse_day(end) or _parse_day(all_points[-1]["date"]) or min_day
+    if max_day <= min_day:
+        max_day = date.fromordinal(min_day.toordinal() + 1)
+    values = [float(point["value"]) for point in all_points if math.isfinite(float(point["value"]))]
+    y_min = max(0.0, min(values) * 0.94)
+    y_max = max(values) * 1.06
+    if y_max <= y_min:
+        y_max = y_min + 1.0
+
+    def x_pos(day_text: str) -> float:
+        day = _parse_day(day_text) or min_day
+        return left + (day.toordinal() - min_day.toordinal()) / (max_day.toordinal() - min_day.toordinal()) * plot_w
+
+    def y_pos(value: float) -> float:
+        return top + (y_max - value) / (y_max - y_min) * plot_h
+
+    lines = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img">',
+        "<title>Strategy Equity With BTC and SPY Overlays</title>",
+        '<rect width="1200" height="680" fill="#ffffff"/>',
+        f'<text x="{left}" y="32" fill="#111827" font-family="Arial, sans-serif" font-size="22" font-weight="700">Equity Curve vs BTC and SPY</text>',
+        f'<text x="{left}" y="52" fill="#4b5563" font-family="Arial, sans-serif" font-size="12">Normalised benchmarks; strategy equity shown in account-growth units. Highlighted rectangles mark the worst drawdown, worst day, and best day.</text>',
+        f'<rect x="{left}" y="{top}" width="{plot_w}" height="{plot_h}" fill="#f9fafb" stroke="#e5e7eb"/>',
+    ]
+    for tick in range(6):
+        value = y_min + (y_max - y_min) * tick / 5
+        y = y_pos(value)
+        lines.append(f'<line x1="{left}" x2="{left + plot_w}" y1="{y:.1f}" y2="{y:.1f}" stroke="#e5e7eb" stroke-width="1"/>')
+        lines.append(f'<text x="{left - 10}" y="{y + 4:.1f}" text-anchor="end" fill="#6b7280" font-family="Arial, sans-serif" font-size="11">{value:.2f}x</text>')
+    for tick in range(5):
+        ordinal = int(min_day.toordinal() + (max_day.toordinal() - min_day.toordinal()) * tick / 4)
+        day = date.fromordinal(ordinal)
+        x = x_pos(day.isoformat())
+        lines.append(f'<line x1="{x:.1f}" x2="{x:.1f}" y1="{top}" y2="{top + plot_h}" stroke="#eef2f7" stroke-width="1"/>')
+        lines.append(f'<text x="{x:.1f}" y="{top + plot_h + 24}" text-anchor="middle" fill="#6b7280" font-family="Arial, sans-serif" font-size="11">{day.isoformat()}</text>')
+
+    for idx, annotation in enumerate(annotations):
+        x = x_pos(str(annotation["date"]))
+        color = str(annotation["color"])
+        label = html.escape(str(annotation["display"]))
+        label_y = top + 18 + idx * 18
+        anchor = "start" if x < left + plot_w * 0.68 else "end"
+        text_x = x + 7 if anchor == "start" else x - 7
+        lines.append(f'<rect x="{x - 4:.1f}" y="{top}" width="8" height="{plot_h}" fill="{color}" opacity="0.12"/>')
+        lines.append(f'<line x1="{x:.1f}" x2="{x:.1f}" y1="{top}" y2="{top + plot_h}" stroke="{color}" stroke-width="1.2" stroke-dasharray="3 3"/>')
+        lines.append(f'<text x="{text_x:.1f}" y="{label_y}" text-anchor="{anchor}" fill="{color}" font-family="Arial, sans-serif" font-size="11" font-weight="700">{label}</text>')
+
+    legend_x = left
+    for item in series:
+        if not item["points"]:
+            continue
+        name = html.escape(str(item["name"]))
+        color = str(item["color"])
+        lines.append(f'<line x1="{legend_x}" x2="{legend_x + 28}" y1="{height - 34}" y2="{height - 34}" stroke="{color}" stroke-width="3"/>')
+        lines.append(f'<text x="{legend_x + 36}" y="{height - 30}" fill="#111827" font-family="Arial, sans-serif" font-size="12">{name}</text>')
+        legend_x += 125
+
+    for item in series:
+        points = item["points"]
+        if len(points) < 2:
+            continue
+        path = " ".join(f"{x_pos(point['date']):.1f},{y_pos(float(point['value'])):.1f}" for point in points)
+        lines.append(
+            f'<polyline fill="none" stroke="{item["color"]}" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" points="{path}"/>'
+        )
+    lines.append("</svg>")
+    return "\n".join(lines) + "\n"
+
+
+def _series_span_days(points: list[dict[str, Any]]) -> int:
+    if len(points) < 2:
+        return 0
+    first = _parse_day(points[0]["date"])
+    last = _parse_day(points[-1]["date"])
+    if first is None or last is None:
+        return 0
+    return (last - first).days
+
+
+def _parse_day(value: Any) -> date | None:
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
 def _promotion_reason(
     complete: bool,
     positive: int,
@@ -1275,6 +1673,9 @@ def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) 
             "volume_event_best_trades.csv",
             "volume_event_best_baskets.csv",
             "volume_event_best_equity.csv",
+            "volume_event_best_equity_btc_spy.svg",
+            "volume_event_best_equity_benchmarks.csv",
+            "volume_event_best_equity_annotations.csv",
             "volume_event_best_monthly.csv",
             "volume_event_research_report.json",
             "volume_event_research_report.md",

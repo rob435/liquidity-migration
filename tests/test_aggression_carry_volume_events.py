@@ -20,6 +20,7 @@ from aggression_carry.volume_events import (
     _promotion_fields,
     _scenario_side,
     _validate_event_config,
+    _write_equity_benchmark_chart,
     run_volume_event_research,
 )
 
@@ -65,6 +66,37 @@ def test_volume_event_research_writes_reports_on_fixture(tmp_path: Path) -> None
     assert payload["rows"]["scenarios"] == 1
     assert (tmp_path / "reports" / "volume_event_research" / "volume_event_research_report.md").exists()
     assert (tmp_path / "reports" / "volume_event_research" / "volume_event_scenario_summary.csv").exists()
+    assert "best_equity_chart" in payload
+
+
+def test_equity_benchmark_chart_writes_overlays_and_annotations(tmp_path: Path) -> None:
+    output_dir = tmp_path / "reports"
+    output_dir.mkdir()
+    equity = pl.DataFrame(
+        [
+            {"ts_ms": 1, "date": "2024-01-01", "equity": 1.0, "drawdown": 0.0, "basket_return": 0.0},
+            {"ts_ms": 2, "date": "2024-01-02", "equity": 0.9, "drawdown": -0.10, "basket_return": -0.10},
+            {"ts_ms": 3, "date": "2024-01-03", "equity": 1.08, "drawdown": 0.0, "basket_return": 0.20},
+        ]
+    )
+    raw_klines = pl.DataFrame(
+        [
+            {"ts_ms": 1, "date": "2024-01-01", "symbol": "BTCUSDT", "close": 100.0},
+            {"ts_ms": 2, "date": "2024-01-02", "symbol": "BTCUSDT", "close": 110.0},
+            {"ts_ms": 3, "date": "2024-01-03", "symbol": "BTCUSDT", "close": 120.0},
+        ]
+    )
+
+    chart = _write_equity_benchmark_chart(output_dir, root=tmp_path, equity=equity, raw_klines=raw_klines)
+
+    svg = Path(chart["svg"]).read_text(encoding="utf-8")
+    assert "Equity Curve vs BTC and SPY" in svg
+    assert "2024-01-02 Worst DD" in svg
+    assert "2024-01-03 Best day" in svg
+    assert Path(chart["benchmarks_csv"]).exists()
+    assert Path(chart["annotations_csv"]).exists()
+    assert chart["series"]["strategy"] == 3
+    assert chart["series"]["btc"] == 3
 
 
 def test_volume_event_research_requires_full_pit_by_default(tmp_path: Path) -> None:
