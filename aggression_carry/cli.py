@@ -227,6 +227,60 @@ def build_parser() -> argparse.ArgumentParser:
         default=0,
         help="Maximum current liquidity rank for liquidity-migration events; 0 disables.",
     )
+    volume_events.add_argument(
+        "--liquidity-migration-event-rank-fraction-max",
+        type=float,
+        default=0.0,
+        help="Maximum current event score rank fraction for liquidity-migration events; 0 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-score-max",
+        type=float,
+        default=0.0,
+        help="Maximum dollar-volume rank z-score for liquidity-migration events; 0 disables.",
+    )
+    volume_events.add_argument(
+        "--market-median-return-1d-min",
+        type=float,
+        default=-1.0,
+        help="Minimum PIT same-day market median return for new event entries; -1 disables.",
+    )
+    volume_events.add_argument(
+        "--market-median-return-1d-max",
+        type=float,
+        default=1.0,
+        help="Maximum PIT same-day market median return for new event entries; 1 disables.",
+    )
+    volume_events.add_argument(
+        "--market-pct-up-1d-max",
+        type=float,
+        default=1.0,
+        help="Maximum PIT same-day fraction of symbols up for new event entries; 1 disables.",
+    )
+    volume_events.add_argument(
+        "--btc-return-1d-min",
+        type=float,
+        default=-1.0,
+        help="Minimum PIT same-day BTC return for new event entries; -1 disables.",
+    )
+    volume_events.add_argument(
+        "--btc-return-1d-max",
+        type=float,
+        default=1.0,
+        help="Maximum PIT same-day BTC return for new event entries; 1 disables.",
+    )
+    volume_events.add_argument(
+        "--stop-pressure-window-days",
+        type=int,
+        default=0,
+        help="Rolling realized stop-loss lookback used to pause new event entries; 0 disables.",
+    )
+    volume_events.add_argument(
+        "--stop-pressure-stop-count",
+        type=int,
+        default=0,
+        help="Pause new event entries after this many realized stops inside the stop-pressure window; 0 disables.",
+    )
     volume_events.add_argument("--exhaustion-min-day-return", type=float, default=0.03, help="Minimum same-day return for volume-exhaustion events.")
     volume_events.add_argument(
         "--selloff-exhaustion-min-abs-day-return",
@@ -841,6 +895,15 @@ def main(argv: list[str] | None = None) -> int:
             liquidity_migration_turnover_ratio_min=args.liquidity_migration_turnover_ratio_min,
             liquidity_migration_prior_rank_min=args.liquidity_migration_prior_rank_min,
             liquidity_migration_current_rank_max=args.liquidity_migration_current_rank_max,
+            liquidity_migration_event_rank_fraction_max=args.liquidity_migration_event_rank_fraction_max,
+            liquidity_migration_score_max=args.liquidity_migration_score_max,
+            market_median_return_1d_min=args.market_median_return_1d_min,
+            market_median_return_1d_max=args.market_median_return_1d_max,
+            market_pct_up_1d_max=args.market_pct_up_1d_max,
+            btc_return_1d_min=args.btc_return_1d_min,
+            btc_return_1d_max=args.btc_return_1d_max,
+            stop_pressure_window_days=args.stop_pressure_window_days,
+            stop_pressure_stop_count=args.stop_pressure_stop_count,
             exhaustion_min_day_return=args.exhaustion_min_day_return,
             selloff_exhaustion_min_abs_day_return=args.selloff_exhaustion_min_abs_day_return,
             absorption_max_abs_day_return=args.absorption_max_abs_day_return,

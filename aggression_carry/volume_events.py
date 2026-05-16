@@ -81,6 +81,15 @@ class VolumeEventResearchConfig:
     liquidity_migration_turnover_ratio_min: float = 0.0
     liquidity_migration_prior_rank_min: int = 0
     liquidity_migration_current_rank_max: int = 0
+    liquidity_migration_event_rank_fraction_max: float = 0.0
+    liquidity_migration_score_max: float = 0.0
+    market_median_return_1d_min: float = -1.0
+    market_median_return_1d_max: float = 1.0
+    market_pct_up_1d_max: float = 1.0
+    btc_return_1d_min: float = -1.0
+    btc_return_1d_max: float = 1.0
+    stop_pressure_window_days: int = 0
+    stop_pressure_stop_count: int = 0
     exhaustion_min_day_return: float = 0.03
     selloff_exhaustion_min_abs_day_return: float = 0.03
     absorption_max_abs_day_return: float = 0.015
@@ -292,13 +301,18 @@ def _run_event_scenario(
     skipped_active = 0
     skipped_cooldown = 0
     skipped_capacity = 0
+    skipped_stop_pressure = 0
     skipped_no_entry = 0
+    stop_exit_ts_ms: list[int] = []
     notional_weight = config.gross_exposure / max(config.max_active_symbols, 1)
     round_trip_cost_bps = base_cost_bps * scenario.cost_multiplier
 
     for event in _execution_ordered_events(events).to_dicts():
         signal_ts_ms = int(event["ts_ms"])
         active_until = {symbol: exit_ts for symbol, exit_ts in active_until.items() if exit_ts > signal_ts_ms}
+        if _stop_pressure_active(stop_exit_ts_ms, signal_ts_ms=signal_ts_ms, config=config):
+            skipped_stop_pressure += 1
+            continue
         symbol = str(event["symbol"])
         if active_until.get(symbol, 0) > signal_ts_ms:
             skipped_active += 1
@@ -351,10 +365,19 @@ def _run_event_scenario(
                 "liquidity_rank": int(event.get("liquidity_rank", 0) or 0),
                 "event_rank_fraction": float(event.get(f"{score_col}_rank_frac", float("nan"))),
                 "daily_return_1d": float(event.get("daily_return_1d", float("nan"))),
+                "market_median_return_1d": float(event.get("market_median_return_1d", float("nan"))),
+                "market_pct_up_1d": float(event.get("market_pct_up_1d", float("nan"))),
+                "btc_return_1d": float(event.get("btc_return_1d", float("nan"))),
+                "liquidity_migration_turnover_ratio": _safe_ratio(
+                    event.get("turnover_quote"),
+                    event.get("prior7_turnover_quote_mean"),
+                ),
                 "tradable_membership_flag": bool(event.get("tradable_membership_flag", False)),
             }
         )
         rows.append(trade)
+        if trade["exit_reason"] == "stop_loss":
+            stop_exit_ts_ms.append(int(trade["exit_ts_ms"]))
         active_until[symbol] = int(trade["exit_ts_ms"])
         cooldown_until[symbol] = int(trade["exit_ts_ms"]) + config.cooldown_days * MS_PER_DAY
 
@@ -379,6 +402,7 @@ def _run_event_scenario(
         "skipped_active": skipped_active,
         "skipped_cooldown": skipped_cooldown,
         "skipped_capacity": skipped_capacity,
+        "skipped_stop_pressure": skipped_stop_pressure,
         "skipped_no_entry": skipped_no_entry,
         **summary,
         **_promotion_fields(
@@ -418,6 +442,14 @@ def _execution_ordered_events(events: pl.DataFrame) -> pl.DataFrame:
         sort_cols.append("symbol")
         descending.append(False)
     return events.sort(sort_cols, descending=descending)
+
+
+def _stop_pressure_active(stop_exit_ts_ms: list[int], *, signal_ts_ms: int, config: VolumeEventResearchConfig) -> bool:
+    if config.stop_pressure_window_days <= 0 or config.stop_pressure_stop_count <= 0:
+        return False
+    cutoff = signal_ts_ms - config.stop_pressure_window_days * MS_PER_DAY
+    recent_known_stops = sum(1 for ts_ms in stop_exit_ts_ms if cutoff <= ts_ms <= signal_ts_ms)
+    return recent_known_stops >= config.stop_pressure_stop_count
 
 
 def _score_name_for_column(score_col: str) -> str:
@@ -617,6 +649,7 @@ def _event_filter(
         base = base.filter(pl.col("liquidity_rank") >= config.universe_rank_min)
     if config.universe_rank_max > 0:
         base = base.filter(pl.col("liquidity_rank") <= config.universe_rank_max)
+    base = _apply_market_context_filters(base, config)
     if event_type == "fresh_volume_spike":
         return base.filter((pl.col(rank_col) >= top_cut) & (pl.col(f"prior_{rank_col}") < top_cut))
     if event_type == "persistent_volume_breakout":
@@ -679,6 +712,10 @@ def _event_filter(
             predicate = predicate & (pl.col("prior7_liquidity_rank") >= config.liquidity_migration_prior_rank_min)
         if config.liquidity_migration_current_rank_max > 0:
             predicate = predicate & (pl.col("liquidity_rank") <= config.liquidity_migration_current_rank_max)
+        if config.liquidity_migration_event_rank_fraction_max > 0.0:
+            predicate = predicate & (pl.col(rank_col) <= config.liquidity_migration_event_rank_fraction_max)
+        if config.liquidity_migration_score_max > 0.0:
+            predicate = predicate & (pl.col(score_col) <= config.liquidity_migration_score_max)
         return base.filter(predicate)
     if event_type == "selloff_exhaustion":
         if not _has_columns(base, "daily_return_1d", "daily_return_rank_frac"):
@@ -694,6 +731,29 @@ def _event_filter(
 def _has_columns(frame: pl.DataFrame, *columns: str) -> bool:
     available = set(frame.columns)
     return all(column in available for column in columns)
+
+
+def _apply_market_context_filters(frame: pl.DataFrame, config: VolumeEventResearchConfig) -> pl.DataFrame:
+    output = frame
+    if config.market_median_return_1d_min > -1.0 or config.market_median_return_1d_max < 1.0:
+        if "market_median_return_1d" not in output.columns:
+            return output.head(0)
+        output = output.filter(
+            (pl.col("market_median_return_1d") >= config.market_median_return_1d_min)
+            & (pl.col("market_median_return_1d") <= config.market_median_return_1d_max)
+        )
+    if config.market_pct_up_1d_max < 1.0:
+        if "market_pct_up_1d" not in output.columns:
+            return output.head(0)
+        output = output.filter(pl.col("market_pct_up_1d") <= config.market_pct_up_1d_max)
+    if config.btc_return_1d_min > -1.0 or config.btc_return_1d_max < 1.0:
+        if "btc_return_1d" not in output.columns:
+            return output.head(0)
+        output = output.filter(
+            (pl.col("btc_return_1d") >= config.btc_return_1d_min)
+            & (pl.col("btc_return_1d") <= config.btc_return_1d_max)
+        )
+    return output
 
 
 def _bottom_cut_from_top_cut(top_cut: float) -> float:
@@ -717,6 +777,7 @@ def _enriched_event_features(features: pl.DataFrame, klines: pl.DataFrame, archi
     enriched = features.join(_daily_return_frame(klines), on=["ts_ms", "symbol"], how="left")
     if "daily_return_1d" in enriched.columns:
         enriched = enriched.with_columns(pl.col("daily_return_1d").abs().alias("abs_daily_return_1d"))
+        enriched = _attach_market_context(enriched)
     rank_inputs = {
         "volume_change_1d_z": "volume_change_1d_z_rank_frac",
         "volume_change_3d_z": "volume_change_3d_z_rank_frac",
@@ -769,6 +830,27 @@ def _enriched_event_features(features: pl.DataFrame, klines: pl.DataFrame, archi
         enriched.sort(["symbol", "ts_ms"]).with_columns(expressions).sort(["ts_ms", "symbol"]),
         archive_manifest,
     )
+
+
+def _attach_market_context(features: pl.DataFrame) -> pl.DataFrame:
+    if features.is_empty() or "daily_return_1d" not in features.columns:
+        return features
+    market_context = features.group_by("ts_ms").agg(
+        [
+            pl.col("daily_return_1d").median().alias("market_median_return_1d"),
+            pl.col("daily_return_1d").mean().alias("market_mean_return_1d"),
+            (pl.col("daily_return_1d") > 0.0).mean().alias("market_pct_up_1d"),
+            pl.col("abs_daily_return_1d").median().alias("market_median_abs_return_1d"),
+        ]
+    )
+    btc_context = features.filter(pl.col("symbol") == "BTCUSDT").select(
+        [
+            "ts_ms",
+            pl.col("daily_return_1d").alias("btc_return_1d"),
+            pl.col("abs_daily_return_1d").alias("btc_abs_return_1d"),
+        ]
+    )
+    return features.join(market_context, on="ts_ms", how="left").join(btc_context, on="ts_ms", how="left")
 
 
 def _attach_event_archive_membership(features: pl.DataFrame, archive_manifest: pl.DataFrame) -> pl.DataFrame:
@@ -1008,6 +1090,17 @@ def _promotion_reason(
     return ",".join(reasons) if reasons else "fail"
 
 
+def _safe_ratio(numerator: Any, denominator: Any) -> float:
+    try:
+        top = float(numerator)
+        bottom = float(denominator)
+    except (TypeError, ValueError):
+        return float("nan")
+    if not math.isfinite(top) or not math.isfinite(bottom) or bottom <= 0.0:
+        return float("nan")
+    return top / bottom
+
+
 def _pit_manifest_metadata(archive_manifest: pl.DataFrame, features: pl.DataFrame) -> dict[str, Any]:
     manifest_symbols = _symbol_set(archive_manifest)
     feature_symbols = _symbol_set(features)
@@ -1186,6 +1279,20 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("liquidity_migration_prior_rank_min must be non-negative")
     if config.liquidity_migration_current_rank_max < 0:
         raise ValueError("liquidity_migration_current_rank_max must be non-negative")
+    if not 0.0 <= config.liquidity_migration_event_rank_fraction_max <= 1.0:
+        raise ValueError("liquidity_migration_event_rank_fraction_max must be in [0, 1]")
+    if config.liquidity_migration_score_max < 0.0:
+        raise ValueError("liquidity_migration_score_max must be non-negative")
+    if config.market_median_return_1d_min > config.market_median_return_1d_max:
+        raise ValueError("market_median_return_1d_min must be <= market_median_return_1d_max")
+    if not 0.0 <= config.market_pct_up_1d_max <= 1.0:
+        raise ValueError("market_pct_up_1d_max must be in [0, 1]")
+    if config.btc_return_1d_min > config.btc_return_1d_max:
+        raise ValueError("btc_return_1d_min must be <= btc_return_1d_max")
+    if config.stop_pressure_window_days < 0:
+        raise ValueError("stop_pressure_window_days must be non-negative")
+    if config.stop_pressure_stop_count < 0:
+        raise ValueError("stop_pressure_stop_count must be non-negative")
     if config.exhaustion_min_day_return < 0.0:
         raise ValueError("exhaustion_min_day_return must be non-negative")
     if config.selloff_exhaustion_min_abs_day_return < 0.0:

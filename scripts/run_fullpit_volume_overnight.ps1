@@ -185,11 +185,11 @@ if missing:
     Invoke-Checked $VenvPython @($ValidationFile)
 
     $EventReportIndex = Join-Path (Join-Path $DataRoot "reports") ("fullpit_volume_event_runs_{0}.csv" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
-    Set-Content -Path $EventReportIndex -Value "run_type,max_active_symbols,cooldown_days,entry_delay_hours,rank_exit_threshold,event_types,thresholds,hold_days,sides,stop_loss_pcts,cost_multipliers,gross_exposure,report_dir" -Encoding UTF8
+    Set-Content -Path $EventReportIndex -Value "run_type,max_active_symbols,cooldown_days,entry_delay_hours,rank_exit_threshold,universe_rank_min,universe_rank_max,liquidity_migration_turnover_ratio_min,liquidity_migration_event_rank_fraction_max,stop_pressure_window_days,stop_pressure_stop_count,event_types,thresholds,hold_days,sides,stop_loss_pcts,cost_multipliers,gross_exposure,report_dir" -Encoding UTF8
 
     if ($RunChampionBacktest) {
         Section "Run selected full PIT volume event backtest"
-        $ChampionReportDir = Join-Path (Join-Path $DataRoot "reports") ("SELECTED_liqmig_reversal_turn1p75_cost3_{0}" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
+        $ChampionReportDir = Join-Path (Join-Path $DataRoot "reports") ("SELECTED_liqmig_dd_repair_turn6_rank31_150_eventcap90_stoppressure_{0}" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
         Invoke-Checked $VenvPython @(
             "-m", "aggression_carry",
             "--data-root", $DataRoot,
@@ -197,20 +197,25 @@ if missing:
             "volume-events",
             "--event-types", "liquidity_migration",
             "--thresholds", "0.3",
-            "--hold-days", "3",
+            "--hold-days", "1",
             "--sides", "reversal",
             "--stop-loss-pcts", "0.12",
             "--cost-multipliers", "3",
             "--gross-exposure", "$ChampionGrossExposure",
             "--entry-delay-hours", "1",
-            "--max-active-symbols", "8",
+            "--max-active-symbols", "6",
             "--cooldown-days", "5",
             "--rank-exit-threshold", "0.55",
+            "--universe-rank-min", "31",
+            "--universe-rank-max", "150",
             "--liquidity-migration-rank-improvement-min", "150",
-            "--liquidity-migration-turnover-ratio-min", "1.75",
+            "--liquidity-migration-turnover-ratio-min", "6.0",
+            "--liquidity-migration-event-rank-fraction-max", "0.90",
+            "--stop-pressure-window-days", "14",
+            "--stop-pressure-stop-count", "12",
             "--report-dir", $ChampionReportDir
         )
-        Add-Content -Path $EventReportIndex -Value "champion,8,5,1,0.55,liquidity_migration,0.3,3,reversal,0.12,3,$ChampionGrossExposure,$ChampionReportDir"
+        Add-Content -Path $EventReportIndex -Value "champion,6,5,1,0.55,31,150,6.0,0.90,14,12,liquidity_migration,0.3,1,reversal,0.12,3,$ChampionGrossExposure,$ChampionReportDir"
     }
 
     Section "Done"

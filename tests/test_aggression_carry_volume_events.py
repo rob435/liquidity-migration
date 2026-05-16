@@ -12,6 +12,7 @@ from aggression_carry.volume_events import (
     _event_filter,
     _execution_ordered_events,
     _full_pit_universe_error,
+    _stop_pressure_active,
     VolumeEventResearchConfig,
     _add_rank_fraction,
     _monthly_returns,
@@ -112,6 +113,29 @@ def test_volume_event_config_validates_new_research_knobs() -> None:
 
     with pytest.raises(ValueError, match="liquidity_migration_current_rank_max"):
         _validate_event_config(VolumeEventResearchConfig(liquidity_migration_current_rank_max=-1))
+
+    with pytest.raises(ValueError, match="liquidity_migration_event_rank_fraction_max"):
+        _validate_event_config(VolumeEventResearchConfig(liquidity_migration_event_rank_fraction_max=1.1))
+
+    with pytest.raises(ValueError, match="liquidity_migration_score_max"):
+        _validate_event_config(VolumeEventResearchConfig(liquidity_migration_score_max=-0.1))
+
+    with pytest.raises(ValueError, match="market_median_return_1d_min"):
+        _validate_event_config(
+            VolumeEventResearchConfig(market_median_return_1d_min=0.05, market_median_return_1d_max=0.01)
+        )
+
+    with pytest.raises(ValueError, match="market_pct_up_1d_max"):
+        _validate_event_config(VolumeEventResearchConfig(market_pct_up_1d_max=1.1))
+
+    with pytest.raises(ValueError, match="btc_return_1d_min"):
+        _validate_event_config(VolumeEventResearchConfig(btc_return_1d_min=0.1, btc_return_1d_max=0.0))
+
+    with pytest.raises(ValueError, match="stop_pressure_window_days"):
+        _validate_event_config(VolumeEventResearchConfig(stop_pressure_window_days=-1))
+
+    with pytest.raises(ValueError, match="stop_pressure_stop_count"):
+        _validate_event_config(VolumeEventResearchConfig(stop_pressure_stop_count=-1))
 
     with pytest.raises(ValueError, match="dryup_prior_volume_rank_max"):
         _validate_event_config(VolumeEventResearchConfig(dryup_prior_volume_rank_max=1.5))
@@ -219,6 +243,17 @@ def test_execution_order_prioritizes_strongest_same_timestamp_events() -> None:
     ordered = _execution_ordered_events(events)
 
     assert ordered["symbol"].to_list() == ["BBBUSDT", "CCCUSDT", "AAAUSDT", "DDDUSDT"]
+
+
+def test_stop_pressure_throttle_uses_only_realized_recent_stops() -> None:
+    config = VolumeEventResearchConfig(stop_pressure_window_days=7, stop_pressure_stop_count=2)
+    signal_ts_ms = 10 * 24 * 60 * 60 * 1000
+    recent_stop = signal_ts_ms - 2 * 24 * 60 * 60 * 1000
+    old_stop = signal_ts_ms - 9 * 24 * 60 * 60 * 1000
+    future_stop = signal_ts_ms + 1
+
+    assert not _stop_pressure_active([recent_stop, old_stop, future_stop], signal_ts_ms=signal_ts_ms, config=config)
+    assert _stop_pressure_active([recent_stop, signal_ts_ms, future_stop], signal_ts_ms=signal_ts_ms, config=config)
 
 
 def test_selloff_exhaustion_side_hypotheses_are_directional() -> None:
@@ -476,6 +511,92 @@ def test_liquidity_migration_quality_controls_require_rank_and_turnover_expansio
             liquidity_migration_turnover_ratio_min=2.0,
             liquidity_migration_prior_rank_min=150,
             liquidity_migration_current_rank_max=80,
+        ),
+    )
+
+    assert migration["symbol"].to_list() == ["GOODUSDT"]
+
+
+def test_liquidity_migration_overheated_and_regime_filters_are_pit_safe() -> None:
+    frame = pl.DataFrame(
+        [
+            {
+                "symbol": "GOODUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 1.8,
+                "dollar_volume_rank_z_rank_frac": 0.88,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 70,
+                "prior7_liquidity_rank": 240,
+                "turnover_quote": 3_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "market_median_return_1d": 0.01,
+                "market_pct_up_1d": 0.55,
+                "btc_return_1d": 0.02,
+                "tradable_membership_flag": True,
+            },
+            {
+                "symbol": "TOORANKEDUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 1.7,
+                "dollar_volume_rank_z_rank_frac": 0.96,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 65,
+                "prior7_liquidity_rank": 230,
+                "turnover_quote": 3_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "market_median_return_1d": 0.01,
+                "market_pct_up_1d": 0.55,
+                "btc_return_1d": 0.02,
+                "tradable_membership_flag": True,
+            },
+            {
+                "symbol": "TOOSCOREDUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 2.7,
+                "dollar_volume_rank_z_rank_frac": 0.88,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 60,
+                "prior7_liquidity_rank": 230,
+                "turnover_quote": 3_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "market_median_return_1d": 0.01,
+                "market_pct_up_1d": 0.55,
+                "btc_return_1d": 0.02,
+                "tradable_membership_flag": True,
+            },
+            {
+                "symbol": "TOOHOTUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 1.8,
+                "dollar_volume_rank_z_rank_frac": 0.88,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 55,
+                "prior7_liquidity_rank": 230,
+                "turnover_quote": 3_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "market_median_return_1d": 0.04,
+                "market_pct_up_1d": 0.55,
+                "btc_return_1d": 0.02,
+                "tradable_membership_flag": True,
+            },
+        ]
+    )
+
+    migration = _event_filter(
+        frame,
+        "liquidity_migration",
+        score_col="dollar_volume_rank_z",
+        rank_col="dollar_volume_rank_z_rank_frac",
+        top_cut=0.80,
+        config=VolumeEventResearchConfig(
+            liquidity_migration_rank_improvement_min=100,
+            liquidity_migration_turnover_ratio_min=2.0,
+            liquidity_migration_event_rank_fraction_max=0.90,
+            liquidity_migration_score_max=2.0,
+            market_median_return_1d_max=0.03,
+            market_pct_up_1d_max=0.70,
+            btc_return_1d_max=0.05,
         ),
     )
 

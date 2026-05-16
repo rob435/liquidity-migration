@@ -183,30 +183,35 @@ if missing:
 PY
 
 EVENT_REPORT_INDEX="$DATA_ROOT/reports/fullpit_volume_event_runs_$(date -u +%Y%m%dT%H%M%SZ).csv"
-echo "run_type,max_active_symbols,cooldown_days,entry_delay_hours,rank_exit_threshold,event_types,thresholds,hold_days,sides,stop_loss_pcts,cost_multipliers,gross_exposure,report_dir" > "$EVENT_REPORT_INDEX"
+echo "run_type,max_active_symbols,cooldown_days,entry_delay_hours,rank_exit_threshold,universe_rank_min,universe_rank_max,liquidity_migration_turnover_ratio_min,liquidity_migration_event_rank_fraction_max,stop_pressure_window_days,stop_pressure_stop_count,event_types,thresholds,hold_days,sides,stop_loss_pcts,cost_multipliers,gross_exposure,report_dir" > "$EVENT_REPORT_INDEX"
 
 if [ "$RUN_CHAMPION_BACKTEST" != "0" ]; then
   section "Run selected full PIT volume event backtest"
-  CHAMPION_REPORT_DIR="$DATA_ROOT/reports/SELECTED_liqmig_reversal_turn1p75_cost3_$(date -u +%Y%m%dT%H%M%SZ)"
+  CHAMPION_REPORT_DIR="$DATA_ROOT/reports/SELECTED_liqmig_dd_repair_turn6_rank31_150_eventcap90_stoppressure_$(date -u +%Y%m%dT%H%M%SZ)"
   python -m aggression_carry \
     --data-root "$DATA_ROOT" \
     --config "$CONFIG_PATH" \
     volume-events \
     --event-types liquidity_migration \
     --thresholds 0.3 \
-    --hold-days 3 \
+    --hold-days 1 \
     --sides reversal \
     --stop-loss-pcts 0.12 \
     --cost-multipliers 3 \
     --gross-exposure "$CHAMPION_GROSS_EXPOSURE" \
     --entry-delay-hours 1 \
-    --max-active-symbols 8 \
+    --max-active-symbols 6 \
     --cooldown-days 5 \
     --rank-exit-threshold 0.55 \
+    --universe-rank-min 31 \
+    --universe-rank-max 150 \
     --liquidity-migration-rank-improvement-min 150 \
-    --liquidity-migration-turnover-ratio-min 1.75 \
+    --liquidity-migration-turnover-ratio-min 6.0 \
+    --liquidity-migration-event-rank-fraction-max 0.90 \
+    --stop-pressure-window-days 14 \
+    --stop-pressure-stop-count 12 \
     --report-dir "$CHAMPION_REPORT_DIR"
-  echo "champion,8,5,1,0.55,liquidity_migration,0.3,3,reversal,0.12,3,$CHAMPION_GROSS_EXPOSURE,$CHAMPION_REPORT_DIR" >> "$EVENT_REPORT_INDEX"
+  echo "champion,6,5,1,0.55,31,150,6.0,0.90,14,12,liquidity_migration,0.3,1,reversal,0.12,3,$CHAMPION_GROSS_EXPOSURE,$CHAMPION_REPORT_DIR" >> "$EVENT_REPORT_INDEX"
 fi
 
 section "Done"

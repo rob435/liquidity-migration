@@ -132,7 +132,7 @@ point-in-time symbol membership
 no current-universe survivorship dependency
 positive train, validation, and OOS splits
 worst split return >= 0
-worst drawdown no worse than -35%
+worst drawdown no worse than -25%
 average Sharpe-like >= 0.5
 cost multipliers of 1x and 3x reported
 trade ledger, equity curve, monthly table, and failure reasons saved
@@ -272,18 +272,25 @@ for any API gaps.
 
 ## Selected Full-PIT Result
 
-Current best volume-alpha candidate:
+Current best volume-alpha candidate. The previous `turnover >= 1.75`,
+3-day-hold candidate is demoted because its `-34.72%` max drawdown was too
+close to the old drawdown gate.
 
 ```text
 event: liquidity_migration
 side: reversal (short)
 threshold: top 30% dollar-volume rank migration
-filters: liquidity-rank improvement >= 150, turnover / prior 7d mean >= 1.75
+filters:
+  point-in-time liquidity rank 31-150
+  liquidity-rank improvement >= 150
+  turnover / prior 7d mean >= 6.0
+  event rank fraction <= 0.90
 entry delay: 1 hour after signal close
-hold: 3 days max
+hold: 1 day max
 stop: 12% fixed
-capacity: max 8 active symbols
+capacity: max 6 active symbols
 cooldown: 5 days
+stop-pressure throttle: pause new entries after 12 realized stops inside 14 days
 cost: 3x base round-trip cost
 ```
 
@@ -296,30 +303,35 @@ python -m aggression_carry \
   volume-events \
   --event-types liquidity_migration \
   --thresholds 0.3 \
-  --hold-days 3 \
+  --hold-days 1 \
   --sides reversal \
   --stop-loss-pcts 0.12 \
   --cost-multipliers 3 \
   --entry-delay-hours 1 \
   --gross-exposure 1 \
-  --max-active-symbols 8 \
+  --max-active-symbols 6 \
   --cooldown-days 5 \
   --rank-exit-threshold 0.55 \
+  --universe-rank-min 31 \
+  --universe-rank-max 150 \
   --liquidity-migration-rank-improvement-min 150 \
-  --liquidity-migration-turnover-ratio-min 1.75
+  --liquidity-migration-turnover-ratio-min 6.0 \
+  --liquidity-migration-event-rank-fraction-max 0.90 \
+  --stop-pressure-window-days 14 \
+  --stop-pressure-stop-count 12
 ```
 
 Full-PIT result on `2023-05-03` to `2026-05-03`:
 
 ```text
-trades: 1,963
-total return: +395.37%
-max drawdown: -34.72%
-worst split return: +41.14%
-worst split drawdown: -33.10%
-average split Sharpe-like: 0.81
-train return: +48.10%
-validation return: +41.14%
-OOS return: +131.52%
+trades: 1,138
+total return: +466.57%
+max drawdown: -20.34%
+worst split return: +34.72%
+worst split drawdown: -21.06%
+average split Sharpe-like: 2.19
+train return: +34.72%
+validation return: +122.24%
+OOS return: +86.76%
 promotion gate: pass
 ```
