@@ -10,6 +10,7 @@ from aggression_carry.volume_events import (
     _attach_event_archive_membership,
     _event_decay_exit_hit,
     _event_filter,
+    _execution_ordered_events,
     _full_pit_universe_error,
     VolumeEventResearchConfig,
     _add_rank_fraction,
@@ -103,6 +104,15 @@ def test_volume_event_config_validates_new_research_knobs() -> None:
     with pytest.raises(ValueError, match="liquidity_migration_rank_improvement_min"):
         _validate_event_config(VolumeEventResearchConfig(liquidity_migration_rank_improvement_min=-1))
 
+    with pytest.raises(ValueError, match="liquidity_migration_turnover_ratio_min"):
+        _validate_event_config(VolumeEventResearchConfig(liquidity_migration_turnover_ratio_min=-1.0))
+
+    with pytest.raises(ValueError, match="liquidity_migration_prior_rank_min"):
+        _validate_event_config(VolumeEventResearchConfig(liquidity_migration_prior_rank_min=-1))
+
+    with pytest.raises(ValueError, match="liquidity_migration_current_rank_max"):
+        _validate_event_config(VolumeEventResearchConfig(liquidity_migration_current_rank_max=-1))
+
     with pytest.raises(ValueError, match="dryup_prior_volume_rank_max"):
         _validate_event_config(VolumeEventResearchConfig(dryup_prior_volume_rank_max=1.5))
 
@@ -194,6 +204,21 @@ def test_event_decay_exit_fires_at_scenario_threshold() -> None:
         rank_lookup={("AAAUSDT", 2): 0.80},
         threshold=0.80,
     )
+
+
+def test_execution_order_prioritizes_strongest_same_timestamp_events() -> None:
+    events = pl.DataFrame(
+        [
+            {"ts_ms": 1, "symbol": "AAAUSDT", "event_rank": 3},
+            {"ts_ms": 1, "symbol": "BBBUSDT", "event_rank": 1},
+            {"ts_ms": 1, "symbol": "CCCUSDT", "event_rank": 2},
+            {"ts_ms": 2, "symbol": "DDDUSDT", "event_rank": 1},
+        ]
+    )
+
+    ordered = _execution_ordered_events(events)
+
+    assert ordered["symbol"].to_list() == ["BBBUSDT", "CCCUSDT", "AAAUSDT", "DDDUSDT"]
 
 
 def test_selloff_exhaustion_side_hypotheses_are_directional() -> None:
@@ -384,6 +409,77 @@ def test_creative_event_filters_select_distinct_pit_events() -> None:
     assert dryup["symbol"].to_list() == ["ABSUSDT", "DRYUSDT"]
     assert migration["symbol"].to_list() == ["MIGUSDT"]
     assert selloff["symbol"].to_list() == ["SELLUSDT"]
+
+
+def test_liquidity_migration_quality_controls_require_rank_and_turnover_expansion() -> None:
+    frame = pl.DataFrame(
+        [
+            {
+                "symbol": "GOODUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 3.0,
+                "dollar_volume_rank_z_rank_frac": 0.95,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 50,
+                "prior7_liquidity_rank": 220,
+                "turnover_quote": 3_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "tradable_membership_flag": True,
+            },
+            {
+                "symbol": "NOGROWTHUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 3.1,
+                "dollar_volume_rank_z_rank_frac": 0.96,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 45,
+                "prior7_liquidity_rank": 210,
+                "turnover_quote": 1_500_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "tradable_membership_flag": True,
+            },
+            {
+                "symbol": "ALREADYLIQUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 3.2,
+                "dollar_volume_rank_z_rank_frac": 0.97,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 30,
+                "prior7_liquidity_rank": 110,
+                "turnover_quote": 3_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "tradable_membership_flag": True,
+            },
+            {
+                "symbol": "NOTCURRENTUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 3.3,
+                "dollar_volume_rank_z_rank_frac": 0.98,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 90,
+                "prior7_liquidity_rank": 260,
+                "turnover_quote": 4_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "tradable_membership_flag": True,
+            },
+        ]
+    )
+
+    migration = _event_filter(
+        frame,
+        "liquidity_migration",
+        score_col="dollar_volume_rank_z",
+        rank_col="dollar_volume_rank_z_rank_frac",
+        top_cut=0.80,
+        config=VolumeEventResearchConfig(
+            liquidity_migration_rank_improvement_min=100,
+            liquidity_migration_turnover_ratio_min=2.0,
+            liquidity_migration_prior_rank_min=150,
+            liquidity_migration_current_rank_max=80,
+        ),
+    )
+
+    assert migration["symbol"].to_list() == ["GOODUSDT"]
 
 
 def test_monthly_returns_are_written_from_baskets() -> None:

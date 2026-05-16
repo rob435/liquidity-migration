@@ -78,6 +78,9 @@ class VolumeEventResearchConfig:
     tail_rank_max: int = 160
     tail_rank_improvement_min: int = 20
     liquidity_migration_rank_improvement_min: int = 50
+    liquidity_migration_turnover_ratio_min: float = 0.0
+    liquidity_migration_prior_rank_min: int = 0
+    liquidity_migration_current_rank_max: int = 0
     exhaustion_min_day_return: float = 0.03
     selloff_exhaustion_min_abs_day_return: float = 0.03
     absorption_max_abs_day_return: float = 0.015
@@ -293,7 +296,7 @@ def _run_event_scenario(
     notional_weight = config.gross_exposure / max(config.max_active_symbols, 1)
     round_trip_cost_bps = base_cost_bps * scenario.cost_multiplier
 
-    for event in events.sort(["ts_ms", "symbol"]).to_dicts():
+    for event in _execution_ordered_events(events).to_dicts():
         signal_ts_ms = int(event["ts_ms"])
         active_until = {symbol: exit_ts for symbol, exit_ts in active_until.items() if exit_ts > signal_ts_ms}
         symbol = str(event["symbol"])
@@ -401,6 +404,20 @@ def _rank_lookup_cache(features: pl.DataFrame, *, config: VolumeEventResearchCon
         )
         output[score_col] = _rank_lookup(features, score_col=score_col, entry_delay_hours=config.entry_delay_hours, config=bt_config)
     return output
+
+
+def _execution_ordered_events(events: pl.DataFrame) -> pl.DataFrame:
+    if events.is_empty():
+        return events
+    sort_cols = ["ts_ms"]
+    descending = [False]
+    if "event_rank" in events.columns:
+        sort_cols.append("event_rank")
+        descending.append(False)
+    if "symbol" in events.columns:
+        sort_cols.append("symbol")
+        descending.append(False)
+    return events.sort(sort_cols, descending=descending)
 
 
 def _score_name_for_column(score_col: str) -> str:
@@ -639,13 +656,30 @@ def _event_filter(
             & (pl.col("prior7_abs_daily_return_mean") <= config.dryup_prior_abs_day_return_max)
         )
     if event_type == "liquidity_migration":
-        if not _has_columns(base, "prior7_liquidity_rank", f"prior7_{rank_col}"):
+        required_cols = ["prior7_liquidity_rank", f"prior7_{rank_col}"]
+        if config.liquidity_migration_turnover_ratio_min > 0.0:
+            required_cols.append("prior7_turnover_quote_mean")
+        if not _has_columns(base, *required_cols):
             return base.head(0)
-        return base.filter(
+        predicate = (
             (pl.col(rank_col) >= top_cut)
             & (pl.col(f"prior7_{rank_col}") < top_cut)
             & ((pl.col("prior7_liquidity_rank") - pl.col("liquidity_rank")) >= config.liquidity_migration_rank_improvement_min)
         )
+        if config.liquidity_migration_turnover_ratio_min > 0.0:
+            predicate = (
+                predicate
+                & (pl.col("prior7_turnover_quote_mean") > 0.0)
+                & (
+                    (pl.col("turnover_quote") / pl.col("prior7_turnover_quote_mean"))
+                    >= config.liquidity_migration_turnover_ratio_min
+                )
+            )
+        if config.liquidity_migration_prior_rank_min > 0:
+            predicate = predicate & (pl.col("prior7_liquidity_rank") >= config.liquidity_migration_prior_rank_min)
+        if config.liquidity_migration_current_rank_max > 0:
+            predicate = predicate & (pl.col("liquidity_rank") <= config.liquidity_migration_current_rank_max)
+        return base.filter(predicate)
     if event_type == "selloff_exhaustion":
         if not _has_columns(base, "daily_return_1d", "daily_return_rank_frac"):
             return base.head(0)
@@ -724,6 +758,11 @@ def _enriched_event_features(features: pl.DataFrame, klines: pl.DataFrame, archi
             .over("symbol")
             .alias("prior7_abs_daily_return_mean"),
             pl.col("liquidity_rank").shift(7).over("symbol").alias("prior7_liquidity_rank"),
+            pl.col("turnover_quote")
+            .shift(1)
+            .rolling_mean(window_size=7, min_samples=1)
+            .over("symbol")
+            .alias("prior7_turnover_quote_mean"),
         ]
     )
     return _attach_event_archive_membership(
@@ -1141,6 +1180,12 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("tail_rank_improvement_min must be non-negative")
     if config.liquidity_migration_rank_improvement_min < 0:
         raise ValueError("liquidity_migration_rank_improvement_min must be non-negative")
+    if config.liquidity_migration_turnover_ratio_min < 0.0:
+        raise ValueError("liquidity_migration_turnover_ratio_min must be non-negative")
+    if config.liquidity_migration_prior_rank_min < 0:
+        raise ValueError("liquidity_migration_prior_rank_min must be non-negative")
+    if config.liquidity_migration_current_rank_max < 0:
+        raise ValueError("liquidity_migration_current_rank_max must be non-negative")
     if config.exhaustion_min_day_return < 0.0:
         raise ValueError("exhaustion_min_day_return must be non-negative")
     if config.selloff_exhaustion_min_abs_day_return < 0.0:

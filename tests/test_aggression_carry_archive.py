@@ -9,11 +9,13 @@ from aggression_carry import archive as archive_module
 from aggression_carry import archive_manifest as manifest_module
 from aggression_carry.archive import download_public_trade_archive, read_public_trade_archive, read_public_trade_archive_klines_1h
 from aggression_carry.archive_manifest import (
+    ArchiveHourlyKlineApiDownloadConfig,
     ArchiveHourlyKlineDownloadConfig,
     ArchiveKlineDownloadConfig,
     ArchiveManifestConfig,
     parse_symbol_directories,
     parse_trade_archive_entries,
+    run_archive_hourly_klines_api_download,
     run_archive_hourly_klines_download,
     run_archive_klines_download,
     run_archive_manifest,
@@ -30,6 +32,10 @@ def test_archive_kline_default_requires_dense_utc_day() -> None:
 
 def test_archive_hourly_kline_default_resumes_written_partitions() -> None:
     assert ArchiveHourlyKlineDownloadConfig().min_existing_bars == 1
+
+
+def test_archive_hourly_api_kline_default_resumes_written_partitions() -> None:
+    assert ArchiveHourlyKlineApiDownloadConfig().min_existing_bars == 1
 
 
 def test_read_bybit_public_trade_csv_gz_archive(tmp_path) -> None:
@@ -372,6 +378,67 @@ def test_archive_hourly_kline_download_writes_1h_partitions(tmp_path, monkeypatc
     ]
     assert not (tmp_path / "archives" / "AAAUSDT" / "AAAUSDT2025-01-02.csv.gz").exists()
     assert (tmp_path / "reports" / "archive_klines_1h_fixture.md").exists()
+
+
+def test_archive_hourly_api_kline_download_writes_1h_partitions(tmp_path, monkeypatch) -> None:
+    manifest = pl.DataFrame(
+        [
+            {
+                "symbol": "AAAUSDT",
+                "date": "2025-01-01",
+                "url": "https://public.bybit.com/trading/AAAUSDT/AAAUSDT2025-01-01.csv.gz",
+                "source": "test",
+            },
+            {
+                "symbol": "AAAUSDT",
+                "date": "2025-01-02",
+                "url": "https://public.bybit.com/trading/AAAUSDT/AAAUSDT2025-01-02.csv.gz",
+                "source": "test",
+            },
+        ]
+    )
+    write_dataset(manifest, tmp_path, "archive_trade_manifest", partition_by=("date",), append=False)
+
+    def fake_fetch(_config, *, symbol, start_ms, end_ms):
+        assert symbol == "AAAUSDT"
+        assert start_ms <= 1_735_689_600_000 <= end_ms
+        return [
+            ["1735689600000", "100", "110", "99", "105", "2.5", "262.5"],
+            ["1735693200000", "105", "112", "104", "108", "3.0", "324.0"],
+            ["1735779600000", "108", "120", "107", "118", "4.0", "472.0"],
+        ]
+
+    monkeypatch.setattr(manifest_module, "_fetch_bybit_api_klines", fake_fetch)
+
+    payload = run_archive_hourly_klines_api_download(
+        tmp_path,
+        config=ArchiveHourlyKlineApiDownloadConfig(
+            start="2025-01-01",
+            end="2025-01-02",
+            workers=1,
+            name="fixture",
+        ),
+    )
+
+    assert payload["downloaded"] == 2
+    rows = read_dataset(tmp_path, "klines_1h").sort(["symbol", "ts_ms"])
+    assert rows.filter(pl.col("date") == "2025-01-01").height == 24
+    assert rows.filter(pl.col("date") == "2025-01-02").height == 24
+    assert rows.filter(pl.col("ts_ms") == 1_735_689_600_000).select(
+        ["open", "close", "volume_base", "turnover_quote", "source"]
+    ).to_dicts() == [
+        {
+            "open": 100.0,
+            "close": 105.0,
+            "volume_base": 2.5,
+            "turnover_quote": 262.5,
+            "source": "bybit_v5_market_kline",
+        }
+    ]
+    assert rows.filter(pl.col("ts_ms") == 1_735_776_000_000).select(["open", "close"]).to_dicts() == [
+        {"open": 108.0, "close": 108.0}
+    ]
+    assert (tmp_path / "reports" / "archive_klines_1h_api_fixture.md").exists()
 
 
 def test_archive_hourly_downloader_processes_each_symbol_in_date_order(tmp_path, monkeypatch) -> None:

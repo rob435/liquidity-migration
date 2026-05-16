@@ -130,6 +130,19 @@ def test_cli_archive_hourly_kline_default_resumes_written_partitions(tmp_path: P
     assert args.min_existing_bars == 1
 
 
+def test_cli_archive_hourly_api_kline_default_resumes_written_partitions(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "archive-download-klines-1h-api",
+        ]
+    )
+
+    assert args.min_existing_bars == 1
+    assert args.interval == "60"
+
+
 def test_cli_parses_volume_events(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [
@@ -172,6 +185,12 @@ def test_cli_parses_volume_events(tmp_path: Path) -> None:
             "40",
             "--liquidity-migration-rank-improvement-min",
             "65",
+            "--liquidity-migration-turnover-ratio-min",
+            "2.5",
+            "--liquidity-migration-prior-rank-min",
+            "120",
+            "--liquidity-migration-current-rank-max",
+            "80",
             "--exhaustion-min-day-return",
             "0.08",
             "--selloff-exhaustion-min-abs-day-return",
@@ -201,6 +220,9 @@ def test_cli_parses_volume_events(tmp_path: Path) -> None:
     assert args.tail_rank_max == 260
     assert args.tail_rank_improvement_min == 40
     assert args.liquidity_migration_rank_improvement_min == 65
+    assert args.liquidity_migration_turnover_ratio_min == 2.5
+    assert args.liquidity_migration_prior_rank_min == 120
+    assert args.liquidity_migration_current_rank_max == 80
     assert args.exhaustion_min_day_return == 0.08
     assert args.selloff_exhaustion_min_abs_day_return == 0.09
     assert args.absorption_max_abs_day_return == 0.012

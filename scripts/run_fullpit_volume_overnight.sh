@@ -7,12 +7,12 @@ MANIFEST_NAME="${MANIFEST_NAME:-pit-all-usdt-20230503-20260503}"
 START_DATE="${START_DATE:-2023-05-03}"
 END_DATE="${END_DATE:-2026-05-03}"
 MANIFEST_WORKERS="${MANIFEST_WORKERS:-32}"
-DOWNLOAD_WORKERS="${DOWNLOAD_WORKERS:-64}"
-MIN_EXISTING_BARS="${MIN_EXISTING_BARS:-20}"
+DOWNLOAD_WORKERS="${DOWNLOAD_WORKERS:-16}"
+MIN_EXISTING_BARS="${MIN_EXISTING_BARS:-1}"
 RUN_TESTS="${RUN_TESTS:-1}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 RUN_CHAMPION_BACKTEST="${RUN_CHAMPION_BACKTEST:-1}"
-CHAMPION_GROSS_EXPOSURE="${CHAMPION_GROSS_EXPOSURE:-0.5}"
+CHAMPION_GROSS_EXPOSURE="${CHAMPION_GROSS_EXPOSURE:-1.0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel >/dev/null 2>&1; then
@@ -113,19 +113,20 @@ python -m aggression_carry \
   --end "$END_DATE" \
   --workers "$MANIFEST_WORKERS"
 
-section "Download full PIT 1h klines"
-AGC_ARCHIVE_DOWNLOAD_BACKEND="${AGC_ARCHIVE_DOWNLOAD_BACKEND:-curl}" \
-AGC_ARCHIVE_DOWNLOAD_RETRIES="${AGC_ARCHIVE_DOWNLOAD_RETRIES:-8}" \
+section "Fill full PIT 1h klines from Bybit v5 API"
 python -m aggression_carry \
   --data-root "$DATA_ROOT" \
   --config "$CONFIG_PATH" \
-  archive-download-klines-1h \
+  archive-download-klines-1h-api \
   --name "$RUN_NAME" \
   --start "$START_DATE" \
   --end "$END_DATE" \
   --workers "$DOWNLOAD_WORKERS" \
   --min-existing-bars "$MIN_EXISTING_BARS" \
-  --discard-archives-after-success
+  --limit 1000 \
+  --retries 8 \
+  --timeout-seconds 30 \
+  --request-sleep-seconds 0.02
 
 section "Validate full PIT coverage"
 python - <<'PY'
@@ -141,7 +142,7 @@ from aggression_carry.storage import dataset_path, read_dataset
 
 root = Path(os.environ["DATA_ROOT"])
 run_name = os.environ["RUN_NAME"]
-report_path = root / "reports" / f"archive_klines_1h_{run_name}.csv"
+report_path = root / "reports" / f"archive_klines_1h_api_{run_name}.csv"
 
 if not report_path.exists():
     raise SystemExit(f"missing downloader report: {report_path}")
@@ -186,24 +187,26 @@ echo "run_type,max_active_symbols,cooldown_days,entry_delay_hours,rank_exit_thre
 
 if [ "$RUN_CHAMPION_BACKTEST" != "0" ]; then
   section "Run selected full PIT volume event backtest"
-  CHAMPION_REPORT_DIR="$DATA_ROOT/reports/volume_event_research_fullpit_pvb_q20_cont_h5_halfgross_$(date -u +%Y%m%dT%H%M%SZ)"
+  CHAMPION_REPORT_DIR="$DATA_ROOT/reports/SELECTED_liqmig_reversal_turn1p75_cost3_$(date -u +%Y%m%dT%H%M%SZ)"
   python -m aggression_carry \
     --data-root "$DATA_ROOT" \
     --config "$CONFIG_PATH" \
     volume-events \
-    --event-types persistent_volume_breakout \
-    --thresholds 0.2 \
-    --hold-days 5 \
-    --sides continuation \
-    --stop-loss-pcts 0 \
-    --cost-multipliers 1,3 \
+    --event-types liquidity_migration \
+    --thresholds 0.3 \
+    --hold-days 3 \
+    --sides reversal \
+    --stop-loss-pcts 0.12 \
+    --cost-multipliers 3 \
     --gross-exposure "$CHAMPION_GROSS_EXPOSURE" \
     --entry-delay-hours 1 \
-    --max-active-symbols 6 \
-    --cooldown-days 7 \
-    --rank-exit-threshold 0.5 \
+    --max-active-symbols 8 \
+    --cooldown-days 5 \
+    --rank-exit-threshold 0.55 \
+    --liquidity-migration-rank-improvement-min 150 \
+    --liquidity-migration-turnover-ratio-min 1.75 \
     --report-dir "$CHAMPION_REPORT_DIR"
-  echo "champion,6,7,1,0.5,persistent_volume_breakout,0.2,5,continuation,0,1|3,$CHAMPION_GROSS_EXPOSURE,$CHAMPION_REPORT_DIR" >> "$EVENT_REPORT_INDEX"
+  echo "champion,8,5,1,0.55,liquidity_migration,0.3,3,reversal,0.12,3,$CHAMPION_GROSS_EXPOSURE,$CHAMPION_REPORT_DIR" >> "$EVENT_REPORT_INDEX"
 fi
 
 section "Done"

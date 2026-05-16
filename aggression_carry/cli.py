@@ -5,9 +5,11 @@ from datetime import datetime
 from dataclasses import replace
 from pathlib import Path
 
-from .archive_manifest import DEFAULT_BYBIT_PUBLIC_TRADING_URL, ArchiveManifestConfig, run_archive_manifest
-from .archive_manifest import ArchiveHourlyKlineDownloadConfig, ArchiveKlineDownloadConfig
-from .archive_manifest import run_archive_hourly_klines_download, run_archive_klines_download
+from .archive_manifest import DEFAULT_BYBIT_PUBLIC_TRADING_URL, DEFAULT_BYBIT_V5_KLINE_URL
+from .archive_manifest import ArchiveHourlyKlineApiDownloadConfig, ArchiveHourlyKlineDownloadConfig
+from .archive_manifest import ArchiveKlineDownloadConfig, ArchiveManifestConfig, run_archive_manifest
+from .archive_manifest import run_archive_hourly_klines_api_download, run_archive_hourly_klines_download
+from .archive_manifest import run_archive_klines_download
 from .config import (
     DEFAULT_MAJOR_SYMBOLS,
     DailyCloseFadeConfig,
@@ -149,6 +151,36 @@ def build_parser() -> argparse.ArgumentParser:
         help="Delete locally downloaded raw trade archives after 1h klines are written successfully.",
     )
 
+    archive_klines_1h_api = subparsers.add_parser(
+        "archive-download-klines-1h-api",
+        help="Fill PIT 1h klines from Bybit v5 market kline API using archive manifest membership.",
+    )
+    archive_klines_1h_api.add_argument("--name", default="bybit-v5-market-klines-1h", help="Name used for download report files.")
+    archive_klines_1h_api.add_argument("--api-url", default=DEFAULT_BYBIT_V5_KLINE_URL, help="Bybit v5 market kline endpoint.")
+    archive_klines_1h_api.add_argument("--category", default="linear", help="Bybit product category.")
+    archive_klines_1h_api.add_argument("--interval", default="60", help="Bybit kline interval; default 60 minutes.")
+    archive_klines_1h_api.add_argument("--symbols", default="", help="Optional comma-separated symbol allowlist.")
+    archive_klines_1h_api.add_argument("--start", default=None, help="Inclusive archive start date YYYY-MM-DD.")
+    archive_klines_1h_api.add_argument("--end", default=None, help="Inclusive archive end date YYYY-MM-DD.")
+    archive_klines_1h_api.add_argument("--max-rows", type=int, default=0, help="Maximum symbol/date manifest rows to process; 0 disables.")
+    archive_klines_1h_api.add_argument("--workers", type=int, default=8, help="Concurrent per-symbol API workers.")
+    archive_klines_1h_api.add_argument("--include-existing", action="store_true", help="Rebuild rows even when the 1h partition already exists.")
+    archive_klines_1h_api.add_argument(
+        "--min-existing-bars",
+        type=int,
+        default=1,
+        help="With missing-only mode, rebuild partitions with fewer than this many 1h bars; default treats any written partition as processed.",
+    )
+    archive_klines_1h_api.add_argument("--limit", type=int, default=1000, help="Bybit page size, capped at 1000.")
+    archive_klines_1h_api.add_argument("--retries", type=int, default=5, help="Retries per API request before marking a symbol chunk failed.")
+    archive_klines_1h_api.add_argument(
+        "--request-sleep-seconds",
+        type=float,
+        default=0.0,
+        help="Optional sleep after each API request inside a symbol worker.",
+    )
+    archive_klines_1h_api.add_argument("--timeout-seconds", type=int, default=30, help="HTTP timeout per API request.")
+
     subparsers.add_parser("volume-alpha", help="Run isolated daily volume-only alpha research sweep.")
 
     volume_events = subparsers.add_parser("volume-events", help="Run event-driven volume-alpha research.")
@@ -176,6 +208,24 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=50,
         help="Minimum 7d liquidity-rank improvement for whole-universe liquidity-migration events.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-turnover-ratio-min",
+        type=float,
+        default=0.0,
+        help="Minimum turnover divided by prior 7d mean turnover for liquidity-migration events; 0 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-prior-rank-min",
+        type=int,
+        default=0,
+        help="Minimum prior 7d liquidity rank for liquidity-migration events; 0 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-current-rank-max",
+        type=int,
+        default=0,
+        help="Maximum current liquidity rank for liquidity-migration events; 0 disables.",
     )
     volume_events.add_argument("--exhaustion-min-day-return", type=float, default=0.03, help="Minimum same-day return for volume-exhaustion events.")
     volume_events.add_argument(
@@ -725,6 +775,36 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1 if payload["failures"] else 0
 
+    if args.command == "archive-download-klines-1h-api":
+        kline_config = ArchiveHourlyKlineApiDownloadConfig(
+            api_url=args.api_url,
+            category=args.category,
+            interval=args.interval,
+            start=args.start,
+            end=args.end,
+            symbols=_csv_str(args.symbols, ()),
+            max_rows=args.max_rows,
+            workers=args.workers,
+            missing_only=not args.include_existing,
+            min_existing_bars=args.min_existing_bars,
+            limit=args.limit,
+            retries=args.retries,
+            request_sleep_seconds=args.request_sleep_seconds,
+            timeout_seconds=args.timeout_seconds,
+            name=args.name,
+        )
+        payload = run_archive_hourly_klines_api_download(data_root, config=kline_config)
+        print(
+            "archive api 1h klines "
+            f"rows={payload['rows']} "
+            f"downloaded={payload['downloaded']} "
+            f"cached={payload['cached']} "
+            f"empty={payload['empty']} "
+            f"failed={payload['failures']} "
+            f"path={data_root / 'reports' / ('archive_klines_1h_api_' + args.name + '.md')}"
+        )
+        return 1 if payload["failures"] else 0
+
     if args.command == "volume-alpha":
         payload = run_volume_alpha(
             data_root,
@@ -758,6 +838,9 @@ def main(argv: list[str] | None = None) -> int:
             tail_rank_max=args.tail_rank_max,
             tail_rank_improvement_min=args.tail_rank_improvement_min,
             liquidity_migration_rank_improvement_min=args.liquidity_migration_rank_improvement_min,
+            liquidity_migration_turnover_ratio_min=args.liquidity_migration_turnover_ratio_min,
+            liquidity_migration_prior_rank_min=args.liquidity_migration_prior_rank_min,
+            liquidity_migration_current_rank_max=args.liquidity_migration_current_rank_max,
             exhaustion_min_day_return=args.exhaustion_min_day_return,
             selloff_exhaustion_min_abs_day_return=args.selloff_exhaustion_min_abs_day_return,
             absorption_max_abs_day_return=args.absorption_max_abs_day_return,

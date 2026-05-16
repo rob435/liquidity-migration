@@ -8,12 +8,12 @@ param(
     [string]$StartDate = "2023-05-03",
     [string]$EndDate = "2026-05-03",
     [int]$ManifestWorkers = 32,
-    [int]$DownloadWorkers = 64,
-    [int]$MinExistingBars = 20,
+    [int]$DownloadWorkers = 16,
+    [int]$MinExistingBars = 1,
     [string]$Python = "python",
     [bool]$RunTests = $true,
     [bool]$RunChampionBacktest = $true,
-    [double]$ChampionGrossExposure = 0.5
+    [double]$ChampionGrossExposure = 1.0
 )
 
 $ErrorActionPreference = "Stop"
@@ -114,24 +114,21 @@ try {
         "--workers", "$ManifestWorkers"
     )
 
-    Section "Download full PIT 1h klines"
-    if (-not $env:AGC_ARCHIVE_DOWNLOAD_BACKEND) {
-        $env:AGC_ARCHIVE_DOWNLOAD_BACKEND = "curl"
-    }
-    if (-not $env:AGC_ARCHIVE_DOWNLOAD_RETRIES) {
-        $env:AGC_ARCHIVE_DOWNLOAD_RETRIES = "8"
-    }
+    Section "Fill full PIT 1h klines from Bybit v5 API"
     Invoke-Checked $VenvPython @(
         "-m", "aggression_carry",
         "--data-root", $DataRoot,
         "--config", $ConfigPath,
-        "archive-download-klines-1h",
+        "archive-download-klines-1h-api",
         "--name", $RunName,
         "--start", $StartDate,
         "--end", $EndDate,
         "--workers", "$DownloadWorkers",
         "--min-existing-bars", "$MinExistingBars",
-        "--discard-archives-after-success"
+        "--limit", "1000",
+        "--retries", "8",
+        "--timeout-seconds", "30",
+        "--request-sleep-seconds", "0.02"
     )
 
     Section "Validate full PIT coverage"
@@ -150,7 +147,7 @@ from aggression_carry.storage import dataset_path, read_dataset
 
 root = Path(os.environ["DATA_ROOT"])
 run_name = os.environ["RUN_NAME"]
-report_path = root / "reports" / f"archive_klines_1h_{run_name}.csv"
+report_path = root / "reports" / f"archive_klines_1h_api_{run_name}.csv"
 
 if not report_path.exists():
     raise SystemExit(f"missing downloader report: {report_path}")
@@ -192,26 +189,28 @@ if missing:
 
     if ($RunChampionBacktest) {
         Section "Run selected full PIT volume event backtest"
-        $ChampionReportDir = Join-Path (Join-Path $DataRoot "reports") ("volume_event_research_fullpit_pvb_q20_cont_h5_halfgross_{0}" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
+        $ChampionReportDir = Join-Path (Join-Path $DataRoot "reports") ("SELECTED_liqmig_reversal_turn1p75_cost3_{0}" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
         Invoke-Checked $VenvPython @(
             "-m", "aggression_carry",
             "--data-root", $DataRoot,
             "--config", $ConfigPath,
             "volume-events",
-            "--event-types", "persistent_volume_breakout",
-            "--thresholds", "0.2",
-            "--hold-days", "5",
-            "--sides", "continuation",
-            "--stop-loss-pcts", "0",
-            "--cost-multipliers", "1,3",
+            "--event-types", "liquidity_migration",
+            "--thresholds", "0.3",
+            "--hold-days", "3",
+            "--sides", "reversal",
+            "--stop-loss-pcts", "0.12",
+            "--cost-multipliers", "3",
             "--gross-exposure", "$ChampionGrossExposure",
             "--entry-delay-hours", "1",
-            "--max-active-symbols", "6",
-            "--cooldown-days", "7",
-            "--rank-exit-threshold", "0.5",
+            "--max-active-symbols", "8",
+            "--cooldown-days", "5",
+            "--rank-exit-threshold", "0.55",
+            "--liquidity-migration-rank-improvement-min", "150",
+            "--liquidity-migration-turnover-ratio-min", "1.75",
             "--report-dir", $ChampionReportDir
         )
-        Add-Content -Path $EventReportIndex -Value "champion,6,7,1,0.5,persistent_volume_breakout,0.2,5,continuation,0,1|3,$ChampionGrossExposure,$ChampionReportDir"
+        Add-Content -Path $EventReportIndex -Value "champion,8,5,1,0.55,liquidity_migration,0.3,3,reversal,0.12,3,$ChampionGrossExposure,$ChampionReportDir"
     }
 
     Section "Done"

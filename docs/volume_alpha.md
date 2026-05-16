@@ -190,9 +190,9 @@ sync repo to origin/main
 install/update local venv
 run focused smoke tests
 build/resume full Bybit USDT public archive manifest
-download/resume full PIT 1h klines with 64 workers
+fill/resume full PIT 1h klines from Bybit v5 API with 16 workers
 validate manifest-to-parquet coverage
-run the selected persistent-volume-breakout event backtest only
+run the selected liquidity-migration reversal backtest only
 ```
 
 The old background creative watcher and event-grid runner path are removed from
@@ -218,15 +218,19 @@ python -m aggression_carry \
   --end 2026-05-03 \
   --workers 32
 
-AGC_ARCHIVE_DOWNLOAD_BACKEND=curl python -m aggression_carry \
+python -m aggression_carry \
   --data-root DATA_ROOT \
   --config configs/volume_alpha.default.yaml \
-  archive-download-klines-1h \
+  archive-download-klines-1h-api \
   --name fullpit-1h-all-usdt-20230503-20260503 \
   --start 2023-05-03 \
   --end 2026-05-03 \
-  --workers 32 \
-  --discard-archives-after-success
+  --workers 16 \
+  --min-existing-bars 1 \
+  --limit 1000 \
+  --retries 8 \
+  --timeout-seconds 30 \
+  --request-sleep-seconds 0.02
 ```
 
 3. Add split evaluation:
@@ -263,4 +267,59 @@ Markdown reports. Promotion requires full point-in-time membership and full
 PIT universe coverage. Do not use current-universe subsets for volume-alpha
 research decisions. The survivorship-free event run must use a data root whose
 `klines_1h` coverage was built from the full `archive_trade_manifest` with
-`archive-download-klines-1h`.
+`archive-download-klines-1h-api`; raw trade archive repair remains the fallback
+for any API gaps.
+
+## Selected Full-PIT Result
+
+Current best volume-alpha candidate:
+
+```text
+event: liquidity_migration
+side: reversal (short)
+threshold: top 30% dollar-volume rank migration
+filters: liquidity-rank improvement >= 150, turnover / prior 7d mean >= 1.75
+entry delay: 1 hour after signal close
+hold: 3 days max
+stop: 12% fixed
+capacity: max 8 active symbols
+cooldown: 5 days
+cost: 3x base round-trip cost
+```
+
+Command:
+
+```bash
+python -m aggression_carry \
+  --data-root DATA_ROOT \
+  --config configs/volume_alpha.default.yaml \
+  volume-events \
+  --event-types liquidity_migration \
+  --thresholds 0.3 \
+  --hold-days 3 \
+  --sides reversal \
+  --stop-loss-pcts 0.12 \
+  --cost-multipliers 3 \
+  --entry-delay-hours 1 \
+  --gross-exposure 1 \
+  --max-active-symbols 8 \
+  --cooldown-days 5 \
+  --rank-exit-threshold 0.55 \
+  --liquidity-migration-rank-improvement-min 150 \
+  --liquidity-migration-turnover-ratio-min 1.75
+```
+
+Full-PIT result on `2023-05-03` to `2026-05-03`:
+
+```text
+trades: 1,963
+total return: +395.37%
+max drawdown: -34.72%
+worst split return: +41.14%
+worst split drawdown: -33.10%
+average split Sharpe-like: 0.81
+train return: +48.10%
+validation return: +41.14%
+OOS return: +131.52%
+promotion gate: pass
+```
