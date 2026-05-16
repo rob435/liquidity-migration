@@ -9,7 +9,7 @@ MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-0}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$REPO_ROOT"
 
 LOG_DIR="$DATA_ROOT/logs"
