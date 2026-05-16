@@ -172,6 +172,7 @@ def test_cli_parses_volume_events(tmp_path: Path) -> None:
             "40",
             "--exhaustion-min-day-return",
             "0.08",
+            "--allow-partial-pit",
         ]
     )
 
@@ -190,6 +191,7 @@ def test_cli_parses_volume_events(tmp_path: Path) -> None:
     assert args.tail_rank_max == 260
     assert args.tail_rank_improvement_min == 40
     assert args.exhaustion_min_day_return == 0.08
+    assert args.allow_partial_pit is True
 
 
 def test_cli_parses_daily_close_fade_entry_risk_knobs(tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ from aggression_carry.volume_events import (
     _attach_event_archive_membership,
     _event_decay_exit_hit,
     _event_filter,
+    _full_pit_universe_error,
     VolumeEventResearchConfig,
     _add_rank_fraction,
     _monthly_returns,
@@ -47,12 +48,45 @@ def test_volume_event_research_writes_reports_on_fixture(tmp_path: Path) -> None
             cost_multipliers=(1.0,),
             max_active_symbols=4,
             cooldown_days=0,
+            require_full_pit_universe=False,
         ),
     )
 
     assert payload["rows"]["scenarios"] == 1
     assert (tmp_path / "reports" / "volume_event_research" / "volume_event_research_report.md").exists()
     assert (tmp_path / "reports" / "volume_event_research" / "volume_event_scenario_summary.csv").exists()
+
+
+def test_volume_event_research_requires_full_pit_by_default(tmp_path: Path) -> None:
+    generate_fixture_data(tmp_path)
+
+    with pytest.raises(RuntimeError, match="requires full PIT archive membership"):
+        run_volume_event_research(
+            tmp_path,
+            event_config=VolumeEventResearchConfig(
+                event_types=("fresh_volume_spike",),
+                thresholds=(0.5,),
+                hold_days=(1,),
+                side_hypotheses=("continuation",),
+                stop_loss_pcts=(0.0,),
+                cost_multipliers=(1.0,),
+            ),
+        )
+
+
+def test_full_pit_universe_error_reports_missing_symbols() -> None:
+    features = pl.DataFrame([{"symbol": "AAAUSDT", "ts_ms": 1}])
+    manifest = pl.DataFrame(
+        [
+            {"symbol": "AAAUSDT", "date": "2024-01-01"},
+            {"symbol": "BBBUSDT", "date": "2024-01-01"},
+        ]
+    )
+
+    message = _full_pit_universe_error(features, manifest)
+
+    assert "missing_symbols=1" in message
+    assert "BBBUSDT" in message
 
 
 def test_volume_event_config_validates_new_research_knobs() -> None:

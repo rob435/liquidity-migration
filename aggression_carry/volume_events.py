@@ -66,6 +66,7 @@ class VolumeEventResearchConfig:
     cooldown_days: int = 3
     rank_exit_threshold: float = 0.50
     require_pit_membership: bool = True
+    require_full_pit_universe: bool = True
     universe_rank_min: int = 1
     universe_rank_max: int = 0
     universe_min_daily_turnover: float = 0.0
@@ -117,11 +118,13 @@ def run_volume_event_research(
         _enriched_event_features(build_volume_features(klines), klines, archive_manifest),
         _window_config(config),
     )
+    full_pit_universe_pass = _full_pit_universe_pass(features, archive_manifest)
+    if config.require_full_pit_universe and not full_pit_universe_pass:
+        raise RuntimeError(_full_pit_universe_error(features, archive_manifest))
     bars = _indexed_price_bars_by_symbol(klines)
     funding_lookup = _funding_lookup(funding)
     rank_lookup_cache = _rank_lookup_cache(features, config=config)
     event_cache: dict[tuple[str, float], pl.DataFrame] = {}
-    full_pit_universe_pass = _full_pit_universe_pass(features, archive_manifest)
 
     scenario_rows = []
     best_payload: dict[str, Any] | None = None
@@ -905,6 +908,22 @@ def _full_pit_universe_pass(features: pl.DataFrame, archive_manifest: pl.DataFra
     manifest_symbols = _symbol_set(archive_manifest)
     feature_symbols = _symbol_set(features)
     return bool(manifest_symbols) and manifest_symbols.issubset(feature_symbols)
+
+
+def _full_pit_universe_error(features: pl.DataFrame, archive_manifest: pl.DataFrame) -> str:
+    manifest_symbols = _symbol_set(archive_manifest)
+    feature_symbols = _symbol_set(features)
+    missing = sorted(manifest_symbols - feature_symbols)
+    if not manifest_symbols:
+        return (
+            "volume-events requires full PIT archive membership by default, but archive_trade_manifest is empty. "
+            "Run archive-manifest and archive-download-klines-1h first, or pass --allow-partial-pit only for explicitly biased diagnostics."
+        )
+    return (
+        "volume-events requires a full PIT universe by default, but klines_1h does not cover every archive manifest symbol. "
+        f"manifest_symbols={len(manifest_symbols)} feature_symbols={len(feature_symbols)} missing_symbols={len(missing)} "
+        f"missing_sample={missing[:20]}. Finish archive-download-klines-1h before running real volume-alpha backtests."
+    )
 
 
 def _symbol_set(frame: pl.DataFrame) -> set[str]:

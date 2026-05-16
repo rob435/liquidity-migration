@@ -172,6 +172,11 @@ def build_parser() -> argparse.ArgumentParser:
     volume_events.add_argument("--tail-rank-max", type=int, default=160, help="Tail-liquidity event upper liquidity-rank bound.")
     volume_events.add_argument("--tail-rank-improvement-min", type=int, default=20, help="Minimum 7d liquidity-rank improvement for tail events.")
     volume_events.add_argument("--exhaustion-min-day-return", type=float, default=0.03, help="Minimum same-day return for volume-exhaustion events.")
+    volume_events.add_argument(
+        "--allow-partial-pit",
+        action="store_true",
+        help="Allow biased diagnostics when archive manifest coverage is incomplete. Do not use for real backtests.",
+    )
     volume_events.add_argument("--report-dir", default=None)
 
     backtest = subparsers.add_parser("volume-backtest", help="Run detailed trade-ledger backtest for the volume alpha.")
@@ -715,6 +720,7 @@ def main(argv: list[str] | None = None) -> int:
             max_active_symbols=args.max_active_symbols,
             cooldown_days=args.cooldown_days,
             rank_exit_threshold=args.rank_exit_threshold,
+            require_full_pit_universe=not args.allow_partial_pit,
             universe_rank_min=args.universe_rank_min,
             universe_rank_max=args.universe_rank_max,
             universe_min_daily_turnover=args.universe_min_daily_turnover,

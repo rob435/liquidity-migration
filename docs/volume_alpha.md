@@ -25,6 +25,16 @@ compare against a fixed-rebalance benchmark only as a control
 Do not promote headline backtest returns from current-universe tests. Those are
 biased benchmarks unless tradable membership is point-in-time.
 
+`volume-events` now requires full PIT universe coverage by default. It should
+raise before running if `archive_trade_manifest` is missing or if `klines_1h`
+does not cover every manifest symbol. Use `--allow-partial-pit` only for an
+explicitly biased diagnostic, not for real research decisions.
+
+A "top 150" universe is acceptable only when it is point-in-time, for example
+running on the completed full-PIT root with `--universe-rank-max 150`. That
+means top 150 by historical daily liquidity rank on each signal date, not the
+top 150 coins by today's turnover.
+
 ## Deprecated
 
 These workflows are intentionally removed from the active research path:
