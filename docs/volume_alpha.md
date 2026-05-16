@@ -168,6 +168,18 @@ PowerShell runner:
 powershell -ExecutionPolicy Bypass -File scripts\run_fullpit_volume_overnight.ps1
 ```
 
+Creative full-PIT-only research runner:
+
+```bash
+nohup bash scripts/run_fullpit_volume_creative_research.sh > fullpit_creative_volume.nohup.log 2>&1 &
+tail -f fullpit_creative_volume.nohup.log
+```
+
+This runner waits for full PIT coverage before running anything. It tests
+PIT top-150 liquidity universes, delayed breakout entries, volume-exhaustion
+continuation/reversal, tail-liquidity jumps, and an all-PIT continuation sanity
+grid. It never passes `--allow-partial-pit`.
+
 Default behavior:
 
 ```text
@@ -249,7 +261,7 @@ They are not the path forward.
 The event-driven runner now exists as `volume-events`. It writes scenario
 summary, best-scenario trades, baskets, equity, monthly returns, JSON, and
 Markdown reports. Promotion requires full point-in-time membership and full
-PIT universe coverage. Current-150 PIT-filtered tests are useful diagnostics
-only; the survivorship-free event run must use a data root whose `klines_1h`
-coverage was built from the full `archive_trade_manifest` with
+PIT universe coverage. Do not use current-universe subsets for volume-alpha
+research decisions. The survivorship-free event run must use a data root whose
+`klines_1h` coverage was built from the full `archive_trade_manifest` with
 `archive-download-klines-1h`.
