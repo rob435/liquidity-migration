@@ -69,7 +69,7 @@ def test_volume_event_research_writes_reports_on_fixture(tmp_path: Path) -> None
     assert "best_equity_chart" in payload
 
 
-def test_equity_benchmark_chart_writes_overlays_and_annotations(tmp_path: Path) -> None:
+def test_equity_benchmark_chart_writes_overlays_without_annotations(tmp_path: Path) -> None:
     from PIL import Image
 
     output_dir = tmp_path / "reports"
@@ -103,10 +103,7 @@ def test_equity_benchmark_chart_writes_overlays_and_annotations(tmp_path: Path) 
     assert not (output_dir / "volume_event_best_equity_annotations.csv").exists()
     assert chart["series"]["strategy"] == 5
     assert chart["series"]["btc"] == 5
-    displays = [row["display"] for row in chart["annotations"]]
-    assert "-10.00%" in displays
-    assert "+20.00%" in displays
-    assert all("Max DD" not in item and "Drop" not in item and "Jump" not in item for item in displays)
+    assert chart["annotations"] == []
 
 
 def test_volume_event_research_requires_full_pit_by_default(tmp_path: Path) -> None:
