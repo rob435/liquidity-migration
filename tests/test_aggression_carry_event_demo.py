@@ -192,10 +192,10 @@ def test_select_demo_entry_candidates_uses_selected_liquidity_migration_filters(
         event_type="liquidity_migration",
         threshold=0.30,
         side_hypothesis="reversal",
-        hold_days=1,
+        hold_days=3,
         stop_loss_pct=0.12,
         cost_multiplier=3.0,
-        take_profit_pct=0.15,
+        take_profit_pct=0.20,
     )
     config = VolumeEventResearchConfig(require_pit_membership=False, require_full_pit_universe=False)
     features = pl.DataFrame(
@@ -246,7 +246,7 @@ def test_select_demo_entry_candidates_uses_selected_liquidity_migration_filters(
     assert [row["symbol"] for row in candidates] == ["AAAUSDT"]
     assert candidates[0]["side"] == "short"
     assert candidates[0]["stop_loss_pct"] == 0.12
-    assert candidates[0]["take_profit_pct"] == 0.15
+    assert candidates[0]["take_profit_pct"] == 0.20
     assert skips["not_ready"] == 0
 
 

@@ -58,10 +58,10 @@ SPLITS = (
 class VolumeEventResearchConfig:
     event_types: tuple[str, ...] = ("liquidity_migration",)
     thresholds: tuple[float, ...] = (0.30,)
-    hold_days: tuple[int, ...] = (1,)
+    hold_days: tuple[int, ...] = (3,)
     side_hypotheses: tuple[str, ...] = ("reversal",)
     stop_loss_pcts: tuple[float, ...] = (0.12,)
-    take_profit_pcts: tuple[float, ...] = (0.15,)
+    take_profit_pcts: tuple[float, ...] = (0.20,)
     cost_multipliers: tuple[float, ...] = (3.0,)
     start_date: str = ""
     end_date: str = ""

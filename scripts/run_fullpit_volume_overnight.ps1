@@ -95,7 +95,7 @@ try {
         Section "Smoke tests"
         Invoke-Checked $VenvPython @(
             "-m", "pytest",
-            "tests/test_aggression_carry_cli.py::test_cli_parses_volume_events",
+            "tests/test_aggression_carry_cli.py::test_cli_parses_volume_events_research_overrides",
             "tests/test_aggression_carry_archive.py::test_archive_hourly_kline_download_writes_1h_partitions",
             "tests/test_aggression_carry_archive.py::test_archive_hourly_downloader_processes_each_symbol_in_date_order",
             "tests/test_aggression_carry_volume_events.py"
@@ -189,7 +189,7 @@ if missing:
 
     if ($RunChampionBacktest) {
         Section "Run selected full PIT volume event backtest"
-        $ChampionReportDir = Join-Path (Join-Path $DataRoot "reports") ("SELECTED_liqmig_res8_q30_tp15_g125_{0}" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
+        $ChampionReportDir = Join-Path (Join-Path $DataRoot "reports") ("SELECTED_liqmig_res8_q30_h3_tp20_g125_{0}" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
         Invoke-Checked $VenvPython @(
             "-m", "aggression_carry",
             "--data-root", $DataRoot,
@@ -197,10 +197,10 @@ if missing:
             "volume-events",
             "--event-types", "liquidity_migration",
             "--thresholds", "0.3",
-            "--hold-days", "1",
+            "--hold-days", "3",
             "--sides", "reversal",
             "--stop-loss-pcts", "0.12",
-            "--take-profit-pcts", "0.15",
+            "--take-profit-pcts", "0.20",
             "--cost-multipliers", "3",
             "--gross-exposure", "$ChampionGrossExposure",
             "--entry-delay-hours", "1",
@@ -221,7 +221,7 @@ if missing:
             "--stop-pressure-stop-count", "12",
             "--report-dir", $ChampionReportDir
         )
-        Add-Content -Path $EventReportIndex -Value "champion,6,5,1,0.55,31,150,150,6.0,0.90,0,0,0.0,0.08,0.55,14,12,liquidity_migration,0.3,1,reversal,0.12,0.15,3,$ChampionGrossExposure,$ChampionReportDir"
+        Add-Content -Path $EventReportIndex -Value "champion,6,5,1,0.55,31,150,150,6.0,0.90,0,0,0.0,0.08,0.55,14,12,liquidity_migration,0.3,3,reversal,0.12,0.20,3,$ChampionGrossExposure,$ChampionReportDir"
     }
 
     Section "Done"

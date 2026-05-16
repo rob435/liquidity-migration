@@ -296,7 +296,7 @@ operations, not for historical promotion evidence.
 
 ## Selected Full-PIT Result
 
-Promoted result after the return-push residual liquidity-migration research pass:
+Promoted result after the hold/exit frontier confirmation:
 
 ```text
 event: liquidity_migration
@@ -311,9 +311,9 @@ filters:
   coin daily_return_1d - market_median_return_1d >= +8%
   market_pct_up_1d <= 0.55 OR coin daily_return_1d >= +20%
 entry delay: 1 hour after signal close
-hold: 1 day max
+hold: 3 days max
 stop: 12% fixed
-take profit: 15% fixed
+take profit: 20% fixed
 gross exposure: 1.25
 capacity: max 6 active symbols
 cooldown: 5 days
@@ -330,10 +330,10 @@ python -m aggression_carry \
   volume-events \
   --event-types liquidity_migration \
   --thresholds 0.3 \
-  --hold-days 1 \
+  --hold-days 3 \
   --sides reversal \
   --stop-loss-pcts 0.12 \
-  --take-profit-pcts 0.15 \
+  --take-profit-pcts 0.20 \
   --cost-multipliers 3 \
   --entry-delay-hours 1 \
   --gross-exposure 1.25 \
@@ -358,17 +358,17 @@ python -m aggression_carry \
 Full-PIT result on `2023-05-03` to `2026-05-03`:
 
 ```text
-report: data/agc-bybit-fullpit-1h-20230503-20260503/reports/research_20260516_return_push_res8_q30_tp15_g125
-trades: 518
-total return: +587.81%
-max drawdown: -15.54%
-max no-new-high stretch: 105 days
-worst 90d return: -10.16%
-worst split return: +59.79%
-average split Sharpe-like: 3.84
-train return: +59.79%
-validation return: +148.32%
-OOS return: +73.35%
+report: data/research_reports/research_20260516_promoted_default_after_patch
+trades: 516
+total return: +1218.79%
+max drawdown: -14.54%
+max no-new-high stretch: 90 days
+worst 90d return: -5.89%
+worst split return: +75.64%
+average split Sharpe-like: 2.67
+train return: +75.64%
+validation return: +254.58%
+OOS return: +111.75%
 default chart: volume_event_best_equity_btc.png with BTC overlay and monthly/growth gridlines
 promotion gate: pass
 ```

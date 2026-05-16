@@ -90,10 +90,10 @@ def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Pa
     assert args.command == "volume-events"
     assert args.event_types == "liquidity_migration"
     assert args.thresholds == "0.3"
-    assert args.hold_days == "1"
+    assert args.hold_days == "3"
     assert args.sides == "reversal"
     assert args.stop_loss_pcts == "0.12"
-    assert args.take_profit_pcts == "0.15"
+    assert args.take_profit_pcts == "0.2"
     assert args.cost_multipliers == "3.0"
     assert args.gross_exposure == 1.25
     assert args.entry_delay_hours == 1

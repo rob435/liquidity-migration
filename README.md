@@ -29,7 +29,7 @@ The `volume-events` defaults are the selected strategy:
 - Idiosyncratic move gate: `daily_return_1d - market_median_return_1d >= +8%`
 - Regime gate: `market_pct_up_1d <= 0.55 OR coin daily_return_1d >= +20%`
 - Entry: 1 hour after the daily signal close
-- Exit: event decay, 12% fixed stop, 15% fixed take profit, or 1-day max hold
+- Exit: event decay, 12% fixed stop, 20% fixed take profit, or 3-day max hold
 - Capacity: max 6 active symbols, 5-day symbol cooldown
 - Stop-pressure throttle: pause new entries after 12 realized stops inside 14 days
 - Cost model: 3x base round-trip costs
@@ -37,21 +37,21 @@ The `volume-events` defaults are the selected strategy:
 
 Promoted full-PIT reference run, 2023-05-03 to 2026-05-03:
 
-- Trades: 518
-- Total return: +587.81%
-- Max drawdown: -15.54%
-- Max no-new-high stretch: 105 days
-- Worst 90d return: -10.16%
-- Worst split return: +59.79%
-- Average split Sharpe-like: 3.84
-- OOS return: +73.35%
+- Trades: 516
+- Total return: +1218.79%
+- Max drawdown: -14.54%
+- Max no-new-high stretch: 90 days
+- Worst 90d return: -5.89%
+- Worst split return: +75.64%
+- Average split Sharpe-like: 2.67
+- OOS return: +111.75%
 - Default chart: `volume_event_best_equity_btc.png` with BTC overlay and monthly/growth gridlines
 - Promotion gate: pass
 
 Reference report:
 
 ```text
-data/agc-bybit-fullpit-1h-20230503-20260503/reports/research_20260516_return_push_res8_q30_tp15_g125
+data/research_reports/research_20260516_promoted_default_after_patch
 ```
 
 ## Full-PIT Runner
@@ -99,7 +99,7 @@ Default forward-test behavior:
 - enters eligible events after the 1-hour signal delay, with stale entries skipped after 15 minutes by default
 - sizes each coin from the backtest weight: `gross_exposure / max_active_symbols`, currently `1.25 / 6 = 20.83%` of current Bybit demo USDT equity
 - uses 2x entry leverage in the continuous runner so the 125% gross target can be submitted without changing the notional sizing
-- exits first on every cycle using fixed stop reconciliation, event decay, rank exit, or 1-day max hold
+- exits first on every cycle using fixed stop reconciliation, event decay, rank exit, or 3-day max hold
 - sends Telegram status with Bybit demo wallet equity, open positions, position value, and unrealized PnL when `TELEGRAM_ENABLED=1`
 - writes ledgers under `event_demo_trades`, `event_demo_orders`, and `event_demo_cycles`
 
