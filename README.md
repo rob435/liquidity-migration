@@ -26,30 +26,32 @@ The `volume-events` defaults are the selected strategy:
 - Rank improvement: at least 150 places versus the 7-day prior rank
 - Turnover expansion: current turnover / prior 7-day mean turnover at least 6.0
 - Overheat filter: event rank fraction no higher than 0.90
-- Regime gate: `market_pct_up_1d <= 0.60 OR coin daily_return_1d >= +20%`
+- Idiosyncratic move gate: `daily_return_1d - market_median_return_1d >= +8%`
+- Regime gate: `market_pct_up_1d <= 0.55 OR coin daily_return_1d >= +20%`
 - Entry: 1 hour after the daily signal close
-- Exit: event decay, 12% fixed stop, or 1-day max hold
+- Exit: event decay, 12% fixed stop, 15% fixed take profit, or 1-day max hold
 - Capacity: max 6 active symbols, 5-day symbol cooldown
 - Stop-pressure throttle: pause new entries after 12 realized stops inside 14 days
 - Cost model: 3x base round-trip costs
-- Gross exposure: 1.0, split across active capacity
+- Gross exposure: 1.25, split across active capacity
 
 Promoted full-PIT reference run, 2023-05-03 to 2026-05-03:
 
-- Trades: 810
-- Total return: +344.73%
-- Max drawdown: -16.86%
-- Worst split return: +24.58%
-- Worst split drawdown: -15.43%
-- Average split Sharpe-like: 2.44
-- OOS return: +86.42%
+- Trades: 518
+- Total return: +587.81%
+- Max drawdown: -15.54%
+- Max no-new-high stretch: 105 days
+- Worst 90d return: -10.16%
+- Worst split return: +59.79%
+- Average split Sharpe-like: 3.84
+- OOS return: +73.35%
 - Default chart: `volume_event_best_equity_btc.png` with BTC overlay and monthly/growth gridlines
 - Promotion gate: pass
 
 Reference report:
 
 ```text
-data/agc-bybit-fullpit-1h-20230503-20260503/reports/research_20260516_promoted_default_stable_peg_or_gate
+data/agc-bybit-fullpit-1h-20230503-20260503/reports/research_20260516_return_push_res8_q30_tp15_g125
 ```
 
 ## Full-PIT Runner
@@ -95,7 +97,8 @@ Default forward-test behavior:
 - pulls current Bybit USDT perp ranks 1-220, then applies the selected rank 31-150 liquidity-migration filter
 - rebuilds recent 1h volume features each cycle from a 45-day lookback
 - enters eligible events after the 1-hour signal delay, with stale entries skipped after 15 minutes by default
-- sizes each coin from the backtest weight: `gross_exposure / max_active_symbols`, currently `1.0 / 6 = 16.67%` of current Bybit demo USDT equity
+- sizes each coin from the backtest weight: `gross_exposure / max_active_symbols`, currently `1.25 / 6 = 20.83%` of current Bybit demo USDT equity
+- uses 2x entry leverage in the continuous runner so the 125% gross target can be submitted without changing the notional sizing
 - exits first on every cycle using fixed stop reconciliation, event decay, rank exit, or 1-day max hold
 - sends Telegram status with Bybit demo wallet equity, open positions, position value, and unrealized PnL when `TELEGRAM_ENABLED=1`
 - writes ledgers under `event_demo_trades`, `event_demo_orders`, and `event_demo_cycles`

@@ -323,6 +323,7 @@ def select_demo_entry_candidates(
                 "turnover_quote": _float(event.get("turnover_quote")),
                 "prior7_turnover_quote_mean": _float(event.get("prior7_turnover_quote_mean")),
                 "daily_return_1d": _float(event.get("daily_return_1d")),
+                "residual_return_1d": _float(event.get("residual_return_1d")),
             }
         )
         if len(candidates) >= max_new_entries:

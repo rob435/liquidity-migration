@@ -93,22 +93,24 @@ def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Pa
     assert args.hold_days == "1"
     assert args.sides == "reversal"
     assert args.stop_loss_pcts == "0.12"
-    assert args.take_profit_pcts == "0.2"
+    assert args.take_profit_pcts == "0.15"
     assert args.cost_multipliers == "3.0"
-    assert args.gross_exposure == 1.0
+    assert args.gross_exposure == 1.25
     assert args.entry_delay_hours == 1
     assert args.max_active_symbols == 6
     assert args.cooldown_days == 5
     assert args.rank_exit_threshold == 0.55
     assert args.universe_rank_min == 31
     assert args.universe_rank_max == 150
-    assert args.liquidity_migration_rank_improvement_min == 80
+    assert args.liquidity_migration_rank_improvement_min == 150
     assert args.liquidity_migration_turnover_ratio_min == 6.0
     assert args.liquidity_migration_event_rank_fraction_max == 0.90
-    assert args.liquidity_migration_event_rank_fraction_exclude_min == 0.75
-    assert args.liquidity_migration_event_rank_fraction_exclude_max == 0.85
+    assert args.liquidity_migration_event_rank_fraction_exclude_min == 0.0
+    assert args.liquidity_migration_event_rank_fraction_exclude_max == 0.0
     assert args.liquidity_migration_day_return_min == 0.0
     assert args.liquidity_migration_day_return_max == 10.0
+    assert args.liquidity_migration_residual_return_min == 0.08
+    assert args.liquidity_migration_residual_return_max == 10.0
     assert args.liquidity_migration_market_pct_up_max == 0.55
     assert args.liquidity_migration_hot_market_day_return_min == 0.20
     assert args.stop_pressure_window_days == 14
@@ -174,6 +176,10 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
             "0.2",
             "--liquidity-migration-day-return-max",
             "0.8",
+            "--liquidity-migration-residual-return-min",
+            "0.08",
+            "--liquidity-migration-residual-return-max",
+            "0.5",
             "--liquidity-migration-market-pct-up-max",
             "0.6",
             "--liquidity-migration-hot-market-day-return-min",
@@ -215,6 +221,8 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
     assert args.liquidity_migration_event_rank_fraction_exclude_max == 0.86
     assert args.liquidity_migration_day_return_min == 0.2
     assert args.liquidity_migration_day_return_max == 0.8
+    assert args.liquidity_migration_residual_return_min == 0.08
+    assert args.liquidity_migration_residual_return_max == 0.5
     assert args.liquidity_migration_market_pct_up_max == 0.6
     assert args.liquidity_migration_hot_market_day_return_min == 0.15
     assert args.exhaustion_min_day_return == 0.08

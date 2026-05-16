@@ -13,7 +13,7 @@ param(
     [string]$Python = "python",
     [bool]$RunTests = $true,
     [bool]$RunChampionBacktest = $true,
-    [double]$ChampionGrossExposure = 1.0
+    [double]$ChampionGrossExposure = 1.25
 )
 
 $ErrorActionPreference = "Stop"
@@ -185,11 +185,11 @@ if missing:
     Invoke-Checked $VenvPython @($ValidationFile)
 
     $EventReportIndex = Join-Path (Join-Path $DataRoot "reports") ("fullpit_volume_event_runs_{0}.csv" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
-    Set-Content -Path $EventReportIndex -Value "run_type,max_active_symbols,cooldown_days,entry_delay_hours,rank_exit_threshold,universe_rank_min,universe_rank_max,liquidity_migration_rank_improvement_min,liquidity_migration_turnover_ratio_min,liquidity_migration_event_rank_fraction_max,liquidity_migration_event_rank_fraction_exclude_min,liquidity_migration_event_rank_fraction_exclude_max,liquidity_migration_day_return_min,liquidity_migration_market_pct_up_max,stop_pressure_window_days,stop_pressure_stop_count,event_types,thresholds,hold_days,sides,stop_loss_pcts,take_profit_pcts,cost_multipliers,gross_exposure,report_dir" -Encoding UTF8
+    Set-Content -Path $EventReportIndex -Value "run_type,max_active_symbols,cooldown_days,entry_delay_hours,rank_exit_threshold,universe_rank_min,universe_rank_max,liquidity_migration_rank_improvement_min,liquidity_migration_turnover_ratio_min,liquidity_migration_event_rank_fraction_max,liquidity_migration_event_rank_fraction_exclude_min,liquidity_migration_event_rank_fraction_exclude_max,liquidity_migration_day_return_min,liquidity_migration_residual_return_min,liquidity_migration_market_pct_up_max,stop_pressure_window_days,stop_pressure_stop_count,event_types,thresholds,hold_days,sides,stop_loss_pcts,take_profit_pcts,cost_multipliers,gross_exposure,report_dir" -Encoding UTF8
 
     if ($RunChampionBacktest) {
         Section "Run selected full PIT volume event backtest"
-        $ChampionReportDir = Join-Path (Join-Path $DataRoot "reports") ("SELECTED_liqmig_fast_recovery_imp80_nomid75_85_tp20_{0}" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
+        $ChampionReportDir = Join-Path (Join-Path $DataRoot "reports") ("SELECTED_liqmig_res8_q30_tp15_g125_{0}" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
         Invoke-Checked $VenvPython @(
             "-m", "aggression_carry",
             "--data-root", $DataRoot,
@@ -200,7 +200,7 @@ if missing:
             "--hold-days", "1",
             "--sides", "reversal",
             "--stop-loss-pcts", "0.12",
-            "--take-profit-pcts", "0.20",
+            "--take-profit-pcts", "0.15",
             "--cost-multipliers", "3",
             "--gross-exposure", "$ChampionGrossExposure",
             "--entry-delay-hours", "1",
@@ -209,18 +209,19 @@ if missing:
             "--rank-exit-threshold", "0.55",
             "--universe-rank-min", "31",
             "--universe-rank-max", "150",
-            "--liquidity-migration-rank-improvement-min", "80",
+            "--liquidity-migration-rank-improvement-min", "150",
             "--liquidity-migration-turnover-ratio-min", "6.0",
             "--liquidity-migration-event-rank-fraction-max", "0.90",
-            "--liquidity-migration-event-rank-fraction-exclude-min", "0.75",
-            "--liquidity-migration-event-rank-fraction-exclude-max", "0.85",
+            "--liquidity-migration-event-rank-fraction-exclude-min", "0",
+            "--liquidity-migration-event-rank-fraction-exclude-max", "0",
             "--liquidity-migration-day-return-min", "0.0",
+            "--liquidity-migration-residual-return-min", "0.08",
             "--liquidity-migration-market-pct-up-max", "0.55",
             "--stop-pressure-window-days", "14",
             "--stop-pressure-stop-count", "12",
             "--report-dir", $ChampionReportDir
         )
-        Add-Content -Path $EventReportIndex -Value "champion,6,5,1,0.55,31,150,80,6.0,0.90,0.75,0.85,0.0,0.55,14,12,liquidity_migration,0.3,1,reversal,0.12,0.20,3,$ChampionGrossExposure,$ChampionReportDir"
+        Add-Content -Path $EventReportIndex -Value "champion,6,5,1,0.55,31,150,150,6.0,0.90,0,0,0.0,0.08,0.55,14,12,liquidity_migration,0.3,1,reversal,0.12,0.15,3,$ChampionGrossExposure,$ChampionReportDir"
     }
 
     Section "Done"

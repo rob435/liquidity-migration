@@ -36,7 +36,7 @@ def test_event_demo_cli_defaults_to_frequent_demo_forward_cycle() -> None:
 
 
 def test_event_demo_default_sizing_matches_backtest_weight() -> None:
-    assert target_order_notional_pct_equity(EventDemoCycleConfig(), VolumeEventResearchConfig()) == 1.0 / 6.0
+    assert target_order_notional_pct_equity(EventDemoCycleConfig(), VolumeEventResearchConfig()) == 1.25 / 6.0
     assert (
         target_order_notional_pct_equity(
             EventDemoCycleConfig(max_order_notional_pct_equity=0.10),
@@ -195,7 +195,7 @@ def test_select_demo_entry_candidates_uses_selected_liquidity_migration_filters(
         hold_days=1,
         stop_loss_pct=0.12,
         cost_multiplier=3.0,
-        take_profit_pct=0.20,
+        take_profit_pct=0.15,
     )
     config = VolumeEventResearchConfig(require_pit_membership=False, require_full_pit_universe=False)
     features = pl.DataFrame(
@@ -211,6 +211,7 @@ def test_select_demo_entry_candidates_uses_selected_liquidity_migration_filters(
                 "turnover_quote": 7_000_000.0,
                 "prior7_turnover_quote_mean": 1_000_000.0,
                 "daily_return_1d": 0.02,
+                "residual_return_1d": 0.09,
                 "market_pct_up_1d": 0.55,
                 "tradable_membership_flag": False,
             },
@@ -225,6 +226,7 @@ def test_select_demo_entry_candidates_uses_selected_liquidity_migration_filters(
                 "turnover_quote": 8_000_000.0,
                 "prior7_turnover_quote_mean": 1_000_000.0,
                 "daily_return_1d": 0.02,
+                "residual_return_1d": 0.09,
                 "market_pct_up_1d": 0.55,
                 "tradable_membership_flag": False,
             },
@@ -244,7 +246,7 @@ def test_select_demo_entry_candidates_uses_selected_liquidity_migration_filters(
     assert [row["symbol"] for row in candidates] == ["AAAUSDT"]
     assert candidates[0]["side"] == "short"
     assert candidates[0]["stop_loss_pct"] == 0.12
-    assert candidates[0]["take_profit_pct"] == 0.20
+    assert candidates[0]["take_profit_pct"] == 0.15
     assert skips["not_ready"] == 0
 
 

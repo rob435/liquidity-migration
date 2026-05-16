@@ -249,6 +249,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum same-day return for liquidity-migration events; 10 disables.",
     )
     volume_events.add_argument(
+        "--liquidity-migration-residual-return-min",
+        type=float,
+        default=event_defaults.liquidity_migration_residual_return_min,
+        help="Minimum coin return minus PIT market median return for liquidity-migration events; -10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-residual-return-max",
+        type=float,
+        default=event_defaults.liquidity_migration_residual_return_max,
+        help="Maximum coin return minus PIT market median return for liquidity-migration events; 10 disables.",
+    )
+    volume_events.add_argument(
         "--liquidity-migration-market-pct-up-max",
         type=float,
         default=event_defaults.liquidity_migration_market_pct_up_max,
@@ -572,6 +584,8 @@ def main(argv: list[str] | None = None) -> int:
             liquidity_migration_score_max=args.liquidity_migration_score_max,
             liquidity_migration_day_return_min=args.liquidity_migration_day_return_min,
             liquidity_migration_day_return_max=args.liquidity_migration_day_return_max,
+            liquidity_migration_residual_return_min=args.liquidity_migration_residual_return_min,
+            liquidity_migration_residual_return_max=args.liquidity_migration_residual_return_max,
             liquidity_migration_market_pct_up_max=args.liquidity_migration_market_pct_up_max,
             liquidity_migration_hot_market_day_return_min=args.liquidity_migration_hot_market_day_return_min,
             market_median_return_1d_min=args.market_median_return_1d_min,

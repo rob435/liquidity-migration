@@ -61,12 +61,12 @@ class VolumeEventResearchConfig:
     hold_days: tuple[int, ...] = (1,)
     side_hypotheses: tuple[str, ...] = ("reversal",)
     stop_loss_pcts: tuple[float, ...] = (0.12,)
-    take_profit_pcts: tuple[float, ...] = (0.20,)
+    take_profit_pcts: tuple[float, ...] = (0.15,)
     cost_multipliers: tuple[float, ...] = (3.0,)
     start_date: str = ""
     end_date: str = ""
     entry_delay_hours: int = 1
-    gross_exposure: float = 1.0
+    gross_exposure: float = 1.25
     max_active_symbols: int = 6
     cooldown_days: int = 5
     rank_exit_threshold: float = 0.55
@@ -78,16 +78,18 @@ class VolumeEventResearchConfig:
     tail_rank_min: int = 81
     tail_rank_max: int = 160
     tail_rank_improvement_min: int = 20
-    liquidity_migration_rank_improvement_min: int = 80
+    liquidity_migration_rank_improvement_min: int = 150
     liquidity_migration_turnover_ratio_min: float = 6.0
     liquidity_migration_prior_rank_min: int = 0
     liquidity_migration_current_rank_max: int = 0
     liquidity_migration_event_rank_fraction_max: float = 0.90
-    liquidity_migration_event_rank_fraction_exclude_min: float = 0.75
-    liquidity_migration_event_rank_fraction_exclude_max: float = 0.85
+    liquidity_migration_event_rank_fraction_exclude_min: float = 0.0
+    liquidity_migration_event_rank_fraction_exclude_max: float = 0.0
     liquidity_migration_score_max: float = 0.0
     liquidity_migration_day_return_min: float = 0.0
     liquidity_migration_day_return_max: float = 10.0
+    liquidity_migration_residual_return_min: float = 0.08
+    liquidity_migration_residual_return_max: float = 10.0
     liquidity_migration_market_pct_up_max: float = 0.55
     liquidity_migration_hot_market_day_return_min: float = 0.20
     market_median_return_1d_min: float = -1.0
@@ -384,6 +386,7 @@ def _run_event_scenario(
                 "liquidity_rank": int(event.get("liquidity_rank", 0) or 0),
                 "event_rank_fraction": _float_or_nan(event.get(f"{score_col}_rank_frac")),
                 "daily_return_1d": _float_or_nan(event.get("daily_return_1d")),
+                "residual_return_1d": _float_or_nan(event.get("residual_return_1d")),
                 "market_median_return_1d": _float_or_nan(event.get("market_median_return_1d")),
                 "market_pct_up_1d": _float_or_nan(event.get("market_pct_up_1d")),
                 "btc_return_1d": _float_or_nan(event.get("btc_return_1d")),
@@ -716,6 +719,11 @@ def _event_filter(
             required_cols.append("prior7_turnover_quote_mean")
         if config.liquidity_migration_day_return_min > -1.0 or config.liquidity_migration_day_return_max < 10.0:
             required_cols.append("daily_return_1d")
+        if (
+            config.liquidity_migration_residual_return_min > -10.0
+            or config.liquidity_migration_residual_return_max < 10.0
+        ):
+            required_cols.append("residual_return_1d")
         if config.liquidity_migration_market_pct_up_max < 1.0:
             required_cols.append("market_pct_up_1d")
             if config.liquidity_migration_hot_market_day_return_min < 10.0:
@@ -758,6 +766,16 @@ def _event_filter(
                 & pl.col("daily_return_1d").is_not_null()
                 & (pl.col("daily_return_1d") >= config.liquidity_migration_day_return_min)
                 & (pl.col("daily_return_1d") <= config.liquidity_migration_day_return_max)
+            )
+        if (
+            config.liquidity_migration_residual_return_min > -10.0
+            or config.liquidity_migration_residual_return_max < 10.0
+        ):
+            predicate = (
+                predicate
+                & pl.col("residual_return_1d").is_not_null()
+                & (pl.col("residual_return_1d") >= config.liquidity_migration_residual_return_min)
+                & (pl.col("residual_return_1d") <= config.liquidity_migration_residual_return_max)
             )
         if config.liquidity_migration_market_pct_up_max < 1.0:
             market_ok = pl.col("market_pct_up_1d").is_not_null() & (
@@ -839,6 +857,10 @@ def _enriched_event_features(features: pl.DataFrame, klines: pl.DataFrame, archi
     if "daily_return_1d" in enriched.columns:
         enriched = enriched.with_columns(pl.col("daily_return_1d").abs().alias("abs_daily_return_1d"))
         enriched = _attach_market_context(enriched)
+        if "market_median_return_1d" in enriched.columns:
+            enriched = enriched.with_columns(
+                (pl.col("daily_return_1d") - pl.col("market_median_return_1d")).alias("residual_return_1d")
+            )
     rank_inputs = {
         "volume_change_1d_z": "volume_change_1d_z_rank_frac",
         "volume_change_3d_z": "volume_change_3d_z_rank_frac",
@@ -1715,6 +1737,10 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("liquidity_migration_score_max must be non-negative")
     if config.liquidity_migration_day_return_min > config.liquidity_migration_day_return_max:
         raise ValueError("liquidity_migration_day_return_min must be <= liquidity_migration_day_return_max")
+    if config.liquidity_migration_residual_return_min > config.liquidity_migration_residual_return_max:
+        raise ValueError(
+            "liquidity_migration_residual_return_min must be <= liquidity_migration_residual_return_max"
+        )
     if not 0.0 <= config.liquidity_migration_market_pct_up_max <= 1.0:
         raise ValueError("liquidity_migration_market_pct_up_max must be in [0, 1]")
     if config.liquidity_migration_hot_market_day_return_min < 0.0:

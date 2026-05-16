@@ -287,7 +287,7 @@ SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 TELEGRAM_ENABLED=1 bash scripts/run_bybit_
 ```
 
 The runner checks every 60 seconds by default, sizes each accepted coin from
-the backtest weight (`gross_exposure / max_active_symbols`, currently 16.67% of
+the backtest weight (`gross_exposure / max_active_symbols`, currently 20.83% of
 current Bybit demo USDT equity), exits before entries, sends Telegram status
 with wallet equity/open positions/unrealized PnL when enabled, and records
 `event_demo_trades`, `event_demo_orders`, and `event_demo_cycles` ledgers. It is
@@ -296,7 +296,7 @@ operations, not for historical promotion evidence.
 
 ## Selected Full-PIT Result
 
-Promoted result after the fast-recovery liquidity-migration research pass:
+Promoted result after the return-push residual liquidity-migration research pass:
 
 ```text
 event: liquidity_migration
@@ -304,16 +304,17 @@ side: reversal (short)
 threshold: top 30% dollar-volume rank migration
 filters:
   point-in-time liquidity rank 31-150
-  liquidity-rank improvement >= 80
+  liquidity-rank improvement >= 150
   turnover / prior 7d mean >= 6.0
   event rank fraction <= 0.90
-  exclude middle event-rank band 0.75-0.85
   coin daily_return_1d >= 0%
+  coin daily_return_1d - market_median_return_1d >= +8%
   market_pct_up_1d <= 0.55 OR coin daily_return_1d >= +20%
 entry delay: 1 hour after signal close
 hold: 1 day max
 stop: 12% fixed
-take profit: 20% fixed
+take profit: 15% fixed
+gross exposure: 1.25
 capacity: max 6 active symbols
 cooldown: 5 days
 stop-pressure throttle: pause new entries after 12 realized stops inside 14 days
@@ -332,21 +333,22 @@ python -m aggression_carry \
   --hold-days 1 \
   --sides reversal \
   --stop-loss-pcts 0.12 \
-  --take-profit-pcts 0.20 \
+  --take-profit-pcts 0.15 \
   --cost-multipliers 3 \
   --entry-delay-hours 1 \
-  --gross-exposure 1 \
+  --gross-exposure 1.25 \
   --max-active-symbols 6 \
   --cooldown-days 5 \
   --rank-exit-threshold 0.55 \
   --universe-rank-min 31 \
   --universe-rank-max 150 \
-  --liquidity-migration-rank-improvement-min 80 \
+  --liquidity-migration-rank-improvement-min 150 \
   --liquidity-migration-turnover-ratio-min 6.0 \
   --liquidity-migration-event-rank-fraction-max 0.90 \
-  --liquidity-migration-event-rank-fraction-exclude-min 0.75 \
-  --liquidity-migration-event-rank-fraction-exclude-max 0.85 \
+  --liquidity-migration-event-rank-fraction-exclude-min 0 \
+  --liquidity-migration-event-rank-fraction-exclude-max 0 \
   --liquidity-migration-day-return-min 0.0 \
+  --liquidity-migration-residual-return-min 0.08 \
   --liquidity-migration-market-pct-up-max 0.55 \
   --liquidity-migration-hot-market-day-return-min 0.20 \
   --stop-pressure-window-days 14 \
@@ -356,17 +358,17 @@ python -m aggression_carry \
 Full-PIT result on `2023-05-03` to `2026-05-03`:
 
 ```text
-report: data/agc-bybit-fullpit-1h-20230503-20260503/reports/research_20260516_promoted_fast_recovery_imp80_nomid75_85_tp20
-trades: 507
-total return: +290.52%
-max drawdown: -14.57%
-max no-new-high stretch: 82 days
-worst 90d return: -6.72%
-worst split return: +35.38%
-average split Sharpe-like: 3.53
-train return: +35.38%
-validation return: +90.89%
-OOS return: +51.12%
+report: data/agc-bybit-fullpit-1h-20230503-20260503/reports/research_20260516_return_push_res8_q30_tp15_g125
+trades: 518
+total return: +587.81%
+max drawdown: -15.54%
+max no-new-high stretch: 105 days
+worst 90d return: -10.16%
+worst split return: +59.79%
+average split Sharpe-like: 3.84
+train return: +59.79%
+validation return: +148.32%
+OOS return: +73.35%
 default chart: volume_event_best_equity_btc.png with BTC overlay and monthly/growth gridlines
 promotion gate: pass
 ```
