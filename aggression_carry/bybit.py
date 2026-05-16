@@ -383,8 +383,10 @@ class BybitPrivateClient:
         tpsl_mode: str = "Full",
         position_idx: int = 0,
         stop_loss: str | float | None = None,
+        take_profit: str | float | None = None,
         trailing_stop: str | float | None = None,
         active_price: str | float | None = None,
+        tp_trigger_by: str | None = "MarkPrice",
         sl_trigger_by: str | None = "MarkPrice",
     ) -> dict[str, Any]:
         params: dict[str, Any] = {
@@ -395,10 +397,14 @@ class BybitPrivateClient:
         }
         if stop_loss is not None:
             params["stopLoss"] = str(stop_loss)
+        if take_profit is not None:
+            params["takeProfit"] = str(take_profit)
         if trailing_stop is not None:
             params["trailingStop"] = str(trailing_stop)
         if active_price is not None:
             params["activePrice"] = str(active_price)
+        if tp_trigger_by:
+            params["tpTriggerBy"] = tp_trigger_by
         if sl_trigger_by:
             params["slTriggerBy"] = sl_trigger_by
         payload = self._call_once("set_trading_stop", **params)

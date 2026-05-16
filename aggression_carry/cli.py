@@ -173,6 +173,7 @@ def build_parser() -> argparse.ArgumentParser:
     volume_events.add_argument("--hold-days", default=",".join(str(item) for item in event_defaults.hold_days), help="Comma-separated max holds in days.")
     volume_events.add_argument("--sides", default=",".join(event_defaults.side_hypotheses), help="continuation,reversal, or both.")
     volume_events.add_argument("--stop-loss-pcts", default=",".join(str(item) for item in event_defaults.stop_loss_pcts), help="Comma-separated fixed stop pcts; 0 disables.")
+    volume_events.add_argument("--take-profit-pcts", default=",".join(str(item) for item in event_defaults.take_profit_pcts), help="Comma-separated fixed take-profit pcts; 0 disables.")
     volume_events.add_argument("--cost-multipliers", default=",".join(str(item) for item in event_defaults.cost_multipliers), help="Comma-separated cost multipliers.")
     volume_events.add_argument("--start", default="", help="Inclusive UTC signal start date/timestamp.")
     volume_events.add_argument("--end", default="", help="Exclusive UTC signal end date/timestamp.")
@@ -216,6 +217,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=event_defaults.liquidity_migration_event_rank_fraction_max,
         help="Maximum current event score rank fraction for liquidity-migration events; 0 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-event-rank-fraction-exclude-min",
+        type=float,
+        default=event_defaults.liquidity_migration_event_rank_fraction_exclude_min,
+        help="Lower edge of the excluded middle event-rank band for liquidity-migration events; 0 disables with exclude max.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-event-rank-fraction-exclude-max",
+        type=float,
+        default=event_defaults.liquidity_migration_event_rank_fraction_exclude_max,
+        help="Upper edge of the excluded middle event-rank band for liquidity-migration events; 0 disables with exclude min.",
     )
     volume_events.add_argument(
         "--liquidity-migration-score-max",
@@ -533,6 +546,7 @@ def main(argv: list[str] | None = None) -> int:
             hold_days=_csv_int(args.hold_days, VolumeEventResearchConfig().hold_days),
             side_hypotheses=_csv_str(args.sides, VolumeEventResearchConfig().side_hypotheses),
             stop_loss_pcts=_csv_float(args.stop_loss_pcts, VolumeEventResearchConfig().stop_loss_pcts),
+            take_profit_pcts=_csv_float(args.take_profit_pcts, VolumeEventResearchConfig().take_profit_pcts),
             cost_multipliers=_csv_float(args.cost_multipliers, VolumeEventResearchConfig().cost_multipliers),
             start_date=args.start,
             end_date=args.end,
@@ -553,6 +567,8 @@ def main(argv: list[str] | None = None) -> int:
             liquidity_migration_prior_rank_min=args.liquidity_migration_prior_rank_min,
             liquidity_migration_current_rank_max=args.liquidity_migration_current_rank_max,
             liquidity_migration_event_rank_fraction_max=args.liquidity_migration_event_rank_fraction_max,
+            liquidity_migration_event_rank_fraction_exclude_min=args.liquidity_migration_event_rank_fraction_exclude_min,
+            liquidity_migration_event_rank_fraction_exclude_max=args.liquidity_migration_event_rank_fraction_exclude_max,
             liquidity_migration_score_max=args.liquidity_migration_score_max,
             liquidity_migration_day_return_min=args.liquidity_migration_day_return_min,
             liquidity_migration_day_return_max=args.liquidity_migration_day_return_max,

@@ -308,6 +308,7 @@ def select_demo_entry_candidates(
                 "side_hypothesis": scenario.side_hypothesis,
                 "hold_days": scenario.hold_days,
                 "stop_loss_pct": scenario.stop_loss_pct,
+                "take_profit_pct": scenario.take_profit_pct,
                 "cost_multiplier": scenario.cost_multiplier,
                 "side": side,
                 "symbol": symbol,
@@ -366,6 +367,25 @@ def plan_demo_exits(
             elif current_price is not None and _price_crosses_stop(side=side, price=current_price, stop_price=stop_price):
                 exit_checks.append((now_ms, 0, "stop_loss", current_price))
 
+        take_profit_price = _float(trade.get("take_profit_price"))
+        if take_profit_price > 0.0:
+            take_profit_hit = _take_profit_hit_since_entry(
+                klines,
+                symbol=symbol,
+                side=side,
+                entry_ts_ms=entry_ts_ms,
+                now_ms=now_ms,
+                take_profit_price=take_profit_price,
+            )
+            if take_profit_hit is not None:
+                exit_checks.append((take_profit_hit, 1, "take_profit", take_profit_price))
+            elif current_price is not None and _price_crosses_take_profit(
+                side=side,
+                price=current_price,
+                take_profit_price=take_profit_price,
+            ):
+                exit_checks.append((now_ms, 1, "take_profit", current_price))
+
         for check_ts_ms, rank_fraction in _rank_checks_for_symbol(rank_lookup, symbol=symbol, entry_ts_ms=entry_ts_ms, now_ms=now_ms):
             if _event_decay_exit_hit(
                 symbol=symbol,
@@ -373,7 +393,7 @@ def plan_demo_exits(
                 rank_lookup=rank_lookup,
                 threshold=event_decay_threshold,
             ):
-                exit_checks.append((check_ts_ms, 1, "event_decay", current_price))
+                exit_checks.append((check_ts_ms, 2, "event_decay", current_price))
                 break
             if _rank_exit_hit(
                 symbol=symbol,
@@ -385,11 +405,11 @@ def plan_demo_exits(
                 threshold=config.rank_exit_threshold,
             ):
                 del rank_fraction
-                exit_checks.append((check_ts_ms, 2, "rank_exit", current_price))
+                exit_checks.append((check_ts_ms, 3, "rank_exit", current_price))
                 break
 
         if now_ms >= planned_exit_ts_ms:
-            exit_checks.append((planned_exit_ts_ms, 3, "max_hold", current_price))
+            exit_checks.append((planned_exit_ts_ms, 4, "max_hold", current_price))
         if not exit_checks:
             continue
 
@@ -559,17 +579,18 @@ def format_event_demo_cycle_report(payload: dict[str, Any]) -> str:
         "",
         "## Entries",
         "",
-        "| Symbol | Side | Qty | Notional | Signal | Ready | Stop | Mode |",
-        "|---|---|---:|---:|---|---|---:|---|",
+        "| Symbol | Side | Qty | Notional | Signal | Ready | Stop | TP | Mode |",
+        "|---|---|---:|---:|---|---|---:|---:|---|",
     ]
     for row in payload.get("entries", []):
         lines.append(
             f"| {row.get('symbol', '')} | {row.get('side', '')} | {row.get('qty', '')} | "
             f"${_float(row.get('notional_usdt')):,.2f} | {_iso_dt(row.get('signal_ts_ms'))} | "
-            f"{_iso_dt(row.get('entry_ready_ts_ms'))} | {_float(row.get('stop_price')):.8g} | {row.get('submit_mode', '')} |"
+            f"{_iso_dt(row.get('entry_ready_ts_ms'))} | {_float(row.get('stop_price')):.8g} | "
+            f"{_float(row.get('take_profit_price')):.8g} | {row.get('submit_mode', '')} |"
         )
     if not payload.get("entries"):
-        lines.append("|  |  |  |  |  |  |  |  |")
+        lines.append("|  |  |  |  |  |  |  |  |  |")
     lines.extend(
         [
             "",
@@ -627,6 +648,7 @@ def _selected_scenario(config: VolumeEventResearchConfig) -> EventScenario:
         hold_days=config.hold_days[0],
         stop_loss_pct=config.stop_loss_pcts[0],
         cost_multiplier=config.cost_multipliers[0],
+        take_profit_pct=config.take_profit_pcts[0],
     )
 
 
@@ -748,6 +770,12 @@ def _execute_entries(
             stop_loss_pct=float(candidate.get("stop_loss_pct") or 0.12),
             tick_size=_float(contract.get("tick_size")) or 0.0001,
         )
+        take_profit_price = _take_profit_price_for_entry(
+            entry_price=price,
+            side=side,
+            take_profit_pct=float(candidate.get("take_profit_pct") or 0.0),
+            tick_size=_float(contract.get("tick_size")) or 0.0001,
+        )
         entry_link = _order_link_id("en", symbol=symbol, signal_ts_ms=int(candidate["signal_ts_ms"]))
         order_result: dict[str, Any] = {}
         exec_summary: dict[str, Any] = {}
@@ -767,7 +795,11 @@ def _execute_entries(
             exec_summary = _execution_summary(
                 trading_client.get_trade_history(symbol=symbol, order_link_id=entry_link, limit=50)
             )
-            trading_client.set_trading_stop(symbol=symbol, stop_loss=_decimal_text(Decimal(str(stop_price))))
+            trading_client.set_trading_stop(
+                symbol=symbol,
+                stop_loss=_decimal_text(Decimal(str(stop_price))),
+                take_profit=_decimal_text(Decimal(str(take_profit_price))) if take_profit_price > 0.0 else None,
+            )
             submit_mode = "submitted"
         entry_price = _float(exec_summary.get("avg_price")) or price
         entry_qty = str(exec_summary.get("qty") or qty)
@@ -781,6 +813,7 @@ def _execute_entries(
             "notional_usdt": actual_notional,
             "equity_usdt": equity_usdt,
             "stop_price": stop_price,
+            "take_profit_price": take_profit_price,
             "entry_order_link_id": entry_link,
             "entry_order_id": order_result.get("orderId", ""),
             "submit_mode": submit_mode,
@@ -1122,8 +1155,38 @@ def _stop_hit_since_entry(
     return None
 
 
+def _take_profit_hit_since_entry(
+    klines: pl.DataFrame,
+    *,
+    symbol: str,
+    side: str,
+    entry_ts_ms: int,
+    now_ms: int,
+    take_profit_price: float,
+) -> int | None:
+    if klines.is_empty() or take_profit_price <= 0.0:
+        return None
+    rows = (
+        klines.filter(pl.col("symbol") == symbol)
+        .with_columns((pl.col("ts_ms") + MS_PER_HOUR).alias("bar_end_ts_ms"))
+        .filter((pl.col("bar_end_ts_ms") > entry_ts_ms) & (pl.col("bar_end_ts_ms") <= now_ms))
+        .sort("bar_end_ts_ms")
+        .to_dicts()
+    )
+    for row in rows:
+        if side == "short" and _float(row.get("low")) <= take_profit_price:
+            return int(row["bar_end_ts_ms"])
+        if side == "long" and _float(row.get("high")) >= take_profit_price:
+            return int(row["bar_end_ts_ms"])
+    return None
+
+
 def _price_crosses_stop(*, side: str, price: float, stop_price: float) -> bool:
     return price >= stop_price if side == "short" else price <= stop_price
+
+
+def _price_crosses_take_profit(*, side: str, price: float, take_profit_price: float) -> bool:
+    return price <= take_profit_price if side == "short" else price >= take_profit_price
 
 
 def _price_lookup_from_tickers_and_klines(tickers: pl.DataFrame, klines: pl.DataFrame) -> dict[str, float]:
@@ -1154,6 +1217,16 @@ def _stop_price_for_entry(*, entry_price: float, side: str, stop_loss_pct: float
         return _round_price(raw, tick_size=tick_size, rounding=ROUND_CEILING)
     raw = entry_price * (1.0 - stop_loss_pct)
     return _round_price(raw, tick_size=tick_size, rounding=ROUND_FLOOR)
+
+
+def _take_profit_price_for_entry(*, entry_price: float, side: str, take_profit_pct: float, tick_size: float) -> float:
+    if take_profit_pct <= 0.0:
+        return 0.0
+    if side == "short":
+        raw = entry_price * (1.0 - take_profit_pct)
+        return _round_price(raw, tick_size=tick_size, rounding=ROUND_FLOOR)
+    raw = entry_price * (1.0 + take_profit_pct)
+    return _round_price(raw, tick_size=tick_size, rounding=ROUND_CEILING)
 
 
 def _round_price(price: float, *, tick_size: float, rounding: str) -> float:

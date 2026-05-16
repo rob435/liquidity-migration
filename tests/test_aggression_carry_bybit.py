@@ -224,6 +224,7 @@ def test_bybit_private_client_wraps_trading_stop(monkeypatch) -> None:
     result = client.set_trading_stop(
         symbol="BTCUSDT",
         stop_loss="120",
+        take_profit="80",
         trailing_stop="2.5",
         active_price="95",
     )
@@ -236,8 +237,10 @@ def test_bybit_private_client_wraps_trading_stop(monkeypatch) -> None:
             "tpslMode": "Full",
             "positionIdx": 0,
             "stopLoss": "120",
+            "takeProfit": "80",
             "trailingStop": "2.5",
             "activePrice": "95",
+            "tpTriggerBy": "MarkPrice",
             "slTriggerBy": "MarkPrice",
         }
     ]

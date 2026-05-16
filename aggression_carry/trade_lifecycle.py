@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -98,6 +98,11 @@ def summarize_trade_backtest(
             "funding_event_count": 0,
             "worst_basket_return": 0.0,
             "worst_day_return": 0.0,
+            "max_underwater_days": 0,
+            "worst_30d_return": 0.0,
+            "worst_60d_return": 0.0,
+            "worst_90d_return": 0.0,
+            "worst_120d_return": 0.0,
         }
     basket_returns = np.asarray(baskets["basket_return"].to_list(), dtype=float)
     mean_return = float(np.mean(basket_returns)) if basket_returns.size else 0.0
@@ -126,6 +131,11 @@ def summarize_trade_backtest(
         "funding_event_count": int(trades["funding_event_count"].sum()) if "funding_event_count" in trades.columns else 0,
         "worst_basket_return": float(basket_returns.min()) if basket_returns.size else 0.0,
         "worst_day_return": _worst_volume_day_return(baskets),
+        "max_underwater_days": _max_underwater_days(equity),
+        "worst_30d_return": _worst_rolling_equity_return(equity, 30),
+        "worst_60d_return": _worst_rolling_equity_return(equity, 60),
+        "worst_90d_return": _worst_rolling_equity_return(equity, 90),
+        "worst_120d_return": _worst_rolling_equity_return(equity, 120),
     }
 
 
@@ -145,6 +155,53 @@ def _worst_volume_day_return(baskets: pl.DataFrame) -> float:
         return 0.0
     daily = baskets.group_by("exit_date").agg(((pl.col("basket_return") + 1.0).product() - 1.0).alias("day_return"))
     return float(daily["day_return"].min()) if not daily.is_empty() else 0.0
+
+
+def _daily_equity_values(equity: pl.DataFrame) -> list[float]:
+    if equity.is_empty() or "ts_ms" not in equity.columns or "equity" not in equity.columns:
+        return []
+    rows = [
+        (datetime.fromtimestamp(int(row["ts_ms"]) / 1000, tz=UTC).date(), float(row["equity"]))
+        for row in equity.sort("ts_ms").to_dicts()
+    ]
+    if not rows:
+        return []
+    values: list[float] = []
+    current_equity = 1.0
+    index = 0
+    current_date = rows[0][0]
+    end_date = rows[-1][0]
+    while current_date <= end_date:
+        while index < len(rows) and rows[index][0] <= current_date:
+            current_equity = rows[index][1]
+            index += 1
+        values.append(current_equity)
+        current_date += timedelta(days=1)
+    return values
+
+
+def _max_underwater_days(equity: pl.DataFrame) -> int:
+    values = _daily_equity_values(equity)
+    if not values:
+        return 0
+    peak = values[0]
+    peak_index = 0
+    max_days = 0
+    for index, value in enumerate(values):
+        if value >= peak - 1e-12:
+            peak = value
+            peak_index = index
+        else:
+            max_days = max(max_days, index - peak_index)
+    return max_days
+
+
+def _worst_rolling_equity_return(equity: pl.DataFrame, days: int) -> float:
+    values = np.asarray(_daily_equity_values(equity), dtype=float)
+    if days <= 0 or values.size <= days:
+        return 0.0
+    returns = values[days:] / values[:-days] - 1.0
+    return float(returns.min()) if returns.size else 0.0
 
 
 def _filter_signal_window(features: pl.DataFrame, config: TradeLifecycleConfig) -> pl.DataFrame:

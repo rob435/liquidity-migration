@@ -61,6 +61,7 @@ class VolumeEventResearchConfig:
     hold_days: tuple[int, ...] = (1,)
     side_hypotheses: tuple[str, ...] = ("reversal",)
     stop_loss_pcts: tuple[float, ...] = (0.12,)
+    take_profit_pcts: tuple[float, ...] = (0.20,)
     cost_multipliers: tuple[float, ...] = (3.0,)
     start_date: str = ""
     end_date: str = ""
@@ -77,15 +78,17 @@ class VolumeEventResearchConfig:
     tail_rank_min: int = 81
     tail_rank_max: int = 160
     tail_rank_improvement_min: int = 20
-    liquidity_migration_rank_improvement_min: int = 150
+    liquidity_migration_rank_improvement_min: int = 80
     liquidity_migration_turnover_ratio_min: float = 6.0
     liquidity_migration_prior_rank_min: int = 0
     liquidity_migration_current_rank_max: int = 0
     liquidity_migration_event_rank_fraction_max: float = 0.90
+    liquidity_migration_event_rank_fraction_exclude_min: float = 0.75
+    liquidity_migration_event_rank_fraction_exclude_max: float = 0.85
     liquidity_migration_score_max: float = 0.0
-    liquidity_migration_day_return_min: float = -1.0
+    liquidity_migration_day_return_min: float = 0.0
     liquidity_migration_day_return_max: float = 10.0
-    liquidity_migration_market_pct_up_max: float = 0.60
+    liquidity_migration_market_pct_up_max: float = 0.55
     liquidity_migration_hot_market_day_return_min: float = 0.20
     market_median_return_1d_min: float = -1.0
     market_median_return_1d_max: float = 1.0
@@ -112,13 +115,15 @@ class EventScenario:
     hold_days: int
     stop_loss_pct: float
     cost_multiplier: float
+    take_profit_pct: float = 0.0
 
     @property
     def scenario_id(self) -> str:
         stop = "none" if self.stop_loss_pct <= 0.0 else f"s{int(self.stop_loss_pct * 10000):04d}"
+        take_profit = "" if self.take_profit_pct <= 0.0 else f"-tp{int(self.take_profit_pct * 10000):04d}"
         threshold = f"q{int(self.threshold * 100):02d}"
         cost = f"c{self.cost_multiplier:g}".replace(".", "p")
-        return f"{self.event_type}-{threshold}-{self.side_hypothesis}-h{self.hold_days}-{stop}-{cost}"
+        return f"{self.event_type}-{threshold}-{self.side_hypothesis}-h{self.hold_days}-{stop}{take_profit}-{cost}"
 
 
 def run_volume_event_research(
@@ -255,13 +260,15 @@ def _iter_scenarios(config: VolumeEventResearchConfig) -> list[EventScenario]:
             hold_days=hold_days,
             stop_loss_pct=stop,
             cost_multiplier=cost,
+            take_profit_pct=take_profit,
         )
-        for event_type, threshold, side, hold_days, stop, cost in product(
+        for event_type, threshold, side, hold_days, stop, take_profit, cost in product(
             config.event_types,
             config.thresholds,
             config.side_hypotheses,
             config.hold_days,
             config.stop_loss_pcts,
+            config.take_profit_pcts,
             config.cost_multipliers,
         )
     ]
@@ -290,7 +297,7 @@ def _run_event_scenario(
         entry_delay_hours=config.entry_delay_hours,
         stop_mode="none" if scenario.stop_loss_pct <= 0.0 else "fixed",
         stop_loss_pct=max(scenario.stop_loss_pct, 0.0),
-        take_profit_pct=0.0,
+        take_profit_pct=max(scenario.take_profit_pct, 0.0),
         min_symbols=4,
         cost_multiplier=scenario.cost_multiplier,
         side_mode=side_mode,
@@ -408,6 +415,7 @@ def _run_event_scenario(
         "side": side,
         "hold_days": scenario.hold_days,
         "stop_loss_pct": scenario.stop_loss_pct,
+        "take_profit_pct": scenario.take_profit_pct,
         "cost_multiplier": scenario.cost_multiplier,
         "candidate_events": events.height,
         "trades": trades.height,
@@ -734,6 +742,14 @@ def _event_filter(
             predicate = predicate & (pl.col("liquidity_rank") <= config.liquidity_migration_current_rank_max)
         if config.liquidity_migration_event_rank_fraction_max > 0.0:
             predicate = predicate & (pl.col(rank_col) <= config.liquidity_migration_event_rank_fraction_max)
+        if (
+            config.liquidity_migration_event_rank_fraction_exclude_min > 0.0
+            or config.liquidity_migration_event_rank_fraction_exclude_max > 0.0
+        ):
+            predicate = predicate & (
+                (pl.col(rank_col) <= config.liquidity_migration_event_rank_fraction_exclude_min)
+                | (pl.col(rank_col) >= config.liquidity_migration_event_rank_fraction_exclude_max)
+            )
         if config.liquidity_migration_score_max > 0.0:
             predicate = predicate & (pl.col(score_col) <= config.liquidity_migration_score_max)
         if config.liquidity_migration_day_return_min > -1.0 or config.liquidity_migration_day_return_max < 10.0:
@@ -1593,15 +1609,18 @@ def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) 
         "",
         "## Top Scenarios",
         "",
-        "| Rank | Promote | Event | Side | Threshold | Hold | Stop | Cost | Trades | Return | Max DD | Sharpe | Pos Splits | Min Split | Avg Split Sharpe | Reason |",
-        "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Rank | Promote | Event | Side | Threshold | Hold | Stop | TP | Cost | Trades | Return | Max DD | Max UW Days | Worst 90d | Sharpe | Pos Splits | Min Split | Avg Split Sharpe | Reason |",
+        "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for index, row in enumerate(summary.head(50).to_dicts() if not summary.is_empty() else [], start=1):
         lines.append(
             f"| {index} | {row.get('promotion_gate_pass', False)} | {row.get('event_type', '')} | "
             f"{row.get('side_hypothesis', '')} | {_pct(row.get('threshold'))} | {row.get('hold_days', 0)}d | "
-            f"{_pct(row.get('stop_loss_pct'))} | {row.get('cost_multiplier', 0):.1f}x | {row.get('trades', 0)} | "
-            f"{_pct(row.get('total_return'))} | {_pct(row.get('max_drawdown'))} | {_num(row.get('sharpe_like'))} | "
+            f"{_pct(row.get('stop_loss_pct'))} | {_pct(row.get('take_profit_pct'))} | "
+            f"{row.get('cost_multiplier', 0):.1f}x | {row.get('trades', 0)} | "
+            f"{_pct(row.get('total_return'))} | {_pct(row.get('max_drawdown'))} | "
+            f"{row.get('max_underwater_days', 0)} | {_pct(row.get('worst_90d_return'))} | "
+            f"{_num(row.get('sharpe_like'))} | "
             f"{row.get('positive_splits', 0)}/{len(SPLITS)} | {_pct(row.get('min_split_return'))} | "
             f"{_num(row.get('avg_split_sharpe'))} | {row.get('promotion_reason', '')} |"
         )
@@ -1641,6 +1660,8 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("hold days must be positive")
     if any(item < 0.0 or item >= 1.0 for item in config.stop_loss_pcts):
         raise ValueError("stop loss pcts must be in [0, 1)")
+    if any(item < 0.0 or item >= 1.0 for item in config.take_profit_pcts):
+        raise ValueError("take profit pcts must be in [0, 1)")
     if any(item < 0.0 for item in config.cost_multipliers):
         raise ValueError("cost multipliers must be non-negative")
     if config.gross_exposure <= 0.0:
@@ -1675,6 +1696,21 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("liquidity_migration_current_rank_max must be non-negative")
     if not 0.0 <= config.liquidity_migration_event_rank_fraction_max <= 1.0:
         raise ValueError("liquidity_migration_event_rank_fraction_max must be in [0, 1]")
+    if not 0.0 <= config.liquidity_migration_event_rank_fraction_exclude_min <= 1.0:
+        raise ValueError("liquidity_migration_event_rank_fraction_exclude_min must be in [0, 1]")
+    if not 0.0 <= config.liquidity_migration_event_rank_fraction_exclude_max <= 1.0:
+        raise ValueError("liquidity_migration_event_rank_fraction_exclude_max must be in [0, 1]")
+    if (
+        config.liquidity_migration_event_rank_fraction_exclude_min > 0.0
+        or config.liquidity_migration_event_rank_fraction_exclude_max > 0.0
+    ) and (
+        config.liquidity_migration_event_rank_fraction_exclude_min
+        >= config.liquidity_migration_event_rank_fraction_exclude_max
+    ):
+        raise ValueError(
+            "liquidity_migration_event_rank_fraction_exclude_min must be < "
+            "liquidity_migration_event_rank_fraction_exclude_max"
+        )
     if config.liquidity_migration_score_max < 0.0:
         raise ValueError("liquidity_migration_score_max must be non-negative")
     if config.liquidity_migration_day_return_min > config.liquidity_migration_day_return_max:

@@ -296,8 +296,7 @@ operations, not for historical promotion evidence.
 
 ## Selected Full-PIT Result
 
-Promoted result after switching to stable/peg-only exclusions and activating
-the liquidity-migration OR regime gate:
+Promoted result after the fast-recovery liquidity-migration research pass:
 
 ```text
 event: liquidity_migration
@@ -305,13 +304,16 @@ side: reversal (short)
 threshold: top 30% dollar-volume rank migration
 filters:
   point-in-time liquidity rank 31-150
-  liquidity-rank improvement >= 150
+  liquidity-rank improvement >= 80
   turnover / prior 7d mean >= 6.0
   event rank fraction <= 0.90
-  market_pct_up_1d <= 0.60 OR coin daily_return_1d >= +20%
+  exclude middle event-rank band 0.75-0.85
+  coin daily_return_1d >= 0%
+  market_pct_up_1d <= 0.55 OR coin daily_return_1d >= +20%
 entry delay: 1 hour after signal close
 hold: 1 day max
 stop: 12% fixed
+take profit: 20% fixed
 capacity: max 6 active symbols
 cooldown: 5 days
 stop-pressure throttle: pause new entries after 12 realized stops inside 14 days
@@ -330,6 +332,7 @@ python -m aggression_carry \
   --hold-days 1 \
   --sides reversal \
   --stop-loss-pcts 0.12 \
+  --take-profit-pcts 0.20 \
   --cost-multipliers 3 \
   --entry-delay-hours 1 \
   --gross-exposure 1 \
@@ -338,10 +341,13 @@ python -m aggression_carry \
   --rank-exit-threshold 0.55 \
   --universe-rank-min 31 \
   --universe-rank-max 150 \
-  --liquidity-migration-rank-improvement-min 150 \
+  --liquidity-migration-rank-improvement-min 80 \
   --liquidity-migration-turnover-ratio-min 6.0 \
   --liquidity-migration-event-rank-fraction-max 0.90 \
-  --liquidity-migration-market-pct-up-max 0.60 \
+  --liquidity-migration-event-rank-fraction-exclude-min 0.75 \
+  --liquidity-migration-event-rank-fraction-exclude-max 0.85 \
+  --liquidity-migration-day-return-min 0.0 \
+  --liquidity-migration-market-pct-up-max 0.55 \
   --liquidity-migration-hot-market-day-return-min 0.20 \
   --stop-pressure-window-days 14 \
   --stop-pressure-stop-count 12
@@ -350,16 +356,17 @@ python -m aggression_carry \
 Full-PIT result on `2023-05-03` to `2026-05-03`:
 
 ```text
-report: data/agc-bybit-fullpit-1h-20230503-20260503/reports/research_20260516_promoted_default_stable_peg_or_gate
-trades: 810
-total return: +344.73%
-max drawdown: -16.86%
-worst split return: +24.58%
-worst split drawdown: -15.43%
-average split Sharpe-like: 2.44
-train return: +24.58%
-validation return: +91.49%
-OOS return: +86.42%
+report: data/agc-bybit-fullpit-1h-20230503-20260503/reports/research_20260516_promoted_fast_recovery_imp80_nomid75_85_tp20
+trades: 507
+total return: +290.52%
+max drawdown: -14.57%
+max no-new-high stretch: 82 days
+worst 90d return: -6.72%
+worst split return: +35.38%
+average split Sharpe-like: 3.53
+train return: +35.38%
+validation return: +90.89%
+OOS return: +51.12%
 default chart: volume_event_best_equity_btc.png with BTC overlay and monthly/growth gridlines
 promotion gate: pass
 ```
