@@ -86,12 +86,28 @@ Serious strategy runs must use:
 
 The old daily-close demo executor was intentionally removed because it encoded the retired calendar-clock candidate scan and sleeve assumptions. Do not revive it.
 
-The next demo execution implementation should be built against this lifecycle:
+The active demo execution path is `event-demo-cycle` plus the continuous runner:
 
-1. At daily signal close, compute PIT-safe liquidity-migration events.
-2. One hour later, submit event entries for accepted symbols subject to max-active, cooldown, and stop-pressure state.
-3. Size each accepted coin from current Bybit demo wallet equity under an explicit per-coin cap.
-4. Mark exits from event decay, fixed stop, and max hold using the same state transitions as the backtest.
-5. Reconcile expected orders, submitted orders, fills, fees, funding, misses, slippage, and PnL drift.
+```bash
+python -m aggression_carry \
+  --data-root data/bybit-demo-event \
+  --config configs/volume_alpha.default.yaml \
+  event-demo-cycle
+```
+
+```bash
+SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 TELEGRAM_ENABLED=1 bash scripts/run_bybit_demo_event_engine.sh
+```
+
+The runner loops every `INTERVAL_SECONDS=300` by default. Each cycle:
+
+1. Pulls the current Bybit USDT perpetual universe through rank 220 so the selected rank 31-150 strategy can be evaluated forward.
+2. Rebuilds recent 1h volume features from a 45-day lookback.
+3. Exits existing demo positions first on fixed-stop reconciliation, event decay, rank exit, or 1-day max hold.
+4. Enters accepted liquidity-migration events after the 1-hour signal delay, subject to max-active, cooldown, stop-pressure, and stale-entry gates.
+5. Sizes each accepted coin at max 10% of current Bybit demo USDT equity.
+6. Writes expected/submitted order state into `event_demo_orders`, trade state into `event_demo_trades`, cycle telemetry into `event_demo_cycles`, and Markdown/JSON reports under `reports/event-demo`.
+
+Order submission is still fail-closed: `--submit-orders` requires `--confirm-demo-orders`, `BYBIT_DEMO_API_KEY`, and `BYBIT_DEMO_API_SECRET`. Without those, the command is a dry-run scan.
 
 Telegram may notify, but it must not approve or submit orders.

@@ -271,6 +271,19 @@ research decisions. The survivorship-free event run must use a data root whose
 `archive-download-klines-1h-api`; raw trade archive repair remains the fallback
 for any API gaps.
 
+Forward demo testing now uses `event-demo-cycle`, not the retired daily-close
+executor. The continuous runner is:
+
+```bash
+SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 TELEGRAM_ENABLED=1 bash scripts/run_bybit_demo_event_engine.sh
+```
+
+The runner checks every 5 minutes by default, sizes each accepted coin at max
+10% of current Bybit demo USDT equity, exits before entries, and records
+`event_demo_trades`, `event_demo_orders`, and `event_demo_cycles` ledgers. It is
+a current-universe forward tester, so it is allowed for demo evidence and
+operations, not for historical promotion evidence.
+
 ## Selected Full-PIT Result
 
 Current selected candidate. The previous `turnover >= 1.75`,

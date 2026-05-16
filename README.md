@@ -64,12 +64,45 @@ powershell -ExecutionPolicy Bypass -File scripts\run_fullpit_volume_overnight.ps
 
 The runner syncs `main`, installs the local Python environment, runs smoke tests, builds/resumes the full Bybit public archive manifest, fills full PIT 1h klines from the Bybit v5 API, validates manifest coverage, then runs the selected liquidity-migration strategy.
 
+## Bybit Demo Forward Runner
+
+One dry-run cycle:
+
+```bash
+python -m aggression_carry \
+  --data-root data/bybit-demo-event \
+  --config configs/volume_alpha.default.yaml \
+  event-demo-cycle
+```
+
+Continuous demo runner, checking every 5 minutes:
+
+```bash
+TELEGRAM_ENABLED=1 \
+SUBMIT_ORDERS=1 \
+CONFIRM_DEMO_ORDERS=1 \
+BYBIT_DEMO_API_KEY=... \
+BYBIT_DEMO_API_SECRET=... \
+bash scripts/run_bybit_demo_event_engine.sh
+```
+
+Default forward-test behavior:
+
+- pulls current Bybit USDT perp ranks 1-220, then applies the selected rank 31-150 liquidity-migration filter
+- rebuilds recent 1h volume features each cycle from a 45-day lookback
+- enters eligible events after the 1-hour signal delay, with stale entries skipped after 180 minutes
+- sizes each coin at max `10%` of current Bybit demo USDT equity
+- exits first on every cycle using fixed stop reconciliation, event decay, rank exit, or 1-day max hold
+- writes ledgers under `event_demo_trades`, `event_demo_orders`, and `event_demo_cycles`
+
 ## Useful Files
 
 - `aggression_carry/volume_events.py`: active event-driven strategy, full-PIT gates, ledger, reports
+- `aggression_carry/event_demo.py`: Bybit demo forward-cycle runner for the selected event strategy
 - `aggression_carry/archive_manifest.py`: PIT manifest and 1h kline builders
 - `aggression_carry/volume_alpha.py`: reusable feature builder for event research
 - `aggression_carry/volume_backtest.py`: reusable trade/equity/cost helpers used by event research
+- `scripts/run_bybit_demo_event_engine.sh`: continuous Bybit demo forward runner
 - `scripts/run_fullpit_volume_overnight.sh`: selected full-PIT runner
 - `scripts/run_fullpit_volume_overnight.ps1`: PowerShell selected full-PIT runner
 - `docs/volume_alpha.md`: strategy notes and current result

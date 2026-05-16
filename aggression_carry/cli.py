@@ -14,6 +14,7 @@ from .config import (
     load_config,
 )
 from .downloaders import download_market_data, parse_date_ms
+from .event_demo import EventDemoCycleConfig, run_event_demo_cycle
 from .ingestion import generate_fixture_data
 from .universe import run_discover_universe
 from .volume_events import VolumeEventResearchConfig, run_volume_event_research
@@ -284,6 +285,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     volume_events.add_argument("--report-dir", default=None)
 
+    event_demo = subparsers.add_parser(
+        "event-demo-cycle",
+        help="Run one frequent Bybit demo forward-testing cycle for the selected event strategy.",
+    )
+    demo_defaults = EventDemoCycleConfig()
+    event_demo.add_argument("--lookback-days", type=int, default=demo_defaults.lookback_days)
+    event_demo.add_argument("--universe-rank-end", type=int, default=demo_defaults.universe_rank_end)
+    event_demo.add_argument("--universe-max-symbols", type=int, default=demo_defaults.universe_max_symbols)
+    event_demo.add_argument("--universe-min-turnover-24h", type=float, default=demo_defaults.universe_min_turnover_24h)
+    event_demo.add_argument("--workers", type=int, default=demo_defaults.workers)
+    event_demo.add_argument("--max-order-notional-pct-equity", type=float, default=demo_defaults.max_order_notional_pct_equity)
+    event_demo.add_argument("--wallet-balance-fraction", type=float, default=demo_defaults.wallet_balance_fraction)
+    event_demo.add_argument("--fallback-equity-usdt", type=float, default=demo_defaults.fallback_equity_usdt)
+    event_demo.add_argument("--max-entry-lag-minutes", type=int, default=demo_defaults.max_entry_lag_minutes)
+    event_demo.add_argument("--max-new-entries-per-cycle", type=int, default=demo_defaults.max_new_entries_per_cycle)
+    event_demo.add_argument("--entry-leverage", type=float, default=demo_defaults.entry_leverage)
+    event_demo.add_argument("--entry-order-type", default=demo_defaults.entry_order_type)
+    event_demo.add_argument("--exit-order-type", default=demo_defaults.exit_order_type)
+    event_demo.add_argument("--submit-orders", action="store_true", help="Submit Bybit demo orders. Dry-run is the default.")
+    event_demo.add_argument("--confirm-demo-orders", action="store_true", help="Required with --submit-orders.")
+    event_demo.add_argument("--telegram", action="store_true", help="Send Telegram cycle summaries when env vars are set.")
+    event_demo.add_argument("--record-dry-run", action="store_true", help="Persist planned dry-run orders/trades into the demo ledger.")
+    event_demo.add_argument("--data-name", default=demo_defaults.data_name)
+
     return parser
 
 
@@ -419,6 +444,41 @@ def main(argv: list[str] | None = None) -> int:
             f"path={data_root / 'reports' / ('archive_klines_1h_api_' + args.name + '.md')}"
         )
         return 1 if payload["failures"] else 0
+
+    if args.command == "event-demo-cycle":
+        demo_config = EventDemoCycleConfig(
+            lookback_days=args.lookback_days,
+            universe_rank_end=args.universe_rank_end,
+            universe_max_symbols=args.universe_max_symbols,
+            universe_min_turnover_24h=args.universe_min_turnover_24h,
+            workers=args.workers,
+            max_order_notional_pct_equity=args.max_order_notional_pct_equity,
+            wallet_balance_fraction=args.wallet_balance_fraction,
+            fallback_equity_usdt=args.fallback_equity_usdt,
+            max_entry_lag_minutes=args.max_entry_lag_minutes,
+            max_new_entries_per_cycle=args.max_new_entries_per_cycle,
+            entry_leverage=args.entry_leverage,
+            entry_order_type=args.entry_order_type,
+            exit_order_type=args.exit_order_type,
+            submit_orders=args.submit_orders,
+            confirm_demo_orders=args.confirm_demo_orders,
+            telegram=args.telegram,
+            record_dry_run=args.record_dry_run,
+            data_name=args.data_name,
+        )
+        payload = run_event_demo_cycle(data_root, config=config, demo_config=demo_config)
+        cycle = payload["cycle"]
+        print(
+            "event demo cycle "
+            f"mode={cycle['mode']} "
+            f"symbols={cycle['symbols']} "
+            f"features={cycle['feature_rows']} "
+            f"entries={cycle['entries_executed']}/{cycle['entry_candidates']} "
+            f"exits={cycle['exits_executed']}/{cycle['exit_candidates']} "
+            f"open={cycle['open_trades_after']} "
+            f"path={Path(payload['report_dir']) / 'latest_event_demo_cycle.md'}"
+        )
+        return 0
 
     if args.command == "volume-events":
         event_config = VolumeEventResearchConfig(

@@ -35,6 +35,9 @@ DATASETS = {
     "volume_backtest_equity_vs_btc",
     "volume_backtest_monthly",
     "volume_backtest_grid",
+    "event_demo_trades",
+    "event_demo_orders",
+    "event_demo_cycles",
 }
 
 DATASET_KEYS = {
@@ -62,6 +65,9 @@ DATASET_KEYS = {
     "volume_backtest_equity_vs_btc": ("ts_ms",),
     "volume_backtest_monthly": ("month",),
     "volume_backtest_grid": ("grid_id",),
+    "event_demo_trades": ("trade_id",),
+    "event_demo_orders": ("order_link_id",),
+    "event_demo_cycles": ("cycle_id",),
 }
 
 
