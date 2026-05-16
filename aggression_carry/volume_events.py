@@ -1,11 +1,7 @@
 from __future__ import annotations
 
-import csv
 import json
 import math
-import ssl
-import urllib.error
-import urllib.request
 from bisect import bisect_right
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
@@ -1124,17 +1120,12 @@ def _write_equity_benchmark_chart(
     start = strategy[0]["date"]
     end = strategy[-1]["date"]
     btc = _normalised_price_series(_btc_daily_close_series(raw_klines, start=start, end=end))
-    spy_status = "skipped_short_range"
-    spy: list[dict[str, Any]] = []
-    if _series_span_days(strategy) >= 90:
-        spy, spy_status = _spy_benchmark_series(root, start=start, end=end)
     series = [
-        {"name": "Strategy", "color": (15, 23, 42), "alpha": 255, "width": 5, "points": strategy},
-        {"name": "BTC", "color": (180, 83, 9), "alpha": 118, "width": 3, "points": btc},
-        {"name": "SPY", "color": (37, 99, 235), "alpha": 108, "width": 3, "points": spy},
+        {"name": "Strategy", "color": (7, 14, 31), "alpha": 255, "width": 5, "points": strategy},
+        {"name": "BTC", "color": (234, 88, 12), "alpha": 215, "width": 3, "points": btc},
     ]
     _remove_stale_chart_artifacts(output_dir)
-    png_path = output_dir / "volume_event_best_equity_btc_spy.png"
+    png_path = output_dir / "volume_event_best_equity_btc.png"
     _write_equity_benchmark_png(
         png_path,
         series=series,
@@ -1146,15 +1137,14 @@ def _write_equity_benchmark_chart(
         "series": {
             "strategy": len(strategy),
             "btc": len(btc),
-            "spy": len(spy),
         },
-        "spy_status": spy_status,
         "annotations": [],
     }
 
 
 def _remove_stale_chart_artifacts(output_dir: Path) -> None:
     for name in (
+        "volume_event_best_equity_btc_spy.png",
         "volume_event_best_equity_btc_spy.svg",
         "volume_event_best_equity_benchmarks.csv",
         "volume_event_best_equity_annotations.csv",
@@ -1266,11 +1256,11 @@ def _write_equity_benchmark_png(
         )
 
     rect((0, 0, width, height), (255, 255, 255, 255))
-    text(left, 46, "Strategy Equity vs BTC and SPY", (17, 24, 39, 255), font_title)
+    text(left, 46, "Strategy Equity vs BTC", (7, 14, 31, 255), font_title)
     text(
         left,
         78,
-        "Growth of $1; benchmark lines are normalised to the strategy start date. Gridlines mark monthly dates and growth levels.",
+        "Strategy and BTC are normalised to $1 at the strategy start; gridlines mark monthly dates and growth levels.",
         (75, 85, 99, 255),
         font_small,
     )
@@ -1308,8 +1298,6 @@ def _write_equity_benchmark_png(
         line([(legend_x, height - 56), (legend_x + 42, height - 56)], (rgb[0], rgb[1], rgb[2], 230), 5)
         text(legend_x + 54, height - 64, label, (17, 24, 39, 255), font_regular)
         legend_x += 230
-
-    text(22, top + plot_h / 2, "Growth", (100, 116, 139, 255), font_tiny)
 
     image = image.resize((width, height), Image.Resampling.LANCZOS).convert("RGB")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1449,157 +1437,6 @@ def _normalised_price_series(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         return []
     base = cleaned[0]["value"]
     return [{"date": row["date"], "value": row["value"] / base} for row in cleaned]
-
-
-def _spy_benchmark_series(root: Path, *, start: str, end: str) -> tuple[list[dict[str, Any]], str]:
-    cache = root / "benchmarks" / "spy_daily.csv"
-    frame = _read_spy_cache(cache)
-    status = "cache_hit" if not frame.is_empty() else "missing"
-    if frame.is_empty() or not _date_frame_overlaps(frame, start=start, end=end):
-        downloaded = _download_spy_daily(cache, start=start, end=end)
-        if not downloaded.is_empty():
-            frame = downloaded
-            status = "downloaded"
-        elif frame.is_empty():
-            return [], "unavailable"
-        else:
-            status = "cache_partial"
-    if frame.is_empty() or not _has_columns(frame, "Date", "Close"):
-        return [], "unavailable"
-    filtered = frame.filter((pl.col("Date") >= start) & (pl.col("Date") <= end) & pl.col("Close").is_not_null()).sort("Date")
-    rows = [{"date": str(row["Date"]), "value": float(row["Close"])} for row in filtered.to_dicts()]
-    return _normalised_price_series(rows), status
-
-
-def _read_spy_cache(path: Path) -> pl.DataFrame:
-    if not path.exists():
-        return pl.DataFrame()
-    try:
-        return pl.read_csv(path)
-    except Exception:
-        return pl.DataFrame()
-
-
-def _date_frame_overlaps(frame: pl.DataFrame, *, start: str, end: str) -> bool:
-    if frame.is_empty() or "Date" not in frame.columns:
-        return False
-    dates = [str(item) for item in frame["Date"].drop_nulls().to_list()]
-    return bool(dates) and max(dates) >= start and min(dates) <= end
-
-
-def _download_spy_daily(path: Path, *, start: str, end: str) -> pl.DataFrame:
-    yahoo = _download_spy_daily_yahoo(path, start=start, end=end)
-    if not yahoo.is_empty():
-        return yahoo
-    return _download_spy_daily_stooq(path, start=start, end=end)
-
-
-def _download_spy_daily_yahoo(path: Path, *, start: str, end: str) -> pl.DataFrame:
-    start_day = _parse_day(start)
-    end_day = _parse_day(end)
-    if start_day is None or end_day is None:
-        return pl.DataFrame()
-    period1 = int(datetime(start_day.year, start_day.month, start_day.day, tzinfo=UTC).timestamp())
-    period2 = int(datetime(end_day.year, end_day.month, end_day.day, tzinfo=UTC).timestamp()) + int(MS_PER_DAY / 1000)
-    url = (
-        "https://query1.finance.yahoo.com/v8/finance/chart/SPY"
-        f"?period1={period1}&period2={period2}&interval=1d&events=history&includeAdjustedClose=true"
-    )
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 MODEL050426/1.0"})
-    try:
-        import certifi
-
-        context = ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        context = ssl.create_default_context()
-    try:
-        with urllib.request.urlopen(request, timeout=10, context=context) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (OSError, urllib.error.URLError, TimeoutError, KeyError, json.JSONDecodeError):
-        return pl.DataFrame()
-    try:
-        result = payload["chart"]["result"][0]
-        timestamps = result["timestamp"]
-        quote = result["indicators"]["quote"][0]
-    except (TypeError, KeyError, IndexError):
-        return pl.DataFrame()
-    rows = []
-    for idx, ts_value in enumerate(timestamps):
-        close = _sequence_float(quote.get("close"), idx)
-        if not math.isfinite(close):
-            continue
-        rows.append(
-            {
-                "Date": datetime.fromtimestamp(int(ts_value), UTC).date().isoformat(),
-                "Open": _sequence_float(quote.get("open"), idx),
-                "High": _sequence_float(quote.get("high"), idx),
-                "Low": _sequence_float(quote.get("low"), idx),
-                "Close": close,
-                "Volume": _sequence_float(quote.get("volume"), idx),
-            }
-        )
-    if not rows:
-        return pl.DataFrame()
-    frame = pl.DataFrame(rows, infer_schema_length=None)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    frame.write_csv(path)
-    return frame
-
-
-def _download_spy_daily_stooq(path: Path, *, start: str, end: str) -> pl.DataFrame:
-    d1 = start.replace("-", "")
-    d2 = end.replace("-", "")
-    url = f"https://stooq.com/q/d/l/?s=spy.us&i=d&d1={d1}&d2={d2}"
-    request = urllib.request.Request(url, headers={"User-Agent": "MODEL050426/1.0"})
-    try:
-        import certifi
-
-        context = ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        context = ssl.create_default_context()
-    try:
-        with urllib.request.urlopen(request, timeout=10, context=context) as response:
-            text = response.read().decode("utf-8")
-    except (OSError, urllib.error.URLError, TimeoutError):
-        return pl.DataFrame()
-    parsed = list(csv.DictReader(text.splitlines()))
-    rows = [
-        {
-            "Date": row.get("Date", ""),
-            "Open": _float_or_nan(row.get("Open")),
-            "High": _float_or_nan(row.get("High")),
-            "Low": _float_or_nan(row.get("Low")),
-            "Close": _float_or_nan(row.get("Close")),
-            "Volume": _float_or_nan(row.get("Volume")),
-        }
-        for row in parsed
-        if row.get("Date")
-    ]
-    if not rows:
-        return pl.DataFrame()
-    frame = pl.DataFrame(rows, infer_schema_length=None).filter(pl.col("Close").is_not_null())
-    if frame.is_empty():
-        return pl.DataFrame()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    frame.write_csv(path)
-    return frame
-
-
-def _sequence_float(values: Any, index: int) -> float:
-    try:
-        return _float_or_nan(values[index])
-    except (TypeError, IndexError):
-        return float("nan")
-
-
-def _series_span_days(points: list[dict[str, Any]]) -> int:
-    if len(points) < 2:
-        return 0
-    first = _parse_day(points[0]["date"])
-    last = _parse_day(points[-1]["date"])
-    if first is None or last is None:
-        return 0
-    return (last - first).days
 
 
 def _parse_day(value: Any) -> date | None:
@@ -1780,7 +1617,7 @@ def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) 
             "volume_event_best_trades.csv",
             "volume_event_best_baskets.csv",
             "volume_event_best_equity.csv",
-            "volume_event_best_equity_btc_spy.png",
+            "volume_event_best_equity_btc.png",
             "volume_event_best_monthly.csv",
             "volume_event_research_report.json",
             "volume_event_research_report.md",

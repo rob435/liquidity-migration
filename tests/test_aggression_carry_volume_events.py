@@ -96,13 +96,17 @@ def test_equity_benchmark_chart_writes_overlays_without_annotations(tmp_path: Pa
     chart = _write_equity_benchmark_chart(output_dir, root=tmp_path, equity=equity, raw_klines=raw_klines)
 
     assert Path(chart["png"]).exists()
+    assert Path(chart["png"]).name == "volume_event_best_equity_btc.png"
     with Image.open(chart["png"]) as image:
         assert image.size == (1600, 940)
+    assert not (output_dir / "volume_event_best_equity_btc_spy.png").exists()
     assert not (output_dir / "volume_event_best_equity_btc_spy.svg").exists()
     assert not (output_dir / "volume_event_best_equity_benchmarks.csv").exists()
     assert not (output_dir / "volume_event_best_equity_annotations.csv").exists()
     assert chart["series"]["strategy"] == 5
     assert chart["series"]["btc"] == 5
+    assert "spy" not in chart["series"]
+    assert "spy_status" not in chart
     assert chart["annotations"] == []
 
 
