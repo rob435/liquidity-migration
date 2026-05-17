@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import polars as pl
 import pytest
 
@@ -11,6 +13,7 @@ from aggression_carry.event_demo import (
     _execute_entries,
     _execute_exits,
     _execute_risk_exits,
+    _download_recent_1h_klines,
     _limit_chase_price,
     _maybe_notify,
     _reconcile_pending_order_fills,
@@ -101,6 +104,31 @@ class FakeRiskClient:
         return {}
 
 
+class FakeKlineMarket:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, int, int]] = []
+
+    def get_klines(self, symbol: str, interval: str, start: int, end: int) -> list[list[str]]:
+        self.calls.append((symbol, interval, start, end))
+        return [
+            [
+                str(ts_ms),
+                "100",
+                "110",
+                "90",
+                "105",
+                "1.5",
+                "157.5",
+            ]
+            for ts_ms in range(start, end + 1, MS_PER_HOUR)
+        ]
+
+
+class FailingKlineMarket(FakeKlineMarket):
+    def get_klines(self, symbol: str, interval: str, start: int, end: int) -> list[list[str]]:
+        raise AssertionError(f"unexpected kline fetch for {symbol} {interval} {start} {end}")
+
+
 def test_event_demo_cli_defaults_to_frequent_demo_forward_cycle() -> None:
     args = build_parser().parse_args(["event-demo-cycle"])
 
@@ -161,6 +189,80 @@ def test_event_demo_default_sizing_matches_backtest_weight() -> None:
         )
         == 0.10
     )
+
+
+def test_demo_kline_cache_avoids_refetching_complete_window(tmp_path: Path) -> None:
+    market = FakeKlineMarket()
+
+    first, first_stats = _download_recent_1h_klines(
+        ["AAAUSDT", "BBBUSDT"],
+        start_ms=0,
+        end_ms=2 * MS_PER_HOUR,
+        config=ResearchConfig(data_root=tmp_path),
+        workers=1,
+        market_client=market,
+        cache_root=tmp_path,
+    )
+
+    assert first.height == 6
+    assert first_stats["fetch_symbols"] == 2
+    assert first_stats["fetched_rows"] == 6
+    assert market.calls == [
+        ("AAAUSDT", "60", 0, 2 * MS_PER_HOUR),
+        ("BBBUSDT", "60", 0, 2 * MS_PER_HOUR),
+    ]
+    cached = read_dataset(tmp_path, "event_demo_klines_1h")
+    assert cached.height == 6
+    assert read_dataset(tmp_path, "klines_1h").is_empty()
+
+    second, second_stats = _download_recent_1h_klines(
+        ["AAAUSDT", "BBBUSDT"],
+        start_ms=0,
+        end_ms=2 * MS_PER_HOUR,
+        config=ResearchConfig(data_root=tmp_path),
+        workers=1,
+        market_client=FailingKlineMarket(),
+        cache_root=tmp_path,
+    )
+
+    assert second.height == 6
+    assert second_stats["cache_rows"] == 6
+    assert second_stats["cache_symbols"] == 2
+    assert second_stats["fetch_symbols"] == 0
+    assert second_stats["fetched_rows"] == 0
+
+
+def test_demo_kline_cache_fetches_only_new_hour(tmp_path: Path) -> None:
+    market = FakeKlineMarket()
+
+    initial, _ = _download_recent_1h_klines(
+        ["AAAUSDT"],
+        start_ms=0,
+        end_ms=MS_PER_HOUR,
+        config=ResearchConfig(data_root=tmp_path),
+        workers=1,
+        market_client=market,
+        cache_root=tmp_path,
+    )
+    assert initial.height == 2
+
+    market.calls.clear()
+    updated, stats = _download_recent_1h_klines(
+        ["AAAUSDT"],
+        start_ms=0,
+        end_ms=2 * MS_PER_HOUR,
+        config=ResearchConfig(data_root=tmp_path),
+        workers=1,
+        market_client=market,
+        cache_root=tmp_path,
+    )
+
+    assert market.calls == [("AAAUSDT", "60", 2 * MS_PER_HOUR, 2 * MS_PER_HOUR)]
+    assert updated.height == 3
+    assert stats["cache_rows"] == 2
+    assert stats["fetch_symbols"] == 1
+    assert stats["fetched_rows"] == 1
+    assert read_dataset(tmp_path, "event_demo_klines_1h").height == 3
 
 
 def test_execute_entries_sizes_notional_before_leverage_margin() -> None:

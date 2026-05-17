@@ -293,6 +293,8 @@ material events when enabled, and records `event_demo_trades`,
 `event_demo_orders`, and `event_demo_cycles` ledgers. It is a current-universe
 forward tester, so it is allowed for demo evidence and operations, not for
 historical promotion evidence.
+Recent 1h bars are cached in `event_demo_klines_1h`, keeping the forward-demo
+cache separate from the full-PIT research `klines_1h` dataset.
 Entry orders attach native stop/TP immediately, then confirmed fills recompute
 the ledger stop/TP from actual fill price and repair Bybit trading-stop state
 when rounding moves the protection levels.

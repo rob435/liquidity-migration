@@ -118,13 +118,14 @@ def run_event_demo_cycle(
             raise RuntimeError("Bybit demo event cycle found no current tradable symbols after universe filters")
 
         start_ms, end_ms = _kline_window(cycle_now_ms, lookback_days=demo.lookback_days)
-        klines = _download_recent_1h_klines(
+        klines, kline_cache_stats = _download_recent_1h_klines(
             symbols,
             start_ms=start_ms,
             end_ms=end_ms,
             config=config,
             workers=demo.workers,
             market_client=public if market_client is not None else None,
+            cache_root=root,
         )
         features = _build_demo_features(klines)
         score_name, score_col = _event_score(strategy.event_types[0])
@@ -238,6 +239,10 @@ def run_event_demo_cycle(
             "mode": "submit" if demo.submit_orders else "dry_run",
             "symbols": len(symbols),
             "kline_rows": klines.height,
+            "kline_cache_rows": kline_cache_stats["cache_rows"],
+            "kline_cache_symbols": kline_cache_stats["cache_symbols"],
+            "kline_fetch_symbols": kline_cache_stats["fetch_symbols"],
+            "kline_fetched_rows": kline_cache_stats["fetched_rows"],
             "feature_rows": features.height,
             "latest_feature_ts_ms": _max_int(features, "ts_ms"),
             "entry_candidates": len(entry_candidates),
@@ -1140,30 +1145,124 @@ def _download_recent_1h_klines(
     config: ResearchConfig,
     workers: int,
     market_client: Any | None,
-) -> pl.DataFrame:
+    cache_root: Path | None = None,
+) -> tuple[pl.DataFrame, dict[str, int]]:
+    stats = {
+        "cache_rows": 0,
+        "cache_symbols": 0,
+        "fetch_symbols": len(symbols),
+        "fetched_rows": 0,
+        "output_rows": 0,
+    }
     if end_ms < start_ms:
-        return pl.DataFrame()
+        return _empty_klines(), stats
+    if not symbols:
+        stats["fetch_symbols"] = 0
+        return _empty_klines(), stats
 
-    def fetch_with_client(client: Any, symbol: str) -> list[dict[str, Any]]:
+    cached = _read_demo_kline_cache(cache_root, symbols=symbols, start_ms=start_ms, end_ms=end_ms)
+    if not cached.is_empty():
+        stats["cache_rows"] = cached.height
+        stats["cache_symbols"] = cached.select("symbol").unique().height
+
+    fetch_ranges = _demo_kline_fetch_ranges(symbols, cached, start_ms=start_ms, end_ms=end_ms)
+    stats["fetch_symbols"] = len(fetch_ranges)
+    if not fetch_ranges:
+        output = _dedupe_recent_klines(cached)
+        stats["output_rows"] = output.height
+        return output, stats
+
+    fetched = _fetch_recent_1h_klines(
+        fetch_ranges,
+        config=config,
+        workers=workers,
+        market_client=market_client,
+    )
+    stats["fetched_rows"] = fetched.height
+    if cache_root is not None and not fetched.is_empty():
+        write_dataset(fetched, cache_root, "event_demo_klines_1h")
+
+    frames = [frame for frame in (cached, fetched) if not frame.is_empty()]
+    output = _dedupe_recent_klines(pl.concat(frames, how="diagonal_relaxed") if frames else _empty_klines())
+    stats["output_rows"] = output.height
+    return output, stats
+
+
+def _read_demo_kline_cache(
+    cache_root: Path | None,
+    *,
+    symbols: list[str],
+    start_ms: int,
+    end_ms: int,
+) -> pl.DataFrame:
+    if cache_root is None:
+        return _empty_klines()
+    cached = read_dataset(cache_root, "event_demo_klines_1h")
+    if cached.is_empty() or "symbol" not in cached.columns or "ts_ms" not in cached.columns:
+        return _empty_klines()
+    return cached.filter(pl.col("symbol").is_in(symbols) & pl.col("ts_ms").is_between(start_ms, end_ms))
+
+
+def _demo_kline_fetch_ranges(
+    symbols: list[str],
+    cached: pl.DataFrame,
+    *,
+    start_ms: int,
+    end_ms: int,
+) -> dict[str, tuple[int, int]]:
+    ranges: dict[str, tuple[int, int]] = {}
+    for symbol in symbols:
+        if cached.is_empty():
+            ranges[symbol] = (start_ms, end_ms)
+            continue
+        symbol_cache = cached.filter(pl.col("symbol") == symbol)
+        if symbol_cache.is_empty():
+            ranges[symbol] = (start_ms, end_ms)
+            continue
+        latest = _max_int(symbol_cache, "ts_ms")
+        fetch_start = max(latest + MS_PER_HOUR, start_ms)
+        if fetch_start <= end_ms:
+            ranges[symbol] = (fetch_start, end_ms)
+    return ranges
+
+
+def _fetch_recent_1h_klines(
+    fetch_ranges: dict[str, tuple[int, int]],
+    *,
+    config: ResearchConfig,
+    workers: int,
+    market_client: Any | None,
+) -> pl.DataFrame:
+    if not fetch_ranges:
+        return _empty_klines()
+
+    def fetch_with_client(client: Any, symbol: str, window: tuple[int, int]) -> list[dict[str, Any]]:
+        start_ms, end_ms = window
         return _normalize_klines(symbol, client.get_klines(symbol, "60", start_ms, end_ms), source="bybit_demo_cycle")
 
     rows: list[dict[str, Any]] = []
     if market_client is not None or workers <= 1:
         client = market_client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
-        for symbol in symbols:
-            rows.extend(fetch_with_client(client, symbol))
-        return pl.DataFrame(rows, infer_schema_length=None) if rows else _empty_klines()
+        for symbol, window in fetch_ranges.items():
+            rows.extend(fetch_with_client(client, symbol, window))
+        return _dedupe_recent_klines(pl.DataFrame(rows, infer_schema_length=None)) if rows else _empty_klines()
 
     def fetch_symbol(symbol: str) -> list[dict[str, Any]]:
         local_client = BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
-        return fetch_with_client(local_client, symbol)
+        return fetch_with_client(local_client, symbol, fetch_ranges[symbol])
 
-    max_workers = max(1, min(workers, len(symbols)))
+    max_workers = max(1, min(workers, len(fetch_ranges)))
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(fetch_symbol, symbol): symbol for symbol in symbols}
+        futures = {executor.submit(fetch_symbol, symbol): symbol for symbol in fetch_ranges}
         for future in as_completed(futures):
             rows.extend(future.result())
-    return pl.DataFrame(rows, infer_schema_length=None) if rows else _empty_klines()
+    return _dedupe_recent_klines(pl.DataFrame(rows, infer_schema_length=None)) if rows else _empty_klines()
+
+
+def _dedupe_recent_klines(klines: pl.DataFrame) -> pl.DataFrame:
+    if klines.is_empty():
+        return _empty_klines()
+    return klines.unique(subset=["ts_ms", "symbol"], keep="last").sort(["symbol", "ts_ms"])
 
 
 def _build_demo_features(klines: pl.DataFrame) -> pl.DataFrame:

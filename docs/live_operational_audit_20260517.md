@@ -43,6 +43,11 @@ Objective: harden the Bybit demo system as if it is live capital, with emphasis 
 - `85f2524 fix(runtime): preserve legacy risk lock`
   - The legacy REST risk wrapper no longer deletes its live cycle lock either.
 
+- `current slice: cache forward demo klines`
+  - The event entry loop now stores recent forward-demo 1h bars in `event_demo_klines_1h`.
+  - Normal cycles reuse cached bars and fetch only missing/new symbol windows.
+  - This keeps the demo cache separate from the full-PIT research `klines_1h` dataset.
+
 ## Verification
 
 Local:
@@ -80,6 +85,6 @@ The observed demo REST order path, around 170-290 ms for place/cancel from the V
 ## Remaining Risks
 
 - Bybit demo is not mainnet. Demo liquidity, latency, and WebSocket Trade limitations do not prove real-money execution quality.
-- The event entry loop still rebuilds a large 45-day, multi-symbol feature set. The 5-minute cadence reduces pressure, but a cached incremental data path would be cleaner.
+- The event entry loop still rebuilds features from a 45-day window, but it now avoids redownloading the whole window every cycle by caching forward-demo 1h bars.
 - Native exchange stop/take-profit remains the primary emergency protection. The local websocket risk engine is the repair/enforcement layer, not a substitute for venue-native stops.
 - Telegram is notification-only. It must not become an order approval or order submission path.

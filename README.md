@@ -95,7 +95,7 @@ bash scripts/run_bybit_demo_event_engine.sh
 Default forward-test behavior:
 
 - pulls current Bybit USDT perp ranks 1-220, then applies the selected rank 31-150 liquidity-migration filter
-- rebuilds recent 1h volume features each cycle from a 45-day lookback
+- rebuilds recent 1h volume features each cycle from a 45-day lookback, using a forward-demo kline cache to fetch only missing/new bars on normal cycles
 - enters eligible events after the 1-hour signal delay, with stale entries skipped after 15 minutes by default
 - sizes each coin from the backtest weight: `gross_exposure / max_active_symbols`, currently `1.25 / 6 = 20.83%` of current Bybit demo USDT equity
 - uses 2x entry leverage in the continuous runner so the 125% gross target can be submitted without changing the notional sizing

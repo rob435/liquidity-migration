@@ -115,7 +115,7 @@ The runner loops every `INTERVAL_SECONDS=300` by default. Each cycle:
 
 1. Pulls the current Bybit USDT perpetual universe through rank 220 so the selected rank 31-150 strategy can be evaluated forward.
 2. Excludes only stable/peg perps, including failed peg remnants such as USTCUSDT, before ranks/features are built.
-3. Rebuilds recent 1h volume features from a 45-day lookback.
+3. Rebuilds recent 1h volume features from a 45-day lookback, using the forward-demo kline cache so normal cycles fetch only missing/new 1h bars instead of the whole window.
 4. Exits existing demo positions first on fixed-stop/take-profit reconciliation, event decay, rank exit, or 3-day max hold.
 5. Enters accepted liquidity-migration events after the 1-hour signal delay, subject to max-active, cooldown, stop-pressure, positive-day-return, residual-return, and stale-entry gates. Stale entries are skipped after 15 minutes by default so demo fills stay close to the backtest entry timestamp.
 6. Sizes each accepted coin from the same weight used by the backtest: `gross_exposure / max_active_symbols`, currently `1.25 / 6 = 20.83%` of current Bybit demo USDT equity. `--max-order-notional-pct-equity` is only an explicit override. The continuous runner defaults entry leverage to 2x so the 125% gross target can be submitted without changing notional sizing.
