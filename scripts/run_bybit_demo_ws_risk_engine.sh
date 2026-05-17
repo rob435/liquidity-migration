@@ -59,7 +59,6 @@ if [[ "$EXIT_UNTRACKED_POSITIONS" != "1" ]]; then
 fi
 
 mkdir -p "$DATA_ROOT/.locks"
-rm -f "$DATA_ROOT/.locks/event_ws_risk_cycle.lock"
 
 echo "event websocket risk engine starting"
 echo "repo=$REPO_ROOT"
