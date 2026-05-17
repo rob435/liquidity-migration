@@ -298,6 +298,9 @@ open orders. It blocks candidates whose symbols already have live exchange
 exposure or non-reduce-only open orders. In submit mode, a position/open-order
 snapshot error blocks all new entries for that cycle rather than trusting the
 ledger alone.
+Position snapshot failures during open-trade reconciliation are surfaced in the
+cycle report and keep the cycle alive, so an outage cannot crash the entry loop
+before the entry guard fails closed.
 Recent 1h bars are cached in `event_demo_klines_1h`, keeping the forward-demo
 cache separate from the full-PIT research `klines_1h` dataset.
 Entry orders attach native stop/TP immediately, then confirmed fills recompute

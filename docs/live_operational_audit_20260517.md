@@ -93,21 +93,30 @@ Objective: harden the Bybit demo system as if it is live capital, with emphasis 
   - For tracked exits, the same reconciliation closes the trade with the submitted order row's exit reason and trigger timestamp instead of later `bybit_position_missing` cleanup.
   - If the open-order snapshot fails, stale pending exits remain pending instead of being inferred flat from incomplete exchange state.
 
+- `current slice: fail closed on entry reconcile position outages`
+  - The event entry loop no longer calls `get_positions()` directly while reconciling open ledger trades.
+  - Position snapshot failures during open-trade reconciliation now leave the ledger unchanged, record `position_report_error`, and skip all new submit-mode entries for that cycle.
+  - This closes the case where a Bybit position API outage with an existing open ledger trade could crash the cycle before writing the fail-closed entry report.
+
 ## Verification
 
 Local:
 
 - Focused streamed/pending exit ledger tests passed after the streamed exit context change.
 - Focused stale flat pending-exit tests passed after the live stale ledger row finding.
-- `pytest -q`: 195 passed after the stale pending-exit cleanup snapshot-failure guard.
+- Focused event-demo position outage tests passed after the open-trade reconciliation guard.
+- `pytest -q`: 196 passed after the open-trade reconciliation position outage guard.
 
 VPS:
 
+- Focused event-demo file: 48 passed after deploying the open-trade reconciliation guard.
+- `pytest -q`: 196 passed after deploying the open-trade reconciliation guard.
 - Focused websocket-risk file: 36 passed after deploying the snapshot-failure guard.
-- `pytest -q`: 195 passed after deploying the snapshot-failure guard.
 - Services after restart:
   - `model050426-bybit-demo.service`: active/running, `INTERVAL_SECONDS=300`.
   - `model050426-bybit-risk.service`: active/running.
+- Entry position-outage drill:
+  - An isolated VPS event-demo cycle with an existing open ledger trade and a failing Bybit position API wrote a report, kept the existing trade open, skipped the forced new entry, submitted `0` orders, and recorded `position_report_error="positions unavailable"`.
 - Stale flat pending-exit cleanup:
   - Live verification found stale local `agc-ux-BTC-tf5z45-0` with `status=submitted_unconfirmed` while Bybit had `active_positions=0` and `open_orders=0`.
   - After deployment and risk-service restart, the row was `status=filled`, `filled_qty=0.001`, `error="filled inferred from flat Bybit position"`, and direct state was `ledger_pending_orders=0`.

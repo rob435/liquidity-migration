@@ -161,7 +161,7 @@ def run_event_demo_cycle(
             all_orders = _upsert_rows(all_orders, pending_fill_orders, key="order_link_id")
             _write_order_rows(root, pl.DataFrame(pending_fill_orders, infer_schema_length=None))
 
-        reconciled_trades, reconcile_rows = _reconcile_open_trades(
+        reconciled_trades, reconcile_rows, reconcile_position_error = _reconcile_open_trades(
             all_trades,
             trading_client=trading_client,
             demo=demo,
@@ -204,6 +204,7 @@ def run_event_demo_cycle(
 
         refreshed_open = _open_trades(all_trades)
         raw_positions, bybit_position_error = _safe_raw_positions(trading_client, settle_coin=demo.settle_coin)
+        position_snapshot_error = _combine_errors(reconcile_position_error, bybit_position_error)
         live_position_symbols = set(_active_position_by_symbol(raw_positions))
         entry_candidates, skip_counts = select_demo_entry_candidates(
             features,
@@ -221,7 +222,7 @@ def run_event_demo_cycle(
         open_order_error_entry_skips = 0
         live_position_entry_skips = 0
         live_open_entry_skips = 0
-        if bybit_position_error and demo.submit_orders:
+        if position_snapshot_error and demo.submit_orders:
             snapshot_error_entry_skips = len(entry_candidates)
             entry_candidates = []
         elif bybit_open_order_error and demo.submit_orders:
@@ -264,8 +265,9 @@ def run_event_demo_cycle(
             else:
                 raw_positions = refreshed_raw_positions
                 bybit_position_error = ""
+        position_snapshot_error = _combine_errors(reconcile_position_error, bybit_position_error)
         bybit_positions = build_position_pnl_snapshot(raw_positions)
-        report_error = "; ".join(error for error in (bybit_position_error, bybit_open_order_error) if error)
+        report_error = _combine_errors(position_snapshot_error, bybit_open_order_error)
         bybit_position_summary = summarize_position_pnl(bybit_positions)
         ledger_positions = build_ledger_position_pnl_snapshot(_open_trades(all_trades), price_by_symbol)
         ledger_position_summary = summarize_position_pnl(ledger_positions)
@@ -2355,11 +2357,13 @@ def _reconcile_open_trades(
     trading_client: Any | None,
     demo: EventDemoCycleConfig,
     now_ms: int,
-) -> tuple[pl.DataFrame, list[dict[str, Any]]]:
+) -> tuple[pl.DataFrame, list[dict[str, Any]], str]:
     open_trades = _open_trades(all_trades)
     if open_trades.is_empty() or trading_client is None or not demo.submit_orders:
-        return open_trades, []
-    positions = trading_client.get_positions(settle_coin=demo.settle_coin)
+        return open_trades, [], ""
+    positions, error = _safe_raw_positions(trading_client, settle_coin=demo.settle_coin)
+    if error:
+        return open_trades, [], error
     size_by_symbol = _position_size_by_symbol(positions)
     updates: list[dict[str, Any]] = []
     kept = []
@@ -2380,7 +2384,7 @@ def _reconcile_open_trades(
             }
         )
         updates.append(updated)
-    return pl.DataFrame(kept, infer_schema_length=None) if kept else _empty_trades(), updates
+    return pl.DataFrame(kept, infer_schema_length=None) if kept else _empty_trades(), updates, ""
 
 
 def _wallet_equity_usdt(trading_client: Any, *, demo: EventDemoCycleConfig) -> float:
@@ -2671,6 +2675,16 @@ def _first_non_empty(*values: Any) -> Any:
         if value not in (None, ""):
             return value
     return ""
+
+
+def _combine_errors(*errors: str) -> str:
+    output: list[str] = []
+    seen: set[str] = set()
+    for error in errors:
+        if error and error not in seen:
+            output.append(error)
+            seen.add(error)
+    return "; ".join(output)
 
 
 def _prices_close(left: float, right: float, *, tolerance_bps: float) -> bool:

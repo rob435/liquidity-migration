@@ -405,6 +405,60 @@ def test_event_demo_cycle_skips_entries_when_position_snapshot_fails(
     assert read_dataset(tmp_path, "event_demo_orders").is_empty()
 
 
+def test_event_demo_cycle_does_not_crash_when_reconcile_position_snapshot_fails_with_open_trade(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_ms = 1_700_000_060_000
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "trade_id": "t-existing",
+                    "symbol": "AAAUSDT",
+                    "side": "short",
+                    "status": "open",
+                    "entry_ts_ms": now_ms - 2 * MS_PER_HOUR,
+                    "planned_exit_ts_ms": now_ms + 24 * MS_PER_HOUR,
+                    "qty": "1",
+                    "entry_price": 100.0,
+                    "stop_price": 112.0,
+                    "take_profit_price": 80.0,
+                }
+            ]
+        ),
+        tmp_path,
+        "event_demo_trades",
+        partition_by=(),
+    )
+    candidate = {
+        "trade_id": "t-position-error",
+        "symbol": "AAAUSDT",
+        "side": "short",
+        "signal_ts_ms": now_ms - MS_PER_HOUR,
+        "stop_loss_pct": 0.12,
+        "take_profit_pct": 0.20,
+    }
+    client = FakeRiskClient(fail_positions=True)
+    _patch_minimal_event_cycle(monkeypatch, candidate)
+
+    payload = run_event_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        market_client=MinimalEventMarket(),
+        private_client=client,
+        now_ms=now_ms,
+    )
+
+    trades = read_dataset(tmp_path, "event_demo_trades")
+    assert client.orders == []
+    assert trades.filter(pl.col("trade_id") == "t-existing").select("status").item() == "open"
+    assert payload["cycle"]["entries_executed"] == 0
+    assert payload["cycle"]["skipped_position_snapshot_error"] == 1
+    assert payload["cycle"]["position_report_error"] == "positions unavailable"
+
+
 def test_event_demo_cycle_skips_entry_when_live_open_entry_order_exists(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
