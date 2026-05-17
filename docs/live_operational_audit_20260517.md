@@ -123,6 +123,10 @@ Objective: harden the Bybit demo system as if it is live capital, with emphasis 
   - If a stale pending entry has a live Bybit position or active open order for that symbol, fill reconciliation keeps polling it.
   - When Bybit later reports the fill, the event loop and websocket risk watchdog rebuild the missing open trade ledger before stale cleanup or untracked-position handling runs.
 
+- `current slice: preserve failed risk-exit context`
+  - Failed tracked risk-exit submissions now write failed order rows with the trade id, exit reason, trigger timestamp, target quantity, and planned exit price.
+  - Failed REST fallback after a rejected WebSocket Trade ack keeps the trade open but records an auditable failed fallback row tied to the original risk trigger.
+
 ## Verification
 
 Local:
@@ -135,6 +139,7 @@ Local:
 - Focused websocket-risk exit-before-stop-repair tests passed after the risk-priority cleanup.
 - Focused failed websocket order-ack fallback tests passed after the rejected-ack recovery change.
 - Focused stale-live pending-entry reconciliation tests passed after the ledger recovery change.
+- Focused failed risk-exit context tests passed after preserving failed-order audit fields.
 - `tests/test_aggression_carry_event_demo.py tests/test_aggression_carry_ws_risk.py`: 90 passed after the flat-entry cleanup.
 - `tests/test_aggression_carry_ws_risk.py`: 40 passed after the risk-priority cleanup.
 - `pytest -q`: 204 passed after the risk-priority cleanup.
@@ -142,6 +147,8 @@ Local:
 - `pytest -q`: 207 passed after the failed-ack recovery change.
 - `tests/test_aggression_carry_event_demo.py tests/test_aggression_carry_ws_risk.py`: 98 passed after the stale-live pending-entry recovery change.
 - `pytest -q`: 210 passed after the stale-live pending-entry recovery change.
+- `tests/test_aggression_carry_event_demo.py tests/test_aggression_carry_ws_risk.py`: 100 passed after the failed risk-exit context change.
+- `pytest -q`: 212 passed after the failed risk-exit context change.
 
 VPS:
 
@@ -154,6 +161,8 @@ VPS:
 - `pytest -q`: 207 passed after deploying the failed-ack recovery change.
 - Focused event-demo + websocket-risk files: 98 passed after deploying the stale-live pending-entry recovery change.
 - `pytest -q`: 210 passed after deploying the stale-live pending-entry recovery change.
+- Focused event-demo + websocket-risk files: 100 passed after deploying the failed risk-exit context change.
+- `pytest -q`: 212 passed after deploying the failed risk-exit context change.
 - Services after restart:
   - `model050426-bybit-demo.service`: active/running, `INTERVAL_SECONDS=300`.
   - `model050426-bybit-risk.service`: active/running.
@@ -166,6 +175,13 @@ VPS:
   - `model050426-bybit-demo.service`: active/running.
   - `model050426-bybit-risk.service`: active/running.
   - Direct live state: `active_positions=0`, `open_orders=0`, `ledger_open_trades=0`, `ledger_pending_orders=0`, latest websocket-risk reason `startup`, `risk_positions=0`, `risk_ledger=0`, `risk_untracked=0`, `risk_live_exit_open_orders=0`, `risk_stop_repairs=0`, `risk_error=""`, latest demo mode `submit`, `demo_entries=0`, `demo_pending_entry_fills_reconciled=0`, `demo_stale_pending_entry_orders_terminalized=0`, and `demo_error=""`.
+- Services after failed risk-exit context restart:
+  - `model050426-bybit-demo.service`: active/running.
+  - `model050426-bybit-risk.service`: active/running.
+  - Direct live state: `active_positions=0`, `open_orders=0`, `ledger_open_trades=0`, `ledger_pending_orders=0`, latest websocket-risk reason `startup`, `risk_positions=0`, `risk_ledger=0`, `risk_untracked=0`, `risk_live_exit_open_orders=0`, `risk_stop_repairs=0`, `risk_exits_executed=0`, `risk_error=""`, latest demo mode `submit`, `demo_entries=0`, `demo_pending_entry_fills_reconciled=0`, `demo_stale_pending_entry_orders_terminalized=0`, and `demo_error=""`.
+- Failed risk-exit context drill:
+  - An isolated VPS `_execute_risk_exits` run with a controlled Bybit order rejection produced `0` closed trade rows and a failed order row containing `trade_id=t1`, `exit_reason=stop_loss`, the original trigger timestamp, `target_qty=1`, `filled_qty=""`, `avg_price=113.0`, and the rejection error.
+  - An isolated VPS websocket-risk rejected-ack path with a failing REST fallback marked the WS row `rejected`, recorded a failed fallback order row with the original trade id, exit reason, trigger timestamp, and target quantity, kept the trade open, submitted no REST order, and cleared the pending-submission guard.
 - Stale-live pending-entry recovery drill:
   - An isolated VPS event-demo cycle with an old `agc-en-*` pending entry row and a live Bybit position for the same symbol polled trade history, marked the order `filled`, rebuilt the open trade ledger with `qty=1`, submitted `0` new orders, recorded `pending_entry_fills_reconciled=1`, and did not terminalize the row as stale.
   - An isolated VPS websocket-risk bootstrap with the same stale live pending entry also marked the order `filled`, rebuilt one open trade, submitted `0` untracked flatten orders, and cleared `pending_entry_symbols`.

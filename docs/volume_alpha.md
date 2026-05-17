@@ -348,6 +348,10 @@ events, so exit decisions survive later quiet heartbeat overwrites.
 WebSocket execution/order-stream closures preserve the original exit reason and
 trigger timestamp from the submitted exit order row, so the ledger remains
 auditable when REST polling is not the closing path.
+Failed tracked risk-exit submissions also keep the trade id, exit reason,
+trigger timestamp, target quantity, and planned exit price on the failed order
+row. A rejected emergency exit therefore stays tied to the open trade in the
+audit ledger instead of becoming an anonymous failed order.
 Fresh pending reduce-only untracked-position exits are restored after restart
 even though they have no ledger trade ID, so the watchdog does not duplicate a
 still-pending emergency flatten order after process loss.

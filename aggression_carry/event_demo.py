@@ -2103,19 +2103,29 @@ def _execute_risk_exits(
             )
         except Exception as exc:  # noqa: BLE001 - surfaced in order telemetry so the loop can continue
             link = _risk_order_link_id("rx", symbol=symbol, ts_ms=now_ms, attempt=0)
-            orders.append(
-                _risk_order_row(
-                    link=link,
-                    ts_ms=now_ms,
-                    symbol=symbol,
-                    side=bybit_side,
-                    qty=qty,
-                    order_type="Market" if risk.exit_order_mode == "market" else "LimitChase",
-                    submit_mode="error",
-                    status="failed",
-                    error=str(exc)[:500],
-                )
+            failed_order = _risk_order_row(
+                link=link,
+                ts_ms=now_ms,
+                symbol=symbol,
+                side=bybit_side,
+                qty=qty,
+                order_type="Market" if risk.exit_order_mode == "market" else "LimitChase",
+                submit_mode="error",
+                status="failed",
+                error=str(exc)[:500],
             )
+            failed_order.update(
+                {
+                    "trade_id": trade_id,
+                    "exit_reason": str(exit_plan["exit_reason"]),
+                    "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
+                    "avg_price": planned_price,
+                    "target_qty": qty,
+                    "filled_qty": "",
+                    "notional_usdt": 0.0,
+                }
+            )
+            orders.append(failed_order)
             continue
         exit_price = _float(submit["exec_summary"].get("avg_price")) or planned_price
         target_qty = _float(qty)

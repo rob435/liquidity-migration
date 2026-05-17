@@ -24,11 +24,13 @@ class FakePrivateClient:
         positions: list[dict[str, object]] | None = None,
         open_orders: list[dict[str, object]] | None = None,
         fail_open_orders: bool = False,
+        fail_order: bool = False,
     ) -> None:
         self.confirm_fills = confirm_fills
         self.fail_trade_history = fail_trade_history
         self.open_orders = open_orders or []
         self.fail_open_orders = fail_open_orders
+        self.fail_order = fail_order
         self.positions = positions if positions is not None else [
             {
                 "symbol": "AAAUSDT",
@@ -56,6 +58,8 @@ class FakePrivateClient:
         return self.open_orders
 
     def place_order(self, **params):
+        if self.fail_order:
+            raise RuntimeError("rest order rejected")
         self.orders.append(params)
         return {"orderId": "rest-order-1"}
 
@@ -531,6 +535,50 @@ def test_ws_then_rest_falls_back_after_failed_ws_order_ack(tmp_path: Path) -> No
     assert stored.filter(pl.col("trade_id") == "t1").select("exit_trigger_ts_ms").item() == trigger_ts_ms
     assert "AAAUSDT" not in engine.state.submitted_symbols
     assert any("websocket order ack failed" in error for error in engine.state.errors)
+
+
+def test_ws_ack_rest_fallback_failure_keeps_trade_open_with_context(tmp_path: Path) -> None:
+    _write_open_trade(tmp_path)
+    private_client = FakePrivateClient(fail_order=True)
+    trade_client = FakeTradeClient()
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="ws_then_rest",
+            rest_fallback=True,
+            exit_untracked_positions=False,
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+        trade_client=trade_client,
+    )
+
+    engine.bootstrap()
+    engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
+    ws_link = str(engine.state.orders[0]["order_link_id"])
+    trigger_ts_ms = int(engine.state.orders[0]["exit_trigger_ts_ms"])
+    engine.on_ws_order_ack({"retCode": 10001, "retMsg": "demo ws rejected", "_agc_order_link_id": ws_link})
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    failed = stored_orders.filter(pl.col("order_link_id") != ws_link).to_dicts()[0]
+    assert private_client.orders == []
+    assert stored_orders.filter(pl.col("order_link_id") == ws_link).select("status").item() == "rejected"
+    assert failed["status"] == "failed"
+    assert failed["trade_id"] == "t1"
+    assert failed["exit_reason"] == "stop_loss"
+    assert failed["exit_trigger_ts_ms"] == trigger_ts_ms
+    assert failed["target_qty"] == "1"
+    assert "rest order rejected" in failed["error"]
+    assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "open"
+    assert "AAAUSDT" not in engine.state.submitted_symbols
 
 
 def test_ws_order_ack_failure_without_rest_marks_order_rejected(tmp_path: Path) -> None:

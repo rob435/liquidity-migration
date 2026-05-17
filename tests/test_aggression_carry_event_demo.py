@@ -2289,6 +2289,52 @@ def test_risk_exit_does_not_close_until_submitted_fill_confirmed() -> None:
     assert orders[0]["notional_usdt"] == 0.0
 
 
+def test_risk_exit_failure_records_auditable_order_context() -> None:
+    all_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "1",
+                "stop_price": 112.0,
+            }
+        ]
+    )
+
+    rows, orders = _execute_risk_exits(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "qty": "1",
+                "exit_reason": "stop_loss",
+                "exit_trigger_ts_ms": 1_700_000_000_000,
+                "planned_exit_price": 113.0,
+                "planned_exit_ts_ms": 1_700_100_000_000,
+            }
+        ],
+        all_trades,
+        trading_client=FakeRiskClient(fail_order_symbols={"AAAUSDT"}),
+        risk=EventRiskCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        now_ms=1_700_000_060_000,
+        price_by_symbol={"AAAUSDT": 113.0},
+        tick_size_by_symbol={},
+    )
+
+    assert rows == []
+    assert orders[0]["status"] == "failed"
+    assert orders[0]["trade_id"] == "t1"
+    assert orders[0]["exit_reason"] == "stop_loss"
+    assert orders[0]["exit_trigger_ts_ms"] == 1_700_000_000_000
+    assert orders[0]["target_qty"] == "1"
+    assert orders[0]["filled_qty"] == ""
+    assert orders[0]["avg_price"] == 113.0
+    assert "order rejected" in orders[0]["error"]
+
+
 def test_risk_exit_records_filled_order_after_confirmed_fill() -> None:
     all_trades = pl.DataFrame(
         [
