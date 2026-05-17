@@ -13,7 +13,7 @@ param(
     [string]$Python = "python",
     [bool]$RunTests = $true,
     [bool]$RunChampionBacktest = $true,
-    [double]$ChampionGrossExposure = 0.97
+    [double]$ChampionGrossExposure = 1.0
 )
 
 $ErrorActionPreference = "Stop"
@@ -189,7 +189,7 @@ if missing:
 
     if ($RunChampionBacktest) {
         Section "Run selected full PIT volume event backtest"
-        $ChampionReportDir = Join-Path (Join-Path $DataRoot "reports") ("SELECTED_liqmig_union_q40_h3_tp25_g097_{0}" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
+        $ChampionReportDir = Join-Path (Join-Path $DataRoot "reports") ("SELECTED_liqmig_union_q40_h3_tp25_g100_{0}" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
         Invoke-Checked $VenvPython @(
             "-m", "aggression_carry",
             "--data-root", $DataRoot,

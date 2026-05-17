@@ -38,7 +38,7 @@ from .volume_events import (
 
 
 MS_PER_MINUTE = 60_000
-DEMO_STRATEGY_ID = "liqmig_union_q40_h3_tp25_g097_crowd_union"
+DEMO_STRATEGY_ID = "liqmig_union_q40_h3_tp25_g100_crowd_union"
 PENDING_ORDER_STATUSES = {"submitted", "submitted_unconfirmed", "partial", "fallback_market"}
 PENDING_ORDER_GUARD_MS = 15 * MS_PER_MINUTE
 

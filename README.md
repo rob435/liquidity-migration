@@ -37,7 +37,7 @@ The `volume-events` defaults are the selected strategy:
 - Stop-pressure throttle: pause new entries after 7 realized stops inside 10 days
 - Realized-loss throttle: pause new entries after 6 realized losses inside 5 days
 - Cost model: 3x base round-trip costs
-- Gross exposure: 0.97, split across active capacity
+- Gross exposure: 1.00, split across active capacity
 
 Legacy full-PIT baseline run, 2023-05-03 to 2026-05-03:
 
@@ -63,12 +63,16 @@ Promoted research frontier after the same-hour crowding audit:
 - Variant: adaptive hot-band liquidity migration with `union_pathology` crowding veto
 - Report: `data/research_reports/frontier_union_crowding_promoted_20260517`
 - Trades: 444
-- Total return: +1950.72%
-- Max drawdown: -10.74%
-- Worst 90d return: -4.64%
-- Worst split return: +113.73%
+- Total return: +2143.28%
+- Max drawdown: -11.05%
+- Worst 90d return: -4.80%
+- Worst split return: +118.65%
 - Average split Sharpe-like: 3.72
-- OOS return: +177.58%
+- OOS return: +186.06%
+
+These promoted frontier metrics are the clean `1.00` gross exposure rescale of
+the existing full-PIT ledger; the event set, exits, cooldowns, and crowding
+decisions are unchanged by the gross cleanup.
 
 This supersedes the earlier March-specific crowding patch and is now the
 research, `volume-events`, and Bybit demo default as of 2026-05-17. The paper
@@ -118,7 +122,7 @@ Default forward-test behavior:
 - pulls current Bybit USDT perp ranks 1-220, then applies the selected rank 31-150 liquidity-migration filter
 - rebuilds recent 1h volume features each cycle from a 45-day lookback, using a forward-demo kline cache to fetch only missing/new bars on normal cycles
 - enters eligible events after the 1-hour signal delay, with stale entries skipped after 15 minutes by default
-- sizes each coin from the backtest weight: `gross_exposure / max_active_symbols`, currently `0.97 / 5 = 19.40%` of current Bybit demo USDT equity
+- sizes each coin from the backtest weight: `gross_exposure / max_active_symbols`, currently `1.00 / 5 = 20.00%` of current Bybit demo USDT equity
 - uses 2x entry leverage in the continuous runner for margin headroom without changing the notional sizing
 - exits first on every cycle using fixed stop reconciliation, event decay, rank exit, or 3-day max hold
 - sends Telegram status with Bybit demo wallet equity, open positions, position value, and unrealized PnL when `TELEGRAM_ENABLED=1`

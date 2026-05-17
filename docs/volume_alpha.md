@@ -287,7 +287,7 @@ SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 TELEGRAM_ENABLED=1 bash scripts/run_bybit_
 ```
 
 The runner checks every 5 minutes by default, sizes each accepted coin from
-the backtest weight (`gross_exposure / max_active_symbols`, currently 20.83% of
+the backtest weight (`gross_exposure / max_active_symbols`, currently 20.00% of
 current Bybit demo USDT equity), exits before entries, sends Telegram only for
 material events when enabled, and records `event_demo_trades`,
 `event_demo_orders`, and `event_demo_cycles` ledgers. It is a current-universe
@@ -399,14 +399,14 @@ the current liquidity-migration short on strict full-PIT improvement criteria.
 The closest result was a lower-drawdown near-30d-high sleeve, but it sacrificed
 too much return and was delay sensitive.
 
-## Selected Full-PIT Result
+## Current Promoted Full-PIT Result
 
-Promoted result after the hold/exit frontier confirmation:
+Active defaults after the same-hour crowding audit and gross cleanup:
 
 ```text
 event: liquidity_migration
 side: reversal (short)
-threshold: top 30% dollar-volume rank migration
+threshold: top 40% dollar-volume rank migration
 filters:
   point-in-time liquidity rank 31-150
   liquidity-rank improvement >= 150
@@ -414,15 +414,19 @@ filters:
   event rank fraction <= 0.90
   coin daily_return_1d >= 0%
   coin daily_return_1d - market_median_return_1d >= +8%
-  market_pct_up_1d <= 0.55 OR coin daily_return_1d >= +20%
+  market_pct_up_1d <= 0.65 OR coin daily_return_1d clears the adaptive 16% +/- 1.5% hot-market band
+  signal-day close location >= 0.45
+  PIT/listing age >= 90 days
+  union_pathology crowding veto
 entry delay: 1 hour after signal close
 hold: 3 days max
 stop: 12% fixed
-take profit: 20% fixed
-gross exposure: 1.25
-capacity: max 6 active symbols
+take profit: 25% fixed
+gross exposure: 1.00
+capacity: max 5 active symbols
 cooldown: 5 days
-stop-pressure throttle: pause new entries after 12 realized stops inside 14 days
+stop-pressure throttle: pause new entries after 7 realized stops inside 10 days
+realized-loss throttle: pause new entries after 6 realized losses inside 5 days
 cost: 3x base round-trip cost
 ```
 
@@ -434,15 +438,15 @@ python -m aggression_carry \
   --config configs/volume_alpha.default.yaml \
   volume-events \
   --event-types liquidity_migration \
-  --thresholds 0.3 \
+  --thresholds 0.4 \
   --hold-days 3 \
   --sides reversal \
   --stop-loss-pcts 0.12 \
-  --take-profit-pcts 0.20 \
+  --take-profit-pcts 0.25 \
   --cost-multipliers 3 \
   --entry-delay-hours 1 \
-  --gross-exposure 1.25 \
-  --max-active-symbols 6 \
+  --gross-exposure 1.0 \
+  --max-active-symbols 5 \
   --cooldown-days 5 \
   --rank-exit-threshold 0.55 \
   --universe-rank-min 31 \
@@ -454,29 +458,39 @@ python -m aggression_carry \
   --liquidity-migration-event-rank-fraction-exclude-max 0 \
   --liquidity-migration-day-return-min 0.0 \
   --liquidity-migration-residual-return-min 0.08 \
-  --liquidity-migration-market-pct-up-max 0.55 \
-  --liquidity-migration-hot-market-day-return-min 0.20 \
-  --stop-pressure-window-days 14 \
-  --stop-pressure-stop-count 12
+  --liquidity-migration-market-pct-up-max 0.65 \
+  --liquidity-migration-hot-market-day-return-min 0.16 \
+  --liquidity-migration-hot-market-day-return-band 0.015 \
+  --liquidity-migration-close-location-min 0.45 \
+  --liquidity-migration-pit-age-days-min 90 \
+  --liquidity-migration-crowding-filter union_pathology \
+  --stop-pressure-window-days 10 \
+  --stop-pressure-stop-count 7 \
+  --realized-loss-pressure-window-days 5 \
+  --realized-loss-pressure-loss-count 6
 ```
 
-Full-PIT result on `2023-05-03` to `2026-05-03`:
+Promoted frontier result on `2023-05-03` to `2026-05-03`:
 
 ```text
-report: data/research_reports/research_20260516_promoted_default_after_patch
-trades: 516
-total return: +1218.79%
-max drawdown: -14.54%
-max no-new-high stretch: 90 days
-worst 90d return: -5.89%
-worst split return: +75.64%
-average split Sharpe-like: 2.67
-train return: +75.64%
-validation return: +254.58%
-OOS return: +111.75%
+report: data/research_reports/frontier_union_crowding_promoted_20260517
+trades: 444
+total return: +2143.28%
+max drawdown: -11.05%
+max no-new-high stretch: 51 days
+worst 90d return: -4.80%
+worst split return: +118.65%
+average split Sharpe-like: 3.72
+train return: +118.65%
+validation return: +258.65%
+OOS return: +186.06%
 default chart: volume_event_best_equity_btc.png with BTC overlay and monthly/growth gridlines
 promotion gate: pass
 ```
+
+The metrics above are a gross-only rescale of the promoted full-PIT ledger to
+the active `1.00` gross exposure. Candidate selection, exits, cooldowns, and
+crowding decisions do not depend on this gross sizing constant.
 
 Funding and execution-realism update from `2026-05-17`:
 

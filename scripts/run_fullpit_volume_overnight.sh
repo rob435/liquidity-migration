@@ -12,7 +12,7 @@ MIN_EXISTING_BARS="${MIN_EXISTING_BARS:-1}"
 RUN_TESTS="${RUN_TESTS:-1}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 RUN_CHAMPION_BACKTEST="${RUN_CHAMPION_BACKTEST:-1}"
-CHAMPION_GROSS_EXPOSURE="${CHAMPION_GROSS_EXPOSURE:-0.97}"
+CHAMPION_GROSS_EXPOSURE="${CHAMPION_GROSS_EXPOSURE:-1.0}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel >/dev/null 2>&1; then
@@ -187,7 +187,7 @@ echo "run_type,max_active_symbols,cooldown_days,entry_delay_hours,rank_exit_thre
 
 if [ "$RUN_CHAMPION_BACKTEST" != "0" ]; then
   section "Run selected full PIT volume event backtest"
-  CHAMPION_REPORT_DIR="$DATA_ROOT/reports/SELECTED_liqmig_union_q40_h3_tp25_g097_$(date -u +%Y%m%dT%H%M%SZ)"
+  CHAMPION_REPORT_DIR="$DATA_ROOT/reports/SELECTED_liqmig_union_q40_h3_tp25_g100_$(date -u +%Y%m%dT%H%M%SZ)"
   python -m aggression_carry \
     --data-root "$DATA_ROOT" \
     --config "$CONFIG_PATH" \

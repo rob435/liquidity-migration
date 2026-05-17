@@ -248,9 +248,9 @@ def test_event_ws_risk_cli_defaults_to_ws_then_rest_demo_path() -> None:
 
 
 def test_event_demo_default_sizing_matches_backtest_weight() -> None:
-    assert target_order_notional_pct_equity(EventDemoCycleConfig(), VolumeEventResearchConfig()) == pytest.approx(0.97 / 5.0)
+    assert target_order_notional_pct_equity(EventDemoCycleConfig(), VolumeEventResearchConfig()) == pytest.approx(1.0 / 5.0)
     assert target_initial_margin_pct_equity(EventDemoCycleConfig(), VolumeEventResearchConfig()) == pytest.approx(
-        0.97 / 5.0 / 2.0
+        1.0 / 5.0 / 2.0
     )
     assert (
         target_order_notional_pct_equity(

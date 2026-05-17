@@ -75,7 +75,7 @@ class VolumeEventResearchConfig:
     start_date: str = ""
     end_date: str = ""
     entry_delay_hours: int = 1
-    gross_exposure: float = 0.97
+    gross_exposure: float = 1.0
     max_active_symbols: int = 5
     cooldown_days: int = 5
     rank_exit_threshold: float = 0.55

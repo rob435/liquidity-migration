@@ -1,6 +1,7 @@
 # Live System Audit - 2026-05-17
 
 Audit timestamp: 2026-05-17T17:00:43Z.
+Sizing cleanup verified on the VPS at 2026-05-17T17:54:33Z.
 
 ## Scope
 
@@ -21,11 +22,12 @@ This was a demo-account audit only. The private client still refuses `demo=False
 
 Latest demo cycle:
 
-- Strategy id: `liqmig_union_q40_h3_tp25_g097_crowd_union`.
+- Strategy id: `liqmig_union_q40_h3_tp25_g100_crowd_union`.
 - Scenario: `liquidity_migration-q40-reversal-h3-s1200-tp2500-c3`.
-- Core config: threshold `0.40`, hold `3d`, stop `12%`, take profit `25%`, gross exposure `0.97`, max active symbols `5`.
+- Core config: threshold `0.40`, hold `3d`, stop `12%`, take profit `25%`, gross exposure `1.00`, max active symbols `5`.
 - Crowding filter: `union_pathology`.
 - Current cycle: `symbols=140`, `features=6146`, entries `0/0`, exits `0/0`, open trades `0`.
+- Runtime sizing: per-entry notional `20.00%` of equity, target gross `100.00%`, target initial margin `50.00%` at 2x.
 
 Latest websocket risk cycle:
 

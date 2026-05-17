@@ -1,7 +1,7 @@
 # Graph Report - MODEL050426  (2026-05-17)
 
 ## Corpus Check
-- 33 files · ~73,829 words
+- 33 files · ~74,611 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
@@ -34,16 +34,16 @@
 10. `EventDemoCycleConfig` - 49 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `test_plan_stop_repairs_detects_missing_exchange_stop()` --calls--> `plan_stop_repairs()`  [INFERRED]
-  tests/test_aggression_carry_event_demo.py → aggression_carry/event_demo.py
-- `test_ledger_position_snapshot_marks_short_pnl_from_current_price()` --calls--> `build_ledger_position_pnl_snapshot()`  [INFERRED]
-  tests/test_aggression_carry_event_demo.py → aggression_carry/event_demo.py
-- `test_trade_parser_handles_websocket_aliases_and_string_booleans()` --calls--> `trades_to_frame()`  [INFERRED]
-  tests/test_aggression_carry_ingestion.py → aggression_carry/ingestion.py
-- `test_trade_klines_1h_aggregates_and_densifies_utc_day()` --calls--> `densify_trade_klines_1h()`  [INFERRED]
-  tests/test_aggression_carry_ingestion.py → aggression_carry/ingestion.py
-- `FakeRiskClient` --uses--> `ResearchConfig`  [INFERRED]
-  tests/test_aggression_carry_event_demo.py → aggression_carry/config.py
+- `plan_stop_repairs()` --calls--> `test_plan_stop_repairs_detects_missing_exchange_stop()`  [INFERRED]
+  aggression_carry/event_demo.py → tests/test_aggression_carry_event_demo.py
+- `build_ledger_position_pnl_snapshot()` --calls--> `test_ledger_position_snapshot_marks_short_pnl_from_current_price()`  [INFERRED]
+  aggression_carry/event_demo.py → tests/test_aggression_carry_event_demo.py
+- `trades_to_frame()` --calls--> `test_trade_parser_handles_websocket_aliases_and_string_booleans()`  [INFERRED]
+  aggression_carry/ingestion.py → tests/test_aggression_carry_ingestion.py
+- `densify_trade_klines_1h()` --calls--> `test_trade_klines_1h_aggregates_and_densifies_utc_day()`  [INFERRED]
+  aggression_carry/ingestion.py → tests/test_aggression_carry_ingestion.py
+- `ResearchConfig` --uses--> `FakeRiskClient`  [INFERRED]
+  aggression_carry/config.py → tests/test_aggression_carry_event_demo.py
 
 ## Communities
 

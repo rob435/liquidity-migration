@@ -29,7 +29,7 @@ python -m aggression_carry \
 ```text
 event: liquidity_migration
 side: reversal / short
-threshold: top 30% dollar-volume rank migration
+threshold: top 40% dollar-volume rank migration
 PIT liquidity rank: 31-150
 excluded: stable/peg perps only, including failed peg remnants such as USTCUSDT
 rank improvement: >= 150 versus prior 7d liquidity rank
@@ -38,15 +38,19 @@ event rank fraction cap: <= 0.90
 event rank middle-band skip: disabled
 coin day-return gate: daily_return_1d >= 0%
 idiosyncratic move gate: daily_return_1d - market_median_return_1d >= +8%
-regime gate: market_pct_up_1d <= 0.55 OR coin daily_return_1d >= +20%
+regime gate: market_pct_up_1d <= 0.65 OR coin daily_return_1d clears the adaptive 16% +/- 1.5% hot-market band
+signal close-location gate: close location >= 0.45
+PIT/listing age gate: >= 90 days
+crowding veto: union_pathology same-entry-hour pathology filter
 entry delay: 1 hour after daily signal close
 max hold: 3 days
 stop: 12% fixed
-take profit: 20% fixed
-gross exposure: 1.25
-max active symbols: 6
+take profit: 25% fixed
+gross exposure: 1.00
+max active symbols: 5
 symbol cooldown: 5 days
-stop-pressure throttle: pause after 12 realized stops inside 14 days
+stop-pressure throttle: pause after 7 realized stops inside 10 days
+realized-loss throttle: pause after 6 realized losses inside 5 days
 cost multiplier: 3x base round-trip cost
 ```
 
@@ -54,7 +58,32 @@ The strategy is short-only because the best full-PIT evidence is in reversal aft
 
 ## Reference Evidence
 
-Promoted full-PIT report after the hold/exit frontier confirmation:
+Current promoted frontier after the same-hour crowding audit and gross cleanup:
+
+```text
+report: data/research_reports/frontier_union_crowding_promoted_20260517
+event: liquidity_migration
+side: reversal / short
+threshold: top 40% dollar-volume rank migration
+gross exposure: 1.00
+max active symbols: 5
+trades: 444
+total return: +2143.28%
+max drawdown: -11.05%
+max no-new-high stretch: 51 days
+worst 90d return: -4.80%
+worst split return: +118.65%
+average split Sharpe-like: 3.72
+OOS return: +186.06%
+promotion gate: pass
+```
+
+Those frontier metrics are a gross-only rescale of the promoted full-PIT
+ledger to the active `1.00` gross exposure. The event set, exits, cooldowns,
+and crowding decisions are unchanged by this cleanup.
+
+Superseded baseline full-PIT report after the earlier hold/exit frontier
+confirmation:
 
 ```text
 data/research_reports/research_20260516_promoted_default_after_patch
@@ -118,7 +147,7 @@ The runner loops every `INTERVAL_SECONDS=300` by default. Each cycle:
 3. Rebuilds recent 1h volume features from a 45-day lookback, using the forward-demo kline cache so normal cycles fetch only missing/new 1h bars instead of the whole window.
 4. Exits existing demo positions first on fixed-stop/take-profit reconciliation, event decay, rank exit, or 3-day max hold.
 5. Enters accepted liquidity-migration events after the 1-hour signal delay, subject to max-active, cooldown, stop-pressure, positive-day-return, residual-return, stale-entry, pending-order, live-open-order, live-position, and wallet-equity gates. Stale entries are skipped after 15 minutes by default so demo fills stay close to the backtest entry timestamp. In submit mode, the runner snapshots current Bybit positions, open orders, and wallet equity before entries; a live exchange position or non-reduce-only open order for the candidate symbol blocks a new entry, and a position/open-order/wallet snapshot error blocks all new entries for that cycle. Stale unconfirmed entry rows are normally not polled forever, but if a current Bybit position or active open order proves the stale row may still represent live exposure, fill reconciliation keeps polling it and reconstructs the missing trade ledger if Bybit reports a fill. Position and wallet snapshot failures during open-trade handling are reported and keep the cycle alive instead of crashing before exits, reports, or the entry guard can run.
-6. Sizes each accepted coin from the same weight used by the backtest: `gross_exposure / max_active_symbols`, currently `1.25 / 6 = 20.83%` of current Bybit demo USDT equity. If wallet equity cannot be read in submit mode, the cycle uses fallback equity only for telemetry and does not submit new entries. `--max-order-notional-pct-equity` is only an explicit override. The continuous runner defaults entry leverage to 2x so the 125% gross target can be submitted without changing notional sizing.
+6. Sizes each accepted coin from the same weight used by the backtest: `gross_exposure / max_active_symbols`, currently `1.00 / 5 = 20.00%` of current Bybit demo USDT equity. If wallet equity cannot be read in submit mode, the cycle uses fallback equity only for telemetry and does not submit new entries. `--max-order-notional-pct-equity` is only an explicit override. The continuous runner defaults entry leverage to 2x so the 100% gross target can be submitted without changing notional sizing.
 7. Attaches exchange-native stop/take-profit to entry orders, then recomputes the ledger stop/take-profit from confirmed fill price. If the confirmed fill moves the rounded protection levels, the runner immediately updates Bybit trading-stop state and records the update status.
 8. Sends Telegram only for material events when enabled: entries, exits, failed entry stop updates, position reconciliation, or position-report errors. Quiet cycles still write local reports but do not notify.
 9. Writes expected/submitted order state into `event_demo_orders`, trade state into `event_demo_trades`, cycle telemetry into `event_demo_cycles`, and Markdown/JSON reports under `reports/event-demo`. Stale unconfirmed entry rows are terminalized only when successful Bybit position and open-order snapshots prove the symbol has no live position and no active entry order, preventing false pending ledger state without erasing possible live exposure.

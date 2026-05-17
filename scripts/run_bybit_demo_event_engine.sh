@@ -47,7 +47,7 @@ fi
 
 echo "event demo engine starting"
 echo "repo=$REPO_ROOT"
-echo "strategy=liqmig_union_q40_h3_tp25_g097_crowd_union"
+echo "strategy=liqmig_union_q40_h3_tp25_g100_crowd_union"
 echo "data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS submit_orders=${SUBMIT_ORDERS:-0}"
 
 mkdir -p "$DATA_ROOT/.locks"

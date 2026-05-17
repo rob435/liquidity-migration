@@ -108,7 +108,7 @@ def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Pa
     assert args.stop_fill_mode == "stop"
     assert args.take_profit_pcts == "0.25"
     assert args.cost_multipliers == "3.0"
-    assert args.gross_exposure == 0.97
+    assert args.gross_exposure == 1.0
     assert args.entry_delay_hours == 1
     assert args.max_active_symbols == 5
     assert args.cooldown_days == 5
