@@ -23,10 +23,10 @@ def test_event_entry_runner_default_cadence_is_rate_limit_safe() -> None:
     assert 'INTERVAL_SECONDS="${INTERVAL_SECONDS:-300}"' in text
 
 
-def test_systemd_entry_runner_cadence_matches_runtime_default() -> None:
+def test_systemd_entry_runner_uses_vps_cadence() -> None:
     repo = Path(__file__).resolve().parents[1]
     text = (repo / "deploy" / "systemd" / "model050426-bybit-demo.service").read_text(
         encoding="utf-8"
     )
 
-    assert "Environment=INTERVAL_SECONDS=300" in text
+    assert "Environment=INTERVAL_SECONDS=60" in text

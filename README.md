@@ -110,7 +110,8 @@ python -m aggression_carry \
   event-demo-cycle
 ```
 
-Continuous demo runner, checking every 5 minutes by default:
+Continuous demo runner, checking every 5 minutes by script default. The VPS
+systemd entry service intentionally overrides this to `INTERVAL_SECONDS=60`:
 
 ```bash
 TELEGRAM_ENABLED=1 \

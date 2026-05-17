@@ -84,7 +84,9 @@ live positions after proof: 0
 open orders after proof: 0
 ```
 
-The entry loop should run at `INTERVAL_SECONDS=300`. Fast exits are handled by the separate websocket risk service, so running the entry scanner every minute only increases Bybit API pressure without improving stop response.
+The VPS entry service intentionally runs at `INTERVAL_SECONDS=60`. Fast exits
+are still handled by the separate websocket risk service; the one-minute entry
+cadence is for quicker stale-order, report, and candidate-state refresh.
 
 ## Known Limits
 

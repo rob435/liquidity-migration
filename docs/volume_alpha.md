@@ -286,13 +286,14 @@ executor. The continuous runner is:
 SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 TELEGRAM_ENABLED=1 bash scripts/run_bybit_demo_event_engine.sh
 ```
 
-The runner checks every 5 minutes by default, sizes each accepted coin from
-the backtest weight (`gross_exposure / max_active_symbols`, currently 20.00% of
-current Bybit demo USDT equity), exits before entries, sends Telegram only for
-material events when enabled, and records `event_demo_trades`,
-`event_demo_orders`, and `event_demo_cycles` ledgers. It is a current-universe
-forward tester, so it is allowed for demo evidence and operations, not for
-historical promotion evidence.
+The runner checks every 5 minutes by script default; the VPS systemd entry
+service intentionally overrides this to `INTERVAL_SECONDS=60`. It sizes each
+accepted coin from the backtest weight (`gross_exposure / max_active_symbols`,
+currently 20.00% of current Bybit demo USDT equity), exits before entries, sends
+Telegram only for material events when enabled, and records
+`event_demo_trades`, `event_demo_orders`, and `event_demo_cycles` ledgers. It is
+a current-universe forward tester, so it is allowed for demo evidence and
+operations, not for historical promotion evidence.
 Before submitting entries, the runner snapshots current Bybit positions, open
 orders, and wallet equity. It blocks candidates whose symbols already have live
 exchange exposure or non-reduce-only open orders. In submit mode, a
