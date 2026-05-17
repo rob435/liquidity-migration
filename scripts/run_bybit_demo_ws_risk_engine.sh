@@ -17,6 +17,7 @@ HEARTBEAT_SECONDS="${HEARTBEAT_SECONDS:-10}"
 STOP_TOLERANCE_BPS="${STOP_TOLERANCE_BPS:-1}"
 FAST_EXECUTION_STREAM="${FAST_EXECUTION_STREAM:-0}"
 PENDING_EXIT_GUARD_SECONDS="${PENDING_EXIT_GUARD_SECONDS:-120}"
+EXIT_UNTRACKED_POSITIONS="${EXIT_UNTRACKED_POSITIONS:-1}"
 
 telegram_args=()
 if [[ "${TELEGRAM_ENABLED:-1}" == "1" ]]; then
@@ -51,6 +52,11 @@ if [[ "$FAST_EXECUTION_STREAM" != "1" ]]; then
     execution_stream_args+=(--no-fast-execution-stream)
 fi
 
+untracked_args=()
+if [[ "$EXIT_UNTRACKED_POSITIONS" != "1" ]]; then
+    untracked_args+=(--no-exit-untracked-positions)
+fi
+
 mkdir -p "$DATA_ROOT/.locks"
 rm -f "$DATA_ROOT/.locks/event_ws_risk_cycle.lock"
 
@@ -70,4 +76,5 @@ echo "data_root=$DATA_ROOT submit_orders=${SUBMIT_ORDERS:-0} order_submit_mode=$
     "${telegram_args[@]}" \
     "${order_args[@]}" \
     "${fallback_args[@]}" \
-    "${execution_stream_args[@]}"
+    "${execution_stream_args[@]}" \
+    "${untracked_args[@]}"

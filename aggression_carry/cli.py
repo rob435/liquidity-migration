@@ -637,6 +637,9 @@ def build_parser() -> argparse.ArgumentParser:
     event_ws_risk.set_defaults(fast_execution_stream=ws_risk_defaults.fast_execution_stream)
     event_ws_risk.add_argument("--stop-tolerance-bps", type=float, default=ws_risk_defaults.stop_tolerance_bps)
     event_ws_risk.add_argument("--pending-exit-guard-seconds", type=float, default=ws_risk_defaults.pending_exit_guard_seconds)
+    event_ws_risk.add_argument("--exit-untracked-positions", dest="exit_untracked_positions", action="store_true")
+    event_ws_risk.add_argument("--no-exit-untracked-positions", dest="exit_untracked_positions", action="store_false")
+    event_ws_risk.set_defaults(exit_untracked_positions=ws_risk_defaults.exit_untracked_positions)
     event_ws_risk.add_argument("--data-name", default=ws_risk_defaults.data_name)
 
     return parser
@@ -873,6 +876,7 @@ def main(argv: list[str] | None = None) -> int:
             fast_execution_stream=args.fast_execution_stream,
             stop_tolerance_bps=args.stop_tolerance_bps,
             pending_exit_guard_seconds=args.pending_exit_guard_seconds,
+            exit_untracked_positions=args.exit_untracked_positions,
             data_name=args.data_name,
         )
         payload = run_event_ws_risk(data_root, config=config, risk_config=risk_config)

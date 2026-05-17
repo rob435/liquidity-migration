@@ -178,6 +178,7 @@ def test_ws_risk_ws_order_closes_from_execution_stream(tmp_path: Path) -> None:
             repair_stops=False,
             order_submit_mode="ws",
             rest_fallback=False,
+            exit_untracked_positions=False,
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
         ),
@@ -297,6 +298,156 @@ def test_ws_risk_bootstrap_loads_pending_exit_order_after_restart(tmp_path: Path
     assert engine.state.exits[0]["submit_mode"] == "submitted"
     assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
     assert stored_orders.filter(pl.col("order_link_id") == "agc-ex-pending").select("status").item() == "filled"
+
+
+def test_ws_risk_flattens_untracked_position_on_bootstrap(tmp_path: Path) -> None:
+    private_client = FakePrivateClient()
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    assert private_client.orders[0]["reduceOnly"] is True
+    assert private_client.orders[0]["side"] == "Buy"
+    assert stored_orders.select("exit_reason").item() == "untracked_position"
+    assert stored_orders.select("status").item() == "filled"
+    assert "AAAUSDT" not in engine.state.positions_by_symbol
+
+
+def test_ws_risk_untracked_exit_blocks_duplicate_until_fill(tmp_path: Path) -> None:
+    private_client = FakePrivateClient(confirm_fills=False)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    engine.on_position_message({"data": private_client.positions[0]})
+
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    assert len(private_client.orders) == 1
+    assert stored_orders.select("status").item() == "submitted_unconfirmed"
+    assert "AAAUSDT" in engine.state.submitted_symbols
+
+
+def test_ws_risk_untracked_exit_retries_after_pending_guard(tmp_path: Path) -> None:
+    private_client = FakePrivateClient(confirm_fills=False)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            pending_exit_guard_seconds=1.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    engine.state.submitted_symbol_ts_ms["AAAUSDT"] -= 2_000
+    engine.exit_untracked_positions()
+
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    assert len(private_client.orders) == 2
+    assert stored_orders.height == 2
+    assert "AAAUSDT" in engine.state.submitted_symbols
+
+
+def test_ws_risk_reconciles_untracked_exit_when_position_is_flat(tmp_path: Path) -> None:
+    private_client = FakePrivateClient(confirm_fills=False)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    private_client.positions = []
+    engine.rest_reconcile()
+
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    assert stored_orders.select("status").item() == "filled"
+    assert float(stored_orders.select("filled_qty").item()) == 1.0
+    assert "AAAUSDT" not in engine.state.submitted_symbols
+
+
+def test_ws_risk_telegram_material_events_are_deduped(tmp_path: Path, monkeypatch) -> None:
+    sent: list[str] = []
+
+    def fake_send(text: str, *, enabled: bool) -> bool:
+        sent.append(text)
+        return enabled
+
+    monkeypatch.setattr("aggression_carry.event_demo.send_telegram_message", fake_send)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(telegram=True, heartbeat_seconds=0.0),
+        private_client=FakePrivateClient(),
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+    engine.state.orders.append(
+        {
+            "order_link_id": "agc-ux-AAA-1",
+            "symbol": "AAAUSDT",
+            "side": "Buy",
+            "status": "filled",
+            "submit_mode": "submitted",
+            "exit_reason": "untracked_position",
+        }
+    )
+
+    first = engine.write_report(reason="untracked_exit_submitted")
+    second = engine.write_report(reason="untracked_exit_submitted")
+    heartbeat = engine.write_report(reason="heartbeat")
+
+    assert first["cycle"]["telegram_sent"] is True
+    assert second["cycle"]["telegram_sent"] is False
+    assert second["cycle"]["telegram_error"] == "duplicate_material_event"
+    assert heartbeat["cycle"]["telegram_error"] == "quiet_no_material_event"
+    assert len(sent) == 1
 
 
 def test_ws_risk_stale_stream_forces_rest_reconcile(tmp_path: Path) -> None:

@@ -2635,6 +2635,8 @@ def _telegram_notification_reason(payload: dict[str, Any]) -> str:
         return "stop_repair_planned"
     if payload.get("untracked_positions"):
         return "untracked_position"
+    if cycle.get("reason") == "untracked_exit_submitted":
+        return "untracked_position_exit"
     if int(cycle.get("entries_executed") or 0) > 0:
         return "entry_executed"
     if int(cycle.get("exits_executed") or 0) > 0:
