@@ -118,6 +118,11 @@ Objective: harden the Bybit demo system as if it is live capital, with emphasis 
   - In `ws_then_rest` mode with REST fallback enabled, the watchdog immediately submits one REST reduce-only fallback from the rejected WS order's ledger context.
   - Confirmed REST risk exits now write `status=filled` order rows, so closed trades are not paired with merely `submitted` exit orders.
 
+- `current slice: recover stale live pending entries`
+  - Stale unconfirmed entry rows are still not polled forever when there is no exchange evidence.
+  - If a stale pending entry has a live Bybit position or active open order for that symbol, fill reconciliation keeps polling it.
+  - When Bybit later reports the fill, the event loop and websocket risk watchdog rebuild the missing open trade ledger before stale cleanup or untracked-position handling runs.
+
 ## Verification
 
 Local:
@@ -129,11 +134,14 @@ Local:
 - Focused stale pending-entry terminalization tests passed after the flat-entry cleanup.
 - Focused websocket-risk exit-before-stop-repair tests passed after the risk-priority cleanup.
 - Focused failed websocket order-ack fallback tests passed after the rejected-ack recovery change.
+- Focused stale-live pending-entry reconciliation tests passed after the ledger recovery change.
 - `tests/test_aggression_carry_event_demo.py tests/test_aggression_carry_ws_risk.py`: 90 passed after the flat-entry cleanup.
 - `tests/test_aggression_carry_ws_risk.py`: 40 passed after the risk-priority cleanup.
 - `pytest -q`: 204 passed after the risk-priority cleanup.
 - `tests/test_aggression_carry_event_demo.py tests/test_aggression_carry_ws_risk.py`: 95 passed after the failed-ack recovery change.
 - `pytest -q`: 207 passed after the failed-ack recovery change.
+- `tests/test_aggression_carry_event_demo.py tests/test_aggression_carry_ws_risk.py`: 98 passed after the stale-live pending-entry recovery change.
+- `pytest -q`: 210 passed after the stale-live pending-entry recovery change.
 
 VPS:
 
@@ -144,6 +152,8 @@ VPS:
 - Focused websocket-risk file: 36 passed after deploying the snapshot-failure guard.
 - Focused event-demo + websocket-risk files: 95 passed after deploying the failed-ack recovery change.
 - `pytest -q`: 207 passed after deploying the failed-ack recovery change.
+- Focused event-demo + websocket-risk files: 98 passed after deploying the stale-live pending-entry recovery change.
+- `pytest -q`: 210 passed after deploying the stale-live pending-entry recovery change.
 - Services after restart:
   - `model050426-bybit-demo.service`: active/running, `INTERVAL_SECONDS=300`.
   - `model050426-bybit-risk.service`: active/running.
@@ -152,6 +162,13 @@ VPS:
   - `model050426-bybit-demo.service`: active/running.
   - `model050426-bybit-risk.service`: active/running.
   - Direct live state: `active_positions=0`, `open_orders=0`, `ledger_open_trades=0`, `ledger_pending_orders=0`, latest websocket-risk reason `startup`, `risk_positions=0`, `risk_ledger=0`, `risk_untracked=0`, `risk_live_exit_open_orders=0`, `risk_stop_repairs=0`, `risk_error=""`, latest demo mode `submit`, `demo_entries=0`, and `demo_error=""`.
+- Services after stale-live pending-entry recovery restart:
+  - `model050426-bybit-demo.service`: active/running.
+  - `model050426-bybit-risk.service`: active/running.
+  - Direct live state: `active_positions=0`, `open_orders=0`, `ledger_open_trades=0`, `ledger_pending_orders=0`, latest websocket-risk reason `startup`, `risk_positions=0`, `risk_ledger=0`, `risk_untracked=0`, `risk_live_exit_open_orders=0`, `risk_stop_repairs=0`, `risk_error=""`, latest demo mode `submit`, `demo_entries=0`, `demo_pending_entry_fills_reconciled=0`, `demo_stale_pending_entry_orders_terminalized=0`, and `demo_error=""`.
+- Stale-live pending-entry recovery drill:
+  - An isolated VPS event-demo cycle with an old `agc-en-*` pending entry row and a live Bybit position for the same symbol polled trade history, marked the order `filled`, rebuilt the open trade ledger with `qty=1`, submitted `0` new orders, recorded `pending_entry_fills_reconciled=1`, and did not terminalize the row as stale.
+  - An isolated VPS websocket-risk bootstrap with the same stale live pending entry also marked the order `filled`, rebuilt one open trade, submitted `0` untracked flatten orders, and cleared `pending_entry_symbols`.
 - Failed websocket order-ack drill:
   - In isolated VPS `ws_then_rest` mode, a rejected async WebSocket Trade ack marked the original WS row `rejected`, submitted exactly one REST reduce-only fallback, recorded the fallback order `filled`, closed the trade with `exit_reason=stop_loss`, preserved the original trigger timestamp, and cleared the pending-submission guard.
   - In isolated VPS pure `ws` mode without REST fallback, the same rejected ack marked the WS row `rejected`, submitted `0` REST orders, left the trade open, and cleared the pending-submission guard for later recovery.

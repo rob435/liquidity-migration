@@ -871,6 +871,39 @@ def test_ws_risk_reconciles_pending_entry_fill_before_untracked_guard(tmp_path: 
     assert engine.state.pending_entry_symbols == set()
 
 
+def test_ws_risk_reconciles_stale_pending_entry_when_position_live(tmp_path: Path) -> None:
+    _write_pending_entry_order(tmp_path, status="submitted_unconfirmed", ts_ms=1)
+    private_client = FakePrivateClient(confirm_fills=True)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    trade = stored.filter(pl.col("trade_id") == "t-entry").to_dicts()[0]
+    assert private_client.orders == []
+    assert trade["status"] == "open"
+    assert trade["symbol"] == "AAAUSDT"
+    assert trade["qty"] == "1"
+    assert stored_orders.filter(pl.col("order_link_id") == "agc-en-pending").select("status").item() == "filled"
+    assert engine.state.open_trades.height == 1
+    assert engine.state.pending_entry_symbols == set()
+
+
 def test_ws_risk_stale_pending_entry_no_longer_blocks_untracked_flatten(tmp_path: Path) -> None:
     _write_pending_entry_order(tmp_path, status="submitted_unconfirmed", ts_ms=1)
     private_client = FakePrivateClient(confirm_fills=False)

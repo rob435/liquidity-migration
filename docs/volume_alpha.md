@@ -309,6 +309,10 @@ when rounding moves the protection levels.
 Stale unconfirmed entry rows are terminalized only after successful Bybit
 position and open-order snapshots prove the symbol is flat and has no active
 entry order. Live exposure or a snapshot failure keeps the pending row intact.
+When live exposure or an active open order exists for an old unconfirmed entry,
+fill reconciliation keeps polling that stale row and rebuilds the missing trade
+ledger once Bybit trade history reports the fill. Stale rows without live
+exchange evidence are still skipped instead of being polled forever.
 
 Fast exit enforcement is handled by the separate exit-only risk watchdog:
 
@@ -352,7 +356,9 @@ position and open-order snapshots show no live position and no live AGC exit
 order for the symbol, so old local rows do not keep reporting false pending
 exposure after the exchange is already flat.
 The same flat/no-open-order evidence terminalizes stale pending entry rows;
-stale entries with a live position or active entry order are left untouched.
+stale entries with a live position or active entry order are reconciled first,
+so delayed fill-history recovery can rebuild a missing trade ledger before the
+watchdog treats the position as untracked.
 Live AGC reduce-only exit open orders on Bybit are also treated as active exit
 submissions, covering crashes that placed an exit but lost the local order row.
 Manual/native reduce-only protection orders do not suppress emergency exits.

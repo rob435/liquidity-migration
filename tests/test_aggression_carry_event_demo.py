@@ -1827,6 +1827,57 @@ def test_stale_pending_order_fill_is_not_polled_forever() -> None:
     assert client.trade_history_calls == []
 
 
+def test_stale_pending_order_fill_reconciles_when_live_position_exists() -> None:
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "agc-en-stale-live",
+                "ts_ms": 1_700_000_000_000,
+                "trade_id": "t-live",
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "order_type": "Market",
+                "qty": "1",
+                "reduce_only": False,
+                "order_id": "order-live",
+                "submit_mode": "submitted",
+                "avg_price": 100.0,
+                "notional_usdt": 0.0,
+                "target_notional_pct_equity": 0.2,
+                "entry_leverage": 2.0,
+                "initial_margin_usdt": 0.0,
+                "status": "submitted_unconfirmed",
+                "trade_side": "short",
+                "signal_ts_ms": 1_700_000_000_000,
+                "equity_usdt": 10_000.0,
+                "tick_size": 0.1,
+                "qty_step": 0.1,
+                "stop_price": 112.0,
+                "take_profit_price": 80.0,
+                "target_qty": "1",
+                "filled_qty": "",
+            }
+        ]
+    )
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-en-",))
+
+    trades, order_updates = _reconcile_pending_order_fills(
+        orders,
+        pl.DataFrame(),
+        trading_client=client,
+        demo=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        now_ms=1_700_000_000_000 + 16 * 60_000,
+        live_position_symbols={"AAAUSDT"},
+    )
+
+    assert client.trade_history_calls == ["agc-en-stale-live"]
+    assert trades[0]["status"] == "open"
+    assert trades[0]["trade_id"] == "t-live"
+    assert trades[0]["qty"] == "1"
+    assert order_updates[0]["status"] == "filled"
+    assert order_updates[0]["filled_qty"] == "1"
+
+
 def test_stale_pending_entry_terminalizes_only_when_exchange_flat() -> None:
     now_ms = 1_700_000_000_000
     orders = pl.DataFrame(
@@ -1946,6 +1997,94 @@ def test_event_demo_cycle_terminalizes_stale_pending_entry_when_exchange_flat(
     assert client.trade_history_calls == []
     assert orders.filter(pl.col("order_link_id") == "agc-en-stale-flat").select("status").item() == "expired_unconfirmed"
     assert payload["cycle"]["stale_pending_entry_orders_terminalized"] == 1
+
+
+def test_event_demo_cycle_reconciles_stale_pending_entry_when_position_live(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_ms = 1_700_000_060_000
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "order_link_id": "agc-en-stale-live",
+                    "ts_ms": now_ms - PENDING_ORDER_GUARD_MS - 1,
+                    "trade_id": "t-live",
+                    "symbol": "AAAUSDT",
+                    "side": "Sell",
+                    "order_type": "Market",
+                    "qty": "1",
+                    "reduce_only": False,
+                    "order_id": "order-live",
+                    "submit_mode": "submitted",
+                    "avg_price": 100.0,
+                    "notional_usdt": 0.0,
+                    "target_notional_pct_equity": 0.2,
+                    "entry_leverage": 2.0,
+                    "initial_margin_usdt": 0.0,
+                    "status": "submitted_unconfirmed",
+                    "trade_side": "short",
+                    "signal_ts_ms": now_ms - MS_PER_HOUR,
+                    "equity_usdt": 10_000.0,
+                    "tick_size": 0.1,
+                    "qty_step": 0.1,
+                    "stop_price": 112.0,
+                    "take_profit_price": 80.0,
+                    "target_qty": "1",
+                    "filled_qty": "",
+                }
+            ]
+        ),
+        tmp_path,
+        "event_demo_orders",
+        partition_by=(),
+    )
+    candidate = {
+        "trade_id": "unused",
+        "symbol": "AAAUSDT",
+        "side": "short",
+        "signal_ts_ms": now_ms - MS_PER_HOUR,
+        "stop_loss_pct": 0.12,
+        "take_profit_pct": 0.20,
+    }
+    _patch_minimal_event_cycle(monkeypatch, candidate)
+    monkeypatch.setattr("aggression_carry.event_demo.select_demo_entry_candidates", lambda *args, **kwargs: ([], {}))
+    client = FakeRiskClient(
+        fill_market_orders=True,
+        fill_order_prefixes=("agc-en-",),
+        positions=[
+            {
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "size": "1",
+                "avgPrice": "100.5",
+                "markPrice": "100.5",
+                "positionValue": "100.5",
+                "unrealisedPnl": "0",
+            }
+        ],
+    )
+
+    payload = run_event_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        market_client=MinimalEventMarket(),
+        private_client=client,
+        now_ms=now_ms,
+    )
+
+    trades = read_dataset(tmp_path, "event_demo_trades")
+    orders = read_dataset(tmp_path, "event_demo_orders")
+    trade = trades.filter(pl.col("trade_id") == "t-live").to_dicts()[0]
+    assert client.trade_history_calls == ["agc-en-stale-live"]
+    assert client.orders == []
+    assert trade["status"] == "open"
+    assert trade["qty"] == "1"
+    assert orders.filter(pl.col("order_link_id") == "agc-en-stale-live").select("status").item() == "filled"
+    assert payload["cycle"]["pending_entry_fills_reconciled"] == 1
+    assert payload["cycle"]["stale_pending_entry_orders_terminalized"] == 0
 
 
 def test_pending_exit_fill_reconciles_to_closed_trade() -> None:

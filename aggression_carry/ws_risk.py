@@ -150,16 +150,16 @@ class EventWebSocketRiskEngine:
         self.state.all_trades = read_dataset(self.root, "event_demo_trades")
         self.state.open_trades = _open_trades(self.state.all_trades)
         orders = read_dataset(self.root, "event_demo_orders")
-        self.reconcile_pending_order_fills(orders)
-        orders = read_dataset(self.root, "event_demo_orders")
-        self.load_pending_entry_orders(orders)
-        self.load_pending_exit_orders(orders)
         raw_positions, error = _safe_raw_positions(self.private_client, settle_coin=self.risk.settle_coin)
         if error:
             self.state.errors.append(error)
         self.state.positions_by_symbol = _active_position_by_symbol(raw_positions)
         self.state.price_by_symbol.update(_price_lookup_from_positions(self.state.positions_by_symbol))
         open_orders_ok = self.refresh_live_exit_order_symbols()
+        self.reconcile_pending_order_fills(orders)
+        orders = read_dataset(self.root, "event_demo_orders")
+        self.load_pending_entry_orders(orders)
+        self.load_pending_exit_orders(orders)
         if not error and open_orders_ok:
             self.reconcile_flat_pending_exit_orders(orders)
             orders = read_dataset(self.root, "event_demo_orders")
@@ -704,11 +704,12 @@ class EventWebSocketRiskEngine:
         self.state.all_trades = read_dataset(self.root, "event_demo_trades")
         self.state.open_trades = _open_trades(self.state.all_trades)
         orders = read_dataset(self.root, "event_demo_orders")
+        open_orders_ok = self.refresh_live_exit_order_symbols()
         self.reconcile_pending_order_fills(orders)
         orders = read_dataset(self.root, "event_demo_orders")
         self.load_pending_entry_orders(orders)
         self.load_pending_exit_orders(orders)
-        if self.refresh_live_exit_order_symbols():
+        if open_orders_ok:
             self.reconcile_flat_pending_exit_orders(orders)
             orders = read_dataset(self.root, "event_demo_orders")
             self.terminalize_stale_pending_entry_orders(orders)
@@ -966,6 +967,8 @@ class EventWebSocketRiskEngine:
                 confirm_demo_orders=self.risk.confirm_demo_orders,
             ),
             now_ms=_now_ms(),
+            live_position_symbols=set(self.state.positions_by_symbol),
+            live_open_order_symbols=self.state.live_entry_order_symbols | self.state.live_exit_order_symbols,
         )
         if trade_rows:
             self.state.all_trades = _upsert_rows(self.state.all_trades, trade_rows, key="trade_id")

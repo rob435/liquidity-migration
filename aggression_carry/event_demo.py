@@ -147,12 +147,20 @@ def run_event_demo_cycle(
         else:
             equity_usdt = demo.fallback_equity_usdt
 
+        raw_open_orders, bybit_open_order_error = _safe_open_orders(trading_client, settle_coin=demo.settle_coin)
+        live_exit_order_symbols = _live_open_order_symbols(raw_open_orders, reduce_only=True)
+        live_entry_order_symbols = _live_open_order_symbols(raw_open_orders, reduce_only=False)
+        raw_positions, bybit_position_error = _safe_raw_positions(trading_client, settle_coin=demo.settle_coin)
+        live_position_symbols = set(_active_position_by_symbol(raw_positions))
+
         pending_fill_trades, pending_fill_orders = _reconcile_pending_order_fills(
             all_orders,
             all_trades,
             trading_client=trading_client,
             demo=demo,
             now_ms=cycle_now_ms,
+            live_position_symbols=live_position_symbols,
+            live_open_order_symbols=live_entry_order_symbols | live_exit_order_symbols,
         )
         pending_order_fills_reconciled = sum(1 for row in pending_fill_orders if _float(row.get("filled_qty")) > 0.0)
         pending_order_fill_errors = sum(
@@ -170,14 +178,12 @@ def run_event_demo_cycle(
             trading_client=trading_client,
             demo=demo,
             now_ms=cycle_now_ms,
+            raw_positions=raw_positions,
+            position_error=bybit_position_error,
         )
         if reconcile_rows:
             all_trades = _upsert_rows(all_trades, reconcile_rows, key="trade_id")
             _write_trade_rows(root, pl.DataFrame(reconcile_rows, infer_schema_length=None))
-
-        raw_open_orders, bybit_open_order_error = _safe_open_orders(trading_client, settle_coin=demo.settle_coin)
-        live_exit_order_symbols = _live_open_order_symbols(raw_open_orders, reduce_only=True)
-        live_entry_order_symbols = _live_open_order_symbols(raw_open_orders, reduce_only=False)
 
         exits = plan_demo_exits(
             reconciled_trades,
@@ -207,9 +213,7 @@ def run_event_demo_cycle(
                 _write_order_rows(root, pl.DataFrame(exit_order_rows, infer_schema_length=None))
 
         refreshed_open = _open_trades(all_trades)
-        raw_positions, bybit_position_error = _safe_raw_positions(trading_client, settle_coin=demo.settle_coin)
         position_snapshot_error = _combine_errors(reconcile_position_error, bybit_position_error)
-        live_position_symbols = set(_active_position_by_symbol(raw_positions))
         stale_entry_order_rows: list[dict[str, Any]] = []
         if demo.submit_orders and not position_snapshot_error and not bybit_open_order_error:
             stale_entry_order_rows = _terminalize_stale_pending_entry_orders(
@@ -277,13 +281,20 @@ def run_event_demo_cycle(
 
         if trading_client is None and demo.telegram:
             bybit_position_error = "Bybit private client unavailable; set BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET"
-        elif entry_order_rows:
+        elif exit_order_rows or entry_order_rows:
             refreshed_raw_positions, refreshed_position_error = _safe_raw_positions(trading_client, settle_coin=demo.settle_coin)
             if refreshed_position_error:
                 bybit_position_error = refreshed_position_error
             else:
                 raw_positions = refreshed_raw_positions
                 bybit_position_error = ""
+            refreshed_open_orders, refreshed_open_order_error = _safe_open_orders(trading_client, settle_coin=demo.settle_coin)
+            if refreshed_open_order_error:
+                bybit_open_order_error = refreshed_open_order_error
+            else:
+                raw_open_orders = refreshed_open_orders
+                live_exit_order_symbols = _live_open_order_symbols(raw_open_orders, reduce_only=True)
+                live_entry_order_symbols = _live_open_order_symbols(raw_open_orders, reduce_only=False)
         position_snapshot_error = _combine_errors(reconcile_position_error, bybit_position_error)
         bybit_positions = build_position_pnl_snapshot(raw_positions)
         report_error = _combine_errors(position_snapshot_error, bybit_open_order_error, wallet_error)
@@ -1845,9 +1856,13 @@ def _reconcile_pending_order_fills(
     trading_client: Any | None,
     demo: EventDemoCycleConfig,
     now_ms: int,
+    live_position_symbols: set[str] | None = None,
+    live_open_order_symbols: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if orders.is_empty() or trading_client is None or not demo.submit_orders:
         return [], []
+    live_position_symbols = live_position_symbols or set()
+    live_open_order_symbols = live_open_order_symbols or set()
     trade_lookup = {str(row["trade_id"]): row for row in all_trades.to_dicts()} if not all_trades.is_empty() else {}
     trade_rows: list[dict[str, Any]] = []
     order_rows: list[dict[str, Any]] = []
@@ -1860,7 +1875,12 @@ def _reconcile_pending_order_fills(
         if not link or not symbol or not trade_id:
             continue
         ts_ms = int(order.get("ts_ms") or 0)
-        if ts_ms > 0 and now_ms - ts_ms > PENDING_ORDER_GUARD_MS:
+        if (
+            ts_ms > 0
+            and now_ms - ts_ms > PENDING_ORDER_GUARD_MS
+            and symbol not in live_position_symbols
+            and symbol not in live_open_order_symbols
+        ):
             continue
         try:
             summary = _execution_summary(trading_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50))
@@ -2416,11 +2436,16 @@ def _reconcile_open_trades(
     trading_client: Any | None,
     demo: EventDemoCycleConfig,
     now_ms: int,
+    raw_positions: list[dict[str, Any]] | None = None,
+    position_error: str = "",
 ) -> tuple[pl.DataFrame, list[dict[str, Any]], str]:
     open_trades = _open_trades(all_trades)
     if open_trades.is_empty() or trading_client is None or not demo.submit_orders:
         return open_trades, [], ""
-    positions, error = _safe_raw_positions(trading_client, settle_coin=demo.settle_coin)
+    if raw_positions is None and not position_error:
+        raw_positions, position_error = _safe_raw_positions(trading_client, settle_coin=demo.settle_coin)
+    positions = raw_positions or []
+    error = position_error
     if error:
         return open_trades, [], error
     size_by_symbol = _position_size_by_symbol(positions)
