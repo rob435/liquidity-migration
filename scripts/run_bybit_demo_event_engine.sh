@@ -12,6 +12,10 @@ CONFIG_PATH="${CONFIG_PATH:-configs/volume_alpha.default.yaml}"
 DATA_ROOT="${DATA_ROOT:-data/bybit-demo-event}"
 STRATEGY_PROFILE="${STRATEGY_PROFILE:-observe}"
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-300}"
+if ! [[ "$INTERVAL_SECONDS" =~ ^[0-9]+$ ]]; then
+    echo "INTERVAL_SECONDS must be a non-negative integer number of seconds." >&2
+    exit 2
+fi
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-45}"
 if [[ "$STRATEGY_PROFILE" == "observe" ]]; then
     UNIVERSE_RANK_END="${UNIVERSE_RANK_END:-300}"
@@ -62,6 +66,7 @@ echo "data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS submit_orders=${SU
 mkdir -p "$DATA_ROOT/.locks"
 
 while true; do
+    cycle_start_epoch="$(date +%s)"
     set +e
     "$PYTHON_BIN" -m aggression_carry \
         --config "$CONFIG_PATH" \
@@ -87,5 +92,11 @@ while true; do
     if [[ "$status" -ne 0 ]]; then
         echo "event demo cycle failed with status=$status; sleeping before retry" >&2
     fi
-    sleep "$INTERVAL_SECONDS"
+    cycle_elapsed_seconds=$(($(date +%s) - cycle_start_epoch))
+    sleep_seconds=$((INTERVAL_SECONDS - cycle_elapsed_seconds))
+    if [[ "$sleep_seconds" -gt 0 ]]; then
+        sleep "$sleep_seconds"
+    else
+        echo "event demo cycle elapsed=${cycle_elapsed_seconds}s exceeded interval=${INTERVAL_SECONDS}s; starting next cycle immediately" >&2
+    fi
 done

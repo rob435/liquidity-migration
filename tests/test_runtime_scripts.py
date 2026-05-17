@@ -21,6 +21,8 @@ def test_event_entry_runner_default_cadence_is_rate_limit_safe() -> None:
     text = (repo / "scripts" / "run_bybit_demo_event_engine.sh").read_text(encoding="utf-8")
 
     assert 'INTERVAL_SECONDS="${INTERVAL_SECONDS:-300}"' in text
+    assert "cycle_elapsed_seconds=$(($(date +%s) - cycle_start_epoch))" in text
+    assert "starting next cycle immediately" in text
 
 
 def test_systemd_entry_runner_uses_vps_cadence() -> None:
