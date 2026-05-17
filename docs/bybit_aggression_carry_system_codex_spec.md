@@ -178,10 +178,7 @@ Cycle lock files record the owning PID and are recovered when that PID is no lon
 
 `EXIT_ORDER_MODE=market` is the default and fastest emergency exit. `EXIT_ORDER_MODE=limit_chase` uses bounded reduce-only IOC limits, controlled by `LIMIT_CHASE_ATTEMPTS`, `LIMIT_CHASE_INITIAL_BPS`, `LIMIT_CHASE_STEP_BPS`, `LIMIT_CHASE_MAX_BPS`, and `LIMIT_CHASE_WAIT_SECONDS`, then falls back to market unless `LIMIT_CHASE_FALLBACK_MARKET=0`. Exchange-native stops remain the primary fast protection; the local watchdog is the repair/enforcement layer when venue state and ledger state diverge.
 
-For live demo order-path latency checks, use:
-
-```bash
-CONFIRM_DEMO_ORDERS=1 PROBE_SYMBOL=BTCUSDT PROBE_COUNT=2 scripts/probe_bybit_demo_order_latency.py
-```
-
-The probe submits tiny far-from-touch post-only demo limit orders and cancels them immediately, reporting place/cancel latency. It is for demo order-path timing only and should not be used as alpha evidence.
+Current live demo order-path proof, deployment state, and remaining caveats are
+summarized in `docs/system_status.md`. The old one-off proof/probe scripts were
+removed after their evidence was summarized because they were not part of the
+active runtime surface.

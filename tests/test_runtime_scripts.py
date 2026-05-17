@@ -7,7 +7,6 @@ def test_runtime_scripts_do_not_delete_live_cycle_locks() -> None:
     repo = Path(__file__).resolve().parents[1]
     scripts = [
         repo / "scripts" / "run_bybit_demo_event_engine.sh",
-        repo / "scripts" / "run_bybit_demo_risk_engine.sh",
         repo / "scripts" / "run_bybit_demo_ws_risk_engine.sh",
     ]
 
@@ -22,3 +21,12 @@ def test_event_entry_runner_default_cadence_is_rate_limit_safe() -> None:
     text = (repo / "scripts" / "run_bybit_demo_event_engine.sh").read_text(encoding="utf-8")
 
     assert 'INTERVAL_SECONDS="${INTERVAL_SECONDS:-300}"' in text
+
+
+def test_systemd_entry_runner_cadence_matches_runtime_default() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    text = (repo / "deploy" / "systemd" / "model050426-bybit-demo.service").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Environment=INTERVAL_SECONDS=300" in text

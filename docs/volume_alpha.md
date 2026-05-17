@@ -380,24 +380,18 @@ Stop-repair alerts are keyed by symbol and target stop/TP rather than synthetic
 repair order-link IDs, so repeated confirmations for the same protection target
 do not create notification noise.
 
-Order-path latency can be measured on the demo account with
-`scripts/probe_bybit_demo_order_latency.py`, which places tiny far-from-touch
-post-only demo orders and cancels them immediately.
+Current live demo order-path proof and deployment status are summarized in
+`docs/system_status.md`. The old one-off proof/probe scripts were retired after
+their evidence was captured there.
 
-## Creative Alpha Research Log
+## Retired Research Summary
 
-Latest full-PIT creative alpha pass:
-
-```text
-docs/creative_alpha_research_20260517.md
-```
-
-Decision: do not change the selected demo strategy. The pass added
-disabled-by-default research controls for 7d momentum, proximity-to-high,
-prior-month MAX/salience, prior return volatility, and intraday range. None beat
-the current liquidity-migration short on strict full-PIT improvement criteria.
-The closest result was a lower-drawdown near-30d-high sleeve, but it sacrificed
-too much return and was delay sensitive.
+Creative full-PIT controls tested on 2026-05-17 included 7d momentum,
+proximity-to-high, prior-month MAX/salience, prior return volatility, and
+intraday range. None beat the current liquidity-migration short on strict
+full-PIT improvement criteria. The closest sleeve lowered drawdown near the
+30-day high but sacrificed too much return and was delay sensitive, so the
+selected demo strategy did not change.
 
 ## Current Promoted Full-PIT Result
 

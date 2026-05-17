@@ -8,6 +8,10 @@ The repo now has one strategy focus: event-driven PIT liquidity migration. The o
 
 The private Bybit client remains demo-only by design: `demo=False` is refused in code. Real-money trading requires a separate explicit implementation decision.
 
+Current operational proof and deployment status are summarized in
+`docs/system_status.md`; dated one-off audit logs have been retired from the
+repo surface.
+
 ## Active Strategy
 
 Command:
@@ -139,9 +143,9 @@ Default forward-test behavior:
 - `aggression_carry/trade_lifecycle.py`: active trade lifecycle, exit, basket, and equity helpers
 - `scripts/run_bybit_demo_event_engine.sh`: continuous Bybit demo forward runner
 - `scripts/run_bybit_demo_ws_risk_engine.sh`: continuous websocket risk watchdog
-- `scripts/prove_bybit_demo_order_lifecycle.py`: guarded demo order-path proof for strategy-sized short entry, native protection, reduce-only exit, and WebSocket Trade availability
 - `scripts/run_fullpit_volume_overnight.sh`: selected full-PIT runner
 - `scripts/run_fullpit_volume_overnight.ps1`: PowerShell selected full-PIT runner
 - `deploy/systemd/model050426-bybit-demo.service`: VPS service definition for the active demo runner
+- `docs/system_status.md`: current deployment and demo order-path proof summary
 - `docs/volume_alpha.md`: strategy notes and current result
 - `docs/bybit_aggression_carry_system_codex_spec.md`: active system spec
