@@ -21,6 +21,7 @@ class FakePrivateClient:
         *,
         confirm_fills: bool = True,
         fail_trade_history: bool = False,
+        positions: list[dict[str, object]] | None = None,
         open_orders: list[dict[str, object]] | None = None,
         fail_open_orders: bool = False,
     ) -> None:
@@ -28,7 +29,7 @@ class FakePrivateClient:
         self.fail_trade_history = fail_trade_history
         self.open_orders = open_orders or []
         self.fail_open_orders = fail_open_orders
-        self.positions = [
+        self.positions = positions if positions is not None else [
             {
                 "symbol": "AAAUSDT",
                 "side": "Sell",
@@ -705,6 +706,70 @@ def test_ws_risk_stale_pending_entry_no_longer_blocks_untracked_flatten(tmp_path
     assert engine.state.pending_entry_symbols == set()
     assert private_client.orders[0]["reduceOnly"] is True
     assert private_client.orders[0]["side"] == "Buy"
+
+
+def test_ws_risk_terminalizes_stale_pending_entry_when_exchange_flat(tmp_path: Path) -> None:
+    _write_pending_entry_order(tmp_path, status="submitted_unconfirmed", ts_ms=1)
+    private_client = FakePrivateClient(confirm_fills=False, positions=[])
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    assert private_client.orders == []
+    assert engine.state.pending_entry_symbols == set()
+    assert stored_orders.filter(pl.col("order_link_id") == "agc-en-pending").select("status").item() == "expired_unconfirmed"
+
+
+def test_ws_risk_keeps_stale_pending_entry_when_live_order_exists(tmp_path: Path) -> None:
+    _write_pending_entry_order(tmp_path, status="submitted_unconfirmed", ts_ms=1)
+    private_client = FakePrivateClient(
+        confirm_fills=False,
+        positions=[],
+        open_orders=[
+            {
+                "symbol": "AAAUSDT",
+                "orderLinkId": "agc-en-pending",
+                "orderStatus": "New",
+                "reduceOnly": False,
+            }
+        ],
+    )
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    assert private_client.orders == []
+    assert stored_orders.filter(pl.col("order_link_id") == "agc-en-pending").select("status").item() == "submitted_unconfirmed"
 
 
 def test_ws_risk_untracked_exit_blocks_duplicate_until_fill(tmp_path: Path) -> None:

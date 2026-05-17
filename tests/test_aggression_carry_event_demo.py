@@ -10,6 +10,7 @@ from aggression_carry.config import ResearchConfig
 from aggression_carry.event_demo import (
     EventDemoCycleConfig,
     EventRiskCycleConfig,
+    PENDING_ORDER_GUARD_MS,
     _execute_entries,
     _execute_exits,
     _execute_risk_exits,
@@ -21,6 +22,7 @@ from aggression_carry.event_demo import (
     _reconcile_pending_order_fills,
     _submit_reduce_only_exit,
     _telegram_notification_reason,
+    _terminalize_stale_pending_entry_orders,
     _validate_demo_config,
     build_ledger_position_pnl_snapshot,
     build_position_pnl_snapshot,
@@ -1823,6 +1825,127 @@ def test_stale_pending_order_fill_is_not_polled_forever() -> None:
     assert trades == []
     assert order_updates == []
     assert client.trade_history_calls == []
+
+
+def test_stale_pending_entry_terminalizes_only_when_exchange_flat() -> None:
+    now_ms = 1_700_000_000_000
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "agc-en-stale-flat",
+                "ts_ms": now_ms - PENDING_ORDER_GUARD_MS - 1,
+                "trade_id": "t-flat",
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "qty": "1",
+                "reduce_only": False,
+                "status": "submitted_unconfirmed",
+            },
+            {
+                "order_link_id": "agc-en-fresh",
+                "ts_ms": now_ms - PENDING_ORDER_GUARD_MS,
+                "trade_id": "t-fresh",
+                "symbol": "BBBUSDT",
+                "side": "Sell",
+                "qty": "1",
+                "reduce_only": False,
+                "status": "submitted_unconfirmed",
+            },
+            {
+                "order_link_id": "agc-ex-stale",
+                "ts_ms": now_ms - PENDING_ORDER_GUARD_MS - 1,
+                "trade_id": "t-exit",
+                "symbol": "CCCUSDT",
+                "side": "Buy",
+                "qty": "1",
+                "reduce_only": True,
+                "status": "submitted_unconfirmed",
+            },
+        ]
+    )
+
+    updates = _terminalize_stale_pending_entry_orders(
+        orders,
+        live_position_symbols=set(),
+        live_open_entry_order_symbols=set(),
+        now_ms=now_ms,
+    )
+    blocked_by_position = _terminalize_stale_pending_entry_orders(
+        orders,
+        live_position_symbols={"AAAUSDT"},
+        live_open_entry_order_symbols=set(),
+        now_ms=now_ms,
+    )
+    blocked_by_open_order = _terminalize_stale_pending_entry_orders(
+        orders,
+        live_position_symbols=set(),
+        live_open_entry_order_symbols={"AAAUSDT"},
+        now_ms=now_ms,
+    )
+
+    assert [row["order_link_id"] for row in updates] == ["agc-en-stale-flat"]
+    assert updates[0]["status"] == "expired_unconfirmed"
+    assert "flat Bybit position and no open order" in updates[0]["error"]
+    assert blocked_by_position == []
+    assert blocked_by_open_order == []
+
+
+def test_event_demo_cycle_terminalizes_stale_pending_entry_when_exchange_flat(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_ms = 1_700_000_060_000
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "order_link_id": "agc-en-stale-flat",
+                    "ts_ms": now_ms - PENDING_ORDER_GUARD_MS - 1,
+                    "trade_id": "t-flat",
+                    "symbol": "AAAUSDT",
+                    "side": "Sell",
+                    "order_type": "Market",
+                    "qty": "1",
+                    "reduce_only": False,
+                    "order_id": "order-flat",
+                    "submit_mode": "submitted",
+                    "avg_price": 100.0,
+                    "notional_usdt": 0.0,
+                    "status": "submitted_unconfirmed",
+                    "trade_side": "short",
+                    "signal_ts_ms": now_ms - MS_PER_HOUR,
+                }
+            ]
+        ),
+        tmp_path,
+        "event_demo_orders",
+        partition_by=(),
+    )
+    candidate = {
+        "trade_id": "unused",
+        "symbol": "AAAUSDT",
+        "side": "short",
+        "signal_ts_ms": now_ms - MS_PER_HOUR,
+        "stop_loss_pct": 0.12,
+        "take_profit_pct": 0.20,
+    }
+    _patch_minimal_event_cycle(monkeypatch, candidate)
+    monkeypatch.setattr("aggression_carry.event_demo.select_demo_entry_candidates", lambda *args, **kwargs: ([], {}))
+    client = FakeRiskClient()
+
+    payload = run_event_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        market_client=MinimalEventMarket(),
+        private_client=client,
+        now_ms=now_ms,
+    )
+
+    orders = read_dataset(tmp_path, "event_demo_orders")
+    assert client.trade_history_calls == []
+    assert orders.filter(pl.col("order_link_id") == "agc-en-stale-flat").select("status").item() == "expired_unconfirmed"
+    assert payload["cycle"]["stale_pending_entry_orders_terminalized"] == 1
 
 
 def test_pending_exit_fill_reconciles_to_closed_trade() -> None:

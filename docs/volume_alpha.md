@@ -306,6 +306,9 @@ cache separate from the full-PIT research `klines_1h` dataset.
 Entry orders attach native stop/TP immediately, then confirmed fills recompute
 the ledger stop/TP from actual fill price and repair Bybit trading-stop state
 when rounding moves the protection levels.
+Stale unconfirmed entry rows are terminalized only after successful Bybit
+position and open-order snapshots prove the symbol is flat and has no active
+entry order. Live exposure or a snapshot failure keeps the pending row intact.
 
 Fast exit enforcement is handled by the separate exit-only risk watchdog:
 
@@ -340,6 +343,8 @@ Stale pending reduce-only exits are terminalized only when successful Bybit
 position and open-order snapshots show no live position and no live AGC exit
 order for the symbol, so old local rows do not keep reporting false pending
 exposure after the exchange is already flat.
+The same flat/no-open-order evidence terminalizes stale pending entry rows;
+stale entries with a live position or active entry order are left untouched.
 Live AGC reduce-only exit open orders on Bybit are also treated as active exit
 submissions, covering crashes that placed an exit but lost the local order row.
 Manual/native reduce-only protection orders do not suppress emergency exits.

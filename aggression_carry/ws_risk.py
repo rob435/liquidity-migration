@@ -36,6 +36,7 @@ from .event_demo import (
     _live_open_order_symbols,
     _safe_open_orders,
     _safe_raw_positions,
+    _terminalize_stale_pending_entry_orders,
     _maybe_notify,
     _telegram_notification_reason,
     _upsert_rows,
@@ -81,6 +82,7 @@ class WebSocketRiskState:
     price_by_symbol: dict[str, float] = field(default_factory=dict)
     pending_entry_symbols: set[str] = field(default_factory=set)
     submitted_symbols: set[str] = field(default_factory=set)
+    live_entry_order_symbols: set[str] = field(default_factory=set)
     live_exit_order_symbols: set[str] = field(default_factory=set)
     submitted_symbol_ts_ms: dict[str, int] = field(default_factory=dict)
     submitted_link_to_trade_id: dict[str, str] = field(default_factory=dict)
@@ -160,6 +162,8 @@ class EventWebSocketRiskEngine:
         open_orders_ok = self.refresh_live_exit_order_symbols()
         if not error and open_orders_ok:
             self.reconcile_flat_pending_exit_orders(orders)
+            orders = read_dataset(self.root, "event_demo_orders")
+            self.terminalize_stale_pending_entry_orders(orders)
         self.reconcile_positions(write=True)
         self.repair_exchange_stops()
         self.exit_untracked_positions()
@@ -639,6 +643,8 @@ class EventWebSocketRiskEngine:
         self.load_pending_exit_orders(orders)
         if self.refresh_live_exit_order_symbols():
             self.reconcile_flat_pending_exit_orders(orders)
+            orders = read_dataset(self.root, "event_demo_orders")
+            self.terminalize_stale_pending_entry_orders(orders)
         self.reconcile_positions(write=True)
         self.repair_exchange_stops()
         self.reconcile_untracked_exit_orders()
@@ -874,6 +880,7 @@ class EventWebSocketRiskEngine:
         if error:
             self.state.errors.append(error)
             return False
+        self.state.live_entry_order_symbols = _live_open_order_symbols(open_orders, reduce_only=False)
         self.state.live_exit_order_symbols = _live_open_order_symbols(open_orders, reduce_only=True)
         return True
 
@@ -905,6 +912,27 @@ class EventWebSocketRiskEngine:
                     if str(order.get("order_link_id") or "") == link:
                         order.update(update)
             _write_order_rows(self.root, pl.DataFrame(order_rows, infer_schema_length=None))
+
+    def terminalize_stale_pending_entry_orders(self, orders: pl.DataFrame) -> None:
+        if orders.is_empty():
+            return
+        order_rows = _terminalize_stale_pending_entry_orders(
+            orders,
+            live_position_symbols=set(self.state.positions_by_symbol),
+            live_open_entry_order_symbols=self.state.live_entry_order_symbols,
+            now_ms=_now_ms(),
+        )
+        if not order_rows:
+            return
+        for update in order_rows:
+            symbol = str(update.get("symbol") or "")
+            if symbol:
+                self.state.pending_entry_symbols.discard(symbol)
+            link = str(update.get("order_link_id") or "")
+            for order in self.state.orders:
+                if str(order.get("order_link_id") or "") == link:
+                    order.update(update)
+        _write_order_rows(self.root, pl.DataFrame(order_rows, infer_schema_length=None))
 
     def on_idle(self) -> None:
         now = time.monotonic()

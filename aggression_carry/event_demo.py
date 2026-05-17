@@ -210,6 +210,17 @@ def run_event_demo_cycle(
         raw_positions, bybit_position_error = _safe_raw_positions(trading_client, settle_coin=demo.settle_coin)
         position_snapshot_error = _combine_errors(reconcile_position_error, bybit_position_error)
         live_position_symbols = set(_active_position_by_symbol(raw_positions))
+        stale_entry_order_rows: list[dict[str, Any]] = []
+        if demo.submit_orders and not position_snapshot_error and not bybit_open_order_error:
+            stale_entry_order_rows = _terminalize_stale_pending_entry_orders(
+                all_orders,
+                live_position_symbols=live_position_symbols,
+                live_open_entry_order_symbols=live_entry_order_symbols,
+                now_ms=cycle_now_ms,
+            )
+            if stale_entry_order_rows:
+                all_orders = _upsert_rows(all_orders, stale_entry_order_rows, key="order_link_id")
+                _write_order_rows(root, pl.DataFrame(stale_entry_order_rows, infer_schema_length=None))
         entry_candidates, skip_counts = select_demo_entry_candidates(
             features,
             all_trades,
@@ -303,6 +314,7 @@ def run_event_demo_cycle(
                 1 for row in pending_fill_orders if _float(row.get("filled_qty")) > 0.0 and _bool(row.get("reduce_only"))
             ),
             "pending_order_fill_errors": pending_order_fill_errors,
+            "stale_pending_entry_orders_terminalized": len(stale_entry_order_rows),
             "open_trades_before": refreshed_open.height,
             "open_trades_after": _open_trades(all_trades).height,
             "equity_usdt": equity_usdt,
@@ -972,6 +984,7 @@ def format_event_demo_cycle_report(payload: dict[str, Any]) -> str:
         f"- Exits executed: {cycle['exits_executed']} / candidates {cycle['exit_candidates']}",
         f"- Pending fills reconciled: {cycle.get('pending_order_fills_reconciled', 0)} "
         f"(entries {cycle.get('pending_entry_fills_reconciled', 0)} / exits {cycle.get('pending_exit_fills_reconciled', 0)})",
+        f"- Stale pending entries terminalized: {cycle.get('stale_pending_entry_orders_terminalized', 0)}",
         f"- Open trades after: {cycle['open_trades_after']}",
         f"- Per-entry notional: {_float(cycle.get('order_notional_pct_equity')):.2%} of equity",
         f"- Per-entry initial margin: {_float(cycle.get('order_initial_margin_pct_equity')):.2%} of equity at {_float(cycle.get('entry_leverage')):.2g}x",
@@ -1650,6 +1663,43 @@ def _pending_order_refs(orders: pl.DataFrame, *, reduce_only: bool, now_ms: int)
         if symbol:
             symbols.add(symbol)
     return trade_ids, symbols
+
+
+def _terminalize_stale_pending_entry_orders(
+    orders: pl.DataFrame,
+    *,
+    live_position_symbols: set[str],
+    live_open_entry_order_symbols: set[str],
+    now_ms: int,
+) -> list[dict[str, Any]]:
+    if orders.is_empty():
+        return []
+    rows: list[dict[str, Any]] = []
+    for order in orders.to_dicts():
+        if _bool(order.get("reduce_only")):
+            continue
+        if str(order.get("status", "")) not in PENDING_ORDER_STATUSES:
+            continue
+        link = str(order.get("order_link_id") or "")
+        symbol = str(order.get("symbol") or "")
+        trade_id = str(order.get("trade_id") or "")
+        if not link or not symbol or not trade_id:
+            continue
+        ts_ms = int(order.get("ts_ms") or 0)
+        if ts_ms <= 0 or now_ms - ts_ms <= PENDING_ORDER_GUARD_MS:
+            continue
+        if symbol in live_position_symbols or symbol in live_open_entry_order_symbols:
+            continue
+        order_update = dict(order)
+        order_update.update(
+            {
+                "status": "expired_unconfirmed",
+                "error": "stale pending entry inferred inactive from flat Bybit position and no open order",
+                "updated_at_ms": now_ms,
+            }
+        )
+        rows.append(order_update)
+    return rows
 
 
 def _live_open_order_symbols(open_orders: list[dict[str, Any]], *, reduce_only: bool) -> set[str]:
