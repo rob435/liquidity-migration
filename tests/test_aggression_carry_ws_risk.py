@@ -300,6 +300,69 @@ def test_ws_risk_bootstrap_loads_pending_exit_order_after_restart(tmp_path: Path
     assert stored_orders.filter(pl.col("order_link_id") == "agc-ex-pending").select("status").item() == "filled"
 
 
+def test_ws_risk_rejected_pending_exit_unblocks_retry_after_restart(tmp_path: Path) -> None:
+    _write_open_trade(tmp_path)
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "order_link_id": "agc-ex-pending",
+                    "ts_ms": 9_999_999_999_000,
+                    "trade_id": "t1",
+                    "symbol": "AAAUSDT",
+                    "side": "Buy",
+                    "order_type": "Market",
+                    "qty": "1",
+                    "reduce_only": True,
+                    "submit_mode": "submitted",
+                    "status": "submitted_unconfirmed",
+                    "exit_reason": "stop_loss",
+                }
+            ]
+        ),
+        tmp_path,
+        "event_demo_orders",
+        partition_by=(),
+    )
+    private_client = FakePrivateClient(confirm_fills=False)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    engine.on_order_message(
+        {
+            "data": [
+                {
+                    "symbol": "AAAUSDT",
+                    "orderLinkId": "agc-ex-pending",
+                    "orderStatus": "Rejected",
+                    "rejectReason": "insufficient margin",
+                }
+            ]
+        }
+    )
+    engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
+
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    assert stored_orders.filter(pl.col("order_link_id") == "agc-ex-pending").select("status").item() == "rejected"
+    assert len(private_client.orders) == 1
+    assert private_client.orders[0]["orderLinkId"] != "agc-ex-pending"
+    assert "AAAUSDT" in engine.state.submitted_symbols
+
+
 def test_ws_risk_flattens_untracked_position_on_bootstrap(tmp_path: Path) -> None:
     private_client = FakePrivateClient()
     engine = EventWebSocketRiskEngine(

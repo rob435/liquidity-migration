@@ -225,12 +225,26 @@ class EventWebSocketRiskEngine:
         self.evaluate_symbols(changed_symbols)
 
     def on_order_message(self, message: dict[str, Any]) -> None:
+        updates: list[dict[str, Any]] = []
         for row in _message_rows(message):
             link = str(row.get("orderLinkId") or row.get("order_link_id") or "")
             if not link:
                 continue
-            if str(row.get("orderStatus", "")).lower() in {"rejected", "cancelled"}:
-                self.clear_submitted_symbol(str(row.get("symbol", "")))
+            status = str(row.get("orderStatus") or row.get("order_status") or "").lower()
+            if status in {"rejected", "cancelled", "canceled", "deactivated"}:
+                updates.extend(self.mark_order_terminal_from_order_update(order_link_id=link, status=status, row=row))
+            elif status == "filled":
+                filled_qty = _float(row.get("cumExecQty") or row.get("qty"))
+                avg_price = _float(row.get("avgPrice") or row.get("price"))
+                updates.extend(
+                    self.mark_order_filled_from_execution(
+                        order_link_id=link,
+                        filled_qty=filled_qty,
+                        exit_price=avg_price,
+                    )
+                )
+        if updates:
+            _write_order_rows(self.root, pl.DataFrame(updates, infer_schema_length=None))
 
     def on_ws_order_ack(self, message: dict[str, Any]) -> None:
         ret_code = _int(message.get("retCode"))
@@ -313,6 +327,25 @@ class EventWebSocketRiskEngine:
             order["filled_qty"] = str(filled_qty)
             order["avg_price"] = exit_price
             order["notional_usdt"] = abs(exit_price * filled_qty) if exit_price > 0.0 else 0.0
+            updates.append(order)
+        return updates
+
+    def mark_order_terminal_from_order_update(
+        self,
+        *,
+        order_link_id: str,
+        status: str,
+        row: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        normalized_status = "cancelled" if status in {"cancelled", "canceled", "deactivated"} else "rejected"
+        updates: list[dict[str, Any]] = []
+        for order in self.state.orders:
+            if str(order.get("order_link_id") or "") != order_link_id:
+                continue
+            symbol = str(row.get("symbol") or order.get("symbol") or "")
+            order["status"] = normalized_status
+            order["error"] = str(row.get("rejectReason") or row.get("cancelType") or row.get("orderStatus") or "")[:500]
+            self.clear_submitted_symbol(symbol)
             updates.append(order)
         return updates
 
