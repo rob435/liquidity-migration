@@ -123,6 +123,7 @@ class EventWebSocketRiskEngine:
         self.state = WebSocketRiskState()
         self.report_dir = self.root / "reports" / self.risk.data_name
         self.report_dir.mkdir(parents=True, exist_ok=True)
+        self.state.telegram_keys_sent = set(_read_telegram_dedupe_keys(self.report_dir))
 
     def run(self) -> dict[str, Any]:
         started = time.monotonic()
@@ -996,6 +997,7 @@ class EventWebSocketRiskEngine:
         sent, error = _maybe_notify(payload, enabled=True)
         if sent:
             self.state.telegram_keys_sent.add(key)
+            _write_telegram_dedupe_keys(self.report_dir, self.state.telegram_keys_sent)
         return sent, error
 
     def close(self) -> None:
@@ -1083,6 +1085,7 @@ def _validate_ws_risk_config(config: EventWebSocketRiskConfig) -> None:
 _DEMO_WS_TRADE_UNAVAILABLE = (
     "Bybit demo WebSocket Trade order entry is unavailable; using REST fallback for demo reduce-only exits."
 )
+TELEGRAM_DEDUPE_RETENTION_SECONDS = 24 * 60 * 60
 
 
 def _message_rows(message: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1144,6 +1147,57 @@ def _telegram_dedupe_key(reason: str, payload: dict[str, Any]) -> str:
             error,
         ]
     )
+
+
+def _telegram_dedupe_path(report_dir: Path) -> Path:
+    return report_dir / "telegram_dedupe_keys.json"
+
+
+def _read_telegram_dedupe_keys(report_dir: Path, *, now: float | None = None) -> set[str]:
+    current = time.time() if now is None else now
+    payload = _read_telegram_dedupe_key_payload(report_dir)
+    return {
+        key
+        for key, sent_at in payload.items()
+        if current - sent_at <= TELEGRAM_DEDUPE_RETENTION_SECONDS
+    }
+
+
+def _write_telegram_dedupe_keys(report_dir: Path, keys: set[str], *, now: float | None = None) -> None:
+    current = time.time() if now is None else now
+    existing = _read_telegram_dedupe_key_payload(report_dir)
+    output = {
+        key: float(existing.get(key, current))
+        for key in sorted(keys)
+        if current - float(existing.get(key, current)) <= TELEGRAM_DEDUPE_RETENTION_SECONDS
+    }
+    path = _telegram_dedupe_path(report_dir)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        temp_path.write_text(json.dumps(output, indent=2, sort_keys=True), encoding="utf-8")
+        temp_path.replace(path)
+    finally:
+        temp_path.unlink(missing_ok=True)
+
+
+def _read_telegram_dedupe_key_payload(report_dir: Path) -> dict[str, float]:
+    path = _telegram_dedupe_path(report_dir)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, OSError, json.JSONDecodeError):
+        return {}
+    if isinstance(payload, list):
+        timestamp = time.time()
+        return {str(item): timestamp for item in payload if item}
+    if not isinstance(payload, dict):
+        return {}
+    output: dict[str, float] = {}
+    for key, value in payload.items():
+        try:
+            output[str(key)] = float(value)
+        except (TypeError, ValueError):
+            output[str(key)] = time.time()
+    return output
 
 
 def _call_with_timeout(label: str, func: Any, *, timeout_seconds: float) -> tuple[Any, str]:

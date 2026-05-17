@@ -322,6 +322,8 @@ exchange-native stops running instead of hanging the watchdog before startup.
 The watchdog writes latest reports under `reports/event-risk-ws` every heartbeat
 and keeps timestamped JSON/Markdown snapshots for startup and material risk
 events, so exit decisions survive later quiet heartbeat overwrites.
+Material Telegram alert keys are persisted in the same report directory, so
+restarting the watchdog does not resend the same alert.
 
 Order-path latency can be measured on the demo account with
 `scripts/probe_bybit_demo_order_latency.py`, which places tiny far-from-touch

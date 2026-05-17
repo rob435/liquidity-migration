@@ -8,7 +8,11 @@ import polars as pl
 from aggression_carry import ws_risk
 from aggression_carry.config import ResearchConfig
 from aggression_carry.storage import read_dataset, write_dataset
-from aggression_carry.ws_risk import EventWebSocketRiskConfig, EventWebSocketRiskEngine
+from aggression_carry.ws_risk import (
+    EventWebSocketRiskConfig,
+    EventWebSocketRiskEngine,
+    _read_telegram_dedupe_keys,
+)
 
 
 class FakePrivateClient:
@@ -841,6 +845,45 @@ def test_ws_risk_pending_fill_notification_is_deduped_across_heartbeats(tmp_path
     assert first["cycle"]["telegram_sent"] is True
     assert second["cycle"]["telegram_sent"] is False
     assert second["cycle"]["telegram_error"] == "duplicate_material_event"
+    assert len(sent) == 1
+
+
+def test_ws_risk_telegram_dedupe_survives_restart(tmp_path: Path, monkeypatch) -> None:
+    sent: list[str] = []
+
+    def fake_send(text: str, *, enabled: bool) -> bool:
+        sent.append(text)
+        return enabled
+
+    monkeypatch.setattr("aggression_carry.event_demo.send_telegram_message", fake_send)
+    first_engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(telegram=True, heartbeat_seconds=0.0),
+        private_client=FakePrivateClient(),
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+    first_engine.state.errors.append("position snapshot failed")
+    first = first_engine.write_report(reason="heartbeat")
+
+    second_engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(telegram=True, heartbeat_seconds=0.0),
+        private_client=FakePrivateClient(),
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+    second_engine.state.errors.append("position snapshot failed")
+    second = second_engine.write_report(reason="heartbeat")
+
+    dedupe_path = tmp_path / "reports" / "event-risk-ws" / "telegram_dedupe_keys.json"
+    assert first["cycle"]["telegram_sent"] is True
+    assert second["cycle"]["telegram_sent"] is False
+    assert second["cycle"]["telegram_error"] == "duplicate_material_event"
+    assert dedupe_path.exists()
+    assert len(_read_telegram_dedupe_keys(dedupe_path.parent)) == 1
     assert len(sent) == 1
 
 
