@@ -171,6 +171,10 @@ def run_event_demo_cycle(
             all_trades = _upsert_rows(all_trades, reconcile_rows, key="trade_id")
             _write_trade_rows(root, pl.DataFrame(reconcile_rows, infer_schema_length=None))
 
+        raw_open_orders, bybit_open_order_error = _safe_open_orders(trading_client, settle_coin=demo.settle_coin)
+        live_exit_order_symbols = _live_open_order_symbols(raw_open_orders, reduce_only=True)
+        live_entry_order_symbols = _live_open_order_symbols(raw_open_orders, reduce_only=False)
+
         exits = plan_demo_exits(
             reconciled_trades,
             rank_lookup=rank_lookup,
@@ -181,6 +185,7 @@ def run_event_demo_cycle(
             scenario=scenario,
         )
         exits, pending_exit_skips = _filter_pending_exit_orders(exits, all_orders, now_ms=cycle_now_ms)
+        exits, live_open_exit_skips = _filter_live_open_exit_orders(exits, live_exit_order_symbols)
         executed_exits, exit_order_rows = _execute_exits(
             exits,
             all_trades,
@@ -213,14 +218,23 @@ def run_event_demo_cycle(
         entry_candidates = entry_candidates[:free_slots]
         entry_candidates, pending_entry_skips = _filter_pending_entry_orders(entry_candidates, all_orders, now_ms=cycle_now_ms)
         snapshot_error_entry_skips = 0
+        open_order_error_entry_skips = 0
         live_position_entry_skips = 0
+        live_open_entry_skips = 0
         if bybit_position_error and demo.submit_orders:
             snapshot_error_entry_skips = len(entry_candidates)
+            entry_candidates = []
+        elif bybit_open_order_error and demo.submit_orders:
+            open_order_error_entry_skips = len(entry_candidates)
             entry_candidates = []
         else:
             entry_candidates, live_position_entry_skips = _filter_live_position_entry_orders(
                 entry_candidates,
                 live_position_symbols,
+            )
+            entry_candidates, live_open_entry_skips = _filter_live_open_entry_orders(
+                entry_candidates,
+                live_entry_order_symbols,
             )
         executed_entries, entry_order_rows = _execute_entries(
             entry_candidates,
@@ -251,6 +265,7 @@ def run_event_demo_cycle(
                 raw_positions = refreshed_raw_positions
                 bybit_position_error = ""
         bybit_positions = build_position_pnl_snapshot(raw_positions)
+        report_error = "; ".join(error for error in (bybit_position_error, bybit_open_order_error) if error)
         bybit_position_summary = summarize_position_pnl(bybit_positions)
         ledger_positions = build_ledger_position_pnl_snapshot(_open_trades(all_trades), price_by_symbol)
         ledger_position_summary = summarize_position_pnl(ledger_positions)
@@ -290,18 +305,24 @@ def run_event_demo_cycle(
             "bybit_position_value_usdt": bybit_position_summary["position_value_usdt"],
             "bybit_unrealized_pnl_usdt": bybit_position_summary["unrealized_pnl_usdt"],
             "bybit_position_pnl_pct": bybit_position_summary["pnl_pct"],
+            "bybit_open_orders": len(raw_open_orders),
+            "bybit_entry_open_orders": len(live_entry_order_symbols),
+            "bybit_exit_open_orders": len(live_exit_order_symbols),
             "ledger_positions": ledger_position_summary["positions"],
             "ledger_position_value_usdt": ledger_position_summary["position_value_usdt"],
             "ledger_unrealized_pnl_usdt": ledger_position_summary["unrealized_pnl_usdt"],
             "ledger_position_pnl_pct": ledger_position_summary["pnl_pct"],
-            "position_report_error": bybit_position_error,
+            "position_report_error": report_error,
             "telegram_sent": False,
             "telegram_error": "",
             **{f"skipped_{key}": value for key, value in skip_counts.items()},
             "skipped_pending_entry_order": pending_entry_skips,
             "skipped_pending_exit_order": pending_exit_skips,
             "skipped_live_position_entry": live_position_entry_skips,
+            "skipped_live_open_entry_order": live_open_entry_skips,
+            "skipped_live_open_exit_order": live_open_exit_skips,
             "skipped_position_snapshot_error": snapshot_error_entry_skips,
+            "skipped_open_order_snapshot_error": open_order_error_entry_skips,
         }
 
         payload = {
@@ -323,6 +344,7 @@ def run_event_demo_cycle(
             "pending_fill_orders": pending_fill_orders,
             "reconciliations": reconcile_rows,
             "bybit_positions": bybit_positions,
+            "bybit_open_orders": raw_open_orders[:20],
             "bybit_position_summary": bybit_position_summary,
             "ledger_positions": ledger_positions,
             "ledger_position_summary": ledger_position_summary,
@@ -1544,6 +1566,38 @@ def _filter_live_position_entry_orders(
     return kept, skipped
 
 
+def _filter_live_open_entry_orders(
+    candidates: list[dict[str, Any]],
+    live_order_symbols: set[str],
+) -> tuple[list[dict[str, Any]], int]:
+    if not candidates or not live_order_symbols:
+        return candidates, 0
+    kept: list[dict[str, Any]] = []
+    skipped = 0
+    for candidate in candidates:
+        if str(candidate.get("symbol", "")) in live_order_symbols:
+            skipped += 1
+            continue
+        kept.append(candidate)
+    return kept, skipped
+
+
+def _filter_live_open_exit_orders(
+    exits: list[dict[str, Any]],
+    live_order_symbols: set[str],
+) -> tuple[list[dict[str, Any]], int]:
+    if not exits or not live_order_symbols:
+        return exits, 0
+    kept: list[dict[str, Any]] = []
+    skipped = 0
+    for exit_plan in exits:
+        if str(exit_plan.get("symbol", "")) in live_order_symbols:
+            skipped += 1
+            continue
+        kept.append(exit_plan)
+    return kept, skipped
+
+
 def _filter_pending_exit_orders(
     exits: list[dict[str, Any]],
     orders: pl.DataFrame,
@@ -1585,6 +1639,34 @@ def _pending_order_refs(orders: pl.DataFrame, *, reduce_only: bool, now_ms: int)
         if symbol:
             symbols.add(symbol)
     return trade_ids, symbols
+
+
+def _live_open_order_symbols(open_orders: list[dict[str, Any]], *, reduce_only: bool) -> set[str]:
+    output: set[str] = set()
+    for row in open_orders:
+        if not _open_order_active(row):
+            continue
+        row_reduce_only = _bool(_first_non_empty(row.get("reduceOnly"), row.get("reduce_only")))
+        if row_reduce_only != reduce_only:
+            continue
+        if reduce_only and not _is_own_exit_order(row):
+            continue
+        symbol = str(row.get("symbol") or "")
+        if symbol:
+            output.add(symbol)
+    return output
+
+
+def _open_order_active(row: dict[str, Any]) -> bool:
+    status = str(row.get("orderStatus") or row.get("order_status") or "").strip().lower()
+    if not status:
+        return True
+    return status not in {"filled", "cancelled", "canceled", "rejected", "deactivated"}
+
+
+def _is_own_exit_order(row: dict[str, Any]) -> bool:
+    link = str(row.get("orderLinkId") or row.get("order_link_id") or "")
+    return link.startswith(("agc-ex-", "agc-rx-", "agc-wx-", "agc-ux-"))
 
 
 def _execute_exits(
@@ -2312,6 +2394,18 @@ def _safe_raw_positions(trading_client: Any | None, *, settle_coin: str) -> tupl
     try:
         return trading_client.get_positions(settle_coin=settle_coin), ""
     except Exception as exc:  # noqa: BLE001 - private API failures should be reported, not hidden
+        return [], str(exc)[:500]
+
+
+def _safe_open_orders(trading_client: Any | None, *, settle_coin: str) -> tuple[list[dict[str, Any]], str]:
+    if trading_client is None:
+        return [], ""
+    get_open_orders = getattr(trading_client, "get_open_orders", None)
+    if not callable(get_open_orders):
+        return [], ""
+    try:
+        return get_open_orders(settle_coin=settle_coin), ""
+    except Exception as exc:  # noqa: BLE001 - open-order snapshot failures should be reported, not hidden
         return [], str(exc)[:500]
 
 

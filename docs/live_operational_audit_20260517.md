@@ -71,18 +71,28 @@ Objective: harden the Bybit demo system as if it is live capital, with emphasis 
   - Candidate symbols with existing live exchange exposure are skipped even if the ledger is missing that position.
   - In submit mode, a position-snapshot error skips all new entries for that cycle instead of trusting the ledger alone.
 
+- `current slice: block entries on live open orders`
+  - The entry loop now snapshots Bybit open orders before submitting new entries.
+  - Candidate symbols with live non-reduce-only open orders are skipped even if the local pending-order guard has expired.
+  - In submit mode, an open-order snapshot error skips all new entries for that cycle instead of trusting the ledger alone.
+  - Event exits also skip symbols that already have an AGC reduce-only exit order live on Bybit, without treating manual/native reduce-only protection as a duplicate event exit.
+
 ## Verification
 
 Local:
 
-- `pytest -q`: 186 passed after the live-position entry guard change.
+- `pytest -q`: 189 passed after the live open-order entry guard change.
 
 VPS:
 
-- `pytest -q`: 186 passed after deploying the live-position entry guard change.
+- `pytest -q`: 189 passed after deploying the live open-order entry guard change.
 - Services after restart:
   - `model050426-bybit-demo.service`: active/running, `INTERVAL_SECONDS=300`.
   - `model050426-bybit-risk.service`: active/running.
+- Entry live-open-order guard drill:
+  - An isolated cycle with a forced entry candidate and a live non-reduce-only open order for the same symbol submitted `0` entry orders and recorded `skipped_live_open_entry_order=1`.
+  - An isolated submit-mode cycle with an open-order snapshot error submitted `0` entry orders and recorded `skipped_open_order_snapshot_error=1`.
+  - A helper drill confirmed event exits are blocked by own AGC reduce-only exit links, while manual/native reduce-only protection links do not suppress an event exit.
 - Entry live-position guard drill:
   - An isolated cycle with a forced entry candidate and a live Bybit position for the same symbol submitted `0` entry orders and recorded `skipped_live_position_entry=1`.
   - An isolated submit-mode cycle with a position-snapshot error submitted `0` entry orders and recorded `skipped_position_snapshot_error=1`.

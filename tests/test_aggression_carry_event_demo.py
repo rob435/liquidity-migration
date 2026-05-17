@@ -13,8 +13,10 @@ from aggression_carry.event_demo import (
     _execute_entries,
     _execute_exits,
     _execute_risk_exits,
+    _filter_live_open_exit_orders,
     _download_recent_1h_klines,
     _limit_chase_price,
+    _live_open_order_symbols,
     _maybe_notify,
     _reconcile_pending_order_fills,
     _submit_reduce_only_exit,
@@ -54,8 +56,11 @@ class FakeRiskClient:
         fail_history_links: set[str] | None = None,
         fail_trade_history: bool = False,
         fail_positions: bool = False,
+        open_orders: list[dict[str, object]] | None = None,
+        fail_open_orders: bool = False,
     ) -> None:
         self.positions = positions or []
+        self.open_orders = open_orders or []
         self.fill_market_orders = fill_market_orders
         self.fill_order_prefixes = fill_order_prefixes
         self.fill_qty = fill_qty
@@ -65,6 +70,7 @@ class FakeRiskClient:
         self.fail_history_links = fail_history_links or set()
         self.fail_trade_history = fail_trade_history
         self.fail_positions = fail_positions
+        self.fail_open_orders = fail_open_orders
         self.orders: list[dict[str, object]] = []
         self.stop_updates: list[dict[str, object]] = []
         self.leverage_updates: list[dict[str, object]] = []
@@ -77,6 +83,13 @@ class FakeRiskClient:
 
     def get_wallet_balance(self, *, account_type: str | None = None, coin: str | None = None) -> dict[str, object]:
         return {"list": [{"totalEquity": "10000"}]}
+
+    def get_open_orders(self, *, symbol: str | None = None, settle_coin: str | None = None) -> list[dict[str, object]]:
+        if self.fail_open_orders:
+            raise RuntimeError("open orders unavailable")
+        if symbol:
+            return [row for row in self.open_orders if str(row.get("symbol") or "") == symbol]
+        return self.open_orders
 
     def place_order(self, **params: object) -> dict[str, str]:
         if str(params.get("symbol")) in self.fail_order_symbols:
@@ -390,6 +403,121 @@ def test_event_demo_cycle_skips_entries_when_position_snapshot_fails(
     assert payload["cycle"]["skipped_position_snapshot_error"] == 1
     assert payload["cycle"]["position_report_error"] == "positions unavailable"
     assert read_dataset(tmp_path, "event_demo_orders").is_empty()
+
+
+def test_event_demo_cycle_skips_entry_when_live_open_entry_order_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_ms = 1_700_000_060_000
+    candidate = {
+        "trade_id": "t-live-open-order",
+        "symbol": "AAAUSDT",
+        "side": "short",
+        "signal_ts_ms": now_ms - MS_PER_HOUR,
+        "stop_loss_pct": 0.12,
+        "take_profit_pct": 0.20,
+    }
+    client = FakeRiskClient(
+        open_orders=[
+            {
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "orderLinkId": "agc-en-existing",
+                "orderStatus": "New",
+                "reduceOnly": False,
+            }
+        ]
+    )
+    _patch_minimal_event_cycle(monkeypatch, candidate)
+
+    payload = run_event_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        market_client=MinimalEventMarket(),
+        private_client=client,
+        now_ms=now_ms,
+    )
+
+    assert client.orders == []
+    assert payload["cycle"]["entries_executed"] == 0
+    assert payload["cycle"]["entry_candidates"] == 0
+    assert payload["cycle"]["bybit_open_orders"] == 1
+    assert payload["cycle"]["bybit_entry_open_orders"] == 1
+    assert payload["cycle"]["skipped_live_open_entry_order"] == 1
+    assert payload["cycle"]["skipped_open_order_snapshot_error"] == 0
+    assert read_dataset(tmp_path, "event_demo_orders").is_empty()
+
+
+def test_event_demo_cycle_skips_entries_when_open_order_snapshot_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_ms = 1_700_000_060_000
+    candidate = {
+        "trade_id": "t-open-order-error",
+        "symbol": "AAAUSDT",
+        "side": "short",
+        "signal_ts_ms": now_ms - MS_PER_HOUR,
+        "stop_loss_pct": 0.12,
+        "take_profit_pct": 0.20,
+    }
+    client = FakeRiskClient(fail_open_orders=True)
+    _patch_minimal_event_cycle(monkeypatch, candidate)
+
+    payload = run_event_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        market_client=MinimalEventMarket(),
+        private_client=client,
+        now_ms=now_ms,
+    )
+
+    assert client.orders == []
+    assert payload["cycle"]["entries_executed"] == 0
+    assert payload["cycle"]["entry_candidates"] == 0
+    assert payload["cycle"]["skipped_live_open_entry_order"] == 0
+    assert payload["cycle"]["skipped_open_order_snapshot_error"] == 1
+    assert payload["cycle"]["position_report_error"] == "open orders unavailable"
+    assert read_dataset(tmp_path, "event_demo_orders").is_empty()
+
+
+def test_live_open_exit_order_filter_only_blocks_own_reduce_only_order() -> None:
+    live_exit_symbols = _live_open_order_symbols(
+        [
+            {
+                "symbol": "AAAUSDT",
+                "orderLinkId": "manual-reduce",
+                "orderStatus": "New",
+                "reduceOnly": True,
+            },
+            {
+                "symbol": "BBBUSDT",
+                "orderLinkId": "agc-ex-existing",
+                "orderStatus": "New",
+                "reduceOnly": True,
+            },
+            {
+                "symbol": "CCCUSDT",
+                "orderLinkId": "agc-ex-filled",
+                "orderStatus": "Filled",
+                "reduceOnly": True,
+            },
+        ],
+        reduce_only=True,
+    )
+    exits = [
+        {"trade_id": "t1", "symbol": "AAAUSDT"},
+        {"trade_id": "t2", "symbol": "BBBUSDT"},
+    ]
+
+    kept, skipped = _filter_live_open_exit_orders(exits, live_exit_symbols)
+
+    assert live_exit_symbols == {"BBBUSDT"}
+    assert kept == [{"trade_id": "t1", "symbol": "AAAUSDT"}]
+    assert skipped == 1
 
 
 def test_execute_entries_sizes_notional_before_leverage_margin() -> None:
