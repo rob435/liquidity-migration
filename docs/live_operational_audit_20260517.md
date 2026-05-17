@@ -131,6 +131,11 @@ Objective: harden the Bybit demo system as if it is live capital, with emphasis 
   - Confirmed partial event/risk exit fills now immediately reduce the open trade quantity and record partial-exit context.
   - Limit-chase risk exits now record each IOC/fallback child order's own status, target quantity, filled quantity, and notional instead of copying aggregate fill state onto every child row.
 
+- `current slice: keep streamed partial fills truthful`
+  - WebSocket execution-stream and order-stream partial fills now immediately reduce the open trade quantity and record partial-exit context.
+  - Streamed partial fills leave the submitted-symbol duplicate guard active until the target exit quantity is filled.
+  - Untracked-position emergency exits now keep their duplicate guard on streamed partial fills instead of marking the flatten complete early.
+
 ## Verification
 
 Local:
@@ -145,6 +150,7 @@ Local:
 - Focused stale-live pending-entry reconciliation tests passed after the ledger recovery change.
 - Focused failed risk-exit context tests passed after preserving failed-order audit fields.
 - Focused partial event/risk exit and limit-chase child-order tests passed after the partial-fill ledger truth change.
+- Focused streamed partial-fill tests passed after the websocket partial-fill ledger truth change.
 - `tests/test_aggression_carry_event_demo.py tests/test_aggression_carry_ws_risk.py`: 90 passed after the flat-entry cleanup.
 - `tests/test_aggression_carry_ws_risk.py`: 40 passed after the risk-priority cleanup.
 - `pytest -q`: 204 passed after the risk-priority cleanup.
@@ -156,6 +162,9 @@ Local:
 - `pytest -q`: 212 passed after the failed risk-exit context change.
 - `tests/test_aggression_carry_event_demo.py tests/test_aggression_carry_ws_risk.py`: 103 passed after the partial-fill ledger truth change.
 - `pytest -q`: 215 passed after the partial-fill ledger truth change.
+- `tests/test_aggression_carry_ws_risk.py`: 47 passed after the streamed partial-fill ledger truth change.
+- `tests/test_aggression_carry_event_demo.py tests/test_aggression_carry_ws_risk.py`: 106 passed after the streamed partial-fill ledger truth change.
+- `pytest -q`: 218 passed after the streamed partial-fill ledger truth change.
 
 VPS:
 
@@ -172,6 +181,9 @@ VPS:
 - `pytest -q`: 212 passed after deploying the failed risk-exit context change.
 - Focused event-demo + websocket-risk files: 103 passed after deploying the partial-fill ledger truth change.
 - `pytest -q`: 215 passed after deploying the partial-fill ledger truth change.
+- Focused websocket-risk file: 47 passed after deploying the streamed partial-fill ledger truth change.
+- Focused event-demo + websocket-risk files: 106 passed after deploying the streamed partial-fill ledger truth change.
+- `pytest -q`: 218 passed after deploying the streamed partial-fill ledger truth change.
 - Services after restart:
   - `model050426-bybit-demo.service`: active/running, `INTERVAL_SECONDS=300`.
   - `model050426-bybit-risk.service`: active/running.
@@ -195,6 +207,14 @@ VPS:
 - Partial-fill ledger truth drill:
   - An isolated VPS event-exit partial fill reduced the open trade from `qty=1` to `qty=0.6`, recorded `partial_exit_qty=0.4`, kept the trade open, and wrote the exit order as `status=partial` with `filled_qty=0.4`.
   - An isolated VPS limit-chase risk exit with two partial IOC fills reduced the open trade from `qty=1` to `qty=0.2`, recorded `partial_exit_qty=0.8`, and wrote child rows with statuses `partial`, `partial`, `fallback_market`, target quantities `1`, `0.6`, `0.2`, and filled quantities `0.4`, `0.4`, `""`.
+- Streamed partial-fill ledger truth drill:
+  - An isolated VPS execution-stream partial fill reduced the tracked open trade from `qty=1` to `qty=0.6`, recorded `partial_exit_qty=0.4`, kept the order `status=partial`, kept the duplicate guard active, then closed the trade and marked the order `filled` after the cumulative fill reached `qty=1`.
+  - An isolated VPS order-stream `PartiallyFilled` update reduced the tracked open trade from `qty=1` to `qty=0.6`, recorded the order `status=partial`, and kept the duplicate guard active.
+  - An isolated VPS untracked-position execution partial fill kept the emergency flatten row `status=partial` and kept the duplicate guard active instead of marking the untracked exit complete.
+- Services after streamed partial-fill ledger truth restart:
+  - `model050426-bybit-demo.service`: active/running.
+  - `model050426-bybit-risk.service`: active/running.
+  - Direct live state: `active_positions=0`, `open_orders=0`, `ledger_open_trades=0`, `ledger_pending_orders=0`, latest websocket-risk reason `startup`, `risk_positions=0`, `risk_ledger=0`, `risk_untracked=0`, `risk_live_exit_open_orders=0`, `risk_exits_executed=0`, `risk_error=""`, latest demo mode `submit`, `demo_entries=0`, `demo_exits=0`, and `demo_error=""`.
 - Failed risk-exit context drill:
   - An isolated VPS `_execute_risk_exits` run with a controlled Bybit order rejection produced `0` closed trade rows and a failed order row containing `trade_id=t1`, `exit_reason=stop_loss`, the original trigger timestamp, `target_qty=1`, `filled_qty=""`, `avg_price=113.0`, and the rejection error.
   - An isolated VPS websocket-risk rejected-ack path with a failing REST fallback marked the WS row `rejected`, recorded a failed fallback order row with the original trade id, exit reason, trigger timestamp, and target quantity, kept the trade open, submitted no REST order, and cleared the pending-submission guard.

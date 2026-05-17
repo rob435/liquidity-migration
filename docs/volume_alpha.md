@@ -348,6 +348,10 @@ events, so exit decisions survive later quiet heartbeat overwrites.
 WebSocket execution/order-stream closures preserve the original exit reason and
 trigger timestamp from the submitted exit order row, so the ledger remains
 auditable when REST polling is not the closing path.
+WebSocket-streamed partial fills reduce the open ledger quantity immediately,
+record partial-exit context, and keep the submitted-symbol duplicate guard
+active until the target exit quantity is filled; untracked emergency exits get
+the same guard treatment on partial stream fills.
 Confirmed partial event/risk exits immediately reduce the open ledger quantity
 and record partial-exit context. Limit-chase risk exits keep per-child IOC and
 fallback order status, target quantity, filled quantity, and notional instead

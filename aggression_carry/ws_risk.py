@@ -30,6 +30,7 @@ from .event_demo import (
     _open_trades,
     _order_params,
     _price_lookup_from_positions,
+    _quantity_text,
     _risk_order_link_id,
     _risk_reconcile_missing_positions,
     _reconcile_pending_order_fills,
@@ -298,19 +299,34 @@ class EventWebSocketRiskEngine:
             status = str(row.get("orderStatus") or row.get("order_status") or "").lower()
             if status in {"rejected", "cancelled", "canceled", "deactivated"}:
                 updates.extend(self.mark_order_terminal_from_order_update(order_link_id=link, status=status, row=row))
-            elif status == "filled":
-                filled_qty = _float(row.get("cumExecQty") or row.get("qty")) or self.order_target_qty(link)
+            elif status in {"filled", "partiallyfilled", "partial"}:
+                filled_qty = _float(
+                    row.get("cumExecQty")
+                    or row.get("cum_exec_qty")
+                    or row.get("executedQty")
+                    or row.get("execQty")
+                )
+                if filled_qty <= 0.0 and status == "filled":
+                    filled_qty = _float(row.get("qty")) or self.order_target_qty(link)
+                if filled_qty <= 0.0:
+                    continue
                 avg_price = _float(row.get("avgPrice") or row.get("price")) or self.order_avg_price(link)
-                updates.extend(
-                    self.mark_order_filled_from_execution(
+                if link in self.state.submitted_link_to_trade_id:
+                    self.record_tracked_exit_stream_fill(
                         order_link_id=link,
                         filled_qty=filled_qty,
                         exit_price=avg_price,
+                        source="order",
                     )
-                )
-                self.close_trade_from_order_update(order_link_id=link, filled_qty=filled_qty, exit_price=avg_price)
-                for order in updates:
-                    self.clear_submitted_symbol(str(order.get("symbol", "")))
+                else:
+                    updates.extend(
+                        self.mark_order_filled_from_execution(
+                            order_link_id=link,
+                            filled_qty=filled_qty,
+                            exit_price=avg_price,
+                        )
+                    )
+                    self.update_stream_order_guards(updates)
         if updates:
             _write_order_rows(self.root, pl.DataFrame(updates, infer_schema_length=None))
 
@@ -353,25 +369,49 @@ class EventWebSocketRiskEngine:
             if not link:
                 continue
             self.state.executions_by_link.setdefault(link, []).append(row)
-            self.close_trade_from_execution(link)
-            if link not in self.state.submitted_link_to_trade_id:
-                filled_qty = sum(_float(item.get("execQty")) for item in self.state.executions_by_link.get(link, []))
-                value = sum(
-                    _float(item.get("execValue")) or _float(item.get("execQty")) * _float(item.get("execPrice"))
-                    for item in self.state.executions_by_link.get(link, [])
+            filled_qty = sum(_float(item.get("execQty")) for item in self.state.executions_by_link.get(link, []))
+            value = sum(
+                _float(item.get("execValue")) or _float(item.get("execQty")) * _float(item.get("execPrice"))
+                for item in self.state.executions_by_link.get(link, [])
+            )
+            exit_price = value / filled_qty if filled_qty > 0.0 else 0.0
+            if link in self.state.submitted_link_to_trade_id:
+                self.record_tracked_exit_stream_fill(
+                    order_link_id=link,
+                    filled_qty=filled_qty,
+                    exit_price=exit_price,
+                    source="execution",
                 )
-                exit_price = value / filled_qty if filled_qty > 0.0 else 0.0
+            else:
                 order_updates = self.mark_order_filled_from_execution(
                     order_link_id=link,
                     filled_qty=filled_qty,
                     exit_price=exit_price,
                 )
-                for order in order_updates:
-                    self.clear_submitted_symbol(str(order.get("symbol", "")))
+                self.update_stream_order_guards(order_updates)
                 if order_updates:
                     _write_order_rows(self.root, pl.DataFrame(order_updates, infer_schema_length=None))
 
     def close_trade_from_execution(self, order_link_id: str) -> None:
+        executions = self.state.executions_by_link.get(order_link_id, [])
+        filled_qty = sum(_float(row.get("execQty")) for row in executions)
+        value = sum(_float(row.get("execValue")) or _float(row.get("execQty")) * _float(row.get("execPrice")) for row in executions)
+        exit_price = value / filled_qty if filled_qty > 0.0 else 0.0
+        self.record_tracked_exit_stream_fill(
+            order_link_id=order_link_id,
+            filled_qty=filled_qty,
+            exit_price=exit_price,
+            source="execution",
+        )
+
+    def record_tracked_exit_stream_fill(
+        self,
+        *,
+        order_link_id: str,
+        filled_qty: float,
+        exit_price: float,
+        source: str,
+    ) -> None:
         trade_id = self.state.submitted_link_to_trade_id.get(order_link_id, "")
         if not trade_id or self.state.all_trades.is_empty():
             return
@@ -379,31 +419,61 @@ class EventWebSocketRiskEngine:
         trade = dict(trades.get(trade_id, {}))
         if not trade or str(trade.get("status")) == "closed":
             return
-        target_qty = _float(trade.get("qty"))
-        executions = self.state.executions_by_link.get(order_link_id, [])
-        filled_qty = sum(_float(row.get("execQty")) for row in executions)
-        if target_qty <= 0.0 or filled_qty + max(target_qty * 1e-8, 1e-12) < target_qty:
+        if filled_qty <= 0.0:
             return
-        value = sum(_float(row.get("execValue")) or _float(row.get("execQty")) * _float(row.get("execPrice")) for row in executions)
-        exit_price = value / filled_qty if filled_qty > 0.0 else _float(trade.get("exit_price"))
-        now_ms = _now_ms()
         order = self.order_row(order_link_id)
-        trade.update(
-            {
-                "status": "closed",
-                "exit_ts_ms": now_ms,
-                "exit_trigger_ts_ms": _int(order.get("exit_trigger_ts_ms")) or now_ms,
-                "exit_price": exit_price,
-                "exit_reason": str(order.get("exit_reason") or trade.get("exit_reason") or "execution_confirmed"),
-                "exit_order_link_id": order_link_id,
-                "submit_mode": self.state.submitted_link_submit_mode.get(order_link_id, "execution_confirmed"),
-                "closed_at_ms": now_ms,
-                "updated_at_ms": now_ms,
-            }
-        )
-        self.state.exits.append(trade)
-        self.clear_submitted_symbol(str(trade.get("symbol", "")))
-        self.state.positions_by_symbol.pop(str(trade.get("symbol", "")), None)
+        previous_filled_qty = _float(order.get("filled_qty"))
+        delta_qty = max(filled_qty - previous_filled_qty, 0.0)
+        order_target_qty = self.order_target_qty(order_link_id)
+        current_trade_qty = _float(trade.get("qty"))
+        remaining_qty = max(current_trade_qty - delta_qty, 0.0)
+        fully_filled = (
+            order_target_qty > 0.0
+            and filled_qty + max(order_target_qty * 1e-8, 1e-12) >= order_target_qty
+        ) or remaining_qty <= max(current_trade_qty * 1e-8, 1e-12)
+        if delta_qty <= 0.0 and not fully_filled:
+            return
+        now_ms = _now_ms()
+        exit_price = exit_price if exit_price > 0.0 else _float(order.get("avg_price")) or _float(trade.get("exit_price"))
+        exit_reason = str(order.get("exit_reason") or trade.get("exit_reason") or f"{source}_confirmed")
+        if fully_filled:
+            trade.update(
+                {
+                    "status": "closed",
+                    "exit_ts_ms": now_ms,
+                    "exit_trigger_ts_ms": _int(order.get("exit_trigger_ts_ms")) or now_ms,
+                    "exit_price": exit_price,
+                    "exit_reason": exit_reason,
+                    "exit_order_link_id": order_link_id,
+                    "exit_order_id": order.get("order_id", ""),
+                    "submit_mode": self.state.submitted_link_submit_mode.get(order_link_id, f"{source}_confirmed"),
+                    "closed_at_ms": now_ms,
+                    "updated_at_ms": now_ms,
+                }
+            )
+            self.state.exits.append(trade)
+            self.clear_submitted_symbol(str(trade.get("symbol", "")))
+            self.state.positions_by_symbol.pop(str(trade.get("symbol", "")), None)
+            report_reason = f"ws_{source}_fill"
+        else:
+            trade.update(
+                {
+                    "status": "open",
+                    "qty": _quantity_text(remaining_qty),
+                    "notional_usdt": abs(_float(trade.get("entry_price")) * remaining_qty),
+                    "partial_exit_order_link_id": order_link_id,
+                    "partial_exit_order_id": order.get("order_id", ""),
+                    "partial_exit_price": exit_price,
+                    "partial_exit_reason": exit_reason,
+                    "partial_exit_qty": _quantity_text(filled_qty),
+                    "partial_exit_trigger_ts_ms": _int(order.get("exit_trigger_ts_ms")) or now_ms,
+                    "partial_exit_ts_ms": now_ms,
+                    "updated_at_ms": now_ms,
+                }
+            )
+            self.state.pending_fill_reconciliations.append(trade)
+            self.mark_submitted_symbol(str(trade.get("symbol", "")), now_ms=now_ms)
+            report_reason = f"ws_{source}_partial_fill"
         self.state.all_trades = _upsert_rows(self.state.all_trades, [trade], key="trade_id")
         self.state.open_trades = _open_trades(self.state.all_trades)
         _write_trade_rows(self.root, pl.DataFrame([trade], infer_schema_length=None))
@@ -414,53 +484,39 @@ class EventWebSocketRiskEngine:
         )
         if order_updates:
             _write_order_rows(self.root, pl.DataFrame(order_updates, infer_schema_length=None))
-        self.write_report(reason="ws_execution_fill")
+        self.write_report(reason=report_reason)
 
     def close_trade_from_order_update(self, *, order_link_id: str, filled_qty: float, exit_price: float) -> None:
-        trade_id = self.state.submitted_link_to_trade_id.get(order_link_id, "")
-        if not trade_id or self.state.all_trades.is_empty():
-            return
-        trades = {str(row["trade_id"]): row for row in self.state.all_trades.to_dicts()}
-        trade = dict(trades.get(trade_id, {}))
-        if not trade or str(trade.get("status")) == "closed":
-            return
-        target_qty = _float(trade.get("qty"))
-        if target_qty <= 0.0 or filled_qty + max(target_qty * 1e-8, 1e-12) < target_qty:
-            return
-        now_ms = _now_ms()
-        order = self.order_row(order_link_id)
-        trade.update(
-            {
-                "status": "closed",
-                "exit_ts_ms": now_ms,
-                "exit_trigger_ts_ms": _int(order.get("exit_trigger_ts_ms")) or now_ms,
-                "exit_price": exit_price if exit_price > 0.0 else _float(trade.get("exit_price")),
-                "exit_reason": str(order.get("exit_reason") or trade.get("exit_reason") or "order_stream_filled"),
-                "exit_order_link_id": order_link_id,
-                "submit_mode": self.state.submitted_link_submit_mode.get(order_link_id, "order_stream_filled"),
-                "closed_at_ms": now_ms,
-                "updated_at_ms": now_ms,
-            }
+        self.record_tracked_exit_stream_fill(
+            order_link_id=order_link_id,
+            filled_qty=filled_qty,
+            exit_price=exit_price,
+            source="order",
         )
-        self.state.exits.append(trade)
-        self.clear_submitted_symbol(str(trade.get("symbol", "")))
-        self.state.positions_by_symbol.pop(str(trade.get("symbol", "")), None)
-        self.state.all_trades = _upsert_rows(self.state.all_trades, [trade], key="trade_id")
-        self.state.open_trades = _open_trades(self.state.all_trades)
-        _write_trade_rows(self.root, pl.DataFrame([trade], infer_schema_length=None))
-        self.write_report(reason="ws_order_fill")
 
     def mark_order_filled_from_execution(self, *, order_link_id: str, filled_qty: float, exit_price: float) -> list[dict[str, Any]]:
         updates: list[dict[str, Any]] = []
         for order in self.state.orders:
             if str(order.get("order_link_id") or "") != order_link_id:
                 continue
-            order["status"] = "filled"
-            order["filled_qty"] = str(filled_qty)
+            target_qty = _float(order.get("target_qty") or order.get("qty"))
+            fully_filled = target_qty > 0.0 and filled_qty + max(target_qty * 1e-8, 1e-12) >= target_qty
+            order["status"] = "filled" if fully_filled else "partial" if filled_qty > 0.0 else order.get("status", "")
+            order["filled_qty"] = _quantity_text(filled_qty) if filled_qty > 0.0 else ""
             order["avg_price"] = exit_price
             order["notional_usdt"] = abs(exit_price * filled_qty) if exit_price > 0.0 else 0.0
             updates.append(order)
         return updates
+
+    def update_stream_order_guards(self, order_updates: list[dict[str, Any]]) -> None:
+        for order in order_updates:
+            symbol = str(order.get("symbol", ""))
+            if str(order.get("status", "")) == "filled":
+                self.clear_submitted_symbol(symbol)
+                if str(order.get("exit_reason", "")) == "untracked_position":
+                    self.state.positions_by_symbol.pop(symbol, None)
+            elif str(order.get("status", "")) in PENDING_ORDER_STATUSES:
+                self.mark_submitted_symbol(symbol)
 
     def order_target_qty(self, order_link_id: str) -> float:
         for order in self.state.orders:
@@ -1111,8 +1167,16 @@ class EventWebSocketRiskEngine:
         ledger_positions = build_ledger_position_pnl_snapshot(self.state.open_trades, self.state.price_by_symbol)
         ledger_summary = summarize_position_pnl(ledger_positions)
         open_symbols = set(_column_values(self.state.open_trades, "symbol"))
-        pending_entry_fills = sum(1 for row in self.state.pending_fill_reconciliations if str(row.get("status", "")) == "open")
-        pending_exit_fills = sum(1 for row in self.state.pending_fill_reconciliations if str(row.get("status", "")) == "closed")
+        pending_entry_fills = sum(
+            1
+            for row in self.state.pending_fill_reconciliations
+            if str(row.get("status", "")) == "open" and not str(row.get("partial_exit_order_link_id") or "")
+        )
+        pending_exit_fills = sum(
+            1
+            for row in self.state.pending_fill_reconciliations
+            if str(row.get("status", "")) == "closed" or str(row.get("partial_exit_order_link_id") or "")
+        )
         pending_entry_positions = [
             row
             for row in position_snapshot

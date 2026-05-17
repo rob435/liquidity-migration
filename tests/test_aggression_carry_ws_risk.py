@@ -494,6 +494,60 @@ def test_ws_risk_ws_order_closes_from_execution_stream(tmp_path: Path) -> None:
     assert stored.filter(pl.col("trade_id") == "t1").select("exit_trigger_ts_ms").item() == trigger_ts_ms
 
 
+def test_ws_risk_execution_stream_partial_fill_reduces_trade_qty(tmp_path: Path) -> None:
+    _write_open_trade(tmp_path)
+    private_client = FakePrivateClient(confirm_fills=False)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
+    link = str(engine.state.orders[0]["order_link_id"])
+    trigger_ts_ms = int(engine.state.orders[0]["exit_trigger_ts_ms"])
+    engine.on_execution_message(
+        {"data": [{"symbol": "AAAUSDT", "orderLinkId": link, "execQty": "0.4", "execPrice": "113", "execValue": "45.2"}]}
+    )
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    stored_order = read_dataset(tmp_path, "event_demo_orders").filter(pl.col("order_link_id") == link).to_dicts()[0]
+    trade = stored.filter(pl.col("trade_id") == "t1").to_dicts()[0]
+    payload = engine.write_report(reason="heartbeat")
+    assert trade["status"] == "open"
+    assert trade["qty"] == "0.6"
+    assert trade["partial_exit_reason"] == "stop_loss"
+    assert trade["partial_exit_qty"] == "0.4"
+    assert trade["partial_exit_trigger_ts_ms"] == trigger_ts_ms
+    assert stored_order["status"] == "partial"
+    assert stored_order["filled_qty"] == "0.4"
+    assert "AAAUSDT" in engine.state.submitted_symbols
+    assert payload["cycle"]["pending_exit_fills_reconciled"] == 1
+    assert payload["cycle"]["pending_entry_fills_reconciled"] == 0
+
+    engine.on_execution_message(
+        {"data": [{"symbol": "AAAUSDT", "orderLinkId": link, "execQty": "0.6", "execPrice": "113", "execValue": "67.8"}]}
+    )
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    stored_order = read_dataset(tmp_path, "event_demo_orders").filter(pl.col("order_link_id") == link).to_dicts()[0]
+    assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
+    assert stored_order["status"] == "filled"
+    assert stored_order["filled_qty"] == "1"
+    assert "AAAUSDT" not in engine.state.submitted_symbols
+
+
 def test_ws_then_rest_falls_back_after_failed_ws_order_ack(tmp_path: Path) -> None:
     _write_open_trade(tmp_path)
     private_client = FakePrivateClient()
@@ -696,6 +750,54 @@ def test_ws_risk_order_stream_fill_closes_trade_when_execution_lags(tmp_path: Pa
     assert stored.filter(pl.col("trade_id") == "t1").select("exit_trigger_ts_ms").item() == trigger_ts_ms
     assert stored_orders.filter(pl.col("order_link_id") == link).select("status").item() == "filled"
     assert "AAAUSDT" not in engine.state.submitted_symbols
+
+
+def test_ws_risk_order_stream_partial_fill_reduces_trade_qty(tmp_path: Path) -> None:
+    _write_open_trade(tmp_path)
+    private_client = FakePrivateClient(confirm_fills=False)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
+    link = str(engine.state.orders[0]["order_link_id"])
+    engine.on_order_message(
+        {
+            "data": [
+                {
+                    "symbol": "AAAUSDT",
+                    "orderLinkId": link,
+                    "orderStatus": "PartiallyFilled",
+                    "cumExecQty": "0.4",
+                    "avgPrice": "113",
+                }
+            ]
+        }
+    )
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    stored_order = read_dataset(tmp_path, "event_demo_orders").filter(pl.col("order_link_id") == link).to_dicts()[0]
+    trade = stored.filter(pl.col("trade_id") == "t1").to_dicts()[0]
+    assert trade["status"] == "open"
+    assert trade["qty"] == "0.6"
+    assert trade["partial_exit_reason"] == "stop_loss"
+    assert trade["partial_exit_qty"] == "0.4"
+    assert stored_order["status"] == "partial"
+    assert stored_order["filled_qty"] == "0.4"
+    assert "AAAUSDT" in engine.state.submitted_symbols
 
 
 def test_ws_risk_bootstrap_loads_pending_exit_order_after_restart(tmp_path: Path) -> None:
@@ -1098,6 +1200,37 @@ def test_ws_risk_untracked_exit_history_error_stays_pending(tmp_path: Path) -> N
     assert order["order_id"] == "rest-order-1"
     assert "fill confirmation failed" in order["error"]
     assert "AAAUSDT" in engine.state.submitted_symbols
+
+
+def test_ws_risk_untracked_execution_partial_keeps_duplicate_guard(tmp_path: Path) -> None:
+    private_client = FakePrivateClient(confirm_fills=False)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    link = str(engine.state.orders[0]["order_link_id"])
+    engine.on_execution_message(
+        {"data": [{"symbol": "AAAUSDT", "orderLinkId": link, "execQty": "0.4", "execPrice": "113", "execValue": "45.2"}]}
+    )
+
+    stored_order = read_dataset(tmp_path, "event_demo_orders").filter(pl.col("order_link_id") == link).to_dicts()[0]
+    assert stored_order["status"] == "partial"
+    assert stored_order["filled_qty"] == "0.4"
+    assert "AAAUSDT" in engine.state.submitted_symbols
+    assert "AAAUSDT" in engine.state.positions_by_symbol
 
 
 def test_ws_risk_bootstrap_loads_pending_untracked_exit_after_restart(tmp_path: Path) -> None:
