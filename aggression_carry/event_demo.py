@@ -1824,6 +1824,18 @@ def _execute_exits(
                 }
             )
             rows.append(trade)
+        elif demo.submit_orders and filled_qty > 0.0:
+            rows.append(
+                _partial_exit_trade_update(
+                    trade,
+                    exit_plan,
+                    filled_qty=filled_qty,
+                    exit_price=exit_price,
+                    order_link_id=exit_link,
+                    order_id=order_result.get("orderId", ""),
+                    now_ms=now_ms,
+                )
+            )
         orders.append(
             {
                 "order_link_id": exit_link,
@@ -1847,6 +1859,36 @@ def _execute_exits(
             }
         )
     return rows, orders
+
+
+def _partial_exit_trade_update(
+    trade: dict[str, Any],
+    exit_plan: dict[str, Any],
+    *,
+    filled_qty: float,
+    exit_price: float,
+    order_link_id: str,
+    order_id: str,
+    now_ms: int,
+) -> dict[str, Any]:
+    remaining_qty = max(_float(trade.get("qty")) - filled_qty, 0.0)
+    updated = dict(trade)
+    updated.update(
+        {
+            "status": "open",
+            "qty": _quantity_text(remaining_qty),
+            "notional_usdt": abs(_float(trade.get("entry_price")) * remaining_qty),
+            "partial_exit_order_link_id": order_link_id,
+            "partial_exit_order_id": order_id,
+            "partial_exit_price": exit_price,
+            "partial_exit_reason": str(exit_plan.get("exit_reason") or "partial_exit"),
+            "partial_exit_qty": _quantity_text(filled_qty),
+            "partial_exit_trigger_ts_ms": int(exit_plan.get("exit_trigger_ts_ms") or now_ms),
+            "partial_exit_ts_ms": now_ms,
+            "updated_at_ms": now_ms,
+        }
+    )
+    return updated
 
 
 def _reconcile_pending_order_fills(
@@ -2132,38 +2174,62 @@ def _execute_risk_exits(
         filled_qty = _float(submit["exec_summary"].get("qty"))
         qty_tolerance = max(target_qty * 1e-8, 1e-12)
         fully_filled = not risk.submit_orders or (target_qty > 0.0 and filled_qty + qty_tolerance >= target_qty)
-        trade.update(
-            {
-                "status": "closed",
-                "exit_ts_ms": now_ms,
-                "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
-                "exit_price": exit_price,
-                "exit_reason": str(exit_plan["exit_reason"]),
-                "exit_order_link_id": submit["order_link_id"],
-                "exit_order_id": submit["order_id"],
-                "submit_mode": submit["submit_mode"],
-                "closed_at_ms": now_ms,
-                "updated_at_ms": now_ms,
-            }
-        )
         for order_row in submit["order_rows"]:
-            if risk.submit_orders:
-                order_row["status"] = "filled" if fully_filled else "partial" if filled_qty > 0.0 else "submitted_unconfirmed"
-            notional_qty = filled_qty if risk.submit_orders else _float(qty)
+            row_target_qty = str(order_row.get("target_qty") or order_row.get("qty") or qty)
+            row_filled_qty = _float(order_row.get("filled_qty"))
+            row_status = str(order_row.get("status") or "")
+            if risk.submit_orders and row_status in {"", "submitted"}:
+                row_target_float = _float(row_target_qty)
+                row_tolerance = max(row_target_float * 1e-8, 1e-12)
+                order_row["status"] = (
+                    "filled"
+                    if row_target_float > 0.0 and row_filled_qty + row_tolerance >= row_target_float
+                    else "partial"
+                    if row_filled_qty > 0.0
+                    else "submitted_unconfirmed"
+                )
+            row_avg_price = _float(order_row.get("avg_price")) or exit_price
+            notional_qty = row_filled_qty if risk.submit_orders else _float(row_target_qty)
             order_row.update(
                 {
                     "trade_id": trade_id,
                     "exit_reason": str(exit_plan["exit_reason"]),
                     "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
-                    "avg_price": exit_price,
-                    "filled_qty": _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0.0 else "",
-                    "target_qty": qty,
-                    "notional_usdt": abs(exit_price * notional_qty) if exit_price > 0.0 else 0.0,
+                    "avg_price": row_avg_price,
+                    "filled_qty": _decimal_text(Decimal(str(row_filled_qty))) if row_filled_qty > 0.0 else "",
+                    "target_qty": row_target_qty,
+                    "notional_usdt": abs(row_avg_price * notional_qty) if row_avg_price > 0.0 else 0.0,
                 }
             )
             orders.append(order_row)
         if fully_filled:
+            trade.update(
+                {
+                    "status": "closed",
+                    "exit_ts_ms": now_ms,
+                    "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
+                    "exit_price": exit_price,
+                    "exit_reason": str(exit_plan["exit_reason"]),
+                    "exit_order_link_id": submit["order_link_id"],
+                    "exit_order_id": submit["order_id"],
+                    "submit_mode": submit["submit_mode"],
+                    "closed_at_ms": now_ms,
+                    "updated_at_ms": now_ms,
+                }
+            )
             rows.append(trade)
+        elif risk.submit_orders and filled_qty > 0.0:
+            rows.append(
+                _partial_exit_trade_update(
+                    trade,
+                    exit_plan,
+                    filled_qty=filled_qty,
+                    exit_price=exit_price,
+                    order_link_id=submit["order_link_id"],
+                    order_id=submit["order_id"],
+                    now_ms=now_ms,
+                )
+            )
     return rows, orders
 
 
@@ -2277,25 +2343,43 @@ def _submit_reduce_only_exit(
             exec_summary = {"qty": "", "avg_price": 0.0, "fee": 0.0, "executions": 0}
             status = "submitted_unconfirmed"
             error = f"fill confirmation failed: {exc}"[:500]
+        filled_qty = _float(exec_summary.get("qty"))
+        target_qty = _float(qty)
+        if status != "submitted_unconfirmed":
+            status = (
+                "filled"
+                if target_qty > 0.0 and filled_qty + max(target_qty * 1e-8, 1e-12) >= target_qty
+                else "partial"
+                if filled_qty > 0.0
+                else "submitted_unconfirmed"
+            )
+        avg_price = _float(exec_summary.get("avg_price"))
+        order_row = _risk_order_row(
+            link=link,
+            ts_ms=now_ms,
+            symbol=symbol,
+            side=bybit_side,
+            qty=qty,
+            order_type="Market",
+            submit_mode="submitted",
+            status=status,
+            order_id=order_result.get("orderId", ""),
+            error=error,
+        )
+        order_row.update(
+            {
+                "target_qty": qty,
+                "filled_qty": _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0.0 else "",
+                "avg_price": avg_price,
+                "notional_usdt": abs(avg_price * filled_qty) if avg_price > 0.0 else 0.0,
+            }
+        )
         return {
             "order_link_id": link,
             "order_id": order_result.get("orderId", ""),
             "submit_mode": "submitted",
             "exec_summary": exec_summary,
-            "order_rows": [
-                _risk_order_row(
-                    link=link,
-                    ts_ms=now_ms,
-                    symbol=symbol,
-                    side=bybit_side,
-                    qty=qty,
-                    order_type="Market",
-                    submit_mode="submitted",
-                    status=status,
-                    order_id=order_result.get("orderId", ""),
-                    error=error,
-                )
-            ],
+            "order_rows": [order_row],
         }
     return _submit_limit_chase_exit(
         symbol=symbol,
@@ -2353,22 +2437,23 @@ def _submit_limit_chase_exit(
         try:
             batch = trading_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50)
         except Exception as exc:  # noqa: BLE001 - accepted IOC may still fill; do not chase blind
-            order_rows.append(
-                _risk_order_row(
-                    link=link,
-                    ts_ms=now_ms,
-                    symbol=symbol,
-                    side=bybit_side,
-                    qty=_decimal_text(Decimal(str(remaining_qty))),
-                    order_type="Limit",
-                    submit_mode="submitted",
-                    status="submitted_unconfirmed",
-                    order_id=last_order_id,
-                    price=limit_price,
-                    time_in_force="IOC",
-                    error=f"fill confirmation failed: {exc}"[:500],
-                )
+            remaining_qty_text = _quantity_text(remaining_qty)
+            row = _risk_order_row(
+                link=link,
+                ts_ms=now_ms,
+                symbol=symbol,
+                side=bybit_side,
+                qty=remaining_qty_text,
+                order_type="Limit",
+                submit_mode="submitted",
+                status="submitted_unconfirmed",
+                order_id=last_order_id,
+                price=limit_price,
+                time_in_force="IOC",
+                error=f"fill confirmation failed: {exc}"[:500],
             )
+            row.update({"target_qty": remaining_qty_text, "filled_qty": ""})
+            order_rows.append(row)
             return {
                 "order_link_id": last_link,
                 "order_id": last_order_id,
@@ -2377,32 +2462,50 @@ def _submit_limit_chase_exit(
                 "order_rows": order_rows,
             }
         summary = _execution_summary(batch)
-        filled_qty += _float(summary.get("qty"))
+        order_filled_qty = _float(summary.get("qty"))
+        filled_qty += order_filled_qty
         executions.extend(batch)
-        order_rows.append(
-            _risk_order_row(
-                link=link,
-                ts_ms=now_ms,
-                symbol=symbol,
-                side=bybit_side,
-                qty=_decimal_text(Decimal(str(remaining_qty))),
-                order_type="Limit",
-                submit_mode="submitted",
-                status="submitted",
-                order_id=last_order_id,
-                price=limit_price,
-                time_in_force="IOC",
-            )
+        remaining_qty_text = _quantity_text(remaining_qty)
+        order_avg_price = _float(summary.get("avg_price"))
+        row_status = (
+            "filled"
+            if remaining_qty > 0.0 and order_filled_qty + max(remaining_qty * 1e-8, 1e-12) >= remaining_qty
+            else "partial"
+            if order_filled_qty > 0.0
+            else "unfilled"
         )
+        row = _risk_order_row(
+            link=link,
+            ts_ms=now_ms,
+            symbol=symbol,
+            side=bybit_side,
+            qty=remaining_qty_text,
+            order_type="Limit",
+            submit_mode="submitted",
+            status=row_status,
+            order_id=last_order_id,
+            price=limit_price,
+            time_in_force="IOC",
+        )
+        row.update(
+            {
+                "target_qty": remaining_qty_text,
+                "filled_qty": _decimal_text(Decimal(str(order_filled_qty))) if order_filled_qty > 0.0 else "",
+                "avg_price": order_avg_price,
+                "notional_usdt": abs(order_avg_price * order_filled_qty) if order_avg_price > 0.0 else 0.0,
+            }
+        )
+        order_rows.append(row)
     remaining_qty = max(target_qty - filled_qty, 0.0)
     if remaining_qty > max(target_qty * 1e-8, 1e-12) and risk.limit_chase_fallback_market:
         link = _risk_order_link_id("lm", symbol=symbol, ts_ms=now_ms, attempt=attempts)
         last_link = link
+        remaining_qty_text = _quantity_text(remaining_qty)
         order_result = trading_client.place_order(
             **_order_params(
                 symbol=symbol,
                 side=bybit_side,
-                qty=_decimal_text(Decimal(str(remaining_qty))),
+                qty=remaining_qty_text,
                 order_type="Market",
                 order_link_id=link,
                 reduce_only=True,
@@ -2411,26 +2514,45 @@ def _submit_limit_chase_exit(
         last_order_id = order_result.get("orderId", "")
         error = ""
         status = "fallback_market"
+        summary = {"qty": "", "avg_price": 0.0, "fee": 0.0, "executions": 0}
         try:
             batch = trading_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50)
             executions.extend(batch)
+            summary = _execution_summary(batch)
         except Exception as exc:  # noqa: BLE001 - accepted market fallback remains pending for reconciliation
             status = "submitted_unconfirmed"
             error = f"fill confirmation failed: {exc}"[:500]
-        order_rows.append(
-            _risk_order_row(
-                link=link,
-                ts_ms=now_ms,
-                symbol=symbol,
-                side=bybit_side,
-                qty=_decimal_text(Decimal(str(remaining_qty))),
-                order_type="Market",
-                submit_mode="submitted",
-                status=status,
-                order_id=last_order_id,
-                error=error,
+        order_filled_qty = _float(summary.get("qty"))
+        if status != "submitted_unconfirmed":
+            status = (
+                "filled"
+                if remaining_qty > 0.0 and order_filled_qty + max(remaining_qty * 1e-8, 1e-12) >= remaining_qty
+                else "partial"
+                if order_filled_qty > 0.0
+                else "fallback_market"
             )
+        order_avg_price = _float(summary.get("avg_price"))
+        row = _risk_order_row(
+            link=link,
+            ts_ms=now_ms,
+            symbol=symbol,
+            side=bybit_side,
+            qty=remaining_qty_text,
+            order_type="Market",
+            submit_mode="submitted",
+            status=status,
+            order_id=last_order_id,
+            error=error,
         )
+        row.update(
+            {
+                "target_qty": remaining_qty_text,
+                "filled_qty": _decimal_text(Decimal(str(order_filled_qty))) if order_filled_qty > 0.0 else "",
+                "avg_price": order_avg_price,
+                "notional_usdt": abs(order_avg_price * order_filled_qty) if order_avg_price > 0.0 else 0.0,
+            }
+        )
+        order_rows.append(row)
     return {
         "order_link_id": last_link,
         "order_id": last_order_id,
@@ -3064,6 +3186,10 @@ def _decimal_text(value: Decimal) -> str:
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return text or "0"
+
+
+def _quantity_text(value: float) -> str:
+    return _decimal_text(Decimal(f"{max(value, 0.0):.12f}"))
 
 
 def _empty_skip_counts() -> dict[str, int]:

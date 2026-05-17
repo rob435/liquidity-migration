@@ -1435,7 +1435,9 @@ def test_limit_chase_uses_ioc_limits_then_market_fallback() -> None:
     assert client.orders[0]["reduceOnly"] is True
     assert client.orders[0]["price"] == "100.1"
     assert submit["exec_summary"]["qty"] == "1"
-    assert submit["order_rows"][-1]["status"] == "fallback_market"
+    assert [row["status"] for row in submit["order_rows"]] == ["unfilled", "unfilled", "filled"]
+    assert submit["order_rows"][-1]["target_qty"] == "1"
+    assert submit["order_rows"][-1]["filled_qty"] == "1"
 
 
 def test_market_risk_exit_history_error_stays_pending() -> None:
@@ -1616,6 +1618,52 @@ def test_event_exit_fill_confirmation_error_stays_pending() -> None:
     assert orders[0]["order_id"] == "order-1"
     assert "fill confirmation failed" in orders[0]["error"]
     assert "history unavailable" in orders[0]["error"]
+
+
+def test_event_exit_partial_fill_reduces_trade_qty_immediately() -> None:
+    all_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "1",
+                "entry_price": 100.0,
+                "notional_usdt": 100.0,
+            }
+        ]
+    )
+
+    rows, orders = _execute_exits(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "qty": "1",
+                "exit_reason": "max_hold",
+                "exit_trigger_ts_ms": 1_700_000_000_000,
+                "planned_exit_price": 99.0,
+            }
+        ],
+        all_trades,
+        trading_client=FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-ex-",), fill_qty="0.4"),
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        now_ms=1_700_000_060_000,
+    )
+
+    assert rows[0]["status"] == "open"
+    assert rows[0]["qty"] == "0.6"
+    assert rows[0]["notional_usdt"] == 60.0
+    assert rows[0]["partial_exit_reason"] == "max_hold"
+    assert rows[0]["partial_exit_qty"] == "0.4"
+    assert orders[0]["status"] == "partial"
+    assert orders[0]["filled_qty"] == "0.4"
 
 
 def test_event_exit_closes_after_confirmed_fill() -> None:
@@ -2333,6 +2381,106 @@ def test_risk_exit_failure_records_auditable_order_context() -> None:
     assert orders[0]["filled_qty"] == ""
     assert orders[0]["avg_price"] == 113.0
     assert "order rejected" in orders[0]["error"]
+
+
+def test_risk_exit_partial_fill_reduces_trade_qty_immediately() -> None:
+    all_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "1",
+                "entry_price": 100.0,
+                "notional_usdt": 100.0,
+                "stop_price": 112.0,
+            }
+        ]
+    )
+
+    rows, orders = _execute_risk_exits(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "qty": "1",
+                "exit_reason": "stop_loss",
+                "exit_trigger_ts_ms": 1_700_000_000_000,
+                "planned_exit_price": 113.0,
+                "planned_exit_ts_ms": 1_700_100_000_000,
+            }
+        ],
+        all_trades,
+        trading_client=FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-rx-",), fill_qty="0.4"),
+        risk=EventRiskCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        now_ms=1_700_000_060_000,
+        price_by_symbol={"AAAUSDT": 113.0},
+        tick_size_by_symbol={},
+    )
+
+    assert rows[0]["status"] == "open"
+    assert rows[0]["qty"] == "0.6"
+    assert rows[0]["notional_usdt"] == 60.0
+    assert rows[0]["partial_exit_reason"] == "stop_loss"
+    assert rows[0]["partial_exit_qty"] == "0.4"
+    assert orders[0]["status"] == "partial"
+    assert orders[0]["target_qty"] == "1"
+    assert orders[0]["filled_qty"] == "0.4"
+
+
+def test_limit_chase_partial_fills_keep_child_order_quantities() -> None:
+    all_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "1",
+                "entry_price": 100.0,
+                "notional_usdt": 100.0,
+                "stop_price": 112.0,
+            }
+        ]
+    )
+
+    rows, orders = _execute_risk_exits(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "qty": "1",
+                "exit_reason": "stop_loss",
+                "exit_trigger_ts_ms": 1_700_000_000_000,
+                "planned_exit_price": 113.0,
+                "planned_exit_ts_ms": 1_700_100_000_000,
+            }
+        ],
+        all_trades,
+        trading_client=FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-lc-",), fill_qty="0.4"),
+        risk=EventRiskCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            exit_order_mode="limit_chase",
+            limit_chase_attempts=2,
+            limit_chase_wait_seconds=0.0,
+        ),
+        now_ms=1_700_000_060_000,
+        price_by_symbol={"AAAUSDT": 113.0},
+        tick_size_by_symbol={"AAAUSDT": 0.1},
+    )
+
+    assert rows[0]["status"] == "open"
+    assert rows[0]["qty"] == "0.2"
+    assert [order["order_type"] for order in orders] == ["Limit", "Limit", "Market"]
+    assert [order["status"] for order in orders] == ["partial", "partial", "fallback_market"]
+    assert [order["target_qty"] for order in orders] == ["1", "0.6", "0.2"]
+    assert [order["filled_qty"] for order in orders] == ["0.4", "0.4", ""]
+    assert orders[0]["notional_usdt"] == pytest.approx(40.2)
+    assert orders[1]["notional_usdt"] == pytest.approx(40.2)
 
 
 def test_risk_exit_records_filled_order_after_confirmed_fill() -> None:

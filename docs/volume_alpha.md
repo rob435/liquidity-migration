@@ -348,6 +348,10 @@ events, so exit decisions survive later quiet heartbeat overwrites.
 WebSocket execution/order-stream closures preserve the original exit reason and
 trigger timestamp from the submitted exit order row, so the ledger remains
 auditable when REST polling is not the closing path.
+Confirmed partial event/risk exits immediately reduce the open ledger quantity
+and record partial-exit context. Limit-chase risk exits keep per-child IOC and
+fallback order status, target quantity, filled quantity, and notional instead
+of stamping the aggregate fill state onto every child order row.
 Failed tracked risk-exit submissions also keep the trade id, exit reason,
 trigger timestamp, target quantity, and planned exit price on the failed order
 row. A rejected emergency exit therefore stays tied to the open trade in the
