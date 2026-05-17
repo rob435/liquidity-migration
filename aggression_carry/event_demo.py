@@ -37,6 +37,8 @@ from .volume_events import (
 
 
 MS_PER_MINUTE = 60_000
+PENDING_ORDER_STATUSES = {"submitted", "submitted_unconfirmed", "partial", "fallback_market"}
+PENDING_ORDER_GUARD_MS = 15 * MS_PER_MINUTE
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +56,8 @@ class EventDemoCycleConfig:
     entry_leverage: float = 2.0
     entry_order_type: str = "Market"
     exit_order_type: str = "Market"
+    order_fill_confirm_seconds: float = 2.0
+    order_fill_poll_interval_seconds: float = 0.2
     submit_orders: bool = False
     confirm_demo_orders: bool = False
     telegram: bool = False
@@ -138,6 +142,20 @@ def run_event_demo_cycle(
             trading_client = _build_private_client(config)
         equity_usdt = _wallet_equity_usdt(trading_client, demo=demo) if trading_client is not None else demo.fallback_equity_usdt
 
+        pending_fill_trades, pending_fill_orders = _reconcile_pending_order_fills(
+            all_orders,
+            all_trades,
+            trading_client=trading_client,
+            demo=demo,
+            now_ms=cycle_now_ms,
+        )
+        if pending_fill_trades:
+            all_trades = _upsert_rows(all_trades, pending_fill_trades, key="trade_id")
+            _write_trade_rows(root, pl.DataFrame(pending_fill_trades, infer_schema_length=None))
+        if pending_fill_orders:
+            all_orders = _upsert_rows(all_orders, pending_fill_orders, key="order_link_id")
+            _write_order_rows(root, pl.DataFrame(pending_fill_orders, infer_schema_length=None))
+
         reconciled_trades, reconcile_rows = _reconcile_open_trades(
             all_trades,
             trading_client=trading_client,
@@ -157,6 +175,7 @@ def run_event_demo_cycle(
             config=strategy,
             scenario=scenario,
         )
+        exits, pending_exit_skips = _filter_pending_exit_orders(exits, all_orders, now_ms=cycle_now_ms)
         executed_exits, exit_order_rows = _execute_exits(
             exits,
             all_trades,
@@ -185,6 +204,7 @@ def run_event_demo_cycle(
         )
         free_slots = max(int(strategy.max_active_symbols) - refreshed_open.height, 0)
         entry_candidates = entry_candidates[:free_slots]
+        entry_candidates, pending_entry_skips = _filter_pending_entry_orders(entry_candidates, all_orders, now_ms=cycle_now_ms)
         executed_entries, entry_order_rows = _execute_entries(
             entry_candidates,
             trading_client=trading_client,
@@ -220,6 +240,9 @@ def run_event_demo_cycle(
             "entries_executed": len(executed_entries),
             "exit_candidates": len(exits),
             "exits_executed": len(executed_exits),
+            "pending_order_fills_reconciled": len(pending_fill_orders),
+            "pending_entry_fills_reconciled": sum(1 for row in pending_fill_orders if not _bool(row.get("reduce_only"))),
+            "pending_exit_fills_reconciled": sum(1 for row in pending_fill_orders if _bool(row.get("reduce_only"))),
             "open_trades_before": refreshed_open.height,
             "open_trades_after": _open_trades(all_trades).height,
             "equity_usdt": equity_usdt,
@@ -240,6 +263,8 @@ def run_event_demo_cycle(
             "telegram_sent": False,
             "telegram_error": "",
             **{f"skipped_{key}": value for key, value in skip_counts.items()},
+            "skipped_pending_entry_order": pending_entry_skips,
+            "skipped_pending_exit_order": pending_exit_skips,
         }
 
         payload = {
@@ -257,6 +282,8 @@ def run_event_demo_cycle(
             "exits": executed_exits,
             "entry_orders": entry_order_rows,
             "exit_orders": exit_order_rows,
+            "pending_fill_trades": pending_fill_trades,
+            "pending_fill_orders": pending_fill_orders,
             "reconciliations": reconcile_rows,
             "bybit_positions": bybit_positions,
             "bybit_position_summary": bybit_position_summary,
@@ -873,6 +900,8 @@ def format_event_demo_cycle_report(payload: dict[str, Any]) -> str:
         f"- Equity used: ${cycle['equity_usdt']:,.2f}",
         f"- Entries executed: {cycle['entries_executed']} / candidates {cycle['entry_candidates']}",
         f"- Exits executed: {cycle['exits_executed']} / candidates {cycle['exit_candidates']}",
+        f"- Pending fills reconciled: {cycle.get('pending_order_fills_reconciled', 0)} "
+        f"(entries {cycle.get('pending_entry_fills_reconciled', 0)} / exits {cycle.get('pending_exit_fills_reconciled', 0)})",
         f"- Open trades after: {cycle['open_trades_after']}",
         f"- Per-entry notional: {_float(cycle.get('order_notional_pct_equity')):.2%} of equity",
         f"- Per-entry initial margin: {_float(cycle.get('order_initial_margin_pct_equity')):.2%} of equity at {_float(cycle.get('entry_leverage')):.2g}x",
@@ -1041,6 +1070,8 @@ def _validate_demo_config(config: EventDemoCycleConfig) -> None:
         raise ValueError("max_new_entries_per_cycle must be positive")
     if config.entry_leverage <= 0.0:
         raise ValueError("entry_leverage must be positive")
+    if config.order_fill_confirm_seconds < 0.0 or config.order_fill_poll_interval_seconds <= 0.0:
+        raise ValueError("order fill confirmation intervals must be non-negative with positive poll interval")
     if config.submit_orders and not config.confirm_demo_orders:
         raise RuntimeError("Refusing to submit demo orders without --confirm-demo-orders")
 
@@ -1176,6 +1207,10 @@ def _execute_entries(
         order_result: dict[str, Any] = {}
         exec_summary: dict[str, Any] = {}
         submit_mode = "dry_run"
+        order_status = "planned"
+        filled_qty = _float(qty)
+        entry_price = price
+        filled_notional = actual_notional
         if demo.submit_orders:
             assert trading_client is not None
             trading_client.set_leverage(symbol=symbol, buy_leverage=demo.entry_leverage, sell_leverage=demo.entry_leverage)
@@ -1186,43 +1221,58 @@ def _execute_entries(
                 order_type=demo.entry_order_type,
                 order_link_id=entry_link,
                 reduce_only=False,
+                stop_loss=stop_price,
+                take_profit=take_profit_price if take_profit_price > 0.0 else None,
             )
             order_result = trading_client.place_order(**order_params)
-            exec_summary = _execution_summary(
-                trading_client.get_trade_history(symbol=symbol, order_link_id=entry_link, limit=50)
-            )
-            trading_client.set_trading_stop(
+            exec_summary = _wait_for_execution_summary(
+                trading_client,
                 symbol=symbol,
-                stop_loss=_decimal_text(Decimal(str(stop_price))),
-                take_profit=_decimal_text(Decimal(str(take_profit_price))) if take_profit_price > 0.0 else None,
+                order_link_id=entry_link,
+                poll_seconds=demo.order_fill_confirm_seconds,
+                poll_interval_seconds=demo.order_fill_poll_interval_seconds,
             )
             submit_mode = "submitted"
-        entry_price = _float(exec_summary.get("avg_price")) or price
-        entry_qty = str(exec_summary.get("qty") or qty)
-        row = {
-            **candidate,
-            "ts_ms": now_ms,
-            "status": "open",
-            "entry_ts_ms": now_ms,
-            "entry_price": entry_price,
-            "qty": entry_qty,
-            "notional_usdt": actual_notional,
-            "equity_usdt": equity_usdt,
-            "target_notional_pct_equity": order_notional_pct_equity,
-            "entry_leverage": demo.entry_leverage,
-            "initial_margin_usdt": initial_margin_usdt,
-            "initial_margin_pct_equity": initial_margin_usdt / equity_usdt if equity_usdt > 0.0 else 0.0,
-            "tick_size": tick_size,
-            "qty_step": qty_step,
-            "stop_price": stop_price,
-            "take_profit_price": take_profit_price,
-            "entry_order_link_id": entry_link,
-            "entry_order_id": order_result.get("orderId", ""),
-            "submit_mode": submit_mode,
-            "opened_at_ms": now_ms,
-            "updated_at_ms": now_ms,
-        }
-        rows.append(row)
+            filled_qty = _float(exec_summary.get("qty"))
+            entry_price = _float(exec_summary.get("avg_price")) or price
+            filled_notional = abs(entry_price * filled_qty) if filled_qty > 0.0 else 0.0
+            target_qty = _float(qty)
+            qty_tolerance = max(target_qty * 1e-8, 1e-12)
+            if target_qty > 0.0 and filled_qty + qty_tolerance >= target_qty:
+                order_status = "filled"
+            elif filled_qty > 0.0:
+                order_status = "partial"
+            else:
+                order_status = "submitted_unconfirmed"
+        entry_qty = _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0.0 else ""
+        filled_initial_margin_usdt = filled_notional / demo.entry_leverage if demo.entry_leverage > 0.0 else 0.0
+        if not demo.submit_orders or filled_qty > 0.0:
+            row = {
+                **candidate,
+                "ts_ms": now_ms,
+                "status": "open",
+                "entry_ts_ms": now_ms,
+                "entry_price": entry_price,
+                "qty": entry_qty or qty,
+                "notional_usdt": filled_notional if demo.submit_orders else actual_notional,
+                "equity_usdt": equity_usdt,
+                "target_notional_pct_equity": order_notional_pct_equity,
+                "entry_leverage": demo.entry_leverage,
+                "initial_margin_usdt": filled_initial_margin_usdt if demo.submit_orders else initial_margin_usdt,
+                "initial_margin_pct_equity": (filled_initial_margin_usdt if demo.submit_orders else initial_margin_usdt) / equity_usdt
+                if equity_usdt > 0.0
+                else 0.0,
+                "tick_size": tick_size,
+                "qty_step": qty_step,
+                "stop_price": stop_price,
+                "take_profit_price": take_profit_price,
+                "entry_order_link_id": entry_link,
+                "entry_order_id": order_result.get("orderId", ""),
+                "submit_mode": submit_mode,
+                "opened_at_ms": now_ms,
+                "updated_at_ms": now_ms,
+            }
+            rows.append(row)
         orders.append(
             {
                 "order_link_id": entry_link,
@@ -1231,19 +1281,88 @@ def _execute_entries(
                 "symbol": symbol,
                 "side": bybit_side,
                 "order_type": demo.entry_order_type,
-                "qty": entry_qty,
+                "qty": entry_qty or qty,
                 "reduce_only": False,
                 "order_id": order_result.get("orderId", ""),
                 "submit_mode": submit_mode,
                 "avg_price": entry_price,
-                "notional_usdt": actual_notional,
+                "notional_usdt": filled_notional if demo.submit_orders else actual_notional,
                 "target_notional_pct_equity": order_notional_pct_equity,
                 "entry_leverage": demo.entry_leverage,
-                "initial_margin_usdt": initial_margin_usdt,
-                "status": "submitted" if demo.submit_orders else "planned",
+                "initial_margin_usdt": filled_initial_margin_usdt if demo.submit_orders else initial_margin_usdt,
+                "status": order_status,
+                "trade_side": side,
+                "signal_ts_ms": int(candidate["signal_ts_ms"]),
+                "equity_usdt": equity_usdt,
+                "tick_size": tick_size,
+                "qty_step": qty_step,
+                "stop_price": stop_price,
+                "take_profit_price": take_profit_price,
             }
         )
     return rows, orders
+
+
+def _filter_pending_entry_orders(
+    candidates: list[dict[str, Any]],
+    orders: pl.DataFrame,
+    *,
+    now_ms: int,
+) -> tuple[list[dict[str, Any]], int]:
+    if not candidates:
+        return candidates, 0
+    pending_trade_ids, pending_symbols = _pending_order_refs(orders, reduce_only=False, now_ms=now_ms)
+    kept: list[dict[str, Any]] = []
+    skipped = 0
+    for candidate in candidates:
+        if str(candidate.get("trade_id", "")) in pending_trade_ids or str(candidate.get("symbol", "")) in pending_symbols:
+            skipped += 1
+            continue
+        kept.append(candidate)
+    return kept, skipped
+
+
+def _filter_pending_exit_orders(
+    exits: list[dict[str, Any]],
+    orders: pl.DataFrame,
+    *,
+    now_ms: int,
+) -> tuple[list[dict[str, Any]], int]:
+    if not exits:
+        return exits, 0
+    pending_trade_ids, pending_symbols = _pending_order_refs(orders, reduce_only=True, now_ms=now_ms)
+    kept: list[dict[str, Any]] = []
+    skipped = 0
+    for exit_plan in exits:
+        if str(exit_plan.get("trade_id", "")) in pending_trade_ids or str(exit_plan.get("symbol", "")) in pending_symbols:
+            skipped += 1
+            continue
+        kept.append(exit_plan)
+    return kept, skipped
+
+
+def _pending_order_refs(orders: pl.DataFrame, *, reduce_only: bool, now_ms: int) -> tuple[set[str], set[str]]:
+    trade_ids: set[str] = set()
+    symbols: set[str] = set()
+    if orders.is_empty():
+        return trade_ids, symbols
+    for row in orders.to_dicts():
+        if _bool(row.get("reduce_only")) != reduce_only:
+            continue
+        if str(row.get("status", "")) not in PENDING_ORDER_STATUSES:
+            continue
+        ts_ms = int(row.get("ts_ms") or 0)
+        if ts_ms > 0 and now_ms - ts_ms > PENDING_ORDER_GUARD_MS:
+            continue
+        if reduce_only and not str(row.get("exit_reason", "")):
+            continue
+        trade_id = str(row.get("trade_id", ""))
+        symbol = str(row.get("symbol", ""))
+        if trade_id:
+            trade_ids.add(trade_id)
+        if symbol:
+            symbols.add(symbol)
+    return trade_ids, symbols
 
 
 def _execute_exits(
@@ -1270,7 +1389,7 @@ def _execute_exits(
             continue
         side = str(exit_plan.get("side") or trade.get("side") or "short")
         bybit_side = "Buy" if side == "short" else "Sell"
-        exit_link = _order_link_id("ex", symbol=symbol, signal_ts_ms=int(trade.get("signal_ts_ms") or now_ms))
+        exit_link = _risk_order_link_id("ex", symbol=symbol, ts_ms=now_ms, attempt=0)
         order_result: dict[str, Any] = {}
         exec_summary: dict[str, Any] = {}
         submit_mode = "dry_run"
@@ -1286,26 +1405,36 @@ def _execute_exits(
                     reduce_only=True,
                 )
             )
-            exec_summary = _execution_summary(
-                trading_client.get_trade_history(symbol=symbol, order_link_id=exit_link, limit=50)
+            exec_summary = _wait_for_execution_summary(
+                trading_client,
+                symbol=symbol,
+                order_link_id=exit_link,
+                poll_seconds=demo.order_fill_confirm_seconds,
+                poll_interval_seconds=demo.order_fill_poll_interval_seconds,
             )
             submit_mode = "submitted"
         exit_price = _float(exec_summary.get("avg_price")) or _float(exit_plan.get("planned_exit_price"))
-        trade.update(
-            {
-                "status": "closed",
-                "exit_ts_ms": now_ms,
-                "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
-                "exit_price": exit_price,
-                "exit_reason": str(exit_plan["exit_reason"]),
-                "exit_order_link_id": exit_link,
-                "exit_order_id": order_result.get("orderId", ""),
-                "submit_mode": submit_mode,
-                "closed_at_ms": now_ms,
-                "updated_at_ms": now_ms,
-            }
-        )
-        rows.append(trade)
+        target_qty = _float(qty)
+        filled_qty = _float(exec_summary.get("qty")) if demo.submit_orders else target_qty
+        qty_tolerance = max(target_qty * 1e-8, 1e-12)
+        fully_filled = not demo.submit_orders or (target_qty > 0.0 and filled_qty + qty_tolerance >= target_qty)
+        order_status = "filled" if fully_filled else "partial" if filled_qty > 0.0 else "submitted_unconfirmed"
+        if fully_filled:
+            trade.update(
+                {
+                    "status": "closed",
+                    "exit_ts_ms": now_ms,
+                    "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
+                    "exit_price": exit_price,
+                    "exit_reason": str(exit_plan["exit_reason"]),
+                    "exit_order_link_id": exit_link,
+                    "exit_order_id": order_result.get("orderId", ""),
+                    "submit_mode": submit_mode,
+                    "closed_at_ms": now_ms,
+                    "updated_at_ms": now_ms,
+                }
+            )
+            rows.append(trade)
         orders.append(
             {
                 "order_link_id": exit_link,
@@ -1319,12 +1448,150 @@ def _execute_exits(
                 "order_id": order_result.get("orderId", ""),
                 "submit_mode": submit_mode,
                 "avg_price": exit_price,
-                "notional_usdt": abs(exit_price * _float(qty)) if exit_price > 0.0 else 0.0,
-                "status": "submitted" if demo.submit_orders else "planned",
+                "notional_usdt": abs(exit_price * filled_qty) if exit_price > 0.0 else 0.0,
+                "status": order_status if demo.submit_orders else "planned",
                 "exit_reason": str(exit_plan["exit_reason"]),
+                "target_qty": qty,
+                "filled_qty": _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0.0 else "",
             }
         )
     return rows, orders
+
+
+def _reconcile_pending_order_fills(
+    orders: pl.DataFrame,
+    all_trades: pl.DataFrame,
+    *,
+    trading_client: Any | None,
+    demo: EventDemoCycleConfig,
+    now_ms: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if orders.is_empty() or trading_client is None or not demo.submit_orders:
+        return [], []
+    trade_lookup = {str(row["trade_id"]): row for row in all_trades.to_dicts()} if not all_trades.is_empty() else {}
+    trade_rows: list[dict[str, Any]] = []
+    order_rows: list[dict[str, Any]] = []
+    for order in orders.to_dicts():
+        if str(order.get("status", "")) not in PENDING_ORDER_STATUSES:
+            continue
+        link = str(order.get("order_link_id") or "")
+        symbol = str(order.get("symbol") or "")
+        trade_id = str(order.get("trade_id") or "")
+        if not link or not symbol or not trade_id:
+            continue
+        ts_ms = int(order.get("ts_ms") or 0)
+        if ts_ms > 0 and now_ms - ts_ms > PENDING_ORDER_GUARD_MS:
+            continue
+        summary = _execution_summary(trading_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50))
+        filled_qty = _float(summary.get("qty"))
+        if filled_qty <= 0.0:
+            continue
+        target_qty = _float(order.get("target_qty") or order.get("qty"))
+        qty_tolerance = max(target_qty * 1e-8, 1e-12)
+        fully_filled = target_qty > 0.0 and filled_qty + qty_tolerance >= target_qty
+        avg_price = _float(summary.get("avg_price")) or _float(order.get("avg_price"))
+        previous_filled_qty = _float(order.get("filled_qty"))
+        order_update = dict(order)
+        order_update.update(
+            {
+                "status": "filled" if fully_filled else "partial",
+                "filled_qty": _decimal_text(Decimal(str(filled_qty))),
+                "avg_price": avg_price,
+                "notional_usdt": abs(avg_price * filled_qty) if avg_price > 0.0 else 0.0,
+                "updated_at_ms": now_ms,
+            }
+        )
+        order_rows.append(order_update)
+        if _bool(order.get("reduce_only")):
+            trade = dict(trade_lookup.get(trade_id, {}))
+            if not trade or str(trade.get("status")) == "closed":
+                continue
+            delta_qty = max(filled_qty - previous_filled_qty, 0.0)
+            remaining_qty = max(_float(trade.get("qty")) - delta_qty, 0.0)
+            if fully_filled or remaining_qty <= max(_float(trade.get("qty")) * 1e-8, 1e-12):
+                trade.update(
+                    {
+                        "status": "closed",
+                        "exit_ts_ms": now_ms,
+                        "exit_trigger_ts_ms": now_ms,
+                        "exit_price": avg_price,
+                        "exit_reason": str(order.get("exit_reason") or "pending_exit_fill"),
+                        "exit_order_link_id": link,
+                        "exit_order_id": order.get("order_id", ""),
+                        "submit_mode": str(order.get("submit_mode") or "execution_reconciled"),
+                        "closed_at_ms": now_ms,
+                        "updated_at_ms": now_ms,
+                    }
+                )
+                trade_rows.append(trade)
+            elif delta_qty > 0.0:
+                trade.update(
+                    {
+                        "qty": _decimal_text(Decimal(str(remaining_qty))),
+                        "notional_usdt": abs(_float(trade.get("entry_price")) * remaining_qty),
+                        "partial_exit_order_link_id": link,
+                        "partial_exit_price": avg_price,
+                        "partial_exit_reason": str(order.get("exit_reason") or "pending_exit_partial_fill"),
+                        "updated_at_ms": now_ms,
+                    }
+                )
+                trade_rows.append(trade)
+            continue
+        existing_trade = dict(trade_lookup.get(trade_id, {}))
+        if existing_trade:
+            if str(existing_trade.get("status")) != "closed" and filled_qty > _float(existing_trade.get("qty")):
+                leverage = _float(existing_trade.get("entry_leverage")) or _float(order.get("entry_leverage")) or demo.entry_leverage
+                notional = abs(avg_price * filled_qty) if avg_price > 0.0 else _float(existing_trade.get("notional_usdt"))
+                initial_margin = notional / leverage if leverage > 0.0 else 0.0
+                equity = _float(existing_trade.get("equity_usdt"))
+                existing_trade.update(
+                    {
+                        "entry_price": avg_price,
+                        "qty": _decimal_text(Decimal(str(filled_qty))),
+                        "notional_usdt": notional,
+                        "initial_margin_usdt": initial_margin,
+                        "initial_margin_pct_equity": initial_margin / equity if equity > 0.0 else 0.0,
+                        "updated_at_ms": now_ms,
+                    }
+                )
+                trade_rows.append(existing_trade)
+            continue
+        leverage = _float(order.get("entry_leverage")) or demo.entry_leverage
+        notional = abs(avg_price * filled_qty) if avg_price > 0.0 else _float(order.get("notional_usdt"))
+        initial_margin = notional / leverage if leverage > 0.0 else 0.0
+        equity = _float(order.get("equity_usdt"))
+        bybit_side = str(order.get("side", ""))
+        trade_side = str(order.get("trade_side") or ("short" if bybit_side == "Sell" else "long"))
+        opened_at_ms = int(order.get("ts_ms") or now_ms)
+        trade_rows.append(
+            {
+                "trade_id": trade_id,
+                "symbol": symbol,
+                "side": trade_side,
+                "signal_ts_ms": int(order.get("signal_ts_ms") or opened_at_ms),
+                "ts_ms": now_ms,
+                "status": "open",
+                "entry_ts_ms": opened_at_ms,
+                "entry_price": avg_price,
+                "qty": _decimal_text(Decimal(str(filled_qty))),
+                "notional_usdt": notional,
+                "equity_usdt": equity,
+                "target_notional_pct_equity": _float(order.get("target_notional_pct_equity")),
+                "entry_leverage": leverage,
+                "initial_margin_usdt": initial_margin,
+                "initial_margin_pct_equity": initial_margin / equity if equity > 0.0 else 0.0,
+                "tick_size": _float(order.get("tick_size")),
+                "qty_step": _float(order.get("qty_step")),
+                "stop_price": _float(order.get("stop_price")),
+                "take_profit_price": _float(order.get("take_profit_price")),
+                "entry_order_link_id": link,
+                "entry_order_id": order.get("order_id", ""),
+                "submit_mode": "execution_reconciled",
+                "opened_at_ms": opened_at_ms,
+                "updated_at_ms": now_ms,
+            }
+        )
+    return trade_rows, order_rows
 
 
 def _execute_risk_exits(
@@ -1828,6 +2095,10 @@ def _order_params(
     reduce_only: bool,
     price: float | None = None,
     time_in_force: str | None = None,
+    stop_loss: float | str | None = None,
+    take_profit: float | str | None = None,
+    tp_trigger_by: str = "MarkPrice",
+    sl_trigger_by: str = "MarkPrice",
 ) -> dict[str, Any]:
     params: dict[str, Any] = {
         "symbol": symbol,
@@ -1837,11 +2108,16 @@ def _order_params(
         "orderLinkId": order_link_id,
         "reduceOnly": reduce_only,
     }
-    if order_type.lower() == "market":
-        return params
-    if price is not None and price > 0.0:
+    if stop_loss is not None and _float(stop_loss) > 0.0:
+        params["stopLoss"] = _decimal_text(Decimal(str(stop_loss)))
+        params["slTriggerBy"] = sl_trigger_by
+    if take_profit is not None and _float(take_profit) > 0.0:
+        params["takeProfit"] = _decimal_text(Decimal(str(take_profit)))
+        params["tpTriggerBy"] = tp_trigger_by
+    if order_type.lower() != "market" and price is not None and price > 0.0:
         params["price"] = _decimal_text(Decimal(str(price)))
-    params["timeInForce"] = time_in_force or "PostOnly"
+    if order_type.lower() != "market":
+        params["timeInForce"] = time_in_force or "PostOnly"
     return params
 
 
@@ -1918,6 +2194,23 @@ def _execution_summary(executions: list[dict[str, Any]]) -> dict[str, Any]:
         "fee": fee,
         "executions": len(executions),
     }
+
+
+def _wait_for_execution_summary(
+    trading_client: Any,
+    *,
+    symbol: str,
+    order_link_id: str,
+    poll_seconds: float,
+    poll_interval_seconds: float,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + max(poll_seconds, 0.0)
+    interval = max(poll_interval_seconds, 0.01)
+    while True:
+        summary = _execution_summary(trading_client.get_trade_history(symbol=symbol, order_link_id=order_link_id, limit=50))
+        if _float(summary.get("qty")) > 0.0 or time.monotonic() >= deadline:
+            return summary
+        time.sleep(min(interval, max(deadline - time.monotonic(), 0.0)))
 
 
 def _position_size_by_symbol(positions: list[dict[str, Any]]) -> dict[str, float]:
@@ -2107,24 +2400,28 @@ def _contract_lookup(universe: pl.DataFrame) -> dict[str, dict[str, Any]]:
 
 
 def _stop_price_for_entry(*, entry_price: float, side: str, stop_loss_pct: float, tick_size: float) -> float:
+    price = Decimal(str(entry_price))
+    pct = Decimal(str(stop_loss_pct))
     if side == "short":
-        raw = entry_price * (1.0 + stop_loss_pct)
+        raw = price * (Decimal("1") + pct)
         return _round_price(raw, tick_size=tick_size, rounding=ROUND_CEILING)
-    raw = entry_price * (1.0 - stop_loss_pct)
+    raw = price * (Decimal("1") - pct)
     return _round_price(raw, tick_size=tick_size, rounding=ROUND_FLOOR)
 
 
 def _take_profit_price_for_entry(*, entry_price: float, side: str, take_profit_pct: float, tick_size: float) -> float:
     if take_profit_pct <= 0.0:
         return 0.0
+    price = Decimal(str(entry_price))
+    pct = Decimal(str(take_profit_pct))
     if side == "short":
-        raw = entry_price * (1.0 - take_profit_pct)
+        raw = price * (Decimal("1") - pct)
         return _round_price(raw, tick_size=tick_size, rounding=ROUND_FLOOR)
-    raw = entry_price * (1.0 + take_profit_pct)
+    raw = price * (Decimal("1") + pct)
     return _round_price(raw, tick_size=tick_size, rounding=ROUND_CEILING)
 
 
-def _round_price(price: float, *, tick_size: float, rounding: str) -> float:
+def _round_price(price: float | Decimal, *, tick_size: float, rounding: str) -> float:
     try:
         value = Decimal(str(price))
         tick = Decimal(str(tick_size if tick_size > 0.0 else 0.0001))
@@ -2210,6 +2507,17 @@ def _float(value: Any) -> float:
     return number if math.isfinite(number) else 0.0
 
 
+def _bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y"}:
+        return True
+    if text in {"0", "false", "no", "n", ""}:
+        return False
+    return bool(value)
+
+
 def _decimal_text(value: Decimal) -> str:
     text = format(value.normalize(), "f")
     if "." in text:
@@ -2274,6 +2582,7 @@ def format_telegram_status_message(payload: dict[str, Any]) -> str:
         f"reason={reason or 'manual_status'}",
         f"mode={cycle['mode']} equity=${_float(cycle['equity_usdt']):,.2f}",
         f"entries={cycle['entries_executed']}/{cycle['entry_candidates']} exits={cycle['exits_executed']}/{cycle['exit_candidates']}",
+        f"pending_fills={cycle.get('pending_order_fills_reconciled', 0)}",
         f"bybit_positions={bybit_summary.get('positions', 0)} "
         f"value=${_float(bybit_summary.get('position_value_usdt')):,.2f} "
         f"uPnL=${_float(bybit_summary.get('unrealized_pnl_usdt')):,.2f} "
@@ -2330,6 +2639,12 @@ def _telegram_notification_reason(payload: dict[str, Any]) -> str:
         return "entry_executed"
     if int(cycle.get("exits_executed") or 0) > 0:
         return "exit_executed"
+    if int(cycle.get("pending_entry_fills_reconciled") or 0) > 0:
+        return "entry_fill_reconciled"
+    if int(cycle.get("pending_exit_fills_reconciled") or 0) > 0:
+        return "exit_fill_reconciled"
+    if any(str(row.get("status", "")) in {"partial", "submitted_unconfirmed"} for row in payload.get("entry_orders", [])):
+        return "entry_order_unconfirmed"
     if any(str(row.get("status", "")) in {"partial", "submitted_unconfirmed"} for row in payload.get("exit_orders", [])):
         return "exit_order_unconfirmed"
     return ""

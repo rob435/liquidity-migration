@@ -19,6 +19,8 @@ MAX_ORDER_NOTIONAL_PCT_EQUITY="${MAX_ORDER_NOTIONAL_PCT_EQUITY:-0}"
 MAX_ENTRY_LAG_MINUTES="${MAX_ENTRY_LAG_MINUTES:-15}"
 MAX_NEW_ENTRIES_PER_CYCLE="${MAX_NEW_ENTRIES_PER_CYCLE:-6}"
 ENTRY_LEVERAGE="${ENTRY_LEVERAGE:-2}"
+ORDER_FILL_CONFIRM_SECONDS="${ORDER_FILL_CONFIRM_SECONDS:-2}"
+ORDER_FILL_POLL_INTERVAL_SECONDS="${ORDER_FILL_POLL_INTERVAL_SECONDS:-0.2}"
 FALLBACK_EQUITY_USDT="${FALLBACK_EQUITY_USDT:-10000}"
 
 telegram_args=()
@@ -61,6 +63,8 @@ while true; do
         --max-entry-lag-minutes "$MAX_ENTRY_LAG_MINUTES" \
         --max-new-entries-per-cycle "$MAX_NEW_ENTRIES_PER_CYCLE" \
         --entry-leverage "$ENTRY_LEVERAGE" \
+        --order-fill-confirm-seconds "$ORDER_FILL_CONFIRM_SECONDS" \
+        --order-fill-poll-interval-seconds "$ORDER_FILL_POLL_INTERVAL_SECONDS" \
         --fallback-equity-usdt "$FALLBACK_EQUITY_USDT" \
         "${telegram_args[@]}" \
         "${order_args[@]}"

@@ -106,6 +106,7 @@ def test_ws_risk_triggers_rest_fallback_exit_from_ticker(tmp_path: Path) -> None
     assert private_client.orders[0]["reduceOnly"] is True
     assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
     assert engine.state.exits[0]["exit_reason"] == "stop_loss"
+    assert "AAAUSDT" not in engine.state.submitted_symbols
 
 
 def test_ws_then_rest_records_demo_trade_socket_limit_and_uses_rest(tmp_path: Path) -> None:
@@ -230,6 +231,72 @@ def test_ws_risk_rest_fallback_order_closes_from_execution_stream(tmp_path: Path
     assert engine.state.orders[0]["status"] == "filled"
     assert engine.state.exits[0]["submit_mode"] == "submitted"
     assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
+
+
+def test_ws_risk_bootstrap_loads_pending_exit_order_after_restart(tmp_path: Path) -> None:
+    _write_open_trade(tmp_path)
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "order_link_id": "agc-ex-pending",
+                    "ts_ms": 9_999_999_999_000,
+                    "trade_id": "t1",
+                    "symbol": "AAAUSDT",
+                    "side": "Buy",
+                    "order_type": "Market",
+                    "qty": "1",
+                    "reduce_only": True,
+                    "submit_mode": "submitted",
+                    "status": "submitted_unconfirmed",
+                    "exit_reason": "stop_loss",
+                }
+            ]
+        ),
+        tmp_path,
+        "event_demo_orders",
+        partition_by=(),
+    )
+    private_client = FakePrivateClient(confirm_fills=False)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    assert "AAAUSDT" in engine.state.submitted_symbols
+    engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
+    engine.on_execution_message(
+        {
+            "data": [
+                {
+                    "symbol": "AAAUSDT",
+                    "orderLinkId": "agc-ex-pending",
+                    "execQty": "1",
+                    "execPrice": "113",
+                    "execValue": "113",
+                }
+            ]
+        }
+    )
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    assert private_client.orders == []
+    assert engine.state.exits[0]["submit_mode"] == "submitted"
+    assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
+    assert stored_orders.filter(pl.col("order_link_id") == "agc-ex-pending").select("status").item() == "filled"
 
 
 def test_ws_risk_stale_stream_forces_rest_reconcile(tmp_path: Path) -> None:

@@ -14,7 +14,9 @@ from .bybit import BybitPrivateClient, BybitPrivateWebSocketStream, BybitPublicT
 from .config import ResearchConfig
 from .event_demo import (
     EventRiskCycleConfig,
+    PENDING_ORDER_STATUSES,
     _active_position_by_symbol,
+    _bool,
     _build_private_client,
     _column_values,
     _empty_trades,
@@ -57,6 +59,7 @@ class EventWebSocketRiskConfig:
     stale_ws_seconds: float = 15.0
     fast_execution_stream: bool = False
     stop_tolerance_bps: float = 1.0
+    pending_exit_guard_seconds: float = 120.0
 
 
 @dataclass(slots=True)
@@ -127,6 +130,7 @@ class EventWebSocketRiskEngine:
         self.private_client = self.private_client or _build_private_client(self.config)
         self.state.all_trades = read_dataset(self.root, "event_demo_trades")
         self.state.open_trades = _open_trades(self.state.all_trades)
+        self.load_pending_exit_orders(read_dataset(self.root, "event_demo_orders"))
         raw_positions, error = _safe_raw_positions(self.private_client, settle_coin=self.risk.settle_coin)
         if error:
             self.state.errors.append(error)
@@ -335,7 +339,12 @@ class EventWebSocketRiskEngine:
                     self.state.submitted_link_submit_mode[link] = str(order.get("submit_mode") or "submitted")
             _write_order_rows(self.root, pl.DataFrame(orders, infer_schema_length=None))
             self.state.orders.extend(orders)
-        self.state.submitted_symbols.add(symbol)
+        open_symbols = set(_column_values(self.state.open_trades, "symbol"))
+        has_pending_order = any(str(order.get("status", "")) in PENDING_ORDER_STATUSES for order in orders)
+        if symbol in open_symbols and has_pending_order:
+            self.state.submitted_symbols.add(symbol)
+        else:
+            self.state.submitted_symbols.discard(symbol)
         self.write_report(reason="exit_submitted")
 
     def ws_exit(self, exit_plan: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -432,6 +441,8 @@ class EventWebSocketRiskEngine:
         if rows:
             self.state.all_trades = _upsert_rows(self.state.all_trades, rows, key="trade_id")
             self.state.reconciliations.extend(rows)
+            for row in rows:
+                self.state.submitted_symbols.discard(str(row.get("symbol", "")))
             if write:
                 _write_trade_rows(self.root, pl.DataFrame(rows, infer_schema_length=None))
 
@@ -444,6 +455,7 @@ class EventWebSocketRiskEngine:
         self.state.price_by_symbol.update(_price_lookup_from_positions(self.state.positions_by_symbol))
         self.state.all_trades = read_dataset(self.root, "event_demo_trades")
         self.state.open_trades = _open_trades(self.state.all_trades)
+        self.load_pending_exit_orders(read_dataset(self.root, "event_demo_orders"))
         self.reconcile_positions(write=True)
         self.repair_exchange_stops()
         self.subscribe_tickers(set(self.state.positions_by_symbol) | set(_column_values(self.state.open_trades, "symbol")))
@@ -472,6 +484,34 @@ class EventWebSocketRiskEngine:
         self.state.errors.append(f"websocket stale for {ws_age:.1f}s; forced REST reconcile")
         self.rest_reconcile()
         self.state.last_stale_reconcile_monotonic = now
+
+    def load_pending_exit_orders(self, orders: pl.DataFrame) -> None:
+        if orders.is_empty() or self.state.open_trades.is_empty():
+            return
+        open_trade_ids = set(_column_values(self.state.open_trades, "trade_id"))
+        loaded_order_links = {str(order.get("order_link_id") or "") for order in self.state.orders}
+        now_ms = _now_ms()
+        max_age_ms = max(self.risk.pending_exit_guard_seconds, 0.0) * 1000.0
+        for row in orders.to_dicts():
+            link = str(row.get("order_link_id") or "")
+            trade_id = str(row.get("trade_id") or "")
+            symbol = str(row.get("symbol") or "")
+            if not link or trade_id not in open_trade_ids:
+                continue
+            if not _bool(row.get("reduce_only")) or not str(row.get("exit_reason", "")):
+                continue
+            if str(row.get("status", "")) not in PENDING_ORDER_STATUSES:
+                continue
+            ts_ms = int(row.get("ts_ms") or 0)
+            if ts_ms > 0 and max_age_ms > 0 and now_ms - ts_ms > max_age_ms:
+                continue
+            self.state.submitted_link_to_trade_id[link] = trade_id
+            self.state.submitted_link_submit_mode[link] = str(row.get("submit_mode") or "submitted")
+            if symbol:
+                self.state.submitted_symbols.add(symbol)
+            if link not in loaded_order_links:
+                self.state.orders.append(dict(row))
+                loaded_order_links.add(link)
 
     def write_report(self, *, reason: str) -> dict[str, Any]:
         now_ms = _now_ms()
@@ -600,6 +640,8 @@ def _validate_ws_risk_config(config: EventWebSocketRiskConfig) -> None:
         raise ValueError("heartbeat and reconcile intervals must be non-negative")
     if config.max_runtime_seconds < 0.0:
         raise ValueError("max_runtime_seconds must be non-negative")
+    if config.pending_exit_guard_seconds < 0.0:
+        raise ValueError("pending_exit_guard_seconds must be non-negative")
 
 
 _DEMO_WS_TRADE_UNAVAILABLE = (

@@ -571,6 +571,8 @@ def build_parser() -> argparse.ArgumentParser:
     event_demo.add_argument("--entry-leverage", type=float, default=demo_defaults.entry_leverage)
     event_demo.add_argument("--entry-order-type", default=demo_defaults.entry_order_type)
     event_demo.add_argument("--exit-order-type", default=demo_defaults.exit_order_type)
+    event_demo.add_argument("--order-fill-confirm-seconds", type=float, default=demo_defaults.order_fill_confirm_seconds)
+    event_demo.add_argument("--order-fill-poll-interval-seconds", type=float, default=demo_defaults.order_fill_poll_interval_seconds)
     event_demo.add_argument("--submit-orders", action="store_true", help="Submit Bybit demo orders. Dry-run is the default.")
     event_demo.add_argument("--confirm-demo-orders", action="store_true", help="Required with --submit-orders.")
     event_demo.add_argument("--telegram", action="store_true", help="Send Telegram cycle summaries when env vars are set.")
@@ -634,6 +636,7 @@ def build_parser() -> argparse.ArgumentParser:
     event_ws_risk.add_argument("--no-fast-execution-stream", dest="fast_execution_stream", action="store_false")
     event_ws_risk.set_defaults(fast_execution_stream=ws_risk_defaults.fast_execution_stream)
     event_ws_risk.add_argument("--stop-tolerance-bps", type=float, default=ws_risk_defaults.stop_tolerance_bps)
+    event_ws_risk.add_argument("--pending-exit-guard-seconds", type=float, default=ws_risk_defaults.pending_exit_guard_seconds)
     event_ws_risk.add_argument("--data-name", default=ws_risk_defaults.data_name)
 
     return parser
@@ -788,6 +791,8 @@ def main(argv: list[str] | None = None) -> int:
             entry_leverage=args.entry_leverage,
             entry_order_type=args.entry_order_type,
             exit_order_type=args.exit_order_type,
+            order_fill_confirm_seconds=args.order_fill_confirm_seconds,
+            order_fill_poll_interval_seconds=args.order_fill_poll_interval_seconds,
             submit_orders=args.submit_orders,
             confirm_demo_orders=args.confirm_demo_orders,
             telegram=args.telegram,
@@ -867,6 +872,7 @@ def main(argv: list[str] | None = None) -> int:
             stale_ws_seconds=args.stale_ws_seconds,
             fast_execution_stream=args.fast_execution_stream,
             stop_tolerance_bps=args.stop_tolerance_bps,
+            pending_exit_guard_seconds=args.pending_exit_guard_seconds,
             data_name=args.data_name,
         )
         payload = run_event_ws_risk(data_root, config=config, risk_config=risk_config)

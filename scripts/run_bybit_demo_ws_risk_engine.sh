@@ -16,6 +16,7 @@ REST_RECONCILE_SECONDS="${REST_RECONCILE_SECONDS:-30}"
 HEARTBEAT_SECONDS="${HEARTBEAT_SECONDS:-10}"
 STOP_TOLERANCE_BPS="${STOP_TOLERANCE_BPS:-1}"
 FAST_EXECUTION_STREAM="${FAST_EXECUTION_STREAM:-0}"
+PENDING_EXIT_GUARD_SECONDS="${PENDING_EXIT_GUARD_SECONDS:-120}"
 
 telegram_args=()
 if [[ "${TELEGRAM_ENABLED:-1}" == "1" ]]; then
@@ -65,6 +66,7 @@ echo "data_root=$DATA_ROOT submit_orders=${SUBMIT_ORDERS:-0} order_submit_mode=$
     --rest-reconcile-seconds "$REST_RECONCILE_SECONDS" \
     --heartbeat-seconds "$HEARTBEAT_SECONDS" \
     --stop-tolerance-bps "$STOP_TOLERANCE_BPS" \
+    --pending-exit-guard-seconds "$PENDING_EXIT_GUARD_SECONDS" \
     "${telegram_args[@]}" \
     "${order_args[@]}" \
     "${fallback_args[@]}" \

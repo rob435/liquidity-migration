@@ -9,9 +9,11 @@ from aggression_carry.event_demo import (
     EventDemoCycleConfig,
     EventRiskCycleConfig,
     _execute_entries,
+    _execute_exits,
     _execute_risk_exits,
     _limit_chase_price,
     _maybe_notify,
+    _reconcile_pending_order_fills,
     _submit_reduce_only_exit,
     _telegram_notification_reason,
     _validate_demo_config,
@@ -40,11 +42,19 @@ class FakeRiskClient:
         *,
         positions: list[dict[str, str]] | None = None,
         fill_market_orders: bool = False,
+        fill_order_prefixes: tuple[str, ...] = ("agc-lm-",),
+        fill_qty: str = "1",
+        fill_price: str = "100.5",
     ) -> None:
         self.positions = positions or []
         self.fill_market_orders = fill_market_orders
+        self.fill_order_prefixes = fill_order_prefixes
+        self.fill_qty = fill_qty
+        self.fill_price = fill_price
         self.orders: list[dict[str, object]] = []
         self.stop_updates: list[dict[str, object]] = []
+        self.leverage_updates: list[dict[str, object]] = []
+        self.trade_history_calls: list[str | None] = []
 
     def get_positions(self, *, settle_coin: str | None = None) -> list[dict[str, str]]:
         return self.positions
@@ -54,12 +64,24 @@ class FakeRiskClient:
         return {"orderId": f"order-{len(self.orders)}"}
 
     def get_trade_history(self, *, symbol: str | None = None, order_link_id: str | None = None, limit: int = 50) -> list[dict[str, str]]:
-        if self.fill_market_orders and order_link_id and order_link_id.startswith("agc-lm-"):
-            return [{"execQty": "1", "execPrice": "100.5", "execValue": "100.5", "execFee": "0.06"}]
+        self.trade_history_calls.append(order_link_id)
+        if self.fill_market_orders and order_link_id and order_link_id.startswith(self.fill_order_prefixes):
+            return [
+                {
+                    "execQty": self.fill_qty,
+                    "execPrice": self.fill_price,
+                    "execValue": str(float(self.fill_qty) * float(self.fill_price)),
+                    "execFee": "0.06",
+                }
+            ]
         return []
 
     def set_trading_stop(self, **params: object) -> dict[str, str]:
         self.stop_updates.append(params)
+        return {}
+
+    def set_leverage(self, **params: object) -> dict[str, str]:
+        self.leverage_updates.append(params)
         return {}
 
 
@@ -74,6 +96,8 @@ def test_event_demo_cli_defaults_to_frequent_demo_forward_cycle() -> None:
     assert args.max_entry_lag_minutes == 15
     assert args.max_new_entries_per_cycle == 6
     assert args.entry_leverage == 2.0
+    assert args.order_fill_confirm_seconds == 2.0
+    assert args.order_fill_poll_interval_seconds == 0.2
     assert args.submit_orders is False
     assert args.confirm_demo_orders is False
 
@@ -102,6 +126,7 @@ def test_event_ws_risk_cli_defaults_to_ws_then_rest_demo_path() -> None:
     assert args.no_rest_fallback is False
     assert args.rest_reconcile_seconds == 30.0
     assert args.heartbeat_seconds == 10.0
+    assert args.pending_exit_guard_seconds == 120.0
     assert args.fast_execution_stream is False
     assert args.submit_orders is False
     assert args.confirm_demo_orders is False
@@ -151,6 +176,75 @@ def test_execute_entries_sizes_notional_before_leverage_margin() -> None:
     assert rows[0]["initial_margin_pct_equity"] == 0.10
     assert orders[0]["notional_usdt"] == 2_000.0
     assert orders[0]["initial_margin_usdt"] == 1_000.0
+
+
+def test_execute_entry_attaches_native_stop_and_requires_fill_confirmation() -> None:
+    candidates = [
+        {
+            "trade_id": "t1",
+            "symbol": "AAAUSDT",
+            "side": "short",
+            "signal_ts_ms": 1_700_000_000_000,
+            "stop_loss_pct": 0.12,
+            "take_profit_pct": 0.20,
+        }
+    ]
+    client = FakeRiskClient()
+
+    rows, orders = _execute_entries(
+        candidates,
+        trading_client=client,
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.20,
+        price_by_symbol={"AAAUSDT": 100.0},
+        contract_by_symbol={"AAAUSDT": {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}},
+        now_ms=1_700_000_060_000,
+    )
+
+    assert rows == []
+    assert orders[0]["status"] == "submitted_unconfirmed"
+    assert client.orders[0]["stopLoss"] == "112"
+    assert client.orders[0]["takeProfit"] == "80"
+    assert client.stop_updates == []
+
+
+def test_execute_entry_records_only_confirmed_fill() -> None:
+    candidates = [
+        {
+            "trade_id": "t1",
+            "symbol": "AAAUSDT",
+            "side": "short",
+            "signal_ts_ms": 1_700_000_000_000,
+            "stop_loss_pct": 0.12,
+            "take_profit_pct": 0.20,
+        }
+    ]
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-en-",))
+
+    rows, orders = _execute_entries(
+        candidates,
+        trading_client=client,
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.20,
+        price_by_symbol={"AAAUSDT": 100.0},
+        contract_by_symbol={"AAAUSDT": {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}},
+        now_ms=1_700_000_060_000,
+    )
+
+    assert rows[0]["qty"] == "1"
+    assert rows[0]["entry_price"] == 100.5
+    assert orders[0]["status"] == "partial"
+    assert orders[0]["notional_usdt"] == 100.5
 
 
 def test_wallet_equity_usdt_prefers_total_equity_then_coin_equity() -> None:
@@ -298,6 +392,32 @@ def test_telegram_notify_only_for_material_events(monkeypatch: pytest.MonkeyPatc
     assert _telegram_notification_reason(quiet_payload) == ""
     assert _maybe_notify(quiet_payload, enabled=True) == (False, "quiet_no_material_event")
     assert sent == []
+    entry_unconfirmed_payload = {
+        **quiet_payload,
+        "entry_orders": [{"status": "submitted_unconfirmed"}],
+    }
+
+    assert _telegram_notification_reason(entry_unconfirmed_payload) == "entry_order_unconfirmed"
+
+    reconciled_entry_payload = {
+        **quiet_payload,
+        "cycle": {
+            **quiet_payload["cycle"],
+            "pending_entry_fills_reconciled": 1,
+        },
+    }
+
+    assert _telegram_notification_reason(reconciled_entry_payload) == "entry_fill_reconciled"
+
+    reconciled_exit_payload = {
+        **quiet_payload,
+        "cycle": {
+            **quiet_payload["cycle"],
+            "pending_exit_fills_reconciled": 1,
+        },
+    }
+
+    assert _telegram_notification_reason(reconciled_exit_payload) == "exit_fill_reconciled"
 
     alert_payload = {
         **quiet_payload,
@@ -604,6 +724,327 @@ def test_limit_chase_uses_ioc_limits_then_market_fallback() -> None:
     assert client.orders[0]["price"] == "100.1"
     assert submit["exec_summary"]["qty"] == "1"
     assert submit["order_rows"][-1]["status"] == "fallback_market"
+
+
+def test_event_exit_does_not_close_until_fill_confirmed() -> None:
+    all_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "1",
+                "entry_price": 100.0,
+            }
+        ]
+    )
+
+    rows, orders = _execute_exits(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "qty": "1",
+                "exit_reason": "max_hold",
+                "exit_trigger_ts_ms": 1_700_000_000_000,
+                "planned_exit_price": 99.0,
+            }
+        ],
+        all_trades,
+        trading_client=FakeRiskClient(),
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        now_ms=1_700_000_060_000,
+    )
+
+    assert rows == []
+    assert orders[0]["status"] == "submitted_unconfirmed"
+    assert orders[0]["notional_usdt"] == 0.0
+
+
+def test_event_exit_closes_after_confirmed_fill() -> None:
+    all_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "1",
+                "entry_price": 100.0,
+            }
+        ]
+    )
+
+    rows, orders = _execute_exits(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "qty": "1",
+                "exit_reason": "max_hold",
+                "exit_trigger_ts_ms": 1_700_000_000_000,
+                "planned_exit_price": 99.0,
+            }
+        ],
+        all_trades,
+        trading_client=FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-ex-",)),
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        now_ms=1_700_000_060_000,
+    )
+
+    assert rows[0]["status"] == "closed"
+    assert rows[0]["exit_price"] == 100.5
+    assert orders[0]["status"] == "filled"
+    assert orders[0]["filled_qty"] == "1"
+
+
+def test_pending_entry_fill_reconciles_to_open_trade() -> None:
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "agc-en-pending",
+                "ts_ms": 1_700_000_060_000,
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "order_type": "Market",
+                "qty": "1",
+                "reduce_only": False,
+                "order_id": "order-1",
+                "submit_mode": "submitted",
+                "avg_price": 100.0,
+                "notional_usdt": 0.0,
+                "target_notional_pct_equity": 0.2,
+                "entry_leverage": 2.0,
+                "initial_margin_usdt": 0.0,
+                "status": "submitted_unconfirmed",
+                "trade_side": "short",
+                "signal_ts_ms": 1_700_000_000_000,
+                "equity_usdt": 10_000.0,
+                "tick_size": 0.1,
+                "qty_step": 0.1,
+                "stop_price": 112.0,
+                "take_profit_price": 80.0,
+            }
+        ]
+    )
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-en-",))
+
+    trades, order_updates = _reconcile_pending_order_fills(
+        orders,
+        pl.DataFrame(),
+        trading_client=client,
+        demo=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        now_ms=1_700_000_120_000,
+    )
+
+    assert trades[0]["status"] == "open"
+    assert trades[0]["qty"] == "1"
+    assert trades[0]["entry_price"] == 100.5
+    assert trades[0]["stop_price"] == 112.0
+    assert order_updates[0]["status"] == "filled"
+    assert order_updates[0]["filled_qty"] == "1"
+
+
+def test_stale_pending_order_fill_is_not_polled_forever() -> None:
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "agc-en-stale",
+                "ts_ms": 1_700_000_000_000,
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "qty": "1",
+                "reduce_only": False,
+                "status": "submitted_unconfirmed",
+            }
+        ]
+    )
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-en-",))
+
+    trades, order_updates = _reconcile_pending_order_fills(
+        orders,
+        pl.DataFrame(),
+        trading_client=client,
+        demo=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        now_ms=1_700_000_000_000 + 16 * 60_000,
+    )
+
+    assert trades == []
+    assert order_updates == []
+    assert client.trade_history_calls == []
+
+
+def test_pending_exit_fill_reconciles_to_closed_trade() -> None:
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "agc-ex-pending",
+                "ts_ms": 1_700_000_060_000,
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "Buy",
+                "order_type": "Market",
+                "qty": "1",
+                "reduce_only": True,
+                "order_id": "order-1",
+                "submit_mode": "submitted",
+                "avg_price": 0.0,
+                "notional_usdt": 0.0,
+                "status": "submitted_unconfirmed",
+                "exit_reason": "time_exit",
+                "target_qty": "1",
+                "filled_qty": "",
+            }
+        ]
+    )
+    trades_df = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "1",
+                "entry_price": 99.0,
+            }
+        ]
+    )
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-ex-",))
+
+    trades, order_updates = _reconcile_pending_order_fills(
+        orders,
+        trades_df,
+        trading_client=client,
+        demo=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        now_ms=1_700_000_120_000,
+    )
+
+    assert trades[0]["status"] == "closed"
+    assert trades[0]["exit_reason"] == "time_exit"
+    assert trades[0]["exit_price"] == 100.5
+    assert order_updates[0]["status"] == "filled"
+    assert order_updates[0]["notional_usdt"] == 100.5
+
+
+def test_pending_exit_partial_fill_reduces_open_trade_qty() -> None:
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "agc-ex-pending",
+                "ts_ms": 1_700_000_060_000,
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "Buy",
+                "order_type": "Market",
+                "qty": "1",
+                "reduce_only": True,
+                "order_id": "order-1",
+                "submit_mode": "submitted",
+                "avg_price": 0.0,
+                "notional_usdt": 0.0,
+                "status": "submitted_unconfirmed",
+                "exit_reason": "time_exit",
+                "target_qty": "1",
+                "filled_qty": "",
+            }
+        ]
+    )
+    trades_df = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "1",
+                "entry_price": 99.0,
+            }
+        ]
+    )
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-ex-",), fill_qty="0.4")
+
+    trades, order_updates = _reconcile_pending_order_fills(
+        orders,
+        trades_df,
+        trading_client=client,
+        demo=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        now_ms=1_700_000_120_000,
+    )
+
+    assert trades[0]["status"] == "open"
+    assert trades[0]["qty"] == "0.6"
+    assert trades[0]["partial_exit_reason"] == "time_exit"
+    assert order_updates[0]["status"] == "partial"
+    assert order_updates[0]["filled_qty"] == "0.4"
+
+
+def test_pending_entry_additional_fill_updates_open_trade_qty() -> None:
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "agc-en-pending",
+                "ts_ms": 1_700_000_060_000,
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "order_type": "Market",
+                "qty": "1",
+                "reduce_only": False,
+                "order_id": "order-1",
+                "submit_mode": "submitted",
+                "avg_price": 100.0,
+                "notional_usdt": 40.0,
+                "target_notional_pct_equity": 0.2,
+                "entry_leverage": 2.0,
+                "initial_margin_usdt": 20.0,
+                "status": "partial",
+                "filled_qty": "0.4",
+            }
+        ]
+    )
+    trades_df = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "0.4",
+                "entry_price": 100.0,
+                "notional_usdt": 40.0,
+                "equity_usdt": 10_000.0,
+                "entry_leverage": 2.0,
+            }
+        ]
+    )
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-en-",), fill_qty="0.7")
+
+    trades, order_updates = _reconcile_pending_order_fills(
+        orders,
+        trades_df,
+        trading_client=client,
+        demo=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        now_ms=1_700_000_120_000,
+    )
+
+    assert trades[0]["qty"] == "0.7"
+    assert trades[0]["entry_price"] == 100.5
+    assert trades[0]["notional_usdt"] == pytest.approx(70.35)
+    assert order_updates[0]["status"] == "partial"
+    assert order_updates[0]["filled_qty"] == "0.7"
 
 
 def test_risk_exit_does_not_close_until_submitted_fill_confirmed() -> None:
