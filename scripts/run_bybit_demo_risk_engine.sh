@@ -57,7 +57,6 @@ echo "repo=$REPO_ROOT"
 echo "data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS submit_orders=${SUBMIT_ORDERS:-0} exit_order_mode=$EXIT_ORDER_MODE"
 
 mkdir -p "$DATA_ROOT/.locks"
-rm -f "$DATA_ROOT/.locks/event_risk_cycle.lock"
 
 if [[ -z "${BYBIT_DEMO_API_KEY:-}" || -z "${BYBIT_DEMO_API_SECRET:-}" ]]; then
     echo "Set BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET so the risk engine can read and enforce live demo positions." >&2
