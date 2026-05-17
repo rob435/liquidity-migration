@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib
+import threading
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -468,6 +470,7 @@ class BybitPublicTradeStream:
     def __post_init__(self) -> None:
         if WebSocket is None:
             raise RuntimeError("pybit is required for BybitPublicTradeStream")
+        _patch_pybit_daemon_ping_timer()
         self._client = WebSocket(testnet=self.testnet, channel_type=self.category)
 
     def subscribe_public_trades(self, symbols: str | list[str], callback: Any) -> None:
@@ -495,6 +498,7 @@ class BybitPublicTickerStream:
     def __post_init__(self) -> None:
         if WebSocket is None:
             raise RuntimeError("pybit is required for BybitPublicTickerStream")
+        _patch_pybit_daemon_ping_timer()
         self._client = WebSocket(testnet=self.testnet, demo=self.demo, channel_type=self.category)
 
     def subscribe_tickers(self, symbols: str | list[str], callback: Any) -> None:
@@ -521,6 +525,7 @@ class BybitPrivateWebSocketStream:
             raise RuntimeError("BybitPrivateWebSocketStream is wired for demo-only trading here; demo=False is refused")
         if not self.api_key or not self.api_secret:
             raise RuntimeError("Bybit demo websocket stream requires API key and secret")
+        _patch_pybit_daemon_ping_timer()
         self._client = WebSocket(
             testnet=self.testnet,
             demo=self.demo,
@@ -583,8 +588,32 @@ class BybitWebSocketTradeClient:
 
 
 def _close_ws_client(client: Any) -> None:
+    timer = getattr(client, "_agc_ping_timer", None)
+    if timer is not None:
+        cancel = getattr(timer, "cancel", None)
+        if callable(cancel):
+            cancel()
     for name in ("exit", "close", "stop"):
         method = getattr(client, name, None)
         if callable(method):
             method()
             return
+
+
+def _patch_pybit_daemon_ping_timer() -> None:
+    try:
+        _websocket_stream = importlib.import_module("pybit._websocket_stream")
+    except ModuleNotFoundError:  # pragma: no cover - dependency may be absent before install
+        return
+    manager = getattr(_websocket_stream, "_V5WebSocketManager", None)
+    if manager is None or getattr(manager, "_agc_daemon_ping_timer", False):
+        return
+
+    def _send_initial_ping(self: Any) -> None:
+        timer = threading.Timer(self.ping_interval, self._send_custom_ping)
+        timer.daemon = True
+        self._agc_ping_timer = timer
+        timer.start()
+
+    manager._send_initial_ping = _send_initial_ping
+    manager._agc_daemon_ping_timer = True

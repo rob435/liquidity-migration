@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 from aggression_carry import bybit
 
 
@@ -117,6 +120,23 @@ def test_bybit_private_websocket_stream_subscribes_private_topics(monkeypatch) -
         ("order", {"callback": callback}),
         ("fast_execution", {"callback": callback}),
     ]
+
+
+def test_bybit_pybit_ping_timer_patch_uses_daemon_timer(monkeypatch) -> None:
+    class FakeManager:
+        ping_interval = 1000
+
+        def _send_custom_ping(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "pybit._websocket_stream", SimpleNamespace(_V5WebSocketManager=FakeManager))
+
+    bybit._patch_pybit_daemon_ping_timer()
+    manager = FakeManager()
+    manager._send_initial_ping()
+
+    assert manager._agc_ping_timer.daemon is True
+    manager._agc_ping_timer.cancel()
 
 
 def test_bybit_websocket_trade_client_wraps_place_and_cancel(monkeypatch) -> None:

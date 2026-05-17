@@ -632,6 +632,7 @@ def build_parser() -> argparse.ArgumentParser:
     event_ws_risk.add_argument("--heartbeat-seconds", type=float, default=ws_risk_defaults.heartbeat_seconds)
     event_ws_risk.add_argument("--max-runtime-seconds", type=float, default=ws_risk_defaults.max_runtime_seconds)
     event_ws_risk.add_argument("--stale-ws-seconds", type=float, default=ws_risk_defaults.stale_ws_seconds)
+    event_ws_risk.add_argument("--stream-start-timeout-seconds", type=float, default=ws_risk_defaults.stream_start_timeout_seconds)
     event_ws_risk.add_argument("--fast-execution-stream", dest="fast_execution_stream", action="store_true")
     event_ws_risk.add_argument("--no-fast-execution-stream", dest="fast_execution_stream", action="store_false")
     event_ws_risk.set_defaults(fast_execution_stream=ws_risk_defaults.fast_execution_stream)
@@ -873,6 +874,7 @@ def main(argv: list[str] | None = None) -> int:
             heartbeat_seconds=args.heartbeat_seconds,
             max_runtime_seconds=args.max_runtime_seconds,
             stale_ws_seconds=args.stale_ws_seconds,
+            stream_start_timeout_seconds=args.stream_start_timeout_seconds,
             fast_execution_stream=args.fast_execution_stream,
             stop_tolerance_bps=args.stop_tolerance_bps,
             pending_exit_guard_seconds=args.pending_exit_guard_seconds,

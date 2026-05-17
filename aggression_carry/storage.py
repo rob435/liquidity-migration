@@ -80,6 +80,12 @@ def exclusive_file_lock(path: str | Path, *, stale_seconds: int = 600, poll_seco
         try:
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
+            if _lock_owner_is_dead(lock_path):
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
             try:
                 age = time.time() - lock_path.stat().st_mtime
             except OSError:
@@ -100,6 +106,27 @@ def exclusive_file_lock(path: str | Path, *, stale_seconds: int = 600, poll_seco
             lock_path.unlink()
         except FileNotFoundError:
             pass
+
+
+def _lock_owner_is_dead(lock_path: Path) -> bool:
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        pid = int(payload.get("pid") or 0)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+    if pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    except OverflowError:
+        return True
+    except OSError:
+        return False
+    return False
 
 
 def with_date_column(df: pl.DataFrame, ts_col: str = "ts_ms") -> pl.DataFrame:

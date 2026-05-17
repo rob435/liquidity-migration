@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import polars as pl
@@ -67,6 +68,16 @@ class FakePublicStream:
 
     def close(self):
         pass
+
+
+class BlockingPrivateStream(FakePrivateStream):
+    def subscribe_positions(self, callback):
+        time.sleep(10)
+
+
+class BlockingPublicStream(FakePublicStream):
+    def subscribe_tickers(self, symbols, callback):
+        time.sleep(10)
 
 
 class FakeTradeClient:
@@ -164,6 +175,65 @@ def test_ws_risk_uses_mainnet_public_ticker_stream_for_demo_market_data(tmp_path
     assert constructed["demo"] is False
     assert constructed["category"] == "linear"
     assert constructed["testnet"] is False
+
+
+def test_ws_risk_run_does_not_hang_when_private_stream_subscription_blocks(tmp_path: Path) -> None:
+    private_client = FakePrivateClient(confirm_fills=False)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            max_runtime_seconds=0.05,
+            stream_start_timeout_seconds=0.01,
+            exit_untracked_positions=False,
+        ),
+        private_client=private_client,
+        private_stream=BlockingPrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    started = time.monotonic()
+    payload = engine.run()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0
+    assert payload["cycle"]["reason"] == "max_runtime"
+    assert "private websocket subscriptions timed out" in payload["cycle"]["position_report_error"]
+
+
+def test_ws_risk_public_ticker_subscription_timeout_does_not_block_bootstrap(tmp_path: Path) -> None:
+    private_client = FakePrivateClient(confirm_fills=False)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            stream_start_timeout_seconds=0.01,
+            exit_untracked_positions=False,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=BlockingPublicStream(),
+    )
+
+    started = time.monotonic()
+    engine.bootstrap()
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 1.0
+    assert "AAAUSDT" in engine.state.subscribed_symbols
+    assert any("public ticker subscription AAAUSDT timed out" in error for error in engine.state.errors)
 
 
 def test_ws_risk_ws_order_closes_from_execution_stream(tmp_path: Path) -> None:

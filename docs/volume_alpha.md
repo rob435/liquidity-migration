@@ -311,6 +311,9 @@ not support WebSocket Trade order entry for demo trading, so the demo VPS uses
 WS order entry is unavailable.
 The demo private socket rejects `execution.fast`, so the VPS uses the normal
 private execution stream unless that limitation is retested and cleared.
+Socket startup is bounded by `STREAM_START_TIMEOUT_SECONDS` so a blocked
+private/public subscription reports an error and leaves REST reconciliation plus
+exchange-native stops running instead of hanging the watchdog before startup.
 
 Order-path latency can be measured on the demo account with
 `scripts/probe_bybit_demo_order_latency.py`, which places tiny far-from-touch

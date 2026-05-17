@@ -35,6 +35,9 @@ decides exits while REST remains the order-submit fallback because Bybit
 WebSocket Trade does not currently support demo trading. The demo socket uses
 the normal private execution stream; `execution.fast` is disabled because the
 demo private socket rejects that topic.
+`STREAM_START_TIMEOUT_SECONDS` bounds private/public WebSocket startup so a
+blocked subscription is reported while REST reconciliation and exchange-native
+stops keep covering open risk.
 
 The retired `model050426-bybit-demo-signal.timer` / `.service` daily signal scan
 must stay disabled; the active runner is the event-driven loop above.

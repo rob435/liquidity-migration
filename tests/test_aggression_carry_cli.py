@@ -137,6 +137,21 @@ def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Pa
     assert args.exclude_symbols == ",".join(DEFAULT_EXCLUDED_SYMBOLS)
 
 
+def test_cli_event_ws_risk_exposes_stream_start_timeout(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "event-risk-ws",
+            "--stream-start-timeout-seconds",
+            "0.25",
+        ]
+    )
+
+    assert args.command == "event-risk-ws"
+    assert args.stream_start_timeout_seconds == 0.25
+
+
 def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [

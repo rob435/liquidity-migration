@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -63,6 +64,7 @@ class EventWebSocketRiskConfig:
     heartbeat_seconds: float = 10.0
     max_runtime_seconds: float = 0.0
     stale_ws_seconds: float = 15.0
+    stream_start_timeout_seconds: float = 3.0
     fast_execution_stream: bool = False
     stop_tolerance_bps: float = 1.0
     pending_exit_guard_seconds: float = 120.0
@@ -159,36 +161,74 @@ class EventWebSocketRiskEngine:
 
     def start_streams(self) -> None:
         if self.private_stream is None:
-            self.private_stream = _build_private_stream(self.config)
+            stream, error = _call_with_timeout(
+                "private websocket stream construction",
+                lambda: _build_private_stream(self.config),
+                timeout_seconds=self.risk.stream_start_timeout_seconds,
+            )
+            if error:
+                self.state.errors.append(error)
+            else:
+                self.private_stream = stream
+        if self.private_stream is not None:
+            _, error = _call_with_timeout(
+                "private websocket subscriptions",
+                self._subscribe_private_stream,
+                timeout_seconds=self.risk.stream_start_timeout_seconds,
+            )
+            if error:
+                self.state.errors.append(error)
+        if self.public_stream is None:
+            stream, error = _call_with_timeout(
+                "public ticker websocket stream construction",
+                lambda: BybitPublicTickerStream(
+                    category=self.config.exchange.category,
+                    testnet=self.config.exchange.testnet,
+                    demo=False,
+                ),
+                timeout_seconds=self.risk.stream_start_timeout_seconds,
+            )
+            if error:
+                self.state.errors.append(error)
+            else:
+                self.public_stream = stream
+        self.subscribe_tickers(set(self.state.positions_by_symbol) | set(_column_values(self.state.open_trades, "symbol")))
+        if self.risk.order_submit_mode in {"ws", "ws_then_rest"} and self.trade_client is None:
+            if self.risk.order_submit_mode == "ws_then_rest":
+                self.state.ws_order_unavailable = _DEMO_WS_TRADE_UNAVAILABLE
+                return
+            client, error = _call_with_timeout(
+                "websocket trade client construction",
+                lambda: _build_ws_trade_client(self.config),
+                timeout_seconds=self.risk.stream_start_timeout_seconds,
+            )
+            if error:
+                self.state.ws_order_unavailable = error[:500]
+                if self.risk.order_submit_mode == "ws" and self.risk.submit_orders:
+                    raise RuntimeError(error)
+            else:
+                self.trade_client = client
+
+    def _subscribe_private_stream(self) -> None:
+        assert self.private_stream is not None
         self.private_stream.subscribe_positions(lambda message: self.events.put(("position", message)))
         self.private_stream.subscribe_orders(lambda message: self.events.put(("order", message)))
         self.private_stream.subscribe_executions(
             lambda message: self.events.put(("execution", message)),
             fast=self.risk.fast_execution_stream,
         )
-        if self.public_stream is None:
-            self.public_stream = BybitPublicTickerStream(
-                category=self.config.exchange.category,
-                testnet=self.config.exchange.testnet,
-                demo=False,
-            )
-        self.subscribe_tickers(set(self.state.positions_by_symbol) | set(_column_values(self.state.open_trades, "symbol")))
-        if self.risk.order_submit_mode in {"ws", "ws_then_rest"} and self.trade_client is None:
-            if self.risk.order_submit_mode == "ws_then_rest":
-                self.state.ws_order_unavailable = _DEMO_WS_TRADE_UNAVAILABLE
-                return
-            try:
-                self.trade_client = _build_ws_trade_client(self.config)
-            except Exception as exc:  # noqa: BLE001 - demo WS order entry is unavailable on Bybit today
-                self.state.ws_order_unavailable = str(exc)[:500]
-                if self.risk.order_submit_mode == "ws" and self.risk.submit_orders:
-                    raise
 
     def subscribe_tickers(self, symbols: set[str]) -> None:
         missing = sorted(symbol for symbol in symbols if symbol and symbol not in self.state.subscribed_symbols)
         if not missing or self.public_stream is None:
             return
-        self.public_stream.subscribe_tickers(missing, lambda message: self.events.put(("ticker", message)))
+        _, error = _call_with_timeout(
+            f"public ticker subscription {','.join(missing[:8])}",
+            lambda: self.public_stream.subscribe_tickers(missing, lambda message: self.events.put(("ticker", message))),
+            timeout_seconds=self.risk.stream_start_timeout_seconds,
+        )
+        if error:
+            self.state.errors.append(error)
         self.state.subscribed_symbols.update(missing)
 
     def handle_event(self, event_type: str, message: dict[str, Any]) -> None:
@@ -1000,6 +1040,8 @@ def _validate_ws_risk_config(config: EventWebSocketRiskConfig) -> None:
         raise ValueError("heartbeat and reconcile intervals must be non-negative")
     if config.max_runtime_seconds < 0.0:
         raise ValueError("max_runtime_seconds must be non-negative")
+    if config.stream_start_timeout_seconds < 0.0:
+        raise ValueError("stream_start_timeout_seconds must be non-negative")
     if config.pending_exit_guard_seconds < 0.0:
         raise ValueError("pending_exit_guard_seconds must be non-negative")
     if config.exit_untracked_positions and config.order_submit_mode == "ws" and not config.rest_fallback:
@@ -1070,6 +1112,33 @@ def _telegram_dedupe_key(reason: str, payload: dict[str, Any]) -> str:
             error,
         ]
     )
+
+
+def _call_with_timeout(label: str, func: Any, *, timeout_seconds: float) -> tuple[Any, str]:
+    timeout = max(float(timeout_seconds), 0.0)
+    if timeout <= 0.0:
+        try:
+            return func(), ""
+        except Exception as exc:  # noqa: BLE001 - caller surfaces third-party transport failures
+            return None, f"{label} failed: {exc}"[:500]
+    result_queue: queue.Queue[tuple[Any, str]] = queue.Queue(maxsize=1)
+
+    def worker() -> None:
+        try:
+            result_queue.put((func(), ""))
+        except Exception as exc:  # noqa: BLE001 - caller surfaces third-party transport failures
+            result_queue.put((None, f"{label} failed: {exc}"[:500]))
+
+    thread = threading.Thread(target=worker, name=f"agc-{_thread_name(label)}", daemon=True)
+    thread.start()
+    try:
+        return result_queue.get(timeout=timeout)
+    except queue.Empty:
+        return None, f"{label} timed out after {timeout:.2f}s; REST reconciliation remains active"
+
+
+def _thread_name(label: str) -> str:
+    return "".join(char if char.isalnum() else "-" for char in label.lower())[:48]
 
 
 def _now_ms() -> int:

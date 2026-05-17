@@ -14,6 +14,7 @@ DATA_ROOT="${DATA_ROOT:-data/bybit-demo-event}"
 ORDER_SUBMIT_MODE="${ORDER_SUBMIT_MODE:-ws_then_rest}"
 REST_RECONCILE_SECONDS="${REST_RECONCILE_SECONDS:-30}"
 HEARTBEAT_SECONDS="${HEARTBEAT_SECONDS:-10}"
+STREAM_START_TIMEOUT_SECONDS="${STREAM_START_TIMEOUT_SECONDS:-3}"
 STOP_TOLERANCE_BPS="${STOP_TOLERANCE_BPS:-1}"
 FAST_EXECUTION_STREAM="${FAST_EXECUTION_STREAM:-0}"
 PENDING_EXIT_GUARD_SECONDS="${PENDING_EXIT_GUARD_SECONDS:-120}"
@@ -71,6 +72,7 @@ echo "data_root=$DATA_ROOT submit_orders=${SUBMIT_ORDERS:-0} order_submit_mode=$
     --order-submit-mode "$ORDER_SUBMIT_MODE" \
     --rest-reconcile-seconds "$REST_RECONCILE_SECONDS" \
     --heartbeat-seconds "$HEARTBEAT_SECONDS" \
+    --stream-start-timeout-seconds "$STREAM_START_TIMEOUT_SECONDS" \
     --stop-tolerance-bps "$STOP_TOLERANCE_BPS" \
     --pending-exit-guard-seconds "$PENDING_EXIT_GUARD_SECONDS" \
     "${telegram_args[@]}" \
