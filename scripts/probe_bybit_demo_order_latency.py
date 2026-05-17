@@ -28,8 +28,13 @@ def main() -> int:
     private = BybitPrivateClient(category=category, testnet=testnet, demo=True, api_key=api_key, api_secret=api_secret)
     contract = _contract(market, symbol)
     reference = _reference_price(market, symbol)
-    qty = _qty_text(contract["min_order_qty"], contract["qty_step"])
     price = _far_post_only_price(side=side, reference=reference, tick_size=contract["tick_size"])
+    qty = _qty_text(
+        contract["min_order_qty"],
+        contract["qty_step"],
+        min_notional_value=contract["min_notional_value"],
+        price=Decimal(price),
+    )
 
     print(
         f"demo_order_latency_probe symbol={symbol} side={side} qty={qty} price={price} "
@@ -83,6 +88,7 @@ def _contract(market: BybitMarketData, symbol: str) -> dict[str, Decimal]:
         return {
             "min_order_qty": Decimal(str(lot.get("minOrderQty") or lot.get("qtyStep") or "0.001")),
             "qty_step": Decimal(str(lot.get("qtyStep") or "0.001")),
+            "min_notional_value": Decimal(str(lot.get("minNotionalValue") or "0")),
             "tick_size": Decimal(str(price_filter.get("tickSize") or "0.1")),
         }
     raise RuntimeError(f"Instrument not found: {symbol}")
@@ -118,8 +124,18 @@ def _verify_cancelled(
         time.sleep(0.1)
 
 
-def _qty_text(min_order_qty: Decimal, qty_step: Decimal) -> str:
-    units = (min_order_qty / qty_step).to_integral_value(rounding=ROUND_CEILING)
+def _qty_text(
+    min_order_qty: Decimal,
+    qty_step: Decimal,
+    *,
+    min_notional_value: Decimal = Decimal("0"),
+    price: Decimal = Decimal("0"),
+) -> str:
+    required_qty = min_order_qty
+    if min_notional_value > 0 and price > 0:
+        notional_qty = min_notional_value / price
+        required_qty = max(required_qty, notional_qty)
+    units = (required_qty / qty_step).to_integral_value(rounding=ROUND_CEILING)
     return _decimal_text(units * qty_step)
 
 

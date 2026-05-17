@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 import pytest
 
 from scripts import probe_bybit_demo_order_latency as probe
@@ -86,3 +88,15 @@ def test_demo_order_latency_probe_raises_if_cancel_verification_fails() -> None:
         )
 
     assert private.cancel_calls == 1
+
+
+def test_qty_text_respects_bybit_min_notional() -> None:
+    assert (
+        probe._qty_text(
+            Decimal("1"),
+            Decimal("1"),
+            min_notional_value=Decimal("5"),
+            price=Decimal("0.055"),
+        )
+        == "91"
+    )
