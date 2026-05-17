@@ -66,18 +66,26 @@ Objective: harden the Bybit demo system as if it is live capital, with emphasis 
   - Fresh pending reduce-only `untracked_position` exits are restored into websocket risk state even though they have no ledger trade ID.
   - This preserves the duplicate-order guard if the risk process restarts while an emergency flatten order is still unconfirmed.
 
+- `current slice: block entries on live exchange exposure`
+  - The entry loop now snapshots Bybit positions before submitting new entries.
+  - Candidate symbols with existing live exchange exposure are skipped even if the ledger is missing that position.
+  - In submit mode, a position-snapshot error skips all new entries for that cycle instead of trusting the ledger alone.
+
 ## Verification
 
 Local:
 
-- `pytest -q`: 184 passed after the pending untracked-exit restart recovery change.
+- `pytest -q`: 186 passed after the live-position entry guard change.
 
 VPS:
 
-- `pytest -q`: 184 passed after deploying the pending untracked-exit restart recovery change.
+- `pytest -q`: 186 passed after deploying the live-position entry guard change.
 - Services after restart:
   - `model050426-bybit-demo.service`: active/running, `INTERVAL_SECONDS=300`.
   - `model050426-bybit-risk.service`: active/running.
+- Entry live-position guard drill:
+  - An isolated cycle with a forced entry candidate and a live Bybit position for the same symbol submitted `0` entry orders and recorded `skipped_live_position_entry=1`.
+  - An isolated submit-mode cycle with a position-snapshot error submitted `0` entry orders and recorded `skipped_position_snapshot_error=1`.
 - Pending untracked-exit restart drill:
   - An isolated VPS data root with a fresh pending `untracked_position` reduce-only order and a still-open Bybit position loaded the existing order on bootstrap.
   - The restarted risk engine submitted `0` duplicate orders and kept `AAAUSDT` in the pending-submission guard.

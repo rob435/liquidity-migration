@@ -198,6 +198,8 @@ def run_event_demo_cycle(
                 _write_order_rows(root, pl.DataFrame(exit_order_rows, infer_schema_length=None))
 
         refreshed_open = _open_trades(all_trades)
+        raw_positions, bybit_position_error = _safe_raw_positions(trading_client, settle_coin=demo.settle_coin)
+        live_position_symbols = set(_active_position_by_symbol(raw_positions))
         entry_candidates, skip_counts = select_demo_entry_candidates(
             features,
             all_trades,
@@ -210,6 +212,16 @@ def run_event_demo_cycle(
         free_slots = max(int(strategy.max_active_symbols) - refreshed_open.height, 0)
         entry_candidates = entry_candidates[:free_slots]
         entry_candidates, pending_entry_skips = _filter_pending_entry_orders(entry_candidates, all_orders, now_ms=cycle_now_ms)
+        snapshot_error_entry_skips = 0
+        live_position_entry_skips = 0
+        if bybit_position_error and demo.submit_orders:
+            snapshot_error_entry_skips = len(entry_candidates)
+            entry_candidates = []
+        else:
+            entry_candidates, live_position_entry_skips = _filter_live_position_entry_orders(
+                entry_candidates,
+                live_position_symbols,
+            )
         executed_entries, entry_order_rows = _execute_entries(
             entry_candidates,
             trading_client=trading_client,
@@ -229,7 +241,16 @@ def run_event_demo_cycle(
             if demo.submit_orders or demo.record_dry_run:
                 _write_order_rows(root, pl.DataFrame(entry_order_rows, infer_schema_length=None))
 
-        bybit_positions, bybit_position_error = _safe_bybit_position_snapshot(trading_client, demo=demo)
+        if trading_client is None and demo.telegram:
+            bybit_position_error = "Bybit private client unavailable; set BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET"
+        elif entry_order_rows:
+            refreshed_raw_positions, refreshed_position_error = _safe_raw_positions(trading_client, settle_coin=demo.settle_coin)
+            if refreshed_position_error:
+                bybit_position_error = refreshed_position_error
+            else:
+                raw_positions = refreshed_raw_positions
+                bybit_position_error = ""
+        bybit_positions = build_position_pnl_snapshot(raw_positions)
         bybit_position_summary = summarize_position_pnl(bybit_positions)
         ledger_positions = build_ledger_position_pnl_snapshot(_open_trades(all_trades), price_by_symbol)
         ledger_position_summary = summarize_position_pnl(ledger_positions)
@@ -279,6 +300,8 @@ def run_event_demo_cycle(
             **{f"skipped_{key}": value for key, value in skip_counts.items()},
             "skipped_pending_entry_order": pending_entry_skips,
             "skipped_pending_exit_order": pending_exit_skips,
+            "skipped_live_position_entry": live_position_entry_skips,
+            "skipped_position_snapshot_error": snapshot_error_entry_skips,
         }
 
         payload = {
@@ -1505,6 +1528,22 @@ def _filter_pending_entry_orders(
     return kept, skipped
 
 
+def _filter_live_position_entry_orders(
+    candidates: list[dict[str, Any]],
+    live_position_symbols: set[str],
+) -> tuple[list[dict[str, Any]], int]:
+    if not candidates or not live_position_symbols:
+        return candidates, 0
+    kept: list[dict[str, Any]] = []
+    skipped = 0
+    for candidate in candidates:
+        if str(candidate.get("symbol", "")) in live_position_symbols:
+            skipped += 1
+            continue
+        kept.append(candidate)
+    return kept, skipped
+
+
 def _filter_pending_exit_orders(
     exits: list[dict[str, Any]],
     orders: pl.DataFrame,
@@ -2265,21 +2304,6 @@ def _wallet_equity_usdt(trading_client: Any, *, demo: EventDemoCycleConfig) -> f
     if equity <= 0.0:
         raise RuntimeError("Bybit demo wallet equity could not be read or was zero")
     return equity
-
-
-def _safe_bybit_position_snapshot(
-    trading_client: Any | None,
-    *,
-    demo: EventDemoCycleConfig,
-) -> tuple[list[dict[str, Any]], str]:
-    if trading_client is None:
-        if demo.telegram:
-            return [], "Bybit private client unavailable; set BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET"
-        return [], ""
-    try:
-        return build_position_pnl_snapshot(trading_client.get_positions(settle_coin=demo.settle_coin)), ""
-    except Exception as exc:  # noqa: BLE001 - private API failures should be reported, not hidden
-        return [], str(exc)[:500]
 
 
 def _safe_raw_positions(trading_client: Any | None, *, settle_coin: str) -> tuple[list[dict[str, Any]], str]:

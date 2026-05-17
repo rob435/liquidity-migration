@@ -27,6 +27,7 @@ from aggression_carry.event_demo import (
     plan_demo_exits,
     plan_risk_exits,
     plan_stop_repairs,
+    run_event_demo_cycle,
     run_event_risk_cycle,
     select_demo_entry_candidates,
     summarize_position_pnl,
@@ -52,6 +53,7 @@ class FakeRiskClient:
         fail_order_symbols: set[str] | None = None,
         fail_history_links: set[str] | None = None,
         fail_trade_history: bool = False,
+        fail_positions: bool = False,
     ) -> None:
         self.positions = positions or []
         self.fill_market_orders = fill_market_orders
@@ -62,13 +64,19 @@ class FakeRiskClient:
         self.fail_order_symbols = fail_order_symbols or set()
         self.fail_history_links = fail_history_links or set()
         self.fail_trade_history = fail_trade_history
+        self.fail_positions = fail_positions
         self.orders: list[dict[str, object]] = []
         self.stop_updates: list[dict[str, object]] = []
         self.leverage_updates: list[dict[str, object]] = []
         self.trade_history_calls: list[str | None] = []
 
     def get_positions(self, *, settle_coin: str | None = None) -> list[dict[str, str]]:
+        if self.fail_positions:
+            raise RuntimeError("positions unavailable")
         return self.positions
+
+    def get_wallet_balance(self, *, account_type: str | None = None, coin: str | None = None) -> dict[str, object]:
+        return {"list": [{"totalEquity": "10000"}]}
 
     def place_order(self, **params: object) -> dict[str, str]:
         if str(params.get("symbol")) in self.fail_order_symbols:
@@ -127,6 +135,49 @@ class FakeKlineMarket:
 class FailingKlineMarket(FakeKlineMarket):
     def get_klines(self, symbol: str, interval: str, start: int, end: int) -> list[list[str]]:
         raise AssertionError(f"unexpected kline fetch for {symbol} {interval} {start} {end}")
+
+
+class MinimalEventMarket:
+    def get_instruments_info(self) -> list[dict[str, str]]:
+        return []
+
+    def get_tickers(self) -> list[dict[str, str]]:
+        return [{"symbol": "AAAUSDT", "markPrice": "100", "lastPrice": "100"}]
+
+    def stats(self) -> dict[str, int]:
+        return {}
+
+
+def _patch_minimal_event_cycle(monkeypatch: pytest.MonkeyPatch, candidate: dict[str, object]) -> None:
+    monkeypatch.setattr(
+        "aggression_carry.event_demo._build_demo_universe",
+        lambda *args, **kwargs: pl.DataFrame(
+            [
+                {
+                    "symbol": "AAAUSDT",
+                    "tick_size": 0.1,
+                    "qty_step": 0.1,
+                    "min_order_qty": 0.1,
+                    "min_notional_value": 5.0,
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "aggression_carry.event_demo._download_recent_1h_klines",
+        lambda *args, **kwargs: (
+            pl.DataFrame([{"symbol": "AAAUSDT", "ts_ms": 1_700_000_000_000, "close": 100.0}]),
+            {"cache_rows": 0, "cache_symbols": 0, "fetch_symbols": 0, "fetched_rows": 0, "output_rows": 1},
+        ),
+    )
+    monkeypatch.setattr(
+        "aggression_carry.event_demo._build_demo_features",
+        lambda klines: pl.DataFrame([{"symbol": "AAAUSDT"}]),
+    )
+    monkeypatch.setattr(
+        "aggression_carry.event_demo.select_demo_entry_candidates",
+        lambda *args, **kwargs: ([candidate], {}),
+    )
 
 
 def test_event_demo_cli_defaults_to_frequent_demo_forward_cycle() -> None:
@@ -263,6 +314,82 @@ def test_demo_kline_cache_fetches_only_new_hour(tmp_path: Path) -> None:
     assert stats["fetch_symbols"] == 1
     assert stats["fetched_rows"] == 1
     assert read_dataset(tmp_path, "event_demo_klines_1h").height == 3
+
+
+def test_event_demo_cycle_skips_entry_when_live_position_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    now_ms = 1_700_000_060_000
+    candidate = {
+        "trade_id": "t-live-position",
+        "symbol": "AAAUSDT",
+        "side": "short",
+        "signal_ts_ms": now_ms - MS_PER_HOUR,
+        "stop_loss_pct": 0.12,
+        "take_profit_pct": 0.20,
+    }
+    client = FakeRiskClient(
+        positions=[
+            {
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "size": "1",
+                "avgPrice": "100",
+                "markPrice": "100",
+                "positionValue": "100",
+            }
+        ]
+    )
+    _patch_minimal_event_cycle(monkeypatch, candidate)
+
+    payload = run_event_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        market_client=MinimalEventMarket(),
+        private_client=client,
+        now_ms=now_ms,
+    )
+
+    assert client.orders == []
+    assert payload["cycle"]["entries_executed"] == 0
+    assert payload["cycle"]["entry_candidates"] == 0
+    assert payload["cycle"]["skipped_live_position_entry"] == 1
+    assert payload["cycle"]["skipped_position_snapshot_error"] == 0
+    assert payload["cycle"]["bybit_positions"] == 1
+    assert read_dataset(tmp_path, "event_demo_orders").is_empty()
+
+
+def test_event_demo_cycle_skips_entries_when_position_snapshot_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_ms = 1_700_000_060_000
+    candidate = {
+        "trade_id": "t-position-error",
+        "symbol": "AAAUSDT",
+        "side": "short",
+        "signal_ts_ms": now_ms - MS_PER_HOUR,
+        "stop_loss_pct": 0.12,
+        "take_profit_pct": 0.20,
+    }
+    client = FakeRiskClient(fail_positions=True)
+    _patch_minimal_event_cycle(monkeypatch, candidate)
+
+    payload = run_event_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        market_client=MinimalEventMarket(),
+        private_client=client,
+        now_ms=now_ms,
+    )
+
+    assert client.orders == []
+    assert payload["cycle"]["entries_executed"] == 0
+    assert payload["cycle"]["entry_candidates"] == 0
+    assert payload["cycle"]["skipped_live_position_entry"] == 0
+    assert payload["cycle"]["skipped_position_snapshot_error"] == 1
+    assert payload["cycle"]["position_report_error"] == "positions unavailable"
+    assert read_dataset(tmp_path, "event_demo_orders").is_empty()
 
 
 def test_execute_entries_sizes_notional_before_leverage_margin() -> None:
