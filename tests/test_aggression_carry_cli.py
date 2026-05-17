@@ -156,6 +156,34 @@ def test_cli_event_ws_risk_exposes_stream_start_timeout(tmp_path: Path) -> None:
     assert args.stream_start_timeout_seconds == 0.25
 
 
+def test_cli_demo_canary_parses_order_probe_args(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "demo-canary",
+            "--symbol",
+            "DOGEUSDT",
+            "--side",
+            "Sell",
+            "--order-notional-usdt",
+            "9",
+            "--price-distance-bps",
+            "1500",
+            "--submit-order",
+            "--confirm-demo-orders",
+        ]
+    )
+
+    assert args.command == "demo-canary"
+    assert args.symbol == "DOGEUSDT"
+    assert args.side == "Sell"
+    assert args.order_notional_usdt == 9
+    assert args.price_distance_bps == 1500
+    assert args.submit_order is True
+    assert args.confirm_demo_orders is True
+
+
 def test_cli_event_ws_risk_summary_points_to_ws_report(tmp_path: Path, capsys) -> None:
     _print_event_risk_summary(
         {

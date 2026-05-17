@@ -70,6 +70,21 @@ class EventDemoCycleConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class DemoCanaryConfig:
+    symbol: str = "DOGEUSDT"
+    side: str = "Buy"
+    order_notional_usdt: float = 8.0
+    price_distance_bps: float = 2_000.0
+    submit_order: bool = False
+    confirm_demo_orders: bool = False
+    cancel_verify_seconds: float = 5.0
+    cancel_verify_poll_seconds: float = 0.25
+    account_type: str = "UNIFIED"
+    settle_coin: str = "USDT"
+    data_name: str = "demo-canary"
+
+
+@dataclass(frozen=True, slots=True)
 class EventRiskCycleConfig:
     submit_orders: bool = False
     confirm_demo_orders: bool = False
@@ -397,6 +412,216 @@ def run_event_demo_cycle(
         report_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         (report_dir / "latest_event_demo_cycle.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         (report_dir / "latest_event_demo_cycle.md").write_text(format_event_demo_cycle_report(payload), encoding="utf-8")
+        return payload
+
+
+def run_demo_canary(
+    data_root: str | Path,
+    *,
+    config: ResearchConfig,
+    canary_config: DemoCanaryConfig | None = None,
+    market_client: Any | None = None,
+    private_client: Any | None = None,
+    now_ms: int | None = None,
+) -> dict[str, Any]:
+    canary = canary_config or DemoCanaryConfig()
+    _validate_demo_canary_config(canary)
+    root = Path(data_root).expanduser()
+    root.mkdir(parents=True, exist_ok=True)
+    report_dir = root / "reports" / canary.data_name
+    report_dir.mkdir(parents=True, exist_ok=True)
+    cycle_now_ms = now_ms if now_ms is not None else _utc_now_ms()
+    cycle_id = f"{_yyyymmddhhmmss(cycle_now_ms)}-{int(time.time_ns())}"
+
+    with exclusive_file_lock(root / ".locks" / "demo_canary.lock", stale_seconds=300):
+        public = market_client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
+        instruments = _normalize_instruments(public.get_instruments_info())
+        tickers = _normalize_tickers(public.get_tickers())
+        symbol = canary.symbol.upper()
+        contract = _canary_contract(instruments, symbol)
+        price = _canary_mark_price(tickers, symbol)
+        tick_size = _float(contract.get("tick_size")) or _fallback_tick_size(price)
+        qty_step = _float(contract.get("qty_step")) or 1.0
+        canary_price = _canary_limit_price(
+            side=canary.side,
+            mark_price=price,
+            distance_bps=canary.price_distance_bps,
+            tick_size=tick_size,
+        )
+        if canary_price <= 0.0:
+            raise RuntimeError(f"canary limit price is not positive for {symbol}: {canary_price}")
+        quantity = order_quantity_for_notional(
+            notional_usdt=canary.order_notional_usdt,
+            price=canary_price,
+            qty_step=qty_step,
+            min_order_qty=_float(contract.get("min_order_qty")),
+            min_notional_value=_float(contract.get("min_notional_value")),
+        )
+        if quantity is None:
+            raise RuntimeError(
+                f"canary order too small for {symbol}: notional={canary.order_notional_usdt} "
+                f"price={canary_price} min_qty={contract.get('min_order_qty')} "
+                f"min_notional={contract.get('min_notional_value')}"
+            )
+        qty, actual_notional = quantity
+
+        trading_client = private_client
+        if trading_client is None and canary.submit_order:
+            trading_client = _build_private_client(config)
+        wallet_error = ""
+        equity_usdt = 0.0
+        raw_positions: list[dict[str, Any]] = []
+        raw_open_orders: list[dict[str, Any]] = []
+        position_error = ""
+        open_order_error = ""
+        if trading_client is not None:
+            demo_like = EventDemoCycleConfig(account_type=canary.account_type, settle_coin=canary.settle_coin)
+            equity_usdt, wallet_error = _safe_wallet_equity_usdt(trading_client, demo=demo_like)
+            raw_positions, position_error = _safe_raw_positions(trading_client, settle_coin=canary.settle_coin)
+            raw_open_orders, open_order_error = _safe_open_orders(trading_client, settle_coin=canary.settle_coin)
+
+        active_symbol_position = symbol in _active_position_by_symbol(raw_positions)
+        live_symbol_orders = [
+            row for row in raw_open_orders if str(row.get("symbol", "")).upper() == symbol and _open_order_is_live(row)
+        ]
+        status = "planned"
+        error = _combine_errors(wallet_error, position_error, open_order_error)
+        order_result: dict[str, Any] = {}
+        cancel_result: dict[str, Any] = {}
+        cancel_verified = False
+        order_live_after_submit = False
+        order_link_id = _order_link_id("cn", symbol=symbol, signal_ts_ms=cycle_now_ms)
+        order_params = _order_params(
+            symbol=symbol,
+            side=canary.side,
+            qty=qty,
+            order_type="Limit",
+            order_link_id=order_link_id,
+            reduce_only=False,
+            price=canary_price,
+            time_in_force="PostOnly",
+        )
+
+        if canary.submit_order:
+            if trading_client is None:
+                status = "failed"
+                error = _combine_errors(error, "Bybit private client unavailable")
+            elif active_symbol_position:
+                status = "blocked"
+                error = _combine_errors(error, f"{symbol} has a live position; canary will not place a non-reduce-only order")
+            elif live_symbol_orders:
+                status = "blocked"
+                error = _combine_errors(error, f"{symbol} has live open orders; canary will not add another order")
+            elif error:
+                status = "blocked"
+            else:
+                place_succeeded = False
+                open_check_unknown = False
+                try:
+                    order_result = trading_client.place_order(**order_params)
+                    status = "submitted"
+                    place_succeeded = True
+                except Exception as exc:  # noqa: BLE001 - canary reports venue failures instead of hiding them
+                    status = "failed"
+                    open_check_unknown = True
+                    error = _combine_errors(error, f"place_order failed: {exc}"[:500])
+                if place_succeeded:
+                    try:
+                        order_live_after_submit = _wait_for_canary_open(
+                            trading_client,
+                            symbol=symbol,
+                            order_link_id=order_link_id,
+                            timeout_seconds=min(canary.cancel_verify_seconds, 2.0),
+                            poll_seconds=canary.cancel_verify_poll_seconds,
+                        )
+                        if not order_live_after_submit:
+                            status = "failed"
+                            error = _combine_errors(
+                                error,
+                                "order was submitted but did not appear in open orders before cancellation",
+                            )
+                    except Exception as exc:  # noqa: BLE001 - cleanup must still run after visibility failures
+                        open_check_unknown = True
+                        status = "failed"
+                        error = _combine_errors(error, f"open order check failed: {exc}"[:500])
+                if place_succeeded or open_check_unknown:
+                    try:
+                        cancel_result = trading_client.cancel_order(symbol=symbol, order_link_id=order_link_id)
+                    except Exception as exc:  # noqa: BLE001 - report and continue to verification
+                        status = "failed"
+                        error = _combine_errors(error, f"cancel_order failed: {exc}"[:500])
+                    try:
+                        cancel_verified = _wait_for_canary_cancel(
+                            trading_client,
+                            symbol=symbol,
+                            order_link_id=order_link_id,
+                            timeout_seconds=canary.cancel_verify_seconds,
+                            poll_seconds=canary.cancel_verify_poll_seconds,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - failed cleanup is the signal we want
+                        status = "failed"
+                        error = _combine_errors(error, f"cancel verification failed: {exc}"[:500])
+                    else:
+                        if status == "submitted":
+                            status = "cancelled_verified" if cancel_verified else "cancelled_unverified"
+
+        refreshed_positions: list[dict[str, Any]] = raw_positions
+        refreshed_open_orders: list[dict[str, Any]] = raw_open_orders
+        if trading_client is not None:
+            refreshed_positions, refreshed_position_error = _safe_raw_positions(
+                trading_client,
+                settle_coin=canary.settle_coin,
+            )
+            refreshed_open_orders, refreshed_open_order_error = _safe_open_orders(
+                trading_client,
+                settle_coin=canary.settle_coin,
+            )
+            error = _combine_errors(error, refreshed_position_error, refreshed_open_order_error)
+        live_canary_orders_after = [
+            row
+            for row in refreshed_open_orders
+            if str(row.get("orderLinkId", "")) == order_link_id and _open_order_is_live(row)
+        ]
+        active_positions_after = _active_position_by_symbol(refreshed_positions)
+        if canary.submit_order and status == "cancelled_verified" and live_canary_orders_after:
+            status = "failed"
+            error = _combine_errors(error, f"{order_link_id} still open after cancellation")
+
+        cycle = {
+            "cycle_id": cycle_id,
+            "ts_ms": cycle_now_ms,
+            "mode": "submit" if canary.submit_order else "dry_run",
+            "status": status,
+            "symbol": symbol,
+            "side": canary.side,
+            "mark_price": price,
+            "limit_price": canary_price,
+            "qty": qty,
+            "notional_usdt": actual_notional,
+            "price_distance_bps": canary.price_distance_bps,
+            "equity_usdt": equity_usdt,
+            "bybit_positions_before": len(_active_position_by_symbol(raw_positions)),
+            "bybit_positions_after": len(active_positions_after),
+            "bybit_open_orders_before": len(raw_open_orders),
+            "bybit_open_orders_after": len(refreshed_open_orders),
+            "order_live_after_submit": order_live_after_submit,
+            "cancel_verified": cancel_verified,
+            "error": error,
+        }
+        payload = {
+            "cycle": cycle,
+            "order_params": order_params,
+            "order_result": order_result,
+            "cancel_result": cancel_result,
+            "bybit_positions_after": build_position_pnl_snapshot(refreshed_positions),
+            "bybit_open_orders_after": refreshed_open_orders[:20],
+            "report_dir": str(report_dir),
+        }
+        report_path = report_dir / f"demo_canary_{cycle_id}.json"
+        payload["report_path"] = str(report_path)
+        report_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        (report_dir / "latest_demo_canary.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        (report_dir / "latest_demo_canary.md").write_text(format_demo_canary_report(payload), encoding="utf-8")
         return payload
 
 
@@ -997,6 +1222,42 @@ def order_quantity_for_notional(
     return _decimal_text(qty), actual_notional
 
 
+def format_demo_canary_report(payload: dict[str, Any]) -> str:
+    cycle = payload["cycle"]
+    lines = [
+        "# Demo Canary",
+        "",
+        f"- Time: {_iso_dt(cycle['ts_ms'])}",
+        f"- Mode: `{cycle['mode']}`",
+        f"- Status: `{cycle['status']}`",
+        f"- Symbol: `{cycle['symbol']}`",
+        f"- Side: `{cycle['side']}`",
+        f"- Mark price: {_float(cycle.get('mark_price')):.8g}",
+        f"- Canary limit: {_float(cycle.get('limit_price')):.8g}",
+        f"- Quantity: {cycle.get('qty', '')}",
+        f"- Notional: ${_float(cycle.get('notional_usdt')):,.2f}",
+        f"- Equity: ${_float(cycle.get('equity_usdt')):,.2f}",
+        f"- Positions before/after: {cycle.get('bybit_positions_before', 0)} / {cycle.get('bybit_positions_after', 0)}",
+        f"- Open orders before/after: {cycle.get('bybit_open_orders_before', 0)} / {cycle.get('bybit_open_orders_after', 0)}",
+        f"- Order live after submit: {cycle.get('order_live_after_submit', False)}",
+        f"- Cancel verified: {cycle.get('cancel_verified', False)}",
+    ]
+    if cycle.get("error"):
+        lines.extend(["", f"Error: {cycle['error']}"])
+    lines.extend(
+        [
+            "",
+            "## Order Params",
+            "",
+            "```json",
+            json.dumps(payload.get("order_params", {}), indent=2, default=str),
+            "```",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def format_event_demo_cycle_report(payload: dict[str, Any]) -> str:
     cycle = payload["cycle"]
     lines = [
@@ -1189,6 +1450,94 @@ def _validate_demo_config(config: EventDemoCycleConfig) -> None:
         raise ValueError("order fill confirmation intervals must be non-negative with positive poll interval")
     if config.submit_orders and not config.confirm_demo_orders:
         raise RuntimeError("Refusing to submit demo orders without --confirm-demo-orders")
+
+
+def _validate_demo_canary_config(config: DemoCanaryConfig) -> None:
+    if not config.symbol.upper().endswith("USDT"):
+        raise ValueError("canary symbol must be a USDT perp symbol")
+    if config.side not in {"Buy", "Sell"}:
+        raise ValueError("canary side must be Buy or Sell")
+    if config.order_notional_usdt <= 0.0:
+        raise ValueError("canary order_notional_usdt must be positive")
+    if not 1.0 <= config.price_distance_bps <= 5_000.0:
+        raise ValueError("canary price_distance_bps must be in [1, 5000]")
+    if config.cancel_verify_seconds < 0.0 or config.cancel_verify_poll_seconds <= 0.0:
+        raise ValueError("canary cancel verification intervals must be non-negative with positive poll interval")
+    if config.submit_order and not config.confirm_demo_orders:
+        raise RuntimeError("Refusing to submit canary demo order without --confirm-demo-orders")
+
+
+def _canary_contract(instruments: pl.DataFrame, symbol: str) -> dict[str, Any]:
+    if instruments.is_empty() or "symbol" not in instruments.columns:
+        raise RuntimeError("canary could not read Bybit instruments")
+    rows = instruments.filter(pl.col("symbol") == symbol).to_dicts()
+    if not rows:
+        raise RuntimeError(f"canary symbol {symbol} not found in Bybit instruments")
+    return rows[0]
+
+
+def _canary_mark_price(tickers: pl.DataFrame, symbol: str) -> float:
+    if tickers.is_empty() or "symbol" not in tickers.columns:
+        raise RuntimeError("canary could not read Bybit tickers")
+    rows = tickers.filter(pl.col("symbol") == symbol).to_dicts()
+    if not rows:
+        raise RuntimeError(f"canary symbol {symbol} not found in Bybit tickers")
+    price = _first_float(rows[0], ("mark_price", "last_price", "index_price"))
+    if price <= 0.0:
+        raise RuntimeError(f"canary symbol {symbol} has no usable mark/last/index price")
+    return price
+
+
+def _canary_limit_price(*, side: str, mark_price: float, distance_bps: float, tick_size: float) -> float:
+    if side == "Buy":
+        raw = mark_price * (1.0 - distance_bps / 10_000.0)
+        return _round_price(raw, tick_size=tick_size or _fallback_tick_size(mark_price), rounding=ROUND_FLOOR)
+    raw = mark_price * (1.0 + distance_bps / 10_000.0)
+    return _round_price(raw, tick_size=tick_size or _fallback_tick_size(mark_price), rounding=ROUND_CEILING)
+
+
+def _open_order_is_live(order: dict[str, Any]) -> bool:
+    status = str(order.get("orderStatus") or order.get("status") or "").lower()
+    return status in {"", "new", "created", "partiallyfilled", "untriggered", "active"}
+
+
+def _canary_order_is_open(trading_client: Any, *, symbol: str, order_link_id: str) -> bool:
+    open_orders = trading_client.get_open_orders(symbol=symbol)
+    return any(str(row.get("orderLinkId", "")) == order_link_id and _open_order_is_live(row) for row in open_orders)
+
+
+def _wait_for_canary_open(
+    trading_client: Any,
+    *,
+    symbol: str,
+    order_link_id: str,
+    timeout_seconds: float,
+    poll_seconds: float,
+) -> bool:
+    deadline = time.monotonic() + max(timeout_seconds, 0.0)
+    while True:
+        if _canary_order_is_open(trading_client, symbol=symbol, order_link_id=order_link_id):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_seconds)
+
+
+def _wait_for_canary_cancel(
+    trading_client: Any,
+    *,
+    symbol: str,
+    order_link_id: str,
+    timeout_seconds: float,
+    poll_seconds: float,
+) -> bool:
+    deadline = time.monotonic() + max(timeout_seconds, 0.0)
+    while True:
+        if not _canary_order_is_open(trading_client, symbol=symbol, order_link_id=order_link_id):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_seconds)
 
 
 def _validate_risk_config(config: EventRiskCycleConfig) -> None:

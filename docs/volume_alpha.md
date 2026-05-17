@@ -302,6 +302,10 @@ rather than trusting the ledger alone or sizing from stale equity.
 Position and wallet snapshot failures during open-trade handling are surfaced
 in the cycle report and keep the cycle alive, so an outage cannot crash exits,
 report writing, or the entry guard.
+The promoted alpha is sparse, so operational observation uses an isolated
+`demo-canary` path rather than relaxed live filters. The canary places and
+cancels a far-from-touch post-only demo order, verifies cleanup, and writes
+`reports/demo-canary` without touching strategy trade/order ledgers.
 Recent 1h bars are cached in `event_demo_klines_1h`, keeping the forward-demo
 cache separate from the full-PIT research `klines_1h` dataset.
 Entry orders attach native stop/TP immediately, then confirmed fills recompute

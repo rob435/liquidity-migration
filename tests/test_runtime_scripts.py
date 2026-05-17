@@ -6,6 +6,7 @@ from pathlib import Path
 def test_runtime_scripts_do_not_delete_live_cycle_locks() -> None:
     repo = Path(__file__).resolve().parents[1]
     scripts = [
+        repo / "scripts" / "run_bybit_demo_canary.sh",
         repo / "scripts" / "run_bybit_demo_event_engine.sh",
         repo / "scripts" / "run_bybit_demo_ws_risk_engine.sh",
     ]

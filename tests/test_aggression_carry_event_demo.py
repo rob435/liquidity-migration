@@ -8,6 +8,7 @@ import pytest
 from aggression_carry.cli import build_parser
 from aggression_carry.config import ResearchConfig
 from aggression_carry.event_demo import (
+    DemoCanaryConfig,
     EventDemoCycleConfig,
     EventRiskCycleConfig,
     PENDING_ORDER_GUARD_MS,
@@ -31,6 +32,7 @@ from aggression_carry.event_demo import (
     plan_demo_exits,
     plan_risk_exits,
     plan_stop_repairs,
+    run_demo_canary,
     run_event_demo_cycle,
     run_event_risk_cycle,
     select_demo_entry_candidates,
@@ -165,6 +167,82 @@ class MinimalEventMarket:
 
     def stats(self) -> dict[str, int]:
         return {}
+
+
+class CanaryMarket:
+    def get_instruments_info(self) -> list[dict[str, object]]:
+        return [
+            {
+                "symbol": "DOGEUSDT",
+                "contractType": "LinearPerpetual",
+                "status": "Trading",
+                "baseCoin": "DOGE",
+                "quoteCoin": "USDT",
+                "settleCoin": "USDT",
+                "launchTime": "1",
+                "deliveryTime": "0",
+                "priceFilter": {"tickSize": "0.00001"},
+                "lotSizeFilter": {
+                    "qtyStep": "1",
+                    "minOrderQty": "1",
+                    "minNotionalValue": "5",
+                    "maxOrderQty": "1000000",
+                    "maxMktOrderQty": "1000000",
+                },
+                "fundingInterval": "480",
+            }
+        ]
+
+    def get_tickers(self) -> list[dict[str, object]]:
+        return [{"symbol": "DOGEUSDT", "markPrice": "0.10", "lastPrice": "0.10", "indexPrice": "0.10"}]
+
+
+class CanaryPrivate:
+    def __init__(self) -> None:
+        self.open_links: set[str] = set()
+        self.orders: list[dict[str, object]] = []
+        self.cancelled: list[str] = []
+
+    def get_wallet_balance(self, *, account_type: str = "UNIFIED", coin: str = "USDT") -> dict[str, object]:
+        return {"list": [{"totalEquity": "10000", "coin": [{"coin": "USDT", "equity": "10000"}]}]}
+
+    def get_positions(self, *, settle_coin: str | None = None) -> list[dict[str, object]]:
+        return []
+
+    def get_open_orders(self, *, symbol: str | None = None, settle_coin: str | None = None) -> list[dict[str, object]]:
+        return [
+            {"symbol": symbol or "DOGEUSDT", "orderLinkId": link, "orderStatus": "New"}
+            for link in sorted(self.open_links)
+        ]
+
+    def place_order(self, **params: object) -> dict[str, str]:
+        link = str(params["orderLinkId"])
+        self.open_links.add(link)
+        self.orders.append(params)
+        return {"orderId": "canary-order-1"}
+
+    def cancel_order(self, *, symbol: str, order_link_id: str) -> dict[str, str]:
+        del symbol
+        self.open_links.discard(order_link_id)
+        self.cancelled.append(order_link_id)
+        return {"orderId": "canary-order-1"}
+
+
+class OpenCheckFailingCanaryPrivate(CanaryPrivate):
+    def __init__(self) -> None:
+        super().__init__()
+        self.fail_next_open_check = False
+
+    def place_order(self, **params: object) -> dict[str, str]:
+        result = super().place_order(**params)
+        self.fail_next_open_check = True
+        return result
+
+    def get_open_orders(self, *, symbol: str | None = None, settle_coin: str | None = None) -> list[dict[str, object]]:
+        if self.fail_next_open_check:
+            self.fail_next_open_check = False
+            raise RuntimeError("open order API outage")
+        return super().get_open_orders(symbol=symbol, settle_coin=settle_coin)
 
 
 def _patch_minimal_event_cycle(monkeypatch: pytest.MonkeyPatch, candidate: dict[str, object]) -> None:
@@ -2586,6 +2664,74 @@ def test_submit_orders_requires_explicit_confirmation() -> None:
 
     with pytest.raises(RuntimeError, match="confirm-demo-orders"):
         _validate_demo_config(config)
+
+
+def test_demo_canary_dry_run_writes_isolated_report(tmp_path: Path) -> None:
+    payload = run_demo_canary(
+        tmp_path,
+        config=ResearchConfig(),
+        canary_config=DemoCanaryConfig(),
+        market_client=CanaryMarket(),
+        now_ms=1_700_000_000_000,
+    )
+
+    assert payload["cycle"]["mode"] == "dry_run"
+    assert payload["cycle"]["status"] == "planned"
+    assert payload["order_params"]["timeInForce"] == "PostOnly"
+    assert payload["order_params"]["orderType"] == "Limit"
+    assert (tmp_path / "reports" / "demo-canary" / "latest_demo_canary.md").exists()
+    assert not (tmp_path / "event_demo_orders").exists()
+
+
+def test_demo_canary_submit_places_cancels_and_verifies(tmp_path: Path) -> None:
+    private = CanaryPrivate()
+
+    payload = run_demo_canary(
+        tmp_path,
+        config=ResearchConfig(),
+        canary_config=DemoCanaryConfig(submit_order=True, confirm_demo_orders=True),
+        market_client=CanaryMarket(),
+        private_client=private,
+        now_ms=1_700_000_000_000,
+    )
+
+    assert payload["cycle"]["status"] == "cancelled_verified"
+    assert payload["cycle"]["order_live_after_submit"] is True
+    assert payload["cycle"]["cancel_verified"] is True
+    assert private.orders[0]["timeInForce"] == "PostOnly"
+    assert private.cancelled == [private.orders[0]["orderLinkId"]]
+    assert private.open_links == set()
+    assert not (tmp_path / "event_demo_trades").exists()
+
+
+def test_demo_canary_cancels_after_open_check_failure(tmp_path: Path) -> None:
+    private = OpenCheckFailingCanaryPrivate()
+
+    payload = run_demo_canary(
+        tmp_path,
+        config=ResearchConfig(),
+        canary_config=DemoCanaryConfig(submit_order=True, confirm_demo_orders=True),
+        market_client=CanaryMarket(),
+        private_client=private,
+        now_ms=1_700_000_000_000,
+    )
+
+    assert payload["cycle"]["status"] == "failed"
+    assert payload["cycle"]["cancel_verified"] is True
+    assert "open order check failed" in payload["cycle"]["error"]
+    assert private.cancelled == [private.orders[0]["orderLinkId"]]
+    assert private.open_links == set()
+
+
+def test_demo_canary_submit_requires_explicit_confirmation(tmp_path: Path) -> None:
+    with pytest.raises(RuntimeError, match="confirm-demo-orders"):
+        run_demo_canary(
+            tmp_path,
+            config=ResearchConfig(),
+            canary_config=DemoCanaryConfig(submit_order=True),
+            market_client=CanaryMarket(),
+            private_client=CanaryPrivate(),
+        )
 
 
 def test_event_demo_rejects_non_positive_entry_leverage() -> None:

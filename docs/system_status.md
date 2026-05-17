@@ -10,6 +10,7 @@ Current as of 2026-05-17.
 - Per-entry target: `20.00%` of current Bybit demo USDT equity.
 - Entry service: `model050426-bybit-demo.service`.
 - Risk service: `model050426-bybit-risk.service`.
+- Operational canary: `model050426-bybit-canary.timer`.
 - Venue mode: Bybit demo only. `demo=False` is still refused by the private client.
 - Paper shadow was intentionally skipped by user decision; keep the risk contained to demo-only trading.
 
@@ -87,6 +88,10 @@ open orders after proof: 0
 The VPS entry service intentionally runs at `INTERVAL_SECONDS=60`. Fast exits
 are still handled by the separate websocket risk service; the one-minute entry
 cadence is for quicker stale-order, report, and candidate-state refresh.
+
+The canary timer can run every 30 minutes to provide order-path evidence between
+sparse strategy signals. It is isolated under `reports/demo-canary` and does not
+write strategy ledgers.
 
 ## Known Limits
 

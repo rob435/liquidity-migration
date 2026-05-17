@@ -4,17 +4,22 @@ The active VPS services are:
 
 - `model050426-bybit-demo.service`: event entry/normal lifecycle runner.
 - `model050426-bybit-risk.service`: fast exit-only risk runner.
+- `model050426-bybit-canary.timer`: optional 30-minute demo order-path canary.
 
 Install or refresh it on the VPS:
 
 ```bash
 cp deploy/systemd/model050426-bybit-demo.service /etc/systemd/system/model050426-bybit-demo.service
 cp deploy/systemd/model050426-bybit-risk.service /etc/systemd/system/model050426-bybit-risk.service
+cp deploy/systemd/model050426-bybit-canary.service /etc/systemd/system/model050426-bybit-canary.service
+cp deploy/systemd/model050426-bybit-canary.timer /etc/systemd/system/model050426-bybit-canary.timer
 systemctl daemon-reload
 systemctl enable --now model050426-bybit-demo.service
 systemctl enable --now model050426-bybit-risk.service
+systemctl enable --now model050426-bybit-canary.timer
 systemctl restart model050426-bybit-demo.service
 systemctl restart model050426-bybit-risk.service
+systemctl start model050426-bybit-canary.service
 ```
 
 Required secrets live outside git in:
@@ -38,6 +43,12 @@ demo private socket rejects that topic.
 `STREAM_START_TIMEOUT_SECONDS` bounds private/public WebSocket startup so a
 blocked subscription is reported while REST reconciliation and exchange-native
 stops keep covering open risk.
+
+The canary timer exists because the promoted alpha is sparse. It places and
+immediately cancels a far-from-touch post-only demo order, verifies cleanup, and
+writes reports under `reports/demo-canary`. Canary reports are operational
+evidence only; they are not strategy trades and do not write the strategy trade
+or order ledger.
 
 The retired `model050426-bybit-demo-signal.timer` / `.service` daily signal scan
 must stay disabled; the active runner is the event-driven loop above.

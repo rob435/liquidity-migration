@@ -134,6 +134,21 @@ Default forward-test behavior:
 - writes ledgers under `event_demo_trades`, `event_demo_orders`, and `event_demo_cycles`
 - the separate websocket risk watchdog writes latest reports under `reports/event-risk-ws` and keeps timestamped audit copies for startup/material events
 
+## Operational Canary
+
+The promoted alpha is intentionally sparse. Do not loosen live filters just to
+create action. To observe exchange plumbing between real signals, run the
+isolated demo canary:
+
+```bash
+SUBMIT_CANARY=1 CONFIRM_DEMO_ORDERS=1 bash scripts/run_bybit_demo_canary.sh
+```
+
+It places a far-from-touch post-only Bybit demo limit order, cancels it
+immediately, verifies cleanup, and writes reports under `reports/demo-canary`.
+It does not write `event_demo_trades` or `event_demo_orders`, so it cannot be
+confused with strategy activity.
+
 ## Useful Files
 
 - `aggression_carry/volume_events.py`: active event-driven strategy, full-PIT gates, ledger, reports
@@ -144,6 +159,7 @@ Default forward-test behavior:
 - `aggression_carry/trade_lifecycle.py`: active trade lifecycle, exit, basket, and equity helpers
 - `scripts/run_bybit_demo_event_engine.sh`: continuous Bybit demo forward runner
 - `scripts/run_bybit_demo_ws_risk_engine.sh`: continuous websocket risk watchdog
+- `scripts/run_bybit_demo_canary.sh`: isolated demo order-path canary
 - `scripts/run_fullpit_volume_overnight.sh`: selected full-PIT runner
 - `scripts/run_fullpit_volume_overnight.ps1`: PowerShell selected full-PIT runner
 - `deploy/systemd/model050426-bybit-demo.service`: VPS service definition for the active demo runner

@@ -16,9 +16,11 @@ from .config import (
 )
 from .downloaders import download_market_data, parse_date_ms
 from .event_demo import (
+    DemoCanaryConfig,
     EventDemoCycleConfig,
     EventRiskCycleConfig,
     build_event_risk_private_client,
+    run_demo_canary,
     run_event_demo_cycle,
     run_event_risk_cycle,
 )
@@ -925,6 +927,21 @@ def build_parser() -> argparse.ArgumentParser:
     event_demo.add_argument("--record-dry-run", action="store_true", help="Persist planned dry-run orders/trades into the demo ledger.")
     event_demo.add_argument("--data-name", default=demo_defaults.data_name)
 
+    demo_canary = subparsers.add_parser(
+        "demo-canary",
+        help="Run an isolated Bybit demo order-path canary without touching the strategy ledger.",
+    )
+    canary_defaults = DemoCanaryConfig()
+    demo_canary.add_argument("--symbol", default=canary_defaults.symbol)
+    demo_canary.add_argument("--side", choices=("Buy", "Sell"), default=canary_defaults.side)
+    demo_canary.add_argument("--order-notional-usdt", type=float, default=canary_defaults.order_notional_usdt)
+    demo_canary.add_argument("--price-distance-bps", type=float, default=canary_defaults.price_distance_bps)
+    demo_canary.add_argument("--submit-order", action="store_true", help="Place and immediately cancel a Bybit demo PostOnly limit order.")
+    demo_canary.add_argument("--confirm-demo-orders", action="store_true", help="Required with --submit-order.")
+    demo_canary.add_argument("--cancel-verify-seconds", type=float, default=canary_defaults.cancel_verify_seconds)
+    demo_canary.add_argument("--cancel-verify-poll-seconds", type=float, default=canary_defaults.cancel_verify_poll_seconds)
+    demo_canary.add_argument("--data-name", default=canary_defaults.data_name)
+
     event_risk = subparsers.add_parser(
         "event-risk-cycle",
         help="Run one fast exit-only Bybit demo risk cycle for open event positions.",
@@ -1160,6 +1177,32 @@ def main(argv: list[str] | None = None) -> int:
             f"exits={cycle['exits_executed']}/{cycle['exit_candidates']} "
             f"open={cycle['open_trades_after']} "
             f"path={Path(payload['report_dir']) / 'latest_event_demo_cycle.md'}"
+        )
+        return 0
+
+    if args.command == "demo-canary":
+        canary_config = DemoCanaryConfig(
+            symbol=args.symbol,
+            side=args.side,
+            order_notional_usdt=args.order_notional_usdt,
+            price_distance_bps=args.price_distance_bps,
+            submit_order=args.submit_order,
+            confirm_demo_orders=args.confirm_demo_orders,
+            cancel_verify_seconds=args.cancel_verify_seconds,
+            cancel_verify_poll_seconds=args.cancel_verify_poll_seconds,
+            data_name=args.data_name,
+        )
+        payload = run_demo_canary(data_root, config=config, canary_config=canary_config)
+        cycle = payload["cycle"]
+        print(
+            "demo canary "
+            f"mode={cycle['mode']} "
+            f"status={cycle['status']} "
+            f"symbol={cycle['symbol']} "
+            f"side={cycle['side']} "
+            f"notional=${cycle['notional_usdt']:,.2f} "
+            f"cancel_verified={cycle['cancel_verified']} "
+            f"path={Path(payload['report_dir']) / 'latest_demo_canary.md'}"
         )
         return 0
 

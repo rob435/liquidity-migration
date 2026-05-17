@@ -158,6 +158,12 @@ Order submission is still fail-closed: `--submit-orders` requires `--confirm-dem
 
 Telegram may notify on material events, but it must not approve or submit orders. The continuous runner still fails startup when `TELEGRAM_ENABLED=1` but Telegram or Bybit demo credentials are missing, because event alerts include position/PnL context.
 
+Because the promoted alpha is sparse, operational liveness is tested with a
+separate `demo-canary` path. The canary places a far-from-touch post-only demo
+limit order, cancels it, verifies no live canary order remains, and writes
+reports under `reports/demo-canary`. It must not write strategy trades/orders or
+be counted as alpha evidence.
+
 The exit-only risk watchdog is separate from the alpha loop:
 
 ```bash
