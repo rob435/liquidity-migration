@@ -661,6 +661,62 @@ def test_ws_risk_untracked_exit_history_error_stays_pending(tmp_path: Path) -> N
     assert "AAAUSDT" in engine.state.submitted_symbols
 
 
+def test_ws_risk_bootstrap_loads_pending_untracked_exit_after_restart(tmp_path: Path) -> None:
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "order_link_id": "agc-ux-pending",
+                    "ts_ms": 9_999_999_999_000,
+                    "trade_id": "",
+                    "symbol": "AAAUSDT",
+                    "side": "Buy",
+                    "order_type": "Market",
+                    "qty": "1",
+                    "reduce_only": True,
+                    "order_id": "rest-order-existing",
+                    "submit_mode": "submitted",
+                    "avg_price": 100.0,
+                    "notional_usdt": 0.0,
+                    "status": "submitted_unconfirmed",
+                    "exit_reason": "untracked_position",
+                    "target_qty": "1",
+                    "filled_qty": "",
+                    "error": "fill confirmation failed: history unavailable",
+                }
+            ]
+        ),
+        tmp_path,
+        "event_demo_orders",
+        partition_by=(),
+    )
+    private_client = FakePrivateClient(confirm_fills=False)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    assert private_client.orders == []
+    assert stored_orders.height == 1
+    assert len(engine.state.orders) == 1
+    assert engine.state.orders[0]["order_link_id"] == "agc-ux-pending"
+    assert "AAAUSDT" in engine.state.submitted_symbols
+
+
 def test_ws_risk_untracked_exit_retries_after_pending_guard(tmp_path: Path) -> None:
     private_client = FakePrivateClient(confirm_fills=False)
     engine = EventWebSocketRiskEngine(

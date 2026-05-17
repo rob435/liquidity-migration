@@ -825,7 +825,7 @@ class EventWebSocketRiskEngine:
         self.state.last_stale_reconcile_monotonic = now
 
     def load_pending_exit_orders(self, orders: pl.DataFrame) -> None:
-        if orders.is_empty() or self.state.open_trades.is_empty():
+        if orders.is_empty():
             return
         open_trade_ids = set(_column_values(self.state.open_trades, "trade_id"))
         loaded_order_links = {str(order.get("order_link_id") or "") for order in self.state.orders}
@@ -835,19 +835,26 @@ class EventWebSocketRiskEngine:
             link = str(row.get("order_link_id") or "")
             trade_id = str(row.get("trade_id") or "")
             symbol = str(row.get("symbol") or "")
-            if not link or trade_id not in open_trade_ids:
+            exit_reason = str(row.get("exit_reason", ""))
+            is_untracked_exit = exit_reason == "untracked_position"
+            if not link or not symbol:
                 continue
-            if not _bool(row.get("reduce_only")) or not str(row.get("exit_reason", "")):
+            if trade_id:
+                if trade_id not in open_trade_ids:
+                    continue
+            elif not is_untracked_exit:
+                continue
+            if not _bool(row.get("reduce_only")) or not exit_reason:
                 continue
             if str(row.get("status", "")) not in PENDING_ORDER_STATUSES:
                 continue
             ts_ms = int(row.get("ts_ms") or 0)
             if ts_ms > 0 and max_age_ms > 0 and now_ms - ts_ms > max_age_ms:
                 continue
-            self.state.submitted_link_to_trade_id[link] = trade_id
+            if trade_id:
+                self.state.submitted_link_to_trade_id[link] = trade_id
             self.state.submitted_link_submit_mode[link] = str(row.get("submit_mode") or "submitted")
-            if symbol:
-                self.mark_submitted_symbol(symbol, now_ms=ts_ms or now_ms)
+            self.mark_submitted_symbol(symbol, now_ms=ts_ms or now_ms)
             if link not in loaded_order_links:
                 self.state.orders.append(dict(row))
                 loaded_order_links.add(link)

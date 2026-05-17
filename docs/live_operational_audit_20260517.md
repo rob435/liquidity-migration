@@ -62,18 +62,25 @@ Objective: harden the Bybit demo system as if it is live capital, with emphasis 
   - A service restart no longer resets Telegram de-dupe state for the same material risk event.
   - Stop-repair alerts de-dupe by symbol and target stop/TP instead of synthetic repair order-link IDs.
 
+- `current slice: recover pending untracked exits after restart`
+  - Fresh pending reduce-only `untracked_position` exits are restored into websocket risk state even though they have no ledger trade ID.
+  - This preserves the duplicate-order guard if the risk process restarts while an emergency flatten order is still unconfirmed.
+
 ## Verification
 
 Local:
 
-- `pytest -q`: 183 passed after the websocket risk Telegram de-dupe change.
+- `pytest -q`: 184 passed after the pending untracked-exit restart recovery change.
 
 VPS:
 
-- `pytest -q`: 183 passed after deploying the websocket risk Telegram de-dupe change.
+- `pytest -q`: 184 passed after deploying the pending untracked-exit restart recovery change.
 - Services after restart:
   - `model050426-bybit-demo.service`: active/running, `INTERVAL_SECONDS=300`.
   - `model050426-bybit-risk.service`: active/running.
+- Pending untracked-exit restart drill:
+  - An isolated VPS data root with a fresh pending `untracked_position` reduce-only order and a still-open Bybit position loaded the existing order on bootstrap.
+  - The restarted risk engine submitted `0` duplicate orders and kept `AAAUSDT` in the pending-submission guard.
 - Telegram de-dupe drill:
   - An isolated VPS restart simulation sent the first material websocket-risk alert.
   - A second engine instance using the same isolated report directory suppressed the same alert as `duplicate_material_event`.

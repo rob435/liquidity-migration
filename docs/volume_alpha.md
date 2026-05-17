@@ -322,6 +322,9 @@ exchange-native stops running instead of hanging the watchdog before startup.
 The watchdog writes latest reports under `reports/event-risk-ws` every heartbeat
 and keeps timestamped JSON/Markdown snapshots for startup and material risk
 events, so exit decisions survive later quiet heartbeat overwrites.
+Fresh pending reduce-only untracked-position exits are restored after restart
+even though they have no ledger trade ID, so the watchdog does not duplicate a
+still-pending emergency flatten order after process loss.
 Material Telegram alert keys are persisted in the same report directory, so
 restarting the watchdog does not resend the same alert.
 Stop-repair alerts are keyed by symbol and target stop/TP rather than synthetic
