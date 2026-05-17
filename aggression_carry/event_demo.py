@@ -63,6 +63,26 @@ class EventDemoCycleConfig:
     data_name: str = "event-demo"
 
 
+@dataclass(frozen=True, slots=True)
+class EventRiskCycleConfig:
+    submit_orders: bool = False
+    confirm_demo_orders: bool = False
+    telegram: bool = False
+    record_dry_run: bool = False
+    account_type: str = "UNIFIED"
+    settle_coin: str = "USDT"
+    data_name: str = "event-risk"
+    repair_stops: bool = True
+    exit_order_mode: str = "market"
+    limit_chase_attempts: int = 3
+    limit_chase_initial_bps: float = 2.0
+    limit_chase_step_bps: float = 3.0
+    limit_chase_max_bps: float = 15.0
+    limit_chase_wait_seconds: float = 0.15
+    limit_chase_fallback_market: bool = True
+    stop_tolerance_bps: float = 1.0
+
+
 def run_event_demo_cycle(
     data_root: str | Path,
     *,
@@ -257,6 +277,179 @@ def run_event_demo_cycle(
         return payload
 
 
+def run_event_risk_cycle(
+    data_root: str | Path,
+    *,
+    config: ResearchConfig,
+    risk_config: EventRiskCycleConfig | None = None,
+    private_client: Any | None = None,
+    market_client: Any | None = None,
+    now_ms: int | None = None,
+) -> dict[str, Any]:
+    risk = risk_config or EventRiskCycleConfig()
+    _validate_risk_config(risk)
+    root = Path(data_root).expanduser()
+    root.mkdir(parents=True, exist_ok=True)
+    report_dir = root / "reports" / risk.data_name
+    report_dir.mkdir(parents=True, exist_ok=True)
+    cycle_now_ms = now_ms if now_ms is not None else _utc_now_ms()
+    cycle_id = f"risk-{_yyyymmddhhmmss(cycle_now_ms)}-{int(time.time_ns())}"
+
+    with exclusive_file_lock(root / ".locks" / "event_risk_cycle.lock", stale_seconds=15, poll_seconds=0.001):
+        trading_client = private_client if private_client is not None else build_event_risk_private_client(config, risk)
+        all_trades = read_dataset(root, "event_demo_trades")
+        all_orders = read_dataset(root, "event_demo_orders")
+        open_trades = _open_trades(all_trades)
+        raw_positions, position_error = _safe_raw_positions(trading_client, settle_coin=risk.settle_coin)
+        if trading_client is None and (risk.telegram or risk.repair_stops):
+            position_error = "Bybit private client unavailable; set BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET"
+        position_by_symbol = _active_position_by_symbol(raw_positions)
+        position_snapshot = build_position_pnl_snapshot(raw_positions)
+        price_by_symbol = _price_lookup_from_positions(position_by_symbol)
+        tick_size_by_symbol = _risk_tick_size_lookup(
+            open_trades,
+            config=config,
+            market_client=market_client,
+            enabled=risk.exit_order_mode == "limit_chase",
+        )
+
+        reconciled_trades, reconcile_rows = _risk_reconcile_missing_positions(
+            open_trades,
+            position_by_symbol=position_by_symbol,
+            now_ms=cycle_now_ms,
+            enabled=risk.submit_orders and trading_client is not None,
+        )
+        if reconcile_rows:
+            all_trades = _upsert_rows(all_trades, reconcile_rows, key="trade_id")
+            _write_trade_rows(root, pl.DataFrame(reconcile_rows, infer_schema_length=None))
+            open_trades = _open_trades(all_trades)
+            reconciled_trades = _open_trades(all_trades)
+
+        exits = plan_risk_exits(
+            reconciled_trades,
+            position_by_symbol=position_by_symbol,
+            price_by_symbol=price_by_symbol,
+            now_ms=cycle_now_ms,
+        )
+        exit_symbols = {str(row["symbol"]) for row in exits}
+        repairs = plan_stop_repairs(
+            reconciled_trades,
+            position_by_symbol=position_by_symbol,
+            skip_symbols=exit_symbols,
+            tolerance_bps=risk.stop_tolerance_bps,
+        )
+        repair_rows = _execute_stop_repairs(
+            repairs,
+            trading_client=trading_client,
+            risk=risk,
+            now_ms=cycle_now_ms,
+        )
+        if repair_rows:
+            all_orders = _upsert_rows(all_orders, repair_rows, key="order_link_id")
+            if risk.submit_orders or risk.record_dry_run:
+                _write_order_rows(root, pl.DataFrame(repair_rows, infer_schema_length=None))
+
+        executed_exits, exit_order_rows = _execute_risk_exits(
+            exits,
+            all_trades,
+            trading_client=trading_client,
+            risk=risk,
+            now_ms=cycle_now_ms,
+            price_by_symbol=price_by_symbol,
+            tick_size_by_symbol=tick_size_by_symbol,
+        )
+        if executed_exits:
+            all_trades = _upsert_rows(all_trades, executed_exits, key="trade_id")
+            if risk.submit_orders or risk.record_dry_run:
+                _write_trade_rows(root, pl.DataFrame(executed_exits, infer_schema_length=None))
+        if exit_order_rows:
+            all_orders = _upsert_rows(all_orders, exit_order_rows, key="order_link_id")
+            if risk.submit_orders or risk.record_dry_run:
+                _write_order_rows(root, pl.DataFrame(exit_order_rows, infer_schema_length=None))
+
+        pending_exit_symbols = {
+            str(row.get("symbol", ""))
+            for row in exit_order_rows
+            if str(row.get("submit_mode", "")) in {"dry_run", "submitted"} and str(row.get("symbol", ""))
+        }
+        open_symbols = set(_column_values(_open_trades(all_trades), "symbol"))
+        untracked_positions = [
+            row
+            for row in position_snapshot
+            if str(row.get("symbol", "")) and str(row.get("symbol", "")) not in open_symbols
+            and str(row.get("symbol", "")) not in pending_exit_symbols
+        ]
+        bybit_position_summary = summarize_position_pnl(position_snapshot)
+        ledger_positions = build_ledger_position_pnl_snapshot(_open_trades(all_trades), price_by_symbol)
+        ledger_position_summary = summarize_position_pnl(ledger_positions)
+        cycle_row = {
+            "cycle_id": cycle_id,
+            "ts_ms": cycle_now_ms,
+            "mode": "risk_submit" if risk.submit_orders else "risk_dry_run",
+            "symbols": len(open_symbols),
+            "kline_rows": 0,
+            "feature_rows": 0,
+            "latest_feature_ts_ms": 0,
+            "entry_candidates": 0,
+            "entries_executed": 0,
+            "exit_candidates": len(exits),
+            "exits_executed": len(executed_exits),
+            "stop_repairs": len(repair_rows),
+            "open_trades_before": open_trades.height,
+            "open_trades_after": _open_trades(all_trades).height,
+            "equity_usdt": 0.0,
+            "order_notional_pct_equity": 0.0,
+            "order_initial_margin_pct_equity": 0.0,
+            "target_gross_exposure": 0.0,
+            "target_initial_margin_pct_equity": 0.0,
+            "entry_leverage": 0.0,
+            "bybit_positions": bybit_position_summary["positions"],
+            "bybit_position_value_usdt": bybit_position_summary["position_value_usdt"],
+            "bybit_unrealized_pnl_usdt": bybit_position_summary["unrealized_pnl_usdt"],
+            "bybit_position_pnl_pct": bybit_position_summary["pnl_pct"],
+            "ledger_positions": ledger_position_summary["positions"],
+            "ledger_position_value_usdt": ledger_position_summary["position_value_usdt"],
+            "ledger_unrealized_pnl_usdt": ledger_position_summary["unrealized_pnl_usdt"],
+            "ledger_position_pnl_pct": ledger_position_summary["pnl_pct"],
+            "position_report_error": position_error,
+            "untracked_positions": len(untracked_positions),
+            "telegram_sent": False,
+            "telegram_error": "",
+        }
+        payload = {
+            "cycle": cycle_row,
+            "risk_config": asdict(risk),
+            "exits": executed_exits,
+            "exit_orders": exit_order_rows,
+            "stop_repairs": repair_rows,
+            "reconciliations": reconcile_rows,
+            "untracked_positions": untracked_positions,
+            "bybit_positions": position_snapshot,
+            "bybit_position_summary": bybit_position_summary,
+            "ledger_positions": ledger_positions,
+            "ledger_position_summary": ledger_position_summary,
+            "report_dir": str(report_dir),
+        }
+        telegram_sent, telegram_error = _maybe_notify(payload, enabled=risk.telegram)
+        cycle_row["telegram_sent"] = telegram_sent
+        cycle_row["telegram_error"] = telegram_error
+        payload["cycle"] = cycle_row
+        write_dataset(pl.DataFrame([cycle_row]), root, "event_demo_cycles", partition_by=())
+        report_path = report_dir / f"event_risk_cycle_{cycle_id}.json"
+        report_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        (report_dir / "latest_event_risk_cycle.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        (report_dir / "latest_event_risk_cycle.md").write_text(format_event_risk_cycle_report(payload), encoding="utf-8")
+        return payload
+
+
+def build_event_risk_private_client(config: ResearchConfig, risk: EventRiskCycleConfig) -> BybitPrivateClient | None:
+    if risk.submit_orders:
+        return _build_private_client(config)
+    if _private_credentials_present() and (risk.telegram or risk.repair_stops):
+        return _build_private_client(config)
+    return None
+
+
 def select_demo_entry_candidates(
     features: pl.DataFrame,
     all_trades: pl.DataFrame,
@@ -433,6 +626,102 @@ def plan_demo_exits(
             }
         )
     return exits
+
+
+def plan_risk_exits(
+    open_trades: pl.DataFrame,
+    *,
+    position_by_symbol: dict[str, dict[str, Any]],
+    price_by_symbol: dict[str, float],
+    now_ms: int,
+) -> list[dict[str, Any]]:
+    if open_trades.is_empty():
+        return []
+    exits: list[dict[str, Any]] = []
+    for trade in open_trades.to_dicts():
+        symbol = str(trade.get("symbol", ""))
+        position = position_by_symbol.get(symbol, {})
+        side = str(trade.get("side") or _normalized_position_side(position.get("side")) or "short")
+        qty = str(_first_non_empty(position.get("size"), trade.get("qty")))
+        if not symbol or not qty:
+            continue
+        current_price = price_by_symbol.get(symbol, 0.0)
+        exit_checks: list[tuple[int, int, str, float | None]] = []
+        stop_price = _float(trade.get("stop_price"))
+        if current_price > 0.0 and stop_price > 0.0 and _price_crosses_stop(side=side, price=current_price, stop_price=stop_price):
+            exit_checks.append((now_ms, 0, "stop_loss", current_price))
+        take_profit_price = _float(trade.get("take_profit_price"))
+        if (
+            current_price > 0.0
+            and take_profit_price > 0.0
+            and _price_crosses_take_profit(side=side, price=current_price, take_profit_price=take_profit_price)
+        ):
+            exit_checks.append((now_ms, 1, "take_profit", current_price))
+        planned_exit_ts_ms = int(trade.get("planned_exit_ts_ms") or 0)
+        if planned_exit_ts_ms > 0 and now_ms >= planned_exit_ts_ms:
+            exit_checks.append((planned_exit_ts_ms, 2, "max_hold", current_price if current_price > 0.0 else None))
+        if not exit_checks:
+            continue
+        trigger_ts_ms, _, reason, planned_price = sorted(exit_checks, key=lambda item: (item[0], item[1]))[0]
+        exits.append(
+            {
+                "trade_id": str(trade["trade_id"]),
+                "symbol": symbol,
+                "side": side,
+                "qty": qty,
+                "exit_reason": reason,
+                "exit_trigger_ts_ms": trigger_ts_ms,
+                "planned_exit_price": planned_price if planned_price is not None else current_price,
+                "planned_exit_ts_ms": planned_exit_ts_ms,
+            }
+        )
+    return exits
+
+
+def plan_stop_repairs(
+    open_trades: pl.DataFrame,
+    *,
+    position_by_symbol: dict[str, dict[str, Any]],
+    skip_symbols: set[str] | None = None,
+    tolerance_bps: float = 1.0,
+) -> list[dict[str, Any]]:
+    if open_trades.is_empty():
+        return []
+    skip = skip_symbols or set()
+    repairs: list[dict[str, Any]] = []
+    for trade in open_trades.to_dicts():
+        symbol = str(trade.get("symbol", ""))
+        if not symbol or symbol in skip:
+            continue
+        position = position_by_symbol.get(symbol)
+        if not position:
+            continue
+        stop_price = _float(trade.get("stop_price"))
+        take_profit_price = _float(trade.get("take_profit_price"))
+        current_stop = _first_float(position, ("stopLoss", "stop_loss", "sl", "stopLossPrice"))
+        current_take_profit = _first_float(position, ("takeProfit", "take_profit", "tp", "takeProfitPrice"))
+        needs_stop = stop_price > 0.0 and not _prices_close(current_stop, stop_price, tolerance_bps=tolerance_bps)
+        needs_take_profit = take_profit_price > 0.0 and not _prices_close(
+            current_take_profit,
+            take_profit_price,
+            tolerance_bps=tolerance_bps,
+        )
+        if not needs_stop and not needs_take_profit:
+            continue
+        repairs.append(
+            {
+                "trade_id": str(trade.get("trade_id", "")),
+                "symbol": symbol,
+                "side": str(trade.get("side") or _normalized_position_side(position.get("side")) or ""),
+                "stop_price": stop_price,
+                "take_profit_price": take_profit_price,
+                "current_stop_price": current_stop,
+                "current_take_profit_price": current_take_profit,
+                "needs_stop_repair": needs_stop,
+                "needs_take_profit_repair": needs_take_profit,
+            }
+        )
+    return repairs
 
 
 def wallet_equity_usdt(wallet_payload: dict[str, Any]) -> float:
@@ -642,6 +931,75 @@ def format_event_demo_cycle_report(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def format_event_risk_cycle_report(payload: dict[str, Any]) -> str:
+    cycle = payload["cycle"]
+    lines = [
+        "# Event Risk Cycle",
+        "",
+        f"- Time: {_iso_dt(cycle['ts_ms'])}",
+        f"- Mode: `{cycle['mode']}`",
+        f"- Exit candidates: {cycle['exit_candidates']}",
+        f"- Exits executed: {cycle['exits_executed']}",
+        f"- Stop repairs: {cycle.get('stop_repairs', 0)}",
+        f"- Open trades after: {cycle['open_trades_after']}",
+        f"- Bybit positions: {cycle.get('bybit_positions', 0)} / uPnL ${_float(cycle.get('bybit_unrealized_pnl_usdt')):,.2f}",
+        f"- Ledger positions: {cycle.get('ledger_positions', 0)} / uPnL ${_float(cycle.get('ledger_unrealized_pnl_usdt')):,.2f}",
+        f"- Untracked Bybit positions: {cycle.get('untracked_positions', 0)}",
+        f"- Telegram sent: {cycle.get('telegram_sent', False)}",
+        "",
+        "## Exits",
+        "",
+        "| Symbol | Reason | Qty | Trigger | Price | Mode |",
+        "|---|---|---:|---|---:|---|",
+    ]
+    for row in payload.get("exits", []):
+        lines.append(
+            f"| {row.get('symbol', '')} | {row.get('exit_reason', '')} | {row.get('qty', '')} | "
+            f"{_iso_dt(row.get('exit_trigger_ts_ms'))} | {_float(row.get('exit_price')):.8g} | "
+            f"{row.get('submit_mode', '')} |"
+        )
+    if not payload.get("exits"):
+        lines.append("|  |  |  |  |  |  |")
+    lines.extend(
+        [
+            "",
+            "## Stop Repairs",
+            "",
+            "| Symbol | Stop | TP | Status | Mode | Error |",
+            "|---|---:|---:|---|---|---|",
+        ]
+    )
+    for row in payload.get("stop_repairs", []):
+        lines.append(
+            f"| {row.get('symbol', '')} | {_float(row.get('stop_price')):.8g} | "
+            f"{_float(row.get('take_profit_price')):.8g} | {row.get('status', '')} | "
+            f"{row.get('submit_mode', '')} | {row.get('error', '')} |"
+        )
+    if not payload.get("stop_repairs"):
+        lines.append("|  |  |  |  |  |  |")
+    lines.extend(
+        [
+            "",
+            "## Bybit Positions",
+            "",
+            "| Symbol | Side | Qty | Value | uPnL | PnL % | Mark | Avg |",
+            "|---|---|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in payload.get("bybit_positions", [])[:20]:
+        lines.append(_position_markdown_row(row))
+    if not payload.get("bybit_positions"):
+        lines.append("|  |  |  |  |  |  |  |  |")
+    if payload.get("untracked_positions"):
+        lines.extend(["", "## Untracked Positions", ""])
+        for row in payload.get("untracked_positions", [])[:20]:
+            lines.append(f"- {row.get('symbol', '')} {row.get('side', '')} qty={_float(row.get('qty')):g}")
+    if payload["cycle"].get("position_report_error"):
+        lines.extend(["", f"Position report error: {payload['cycle']['position_report_error']}"])
+    lines.extend([""])
+    return "\n".join(lines)
+
+
 def _demo_event_config(config: VolumeEventResearchConfig) -> VolumeEventResearchConfig:
     return replace(
         config,
@@ -685,6 +1043,23 @@ def _validate_demo_config(config: EventDemoCycleConfig) -> None:
         raise ValueError("entry_leverage must be positive")
     if config.submit_orders and not config.confirm_demo_orders:
         raise RuntimeError("Refusing to submit demo orders without --confirm-demo-orders")
+
+
+def _validate_risk_config(config: EventRiskCycleConfig) -> None:
+    if config.submit_orders and not config.confirm_demo_orders:
+        raise RuntimeError("Refusing to submit demo risk orders without --confirm-demo-orders")
+    if config.exit_order_mode not in {"market", "limit_chase"}:
+        raise ValueError("exit_order_mode must be market or limit_chase")
+    if config.limit_chase_attempts <= 0:
+        raise ValueError("limit_chase_attempts must be positive")
+    if config.limit_chase_initial_bps < 0.0 or config.limit_chase_step_bps < 0.0:
+        raise ValueError("limit chase bps values must be non-negative")
+    if config.limit_chase_max_bps < config.limit_chase_initial_bps:
+        raise ValueError("limit_chase_max_bps must be >= limit_chase_initial_bps")
+    if config.limit_chase_wait_seconds < 0.0:
+        raise ValueError("limit_chase_wait_seconds must be non-negative")
+    if config.stop_tolerance_bps < 0.0:
+        raise ValueError("stop_tolerance_bps must be non-negative")
 
 
 def _build_demo_universe(
@@ -769,11 +1144,13 @@ def _execute_entries(
         contract = contract_by_symbol.get(symbol, {})
         if price is None or price <= 0.0:
             continue
+        tick_size = _float(contract.get("tick_size")) or 0.0001
+        qty_step = _float(contract.get("qty_step")) or 0.001
         capped_notional = equity_usdt * demo.wallet_balance_fraction * order_notional_pct_equity
         quantity = order_quantity_for_notional(
             notional_usdt=capped_notional,
             price=price,
-            qty_step=_float(contract.get("qty_step")) or 0.001,
+            qty_step=qty_step,
             min_order_qty=_float(contract.get("min_order_qty")),
             min_notional_value=_float(contract.get("min_notional_value")),
         )
@@ -787,13 +1164,13 @@ def _execute_entries(
             entry_price=price,
             side=side,
             stop_loss_pct=float(candidate.get("stop_loss_pct") or 0.12),
-            tick_size=_float(contract.get("tick_size")) or 0.0001,
+            tick_size=tick_size,
         )
         take_profit_price = _take_profit_price_for_entry(
             entry_price=price,
             side=side,
             take_profit_pct=float(candidate.get("take_profit_pct") or 0.0),
-            tick_size=_float(contract.get("tick_size")) or 0.0001,
+            tick_size=tick_size,
         )
         entry_link = _order_link_id("en", symbol=symbol, signal_ts_ms=int(candidate["signal_ts_ms"]))
         order_result: dict[str, Any] = {}
@@ -835,6 +1212,8 @@ def _execute_entries(
             "entry_leverage": demo.entry_leverage,
             "initial_margin_usdt": initial_margin_usdt,
             "initial_margin_pct_equity": initial_margin_usdt / equity_usdt if equity_usdt > 0.0 else 0.0,
+            "tick_size": tick_size,
+            "qty_step": qty_step,
             "stop_price": stop_price,
             "take_profit_price": take_profit_price,
             "entry_order_link_id": entry_link,
@@ -948,6 +1327,332 @@ def _execute_exits(
     return rows, orders
 
 
+def _execute_risk_exits(
+    exits: list[dict[str, Any]],
+    all_trades: pl.DataFrame,
+    *,
+    trading_client: Any | None,
+    risk: EventRiskCycleConfig,
+    now_ms: int,
+    price_by_symbol: dict[str, float],
+    tick_size_by_symbol: dict[str, float],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not exits:
+        return [], []
+    trade_lookup = {str(row["trade_id"]): row for row in all_trades.to_dicts()} if not all_trades.is_empty() else {}
+    rows: list[dict[str, Any]] = []
+    orders: list[dict[str, Any]] = []
+    for exit_plan in exits:
+        trade_id = str(exit_plan["trade_id"])
+        trade = dict(trade_lookup.get(trade_id, {}))
+        if not trade:
+            continue
+        symbol = str(exit_plan["symbol"])
+        qty = str(exit_plan.get("qty") or trade.get("qty") or "")
+        if not qty:
+            continue
+        side = str(exit_plan.get("side") or trade.get("side") or "short")
+        bybit_side = "Buy" if side == "short" else "Sell"
+        planned_price = _float(exit_plan.get("planned_exit_price")) or price_by_symbol.get(symbol, 0.0)
+        try:
+            submit = _submit_reduce_only_exit(
+                symbol=symbol,
+                bybit_side=bybit_side,
+                qty=qty,
+                trading_client=trading_client,
+                risk=risk,
+                now_ms=now_ms,
+                reference_price=planned_price,
+                tick_size=tick_size_by_symbol.get(symbol) or _float(trade.get("tick_size")) or 0.0,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced in order telemetry so the loop can continue
+            link = _risk_order_link_id("rx", symbol=symbol, ts_ms=now_ms, attempt=0)
+            orders.append(
+                _risk_order_row(
+                    link=link,
+                    ts_ms=now_ms,
+                    symbol=symbol,
+                    side=bybit_side,
+                    qty=qty,
+                    order_type="Market" if risk.exit_order_mode == "market" else "LimitChase",
+                    submit_mode="error",
+                    status="failed",
+                    error=str(exc)[:500],
+                )
+            )
+            continue
+        exit_price = _float(submit["exec_summary"].get("avg_price")) or planned_price
+        target_qty = _float(qty)
+        filled_qty = _float(submit["exec_summary"].get("qty"))
+        qty_tolerance = max(target_qty * 1e-8, 1e-12)
+        fully_filled = not risk.submit_orders or (target_qty > 0.0 and filled_qty + qty_tolerance >= target_qty)
+        trade.update(
+            {
+                "status": "closed",
+                "exit_ts_ms": now_ms,
+                "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
+                "exit_price": exit_price,
+                "exit_reason": str(exit_plan["exit_reason"]),
+                "exit_order_link_id": submit["order_link_id"],
+                "exit_order_id": submit["order_id"],
+                "submit_mode": submit["submit_mode"],
+                "closed_at_ms": now_ms,
+                "updated_at_ms": now_ms,
+            }
+        )
+        for order_row in submit["order_rows"]:
+            if risk.submit_orders and not fully_filled:
+                order_row["status"] = "partial" if filled_qty > 0.0 else "submitted_unconfirmed"
+            notional_qty = filled_qty if risk.submit_orders else _float(qty)
+            order_row.update(
+                {
+                    "trade_id": trade_id,
+                    "exit_reason": str(exit_plan["exit_reason"]),
+                    "avg_price": exit_price,
+                    "filled_qty": _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0.0 else "",
+                    "target_qty": qty,
+                    "notional_usdt": abs(exit_price * notional_qty) if exit_price > 0.0 else 0.0,
+                }
+            )
+            orders.append(order_row)
+        if fully_filled:
+            rows.append(trade)
+    return rows, orders
+
+
+def _execute_stop_repairs(
+    repairs: list[dict[str, Any]],
+    *,
+    trading_client: Any | None,
+    risk: EventRiskCycleConfig,
+    now_ms: int,
+) -> list[dict[str, Any]]:
+    if not repairs or not risk.repair_stops:
+        return []
+    rows: list[dict[str, Any]] = []
+    for repair in repairs:
+        symbol = str(repair["symbol"])
+        link = _risk_order_link_id("st", symbol=symbol, ts_ms=now_ms, attempt=len(rows))
+        submit_mode = "dry_run"
+        status = "planned"
+        error = ""
+        if risk.submit_orders:
+            assert trading_client is not None
+            try:
+                trading_client.set_trading_stop(
+                    symbol=symbol,
+                    stop_loss=_decimal_text(Decimal(str(repair["stop_price"])))
+                    if _float(repair.get("stop_price")) > 0.0
+                    else None,
+                    take_profit=_decimal_text(Decimal(str(repair["take_profit_price"])))
+                    if _float(repair.get("take_profit_price")) > 0.0
+                    else None,
+                )
+                submit_mode = "submitted"
+                status = "stop_repaired"
+            except Exception as exc:  # noqa: BLE001 - surfaced in cycle telemetry
+                submit_mode = "error"
+                status = "failed"
+                error = str(exc)[:500]
+        rows.append(
+            {
+                "order_link_id": link,
+                "ts_ms": now_ms,
+                "trade_id": str(repair.get("trade_id", "")),
+                "symbol": symbol,
+                "side": "",
+                "order_type": "TradingStop",
+                "qty": "",
+                "reduce_only": True,
+                "order_id": "",
+                "submit_mode": submit_mode,
+                "avg_price": 0.0,
+                "notional_usdt": 0.0,
+                "status": status,
+                "exit_reason": "",
+                "stop_price": _float(repair.get("stop_price")),
+                "take_profit_price": _float(repair.get("take_profit_price")),
+                "error": error,
+            }
+        )
+    return rows
+
+
+def _submit_reduce_only_exit(
+    *,
+    symbol: str,
+    bybit_side: str,
+    qty: str,
+    trading_client: Any | None,
+    risk: EventRiskCycleConfig,
+    now_ms: int,
+    reference_price: float,
+    tick_size: float,
+) -> dict[str, Any]:
+    if not risk.submit_orders:
+        link = _risk_order_link_id("rx", symbol=symbol, ts_ms=now_ms, attempt=0)
+        return {
+            "order_link_id": link,
+            "order_id": "",
+            "submit_mode": "dry_run",
+            "exec_summary": {"qty": "", "avg_price": 0.0, "fee": 0.0, "executions": 0},
+            "order_rows": [
+                _risk_order_row(
+                    link=link,
+                    ts_ms=now_ms,
+                    symbol=symbol,
+                    side=bybit_side,
+                    qty=qty,
+                    order_type="Market" if risk.exit_order_mode == "market" else "LimitChase",
+                    submit_mode="dry_run",
+                    status="planned",
+                )
+            ],
+        }
+    assert trading_client is not None
+    if risk.exit_order_mode == "market":
+        link = _risk_order_link_id("rx", symbol=symbol, ts_ms=now_ms, attempt=0)
+        order_result = trading_client.place_order(
+            **_order_params(
+                symbol=symbol,
+                side=bybit_side,
+                qty=qty,
+                order_type="Market",
+                order_link_id=link,
+                reduce_only=True,
+            )
+        )
+        exec_summary = _execution_summary(trading_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50))
+        return {
+            "order_link_id": link,
+            "order_id": order_result.get("orderId", ""),
+            "submit_mode": "submitted",
+            "exec_summary": exec_summary,
+            "order_rows": [
+                _risk_order_row(
+                    link=link,
+                    ts_ms=now_ms,
+                    symbol=symbol,
+                    side=bybit_side,
+                    qty=qty,
+                    order_type="Market",
+                    submit_mode="submitted",
+                    status="submitted",
+                    order_id=order_result.get("orderId", ""),
+                )
+            ],
+        }
+    return _submit_limit_chase_exit(
+        symbol=symbol,
+        bybit_side=bybit_side,
+        qty=qty,
+        trading_client=trading_client,
+        risk=risk,
+        now_ms=now_ms,
+        reference_price=reference_price,
+        tick_size=tick_size,
+    )
+
+
+def _submit_limit_chase_exit(
+    *,
+    symbol: str,
+    bybit_side: str,
+    qty: str,
+    trading_client: Any,
+    risk: EventRiskCycleConfig,
+    now_ms: int,
+    reference_price: float,
+    tick_size: float,
+) -> dict[str, Any]:
+    target_qty = _float(qty)
+    filled_qty = 0.0
+    executions: list[dict[str, Any]] = []
+    order_rows: list[dict[str, Any]] = []
+    last_link = ""
+    last_order_id = ""
+    attempts = max(1, risk.limit_chase_attempts)
+    for attempt in range(attempts):
+        remaining_qty = max(target_qty - filled_qty, 0.0)
+        if remaining_qty <= max(target_qty * 1e-8, 1e-12):
+            break
+        link = _risk_order_link_id("lc", symbol=symbol, ts_ms=now_ms, attempt=attempt)
+        last_link = link
+        bps = min(risk.limit_chase_max_bps, risk.limit_chase_initial_bps + attempt * risk.limit_chase_step_bps)
+        limit_price = _limit_chase_price(bybit_side=bybit_side, reference_price=reference_price, bps=bps, tick_size=tick_size)
+        order_result = trading_client.place_order(
+            **_order_params(
+                symbol=symbol,
+                side=bybit_side,
+                qty=_decimal_text(Decimal(str(remaining_qty))),
+                order_type="Limit",
+                order_link_id=link,
+                reduce_only=True,
+                price=limit_price,
+                time_in_force="IOC",
+            )
+        )
+        last_order_id = order_result.get("orderId", "")
+        if risk.limit_chase_wait_seconds > 0.0:
+            time.sleep(risk.limit_chase_wait_seconds)
+        batch = trading_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50)
+        summary = _execution_summary(batch)
+        filled_qty += _float(summary.get("qty"))
+        executions.extend(batch)
+        order_rows.append(
+            _risk_order_row(
+                link=link,
+                ts_ms=now_ms,
+                symbol=symbol,
+                side=bybit_side,
+                qty=_decimal_text(Decimal(str(remaining_qty))),
+                order_type="Limit",
+                submit_mode="submitted",
+                status="submitted",
+                order_id=last_order_id,
+                price=limit_price,
+                time_in_force="IOC",
+            )
+        )
+    remaining_qty = max(target_qty - filled_qty, 0.0)
+    if remaining_qty > max(target_qty * 1e-8, 1e-12) and risk.limit_chase_fallback_market:
+        link = _risk_order_link_id("lm", symbol=symbol, ts_ms=now_ms, attempt=attempts)
+        last_link = link
+        order_result = trading_client.place_order(
+            **_order_params(
+                symbol=symbol,
+                side=bybit_side,
+                qty=_decimal_text(Decimal(str(remaining_qty))),
+                order_type="Market",
+                order_link_id=link,
+                reduce_only=True,
+            )
+        )
+        last_order_id = order_result.get("orderId", "")
+        batch = trading_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50)
+        executions.extend(batch)
+        order_rows.append(
+            _risk_order_row(
+                link=link,
+                ts_ms=now_ms,
+                symbol=symbol,
+                side=bybit_side,
+                qty=_decimal_text(Decimal(str(remaining_qty))),
+                order_type="Market",
+                submit_mode="submitted",
+                status="fallback_market",
+                order_id=last_order_id,
+            )
+        )
+    return {
+        "order_link_id": last_link,
+        "order_id": last_order_id,
+        "submit_mode": "submitted",
+        "exec_summary": _execution_summary(executions),
+        "order_rows": order_rows,
+    }
+
+
 def _reconcile_open_trades(
     all_trades: pl.DataFrame,
     *,
@@ -1004,6 +1709,97 @@ def _safe_bybit_position_snapshot(
         return [], str(exc)[:500]
 
 
+def _safe_raw_positions(trading_client: Any | None, *, settle_coin: str) -> tuple[list[dict[str, Any]], str]:
+    if trading_client is None:
+        return [], ""
+    try:
+        return trading_client.get_positions(settle_coin=settle_coin), ""
+    except Exception as exc:  # noqa: BLE001 - private API failures should be reported, not hidden
+        return [], str(exc)[:500]
+
+
+def _active_position_by_symbol(positions: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    output: dict[str, dict[str, Any]] = {}
+    for position in positions:
+        symbol = str(position.get("symbol", ""))
+        size = _float(position.get("size"))
+        if symbol and size > 0.0:
+            output[symbol] = position
+    return output
+
+
+def _price_lookup_from_positions(position_by_symbol: dict[str, dict[str, Any]]) -> dict[str, float]:
+    output: dict[str, float] = {}
+    for symbol, position in position_by_symbol.items():
+        price = _first_float(position, ("markPrice", "mark_price", "lastPrice", "indexPrice", "avgPrice"))
+        if price > 0.0:
+            output[symbol] = price
+    return output
+
+
+def _risk_tick_size_lookup(
+    open_trades: pl.DataFrame,
+    *,
+    config: ResearchConfig,
+    market_client: Any | None,
+    enabled: bool,
+) -> dict[str, float]:
+    output: dict[str, float] = {}
+    if not open_trades.is_empty() and "tick_size" in open_trades.columns:
+        for row in open_trades.select(["symbol", "tick_size"]).drop_nulls(["symbol"]).to_dicts():
+            tick_size = _float(row.get("tick_size"))
+            if tick_size > 0.0:
+                output[str(row["symbol"])] = tick_size
+    if not enabled:
+        return output
+    missing_symbols = set(_column_values(open_trades, "symbol")) - set(output)
+    if not missing_symbols:
+        return output
+    try:
+        client = market_client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
+        instruments = _normalize_instruments(client.get_instruments_info())
+    except Exception:
+        return output
+    if instruments.is_empty():
+        return output
+    for row in instruments.filter(pl.col("symbol").is_in(sorted(missing_symbols))).select(["symbol", "tick_size"]).to_dicts():
+        tick_size = _float(row.get("tick_size"))
+        if tick_size > 0.0:
+            output[str(row["symbol"])] = tick_size
+    return output
+
+
+def _risk_reconcile_missing_positions(
+    open_trades: pl.DataFrame,
+    *,
+    position_by_symbol: dict[str, dict[str, Any]],
+    now_ms: int,
+    enabled: bool,
+) -> tuple[pl.DataFrame, list[dict[str, Any]]]:
+    if open_trades.is_empty() or not enabled:
+        return open_trades, []
+    updates: list[dict[str, Any]] = []
+    kept = []
+    for trade in open_trades.to_dicts():
+        symbol = str(trade.get("symbol", ""))
+        if symbol and symbol in position_by_symbol:
+            kept.append(trade)
+            continue
+        updated = dict(trade)
+        updated.update(
+            {
+                "status": "closed",
+                "exit_ts_ms": now_ms,
+                "exit_trigger_ts_ms": now_ms,
+                "exit_reason": "bybit_position_missing",
+                "closed_at_ms": now_ms,
+                "updated_at_ms": now_ms,
+            }
+        )
+        updates.append(updated)
+    return pl.DataFrame(kept, infer_schema_length=None) if kept else _empty_trades(), updates
+
+
 def _private_credentials_present() -> bool:
     return bool(os.environ.get("BYBIT_DEMO_API_KEY") and os.environ.get("BYBIT_DEMO_API_SECRET"))
 
@@ -1030,6 +1826,8 @@ def _order_params(
     order_type: str,
     order_link_id: str,
     reduce_only: bool,
+    price: float | None = None,
+    time_in_force: str | None = None,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {
         "symbol": symbol,
@@ -1041,8 +1839,66 @@ def _order_params(
     }
     if order_type.lower() == "market":
         return params
-    params["timeInForce"] = "PostOnly"
+    if price is not None and price > 0.0:
+        params["price"] = _decimal_text(Decimal(str(price)))
+    params["timeInForce"] = time_in_force or "PostOnly"
     return params
+
+
+def _risk_order_row(
+    *,
+    link: str,
+    ts_ms: int,
+    symbol: str,
+    side: str,
+    qty: str,
+    order_type: str,
+    submit_mode: str,
+    status: str,
+    order_id: str = "",
+    price: float = 0.0,
+    time_in_force: str = "",
+    error: str = "",
+) -> dict[str, Any]:
+    return {
+        "order_link_id": link,
+        "ts_ms": ts_ms,
+        "trade_id": "",
+        "symbol": symbol,
+        "side": side,
+        "order_type": order_type,
+        "qty": qty,
+        "reduce_only": True,
+        "order_id": order_id,
+        "submit_mode": submit_mode,
+        "avg_price": 0.0,
+        "notional_usdt": 0.0,
+        "status": status,
+        "exit_reason": "",
+        "price": price,
+        "time_in_force": time_in_force,
+        "error": error,
+    }
+
+
+def _limit_chase_price(*, bybit_side: str, reference_price: float, bps: float, tick_size: float) -> float:
+    if reference_price <= 0.0:
+        return 0.0
+    if bybit_side == "Buy":
+        raw = reference_price * (1.0 + bps / 10_000.0)
+        return _round_price(raw, tick_size=tick_size or _fallback_tick_size(reference_price), rounding=ROUND_CEILING)
+    raw = reference_price * (1.0 - bps / 10_000.0)
+    return _round_price(raw, tick_size=tick_size or _fallback_tick_size(reference_price), rounding=ROUND_FLOOR)
+
+
+def _fallback_tick_size(price: float) -> float:
+    if price >= 1000.0:
+        return 0.1
+    if price >= 100.0:
+        return 0.01
+    if price >= 1.0:
+        return 0.0001
+    return 0.000001
 
 
 def _execution_summary(executions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -1089,6 +1945,19 @@ def _first_float(row: dict[str, Any], keys: tuple[str, ...]) -> float:
         if value != 0.0:
             return value
     return 0.0
+
+
+def _first_non_empty(*values: Any) -> Any:
+    for value in values:
+        if value not in (None, ""):
+            return value
+    return ""
+
+
+def _prices_close(left: float, right: float, *, tolerance_bps: float) -> bool:
+    if left <= 0.0 or right <= 0.0:
+        return False
+    return abs(left / right - 1.0) <= tolerance_bps / 10_000.0
 
 
 def _open_trades(trades: pl.DataFrame) -> pl.DataFrame:
@@ -1275,6 +2144,12 @@ def _order_link_id(prefix: str, *, symbol: str, signal_ts_ms: int) -> str:
     return f"agc-{prefix}-{base}-{encoded_ts}"[:36]
 
 
+def _risk_order_link_id(prefix: str, *, symbol: str, ts_ms: int, attempt: int) -> str:
+    base = symbol.replace("USDT", "")[-8:]
+    encoded_ts = _base36(max(ts_ms // 1000, 0))
+    return f"agc-{prefix}-{base}-{encoded_ts}-{attempt}"[:36]
+
+
 def _base36(value: int) -> str:
     chars = "0123456789abcdefghijklmnopqrstuvwxyz"
     if value == 0:
@@ -1441,10 +2316,22 @@ def _telegram_notification_reason(payload: dict[str, Any]) -> str:
         return "position_report_error"
     if payload.get("reconciliations"):
         return "position_reconciled"
+    if any(str(row.get("submit_mode", "")) == "error" for row in payload.get("exit_orders", [])):
+        return "risk_order_error"
+    if payload.get("stop_repairs"):
+        if any(str(row.get("submit_mode", "")) == "error" for row in payload.get("stop_repairs", [])):
+            return "stop_repair_failed"
+        if any(str(row.get("submit_mode", "")) == "submitted" for row in payload.get("stop_repairs", [])):
+            return "stop_repaired"
+        return "stop_repair_planned"
+    if payload.get("untracked_positions"):
+        return "untracked_position"
     if int(cycle.get("entries_executed") or 0) > 0:
         return "entry_executed"
     if int(cycle.get("exits_executed") or 0) > 0:
         return "exit_executed"
+    if any(str(row.get("status", "")) in {"partial", "submitted_unconfirmed"} for row in payload.get("exit_orders", [])):
+        return "exit_order_unconfirmed"
     return ""
 
 

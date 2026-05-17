@@ -121,6 +121,18 @@ def write_dataset(
     append: bool = True,
 ) -> Path:
     root = ensure_data_root(data_root)
+    with exclusive_file_lock(dataset_lock_path(root, dataset), stale_seconds=21_600, poll_seconds=0.01):
+        return _write_dataset_unlocked(df, root, dataset, partition_by=partition_by, append=append)
+
+
+def _write_dataset_unlocked(
+    df: pl.DataFrame,
+    root: Path,
+    dataset: str,
+    *,
+    partition_by: tuple[str, ...],
+    append: bool,
+) -> Path:
     path = dataset_path(root, dataset)
     if df.is_empty():
         path.mkdir(parents=True, exist_ok=True)

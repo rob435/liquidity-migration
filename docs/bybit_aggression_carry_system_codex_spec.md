@@ -125,3 +125,29 @@ The runner loops every `INTERVAL_SECONDS=60` by default. Each cycle:
 Order submission is still fail-closed: `--submit-orders` requires `--confirm-demo-orders`, `BYBIT_DEMO_API_KEY`, and `BYBIT_DEMO_API_SECRET`. Without those, the command is a dry-run scan.
 
 Telegram may notify on material events, but it must not approve or submit orders. The continuous runner still fails startup when `TELEGRAM_ENABLED=1` but Telegram or Bybit demo credentials are missing, because event alerts include position/PnL context.
+
+The exit-only risk watchdog is separate from the alpha loop:
+
+```bash
+SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 TELEGRAM_ENABLED=1 bash scripts/run_bybit_demo_ws_risk_engine.sh
+```
+
+It runs `event-risk-ws` by default. The priority order is:
+
+1. Exchange-native stop/take-profit attached to the position.
+2. WebSocket streams for live state: demo private position/order/execution streams plus the mainnet public ticker stream.
+3. REST only as the demo fallback for order submission and periodic reconciliation.
+
+This loop never opens positions and never approves orders through Telegram. It reads the demo trade ledger plus current Bybit positions, repairs missing or mismatched exchange-native stop/take-profit settings, subscribes to active-position tickers, and sends reduce-only exits when a live streamed mark price crosses the ledger stop, streamed mark crosses the take-profit, or the max-hold timestamp has passed. WebSocket execution messages can close the ledger without REST polling. Quiet cycles still update local reports but do not spam system logs.
+
+Bybit's current demo docs state that demo WebSocket supports private streams only, public data is the same as mainnet public WebSocket data, and WebSocket Trade order entry does not support demo trading. For that reason the demo VPS uses `ORDER_SUBMIT_MODE=ws_then_rest`: the risk decision path is WebSocket-first, but actual demo reduce-only order submission falls back to REST when the demo WS trade socket is unavailable. The demo VPS also uses the normal private execution stream because `execution.fast` is not accepted by the demo private socket. Do not claim demo WS order-entry or fast-execution evidence unless these limitations are retested and cleared.
+
+`EXIT_ORDER_MODE=market` is the default and fastest emergency exit. `EXIT_ORDER_MODE=limit_chase` uses bounded reduce-only IOC limits, controlled by `LIMIT_CHASE_ATTEMPTS`, `LIMIT_CHASE_INITIAL_BPS`, `LIMIT_CHASE_STEP_BPS`, `LIMIT_CHASE_MAX_BPS`, and `LIMIT_CHASE_WAIT_SECONDS`, then falls back to market unless `LIMIT_CHASE_FALLBACK_MARKET=0`. Exchange-native stops remain the primary fast protection; the local watchdog is the repair/enforcement layer when venue state and ledger state diverge.
+
+For live demo order-path latency checks, use:
+
+```bash
+CONFIRM_DEMO_ORDERS=1 PROBE_SYMBOL=BTCUSDT PROBE_COUNT=2 scripts/probe_bybit_demo_order_latency.py
+```
+
+The probe submits tiny far-from-touch post-only demo limit orders and cancels them immediately, reporting place/cancel latency. It is for demo order-path timing only and should not be used as alpha evidence.

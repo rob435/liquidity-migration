@@ -61,6 +61,7 @@ class VolumeEventResearchConfig:
     hold_days: tuple[int, ...] = (3,)
     side_hypotheses: tuple[str, ...] = ("reversal",)
     stop_loss_pcts: tuple[float, ...] = (0.12,)
+    stop_fill_mode: str = "stop"
     take_profit_pcts: tuple[float, ...] = (0.20,)
     cost_multipliers: tuple[float, ...] = (3.0,)
     start_date: str = ""
@@ -88,8 +89,33 @@ class VolumeEventResearchConfig:
     liquidity_migration_score_max: float = 0.0
     liquidity_migration_day_return_min: float = 0.0
     liquidity_migration_day_return_max: float = 10.0
+    liquidity_migration_return_7d_min: float = -10.0
+    liquidity_migration_return_7d_max: float = 10.0
     liquidity_migration_residual_return_min: float = 0.08
     liquidity_migration_residual_return_max: float = 10.0
+    liquidity_migration_close_to_high_7d_min: float = -10.0
+    liquidity_migration_close_to_high_30d_min: float = -10.0
+    liquidity_migration_prior30_max_return_min: float = -10.0
+    liquidity_migration_prior30_max_return_max: float = 10.0
+    liquidity_migration_prior7_return_volatility_min: float = 0.0
+    liquidity_migration_prior7_return_volatility_max: float = 10.0
+    liquidity_migration_intraday_range_max: float = 10.0
+    liquidity_migration_funding_rate_last_min: float = -10.0
+    liquidity_migration_funding_rate_last_max: float = 10.0
+    liquidity_migration_funding_3d_sum_min: float = -10.0
+    liquidity_migration_funding_3d_sum_max: float = 10.0
+    liquidity_migration_funding_7d_sum_min: float = -10.0
+    liquidity_migration_funding_7d_sum_max: float = 10.0
+    liquidity_migration_open_interest_return_3d_min: float = -10.0
+    liquidity_migration_open_interest_return_3d_max: float = 10.0
+    liquidity_migration_open_interest_return_7d_min: float = -10.0
+    liquidity_migration_open_interest_return_7d_max: float = 10.0
+    liquidity_migration_volume_to_oi_quote_min: float = 0.0
+    liquidity_migration_volume_to_oi_quote_max: float = 0.0
+    liquidity_migration_taker_imbalance_1d_min: float = -1.0
+    liquidity_migration_taker_imbalance_1d_max: float = 1.0
+    liquidity_migration_taker_imbalance_3d_min: float = -1.0
+    liquidity_migration_taker_imbalance_3d_max: float = 1.0
     liquidity_migration_market_pct_up_max: float = 0.55
     liquidity_migration_hot_market_day_return_min: float = 0.20
     market_median_return_1d_min: float = -1.0
@@ -146,12 +172,23 @@ def run_volume_event_research(
     if raw_klines.is_empty():
         raise RuntimeError("klines_1h is empty; run download-data first")
     funding = read_dataset(root, "funding")
+    open_interest = read_dataset(root, "open_interest")
+    signed_flow_1h = read_dataset(root, "signed_flow_1h")
     archive_manifest = read_dataset(root, "archive_trade_manifest")
     klines = _exclude_symbols(raw_klines, config.exclude_symbols)
     funding = _exclude_symbols(funding, config.exclude_symbols)
+    open_interest = _exclude_symbols(open_interest, config.exclude_symbols)
+    signed_flow_1h = _exclude_symbols(signed_flow_1h, config.exclude_symbols)
     archive_manifest = _exclude_symbols(archive_manifest, config.exclude_symbols)
     features = _filter_signal_window(
-        _enriched_event_features(build_volume_features(klines), klines, archive_manifest),
+        _enriched_event_features(
+            build_volume_features(klines),
+            klines,
+            archive_manifest,
+            funding=funding,
+            open_interest=open_interest,
+            signed_flow_1h=signed_flow_1h,
+        ),
         _window_config(config),
     )
     full_pit_universe_pass = _full_pit_universe_pass(klines, archive_manifest)
@@ -280,7 +317,7 @@ def _run_event_scenario(
     features: pl.DataFrame,
     bars: dict[str, dict[str, Any]],
     *,
-    funding_lookup: dict[str, list[tuple[int, float]]] | None,
+    funding_lookup: dict[str, dict[str, Any]] | None,
     base_cost_bps: float,
     rank_lookup_cache: dict[str, dict[tuple[str, int], float]],
     event_cache: dict[tuple[str, float], pl.DataFrame],
@@ -372,6 +409,7 @@ def _run_event_scenario(
             rank_lookup=rank_lookup,
             event_decay_threshold=1.0 - scenario.threshold,
             funding_lookup=funding_lookup,
+            stop_fill_mode=config.stop_fill_mode,
         )
         if trade is None:
             skipped_no_entry += 1
@@ -379,6 +417,7 @@ def _run_event_scenario(
         trade.update(
             {
                 "scenario_id": scenario.scenario_id,
+                "stop_fill_mode": config.stop_fill_mode,
                 "event_type": scenario.event_type,
                 "threshold": scenario.threshold,
                 "side_hypothesis": scenario.side_hypothesis,
@@ -386,6 +425,24 @@ def _run_event_scenario(
                 "liquidity_rank": int(event.get("liquidity_rank", 0) or 0),
                 "event_rank_fraction": _float_or_nan(event.get(f"{score_col}_rank_frac")),
                 "daily_return_1d": _float_or_nan(event.get("daily_return_1d")),
+                "return_7d": _float_or_nan(event.get("return_7d")),
+                "close_to_high_7d": _float_or_nan(event.get("close_to_high_7d")),
+                "close_to_high_30d": _float_or_nan(event.get("close_to_high_30d")),
+                "prior30_max_daily_return": _float_or_nan(event.get("prior30_max_daily_return")),
+                "prior7_return_volatility": _float_or_nan(event.get("prior7_return_volatility")),
+                "intraday_range_1d": _float_or_nan(event.get("intraday_range_1d")),
+                "funding_rate_last": _float_or_nan(event.get("funding_rate_last")),
+                "funding_rate_1d_sum": _float_or_nan(event.get("funding_rate_1d_sum")),
+                "funding_rate_3d_sum": _float_or_nan(event.get("funding_rate_3d_sum")),
+                "funding_rate_7d_sum": _float_or_nan(event.get("funding_rate_7d_sum")),
+                "open_interest": _float_or_nan(event.get("open_interest")),
+                "open_interest_quote": _float_or_nan(event.get("open_interest_quote")),
+                "open_interest_return_1d": _float_or_nan(event.get("open_interest_return_1d")),
+                "open_interest_return_3d": _float_or_nan(event.get("open_interest_return_3d")),
+                "open_interest_return_7d": _float_or_nan(event.get("open_interest_return_7d")),
+                "volume_to_open_interest_quote": _float_or_nan(event.get("volume_to_open_interest_quote")),
+                "taker_imbalance_1d": _float_or_nan(event.get("taker_imbalance_1d")),
+                "taker_imbalance_3d": _float_or_nan(event.get("taker_imbalance_3d")),
                 "residual_return_1d": _float_or_nan(event.get("residual_return_1d")),
                 "market_median_return_1d": _float_or_nan(event.get("market_median_return_1d")),
                 "market_pct_up_1d": _float_or_nan(event.get("market_pct_up_1d")),
@@ -418,6 +475,7 @@ def _run_event_scenario(
         "side": side,
         "hold_days": scenario.hold_days,
         "stop_loss_pct": scenario.stop_loss_pct,
+        "stop_fill_mode": config.stop_fill_mode,
         "take_profit_pct": scenario.take_profit_pct,
         "cost_multiplier": scenario.cost_multiplier,
         "candidate_events": events.height,
@@ -512,7 +570,8 @@ def _simulate_indexed_trade(
     stop_pct: float | None,
     rank_lookup: dict[tuple[str, int], float],
     event_decay_threshold: float,
-    funding_lookup: dict[str, list[tuple[int, float]]] | None,
+    funding_lookup: dict[str, dict[str, Any]] | None,
+    stop_fill_mode: str = "stop",
 ) -> dict[str, Any] | None:
     entry_ts_ms = int(entry_bar["bar_end_ts_ms"])
     entry_price = float(entry_bar["close"])
@@ -547,7 +606,7 @@ def _simulate_indexed_trade(
             take_profit_price=take_profit_price,
         )
         if stop_hit:
-            exit_price = stop_price
+            exit_price = _stop_fill_price(side=side, stop_price=stop_price, high=float(bar["high"]), low=float(bar["low"]), mode=stop_fill_mode)
             exit_ts_ms = int(bar["bar_end_ts_ms"])
             exit_reason = "stop_loss"
             break
@@ -631,6 +690,16 @@ def _simulate_indexed_trade(
         "bars_held": bars_held,
         "hold_hours": (int(exit_ts_ms) - entry_ts_ms) / MS_PER_HOUR,
     }
+
+
+def _stop_fill_price(*, side: str, stop_price: float | None, high: float, low: float, mode: str) -> float:
+    if stop_price is None:
+        return float("nan")
+    if mode == "stop":
+        return float(stop_price)
+    if mode == "bar_extreme":
+        return float(min(stop_price, low) if side == "long" else max(stop_price, high))
+    raise ValueError(f"Unknown stop_fill_mode: {mode}")
 
 
 def _select_events(
@@ -719,11 +788,66 @@ def _event_filter(
             required_cols.append("prior7_turnover_quote_mean")
         if config.liquidity_migration_day_return_min > -1.0 or config.liquidity_migration_day_return_max < 10.0:
             required_cols.append("daily_return_1d")
+        if config.liquidity_migration_return_7d_min > -10.0 or config.liquidity_migration_return_7d_max < 10.0:
+            required_cols.append("return_7d")
         if (
             config.liquidity_migration_residual_return_min > -10.0
             or config.liquidity_migration_residual_return_max < 10.0
         ):
             required_cols.append("residual_return_1d")
+        if config.liquidity_migration_close_to_high_7d_min > -10.0:
+            required_cols.append("close_to_high_7d")
+        if config.liquidity_migration_close_to_high_30d_min > -10.0:
+            required_cols.append("close_to_high_30d")
+        if (
+            config.liquidity_migration_prior30_max_return_min > -10.0
+            or config.liquidity_migration_prior30_max_return_max < 10.0
+        ):
+            required_cols.append("prior30_max_daily_return")
+        if (
+            config.liquidity_migration_prior7_return_volatility_min > 0.0
+            or config.liquidity_migration_prior7_return_volatility_max < 10.0
+        ):
+            required_cols.append("prior7_return_volatility")
+        if config.liquidity_migration_intraday_range_max < 10.0:
+            required_cols.append("intraday_range_1d")
+        if (
+            config.liquidity_migration_funding_rate_last_min > -10.0
+            or config.liquidity_migration_funding_rate_last_max < 10.0
+        ):
+            required_cols.append("funding_rate_last")
+        if (
+            config.liquidity_migration_funding_3d_sum_min > -10.0
+            or config.liquidity_migration_funding_3d_sum_max < 10.0
+        ):
+            required_cols.append("funding_rate_3d_sum")
+        if (
+            config.liquidity_migration_funding_7d_sum_min > -10.0
+            or config.liquidity_migration_funding_7d_sum_max < 10.0
+        ):
+            required_cols.append("funding_rate_7d_sum")
+        if (
+            config.liquidity_migration_open_interest_return_3d_min > -10.0
+            or config.liquidity_migration_open_interest_return_3d_max < 10.0
+        ):
+            required_cols.append("open_interest_return_3d")
+        if (
+            config.liquidity_migration_open_interest_return_7d_min > -10.0
+            or config.liquidity_migration_open_interest_return_7d_max < 10.0
+        ):
+            required_cols.append("open_interest_return_7d")
+        if config.liquidity_migration_volume_to_oi_quote_min > 0.0 or config.liquidity_migration_volume_to_oi_quote_max > 0.0:
+            required_cols.append("volume_to_open_interest_quote")
+        if (
+            config.liquidity_migration_taker_imbalance_1d_min > -1.0
+            or config.liquidity_migration_taker_imbalance_1d_max < 1.0
+        ):
+            required_cols.append("taker_imbalance_1d")
+        if (
+            config.liquidity_migration_taker_imbalance_3d_min > -1.0
+            or config.liquidity_migration_taker_imbalance_3d_max < 1.0
+        ):
+            required_cols.append("taker_imbalance_3d")
         if config.liquidity_migration_market_pct_up_max < 1.0:
             required_cols.append("market_pct_up_1d")
             if config.liquidity_migration_hot_market_day_return_min < 10.0:
@@ -767,6 +891,13 @@ def _event_filter(
                 & (pl.col("daily_return_1d") >= config.liquidity_migration_day_return_min)
                 & (pl.col("daily_return_1d") <= config.liquidity_migration_day_return_max)
             )
+        if config.liquidity_migration_return_7d_min > -10.0 or config.liquidity_migration_return_7d_max < 10.0:
+            predicate = (
+                predicate
+                & pl.col("return_7d").is_not_null()
+                & (pl.col("return_7d") >= config.liquidity_migration_return_7d_min)
+                & (pl.col("return_7d") <= config.liquidity_migration_return_7d_max)
+            )
         if (
             config.liquidity_migration_residual_return_min > -10.0
             or config.liquidity_migration_residual_return_max < 10.0
@@ -776,6 +907,124 @@ def _event_filter(
                 & pl.col("residual_return_1d").is_not_null()
                 & (pl.col("residual_return_1d") >= config.liquidity_migration_residual_return_min)
                 & (pl.col("residual_return_1d") <= config.liquidity_migration_residual_return_max)
+            )
+        if config.liquidity_migration_close_to_high_7d_min > -10.0:
+            predicate = (
+                predicate
+                & pl.col("close_to_high_7d").is_not_null()
+                & (pl.col("close_to_high_7d") >= config.liquidity_migration_close_to_high_7d_min)
+            )
+        if config.liquidity_migration_close_to_high_30d_min > -10.0:
+            predicate = (
+                predicate
+                & pl.col("close_to_high_30d").is_not_null()
+                & (pl.col("close_to_high_30d") >= config.liquidity_migration_close_to_high_30d_min)
+            )
+        if (
+            config.liquidity_migration_prior30_max_return_min > -10.0
+            or config.liquidity_migration_prior30_max_return_max < 10.0
+        ):
+            predicate = (
+                predicate
+                & pl.col("prior30_max_daily_return").is_not_null()
+                & (pl.col("prior30_max_daily_return") >= config.liquidity_migration_prior30_max_return_min)
+                & (pl.col("prior30_max_daily_return") <= config.liquidity_migration_prior30_max_return_max)
+            )
+        if (
+            config.liquidity_migration_prior7_return_volatility_min > 0.0
+            or config.liquidity_migration_prior7_return_volatility_max < 10.0
+        ):
+            predicate = (
+                predicate
+                & pl.col("prior7_return_volatility").is_not_null()
+                & (pl.col("prior7_return_volatility") >= config.liquidity_migration_prior7_return_volatility_min)
+                & (pl.col("prior7_return_volatility") <= config.liquidity_migration_prior7_return_volatility_max)
+            )
+        if config.liquidity_migration_intraday_range_max < 10.0:
+            predicate = (
+                predicate
+                & pl.col("intraday_range_1d").is_not_null()
+                & (pl.col("intraday_range_1d") <= config.liquidity_migration_intraday_range_max)
+            )
+        if (
+            config.liquidity_migration_funding_rate_last_min > -10.0
+            or config.liquidity_migration_funding_rate_last_max < 10.0
+        ):
+            predicate = (
+                predicate
+                & pl.col("funding_rate_last").is_not_null()
+                & (pl.col("funding_rate_last") >= config.liquidity_migration_funding_rate_last_min)
+                & (pl.col("funding_rate_last") <= config.liquidity_migration_funding_rate_last_max)
+            )
+        if (
+            config.liquidity_migration_funding_3d_sum_min > -10.0
+            or config.liquidity_migration_funding_3d_sum_max < 10.0
+        ):
+            predicate = (
+                predicate
+                & pl.col("funding_rate_3d_sum").is_not_null()
+                & (pl.col("funding_rate_3d_sum") >= config.liquidity_migration_funding_3d_sum_min)
+                & (pl.col("funding_rate_3d_sum") <= config.liquidity_migration_funding_3d_sum_max)
+            )
+        if (
+            config.liquidity_migration_funding_7d_sum_min > -10.0
+            or config.liquidity_migration_funding_7d_sum_max < 10.0
+        ):
+            predicate = (
+                predicate
+                & pl.col("funding_rate_7d_sum").is_not_null()
+                & (pl.col("funding_rate_7d_sum") >= config.liquidity_migration_funding_7d_sum_min)
+                & (pl.col("funding_rate_7d_sum") <= config.liquidity_migration_funding_7d_sum_max)
+            )
+        if (
+            config.liquidity_migration_open_interest_return_3d_min > -10.0
+            or config.liquidity_migration_open_interest_return_3d_max < 10.0
+        ):
+            predicate = (
+                predicate
+                & pl.col("open_interest_return_3d").is_not_null()
+                & (pl.col("open_interest_return_3d") >= config.liquidity_migration_open_interest_return_3d_min)
+                & (pl.col("open_interest_return_3d") <= config.liquidity_migration_open_interest_return_3d_max)
+            )
+        if (
+            config.liquidity_migration_open_interest_return_7d_min > -10.0
+            or config.liquidity_migration_open_interest_return_7d_max < 10.0
+        ):
+            predicate = (
+                predicate
+                & pl.col("open_interest_return_7d").is_not_null()
+                & (pl.col("open_interest_return_7d") >= config.liquidity_migration_open_interest_return_7d_min)
+                & (pl.col("open_interest_return_7d") <= config.liquidity_migration_open_interest_return_7d_max)
+            )
+        if config.liquidity_migration_volume_to_oi_quote_min > 0.0 or config.liquidity_migration_volume_to_oi_quote_max > 0.0:
+            predicate = predicate & pl.col("volume_to_open_interest_quote").is_not_null()
+            if config.liquidity_migration_volume_to_oi_quote_min > 0.0:
+                predicate = predicate & (
+                    pl.col("volume_to_open_interest_quote") >= config.liquidity_migration_volume_to_oi_quote_min
+                )
+            if config.liquidity_migration_volume_to_oi_quote_max > 0.0:
+                predicate = predicate & (
+                    pl.col("volume_to_open_interest_quote") <= config.liquidity_migration_volume_to_oi_quote_max
+                )
+        if (
+            config.liquidity_migration_taker_imbalance_1d_min > -1.0
+            or config.liquidity_migration_taker_imbalance_1d_max < 1.0
+        ):
+            predicate = (
+                predicate
+                & pl.col("taker_imbalance_1d").is_not_null()
+                & (pl.col("taker_imbalance_1d") >= config.liquidity_migration_taker_imbalance_1d_min)
+                & (pl.col("taker_imbalance_1d") <= config.liquidity_migration_taker_imbalance_1d_max)
+            )
+        if (
+            config.liquidity_migration_taker_imbalance_3d_min > -1.0
+            or config.liquidity_migration_taker_imbalance_3d_max < 1.0
+        ):
+            predicate = (
+                predicate
+                & pl.col("taker_imbalance_3d").is_not_null()
+                & (pl.col("taker_imbalance_3d") >= config.liquidity_migration_taker_imbalance_3d_min)
+                & (pl.col("taker_imbalance_3d") <= config.liquidity_migration_taker_imbalance_3d_max)
             )
         if config.liquidity_migration_market_pct_up_max < 1.0:
             market_ok = pl.col("market_pct_up_1d").is_not_null() & (
@@ -850,10 +1099,35 @@ def _event_decay_exit_hit(
     return rank_fraction is not None and rank_fraction < threshold
 
 
-def _enriched_event_features(features: pl.DataFrame, klines: pl.DataFrame, archive_manifest: pl.DataFrame) -> pl.DataFrame:
+def _enriched_event_features(
+    features: pl.DataFrame,
+    klines: pl.DataFrame,
+    archive_manifest: pl.DataFrame,
+    *,
+    funding: pl.DataFrame | None = None,
+    open_interest: pl.DataFrame | None = None,
+    signed_flow_1h: pl.DataFrame | None = None,
+) -> pl.DataFrame:
     if features.is_empty():
         return features
-    enriched = features.join(_daily_return_frame(klines), on=["ts_ms", "symbol"], how="left")
+    daily_returns = _daily_return_frame(klines)
+    enriched = features.join(daily_returns, on=["ts_ms", "symbol"], how="left")
+    funding_features = _funding_feature_frame(funding)
+    if not funding_features.is_empty():
+        enriched = enriched.join(funding_features, on=["ts_ms", "symbol"], how="left")
+    open_interest_features = _open_interest_feature_frame(open_interest, daily_returns)
+    if not open_interest_features.is_empty():
+        enriched = enriched.join(open_interest_features, on=["ts_ms", "symbol"], how="left")
+    flow_features = _signed_flow_feature_frame(signed_flow_1h)
+    if not flow_features.is_empty():
+        enriched = enriched.join(flow_features, on=["ts_ms", "symbol"], how="left")
+    if _has_columns(enriched, "turnover_quote", "open_interest_quote"):
+        enriched = enriched.with_columns(
+            pl.when(pl.col("open_interest_quote") > 0.0)
+            .then(pl.col("turnover_quote") / pl.col("open_interest_quote"))
+            .otherwise(None)
+            .alias("volume_to_open_interest_quote")
+        )
     if "daily_return_1d" in enriched.columns:
         enriched = enriched.with_columns(pl.col("daily_return_1d").abs().alias("abs_daily_return_1d"))
         enriched = _attach_market_context(enriched)
@@ -869,6 +1143,18 @@ def _enriched_event_features(features: pl.DataFrame, klines: pl.DataFrame, archi
         "volume_composite": "volume_composite_rank_frac",
         "daily_return_1d": "daily_return_rank_frac",
         "abs_daily_return_1d": "abs_daily_return_rank_frac",
+        "return_7d": "return_7d_rank_frac",
+        "prior30_max_daily_return": "prior30_max_daily_return_rank_frac",
+        "prior7_return_volatility": "prior7_return_volatility_rank_frac",
+        "intraday_range_1d": "intraday_range_rank_frac",
+        "funding_rate_last": "funding_rate_last_rank_frac",
+        "funding_rate_3d_sum": "funding_rate_3d_sum_rank_frac",
+        "funding_rate_7d_sum": "funding_rate_7d_sum_rank_frac",
+        "open_interest_return_3d": "open_interest_return_3d_rank_frac",
+        "open_interest_return_7d": "open_interest_return_7d_rank_frac",
+        "volume_to_open_interest_quote": "volume_to_open_interest_quote_rank_frac",
+        "taker_imbalance_1d": "taker_imbalance_1d_rank_frac",
+        "taker_imbalance_3d": "taker_imbalance_3d_rank_frac",
     }
     for source, alias in rank_inputs.items():
         if source in enriched.columns:
@@ -915,6 +1201,143 @@ def _enriched_event_features(features: pl.DataFrame, klines: pl.DataFrame, archi
     )
 
 
+def _funding_feature_frame(funding: pl.DataFrame | None) -> pl.DataFrame:
+    if funding is None or funding.is_empty() or not _has_columns(funding, "symbol", "ts_ms"):
+        return pl.DataFrame()
+    rate_col = "funding_rate_8h_equiv" if "funding_rate_8h_equiv" in funding.columns else "funding_rate"
+    if rate_col not in funding.columns:
+        return pl.DataFrame()
+    daily = (
+        funding.select(["symbol", "ts_ms", rate_col])
+        .drop_nulls(["symbol", "ts_ms", rate_col])
+        .sort(["symbol", "ts_ms"])
+        .with_columns((((pl.col("ts_ms") - 1) // MS_PER_DAY + 1) * MS_PER_DAY).alias("signal_day_end_ms"))
+        .group_by(["symbol", "signal_day_end_ms"], maintain_order=True)
+        .agg(
+            [
+                pl.col(rate_col).last().alias("funding_rate_last"),
+                pl.col(rate_col).sum().alias("funding_rate_1d_sum"),
+                (pl.col(rate_col) > 0.0).mean().alias("funding_positive_fraction_1d"),
+                pl.len().alias("funding_event_count_1d"),
+            ]
+        )
+        .rename({"signal_day_end_ms": "ts_ms"})
+        .sort(["symbol", "ts_ms"])
+        .with_columns(
+            [
+                pl.col("funding_rate_1d_sum")
+                .rolling_sum(window_size=3, min_samples=1)
+                .over("symbol")
+                .alias("funding_rate_3d_sum"),
+                pl.col("funding_rate_1d_sum")
+                .rolling_sum(window_size=7, min_samples=1)
+                .over("symbol")
+                .alias("funding_rate_7d_sum"),
+                pl.col("funding_rate_1d_sum")
+                .rolling_mean(window_size=7, min_samples=1)
+                .over("symbol")
+                .alias("funding_rate_7d_mean"),
+                pl.col("funding_positive_fraction_1d")
+                .rolling_mean(window_size=7, min_samples=1)
+                .over("symbol")
+                .alias("funding_positive_fraction_7d"),
+            ]
+        )
+    )
+    return daily
+
+
+def _open_interest_feature_frame(open_interest: pl.DataFrame | None, daily_returns: pl.DataFrame) -> pl.DataFrame:
+    if open_interest is None or open_interest.is_empty() or not _has_columns(open_interest, "symbol", "ts_ms", "open_interest"):
+        return pl.DataFrame()
+    daily = (
+        open_interest.select(["symbol", "ts_ms", "open_interest"])
+        .drop_nulls(["symbol", "ts_ms", "open_interest"])
+        .sort(["symbol", "ts_ms"])
+        .with_columns((((pl.col("ts_ms") - 1) // MS_PER_DAY + 1) * MS_PER_DAY).alias("signal_day_end_ms"))
+        .group_by(["symbol", "signal_day_end_ms"], maintain_order=True)
+        .agg(pl.col("open_interest").last().alias("open_interest"))
+        .rename({"signal_day_end_ms": "ts_ms"})
+        .sort(["symbol", "ts_ms"])
+    )
+    if not daily_returns.is_empty() and _has_columns(daily_returns, "symbol", "ts_ms", "daily_close"):
+        daily = daily.join(daily_returns.select(["symbol", "ts_ms", "daily_close"]), on=["symbol", "ts_ms"], how="left")
+        daily = daily.with_columns((pl.col("open_interest") * pl.col("daily_close")).alias("open_interest_quote"))
+    else:
+        daily = daily.with_columns(pl.lit(None, dtype=pl.Float64).alias("open_interest_quote"))
+    return daily.with_columns(
+        [
+            (pl.col("open_interest") / pl.col("open_interest").shift(1).over("symbol") - 1.0).alias(
+                "open_interest_return_1d"
+            ),
+            (pl.col("open_interest") / pl.col("open_interest").shift(3).over("symbol") - 1.0).alias(
+                "open_interest_return_3d"
+            ),
+            (pl.col("open_interest") / pl.col("open_interest").shift(7).over("symbol") - 1.0).alias(
+                "open_interest_return_7d"
+            ),
+            (pl.col("open_interest_quote") / pl.col("open_interest_quote").shift(1).over("symbol") - 1.0).alias(
+                "open_interest_quote_return_1d"
+            ),
+            (pl.col("open_interest_quote") / pl.col("open_interest_quote").shift(3).over("symbol") - 1.0).alias(
+                "open_interest_quote_return_3d"
+            ),
+            (pl.col("open_interest_quote") / pl.col("open_interest_quote").shift(7).over("symbol") - 1.0).alias(
+                "open_interest_quote_return_7d"
+            ),
+        ]
+    )
+
+
+def _signed_flow_feature_frame(flow: pl.DataFrame | None) -> pl.DataFrame:
+    if flow is None or flow.is_empty() or not _has_columns(flow, "symbol", "ts_ms"):
+        return pl.DataFrame()
+    required = {"buy_quote", "sell_quote", "signed_quote", "total_quote"}
+    if not required <= set(flow.columns):
+        return pl.DataFrame()
+    daily = (
+        flow.select(["symbol", "ts_ms", "buy_quote", "sell_quote", "signed_quote", "total_quote"])
+        .drop_nulls(["symbol", "ts_ms"])
+        .sort(["symbol", "ts_ms"])
+        .with_columns(((pl.col("ts_ms") // MS_PER_DAY + 1) * MS_PER_DAY).alias("ts_ms"))
+        .group_by(["symbol", "ts_ms"], maintain_order=True)
+        .agg(
+            [
+                pl.col("buy_quote").sum().alias("taker_buy_quote_1d"),
+                pl.col("sell_quote").sum().alias("taker_sell_quote_1d"),
+                pl.col("signed_quote").sum().alias("taker_signed_quote_1d"),
+                pl.col("total_quote").sum().alias("taker_total_quote_1d"),
+            ]
+        )
+        .with_columns(
+            pl.when(pl.col("taker_total_quote_1d") > 0.0)
+            .then(pl.col("taker_signed_quote_1d") / pl.col("taker_total_quote_1d"))
+            .otherwise(None)
+            .alias("taker_imbalance_1d")
+        )
+        .sort(["symbol", "ts_ms"])
+        .with_columns(
+            [
+                pl.col("taker_signed_quote_1d")
+                .rolling_sum(window_size=3, min_samples=1)
+                .over("symbol")
+                .alias("taker_signed_quote_3d"),
+                pl.col("taker_total_quote_1d")
+                .rolling_sum(window_size=3, min_samples=1)
+                .over("symbol")
+                .alias("taker_total_quote_3d"),
+            ]
+        )
+        .with_columns(
+            pl.when(pl.col("taker_total_quote_3d") > 0.0)
+            .then(pl.col("taker_signed_quote_3d") / pl.col("taker_total_quote_3d"))
+            .otherwise(None)
+            .alias("taker_imbalance_3d")
+        )
+    )
+    return daily
+
+
 def _attach_market_context(features: pl.DataFrame) -> pl.DataFrame:
     if features.is_empty() or "daily_return_1d" not in features.columns:
         return features
@@ -955,12 +1378,75 @@ def _daily_return_frame(klines: pl.DataFrame) -> pl.DataFrame:
         klines.with_columns((pl.col("ts_ms") - (pl.col("ts_ms") % MS_PER_DAY)).alias("day_start_ms"))
         .sort(["symbol", "ts_ms"])
         .group_by(["symbol", "day_start_ms"], maintain_order=True)
-        .agg([pl.col("close").last().alias("close"), pl.len().alias("hourly_bars")])
+        .agg(
+            [
+                pl.col("open").first().alias("open"),
+                pl.col("high").max().alias("high"),
+                pl.col("low").min().alias("low"),
+                pl.col("close").last().alias("close"),
+                pl.len().alias("hourly_bars"),
+            ]
+        )
         .filter(pl.col("hourly_bars") >= 20)
         .with_columns((pl.col("day_start_ms") + MS_PER_DAY).alias("ts_ms"))
         .sort(["symbol", "ts_ms"])
-        .with_columns((pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias("daily_return_1d"))
-        .select(["ts_ms", "symbol", "daily_return_1d"])
+        .with_columns(
+            [
+                (pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias("daily_return_1d"),
+                (pl.col("close") / pl.col("close").shift(3).over("symbol") - 1.0).alias("return_3d"),
+                (pl.col("close") / pl.col("close").shift(7).over("symbol") - 1.0).alias("return_7d"),
+                (pl.col("close") / pl.col("close").shift(14).over("symbol") - 1.0).alias("return_14d"),
+                (pl.col("close") / pl.col("close").shift(30).over("symbol") - 1.0).alias("return_30d"),
+                (pl.col("high") / pl.col("low") - 1.0).alias("intraday_range_1d"),
+            ]
+        )
+        .with_columns(
+            [
+                (pl.col("close") / pl.col("high").rolling_max(window_size=7, min_samples=3).over("symbol") - 1.0).alias(
+                    "close_to_high_7d"
+                ),
+                (pl.col("close") / pl.col("high").rolling_max(window_size=30, min_samples=10).over("symbol") - 1.0).alias(
+                    "close_to_high_30d"
+                ),
+                (pl.col("close") / pl.col("low").rolling_min(window_size=7, min_samples=3).over("symbol") - 1.0).alias(
+                    "close_to_low_7d"
+                ),
+                pl.col("daily_return_1d")
+                .shift(1)
+                .rolling_max(window_size=30, min_samples=5)
+                .over("symbol")
+                .alias("prior30_max_daily_return"),
+                pl.col("daily_return_1d")
+                .shift(1)
+                .rolling_min(window_size=30, min_samples=5)
+                .over("symbol")
+                .alias("prior30_min_daily_return"),
+                pl.col("daily_return_1d")
+                .shift(1)
+                .rolling_std(window_size=7, min_samples=4)
+                .over("symbol")
+                .alias("prior7_return_volatility"),
+            ]
+        )
+        .select(
+            [
+                "ts_ms",
+                "symbol",
+                pl.col("close").alias("daily_close"),
+                "daily_return_1d",
+                "return_3d",
+                "return_7d",
+                "return_14d",
+                "return_30d",
+                "intraday_range_1d",
+                "close_to_high_7d",
+                "close_to_high_30d",
+                "close_to_low_7d",
+                "prior30_max_daily_return",
+                "prior30_min_daily_return",
+                "prior7_return_volatility",
+            ]
+        )
     )
     return daily
 
@@ -1658,6 +2144,7 @@ def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) 
         f"- Run label: `{metadata['run_label']}`",
         f"- Feature rows: {metadata['rows']['features']}",
         f"- Scenarios: {metadata['rows']['scenarios']}",
+        f"- Stop fill mode: `{metadata['config'].get('stop_fill_mode', 'stop')}`",
         f"- Pre-PIT promotable rows: {metadata['rows']['pre_pit_promotable']}",
         f"- Promotable rows: {metadata['rows']['promotable']}",
         f"- Date range: {metadata['date_range']['start']} to {metadata['date_range']['end']}",
@@ -1720,6 +2207,8 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("hold days must be positive")
     if any(item < 0.0 or item >= 1.0 for item in config.stop_loss_pcts):
         raise ValueError("stop loss pcts must be in [0, 1)")
+    if config.stop_fill_mode not in {"stop", "bar_extreme"}:
+        raise ValueError("stop_fill_mode must be stop or bar_extreme")
     if any(item < 0.0 or item >= 1.0 for item in config.take_profit_pcts):
         raise ValueError("take profit pcts must be in [0, 1)")
     if any(item < 0.0 for item in config.cost_multipliers):
@@ -1775,10 +2264,73 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("liquidity_migration_score_max must be non-negative")
     if config.liquidity_migration_day_return_min > config.liquidity_migration_day_return_max:
         raise ValueError("liquidity_migration_day_return_min must be <= liquidity_migration_day_return_max")
+    if config.liquidity_migration_return_7d_min > config.liquidity_migration_return_7d_max:
+        raise ValueError("liquidity_migration_return_7d_min must be <= liquidity_migration_return_7d_max")
     if config.liquidity_migration_residual_return_min > config.liquidity_migration_residual_return_max:
         raise ValueError(
             "liquidity_migration_residual_return_min must be <= liquidity_migration_residual_return_max"
         )
+    if config.liquidity_migration_close_to_high_7d_min > 0.0:
+        raise ValueError("liquidity_migration_close_to_high_7d_min must be <= 0")
+    if config.liquidity_migration_close_to_high_30d_min > 0.0:
+        raise ValueError("liquidity_migration_close_to_high_30d_min must be <= 0")
+    if config.liquidity_migration_prior30_max_return_min > config.liquidity_migration_prior30_max_return_max:
+        raise ValueError(
+            "liquidity_migration_prior30_max_return_min must be <= liquidity_migration_prior30_max_return_max"
+        )
+    if (
+        config.liquidity_migration_prior7_return_volatility_min < 0.0
+        or config.liquidity_migration_prior7_return_volatility_max < 0.0
+    ):
+        raise ValueError("liquidity_migration_prior7_return_volatility bounds must be non-negative")
+    if config.liquidity_migration_prior7_return_volatility_min > config.liquidity_migration_prior7_return_volatility_max:
+        raise ValueError(
+            "liquidity_migration_prior7_return_volatility_min must be <= "
+            "liquidity_migration_prior7_return_volatility_max"
+        )
+    if config.liquidity_migration_intraday_range_max < 0.0:
+        raise ValueError("liquidity_migration_intraday_range_max must be non-negative")
+    if config.liquidity_migration_funding_rate_last_min > config.liquidity_migration_funding_rate_last_max:
+        raise ValueError("liquidity_migration_funding_rate_last_min must be <= liquidity_migration_funding_rate_last_max")
+    if config.liquidity_migration_funding_3d_sum_min > config.liquidity_migration_funding_3d_sum_max:
+        raise ValueError("liquidity_migration_funding_3d_sum_min must be <= liquidity_migration_funding_3d_sum_max")
+    if config.liquidity_migration_funding_7d_sum_min > config.liquidity_migration_funding_7d_sum_max:
+        raise ValueError("liquidity_migration_funding_7d_sum_min must be <= liquidity_migration_funding_7d_sum_max")
+    if (
+        config.liquidity_migration_open_interest_return_3d_min
+        > config.liquidity_migration_open_interest_return_3d_max
+    ):
+        raise ValueError(
+            "liquidity_migration_open_interest_return_3d_min must be <= "
+            "liquidity_migration_open_interest_return_3d_max"
+        )
+    if (
+        config.liquidity_migration_open_interest_return_7d_min
+        > config.liquidity_migration_open_interest_return_7d_max
+    ):
+        raise ValueError(
+            "liquidity_migration_open_interest_return_7d_min must be <= "
+            "liquidity_migration_open_interest_return_7d_max"
+        )
+    if config.liquidity_migration_volume_to_oi_quote_min < 0.0 or config.liquidity_migration_volume_to_oi_quote_max < 0.0:
+        raise ValueError("liquidity_migration_volume_to_oi_quote bounds must be non-negative")
+    if (
+        config.liquidity_migration_volume_to_oi_quote_max > 0.0
+        and config.liquidity_migration_volume_to_oi_quote_min > config.liquidity_migration_volume_to_oi_quote_max
+    ):
+        raise ValueError("liquidity_migration_volume_to_oi_quote_min must be <= liquidity_migration_volume_to_oi_quote_max")
+    if not -1.0 <= config.liquidity_migration_taker_imbalance_1d_min <= 1.0:
+        raise ValueError("liquidity_migration_taker_imbalance_1d_min must be in [-1, 1]")
+    if not -1.0 <= config.liquidity_migration_taker_imbalance_1d_max <= 1.0:
+        raise ValueError("liquidity_migration_taker_imbalance_1d_max must be in [-1, 1]")
+    if config.liquidity_migration_taker_imbalance_1d_min > config.liquidity_migration_taker_imbalance_1d_max:
+        raise ValueError("liquidity_migration_taker_imbalance_1d_min must be <= liquidity_migration_taker_imbalance_1d_max")
+    if not -1.0 <= config.liquidity_migration_taker_imbalance_3d_min <= 1.0:
+        raise ValueError("liquidity_migration_taker_imbalance_3d_min must be in [-1, 1]")
+    if not -1.0 <= config.liquidity_migration_taker_imbalance_3d_max <= 1.0:
+        raise ValueError("liquidity_migration_taker_imbalance_3d_max must be in [-1, 1]")
+    if config.liquidity_migration_taker_imbalance_3d_min > config.liquidity_migration_taker_imbalance_3d_max:
+        raise ValueError("liquidity_migration_taker_imbalance_3d_min must be <= liquidity_migration_taker_imbalance_3d_max")
     if not 0.0 <= config.liquidity_migration_market_pct_up_max <= 1.0:
         raise ValueError("liquidity_migration_market_pct_up_max must be in [0, 1]")
     if config.liquidity_migration_hot_market_day_return_min < 0.0:

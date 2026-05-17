@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import time
 from pathlib import Path
 
 from .archive_manifest import DEFAULT_BYBIT_PUBLIC_TRADING_URL, DEFAULT_BYBIT_V5_KLINE_URL
@@ -14,10 +15,46 @@ from .config import (
     load_config,
 )
 from .downloaders import download_market_data, parse_date_ms
-from .event_demo import EventDemoCycleConfig, run_event_demo_cycle
+from .event_demo import (
+    EventDemoCycleConfig,
+    EventRiskCycleConfig,
+    build_event_risk_private_client,
+    run_event_demo_cycle,
+    run_event_risk_cycle,
+)
 from .ingestion import generate_fixture_data
 from .universe import run_discover_universe
 from .volume_events import VolumeEventResearchConfig, run_volume_event_research
+from .ws_risk import EventWebSocketRiskConfig, run_event_ws_risk
+
+
+def _print_event_risk_summary(payload: dict, *, elapsed_ms: float | None = None) -> None:
+    cycle = payload["cycle"]
+    latency_text = f" latency_ms={elapsed_ms:.1f}" if elapsed_ms is not None else ""
+    print(
+        "event risk cycle "
+        f"mode={cycle['mode']} "
+        f"exits={cycle['exits_executed']}/{cycle['exit_candidates']} "
+        f"repairs={cycle.get('stop_repairs', 0)} "
+        f"open={cycle['open_trades_after']} "
+        f"untracked={cycle.get('untracked_positions', 0)}"
+        f"{latency_text} "
+        f"path={Path(payload['report_dir']) / 'latest_event_risk_cycle.md'}",
+        flush=True,
+    )
+
+
+def _event_risk_payload_material(payload: dict) -> bool:
+    cycle = payload.get("cycle", {})
+    return bool(
+        cycle.get("position_report_error")
+        or int(cycle.get("exit_candidates") or 0) > 0
+        or int(cycle.get("exits_executed") or 0) > 0
+        or int(cycle.get("stop_repairs") or 0) > 0
+        or int(cycle.get("untracked_positions") or 0) > 0
+        or payload.get("reconciliations")
+        or payload.get("exit_orders")
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -51,6 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=1,
         help="Concurrent per-symbol REST download workers. Use 1 for safest rate-limit behavior.",
+    )
+    download.add_argument(
+        "--open-interest-interval",
+        default="1h",
+        help="Bybit open-interest interval for download-data open_interest: 5min, 15min, 30min, 1h, 4h, or 1d.",
     )
 
     universe = subparsers.add_parser("discover-universe", help="Build a current Bybit USDT perp universe snapshot.")
@@ -173,6 +215,11 @@ def build_parser() -> argparse.ArgumentParser:
     volume_events.add_argument("--hold-days", default=",".join(str(item) for item in event_defaults.hold_days), help="Comma-separated max holds in days.")
     volume_events.add_argument("--sides", default=",".join(event_defaults.side_hypotheses), help="continuation,reversal, or both.")
     volume_events.add_argument("--stop-loss-pcts", default=",".join(str(item) for item in event_defaults.stop_loss_pcts), help="Comma-separated fixed stop pcts; 0 disables.")
+    volume_events.add_argument(
+        "--stop-fill-mode",
+        default=event_defaults.stop_fill_mode,
+        help="Stop fill assumption: stop fills at stop price, bar_extreme fills at adverse hourly high/low.",
+    )
     volume_events.add_argument("--take-profit-pcts", default=",".join(str(item) for item in event_defaults.take_profit_pcts), help="Comma-separated fixed take-profit pcts; 0 disables.")
     volume_events.add_argument("--cost-multipliers", default=",".join(str(item) for item in event_defaults.cost_multipliers), help="Comma-separated cost multipliers.")
     volume_events.add_argument("--start", default="", help="Inclusive UTC signal start date/timestamp.")
@@ -249,6 +296,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum same-day return for liquidity-migration events; 10 disables.",
     )
     volume_events.add_argument(
+        "--liquidity-migration-return-7d-min",
+        type=float,
+        default=event_defaults.liquidity_migration_return_7d_min,
+        help="Minimum 7d close-to-close return for liquidity-migration events; -10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-return-7d-max",
+        type=float,
+        default=event_defaults.liquidity_migration_return_7d_max,
+        help="Maximum 7d close-to-close return for liquidity-migration events; 10 disables.",
+    )
+    volume_events.add_argument(
         "--liquidity-migration-residual-return-min",
         type=float,
         default=event_defaults.liquidity_migration_residual_return_min,
@@ -259,6 +318,144 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=event_defaults.liquidity_migration_residual_return_max,
         help="Maximum coin return minus PIT market median return for liquidity-migration events; 10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-close-to-high-7d-min",
+        type=float,
+        default=event_defaults.liquidity_migration_close_to_high_7d_min,
+        help="Minimum close/7d-high - 1 for liquidity-migration events; -10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-close-to-high-30d-min",
+        type=float,
+        default=event_defaults.liquidity_migration_close_to_high_30d_min,
+        help="Minimum close/30d-high - 1 for liquidity-migration events; -10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-prior30-max-return-min",
+        type=float,
+        default=event_defaults.liquidity_migration_prior30_max_return_min,
+        help="Minimum prior 30d maximum daily return for liquidity-migration events; -10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-prior30-max-return-max",
+        type=float,
+        default=event_defaults.liquidity_migration_prior30_max_return_max,
+        help="Maximum prior 30d maximum daily return for liquidity-migration events; 10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-prior7-return-volatility-min",
+        type=float,
+        default=event_defaults.liquidity_migration_prior7_return_volatility_min,
+        help="Minimum prior 7d daily-return volatility for liquidity-migration events; 0 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-prior7-return-volatility-max",
+        type=float,
+        default=event_defaults.liquidity_migration_prior7_return_volatility_max,
+        help="Maximum prior 7d daily-return volatility for liquidity-migration events; 10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-intraday-range-max",
+        type=float,
+        default=event_defaults.liquidity_migration_intraday_range_max,
+        help="Maximum signal-day high/low - 1 for liquidity-migration events; 10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-funding-rate-last-min",
+        type=float,
+        default=event_defaults.liquidity_migration_funding_rate_last_min,
+        help="Minimum latest 8h-equivalent funding rate at signal close; -10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-funding-rate-last-max",
+        type=float,
+        default=event_defaults.liquidity_migration_funding_rate_last_max,
+        help="Maximum latest 8h-equivalent funding rate at signal close; 10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-funding-3d-sum-min",
+        type=float,
+        default=event_defaults.liquidity_migration_funding_3d_sum_min,
+        help="Minimum prior 3d funding sum at signal close; -10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-funding-3d-sum-max",
+        type=float,
+        default=event_defaults.liquidity_migration_funding_3d_sum_max,
+        help="Maximum prior 3d funding sum at signal close; 10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-funding-7d-sum-min",
+        type=float,
+        default=event_defaults.liquidity_migration_funding_7d_sum_min,
+        help="Minimum prior 7d funding sum at signal close; -10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-funding-7d-sum-max",
+        type=float,
+        default=event_defaults.liquidity_migration_funding_7d_sum_max,
+        help="Maximum prior 7d funding sum at signal close; 10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-open-interest-return-3d-min",
+        type=float,
+        default=event_defaults.liquidity_migration_open_interest_return_3d_min,
+        help="Minimum 3d open-interest change at signal close; -10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-open-interest-return-3d-max",
+        type=float,
+        default=event_defaults.liquidity_migration_open_interest_return_3d_max,
+        help="Maximum 3d open-interest change at signal close; 10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-open-interest-return-7d-min",
+        type=float,
+        default=event_defaults.liquidity_migration_open_interest_return_7d_min,
+        help="Minimum 7d open-interest change at signal close; -10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-open-interest-return-7d-max",
+        type=float,
+        default=event_defaults.liquidity_migration_open_interest_return_7d_max,
+        help="Maximum 7d open-interest change at signal close; 10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-volume-to-oi-quote-min",
+        type=float,
+        default=event_defaults.liquidity_migration_volume_to_oi_quote_min,
+        help="Minimum signal-day quote turnover divided by estimated quote OI; 0 with max 0 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-volume-to-oi-quote-max",
+        type=float,
+        default=event_defaults.liquidity_migration_volume_to_oi_quote_max,
+        help="Maximum signal-day quote turnover divided by estimated quote OI; 0 with min 0 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-taker-imbalance-1d-min",
+        type=float,
+        default=event_defaults.liquidity_migration_taker_imbalance_1d_min,
+        help="Minimum signal-day taker buy-minus-sell quote imbalance; -1 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-taker-imbalance-1d-max",
+        type=float,
+        default=event_defaults.liquidity_migration_taker_imbalance_1d_max,
+        help="Maximum signal-day taker buy-minus-sell quote imbalance; 1 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-taker-imbalance-3d-min",
+        type=float,
+        default=event_defaults.liquidity_migration_taker_imbalance_3d_min,
+        help="Minimum 3d taker buy-minus-sell quote imbalance; -1 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-taker-imbalance-3d-max",
+        type=float,
+        default=event_defaults.liquidity_migration_taker_imbalance_3d_max,
+        help="Maximum 3d taker buy-minus-sell quote imbalance; 1 disables.",
     )
     volume_events.add_argument(
         "--liquidity-migration-market-pct-up-max",
@@ -380,6 +577,65 @@ def build_parser() -> argparse.ArgumentParser:
     event_demo.add_argument("--record-dry-run", action="store_true", help="Persist planned dry-run orders/trades into the demo ledger.")
     event_demo.add_argument("--data-name", default=demo_defaults.data_name)
 
+    event_risk = subparsers.add_parser(
+        "event-risk-cycle",
+        help="Run one fast exit-only Bybit demo risk cycle for open event positions.",
+    )
+    risk_defaults = EventRiskCycleConfig()
+    event_risk.add_argument("--submit-orders", action="store_true", help="Submit reduce-only Bybit demo risk orders. Dry-run is the default.")
+    event_risk.add_argument("--confirm-demo-orders", action="store_true", help="Required with --submit-orders.")
+    event_risk.add_argument("--telegram", action="store_true", help="Send Telegram only for exits, repairs, mismatches, or errors.")
+    event_risk.add_argument("--record-dry-run", action="store_true", help="Persist planned dry-run risk orders/trade closes.")
+    event_risk.add_argument("--no-repair-stops", action="store_true", help="Do not repair missing/mismatched exchange-native stop/TP settings.")
+    event_risk.add_argument("--loop", action="store_true", help="Run continuously in one Python process and reuse the Bybit private client.")
+    event_risk.add_argument("--quiet-loop", action="store_true", help="In loop mode, print only material risk events instead of every quiet cycle.")
+    event_risk.add_argument("--interval-seconds", type=float, default=0.25, help="Seconds between in-process risk loop cycles.")
+    event_risk.add_argument("--max-cycles", type=int, default=0, help="Stop after this many loop cycles. Default 0 runs forever.")
+    event_risk.add_argument(
+        "--exit-order-mode",
+        default=risk_defaults.exit_order_mode,
+        choices=("market", "limit_chase"),
+        help="Risk exit execution mode. market is fastest; limit_chase uses bounded IOC limit attempts before optional market fallback.",
+    )
+    event_risk.add_argument("--limit-chase-attempts", type=int, default=risk_defaults.limit_chase_attempts)
+    event_risk.add_argument("--limit-chase-initial-bps", type=float, default=risk_defaults.limit_chase_initial_bps)
+    event_risk.add_argument("--limit-chase-step-bps", type=float, default=risk_defaults.limit_chase_step_bps)
+    event_risk.add_argument("--limit-chase-max-bps", type=float, default=risk_defaults.limit_chase_max_bps)
+    event_risk.add_argument("--limit-chase-wait-seconds", type=float, default=risk_defaults.limit_chase_wait_seconds)
+    event_risk.add_argument(
+        "--no-limit-chase-fallback-market",
+        action="store_true",
+        help="Do not fall back to a market reduce-only order after limit chase attempts.",
+    )
+    event_risk.add_argument("--stop-tolerance-bps", type=float, default=risk_defaults.stop_tolerance_bps)
+    event_risk.add_argument("--data-name", default=risk_defaults.data_name)
+
+    event_ws_risk = subparsers.add_parser(
+        "event-risk-ws",
+        help="Run the exchange-stop-first WebSocket Bybit demo risk daemon.",
+    )
+    ws_risk_defaults = EventWebSocketRiskConfig()
+    event_ws_risk.add_argument("--submit-orders", action="store_true", help="Submit demo exits. Dry-run is the default.")
+    event_ws_risk.add_argument("--confirm-demo-orders", action="store_true", help="Required with --submit-orders.")
+    event_ws_risk.add_argument("--telegram", action="store_true", help="Reserved for material WebSocket risk alerts.")
+    event_ws_risk.add_argument("--no-repair-stops", action="store_true", help="Do not repair missing/mismatched exchange-native stop/TP settings.")
+    event_ws_risk.add_argument(
+        "--order-submit-mode",
+        choices=("ws", "ws_then_rest", "rest"),
+        default=ws_risk_defaults.order_submit_mode,
+        help="Exit submission path. Demo WS trade is currently unsupported by Bybit, so ws_then_rest falls back to REST.",
+    )
+    event_ws_risk.add_argument("--no-rest-fallback", action="store_true", help="Disable REST order fallback after a WebSocket order-path failure.")
+    event_ws_risk.add_argument("--rest-reconcile-seconds", type=float, default=ws_risk_defaults.rest_reconcile_seconds)
+    event_ws_risk.add_argument("--heartbeat-seconds", type=float, default=ws_risk_defaults.heartbeat_seconds)
+    event_ws_risk.add_argument("--max-runtime-seconds", type=float, default=ws_risk_defaults.max_runtime_seconds)
+    event_ws_risk.add_argument("--stale-ws-seconds", type=float, default=ws_risk_defaults.stale_ws_seconds)
+    event_ws_risk.add_argument("--fast-execution-stream", dest="fast_execution_stream", action="store_true")
+    event_ws_risk.add_argument("--no-fast-execution-stream", dest="fast_execution_stream", action="store_false")
+    event_ws_risk.set_defaults(fast_execution_stream=ws_risk_defaults.fast_execution_stream)
+    event_ws_risk.add_argument("--stop-tolerance-bps", type=float, default=ws_risk_defaults.stop_tolerance_bps)
+    event_ws_risk.add_argument("--data-name", default=ws_risk_defaults.data_name)
+
     return parser
 
 
@@ -404,6 +660,7 @@ def main(argv: list[str] | None = None) -> int:
                 archive_url_template=args.archive_url_template,
                 store_raw_public_trades=not args.skip_raw_public_trades,
                 workers=args.workers,
+                open_interest_interval=args.open_interest_interval,
             )
         action = "fixture datasets written" if args.fixture else "Bybit datasets written"
         print(f"{action} under {data_root}")
@@ -551,6 +808,71 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "event-risk-cycle":
+        risk_config = EventRiskCycleConfig(
+            submit_orders=args.submit_orders,
+            confirm_demo_orders=args.confirm_demo_orders,
+            telegram=args.telegram,
+            record_dry_run=args.record_dry_run,
+            repair_stops=not args.no_repair_stops,
+            exit_order_mode=args.exit_order_mode,
+            limit_chase_attempts=args.limit_chase_attempts,
+            limit_chase_initial_bps=args.limit_chase_initial_bps,
+            limit_chase_step_bps=args.limit_chase_step_bps,
+            limit_chase_max_bps=args.limit_chase_max_bps,
+            limit_chase_wait_seconds=args.limit_chase_wait_seconds,
+            limit_chase_fallback_market=not args.no_limit_chase_fallback_market,
+            stop_tolerance_bps=args.stop_tolerance_bps,
+            data_name=args.data_name,
+        )
+        if args.loop:
+            if args.interval_seconds < 0.0:
+                raise ValueError("interval-seconds must be non-negative")
+            if args.max_cycles < 0:
+                raise ValueError("max-cycles must be non-negative")
+            private_client = build_event_risk_private_client(config, risk_config)
+            cycles = 0
+            while True:
+                started = time.perf_counter()
+                payload = run_event_risk_cycle(
+                    data_root,
+                    config=config,
+                    risk_config=risk_config,
+                    private_client=private_client,
+                )
+                elapsed_seconds = time.perf_counter() - started
+                if not args.quiet_loop or _event_risk_payload_material(payload):
+                    _print_event_risk_summary(payload, elapsed_ms=elapsed_seconds * 1000.0)
+                cycles += 1
+                if args.max_cycles and cycles >= args.max_cycles:
+                    return 0
+                sleep_seconds = max(args.interval_seconds - elapsed_seconds, 0.0)
+                if sleep_seconds > 0.0:
+                    time.sleep(sleep_seconds)
+        payload = run_event_risk_cycle(data_root, config=config, risk_config=risk_config)
+        _print_event_risk_summary(payload)
+        return 0
+
+    if args.command == "event-risk-ws":
+        risk_config = EventWebSocketRiskConfig(
+            submit_orders=args.submit_orders,
+            confirm_demo_orders=args.confirm_demo_orders,
+            telegram=args.telegram,
+            repair_stops=not args.no_repair_stops,
+            order_submit_mode=args.order_submit_mode,
+            rest_fallback=not args.no_rest_fallback,
+            rest_reconcile_seconds=args.rest_reconcile_seconds,
+            heartbeat_seconds=args.heartbeat_seconds,
+            max_runtime_seconds=args.max_runtime_seconds,
+            stale_ws_seconds=args.stale_ws_seconds,
+            fast_execution_stream=args.fast_execution_stream,
+            stop_tolerance_bps=args.stop_tolerance_bps,
+            data_name=args.data_name,
+        )
+        payload = run_event_ws_risk(data_root, config=config, risk_config=risk_config)
+        _print_event_risk_summary(payload)
+        return 0
+
     if args.command == "volume-events":
         event_config = VolumeEventResearchConfig(
             event_types=_csv_str(args.event_types, VolumeEventResearchConfig().event_types),
@@ -558,6 +880,7 @@ def main(argv: list[str] | None = None) -> int:
             hold_days=_csv_int(args.hold_days, VolumeEventResearchConfig().hold_days),
             side_hypotheses=_csv_str(args.sides, VolumeEventResearchConfig().side_hypotheses),
             stop_loss_pcts=_csv_float(args.stop_loss_pcts, VolumeEventResearchConfig().stop_loss_pcts),
+            stop_fill_mode=args.stop_fill_mode,
             take_profit_pcts=_csv_float(args.take_profit_pcts, VolumeEventResearchConfig().take_profit_pcts),
             cost_multipliers=_csv_float(args.cost_multipliers, VolumeEventResearchConfig().cost_multipliers),
             start_date=args.start,
@@ -584,8 +907,33 @@ def main(argv: list[str] | None = None) -> int:
             liquidity_migration_score_max=args.liquidity_migration_score_max,
             liquidity_migration_day_return_min=args.liquidity_migration_day_return_min,
             liquidity_migration_day_return_max=args.liquidity_migration_day_return_max,
+            liquidity_migration_return_7d_min=args.liquidity_migration_return_7d_min,
+            liquidity_migration_return_7d_max=args.liquidity_migration_return_7d_max,
             liquidity_migration_residual_return_min=args.liquidity_migration_residual_return_min,
             liquidity_migration_residual_return_max=args.liquidity_migration_residual_return_max,
+            liquidity_migration_close_to_high_7d_min=args.liquidity_migration_close_to_high_7d_min,
+            liquidity_migration_close_to_high_30d_min=args.liquidity_migration_close_to_high_30d_min,
+            liquidity_migration_prior30_max_return_min=args.liquidity_migration_prior30_max_return_min,
+            liquidity_migration_prior30_max_return_max=args.liquidity_migration_prior30_max_return_max,
+            liquidity_migration_prior7_return_volatility_min=args.liquidity_migration_prior7_return_volatility_min,
+            liquidity_migration_prior7_return_volatility_max=args.liquidity_migration_prior7_return_volatility_max,
+            liquidity_migration_intraday_range_max=args.liquidity_migration_intraday_range_max,
+            liquidity_migration_funding_rate_last_min=args.liquidity_migration_funding_rate_last_min,
+            liquidity_migration_funding_rate_last_max=args.liquidity_migration_funding_rate_last_max,
+            liquidity_migration_funding_3d_sum_min=args.liquidity_migration_funding_3d_sum_min,
+            liquidity_migration_funding_3d_sum_max=args.liquidity_migration_funding_3d_sum_max,
+            liquidity_migration_funding_7d_sum_min=args.liquidity_migration_funding_7d_sum_min,
+            liquidity_migration_funding_7d_sum_max=args.liquidity_migration_funding_7d_sum_max,
+            liquidity_migration_open_interest_return_3d_min=args.liquidity_migration_open_interest_return_3d_min,
+            liquidity_migration_open_interest_return_3d_max=args.liquidity_migration_open_interest_return_3d_max,
+            liquidity_migration_open_interest_return_7d_min=args.liquidity_migration_open_interest_return_7d_min,
+            liquidity_migration_open_interest_return_7d_max=args.liquidity_migration_open_interest_return_7d_max,
+            liquidity_migration_volume_to_oi_quote_min=args.liquidity_migration_volume_to_oi_quote_min,
+            liquidity_migration_volume_to_oi_quote_max=args.liquidity_migration_volume_to_oi_quote_max,
+            liquidity_migration_taker_imbalance_1d_min=args.liquidity_migration_taker_imbalance_1d_min,
+            liquidity_migration_taker_imbalance_1d_max=args.liquidity_migration_taker_imbalance_1d_max,
+            liquidity_migration_taker_imbalance_3d_min=args.liquidity_migration_taker_imbalance_3d_min,
+            liquidity_migration_taker_imbalance_3d_max=args.liquidity_migration_taker_imbalance_3d_max,
             liquidity_migration_market_pct_up_max=args.liquidity_migration_market_pct_up_max,
             liquidity_migration_hot_market_day_return_min=args.liquidity_migration_hot_market_day_return_min,
             market_median_return_1d_min=args.market_median_return_1d_min,

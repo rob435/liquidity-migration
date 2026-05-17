@@ -294,6 +294,43 @@ material events when enabled, and records `event_demo_trades`,
 forward tester, so it is allowed for demo evidence and operations, not for
 historical promotion evidence.
 
+Fast exit enforcement is handled by the separate exit-only risk watchdog:
+
+```bash
+SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 TELEGRAM_ENABLED=1 bash scripts/run_bybit_demo_ws_risk_engine.sh
+```
+
+The watchdog now defaults to `event-risk-ws`: exchange-native stops first,
+demo private WebSocket position/order/execution streams plus the mainnet public
+ticker stream second, and REST only for demo fallback/reconciliation. It does not scan for entries. It repairs
+exchange-native stops/TPs, subscribes to active-position ticker streams, forces
+reduce-only exits on streamed stop, take-profit, or max-hold breaches, and can
+mark the ledger closed from WebSocket execution messages. Bybit currently does
+not support WebSocket Trade order entry for demo trading, so the demo VPS uses
+`ORDER_SUBMIT_MODE=ws_then_rest`: WebSocket decides, REST submits only when demo
+WS order entry is unavailable.
+The demo private socket rejects `execution.fast`, so the VPS uses the normal
+private execution stream unless that limitation is retested and cleared.
+
+Order-path latency can be measured on the demo account with
+`scripts/probe_bybit_demo_order_latency.py`, which places tiny far-from-touch
+post-only demo orders and cancels them immediately.
+
+## Creative Alpha Research Log
+
+Latest full-PIT creative alpha pass:
+
+```text
+docs/creative_alpha_research_20260517.md
+```
+
+Decision: do not change the selected demo strategy. The pass added
+disabled-by-default research controls for 7d momentum, proximity-to-high,
+prior-month MAX/salience, prior return volatility, and intraday range. None beat
+the current liquidity-migration short on strict full-PIT improvement criteria.
+The closest result was a lower-drawdown near-30d-high sleeve, but it sacrificed
+too much return and was delay sensitive.
+
 ## Selected Full-PIT Result
 
 Promoted result after the hold/exit frontier confirmation:
@@ -371,6 +408,35 @@ validation return: +254.58%
 OOS return: +111.75%
 default chart: volume_event_best_equity_btc.png with BTC overlay and monthly/growth gridlines
 promotion gate: pass
+```
+
+Funding and execution-realism update from `2026-05-17`:
+
+```text
+funded default report: data/research_reports/research_20260517_default_with_funding_oi_features
+funded default return: +957.82%
+funded default max drawdown: -18.62%
+funding return drag: -22.03%
+
+adverse stop-fill report: data/research_reports/research_20260517_default_funding_bar_extreme_stops
+adverse stop-fill return: +141.34%
+adverse stop-fill max drawdown: -35.88%
+adverse stop-fill OOS return: -13.69%
+adverse stop-fill promotion gate: fail
+```
+
+The strongest new research candidate is the same liquidity-migration short
+strategy gated to `funding_7d_sum >= 0` at signal close. It is not the active
+demo default yet because there is no forward/demo evidence and the demo cycle
+does not currently compute the 7d funding gate. Full report:
+
+```text
+data/research_reports/research_20260517_funding7_positive_bar_extreme_stops
+return: +213.66%
+max drawdown: -16.61%
+min split return: +12.10%
+funding return: +3.13%
+promotion gate: pass under adverse hourly stop fills
 ```
 
 In the promotion comparison, BTC/ETH/SOL/BNB/XRP/TRX took no direct trades, but

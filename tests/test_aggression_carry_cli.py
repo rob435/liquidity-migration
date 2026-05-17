@@ -78,6 +78,18 @@ def test_cli_archive_hourly_api_kline_default_resumes_written_partitions(tmp_pat
     assert args.interval == "60"
 
 
+def test_cli_download_data_default_open_interest_interval(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "download-data",
+        ]
+    )
+
+    assert args.open_interest_interval == "1h"
+
+
 def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [
@@ -93,6 +105,7 @@ def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Pa
     assert args.hold_days == "3"
     assert args.sides == "reversal"
     assert args.stop_loss_pcts == "0.12"
+    assert args.stop_fill_mode == "stop"
     assert args.take_profit_pcts == "0.2"
     assert args.cost_multipliers == "3.0"
     assert args.gross_exposure == 1.25
@@ -111,6 +124,12 @@ def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Pa
     assert args.liquidity_migration_day_return_max == 10.0
     assert args.liquidity_migration_residual_return_min == 0.08
     assert args.liquidity_migration_residual_return_max == 10.0
+    assert args.liquidity_migration_funding_rate_last_min == -10.0
+    assert args.liquidity_migration_funding_rate_last_max == 10.0
+    assert args.liquidity_migration_open_interest_return_3d_min == -10.0
+    assert args.liquidity_migration_open_interest_return_3d_max == 10.0
+    assert args.liquidity_migration_taker_imbalance_1d_min == -1.0
+    assert args.liquidity_migration_taker_imbalance_1d_max == 1.0
     assert args.liquidity_migration_market_pct_up_max == 0.55
     assert args.liquidity_migration_hot_market_day_return_min == 0.20
     assert args.stop_pressure_window_days == 14
@@ -134,6 +153,8 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
             "continuation",
             "--stop-loss-pcts",
             "0,0.12",
+            "--stop-fill-mode",
+            "bar_extreme",
             "--take-profit-pcts",
             "0,0.2",
             "--cost-multipliers",
@@ -180,6 +201,26 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
             "0.08",
             "--liquidity-migration-residual-return-max",
             "0.5",
+            "--liquidity-migration-funding-rate-last-min",
+            "0.0001",
+            "--liquidity-migration-funding-rate-last-max",
+            "0.01",
+            "--liquidity-migration-funding-3d-sum-min",
+            "0.0002",
+            "--liquidity-migration-funding-7d-sum-max",
+            "0.02",
+            "--liquidity-migration-open-interest-return-3d-min",
+            "0.05",
+            "--liquidity-migration-open-interest-return-7d-max",
+            "0.8",
+            "--liquidity-migration-volume-to-oi-quote-min",
+            "0.5",
+            "--liquidity-migration-volume-to-oi-quote-max",
+            "5.0",
+            "--liquidity-migration-taker-imbalance-1d-min",
+            "-0.25",
+            "--liquidity-migration-taker-imbalance-3d-max",
+            "0.5",
             "--liquidity-migration-market-pct-up-max",
             "0.6",
             "--liquidity-migration-hot-market-day-return-min",
@@ -201,6 +242,7 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
     assert args.command == "volume-events"
     assert args.event_types == "volume_exhaustion,persistent_volume_breakout"
     assert args.thresholds == "0.2"
+    assert args.stop_fill_mode == "bar_extreme"
     assert args.take_profit_pcts == "0,0.2"
     assert args.gross_exposure == 0.5
     assert args.entry_delay_hours == 6
@@ -223,6 +265,16 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
     assert args.liquidity_migration_day_return_max == 0.8
     assert args.liquidity_migration_residual_return_min == 0.08
     assert args.liquidity_migration_residual_return_max == 0.5
+    assert args.liquidity_migration_funding_rate_last_min == 0.0001
+    assert args.liquidity_migration_funding_rate_last_max == 0.01
+    assert args.liquidity_migration_funding_3d_sum_min == 0.0002
+    assert args.liquidity_migration_funding_7d_sum_max == 0.02
+    assert args.liquidity_migration_open_interest_return_3d_min == 0.05
+    assert args.liquidity_migration_open_interest_return_7d_max == 0.8
+    assert args.liquidity_migration_volume_to_oi_quote_min == 0.5
+    assert args.liquidity_migration_volume_to_oi_quote_max == 5.0
+    assert args.liquidity_migration_taker_imbalance_1d_min == -0.25
+    assert args.liquidity_migration_taker_imbalance_3d_max == 0.5
     assert args.liquidity_migration_market_pct_up_max == 0.6
     assert args.liquidity_migration_hot_market_day_return_min == 0.15
     assert args.exhaustion_min_day_return == 0.08

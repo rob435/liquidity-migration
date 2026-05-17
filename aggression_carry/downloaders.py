@@ -61,6 +61,7 @@ def download_market_data(
     archive_url_template: str | None = None,
     store_raw_public_trades: bool = True,
     workers: int = 1,
+    open_interest_interval: str = "1h",
 ) -> dict[str, Path]:
     client = BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet) if datasets & REST_DATASETS else None
     symbols = tuple(dict.fromkeys(symbol.upper() for symbol in symbols))
@@ -93,6 +94,7 @@ def download_market_data(
                     end_ms=end_ms,
                     datasets=per_symbol_rest,
                     store_raw_public_trades=store_raw_public_trades,
+                    open_interest_interval=open_interest_interval,
                 ): symbol
                 for index, symbol in enumerate(symbols, start=1)
             }
@@ -115,6 +117,7 @@ def download_market_data(
                     end_ms=end_ms,
                     datasets=per_symbol_rest,
                     store_raw_public_trades=store_raw_public_trades,
+                    open_interest_interval=open_interest_interval,
                 )
             )
         if archive_requested and archive_url_template:
@@ -172,6 +175,7 @@ def _download_rest_symbol_datasets(
     end_ms: int,
     datasets: set[str],
     store_raw_public_trades: bool,
+    open_interest_interval: str = "1h",
     client: BybitMarketData | None = None,
 ) -> dict[str, Path]:
     local_client = client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
@@ -242,7 +246,12 @@ def _download_rest_symbol_datasets(
             total=total,
             start_ms=start_ms,
             end_ms=end_ms,
-            fetch=lambda: _normalize_open_interest(symbol, local_client.get_open_interest(symbol, "1h", start_ms, end_ms)),
+            fetch=lambda: _normalize_open_interest(
+                symbol,
+                local_client.get_open_interest(symbol, open_interest_interval, start_ms, end_ms),
+                interval_time=open_interest_interval,
+            ),
+            marker_suffix=f"_{open_interest_interval}",
         )
     if "mark_price_1h" in datasets:
         outputs["mark_price_1h"] = _download_symbol_dataset(
@@ -315,10 +324,11 @@ def _download_symbol_dataset(
     end_ms: int,
     fetch: Callable[[], list[dict]],
     postprocess: Callable[[pl.DataFrame], pl.DataFrame] | None = None,
+    marker_suffix: str = "",
 ) -> Path:
     output = dataset_path(data_root, dataset)
-    marker = _marker_path(data_root, dataset=dataset, symbol=symbol, start_ms=start_ms, end_ms=end_ms)
-    if _marked_complete(data_root, dataset=dataset, symbol=symbol, start_ms=start_ms, end_ms=end_ms):
+    marker = _marker_path(data_root, dataset=dataset, symbol=symbol, start_ms=start_ms, end_ms=end_ms, suffix=marker_suffix)
+    if _marked_complete(data_root, dataset=dataset, symbol=symbol, start_ms=start_ms, end_ms=end_ms, suffix=marker_suffix):
         print(f"{dataset}: {index}/{total} {symbol} cached", flush=True)
         return output
 
@@ -335,13 +345,22 @@ def _download_symbol_dataset(
     return output
 
 
-def _marker_path(data_root: str | Path, *, dataset: str, symbol: str, start_ms: int, end_ms: int) -> Path:
+def _marker_path(data_root: str | Path, *, dataset: str, symbol: str, start_ms: int, end_ms: int, suffix: str = "") -> Path:
     safe_symbol = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in symbol)
-    return Path(data_root).expanduser() / MARKER_DIR / dataset / f"{safe_symbol}_{start_ms}_{end_ms}.done"
+    safe_suffix = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in suffix)
+    return Path(data_root).expanduser() / MARKER_DIR / dataset / f"{safe_symbol}_{start_ms}_{end_ms}{safe_suffix}.done"
 
 
-def _marked_complete(data_root: str | Path, *, dataset: str, symbol: str, start_ms: int, end_ms: int) -> bool:
-    marker = _marker_path(data_root, dataset=dataset, symbol=symbol, start_ms=start_ms, end_ms=end_ms)
+def _marked_complete(
+    data_root: str | Path,
+    *,
+    dataset: str,
+    symbol: str,
+    start_ms: int,
+    end_ms: int,
+    suffix: str = "",
+) -> bool:
+    marker = _marker_path(data_root, dataset=dataset, symbol=symbol, start_ms=start_ms, end_ms=end_ms, suffix=suffix)
     return marker.exists() and marker.stat().st_size > 0
 
 
@@ -398,13 +417,14 @@ def _normalize_funding(symbol: str, rows: list[dict]) -> list[dict]:
     ]
 
 
-def _normalize_open_interest(symbol: str, rows: list[dict]) -> list[dict]:
+def _normalize_open_interest(symbol: str, rows: list[dict], *, interval_time: str = "1h") -> list[dict]:
     return [
         {
             "ts_ms": int(row["timestamp"]),
             "symbol": symbol,
             "open_interest": float(row.get("openInterest", 0.0)),
             "open_interest_value": float(row.get("openInterestValue", row.get("openInterest", 0.0))),
+            "open_interest_interval": interval_time,
         }
         for row in rows
     ]

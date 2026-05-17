@@ -6,10 +6,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 try:
-    from pybit.unified_trading import HTTP, WebSocket
+    from pybit.unified_trading import HTTP, WebSocket, WebSocketTrading
 except ModuleNotFoundError:  # pragma: no cover - dependency may be absent before install
     HTTP = None
     WebSocket = None
+    WebSocketTrading = None
 
 
 class BybitDataError(RuntimeError):
@@ -482,3 +483,108 @@ class BybitPublicTradeStream:
             if callable(method):
                 method()
                 return
+
+
+@dataclass(slots=True)
+class BybitPublicTickerStream:
+    category: str = "linear"
+    testnet: bool = False
+    demo: bool = False
+    _client: Any = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if WebSocket is None:
+            raise RuntimeError("pybit is required for BybitPublicTickerStream")
+        self._client = WebSocket(testnet=self.testnet, demo=self.demo, channel_type=self.category)
+
+    def subscribe_tickers(self, symbols: str | list[str], callback: Any) -> None:
+        symbol_arg: str | list[str] = symbols if isinstance(symbols, str) else list(symbols)
+        self._client.ticker_stream(symbol=symbol_arg, callback=callback)
+
+    def close(self) -> None:
+        _close_ws_client(self._client)
+
+
+@dataclass(slots=True)
+class BybitPrivateWebSocketStream:
+    category: str = "linear"
+    testnet: bool = False
+    demo: bool = True
+    api_key: str | None = None
+    api_secret: str | None = None
+    _client: Any = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if WebSocket is None:
+            raise RuntimeError("pybit is required for BybitPrivateWebSocketStream")
+        if not self.demo:
+            raise RuntimeError("BybitPrivateWebSocketStream is wired for demo-only trading here; demo=False is refused")
+        if not self.api_key or not self.api_secret:
+            raise RuntimeError("Bybit demo websocket stream requires API key and secret")
+        self._client = WebSocket(
+            testnet=self.testnet,
+            demo=self.demo,
+            channel_type="private",
+            api_key=self.api_key,
+            api_secret=self.api_secret,
+        )
+
+    def subscribe_positions(self, callback: Any) -> None:
+        self._client.position_stream(callback=callback)
+
+    def subscribe_orders(self, callback: Any) -> None:
+        self._client.order_stream(callback=callback)
+
+    def subscribe_executions(self, callback: Any, *, fast: bool = False) -> None:
+        if fast and hasattr(self._client, "fast_execution_stream"):
+            self._client.fast_execution_stream(callback=callback)
+            return
+        self._client.execution_stream(callback=callback)
+
+    def close(self) -> None:
+        _close_ws_client(self._client)
+
+
+@dataclass(slots=True)
+class BybitWebSocketTradeClient:
+    category: str = "linear"
+    testnet: bool = False
+    demo: bool = True
+    api_key: str | None = None
+    api_secret: str | None = None
+    recv_window: int = 1000
+    _client: Any = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if WebSocketTrading is None:
+            raise RuntimeError("pybit is required for BybitWebSocketTradeClient")
+        if not self.demo:
+            raise RuntimeError("BybitWebSocketTradeClient is wired for demo-only trading here; demo=False is refused")
+        if not self.api_key or not self.api_secret:
+            raise RuntimeError("Bybit demo websocket trading requires API key and secret")
+        self._client = WebSocketTrading(
+            testnet=self.testnet,
+            demo=self.demo,
+            api_key=self.api_key,
+            api_secret=self.api_secret,
+            recv_window=self.recv_window,
+        )
+
+    def place_order(self, callback: Any, **params: Any) -> None:
+        if "orderLinkId" not in params:
+            raise ValueError("orderLinkId is required for idempotent Bybit websocket order submission")
+        self._client.place_order(callback, category=self.category, **params)
+
+    def cancel_order(self, callback: Any, *, symbol: str, order_link_id: str) -> None:
+        self._client.cancel_order(callback, category=self.category, symbol=symbol, orderLinkId=order_link_id)
+
+    def close(self) -> None:
+        _close_ws_client(self._client)
+
+
+def _close_ws_client(client: Any) -> None:
+    for name in ("exit", "close", "stop"):
+        method = getattr(client, name, None)
+        if callable(method):
+            method()
+            return
