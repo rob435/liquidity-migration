@@ -327,9 +327,16 @@ exchange-native stops running instead of hanging the watchdog before startup.
 The watchdog writes latest reports under `reports/event-risk-ws` every heartbeat
 and keeps timestamped JSON/Markdown snapshots for startup and material risk
 events, so exit decisions survive later quiet heartbeat overwrites.
+WebSocket execution/order-stream closures preserve the original exit reason and
+trigger timestamp from the submitted exit order row, so the ledger remains
+auditable when REST polling is not the closing path.
 Fresh pending reduce-only untracked-position exits are restored after restart
 even though they have no ledger trade ID, so the watchdog does not duplicate a
 still-pending emergency flatten order after process loss.
+Stale pending reduce-only exits are terminalized only when successful Bybit
+position and open-order snapshots show no live position and no live AGC exit
+order for the symbol, so old local rows do not keep reporting false pending
+exposure after the exchange is already flat.
 Live AGC reduce-only exit open orders on Bybit are also treated as active exit
 submissions, covering crashes that placed an exit but lost the local order row.
 Manual/native reduce-only protection orders do not suppress emergency exits.

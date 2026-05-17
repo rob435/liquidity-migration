@@ -1674,6 +1674,7 @@ def test_pending_exit_fill_reconciles_to_closed_trade() -> None:
                 "notional_usdt": 0.0,
                 "status": "submitted_unconfirmed",
                 "exit_reason": "time_exit",
+                "exit_trigger_ts_ms": 1_700_000_061_000,
                 "target_qty": "1",
                 "filled_qty": "",
             }
@@ -1703,6 +1704,7 @@ def test_pending_exit_fill_reconciles_to_closed_trade() -> None:
 
     assert trades[0]["status"] == "closed"
     assert trades[0]["exit_reason"] == "time_exit"
+    assert trades[0]["exit_trigger_ts_ms"] == 1_700_000_061_000
     assert trades[0]["exit_price"] == 100.5
     assert order_updates[0]["status"] == "filled"
     assert order_updates[0]["notional_usdt"] == 100.5

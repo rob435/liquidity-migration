@@ -82,18 +82,39 @@ Objective: harden the Bybit demo system as if it is live capital, with emphasis 
   - This covers the crash window where an exit order reached Bybit but the local `event_demo_orders` row was not written.
   - Manual/native reduce-only protection orders do not suppress emergency risk exits.
 
+- `current slice: preserve streamed exit ledger context`
+  - Websocket execution-stream and order-stream closures now preserve the submitted exit order row's `exit_reason`.
+  - The same closure paths preserve `exit_trigger_ts_ms` instead of replacing the risk trigger time with the later fill/stream processing time.
+  - Pending reduce-only fill reconciliation also keeps the original exit trigger timestamp when closing a trade after restart.
+
+- `current slice: clear stale flat pending exits`
+  - Live VPS verification found one stale local `submitted_unconfirmed` untracked BTC reduce-only exit while Bybit had zero positions and zero open orders.
+  - The websocket risk daemon now marks pending reduce-only exits `filled` when successful Bybit position and open-order snapshots show no live position and no live AGC exit order for that symbol.
+  - For tracked exits, the same reconciliation closes the trade with the submitted order row's exit reason and trigger timestamp instead of later `bybit_position_missing` cleanup.
+  - If the open-order snapshot fails, stale pending exits remain pending instead of being inferred flat from incomplete exchange state.
+
 ## Verification
 
 Local:
 
-- `pytest -q`: 192 passed after the websocket risk live-open-exit guard change.
+- Focused streamed/pending exit ledger tests passed after the streamed exit context change.
+- Focused stale flat pending-exit tests passed after the live stale ledger row finding.
+- `pytest -q`: 195 passed after the stale pending-exit cleanup snapshot-failure guard.
 
 VPS:
 
-- `pytest -q`: 192 passed after deploying the websocket risk live-open-exit guard change.
+- Focused websocket-risk file: 36 passed after deploying the snapshot-failure guard.
+- `pytest -q`: 195 passed after deploying the snapshot-failure guard.
 - Services after restart:
   - `model050426-bybit-demo.service`: active/running, `INTERVAL_SECONDS=300`.
   - `model050426-bybit-risk.service`: active/running.
+- Stale flat pending-exit cleanup:
+  - Live verification found stale local `agc-ux-BTC-tf5z45-0` with `status=submitted_unconfirmed` while Bybit had `active_positions=0` and `open_orders=0`.
+  - After deployment and risk-service restart, the row was `status=filled`, `filled_qty=0.001`, `error="filled inferred from flat Bybit position"`, and direct state was `ledger_pending_orders=0`.
+  - Isolated VPS drills confirmed stale untracked and stale tracked pending exits terminalize with `0` new orders when the exchange is flat; tracked trades preserve `exit_reason=stop_loss` and the original trigger timestamp.
+  - A snapshot-failure drill confirmed stale pending exits remain `submitted_unconfirmed` when the Bybit open-order snapshot fails.
+- Streamed ledger-context drill:
+  - Isolated VPS execution-stream and order-stream closures both closed the trade with `exit_reason=stop_loss` and preserved the submitted order row's trigger timestamp.
 - Risk live-open-exit guard drill:
   - An isolated tracked-position stop breach with a live `agc-ex-*` reduce-only open order submitted `0` duplicate exits and recorded `bybit_live_exit_open_orders=1`.
   - An isolated untracked-position restart with a live `agc-ux-*` reduce-only open order submitted `0` duplicate exits and recorded `bybit_live_exit_open_orders=1`.

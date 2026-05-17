@@ -1768,6 +1768,7 @@ def _execute_exits(
                 "notional_usdt": abs(exit_price * filled_qty) if exit_price > 0.0 else 0.0,
                 "status": order_status if demo.submit_orders else "planned",
                 "exit_reason": str(exit_plan["exit_reason"]),
+                "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
                 "target_qty": qty,
                 "filled_qty": _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0.0 else "",
                 "error": error,
@@ -1894,7 +1895,7 @@ def _reconcile_pending_order_fills(
                     {
                         "status": "closed",
                         "exit_ts_ms": now_ms,
-                        "exit_trigger_ts_ms": now_ms,
+                        "exit_trigger_ts_ms": int(order.get("exit_trigger_ts_ms") or now_ms),
                         "exit_price": avg_price,
                         "exit_reason": str(order.get("exit_reason") or "pending_exit_fill"),
                         "exit_order_link_id": link,
@@ -2062,6 +2063,7 @@ def _execute_risk_exits(
                 {
                     "trade_id": trade_id,
                     "exit_reason": str(exit_plan["exit_reason"]),
+                    "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
                     "avg_price": exit_price,
                     "filled_qty": _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0.0 else "",
                     "target_qty": qty,

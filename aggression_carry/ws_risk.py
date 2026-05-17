@@ -157,7 +157,9 @@ class EventWebSocketRiskEngine:
             self.state.errors.append(error)
         self.state.positions_by_symbol = _active_position_by_symbol(raw_positions)
         self.state.price_by_symbol.update(_price_lookup_from_positions(self.state.positions_by_symbol))
-        self.refresh_live_exit_order_symbols()
+        open_orders_ok = self.refresh_live_exit_order_symbols()
+        if not error and open_orders_ok:
+            self.reconcile_flat_pending_exit_orders(orders)
         self.reconcile_positions(write=True)
         self.repair_exchange_stops()
         self.exit_untracked_positions()
@@ -354,11 +356,14 @@ class EventWebSocketRiskEngine:
         value = sum(_float(row.get("execValue")) or _float(row.get("execQty")) * _float(row.get("execPrice")) for row in executions)
         exit_price = value / filled_qty if filled_qty > 0.0 else _float(trade.get("exit_price"))
         now_ms = _now_ms()
+        order = self.order_row(order_link_id)
         trade.update(
             {
                 "status": "closed",
                 "exit_ts_ms": now_ms,
+                "exit_trigger_ts_ms": _int(order.get("exit_trigger_ts_ms")) or now_ms,
                 "exit_price": exit_price,
+                "exit_reason": str(order.get("exit_reason") or trade.get("exit_reason") or "execution_confirmed"),
                 "exit_order_link_id": order_link_id,
                 "submit_mode": self.state.submitted_link_submit_mode.get(order_link_id, "execution_confirmed"),
                 "closed_at_ms": now_ms,
@@ -391,11 +396,14 @@ class EventWebSocketRiskEngine:
         if target_qty <= 0.0 or filled_qty + max(target_qty * 1e-8, 1e-12) < target_qty:
             return
         now_ms = _now_ms()
+        order = self.order_row(order_link_id)
         trade.update(
             {
                 "status": "closed",
                 "exit_ts_ms": now_ms,
+                "exit_trigger_ts_ms": _int(order.get("exit_trigger_ts_ms")) or now_ms,
                 "exit_price": exit_price if exit_price > 0.0 else _float(trade.get("exit_price")),
+                "exit_reason": str(order.get("exit_reason") or trade.get("exit_reason") or "order_stream_filled"),
                 "exit_order_link_id": order_link_id,
                 "submit_mode": self.state.submitted_link_submit_mode.get(order_link_id, "order_stream_filled"),
                 "closed_at_ms": now_ms,
@@ -432,6 +440,12 @@ class EventWebSocketRiskEngine:
             if str(order.get("order_link_id") or "") == order_link_id:
                 return _float(order.get("avg_price"))
         return 0.0
+
+    def order_row(self, order_link_id: str) -> dict[str, Any]:
+        for order in self.state.orders:
+            if str(order.get("order_link_id") or "") == order_link_id:
+                return order
+        return {}
 
     def mark_order_terminal_from_order_update(
         self,
@@ -542,6 +556,7 @@ class EventWebSocketRiskEngine:
             "notional_usdt": 0.0,
             "status": "submitted_unconfirmed",
             "exit_reason": str(exit_plan["exit_reason"]),
+            "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
             "target_qty": qty,
             "filled_qty": "",
         }
@@ -622,7 +637,8 @@ class EventWebSocketRiskEngine:
         orders = read_dataset(self.root, "event_demo_orders")
         self.load_pending_entry_orders(orders)
         self.load_pending_exit_orders(orders)
-        self.refresh_live_exit_order_symbols()
+        if self.refresh_live_exit_order_symbols():
+            self.reconcile_flat_pending_exit_orders(orders)
         self.reconcile_positions(write=True)
         self.repair_exchange_stops()
         self.reconcile_untracked_exit_orders()
@@ -780,12 +796,86 @@ class EventWebSocketRiskEngine:
         if updates:
             _write_order_rows(self.root, pl.DataFrame(updates, infer_schema_length=None))
 
-    def refresh_live_exit_order_symbols(self) -> None:
+    def reconcile_flat_pending_exit_orders(self, orders: pl.DataFrame) -> None:
+        if orders.is_empty():
+            return
+        active_symbols = set(self.state.positions_by_symbol)
+        trade_lookup = {str(row["trade_id"]): row for row in self.state.open_trades.to_dicts()}
+        now_ms = _now_ms()
+        order_updates: list[dict[str, Any]] = []
+        trade_updates: list[dict[str, Any]] = []
+        for order in orders.to_dicts():
+            if not _bool(order.get("reduce_only")):
+                continue
+            if str(order.get("status", "")) not in PENDING_ORDER_STATUSES:
+                continue
+            if not str(order.get("exit_reason", "")):
+                continue
+            symbol = str(order.get("symbol") or "")
+            link = str(order.get("order_link_id") or "")
+            if not symbol or not link:
+                continue
+            if symbol in active_symbols or symbol in self.state.live_exit_order_symbols:
+                continue
+            target_qty = str(order.get("target_qty") or order.get("qty") or "")
+            filled_qty = target_qty if _float(target_qty) > 0.0 else str(order.get("filled_qty") or "")
+            avg_price = _float(order.get("avg_price"))
+            filled_qty_float = _float(filled_qty)
+            order_update = dict(order)
+            order_update.update(
+                {
+                    "status": "filled",
+                    "filled_qty": filled_qty,
+                    "notional_usdt": abs(avg_price * filled_qty_float) if avg_price > 0.0 else _float(order.get("notional_usdt")),
+                    "updated_at_ms": now_ms,
+                }
+            )
+            if not str(order_update.get("error") or ""):
+                order_update["error"] = "filled inferred from flat Bybit position"
+            order_updates.append(order_update)
+            self.clear_submitted_symbol(symbol)
+            loaded = False
+            for state_order in self.state.orders:
+                if str(state_order.get("order_link_id") or "") == link:
+                    state_order.update(order_update)
+                    loaded = True
+            if not loaded:
+                self.state.orders.append(order_update)
+
+            trade_id = str(order.get("trade_id") or "")
+            trade = dict(trade_lookup.get(trade_id, {}))
+            if not trade:
+                continue
+            trade.update(
+                {
+                    "status": "closed",
+                    "exit_ts_ms": now_ms,
+                    "exit_trigger_ts_ms": _int(order.get("exit_trigger_ts_ms")) or now_ms,
+                    "exit_price": avg_price,
+                    "exit_reason": str(order.get("exit_reason") or "pending_exit_position_flat"),
+                    "exit_order_link_id": link,
+                    "exit_order_id": order.get("order_id", ""),
+                    "submit_mode": str(order.get("submit_mode") or "position_flat_reconciled"),
+                    "closed_at_ms": now_ms,
+                    "updated_at_ms": now_ms,
+                }
+            )
+            trade_updates.append(trade)
+        if order_updates:
+            _write_order_rows(self.root, pl.DataFrame(order_updates, infer_schema_length=None))
+        if trade_updates:
+            self.state.all_trades = _upsert_rows(self.state.all_trades, trade_updates, key="trade_id")
+            self.state.open_trades = _open_trades(self.state.all_trades)
+            self.state.pending_fill_reconciliations.extend(trade_updates)
+            _write_trade_rows(self.root, pl.DataFrame(trade_updates, infer_schema_length=None))
+
+    def refresh_live_exit_order_symbols(self) -> bool:
         open_orders, error = _safe_open_orders(self.private_client, settle_coin=self.risk.settle_coin)
         if error:
             self.state.errors.append(error)
-            return
+            return False
         self.state.live_exit_order_symbols = _live_open_order_symbols(open_orders, reduce_only=True)
+        return True
 
     def exit_submission_active(self, symbol: str) -> bool:
         return symbol in self.state.submitted_symbols or symbol in self.state.live_exit_order_symbols
