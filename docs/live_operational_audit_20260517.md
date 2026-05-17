@@ -113,6 +113,11 @@ Objective: harden the Bybit demo system as if it is live capital, with emphasis 
   - Stop repair skips symbols with pending local exit submissions or live AGC reduce-only exit orders.
   - This prevents a stale-WebSocket fallback or restart from spending a REST call on stop repair for a position that should be flattened immediately.
 
+- `current slice: recover failed websocket order acks`
+  - If a WebSocket Trade order ack rejects an exit, the watchdog marks the WS order row `rejected` instead of leaving it `submitted_unconfirmed`.
+  - In `ws_then_rest` mode with REST fallback enabled, the watchdog immediately submits one REST reduce-only fallback from the rejected WS order's ledger context.
+  - Confirmed REST risk exits now write `status=filled` order rows, so closed trades are not paired with merely `submitted` exit orders.
+
 ## Verification
 
 Local:
@@ -123,9 +128,12 @@ Local:
 - Focused event-demo wallet outage tests passed after the wallet equity guard.
 - Focused stale pending-entry terminalization tests passed after the flat-entry cleanup.
 - Focused websocket-risk exit-before-stop-repair tests passed after the risk-priority cleanup.
+- Focused failed websocket order-ack fallback tests passed after the rejected-ack recovery change.
 - `tests/test_aggression_carry_event_demo.py tests/test_aggression_carry_ws_risk.py`: 90 passed after the flat-entry cleanup.
 - `tests/test_aggression_carry_ws_risk.py`: 40 passed after the risk-priority cleanup.
 - `pytest -q`: 204 passed after the risk-priority cleanup.
+- `tests/test_aggression_carry_event_demo.py tests/test_aggression_carry_ws_risk.py`: 95 passed after the failed-ack recovery change.
+- `pytest -q`: 207 passed after the failed-ack recovery change.
 
 VPS:
 
@@ -134,10 +142,19 @@ VPS:
 - Focused websocket-risk file: 40 passed after deploying the risk-priority cleanup.
 - `pytest -q`: 204 passed after deploying the risk-priority cleanup.
 - Focused websocket-risk file: 36 passed after deploying the snapshot-failure guard.
+- Focused event-demo + websocket-risk files: 95 passed after deploying the failed-ack recovery change.
+- `pytest -q`: 207 passed after deploying the failed-ack recovery change.
 - Services after restart:
   - `model050426-bybit-demo.service`: active/running, `INTERVAL_SECONDS=300`.
   - `model050426-bybit-risk.service`: active/running.
   - Direct live state after the risk-priority cleanup deployment: `active_positions=0`, `open_orders=0`, `ledger_open_trades=0`, `ledger_pending_orders=0`, latest websocket-risk reason `startup`, `risk_stop_repairs=0`, and latest demo mode `submit` with `demo_entries=0`.
+- Services after failed-ack recovery restart:
+  - `model050426-bybit-demo.service`: active/running.
+  - `model050426-bybit-risk.service`: active/running.
+  - Direct live state: `active_positions=0`, `open_orders=0`, `ledger_open_trades=0`, `ledger_pending_orders=0`, latest websocket-risk reason `startup`, `risk_positions=0`, `risk_ledger=0`, `risk_untracked=0`, `risk_live_exit_open_orders=0`, `risk_stop_repairs=0`, `risk_error=""`, latest demo mode `submit`, `demo_entries=0`, and `demo_error=""`.
+- Failed websocket order-ack drill:
+  - In isolated VPS `ws_then_rest` mode, a rejected async WebSocket Trade ack marked the original WS row `rejected`, submitted exactly one REST reduce-only fallback, recorded the fallback order `filled`, closed the trade with `exit_reason=stop_loss`, preserved the original trigger timestamp, and cleared the pending-submission guard.
+  - In isolated VPS pure `ws` mode without REST fallback, the same rejected ack marked the WS row `rejected`, submitted `0` REST orders, left the trade open, and cleared the pending-submission guard for later recovery.
 - Risk exit before stop-repair drills:
   - An isolated VPS websocket-risk bootstrap with an open ledger short, missing exchange stop, and mark already beyond the ledger stop submitted exactly one reduce-only exit, closed the trade with `exit_reason=stop_loss`, sent `0` stop repairs, and cleared the stale position snapshot from engine state.
   - An isolated VPS websocket-risk bootstrap with a pending `agc-ex-*` exit and missing exchange stop submitted `0` new exits, sent `0` stop repairs, and kept the symbol in the pending-submission guard.

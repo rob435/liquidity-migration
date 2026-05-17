@@ -490,6 +490,83 @@ def test_ws_risk_ws_order_closes_from_execution_stream(tmp_path: Path) -> None:
     assert stored.filter(pl.col("trade_id") == "t1").select("exit_trigger_ts_ms").item() == trigger_ts_ms
 
 
+def test_ws_then_rest_falls_back_after_failed_ws_order_ack(tmp_path: Path) -> None:
+    _write_open_trade(tmp_path)
+    private_client = FakePrivateClient()
+    trade_client = FakeTradeClient()
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="ws_then_rest",
+            rest_fallback=True,
+            exit_untracked_positions=False,
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+        trade_client=trade_client,
+    )
+
+    engine.bootstrap()
+    engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
+    ws_link = str(engine.state.orders[0]["order_link_id"])
+    trigger_ts_ms = int(engine.state.orders[0]["exit_trigger_ts_ms"])
+    engine.on_ws_order_ack({"retCode": 10001, "retMsg": "demo ws rejected", "_agc_order_link_id": ws_link})
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    assert trade_client.orders[0]["reduceOnly"] is True
+    assert len(private_client.orders) == 1
+    assert private_client.orders[0]["reduceOnly"] is True
+    assert stored_orders.filter(pl.col("order_link_id") == ws_link).select("status").item() == "rejected"
+    assert stored_orders.filter(pl.col("order_link_id") != ws_link).select("status").item() == "filled"
+    assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
+    assert stored.filter(pl.col("trade_id") == "t1").select("exit_reason").item() == "stop_loss"
+    assert stored.filter(pl.col("trade_id") == "t1").select("exit_trigger_ts_ms").item() == trigger_ts_ms
+    assert "AAAUSDT" not in engine.state.submitted_symbols
+    assert any("websocket order ack failed" in error for error in engine.state.errors)
+
+
+def test_ws_order_ack_failure_without_rest_marks_order_rejected(tmp_path: Path) -> None:
+    _write_open_trade(tmp_path)
+    trade_client = FakeTradeClient()
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="ws",
+            rest_fallback=False,
+            exit_untracked_positions=False,
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=FakePrivateClient(),
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+        trade_client=trade_client,
+    )
+
+    engine.bootstrap()
+    engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
+    ws_link = str(engine.state.orders[0]["order_link_id"])
+    engine.on_ws_order_ack({"retCode": 10001, "retMsg": "demo ws rejected", "_agc_order_link_id": ws_link})
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    assert stored_orders.filter(pl.col("order_link_id") == ws_link).select("status").item() == "rejected"
+    assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "open"
+    assert "AAAUSDT" not in engine.state.submitted_symbols
+
+
 def test_ws_risk_rest_fallback_order_closes_from_execution_stream(tmp_path: Path) -> None:
     _write_open_trade(tmp_path)
     private_client = FakePrivateClient(confirm_fills=False)

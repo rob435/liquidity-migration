@@ -2117,8 +2117,8 @@ def _execute_risk_exits(
             }
         )
         for order_row in submit["order_rows"]:
-            if risk.submit_orders and not fully_filled:
-                order_row["status"] = "partial" if filled_qty > 0.0 else "submitted_unconfirmed"
+            if risk.submit_orders:
+                order_row["status"] = "filled" if fully_filled else "partial" if filled_qty > 0.0 else "submitted_unconfirmed"
             notional_qty = filled_qty if risk.submit_orders else _float(qty)
             order_row.update(
                 {

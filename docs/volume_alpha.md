@@ -325,6 +325,10 @@ mark the ledger closed from WebSocket execution messages. Bybit currently does
 not support WebSocket Trade order entry for demo trading, so the demo VPS uses
 `ORDER_SUBMIT_MODE=ws_then_rest`: WebSocket decides, REST submits only when demo
 WS order entry is unavailable.
+If a future WebSocket Trade path is enabled and an order ack rejects the exit
+asynchronously, the watchdog marks the WS order row rejected and submits the
+configured REST fallback once. Confirmed REST risk exits record filled order
+rows instead of leaving closed trades paired with merely `submitted` orders.
 On startup and REST reconciliation, tracked-position exits are evaluated before
 stop repair, and stop repair skips symbols with pending or live AGC exit orders.
 The risk path should flatten a breached position before spending a REST call on

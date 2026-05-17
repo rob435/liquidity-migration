@@ -320,6 +320,32 @@ class EventWebSocketRiskEngine:
             return
         ret_msg = str(message.get("retMsg") or message.get("ret_msg") or message)[:500]
         self.state.errors.append(f"websocket order ack failed: {ret_msg}")
+        link = _ack_order_link(message)
+        order = self.order_row(link) if link else {}
+        if not order:
+            self.write_report(reason="ws_order_ack_failed")
+            return
+        was_pending = str(order.get("status", "")) in PENDING_ORDER_STATUSES
+        updates = self.mark_order_terminal_from_order_update(
+            order_link_id=link,
+            status="rejected",
+            row={"symbol": order.get("symbol", ""), "rejectReason": ret_msg},
+        )
+        if updates:
+            _write_order_rows(self.root, pl.DataFrame(updates, infer_schema_length=None))
+        if (
+            was_pending
+            and self.risk.submit_orders
+            and self.risk.rest_fallback
+            and self.risk.order_submit_mode == "ws_then_rest"
+        ):
+            exit_plan = self.exit_plan_from_order(order)
+            if exit_plan is not None:
+                rows, orders = self.rest_exit([exit_plan], submit_orders=True)
+                self.record_exit_submission_result(str(exit_plan.get("symbol", "")), rows, orders)
+                self.write_report(reason="ws_order_ack_rest_fallback")
+                return
+        self.write_report(reason="ws_order_ack_failed")
 
     def on_execution_message(self, message: dict[str, Any]) -> None:
         for row in _message_rows(message):
@@ -507,6 +533,15 @@ class EventWebSocketRiskEngine:
             rows, orders = self.rest_exit([exit_plan], submit_orders=True)
         else:
             raise RuntimeError("No available risk exit order path")
+        self.record_exit_submission_result(symbol, rows, orders)
+        self.write_report(reason="exit_submitted")
+
+    def record_exit_submission_result(
+        self,
+        symbol: str,
+        rows: list[dict[str, Any]],
+        orders: list[dict[str, Any]],
+    ) -> None:
         if rows:
             self.state.all_trades = _upsert_rows(self.state.all_trades, rows, key="trade_id")
             self.state.open_trades = _open_trades(self.state.all_trades)
@@ -530,7 +565,27 @@ class EventWebSocketRiskEngine:
             self.mark_submitted_symbol(symbol)
         else:
             self.clear_submitted_symbol(symbol)
-        self.write_report(reason="exit_submitted")
+
+    def exit_plan_from_order(self, order: dict[str, Any]) -> dict[str, Any] | None:
+        trade_id = str(order.get("trade_id") or "")
+        symbol = str(order.get("symbol") or "")
+        if not trade_id or not symbol or self.state.open_trades.is_empty():
+            return None
+        trade_lookup = {str(row["trade_id"]): row for row in self.state.open_trades.to_dicts()}
+        trade = trade_lookup.get(trade_id)
+        if not trade:
+            return None
+        bybit_side = str(order.get("side") or "")
+        side = str(trade.get("side") or ("short" if bybit_side == "Buy" else "long" if bybit_side == "Sell" else ""))
+        return {
+            "trade_id": trade_id,
+            "symbol": symbol,
+            "side": side,
+            "qty": str(order.get("target_qty") or order.get("qty") or trade.get("qty") or ""),
+            "exit_reason": str(order.get("exit_reason") or "ws_order_ack_failed"),
+            "exit_trigger_ts_ms": _int(order.get("exit_trigger_ts_ms")) or _now_ms(),
+            "planned_exit_price": self.state.price_by_symbol.get(symbol, _float(order.get("avg_price"))),
+        }
 
     def ws_exit(self, exit_plan: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         trade_lookup = {str(row["trade_id"]): row for row in self.state.all_trades.to_dicts()}
@@ -548,7 +603,12 @@ class EventWebSocketRiskEngine:
             order_link_id=link,
             reduce_only=True,
         )
-        self.trade_client.place_order(lambda message: self.events.put(("ws_order_ack", message)), **order_params)
+        def enqueue_ack(message: dict[str, Any]) -> None:
+            payload = dict(message) if isinstance(message, dict) else {"message": message}
+            payload["_agc_order_link_id"] = link
+            self.events.put(("ws_order_ack", payload))
+
+        self.trade_client.place_order(enqueue_ack, **order_params)
         self.state.submitted_link_to_trade_id[link] = str(trade["trade_id"])
         self.state.submitted_link_submit_mode[link] = "ws_submitted"
         order_row = {
@@ -1243,6 +1303,18 @@ def _message_rows(message: dict[str, Any]) -> list[dict[str, Any]]:
     if isinstance(data, dict):
         return [data]
     return []
+
+
+def _ack_order_link(message: dict[str, Any]) -> str:
+    data = message.get("data") if isinstance(message.get("data"), dict) else {}
+    return str(
+        message.get("_agc_order_link_id")
+        or message.get("orderLinkId")
+        or message.get("order_link_id")
+        or data.get("orderLinkId")
+        or data.get("order_link_id")
+        or ""
+    )
 
 
 def _position_price(row: dict[str, Any]) -> float:

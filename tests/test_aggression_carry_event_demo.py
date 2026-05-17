@@ -2150,6 +2150,46 @@ def test_risk_exit_does_not_close_until_submitted_fill_confirmed() -> None:
     assert orders[0]["notional_usdt"] == 0.0
 
 
+def test_risk_exit_records_filled_order_after_confirmed_fill() -> None:
+    all_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "1",
+                "stop_price": 112.0,
+            }
+        ]
+    )
+
+    rows, orders = _execute_risk_exits(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "qty": "1",
+                "exit_reason": "stop_loss",
+                "exit_trigger_ts_ms": 1_700_000_000_000,
+                "planned_exit_price": 113.0,
+                "planned_exit_ts_ms": 1_700_100_000_000,
+            }
+        ],
+        all_trades,
+        trading_client=FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-rx-",)),
+        risk=EventRiskCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        now_ms=1_700_000_060_000,
+        price_by_symbol={"AAAUSDT": 113.0},
+        tick_size_by_symbol={},
+    )
+
+    assert rows[0]["status"] == "closed"
+    assert orders[0]["status"] == "filled"
+    assert orders[0]["filled_qty"] == "1"
+
+
 def test_run_event_risk_cycle_dry_run_closes_crossed_stop(tmp_path) -> None:
     write_dataset(
         pl.DataFrame(
