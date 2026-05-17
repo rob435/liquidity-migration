@@ -436,6 +436,93 @@ def test_ws_risk_flattens_untracked_position_on_bootstrap(tmp_path: Path) -> Non
     assert "AAAUSDT" not in engine.state.positions_by_symbol
 
 
+def test_ws_risk_pending_entry_position_is_not_flattened_before_entry_reconcile(tmp_path: Path) -> None:
+    _write_pending_entry_order(tmp_path, status="submitted_unconfirmed", ts_ms=9_999_999_999_000)
+    private_client = FakePrivateClient(confirm_fills=False)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    payload = engine.write_report(reason="heartbeat")
+
+    assert private_client.orders == []
+    assert engine.state.pending_entry_symbols == {"AAAUSDT"}
+    assert payload["cycle"]["pending_entry_positions"] == 1
+    assert payload["cycle"]["untracked_positions"] == 0
+
+
+def test_ws_risk_reconciles_pending_entry_fill_before_untracked_guard(tmp_path: Path) -> None:
+    _write_pending_entry_order(tmp_path, status="submitted_unconfirmed", ts_ms=9_999_999_999_000)
+    private_client = FakePrivateClient(confirm_fills=True)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    trade = stored.filter(pl.col("trade_id") == "t-entry").to_dicts()[0]
+    assert private_client.orders == []
+    assert trade["status"] == "open"
+    assert trade["symbol"] == "AAAUSDT"
+    assert trade["qty"] == "1"
+    assert stored_orders.filter(pl.col("order_link_id") == "agc-en-pending").select("status").item() == "filled"
+    assert engine.state.open_trades.height == 1
+    assert engine.state.pending_entry_symbols == set()
+
+
+def test_ws_risk_stale_pending_entry_no_longer_blocks_untracked_flatten(tmp_path: Path) -> None:
+    _write_pending_entry_order(tmp_path, status="submitted_unconfirmed", ts_ms=1)
+    private_client = FakePrivateClient(confirm_fills=False)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    assert engine.state.pending_entry_symbols == set()
+    assert private_client.orders[0]["reduceOnly"] is True
+    assert private_client.orders[0]["side"] == "Buy"
+
+
 def test_ws_risk_untracked_exit_blocks_duplicate_until_fill(tmp_path: Path) -> None:
     private_client = FakePrivateClient(confirm_fills=False)
     engine = EventWebSocketRiskEngine(
@@ -558,6 +645,42 @@ def test_ws_risk_telegram_material_events_are_deduped(tmp_path: Path, monkeypatc
     assert len(sent) == 1
 
 
+def test_ws_risk_pending_fill_notification_is_deduped_across_heartbeats(tmp_path: Path, monkeypatch) -> None:
+    sent: list[str] = []
+
+    def fake_send(text: str, *, enabled: bool) -> bool:
+        sent.append(text)
+        return enabled
+
+    monkeypatch.setattr("aggression_carry.event_demo.send_telegram_message", fake_send)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(telegram=True, heartbeat_seconds=0.0),
+        private_client=FakePrivateClient(),
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+    engine.state.pending_fill_reconciliations.append(
+        {
+            "trade_id": "t-entry",
+            "symbol": "AAAUSDT",
+            "status": "open",
+            "entry_order_link_id": "agc-en-pending",
+        }
+    )
+
+    first = engine.write_report(reason="startup")
+    second = engine.write_report(reason="heartbeat")
+
+    assert first["cycle"]["pending_order_fills_reconciled"] == 1
+    assert first["cycle"]["pending_entry_fills_reconciled"] == 1
+    assert first["cycle"]["telegram_sent"] is True
+    assert second["cycle"]["telegram_sent"] is False
+    assert second["cycle"]["telegram_error"] == "duplicate_material_event"
+    assert len(sent) == 1
+
+
 def test_ws_risk_position_stream_zero_closes_missing_ledger_position(tmp_path: Path) -> None:
     _write_open_trade(tmp_path)
     private_client = FakePrivateClient()
@@ -637,5 +760,44 @@ def _write_open_trade(root: Path) -> None:
         ),
         root,
         "event_demo_trades",
+        partition_by=(),
+    )
+
+
+def _write_pending_entry_order(root: Path, *, status: str, ts_ms: int) -> None:
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "order_link_id": "agc-en-pending",
+                    "ts_ms": ts_ms,
+                    "trade_id": "t-entry",
+                    "symbol": "AAAUSDT",
+                    "side": "Sell",
+                    "order_type": "Market",
+                    "qty": "1",
+                    "reduce_only": False,
+                    "order_id": "order-entry",
+                    "submit_mode": "submitted",
+                    "avg_price": 100.0,
+                    "notional_usdt": 100.0,
+                    "target_notional_pct_equity": 0.2,
+                    "entry_leverage": 2.0,
+                    "initial_margin_usdt": 50.0,
+                    "status": status,
+                    "trade_side": "short",
+                    "signal_ts_ms": 1_700_000_000_000,
+                    "equity_usdt": 10_000.0,
+                    "tick_size": 0.1,
+                    "qty_step": 0.1,
+                    "stop_price": 112.0,
+                    "take_profit_price": 80.0,
+                    "target_qty": "1",
+                    "filled_qty": "",
+                }
+            ]
+        ),
+        root,
+        "event_demo_orders",
         partition_by=(),
     )

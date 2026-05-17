@@ -13,7 +13,9 @@ import polars as pl
 from .bybit import BybitPrivateClient, BybitPrivateWebSocketStream, BybitPublicTickerStream, BybitWebSocketTradeClient
 from .config import ResearchConfig
 from .event_demo import (
+    EventDemoCycleConfig,
     EventRiskCycleConfig,
+    PENDING_ORDER_GUARD_MS,
     PENDING_ORDER_STATUSES,
     _active_position_by_symbol,
     _bool,
@@ -29,6 +31,7 @@ from .event_demo import (
     _price_lookup_from_positions,
     _risk_order_link_id,
     _risk_reconcile_missing_positions,
+    _reconcile_pending_order_fills,
     _safe_raw_positions,
     _maybe_notify,
     _telegram_notification_reason,
@@ -72,6 +75,7 @@ class WebSocketRiskState:
     open_trades: pl.DataFrame = field(default_factory=_empty_trades)
     positions_by_symbol: dict[str, dict[str, Any]] = field(default_factory=dict)
     price_by_symbol: dict[str, float] = field(default_factory=dict)
+    pending_entry_symbols: set[str] = field(default_factory=set)
     submitted_symbols: set[str] = field(default_factory=set)
     submitted_symbol_ts_ms: dict[str, int] = field(default_factory=dict)
     submitted_link_to_trade_id: dict[str, str] = field(default_factory=dict)
@@ -86,6 +90,7 @@ class WebSocketRiskState:
     orders: list[dict[str, Any]] = field(default_factory=list)
     repairs: list[dict[str, Any]] = field(default_factory=list)
     reconciliations: list[dict[str, Any]] = field(default_factory=list)
+    pending_fill_reconciliations: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     ws_order_unavailable: str = ""
     telegram_keys_sent: set[str] = field(default_factory=set)
@@ -136,7 +141,11 @@ class EventWebSocketRiskEngine:
         self.private_client = self.private_client or _build_private_client(self.config)
         self.state.all_trades = read_dataset(self.root, "event_demo_trades")
         self.state.open_trades = _open_trades(self.state.all_trades)
-        self.load_pending_exit_orders(read_dataset(self.root, "event_demo_orders"))
+        orders = read_dataset(self.root, "event_demo_orders")
+        self.reconcile_pending_order_fills(orders)
+        orders = read_dataset(self.root, "event_demo_orders")
+        self.load_pending_entry_orders(orders)
+        self.load_pending_exit_orders(orders)
         raw_positions, error = _safe_raw_positions(self.private_client, settle_coin=self.risk.settle_coin)
         if error:
             self.state.errors.append(error)
@@ -562,7 +571,11 @@ class EventWebSocketRiskEngine:
         self.state.price_by_symbol.update(_price_lookup_from_positions(self.state.positions_by_symbol))
         self.state.all_trades = read_dataset(self.root, "event_demo_trades")
         self.state.open_trades = _open_trades(self.state.all_trades)
-        self.load_pending_exit_orders(read_dataset(self.root, "event_demo_orders"))
+        orders = read_dataset(self.root, "event_demo_orders")
+        self.reconcile_pending_order_fills(orders)
+        orders = read_dataset(self.root, "event_demo_orders")
+        self.load_pending_entry_orders(orders)
+        self.load_pending_exit_orders(orders)
         self.reconcile_positions(write=True)
         self.repair_exchange_stops()
         self.reconcile_untracked_exit_orders()
@@ -581,7 +594,13 @@ class EventWebSocketRiskEngine:
         for position in list(self.state.positions_by_symbol.values()):
             symbol = str(position.get("symbol", ""))
             qty = str(position.get("size") or "")
-            if not symbol or symbol in open_symbols or symbol in self.state.submitted_symbols or _float(qty) <= 0.0:
+            if (
+                not symbol
+                or symbol in open_symbols
+                or symbol in self.state.pending_entry_symbols
+                or symbol in self.state.submitted_symbols
+                or _float(qty) <= 0.0
+            ):
                 continue
             side_text = str(position.get("side") or "").lower()
             close_side = "Sell" if side_text in {"buy", "long"} else "Buy"
@@ -697,6 +716,32 @@ class EventWebSocketRiskEngine:
         if updates:
             _write_order_rows(self.root, pl.DataFrame(updates, infer_schema_length=None))
 
+    def reconcile_pending_order_fills(self, orders: pl.DataFrame) -> None:
+        if orders.is_empty() or self.private_client is None:
+            return
+        trade_rows, order_rows = _reconcile_pending_order_fills(
+            orders,
+            self.state.all_trades,
+            trading_client=self.private_client,
+            demo=EventDemoCycleConfig(
+                submit_orders=self.risk.submit_orders,
+                confirm_demo_orders=self.risk.confirm_demo_orders,
+            ),
+            now_ms=_now_ms(),
+        )
+        if trade_rows:
+            self.state.all_trades = _upsert_rows(self.state.all_trades, trade_rows, key="trade_id")
+            self.state.open_trades = _open_trades(self.state.all_trades)
+            self.state.pending_fill_reconciliations.extend(trade_rows)
+            _write_trade_rows(self.root, pl.DataFrame(trade_rows, infer_schema_length=None))
+        if order_rows:
+            for update in order_rows:
+                link = str(update.get("order_link_id") or "")
+                for order in self.state.orders:
+                    if str(order.get("order_link_id") or "") == link:
+                        order.update(update)
+            _write_order_rows(self.root, pl.DataFrame(order_rows, infer_schema_length=None))
+
     def on_idle(self) -> None:
         now = time.monotonic()
         self.reconcile_stale_websocket(now)
@@ -748,6 +793,27 @@ class EventWebSocketRiskEngine:
                 self.state.orders.append(dict(row))
                 loaded_order_links.add(link)
 
+    def load_pending_entry_orders(self, orders: pl.DataFrame) -> None:
+        self.state.pending_entry_symbols.clear()
+        if orders.is_empty():
+            return
+        open_symbols = set(_column_values(self.state.open_trades, "symbol"))
+        now_ms = _now_ms()
+        for row in orders.to_dicts():
+            symbol = str(row.get("symbol") or "")
+            link = str(row.get("order_link_id") or "")
+            trade_id = str(row.get("trade_id") or "")
+            if not symbol or not link or not trade_id or symbol in open_symbols:
+                continue
+            if _bool(row.get("reduce_only")):
+                continue
+            if str(row.get("status", "")) not in PENDING_ORDER_STATUSES:
+                continue
+            ts_ms = _int(row.get("ts_ms"))
+            if ts_ms > 0 and now_ms - ts_ms > PENDING_ORDER_GUARD_MS:
+                continue
+            self.state.pending_entry_symbols.add(symbol)
+
     def mark_submitted_symbol(self, symbol: str, *, now_ms: int | None = None) -> None:
         if not symbol:
             return
@@ -776,8 +842,20 @@ class EventWebSocketRiskEngine:
         ledger_positions = build_ledger_position_pnl_snapshot(self.state.open_trades, self.state.price_by_symbol)
         ledger_summary = summarize_position_pnl(ledger_positions)
         open_symbols = set(_column_values(self.state.open_trades, "symbol"))
+        pending_entry_fills = sum(1 for row in self.state.pending_fill_reconciliations if str(row.get("status", "")) == "open")
+        pending_exit_fills = sum(1 for row in self.state.pending_fill_reconciliations if str(row.get("status", "")) == "closed")
+        pending_entry_positions = [
+            row
+            for row in position_snapshot
+            if str(row.get("symbol", "")) and str(row.get("symbol", "")) in self.state.pending_entry_symbols
+            and str(row.get("symbol", "")) not in open_symbols
+        ]
         untracked_positions = [
-            row for row in position_snapshot if str(row.get("symbol", "")) and str(row.get("symbol", "")) not in open_symbols
+            row
+            for row in position_snapshot
+            if str(row.get("symbol", ""))
+            and str(row.get("symbol", "")) not in open_symbols
+            and str(row.get("symbol", "")) not in self.state.pending_entry_symbols
         ]
         cycle = {
             "cycle_id": f"ws-risk-{now_ms}",
@@ -790,6 +868,11 @@ class EventWebSocketRiskEngine:
             "exit_candidates": len(self.state.orders),
             "exits_executed": len(self.state.exits),
             "stop_repairs": len(self.state.repairs),
+            "pending_entry_positions": len(pending_entry_positions),
+            "pending_fills_reconciled": len(self.state.pending_fill_reconciliations),
+            "pending_order_fills_reconciled": len(self.state.pending_fill_reconciliations),
+            "pending_entry_fills_reconciled": pending_entry_fills,
+            "pending_exit_fills_reconciled": pending_exit_fills,
             "untracked_exits_submitted": sum(1 for row in self.state.orders if str(row.get("exit_reason", "")) == "untracked_position"),
             "open_trades_before": self.state.open_trades.height,
             "open_trades_after": self.state.open_trades.height,
@@ -815,6 +898,8 @@ class EventWebSocketRiskEngine:
             "exit_orders": self.state.orders[-20:],
             "stop_repairs": self.state.repairs[-20:],
             "reconciliations": self.state.reconciliations[-20:],
+            "pending_fill_reconciliations": self.state.pending_fill_reconciliations[-20:],
+            "pending_entry_positions": pending_entry_positions,
             "untracked_positions": untracked_positions,
             "bybit_positions": position_snapshot,
             "bybit_position_summary": bybit_summary,
@@ -960,6 +1045,10 @@ def _telegram_dedupe_key(reason: str, payload: dict[str, Any]) -> str:
         str(row.get("order_link_id") or "")
         for row in payload.get("exit_orders", [])
         if str(row.get("order_link_id") or "")
+    ) + sorted(
+        str(row.get("entry_order_link_id") or row.get("exit_order_link_id") or row.get("order_link_id") or "")
+        for row in payload.get("pending_fill_reconciliations", [])
+        if str(row.get("entry_order_link_id") or row.get("exit_order_link_id") or row.get("order_link_id") or "")
     )
     symbols = sorted(
         str(row.get("symbol") or "")
@@ -975,7 +1064,6 @@ def _telegram_dedupe_key(reason: str, payload: dict[str, Any]) -> str:
     return "|".join(
         [
             reason,
-            str(cycle.get("reason") or ""),
             ",".join(order_links[-8:]),
             ",".join(repairs[-8:]),
             ",".join(symbols),

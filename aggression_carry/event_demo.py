@@ -970,6 +970,9 @@ def format_event_risk_cycle_report(payload: dict[str, Any]) -> str:
         f"- Exit candidates: {cycle['exit_candidates']}",
         f"- Exits executed: {cycle['exits_executed']}",
         f"- Stop repairs: {cycle.get('stop_repairs', 0)}",
+        f"- Pending fills reconciled: {cycle.get('pending_order_fills_reconciled', cycle.get('pending_fills_reconciled', 0))} "
+        f"(entries {cycle.get('pending_entry_fills_reconciled', 0)} / exits {cycle.get('pending_exit_fills_reconciled', 0)})",
+        f"- Pending entry Bybit positions: {cycle.get('pending_entry_positions', 0)}",
         f"- Open trades after: {cycle['open_trades_after']}",
         f"- Bybit positions: {cycle.get('bybit_positions', 0)} / uPnL ${_float(cycle.get('bybit_unrealized_pnl_usdt')):,.2f}",
         f"- Ledger positions: {cycle.get('ledger_positions', 0)} / uPnL ${_float(cycle.get('ledger_unrealized_pnl_usdt')):,.2f}",
@@ -1022,6 +1025,10 @@ def format_event_risk_cycle_report(payload: dict[str, Any]) -> str:
     if payload.get("untracked_positions"):
         lines.extend(["", "## Untracked Positions", ""])
         for row in payload.get("untracked_positions", [])[:20]:
+            lines.append(f"- {row.get('symbol', '')} {row.get('side', '')} qty={_float(row.get('qty')):g}")
+    if payload.get("pending_entry_positions"):
+        lines.extend(["", "## Pending Entry Positions", ""])
+        for row in payload.get("pending_entry_positions", [])[:20]:
             lines.append(f"- {row.get('symbol', '')} {row.get('side', '')} qty={_float(row.get('qty')):g}")
     if payload["cycle"].get("position_report_error"):
         lines.extend(["", f"Position report error: {payload['cycle']['position_report_error']}"])
