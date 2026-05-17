@@ -74,7 +74,13 @@ def ensure_data_root(data_root: str | Path) -> Path:
 
 
 @contextmanager
-def exclusive_file_lock(path: str | Path, *, stale_seconds: int = 600, poll_seconds: float = 0.05) -> Iterator[None]:
+def exclusive_file_lock(
+    path: str | Path,
+    *,
+    stale_seconds: float = 600,
+    poll_seconds: float = 0.05,
+    invalid_lock_stale_seconds: float = 30.0,
+) -> Iterator[None]:
     lock_path = Path(path).expanduser()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd: int | None = None
@@ -92,6 +98,17 @@ def exclusive_file_lock(path: str | Path, *, stale_seconds: int = 600, poll_seco
                 age = time.time() - lock_path.stat().st_mtime
             except OSError:
                 age = 0.0
+            invalid_lock_stale = (
+                _lock_payload_is_invalid(lock_path)
+                and invalid_lock_stale_seconds >= 0
+                and age > invalid_lock_stale_seconds
+            )
+            if invalid_lock_stale:
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
             if stale_seconds > 0 and age > stale_seconds:
                 try:
                     lock_path.unlink()
@@ -129,6 +146,17 @@ def _lock_owner_is_dead(lock_path: Path) -> bool:
     except OSError:
         return False
     return False
+
+
+def _lock_payload_is_invalid(lock_path: Path) -> bool:
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        pid = int(payload.get("pid") or 0)
+    except FileNotFoundError:
+        return False
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError):
+        return True
+    return pid <= 0
 
 
 def with_date_column(df: pl.DataFrame, ts_col: str = "ts_ms") -> pl.DataFrame:

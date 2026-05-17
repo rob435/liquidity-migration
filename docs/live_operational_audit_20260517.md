@@ -53,18 +53,25 @@ Objective: harden the Bybit demo system as if it is live capital, with emphasis 
   - Startup and material risk reports now also get timestamped JSON/Markdown snapshots.
   - CLI risk summaries point to `latest_event_ws_risk_cycle.md` for `event-risk-ws` instead of the legacy REST risk report path.
 
+- `current slice: recover malformed runtime locks`
+  - Shared file locks now recover malformed or empty lock payloads after a short invalid-payload grace period.
+  - This closes the restart edge case where a process killed between lock creation and owner JSON write could block `event_ws_risk_cycle.lock` forever because that daemon intentionally uses no age-based stale timeout.
+
 ## Verification
 
 Local:
 
-- `pytest -q`: 180 passed after the websocket risk audit-report change.
+- `pytest -q`: 181 passed after the malformed lock recovery change.
 
 VPS:
 
-- `pytest -q`: 180 passed after deploying the websocket risk audit-report change.
+- `pytest -q`: 181 passed after deploying the malformed lock recovery change.
 - Services after restart:
   - `model050426-bybit-demo.service`: active/running, `INTERVAL_SECONDS=300`.
   - `model050426-bybit-risk.service`: active/running.
+- Lock recovery drill:
+  - An isolated empty `event_ws_risk_cycle.lock` with `stale_seconds=0` was recovered on the VPS.
+  - The lock existed while held by the new owner PID and was removed after release.
 - Websocket risk report evidence:
   - latest heartbeat report path: `data/bybit-demo-event/reports/event-risk-ws/latest_event_ws_risk_cycle.md`.
   - startup snapshot persisted as a timestamped `event_ws_risk_cycle_ws-risk-*.json`/`.md` pair.

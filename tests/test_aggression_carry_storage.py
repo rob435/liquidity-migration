@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import polars as pl
@@ -113,5 +115,24 @@ def test_exclusive_file_lock_recovers_dead_pid_lock_even_without_stale_timeout(t
     with exclusive_file_lock(lock_path, stale_seconds=0, poll_seconds=0.0):
         payload = json.loads(lock_path.read_text(encoding="utf-8"))
         assert payload["pid"] != 2_147_483_647
+
+    assert not lock_path.exists()
+
+
+def test_exclusive_file_lock_recovers_malformed_lock_after_grace_without_stale_timeout(tmp_path: Path) -> None:
+    lock_path = dataset_lock_path(tmp_path, "klines_1h")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text("", encoding="utf-8")
+    old_ts = time.time() - 10.0
+    os.utime(lock_path, (old_ts, old_ts))
+
+    with exclusive_file_lock(
+        lock_path,
+        stale_seconds=0,
+        poll_seconds=0.0,
+        invalid_lock_stale_seconds=0.01,
+    ):
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        assert payload["pid"] == os.getpid()
 
     assert not lock_path.exists()

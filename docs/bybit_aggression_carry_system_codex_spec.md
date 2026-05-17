@@ -145,7 +145,7 @@ Bybit's current demo docs state that demo WebSocket supports private streams onl
 
 WebSocket startup is bounded by `STREAM_START_TIMEOUT_SECONDS` / `--stream-start-timeout-seconds`, default 3 seconds per startup operation. If private or public socket startup blocks, the risk daemon records the timeout, writes reports, and keeps REST reconciliation plus exchange-native stops active instead of hanging before the watchdog loop starts.
 
-Cycle lock files record the owning PID and are recovered when that PID is no longer alive, including locks configured with no age-based stale timeout. This is required so a killed probe or service process cannot permanently block the risk daemon after restart.
+Cycle lock files record the owning PID and are recovered when that PID is no longer alive, including locks configured with no age-based stale timeout. Malformed or empty lock files are also recovered after a short invalid-payload grace period. This is required so a killed probe or service process cannot permanently block the risk daemon after restart.
 
 `EXIT_ORDER_MODE=market` is the default and fastest emergency exit. `EXIT_ORDER_MODE=limit_chase` uses bounded reduce-only IOC limits, controlled by `LIMIT_CHASE_ATTEMPTS`, `LIMIT_CHASE_INITIAL_BPS`, `LIMIT_CHASE_STEP_BPS`, `LIMIT_CHASE_MAX_BPS`, and `LIMIT_CHASE_WAIT_SECONDS`, then falls back to market unless `LIMIT_CHASE_FALLBACK_MARKET=0`. Exchange-native stops remain the primary fast protection; the local watchdog is the repair/enforcement layer when venue state and ledger state diverge.
 
