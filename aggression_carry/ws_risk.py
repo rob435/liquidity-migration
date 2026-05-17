@@ -234,8 +234,8 @@ class EventWebSocketRiskEngine:
             if status in {"rejected", "cancelled", "canceled", "deactivated"}:
                 updates.extend(self.mark_order_terminal_from_order_update(order_link_id=link, status=status, row=row))
             elif status == "filled":
-                filled_qty = _float(row.get("cumExecQty") or row.get("qty"))
-                avg_price = _float(row.get("avgPrice") or row.get("price"))
+                filled_qty = _float(row.get("cumExecQty") or row.get("qty")) or self.order_target_qty(link)
+                avg_price = _float(row.get("avgPrice") or row.get("price")) or self.order_avg_price(link)
                 updates.extend(
                     self.mark_order_filled_from_execution(
                         order_link_id=link,
@@ -243,6 +243,9 @@ class EventWebSocketRiskEngine:
                         exit_price=avg_price,
                     )
                 )
+                self.close_trade_from_order_update(order_link_id=link, filled_qty=filled_qty, exit_price=avg_price)
+                for order in updates:
+                    self.clear_submitted_symbol(str(order.get("symbol", "")))
         if updates:
             _write_order_rows(self.root, pl.DataFrame(updates, infer_schema_length=None))
 
@@ -318,6 +321,36 @@ class EventWebSocketRiskEngine:
             _write_order_rows(self.root, pl.DataFrame(order_updates, infer_schema_length=None))
         self.write_report(reason="ws_execution_fill")
 
+    def close_trade_from_order_update(self, *, order_link_id: str, filled_qty: float, exit_price: float) -> None:
+        trade_id = self.state.submitted_link_to_trade_id.get(order_link_id, "")
+        if not trade_id or self.state.all_trades.is_empty():
+            return
+        trades = {str(row["trade_id"]): row for row in self.state.all_trades.to_dicts()}
+        trade = dict(trades.get(trade_id, {}))
+        if not trade or str(trade.get("status")) == "closed":
+            return
+        target_qty = _float(trade.get("qty"))
+        if target_qty <= 0.0 or filled_qty + max(target_qty * 1e-8, 1e-12) < target_qty:
+            return
+        now_ms = _now_ms()
+        trade.update(
+            {
+                "status": "closed",
+                "exit_ts_ms": now_ms,
+                "exit_price": exit_price if exit_price > 0.0 else _float(trade.get("exit_price")),
+                "exit_order_link_id": order_link_id,
+                "submit_mode": self.state.submitted_link_submit_mode.get(order_link_id, "order_stream_filled"),
+                "closed_at_ms": now_ms,
+                "updated_at_ms": now_ms,
+            }
+        )
+        self.state.exits.append(trade)
+        self.clear_submitted_symbol(str(trade.get("symbol", "")))
+        self.state.all_trades = _upsert_rows(self.state.all_trades, [trade], key="trade_id")
+        self.state.open_trades = _open_trades(self.state.all_trades)
+        _write_trade_rows(self.root, pl.DataFrame([trade], infer_schema_length=None))
+        self.write_report(reason="ws_order_fill")
+
     def mark_order_filled_from_execution(self, *, order_link_id: str, filled_qty: float, exit_price: float) -> list[dict[str, Any]]:
         updates: list[dict[str, Any]] = []
         for order in self.state.orders:
@@ -329,6 +362,18 @@ class EventWebSocketRiskEngine:
             order["notional_usdt"] = abs(exit_price * filled_qty) if exit_price > 0.0 else 0.0
             updates.append(order)
         return updates
+
+    def order_target_qty(self, order_link_id: str) -> float:
+        for order in self.state.orders:
+            if str(order.get("order_link_id") or "") == order_link_id:
+                return _float(order.get("target_qty") or order.get("qty"))
+        return 0.0
+
+    def order_avg_price(self, order_link_id: str) -> float:
+        for order in self.state.orders:
+            if str(order.get("order_link_id") or "") == order_link_id:
+                return _float(order.get("avg_price"))
+        return 0.0
 
     def mark_order_terminal_from_order_update(
         self,

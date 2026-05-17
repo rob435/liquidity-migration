@@ -234,6 +234,51 @@ def test_ws_risk_rest_fallback_order_closes_from_execution_stream(tmp_path: Path
     assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
 
 
+def test_ws_risk_order_stream_fill_closes_trade_when_execution_lags(tmp_path: Path) -> None:
+    _write_open_trade(tmp_path)
+    private_client = FakePrivateClient(confirm_fills=False)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
+    link = str(engine.state.orders[0]["order_link_id"])
+    engine.on_order_message(
+        {
+            "data": [
+                {
+                    "symbol": "AAAUSDT",
+                    "orderLinkId": link,
+                    "orderStatus": "Filled",
+                    "cumExecQty": "1",
+                    "avgPrice": "113",
+                }
+            ]
+        }
+    )
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    assert engine.state.orders[0]["status"] == "filled"
+    assert engine.state.exits[0]["submit_mode"] == "submitted"
+    assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
+    assert stored_orders.filter(pl.col("order_link_id") == link).select("status").item() == "filled"
+    assert "AAAUSDT" not in engine.state.submitted_symbols
+
+
 def test_ws_risk_bootstrap_loads_pending_exit_order_after_restart(tmp_path: Path) -> None:
     _write_open_trade(tmp_path)
     write_dataset(
