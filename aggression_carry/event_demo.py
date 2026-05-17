@@ -29,6 +29,7 @@ from .volume_events import (
     _event_score,
     _execution_ordered_events,
     _rank_lookup_cache,
+    _realized_loss_pressure_active,
     _scenario_side,
     _select_events,
     _stop_pressure_active,
@@ -37,6 +38,7 @@ from .volume_events import (
 
 
 MS_PER_MINUTE = 60_000
+DEMO_STRATEGY_ID = "liqmig_union_q40_h3_tp25_g097_crowd_union"
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,7 +52,7 @@ class EventDemoCycleConfig:
     wallet_balance_fraction: float = 1.0
     fallback_equity_usdt: float = 10_000.0
     max_entry_lag_minutes: int = 15
-    max_new_entries_per_cycle: int = 6
+    max_new_entries_per_cycle: int = 5
     entry_leverage: float = 1.0
     entry_order_type: str = "Market"
     exit_order_type: str = "Market"
@@ -102,7 +104,7 @@ def run_event_demo_cycle(
             workers=demo.workers,
             market_client=public if market_client is not None else None,
         )
-        features = _build_demo_features(klines)
+        features = _build_demo_features(klines, universe)
         score_name, score_col = _event_score(strategy.event_types[0])
         scenario = _selected_scenario(strategy)
         order_notional_pct_equity = target_order_notional_pct_equity(demo, strategy)
@@ -191,6 +193,7 @@ def run_event_demo_cycle(
             "cycle_id": cycle_id,
             "ts_ms": cycle_now_ms,
             "mode": "submit" if demo.submit_orders else "dry_run",
+            "strategy_id": DEMO_STRATEGY_ID,
             "symbols": len(symbols),
             "kline_rows": klines.height,
             "feature_rows": features.height,
@@ -270,6 +273,7 @@ def select_demo_entry_candidates(
     open_symbols = set(_column_values(_open_trades(all_trades), "symbol"))
     cooldown_until = _cooldown_until(all_trades, config=config)
     stop_exit_ts = _realized_stop_exit_ts(all_trades)
+    realized_loss_exit_ts = _realized_loss_exit_ts(all_trades, config=config)
     candidates: list[dict[str, Any]] = []
     skips = _empty_skip_counts()
     min_ready_ts = now_ms - max_entry_lag_minutes * MS_PER_MINUTE if max_entry_lag_minutes >= 0 else 0
@@ -285,6 +289,9 @@ def select_demo_entry_candidates(
             continue
         if _stop_pressure_active(stop_exit_ts, signal_ts_ms=signal_ts_ms, config=config):
             skips["stop_pressure"] += 1
+            continue
+        if _realized_loss_pressure_active(realized_loss_exit_ts, signal_ts_ms=signal_ts_ms, config=config):
+            skips["realized_loss_pressure"] += 1
             continue
         symbol = str(event["symbol"])
         trade_id = _trade_id(scenario, symbol=symbol, signal_ts_ms=signal_ts_ms)
@@ -322,8 +329,18 @@ def select_demo_entry_candidates(
                 "liquidity_rank": int(event.get("liquidity_rank", 0) or 0),
                 "turnover_quote": _float(event.get("turnover_quote")),
                 "prior7_turnover_quote_mean": _float(event.get("prior7_turnover_quote_mean")),
+                "liquidity_migration_turnover_ratio": _safe_ratio(
+                    event.get("turnover_quote"),
+                    event.get("prior7_turnover_quote_mean"),
+                ),
                 "daily_return_1d": _float(event.get("daily_return_1d")),
                 "residual_return_1d": _float(event.get("residual_return_1d")),
+                "market_pct_up_1d": _float(event.get("market_pct_up_1d")),
+                "signal_day_close_location": _float(event.get("signal_day_close_location")),
+                "signal_day_last6h_return": _float(event.get("signal_day_last6h_return")),
+                "signal_day_last6h_turnover_share": _float(event.get("signal_day_last6h_turnover_share")),
+                "signal_day_range_pct": _float(event.get("signal_day_range_pct")),
+                "pit_age_days": _float(event.get("pit_age_days")),
             }
         )
         if len(candidates) >= max_new_entries:
@@ -566,6 +583,7 @@ def format_event_demo_cycle_report(payload: dict[str, Any]) -> str:
         "",
         f"- Time: {_iso_dt(cycle['ts_ms'])}",
         f"- Mode: `{cycle['mode']}`",
+        f"- Strategy: `{cycle.get('strategy_id', '')}`",
         f"- Universe symbols: {cycle['symbols']}",
         f"- Feature rows: {cycle['feature_rows']}",
         f"- Latest feature: {_iso_dt(cycle.get('latest_feature_ts_ms'))}",
@@ -628,16 +646,12 @@ def format_event_demo_cycle_report(payload: dict[str, Any]) -> str:
 
 
 def _demo_event_config(config: VolumeEventResearchConfig) -> VolumeEventResearchConfig:
+    promoted = VolumeEventResearchConfig()
     return replace(
-        config,
+        promoted,
         require_pit_membership=False,
         require_full_pit_universe=False,
-        event_types=(config.event_types[0],),
-        thresholds=(config.thresholds[0],),
-        side_hypotheses=(config.side_hypotheses[0],),
-        hold_days=(config.hold_days[0],),
-        stop_loss_pcts=(config.stop_loss_pcts[0],),
-        cost_multipliers=(config.cost_multipliers[0],),
+        exclude_symbols=config.exclude_symbols,
     )
 
 
@@ -727,10 +741,26 @@ def _download_recent_1h_klines(
     return pl.DataFrame(rows, infer_schema_length=None) if rows else _empty_klines()
 
 
-def _build_demo_features(klines: pl.DataFrame) -> pl.DataFrame:
+def _build_demo_features(klines: pl.DataFrame, universe: pl.DataFrame) -> pl.DataFrame:
     if klines.is_empty():
         return pl.DataFrame()
-    return _enriched_event_features(build_volume_features(klines), klines, pl.DataFrame())
+    features = _enriched_event_features(build_volume_features(klines), klines, pl.DataFrame())
+    if universe.is_empty() or "listing_age_days" not in universe.columns:
+        return features
+    ages = universe.select(["symbol", "listing_age_days"]).unique(subset=["symbol"], keep="first")
+    for column in ("symbol_age_days", "pit_age_days"):
+        if column in features.columns:
+            features = features.drop(column)
+    return (
+        features.join(ages, on="symbol", how="left")
+        .with_columns(
+            [
+                pl.col("listing_age_days").cast(pl.Int64, strict=False).alias("symbol_age_days"),
+                pl.col("listing_age_days").cast(pl.Float64, strict=False).alias("pit_age_days"),
+            ]
+        )
+        .drop("listing_age_days")
+    )
 
 
 def _execute_entries(
@@ -887,12 +917,17 @@ def _execute_exits(
             )
             submit_mode = "submitted"
         exit_price = _float(exec_summary.get("avg_price")) or _float(exit_plan.get("planned_exit_price"))
+        entry_price = _float(trade.get("entry_price"))
+        gross_trade_return = _trade_return(entry_price, exit_price, side=side)
+        notional_weight = _safe_ratio(trade.get("notional_usdt"), trade.get("equity_usdt"))
         trade.update(
             {
                 "status": "closed",
                 "exit_ts_ms": now_ms,
                 "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
                 "exit_price": exit_price,
+                "gross_trade_return": gross_trade_return,
+                "net_return": gross_trade_return * notional_weight,
                 "exit_reason": str(exit_plan["exit_reason"]),
                 "exit_order_link_id": exit_link,
                 "exit_order_id": order_result.get("orderId", ""),
@@ -1115,6 +1150,22 @@ def _realized_stop_exit_ts(trades: pl.DataFrame) -> list[int]:
     ]
 
 
+def _realized_loss_exit_ts(trades: pl.DataFrame, *, config: VolumeEventResearchConfig) -> list[int]:
+    if trades.is_empty() or "exit_ts_ms" not in trades.columns:
+        return []
+    output: list[int] = []
+    for row in trades.to_dicts():
+        if str(row.get("status", "")) != "closed":
+            continue
+        exit_ts = int(row.get("exit_ts_ms") or 0)
+        if exit_ts <= 0:
+            continue
+        loss_return = _row_realized_return(row)
+        if loss_return is not None and loss_return <= -config.realized_loss_pressure_min_loss_abs:
+            output.append(exit_ts)
+    return output
+
+
 def _rank_checks_for_symbol(
     rank_lookup: dict[tuple[str, int], float],
     *,
@@ -1310,6 +1361,37 @@ def _float(value: Any) -> float:
     return number if math.isfinite(number) else 0.0
 
 
+def _safe_ratio(numerator: Any, denominator: Any) -> float:
+    denom = _float(denominator)
+    if denom == 0.0:
+        return 0.0
+    return _float(numerator) / denom
+
+
+def _trade_return(entry_price: float, exit_price: float, *, side: str) -> float:
+    if entry_price <= 0.0 or exit_price <= 0.0:
+        return 0.0
+    if side == "short":
+        return (entry_price - exit_price) / entry_price
+    if side == "long":
+        return (exit_price - entry_price) / entry_price
+    return 0.0
+
+
+def _row_realized_return(row: dict[str, Any]) -> float | None:
+    for key in ("net_return", "gross_trade_return"):
+        if key in row and row.get(key) not in (None, ""):
+            value = _float(row.get(key))
+            if math.isfinite(value):
+                return value
+    entry_price = _float(row.get("entry_price"))
+    exit_price = _float(row.get("exit_price"))
+    side = str(row.get("side") or "short")
+    if entry_price <= 0.0 or exit_price <= 0.0:
+        return None
+    return _trade_return(entry_price, exit_price, side=side)
+
+
 def _decimal_text(value: Decimal) -> str:
     text = format(value.normalize(), "f")
     if "." in text:
@@ -1322,6 +1404,7 @@ def _empty_skip_counts() -> dict[str, int]:
         "not_ready": 0,
         "stale": 0,
         "stop_pressure": 0,
+        "realized_loss_pressure": 0,
         "already_traded": 0,
         "active_symbol": 0,
         "cooldown": 0,

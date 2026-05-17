@@ -12,7 +12,7 @@ MIN_EXISTING_BARS="${MIN_EXISTING_BARS:-1}"
 RUN_TESTS="${RUN_TESTS:-1}"
 PYTHON_BIN="${PYTHON_BIN:-}"
 RUN_CHAMPION_BACKTEST="${RUN_CHAMPION_BACKTEST:-1}"
-CHAMPION_GROSS_EXPOSURE="${CHAMPION_GROSS_EXPOSURE:-1.25}"
+CHAMPION_GROSS_EXPOSURE="${CHAMPION_GROSS_EXPOSURE:-0.97}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel >/dev/null 2>&1; then
@@ -183,25 +183,25 @@ if missing:
 PY
 
 EVENT_REPORT_INDEX="$DATA_ROOT/reports/fullpit_volume_event_runs_$(date -u +%Y%m%dT%H%M%SZ).csv"
-echo "run_type,max_active_symbols,cooldown_days,entry_delay_hours,rank_exit_threshold,universe_rank_min,universe_rank_max,liquidity_migration_rank_improvement_min,liquidity_migration_turnover_ratio_min,liquidity_migration_event_rank_fraction_max,liquidity_migration_event_rank_fraction_exclude_min,liquidity_migration_event_rank_fraction_exclude_max,liquidity_migration_day_return_min,liquidity_migration_residual_return_min,liquidity_migration_market_pct_up_max,stop_pressure_window_days,stop_pressure_stop_count,event_types,thresholds,hold_days,sides,stop_loss_pcts,take_profit_pcts,cost_multipliers,gross_exposure,report_dir" > "$EVENT_REPORT_INDEX"
+echo "run_type,max_active_symbols,cooldown_days,entry_delay_hours,rank_exit_threshold,universe_rank_min,universe_rank_max,liquidity_migration_rank_improvement_min,liquidity_migration_turnover_ratio_min,liquidity_migration_event_rank_fraction_max,liquidity_migration_day_return_min,liquidity_migration_residual_return_min,liquidity_migration_market_pct_up_max,liquidity_migration_hot_market_day_return_min,liquidity_migration_hot_market_day_return_band,liquidity_migration_close_location_min,liquidity_migration_pit_age_days_min,liquidity_migration_crowding_filter,stop_pressure_window_days,stop_pressure_stop_count,realized_loss_pressure_window_days,realized_loss_pressure_loss_count,event_types,thresholds,hold_days,sides,stop_loss_pcts,take_profit_pcts,cost_multipliers,gross_exposure,report_dir" > "$EVENT_REPORT_INDEX"
 
 if [ "$RUN_CHAMPION_BACKTEST" != "0" ]; then
   section "Run selected full PIT volume event backtest"
-  CHAMPION_REPORT_DIR="$DATA_ROOT/reports/SELECTED_liqmig_res8_q30_h3_tp20_g125_$(date -u +%Y%m%dT%H%M%SZ)"
+  CHAMPION_REPORT_DIR="$DATA_ROOT/reports/SELECTED_liqmig_union_q40_h3_tp25_g097_$(date -u +%Y%m%dT%H%M%SZ)"
   python -m aggression_carry \
     --data-root "$DATA_ROOT" \
     --config "$CONFIG_PATH" \
     volume-events \
     --event-types liquidity_migration \
-    --thresholds 0.3 \
+    --thresholds 0.4 \
     --hold-days 3 \
     --sides reversal \
     --stop-loss-pcts 0.12 \
-    --take-profit-pcts 0.20 \
+    --take-profit-pcts 0.25 \
     --cost-multipliers 3 \
     --gross-exposure "$CHAMPION_GROSS_EXPOSURE" \
     --entry-delay-hours 1 \
-    --max-active-symbols 6 \
+    --max-active-symbols 5 \
     --cooldown-days 5 \
     --rank-exit-threshold 0.55 \
     --universe-rank-min 31 \
@@ -213,11 +213,19 @@ if [ "$RUN_CHAMPION_BACKTEST" != "0" ]; then
     --liquidity-migration-event-rank-fraction-exclude-max 0 \
     --liquidity-migration-day-return-min 0.0 \
     --liquidity-migration-residual-return-min 0.08 \
-    --liquidity-migration-market-pct-up-max 0.55 \
-    --stop-pressure-window-days 14 \
-    --stop-pressure-stop-count 12 \
+    --liquidity-migration-market-pct-up-max 0.65 \
+    --liquidity-migration-hot-market-day-return-min 0.16 \
+    --liquidity-migration-hot-market-day-return-band 0.015 \
+    --liquidity-migration-close-location-min 0.45 \
+    --liquidity-migration-pit-age-days-min 90 \
+    --liquidity-migration-crowding-filter union_pathology \
+    --stop-pressure-window-days 10 \
+    --stop-pressure-stop-count 7 \
+    --realized-loss-pressure-window-days 5 \
+    --realized-loss-pressure-loss-count 6 \
+    --realized-loss-pressure-min-loss-abs 0.0 \
     --report-dir "$CHAMPION_REPORT_DIR"
-  echo "champion,6,5,1,0.55,31,150,150,6.0,0.90,0,0,0.0,0.08,0.55,14,12,liquidity_migration,0.3,3,reversal,0.12,0.20,3,$CHAMPION_GROSS_EXPOSURE,$CHAMPION_REPORT_DIR" >> "$EVENT_REPORT_INDEX"
+  echo "champion,5,5,1,0.55,31,150,150,6.0,0.90,0.0,0.08,0.65,0.16,0.015,0.45,90,union_pathology,10,7,5,6,liquidity_migration,0.4,3,reversal,0.12,0.25,3,$CHAMPION_GROSS_EXPOSURE,$CHAMPION_REPORT_DIR" >> "$EVENT_REPORT_INDEX"
 fi
 
 section "Done"

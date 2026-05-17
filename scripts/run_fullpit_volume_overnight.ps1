@@ -13,7 +13,7 @@ param(
     [string]$Python = "python",
     [bool]$RunTests = $true,
     [bool]$RunChampionBacktest = $true,
-    [double]$ChampionGrossExposure = 1.25
+    [double]$ChampionGrossExposure = 0.97
 )
 
 $ErrorActionPreference = "Stop"
@@ -185,26 +185,26 @@ if missing:
     Invoke-Checked $VenvPython @($ValidationFile)
 
     $EventReportIndex = Join-Path (Join-Path $DataRoot "reports") ("fullpit_volume_event_runs_{0}.csv" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
-    Set-Content -Path $EventReportIndex -Value "run_type,max_active_symbols,cooldown_days,entry_delay_hours,rank_exit_threshold,universe_rank_min,universe_rank_max,liquidity_migration_rank_improvement_min,liquidity_migration_turnover_ratio_min,liquidity_migration_event_rank_fraction_max,liquidity_migration_event_rank_fraction_exclude_min,liquidity_migration_event_rank_fraction_exclude_max,liquidity_migration_day_return_min,liquidity_migration_residual_return_min,liquidity_migration_market_pct_up_max,stop_pressure_window_days,stop_pressure_stop_count,event_types,thresholds,hold_days,sides,stop_loss_pcts,take_profit_pcts,cost_multipliers,gross_exposure,report_dir" -Encoding UTF8
+    Set-Content -Path $EventReportIndex -Value "run_type,max_active_symbols,cooldown_days,entry_delay_hours,rank_exit_threshold,universe_rank_min,universe_rank_max,liquidity_migration_rank_improvement_min,liquidity_migration_turnover_ratio_min,liquidity_migration_event_rank_fraction_max,liquidity_migration_day_return_min,liquidity_migration_residual_return_min,liquidity_migration_market_pct_up_max,liquidity_migration_hot_market_day_return_min,liquidity_migration_hot_market_day_return_band,liquidity_migration_close_location_min,liquidity_migration_pit_age_days_min,liquidity_migration_crowding_filter,stop_pressure_window_days,stop_pressure_stop_count,realized_loss_pressure_window_days,realized_loss_pressure_loss_count,event_types,thresholds,hold_days,sides,stop_loss_pcts,take_profit_pcts,cost_multipliers,gross_exposure,report_dir" -Encoding UTF8
 
     if ($RunChampionBacktest) {
         Section "Run selected full PIT volume event backtest"
-        $ChampionReportDir = Join-Path (Join-Path $DataRoot "reports") ("SELECTED_liqmig_res8_q30_h3_tp20_g125_{0}" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
+        $ChampionReportDir = Join-Path (Join-Path $DataRoot "reports") ("SELECTED_liqmig_union_q40_h3_tp25_g097_{0}" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
         Invoke-Checked $VenvPython @(
             "-m", "aggression_carry",
             "--data-root", $DataRoot,
             "--config", $ConfigPath,
             "volume-events",
             "--event-types", "liquidity_migration",
-            "--thresholds", "0.3",
+            "--thresholds", "0.4",
             "--hold-days", "3",
             "--sides", "reversal",
             "--stop-loss-pcts", "0.12",
-            "--take-profit-pcts", "0.20",
+            "--take-profit-pcts", "0.25",
             "--cost-multipliers", "3",
             "--gross-exposure", "$ChampionGrossExposure",
             "--entry-delay-hours", "1",
-            "--max-active-symbols", "6",
+            "--max-active-symbols", "5",
             "--cooldown-days", "5",
             "--rank-exit-threshold", "0.55",
             "--universe-rank-min", "31",
@@ -216,12 +216,20 @@ if missing:
             "--liquidity-migration-event-rank-fraction-exclude-max", "0",
             "--liquidity-migration-day-return-min", "0.0",
             "--liquidity-migration-residual-return-min", "0.08",
-            "--liquidity-migration-market-pct-up-max", "0.55",
-            "--stop-pressure-window-days", "14",
-            "--stop-pressure-stop-count", "12",
+            "--liquidity-migration-market-pct-up-max", "0.65",
+            "--liquidity-migration-hot-market-day-return-min", "0.16",
+            "--liquidity-migration-hot-market-day-return-band", "0.015",
+            "--liquidity-migration-close-location-min", "0.45",
+            "--liquidity-migration-pit-age-days-min", "90",
+            "--liquidity-migration-crowding-filter", "union_pathology",
+            "--stop-pressure-window-days", "10",
+            "--stop-pressure-stop-count", "7",
+            "--realized-loss-pressure-window-days", "5",
+            "--realized-loss-pressure-loss-count", "6",
+            "--realized-loss-pressure-min-loss-abs", "0.0",
             "--report-dir", $ChampionReportDir
         )
-        Add-Content -Path $EventReportIndex -Value "champion,6,5,1,0.55,31,150,150,6.0,0.90,0,0,0.0,0.08,0.55,14,12,liquidity_migration,0.3,3,reversal,0.12,0.20,3,$ChampionGrossExposure,$ChampionReportDir"
+        Add-Content -Path $EventReportIndex -Value "champion,5,5,1,0.55,31,150,150,6.0,0.90,0.0,0.08,0.65,0.16,0.015,0.45,90,union_pathology,10,7,5,6,liquidity_migration,0.4,3,reversal,0.12,0.25,3,$ChampionGrossExposure,$ChampionReportDir"
     }
 
     Section "Done"

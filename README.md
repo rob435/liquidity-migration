@@ -20,22 +20,26 @@ The `volume-events` defaults are the selected strategy:
 
 - Event: `liquidity_migration`
 - Side: reversal, which means short
-- Threshold: top 30% dollar-volume rank migration
+- Threshold: top 40% dollar-volume rank migration
 - Universe: point-in-time liquidity rank 31-150
 - Exclusions: stable/peg perps only, including failed peg remnants such as `USTCUSDT`
 - Rank improvement: at least 150 places versus the 7-day prior rank
 - Turnover expansion: current turnover / prior 7-day mean turnover at least 6.0
 - Overheat filter: event rank fraction no higher than 0.90
 - Idiosyncratic move gate: `daily_return_1d - market_median_return_1d >= +8%`
-- Regime gate: `market_pct_up_1d <= 0.55 OR coin daily_return_1d >= +20%`
+- Regime gate: `market_pct_up_1d <= 0.65 OR coin daily_return_1d` clears the adaptive 16% +/- 1.5% hot-market band
+- Strong-close gate: signal-day close location at least 0.45
+- Maturity gate: PIT/listing age at least 90 days
+- Crowding veto: `union_pathology` same-entry-hour pathology filter
 - Entry: 1 hour after the daily signal close
-- Exit: event decay, 12% fixed stop, 20% fixed take profit, or 3-day max hold
-- Capacity: max 6 active symbols, 5-day symbol cooldown
-- Stop-pressure throttle: pause new entries after 12 realized stops inside 14 days
+- Exit: event decay, rank exit, 12% fixed stop, 25% fixed take profit, or 3-day max hold
+- Capacity: max 5 active symbols, 5-day symbol cooldown
+- Stop-pressure throttle: pause new entries after 7 realized stops inside 10 days
+- Realized-loss throttle: pause new entries after 6 realized losses inside 5 days
 - Cost model: 3x base round-trip costs
-- Gross exposure: 1.25, split across active capacity
+- Gross exposure: 0.97, split across active capacity
 
-Promoted full-PIT reference run, 2023-05-03 to 2026-05-03:
+Legacy full-PIT baseline run, 2023-05-03 to 2026-05-03:
 
 - Trades: 516
 - Total return: +1218.79%
@@ -53,6 +57,23 @@ Reference report:
 ```text
 data/research_reports/research_20260516_promoted_default_after_patch
 ```
+
+Promoted research frontier after the same-hour crowding audit:
+
+- Variant: adaptive hot-band liquidity migration with `union_pathology` crowding veto
+- Report: `data/research_reports/frontier_union_crowding_promoted_20260517`
+- Trades: 444
+- Total return: +1950.72%
+- Max drawdown: -10.74%
+- Worst 90d return: -4.64%
+- Worst split return: +113.73%
+- Average split Sharpe-like: 3.72
+- OOS return: +177.58%
+
+This supersedes the earlier March-specific crowding patch and is now the
+research, `volume-events`, and Bybit demo default as of 2026-05-17. The paper
+shadow step was intentionally skipped by user decision; keep that risk
+contained to demo-only trading.
 
 ## Full-PIT Runner
 
@@ -97,8 +118,8 @@ Default forward-test behavior:
 - pulls current Bybit USDT perp ranks 1-220, then applies the selected rank 31-150 liquidity-migration filter
 - rebuilds recent 1h volume features each cycle from a 45-day lookback
 - enters eligible events after the 1-hour signal delay, with stale entries skipped after 15 minutes by default
-- sizes each coin from the backtest weight: `gross_exposure / max_active_symbols`, currently `1.25 / 6 = 20.83%` of current Bybit demo USDT equity
-- uses 2x entry leverage in the continuous runner so the 125% gross target can be submitted without changing the notional sizing
+- sizes each coin from the backtest weight: `gross_exposure / max_active_symbols`, currently `0.97 / 5 = 19.40%` of current Bybit demo USDT equity
+- uses 2x entry leverage in the continuous runner for margin headroom without changing the notional sizing
 - exits first on every cycle using fixed stop reconciliation, event decay, rank exit, or 3-day max hold
 - sends Telegram status with Bybit demo wallet equity, open positions, position value, and unrealized PnL when `TELEGRAM_ENABLED=1`
 - writes ledgers under `event_demo_trades`, `event_demo_orders`, and `event_demo_cycles`

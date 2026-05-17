@@ -175,6 +175,18 @@ def build_parser() -> argparse.ArgumentParser:
     volume_events.add_argument("--stop-loss-pcts", default=",".join(str(item) for item in event_defaults.stop_loss_pcts), help="Comma-separated fixed stop pcts; 0 disables.")
     volume_events.add_argument("--take-profit-pcts", default=",".join(str(item) for item in event_defaults.take_profit_pcts), help="Comma-separated fixed take-profit pcts; 0 disables.")
     volume_events.add_argument("--cost-multipliers", default=",".join(str(item) for item in event_defaults.cost_multipliers), help="Comma-separated cost multipliers.")
+    volume_events.add_argument(
+        "--mfe-giveback-trigger-pct",
+        type=float,
+        default=event_defaults.mfe_giveback_trigger_pct,
+        help="Activate MFE giveback exit after this per-trade favorable return; 0 disables.",
+    )
+    volume_events.add_argument(
+        "--mfe-giveback-retain-pct",
+        type=float,
+        default=event_defaults.mfe_giveback_retain_pct,
+        help="After MFE activation, exit when close return retains no more than this fraction of MFE; 0 disables.",
+    )
     volume_events.add_argument("--start", default="", help="Inclusive UTC signal start date/timestamp.")
     volume_events.add_argument("--end", default="", help="Exclusive UTC signal end date/timestamp.")
     volume_events.add_argument("--entry-delay-hours", type=int, default=event_defaults.entry_delay_hours, help="Hours after signal close before entry.")
@@ -273,6 +285,99 @@ def build_parser() -> argparse.ArgumentParser:
         help="When market pct-up is above the liquidity-migration max, still allow events with at least this same-day coin return; 10 disables.",
     )
     volume_events.add_argument(
+        "--liquidity-migration-hot-market-day-return-band",
+        type=float,
+        default=event_defaults.liquidity_migration_hot_market_day_return_band,
+        help=(
+            "Adaptive width around the hot-market same-day coin return threshold. "
+            "When positive, the exception threshold ramps from min-band at the breadth cap "
+            "to min+band when the full PIT market is up."
+        ),
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-close-location-min",
+        type=float,
+        default=event_defaults.liquidity_migration_close_location_min,
+        help="Minimum event-day close location inside the high-low range for liquidity-migration events; 0 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-close-location-max",
+        type=float,
+        default=event_defaults.liquidity_migration_close_location_max,
+        help="Maximum event-day close location inside the high-low range for liquidity-migration events; 1 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-pit-age-days-min",
+        type=int,
+        default=event_defaults.liquidity_migration_pit_age_days_min,
+        help="Minimum point-in-time manifest age in days for liquidity-migration events; 0 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-pit-age-days-max",
+        type=int,
+        default=event_defaults.liquidity_migration_pit_age_days_max,
+        help="Maximum point-in-time manifest age in days for liquidity-migration events; 0 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-crowding-filter",
+        default=event_defaults.liquidity_migration_crowding_filter,
+        help="Liquidity-migration same-hour crowding veto mode: none or union_pathology.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-crowding-min-signals",
+        type=int,
+        default=event_defaults.liquidity_migration_crowding_min_signals,
+        help="Minimum selected signals in the same entry hour before the crowding veto can fire.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-crowding-stalled-last6h-return-max",
+        type=float,
+        default=event_defaults.liquidity_migration_crowding_stalled_last6h_return_max,
+        help="Union crowding veto stalled-regime max average final-6h return.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-crowding-stalled-close-location-min",
+        type=float,
+        default=event_defaults.liquidity_migration_crowding_stalled_close_location_min,
+        help="Union crowding veto stalled-regime minimum individual close location.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-crowding-stalled-turnover-ratio-max",
+        type=float,
+        default=event_defaults.liquidity_migration_crowding_stalled_turnover_ratio_max,
+        help="Union crowding veto stalled-regime max turnover divided by prior 7d mean.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-crowding-late-max-turnover-share-min",
+        type=float,
+        default=event_defaults.liquidity_migration_crowding_late_max_turnover_share_min,
+        help="Union crowding veto late-concentration regime minimum entry-hour max final-6h turnover share.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-crowding-late-last6h-return-min",
+        type=float,
+        default=event_defaults.liquidity_migration_crowding_late_last6h_return_min,
+        help="Union crowding veto late-concentration regime minimum individual final-6h return.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-crowding-late-turnover-ratio-min",
+        type=float,
+        default=event_defaults.liquidity_migration_crowding_late_turnover_ratio_min,
+        help="Union crowding veto late-concentration regime minimum turnover divided by prior 7d mean.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-crowding-weak-market-pct-up-max",
+        type=float,
+        default=event_defaults.liquidity_migration_crowding_weak_market_pct_up_max,
+        help="Union crowding veto weak-tape regime maximum PIT fraction of symbols up.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-crowding-weak-avg-turnover-share-min",
+        type=float,
+        default=event_defaults.liquidity_migration_crowding_weak_avg_turnover_share_min,
+        help="Union crowding veto weak-tape regime minimum entry-hour average final-6h turnover share.",
+    )
+    volume_events.add_argument(
         "--market-median-return-1d-min",
         type=float,
         default=event_defaults.market_median_return_1d_min,
@@ -283,6 +388,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=event_defaults.market_median_return_1d_max,
         help="Maximum PIT same-day market median return for new event entries; 1 disables.",
+    )
+    volume_events.add_argument(
+        "--market-pct-up-1d-min",
+        type=float,
+        default=event_defaults.market_pct_up_1d_min,
+        help="Minimum PIT same-day fraction of symbols up for new event entries; 0 disables.",
     )
     volume_events.add_argument(
         "--market-pct-up-1d-max",
@@ -314,6 +425,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=event_defaults.stop_pressure_stop_count,
         help="Pause new event entries after this many realized stops inside the stop-pressure window; 0 disables.",
     )
+    volume_events.add_argument(
+        "--realized-loss-pressure-window-days",
+        type=int,
+        default=event_defaults.realized_loss_pressure_window_days,
+        help="Rolling realized-loss lookback used to pause new event entries; 0 disables.",
+    )
+    volume_events.add_argument(
+        "--realized-loss-pressure-loss-count",
+        type=int,
+        default=event_defaults.realized_loss_pressure_loss_count,
+        help="Pause new event entries after this many realized losing exits inside the realized-loss window; 0 disables.",
+    )
+    volume_events.add_argument(
+        "--realized-loss-pressure-min-loss-abs",
+        type=float,
+        default=event_defaults.realized_loss_pressure_min_loss_abs,
+        help="Minimum absolute net loss for the realized-loss pressure throttle; 0 counts any negative or flat trade.",
+    )
     volume_events.add_argument("--exhaustion-min-day-return", type=float, default=event_defaults.exhaustion_min_day_return, help="Minimum same-day return for volume-exhaustion events.")
     volume_events.add_argument(
         "--selloff-exhaustion-min-abs-day-return",
@@ -338,6 +467,210 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=event_defaults.dryup_prior_abs_day_return_max,
         help="Maximum prior 7d mean absolute daily return for dry-up reacceleration.",
+    )
+    volume_events.add_argument(
+        "--top-volume-rank-max",
+        type=int,
+        default=event_defaults.top_volume_rank_max,
+        help="Maximum PIT liquidity rank for top-volume leadership long events.",
+    )
+    volume_events.add_argument(
+        "--top-volume-prior-rank-min",
+        type=int,
+        default=event_defaults.top_volume_prior_rank_min,
+        help="Minimum prior 7d liquidity rank before a fresh top-volume leadership event.",
+    )
+    volume_events.add_argument(
+        "--top-volume-min-age-days",
+        type=int,
+        default=event_defaults.top_volume_min_age_days,
+        help="Minimum PIT symbol age in days for top-volume leadership events.",
+    )
+    volume_events.add_argument(
+        "--top-volume-turnover-ratio-min",
+        type=float,
+        default=event_defaults.top_volume_turnover_ratio_min,
+        help="Minimum current turnover divided by prior 7d mean for top-volume leadership events.",
+    )
+    volume_events.add_argument(
+        "--top-volume-day-return-min",
+        type=float,
+        default=event_defaults.top_volume_day_return_min,
+        help="Minimum same-day return for top-volume leadership events; -1 disables.",
+    )
+    volume_events.add_argument(
+        "--top-volume-residual-return-min",
+        type=float,
+        default=event_defaults.top_volume_residual_return_min,
+        help="Minimum coin return minus PIT market median return for top-volume leadership; -1 disables.",
+    )
+    volume_events.add_argument(
+        "--top-volume-close-position-min",
+        type=float,
+        default=event_defaults.top_volume_close_position_min,
+        help="Minimum daily close position in the high-low range for top-volume leadership; 0 disables.",
+    )
+    volume_events.add_argument(
+        "--leadership-pullback-rank-max",
+        type=int,
+        default=event_defaults.leadership_pullback_rank_max,
+        help="Maximum PIT liquidity rank for orderly leadership pullback events.",
+    )
+    volume_events.add_argument(
+        "--leadership-pullback-min-age-days",
+        type=int,
+        default=event_defaults.leadership_pullback_min_age_days,
+        help="Minimum PIT symbol age in days for orderly leadership pullback events.",
+    )
+    volume_events.add_argument(
+        "--leadership-pullback-prior7-return-min",
+        type=float,
+        default=event_defaults.leadership_pullback_prior7_return_min,
+        help="Minimum prior 7d return before orderly leadership pullback events.",
+    )
+    volume_events.add_argument(
+        "--leadership-pullback-prior7-return-max",
+        type=float,
+        default=event_defaults.leadership_pullback_prior7_return_max,
+        help="Maximum prior 7d return before orderly leadership pullback events.",
+    )
+    volume_events.add_argument(
+        "--leadership-pullback-day-return-min",
+        type=float,
+        default=event_defaults.leadership_pullback_day_return_min,
+        help="Minimum current-day return for orderly leadership pullback events.",
+    )
+    volume_events.add_argument(
+        "--leadership-pullback-day-return-max",
+        type=float,
+        default=event_defaults.leadership_pullback_day_return_max,
+        help="Maximum current-day return for orderly leadership pullback events.",
+    )
+    volume_events.add_argument(
+        "--leadership-pullback-residual-return-min",
+        type=float,
+        default=event_defaults.leadership_pullback_residual_return_min,
+        help="Minimum coin return minus PIT market median for orderly leadership pullback events.",
+    )
+    volume_events.add_argument(
+        "--leadership-pullback-close-position-min",
+        type=float,
+        default=event_defaults.leadership_pullback_close_position_min,
+        help="Minimum daily close position for orderly leadership pullback events.",
+    )
+    volume_events.add_argument(
+        "--leadership-pullback-abs-day-return-max",
+        type=float,
+        default=event_defaults.leadership_pullback_abs_day_return_max,
+        help="Maximum absolute current-day return for orderly leadership pullback events.",
+    )
+    volume_events.add_argument(
+        "--shelf-reclaim-min-age-days",
+        type=int,
+        default=event_defaults.shelf_reclaim_min_age_days,
+        help="Minimum PIT symbol age in days for volume shelf reclaim events.",
+    )
+    volume_events.add_argument(
+        "--shelf-reclaim-prior7-volume-rank-max",
+        type=float,
+        default=event_defaults.shelf_reclaim_prior7_volume_rank_max,
+        help="Maximum prior 7d volume-persistence rank fraction for volume shelf reclaim events.",
+    )
+    volume_events.add_argument(
+        "--shelf-reclaim-prior7-abs-return-mean-max",
+        type=float,
+        default=event_defaults.shelf_reclaim_prior7_abs_return_mean_max,
+        help="Maximum prior 7d mean absolute daily return for volume shelf reclaim events.",
+    )
+    volume_events.add_argument(
+        "--shelf-reclaim-day-return-min",
+        type=float,
+        default=event_defaults.shelf_reclaim_day_return_min,
+        help="Minimum current-day return for volume shelf reclaim events.",
+    )
+    volume_events.add_argument(
+        "--shelf-reclaim-day-return-max",
+        type=float,
+        default=event_defaults.shelf_reclaim_day_return_max,
+        help="Maximum current-day return for volume shelf reclaim events.",
+    )
+    volume_events.add_argument(
+        "--shelf-reclaim-residual-return-min",
+        type=float,
+        default=event_defaults.shelf_reclaim_residual_return_min,
+        help="Minimum coin return minus PIT market median for volume shelf reclaim events.",
+    )
+    volume_events.add_argument(
+        "--shelf-reclaim-close-position-min",
+        type=float,
+        default=event_defaults.shelf_reclaim_close_position_min,
+        help="Minimum daily close position for volume shelf reclaim events.",
+    )
+    volume_events.add_argument(
+        "--shelf-reclaim-close-vs-prior20-high-min",
+        type=float,
+        default=event_defaults.shelf_reclaim_close_vs_prior20_high_min,
+        help="Minimum current close versus prior 20d high for volume shelf reclaim events.",
+    )
+    volume_events.add_argument(
+        "--shelf-reclaim-close-vs-prior20-high-max",
+        type=float,
+        default=event_defaults.shelf_reclaim_close_vs_prior20_high_max,
+        help="Maximum current close versus prior 20d high for volume shelf reclaim events.",
+    )
+    volume_events.add_argument(
+        "--long-reclaim-day-return-min",
+        type=float,
+        default=event_defaults.long_reclaim_day_return_min,
+        help="Minimum same-day return for long reclaim events.",
+    )
+    volume_events.add_argument(
+        "--long-reclaim-residual-return-min",
+        type=float,
+        default=event_defaults.long_reclaim_residual_return_min,
+        help="Minimum coin return minus PIT market median return for long reclaim events.",
+    )
+    volume_events.add_argument(
+        "--long-reclaim-close-position-min",
+        type=float,
+        default=event_defaults.long_reclaim_close_position_min,
+        help="Minimum daily close position in the high-low range for long reclaim events.",
+    )
+    volume_events.add_argument(
+        "--long-reclaim-prior7-abs-return-mean-max",
+        type=float,
+        default=event_defaults.long_reclaim_prior7_abs_return_mean_max,
+        help="Maximum prior 7d mean absolute daily return for range-reclaim breakouts.",
+    )
+    volume_events.add_argument(
+        "--long-breakout-prior20-high-buffer-min",
+        type=float,
+        default=event_defaults.long_breakout_prior20_high_buffer_min,
+        help="Minimum current close versus prior 20d high for range-reclaim breakouts.",
+    )
+    volume_events.add_argument(
+        "--long-breakout-prior20-high-buffer-max",
+        type=float,
+        default=event_defaults.long_breakout_prior20_high_buffer_max,
+        help="Maximum current close versus prior 20d high for range-reclaim breakouts.",
+    )
+    volume_events.add_argument(
+        "--capitulation-reclaim-prior7-return-max",
+        type=float,
+        default=event_defaults.capitulation_reclaim_prior7_return_max,
+        help="Maximum prior 7d return before capitulation-reclaim long events.",
+    )
+    volume_events.add_argument(
+        "--capitulation-reclaim-prior20-drawdown-max",
+        type=float,
+        default=event_defaults.capitulation_reclaim_prior20_drawdown_max,
+        help="Maximum prior drawdown from the prior 20d high before capitulation-reclaim long events.",
+    )
+    volume_events.add_argument(
+        "--capitulation-reclaim-close-vs-prior20-high-max",
+        type=float,
+        default=event_defaults.capitulation_reclaim_close_vs_prior20_high_max,
+        help="Maximum current close versus prior 20d high for capitulation-reclaim long events.",
     )
     volume_events.add_argument(
         "--exclude-symbols",
@@ -560,6 +893,8 @@ def main(argv: list[str] | None = None) -> int:
             stop_loss_pcts=_csv_float(args.stop_loss_pcts, VolumeEventResearchConfig().stop_loss_pcts),
             take_profit_pcts=_csv_float(args.take_profit_pcts, VolumeEventResearchConfig().take_profit_pcts),
             cost_multipliers=_csv_float(args.cost_multipliers, VolumeEventResearchConfig().cost_multipliers),
+            mfe_giveback_trigger_pct=args.mfe_giveback_trigger_pct,
+            mfe_giveback_retain_pct=args.mfe_giveback_retain_pct,
             start_date=args.start,
             end_date=args.end,
             entry_delay_hours=args.entry_delay_hours,
@@ -588,18 +923,87 @@ def main(argv: list[str] | None = None) -> int:
             liquidity_migration_residual_return_max=args.liquidity_migration_residual_return_max,
             liquidity_migration_market_pct_up_max=args.liquidity_migration_market_pct_up_max,
             liquidity_migration_hot_market_day_return_min=args.liquidity_migration_hot_market_day_return_min,
+            liquidity_migration_hot_market_day_return_band=args.liquidity_migration_hot_market_day_return_band,
+            liquidity_migration_close_location_min=args.liquidity_migration_close_location_min,
+            liquidity_migration_close_location_max=args.liquidity_migration_close_location_max,
+            liquidity_migration_pit_age_days_min=args.liquidity_migration_pit_age_days_min,
+            liquidity_migration_pit_age_days_max=args.liquidity_migration_pit_age_days_max,
+            liquidity_migration_crowding_filter=args.liquidity_migration_crowding_filter,
+            liquidity_migration_crowding_min_signals=args.liquidity_migration_crowding_min_signals,
+            liquidity_migration_crowding_stalled_last6h_return_max=(
+                args.liquidity_migration_crowding_stalled_last6h_return_max
+            ),
+            liquidity_migration_crowding_stalled_close_location_min=(
+                args.liquidity_migration_crowding_stalled_close_location_min
+            ),
+            liquidity_migration_crowding_stalled_turnover_ratio_max=(
+                args.liquidity_migration_crowding_stalled_turnover_ratio_max
+            ),
+            liquidity_migration_crowding_late_max_turnover_share_min=(
+                args.liquidity_migration_crowding_late_max_turnover_share_min
+            ),
+            liquidity_migration_crowding_late_last6h_return_min=(
+                args.liquidity_migration_crowding_late_last6h_return_min
+            ),
+            liquidity_migration_crowding_late_turnover_ratio_min=(
+                args.liquidity_migration_crowding_late_turnover_ratio_min
+            ),
+            liquidity_migration_crowding_weak_market_pct_up_max=(
+                args.liquidity_migration_crowding_weak_market_pct_up_max
+            ),
+            liquidity_migration_crowding_weak_avg_turnover_share_min=(
+                args.liquidity_migration_crowding_weak_avg_turnover_share_min
+            ),
             market_median_return_1d_min=args.market_median_return_1d_min,
             market_median_return_1d_max=args.market_median_return_1d_max,
+            market_pct_up_1d_min=args.market_pct_up_1d_min,
             market_pct_up_1d_max=args.market_pct_up_1d_max,
             btc_return_1d_min=args.btc_return_1d_min,
             btc_return_1d_max=args.btc_return_1d_max,
             stop_pressure_window_days=args.stop_pressure_window_days,
             stop_pressure_stop_count=args.stop_pressure_stop_count,
+            realized_loss_pressure_window_days=args.realized_loss_pressure_window_days,
+            realized_loss_pressure_loss_count=args.realized_loss_pressure_loss_count,
+            realized_loss_pressure_min_loss_abs=args.realized_loss_pressure_min_loss_abs,
             exhaustion_min_day_return=args.exhaustion_min_day_return,
             selloff_exhaustion_min_abs_day_return=args.selloff_exhaustion_min_abs_day_return,
             absorption_max_abs_day_return=args.absorption_max_abs_day_return,
             dryup_prior_volume_rank_max=args.dryup_prior_volume_rank_max,
             dryup_prior_abs_day_return_max=args.dryup_prior_abs_day_return_max,
+            top_volume_rank_max=args.top_volume_rank_max,
+            top_volume_prior_rank_min=args.top_volume_prior_rank_min,
+            top_volume_min_age_days=args.top_volume_min_age_days,
+            top_volume_turnover_ratio_min=args.top_volume_turnover_ratio_min,
+            top_volume_day_return_min=args.top_volume_day_return_min,
+            top_volume_residual_return_min=args.top_volume_residual_return_min,
+            top_volume_close_position_min=args.top_volume_close_position_min,
+            leadership_pullback_rank_max=args.leadership_pullback_rank_max,
+            leadership_pullback_min_age_days=args.leadership_pullback_min_age_days,
+            leadership_pullback_prior7_return_min=args.leadership_pullback_prior7_return_min,
+            leadership_pullback_prior7_return_max=args.leadership_pullback_prior7_return_max,
+            leadership_pullback_day_return_min=args.leadership_pullback_day_return_min,
+            leadership_pullback_day_return_max=args.leadership_pullback_day_return_max,
+            leadership_pullback_residual_return_min=args.leadership_pullback_residual_return_min,
+            leadership_pullback_close_position_min=args.leadership_pullback_close_position_min,
+            leadership_pullback_abs_day_return_max=args.leadership_pullback_abs_day_return_max,
+            shelf_reclaim_min_age_days=args.shelf_reclaim_min_age_days,
+            shelf_reclaim_prior7_volume_rank_max=args.shelf_reclaim_prior7_volume_rank_max,
+            shelf_reclaim_prior7_abs_return_mean_max=args.shelf_reclaim_prior7_abs_return_mean_max,
+            shelf_reclaim_day_return_min=args.shelf_reclaim_day_return_min,
+            shelf_reclaim_day_return_max=args.shelf_reclaim_day_return_max,
+            shelf_reclaim_residual_return_min=args.shelf_reclaim_residual_return_min,
+            shelf_reclaim_close_position_min=args.shelf_reclaim_close_position_min,
+            shelf_reclaim_close_vs_prior20_high_min=args.shelf_reclaim_close_vs_prior20_high_min,
+            shelf_reclaim_close_vs_prior20_high_max=args.shelf_reclaim_close_vs_prior20_high_max,
+            long_reclaim_day_return_min=args.long_reclaim_day_return_min,
+            long_reclaim_residual_return_min=args.long_reclaim_residual_return_min,
+            long_reclaim_close_position_min=args.long_reclaim_close_position_min,
+            long_reclaim_prior7_abs_return_mean_max=args.long_reclaim_prior7_abs_return_mean_max,
+            long_breakout_prior20_high_buffer_min=args.long_breakout_prior20_high_buffer_min,
+            long_breakout_prior20_high_buffer_max=args.long_breakout_prior20_high_buffer_max,
+            capitulation_reclaim_prior7_return_max=args.capitulation_reclaim_prior7_return_max,
+            capitulation_reclaim_prior20_drawdown_max=args.capitulation_reclaim_prior20_drawdown_max,
+            capitulation_reclaim_close_vs_prior20_high_max=args.capitulation_reclaim_close_vs_prior20_high_max,
             exclude_symbols=_csv_str(args.exclude_symbols, VolumeEventResearchConfig().exclude_symbols),
         )
         payload = run_volume_event_research(

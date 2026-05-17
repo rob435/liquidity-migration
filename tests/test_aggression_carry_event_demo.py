@@ -6,6 +6,7 @@ import pytest
 from aggression_carry.cli import build_parser
 from aggression_carry.event_demo import (
     EventDemoCycleConfig,
+    _demo_event_config,
     _validate_demo_config,
     build_ledger_position_pnl_snapshot,
     build_position_pnl_snapshot,
@@ -30,13 +31,13 @@ def test_event_demo_cli_defaults_to_frequent_demo_forward_cycle() -> None:
     assert args.universe_max_symbols == 220
     assert args.max_order_notional_pct_equity == 0.0
     assert args.max_entry_lag_minutes == 15
-    assert args.max_new_entries_per_cycle == 6
+    assert args.max_new_entries_per_cycle == 5
     assert args.submit_orders is False
     assert args.confirm_demo_orders is False
 
 
 def test_event_demo_default_sizing_matches_backtest_weight() -> None:
-    assert target_order_notional_pct_equity(EventDemoCycleConfig(), VolumeEventResearchConfig()) == 1.25 / 6.0
+    assert target_order_notional_pct_equity(EventDemoCycleConfig(), VolumeEventResearchConfig()) == 0.97 / 5.0
     assert (
         target_order_notional_pct_equity(
             EventDemoCycleConfig(max_order_notional_pct_equity=0.10),
@@ -44,6 +45,28 @@ def test_event_demo_default_sizing_matches_backtest_weight() -> None:
         )
         == 0.10
     )
+
+
+def test_demo_event_config_promotes_union_strategy() -> None:
+    config = _demo_event_config(VolumeEventResearchConfig())
+
+    assert config.require_pit_membership is False
+    assert config.require_full_pit_universe is False
+    assert config.thresholds == (0.40,)
+    assert config.take_profit_pcts == (0.25,)
+    assert config.gross_exposure == 0.97
+    assert config.max_active_symbols == 5
+    assert config.liquidity_migration_market_pct_up_max == 0.65
+    assert config.liquidity_migration_hot_market_day_return_min == 0.16
+    assert config.liquidity_migration_hot_market_day_return_band == 0.015
+    assert config.liquidity_migration_close_location_min == 0.45
+    assert config.liquidity_migration_pit_age_days_min == 90
+    assert config.liquidity_migration_crowding_filter == "union_pathology"
+    assert config.stop_pressure_window_days == 10
+    assert config.stop_pressure_stop_count == 7
+    assert config.realized_loss_pressure_window_days == 5
+    assert config.realized_loss_pressure_loss_count == 6
+    assert target_order_notional_pct_equity(EventDemoCycleConfig(), config) == 0.97 / 5.0
 
 
 def test_wallet_equity_usdt_prefers_total_equity_then_coin_equity() -> None:
@@ -197,7 +220,15 @@ def test_select_demo_entry_candidates_uses_selected_liquidity_migration_filters(
         cost_multiplier=3.0,
         take_profit_pct=0.20,
     )
-    config = VolumeEventResearchConfig(require_pit_membership=False, require_full_pit_universe=False)
+    config = VolumeEventResearchConfig(
+        require_pit_membership=False,
+        require_full_pit_universe=False,
+        liquidity_migration_crowding_filter="none",
+        liquidity_migration_market_pct_up_max=1.0,
+        liquidity_migration_hot_market_day_return_min=10.0,
+        liquidity_migration_close_location_min=0.0,
+        liquidity_migration_pit_age_days_min=0,
+    )
     features = pl.DataFrame(
         [
             {
@@ -248,6 +279,76 @@ def test_select_demo_entry_candidates_uses_selected_liquidity_migration_filters(
     assert candidates[0]["stop_loss_pct"] == 0.12
     assert candidates[0]["take_profit_pct"] == 0.20
     assert skips["not_ready"] == 0
+
+
+def test_select_demo_entry_candidates_respects_realized_loss_pressure() -> None:
+    signal_ts = 1_700_000_000_000
+    scenario = EventScenario(
+        event_type="liquidity_migration",
+        threshold=0.30,
+        side_hypothesis="reversal",
+        hold_days=3,
+        stop_loss_pct=0.12,
+        cost_multiplier=3.0,
+        take_profit_pct=0.20,
+    )
+    config = VolumeEventResearchConfig(
+        require_pit_membership=False,
+        require_full_pit_universe=False,
+        liquidity_migration_crowding_filter="none",
+        liquidity_migration_market_pct_up_max=1.0,
+        liquidity_migration_hot_market_day_return_min=10.0,
+        liquidity_migration_close_location_min=0.0,
+        liquidity_migration_pit_age_days_min=0,
+        realized_loss_pressure_window_days=5,
+        realized_loss_pressure_loss_count=1,
+        realized_loss_pressure_min_loss_abs=0.0,
+    )
+    features = pl.DataFrame(
+        [
+            {
+                "ts_ms": signal_ts,
+                "symbol": "AAAUSDT",
+                "dollar_volume_rank_z": 2.0,
+                "dollar_volume_rank_z_rank_frac": 0.85,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 50,
+                "prior7_liquidity_rank": 225,
+                "turnover_quote": 7_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "daily_return_1d": 0.02,
+                "residual_return_1d": 0.09,
+                "market_pct_up_1d": 0.55,
+                "tradable_membership_flag": False,
+            }
+        ]
+    )
+    closed_loss = pl.DataFrame(
+        [
+            {
+                "trade_id": "old",
+                "symbol": "OLDUSDT",
+                "side": "short",
+                "status": "closed",
+                "entry_price": 100.0,
+                "exit_price": 101.0,
+                "exit_ts_ms": signal_ts - MS_PER_HOUR,
+            }
+        ]
+    )
+
+    candidates, skips = select_demo_entry_candidates(
+        features,
+        closed_loss,
+        now_ms=signal_ts + MS_PER_HOUR + 5 * 60_000,
+        config=config,
+        scenario=scenario,
+        max_entry_lag_minutes=180,
+        max_new_entries=5,
+    )
+
+    assert candidates == []
+    assert skips["realized_loss_pressure"] == 1
 
 
 def test_plan_demo_exits_detects_rank_decay_before_max_hold() -> None:

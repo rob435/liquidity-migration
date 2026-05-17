@@ -29,7 +29,7 @@ python -m aggression_carry \
 ```text
 event: liquidity_migration
 side: reversal / short
-threshold: top 30% dollar-volume rank migration
+threshold: top 40% dollar-volume rank migration
 PIT liquidity rank: 31-150
 excluded: stable/peg perps only, including failed peg remnants such as USTCUSDT
 rank improvement: >= 150 versus prior 7d liquidity rank
@@ -38,23 +38,43 @@ event rank fraction cap: <= 0.90
 event rank middle-band skip: disabled
 coin day-return gate: daily_return_1d >= 0%
 idiosyncratic move gate: daily_return_1d - market_median_return_1d >= +8%
-regime gate: market_pct_up_1d <= 0.55 OR coin daily_return_1d >= +20%
+regime gate: market_pct_up_1d <= 0.65 OR coin daily_return_1d clears the adaptive 16% +/- 1.5% hot-market band
+strong-close gate: signal-day close location >= 0.45
+PIT/listing age gate: >= 90 days
+crowding veto: union_pathology same-entry-hour pathology filter
 entry delay: 1 hour after daily signal close
 max hold: 3 days
 stop: 12% fixed
-take profit: 20% fixed
-gross exposure: 1.25
-max active symbols: 6
+take profit: 25% fixed
+gross exposure: 0.97
+max active symbols: 5
 symbol cooldown: 5 days
-stop-pressure throttle: pause after 12 realized stops inside 14 days
+stop-pressure throttle: pause after 7 realized stops inside 10 days
+realized-loss throttle: pause after 6 realized losses inside 5 days
 cost multiplier: 3x base round-trip cost
 ```
 
 The strategy is short-only because the best full-PIT evidence is in reversal after liquidity migration. Long continuation is not promoted unless a fresh full-PIT run clears costs, splits, drawdown, and report gates.
 
+Current research frontier:
+
+```text
+data/research_reports/frontier_union_crowding_promoted_20260517
+```
+
+This is the adaptive hot-band liquidity-migration short with the `union_pathology`
+same-hour crowding veto. It replaces the rejected March-specific crowding patch
+as the active research and demo-default strategy, with +1950.72% total return, -10.74% max drawdown,
+-4.64% worst 90d, +113.73% worst split, average split Sharpe-like 3.72, and
++177.58% OOS over the full-PIT no-funding research root.
+
+Risk note: this was promoted into demo defaults on 2026-05-17 by explicit user
+decision without waiting for a paper shadow cycle. That is acceptable only
+because the client is demo-only. It is not real-money evidence.
+
 ## Reference Evidence
 
-Promoted full-PIT report after the hold/exit frontier confirmation:
+Legacy full-PIT baseline before the union crowding promotion:
 
 ```text
 data/research_reports/research_20260516_promoted_default_after_patch
@@ -117,8 +137,8 @@ The runner loops every `INTERVAL_SECONDS=60` by default. Each cycle:
 2. Excludes only stable/peg perps, including failed peg remnants such as USTCUSDT, before ranks/features are built.
 3. Rebuilds recent 1h volume features from a 45-day lookback.
 4. Exits existing demo positions first on fixed-stop/take-profit reconciliation, event decay, rank exit, or 3-day max hold.
-5. Enters accepted liquidity-migration events after the 1-hour signal delay, subject to max-active, cooldown, stop-pressure, positive-day-return, residual-return, and stale-entry gates. Stale entries are skipped after 15 minutes by default so demo fills stay close to the backtest entry timestamp.
-6. Sizes each accepted coin from the same weight used by the backtest: `gross_exposure / max_active_symbols`, currently `1.25 / 6 = 20.83%` of current Bybit demo USDT equity. `--max-order-notional-pct-equity` is only an explicit override. The continuous runner defaults entry leverage to 2x so the 125% gross target can be submitted without changing notional sizing.
+5. Enters accepted liquidity-migration events after the 1-hour signal delay, subject to max-active, cooldown, stop-pressure, realized-loss-pressure, positive-day-return, residual-return, hot-band regime, close-location, listing-age, union crowding, and stale-entry gates. Stale entries are skipped after 15 minutes by default so demo fills stay close to the backtest entry timestamp.
+6. Sizes each accepted coin from the same weight used by the backtest: `gross_exposure / max_active_symbols`, currently `0.97 / 5 = 19.40%` of current Bybit demo USDT equity. `--max-order-notional-pct-equity` is only an explicit override. The continuous runner defaults entry leverage to 2x for margin headroom without changing notional sizing.
 7. Sends Telegram status with wallet equity, Bybit demo open positions, position value, and unrealized PnL when Telegram is enabled.
 8. Writes expected/submitted order state into `event_demo_orders`, trade state into `event_demo_trades`, cycle telemetry into `event_demo_cycles`, and Markdown/JSON reports under `reports/event-demo`.
 

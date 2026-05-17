@@ -62,6 +62,8 @@ class TradeLifecycleConfig:
     min_stop_loss_pct: float = 0.0
     max_stop_loss_pct: float = 0.0
     take_profit_pct: float = 0.0
+    mfe_giveback_trigger_pct: float = 0.0
+    mfe_giveback_retain_pct: float = 0.0
     min_symbols: int = 4
     cost_multiplier: float = 1.0
     side_mode: str = "long_high_short_low"

@@ -44,9 +44,15 @@ EVENT_TYPES = (
     "volume_absorption",
     "dryup_reacceleration",
     "liquidity_migration",
+    "top_volume_leadership",
+    "orderly_leadership_pullback",
+    "volume_shelf_reclaim",
+    "reclaim_breakout",
+    "capitulation_reclaim",
     "selloff_exhaustion",
 )
 SIDE_HYPOTHESES = ("continuation", "reversal")
+LIQUIDITY_MIGRATION_CROWDING_FILTERS = ("none", "union_pathology")
 SPLITS = (
     ("train_2023_2024", "2023-05-03", "2024-05-03"),
     ("validation_2024_2025", "2024-05-03", "2025-05-03"),
@@ -57,17 +63,19 @@ SPLITS = (
 @dataclass(frozen=True, slots=True)
 class VolumeEventResearchConfig:
     event_types: tuple[str, ...] = ("liquidity_migration",)
-    thresholds: tuple[float, ...] = (0.30,)
+    thresholds: tuple[float, ...] = (0.40,)
     hold_days: tuple[int, ...] = (3,)
     side_hypotheses: tuple[str, ...] = ("reversal",)
     stop_loss_pcts: tuple[float, ...] = (0.12,)
-    take_profit_pcts: tuple[float, ...] = (0.20,)
+    take_profit_pcts: tuple[float, ...] = (0.25,)
     cost_multipliers: tuple[float, ...] = (3.0,)
+    mfe_giveback_trigger_pct: float = 0.0
+    mfe_giveback_retain_pct: float = 0.0
     start_date: str = ""
     end_date: str = ""
     entry_delay_hours: int = 1
-    gross_exposure: float = 1.25
-    max_active_symbols: int = 6
+    gross_exposure: float = 0.97
+    max_active_symbols: int = 5
     cooldown_days: int = 5
     rank_exit_threshold: float = 0.55
     require_pit_membership: bool = True
@@ -90,20 +98,73 @@ class VolumeEventResearchConfig:
     liquidity_migration_day_return_max: float = 10.0
     liquidity_migration_residual_return_min: float = 0.08
     liquidity_migration_residual_return_max: float = 10.0
-    liquidity_migration_market_pct_up_max: float = 0.55
-    liquidity_migration_hot_market_day_return_min: float = 0.20
+    liquidity_migration_market_pct_up_max: float = 0.65
+    liquidity_migration_hot_market_day_return_min: float = 0.16
+    liquidity_migration_hot_market_day_return_band: float = 0.015
+    liquidity_migration_close_location_min: float = 0.45
+    liquidity_migration_close_location_max: float = 1.0
+    liquidity_migration_pit_age_days_min: int = 90
+    liquidity_migration_pit_age_days_max: int = 0
+    liquidity_migration_crowding_filter: str = "union_pathology"
+    liquidity_migration_crowding_min_signals: int = 2
+    liquidity_migration_crowding_stalled_last6h_return_max: float = 0.03
+    liquidity_migration_crowding_stalled_close_location_min: float = 0.65
+    liquidity_migration_crowding_stalled_turnover_ratio_max: float = 20.0
+    liquidity_migration_crowding_late_max_turnover_share_min: float = 0.90
+    liquidity_migration_crowding_late_last6h_return_min: float = 0.03
+    liquidity_migration_crowding_late_turnover_ratio_min: float = 12.0
+    liquidity_migration_crowding_weak_market_pct_up_max: float = 0.65
+    liquidity_migration_crowding_weak_avg_turnover_share_min: float = 0.50
     market_median_return_1d_min: float = -1.0
     market_median_return_1d_max: float = 1.0
+    market_pct_up_1d_min: float = 0.0
     market_pct_up_1d_max: float = 1.0
     btc_return_1d_min: float = -1.0
     btc_return_1d_max: float = 1.0
-    stop_pressure_window_days: int = 14
-    stop_pressure_stop_count: int = 12
+    stop_pressure_window_days: int = 10
+    stop_pressure_stop_count: int = 7
+    realized_loss_pressure_window_days: int = 5
+    realized_loss_pressure_loss_count: int = 6
+    realized_loss_pressure_min_loss_abs: float = 0.0
     exhaustion_min_day_return: float = 0.03
     selloff_exhaustion_min_abs_day_return: float = 0.03
     absorption_max_abs_day_return: float = 0.015
     dryup_prior_volume_rank_max: float = 0.35
     dryup_prior_abs_day_return_max: float = 0.02
+    top_volume_rank_max: int = 30
+    top_volume_prior_rank_min: int = 31
+    top_volume_min_age_days: int = 30
+    top_volume_turnover_ratio_min: float = 1.25
+    top_volume_day_return_min: float = 0.0
+    top_volume_residual_return_min: float = -1.0
+    top_volume_close_position_min: float = 0.0
+    leadership_pullback_rank_max: int = 80
+    leadership_pullback_min_age_days: int = 120
+    leadership_pullback_prior7_return_min: float = 0.08
+    leadership_pullback_prior7_return_max: float = 0.80
+    leadership_pullback_day_return_min: float = -0.06
+    leadership_pullback_day_return_max: float = 0.08
+    leadership_pullback_residual_return_min: float = -0.02
+    leadership_pullback_close_position_min: float = 0.55
+    leadership_pullback_abs_day_return_max: float = 0.12
+    shelf_reclaim_min_age_days: int = 90
+    shelf_reclaim_prior7_volume_rank_max: float = 0.55
+    shelf_reclaim_prior7_abs_return_mean_max: float = 0.035
+    shelf_reclaim_day_return_min: float = 0.02
+    shelf_reclaim_day_return_max: float = 0.18
+    shelf_reclaim_residual_return_min: float = 0.01
+    shelf_reclaim_close_position_min: float = 0.70
+    shelf_reclaim_close_vs_prior20_high_min: float = -0.08
+    shelf_reclaim_close_vs_prior20_high_max: float = 0.15
+    long_reclaim_day_return_min: float = 0.02
+    long_reclaim_residual_return_min: float = 0.03
+    long_reclaim_close_position_min: float = 0.70
+    long_reclaim_prior7_abs_return_mean_max: float = 0.045
+    long_breakout_prior20_high_buffer_min: float = -0.025
+    long_breakout_prior20_high_buffer_max: float = 0.35
+    capitulation_reclaim_prior7_return_max: float = -0.08
+    capitulation_reclaim_prior20_drawdown_max: float = -0.10
+    capitulation_reclaim_close_vs_prior20_high_max: float = -0.04
     exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
     promotion_max_drawdown: float = -0.35
     promotion_min_avg_sharpe: float = 0.50
@@ -300,6 +361,8 @@ def _run_event_scenario(
         stop_mode="none" if scenario.stop_loss_pct <= 0.0 else "fixed",
         stop_loss_pct=max(scenario.stop_loss_pct, 0.0),
         take_profit_pct=max(scenario.take_profit_pct, 0.0),
+        mfe_giveback_trigger_pct=config.mfe_giveback_trigger_pct,
+        mfe_giveback_retain_pct=config.mfe_giveback_retain_pct,
         min_symbols=4,
         cost_multiplier=scenario.cost_multiplier,
         side_mode=side_mode,
@@ -323,8 +386,10 @@ def _run_event_scenario(
     skipped_cooldown = 0
     skipped_capacity = 0
     skipped_stop_pressure = 0
+    skipped_realized_loss_pressure = 0
     skipped_no_entry = 0
     stop_exit_ts_ms: list[int] = []
+    realized_loss_exit_ts_ms: list[int] = []
     notional_weight = config.gross_exposure / max(config.max_active_symbols, 1)
     round_trip_cost_bps = base_cost_bps * scenario.cost_multiplier
 
@@ -333,6 +398,9 @@ def _run_event_scenario(
         active_until = {symbol: exit_ts for symbol, exit_ts in active_until.items() if exit_ts > signal_ts_ms}
         if _stop_pressure_active(stop_exit_ts_ms, signal_ts_ms=signal_ts_ms, config=config):
             skipped_stop_pressure += 1
+            continue
+        if _realized_loss_pressure_active(realized_loss_exit_ts_ms, signal_ts_ms=signal_ts_ms, config=config):
+            skipped_realized_loss_pressure += 1
             continue
         symbol = str(event["symbol"])
         if active_until.get(symbol, 0) > signal_ts_ms:
@@ -390,6 +458,17 @@ def _run_event_scenario(
                 "market_median_return_1d": _float_or_nan(event.get("market_median_return_1d")),
                 "market_pct_up_1d": _float_or_nan(event.get("market_pct_up_1d")),
                 "btc_return_1d": _float_or_nan(event.get("btc_return_1d")),
+                "signal_day_close_location": _float_or_nan(event.get("signal_day_close_location")),
+                "signal_day_last6h_return": _float_or_nan(event.get("signal_day_last6h_return")),
+                "signal_day_last6h_turnover_share": _float_or_nan(event.get("signal_day_last6h_turnover_share")),
+                "signal_day_range_pct": _float_or_nan(event.get("signal_day_range_pct")),
+                "close_position_1d": _float_or_nan(event.get("close_position_1d")),
+                "close_vs_prior20_high": _float_or_nan(event.get("close_vs_prior20_high")),
+                "prior7_return": _float_or_nan(event.get("prior7_return")),
+                "prior14_return": _float_or_nan(event.get("prior14_return")),
+                "prior20_drawdown": _float_or_nan(event.get("prior20_drawdown")),
+                "symbol_age_days": int(event.get("symbol_age_days", 0) or 0),
+                "pit_age_days": _float_or_nan(event.get("pit_age_days")),
                 "liquidity_migration_turnover_ratio": _safe_ratio(
                     event.get("turnover_quote"),
                     event.get("prior7_turnover_quote_mean"),
@@ -400,6 +479,8 @@ def _run_event_scenario(
         rows.append(trade)
         if trade["exit_reason"] == "stop_loss":
             stop_exit_ts_ms.append(int(trade["exit_ts_ms"]))
+        if float(trade["net_return"]) <= -config.realized_loss_pressure_min_loss_abs:
+            realized_loss_exit_ts_ms.append(int(trade["exit_ts_ms"]))
         active_until[symbol] = int(trade["exit_ts_ms"])
         cooldown_until[symbol] = int(trade["exit_ts_ms"]) + config.cooldown_days * MS_PER_DAY
 
@@ -419,6 +500,8 @@ def _run_event_scenario(
         "hold_days": scenario.hold_days,
         "stop_loss_pct": scenario.stop_loss_pct,
         "take_profit_pct": scenario.take_profit_pct,
+        "mfe_giveback_trigger_pct": config.mfe_giveback_trigger_pct,
+        "mfe_giveback_retain_pct": config.mfe_giveback_retain_pct,
         "cost_multiplier": scenario.cost_multiplier,
         "candidate_events": events.height,
         "trades": trades.height,
@@ -426,6 +509,7 @@ def _run_event_scenario(
         "skipped_cooldown": skipped_cooldown,
         "skipped_capacity": skipped_capacity,
         "skipped_stop_pressure": skipped_stop_pressure,
+        "skipped_realized_loss_pressure": skipped_realized_loss_pressure,
         "skipped_no_entry": skipped_no_entry,
         **summary,
         **_promotion_fields(
@@ -474,6 +558,16 @@ def _stop_pressure_active(stop_exit_ts_ms: list[int], *, signal_ts_ms: int, conf
     cutoff = signal_ts_ms - config.stop_pressure_window_days * MS_PER_DAY
     recent_known_stops = sum(1 for ts_ms in stop_exit_ts_ms if cutoff <= ts_ms <= signal_ts_ms)
     return recent_known_stops >= config.stop_pressure_stop_count
+
+
+def _realized_loss_pressure_active(
+    realized_loss_exit_ts_ms: list[int], *, signal_ts_ms: int, config: VolumeEventResearchConfig
+) -> bool:
+    if config.realized_loss_pressure_window_days <= 0 or config.realized_loss_pressure_loss_count <= 0:
+        return False
+    cutoff = signal_ts_ms - config.realized_loss_pressure_window_days * MS_PER_DAY
+    recent_known_losses = sum(1 for ts_ms in realized_loss_exit_ts_ms if cutoff <= ts_ms <= signal_ts_ms)
+    return recent_known_losses >= config.realized_loss_pressure_loss_count
 
 
 def _score_name_for_column(score_col: str) -> str:
@@ -555,6 +649,17 @@ def _simulate_indexed_trade(
             exit_price = take_profit_price
             exit_ts_ms = int(bar["bar_end_ts_ms"])
             exit_reason = "take_profit"
+            break
+        close_return = _side_return(entry_price, float(bar["close"]), side=side)
+        if (
+            config.mfe_giveback_trigger_pct > 0.0
+            and config.mfe_giveback_retain_pct > 0.0
+            and mfe >= config.mfe_giveback_trigger_pct
+            and close_return <= mfe * config.mfe_giveback_retain_pct
+        ):
+            exit_price = float(bar["close"])
+            exit_ts_ms = int(bar["bar_end_ts_ms"])
+            exit_reason = "mfe_giveback"
             break
         if _event_decay_exit_hit(
             symbol=symbol,
@@ -647,9 +752,87 @@ def _select_events(
     filtered = _event_filter(features, scenario.event_type, score_col=score_col, rank_col=rank_col, top_cut=top_cut, config=config)
     if filtered.is_empty():
         return filtered
+    if scenario.event_type == "liquidity_migration":
+        filtered = _apply_liquidity_migration_crowding_filter(filtered, config=config)
+        if filtered.is_empty():
+            return filtered
     return (
         filtered.sort(["ts_ms", rank_col, "turnover_quote"], descending=[False, True, True])
         .with_columns(pl.col(rank_col).rank("ordinal", descending=True).over("ts_ms").alias("event_rank"))
+    )
+
+
+def _apply_liquidity_migration_crowding_filter(events: pl.DataFrame, *, config: VolumeEventResearchConfig) -> pl.DataFrame:
+    mode = config.liquidity_migration_crowding_filter
+    if mode == "none" or events.is_empty():
+        return events
+    if mode != "union_pathology":
+        raise ValueError(f"Unknown liquidity migration crowding filter: {mode}")
+    required_cols = {
+        "ts_ms",
+        "turnover_quote",
+        "prior7_turnover_quote_mean",
+        "signal_day_close_location",
+        "signal_day_last6h_return",
+        "signal_day_last6h_turnover_share",
+        "market_pct_up_1d",
+    }
+    if not required_cols.issubset(set(events.columns)):
+        return events.head(0)
+
+    turnover_ratio = pl.col("turnover_quote") / pl.col("prior7_turnover_quote_mean")
+    annotated = (
+        events.with_columns(((pl.col("ts_ms") + config.entry_delay_hours * MS_PER_HOUR) // MS_PER_HOUR).alias("_entry_hour"))
+        .with_columns(
+            [
+                pl.len().over("_entry_hour").alias("_entry_hour_signal_count"),
+                pl.col("signal_day_last6h_return").mean().over("_entry_hour").alias("_entry_hour_avg_last6h_return"),
+                pl.col("signal_day_last6h_turnover_share")
+                .mean()
+                .over("_entry_hour")
+                .alias("_entry_hour_avg_last6h_turnover_share"),
+                pl.col("signal_day_last6h_turnover_share")
+                .max()
+                .over("_entry_hour")
+                .alias("_entry_hour_max_last6h_turnover_share"),
+            ]
+        )
+        .with_columns(turnover_ratio.alias("_liquidity_migration_turnover_ratio"))
+    )
+    crowded = pl.col("_entry_hour_signal_count") >= config.liquidity_migration_crowding_min_signals
+    stalled_low_turnover = (
+        (pl.col("_entry_hour_avg_last6h_return") <= config.liquidity_migration_crowding_stalled_last6h_return_max)
+        & (pl.col("signal_day_close_location") >= config.liquidity_migration_crowding_stalled_close_location_min)
+        & (
+            pl.col("_liquidity_migration_turnover_ratio")
+            <= config.liquidity_migration_crowding_stalled_turnover_ratio_max
+        )
+    )
+    late_concentration = (
+        (
+            pl.col("_entry_hour_max_last6h_turnover_share")
+            >= config.liquidity_migration_crowding_late_max_turnover_share_min
+        )
+        & (pl.col("signal_day_last6h_return") >= config.liquidity_migration_crowding_late_last6h_return_min)
+        & (pl.col("_liquidity_migration_turnover_ratio") >= config.liquidity_migration_crowding_late_turnover_ratio_min)
+    )
+    weak_tape_high_share = (
+        (pl.col("market_pct_up_1d") <= config.liquidity_migration_crowding_weak_market_pct_up_max)
+        & (
+            pl.col("_entry_hour_avg_last6h_turnover_share")
+            >= config.liquidity_migration_crowding_weak_avg_turnover_share_min
+        )
+    )
+    veto = crowded & (stalled_low_turnover | late_concentration | weak_tape_high_share)
+    return annotated.filter(~veto).drop(
+        [
+            "_entry_hour",
+            "_entry_hour_signal_count",
+            "_entry_hour_avg_last6h_return",
+            "_entry_hour_avg_last6h_turnover_share",
+            "_entry_hour_max_last6h_turnover_share",
+            "_liquidity_migration_turnover_ratio",
+        ]
     )
 
 
@@ -670,10 +853,11 @@ def _event_filter(
         base = base.filter(pl.col("tradable_membership_flag"))
     if config.universe_min_daily_turnover > 0.0:
         base = base.filter(pl.col("turnover_quote") >= config.universe_min_daily_turnover)
-    if config.universe_rank_min > 1:
-        base = base.filter(pl.col("liquidity_rank") >= config.universe_rank_min)
-    if config.universe_rank_max > 0:
-        base = base.filter(pl.col("liquidity_rank") <= config.universe_rank_max)
+    if event_type != "top_volume_leadership":
+        if config.universe_rank_min > 1:
+            base = base.filter(pl.col("liquidity_rank") >= config.universe_rank_min)
+        if config.universe_rank_max > 0:
+            base = base.filter(pl.col("liquidity_rank") <= config.universe_rank_max)
     base = _apply_market_context_filters(base, config)
     if event_type == "fresh_volume_spike":
         return base.filter((pl.col(rank_col) >= top_cut) & (pl.col(f"prior_{rank_col}") < top_cut))
@@ -713,6 +897,124 @@ def _event_filter(
             & (pl.col("prior7_volume_persistence_rank_max") <= config.dryup_prior_volume_rank_max)
             & (pl.col("prior7_abs_daily_return_mean") <= config.dryup_prior_abs_day_return_max)
         )
+    if event_type == "top_volume_leadership":
+        required_cols = ["prior7_liquidity_rank", "prior7_turnover_quote_mean", "symbol_age_days", f"prior7_{rank_col}"]
+        if config.top_volume_day_return_min > -1.0:
+            required_cols.append("daily_return_1d")
+        if config.top_volume_residual_return_min > -1.0:
+            required_cols.append("residual_return_1d")
+        if config.top_volume_close_position_min > 0.0:
+            required_cols.append("close_position_1d")
+        if not _has_columns(base, *required_cols):
+            return base.head(0)
+        predicate = (
+            (pl.col("liquidity_rank") <= config.top_volume_rank_max)
+            & (pl.col("symbol_age_days") >= config.top_volume_min_age_days)
+            & (pl.col(rank_col) >= top_cut)
+            & (pl.col(f"prior7_{rank_col}") < top_cut)
+            & (pl.col("prior7_liquidity_rank") >= config.top_volume_prior_rank_min)
+            & (pl.col("prior7_turnover_quote_mean") > 0.0)
+            & ((pl.col("turnover_quote") / pl.col("prior7_turnover_quote_mean")) >= config.top_volume_turnover_ratio_min)
+        )
+        if config.top_volume_day_return_min > -1.0:
+            predicate = predicate & (pl.col("daily_return_1d") >= config.top_volume_day_return_min)
+        if config.top_volume_residual_return_min > -1.0:
+            predicate = predicate & (pl.col("residual_return_1d") >= config.top_volume_residual_return_min)
+        if config.top_volume_close_position_min > 0.0:
+            predicate = predicate & (pl.col("close_position_1d") >= config.top_volume_close_position_min)
+        return base.filter(predicate)
+    if event_type == "orderly_leadership_pullback":
+        required_cols = [
+            "symbol_age_days",
+            "volume_persistence_z_rank_frac",
+            "daily_return_1d",
+            "abs_daily_return_1d",
+            "residual_return_1d",
+            "close_position_1d",
+            "prior7_return",
+        ]
+        if not _has_columns(base, *required_cols):
+            return base.head(0)
+        return base.filter(
+            (pl.col(rank_col) >= top_cut)
+            & (pl.col("liquidity_rank") <= config.leadership_pullback_rank_max)
+            & (pl.col("symbol_age_days") >= config.leadership_pullback_min_age_days)
+            & (pl.col("volume_persistence_z_rank_frac") >= top_cut)
+            & (pl.col("prior7_return") >= config.leadership_pullback_prior7_return_min)
+            & (pl.col("prior7_return") <= config.leadership_pullback_prior7_return_max)
+            & (pl.col("daily_return_1d") >= config.leadership_pullback_day_return_min)
+            & (pl.col("daily_return_1d") <= config.leadership_pullback_day_return_max)
+            & (pl.col("abs_daily_return_1d") <= config.leadership_pullback_abs_day_return_max)
+            & (pl.col("residual_return_1d") >= config.leadership_pullback_residual_return_min)
+            & (pl.col("close_position_1d") >= config.leadership_pullback_close_position_min)
+        )
+    if event_type == "volume_shelf_reclaim":
+        required_cols = [
+            "symbol_age_days",
+            "prior7_volume_persistence_rank_max",
+            "prior7_abs_daily_return_mean",
+            "daily_return_1d",
+            "residual_return_1d",
+            "close_position_1d",
+            "close_vs_prior20_high",
+        ]
+        if not _has_columns(base, *required_cols):
+            return base.head(0)
+        return base.filter(
+            (pl.col(rank_col) >= top_cut)
+            & (pl.col("symbol_age_days") >= config.shelf_reclaim_min_age_days)
+            & (pl.col("prior7_volume_persistence_rank_max") <= config.shelf_reclaim_prior7_volume_rank_max)
+            & (pl.col("prior7_abs_daily_return_mean") <= config.shelf_reclaim_prior7_abs_return_mean_max)
+            & (pl.col("daily_return_1d") >= config.shelf_reclaim_day_return_min)
+            & (pl.col("daily_return_1d") <= config.shelf_reclaim_day_return_max)
+            & (pl.col("residual_return_1d") >= config.shelf_reclaim_residual_return_min)
+            & (pl.col("close_position_1d") >= config.shelf_reclaim_close_position_min)
+            & (pl.col("close_vs_prior20_high") >= config.shelf_reclaim_close_vs_prior20_high_min)
+            & (pl.col("close_vs_prior20_high") <= config.shelf_reclaim_close_vs_prior20_high_max)
+        )
+    if event_type == "reclaim_breakout":
+        required_cols = [
+            f"prior_{rank_col}",
+            "daily_return_1d",
+            "residual_return_1d",
+            "close_position_1d",
+            "close_vs_prior20_high",
+            "prior7_abs_daily_return_mean",
+        ]
+        if not _has_columns(base, *required_cols):
+            return base.head(0)
+        return base.filter(
+            (pl.col(rank_col) >= top_cut)
+            & (pl.col(f"prior_{rank_col}") < top_cut)
+            & (pl.col("daily_return_1d") >= config.long_reclaim_day_return_min)
+            & (pl.col("residual_return_1d") >= config.long_reclaim_residual_return_min)
+            & (pl.col("close_position_1d") >= config.long_reclaim_close_position_min)
+            & (pl.col("close_vs_prior20_high") >= config.long_breakout_prior20_high_buffer_min)
+            & (pl.col("close_vs_prior20_high") <= config.long_breakout_prior20_high_buffer_max)
+            & (pl.col("prior7_abs_daily_return_mean") <= config.long_reclaim_prior7_abs_return_mean_max)
+        )
+    if event_type == "capitulation_reclaim":
+        required_cols = [
+            f"prior_{rank_col}",
+            "daily_return_1d",
+            "residual_return_1d",
+            "close_position_1d",
+            "close_vs_prior20_high",
+            "prior7_return",
+            "prior20_drawdown",
+        ]
+        if not _has_columns(base, *required_cols):
+            return base.head(0)
+        return base.filter(
+            (pl.col(rank_col) >= top_cut)
+            & (pl.col(f"prior_{rank_col}") < top_cut)
+            & (pl.col("daily_return_1d") >= config.long_reclaim_day_return_min)
+            & (pl.col("residual_return_1d") >= config.long_reclaim_residual_return_min)
+            & (pl.col("close_position_1d") >= config.long_reclaim_close_position_min)
+            & (pl.col("prior7_return") <= config.capitulation_reclaim_prior7_return_max)
+            & (pl.col("prior20_drawdown") <= config.capitulation_reclaim_prior20_drawdown_max)
+            & (pl.col("close_vs_prior20_high") <= config.capitulation_reclaim_close_vs_prior20_high_max)
+        )
     if event_type == "liquidity_migration":
         required_cols = ["prior7_liquidity_rank", f"prior7_{rank_col}"]
         if config.liquidity_migration_turnover_ratio_min > 0.0:
@@ -728,6 +1030,13 @@ def _event_filter(
             required_cols.append("market_pct_up_1d")
             if config.liquidity_migration_hot_market_day_return_min < 10.0:
                 required_cols.append("daily_return_1d")
+        if (
+            config.liquidity_migration_close_location_min > 0.0
+            or config.liquidity_migration_close_location_max < 1.0
+        ):
+            required_cols.append("signal_day_close_location")
+        if config.liquidity_migration_pit_age_days_min > 0 or config.liquidity_migration_pit_age_days_max > 0:
+            required_cols.append("pit_age_days")
         if not _has_columns(base, *required_cols):
             return base.head(0)
         predicate = (
@@ -783,11 +1092,27 @@ def _event_filter(
             )
             if config.liquidity_migration_hot_market_day_return_min < 10.0:
                 hot_coin_ok = pl.col("daily_return_1d").is_not_null() & (
-                    pl.col("daily_return_1d") >= config.liquidity_migration_hot_market_day_return_min
+                    pl.col("daily_return_1d") >= _liquidity_migration_hot_return_threshold_expr(config)
                 )
                 predicate = predicate & (market_ok | hot_coin_ok)
             else:
                 predicate = predicate & market_ok
+        if (
+            config.liquidity_migration_close_location_min > 0.0
+            or config.liquidity_migration_close_location_max < 1.0
+        ):
+            predicate = (
+                predicate
+                & pl.col("signal_day_close_location").is_not_null()
+                & (pl.col("signal_day_close_location") >= config.liquidity_migration_close_location_min)
+                & (pl.col("signal_day_close_location") <= config.liquidity_migration_close_location_max)
+            )
+        if config.liquidity_migration_pit_age_days_min > 0 or config.liquidity_migration_pit_age_days_max > 0:
+            predicate = predicate & pl.col("pit_age_days").is_not_null()
+            if config.liquidity_migration_pit_age_days_min > 0:
+                predicate = predicate & (pl.col("pit_age_days") >= float(config.liquidity_migration_pit_age_days_min))
+            if config.liquidity_migration_pit_age_days_max > 0:
+                predicate = predicate & (pl.col("pit_age_days") <= float(config.liquidity_migration_pit_age_days_max))
         return base.filter(predicate)
     if event_type == "selloff_exhaustion":
         if not _has_columns(base, "daily_return_1d", "daily_return_rank_frac"):
@@ -821,10 +1146,13 @@ def _apply_market_context_filters(frame: pl.DataFrame, config: VolumeEventResear
             (pl.col("market_median_return_1d") >= config.market_median_return_1d_min)
             & (pl.col("market_median_return_1d") <= config.market_median_return_1d_max)
         )
-    if config.market_pct_up_1d_max < 1.0:
+    if config.market_pct_up_1d_min > 0.0 or config.market_pct_up_1d_max < 1.0:
         if "market_pct_up_1d" not in output.columns:
             return output.head(0)
-        output = output.filter(pl.col("market_pct_up_1d") <= config.market_pct_up_1d_max)
+        output = output.filter(
+            (pl.col("market_pct_up_1d") >= config.market_pct_up_1d_min)
+            & (pl.col("market_pct_up_1d") <= config.market_pct_up_1d_max)
+        )
     if config.btc_return_1d_min > -1.0 or config.btc_return_1d_max < 1.0:
         if "btc_return_1d" not in output.columns:
             return output.head(0)
@@ -833,6 +1161,19 @@ def _apply_market_context_filters(frame: pl.DataFrame, config: VolumeEventResear
             & (pl.col("btc_return_1d") <= config.btc_return_1d_max)
         )
     return output
+
+
+def _liquidity_migration_hot_return_threshold_expr(config: VolumeEventResearchConfig) -> pl.Expr:
+    base = config.liquidity_migration_hot_market_day_return_min
+    band = config.liquidity_migration_hot_market_day_return_band
+    if band <= 0.0 or config.liquidity_migration_market_pct_up_max >= 1.0:
+        return pl.lit(base)
+    breadth_span = max(1.0 - config.liquidity_migration_market_pct_up_max, 1e-9)
+    hot_breadth_position = (
+        (pl.col("market_pct_up_1d") - config.liquidity_migration_market_pct_up_max).clip(0.0, breadth_span)
+        / breadth_span
+    )
+    return pl.lit(base - band) + hot_breadth_position * (2.0 * band)
 
 
 def _bottom_cut_from_top_cut(top_cut: float) -> float:
@@ -853,7 +1194,7 @@ def _event_decay_exit_hit(
 def _enriched_event_features(features: pl.DataFrame, klines: pl.DataFrame, archive_manifest: pl.DataFrame) -> pl.DataFrame:
     if features.is_empty():
         return features
-    enriched = features.join(_daily_return_frame(klines), on=["ts_ms", "symbol"], how="left")
+    enriched = features.join(_daily_context_frame(klines), on=["ts_ms", "symbol"], how="left")
     if "daily_return_1d" in enriched.columns:
         enriched = enriched.with_columns(pl.col("daily_return_1d").abs().alias("abs_daily_return_1d"))
         enriched = _attach_market_context(enriched)
@@ -869,8 +1210,22 @@ def _enriched_event_features(features: pl.DataFrame, klines: pl.DataFrame, archi
         "volume_composite": "volume_composite_rank_frac",
         "daily_return_1d": "daily_return_rank_frac",
         "abs_daily_return_1d": "abs_daily_return_rank_frac",
+        "residual_return_1d": "residual_return_rank_frac",
+        "close_position_1d": "close_position_rank_frac",
+        "close_vs_prior20_high": "close_vs_prior20_high_rank_frac",
+        "prior7_return": "prior7_return_rank_frac",
+        "prior20_drawdown": "prior20_drawdown_rank_frac",
     }
     for source, alias in rank_inputs.items():
+        if source in enriched.columns:
+            enriched = _add_rank_fraction(enriched, source, alias)
+    enriched = _add_reclaim_scores(enriched)
+    for source, alias in {
+        "reclaim_breakout_score": "reclaim_breakout_score_rank_frac",
+        "capitulation_reclaim_score": "capitulation_reclaim_score_rank_frac",
+        "orderly_leadership_pullback_score": "orderly_leadership_pullback_score_rank_frac",
+        "volume_shelf_reclaim_score": "volume_shelf_reclaim_score_rank_frac",
+    }.items():
         if source in enriched.columns:
             enriched = _add_rank_fraction(enriched, source, alias)
     shift_cols = [
@@ -878,6 +1233,10 @@ def _enriched_event_features(features: pl.DataFrame, klines: pl.DataFrame, archi
         "volume_persistence_z_rank_frac",
         "dollar_volume_rank_z_rank_frac",
         "volume_composite_rank_frac",
+        "reclaim_breakout_score_rank_frac",
+        "capitulation_reclaim_score_rank_frac",
+        "orderly_leadership_pullback_score_rank_frac",
+        "volume_shelf_reclaim_score_rank_frac",
     ]
     expressions = []
     for col in shift_cols:
@@ -915,6 +1274,91 @@ def _enriched_event_features(features: pl.DataFrame, klines: pl.DataFrame, archi
     )
 
 
+def _add_reclaim_scores(features: pl.DataFrame) -> pl.DataFrame:
+    if features.is_empty():
+        return features
+    available = set(features.columns)
+    output = []
+    volume = pl.col("volume_change_1d_z").fill_null(0.0).fill_nan(0.0)
+    persistence = pl.col("volume_persistence_z").fill_null(0.0).fill_nan(0.0)
+    dollar_volume = pl.col("dollar_volume_rank_z").fill_null(0.0).fill_nan(0.0)
+    daily = _centered_rank("daily_return_rank_frac")
+    close_position = _centered_rank("close_position_rank_frac")
+    residual = _centered_rank("residual_return_rank_frac")
+    high_reclaim = _centered_rank("close_vs_prior20_high_rank_frac")
+    prior_drawdown_depth = -_centered_rank("prior20_drawdown_rank_frac")
+    prior_weakness = -_centered_rank("prior7_return_rank_frac")
+    prior_strength = _centered_rank("prior7_return_rank_frac")
+    quiet_extension = _centered_rank("abs_daily_return_rank_frac")
+    reclaim_cols = {
+        "volume_change_1d_z",
+        "daily_return_rank_frac",
+        "close_position_rank_frac",
+        "residual_return_rank_frac",
+        "close_vs_prior20_high_rank_frac",
+        "prior7_return_rank_frac",
+        "prior20_drawdown_rank_frac",
+    }
+    if reclaim_cols.issubset(available):
+        output.extend(
+            [
+                (0.35 * volume + 0.20 * daily + 0.20 * close_position + 0.15 * residual + 0.10 * high_reclaim)
+                .clip(-3.0, 3.0)
+                .alias("reclaim_breakout_score"),
+                (
+                    0.30 * volume
+                    + 0.20 * daily
+                    + 0.20 * close_position
+                    + 0.15 * residual
+                    + 0.10 * prior_drawdown_depth
+                    + 0.05 * prior_weakness
+                )
+                .clip(-3.0, 3.0)
+                .alias("capitulation_reclaim_score"),
+            ]
+        )
+    leadership_cols = {
+        "dollar_volume_rank_z",
+        "volume_persistence_z",
+        "prior7_return_rank_frac",
+        "close_position_rank_frac",
+        "residual_return_rank_frac",
+        "abs_daily_return_rank_frac",
+    }
+    if leadership_cols.issubset(available):
+        output.append(
+            (
+                0.20 * dollar_volume
+                + 0.20 * persistence
+                + 0.20 * prior_strength
+                + 0.15 * close_position
+                + 0.15 * residual
+                - 0.10 * quiet_extension
+            )
+            .clip(-3.0, 3.0)
+            .alias("orderly_leadership_pullback_score")
+        )
+    shelf_cols = {
+        "volume_change_1d_z",
+        "volume_persistence_z",
+        "daily_return_rank_frac",
+        "close_position_rank_frac",
+        "residual_return_rank_frac",
+        "close_vs_prior20_high_rank_frac",
+    }
+    if shelf_cols.issubset(available):
+        output.append(
+            (0.35 * volume + 0.20 * daily + 0.20 * close_position + 0.15 * residual + 0.10 * high_reclaim)
+            .clip(-3.0, 3.0)
+            .alias("volume_shelf_reclaim_score")
+        )
+    return features.with_columns(output) if output else features
+
+
+def _centered_rank(column: str) -> pl.Expr:
+    return (pl.col(column).fill_null(0.5).fill_nan(0.5) - 0.5) * 2.0
+
+
 def _attach_market_context(features: pl.DataFrame) -> pl.DataFrame:
     if features.is_empty() or "daily_return_1d" not in features.columns:
         return features
@@ -938,29 +1382,132 @@ def _attach_market_context(features: pl.DataFrame) -> pl.DataFrame:
 
 def _attach_event_archive_membership(features: pl.DataFrame, archive_manifest: pl.DataFrame) -> pl.DataFrame:
     if features.is_empty():
-        return features.with_columns(pl.lit(False).alias("tradable_membership_flag"))
+        return features.with_columns(
+            [
+                pl.lit(False).alias("tradable_membership_flag"),
+                pl.lit(None, dtype=pl.Int64).alias("symbol_age_days"),
+                pl.lit(None, dtype=pl.Float64).alias("pit_age_days"),
+            ]
+        )
     frame = features
     if "date" not in frame.columns:
         frame = frame.with_columns(pl.from_epoch(pl.col("ts_ms"), time_unit="ms").dt.strftime("%Y-%m-%d").alias("date"))
     if archive_manifest.is_empty():
-        return frame.with_columns(pl.lit(False).alias("tradable_membership_flag"))
+        return frame.with_columns(
+            [
+                pl.lit(False).alias("tradable_membership_flag"),
+                pl.lit(None, dtype=pl.Int64).alias("symbol_age_days"),
+                pl.lit(None, dtype=pl.Float64).alias("pit_age_days"),
+            ]
+        )
     membership = archive_manifest.select(["symbol", "date"]).unique().with_columns(pl.lit(True).alias("tradable_membership_flag"))
-    return frame.join(membership, on=["symbol", "date"], how="left").with_columns(
-        pl.col("tradable_membership_flag").fill_null(False)
+    first_seen = archive_manifest.group_by("symbol").agg(pl.col("date").min().alias("first_manifest_date"))
+    return (
+        frame.join(membership, on=["symbol", "date"], how="left")
+        .join(first_seen, on="symbol", how="left")
+        .with_columns(
+            [
+                pl.col("tradable_membership_flag").fill_null(False),
+                (
+                    pl.col("date").str.strptime(pl.Date, "%Y-%m-%d", strict=False)
+                    - pl.col("first_manifest_date").str.strptime(pl.Date, "%Y-%m-%d", strict=False)
+                )
+                .dt.total_days()
+                .cast(pl.Int64)
+                .alias("symbol_age_days"),
+                (
+                    pl.col("date").str.strptime(pl.Date, "%Y-%m-%d", strict=False)
+                    - pl.col("first_manifest_date").str.strptime(pl.Date, "%Y-%m-%d", strict=False)
+                )
+                .dt.total_days()
+                .cast(pl.Float64)
+                .alias("pit_age_days"),
+            ]
+        )
     )
 
 
-def _daily_return_frame(klines: pl.DataFrame) -> pl.DataFrame:
+def _daily_context_frame(klines: pl.DataFrame) -> pl.DataFrame:
     daily = (
         klines.with_columns((pl.col("ts_ms") - (pl.col("ts_ms") % MS_PER_DAY)).alias("day_start_ms"))
         .sort(["symbol", "ts_ms"])
         .group_by(["symbol", "day_start_ms"], maintain_order=True)
-        .agg([pl.col("close").last().alias("close"), pl.len().alias("hourly_bars")])
+        .agg(
+            [
+                pl.col("open").first().alias("open"),
+                pl.col("high").max().alias("high"),
+                pl.col("low").min().alias("low"),
+                pl.col("close").last().alias("close"),
+                pl.col("open").tail(6).first().alias("signal_day_last6h_open"),
+                pl.col("turnover_quote").sum().alias("signal_day_turnover"),
+                pl.col("turnover_quote").tail(6).sum().alias("signal_day_last6h_turnover"),
+                pl.len().alias("hourly_bars"),
+            ]
+        )
         .filter(pl.col("hourly_bars") >= 20)
         .with_columns((pl.col("day_start_ms") + MS_PER_DAY).alias("ts_ms"))
         .sort(["symbol", "ts_ms"])
-        .with_columns((pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias("daily_return_1d"))
-        .select(["ts_ms", "symbol", "daily_return_1d"])
+        .with_columns(
+            [
+                (pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias("daily_return_1d"),
+                (pl.col("close") / pl.col("open") - 1.0).alias("daily_intraday_return_1d"),
+                (pl.col("high") / pl.col("low") - 1.0).alias("daily_range_1d"),
+                pl.when((pl.col("high") - pl.col("low")).abs() > 1e-12)
+                .then((pl.col("close") - pl.col("low")) / (pl.col("high") - pl.col("low")))
+                .otherwise(0.5)
+                .clip(0.0, 1.0)
+                .alias("close_position_1d"),
+                pl.when((pl.col("high") - pl.col("low")).abs() > 1e-12)
+                .then((pl.col("close") - pl.col("low")) / (pl.col("high") - pl.col("low")))
+                .otherwise(0.5)
+                .clip(0.0, 1.0)
+                .alias("signal_day_close_location"),
+                pl.when(pl.col("signal_day_last6h_open") > 0.0)
+                .then(pl.col("close") / pl.col("signal_day_last6h_open") - 1.0)
+                .otherwise(None)
+                .alias("signal_day_last6h_return"),
+                pl.when(pl.col("signal_day_turnover") > 0.0)
+                .then(pl.col("signal_day_last6h_turnover") / pl.col("signal_day_turnover"))
+                .otherwise(None)
+                .alias("signal_day_last6h_turnover_share"),
+                pl.when(pl.col("close") > 0.0)
+                .then((pl.col("high") - pl.col("low")) / pl.col("close"))
+                .otherwise(None)
+                .alias("signal_day_range_pct"),
+                (pl.col("close").shift(1).over("symbol") / pl.col("close").shift(8).over("symbol") - 1.0).alias("prior7_return"),
+                (pl.col("close").shift(1).over("symbol") / pl.col("close").shift(15).over("symbol") - 1.0).alias("prior14_return"),
+                pl.col("close").shift(1).rolling_max(window_size=20, min_samples=5).over("symbol").alias("prior20_close_high"),
+                pl.col("close").shift(1).rolling_min(window_size=20, min_samples=5).over("symbol").alias("prior20_close_low"),
+            ]
+        )
+        .with_columns(
+            [
+                (pl.col("close") / pl.col("prior20_close_high") - 1.0).alias("close_vs_prior20_high"),
+                (pl.col("close") / pl.col("prior20_close_low") - 1.0).alias("close_vs_prior20_low"),
+                (pl.col("close").shift(1).over("symbol") / pl.col("prior20_close_high") - 1.0).alias("prior20_drawdown"),
+            ]
+        )
+        .select(
+            [
+                "ts_ms",
+                "symbol",
+                "daily_return_1d",
+                "daily_intraday_return_1d",
+                "daily_range_1d",
+                "close_position_1d",
+                "signal_day_close_location",
+                "signal_day_last6h_return",
+                "signal_day_last6h_turnover_share",
+                "signal_day_range_pct",
+                "prior7_return",
+                "prior14_return",
+                "prior20_close_high",
+                "prior20_close_low",
+                "close_vs_prior20_high",
+                "close_vs_prior20_low",
+                "prior20_drawdown",
+            ]
+        )
     )
     return daily
 
@@ -996,8 +1543,16 @@ def _event_score(event_type: str) -> tuple[str, str]:
         return "volume_change_1d", VOLUME_SCORE_COLUMNS["volume_change_1d"]
     if event_type == "persistent_volume_breakout":
         return "volume_persistence", VOLUME_SCORE_COLUMNS["volume_persistence"]
-    if event_type in {"tail_liquidity_jump", "liquidity_migration"}:
+    if event_type in {"tail_liquidity_jump", "liquidity_migration", "top_volume_leadership"}:
         return "dollar_volume_rank", VOLUME_SCORE_COLUMNS["dollar_volume_rank"]
+    if event_type == "reclaim_breakout":
+        return "reclaim_breakout", "reclaim_breakout_score"
+    if event_type == "capitulation_reclaim":
+        return "capitulation_reclaim", "capitulation_reclaim_score"
+    if event_type == "orderly_leadership_pullback":
+        return "orderly_leadership_pullback", "orderly_leadership_pullback_score"
+    if event_type == "volume_shelf_reclaim":
+        return "volume_shelf_reclaim", "volume_shelf_reclaim_score"
     raise ValueError(f"Unknown event type: {event_type}")
 
 
@@ -1686,6 +2241,12 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("take profit pcts must be in [0, 1)")
     if any(item < 0.0 for item in config.cost_multipliers):
         raise ValueError("cost multipliers must be non-negative")
+    if config.mfe_giveback_trigger_pct < 0.0 or config.mfe_giveback_trigger_pct >= 1.0:
+        raise ValueError("mfe_giveback_trigger_pct must be in [0, 1)")
+    if not 0.0 <= config.mfe_giveback_retain_pct <= 1.0:
+        raise ValueError("mfe_giveback_retain_pct must be in [0, 1]")
+    if config.mfe_giveback_retain_pct > 0.0 and config.mfe_giveback_trigger_pct <= 0.0:
+        raise ValueError("mfe_giveback_trigger_pct must be positive when MFE giveback is enabled")
     if config.gross_exposure <= 0.0:
         raise ValueError("gross_exposure must be positive")
     if config.max_active_symbols <= 0:
@@ -1745,16 +2306,83 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("liquidity_migration_market_pct_up_max must be in [0, 1]")
     if config.liquidity_migration_hot_market_day_return_min < 0.0:
         raise ValueError("liquidity_migration_hot_market_day_return_min must be non-negative")
+    if config.liquidity_migration_hot_market_day_return_band < 0.0:
+        raise ValueError("liquidity_migration_hot_market_day_return_band must be non-negative")
+    if (
+        config.liquidity_migration_hot_market_day_return_min < 10.0
+        and config.liquidity_migration_hot_market_day_return_band
+        > config.liquidity_migration_hot_market_day_return_min
+    ):
+        raise ValueError(
+            "liquidity_migration_hot_market_day_return_band must not exceed "
+            "liquidity_migration_hot_market_day_return_min"
+        )
+    if not 0.0 <= config.liquidity_migration_close_location_min <= 1.0:
+        raise ValueError("liquidity_migration_close_location_min must be in [0, 1]")
+    if not 0.0 <= config.liquidity_migration_close_location_max <= 1.0:
+        raise ValueError("liquidity_migration_close_location_max must be in [0, 1]")
+    if config.liquidity_migration_close_location_min > config.liquidity_migration_close_location_max:
+        raise ValueError("liquidity_migration_close_location_min must be <= liquidity_migration_close_location_max")
+    if config.liquidity_migration_pit_age_days_min < 0:
+        raise ValueError("liquidity_migration_pit_age_days_min must be non-negative")
+    if config.liquidity_migration_pit_age_days_max < 0:
+        raise ValueError("liquidity_migration_pit_age_days_max must be non-negative")
+    if (
+        config.liquidity_migration_pit_age_days_max > 0
+        and config.liquidity_migration_pit_age_days_min > config.liquidity_migration_pit_age_days_max
+    ):
+        raise ValueError("liquidity_migration_pit_age_days_min must be <= liquidity_migration_pit_age_days_max")
+    if config.liquidity_migration_crowding_filter not in LIQUIDITY_MIGRATION_CROWDING_FILTERS:
+        raise ValueError(
+            "liquidity_migration_crowding_filter must be one of "
+            f"{LIQUIDITY_MIGRATION_CROWDING_FILTERS}"
+        )
+    if config.liquidity_migration_crowding_min_signals <= 0:
+        raise ValueError("liquidity_migration_crowding_min_signals must be positive")
+    if config.liquidity_migration_crowding_stalled_turnover_ratio_max < 0.0:
+        raise ValueError("liquidity_migration_crowding_stalled_turnover_ratio_max must be non-negative")
+    if config.liquidity_migration_crowding_late_turnover_ratio_min < 0.0:
+        raise ValueError("liquidity_migration_crowding_late_turnover_ratio_min must be non-negative")
+    for field_name, value in (
+        (
+            "liquidity_migration_crowding_stalled_close_location_min",
+            config.liquidity_migration_crowding_stalled_close_location_min,
+        ),
+        (
+            "liquidity_migration_crowding_late_max_turnover_share_min",
+            config.liquidity_migration_crowding_late_max_turnover_share_min,
+        ),
+        (
+            "liquidity_migration_crowding_weak_market_pct_up_max",
+            config.liquidity_migration_crowding_weak_market_pct_up_max,
+        ),
+        (
+            "liquidity_migration_crowding_weak_avg_turnover_share_min",
+            config.liquidity_migration_crowding_weak_avg_turnover_share_min,
+        ),
+    ):
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"{field_name} must be in [0, 1]")
     if config.market_median_return_1d_min > config.market_median_return_1d_max:
         raise ValueError("market_median_return_1d_min must be <= market_median_return_1d_max")
+    if not 0.0 <= config.market_pct_up_1d_min <= 1.0:
+        raise ValueError("market_pct_up_1d_min must be in [0, 1]")
     if not 0.0 <= config.market_pct_up_1d_max <= 1.0:
         raise ValueError("market_pct_up_1d_max must be in [0, 1]")
+    if config.market_pct_up_1d_min > config.market_pct_up_1d_max:
+        raise ValueError("market_pct_up_1d_min must be <= market_pct_up_1d_max")
     if config.btc_return_1d_min > config.btc_return_1d_max:
         raise ValueError("btc_return_1d_min must be <= btc_return_1d_max")
     if config.stop_pressure_window_days < 0:
         raise ValueError("stop_pressure_window_days must be non-negative")
     if config.stop_pressure_stop_count < 0:
         raise ValueError("stop_pressure_stop_count must be non-negative")
+    if config.realized_loss_pressure_window_days < 0:
+        raise ValueError("realized_loss_pressure_window_days must be non-negative")
+    if config.realized_loss_pressure_loss_count < 0:
+        raise ValueError("realized_loss_pressure_loss_count must be non-negative")
+    if config.realized_loss_pressure_min_loss_abs < 0.0:
+        raise ValueError("realized_loss_pressure_min_loss_abs must be non-negative")
     if config.exhaustion_min_day_return < 0.0:
         raise ValueError("exhaustion_min_day_return must be non-negative")
     if config.selloff_exhaustion_min_abs_day_return < 0.0:
@@ -1765,6 +2393,58 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("dryup_prior_volume_rank_max must be in [0, 1]")
     if config.dryup_prior_abs_day_return_max < 0.0:
         raise ValueError("dryup_prior_abs_day_return_max must be non-negative")
+    if config.top_volume_rank_max <= 0:
+        raise ValueError("top_volume_rank_max must be positive")
+    if config.top_volume_prior_rank_min <= 0:
+        raise ValueError("top_volume_prior_rank_min must be positive")
+    if config.top_volume_min_age_days < 0:
+        raise ValueError("top_volume_min_age_days must be non-negative")
+    if config.top_volume_turnover_ratio_min < 0.0:
+        raise ValueError("top_volume_turnover_ratio_min must be non-negative")
+    if config.top_volume_day_return_min < -1.0:
+        raise ValueError("top_volume_day_return_min must be >= -1")
+    if config.top_volume_residual_return_min < -1.0:
+        raise ValueError("top_volume_residual_return_min must be >= -1")
+    if not 0.0 <= config.top_volume_close_position_min <= 1.0:
+        raise ValueError("top_volume_close_position_min must be in [0, 1]")
+    if config.leadership_pullback_rank_max <= 0:
+        raise ValueError("leadership_pullback_rank_max must be positive")
+    if config.leadership_pullback_min_age_days < 0:
+        raise ValueError("leadership_pullback_min_age_days must be non-negative")
+    if config.leadership_pullback_prior7_return_min > config.leadership_pullback_prior7_return_max:
+        raise ValueError("leadership_pullback_prior7_return_min must be <= leadership_pullback_prior7_return_max")
+    if config.leadership_pullback_day_return_min > config.leadership_pullback_day_return_max:
+        raise ValueError("leadership_pullback_day_return_min must be <= leadership_pullback_day_return_max")
+    if config.leadership_pullback_residual_return_min < -1.0:
+        raise ValueError("leadership_pullback_residual_return_min must be >= -1")
+    if not 0.0 <= config.leadership_pullback_close_position_min <= 1.0:
+        raise ValueError("leadership_pullback_close_position_min must be in [0, 1]")
+    if config.leadership_pullback_abs_day_return_max < 0.0:
+        raise ValueError("leadership_pullback_abs_day_return_max must be non-negative")
+    if config.shelf_reclaim_min_age_days < 0:
+        raise ValueError("shelf_reclaim_min_age_days must be non-negative")
+    if not 0.0 <= config.shelf_reclaim_prior7_volume_rank_max <= 1.0:
+        raise ValueError("shelf_reclaim_prior7_volume_rank_max must be in [0, 1]")
+    if config.shelf_reclaim_prior7_abs_return_mean_max < 0.0:
+        raise ValueError("shelf_reclaim_prior7_abs_return_mean_max must be non-negative")
+    if config.shelf_reclaim_day_return_min > config.shelf_reclaim_day_return_max:
+        raise ValueError("shelf_reclaim_day_return_min must be <= shelf_reclaim_day_return_max")
+    if config.shelf_reclaim_residual_return_min < -1.0:
+        raise ValueError("shelf_reclaim_residual_return_min must be >= -1")
+    if not 0.0 <= config.shelf_reclaim_close_position_min <= 1.0:
+        raise ValueError("shelf_reclaim_close_position_min must be in [0, 1]")
+    if config.shelf_reclaim_close_vs_prior20_high_min > config.shelf_reclaim_close_vs_prior20_high_max:
+        raise ValueError("shelf_reclaim_close_vs_prior20_high_min must be <= shelf_reclaim_close_vs_prior20_high_max")
+    if config.long_reclaim_day_return_min < -1.0:
+        raise ValueError("long_reclaim_day_return_min must be >= -1")
+    if config.long_reclaim_residual_return_min < -1.0:
+        raise ValueError("long_reclaim_residual_return_min must be >= -1")
+    if not 0.0 <= config.long_reclaim_close_position_min <= 1.0:
+        raise ValueError("long_reclaim_close_position_min must be in [0, 1]")
+    if config.long_reclaim_prior7_abs_return_mean_max < 0.0:
+        raise ValueError("long_reclaim_prior7_abs_return_mean_max must be non-negative")
+    if config.long_breakout_prior20_high_buffer_min > config.long_breakout_prior20_high_buffer_max:
+        raise ValueError("long_breakout_prior20_high_buffer_min must be <= long_breakout_prior20_high_buffer_max")
 
 
 def _window_config(config: VolumeEventResearchConfig) -> TradeLifecycleConfig:
