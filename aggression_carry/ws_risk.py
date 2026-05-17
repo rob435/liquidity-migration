@@ -211,6 +211,9 @@ class EventWebSocketRiskEngine:
             else:
                 self.state.positions_by_symbol.pop(symbol, None)
         self.subscribe_tickers(changed_symbols)
+        reconcile_rows = self.reconcile_positions(write=True)
+        if reconcile_rows:
+            self.write_report(reason="position_stream_reconcile")
         self.exit_untracked_positions()
         self.evaluate_symbols(changed_symbols)
 
@@ -533,7 +536,7 @@ class EventWebSocketRiskEngine:
             _write_order_rows(self.root, pl.DataFrame(rows, infer_schema_length=None))
             self.state.repairs.extend(rows)
 
-    def reconcile_positions(self, *, write: bool) -> None:
+    def reconcile_positions(self, *, write: bool) -> list[dict[str, Any]]:
         reconciled, rows = _risk_reconcile_missing_positions(
             self.state.open_trades,
             position_by_symbol=self.state.positions_by_symbol,
@@ -548,6 +551,7 @@ class EventWebSocketRiskEngine:
                 self.clear_submitted_symbol(str(row.get("symbol", "")))
             if write:
                 _write_trade_rows(self.root, pl.DataFrame(rows, infer_schema_length=None))
+        return rows
 
     def rest_reconcile(self) -> None:
         raw_positions, error = _safe_raw_positions(self.private_client, settle_coin=self.risk.settle_coin)

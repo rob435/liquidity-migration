@@ -558,6 +558,36 @@ def test_ws_risk_telegram_material_events_are_deduped(tmp_path: Path, monkeypatc
     assert len(sent) == 1
 
 
+def test_ws_risk_position_stream_zero_closes_missing_ledger_position(tmp_path: Path) -> None:
+    _write_open_trade(tmp_path)
+    private_client = FakePrivateClient()
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    engine.mark_submitted_symbol("AAAUSDT")
+    engine.on_position_message({"data": {"symbol": "AAAUSDT", "side": "Sell", "size": "0", "markPrice": "113"}})
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
+    assert stored.filter(pl.col("trade_id") == "t1").select("exit_reason").item() == "bybit_position_missing"
+    assert "AAAUSDT" not in engine.state.submitted_symbols
+    assert engine.state.reconciliations[0]["trade_id"] == "t1"
+
+
 def test_ws_risk_stale_stream_forces_rest_reconcile(tmp_path: Path) -> None:
     _write_open_trade(tmp_path)
     private_client = FakePrivateClient()
