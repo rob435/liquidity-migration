@@ -969,9 +969,18 @@ class EventWebSocketRiskEngine:
         cycle["telegram_sent"] = telegram_sent
         cycle["telegram_error"] = telegram_error
         payload["cycle"] = cycle
+        latest_json_path = self.report_dir / "latest_event_ws_risk_cycle.json"
+        latest_md_path = self.report_dir / "latest_event_ws_risk_cycle.md"
+        payload["report_path"] = str(latest_md_path)
+        if _persist_ws_risk_history(payload):
+            history_json_path = self.report_dir / f"event_ws_risk_cycle_{cycle['cycle_id']}.json"
+            history_md_path = self.report_dir / f"event_ws_risk_cycle_{cycle['cycle_id']}.md"
+            payload["history_report_path"] = str(history_md_path)
+            history_json_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+            history_md_path.write_text(format_event_risk_cycle_report(payload), encoding="utf-8")
         write_dataset(pl.DataFrame([cycle]), self.root, "event_demo_cycles", partition_by=())
-        (self.report_dir / "latest_event_ws_risk_cycle.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
-        (self.report_dir / "latest_event_ws_risk_cycle.md").write_text(format_event_risk_cycle_report(payload), encoding="utf-8")
+        latest_json_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        latest_md_path.write_text(format_event_risk_cycle_report(payload), encoding="utf-8")
         self.state.last_report_monotonic = time.monotonic()
         return payload
 
@@ -1045,6 +1054,11 @@ def _build_ws_trade_client(config: ResearchConfig) -> BybitWebSocketTradeClient:
         api_key=api_key,
         api_secret=api_secret,
     )
+
+
+def _persist_ws_risk_history(payload: dict[str, Any]) -> bool:
+    reason = str(payload.get("cycle", {}).get("reason") or "")
+    return reason != "heartbeat" or bool(_telegram_notification_reason(payload))
 
 
 def _validate_ws_risk_config(config: EventWebSocketRiskConfig) -> None:

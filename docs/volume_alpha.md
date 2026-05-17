@@ -319,6 +319,9 @@ private execution stream unless that limitation is retested and cleared.
 Socket startup is bounded by `STREAM_START_TIMEOUT_SECONDS` so a blocked
 private/public subscription reports an error and leaves REST reconciliation plus
 exchange-native stops running instead of hanging the watchdog before startup.
+The watchdog writes latest reports under `reports/event-risk-ws` every heartbeat
+and keeps timestamped JSON/Markdown snapshots for startup and material risk
+events, so exit decisions survive later quiet heartbeat overwrites.
 
 Order-path latency can be measured on the demo account with
 `scripts/probe_bybit_demo_order_latency.py`, which places tiny far-from-touch

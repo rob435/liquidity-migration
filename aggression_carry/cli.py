@@ -31,6 +31,7 @@ from .ws_risk import EventWebSocketRiskConfig, run_event_ws_risk
 def _print_event_risk_summary(payload: dict, *, elapsed_ms: float | None = None) -> None:
     cycle = payload["cycle"]
     latency_text = f" latency_ms={elapsed_ms:.1f}" if elapsed_ms is not None else ""
+    report_path = _event_risk_report_path(payload)
     print(
         "event risk cycle "
         f"mode={cycle['mode']} "
@@ -39,9 +40,21 @@ def _print_event_risk_summary(payload: dict, *, elapsed_ms: float | None = None)
         f"open={cycle['open_trades_after']} "
         f"untracked={cycle.get('untracked_positions', 0)}"
         f"{latency_text} "
-        f"path={Path(payload['report_dir']) / 'latest_event_risk_cycle.md'}",
+        f"path={report_path}",
         flush=True,
     )
+
+
+def _event_risk_report_path(payload: dict) -> Path:
+    if payload.get("report_path"):
+        return Path(str(payload["report_path"]))
+    cycle = payload.get("cycle", {})
+    filename = (
+        "latest_event_ws_risk_cycle.md"
+        if str(cycle.get("mode", "")).startswith("ws_risk_")
+        else "latest_event_risk_cycle.md"
+    )
+    return Path(payload["report_dir"]) / filename
 
 
 def _event_risk_payload_material(payload: dict) -> bool:

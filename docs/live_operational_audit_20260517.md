@@ -43,23 +43,34 @@ Objective: harden the Bybit demo system as if it is live capital, with emphasis 
 - `85f2524 fix(runtime): preserve legacy risk lock`
   - The legacy REST risk wrapper no longer deletes its live cycle lock either.
 
-- `current slice: cache forward demo klines`
+- `2ac31ed perf(demo): cache forward klines`
   - The event entry loop now stores recent forward-demo 1h bars in `event_demo_klines_1h`.
   - Normal cycles reuse cached bars and fetch only missing/new symbol windows.
   - This keeps the demo cache separate from the full-PIT research `klines_1h` dataset.
+
+- `current slice: persist websocket risk audit reports`
+  - The websocket risk daemon keeps latest heartbeat reports under `reports/event-risk-ws`.
+  - Startup and material risk reports now also get timestamped JSON/Markdown snapshots.
+  - CLI risk summaries point to `latest_event_ws_risk_cycle.md` for `event-risk-ws` instead of the legacy REST risk report path.
 
 ## Verification
 
 Local:
 
-- `pytest -q`: 174 passed after the runtime cadence/lock changes.
+- `pytest -q`: 180 passed after the websocket risk audit-report change.
 
 VPS:
 
-- `pytest -q`: 174 passed after deployment.
+- `pytest -q`: 180 passed after deploying the websocket risk audit-report change.
 - Services after restart:
   - `model050426-bybit-demo.service`: active/running, `INTERVAL_SECONDS=300`.
   - `model050426-bybit-risk.service`: active/running.
+- Websocket risk report evidence:
+  - latest heartbeat report path: `data/bybit-demo-event/reports/event-risk-ws/latest_event_ws_risk_cycle.md`.
+  - startup snapshot persisted as a timestamped `event_ws_risk_cycle_ws-risk-*.json`/`.md` pair.
+- Forward-demo cache evidence:
+  - first post-deploy cycle seeded `159648` kline rows for `148` symbols.
+  - next scheduled cycle reported `kline_fetch_symbols=0` and `kline_fetched_rows=0`.
 - Post-deploy state checks:
   - `active_positions=0`
   - `open_orders=0`

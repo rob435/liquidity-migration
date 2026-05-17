@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from aggression_carry.config import DEFAULT_EXCLUDED_SYMBOLS
-from aggression_carry.cli import build_parser, main
+from aggression_carry.cli import _print_event_risk_summary, build_parser, main
 
 
 def test_cli_fixture_pipeline_runs_volume_events(tmp_path: Path) -> None:
@@ -150,6 +150,24 @@ def test_cli_event_ws_risk_exposes_stream_start_timeout(tmp_path: Path) -> None:
 
     assert args.command == "event-risk-ws"
     assert args.stream_start_timeout_seconds == 0.25
+
+
+def test_cli_event_ws_risk_summary_points_to_ws_report(tmp_path: Path, capsys) -> None:
+    _print_event_risk_summary(
+        {
+            "cycle": {
+                "mode": "ws_risk_submit",
+                "exits_executed": 0,
+                "exit_candidates": 0,
+                "stop_repairs": 0,
+                "open_trades_after": 0,
+                "untracked_positions": 0,
+            },
+            "report_dir": str(tmp_path / "reports" / "event-risk-ws"),
+        }
+    )
+
+    assert "latest_event_ws_risk_cycle.md" in capsys.readouterr().out
 
 
 def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:

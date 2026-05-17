@@ -844,6 +844,64 @@ def test_ws_risk_pending_fill_notification_is_deduped_across_heartbeats(tmp_path
     assert len(sent) == 1
 
 
+def test_ws_risk_startup_report_keeps_timestamped_audit_copy(tmp_path: Path) -> None:
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(heartbeat_seconds=0.0),
+        private_client=FakePrivateClient(),
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    payload = engine.write_report(reason="startup")
+
+    latest_path = tmp_path / "reports" / "event-risk-ws" / "latest_event_ws_risk_cycle.md"
+    history_path = Path(payload["history_report_path"])
+    assert payload["report_path"] == str(latest_path)
+    assert latest_path.exists()
+    assert (tmp_path / "reports" / "event-risk-ws" / "latest_event_ws_risk_cycle.json").exists()
+    assert history_path.exists()
+    assert history_path.name.startswith("event_ws_risk_cycle_ws-risk-")
+    assert history_path.with_suffix(".json").exists()
+
+
+def test_ws_risk_quiet_heartbeat_only_updates_latest_report(tmp_path: Path) -> None:
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(heartbeat_seconds=0.0),
+        private_client=FakePrivateClient(),
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    payload = engine.write_report(reason="heartbeat")
+
+    report_dir = tmp_path / "reports" / "event-risk-ws"
+    assert "history_report_path" not in payload
+    assert (report_dir / "latest_event_ws_risk_cycle.md").exists()
+    assert list(report_dir.glob("event_ws_risk_cycle_*.json")) == []
+
+
+def test_ws_risk_material_heartbeat_keeps_timestamped_audit_copy(tmp_path: Path) -> None:
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(heartbeat_seconds=0.0),
+        private_client=FakePrivateClient(),
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+    engine.state.errors.append("position snapshot failed")
+
+    payload = engine.write_report(reason="heartbeat")
+
+    history_path = Path(payload["history_report_path"])
+    assert history_path.exists()
+    assert history_path.with_suffix(".json").exists()
+
+
 def test_ws_risk_position_stream_zero_closes_missing_ledger_position(tmp_path: Path) -> None:
     _write_open_trade(tmp_path)
     private_client = FakePrivateClient()
