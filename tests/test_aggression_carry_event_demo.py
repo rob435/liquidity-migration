@@ -45,12 +45,20 @@ class FakeRiskClient:
         fill_order_prefixes: tuple[str, ...] = ("agc-lm-",),
         fill_qty: str = "1",
         fill_price: str = "100.5",
+        fail_leverage_symbols: set[str] | None = None,
+        fail_order_symbols: set[str] | None = None,
+        fail_history_links: set[str] | None = None,
+        fail_trade_history: bool = False,
     ) -> None:
         self.positions = positions or []
         self.fill_market_orders = fill_market_orders
         self.fill_order_prefixes = fill_order_prefixes
         self.fill_qty = fill_qty
         self.fill_price = fill_price
+        self.fail_leverage_symbols = fail_leverage_symbols or set()
+        self.fail_order_symbols = fail_order_symbols or set()
+        self.fail_history_links = fail_history_links or set()
+        self.fail_trade_history = fail_trade_history
         self.orders: list[dict[str, object]] = []
         self.stop_updates: list[dict[str, object]] = []
         self.leverage_updates: list[dict[str, object]] = []
@@ -60,11 +68,17 @@ class FakeRiskClient:
         return self.positions
 
     def place_order(self, **params: object) -> dict[str, str]:
+        if str(params.get("symbol")) in self.fail_order_symbols:
+            raise RuntimeError("order rejected")
         self.orders.append(params)
         return {"orderId": f"order-{len(self.orders)}"}
 
     def get_trade_history(self, *, symbol: str | None = None, order_link_id: str | None = None, limit: int = 50) -> list[dict[str, str]]:
         self.trade_history_calls.append(order_link_id)
+        if self.fail_trade_history:
+            raise RuntimeError("history unavailable")
+        if order_link_id in self.fail_history_links:
+            raise RuntimeError("history unavailable")
         if self.fill_market_orders and order_link_id and order_link_id.startswith(self.fill_order_prefixes):
             return [
                 {
@@ -81,6 +95,8 @@ class FakeRiskClient:
         return {}
 
     def set_leverage(self, **params: object) -> dict[str, str]:
+        if str(params.get("symbol")) in self.fail_leverage_symbols:
+            raise RuntimeError("leverage rejected")
         self.leverage_updates.append(params)
         return {}
 
@@ -259,6 +275,148 @@ def test_execute_entry_records_only_confirmed_fill() -> None:
     assert client.stop_updates == [{"symbol": "AAAUSDT", "stop_loss": "112.6", "take_profit": "80.4"}]
 
 
+def test_execute_entry_records_leverage_error_without_raising() -> None:
+    candidates = [
+        {
+            "trade_id": "t1",
+            "symbol": "AAAUSDT",
+            "side": "short",
+            "signal_ts_ms": 1_700_000_000_000,
+            "stop_loss_pct": 0.12,
+            "take_profit_pct": 0.20,
+        }
+    ]
+    client = FakeRiskClient(fail_leverage_symbols={"AAAUSDT"})
+
+    rows, orders = _execute_entries(
+        candidates,
+        trading_client=client,
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.20,
+        price_by_symbol={"AAAUSDT": 100.0},
+        contract_by_symbol={"AAAUSDT": {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}},
+        now_ms=1_700_000_060_000,
+    )
+
+    assert rows == []
+    assert len(orders) == 1
+    assert orders[0]["status"] == "failed"
+    assert orders[0]["submit_mode"] == "error"
+    assert orders[0]["order_id"] == ""
+    assert orders[0]["notional_usdt"] == 0.0
+    assert orders[0]["initial_margin_usdt"] == 0.0
+    assert orders[0]["stop_price"] == 112.0
+    assert orders[0]["take_profit_price"] == 80.0
+    assert orders[0]["stop_loss_pct"] == 0.12
+    assert orders[0]["take_profit_pct"] == 0.20
+    assert "set_leverage failed" in str(orders[0]["error"])
+    assert "leverage rejected" in str(orders[0]["error"])
+    assert client.orders == []
+
+
+def test_execute_entry_records_order_error_and_continues() -> None:
+    candidates = [
+        {
+            "trade_id": "t1",
+            "symbol": "AAAUSDT",
+            "side": "short",
+            "signal_ts_ms": 1_700_000_000_000,
+            "stop_loss_pct": 0.12,
+            "take_profit_pct": 0.20,
+        },
+        {
+            "trade_id": "t2",
+            "symbol": "BBBUSDT",
+            "side": "short",
+            "signal_ts_ms": 1_700_000_060_000,
+            "stop_loss_pct": 0.12,
+            "take_profit_pct": 0.20,
+        },
+    ]
+    client = FakeRiskClient(
+        fill_market_orders=True,
+        fill_order_prefixes=("agc-en-",),
+        fill_qty="1",
+        fill_price="100",
+        fail_order_symbols={"AAAUSDT"},
+    )
+
+    rows, orders = _execute_entries(
+        candidates,
+        trading_client=client,
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.01,
+        price_by_symbol={"AAAUSDT": 100.0, "BBBUSDT": 100.0},
+        contract_by_symbol={
+            "AAAUSDT": {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0},
+            "BBBUSDT": {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0},
+        },
+        now_ms=1_700_000_120_000,
+    )
+
+    assert [row["trade_id"] for row in rows] == ["t2"]
+    assert [row["symbol"] for row in orders] == ["AAAUSDT", "BBBUSDT"]
+    assert orders[0]["status"] == "failed"
+    assert orders[0]["submit_mode"] == "error"
+    assert "place_order failed" in str(orders[0]["error"])
+    assert "order rejected" in str(orders[0]["error"])
+    assert orders[1]["status"] == "filled"
+    assert orders[1]["submit_mode"] == "submitted"
+    assert orders[1]["error"] == ""
+    assert rows[0]["entry_order_id"] == "order-1"
+
+
+def test_execute_entry_fill_confirmation_error_leaves_pending_order_for_reconcile() -> None:
+    candidates = [
+        {
+            "trade_id": "t1",
+            "symbol": "AAAUSDT",
+            "side": "short",
+            "signal_ts_ms": 1_700_000_000_000,
+            "stop_loss_pct": 0.12,
+            "take_profit_pct": 0.20,
+        }
+    ]
+    client = FakeRiskClient(fail_trade_history=True)
+
+    rows, orders = _execute_entries(
+        candidates,
+        trading_client=client,
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.20,
+        price_by_symbol={"AAAUSDT": 100.0},
+        contract_by_symbol={"AAAUSDT": {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}},
+        now_ms=1_700_000_060_000,
+    )
+
+    assert rows == []
+    assert len(orders) == 1
+    assert orders[0]["status"] == "submitted_unconfirmed"
+    assert orders[0]["submit_mode"] == "submitted"
+    assert orders[0]["order_id"] == "order-1"
+    assert orders[0]["notional_usdt"] == 0.0
+    assert orders[0]["qty"] == "20"
+    assert "fill confirmation failed" in str(orders[0]["error"])
+    assert "history unavailable" in str(orders[0]["error"])
+    assert client.orders[0]["stopLoss"] == "112"
+    assert client.orders[0]["takeProfit"] == "80"
+
+
 def test_wallet_equity_usdt_prefers_total_equity_then_coin_equity() -> None:
     assert wallet_equity_usdt({"list": [{"totalEquity": "1234.5", "coin": []}]}) == 1234.5
     assert (
@@ -417,6 +575,13 @@ def test_telegram_notify_only_for_material_events(monkeypatch: pytest.MonkeyPatc
     }
 
     assert _telegram_notification_reason(failed_entry_stop_update_payload) == "entry_stop_update_failed"
+
+    failed_entry_order_payload = {
+        **quiet_payload,
+        "entry_orders": [{"status": "failed", "submit_mode": "error"}],
+    }
+
+    assert _telegram_notification_reason(failed_entry_order_payload) == "entry_order_error"
 
     reconciled_entry_payload = {
         **quiet_payload,

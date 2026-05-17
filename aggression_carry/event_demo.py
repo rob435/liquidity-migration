@@ -1219,75 +1219,99 @@ def _execute_entries(
         protection_update_error = ""
         submit_mode = "dry_run"
         order_status = "planned"
+        error = ""
         filled_qty = _float(qty)
         entry_price = price
         filled_notional = actual_notional
         if demo.submit_orders:
             assert trading_client is not None
-            trading_client.set_leverage(symbol=symbol, buy_leverage=demo.entry_leverage, sell_leverage=demo.entry_leverage)
-            order_params = _order_params(
-                symbol=symbol,
-                side=bybit_side,
-                qty=qty,
-                order_type=demo.entry_order_type,
-                order_link_id=entry_link,
-                reduce_only=False,
-                stop_loss=stop_price,
-                take_profit=take_profit_price if take_profit_price > 0.0 else None,
-            )
-            order_result = trading_client.place_order(**order_params)
-            exec_summary = _wait_for_execution_summary(
-                trading_client,
-                symbol=symbol,
-                order_link_id=entry_link,
-                poll_seconds=demo.order_fill_confirm_seconds,
-                poll_interval_seconds=demo.order_fill_poll_interval_seconds,
-            )
-            submit_mode = "submitted"
-            filled_qty = _float(exec_summary.get("qty"))
-            entry_price = _float(exec_summary.get("avg_price")) or price
-            filled_notional = abs(entry_price * filled_qty) if filled_qty > 0.0 else 0.0
-            target_qty = _float(qty)
-            qty_tolerance = max(target_qty * 1e-8, 1e-12)
-            if target_qty > 0.0 and filled_qty + qty_tolerance >= target_qty:
-                order_status = "filled"
-            elif filled_qty > 0.0:
-                order_status = "partial"
-            else:
-                order_status = "submitted_unconfirmed"
-            if filled_qty > 0.0:
-                filled_stop_price = _stop_price_for_entry(
-                    entry_price=entry_price,
-                    side=side,
-                    stop_loss_pct=stop_loss_pct,
-                    tick_size=tick_size,
+            try:
+                trading_client.set_leverage(symbol=symbol, buy_leverage=demo.entry_leverage, sell_leverage=demo.entry_leverage)
+            except Exception as exc:  # noqa: BLE001 - failed entries must be ledgered without aborting the cycle
+                submit_mode = "error"
+                order_status = "failed"
+                error = f"set_leverage failed: {exc}"[:500]
+                filled_qty = 0.0
+                filled_notional = 0.0
+            if not error:
+                order_params = _order_params(
+                    symbol=symbol,
+                    side=bybit_side,
+                    qty=qty,
+                    order_type=demo.entry_order_type,
+                    order_link_id=entry_link,
+                    reduce_only=False,
+                    stop_loss=stop_price,
+                    take_profit=take_profit_price if take_profit_price > 0.0 else None,
                 )
-                filled_take_profit_price = _take_profit_price_for_entry(
-                    entry_price=entry_price,
-                    side=side,
-                    take_profit_pct=take_profit_pct,
-                    tick_size=tick_size,
-                )
-                if not _prices_close(stop_price, filled_stop_price, tolerance_bps=0.0) or (
-                    filled_take_profit_price > 0.0
-                    and not _prices_close(take_profit_price, filled_take_profit_price, tolerance_bps=0.0)
-                ):
-                    try:
-                        trading_client.set_trading_stop(
-                            symbol=symbol,
-                            stop_loss=_decimal_text(Decimal(str(filled_stop_price)))
-                            if filled_stop_price > 0.0
-                            else None,
-                            take_profit=_decimal_text(Decimal(str(filled_take_profit_price)))
-                            if filled_take_profit_price > 0.0
-                            else None,
-                        )
-                        protection_update_status = "submitted"
-                    except Exception as exc:  # noqa: BLE001 - venue repair daemon will retry from ledger state
-                        protection_update_status = "failed"
-                        protection_update_error = str(exc)[:500]
-                stop_price = filled_stop_price
-                take_profit_price = filled_take_profit_price
+                try:
+                    order_result = trading_client.place_order(**order_params)
+                    submit_mode = "submitted"
+                except Exception as exc:  # noqa: BLE001 - failed entries must be ledgered without aborting the cycle
+                    submit_mode = "error"
+                    order_status = "failed"
+                    error = f"place_order failed: {exc}"[:500]
+                    filled_qty = 0.0
+                    filled_notional = 0.0
+            if submit_mode == "submitted":
+                try:
+                    exec_summary = _wait_for_execution_summary(
+                        trading_client,
+                        symbol=symbol,
+                        order_link_id=entry_link,
+                        poll_seconds=demo.order_fill_confirm_seconds,
+                        poll_interval_seconds=demo.order_fill_poll_interval_seconds,
+                    )
+                except Exception as exc:  # noqa: BLE001 - order may still fill; pending reconciliation will retry
+                    order_status = "submitted_unconfirmed"
+                    error = f"fill confirmation failed: {exc}"[:500]
+                    filled_qty = 0.0
+                    filled_notional = 0.0
+                else:
+                    filled_qty = _float(exec_summary.get("qty"))
+                    entry_price = _float(exec_summary.get("avg_price")) or price
+                    filled_notional = abs(entry_price * filled_qty) if filled_qty > 0.0 else 0.0
+                    target_qty = _float(qty)
+                    qty_tolerance = max(target_qty * 1e-8, 1e-12)
+                    if target_qty > 0.0 and filled_qty + qty_tolerance >= target_qty:
+                        order_status = "filled"
+                    elif filled_qty > 0.0:
+                        order_status = "partial"
+                    else:
+                        order_status = "submitted_unconfirmed"
+                if filled_qty > 0.0:
+                    filled_stop_price = _stop_price_for_entry(
+                        entry_price=entry_price,
+                        side=side,
+                        stop_loss_pct=stop_loss_pct,
+                        tick_size=tick_size,
+                    )
+                    filled_take_profit_price = _take_profit_price_for_entry(
+                        entry_price=entry_price,
+                        side=side,
+                        take_profit_pct=take_profit_pct,
+                        tick_size=tick_size,
+                    )
+                    if not _prices_close(stop_price, filled_stop_price, tolerance_bps=0.0) or (
+                        filled_take_profit_price > 0.0
+                        and not _prices_close(take_profit_price, filled_take_profit_price, tolerance_bps=0.0)
+                    ):
+                        try:
+                            trading_client.set_trading_stop(
+                                symbol=symbol,
+                                stop_loss=_decimal_text(Decimal(str(filled_stop_price)))
+                                if filled_stop_price > 0.0
+                                else None,
+                                take_profit=_decimal_text(Decimal(str(filled_take_profit_price)))
+                                if filled_take_profit_price > 0.0
+                                else None,
+                            )
+                            protection_update_status = "submitted"
+                        except Exception as exc:  # noqa: BLE001 - venue repair daemon will retry from ledger state
+                            protection_update_status = "failed"
+                            protection_update_error = str(exc)[:500]
+                    stop_price = filled_stop_price
+                    take_profit_price = filled_take_profit_price
         entry_qty = _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0.0 else ""
         filled_initial_margin_usdt = filled_notional / demo.entry_leverage if demo.entry_leverage > 0.0 else 0.0
         if not demo.submit_orders or filled_qty > 0.0:
@@ -1348,6 +1372,7 @@ def _execute_entries(
                 "take_profit_pct": take_profit_pct,
                 "entry_stop_update_status": protection_update_status,
                 "entry_stop_update_error": protection_update_error,
+                "error": error,
             }
         )
     return rows, orders
@@ -2733,6 +2758,11 @@ def _telegram_notification_reason(payload: dict[str, Any]) -> str:
         return "position_report_error"
     if payload.get("reconciliations"):
         return "position_reconciled"
+    if any(
+        str(row.get("submit_mode", "")) == "error" or str(row.get("status", "")) == "failed"
+        for row in payload.get("entry_orders", [])
+    ):
+        return "entry_order_error"
     if any(
         str(row.get("entry_stop_update_status", "")) == "failed"
         for row in (payload.get("entries") or [])
