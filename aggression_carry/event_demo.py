@@ -1198,21 +1198,25 @@ def _execute_entries(
         initial_margin_usdt = actual_notional / demo.entry_leverage
         side = str(candidate["side"])
         bybit_side = "Sell" if side == "short" else "Buy"
+        stop_loss_pct = float(candidate.get("stop_loss_pct") or 0.12)
+        take_profit_pct = float(candidate.get("take_profit_pct") or 0.0)
         stop_price = _stop_price_for_entry(
             entry_price=price,
             side=side,
-            stop_loss_pct=float(candidate.get("stop_loss_pct") or 0.12),
+            stop_loss_pct=stop_loss_pct,
             tick_size=tick_size,
         )
         take_profit_price = _take_profit_price_for_entry(
             entry_price=price,
             side=side,
-            take_profit_pct=float(candidate.get("take_profit_pct") or 0.0),
+            take_profit_pct=take_profit_pct,
             tick_size=tick_size,
         )
         entry_link = _order_link_id("en", symbol=symbol, signal_ts_ms=int(candidate["signal_ts_ms"]))
         order_result: dict[str, Any] = {}
         exec_summary: dict[str, Any] = {}
+        protection_update_status = ""
+        protection_update_error = ""
         submit_mode = "dry_run"
         order_status = "planned"
         filled_qty = _float(qty)
@@ -1251,6 +1255,39 @@ def _execute_entries(
                 order_status = "partial"
             else:
                 order_status = "submitted_unconfirmed"
+            if filled_qty > 0.0:
+                filled_stop_price = _stop_price_for_entry(
+                    entry_price=entry_price,
+                    side=side,
+                    stop_loss_pct=stop_loss_pct,
+                    tick_size=tick_size,
+                )
+                filled_take_profit_price = _take_profit_price_for_entry(
+                    entry_price=entry_price,
+                    side=side,
+                    take_profit_pct=take_profit_pct,
+                    tick_size=tick_size,
+                )
+                if not _prices_close(stop_price, filled_stop_price, tolerance_bps=0.0) or (
+                    filled_take_profit_price > 0.0
+                    and not _prices_close(take_profit_price, filled_take_profit_price, tolerance_bps=0.0)
+                ):
+                    try:
+                        trading_client.set_trading_stop(
+                            symbol=symbol,
+                            stop_loss=_decimal_text(Decimal(str(filled_stop_price)))
+                            if filled_stop_price > 0.0
+                            else None,
+                            take_profit=_decimal_text(Decimal(str(filled_take_profit_price)))
+                            if filled_take_profit_price > 0.0
+                            else None,
+                        )
+                        protection_update_status = "submitted"
+                    except Exception as exc:  # noqa: BLE001 - venue repair daemon will retry from ledger state
+                        protection_update_status = "failed"
+                        protection_update_error = str(exc)[:500]
+                stop_price = filled_stop_price
+                take_profit_price = filled_take_profit_price
         entry_qty = _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0.0 else ""
         filled_initial_margin_usdt = filled_notional / demo.entry_leverage if demo.entry_leverage > 0.0 else 0.0
         if not demo.submit_orders or filled_qty > 0.0:
@@ -1273,6 +1310,8 @@ def _execute_entries(
                 "qty_step": qty_step,
                 "stop_price": stop_price,
                 "take_profit_price": take_profit_price,
+                "entry_stop_update_status": protection_update_status,
+                "entry_stop_update_error": protection_update_error,
                 "entry_order_link_id": entry_link,
                 "entry_order_id": order_result.get("orderId", ""),
                 "submit_mode": submit_mode,
@@ -1305,6 +1344,10 @@ def _execute_entries(
                 "qty_step": qty_step,
                 "stop_price": stop_price,
                 "take_profit_price": take_profit_price,
+                "stop_loss_pct": stop_loss_pct,
+                "take_profit_pct": take_profit_pct,
+                "entry_stop_update_status": protection_update_status,
+                "entry_stop_update_error": protection_update_error,
             }
         )
     return rows, orders
@@ -1498,6 +1541,54 @@ def _reconcile_pending_order_fills(
         fully_filled = target_qty > 0.0 and filled_qty + qty_tolerance >= target_qty
         avg_price = _float(summary.get("avg_price")) or _float(order.get("avg_price"))
         previous_filled_qty = _float(order.get("filled_qty"))
+        entry_stop_price = _float(order.get("stop_price"))
+        entry_take_profit_price = _float(order.get("take_profit_price"))
+        entry_stop_update_status = str(order.get("entry_stop_update_status") or "")
+        entry_stop_update_error = str(order.get("entry_stop_update_error") or "")
+        if not _bool(order.get("reduce_only")) and avg_price > 0.0:
+            trade_side = str(order.get("trade_side") or ("short" if str(order.get("side", "")) == "Sell" else "long"))
+            tick_size = _float(order.get("tick_size")) or 0.0001
+            stop_loss_pct = _float(order.get("stop_loss_pct"))
+            take_profit_pct = _float(order.get("take_profit_pct"))
+            recalculated_stop_price = (
+                _stop_price_for_entry(entry_price=avg_price, side=trade_side, stop_loss_pct=stop_loss_pct, tick_size=tick_size)
+                if stop_loss_pct > 0.0
+                else entry_stop_price
+            )
+            recalculated_take_profit_price = (
+                _take_profit_price_for_entry(
+                    entry_price=avg_price,
+                    side=trade_side,
+                    take_profit_pct=take_profit_pct,
+                    tick_size=tick_size,
+                )
+                if take_profit_pct > 0.0
+                else entry_take_profit_price
+            )
+            if (stop_loss_pct > 0.0 or take_profit_pct > 0.0) and (
+                not _prices_close(entry_stop_price, recalculated_stop_price, tolerance_bps=0.0)
+                or (
+                    recalculated_take_profit_price > 0.0
+                    and not _prices_close(entry_take_profit_price, recalculated_take_profit_price, tolerance_bps=0.0)
+                )
+            ):
+                try:
+                    trading_client.set_trading_stop(
+                        symbol=symbol,
+                        stop_loss=_decimal_text(Decimal(str(recalculated_stop_price)))
+                        if recalculated_stop_price > 0.0
+                        else None,
+                        take_profit=_decimal_text(Decimal(str(recalculated_take_profit_price)))
+                        if recalculated_take_profit_price > 0.0
+                        else None,
+                    )
+                    entry_stop_update_status = "submitted"
+                    entry_stop_update_error = ""
+                except Exception as exc:  # noqa: BLE001 - venue repair daemon will retry from ledger state
+                    entry_stop_update_status = "failed"
+                    entry_stop_update_error = str(exc)[:500]
+            entry_stop_price = recalculated_stop_price
+            entry_take_profit_price = recalculated_take_profit_price
         order_update = dict(order)
         order_update.update(
             {
@@ -1505,6 +1596,10 @@ def _reconcile_pending_order_fills(
                 "filled_qty": _decimal_text(Decimal(str(filled_qty))),
                 "avg_price": avg_price,
                 "notional_usdt": abs(avg_price * filled_qty) if avg_price > 0.0 else 0.0,
+                "stop_price": entry_stop_price,
+                "take_profit_price": entry_take_profit_price,
+                "entry_stop_update_status": entry_stop_update_status,
+                "entry_stop_update_error": entry_stop_update_error,
                 "updated_at_ms": now_ms,
             }
         )
@@ -1558,6 +1653,10 @@ def _reconcile_pending_order_fills(
                         "notional_usdt": notional,
                         "initial_margin_usdt": initial_margin,
                         "initial_margin_pct_equity": initial_margin / equity if equity > 0.0 else 0.0,
+                        "stop_price": entry_stop_price,
+                        "take_profit_price": entry_take_profit_price,
+                        "entry_stop_update_status": entry_stop_update_status,
+                        "entry_stop_update_error": entry_stop_update_error,
                         "updated_at_ms": now_ms,
                     }
                 )
@@ -1589,8 +1688,10 @@ def _reconcile_pending_order_fills(
                 "initial_margin_pct_equity": initial_margin / equity if equity > 0.0 else 0.0,
                 "tick_size": _float(order.get("tick_size")),
                 "qty_step": _float(order.get("qty_step")),
-                "stop_price": _float(order.get("stop_price")),
-                "take_profit_price": _float(order.get("take_profit_price")),
+                "stop_price": entry_stop_price,
+                "take_profit_price": entry_take_profit_price,
+                "entry_stop_update_status": entry_stop_update_status,
+                "entry_stop_update_error": entry_stop_update_error,
                 "entry_order_link_id": link,
                 "entry_order_id": order.get("order_id", ""),
                 "submit_mode": "execution_reconciled",
@@ -2632,6 +2733,14 @@ def _telegram_notification_reason(payload: dict[str, Any]) -> str:
         return "position_report_error"
     if payload.get("reconciliations"):
         return "position_reconciled"
+    if any(
+        str(row.get("entry_stop_update_status", "")) == "failed"
+        for row in (payload.get("entries") or [])
+        + (payload.get("entry_orders") or [])
+        + (payload.get("pending_fill_trades") or [])
+        + (payload.get("pending_fill_orders") or [])
+    ):
+        return "entry_stop_update_failed"
     if any(str(row.get("submit_mode", "")) == "error" for row in payload.get("exit_orders", [])):
         return "risk_order_error"
     if payload.get("stop_repairs"):

@@ -244,8 +244,19 @@ def test_execute_entry_records_only_confirmed_fill() -> None:
 
     assert rows[0]["qty"] == "1"
     assert rows[0]["entry_price"] == 100.5
+    assert rows[0]["stop_price"] == 112.6
+    assert rows[0]["take_profit_price"] == 80.4
+    assert rows[0]["entry_stop_update_status"] == "submitted"
     assert orders[0]["status"] == "partial"
     assert orders[0]["notional_usdt"] == 100.5
+    assert orders[0]["stop_price"] == 112.6
+    assert orders[0]["take_profit_price"] == 80.4
+    assert orders[0]["stop_loss_pct"] == 0.12
+    assert orders[0]["take_profit_pct"] == 0.20
+    assert orders[0]["entry_stop_update_status"] == "submitted"
+    assert client.orders[0]["stopLoss"] == "112"
+    assert client.orders[0]["takeProfit"] == "80"
+    assert client.stop_updates == [{"symbol": "AAAUSDT", "stop_loss": "112.6", "take_profit": "80.4"}]
 
 
 def test_wallet_equity_usdt_prefers_total_equity_then_coin_equity() -> None:
@@ -399,6 +410,13 @@ def test_telegram_notify_only_for_material_events(monkeypatch: pytest.MonkeyPatc
     }
 
     assert _telegram_notification_reason(entry_unconfirmed_payload) == "entry_order_unconfirmed"
+
+    failed_entry_stop_update_payload = {
+        **quiet_payload,
+        "entry_orders": [{"status": "filled", "entry_stop_update_status": "failed"}],
+    }
+
+    assert _telegram_notification_reason(failed_entry_stop_update_payload) == "entry_stop_update_failed"
 
     reconciled_entry_payload = {
         **quiet_payload,
@@ -856,6 +874,58 @@ def test_pending_entry_fill_reconciles_to_open_trade() -> None:
     assert trades[0]["stop_price"] == 112.0
     assert order_updates[0]["status"] == "filled"
     assert order_updates[0]["filled_qty"] == "1"
+
+
+def test_pending_entry_fill_recomputes_protection_from_confirmed_fill() -> None:
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "agc-en-pending",
+                "ts_ms": 1_700_000_060_000,
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "order_type": "Market",
+                "qty": "1",
+                "reduce_only": False,
+                "order_id": "order-1",
+                "submit_mode": "submitted",
+                "avg_price": 100.0,
+                "notional_usdt": 0.0,
+                "target_notional_pct_equity": 0.2,
+                "entry_leverage": 2.0,
+                "initial_margin_usdt": 0.0,
+                "status": "submitted_unconfirmed",
+                "trade_side": "short",
+                "signal_ts_ms": 1_700_000_000_000,
+                "equity_usdt": 10_000.0,
+                "tick_size": 0.1,
+                "qty_step": 0.1,
+                "stop_price": 112.0,
+                "take_profit_price": 80.0,
+                "stop_loss_pct": 0.12,
+                "take_profit_pct": 0.20,
+            }
+        ]
+    )
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-en-",))
+
+    trades, order_updates = _reconcile_pending_order_fills(
+        orders,
+        pl.DataFrame(),
+        trading_client=client,
+        demo=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        now_ms=1_700_000_120_000,
+    )
+
+    assert trades[0]["entry_price"] == 100.5
+    assert trades[0]["stop_price"] == 112.6
+    assert trades[0]["take_profit_price"] == 80.4
+    assert trades[0]["entry_stop_update_status"] == "submitted"
+    assert order_updates[0]["stop_price"] == 112.6
+    assert order_updates[0]["take_profit_price"] == 80.4
+    assert order_updates[0]["entry_stop_update_status"] == "submitted"
+    assert client.stop_updates == [{"symbol": "AAAUSDT", "stop_loss": "112.6", "take_profit": "80.4"}]
 
 
 def test_stale_pending_order_fill_is_not_polled_forever() -> None:

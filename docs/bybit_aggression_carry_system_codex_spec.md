@@ -119,8 +119,9 @@ The runner loops every `INTERVAL_SECONDS=60` by default. Each cycle:
 4. Exits existing demo positions first on fixed-stop/take-profit reconciliation, event decay, rank exit, or 3-day max hold.
 5. Enters accepted liquidity-migration events after the 1-hour signal delay, subject to max-active, cooldown, stop-pressure, positive-day-return, residual-return, and stale-entry gates. Stale entries are skipped after 15 minutes by default so demo fills stay close to the backtest entry timestamp.
 6. Sizes each accepted coin from the same weight used by the backtest: `gross_exposure / max_active_symbols`, currently `1.25 / 6 = 20.83%` of current Bybit demo USDT equity. `--max-order-notional-pct-equity` is only an explicit override. The continuous runner defaults entry leverage to 2x so the 125% gross target can be submitted without changing notional sizing.
-7. Sends Telegram only for material events when enabled: entries, exits, position reconciliation, or position-report errors. Quiet cycles still write local reports but do not notify.
-8. Writes expected/submitted order state into `event_demo_orders`, trade state into `event_demo_trades`, cycle telemetry into `event_demo_cycles`, and Markdown/JSON reports under `reports/event-demo`.
+7. Attaches exchange-native stop/take-profit to entry orders, then recomputes the ledger stop/take-profit from confirmed fill price. If the confirmed fill moves the rounded protection levels, the runner immediately updates Bybit trading-stop state and records the update status.
+8. Sends Telegram only for material events when enabled: entries, exits, failed entry stop updates, position reconciliation, or position-report errors. Quiet cycles still write local reports but do not notify.
+9. Writes expected/submitted order state into `event_demo_orders`, trade state into `event_demo_trades`, cycle telemetry into `event_demo_cycles`, and Markdown/JSON reports under `reports/event-demo`.
 
 Order submission is still fail-closed: `--submit-orders` requires `--confirm-demo-orders`, `BYBIT_DEMO_API_KEY`, and `BYBIT_DEMO_API_SECRET`. Without those, the command is a dry-run scan.
 

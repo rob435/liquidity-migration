@@ -293,6 +293,9 @@ material events when enabled, and records `event_demo_trades`,
 `event_demo_orders`, and `event_demo_cycles` ledgers. It is a current-universe
 forward tester, so it is allowed for demo evidence and operations, not for
 historical promotion evidence.
+Entry orders attach native stop/TP immediately, then confirmed fills recompute
+the ledger stop/TP from actual fill price and repair Bybit trading-stop state
+when rounding moves the protection levels.
 
 Fast exit enforcement is handled by the separate exit-only risk watchdog:
 
