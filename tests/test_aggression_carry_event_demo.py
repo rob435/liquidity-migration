@@ -910,6 +910,57 @@ def test_limit_chase_uses_ioc_limits_then_market_fallback() -> None:
     assert submit["order_rows"][-1]["status"] == "fallback_market"
 
 
+def test_market_risk_exit_history_error_stays_pending() -> None:
+    client = FakeRiskClient(fail_trade_history=True)
+
+    submit = _submit_reduce_only_exit(
+        symbol="AAAUSDT",
+        bybit_side="Buy",
+        qty="1",
+        trading_client=client,
+        risk=EventRiskCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            exit_order_mode="market",
+        ),
+        now_ms=1_700_000_000_000,
+        reference_price=100.0,
+        tick_size=0.1,
+    )
+
+    assert submit["order_id"] == "order-1"
+    assert submit["exec_summary"]["qty"] == ""
+    assert submit["order_rows"][0]["status"] == "submitted_unconfirmed"
+    assert "fill confirmation failed" in submit["order_rows"][0]["error"]
+
+
+def test_limit_chase_history_error_stops_before_fallback() -> None:
+    client = FakeRiskClient(fail_trade_history=True)
+
+    submit = _submit_reduce_only_exit(
+        symbol="AAAUSDT",
+        bybit_side="Buy",
+        qty="1",
+        trading_client=client,
+        risk=EventRiskCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            exit_order_mode="limit_chase",
+            limit_chase_attempts=2,
+            limit_chase_wait_seconds=0.0,
+        ),
+        now_ms=1_700_000_000_000,
+        reference_price=100.0,
+        tick_size=0.1,
+    )
+
+    assert [row["orderType"] for row in client.orders] == ["Limit"]
+    assert submit["order_id"] == "order-1"
+    assert submit["exec_summary"]["qty"] == ""
+    assert submit["order_rows"][0]["status"] == "submitted_unconfirmed"
+    assert "fill confirmation failed" in submit["order_rows"][0]["error"]
+
+
 def test_event_exit_does_not_close_until_fill_confirmed() -> None:
     all_trades = pl.DataFrame(
         [
@@ -949,6 +1000,94 @@ def test_event_exit_does_not_close_until_fill_confirmed() -> None:
     assert rows == []
     assert orders[0]["status"] == "submitted_unconfirmed"
     assert orders[0]["notional_usdt"] == 0.0
+
+
+def test_event_exit_records_order_error_without_raising() -> None:
+    all_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "1",
+                "entry_price": 100.0,
+            }
+        ]
+    )
+
+    rows, orders = _execute_exits(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "qty": "1",
+                "exit_reason": "max_hold",
+                "exit_trigger_ts_ms": 1_700_000_000_000,
+                "planned_exit_price": 99.0,
+            }
+        ],
+        all_trades,
+        trading_client=FakeRiskClient(fail_order_symbols={"AAAUSDT"}),
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        now_ms=1_700_000_060_000,
+    )
+
+    assert rows == []
+    assert orders[0]["status"] == "failed"
+    assert orders[0]["submit_mode"] == "error"
+    assert orders[0]["order_id"] == ""
+    assert "place_order failed" in orders[0]["error"]
+    assert "order rejected" in orders[0]["error"]
+
+
+def test_event_exit_fill_confirmation_error_stays_pending() -> None:
+    all_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "1",
+                "entry_price": 100.0,
+            }
+        ]
+    )
+
+    rows, orders = _execute_exits(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "qty": "1",
+                "exit_reason": "max_hold",
+                "exit_trigger_ts_ms": 1_700_000_000_000,
+                "planned_exit_price": 99.0,
+            }
+        ],
+        all_trades,
+        trading_client=FakeRiskClient(fail_trade_history=True),
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        now_ms=1_700_000_060_000,
+    )
+
+    assert rows == []
+    assert orders[0]["status"] == "submitted_unconfirmed"
+    assert orders[0]["submit_mode"] == "submitted"
+    assert orders[0]["order_id"] == "order-1"
+    assert "fill confirmation failed" in orders[0]["error"]
+    assert "history unavailable" in orders[0]["error"]
 
 
 def test_event_exit_closes_after_confirmed_fill() -> None:
@@ -1091,6 +1230,43 @@ def test_pending_entry_fill_recomputes_protection_from_confirmed_fill() -> None:
     assert order_updates[0]["take_profit_price"] == 80.4
     assert order_updates[0]["entry_stop_update_status"] == "submitted"
     assert client.stop_updates == [{"symbol": "AAAUSDT", "stop_loss": "112.6", "take_profit": "80.4"}]
+
+
+def test_pending_fill_history_error_keeps_order_pending() -> None:
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "agc-en-pending",
+                "ts_ms": 1_700_000_060_000,
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "order_type": "Market",
+                "qty": "1",
+                "reduce_only": False,
+                "order_id": "order-1",
+                "submit_mode": "submitted",
+                "avg_price": 100.0,
+                "notional_usdt": 0.0,
+                "status": "submitted_unconfirmed",
+            }
+        ]
+    )
+    client = FakeRiskClient(fail_trade_history=True)
+
+    trades, order_updates = _reconcile_pending_order_fills(
+        orders,
+        pl.DataFrame(),
+        trading_client=client,
+        demo=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        now_ms=1_700_000_120_000,
+    )
+
+    assert trades == []
+    assert order_updates[0]["status"] == "submitted_unconfirmed"
+    assert order_updates[0]["order_link_id"] == "agc-en-pending"
+    assert "fill reconciliation failed" in order_updates[0]["error"]
+    assert "history unavailable" in order_updates[0]["error"]
 
 
 def test_stale_pending_order_fill_is_not_polled_forever() -> None:

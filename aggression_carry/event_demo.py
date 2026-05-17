@@ -149,6 +149,10 @@ def run_event_demo_cycle(
             demo=demo,
             now_ms=cycle_now_ms,
         )
+        pending_order_fills_reconciled = sum(1 for row in pending_fill_orders if _float(row.get("filled_qty")) > 0.0)
+        pending_order_fill_errors = sum(
+            1 for row in pending_fill_orders if str(row.get("error", "")).startswith("fill reconciliation failed")
+        )
         if pending_fill_trades:
             all_trades = _upsert_rows(all_trades, pending_fill_trades, key="trade_id")
             _write_trade_rows(root, pl.DataFrame(pending_fill_trades, infer_schema_length=None))
@@ -240,9 +244,14 @@ def run_event_demo_cycle(
             "entries_executed": len(executed_entries),
             "exit_candidates": len(exits),
             "exits_executed": len(executed_exits),
-            "pending_order_fills_reconciled": len(pending_fill_orders),
-            "pending_entry_fills_reconciled": sum(1 for row in pending_fill_orders if not _bool(row.get("reduce_only"))),
-            "pending_exit_fills_reconciled": sum(1 for row in pending_fill_orders if _bool(row.get("reduce_only"))),
+            "pending_order_fills_reconciled": pending_order_fills_reconciled,
+            "pending_entry_fills_reconciled": sum(
+                1 for row in pending_fill_orders if _float(row.get("filled_qty")) > 0.0 and not _bool(row.get("reduce_only"))
+            ),
+            "pending_exit_fills_reconciled": sum(
+                1 for row in pending_fill_orders if _float(row.get("filled_qty")) > 0.0 and _bool(row.get("reduce_only"))
+            ),
+            "pending_order_fill_errors": pending_order_fill_errors,
             "open_trades_before": refreshed_open.height,
             "open_trades_after": _open_trades(all_trades).height,
             "equity_usdt": equity_usdt,
@@ -1468,32 +1477,45 @@ def _execute_exits(
         order_result: dict[str, Any] = {}
         exec_summary: dict[str, Any] = {}
         submit_mode = "dry_run"
+        error = ""
+        order_status = "planned"
         if demo.submit_orders:
             assert trading_client is not None
-            order_result = trading_client.place_order(
-                **_order_params(
-                    symbol=symbol,
-                    side=bybit_side,
-                    qty=qty,
-                    order_type=demo.exit_order_type,
-                    order_link_id=exit_link,
-                    reduce_only=True,
+            try:
+                order_result = trading_client.place_order(
+                    **_order_params(
+                        symbol=symbol,
+                        side=bybit_side,
+                        qty=qty,
+                        order_type=demo.exit_order_type,
+                        order_link_id=exit_link,
+                        reduce_only=True,
+                    )
                 )
-            )
-            exec_summary = _wait_for_execution_summary(
-                trading_client,
-                symbol=symbol,
-                order_link_id=exit_link,
-                poll_seconds=demo.order_fill_confirm_seconds,
-                poll_interval_seconds=demo.order_fill_poll_interval_seconds,
-            )
-            submit_mode = "submitted"
+                submit_mode = "submitted"
+            except Exception as exc:  # noqa: BLE001 - failed exits must be ledgered without aborting the cycle
+                submit_mode = "error"
+                order_status = "failed"
+                error = f"place_order failed: {exc}"[:500]
+            if submit_mode == "submitted":
+                try:
+                    exec_summary = _wait_for_execution_summary(
+                        trading_client,
+                        symbol=symbol,
+                        order_link_id=exit_link,
+                        poll_seconds=demo.order_fill_confirm_seconds,
+                        poll_interval_seconds=demo.order_fill_poll_interval_seconds,
+                    )
+                except Exception as exc:  # noqa: BLE001 - order may still fill; pending reconciliation will retry
+                    order_status = "submitted_unconfirmed"
+                    error = f"fill confirmation failed: {exc}"[:500]
         exit_price = _float(exec_summary.get("avg_price")) or _float(exit_plan.get("planned_exit_price"))
         target_qty = _float(qty)
         filled_qty = _float(exec_summary.get("qty")) if demo.submit_orders else target_qty
         qty_tolerance = max(target_qty * 1e-8, 1e-12)
         fully_filled = not demo.submit_orders or (target_qty > 0.0 and filled_qty + qty_tolerance >= target_qty)
-        order_status = "filled" if fully_filled else "partial" if filled_qty > 0.0 else "submitted_unconfirmed"
+        if order_status != "failed":
+            order_status = "filled" if fully_filled else "partial" if filled_qty > 0.0 else "submitted_unconfirmed"
         if fully_filled:
             trade.update(
                 {
@@ -1528,6 +1550,7 @@ def _execute_exits(
                 "exit_reason": str(exit_plan["exit_reason"]),
                 "target_qty": qty,
                 "filled_qty": _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0.0 else "",
+                "error": error,
             }
         )
     return rows, orders
@@ -1557,7 +1580,18 @@ def _reconcile_pending_order_fills(
         ts_ms = int(order.get("ts_ms") or 0)
         if ts_ms > 0 and now_ms - ts_ms > PENDING_ORDER_GUARD_MS:
             continue
-        summary = _execution_summary(trading_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50))
+        try:
+            summary = _execution_summary(trading_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50))
+        except Exception as exc:  # noqa: BLE001 - keep the pending guard active and retry next cycle
+            order_update = dict(order)
+            order_update.update(
+                {
+                    "error": f"fill reconciliation failed: {exc}"[:500],
+                    "updated_at_ms": now_ms,
+                }
+            )
+            order_rows.append(order_update)
+            continue
         filled_qty = _float(summary.get("qty"))
         if filled_qty <= 0.0:
             continue
@@ -1922,7 +1956,14 @@ def _submit_reduce_only_exit(
                 reduce_only=True,
             )
         )
-        exec_summary = _execution_summary(trading_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50))
+        error = ""
+        status = "submitted"
+        try:
+            exec_summary = _execution_summary(trading_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50))
+        except Exception as exc:  # noqa: BLE001 - accepted reduce-only order remains pending for reconciliation
+            exec_summary = {"qty": "", "avg_price": 0.0, "fee": 0.0, "executions": 0}
+            status = "submitted_unconfirmed"
+            error = f"fill confirmation failed: {exc}"[:500]
         return {
             "order_link_id": link,
             "order_id": order_result.get("orderId", ""),
@@ -1937,8 +1978,9 @@ def _submit_reduce_only_exit(
                     qty=qty,
                     order_type="Market",
                     submit_mode="submitted",
-                    status="submitted",
+                    status=status,
                     order_id=order_result.get("orderId", ""),
+                    error=error,
                 )
             ],
         }
@@ -1995,7 +2037,32 @@ def _submit_limit_chase_exit(
         last_order_id = order_result.get("orderId", "")
         if risk.limit_chase_wait_seconds > 0.0:
             time.sleep(risk.limit_chase_wait_seconds)
-        batch = trading_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50)
+        try:
+            batch = trading_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50)
+        except Exception as exc:  # noqa: BLE001 - accepted IOC may still fill; do not chase blind
+            order_rows.append(
+                _risk_order_row(
+                    link=link,
+                    ts_ms=now_ms,
+                    symbol=symbol,
+                    side=bybit_side,
+                    qty=_decimal_text(Decimal(str(remaining_qty))),
+                    order_type="Limit",
+                    submit_mode="submitted",
+                    status="submitted_unconfirmed",
+                    order_id=last_order_id,
+                    price=limit_price,
+                    time_in_force="IOC",
+                    error=f"fill confirmation failed: {exc}"[:500],
+                )
+            )
+            return {
+                "order_link_id": last_link,
+                "order_id": last_order_id,
+                "submit_mode": "submitted",
+                "exec_summary": _execution_summary(executions),
+                "order_rows": order_rows,
+            }
         summary = _execution_summary(batch)
         filled_qty += _float(summary.get("qty"))
         executions.extend(batch)
@@ -2029,8 +2096,14 @@ def _submit_limit_chase_exit(
             )
         )
         last_order_id = order_result.get("orderId", "")
-        batch = trading_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50)
-        executions.extend(batch)
+        error = ""
+        status = "fallback_market"
+        try:
+            batch = trading_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50)
+            executions.extend(batch)
+        except Exception as exc:  # noqa: BLE001 - accepted market fallback remains pending for reconciliation
+            status = "submitted_unconfirmed"
+            error = f"fill confirmation failed: {exc}"[:500]
         order_rows.append(
             _risk_order_row(
                 link=link,
@@ -2040,8 +2113,9 @@ def _submit_limit_chase_exit(
                 qty=_decimal_text(Decimal(str(remaining_qty))),
                 order_type="Market",
                 submit_mode="submitted",
-                status="fallback_market",
+                status=status,
                 order_id=last_order_id,
+                error=error,
             )
         )
     return {
