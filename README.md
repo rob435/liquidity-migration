@@ -139,6 +139,7 @@ Default forward-test behavior:
 - `aggression_carry/trade_lifecycle.py`: active trade lifecycle, exit, basket, and equity helpers
 - `scripts/run_bybit_demo_event_engine.sh`: continuous Bybit demo forward runner
 - `scripts/run_bybit_demo_ws_risk_engine.sh`: continuous websocket risk watchdog
+- `scripts/prove_bybit_demo_order_lifecycle.py`: guarded demo order-path proof for strategy-sized short entry, native protection, reduce-only exit, and WebSocket Trade availability
 - `scripts/run_fullpit_volume_overnight.sh`: selected full-PIT runner
 - `scripts/run_fullpit_volume_overnight.ps1`: PowerShell selected full-PIT runner
 - `deploy/systemd/model050426-bybit-demo.service`: VPS service definition for the active demo runner

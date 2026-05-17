@@ -64,6 +64,39 @@ Audit artifact on VPS:
 
 - `data/bybit-demo-event/reports/system-audit/latest_filled_order_audit.json`.
 
+## Strategy-Sized Proof Tests
+
+After cleaning the VPS checkout, ran `scripts/prove_bybit_demo_order_lifecycle.py`
+with the autonomous demo/risk services stopped and restarted by shell trap.
+The script refuses to start if any live position or open order exists, uses
+the production entry helper for a forced short lifecycle, verifies native
+exchange stop/take-profit fields, exits through the production reduce-only
+risk helper, and always attempts symbol cleanup before writing its report.
+
+BTCUSDT proof:
+
+- Artifact: `data/bybit-demo-event/reports/system-audit/prove_unproven_20260517T182940Z.json`.
+- Entry: strategy-sized demo short, `0.025 BTC`, notional `1952.7075 USDT`, `19.53%` of equity.
+- Entry status: filled; native stop loss `87481.3`, native take profit `58581.2`.
+- Entry execution history was visible after `181.628ms`.
+- Exit: production reduce-only market helper; execution history was visible after `1925.515ms`.
+- Final state: `0` positions, `0` open orders.
+
+DOGEUSDT proof:
+
+- Artifact: `data/bybit-demo-event/reports/system-audit/prove_unproven_20260517T183044Z.json`.
+- Entry: strategy-sized demo short, `18161 DOGE`, notional `1998.61805 USDT`, `20.00%` of equity.
+- Entry status: filled; native stop loss `0.12326`, native take profit `0.08253`.
+- Entry execution history was visible after `609.757ms`.
+- Exit: production reduce-only market helper; execution history was visible after `3201.353ms`.
+- Final state: `0` positions, `0` open orders.
+
+WebSocket Trade proof:
+
+- Attempted demo WebSocket Trade order entry with a far post-only BTC order.
+- Result: `unavailable_or_rejected`; Bybit demo WebSocket Trade auth failed at `wss://stream-demo.bybit.com/v5/trade`.
+- Decision: keep `ORDER_SUBMIT_MODE=ws_then_rest`; the risk decision path remains WebSocket-first, but demo order submission must continue using REST fallback.
+
 ## Findings
 
 1. Pass: demo auth, private REST order placement, cancellation, market entry, attached protection, reduce-only exit, delayed execution history, and cleanup all worked on the Bybit demo account.
@@ -71,8 +104,13 @@ Audit artifact on VPS:
 3. Fixed: `scripts/probe_bybit_demo_order_latency.py` sized by `minOrderQty` only and failed cheap symbols below Bybit's 5 USDT minimum. It now respects `minNotionalValue`; the DOGE buy/sell post-only probes pass after the fix.
 4. Watch: immediate trade-history lookup for the reduce-only exit returned empty, while delayed lookup confirmed the fill and the position was already flat. The system's reconciliation path covers this, but immediate reports can briefly show `submitted_unconfirmed`.
 5. Watch: risk service reports `ws_order_unavailable` and uses REST fallback for demo reduce-only exits. This is acceptable for the current deployment because the fallback path was live-tested, but it should stay visible in monitoring.
-6. Low severity: manual service stops emitted one systemd warning, `Failed to kill control group ... ignoring: Invalid argument`. Services still stopped, restarted, and ran normally.
+6. Pass: strategy-sized short lifecycle was live-tested on BTCUSDT and DOGEUSDT at roughly 20% equity per entry. Both attached native protection, exited reduce-only, and ended flat.
+7. Low severity: manual service stops emitted one systemd warning, `Failed to kill control group ... ignoring: Invalid argument`. Services still stopped, restarted, and ran normally.
 
 ## Decision
 
-The deployed demo system is operational after this audit. The order path is safe for demo trading, the account is flat after testing, and the active strategy configuration matches the promoted union liquidity-migration system.
+The deployed demo system is operational after this audit. The order path is safe for demo trading, strategy-sized demo order behavior has been tested on both BTC and DOGE, the account is flat after testing, and the active strategy configuration matches the promoted union liquidity-migration system.
+
+This still does not prove future profitability or real-money venue behavior.
+It proves the demo execution and risk plumbing far more strongly than the
+initial tiny-order audit did.
