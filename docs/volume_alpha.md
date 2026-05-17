@@ -330,6 +330,9 @@ events, so exit decisions survive later quiet heartbeat overwrites.
 Fresh pending reduce-only untracked-position exits are restored after restart
 even though they have no ledger trade ID, so the watchdog does not duplicate a
 still-pending emergency flatten order after process loss.
+Live AGC reduce-only exit open orders on Bybit are also treated as active exit
+submissions, covering crashes that placed an exit but lost the local order row.
+Manual/native reduce-only protection orders do not suppress emergency exits.
 Material Telegram alert keys are persisted in the same report directory, so
 restarting the watchdog does not resend the same alert.
 Stop-repair alerts are keyed by symbol and target stop/TP rather than synthetic

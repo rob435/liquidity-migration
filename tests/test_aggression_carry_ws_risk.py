@@ -16,9 +16,18 @@ from aggression_carry.ws_risk import (
 
 
 class FakePrivateClient:
-    def __init__(self, *, confirm_fills: bool = True, fail_trade_history: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        confirm_fills: bool = True,
+        fail_trade_history: bool = False,
+        open_orders: list[dict[str, object]] | None = None,
+        fail_open_orders: bool = False,
+    ) -> None:
         self.confirm_fills = confirm_fills
         self.fail_trade_history = fail_trade_history
+        self.open_orders = open_orders or []
+        self.fail_open_orders = fail_open_orders
         self.positions = [
             {
                 "symbol": "AAAUSDT",
@@ -36,6 +45,13 @@ class FakePrivateClient:
 
     def get_positions(self, *, settle_coin: str | None = None):
         return self.positions
+
+    def get_open_orders(self, *, symbol: str | None = None, settle_coin: str | None = None):
+        if self.fail_open_orders:
+            raise RuntimeError("open orders unavailable")
+        if symbol:
+            return [row for row in self.open_orders if str(row.get("symbol") or "") == symbol]
+        return self.open_orders
 
     def place_order(self, **params):
         self.orders.append(params)
@@ -125,6 +141,82 @@ def test_ws_risk_triggers_rest_fallback_exit_from_ticker(tmp_path: Path) -> None
     assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
     assert engine.state.exits[0]["exit_reason"] == "stop_loss"
     assert "AAAUSDT" not in engine.state.submitted_symbols
+
+
+def test_ws_risk_live_open_exit_order_blocks_duplicate_tracked_exit(tmp_path: Path) -> None:
+    _write_open_trade(tmp_path)
+    private_client = FakePrivateClient(
+        open_orders=[
+            {
+                "symbol": "AAAUSDT",
+                "orderLinkId": "agc-ex-existing",
+                "orderStatus": "New",
+                "reduceOnly": True,
+            }
+        ]
+    )
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
+    payload = engine.write_report(reason="heartbeat")
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    assert private_client.orders == []
+    assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "open"
+    assert engine.state.live_exit_order_symbols == {"AAAUSDT"}
+    assert payload["cycle"]["bybit_live_exit_open_orders"] == 1
+
+
+def test_ws_risk_manual_reduce_only_order_does_not_block_emergency_exit(tmp_path: Path) -> None:
+    _write_open_trade(tmp_path)
+    private_client = FakePrivateClient(
+        open_orders=[
+            {
+                "symbol": "AAAUSDT",
+                "orderLinkId": "manual-reduce",
+                "orderStatus": "New",
+                "reduceOnly": True,
+            }
+        ]
+    )
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    assert len(private_client.orders) == 1
+    assert private_client.orders[0]["reduceOnly"] is True
+    assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
 
 
 def test_ws_then_rest_records_demo_trade_socket_limit_and_uses_rest(tmp_path: Path) -> None:
@@ -715,6 +807,43 @@ def test_ws_risk_bootstrap_loads_pending_untracked_exit_after_restart(tmp_path: 
     assert len(engine.state.orders) == 1
     assert engine.state.orders[0]["order_link_id"] == "agc-ux-pending"
     assert "AAAUSDT" in engine.state.submitted_symbols
+
+
+def test_ws_risk_live_open_untracked_exit_blocks_duplicate_after_restart(tmp_path: Path) -> None:
+    private_client = FakePrivateClient(
+        confirm_fills=False,
+        open_orders=[
+            {
+                "symbol": "AAAUSDT",
+                "orderLinkId": "agc-ux-existing",
+                "orderStatus": "New",
+                "reduceOnly": True,
+            }
+        ],
+    )
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    payload = engine.write_report(reason="heartbeat")
+
+    assert private_client.orders == []
+    assert read_dataset(tmp_path, "event_demo_orders").is_empty()
+    assert engine.state.live_exit_order_symbols == {"AAAUSDT"}
+    assert payload["cycle"]["bybit_live_exit_open_orders"] == 1
 
 
 def test_ws_risk_untracked_exit_retries_after_pending_guard(tmp_path: Path) -> None:

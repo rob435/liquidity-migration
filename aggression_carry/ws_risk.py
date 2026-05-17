@@ -33,6 +33,8 @@ from .event_demo import (
     _risk_order_link_id,
     _risk_reconcile_missing_positions,
     _reconcile_pending_order_fills,
+    _live_open_order_symbols,
+    _safe_open_orders,
     _safe_raw_positions,
     _maybe_notify,
     _telegram_notification_reason,
@@ -79,6 +81,7 @@ class WebSocketRiskState:
     price_by_symbol: dict[str, float] = field(default_factory=dict)
     pending_entry_symbols: set[str] = field(default_factory=set)
     submitted_symbols: set[str] = field(default_factory=set)
+    live_exit_order_symbols: set[str] = field(default_factory=set)
     submitted_symbol_ts_ms: dict[str, int] = field(default_factory=dict)
     submitted_link_to_trade_id: dict[str, str] = field(default_factory=dict)
     submitted_link_submit_mode: dict[str, str] = field(default_factory=dict)
@@ -154,6 +157,7 @@ class EventWebSocketRiskEngine:
             self.state.errors.append(error)
         self.state.positions_by_symbol = _active_position_by_symbol(raw_positions)
         self.state.price_by_symbol.update(_price_lookup_from_positions(self.state.positions_by_symbol))
+        self.refresh_live_exit_order_symbols()
         self.reconcile_positions(write=True)
         self.repair_exchange_stops()
         self.exit_untracked_positions()
@@ -463,7 +467,7 @@ class EventWebSocketRiskEngine:
         )
         for exit_plan in exits:
             symbol = str(exit_plan.get("symbol", ""))
-            if symbol and symbol not in self.state.submitted_symbols:
+            if symbol and not self.exit_submission_active(symbol):
                 self.submit_exit(exit_plan)
 
     def submit_exit(self, exit_plan: dict[str, Any]) -> None:
@@ -618,6 +622,7 @@ class EventWebSocketRiskEngine:
         orders = read_dataset(self.root, "event_demo_orders")
         self.load_pending_entry_orders(orders)
         self.load_pending_exit_orders(orders)
+        self.refresh_live_exit_order_symbols()
         self.reconcile_positions(write=True)
         self.repair_exchange_stops()
         self.reconcile_untracked_exit_orders()
@@ -640,7 +645,7 @@ class EventWebSocketRiskEngine:
                 not symbol
                 or symbol in open_symbols
                 or symbol in self.state.pending_entry_symbols
-                or symbol in self.state.submitted_symbols
+                or self.exit_submission_active(symbol)
                 or _float(qty) <= 0.0
             ):
                 continue
@@ -774,6 +779,16 @@ class EventWebSocketRiskEngine:
                 self.mark_submitted_symbol(symbol)
         if updates:
             _write_order_rows(self.root, pl.DataFrame(updates, infer_schema_length=None))
+
+    def refresh_live_exit_order_symbols(self) -> None:
+        open_orders, error = _safe_open_orders(self.private_client, settle_coin=self.risk.settle_coin)
+        if error:
+            self.state.errors.append(error)
+            return
+        self.state.live_exit_order_symbols = _live_open_order_symbols(open_orders, reduce_only=True)
+
+    def exit_submission_active(self, symbol: str) -> bool:
+        return symbol in self.state.submitted_symbols or symbol in self.state.live_exit_order_symbols
 
     def reconcile_pending_order_fills(self, orders: pl.DataFrame) -> None:
         if orders.is_empty() or self.private_client is None:
@@ -940,6 +955,7 @@ class EventWebSocketRiskEngine:
             "pending_entry_fills_reconciled": pending_entry_fills,
             "pending_exit_fills_reconciled": pending_exit_fills,
             "untracked_exits_submitted": sum(1 for row in self.state.orders if str(row.get("exit_reason", "")) == "untracked_position"),
+            "bybit_live_exit_open_orders": len(self.state.live_exit_order_symbols),
             "open_trades_before": self.state.open_trades.height,
             "open_trades_after": self.state.open_trades.height,
             "equity_usdt": 0.0,

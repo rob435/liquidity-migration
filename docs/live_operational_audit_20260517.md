@@ -77,18 +77,27 @@ Objective: harden the Bybit demo system as if it is live capital, with emphasis 
   - In submit mode, an open-order snapshot error skips all new entries for that cycle instead of trusting the ledger alone.
   - Event exits also skip symbols that already have an AGC reduce-only exit order live on Bybit, without treating manual/native reduce-only protection as a duplicate event exit.
 
+- `current slice: recover live risk exit open-order guards`
+  - The websocket risk watchdog now snapshots Bybit open orders and treats live AGC reduce-only exit orders as active exit submissions.
+  - This covers the crash window where an exit order reached Bybit but the local `event_demo_orders` row was not written.
+  - Manual/native reduce-only protection orders do not suppress emergency risk exits.
+
 ## Verification
 
 Local:
 
-- `pytest -q`: 189 passed after the live open-order entry guard change.
+- `pytest -q`: 192 passed after the websocket risk live-open-exit guard change.
 
 VPS:
 
-- `pytest -q`: 189 passed after deploying the live open-order entry guard change.
+- `pytest -q`: 192 passed after deploying the websocket risk live-open-exit guard change.
 - Services after restart:
   - `model050426-bybit-demo.service`: active/running, `INTERVAL_SECONDS=300`.
   - `model050426-bybit-risk.service`: active/running.
+- Risk live-open-exit guard drill:
+  - An isolated tracked-position stop breach with a live `agc-ex-*` reduce-only open order submitted `0` duplicate exits and recorded `bybit_live_exit_open_orders=1`.
+  - An isolated untracked-position restart with a live `agc-ux-*` reduce-only open order submitted `0` duplicate exits and recorded `bybit_live_exit_open_orders=1`.
+  - A manual reduce-only open order did not suppress an emergency stop exit.
 - Entry live-open-order guard drill:
   - An isolated cycle with a forced entry candidate and a live non-reduce-only open order for the same symbol submitted `0` entry orders and recorded `skipped_live_open_entry_order=1`.
   - An isolated submit-mode cycle with an open-order snapshot error submitted `0` entry orders and recorded `skipped_open_order_snapshot_error=1`.
