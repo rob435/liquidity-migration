@@ -102,7 +102,7 @@ python -m aggression_carry \
   event-demo-cycle
 ```
 
-Continuous demo runner, checking every 60 seconds:
+Continuous demo runner, checking every 5 minutes by default:
 
 ```bash
 TELEGRAM_ENABLED=1 \
@@ -116,22 +116,25 @@ bash scripts/run_bybit_demo_event_engine.sh
 Default forward-test behavior:
 
 - pulls current Bybit USDT perp ranks 1-220, then applies the selected rank 31-150 liquidity-migration filter
-- rebuilds recent 1h volume features each cycle from a 45-day lookback
+- rebuilds recent 1h volume features each cycle from a 45-day lookback, using a forward-demo kline cache to fetch only missing/new bars on normal cycles
 - enters eligible events after the 1-hour signal delay, with stale entries skipped after 15 minutes by default
 - sizes each coin from the backtest weight: `gross_exposure / max_active_symbols`, currently `0.97 / 5 = 19.40%` of current Bybit demo USDT equity
 - uses 2x entry leverage in the continuous runner for margin headroom without changing the notional sizing
 - exits first on every cycle using fixed stop reconciliation, event decay, rank exit, or 3-day max hold
 - sends Telegram status with Bybit demo wallet equity, open positions, position value, and unrealized PnL when `TELEGRAM_ENABLED=1`
 - writes ledgers under `event_demo_trades`, `event_demo_orders`, and `event_demo_cycles`
+- the separate websocket risk watchdog writes latest reports under `reports/event-risk-ws` and keeps timestamped audit copies for startup/material events
 
 ## Useful Files
 
 - `aggression_carry/volume_events.py`: active event-driven strategy, full-PIT gates, ledger, reports
 - `aggression_carry/event_demo.py`: Bybit demo forward-cycle runner for the selected event strategy
+- `aggression_carry/ws_risk.py`: websocket-first risk watchdog with REST fallback and audit reports
 - `aggression_carry/archive_manifest.py`: PIT manifest and 1h kline builders
 - `aggression_carry/volume_features.py`: active daily volume and liquidity-rank feature builder
 - `aggression_carry/trade_lifecycle.py`: active trade lifecycle, exit, basket, and equity helpers
 - `scripts/run_bybit_demo_event_engine.sh`: continuous Bybit demo forward runner
+- `scripts/run_bybit_demo_ws_risk_engine.sh`: continuous websocket risk watchdog
 - `scripts/run_fullpit_volume_overnight.sh`: selected full-PIT runner
 - `scripts/run_fullpit_volume_overnight.ps1`: PowerShell selected full-PIT runner
 - `deploy/systemd/model050426-bybit-demo.service`: VPS service definition for the active demo runner

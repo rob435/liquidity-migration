@@ -26,6 +26,7 @@ DATASETS = {
     "ticker_snapshots",
     "archive_trade_manifest",
     "universe_current",
+    "event_demo_klines_1h",
     "event_demo_trades",
     "event_demo_orders",
     "event_demo_cycles",
@@ -47,6 +48,7 @@ DATASET_KEYS = {
     "ticker_snapshots": ("ts_ms", "symbol"),
     "archive_trade_manifest": ("symbol", "date", "url"),
     "universe_current": ("snapshot_ts_ms", "symbol"),
+    "event_demo_klines_1h": ("ts_ms", "symbol"),
     "event_demo_trades": ("trade_id",),
     "event_demo_orders": ("order_link_id",),
     "event_demo_cycles": ("cycle_id",),
@@ -72,7 +74,13 @@ def ensure_data_root(data_root: str | Path) -> Path:
 
 
 @contextmanager
-def exclusive_file_lock(path: str | Path, *, stale_seconds: int = 600, poll_seconds: float = 0.05) -> Iterator[None]:
+def exclusive_file_lock(
+    path: str | Path,
+    *,
+    stale_seconds: float = 600,
+    poll_seconds: float = 0.05,
+    invalid_lock_stale_seconds: float = 30.0,
+) -> Iterator[None]:
     lock_path = Path(path).expanduser()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     fd: int | None = None
@@ -80,10 +88,27 @@ def exclusive_file_lock(path: str | Path, *, stale_seconds: int = 600, poll_seco
         try:
             fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         except FileExistsError:
+            if _lock_owner_is_dead(lock_path):
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
             try:
                 age = time.time() - lock_path.stat().st_mtime
             except OSError:
                 age = 0.0
+            invalid_lock_stale = (
+                _lock_payload_is_invalid(lock_path)
+                and invalid_lock_stale_seconds >= 0
+                and age > invalid_lock_stale_seconds
+            )
+            if invalid_lock_stale:
+                try:
+                    lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+                continue
             if stale_seconds > 0 and age > stale_seconds:
                 try:
                     lock_path.unlink()
@@ -100,6 +125,38 @@ def exclusive_file_lock(path: str | Path, *, stale_seconds: int = 600, poll_seco
             lock_path.unlink()
         except FileNotFoundError:
             pass
+
+
+def _lock_owner_is_dead(lock_path: Path) -> bool:
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        pid = int(payload.get("pid") or 0)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return False
+    if pid <= 0 or pid == os.getpid():
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False
+    except OverflowError:
+        return True
+    except OSError:
+        return False
+    return False
+
+
+def _lock_payload_is_invalid(lock_path: Path) -> bool:
+    try:
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        pid = int(payload.get("pid") or 0)
+    except FileNotFoundError:
+        return False
+    except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError):
+        return True
+    return pid <= 0
 
 
 def with_date_column(df: pl.DataFrame, ts_col: str = "ts_ms") -> pl.DataFrame:
@@ -121,6 +178,18 @@ def write_dataset(
     append: bool = True,
 ) -> Path:
     root = ensure_data_root(data_root)
+    with exclusive_file_lock(dataset_lock_path(root, dataset), stale_seconds=21_600, poll_seconds=0.01):
+        return _write_dataset_unlocked(df, root, dataset, partition_by=partition_by, append=append)
+
+
+def _write_dataset_unlocked(
+    df: pl.DataFrame,
+    root: Path,
+    dataset: str,
+    *,
+    partition_by: tuple[str, ...],
+    append: bool,
+) -> Path:
     path = dataset_path(root, dataset)
     if df.is_empty():
         path.mkdir(parents=True, exist_ok=True)

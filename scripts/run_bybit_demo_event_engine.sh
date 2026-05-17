@@ -10,7 +10,7 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 CONFIG_PATH="${CONFIG_PATH:-configs/volume_alpha.default.yaml}"
 DATA_ROOT="${DATA_ROOT:-data/bybit-demo-event}"
-INTERVAL_SECONDS="${INTERVAL_SECONDS:-60}"
+INTERVAL_SECONDS="${INTERVAL_SECONDS:-300}"
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-45}"
 UNIVERSE_RANK_END="${UNIVERSE_RANK_END:-220}"
 UNIVERSE_MAX_SYMBOLS="${UNIVERSE_MAX_SYMBOLS:-220}"
@@ -19,6 +19,8 @@ MAX_ORDER_NOTIONAL_PCT_EQUITY="${MAX_ORDER_NOTIONAL_PCT_EQUITY:-0}"
 MAX_ENTRY_LAG_MINUTES="${MAX_ENTRY_LAG_MINUTES:-15}"
 MAX_NEW_ENTRIES_PER_CYCLE="${MAX_NEW_ENTRIES_PER_CYCLE:-5}"
 ENTRY_LEVERAGE="${ENTRY_LEVERAGE:-2}"
+ORDER_FILL_CONFIRM_SECONDS="${ORDER_FILL_CONFIRM_SECONDS:-2}"
+ORDER_FILL_POLL_INTERVAL_SECONDS="${ORDER_FILL_POLL_INTERVAL_SECONDS:-0.2}"
 FALLBACK_EQUITY_USDT="${FALLBACK_EQUITY_USDT:-10000}"
 
 telegram_args=()
@@ -48,6 +50,8 @@ echo "repo=$REPO_ROOT"
 echo "strategy=liqmig_union_q40_h3_tp25_g097_crowd_union"
 echo "data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS submit_orders=${SUBMIT_ORDERS:-0}"
 
+mkdir -p "$DATA_ROOT/.locks"
+
 while true; do
     set +e
     "$PYTHON_BIN" -m aggression_carry \
@@ -62,6 +66,8 @@ while true; do
         --max-entry-lag-minutes "$MAX_ENTRY_LAG_MINUTES" \
         --max-new-entries-per-cycle "$MAX_NEW_ENTRIES_PER_CYCLE" \
         --entry-leverage "$ENTRY_LEVERAGE" \
+        --order-fill-confirm-seconds "$ORDER_FILL_CONFIRM_SECONDS" \
+        --order-fill-poll-interval-seconds "$ORDER_FILL_POLL_INTERVAL_SECONDS" \
         --fallback-equity-usdt "$FALLBACK_EQUITY_USDT" \
         "${telegram_args[@]}" \
         "${order_args[@]}"

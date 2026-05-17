@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 from aggression_carry import bybit
 
 
@@ -52,6 +55,131 @@ def test_bybit_public_trade_stream_subscribes_symbols(monkeypatch) -> None:
     assert client._client.kwargs == {"testnet": True, "channel_type": "linear"}
     assert client._client.trade_calls == [{"symbol": ["BTCUSDT", "ETHUSDT"], "callback": callback}]
     assert client._client.closed is True
+
+
+def test_bybit_public_ticker_stream_subscribes_symbols(monkeypatch) -> None:
+    class FakeWebSocket:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.ticker_calls = []
+            self.closed = False
+
+        def ticker_stream(self, **params):
+            self.ticker_calls.append(params)
+
+        def exit(self):
+            self.closed = True
+
+    monkeypatch.setattr(bybit, "WebSocket", FakeWebSocket)
+
+    client = bybit.BybitPublicTickerStream(testnet=True, demo=True)
+    callback = object()
+    client.subscribe_tickers(["BTCUSDT", "ETHUSDT"], callback)
+    client.close()
+
+    assert client._client.kwargs == {"testnet": True, "demo": True, "channel_type": "linear"}
+    assert client._client.ticker_calls == [{"symbol": ["BTCUSDT", "ETHUSDT"], "callback": callback}]
+    assert client._client.closed is True
+
+
+def test_bybit_private_websocket_stream_subscribes_private_topics(monkeypatch) -> None:
+    class FakeWebSocket:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.calls = []
+
+        def position_stream(self, **params):
+            self.calls.append(("position", params))
+
+        def order_stream(self, **params):
+            self.calls.append(("order", params))
+
+        def execution_stream(self, **params):
+            self.calls.append(("execution", params))
+
+        def fast_execution_stream(self, **params):
+            self.calls.append(("fast_execution", params))
+
+    monkeypatch.setattr(bybit, "WebSocket", FakeWebSocket)
+
+    client = bybit.BybitPrivateWebSocketStream(api_key="key", api_secret="secret", demo=True)
+    callback = object()
+    client.subscribe_positions(callback)
+    client.subscribe_orders(callback)
+    client.subscribe_executions(callback, fast=True)
+
+    assert client._client.kwargs == {
+        "testnet": False,
+        "demo": True,
+        "channel_type": "private",
+        "api_key": "key",
+        "api_secret": "secret",
+    }
+    assert client._client.calls == [
+        ("position", {"callback": callback}),
+        ("order", {"callback": callback}),
+        ("fast_execution", {"callback": callback}),
+    ]
+
+
+def test_bybit_pybit_ping_timer_patch_uses_daemon_timer(monkeypatch) -> None:
+    class FakeManager:
+        ping_interval = 1000
+
+        def _send_custom_ping(self):
+            pass
+
+    monkeypatch.setitem(sys.modules, "pybit._websocket_stream", SimpleNamespace(_V5WebSocketManager=FakeManager))
+
+    bybit._patch_pybit_daemon_ping_timer()
+    manager = FakeManager()
+    manager._send_initial_ping()
+
+    assert manager._agc_ping_timer.daemon is True
+    manager._agc_ping_timer.cancel()
+
+
+def test_bybit_websocket_trade_client_wraps_place_and_cancel(monkeypatch) -> None:
+    class FakeWebSocketTrading:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.calls = []
+
+        def place_order(self, callback, **params):
+            self.calls.append(("place", callback, params))
+
+        def cancel_order(self, callback, **params):
+            self.calls.append(("cancel", callback, params))
+
+    monkeypatch.setattr(bybit, "WebSocketTrading", FakeWebSocketTrading)
+
+    client = bybit.BybitWebSocketTradeClient(api_key="key", api_secret="secret", demo=True, recv_window=1000)
+    callback = object()
+    client.place_order(callback, symbol="BTCUSDT", side="Buy", orderType="Market", qty="0.001", orderLinkId="agc")
+    client.cancel_order(callback, symbol="BTCUSDT", order_link_id="agc")
+
+    assert client._client.kwargs == {
+        "testnet": False,
+        "demo": True,
+        "api_key": "key",
+        "api_secret": "secret",
+        "recv_window": 1000,
+    }
+    assert client._client.calls == [
+        (
+            "place",
+            callback,
+            {
+                "category": "linear",
+                "symbol": "BTCUSDT",
+                "side": "Buy",
+                "orderType": "Market",
+                "qty": "0.001",
+                "orderLinkId": "agc",
+            },
+        ),
+        ("cancel", callback, {"category": "linear", "symbol": "BTCUSDT", "orderLinkId": "agc"}),
+    ]
 
 
 def test_bybit_private_client_refuses_non_demo_session(monkeypatch) -> None:

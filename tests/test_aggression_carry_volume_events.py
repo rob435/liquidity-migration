@@ -7,21 +7,22 @@ import pytest
 
 from aggression_carry.config import TradeLifecycleConfig
 from aggression_carry.ingestion import generate_fixture_data
+from aggression_carry.trade_lifecycle import _funding_lookup, _perp_funding_return
 from aggression_carry.volume_events import (
-    EventScenario,
     _attach_event_archive_membership,
+    _daily_return_frame,
     _event_decay_exit_hit,
     _event_filter,
     _execution_ordered_events,
     _float_or_nan,
     _full_pit_universe_error,
-    _realized_loss_pressure_active,
-    _select_events,
+    _funding_feature_frame,
+    _open_interest_feature_frame,
+    _signed_flow_feature_frame,
     _simulate_indexed_trade,
     _stop_pressure_active,
     VolumeEventResearchConfig,
     _add_rank_fraction,
-    _daily_context_frame,
     _monthly_returns,
     _promotion_fields,
     _scenario_side,
@@ -29,6 +30,16 @@ from aggression_carry.volume_events import (
     _write_equity_benchmark_chart,
     run_volume_event_research,
 )
+
+
+def _migration_unit_config(**overrides: object) -> VolumeEventResearchConfig:
+    defaults = {
+        "liquidity_migration_close_location_min": 0.0,
+        "liquidity_migration_pit_age_days_min": 0,
+        "liquidity_migration_crowding_filter": "none",
+    }
+    defaults.update(overrides)
+    return VolumeEventResearchConfig(**defaults)
 
 
 def test_add_rank_fraction_scales_cross_section_to_zero_one() -> None:
@@ -49,6 +60,118 @@ def test_float_or_nan_handles_missing_context_values() -> None:
     assert _float_or_nan(None) != _float_or_nan(None)
     assert _float_or_nan("bad") != _float_or_nan("bad")
     assert _float_or_nan("0.25") == pytest.approx(0.25)
+
+
+def test_orthogonal_feature_frames_are_point_in_time_daily() -> None:
+    day = 24 * 60 * 60 * 1000
+    funding = pl.DataFrame(
+        [
+            {"symbol": "AUSDT", "ts_ms": day, "funding_rate_8h_equiv": 0.001},
+            {"symbol": "AUSDT", "ts_ms": day + 8 * 60 * 60 * 1000, "funding_rate_8h_equiv": 0.002},
+            {"symbol": "AUSDT", "ts_ms": day + 16 * 60 * 60 * 1000, "funding_rate_8h_equiv": -0.001},
+        ]
+    )
+    daily_returns = pl.DataFrame(
+        [
+            {"symbol": "AUSDT", "ts_ms": day, "daily_close": 10.0},
+            {"symbol": "AUSDT", "ts_ms": 2 * day, "daily_close": 12.0},
+            {"symbol": "AUSDT", "ts_ms": 3 * day, "daily_close": 15.0},
+            {"symbol": "AUSDT", "ts_ms": 4 * day, "daily_close": 18.0},
+        ]
+    )
+    open_interest = pl.DataFrame(
+        [
+            {"symbol": "AUSDT", "ts_ms": day, "open_interest": 100.0},
+            {"symbol": "AUSDT", "ts_ms": 2 * day, "open_interest": 120.0},
+            {"symbol": "AUSDT", "ts_ms": 3 * day, "open_interest": 150.0},
+            {"symbol": "AUSDT", "ts_ms": 4 * day, "open_interest": 180.0},
+        ]
+    )
+    flow = pl.DataFrame(
+        [
+            {"symbol": "AUSDT", "ts_ms": day + 23 * 60 * 60 * 1000, "buy_quote": 70.0, "sell_quote": 30.0, "signed_quote": 40.0, "total_quote": 100.0},
+            {"symbol": "AUSDT", "ts_ms": 2 * day + 23 * 60 * 60 * 1000, "buy_quote": 20.0, "sell_quote": 80.0, "signed_quote": -60.0, "total_quote": 100.0},
+        ]
+    )
+
+    funding_features = _funding_feature_frame(funding).sort("ts_ms")
+    oi_features = _open_interest_feature_frame(open_interest, daily_returns).sort("ts_ms")
+    flow_features = _signed_flow_feature_frame(flow).sort("ts_ms")
+
+    assert funding_features.filter(pl.col("ts_ms") == day)["funding_rate_1d_sum"][0] == pytest.approx(0.001)
+    assert funding_features.filter(pl.col("ts_ms") == 2 * day)["funding_rate_1d_sum"][0] == pytest.approx(0.001)
+    assert oi_features.filter(pl.col("ts_ms") == 4 * day)["open_interest_return_3d"][0] == pytest.approx(0.8)
+    assert oi_features.filter(pl.col("ts_ms") == 4 * day)["open_interest_quote"][0] == pytest.approx(3240.0)
+    assert flow_features.filter(pl.col("ts_ms") == 2 * day)["taker_imbalance_1d"][0] == pytest.approx(0.4)
+    assert flow_features.filter(pl.col("ts_ms") == 3 * day)["taker_imbalance_3d"][0] == pytest.approx(-0.1)
+
+
+def test_bar_extreme_stop_fill_uses_adverse_hourly_extreme_for_short() -> None:
+    hour = 60 * 60 * 1000
+    symbol_bars = {
+        "rows": [
+            {"bar_end_ts_ms": hour, "high": 101.0, "low": 99.0, "close": 100.0},
+            {"bar_end_ts_ms": 2 * hour, "high": 130.0, "low": 95.0, "close": 105.0},
+        ],
+        "ends": [hour, 2 * hour],
+        "by_end": {},
+    }
+    base_kwargs = {
+        "symbol": "AUSDT",
+        "side": "short",
+        "score": 1.0,
+        "rank": 1,
+        "basket_id": "basket",
+        "signal_ts_ms": 0,
+        "entry_bar": symbol_bars["rows"][0],
+        "symbol_bars": symbol_bars,
+        "planned_exit_ts_ms": 2 * hour,
+        "notional_weight": 1.0,
+        "config": TradeLifecycleConfig(take_profit_pct=0.0),
+        "round_trip_cost_bps": 0.0,
+        "stop_pct": 0.12,
+        "rank_lookup": {},
+        "event_decay_threshold": -1.0,
+        "funding_lookup": None,
+    }
+
+    normal = _simulate_indexed_trade(**base_kwargs, stop_fill_mode="stop")
+    stressed = _simulate_indexed_trade(**base_kwargs, stop_fill_mode="bar_extreme")
+
+    assert normal is not None
+    assert stressed is not None
+    assert normal["exit_price"] == pytest.approx(112.0)
+    assert stressed["exit_price"] == pytest.approx(130.0)
+    assert stressed["gross_trade_return"] == pytest.approx(-0.30)
+
+
+def test_funding_lookup_marks_symbol_or_date_gaps_as_missing_or_partial() -> None:
+    day = 24 * 60 * 60 * 1000
+    funding = pl.DataFrame(
+        [
+            {"symbol": "AUSDT", "ts_ms": day, "funding_rate": 0.001},
+            {"symbol": "AUSDT", "ts_ms": 2 * day, "funding_rate": 0.002},
+        ]
+    )
+
+    lookup = _funding_lookup(funding)
+
+    assert lookup is not None
+    assert _perp_funding_return(lookup, symbol="BUSDT", side="short", entry_ts_ms=day, exit_ts_ms=2 * day) == (
+        0.0,
+        "missing",
+        0,
+    )
+    assert _perp_funding_return(lookup, symbol="AUSDT", side="short", entry_ts_ms=0, exit_ts_ms=2 * day) == (
+        0.0,
+        "partial",
+        0,
+    )
+    assert _perp_funding_return(lookup, symbol="AUSDT", side="short", entry_ts_ms=day, exit_ts_ms=2 * day) == (
+        pytest.approx(0.002),
+        "modeled",
+        1,
+    )
 
 
 def test_volume_event_research_writes_reports_on_fixture(tmp_path: Path) -> None:
@@ -134,7 +257,7 @@ def test_volume_event_research_requires_full_pit_by_default(tmp_path: Path) -> N
 
 
 def test_full_pit_universe_error_reports_missing_symbols() -> None:
-    features = pl.DataFrame([{"symbol": "AAAUSDT", "ts_ms": 1}])
+    klines = pl.DataFrame([{"symbol": "AAAUSDT", "date": "2024-01-01"} for _ in range(24)])
     manifest = pl.DataFrame(
         [
             {"symbol": "AAAUSDT", "date": "2024-01-01"},
@@ -142,10 +265,26 @@ def test_full_pit_universe_error_reports_missing_symbols() -> None:
         ]
     )
 
-    message = _full_pit_universe_error(features, manifest)
+    message = _full_pit_universe_error(klines, manifest)
 
     assert "missing_symbols=1" in message
     assert "BBBUSDT" in message
+
+
+def test_full_pit_universe_error_reports_missing_symbol_dates() -> None:
+    klines = pl.DataFrame([{"symbol": "AAAUSDT", "date": "2024-01-01"} for _ in range(24)])
+    manifest = pl.DataFrame(
+        [
+            {"symbol": "AAAUSDT", "date": "2024-01-01"},
+            {"symbol": "AAAUSDT", "date": "2024-01-02"},
+        ]
+    )
+
+    message = _full_pit_universe_error(klines, manifest)
+
+    assert "missing_symbols=0" in message
+    assert "missing_date_symbols=1" in message
+    assert "2024-01-02" in message
 
 
 def test_event_filter_excludes_default_stable_and_peg_symbols() -> None:
@@ -193,38 +332,6 @@ def test_event_filter_excludes_default_stable_and_peg_symbols() -> None:
     assert filtered["symbol"].to_list() == ["AAAUSDT", "XRPUSDT"]
 
 
-def test_daily_context_frame_builds_causal_reclaim_features() -> None:
-    rows = []
-    base_ts = 1_704_067_200_000
-    for day in range(25):
-        for hour in range(24):
-            price = 100.0 + day
-            rows.append(
-                {
-                    "ts_ms": base_ts + (day * 24 + hour) * 60 * 60 * 1000,
-                    "symbol": "AAAUSDT",
-                    "open": price,
-                    "high": price + 2.0,
-                    "low": price - 2.0,
-                    "close": price + (1.0 if hour == 23 else 0.0),
-                    "turnover_quote": 1_000.0,
-                }
-            )
-
-    context = _daily_context_frame(pl.DataFrame(rows)).sort("ts_ms")
-    last = context.tail(1).to_dicts()[0]
-
-    assert last["daily_return_1d"] > 0.0
-    assert last["close_position_1d"] == pytest.approx(0.75)
-    assert last["signal_day_close_location"] == pytest.approx(0.75)
-    assert last["signal_day_last6h_return"] > 0.0
-    assert last["signal_day_last6h_turnover_share"] == pytest.approx(0.25)
-    assert last["signal_day_range_pct"] > 0.0
-    assert last["prior7_return"] > 0.0
-    assert last["close_vs_prior20_high"] > 0.0
-    assert last["prior20_drawdown"] <= 0.0
-
-
 def test_volume_event_config_validates_new_research_knobs() -> None:
     with pytest.raises(ValueError, match="entry_delay_hours"):
         _validate_event_config(VolumeEventResearchConfig(entry_delay_hours=-1))
@@ -251,12 +358,6 @@ def test_volume_event_config_validates_new_research_knobs() -> None:
         _validate_event_config(VolumeEventResearchConfig(liquidity_migration_event_rank_fraction_max=1.1))
     with pytest.raises(ValueError, match="take profit pcts"):
         _validate_event_config(VolumeEventResearchConfig(take_profit_pcts=(-0.1,)))
-    with pytest.raises(ValueError, match="mfe_giveback_trigger_pct"):
-        _validate_event_config(VolumeEventResearchConfig(mfe_giveback_trigger_pct=-0.01))
-    with pytest.raises(ValueError, match="mfe_giveback_retain_pct"):
-        _validate_event_config(VolumeEventResearchConfig(mfe_giveback_retain_pct=1.1))
-    with pytest.raises(ValueError, match="mfe_giveback_trigger_pct"):
-        _validate_event_config(VolumeEventResearchConfig(mfe_giveback_retain_pct=0.5))
     with pytest.raises(ValueError, match="liquidity_migration_event_rank_fraction_exclude_min"):
         _validate_event_config(VolumeEventResearchConfig(liquidity_migration_event_rank_fraction_exclude_min=0.9))
     with pytest.raises(ValueError, match="liquidity_migration_event_rank_fraction_exclude_min"):
@@ -273,6 +374,10 @@ def test_volume_event_config_validates_new_research_knobs() -> None:
         _validate_event_config(
             VolumeEventResearchConfig(liquidity_migration_day_return_min=0.2, liquidity_migration_day_return_max=0.1)
         )
+    with pytest.raises(ValueError, match="liquidity_migration_return_7d_min"):
+        _validate_event_config(
+            VolumeEventResearchConfig(liquidity_migration_return_7d_min=0.2, liquidity_migration_return_7d_max=0.1)
+        )
     with pytest.raises(ValueError, match="liquidity_migration_residual_return_min"):
         _validate_event_config(
             VolumeEventResearchConfig(
@@ -280,37 +385,23 @@ def test_volume_event_config_validates_new_research_knobs() -> None:
                 liquidity_migration_residual_return_max=0.03,
             )
         )
+    with pytest.raises(ValueError, match="liquidity_migration_close_to_high_7d_min"):
+        _validate_event_config(VolumeEventResearchConfig(liquidity_migration_close_to_high_7d_min=0.01))
+    with pytest.raises(ValueError, match="liquidity_migration_prior30_max_return_min"):
+        _validate_event_config(
+            VolumeEventResearchConfig(
+                liquidity_migration_prior30_max_return_min=0.4,
+                liquidity_migration_prior30_max_return_max=0.2,
+            )
+        )
+    with pytest.raises(ValueError, match="liquidity_migration_prior7_return_volatility"):
+        _validate_event_config(VolumeEventResearchConfig(liquidity_migration_prior7_return_volatility_min=-0.01))
+    with pytest.raises(ValueError, match="liquidity_migration_intraday_range_max"):
+        _validate_event_config(VolumeEventResearchConfig(liquidity_migration_intraday_range_max=-0.01))
     with pytest.raises(ValueError, match="liquidity_migration_market_pct_up_max"):
         _validate_event_config(VolumeEventResearchConfig(liquidity_migration_market_pct_up_max=1.1))
     with pytest.raises(ValueError, match="liquidity_migration_hot_market_day_return_min"):
         _validate_event_config(VolumeEventResearchConfig(liquidity_migration_hot_market_day_return_min=-0.1))
-    with pytest.raises(ValueError, match="liquidity_migration_hot_market_day_return_band"):
-        _validate_event_config(VolumeEventResearchConfig(liquidity_migration_hot_market_day_return_band=-0.1))
-    with pytest.raises(ValueError, match="liquidity_migration_hot_market_day_return_band"):
-        _validate_event_config(
-            VolumeEventResearchConfig(
-                liquidity_migration_hot_market_day_return_min=0.02,
-                liquidity_migration_hot_market_day_return_band=0.03,
-            )
-        )
-    with pytest.raises(ValueError, match="liquidity_migration_close_location_min"):
-        _validate_event_config(
-            VolumeEventResearchConfig(
-                liquidity_migration_close_location_min=0.8,
-                liquidity_migration_close_location_max=0.4,
-            )
-        )
-    with pytest.raises(ValueError, match="liquidity_migration_pit_age_days_min"):
-        _validate_event_config(
-            VolumeEventResearchConfig(
-                liquidity_migration_pit_age_days_min=200,
-                liquidity_migration_pit_age_days_max=100,
-            )
-        )
-    with pytest.raises(ValueError, match="liquidity_migration_crowding_filter"):
-        _validate_event_config(VolumeEventResearchConfig(liquidity_migration_crowding_filter="march_patch"))
-    with pytest.raises(ValueError, match="liquidity_migration_crowding_min_signals"):
-        _validate_event_config(VolumeEventResearchConfig(liquidity_migration_crowding_min_signals=0))
 
     with pytest.raises(ValueError, match="market_median_return_1d_min"):
         _validate_event_config(
@@ -320,9 +411,6 @@ def test_volume_event_config_validates_new_research_knobs() -> None:
     with pytest.raises(ValueError, match="market_pct_up_1d_max"):
         _validate_event_config(VolumeEventResearchConfig(market_pct_up_1d_max=1.1))
 
-    with pytest.raises(ValueError, match="market_pct_up_1d_min"):
-        _validate_event_config(VolumeEventResearchConfig(market_pct_up_1d_min=0.7, market_pct_up_1d_max=0.6))
-
     with pytest.raises(ValueError, match="btc_return_1d_min"):
         _validate_event_config(VolumeEventResearchConfig(btc_return_1d_min=0.1, btc_return_1d_max=0.0))
 
@@ -331,55 +419,9 @@ def test_volume_event_config_validates_new_research_knobs() -> None:
 
     with pytest.raises(ValueError, match="stop_pressure_stop_count"):
         _validate_event_config(VolumeEventResearchConfig(stop_pressure_stop_count=-1))
-    with pytest.raises(ValueError, match="realized_loss_pressure_window_days"):
-        _validate_event_config(VolumeEventResearchConfig(realized_loss_pressure_window_days=-1))
-    with pytest.raises(ValueError, match="realized_loss_pressure_loss_count"):
-        _validate_event_config(VolumeEventResearchConfig(realized_loss_pressure_loss_count=-1))
 
     with pytest.raises(ValueError, match="dryup_prior_volume_rank_max"):
         _validate_event_config(VolumeEventResearchConfig(dryup_prior_volume_rank_max=1.5))
-
-    with pytest.raises(ValueError, match="top_volume_rank_max"):
-        _validate_event_config(VolumeEventResearchConfig(top_volume_rank_max=0))
-
-    with pytest.raises(ValueError, match="top_volume_turnover_ratio_min"):
-        _validate_event_config(VolumeEventResearchConfig(top_volume_turnover_ratio_min=-0.1))
-
-    with pytest.raises(ValueError, match="top_volume_close_position_min"):
-        _validate_event_config(VolumeEventResearchConfig(top_volume_close_position_min=1.5))
-
-    with pytest.raises(ValueError, match="leadership_pullback_day_return_min"):
-        _validate_event_config(
-            VolumeEventResearchConfig(
-                leadership_pullback_day_return_min=0.1,
-                leadership_pullback_day_return_max=0.0,
-            )
-        )
-
-    with pytest.raises(ValueError, match="leadership_pullback_close_position_min"):
-        _validate_event_config(VolumeEventResearchConfig(leadership_pullback_close_position_min=1.2))
-
-    with pytest.raises(ValueError, match="shelf_reclaim_prior7_volume_rank_max"):
-        _validate_event_config(VolumeEventResearchConfig(shelf_reclaim_prior7_volume_rank_max=1.2))
-
-    with pytest.raises(ValueError, match="shelf_reclaim_close_vs_prior20_high_min"):
-        _validate_event_config(
-            VolumeEventResearchConfig(
-                shelf_reclaim_close_vs_prior20_high_min=0.2,
-                shelf_reclaim_close_vs_prior20_high_max=0.1,
-            )
-        )
-
-    with pytest.raises(ValueError, match="long_reclaim_close_position_min"):
-        _validate_event_config(VolumeEventResearchConfig(long_reclaim_close_position_min=1.5))
-
-    with pytest.raises(ValueError, match="long_breakout_prior20_high_buffer_min"):
-        _validate_event_config(
-            VolumeEventResearchConfig(
-                long_breakout_prior20_high_buffer_min=0.2,
-                long_breakout_prior20_high_buffer_max=0.1,
-            )
-        )
 
 
 def test_volume_event_promotion_requires_all_splits_positive() -> None:
@@ -429,6 +471,22 @@ def test_volume_event_promotion_requires_full_pit_universe() -> None:
     assert fields["pit_membership_pass"] is True
     assert fields["promotion_gate_pass"] is False
     assert fields["promotion_reason"] == "full_pit_universe_fail"
+
+
+def test_volume_event_promotion_uses_documented_drawdown_gate() -> None:
+    fields = _promotion_fields(
+        [
+            {"name": "train_2023_2024", "total_return": 0.10, "max_drawdown": -0.24, "sharpe_like": 1.0},
+            {"name": "validation_2024_2025", "total_return": 0.08, "max_drawdown": -0.26, "sharpe_like": 0.8},
+            {"name": "oos_2025_2026", "total_return": 0.03, "max_drawdown": -0.15, "sharpe_like": 0.7},
+        ],
+        config=VolumeEventResearchConfig(),
+        pit_membership_pass=True,
+        full_pit_universe_pass=True,
+    )
+
+    assert fields["promotion_gate_pass"] is False
+    assert "drawdown_fail" in fields["promotion_reason"]
 
 
 def test_attach_event_archive_membership_flags_symbol_dates() -> None:
@@ -495,65 +553,6 @@ def test_stop_pressure_throttle_uses_only_realized_recent_stops() -> None:
 
     assert not _stop_pressure_active([recent_stop, old_stop, future_stop], signal_ts_ms=signal_ts_ms, config=config)
     assert _stop_pressure_active([recent_stop, signal_ts_ms, future_stop], signal_ts_ms=signal_ts_ms, config=config)
-
-
-def test_realized_loss_pressure_throttle_uses_only_realized_recent_losses() -> None:
-    config = VolumeEventResearchConfig(realized_loss_pressure_window_days=5, realized_loss_pressure_loss_count=2)
-    signal_ts_ms = 10 * 24 * 60 * 60 * 1000
-    recent_loss = signal_ts_ms - 2 * 24 * 60 * 60 * 1000
-    old_loss = signal_ts_ms - 8 * 24 * 60 * 60 * 1000
-    future_loss = signal_ts_ms + 1
-
-    assert not _realized_loss_pressure_active(
-        [recent_loss, old_loss, future_loss],
-        signal_ts_ms=signal_ts_ms,
-        config=config,
-    )
-    assert _realized_loss_pressure_active(
-        [recent_loss, signal_ts_ms, future_loss],
-        signal_ts_ms=signal_ts_ms,
-        config=config,
-    )
-
-
-def test_mfe_giveback_exit_closes_after_profit_retrace() -> None:
-    trade = _simulate_indexed_trade(
-        symbol="AAAUSDT",
-        side="short",
-        score=1.0,
-        rank=1,
-        basket_id="basket",
-        signal_ts_ms=0,
-        entry_bar={"bar_end_ts_ms": 1, "close": 100.0},
-        symbol_bars={
-            "rows": [
-                {"bar_end_ts_ms": 2, "high": 100.0, "low": 90.0, "close": 94.0},
-                {"bar_end_ts_ms": 3, "high": 98.0, "low": 92.0, "close": 96.0},
-                {"bar_end_ts_ms": 4, "high": 99.0, "low": 95.0, "close": 97.0},
-            ],
-            "ends": [2, 3, 4],
-            "by_end": {},
-        },
-        planned_exit_ts_ms=5,
-        notional_weight=1.0,
-        config=TradeLifecycleConfig(
-            take_profit_pct=0.0,
-            mfe_giveback_trigger_pct=0.08,
-            mfe_giveback_retain_pct=0.50,
-            rank_exit_enabled=False,
-        ),
-        round_trip_cost_bps=0.0,
-        stop_pct=None,
-        rank_lookup={},
-        event_decay_threshold=0.0,
-        funding_lookup=None,
-    )
-
-    assert trade is not None
-    assert trade["exit_reason"] == "mfe_giveback"
-    assert trade["exit_ts_ms"] == 3
-    assert trade["gross_trade_return"] == pytest.approx(0.04)
-    assert trade["mfe"] == pytest.approx(0.10)
 
 
 def test_selloff_exhaustion_side_hypotheses_are_directional() -> None:
@@ -699,15 +698,13 @@ def test_creative_event_filters_select_distinct_pit_events() -> None:
         ]
     )
 
-    config = VolumeEventResearchConfig(
+    config = _migration_unit_config(
         liquidity_migration_rank_improvement_min=50,
         liquidity_migration_turnover_ratio_min=0.0,
         liquidity_migration_event_rank_fraction_max=0.0,
         liquidity_migration_residual_return_min=-10.0,
         liquidity_migration_market_pct_up_max=1.0,
         liquidity_migration_hot_market_day_return_min=10.0,
-        liquidity_migration_close_location_min=0.0,
-        liquidity_migration_pit_age_days_min=0,
         absorption_max_abs_day_return=0.015,
         dryup_prior_volume_rank_max=0.35,
         dryup_prior_abs_day_return_max=0.02,
@@ -751,259 +748,6 @@ def test_creative_event_filters_select_distinct_pit_events() -> None:
     assert dryup["symbol"].to_list() == ["ABSUSDT", "DRYUSDT"]
     assert migration["symbol"].to_list() == ["MIGUSDT"]
     assert selloff["symbol"].to_list() == ["SELLUSDT"]
-
-
-def test_long_reclaim_event_filters_use_price_context() -> None:
-    frame = pl.DataFrame(
-        [
-            {
-                "symbol": "BREAKUSDT",
-                "ts_ms": 1,
-                "reclaim_breakout_score": 2.0,
-                "reclaim_breakout_score_rank_frac": 0.95,
-                "prior_reclaim_breakout_score_rank_frac": 0.20,
-                "capitulation_reclaim_score": 0.8,
-                "capitulation_reclaim_score_rank_frac": 0.60,
-                "prior_capitulation_reclaim_score_rank_frac": 0.20,
-                "daily_return_1d": 0.05,
-                "residual_return_1d": 0.04,
-                "close_position_1d": 0.85,
-                "close_vs_prior20_high": 0.02,
-                "prior7_abs_daily_return_mean": 0.015,
-                "prior7_return": 0.04,
-                "prior20_drawdown": -0.02,
-                "liquidity_rank": 50,
-                "turnover_quote": 1_000_000.0,
-                "tradable_membership_flag": True,
-            },
-            {
-                "symbol": "CAPUSDT",
-                "ts_ms": 1,
-                "reclaim_breakout_score": 0.7,
-                "reclaim_breakout_score_rank_frac": 0.55,
-                "prior_reclaim_breakout_score_rank_frac": 0.20,
-                "capitulation_reclaim_score": 2.2,
-                "capitulation_reclaim_score_rank_frac": 0.96,
-                "prior_capitulation_reclaim_score_rank_frac": 0.15,
-                "daily_return_1d": 0.06,
-                "residual_return_1d": 0.05,
-                "close_position_1d": 0.82,
-                "close_vs_prior20_high": -0.18,
-                "prior7_abs_daily_return_mean": 0.07,
-                "prior7_return": -0.16,
-                "prior20_drawdown": -0.30,
-                "liquidity_rank": 70,
-                "turnover_quote": 1_000_000.0,
-                "tradable_membership_flag": True,
-            },
-            {
-                "symbol": "LOWCLOSEUSDT",
-                "ts_ms": 1,
-                "reclaim_breakout_score": 2.3,
-                "reclaim_breakout_score_rank_frac": 0.97,
-                "prior_reclaim_breakout_score_rank_frac": 0.10,
-                "capitulation_reclaim_score": 2.4,
-                "capitulation_reclaim_score_rank_frac": 0.98,
-                "prior_capitulation_reclaim_score_rank_frac": 0.10,
-                "daily_return_1d": 0.06,
-                "residual_return_1d": 0.05,
-                "close_position_1d": 0.35,
-                "close_vs_prior20_high": -0.12,
-                "prior7_abs_daily_return_mean": 0.01,
-                "prior7_return": -0.16,
-                "prior20_drawdown": -0.25,
-                "liquidity_rank": 80,
-                "turnover_quote": 1_000_000.0,
-                "tradable_membership_flag": True,
-            },
-        ]
-    )
-
-    breakout = _event_filter(
-        frame,
-        "reclaim_breakout",
-        score_col="reclaim_breakout_score",
-        rank_col="reclaim_breakout_score_rank_frac",
-        top_cut=0.80,
-        config=VolumeEventResearchConfig(),
-    )
-    capitulation = _event_filter(
-        frame,
-        "capitulation_reclaim",
-        score_col="capitulation_reclaim_score",
-        rank_col="capitulation_reclaim_score_rank_frac",
-        top_cut=0.80,
-        config=VolumeEventResearchConfig(),
-    )
-
-    assert breakout["symbol"].to_list() == ["BREAKUSDT"]
-    assert capitulation["symbol"].to_list() == ["CAPUSDT"]
-
-
-def test_top_volume_leadership_selects_fresh_top_volume_entrants() -> None:
-    frame = pl.DataFrame(
-        [
-            {
-                "symbol": "LEADUSDT",
-                "ts_ms": 1,
-                "dollar_volume_rank_z": 3.0,
-                "dollar_volume_rank_z_rank_frac": 0.97,
-                "prior7_dollar_volume_rank_z_rank_frac": 0.60,
-                "liquidity_rank": 12,
-                "prior7_liquidity_rank": 55,
-                "symbol_age_days": 180,
-                "turnover_quote": 3_000_000.0,
-                "prior7_turnover_quote_mean": 1_000_000.0,
-                "daily_return_1d": 0.03,
-                "residual_return_1d": 0.02,
-                "close_position_1d": 0.80,
-                "tradable_membership_flag": True,
-            },
-            {
-                "symbol": "STATICUSDT",
-                "ts_ms": 1,
-                "dollar_volume_rank_z": 2.9,
-                "dollar_volume_rank_z_rank_frac": 0.96,
-                "prior7_dollar_volume_rank_z_rank_frac": 0.95,
-                "liquidity_rank": 8,
-                "prior7_liquidity_rank": 10,
-                "symbol_age_days": 180,
-                "turnover_quote": 3_000_000.0,
-                "prior7_turnover_quote_mean": 2_000_000.0,
-                "daily_return_1d": 0.03,
-                "residual_return_1d": 0.02,
-                "close_position_1d": 0.80,
-                "tradable_membership_flag": True,
-            },
-            {
-                "symbol": "WEAKUSDT",
-                "ts_ms": 1,
-                "dollar_volume_rank_z": 2.8,
-                "dollar_volume_rank_z_rank_frac": 0.95,
-                "prior7_dollar_volume_rank_z_rank_frac": 0.50,
-                "liquidity_rank": 18,
-                "prior7_liquidity_rank": 70,
-                "symbol_age_days": 180,
-                "turnover_quote": 1_100_000.0,
-                "prior7_turnover_quote_mean": 1_000_000.0,
-                "daily_return_1d": 0.03,
-                "residual_return_1d": 0.02,
-                "close_position_1d": 0.80,
-                "tradable_membership_flag": True,
-            },
-        ]
-    )
-
-    filtered = _event_filter(
-        frame,
-        "top_volume_leadership",
-        score_col="dollar_volume_rank_z",
-        rank_col="dollar_volume_rank_z_rank_frac",
-        top_cut=0.80,
-        config=VolumeEventResearchConfig(),
-    )
-
-    assert filtered["symbol"].to_list() == ["LEADUSDT"]
-
-
-def test_orderly_leadership_pullback_requires_resting_strength() -> None:
-    frame = pl.DataFrame(
-        [
-            {
-                "symbol": "RESTUSDT",
-                "ts_ms": 1,
-                "orderly_leadership_pullback_score": 2.4,
-                "orderly_leadership_pullback_score_rank_frac": 0.95,
-                "liquidity_rank": 35,
-                "symbol_age_days": 240,
-                "volume_persistence_z_rank_frac": 0.92,
-                "daily_return_1d": 0.01,
-                "abs_daily_return_1d": 0.01,
-                "residual_return_1d": 0.02,
-                "close_position_1d": 0.70,
-                "prior7_return": 0.18,
-                "turnover_quote": 2_000_000.0,
-                "tradable_membership_flag": True,
-            },
-            {
-                "symbol": "BLOWOFFUSDT",
-                "ts_ms": 1,
-                "orderly_leadership_pullback_score": 2.5,
-                "orderly_leadership_pullback_score_rank_frac": 0.96,
-                "liquidity_rank": 30,
-                "symbol_age_days": 240,
-                "volume_persistence_z_rank_frac": 0.93,
-                "daily_return_1d": 0.25,
-                "abs_daily_return_1d": 0.25,
-                "residual_return_1d": 0.20,
-                "close_position_1d": 0.95,
-                "prior7_return": 0.18,
-                "turnover_quote": 2_000_000.0,
-                "tradable_membership_flag": True,
-            },
-        ]
-    )
-
-    filtered = _event_filter(
-        frame,
-        "orderly_leadership_pullback",
-        score_col="orderly_leadership_pullback_score",
-        rank_col="orderly_leadership_pullback_score_rank_frac",
-        top_cut=0.80,
-        config=VolumeEventResearchConfig(),
-    )
-
-    assert filtered["symbol"].to_list() == ["RESTUSDT"]
-
-
-def test_volume_shelf_reclaim_requires_quiet_prior_regime() -> None:
-    frame = pl.DataFrame(
-        [
-            {
-                "symbol": "SHELFUSDT",
-                "ts_ms": 1,
-                "volume_shelf_reclaim_score": 2.2,
-                "volume_shelf_reclaim_score_rank_frac": 0.94,
-                "liquidity_rank": 70,
-                "symbol_age_days": 180,
-                "prior7_volume_persistence_rank_max": 0.35,
-                "prior7_abs_daily_return_mean": 0.018,
-                "daily_return_1d": 0.05,
-                "residual_return_1d": 0.03,
-                "close_position_1d": 0.82,
-                "close_vs_prior20_high": -0.02,
-                "turnover_quote": 1_500_000.0,
-                "tradable_membership_flag": True,
-            },
-            {
-                "symbol": "NOISYUSDT",
-                "ts_ms": 1,
-                "volume_shelf_reclaim_score": 2.3,
-                "volume_shelf_reclaim_score_rank_frac": 0.95,
-                "liquidity_rank": 65,
-                "symbol_age_days": 180,
-                "prior7_volume_persistence_rank_max": 0.35,
-                "prior7_abs_daily_return_mean": 0.08,
-                "daily_return_1d": 0.05,
-                "residual_return_1d": 0.03,
-                "close_position_1d": 0.82,
-                "close_vs_prior20_high": -0.02,
-                "turnover_quote": 1_500_000.0,
-                "tradable_membership_flag": True,
-            },
-        ]
-    )
-
-    filtered = _event_filter(
-        frame,
-        "volume_shelf_reclaim",
-        score_col="volume_shelf_reclaim_score",
-        rank_col="volume_shelf_reclaim_score_rank_frac",
-        top_cut=0.80,
-        config=VolumeEventResearchConfig(),
-    )
-
-    assert filtered["symbol"].to_list() == ["SHELFUSDT"]
 
 
 def test_liquidity_migration_quality_controls_require_rank_and_turnover_expansion() -> None:
@@ -1066,7 +810,7 @@ def test_liquidity_migration_quality_controls_require_rank_and_turnover_expansio
         score_col="dollar_volume_rank_z",
         rank_col="dollar_volume_rank_z_rank_frac",
         top_cut=0.80,
-        config=VolumeEventResearchConfig(
+        config=_migration_unit_config(
             liquidity_migration_rank_improvement_min=100,
             liquidity_migration_turnover_ratio_min=2.0,
             liquidity_migration_event_rank_fraction_max=0.0,
@@ -1076,8 +820,6 @@ def test_liquidity_migration_quality_controls_require_rank_and_turnover_expansio
             liquidity_migration_residual_return_min=-10.0,
             liquidity_migration_market_pct_up_max=1.0,
             liquidity_migration_hot_market_day_return_min=10.0,
-            liquidity_migration_close_location_min=0.0,
-            liquidity_migration_pit_age_days_min=0,
         ),
     )
 
@@ -1122,7 +864,7 @@ def test_liquidity_migration_can_require_positive_event_day_return() -> None:
         score_col="dollar_volume_rank_z",
         rank_col="dollar_volume_rank_z_rank_frac",
         top_cut=0.80,
-        config=VolumeEventResearchConfig(
+        config=_migration_unit_config(
             liquidity_migration_rank_improvement_min=100,
             liquidity_migration_turnover_ratio_min=2.0,
             liquidity_migration_event_rank_fraction_max=0.90,
@@ -1130,8 +872,6 @@ def test_liquidity_migration_can_require_positive_event_day_return() -> None:
             liquidity_migration_residual_return_min=-10.0,
             liquidity_migration_market_pct_up_max=1.0,
             liquidity_migration_hot_market_day_return_min=10.0,
-            liquidity_migration_close_location_min=0.0,
-            liquidity_migration_pit_age_days_min=0,
         ),
     )
 
@@ -1180,19 +920,165 @@ def test_liquidity_migration_can_require_idiosyncratic_residual_return() -> None
         score_col="dollar_volume_rank_z",
         rank_col="dollar_volume_rank_z_rank_frac",
         top_cut=0.80,
-        config=VolumeEventResearchConfig(
+        config=_migration_unit_config(
             liquidity_migration_rank_improvement_min=100,
             liquidity_migration_turnover_ratio_min=2.0,
             liquidity_migration_event_rank_fraction_max=0.90,
             liquidity_migration_residual_return_min=0.08,
             liquidity_migration_market_pct_up_max=1.0,
             liquidity_migration_hot_market_day_return_min=10.0,
-            liquidity_migration_close_location_min=0.0,
-            liquidity_migration_pit_age_days_min=0,
         ),
     )
 
     assert migration["symbol"].to_list() == ["IDIOUSDT"]
+
+
+def test_daily_return_frame_adds_quant_state_features() -> None:
+    rows = []
+    start = 1_704_067_200_000
+    for day in range(35):
+        day_start = start + day * 24 * 60 * 60 * 1000
+        open_price = 100.0 + day
+        close_price = open_price * (1.02 if day == 34 else 1.0)
+        for hour in range(24):
+            rows.append(
+                {
+                    "symbol": "AAAUSDT",
+                    "ts_ms": day_start + hour * 60 * 60 * 1000,
+                    "open": open_price,
+                    "high": close_price * 1.01,
+                    "low": open_price * 0.99,
+                    "close": close_price,
+                    "turnover_quote": 1_000_000.0,
+                    "date": "2024-01-01",
+                }
+            )
+    frame = _daily_return_frame(pl.DataFrame(rows)).sort("ts_ms")
+    last = frame.tail(1).to_dicts()[0]
+
+    assert last["return_7d"] > 0.0
+    assert last["close_to_high_7d"] <= 0.0
+    assert last["close_to_high_30d"] <= 0.0
+    assert last["prior30_max_daily_return"] is not None
+    assert last["prior7_return_volatility"] is not None
+    assert last["intraday_range_1d"] > 0.0
+
+
+def test_liquidity_migration_quant_state_filters_are_pit_safe() -> None:
+    frame = pl.DataFrame(
+        [
+            {
+                "symbol": "GOODUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 3.0,
+                "dollar_volume_rank_z_rank_frac": 0.86,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 80,
+                "prior7_liquidity_rank": 240,
+                "turnover_quote": 7_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "daily_return_1d": 0.15,
+                "return_7d": 0.45,
+                "close_to_high_7d": -0.01,
+                "close_to_high_30d": -0.03,
+                "prior30_max_daily_return": 0.28,
+                "prior7_return_volatility": 0.07,
+                "intraday_range_1d": 0.18,
+                "residual_return_1d": 0.10,
+                "market_pct_up_1d": 0.45,
+                "tradable_membership_flag": True,
+            },
+            {
+                "symbol": "WEAKMOMUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 3.1,
+                "dollar_volume_rank_z_rank_frac": 0.87,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 82,
+                "prior7_liquidity_rank": 250,
+                "turnover_quote": 7_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "daily_return_1d": 0.15,
+                "return_7d": 0.05,
+                "close_to_high_7d": -0.01,
+                "close_to_high_30d": -0.03,
+                "prior30_max_daily_return": 0.28,
+                "prior7_return_volatility": 0.07,
+                "intraday_range_1d": 0.18,
+                "residual_return_1d": 0.10,
+                "market_pct_up_1d": 0.45,
+                "tradable_membership_flag": True,
+            },
+            {
+                "symbol": "FARFROMHIGHUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 3.2,
+                "dollar_volume_rank_z_rank_frac": 0.88,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 84,
+                "prior7_liquidity_rank": 260,
+                "turnover_quote": 7_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "daily_return_1d": 0.15,
+                "return_7d": 0.45,
+                "close_to_high_7d": -0.20,
+                "close_to_high_30d": -0.03,
+                "prior30_max_daily_return": 0.28,
+                "prior7_return_volatility": 0.07,
+                "intraday_range_1d": 0.18,
+                "residual_return_1d": 0.10,
+                "market_pct_up_1d": 0.45,
+                "tradable_membership_flag": True,
+            },
+            {
+                "symbol": "NOLOTTERYUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 3.3,
+                "dollar_volume_rank_z_rank_frac": 0.89,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 86,
+                "prior7_liquidity_rank": 270,
+                "turnover_quote": 7_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "daily_return_1d": 0.15,
+                "return_7d": 0.45,
+                "close_to_high_7d": -0.01,
+                "close_to_high_30d": -0.03,
+                "prior30_max_daily_return": 0.03,
+                "prior7_return_volatility": 0.07,
+                "intraday_range_1d": 0.18,
+                "residual_return_1d": 0.10,
+                "market_pct_up_1d": 0.45,
+                "tradable_membership_flag": True,
+            },
+        ]
+    )
+
+    migration = _event_filter(
+        frame,
+        "liquidity_migration",
+        score_col="dollar_volume_rank_z",
+        rank_col="dollar_volume_rank_z_rank_frac",
+        top_cut=0.80,
+        config=_migration_unit_config(
+            liquidity_migration_rank_improvement_min=100,
+            liquidity_migration_turnover_ratio_min=2.0,
+            liquidity_migration_event_rank_fraction_max=0.90,
+            liquidity_migration_day_return_min=0.10,
+            liquidity_migration_return_7d_min=0.20,
+            liquidity_migration_close_to_high_7d_min=-0.05,
+            liquidity_migration_close_to_high_30d_min=-0.10,
+            liquidity_migration_prior30_max_return_min=0.20,
+            liquidity_migration_prior7_return_volatility_min=0.02,
+            liquidity_migration_prior7_return_volatility_max=0.15,
+            liquidity_migration_intraday_range_max=0.25,
+            liquidity_migration_residual_return_min=0.08,
+            liquidity_migration_market_pct_up_max=1.0,
+            liquidity_migration_hot_market_day_return_min=10.0,
+        ),
+    )
+
+    assert migration["symbol"].to_list() == ["GOODUSDT"]
 
 
 def test_liquidity_migration_can_skip_middle_event_rank_band() -> None:
@@ -1249,13 +1135,11 @@ def test_liquidity_migration_can_skip_middle_event_rank_band() -> None:
         score_col="dollar_volume_rank_z",
         rank_col="dollar_volume_rank_z_rank_frac",
         top_cut=0.70,
-        config=VolumeEventResearchConfig(
+        config=_migration_unit_config(
             liquidity_migration_rank_improvement_min=100,
             liquidity_migration_event_rank_fraction_exclude_min=0.75,
             liquidity_migration_event_rank_fraction_exclude_max=0.85,
             liquidity_migration_residual_return_min=-10.0,
-            liquidity_migration_close_location_min=0.0,
-            liquidity_migration_pit_age_days_min=0,
         ),
     )
 
@@ -1316,89 +1200,17 @@ def test_liquidity_migration_market_gate_allows_hot_coin_exception() -> None:
         score_col="dollar_volume_rank_z",
         rank_col="dollar_volume_rank_z_rank_frac",
         top_cut=0.80,
-        config=VolumeEventResearchConfig(
+        config=_migration_unit_config(
             liquidity_migration_rank_improvement_min=100,
             liquidity_migration_turnover_ratio_min=2.0,
             liquidity_migration_event_rank_fraction_max=0.90,
             liquidity_migration_residual_return_min=-10.0,
             liquidity_migration_market_pct_up_max=0.60,
             liquidity_migration_hot_market_day_return_min=0.15,
-            liquidity_migration_close_location_min=0.0,
-            liquidity_migration_pit_age_days_min=0,
         ),
     )
 
     assert migration["symbol"].to_list() == ["COOLMKTUSDT", "BLOWOFFUSDT"]
-
-
-def test_liquidity_migration_hot_coin_exception_can_ramp_with_breadth() -> None:
-    frame = pl.DataFrame(
-        [
-            {
-                "symbol": "SLIGHTHOTUSDT",
-                "ts_ms": 1,
-                "dollar_volume_rank_z": 3.0,
-                "dollar_volume_rank_z_rank_frac": 0.86,
-                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
-                "liquidity_rank": 80,
-                "prior7_liquidity_rank": 240,
-                "turnover_quote": 3_000_000.0,
-                "prior7_turnover_quote_mean": 1_000_000.0,
-                "market_pct_up_1d": 0.61,
-                "daily_return_1d": 0.145,
-                "tradable_membership_flag": True,
-            },
-            {
-                "symbol": "MIDHOTUSDT",
-                "ts_ms": 1,
-                "dollar_volume_rank_z": 3.1,
-                "dollar_volume_rank_z_rank_frac": 0.87,
-                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
-                "liquidity_rank": 75,
-                "prior7_liquidity_rank": 240,
-                "turnover_quote": 3_000_000.0,
-                "prior7_turnover_quote_mean": 1_000_000.0,
-                "market_pct_up_1d": 0.80,
-                "daily_return_1d": 0.161,
-                "tradable_membership_flag": True,
-            },
-            {
-                "symbol": "EUPHORICUSDT",
-                "ts_ms": 1,
-                "dollar_volume_rank_z": 3.2,
-                "dollar_volume_rank_z_rank_frac": 0.88,
-                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
-                "liquidity_rank": 70,
-                "prior7_liquidity_rank": 240,
-                "turnover_quote": 3_000_000.0,
-                "prior7_turnover_quote_mean": 1_000_000.0,
-                "market_pct_up_1d": 1.00,
-                "daily_return_1d": 0.17,
-                "tradable_membership_flag": True,
-            },
-        ]
-    )
-
-    migration = _event_filter(
-        frame,
-        "liquidity_migration",
-        score_col="dollar_volume_rank_z",
-        rank_col="dollar_volume_rank_z_rank_frac",
-        top_cut=0.80,
-        config=VolumeEventResearchConfig(
-            liquidity_migration_rank_improvement_min=100,
-            liquidity_migration_turnover_ratio_min=2.0,
-            liquidity_migration_event_rank_fraction_max=0.90,
-            liquidity_migration_residual_return_min=-10.0,
-            liquidity_migration_market_pct_up_max=0.60,
-            liquidity_migration_hot_market_day_return_min=0.16,
-            liquidity_migration_hot_market_day_return_band=0.02,
-            liquidity_migration_close_location_min=0.0,
-            liquidity_migration_pit_age_days_min=0,
-        ),
-    )
-
-    assert migration["symbol"].to_list() == ["SLIGHTHOTUSDT", "MIDHOTUSDT"]
 
 
 def test_liquidity_migration_overheated_and_regime_filters_are_pit_safe() -> None:
@@ -1473,7 +1285,7 @@ def test_liquidity_migration_overheated_and_regime_filters_are_pit_safe() -> Non
         score_col="dollar_volume_rank_z",
         rank_col="dollar_volume_rank_z_rank_frac",
         top_cut=0.80,
-        config=VolumeEventResearchConfig(
+        config=_migration_unit_config(
             liquidity_migration_rank_improvement_min=100,
             liquidity_migration_turnover_ratio_min=2.0,
             liquidity_migration_event_rank_fraction_max=0.90,
@@ -1482,8 +1294,6 @@ def test_liquidity_migration_overheated_and_regime_filters_are_pit_safe() -> Non
             liquidity_migration_residual_return_min=-10.0,
             liquidity_migration_market_pct_up_max=1.0,
             liquidity_migration_hot_market_day_return_min=10.0,
-            liquidity_migration_close_location_min=0.0,
-            liquidity_migration_pit_age_days_min=0,
             market_median_return_1d_max=0.03,
             market_pct_up_1d_max=0.70,
             btc_return_1d_max=0.05,
@@ -1491,54 +1301,6 @@ def test_liquidity_migration_overheated_and_regime_filters_are_pit_safe() -> Non
     )
 
     assert migration["symbol"].to_list() == ["GOODUSDT"]
-
-
-def test_liquidity_migration_union_crowding_filter_vetoes_same_hour_pathology() -> None:
-    ts_ms = 1_704_067_200_000
-    base = {
-        "dollar_volume_rank_z": 1.8,
-        "dollar_volume_rank_z_rank_frac": 0.82,
-        "prior7_dollar_volume_rank_z_rank_frac": 0.20,
-        "liquidity_rank": 70,
-        "prior7_liquidity_rank": 240,
-        "turnover_quote": 10_000_000.0,
-        "prior7_turnover_quote_mean": 1_000_000.0,
-        "daily_return_1d": 0.10,
-        "residual_return_1d": 0.09,
-        "market_pct_up_1d": 0.50,
-        "signal_day_close_location": 0.70,
-        "signal_day_last6h_turnover_share": 0.10,
-        "tradable_membership_flag": True,
-    }
-    frame = pl.DataFrame(
-        [
-            {"symbol": "BAD1USDT", "ts_ms": ts_ms, "signal_day_last6h_return": 0.01, **base},
-            {"symbol": "BAD2USDT", "ts_ms": ts_ms, "signal_day_last6h_return": 0.02, **base},
-            {"symbol": "KEEPUSDT", "ts_ms": ts_ms + 24 * 60 * 60 * 1000, "signal_day_last6h_return": 0.01, **base},
-        ]
-    )
-
-    selected = _select_events(
-        frame,
-        scenario=EventScenario(
-            event_type="liquidity_migration",
-            threshold=0.40,
-            side_hypothesis="reversal",
-            hold_days=3,
-            stop_loss_pct=0.12,
-            take_profit_pct=0.25,
-            cost_multiplier=3.0,
-        ),
-        config=VolumeEventResearchConfig(
-            require_pit_membership=False,
-            liquidity_migration_crowding_filter="union_pathology",
-            liquidity_migration_market_pct_up_max=1.0,
-            liquidity_migration_pit_age_days_min=0,
-        ),
-        score_col="dollar_volume_rank_z",
-    )
-
-    assert selected["symbol"].to_list() == ["KEEPUSDT"]
 
 
 def test_monthly_returns_are_written_from_baskets() -> None:

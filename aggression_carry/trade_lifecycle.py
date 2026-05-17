@@ -293,22 +293,28 @@ def _rank_exit_hit(
     return rank_fraction < threshold
 
 
-def _funding_lookup(funding: pl.DataFrame | None) -> dict[str, list[tuple[int, float]]] | None:
+def _funding_lookup(funding: pl.DataFrame | None) -> dict[str, dict[str, Any]] | None:
     if funding is None or funding.is_empty() or "symbol" not in funding.columns or "ts_ms" not in funding.columns:
         return None
     rate_col = "funding_rate" if "funding_rate" in funding.columns else "funding_rate_8h_equiv"
     if rate_col not in funding.columns:
         return None
-    output: dict[str, list[tuple[int, float]]] = {}
+    output: dict[str, dict[str, Any]] = {}
     rows = funding.select(["symbol", "ts_ms", rate_col]).drop_nulls(["symbol", "ts_ms"]).sort(["symbol", "ts_ms"])
     for key, part in rows.partition_by("symbol", as_dict=True, maintain_order=True).items():
         symbol = str(key[0] if isinstance(key, tuple) else key)
-        output[symbol] = [(int(row["ts_ms"]), float(row[rate_col])) for row in part.to_dicts()]
+        events = [(int(row["ts_ms"]), float(row[rate_col])) for row in part.to_dicts()]
+        if events:
+            output[symbol] = {
+                "events": events,
+                "start_ts_ms": events[0][0],
+                "end_ts_ms": events[-1][0],
+            }
     return output
 
 
 def _perp_funding_return(
-    funding_lookup: dict[str, list[tuple[int, float]]] | None,
+    funding_lookup: dict[str, dict[str, Any]] | None,
     *,
     symbol: str,
     side: str,
@@ -317,9 +323,14 @@ def _perp_funding_return(
 ) -> tuple[float, str, int]:
     if funding_lookup is None:
         return 0.0, "missing", 0
+    series = funding_lookup.get(symbol)
+    if series is None:
+        return 0.0, "missing", 0
+    if entry_ts_ms < int(series["start_ts_ms"]) or exit_ts_ms > int(series["end_ts_ms"]):
+        return 0.0, "partial", 0
     events = [
         rate
-        for ts_ms, rate in funding_lookup.get(symbol, [])
+        for ts_ms, rate in series["events"]
         if entry_ts_ms < ts_ms <= exit_ts_ms
     ]
     if not events:

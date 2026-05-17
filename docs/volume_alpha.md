@@ -98,27 +98,6 @@ liquidity_migration:
   dollar-volume rank jumps sharply across the whole PIT universe
   unlike tail_liquidity_jump, this is not restricted to ranks 81-160
 
-top_volume_leadership:
-  symbol freshly enters the PIT top-volume/top-liquidity cohort
-  requires mature listing age, turnover expansion, positive residual return,
-  strong daily close location, and broad market confirmation
-
-orderly_leadership_pullback:
-  liquid prior leader rests without a blow-off day
-  tests whether persistent volume leadership continues after a controlled pause
-
-volume_shelf_reclaim:
-  quiet prior regime re-accelerates with a strong close and modest range reclaim
-  tests a broader, lower-convexity long sleeve than top-volume leadership
-
-reclaim_breakout:
-  volume/price reclaim through the prior range high
-  tests long continuation after a quiet prior regime
-
-capitulation_reclaim:
-  rebound after prior drawdown and capitulation
-  tests long snapback after punished names reclaim the daily range
-
 selloff_exhaustion:
   extreme volume spike after a strong negative same-day move
   tests panic continuation versus snapback separately
@@ -307,17 +286,122 @@ executor. The continuous runner is:
 SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 TELEGRAM_ENABLED=1 bash scripts/run_bybit_demo_event_engine.sh
 ```
 
-The runner checks every 60 seconds by default, sizes each accepted coin from
-the backtest weight (`gross_exposure / max_active_symbols`, currently 19.40% of
-current Bybit demo USDT equity), exits before entries, sends Telegram status
-with wallet equity/open positions/unrealized PnL when enabled, and records
-`event_demo_trades`, `event_demo_orders`, and `event_demo_cycles` ledgers. It is
-a current-universe forward tester, so it is allowed for demo evidence and
-operations, not for historical promotion evidence.
+The runner checks every 5 minutes by default, sizes each accepted coin from
+the backtest weight (`gross_exposure / max_active_symbols`, currently 20.83% of
+current Bybit demo USDT equity), exits before entries, sends Telegram only for
+material events when enabled, and records `event_demo_trades`,
+`event_demo_orders`, and `event_demo_cycles` ledgers. It is a current-universe
+forward tester, so it is allowed for demo evidence and operations, not for
+historical promotion evidence.
+Before submitting entries, the runner snapshots current Bybit positions, open
+orders, and wallet equity. It blocks candidates whose symbols already have live
+exchange exposure or non-reduce-only open orders. In submit mode, a
+position/open-order/wallet snapshot error blocks all new entries for that cycle
+rather than trusting the ledger alone or sizing from stale equity.
+Position and wallet snapshot failures during open-trade handling are surfaced
+in the cycle report and keep the cycle alive, so an outage cannot crash exits,
+report writing, or the entry guard.
+Recent 1h bars are cached in `event_demo_klines_1h`, keeping the forward-demo
+cache separate from the full-PIT research `klines_1h` dataset.
+Entry orders attach native stop/TP immediately, then confirmed fills recompute
+the ledger stop/TP from actual fill price and repair Bybit trading-stop state
+when rounding moves the protection levels.
+Stale unconfirmed entry rows are terminalized only after successful Bybit
+position and open-order snapshots prove the symbol is flat and has no active
+entry order. Live exposure or a snapshot failure keeps the pending row intact.
+When live exposure or an active open order exists for an old unconfirmed entry,
+fill reconciliation keeps polling that stale row and rebuilds the missing trade
+ledger once Bybit trade history reports the fill. Stale rows without live
+exchange evidence are still skipped instead of being polled forever.
 
-## Legacy Full-PIT Baseline
+Fast exit enforcement is handled by the separate exit-only risk watchdog:
 
-Superseded result after the hold/exit frontier confirmation:
+```bash
+SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 TELEGRAM_ENABLED=1 bash scripts/run_bybit_demo_ws_risk_engine.sh
+```
+
+The watchdog now defaults to `event-risk-ws`: exchange-native stops first,
+demo private WebSocket position/order/execution streams plus the mainnet public
+ticker stream second, and REST only for demo fallback/reconciliation. It does not scan for entries. It repairs
+exchange-native stops/TPs, subscribes to active-position ticker streams, forces
+reduce-only exits on streamed stop, take-profit, or max-hold breaches, and can
+mark the ledger closed from WebSocket execution messages. Bybit currently does
+not support WebSocket Trade order entry for demo trading, so the demo VPS uses
+`ORDER_SUBMIT_MODE=ws_then_rest`: WebSocket decides, REST submits only when demo
+WS order entry is unavailable.
+If a future WebSocket Trade path is enabled and an order ack rejects the exit
+asynchronously, the watchdog marks the WS order row rejected and submits the
+configured REST fallback once. Confirmed REST risk exits record filled order
+rows instead of leaving closed trades paired with merely `submitted` orders.
+On startup and REST reconciliation, tracked-position exits are evaluated before
+stop repair, and stop repair skips symbols with pending or live AGC exit orders.
+The risk path should flatten a breached position before spending a REST call on
+repairing protection for that same position.
+The demo private socket rejects `execution.fast`, so the VPS uses the normal
+private execution stream unless that limitation is retested and cleared.
+Socket startup is bounded by `STREAM_START_TIMEOUT_SECONDS` so a blocked
+private/public subscription reports an error and leaves REST reconciliation plus
+exchange-native stops running instead of hanging the watchdog before startup.
+The watchdog writes latest reports under `reports/event-risk-ws` every heartbeat
+and keeps timestamped JSON/Markdown snapshots for startup and material risk
+events, so exit decisions survive later quiet heartbeat overwrites.
+WebSocket execution/order-stream closures preserve the original exit reason and
+trigger timestamp from the submitted exit order row, so the ledger remains
+auditable when REST polling is not the closing path.
+WebSocket-streamed partial fills reduce the open ledger quantity immediately,
+record partial-exit context, and keep the submitted-symbol duplicate guard
+active until the target exit quantity is filled; untracked emergency exits get
+the same guard treatment on partial stream fills.
+Confirmed partial event/risk exits immediately reduce the open ledger quantity
+and record partial-exit context. Limit-chase risk exits keep per-child IOC and
+fallback order status, target quantity, filled quantity, and notional instead
+of stamping the aggregate fill state onto every child order row.
+Failed tracked risk-exit submissions also keep the trade id, exit reason,
+trigger timestamp, target quantity, and planned exit price on the failed order
+row. A rejected emergency exit therefore stays tied to the open trade in the
+audit ledger instead of becoming an anonymous failed order.
+Fresh pending reduce-only untracked-position exits are restored after restart
+even though they have no ledger trade ID, so the watchdog does not duplicate a
+still-pending emergency flatten order after process loss.
+Stale pending reduce-only exits are terminalized only when successful Bybit
+position and open-order snapshots show no live position and no live AGC exit
+order for the symbol, so old local rows do not keep reporting false pending
+exposure after the exchange is already flat.
+The same flat/no-open-order evidence terminalizes stale pending entry rows;
+stale entries with a live position or active entry order are reconciled first,
+so delayed fill-history recovery can rebuild a missing trade ledger before the
+watchdog treats the position as untracked.
+Live AGC reduce-only exit open orders on Bybit are also treated as active exit
+submissions, covering crashes that placed an exit but lost the local order row.
+Manual/native reduce-only protection orders do not suppress emergency exits.
+Material Telegram alert keys are persisted in the same report directory, so
+restarting the watchdog does not resend the same alert.
+Stop-repair alerts are keyed by symbol and target stop/TP rather than synthetic
+repair order-link IDs, so repeated confirmations for the same protection target
+do not create notification noise.
+
+Order-path latency can be measured on the demo account with
+`scripts/probe_bybit_demo_order_latency.py`, which places tiny far-from-touch
+post-only demo orders and cancels them immediately.
+
+## Creative Alpha Research Log
+
+Latest full-PIT creative alpha pass:
+
+```text
+docs/creative_alpha_research_20260517.md
+```
+
+Decision: do not change the selected demo strategy. The pass added
+disabled-by-default research controls for 7d momentum, proximity-to-high,
+prior-month MAX/salience, prior return volatility, and intraday range. None beat
+the current liquidity-migration short on strict full-PIT improvement criteria.
+The closest result was a lower-drawdown near-30d-high sleeve, but it sacrificed
+too much return and was delay sensitive.
+
+## Selected Full-PIT Result
+
+Promoted result after the hold/exit frontier confirmation:
 
 ```text
 event: liquidity_migration
@@ -376,96 +460,7 @@ python -m aggression_carry \
   --stop-pressure-stop-count 12
 ```
 
-## Promoted Active Strategy - Union Crowding Veto
-
-The March-only crowding patch is rejected. A hostile CSV audit found 10
-same-entry-hour toxic stop clusters and 20 stop-loss trades inside those
-clusters; the March rule covered only 4 of those 20 stop trades.
-
-Promoted research and demo-default strategy:
-
-```text
-variant: adaptive hot-band liquidity_migration short + union_pathology crowding veto
-report: data/research_reports/frontier_union_crowding_promoted_20260517
-audit: data/research_reports/frontier_crowding_pathology_audit_20260517
-trades: 444
-total return: +1950.72%
-max drawdown: -10.74%
-max no-new-high stretch: 51 days
-worst 90d return: -4.64%
-worst split return: +113.73%
-average split Sharpe-like: 3.72
-OOS return: +177.58%
-full PIT universe pass: true
-promotion status: active volume-events and Bybit demo default as of 2026-05-17
-```
-
-The paper shadow step was skipped by explicit user decision. That is a real
-validation gap, so this promotion remains demo-only and must not be interpreted
-as real-money readiness.
-
-Equivalent explicit command:
-
-```bash
-python -m aggression_carry \
-  --data-root DATA_ROOT \
-  --config configs/volume_alpha.default.yaml \
-  volume-events \
-  --event-types liquidity_migration \
-  --thresholds 0.4 \
-  --hold-days 3 \
-  --sides reversal \
-  --stop-loss-pcts 0.12 \
-  --take-profit-pcts 0.25 \
-  --cost-multipliers 3 \
-  --entry-delay-hours 1 \
-  --gross-exposure 0.97 \
-  --max-active-symbols 5 \
-  --cooldown-days 5 \
-  --rank-exit-threshold 0.55 \
-  --universe-rank-min 31 \
-  --universe-rank-max 150 \
-  --liquidity-migration-rank-improvement-min 150 \
-  --liquidity-migration-turnover-ratio-min 6.0 \
-  --liquidity-migration-event-rank-fraction-max 0.90 \
-  --liquidity-migration-day-return-min 0.0 \
-  --liquidity-migration-residual-return-min 0.08 \
-  --liquidity-migration-market-pct-up-max 0.65 \
-  --liquidity-migration-hot-market-day-return-min 0.16 \
-  --liquidity-migration-hot-market-day-return-band 0.015 \
-  --liquidity-migration-close-location-min 0.45 \
-  --liquidity-migration-pit-age-days-min 90 \
-  --stop-pressure-window-days 10 \
-  --stop-pressure-stop-count 7 \
-  --realized-loss-pressure-window-days 5 \
-  --realized-loss-pressure-loss-count 6 \
-  --realized-loss-pressure-min-loss-abs 0.0 \
-  --liquidity-migration-crowding-filter union_pathology
-```
-
-The `union_pathology` veto is causal and only uses selected same-entry-hour
-signals plus event-day tape shape:
-
-```text
-crowded hour: selected entry-hour signal count >= 2
-
-veto if any regime is true:
-  stalled low-turnover migration:
-    entry-hour average final-6h return <= 3%
-    individual close location >= 65%
-    turnover / prior 7d mean <= 20
-
-  late-turnover concentration:
-    entry-hour max final-6h turnover share >= 90%
-    individual final-6h return >= 3%
-    turnover / prior 7d mean >= 12
-
-  weak-tape high-share squeeze:
-    market_pct_up_1d <= 65%
-    entry-hour average final-6h turnover share >= 50%
-```
-
-Legacy selected-default full-PIT result on `2023-05-03` to `2026-05-03`:
+Full-PIT result on `2023-05-03` to `2026-05-03`:
 
 ```text
 report: data/research_reports/research_20260516_promoted_default_after_patch
@@ -483,163 +478,36 @@ default chart: volume_event_best_equity_btc.png with BTC overlay and monthly/gro
 promotion gate: pass
 ```
 
+Funding and execution-realism update from `2026-05-17`:
+
+```text
+funded default report: data/research_reports/research_20260517_default_with_funding_oi_features
+funded default return: +957.82%
+funded default max drawdown: -18.62%
+funding return drag: -22.03%
+
+adverse stop-fill report: data/research_reports/research_20260517_default_funding_bar_extreme_stops
+adverse stop-fill return: +141.34%
+adverse stop-fill max drawdown: -35.88%
+adverse stop-fill OOS return: -13.69%
+adverse stop-fill promotion gate: fail
+```
+
+The strongest new research candidate is the same liquidity-migration short
+strategy gated to `funding_7d_sum >= 0` at signal close. It is not the active
+demo default yet because there is no forward/demo evidence and the demo cycle
+does not currently compute the 7d funding gate. Full report:
+
+```text
+data/research_reports/research_20260517_funding7_positive_bar_extreme_stops
+return: +213.66%
+max drawdown: -16.61%
+min split return: +12.10%
+funding return: +3.13%
+promotion gate: pass under adverse hourly stop fills
+```
+
 In the promotion comparison, BTC/ETH/SOL/BNB/XRP/TRX took no direct trades, but
 including them improved the PIT rank map and market context. That is why the
 default exclusion rule is now stable/peg-only rather than a manual top-coin
 blacklist.
-
-## Long Complement Candidate
-
-This is a standalone long research result to complement the selected short
-liquidity-migration system. It is not the demo default until forward/demo
-evidence exists and portfolio interaction with the short book is tested.
-
-Selected candidate:
-
-```text
-event: top_volume_leadership
-side: continuation (long)
-threshold: top 25% dollar-volume rank score
-filters:
-  point-in-time liquidity rank <= 30
-  prior 7d liquidity rank >= 31
-  symbol age >= 120 days
-  turnover / prior 7d mean >= 1.25
-  coin daily_return_1d >= +3%
-  coin daily_return_1d - market_median_return_1d >= +3%
-  daily close position in high-low range >= 0.80
-  market_pct_up_1d >= 0.55
-  market_median_return_1d >= 0%
-  BTC return >= 0%
-hold: 3 days max
-stop: 12% fixed
-take profit: 50% fixed
-gross exposure: 1.25
-capacity: max 6 active symbols
-cooldown: 2 days
-```
-
-Equivalent explicit command:
-
-```bash
-python -m aggression_carry \
-  --data-root DATA_ROOT \
-  --config configs/volume_alpha.default.yaml \
-  volume-events \
-  --event-types top_volume_leadership \
-  --thresholds 0.25 \
-  --hold-days 3 \
-  --sides continuation \
-  --stop-loss-pcts 0.12 \
-  --take-profit-pcts 0.50 \
-  --cost-multipliers 1,3,5 \
-  --max-active-symbols 6 \
-  --cooldown-days 2 \
-  --top-volume-rank-max 30 \
-  --top-volume-prior-rank-min 31 \
-  --top-volume-min-age-days 120 \
-  --top-volume-turnover-ratio-min 1.25 \
-  --top-volume-day-return-min 0.03 \
-  --top-volume-residual-return-min 0.03 \
-  --top-volume-close-position-min 0.80 \
-  --market-pct-up-1d-min 0.55 \
-  --market-median-return-1d-min 0 \
-  --btc-return-1d-min 0
-```
-
-Full-PIT result on `2023-05-03` to `2026-05-03`:
-
-```text
-report: data/research_reports/top_volume_aggressive_q25h3_cost_grid_20260517
-3x audit ledger: data/research_reports/top_volume_aggressive_q25h3_selected_c3_20260517
-trades: 137
-cost 1x return: +125.68%, max drawdown: -19.47%, min split: +13.24%
-cost 3x return: +113.70%, max drawdown: -20.63%, min split: +11.14%
-cost 5x return: +102.36%, max drawdown: -21.77%, min split: +9.07%
-worst 90d return at 3x cost: -14.22%
-train / validation / OOS at 3x cost: +11.14% / +53.90% / +24.95%
-promotion gate: pass
-```
-
-Rejected or secondary long research from the same session:
-
-```text
-generic breadth-gated volume families:
-  report: data/research_reports/orthogonal_existing_long_breadth_20260517
-  scenarios: 270
-  promotable: 0
-  best return: -18.91%
-
-selloff-exhaustion reversal:
-  report: data/research_reports/orthogonal_selloff_reversal_20260517
-  scenarios: 144
-  promotable: 0
-  best return: -65.84%
-
-volume_shelf_reclaim:
-  report: data/research_reports/volume_shelf_reclaim_selected_cost_grid_20260517
-  3x selected return: +45.30%, max drawdown: -15.98%, trades: 371
-  status: viable secondary sleeve, not a replacement; fails 5x split robustness
-
-top-volume + shelf blend:
-  report: data/research_reports/long_blend_top_volume_shelf_20260517
-  status: did not improve top-volume standalone return or drawdown enough
-```
-
-## True Hedge Candidate
-
-The current best hedge research does not promote a standalone long alpha. The
-short book's worst drawdowns are mostly idiosyncratic alt squeezes with
-exploding open interest, often while BTC is flat or down. A generic long-only
-top-volume sleeve is not a good hedge for that risk.
-
-Recommended balanced hedge overlay:
-
-```text
-base system: selected liquidity_migration short
-when signal open_interest_return_1d >= +40%:
-  size that short trade at 75% of normal notional
-when BTC return >= 0% OR market_pct_up_1d >= 70%:
-  add BTCUSDT long hedge at 50% of that short trade's normal notional
-  hold the BTC hedge for the same entry/exit window as the short trade
-cost: 3x base round-trip cost on the hedge leg
-```
-
-Full-PIT result versus the inspected short baseline:
-
-```text
-research report: data/research_reports/true_hedge_research_20260517
-short baseline report: /Users/jhbvdnsbkvnsd/Desktop/MODEL050426/data/research_reports/research_20260517_default_with_funding_oi_features
-
-baseline return: +957.82%
-baseline max drawdown: -18.62%
-baseline worst 90d: -7.00%
-baseline split returns: +77.60% / +221.83% / +85.07%
-
-balanced hedge return: +874.95%
-balanced hedge max drawdown: -14.86%
-balanced hedge worst 90d: -4.37%
-balanced hedge split returns: +76.45% / +213.32% / +76.35%
-return retention: 91.35%
-drawdown improvement: +3.77 percentage points
-worst-90d improvement: +2.63 percentage points
-promotion status: research pass, not demo-integrated
-```
-
-Maximum-protection variant:
-
-```text
-when signal open_interest_return_1d >= +125%:
-  size that short trade at 50% of normal notional
-when BTC return >= 0% OR market_pct_up_1d >= 70%:
-  add ETHUSDT long hedge at 50% of that short trade's normal notional
-
-return: +838.34%
-max drawdown: -13.97%
-worst 90d: -5.35%
-return retention: 87.53%
-```
-
-Do not mix the prior long-only top-volume sleeve into the short stack as a
-hedge. In capital-normalized tests it cut drawdown only by reallocating away
-from the short edge and failed the true-hedge retention gate.
