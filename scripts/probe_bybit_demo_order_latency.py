@@ -14,8 +14,11 @@ def main() -> int:
     testnet = os.environ.get("BYBIT_TESTNET", "0") == "1"
     count = int(os.environ.get("PROBE_COUNT", "2"))
     side = os.environ.get("PROBE_SIDE", "Buy")
+    cancel_verify_seconds = float(os.environ.get("PROBE_CANCEL_VERIFY_SECONDS", "2.0"))
     if os.environ.get("CONFIRM_DEMO_ORDERS") != "1":
         raise RuntimeError("Set CONFIRM_DEMO_ORDERS=1 to run the demo order latency probe")
+    if side not in {"Buy", "Sell"}:
+        raise ValueError("PROBE_SIDE must be Buy or Sell")
     api_key = os.environ.get("BYBIT_DEMO_API_KEY")
     api_secret = os.environ.get("BYBIT_DEMO_API_SECRET")
     if not api_key or not api_secret:
@@ -34,21 +37,36 @@ def main() -> int:
     )
     for index in range(max(count, 1)):
         link = f"agc-probe-{int(time.time() * 1000)}-{index}"[:36]
+        placed = False
         place_start = time.perf_counter()
-        result = private.place_order(
-            symbol=symbol,
-            side=side,
-            orderType="Limit",
-            qty=qty,
-            price=price,
-            timeInForce="PostOnly",
-            orderLinkId=link,
-            reduceOnly=False,
-        )
-        place_ms = (time.perf_counter() - place_start) * 1000.0
-        cancel_start = time.perf_counter()
-        private.cancel_order(symbol=symbol, order_link_id=link)
-        cancel_ms = (time.perf_counter() - cancel_start) * 1000.0
+        result: dict[str, object] = {}
+        place_ms = 0.0
+        cancel_ms = 0.0
+        try:
+            result = private.place_order(
+                symbol=symbol,
+                side=side,
+                orderType="Limit",
+                qty=qty,
+                price=price,
+                timeInForce="PostOnly",
+                orderLinkId=link,
+                reduceOnly=False,
+            )
+            placed = True
+            place_ms = (time.perf_counter() - place_start) * 1000.0
+        finally:
+            if placed:
+                cancel_start = time.perf_counter()
+                cancel_error: Exception | None = None
+                try:
+                    private.cancel_order(symbol=symbol, order_link_id=link)
+                except Exception as exc:  # noqa: BLE001 - verification below still tries to clean up
+                    cancel_error = exc
+                cancel_ms = (time.perf_counter() - cancel_start) * 1000.0
+                _verify_cancelled(private, symbol=symbol, order_link_id=link, timeout_seconds=cancel_verify_seconds)
+                if cancel_error is not None:
+                    raise RuntimeError(f"Probe cancel request failed after order placement: {link}") from cancel_error
         print(
             f"probe={index + 1} order_id={result.get('orderId', '')} "
             f"place_ms={place_ms:.1f} cancel_ms={cancel_ms:.1f}"
@@ -78,6 +96,26 @@ def _reference_price(market: BybitMarketData, symbol: str) -> Decimal:
                 if value > 0:
                     return value
     raise RuntimeError(f"Ticker not found: {symbol}")
+
+
+def _verify_cancelled(
+    private: BybitPrivateClient,
+    *,
+    symbol: str,
+    order_link_id: str,
+    timeout_seconds: float,
+) -> None:
+    deadline = time.monotonic() + max(timeout_seconds, 0.0)
+    while True:
+        open_orders = private.get_open_orders(symbol=symbol)
+        if not any(str(row.get("orderLinkId") or row.get("order_link_id") or "") == order_link_id for row in open_orders):
+            return
+        if time.monotonic() >= deadline:
+            try:
+                private.cancel_order(symbol=symbol, order_link_id=order_link_id)
+            finally:
+                raise RuntimeError(f"Probe order still open after cancel: {order_link_id}")
+        time.sleep(0.1)
 
 
 def _qty_text(min_order_qty: Decimal, qty_step: Decimal) -> str:
