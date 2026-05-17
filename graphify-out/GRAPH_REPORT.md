@@ -1,11 +1,11 @@
 # Graph Report - MODEL050426  (2026-05-17)
 
 ## Corpus Check
-- 33 files · ~58,435 words
+- 33 files · ~58,455 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 678 nodes · 1995 edges · 10 communities detected
+- 679 nodes · 1996 edges · 10 communities detected
 - Extraction: 68% EXTRACTED · 32% INFERRED · 0% AMBIGUOUS · INFERRED: 642 edges (avg confidence: 0.77)
 - Token cost: 0 input · 0 output
 
@@ -18,8 +18,8 @@
 - [[_COMMUNITY_Community 5|Community 5]]
 - [[_COMMUNITY_Community 6|Community 6]]
 - [[_COMMUNITY_Community 7|Community 7]]
-- [[_COMMUNITY_Community 9|Community 9]]
-- [[_COMMUNITY_Community 12|Community 12]]
+- [[_COMMUNITY_Community 8|Community 8]]
+- [[_COMMUNITY_Community 13|Community 13]]
 
 ## God Nodes (most connected - your core abstractions)
 1. `EventWebSocketRiskEngine` - 77 edges
@@ -65,42 +65,42 @@ Nodes (57): download_archive_bytes(), _download_archive_to_path(), download_publ
 
 ### Community 4 - "Community 4"
 Cohesion: 0.06
-Nodes (45): build_parser(), _csv_float(), _csv_int(), _csv_str(), _event_risk_payload_material(), main(), _print_event_risk_summary(), _universe_config_from_args() (+37 more)
-
-### Community 5 - "Community 5"
-Cohesion: 0.06
 Nodes (13): BybitDataError, BybitMarketData, BybitPrivateClient, BybitPrivateWebSocketStream, BybitPublicTickerStream, BybitPublicTradeStream, BybitWebSocketTradeClient, _close_ws_client() (+5 more)
 
-### Community 6 - "Community 6"
+### Community 5 - "Community 5"
 Cohesion: 0.12
 Nodes (19): _column_values(), _empty_trades(), _open_trades(), _risk_reconcile_missing_positions(), _safe_raw_positions(), _upsert_rows(), _write_order_rows(), _write_trade_rows() (+11 more)
 
-### Community 7 - "Community 7"
+### Community 6 - "Community 6"
 Cohesion: 0.15
 Nodes (38): ResearchConfig, read_dataset(), EventWebSocketRiskConfig, test_archive_download_can_build_1m_klines_from_public_trades(), test_rest_kline_download_only_marks_successful_symbols(), test_rest_kline_download_writes_each_symbol_and_resumes(), BlockingPrivateStream, BlockingPublicStream (+30 more)
 
-### Community 9 - "Community 9"
-Cohesion: 0.36
-Nodes (7): _add_cross_sectional_z(), _add_liquidity_rank(), build_volume_features(), _daily_bars(), _rolling_mean(), _rolling_sum(), test_volume_features_build_daily_liquidity_ranks()
+### Community 7 - "Community 7"
+Cohesion: 0.07
+Nodes (35): build_parser(), _csv_float(), _csv_int(), _csv_str(), _event_risk_payload_material(), main(), _print_event_risk_summary(), _universe_config_from_args() (+27 more)
 
-### Community 12 - "Community 12"
+### Community 8 - "Community 8"
+Cohesion: 0.16
+Nodes (17): _age_filter_label(), build_current_universe_table(), _empty_universe_table(), format_universe_report(), run_discover_universe(), _safe_name(), _add_cross_sectional_z(), _add_liquidity_rank() (+9 more)
+
+### Community 13 - "Community 13"
 Cohesion: 1.0
 Nodes (1): Bybit liquidity-migration research package.
 
 ## Knowledge Gaps
 - **2 isolated node(s):** `ExchangeConfig`, `Bybit liquidity-migration research package.`
   These have ≤1 connection - possible missing edges or undocumented components.
-- **Thin community `Community 12`** (2 nodes): `__init__.py`, `Bybit liquidity-migration research package.`
+- **Thin community `Community 13`** (2 nodes): `__init__.py`, `Bybit liquidity-migration research package.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `EventWebSocketRiskEngine` connect `Community 6` to `Community 1`, `Community 5`, `Community 7`?**
+- **Why does `EventWebSocketRiskEngine` connect `Community 5` to `Community 1`, `Community 4`, `Community 6`?**
   _High betweenness centrality (0.075) - this node is a cross-community bridge._
 - **Why does `EventDemoCycleConfig` connect `Community 1` to `Community 0`, `Community 4`, `Community 5`, `Community 6`, `Community 7`?**
-  _High betweenness centrality (0.069) - this node is a cross-community bridge._
-- **Why does `main()` connect `Community 4` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 6`, `Community 7`?**
+  _High betweenness centrality (0.068) - this node is a cross-community bridge._
+- **Why does `main()` connect `Community 7` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 5`, `Community 6`, `Community 8`?**
   _High betweenness centrality (0.067) - this node is a cross-community bridge._
 - **Are the 37 inferred relationships involving `EventWebSocketRiskEngine` (e.g. with `BybitPrivateClient` and `BybitPrivateWebSocketStream`) actually correct?**
   _`EventWebSocketRiskEngine` has 37 INFERRED edges - model-reasoned connections that need verification._

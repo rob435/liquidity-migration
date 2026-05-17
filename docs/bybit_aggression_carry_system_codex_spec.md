@@ -111,7 +111,7 @@ python -m aggression_carry \
 SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 TELEGRAM_ENABLED=1 bash scripts/run_bybit_demo_event_engine.sh
 ```
 
-The runner loops every `INTERVAL_SECONDS=60` by default. Each cycle:
+The runner loops every `INTERVAL_SECONDS=300` by default. Each cycle:
 
 1. Pulls the current Bybit USDT perpetual universe through rank 220 so the selected rank 31-150 strategy can be evaluated forward.
 2. Excludes only stable/peg perps, including failed peg remnants such as USTCUSDT, before ranks/features are built.

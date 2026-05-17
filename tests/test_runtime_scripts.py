@@ -14,3 +14,10 @@ def test_runtime_scripts_do_not_delete_live_cycle_locks() -> None:
         text = script.read_text(encoding="utf-8")
         assert "rm -f \"$DATA_ROOT/.locks/" not in text
         assert "mkdir -p \"$DATA_ROOT/.locks\"" in text
+
+
+def test_event_entry_runner_default_cadence_is_rate_limit_safe() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    text = (repo / "scripts" / "run_bybit_demo_event_engine.sh").read_text(encoding="utf-8")
+
+    assert 'INTERVAL_SECONDS="${INTERVAL_SECONDS:-300}"' in text

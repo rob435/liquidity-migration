@@ -81,7 +81,7 @@ python -m aggression_carry \
   event-demo-cycle
 ```
 
-Continuous demo runner, checking every 60 seconds:
+Continuous demo runner, checking every 5 minutes by default:
 
 ```bash
 TELEGRAM_ENABLED=1 \
