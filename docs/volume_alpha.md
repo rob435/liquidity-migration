@@ -324,6 +324,9 @@ and keeps timestamped JSON/Markdown snapshots for startup and material risk
 events, so exit decisions survive later quiet heartbeat overwrites.
 Material Telegram alert keys are persisted in the same report directory, so
 restarting the watchdog does not resend the same alert.
+Stop-repair alerts are keyed by symbol and target stop/TP rather than synthetic
+repair order-link IDs, so repeated confirmations for the same protection target
+do not create notification noise.
 
 Order-path latency can be measured on the demo account with
 `scripts/probe_bybit_demo_order_latency.py`, which places tiny far-from-touch

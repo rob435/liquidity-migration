@@ -1,12 +1,12 @@
 # Graph Report - MODEL050426  (2026-05-17)
 
 ## Corpus Check
-- 33 files · ~60,700 words
+- 33 files · ~60,912 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 703 nodes · 2090 edges · 10 communities detected
-- Extraction: 68% EXTRACTED · 32% INFERRED · 0% AMBIGUOUS · INFERRED: 678 edges (avg confidence: 0.77)
+- 704 nodes · 2092 edges · 11 communities detected
+- Extraction: 68% EXTRACTED · 32% INFERRED · 0% AMBIGUOUS · INFERRED: 679 edges (avg confidence: 0.77)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -19,7 +19,8 @@
 - [[_COMMUNITY_Community 6|Community 6]]
 - [[_COMMUNITY_Community 7|Community 7]]
 - [[_COMMUNITY_Community 8|Community 8]]
-- [[_COMMUNITY_Community 13|Community 13]]
+- [[_COMMUNITY_Community 10|Community 10]]
+- [[_COMMUNITY_Community 14|Community 14]]
 
 ## God Nodes (most connected - your core abstractions)
 1. `EventWebSocketRiskEngine` - 81 edges
@@ -27,7 +28,7 @@
 3. `run_event_demo_cycle()` - 50 edges
 4. `read_dataset()` - 47 edges
 5. `EventWebSocketRiskConfig` - 45 edges
-6. `_float()` - 40 edges
+6. `_float()` - 41 edges
 7. `write_dataset()` - 37 edges
 8. `EventDemoCycleConfig` - 37 edges
 9. `FakePrivateStream` - 37 edges
@@ -52,55 +53,59 @@ Cohesion: 0.03
 Nodes (129): TradeLifecycleConfig, _cooldown_until(), _empty_skip_counts(), _realized_stop_exit_ts(), select_demo_entry_candidates(), _trade_id(), _bar_excursion(), _bar_exit_hits() (+121 more)
 
 ### Community 1 - "Community 1"
-Cohesion: 0.06
-Nodes (87): _active_position_by_symbol(), _base36(), _bool(), _build_demo_features(), _build_demo_universe(), build_event_risk_private_client(), build_ledger_position_pnl_snapshot(), build_position_pnl_snapshot() (+79 more)
+Cohesion: 0.05
+Nodes (88): _active_position_by_symbol(), _base36(), _bool(), _build_demo_features(), _build_demo_universe(), build_event_risk_private_client(), build_ledger_position_pnl_snapshot(), build_position_pnl_snapshot() (+80 more)
 
 ### Community 2 - "Community 2"
-Cohesion: 0.05
-Nodes (85): _archive_kline_skip_rows(), ArchiveHourlyKlineApiDownloadConfig, ArchiveHourlyKlineDownloadConfig, ArchiveKlineDownloadConfig, ArchiveManifestConfig, build_archive_trade_manifest(), _bybit_api_kline_url(), _date_from_ts_ms() (+77 more)
+Cohesion: 0.06
+Nodes (75): _archive_kline_skip_rows(), ArchiveHourlyKlineApiDownloadConfig, ArchiveHourlyKlineDownloadConfig, ArchiveKlineDownloadConfig, ArchiveManifestConfig, build_archive_trade_manifest(), _bybit_api_kline_url(), _date_from_ts_ms() (+67 more)
 
 ### Community 3 - "Community 3"
-Cohesion: 0.04
-Nodes (38): BybitDataError, BybitPrivateClient, BybitPrivateWebSocketStream, BybitPublicTickerStream, BybitPublicTradeStream, BybitWebSocketTradeClient, _close_ws_client(), _is_rate_limit() (+30 more)
+Cohesion: 0.05
+Nodes (37): BybitDataError, BybitPrivateClient, BybitPrivateWebSocketStream, BybitPublicTickerStream, BybitPublicTradeStream, BybitWebSocketTradeClient, _close_ws_client(), _is_rate_limit() (+29 more)
 
 ### Community 4 - "Community 4"
 Cohesion: 0.06
-Nodes (61): download_archive_bytes(), _download_archive_to_path(), download_public_trade_archive(), _download_and_read_hourly_archive(), _positive_int_env(), _public_trade_text_handle(), read_public_trade_archive(), read_public_trade_archive_klines_1h() (+53 more)
+Nodes (60): download_archive_bytes(), _download_archive_to_path(), download_public_trade_archive(), _download_and_read_hourly_archive(), _positive_int_env(), _public_trade_text_handle(), read_public_trade_archive(), read_public_trade_archive_klines_1h() (+52 more)
 
 ### Community 5 - "Community 5"
-Cohesion: 0.07
-Nodes (54): build_parser(), UniverseConfig, EventDemoCycleConfig, EventRiskCycleConfig, _validate_demo_config(), EventScenario, test_cli_archive_hourly_api_kline_default_resumes_written_partitions(), test_cli_archive_hourly_kline_default_resumes_written_partitions() (+46 more)
-
-### Community 6 - "Community 6"
 Cohesion: 0.15
 Nodes (43): ResearchConfig, read_dataset(), EventWebSocketRiskConfig, EventWebSocketRiskEngine, test_archive_download_can_build_1m_klines_from_public_trades(), test_rest_kline_download_only_marks_successful_symbols(), test_rest_kline_download_writes_each_symbol_and_resumes(), BlockingPrivateStream (+35 more)
 
+### Community 6 - "Community 6"
+Cohesion: 0.09
+Nodes (43): UniverseConfig, EventDemoCycleConfig, EventRiskCycleConfig, _validate_demo_config(), EventScenario, FailingKlineMarket, FakeKlineMarket, FakeRiskClient (+35 more)
+
 ### Community 7 - "Community 7"
-Cohesion: 0.11
-Nodes (24): CostConfig, ExchangeConfig, load_config(), _merge_dataclass(), _merge_universe_config(), _tuple_str(), _age_filter_label(), build_current_universe_table() (+16 more)
+Cohesion: 0.07
+Nodes (39): build_parser(), _csv_float(), _csv_int(), _csv_str(), _event_risk_payload_material(), _event_risk_report_path(), main(), _print_event_risk_summary() (+31 more)
 
 ### Community 8 - "Community 8"
-Cohesion: 0.17
+Cohesion: 0.16
 Nodes (6): BybitMarketData, _dedupe_recent_klines(), _download_recent_1h_klines(), _empty_klines(), _fetch_recent_1h_klines(), _read_demo_kline_cache()
 
-### Community 13 - "Community 13"
+### Community 10 - "Community 10"
+Cohesion: 0.36
+Nodes (7): _add_cross_sectional_z(), _add_liquidity_rank(), build_volume_features(), _daily_bars(), _rolling_mean(), _rolling_sum(), test_volume_features_build_daily_liquidity_ranks()
+
+### Community 14 - "Community 14"
 Cohesion: 1.0
 Nodes (1): Bybit liquidity-migration research package.
 
 ## Knowledge Gaps
 - **2 isolated node(s):** `ExchangeConfig`, `Bybit liquidity-migration research package.`
   These have ≤1 connection - possible missing edges or undocumented components.
-- **Thin community `Community 13`** (2 nodes): `__init__.py`, `Bybit liquidity-migration research package.`
+- **Thin community `Community 14`** (2 nodes): `__init__.py`, `Bybit liquidity-migration research package.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `EventWebSocketRiskEngine` connect `Community 6` to `Community 1`, `Community 2`, `Community 3`, `Community 5`?**
+- **Why does `EventWebSocketRiskEngine` connect `Community 5` to `Community 1`, `Community 3`, `Community 6`?**
   _High betweenness centrality (0.075) - this node is a cross-community bridge._
-- **Why does `EventDemoCycleConfig` connect `Community 5` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 6`, `Community 8`?**
+- **Why does `EventDemoCycleConfig` connect `Community 6` to `Community 0`, `Community 1`, `Community 3`, `Community 5`, `Community 7`, `Community 8`?**
   _High betweenness centrality (0.068) - this node is a cross-community bridge._
-- **Why does `main()` connect `Community 2` to `Community 0`, `Community 1`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`?**
+- **Why does `main()` connect `Community 7` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`?**
   _High betweenness centrality (0.066) - this node is a cross-community bridge._
 - **Are the 41 inferred relationships involving `EventWebSocketRiskEngine` (e.g. with `BybitPrivateClient` and `BybitPrivateWebSocketStream`) actually correct?**
   _`EventWebSocketRiskEngine` has 41 INFERRED edges - model-reasoned connections that need verification._

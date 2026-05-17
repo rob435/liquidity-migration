@@ -60,16 +60,17 @@ Objective: harden the Bybit demo system as if it is live capital, with emphasis 
 - `current slice: persist websocket risk Telegram de-dupe`
   - Websocket risk material alert keys are stored under `reports/event-risk-ws`.
   - A service restart no longer resets Telegram de-dupe state for the same material risk event.
+  - Stop-repair alerts de-dupe by symbol and target stop/TP instead of synthetic repair order-link IDs.
 
 ## Verification
 
 Local:
 
-- `pytest -q`: 182 passed after the websocket risk Telegram de-dupe change.
+- `pytest -q`: 183 passed after the websocket risk Telegram de-dupe change.
 
 VPS:
 
-- `pytest -q`: 182 passed after deploying the websocket risk Telegram de-dupe change.
+- `pytest -q`: 183 passed after deploying the websocket risk Telegram de-dupe change.
 - Services after restart:
   - `model050426-bybit-demo.service`: active/running, `INTERVAL_SECONDS=300`.
   - `model050426-bybit-risk.service`: active/running.
@@ -77,6 +78,8 @@ VPS:
   - An isolated VPS restart simulation sent the first material websocket-risk alert.
   - A second engine instance using the same isolated report directory suppressed the same alert as `duplicate_material_event`.
   - The persisted `telegram_dedupe_keys.json` contained the material alert key.
+  - A repeated stop-repair report with the same symbol and target stop/TP but a different synthetic order-link ID was suppressed as `duplicate_material_event`.
+  - A changed stop target still alerted; the isolated stop-repair drill sent 2 alerts across 3 reports.
 - Lock recovery drill:
   - An isolated empty `event_ws_risk_cycle.lock` with `stale_seconds=0` was recovered on the VPS.
   - The lock existed while held by the new owner PID and was removed after release.

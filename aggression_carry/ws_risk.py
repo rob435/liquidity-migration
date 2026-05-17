@@ -1133,9 +1133,18 @@ def _telegram_dedupe_key(reason: str, payload: dict[str, Any]) -> str:
         if str(row.get("symbol") or "")
     )
     repairs = sorted(
-        str(row.get("order_link_id") or "")
+        "|".join(
+            [
+                str(row.get("symbol") or ""),
+                f"{_float(row.get('stop_price')):.12g}",
+                f"{_float(row.get('take_profit_price')):.12g}",
+                str(row.get("status") or ""),
+                str(row.get("submit_mode") or ""),
+                str(row.get("error") or "")[:160],
+            ]
+        )
         for row in payload.get("stop_repairs", [])
-        if str(row.get("order_link_id") or "")
+        if str(row.get("symbol") or "")
     )
     error = str(cycle.get("position_report_error") or "")[:160]
     return "|".join(

@@ -887,6 +887,47 @@ def test_ws_risk_telegram_dedupe_survives_restart(tmp_path: Path, monkeypatch) -
     assert len(sent) == 1
 
 
+def test_ws_risk_stop_repair_dedupe_ignores_synthetic_order_link(tmp_path: Path, monkeypatch) -> None:
+    sent: list[str] = []
+
+    def fake_send(text: str, *, enabled: bool) -> bool:
+        sent.append(text)
+        return enabled
+
+    monkeypatch.setattr("aggression_carry.event_demo.send_telegram_message", fake_send)
+
+    def write_repair(order_link_id: str, *, stop_price: float = 112.0) -> dict[str, object]:
+        engine = EventWebSocketRiskEngine(
+            tmp_path,
+            config=ResearchConfig(data_root=tmp_path),
+            risk_config=EventWebSocketRiskConfig(telegram=True, heartbeat_seconds=0.0),
+            private_client=FakePrivateClient(),
+            private_stream=FakePrivateStream(),
+            public_stream=FakePublicStream(),
+        )
+        engine.state.repairs.append(
+            {
+                "order_link_id": order_link_id,
+                "symbol": "AAAUSDT",
+                "status": "stop_repaired",
+                "submit_mode": "submitted",
+                "stop_price": stop_price,
+                "take_profit_price": 80.0,
+            }
+        )
+        return engine.write_report(reason="heartbeat")
+
+    first = write_repair("agc-st-AAA-1")
+    duplicate = write_repair("agc-st-AAA-2")
+    changed_target = write_repair("agc-st-AAA-3", stop_price=113.0)
+
+    assert first["cycle"]["telegram_sent"] is True
+    assert duplicate["cycle"]["telegram_sent"] is False
+    assert duplicate["cycle"]["telegram_error"] == "duplicate_material_event"
+    assert changed_target["cycle"]["telegram_sent"] is True
+    assert len(sent) == 2
+
+
 def test_ws_risk_startup_report_keeps_timestamped_audit_copy(tmp_path: Path) -> None:
     engine = EventWebSocketRiskEngine(
         tmp_path,
