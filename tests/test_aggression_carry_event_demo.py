@@ -56,6 +56,7 @@ class FakeRiskClient:
         fail_history_links: set[str] | None = None,
         fail_trade_history: bool = False,
         fail_positions: bool = False,
+        fail_wallet: bool = False,
         open_orders: list[dict[str, object]] | None = None,
         fail_open_orders: bool = False,
     ) -> None:
@@ -70,6 +71,7 @@ class FakeRiskClient:
         self.fail_history_links = fail_history_links or set()
         self.fail_trade_history = fail_trade_history
         self.fail_positions = fail_positions
+        self.fail_wallet = fail_wallet
         self.fail_open_orders = fail_open_orders
         self.orders: list[dict[str, object]] = []
         self.stop_updates: list[dict[str, object]] = []
@@ -82,6 +84,8 @@ class FakeRiskClient:
         return self.positions
 
     def get_wallet_balance(self, *, account_type: str | None = None, coin: str | None = None) -> dict[str, object]:
+        if self.fail_wallet:
+            raise RuntimeError("wallet unavailable")
         return {"list": [{"totalEquity": "10000"}]}
 
     def get_open_orders(self, *, symbol: str | None = None, settle_coin: str | None = None) -> list[dict[str, object]]:
@@ -457,6 +461,117 @@ def test_event_demo_cycle_does_not_crash_when_reconcile_position_snapshot_fails_
     assert payload["cycle"]["entries_executed"] == 0
     assert payload["cycle"]["skipped_position_snapshot_error"] == 1
     assert payload["cycle"]["position_report_error"] == "positions unavailable"
+
+
+def test_event_demo_cycle_skips_entries_when_wallet_snapshot_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_ms = 1_700_000_060_000
+    candidate = {
+        "trade_id": "t-wallet-error",
+        "symbol": "AAAUSDT",
+        "side": "short",
+        "signal_ts_ms": now_ms - MS_PER_HOUR,
+        "stop_loss_pct": 0.12,
+        "take_profit_pct": 0.20,
+    }
+    client = FakeRiskClient(fail_wallet=True)
+    _patch_minimal_event_cycle(monkeypatch, candidate)
+
+    payload = run_event_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        market_client=MinimalEventMarket(),
+        private_client=client,
+        now_ms=now_ms,
+    )
+
+    assert client.orders == []
+    assert payload["cycle"]["entries_executed"] == 0
+    assert payload["cycle"]["entry_candidates"] == 0
+    assert payload["cycle"]["skipped_wallet_snapshot_error"] == 1
+    assert payload["cycle"]["position_report_error"] == "wallet equity unavailable: wallet unavailable"
+    assert payload["cycle"]["equity_usdt"] == 10_000.0
+    assert read_dataset(tmp_path, "event_demo_orders").is_empty()
+
+
+def test_event_demo_cycle_still_exits_when_wallet_snapshot_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now_ms = 1_700_000_060_000
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "trade_id": "t-existing",
+                    "symbol": "AAAUSDT",
+                    "side": "short",
+                    "status": "open",
+                    "entry_ts_ms": now_ms - 4 * 24 * MS_PER_HOUR,
+                    "planned_exit_ts_ms": now_ms - MS_PER_HOUR,
+                    "qty": "1",
+                    "entry_price": 100.0,
+                    "stop_price": 112.0,
+                    "take_profit_price": 80.0,
+                }
+            ]
+        ),
+        tmp_path,
+        "event_demo_trades",
+        partition_by=(),
+    )
+    candidate = {
+        "trade_id": "t-wallet-error-entry",
+        "symbol": "AAAUSDT",
+        "side": "short",
+        "signal_ts_ms": now_ms - MS_PER_HOUR,
+        "stop_loss_pct": 0.12,
+        "take_profit_pct": 0.20,
+    }
+    client = FakeRiskClient(
+        positions=[
+            {
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "size": "1",
+                "avgPrice": "100",
+                "markPrice": "100",
+                "positionValue": "100",
+                "unrealisedPnl": "0",
+            }
+        ],
+        fill_market_orders=True,
+        fill_order_prefixes=("agc-ex-",),
+        fail_wallet=True,
+    )
+    _patch_minimal_event_cycle(monkeypatch, candidate)
+
+    payload = run_event_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        market_client=MinimalEventMarket(),
+        private_client=client,
+        now_ms=now_ms,
+    )
+
+    trades = read_dataset(tmp_path, "event_demo_trades")
+    orders = read_dataset(tmp_path, "event_demo_orders")
+    assert len(client.orders) == 1
+    assert client.orders[0]["reduceOnly"] is True
+    assert payload["cycle"]["exits_executed"] == 1
+    assert payload["cycle"]["entries_executed"] == 0
+    assert payload["cycle"]["skipped_wallet_snapshot_error"] == 1
+    assert payload["cycle"]["position_report_error"] == "wallet equity unavailable: wallet unavailable"
+    assert trades.filter(pl.col("trade_id") == "t-existing").select("status").item() == "closed"
+    assert orders.filter(pl.col("trade_id") == "t-existing").select("status").item() == "filled"
 
 
 def test_event_demo_cycle_skips_entry_when_live_open_entry_order_exists(

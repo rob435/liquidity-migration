@@ -98,6 +98,11 @@ Objective: harden the Bybit demo system as if it is live capital, with emphasis 
   - Position snapshot failures during open-trade reconciliation now leave the ledger unchanged, record `position_report_error`, and skip all new submit-mode entries for that cycle.
   - This closes the case where a Bybit position API outage with an existing open ledger trade could crash the cycle before writing the fail-closed entry report.
 
+- `current slice: fail closed on wallet equity outages`
+  - The event entry loop now reads wallet equity through a safe wrapper instead of letting a wallet API outage crash the cycle before pending fills, exits, or reports run.
+  - In submit mode, a wallet equity snapshot error records `position_report_error`, uses fallback equity only for cycle telemetry, and skips all new entry candidates for that cycle.
+  - Existing open trades can still submit reduce-only exits while the wallet endpoint is unavailable.
+
 ## Verification
 
 Local:
@@ -105,16 +110,22 @@ Local:
 - Focused streamed/pending exit ledger tests passed after the streamed exit context change.
 - Focused stale flat pending-exit tests passed after the live stale ledger row finding.
 - Focused event-demo position outage tests passed after the open-trade reconciliation guard.
-- `pytest -q`: 196 passed after the open-trade reconciliation position outage guard.
+- Focused event-demo wallet outage tests passed after the wallet equity guard.
+- `tests/test_aggression_carry_event_demo.py`: 50 passed after the wallet equity guard.
+- `pytest -q`: 198 passed after the wallet equity guard.
 
 VPS:
 
-- Focused event-demo file: 48 passed after deploying the open-trade reconciliation guard.
-- `pytest -q`: 196 passed after deploying the open-trade reconciliation guard.
+- Focused event-demo file: 50 passed after deploying the wallet equity guard.
+- `pytest -q`: 198 passed after deploying the wallet equity guard.
 - Focused websocket-risk file: 36 passed after deploying the snapshot-failure guard.
 - Services after restart:
   - `model050426-bybit-demo.service`: active/running, `INTERVAL_SECONDS=300`.
   - `model050426-bybit-risk.service`: active/running.
+  - Direct live state after the wallet guard deployment: `active_positions=0`, `open_orders=0`, `ledger_open_trades=0`, `ledger_pending_orders=0`, latest websocket-risk reason `startup`, and latest demo mode `submit` with `demo_entries=0`.
+- Entry wallet-outage drill:
+  - An isolated VPS event-demo cycle with a forced entry candidate and failing Bybit wallet API submitted `0` orders, left `event_demo_orders` empty, recorded `skipped_wallet_snapshot_error=1`, and wrote `position_report_error="wallet equity unavailable: wallet unavailable"`.
+  - An isolated VPS event-demo cycle with an existing open ledger trade, a forced entry candidate, and the same wallet outage submitted one reduce-only `agc-ex-*` exit, filled it, closed the trade, skipped the new entry, and recorded the same wallet error.
 - Entry position-outage drill:
   - An isolated VPS event-demo cycle with an existing open ledger trade and a failing Bybit position API wrote a report, kept the existing trade open, skipped the forced new entry, submitted `0` orders, and recorded `position_report_error="positions unavailable"`.
 - Stale flat pending-exit cleanup:

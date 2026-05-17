@@ -293,14 +293,14 @@ material events when enabled, and records `event_demo_trades`,
 `event_demo_orders`, and `event_demo_cycles` ledgers. It is a current-universe
 forward tester, so it is allowed for demo evidence and operations, not for
 historical promotion evidence.
-Before submitting entries, the runner snapshots current Bybit positions and
-open orders. It blocks candidates whose symbols already have live exchange
-exposure or non-reduce-only open orders. In submit mode, a position/open-order
-snapshot error blocks all new entries for that cycle rather than trusting the
-ledger alone.
-Position snapshot failures during open-trade reconciliation are surfaced in the
-cycle report and keep the cycle alive, so an outage cannot crash the entry loop
-before the entry guard fails closed.
+Before submitting entries, the runner snapshots current Bybit positions, open
+orders, and wallet equity. It blocks candidates whose symbols already have live
+exchange exposure or non-reduce-only open orders. In submit mode, a
+position/open-order/wallet snapshot error blocks all new entries for that cycle
+rather than trusting the ledger alone or sizing from stale equity.
+Position and wallet snapshot failures during open-trade handling are surfaced
+in the cycle report and keep the cycle alive, so an outage cannot crash exits,
+report writing, or the entry guard.
 Recent 1h bars are cached in `event_demo_klines_1h`, keeping the forward-demo
 cache separate from the full-PIT research `klines_1h` dataset.
 Entry orders attach native stop/TP immediately, then confirmed fills recompute

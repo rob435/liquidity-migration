@@ -141,7 +141,11 @@ def run_event_demo_cycle(
         trading_client = private_client
         if trading_client is None and (demo.submit_orders or (demo.telegram and _private_credentials_present())):
             trading_client = _build_private_client(config)
-        equity_usdt = _wallet_equity_usdt(trading_client, demo=demo) if trading_client is not None else demo.fallback_equity_usdt
+        wallet_error = ""
+        if trading_client is not None:
+            equity_usdt, wallet_error = _safe_wallet_equity_usdt(trading_client, demo=demo)
+        else:
+            equity_usdt = demo.fallback_equity_usdt
 
         pending_fill_trades, pending_fill_orders = _reconcile_pending_order_fills(
             all_orders,
@@ -220,6 +224,7 @@ def run_event_demo_cycle(
         entry_candidates, pending_entry_skips = _filter_pending_entry_orders(entry_candidates, all_orders, now_ms=cycle_now_ms)
         snapshot_error_entry_skips = 0
         open_order_error_entry_skips = 0
+        wallet_error_entry_skips = 0
         live_position_entry_skips = 0
         live_open_entry_skips = 0
         if position_snapshot_error and demo.submit_orders:
@@ -227,6 +232,9 @@ def run_event_demo_cycle(
             entry_candidates = []
         elif bybit_open_order_error and demo.submit_orders:
             open_order_error_entry_skips = len(entry_candidates)
+            entry_candidates = []
+        elif wallet_error and demo.submit_orders:
+            wallet_error_entry_skips = len(entry_candidates)
             entry_candidates = []
         else:
             entry_candidates, live_position_entry_skips = _filter_live_position_entry_orders(
@@ -267,7 +275,7 @@ def run_event_demo_cycle(
                 bybit_position_error = ""
         position_snapshot_error = _combine_errors(reconcile_position_error, bybit_position_error)
         bybit_positions = build_position_pnl_snapshot(raw_positions)
-        report_error = _combine_errors(position_snapshot_error, bybit_open_order_error)
+        report_error = _combine_errors(position_snapshot_error, bybit_open_order_error, wallet_error)
         bybit_position_summary = summarize_position_pnl(bybit_positions)
         ledger_positions = build_ledger_position_pnl_snapshot(_open_trades(all_trades), price_by_symbol)
         ledger_position_summary = summarize_position_pnl(ledger_positions)
@@ -325,6 +333,7 @@ def run_event_demo_cycle(
             "skipped_live_open_exit_order": live_open_exit_skips,
             "skipped_position_snapshot_error": snapshot_error_entry_skips,
             "skipped_open_order_snapshot_error": open_order_error_entry_skips,
+            "skipped_wallet_snapshot_error": wallet_error_entry_skips,
         }
 
         payload = {
@@ -2392,6 +2401,13 @@ def _wallet_equity_usdt(trading_client: Any, *, demo: EventDemoCycleConfig) -> f
     if equity <= 0.0:
         raise RuntimeError("Bybit demo wallet equity could not be read or was zero")
     return equity
+
+
+def _safe_wallet_equity_usdt(trading_client: Any, *, demo: EventDemoCycleConfig) -> tuple[float, str]:
+    try:
+        return _wallet_equity_usdt(trading_client, demo=demo), ""
+    except Exception as exc:  # noqa: BLE001 - wallet outages must fail entries closed, not kill exits/reports
+        return demo.fallback_equity_usdt, f"wallet equity unavailable: {exc}"[:500]
 
 
 def _safe_raw_positions(trading_client: Any | None, *, settle_coin: str) -> tuple[list[dict[str, Any]], str]:
