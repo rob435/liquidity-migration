@@ -49,6 +49,9 @@ echo "event demo engine starting"
 echo "repo=$REPO_ROOT"
 echo "data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS submit_orders=${SUBMIT_ORDERS:-0}"
 
+mkdir -p "$DATA_ROOT/.locks"
+rm -f "$DATA_ROOT/.locks/event_demo_cycle.lock"
+
 while true; do
     set +e
     "$PYTHON_BIN" -m aggression_carry \
