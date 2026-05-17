@@ -11,7 +11,8 @@ from aggression_carry.ws_risk import EventWebSocketRiskConfig, EventWebSocketRis
 
 
 class FakePrivateClient:
-    def __init__(self) -> None:
+    def __init__(self, *, confirm_fills: bool = True) -> None:
+        self.confirm_fills = confirm_fills
         self.positions = [
             {
                 "symbol": "AAAUSDT",
@@ -35,6 +36,8 @@ class FakePrivateClient:
         return {"orderId": "rest-order-1"}
 
     def get_trade_history(self, *, symbol: str | None = None, order_link_id: str | None = None, limit: int = 50):
+        if not self.confirm_fills:
+            return []
         return [{"orderLinkId": order_link_id, "execQty": "1", "execPrice": "113", "execValue": "113", "execFee": "0.01"}]
 
 
@@ -193,6 +196,38 @@ def test_ws_risk_ws_order_closes_from_execution_stream(tmp_path: Path) -> None:
     stored = read_dataset(tmp_path, "event_demo_trades")
     assert trade_client.orders[0]["reduceOnly"] is True
     assert engine.state.orders[0]["submit_mode"] == "ws_submitted"
+    assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
+
+
+def test_ws_risk_rest_fallback_order_closes_from_execution_stream(tmp_path: Path) -> None:
+    _write_open_trade(tmp_path)
+    private_client = FakePrivateClient(confirm_fills=False)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
+    link = str(engine.state.orders[0]["order_link_id"])
+    engine.on_execution_message(
+        {"data": [{"symbol": "AAAUSDT", "orderLinkId": link, "execQty": "1", "execPrice": "113", "execValue": "113"}]}
+    )
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    assert engine.state.orders[0]["status"] == "submitted_unconfirmed"
+    assert engine.state.exits[0]["submit_mode"] == "submitted"
     assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
 
 

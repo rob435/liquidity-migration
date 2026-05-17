@@ -67,6 +67,7 @@ class WebSocketRiskState:
     price_by_symbol: dict[str, float] = field(default_factory=dict)
     submitted_symbols: set[str] = field(default_factory=set)
     submitted_link_to_trade_id: dict[str, str] = field(default_factory=dict)
+    submitted_link_submit_mode: dict[str, str] = field(default_factory=dict)
     executions_by_link: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     subscribed_symbols: set[str] = field(default_factory=set)
     last_ws_event_monotonic: float = field(default_factory=time.monotonic)
@@ -256,12 +257,13 @@ class EventWebSocketRiskEngine:
                 "exit_ts_ms": now_ms,
                 "exit_price": exit_price,
                 "exit_order_link_id": order_link_id,
-                "submit_mode": "ws_submitted",
+                "submit_mode": self.state.submitted_link_submit_mode.get(order_link_id, "execution_confirmed"),
                 "closed_at_ms": now_ms,
                 "updated_at_ms": now_ms,
             }
         )
         self.state.exits.append(trade)
+        self.state.submitted_symbols.discard(str(trade.get("symbol", "")))
         self.state.all_trades = _upsert_rows(self.state.all_trades, [trade], key="trade_id")
         self.state.open_trades = _open_trades(self.state.all_trades)
         _write_trade_rows(self.root, pl.DataFrame([trade], infer_schema_length=None))
@@ -306,6 +308,12 @@ class EventWebSocketRiskEngine:
             _write_trade_rows(self.root, pl.DataFrame(rows, infer_schema_length=None))
             self.state.exits.extend(rows)
         if orders:
+            for order in orders:
+                link = str(order.get("order_link_id") or "")
+                trade_id = str(order.get("trade_id") or "")
+                if link and trade_id:
+                    self.state.submitted_link_to_trade_id[link] = trade_id
+                    self.state.submitted_link_submit_mode[link] = str(order.get("submit_mode") or "submitted")
             _write_order_rows(self.root, pl.DataFrame(orders, infer_schema_length=None))
             self.state.orders.extend(orders)
         self.state.submitted_symbols.add(symbol)
@@ -329,6 +337,7 @@ class EventWebSocketRiskEngine:
         )
         self.trade_client.place_order(lambda message: self.events.put(("ws_order_ack", message)), **order_params)
         self.state.submitted_link_to_trade_id[link] = str(trade["trade_id"])
+        self.state.submitted_link_submit_mode[link] = "ws_submitted"
         order_row = {
             "order_link_id": link,
             "ts_ms": _now_ms(),
