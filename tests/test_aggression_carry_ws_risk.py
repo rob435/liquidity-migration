@@ -12,8 +12,9 @@ from aggression_carry.ws_risk import EventWebSocketRiskConfig, EventWebSocketRis
 
 
 class FakePrivateClient:
-    def __init__(self, *, confirm_fills: bool = True) -> None:
+    def __init__(self, *, confirm_fills: bool = True, fail_trade_history: bool = False) -> None:
         self.confirm_fills = confirm_fills
+        self.fail_trade_history = fail_trade_history
         self.positions = [
             {
                 "symbol": "AAAUSDT",
@@ -37,6 +38,8 @@ class FakePrivateClient:
         return {"orderId": "rest-order-1"}
 
     def get_trade_history(self, *, symbol: str | None = None, order_link_id: str | None = None, limit: int = 50):
+        if self.fail_trade_history:
+            raise RuntimeError("history unavailable")
         if not self.confirm_fills:
             return []
         return [{"orderLinkId": order_link_id, "execQty": "1", "execPrice": "113", "execValue": "113", "execFee": "0.01"}]
@@ -232,8 +235,11 @@ def test_ws_risk_public_ticker_subscription_timeout_does_not_block_bootstrap(tmp
     elapsed = time.monotonic() - started
 
     assert elapsed < 1.0
-    assert "AAAUSDT" in engine.state.subscribed_symbols
+    assert "AAAUSDT" not in engine.state.subscribed_symbols
     assert any("public ticker subscription AAAUSDT timed out" in error for error in engine.state.errors)
+    engine.public_stream = FakePublicStream()
+    engine.subscribe_tickers({"AAAUSDT"})
+    assert "AAAUSDT" in engine.state.subscribed_symbols
 
 
 def test_ws_risk_ws_order_closes_from_execution_stream(tmp_path: Path) -> None:
@@ -620,6 +626,37 @@ def test_ws_risk_untracked_exit_blocks_duplicate_until_fill(tmp_path: Path) -> N
     assert "AAAUSDT" in engine.state.submitted_symbols
 
 
+def test_ws_risk_untracked_exit_history_error_stays_pending(tmp_path: Path) -> None:
+    private_client = FakePrivateClient(fail_trade_history=True)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    engine.on_position_message({"data": private_client.positions[0]})
+
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    order = stored_orders.to_dicts()[0]
+    assert len(private_client.orders) == 1
+    assert order["status"] == "submitted_unconfirmed"
+    assert order["submit_mode"] == "submitted"
+    assert order["order_id"] == "rest-order-1"
+    assert "fill confirmation failed" in order["error"]
+    assert "AAAUSDT" in engine.state.submitted_symbols
+
+
 def test_ws_risk_untracked_exit_retries_after_pending_guard(tmp_path: Path) -> None:
     private_client = FakePrivateClient(confirm_fills=False)
     engine = EventWebSocketRiskEngine(
@@ -647,6 +684,62 @@ def test_ws_risk_untracked_exit_retries_after_pending_guard(tmp_path: Path) -> N
     assert len(private_client.orders) == 2
     assert stored_orders.height == 2
     assert "AAAUSDT" in engine.state.submitted_symbols
+
+
+def test_ws_risk_untracked_reconcile_history_error_keeps_pending(tmp_path: Path) -> None:
+    private_client = FakePrivateClient(confirm_fills=False, fail_trade_history=True)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    engine.reconcile_untracked_exit_orders()
+
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    order = stored_orders.to_dicts()[0]
+    assert order["status"] == "submitted_unconfirmed"
+    assert "fill reconciliation failed" in order["error"]
+    assert "AAAUSDT" in engine.state.submitted_symbols
+
+
+def test_ws_risk_untracked_reconcile_flattens_when_position_missing_even_if_history_fails(tmp_path: Path) -> None:
+    private_client = FakePrivateClient(confirm_fills=False, fail_trade_history=True)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    private_client.positions = []
+    engine.rest_reconcile()
+
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    assert stored_orders.select("status").item() == "filled"
+    assert float(stored_orders.select("filled_qty").item()) == 1.0
+    assert "AAAUSDT" not in engine.state.submitted_symbols
 
 
 def test_ws_risk_reconciles_untracked_exit_when_position_is_flat(tmp_path: Path) -> None:

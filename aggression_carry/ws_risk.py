@@ -229,6 +229,7 @@ class EventWebSocketRiskEngine:
         )
         if error:
             self.state.errors.append(error)
+            return
         self.state.subscribed_symbols.update(missing)
 
     def handle_event(self, event_type: str, message: dict[str, Any]) -> None:
@@ -673,26 +674,33 @@ class EventWebSocketRiskEngine:
                                 reduce_only=True,
                             )
                         )
-                        exec_summary = _execution_summary(
-                            self.private_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50)
-                        )
                         submit_mode = "submitted"
-                        filled_qty = _float(exec_summary.get("qty"))
-                        target_qty = _float(qty)
-                        if target_qty > 0.0 and filled_qty + max(target_qty * 1e-8, 1e-12) >= target_qty:
-                            status = "filled"
-                            self.state.positions_by_symbol.pop(symbol, None)
-                        elif filled_qty > 0.0:
-                            status = "partial"
-                            self.mark_submitted_symbol(symbol, now_ms=now_ms)
-                        else:
-                            status = "submitted_unconfirmed"
-                            self.mark_submitted_symbol(symbol, now_ms=now_ms)
                     except Exception as exc:  # noqa: BLE001 - untracked positions must be surfaced and retried
                         submit_mode = "error"
                         status = "failed"
                         error = str(exc)[:500]
                         self.state.errors.append(error)
+                    if submit_mode == "submitted":
+                        try:
+                            exec_summary = _execution_summary(
+                                self.private_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50)
+                            )
+                        except Exception as exc:  # noqa: BLE001 - accepted reduce-only order remains pending for reconciliation
+                            status = "submitted_unconfirmed"
+                            error = f"fill confirmation failed: {exc}"[:500]
+                            self.mark_submitted_symbol(symbol, now_ms=now_ms)
+                        else:
+                            filled_qty = _float(exec_summary.get("qty"))
+                            target_qty = _float(qty)
+                            if target_qty > 0.0 and filled_qty + max(target_qty * 1e-8, 1e-12) >= target_qty:
+                                status = "filled"
+                                self.state.positions_by_symbol.pop(symbol, None)
+                            elif filled_qty > 0.0:
+                                status = "partial"
+                                self.mark_submitted_symbol(symbol, now_ms=now_ms)
+                            else:
+                                status = "submitted_unconfirmed"
+                                self.mark_submitted_symbol(symbol, now_ms=now_ms)
             filled_qty = _float(exec_summary.get("qty")) if exec_summary else 0.0
             avg_price = _float(exec_summary.get("avg_price")) or _position_price(position)
             rows.append(
@@ -735,10 +743,20 @@ class EventWebSocketRiskEngine:
             symbol = str(order.get("symbol", ""))
             link = str(order.get("order_link_id", ""))
             target_qty = _float(order.get("target_qty") or order.get("qty"))
-            summary = _execution_summary(self.private_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50))
+            position_flat = symbol and symbol not in active_symbols
+            try:
+                summary = _execution_summary(self.private_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50))
+            except Exception as exc:  # noqa: BLE001 - keep pending guard active and retry
+                if position_flat:
+                    summary = {"qty": "", "avg_price": 0.0, "fee": 0.0, "executions": 0}
+                else:
+                    order["error"] = f"fill reconciliation failed: {exc}"[:500]
+                    order["updated_at_ms"] = _now_ms()
+                    updates.append(dict(order))
+                    self.mark_submitted_symbol(symbol)
+                    continue
             filled_qty = _float(summary.get("qty"))
             avg_price = _float(summary.get("avg_price")) or _float(order.get("avg_price"))
-            position_flat = symbol and symbol not in active_symbols
             if filled_qty <= 0.0 and position_flat:
                 filled_qty = target_qty
             if filled_qty <= 0.0:
