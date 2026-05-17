@@ -165,6 +165,7 @@ class EventWebSocketRiskEngine:
             orders = read_dataset(self.root, "event_demo_orders")
             self.terminalize_stale_pending_entry_orders(orders)
         self.reconcile_positions(write=True)
+        self.evaluate_symbols(set(self.state.positions_by_symbol))
         self.repair_exchange_stops()
         self.exit_untracked_positions()
         self.start_streams()
@@ -376,6 +377,7 @@ class EventWebSocketRiskEngine:
         )
         self.state.exits.append(trade)
         self.clear_submitted_symbol(str(trade.get("symbol", "")))
+        self.state.positions_by_symbol.pop(str(trade.get("symbol", "")), None)
         self.state.all_trades = _upsert_rows(self.state.all_trades, [trade], key="trade_id")
         self.state.open_trades = _open_trades(self.state.all_trades)
         _write_trade_rows(self.root, pl.DataFrame([trade], infer_schema_length=None))
@@ -416,6 +418,7 @@ class EventWebSocketRiskEngine:
         )
         self.state.exits.append(trade)
         self.clear_submitted_symbol(str(trade.get("symbol", "")))
+        self.state.positions_by_symbol.pop(str(trade.get("symbol", "")), None)
         self.state.all_trades = _upsert_rows(self.state.all_trades, [trade], key="trade_id")
         self.state.open_trades = _open_trades(self.state.all_trades)
         _write_trade_rows(self.root, pl.DataFrame([trade], infer_schema_length=None))
@@ -509,6 +512,9 @@ class EventWebSocketRiskEngine:
             self.state.open_trades = _open_trades(self.state.all_trades)
             _write_trade_rows(self.root, pl.DataFrame(rows, infer_schema_length=None))
             self.state.exits.extend(rows)
+            for row in rows:
+                if str(row.get("status", "")) == "closed":
+                    self.state.positions_by_symbol.pop(str(row.get("symbol", "")), None)
         if orders:
             for order in orders:
                 link = str(order.get("order_link_id") or "")
@@ -591,6 +597,7 @@ class EventWebSocketRiskEngine:
         repairs = plan_stop_repairs(
             self.state.open_trades,
             position_by_symbol=self.state.positions_by_symbol,
+            skip_symbols=self.state.submitted_symbols | self.state.live_exit_order_symbols,
             tolerance_bps=self.risk.stop_tolerance_bps,
         )
         if not repairs:
@@ -646,11 +653,11 @@ class EventWebSocketRiskEngine:
             orders = read_dataset(self.root, "event_demo_orders")
             self.terminalize_stale_pending_entry_orders(orders)
         self.reconcile_positions(write=True)
+        self.evaluate_symbols(set(self.state.positions_by_symbol))
         self.repair_exchange_stops()
         self.reconcile_untracked_exit_orders()
         self.exit_untracked_positions()
         self.subscribe_tickers(set(self.state.positions_by_symbol) | set(_column_values(self.state.open_trades, "symbol")))
-        self.evaluate_symbols(set(self.state.positions_by_symbol))
         self.state.last_reconcile_monotonic = time.monotonic()
 
     def exit_untracked_positions(self) -> None:

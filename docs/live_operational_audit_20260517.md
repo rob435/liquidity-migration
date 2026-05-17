@@ -108,6 +108,11 @@ Objective: harden the Bybit demo system as if it is live capital, with emphasis 
   - The event entry loop records `stale_pending_entry_orders_terminalized` in cycle telemetry.
   - The websocket risk watchdog applies the same cleanup during bootstrap and REST reconciliation; stale entries with a live position, live entry order, or snapshot failure remain untouched.
 
+- `current slice: prioritize risk exits before stop repair`
+  - Websocket-risk bootstrap and REST reconciliation now evaluate tracked-position stop/take-profit/max-hold exits before attempting exchange-native stop repair.
+  - Stop repair skips symbols with pending local exit submissions or live AGC reduce-only exit orders.
+  - This prevents a stale-WebSocket fallback or restart from spending a REST call on stop repair for a position that should be flattened immediately.
+
 ## Verification
 
 Local:
@@ -117,19 +122,25 @@ Local:
 - Focused event-demo position outage tests passed after the open-trade reconciliation guard.
 - Focused event-demo wallet outage tests passed after the wallet equity guard.
 - Focused stale pending-entry terminalization tests passed after the flat-entry cleanup.
+- Focused websocket-risk exit-before-stop-repair tests passed after the risk-priority cleanup.
 - `tests/test_aggression_carry_event_demo.py tests/test_aggression_carry_ws_risk.py`: 90 passed after the flat-entry cleanup.
-- `pytest -q`: 202 passed after the flat-entry cleanup.
+- `tests/test_aggression_carry_ws_risk.py`: 40 passed after the risk-priority cleanup.
+- `pytest -q`: 204 passed after the risk-priority cleanup.
 
 VPS:
 
 - Focused event-demo file: 50 passed after deploying the wallet equity guard.
 - Focused event-demo + websocket-risk files: 90 passed after deploying the flat-entry cleanup.
-- `pytest -q`: 202 passed after deploying the flat-entry cleanup.
+- Focused websocket-risk file: 40 passed after deploying the risk-priority cleanup.
+- `pytest -q`: 204 passed after deploying the risk-priority cleanup.
 - Focused websocket-risk file: 36 passed after deploying the snapshot-failure guard.
 - Services after restart:
   - `model050426-bybit-demo.service`: active/running, `INTERVAL_SECONDS=300`.
   - `model050426-bybit-risk.service`: active/running.
-  - Direct live state after the flat-entry cleanup deployment: `active_positions=0`, `open_orders=0`, `ledger_open_trades=0`, `ledger_pending_orders=0`, `ledger_expired_unconfirmed_orders=0`, latest websocket-risk reason `startup`, and latest demo mode `submit` with `demo_entries=0`.
+  - Direct live state after the risk-priority cleanup deployment: `active_positions=0`, `open_orders=0`, `ledger_open_trades=0`, `ledger_pending_orders=0`, latest websocket-risk reason `startup`, `risk_stop_repairs=0`, and latest demo mode `submit` with `demo_entries=0`.
+- Risk exit before stop-repair drills:
+  - An isolated VPS websocket-risk bootstrap with an open ledger short, missing exchange stop, and mark already beyond the ledger stop submitted exactly one reduce-only exit, closed the trade with `exit_reason=stop_loss`, sent `0` stop repairs, and cleared the stale position snapshot from engine state.
+  - An isolated VPS websocket-risk bootstrap with a pending `agc-ex-*` exit and missing exchange stop submitted `0` new exits, sent `0` stop repairs, and kept the symbol in the pending-submission guard.
 - Stale flat pending-entry cleanup:
   - An isolated VPS event-demo cycle with a stale `agc-en-*` entry row, no Bybit position, and no Bybit open order marked the row `expired_unconfirmed`, recorded `stale_pending_entry_orders_terminalized=1`, and made no trade-history calls.
   - The same isolated event-demo cycle with a live non-reduce-only open order for the symbol left the stale row `submitted_unconfirmed`.

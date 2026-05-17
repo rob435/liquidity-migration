@@ -43,6 +43,7 @@ class FakePrivateClient:
             }
         ]
         self.orders: list[dict[str, object]] = []
+        self.stop_updates: list[dict[str, object]] = []
 
     def get_positions(self, *, settle_coin: str | None = None):
         return self.positions
@@ -57,6 +58,10 @@ class FakePrivateClient:
     def place_order(self, **params):
         self.orders.append(params)
         return {"orderId": "rest-order-1"}
+
+    def set_trading_stop(self, **params):
+        self.stop_updates.append(params)
+        return {}
 
     def get_trade_history(self, *, symbol: str | None = None, order_link_id: str | None = None, limit: int = 50):
         if self.fail_trade_history:
@@ -142,6 +147,113 @@ def test_ws_risk_triggers_rest_fallback_exit_from_ticker(tmp_path: Path) -> None
     assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
     assert engine.state.exits[0]["exit_reason"] == "stop_loss"
     assert "AAAUSDT" not in engine.state.submitted_symbols
+
+
+def test_ws_risk_bootstrap_exits_crossed_stop_before_stop_repair(tmp_path: Path) -> None:
+    _write_open_trade(tmp_path)
+    private_client = FakePrivateClient(
+        positions=[
+            {
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "size": "1",
+                "avgPrice": "100",
+                "markPrice": "113",
+                "positionValue": "113",
+                "unrealisedPnl": "-13",
+                "stopLoss": "",
+                "takeProfit": "80",
+            }
+        ]
+    )
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=True,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    assert len(private_client.orders) == 1
+    assert private_client.orders[0]["reduceOnly"] is True
+    assert private_client.stop_updates == []
+    assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
+    assert stored.filter(pl.col("trade_id") == "t1").select("exit_reason").item() == "stop_loss"
+
+
+def test_ws_risk_skips_stop_repair_when_exit_order_pending(tmp_path: Path) -> None:
+    _write_open_trade(tmp_path)
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "order_link_id": "agc-ex-pending",
+                    "ts_ms": 9_999_999_999_000,
+                    "trade_id": "t1",
+                    "symbol": "AAAUSDT",
+                    "side": "Buy",
+                    "order_type": "Market",
+                    "qty": "1",
+                    "reduce_only": True,
+                    "submit_mode": "submitted",
+                    "status": "submitted_unconfirmed",
+                    "exit_reason": "stop_loss",
+                    "exit_trigger_ts_ms": 1_234_567_890,
+                }
+            ]
+        ),
+        tmp_path,
+        "event_demo_orders",
+        partition_by=(),
+    )
+    private_client = FakePrivateClient(
+        confirm_fills=False,
+        positions=[
+            {
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "size": "1",
+                "avgPrice": "100",
+                "markPrice": "100",
+                "positionValue": "100",
+                "unrealisedPnl": "0",
+                "stopLoss": "",
+                "takeProfit": "80",
+            }
+        ],
+    )
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=True,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    assert private_client.orders == []
+    assert private_client.stop_updates == []
+    assert "AAAUSDT" in engine.state.submitted_symbols
 
 
 def test_ws_risk_live_open_exit_order_blocks_duplicate_tracked_exit(tmp_path: Path) -> None:

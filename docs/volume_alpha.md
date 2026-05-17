@@ -325,6 +325,10 @@ mark the ledger closed from WebSocket execution messages. Bybit currently does
 not support WebSocket Trade order entry for demo trading, so the demo VPS uses
 `ORDER_SUBMIT_MODE=ws_then_rest`: WebSocket decides, REST submits only when demo
 WS order entry is unavailable.
+On startup and REST reconciliation, tracked-position exits are evaluated before
+stop repair, and stop repair skips symbols with pending or live AGC exit orders.
+The risk path should flatten a breached position before spending a REST call on
+repairing protection for that same position.
 The demo private socket rejects `execution.fast`, so the VPS uses the normal
 private execution stream unless that limitation is retested and cleared.
 Socket startup is bounded by `STREAM_START_TIMEOUT_SECONDS` so a blocked
