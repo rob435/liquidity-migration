@@ -196,6 +196,7 @@ def test_ws_risk_ws_order_closes_from_execution_stream(tmp_path: Path) -> None:
     stored = read_dataset(tmp_path, "event_demo_trades")
     assert trade_client.orders[0]["reduceOnly"] is True
     assert engine.state.orders[0]["submit_mode"] == "ws_submitted"
+    assert engine.state.orders[0]["status"] == "filled"
     assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
 
 
@@ -226,7 +227,7 @@ def test_ws_risk_rest_fallback_order_closes_from_execution_stream(tmp_path: Path
     )
 
     stored = read_dataset(tmp_path, "event_demo_trades")
-    assert engine.state.orders[0]["status"] == "submitted_unconfirmed"
+    assert engine.state.orders[0]["status"] == "filled"
     assert engine.state.exits[0]["submit_mode"] == "submitted"
     assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
 

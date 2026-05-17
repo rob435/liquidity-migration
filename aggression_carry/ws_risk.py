@@ -267,7 +267,26 @@ class EventWebSocketRiskEngine:
         self.state.all_trades = _upsert_rows(self.state.all_trades, [trade], key="trade_id")
         self.state.open_trades = _open_trades(self.state.all_trades)
         _write_trade_rows(self.root, pl.DataFrame([trade], infer_schema_length=None))
+        order_updates = self.mark_order_filled_from_execution(
+            order_link_id=order_link_id,
+            filled_qty=filled_qty,
+            exit_price=exit_price,
+        )
+        if order_updates:
+            _write_order_rows(self.root, pl.DataFrame(order_updates, infer_schema_length=None))
         self.write_report(reason="ws_execution_fill")
+
+    def mark_order_filled_from_execution(self, *, order_link_id: str, filled_qty: float, exit_price: float) -> list[dict[str, Any]]:
+        updates: list[dict[str, Any]] = []
+        for order in self.state.orders:
+            if str(order.get("order_link_id") or "") != order_link_id:
+                continue
+            order["status"] = "filled"
+            order["filled_qty"] = str(filled_qty)
+            order["avg_price"] = exit_price
+            order["notional_usdt"] = abs(exit_price * filled_qty) if exit_price > 0.0 else 0.0
+            updates.append(order)
+        return updates
 
     def evaluate_symbols(self, symbols: set[str]) -> None:
         if self.state.open_trades.is_empty() or not symbols:
