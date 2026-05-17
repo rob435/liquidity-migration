@@ -4,13 +4,13 @@ Current as of 2026-05-17.
 
 ## Active System
 
-- Strategy: full-PIT liquidity-migration short, `union_pathology` crowding veto.
-- Strategy id: `liqmig_union_q40_h3_tp25_g100_crowd_union`.
-- Gross exposure: `1.00`, split across `5` max active symbols.
-- Per-entry target: `20.00%` of current Bybit demo USDT equity.
+- Research default: full-PIT liquidity-migration short, `union_pathology` crowding veto.
+- Promoted research strategy id: `liqmig_union_q40_h3_tp25_g100_crowd_union`.
+- Live demo entry profile: `observe`, strategy id `observe_liqmig_q40_h3_tp25_g100_relaxed`.
+- Gross exposure: `1.00`, split across `10` max active symbols in observe mode.
+- Per-entry target: `10.00%` of current Bybit demo USDT equity in observe mode.
 - Entry service: `model050426-bybit-demo.service`.
 - Risk service: `model050426-bybit-risk.service`.
-- Operational canary: `model050426-bybit-canary.timer`.
 - Venue mode: Bybit demo only. `demo=False` is still refused by the private client.
 - Paper shadow was intentionally skipped by user decision; keep the risk contained to demo-only trading.
 
@@ -37,6 +37,48 @@ promotion gate: pass
 ```
 
 This is a `1.00` gross exposure rescale of the promoted full-PIT ledger. Candidate selection, exits, cooldowns, and crowding decisions are unchanged by the gross cleanup.
+
+## Observe-Mode Evidence
+
+The active VPS entry service is intentionally configured for a higher-frequency
+demo-only observation profile. This profile is not the promoted research
+default. It lowers the entry gates while keeping the same short
+liquidity-migration premise, fixed exits, stop/loss throttles, and
+`union_pathology` same-hour crowding veto.
+
+Full-PIT funded report:
+
+```text
+/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/observe_mode_sweep_20260517/observe_c
+```
+
+```text
+trades: 1268
+candidate events: 1603
+total return: +211.78%
+max drawdown: -21.34%
+worst 90d return: -18.90%
+train return: +12.33%
+validation return: +17.84%
+OOS return: +134.17%
+average split Sharpe-like: 1.02
+promotion gate: pass
+```
+
+Observe-mode relaxed gates:
+
+```text
+PIT liquidity rank: 11-260
+current 24h turnover floor: disabled
+rank improvement: >= 80
+turnover expansion: >= 3.0
+daily return floor: >= -3%
+residual return floor: >= +3%
+close-location floor: >= 0.25
+max active symbols: 10
+symbol cooldown: 2 days
+crowding veto: union_pathology kept
+```
 
 ## Live Demo Proof
 
@@ -85,13 +127,10 @@ live positions after proof: 0
 open orders after proof: 0
 ```
 
-The VPS entry service intentionally runs at `INTERVAL_SECONDS=60`. Fast exits
-are still handled by the separate websocket risk service; the one-minute entry
-cadence is for quicker stale-order, report, and candidate-state refresh.
-
-The canary timer can run every 30 minutes to provide order-path evidence between
-sparse strategy signals. It is isolated under `reports/demo-canary` and does not
-write strategy ledgers.
+The VPS entry service intentionally runs at `INTERVAL_SECONDS=60` and
+`STRATEGY_PROFILE=observe`. Fast exits are still handled by the separate
+websocket risk service; the one-minute entry cadence is for quicker stale-order,
+report, and candidate-state refresh.
 
 ## Known Limits
 

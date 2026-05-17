@@ -141,15 +141,16 @@ SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 TELEGRAM_ENABLED=1 bash scripts/run_bybit_
 ```
 
 The runner loops every `INTERVAL_SECONDS=300` by script default. The VPS
-systemd entry service intentionally overrides this to `INTERVAL_SECONDS=60`.
+systemd entry service intentionally overrides this to `INTERVAL_SECONDS=60` and
+`STRATEGY_PROFILE=observe`.
 Each cycle:
 
-1. Pulls the current Bybit USDT perpetual universe through rank 220 so the selected rank 31-150 strategy can be evaluated forward.
+1. Pulls the current Bybit USDT perpetual universe through rank 300 in observe mode so the relaxed rank 11-260 test profile can be evaluated forward.
 2. Excludes only stable/peg perps, including failed peg remnants such as USTCUSDT, before ranks/features are built.
 3. Rebuilds recent 1h volume features from a 45-day lookback, using the forward-demo kline cache so normal cycles fetch only missing/new 1h bars instead of the whole window.
 4. Exits existing demo positions first on fixed-stop/take-profit reconciliation, event decay, rank exit, or 3-day max hold.
-5. Enters accepted liquidity-migration events after the 1-hour signal delay, subject to max-active, cooldown, stop-pressure, positive-day-return, residual-return, stale-entry, pending-order, live-open-order, live-position, and wallet-equity gates. Stale entries are skipped after 15 minutes by default so demo fills stay close to the backtest entry timestamp. In submit mode, the runner snapshots current Bybit positions, open orders, and wallet equity before entries; a live exchange position or non-reduce-only open order for the candidate symbol blocks a new entry, and a position/open-order/wallet snapshot error blocks all new entries for that cycle. Stale unconfirmed entry rows are normally not polled forever, but if a current Bybit position or active open order proves the stale row may still represent live exposure, fill reconciliation keeps polling it and reconstructs the missing trade ledger if Bybit reports a fill. Position and wallet snapshot failures during open-trade handling are reported and keep the cycle alive instead of crashing before exits, reports, or the entry guard can run.
-6. Sizes each accepted coin from the same weight used by the backtest: `gross_exposure / max_active_symbols`, currently `1.00 / 5 = 20.00%` of current Bybit demo USDT equity. If wallet equity cannot be read in submit mode, the cycle uses fallback equity only for telemetry and does not submit new entries. `--max-order-notional-pct-equity` is only an explicit override. The continuous runner defaults entry leverage to 2x so the 100% gross target can be submitted without changing notional sizing.
+5. Enters accepted liquidity-migration events after the 1-hour signal delay, subject to max-active, cooldown, stop-pressure, day-return, residual-return, stale-entry, pending-order, live-open-order, live-position, and wallet-equity gates. In observe mode those gates are intentionally relaxed to rank 11-260, no extra current 24h turnover floor, 80-rank improvement, 3.0 turnover ratio, -3% day-return floor, +3% residual-return floor, 0.25 close-location floor, 10 max active symbols, and 2-day cooldown. The same `union_pathology` crowding veto stays active. Stale entries are skipped after 15 minutes by default so demo fills stay close to the backtest entry timestamp. In submit mode, the runner snapshots current Bybit positions, open orders, and wallet equity before entries; a live exchange position or non-reduce-only open order for the candidate symbol blocks a new entry, and a position/open-order/wallet snapshot error blocks all new entries for that cycle. Stale unconfirmed entry rows are normally not polled forever, but if a current Bybit position or active open order proves the stale row may still represent live exposure, fill reconciliation keeps polling it and reconstructs the missing trade ledger if Bybit reports a fill. Position and wallet snapshot failures during open-trade handling are reported and keep the cycle alive instead of crashing before exits, reports, or the entry guard can run.
+6. Sizes each accepted coin from the same weight used by the active profile backtest: `gross_exposure / max_active_symbols`, currently `1.00 / 10 = 10.00%` of current Bybit demo USDT equity in observe mode. If wallet equity cannot be read in submit mode, the cycle uses fallback equity only for telemetry and does not submit new entries. `--max-order-notional-pct-equity` is only an explicit override. The continuous runner defaults entry leverage to 2x so the 100% gross target can be submitted without changing notional sizing.
 7. Attaches exchange-native stop/take-profit to entry orders, then recomputes the ledger stop/take-profit from confirmed fill price. If the confirmed fill moves the rounded protection levels, the runner immediately updates Bybit trading-stop state and records the update status.
 8. Sends Telegram only for material events when enabled: entries, exits, failed entry stop updates, position reconciliation, or position-report errors. Quiet cycles still write local reports but do not notify.
 9. Writes expected/submitted order state into `event_demo_orders`, trade state into `event_demo_trades`, cycle telemetry into `event_demo_cycles`, and Markdown/JSON reports under `reports/event-demo`. Stale unconfirmed entry rows are terminalized only when successful Bybit position and open-order snapshots prove the symbol has no live position and no active entry order, preventing false pending ledger state without erasing possible live exposure.
@@ -158,11 +159,10 @@ Order submission is still fail-closed: `--submit-orders` requires `--confirm-dem
 
 Telegram may notify on material events, but it must not approve or submit orders. The continuous runner still fails startup when `TELEGRAM_ENABLED=1` but Telegram or Bybit demo credentials are missing, because event alerts include position/PnL context.
 
-Because the promoted alpha is sparse, operational liveness is tested with a
-separate `demo-canary` path. The canary places a far-from-touch post-only demo
-limit order, cancels it, verifies no live canary order remains, and writes
-reports under `reports/demo-canary`. It must not write strategy trades/orders or
-be counted as alpha evidence.
+The observe profile is explicitly a demo-only test system, not a replacement
+promotion. Its full-PIT funded evidence is summarized in `docs/system_status.md`
+and reports under
+`/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/observe_mode_sweep_20260517/observe_c`.
 
 The exit-only risk watchdog is separate from the alpha loop:
 

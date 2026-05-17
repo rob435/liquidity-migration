@@ -14,10 +14,14 @@ Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
 Environment=SUBMIT_ORDERS=1
 Environment=CONFIRM_DEMO_ORDERS=1
 Environment=TELEGRAM_ENABLED=1
+Environment=STRATEGY_PROFILE=observe
 Environment=INTERVAL_SECONDS=60
 Environment=MAX_ORDER_NOTIONAL_PCT_EQUITY=0
 Environment=MAX_ENTRY_LAG_MINUTES=15
-Environment=MAX_NEW_ENTRIES_PER_CYCLE=5
+Environment=MAX_NEW_ENTRIES_PER_CYCLE=10
+Environment=UNIVERSE_RANK_END=300
+Environment=UNIVERSE_MAX_SYMBOLS=300
+Environment=UNIVERSE_MIN_TURNOVER_24H=0
 Environment=WORKERS=8
 Environment=ENTRY_LEVERAGE=2
 ExecStart=/opt/MODEL050426/scripts/run_bybit_demo_event_engine.sh

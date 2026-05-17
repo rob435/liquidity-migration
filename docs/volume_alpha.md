@@ -287,10 +287,15 @@ SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 TELEGRAM_ENABLED=1 bash scripts/run_bybit_
 ```
 
 The runner checks every 5 minutes by script default; the VPS systemd entry
-service intentionally overrides this to `INTERVAL_SECONDS=60`. It sizes each
-accepted coin from the backtest weight (`gross_exposure / max_active_symbols`,
-currently 20.00% of current Bybit demo USDT equity), exits before entries, sends
-Telegram only for material events when enabled, and records
+service intentionally overrides this to `INTERVAL_SECONDS=60` and
+`STRATEGY_PROFILE=observe`. The observe profile is a higher-frequency demo-only
+test system: rank 11-260, 80-rank improvement, 3.0 turnover ratio, -3% day-return
+floor, +3% residual-return floor, 0.25 close-location floor, no extra current
+24h turnover floor, 10 max active symbols, 2-day cooldown, and the
+`union_pathology` crowding veto still enabled.
+It sizes each accepted coin from the backtest weight (`gross_exposure /
+max_active_symbols`, currently 10.00% of current Bybit demo USDT equity), exits
+before entries, sends Telegram only for material events when enabled, and records
 `event_demo_trades`, `event_demo_orders`, and `event_demo_cycles` ledgers. It is
 a current-universe forward tester, so it is allowed for demo evidence and
 operations, not for historical promotion evidence.
@@ -302,10 +307,10 @@ rather than trusting the ledger alone or sizing from stale equity.
 Position and wallet snapshot failures during open-trade handling are surfaced
 in the cycle report and keep the cycle alive, so an outage cannot crash exits,
 report writing, or the entry guard.
-The promoted alpha is sparse, so operational observation uses an isolated
-`demo-canary` path rather than relaxed live filters. The canary places and
-cancels a far-from-touch post-only demo order, verifies cleanup, and writes
-`reports/demo-canary` without touching strategy trade/order ledgers.
+Observe-mode full-PIT funded evidence on 2023-05-03 to 2026-05-03: 1,268 trades,
++211.78% total return, -21.34% max drawdown, -18.90% worst 90d, +12.33% worst
+split, +134.17% OOS, and promotion gate pass. Report:
+`/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/observe_mode_sweep_20260517/observe_c`.
 Recent 1h bars are cached in `event_demo_klines_1h`, keeping the forward-demo
 cache separate from the full-PIT research `klines_1h` dataset.
 Entry orders attach native stop/TP immediately, then confirmed fills recompute

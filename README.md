@@ -78,10 +78,10 @@ These promoted frontier metrics are the clean `1.00` gross exposure rescale of
 the existing full-PIT ledger; the event set, exits, cooldowns, and crowding
 decisions are unchanged by the gross cleanup.
 
-This supersedes the earlier March-specific crowding patch and is now the
-research, `volume-events`, and Bybit demo default as of 2026-05-17. The paper
-shadow step was intentionally skipped by user decision; keep that risk
-contained to demo-only trading.
+This remains the promoted research default for `volume-events`. The live demo
+entry service can run a separate higher-frequency observation profile, described
+below, but that profile is explicitly a demo test system rather than promoted
+alpha.
 
 ## Full-PIT Runner
 
@@ -111,7 +111,8 @@ python -m aggression_carry \
 ```
 
 Continuous demo runner, checking every 5 minutes by script default. The VPS
-systemd entry service intentionally overrides this to `INTERVAL_SECONDS=60`:
+systemd entry service intentionally overrides this to `INTERVAL_SECONDS=60` and
+`STRATEGY_PROFILE=observe`:
 
 ```bash
 TELEGRAM_ENABLED=1 \
@@ -124,30 +125,17 @@ bash scripts/run_bybit_demo_event_engine.sh
 
 Default forward-test behavior:
 
-- pulls current Bybit USDT perp ranks 1-220, then applies the selected rank 31-150 liquidity-migration filter
+- `STRATEGY_PROFILE=observe` is a test-only relaxed-gate profile. It keeps the same short liquidity-migration idea and `union_pathology` crowding veto, but uses ranks 11-260, no extra current 24h turnover floor, 80-rank improvement, 3.0x turnover expansion, -3% day-return floor, +3% residual-return floor, 0.25 close-location floor, 10 max active symbols, and 2-day cooldown.
+- full-PIT funded observation evidence: 1,268 trades, +211.78% total return, -21.34% max drawdown, -18.90% worst 90d, +12.33% worst split, +134.17% OOS, promotion gate pass. Report: `/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/observe_mode_sweep_20260517/observe_c`.
+- pulls current Bybit USDT perp ranks 1-300 for observe mode, then applies the selected strategy profile's rank filter
 - rebuilds recent 1h volume features each cycle from a 45-day lookback, using a forward-demo kline cache to fetch only missing/new bars on normal cycles
 - enters eligible events after the 1-hour signal delay, with stale entries skipped after 15 minutes by default
-- sizes each coin from the backtest weight: `gross_exposure / max_active_symbols`, currently `1.00 / 5 = 20.00%` of current Bybit demo USDT equity
+- sizes each coin from the backtest weight: `gross_exposure / max_active_symbols`, currently `1.00 / 10 = 10.00%` of current Bybit demo USDT equity in observe mode
 - uses 2x entry leverage in the continuous runner for margin headroom without changing the notional sizing
 - exits first on every cycle using fixed stop reconciliation, event decay, rank exit, or 3-day max hold
 - sends Telegram status with Bybit demo wallet equity, open positions, position value, and unrealized PnL when `TELEGRAM_ENABLED=1`
 - writes ledgers under `event_demo_trades`, `event_demo_orders`, and `event_demo_cycles`
 - the separate websocket risk watchdog writes latest reports under `reports/event-risk-ws` and keeps timestamped audit copies for startup/material events
-
-## Operational Canary
-
-The promoted alpha is intentionally sparse. Do not loosen live filters just to
-create action. To observe exchange plumbing between real signals, run the
-isolated demo canary:
-
-```bash
-SUBMIT_CANARY=1 CONFIRM_DEMO_ORDERS=1 bash scripts/run_bybit_demo_canary.sh
-```
-
-It places a far-from-touch post-only Bybit demo limit order, cancels it
-immediately, verifies cleanup, and writes reports under `reports/demo-canary`.
-It does not write `event_demo_trades` or `event_demo_orders`, so it cannot be
-confused with strategy activity.
 
 ## Useful Files
 
@@ -159,7 +147,6 @@ confused with strategy activity.
 - `aggression_carry/trade_lifecycle.py`: active trade lifecycle, exit, basket, and equity helpers
 - `scripts/run_bybit_demo_event_engine.sh`: continuous Bybit demo forward runner
 - `scripts/run_bybit_demo_ws_risk_engine.sh`: continuous websocket risk watchdog
-- `scripts/run_bybit_demo_canary.sh`: isolated demo order-path canary
 - `scripts/run_fullpit_volume_overnight.sh`: selected full-PIT runner
 - `scripts/run_fullpit_volume_overnight.ps1`: PowerShell selected full-PIT runner
 - `deploy/systemd/model050426-bybit-demo.service`: VPS service definition for the active demo runner

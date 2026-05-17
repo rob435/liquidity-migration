@@ -8,10 +8,11 @@ import pytest
 from aggression_carry.cli import build_parser
 from aggression_carry.config import ResearchConfig
 from aggression_carry.event_demo import (
-    DemoCanaryConfig,
+    OBSERVE_DEMO_STRATEGY_ID,
     EventDemoCycleConfig,
     EventRiskCycleConfig,
     PENDING_ORDER_GUARD_MS,
+    _demo_event_config,
     _execute_entries,
     _execute_exits,
     _execute_risk_exits,
@@ -32,7 +33,6 @@ from aggression_carry.event_demo import (
     plan_demo_exits,
     plan_risk_exits,
     plan_stop_repairs,
-    run_demo_canary,
     run_event_demo_cycle,
     run_event_risk_cycle,
     select_demo_entry_candidates,
@@ -167,82 +167,6 @@ class MinimalEventMarket:
 
     def stats(self) -> dict[str, int]:
         return {}
-
-
-class CanaryMarket:
-    def get_instruments_info(self) -> list[dict[str, object]]:
-        return [
-            {
-                "symbol": "DOGEUSDT",
-                "contractType": "LinearPerpetual",
-                "status": "Trading",
-                "baseCoin": "DOGE",
-                "quoteCoin": "USDT",
-                "settleCoin": "USDT",
-                "launchTime": "1",
-                "deliveryTime": "0",
-                "priceFilter": {"tickSize": "0.00001"},
-                "lotSizeFilter": {
-                    "qtyStep": "1",
-                    "minOrderQty": "1",
-                    "minNotionalValue": "5",
-                    "maxOrderQty": "1000000",
-                    "maxMktOrderQty": "1000000",
-                },
-                "fundingInterval": "480",
-            }
-        ]
-
-    def get_tickers(self) -> list[dict[str, object]]:
-        return [{"symbol": "DOGEUSDT", "markPrice": "0.10", "lastPrice": "0.10", "indexPrice": "0.10"}]
-
-
-class CanaryPrivate:
-    def __init__(self) -> None:
-        self.open_links: set[str] = set()
-        self.orders: list[dict[str, object]] = []
-        self.cancelled: list[str] = []
-
-    def get_wallet_balance(self, *, account_type: str = "UNIFIED", coin: str = "USDT") -> dict[str, object]:
-        return {"list": [{"totalEquity": "10000", "coin": [{"coin": "USDT", "equity": "10000"}]}]}
-
-    def get_positions(self, *, settle_coin: str | None = None) -> list[dict[str, object]]:
-        return []
-
-    def get_open_orders(self, *, symbol: str | None = None, settle_coin: str | None = None) -> list[dict[str, object]]:
-        return [
-            {"symbol": symbol or "DOGEUSDT", "orderLinkId": link, "orderStatus": "New"}
-            for link in sorted(self.open_links)
-        ]
-
-    def place_order(self, **params: object) -> dict[str, str]:
-        link = str(params["orderLinkId"])
-        self.open_links.add(link)
-        self.orders.append(params)
-        return {"orderId": "canary-order-1"}
-
-    def cancel_order(self, *, symbol: str, order_link_id: str) -> dict[str, str]:
-        del symbol
-        self.open_links.discard(order_link_id)
-        self.cancelled.append(order_link_id)
-        return {"orderId": "canary-order-1"}
-
-
-class OpenCheckFailingCanaryPrivate(CanaryPrivate):
-    def __init__(self) -> None:
-        super().__init__()
-        self.fail_next_open_check = False
-
-    def place_order(self, **params: object) -> dict[str, str]:
-        result = super().place_order(**params)
-        self.fail_next_open_check = True
-        return result
-
-    def get_open_orders(self, *, symbol: str | None = None, settle_coin: str | None = None) -> list[dict[str, object]]:
-        if self.fail_next_open_check:
-            self.fail_next_open_check = False
-            raise RuntimeError("open order API outage")
-        return super().get_open_orders(symbol=symbol, settle_coin=settle_coin)
 
 
 def _patch_minimal_event_cycle(monkeypatch: pytest.MonkeyPatch, candidate: dict[str, object]) -> None:
@@ -790,6 +714,7 @@ def test_execute_entries_sizes_notional_before_leverage_margin() -> None:
         price_by_symbol={"AAAUSDT": 100.0},
         contract_by_symbol={"AAAUSDT": {"qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}},
         now_ms=1_700_000_060_000,
+        strategy_id=OBSERVE_DEMO_STRATEGY_ID,
     )
 
     assert rows[0]["qty"] == "20"
@@ -827,6 +752,7 @@ def test_execute_entry_attaches_native_stop_and_requires_fill_confirmation() -> 
         price_by_symbol={"AAAUSDT": 100.0},
         contract_by_symbol={"AAAUSDT": {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}},
         now_ms=1_700_000_060_000,
+        strategy_id=OBSERVE_DEMO_STRATEGY_ID,
     )
 
     assert rows == []
@@ -862,6 +788,7 @@ def test_execute_entry_records_only_confirmed_fill() -> None:
         price_by_symbol={"AAAUSDT": 100.0},
         contract_by_symbol={"AAAUSDT": {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}},
         now_ms=1_700_000_060_000,
+        strategy_id=OBSERVE_DEMO_STRATEGY_ID,
     )
 
     assert rows[0]["qty"] == "1"
@@ -907,6 +834,7 @@ def test_execute_entry_records_leverage_error_without_raising() -> None:
         price_by_symbol={"AAAUSDT": 100.0},
         contract_by_symbol={"AAAUSDT": {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}},
         now_ms=1_700_000_060_000,
+        strategy_id=OBSERVE_DEMO_STRATEGY_ID,
     )
 
     assert rows == []
@@ -968,6 +896,7 @@ def test_execute_entry_records_order_error_and_continues() -> None:
             "BBBUSDT": {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0},
         },
         now_ms=1_700_000_120_000,
+        strategy_id=OBSERVE_DEMO_STRATEGY_ID,
     )
 
     assert [row["trade_id"] for row in rows] == ["t2"]
@@ -1008,6 +937,7 @@ def test_execute_entry_fill_confirmation_error_leaves_pending_order_for_reconcil
         price_by_symbol={"AAAUSDT": 100.0},
         contract_by_symbol={"AAAUSDT": {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}},
         now_ms=1_700_000_060_000,
+        strategy_id=OBSERVE_DEMO_STRATEGY_ID,
     )
 
     assert rows == []
@@ -2666,71 +2596,25 @@ def test_submit_orders_requires_explicit_confirmation() -> None:
         _validate_demo_config(config)
 
 
-def test_demo_canary_dry_run_writes_isolated_report(tmp_path: Path) -> None:
-    payload = run_demo_canary(
-        tmp_path,
-        config=ResearchConfig(),
-        canary_config=DemoCanaryConfig(),
-        market_client=CanaryMarket(),
-        now_ms=1_700_000_000_000,
-    )
+def test_observe_profile_lowers_gates_for_more_demo_trades() -> None:
+    strategy = _demo_event_config(VolumeEventResearchConfig(), profile="observe")
 
-    assert payload["cycle"]["mode"] == "dry_run"
-    assert payload["cycle"]["status"] == "planned"
-    assert payload["order_params"]["timeInForce"] == "PostOnly"
-    assert payload["order_params"]["orderType"] == "Limit"
-    assert (tmp_path / "reports" / "demo-canary" / "latest_demo_canary.md").exists()
-    assert not (tmp_path / "event_demo_orders").exists()
+    assert strategy.max_active_symbols == 10
+    assert strategy.cooldown_days == 2
+    assert strategy.universe_rank_min == 11
+    assert strategy.universe_rank_max == 260
+    assert strategy.liquidity_migration_rank_improvement_min == 80
+    assert strategy.liquidity_migration_turnover_ratio_min == 3.0
+    assert strategy.liquidity_migration_day_return_min == -0.03
+    assert strategy.liquidity_migration_residual_return_min == 0.03
+    assert strategy.liquidity_migration_close_location_min == 0.25
+    assert strategy.liquidity_migration_crowding_filter == "union_pathology"
 
 
-def test_demo_canary_submit_places_cancels_and_verifies(tmp_path: Path) -> None:
-    private = CanaryPrivate()
-
-    payload = run_demo_canary(
-        tmp_path,
-        config=ResearchConfig(),
-        canary_config=DemoCanaryConfig(submit_order=True, confirm_demo_orders=True),
-        market_client=CanaryMarket(),
-        private_client=private,
-        now_ms=1_700_000_000_000,
-    )
-
-    assert payload["cycle"]["status"] == "cancelled_verified"
-    assert payload["cycle"]["order_live_after_submit"] is True
-    assert payload["cycle"]["cancel_verified"] is True
-    assert private.orders[0]["timeInForce"] == "PostOnly"
-    assert private.cancelled == [private.orders[0]["orderLinkId"]]
-    assert private.open_links == set()
-    assert not (tmp_path / "event_demo_trades").exists()
-
-
-def test_demo_canary_cancels_after_open_check_failure(tmp_path: Path) -> None:
-    private = OpenCheckFailingCanaryPrivate()
-
-    payload = run_demo_canary(
-        tmp_path,
-        config=ResearchConfig(),
-        canary_config=DemoCanaryConfig(submit_order=True, confirm_demo_orders=True),
-        market_client=CanaryMarket(),
-        private_client=private,
-        now_ms=1_700_000_000_000,
-    )
-
-    assert payload["cycle"]["status"] == "failed"
-    assert payload["cycle"]["cancel_verified"] is True
-    assert "open order check failed" in payload["cycle"]["error"]
-    assert private.cancelled == [private.orders[0]["orderLinkId"]]
-    assert private.open_links == set()
-
-
-def test_demo_canary_submit_requires_explicit_confirmation(tmp_path: Path) -> None:
-    with pytest.raises(RuntimeError, match="confirm-demo-orders"):
-        run_demo_canary(
-            tmp_path,
-            config=ResearchConfig(),
-            canary_config=DemoCanaryConfig(submit_order=True),
-            market_client=CanaryMarket(),
-            private_client=CanaryPrivate(),
+def test_observe_profile_requires_wide_forward_universe() -> None:
+    with pytest.raises(ValueError, match="rank 260"):
+        _validate_demo_config(
+            EventDemoCycleConfig(strategy_profile="observe", universe_rank_end=220, universe_max_symbols=220)
         )
 
 
