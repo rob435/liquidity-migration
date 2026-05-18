@@ -123,15 +123,20 @@ Bybit demo WebSocket Trade order entry was attempted and was unavailable or reje
 
 ## Deployed State
 
-Last verified VPS state before this cleanup:
+Last verified VPS state after quality-squeeze deployment:
 
 ```text
 path: /opt/MODEL050426
 branch: main
+commit: 29549ec
 services: model050426-bybit-demo.service, model050426-bybit-risk.service
-service restarts: 0
-live positions after proof: 0
-open orders after proof: 0
+entry strategy id: observe_liqmig_q40_h3_tp25_g100_relaxed_qsqueeze
+entry policy: promoted_quality_squeeze
+latest entry cycle: 20260518014729-1779068849417571413
+latest risk cycle: ws-risk-1779068939808
+service state: active / active
+latest report position errors: none
+open trades after restart proof: 0
 ```
 
 The VPS entry service intentionally runs at `INTERVAL_SECONDS=60` and
