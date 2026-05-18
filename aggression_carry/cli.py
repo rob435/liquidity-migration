@@ -23,6 +23,7 @@ from .event_demo import (
     run_event_demo_cycle,
     run_event_risk_cycle,
 )
+from .feature_factory import run_feature_factory_report
 from .ingestion import generate_fixture_data
 from .portfolio_hedge import run_portfolio_hedge_report
 from .strategy_tribunal import StrategyTribunalConfig, run_strategy_tribunal
@@ -1048,6 +1049,21 @@ def build_parser() -> argparse.ArgumentParser:
     hedge.add_argument("--hedge-weights", default="0.25,0.5,1.0", help="Comma-separated long overlay weights.")
     hedge.add_argument("--report-dir", required=True, help="Directory for portfolio hedge report output.")
 
+    feature_factory = subparsers.add_parser(
+        "feature-factory",
+        help="Audit causal research features in a completed volume-events trade ledger.",
+    )
+    feature_factory.add_argument(
+        "--report-dir",
+        default=None,
+        help="Completed volume-events report directory. Defaults to DATA_ROOT/reports/volume_event_research.",
+    )
+    feature_factory.add_argument("--output-dir", default=None, help="Where to write feature-factory output.")
+    feature_factory.add_argument("--target-col", default="net_return", help="Trade return column to score.")
+    feature_factory.add_argument("--min-rows", type=int, default=12, help="Minimum rows for a feature bucket edge test.")
+    feature_factory.add_argument("--shuffle-samples", type=int, default=64, help="Shuffled-feature controls per feature.")
+    feature_factory.add_argument("--random-seed", type=int, default=17)
+
     event_demo = subparsers.add_parser(
         "event-demo-cycle",
         help="Run one frequent Bybit demo forward-testing cycle for the selected event strategy.",
@@ -1605,6 +1621,24 @@ def main(argv: list[str] | None = None) -> int:
             "portfolio hedge "
             f"rows={len(payload['rows'])} "
             f"path={payload['report_path']}"
+        )
+        return 0
+
+    if args.command == "feature-factory":
+        report_dir = Path(args.report_dir).expanduser() if args.report_dir else data_root / "reports" / "volume_event_research"
+        payload = run_feature_factory_report(
+            report_dir,
+            output_dir=args.output_dir,
+            target_col=args.target_col,
+            min_rows=args.min_rows,
+            shuffle_samples=args.shuffle_samples,
+            random_seed=args.random_seed,
+        )
+        print(
+            "feature factory "
+            f"features={payload['features_with_coverage']}/{payload['features_expected']} "
+            f"rows={payload['rows']} "
+            f"path={payload['output_files']['markdown']}"
         )
         return 0
 

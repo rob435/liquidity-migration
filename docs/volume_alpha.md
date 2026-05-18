@@ -599,3 +599,53 @@ In the promotion comparison, BTC/ETH/SOL/BNB/XRP/TRX took no direct trades, but
 including them improved the PIT rank map and market context. That is why the
 default exclusion rule is now stable/peg-only rather than a manual top-coin
 blacklist.
+
+## Feature Factory
+
+`feature-factory` is a shadow audit command for controlled feature research. It
+reads a completed `volume-events` report, checks candidate feature coverage,
+scores high-vs-low tertile edges against shuffled-feature controls, and writes
+split/interaction diagnostics. It does not change live trading.
+
+Current feature-factory promoted rerun:
+
+```bash
+python -m aggression_carry \
+  --data-root /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503 \
+  volume-events \
+  --report-dir /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/feature_factory_promoted_20260518
+
+python -m aggression_carry \
+  --data-root /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503 \
+  feature-factory \
+  --report-dir /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/feature_factory_promoted_20260518 \
+  --output-dir /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/feature_factory_promoted_20260518/feature_factory \
+  --min-rows 24 \
+  --shuffle-samples 128
+```
+
+Result:
+
+```text
+promoted rerun: 444 trades, +1853.99% return, -13.72% max drawdown, -6.29% worst 90d, +175.32% OOS
+feature coverage: 16/27 non-null audited features
+report: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/feature_factory_promoted_20260518/feature_factory/feature_factory_report.md
+```
+
+New causal columns now written to trade ledgers include:
+
+```text
+event_uniqueness_score
+prior1_liquidity_rank / prior3_liquidity_rank / prior7_liquidity_rank
+liquidity_rank_improvement_1d / 3d / 7d
+liquidity_rank_speed_3d
+prior7_intraday_range_mean
+intraday_range_expansion_7d
+mark_index_basis_* and premium_index_* when datasets exist
+```
+
+Honest read: the new rank-speed, volatility-expansion, and uniqueness columns
+are useful audit dimensions, but they did not beat shuffled-feature controls on
+the promoted ledger. Funding features, residual return, and close-to-30d-high
+screened strongest, but that is still shadow evidence. Any future feature gate
+must go through the Model Court with data coverage and stress evidence.

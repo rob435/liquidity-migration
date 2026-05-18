@@ -260,11 +260,17 @@ def run_volume_event_research(
     funding = read_dataset(root, "funding")
     open_interest = read_dataset(root, "open_interest")
     signed_flow_1h = read_dataset(root, "signed_flow_1h")
+    mark_price_1h = read_dataset(root, "mark_price_1h")
+    index_price_1h = read_dataset(root, "index_price_1h")
+    premium_index_1h = read_dataset(root, "premium_index_1h")
     archive_manifest = read_dataset(root, "archive_trade_manifest")
     klines = _exclude_symbols(raw_klines, config.exclude_symbols)
     funding = _exclude_symbols(funding, config.exclude_symbols)
     open_interest = _exclude_symbols(open_interest, config.exclude_symbols)
     signed_flow_1h = _exclude_symbols(signed_flow_1h, config.exclude_symbols)
+    mark_price_1h = _exclude_symbols(mark_price_1h, config.exclude_symbols)
+    index_price_1h = _exclude_symbols(index_price_1h, config.exclude_symbols)
+    premium_index_1h = _exclude_symbols(premium_index_1h, config.exclude_symbols)
     archive_manifest = _exclude_symbols(archive_manifest, config.exclude_symbols)
     features = _filter_signal_window(
         _enriched_event_features(
@@ -274,6 +280,9 @@ def run_volume_event_research(
             funding=funding,
             open_interest=open_interest,
             signed_flow_1h=signed_flow_1h,
+            mark_price_1h=mark_price_1h,
+            index_price_1h=index_price_1h,
+            premium_index_1h=premium_index_1h,
         ),
         _window_config(config),
     )
@@ -528,10 +537,26 @@ def _run_event_scenario(
                 "prior30_max_daily_return": _float_or_nan(event.get("prior30_max_daily_return")),
                 "prior7_return_volatility": _float_or_nan(event.get("prior7_return_volatility")),
                 "intraday_range_1d": _float_or_nan(event.get("intraday_range_1d")),
+                "prior7_intraday_range_mean": _float_or_nan(event.get("prior7_intraday_range_mean")),
+                "intraday_range_expansion_7d": _float_or_nan(event.get("intraday_range_expansion_7d")),
+                "prior1_liquidity_rank": _float_or_nan(event.get("prior1_liquidity_rank")),
+                "prior3_liquidity_rank": _float_or_nan(event.get("prior3_liquidity_rank")),
+                "prior7_liquidity_rank": _float_or_nan(event.get("prior7_liquidity_rank")),
+                "liquidity_rank_improvement_1d": _float_or_nan(event.get("liquidity_rank_improvement_1d")),
+                "liquidity_rank_improvement_3d": _float_or_nan(event.get("liquidity_rank_improvement_3d")),
+                "liquidity_rank_improvement_7d": _float_or_nan(event.get("liquidity_rank_improvement_7d")),
+                "liquidity_rank_speed_3d": _float_or_nan(event.get("liquidity_rank_speed_3d")),
+                "event_uniqueness_score": _float_or_nan(event.get("event_uniqueness_score")),
                 "funding_rate_last": _float_or_nan(event.get("funding_rate_last")),
                 "funding_rate_1d_sum": _float_or_nan(event.get("funding_rate_1d_sum")),
                 "funding_rate_3d_sum": _float_or_nan(event.get("funding_rate_3d_sum")),
                 "funding_rate_7d_sum": _float_or_nan(event.get("funding_rate_7d_sum")),
+                "mark_index_basis_last": _float_or_nan(event.get("mark_index_basis_last")),
+                "mark_index_basis_1d_mean": _float_or_nan(event.get("mark_index_basis_1d_mean")),
+                "mark_index_basis_3d_mean": _float_or_nan(event.get("mark_index_basis_3d_mean")),
+                "premium_index_last": _float_or_nan(event.get("premium_index_last")),
+                "premium_index_1d_mean": _float_or_nan(event.get("premium_index_1d_mean")),
+                "premium_index_3d_mean": _float_or_nan(event.get("premium_index_3d_mean")),
                 "open_interest": _float_or_nan(event.get("open_interest")),
                 "open_interest_quote": _float_or_nan(event.get("open_interest_quote")),
                 "open_interest_return_1d": _float_or_nan(event.get("open_interest_return_1d")),
@@ -2136,6 +2161,9 @@ def _enriched_event_features(
     funding: pl.DataFrame | None = None,
     open_interest: pl.DataFrame | None = None,
     signed_flow_1h: pl.DataFrame | None = None,
+    mark_price_1h: pl.DataFrame | None = None,
+    index_price_1h: pl.DataFrame | None = None,
+    premium_index_1h: pl.DataFrame | None = None,
 ) -> pl.DataFrame:
     if features.is_empty():
         return features
@@ -2150,6 +2178,9 @@ def _enriched_event_features(
     flow_features = _signed_flow_feature_frame(signed_flow_1h)
     if not flow_features.is_empty():
         enriched = enriched.join(flow_features, on=["ts_ms", "symbol"], how="left")
+    basis_features = _basis_feature_frame(mark_price_1h, index_price_1h, premium_index_1h)
+    if not basis_features.is_empty():
+        enriched = enriched.join(basis_features, on=["ts_ms", "symbol"], how="left")
     if _has_columns(enriched, "turnover_quote", "open_interest_quote"):
         enriched = enriched.with_columns(
             pl.when(pl.col("open_interest_quote") > 0.0)
@@ -2181,9 +2212,16 @@ def _enriched_event_features(
         "prior30_max_daily_return": "prior30_max_daily_return_rank_frac",
         "prior7_return_volatility": "prior7_return_volatility_rank_frac",
         "intraday_range_1d": "intraday_range_rank_frac",
+        "intraday_range_expansion_7d": "intraday_range_expansion_rank_frac",
         "funding_rate_last": "funding_rate_last_rank_frac",
         "funding_rate_3d_sum": "funding_rate_3d_sum_rank_frac",
         "funding_rate_7d_sum": "funding_rate_7d_sum_rank_frac",
+        "mark_index_basis_last": "mark_index_basis_last_rank_frac",
+        "mark_index_basis_1d_mean": "mark_index_basis_1d_mean_rank_frac",
+        "mark_index_basis_3d_mean": "mark_index_basis_3d_mean_rank_frac",
+        "premium_index_last": "premium_index_last_rank_frac",
+        "premium_index_1d_mean": "premium_index_1d_mean_rank_frac",
+        "premium_index_3d_mean": "premium_index_3d_mean_rank_frac",
         "open_interest_return_3d": "open_interest_return_3d_rank_frac",
         "open_interest_return_7d": "open_interest_return_7d_rank_frac",
         "volume_to_open_interest_quote": "volume_to_open_interest_quote_rank_frac",
@@ -2193,6 +2231,9 @@ def _enriched_event_features(
     for source, alias in rank_inputs.items():
         if source in enriched.columns:
             enriched = _add_rank_fraction(enriched, source, alias)
+    enriched = _add_event_uniqueness_score(enriched)
+    if "event_uniqueness_score" in enriched.columns:
+        enriched = _add_rank_fraction(enriched, "event_uniqueness_score", "event_uniqueness_score_rank_frac")
     enriched = _add_reclaim_scores(enriched)
     for source, alias in {
         "reclaim_breakout_score": "reclaim_breakout_score_rank_frac",
@@ -2235,6 +2276,8 @@ def _enriched_event_features(
             .over("symbol")
             .alias("prior7_abs_daily_return_mean"),
             pl.col("liquidity_rank").shift(7).over("symbol").alias("prior7_liquidity_rank"),
+            pl.col("liquidity_rank").shift(1).over("symbol").alias("prior1_liquidity_rank"),
+            pl.col("liquidity_rank").shift(3).over("symbol").alias("prior3_liquidity_rank"),
             pl.col("turnover_quote")
             .shift(1)
             .rolling_mean(window_size=7, min_samples=1)
@@ -2242,8 +2285,10 @@ def _enriched_event_features(
             .alias("prior7_turnover_quote_mean"),
         ]
     )
+    enriched = enriched.sort(["symbol", "ts_ms"]).with_columns(expressions)
+    enriched = _add_liquidity_migration_speed_features(enriched)
     return _attach_event_archive_membership(
-        enriched.sort(["symbol", "ts_ms"]).with_columns(expressions).sort(["ts_ms", "symbol"]),
+        enriched.sort(["ts_ms", "symbol"]),
         archive_manifest,
     )
 
@@ -2383,6 +2428,143 @@ def _signed_flow_feature_frame(flow: pl.DataFrame | None) -> pl.DataFrame:
         )
     )
     return daily
+
+
+def _basis_feature_frame(
+    mark_price_1h: pl.DataFrame | None,
+    index_price_1h: pl.DataFrame | None,
+    premium_index_1h: pl.DataFrame | None,
+) -> pl.DataFrame:
+    basis = _mark_index_basis_frame(mark_price_1h, index_price_1h)
+    premium = _premium_index_frame(premium_index_1h)
+    if basis.is_empty():
+        return premium
+    if premium.is_empty():
+        return basis
+    return basis.join(premium, on=["symbol", "ts_ms"], how="full", coalesce=True).sort(["symbol", "ts_ms"])
+
+
+def _mark_index_basis_frame(mark_price_1h: pl.DataFrame | None, index_price_1h: pl.DataFrame | None) -> pl.DataFrame:
+    if (
+        mark_price_1h is None
+        or index_price_1h is None
+        or mark_price_1h.is_empty()
+        or index_price_1h.is_empty()
+        or not _has_columns(mark_price_1h, "symbol", "ts_ms", "close")
+        or not _has_columns(index_price_1h, "symbol", "ts_ms", "close")
+    ):
+        return pl.DataFrame()
+    basis = (
+        mark_price_1h.select(["symbol", "ts_ms", pl.col("close").alias("mark_price_close")])
+        .drop_nulls(["symbol", "ts_ms", "mark_price_close"])
+        .join(
+            index_price_1h.select(["symbol", "ts_ms", pl.col("close").alias("index_price_close")]).drop_nulls(
+                ["symbol", "ts_ms", "index_price_close"]
+            ),
+            on=["symbol", "ts_ms"],
+            how="inner",
+        )
+        .filter(pl.col("index_price_close") > 0.0)
+        .with_columns((pl.col("mark_price_close") / pl.col("index_price_close") - 1.0).alias("mark_index_basis"))
+        .with_columns(((pl.col("ts_ms") // MS_PER_DAY + 1) * MS_PER_DAY).alias("signal_day_end_ms"))
+        .group_by(["symbol", "signal_day_end_ms"], maintain_order=True)
+        .agg(
+            [
+                pl.col("mark_index_basis").last().alias("mark_index_basis_last"),
+                pl.col("mark_index_basis").mean().alias("mark_index_basis_1d_mean"),
+                pl.col("mark_index_basis").abs().max().alias("mark_index_basis_1d_abs_max"),
+            ]
+        )
+        .rename({"signal_day_end_ms": "ts_ms"})
+        .sort(["symbol", "ts_ms"])
+    )
+    return basis.with_columns(
+        [
+            pl.col("mark_index_basis_1d_mean")
+            .rolling_mean(window_size=3, min_samples=1)
+            .over("symbol")
+            .alias("mark_index_basis_3d_mean"),
+            pl.col("mark_index_basis_1d_mean")
+            .rolling_mean(window_size=7, min_samples=1)
+            .over("symbol")
+            .alias("mark_index_basis_7d_mean"),
+        ]
+    )
+
+
+def _premium_index_frame(premium_index_1h: pl.DataFrame | None) -> pl.DataFrame:
+    if premium_index_1h is None or premium_index_1h.is_empty() or not _has_columns(premium_index_1h, "symbol", "ts_ms", "close"):
+        return pl.DataFrame()
+    premium = (
+        premium_index_1h.select(["symbol", "ts_ms", pl.col("close").alias("premium_index")])
+        .drop_nulls(["symbol", "ts_ms", "premium_index"])
+        .with_columns(((pl.col("ts_ms") // MS_PER_DAY + 1) * MS_PER_DAY).alias("signal_day_end_ms"))
+        .group_by(["symbol", "signal_day_end_ms"], maintain_order=True)
+        .agg(
+            [
+                pl.col("premium_index").last().alias("premium_index_last"),
+                pl.col("premium_index").mean().alias("premium_index_1d_mean"),
+                pl.col("premium_index").abs().max().alias("premium_index_1d_abs_max"),
+            ]
+        )
+        .rename({"signal_day_end_ms": "ts_ms"})
+        .sort(["symbol", "ts_ms"])
+    )
+    return premium.with_columns(
+        [
+            pl.col("premium_index_1d_mean")
+            .rolling_mean(window_size=3, min_samples=1)
+            .over("symbol")
+            .alias("premium_index_3d_mean"),
+            pl.col("premium_index_1d_mean")
+            .rolling_mean(window_size=7, min_samples=1)
+            .over("symbol")
+            .alias("premium_index_7d_mean"),
+        ]
+    )
+
+
+def _add_event_uniqueness_score(features: pl.DataFrame) -> pl.DataFrame:
+    required = {
+        "residual_return_rank_frac",
+        "volume_change_1d_z_rank_frac",
+        "dollar_volume_rank_z_rank_frac",
+        "intraday_range_expansion_rank_frac",
+        "market_pct_up_1d",
+    }
+    if features.is_empty() or not required.issubset(set(features.columns)):
+        return features
+    market_isolation = (1.0 - pl.col("market_pct_up_1d").clip(0.0, 1.0)).fill_null(0.5).fill_nan(0.5)
+    return features.with_columns(
+        (
+            0.30 * pl.col("residual_return_rank_frac").fill_null(0.5).fill_nan(0.5)
+            + 0.25 * pl.col("volume_change_1d_z_rank_frac").fill_null(0.5).fill_nan(0.5)
+            + 0.20 * pl.col("dollar_volume_rank_z_rank_frac").fill_null(0.5).fill_nan(0.5)
+            + 0.15 * pl.col("intraday_range_expansion_rank_frac").fill_null(0.5).fill_nan(0.5)
+            + 0.10 * market_isolation
+        )
+        .clip(0.0, 1.0)
+        .alias("event_uniqueness_score")
+    )
+
+
+def _add_liquidity_migration_speed_features(features: pl.DataFrame) -> pl.DataFrame:
+    if features.is_empty() or not _has_columns(
+        features,
+        "liquidity_rank",
+        "prior1_liquidity_rank",
+        "prior3_liquidity_rank",
+        "prior7_liquidity_rank",
+    ):
+        return features
+    return features.with_columns(
+        [
+            (pl.col("prior1_liquidity_rank") - pl.col("liquidity_rank")).alias("liquidity_rank_improvement_1d"),
+            (pl.col("prior3_liquidity_rank") - pl.col("liquidity_rank")).alias("liquidity_rank_improvement_3d"),
+            (pl.col("prior7_liquidity_rank") - pl.col("liquidity_rank")).alias("liquidity_rank_improvement_7d"),
+            ((pl.col("prior3_liquidity_rank") - pl.col("liquidity_rank")) / 3.0).alias("liquidity_rank_speed_3d"),
+        ]
+    )
 
 
 def _attach_market_context(features: pl.DataFrame) -> pl.DataFrame:
@@ -2553,6 +2735,19 @@ def _daily_return_frame(klines: pl.DataFrame) -> pl.DataFrame:
                 .rolling_std(window_size=7, min_samples=4)
                 .over("symbol")
                 .alias("prior7_return_volatility"),
+                pl.col("intraday_range_1d")
+                .shift(1)
+                .rolling_mean(window_size=7, min_samples=4)
+                .over("symbol")
+                .alias("prior7_intraday_range_mean"),
+            ]
+        )
+        .with_columns(
+            [
+                pl.when(pl.col("prior7_intraday_range_mean") > 0.0)
+                .then(pl.col("intraday_range_1d") / pl.col("prior7_intraday_range_mean"))
+                .otherwise(None)
+                .alias("intraday_range_expansion_7d"),
             ]
         )
         .select(
@@ -2585,6 +2780,8 @@ def _daily_return_frame(klines: pl.DataFrame) -> pl.DataFrame:
                 "prior30_max_daily_return",
                 "prior30_min_daily_return",
                 "prior7_return_volatility",
+                "prior7_intraday_range_mean",
+                "intraday_range_expansion_7d",
             ]
         )
     )

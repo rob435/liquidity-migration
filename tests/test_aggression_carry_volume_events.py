@@ -15,7 +15,9 @@ from aggression_carry.volume_events import (
     _apply_entry_execution_veto,
     _attach_event_archive_membership,
     _apply_liquidity_migration_crowding_filter,
+    _basis_feature_frame,
     _daily_return_frame,
+    _enriched_event_features,
     _entry_decision_for_event,
     _event_decay_exit_hit,
     _event_filter,
@@ -173,6 +175,101 @@ def test_orthogonal_feature_frames_are_point_in_time_daily() -> None:
     assert oi_features.filter(pl.col("ts_ms") == 4 * day)["open_interest_quote"][0] == pytest.approx(3240.0)
     assert flow_features.filter(pl.col("ts_ms") == 2 * day)["taker_imbalance_1d"][0] == pytest.approx(0.4)
     assert flow_features.filter(pl.col("ts_ms") == 3 * day)["taker_imbalance_3d"][0] == pytest.approx(-0.1)
+
+
+def test_basis_feature_frame_maps_hourly_basis_to_signal_day() -> None:
+    day = 24 * 60 * 60 * 1000
+    mark = pl.DataFrame(
+        [
+            {"symbol": "AUSDT", "ts_ms": day + 23 * 60 * 60 * 1000, "close": 102.0},
+            {"symbol": "AUSDT", "ts_ms": 2 * day + 23 * 60 * 60 * 1000, "close": 103.0},
+        ]
+    )
+    index = pl.DataFrame(
+        [
+            {"symbol": "AUSDT", "ts_ms": day + 23 * 60 * 60 * 1000, "close": 100.0},
+            {"symbol": "AUSDT", "ts_ms": 2 * day + 23 * 60 * 60 * 1000, "close": 100.0},
+        ]
+    )
+    premium = pl.DataFrame(
+        [
+            {"symbol": "AUSDT", "ts_ms": day + 23 * 60 * 60 * 1000, "close": 0.002},
+            {"symbol": "AUSDT", "ts_ms": 2 * day + 23 * 60 * 60 * 1000, "close": 0.003},
+        ]
+    )
+
+    basis = _basis_feature_frame(mark, index, premium).sort("ts_ms")
+    second_day = basis.filter(pl.col("ts_ms") == 2 * day).to_dicts()[0]
+
+    assert second_day["mark_index_basis_last"] == pytest.approx(0.02)
+    assert second_day["premium_index_last"] == pytest.approx(0.002)
+
+
+def test_enriched_event_features_adds_feature_factory_columns() -> None:
+    day = 24 * 60 * 60 * 1000
+    hour = 60 * 60 * 1000
+    symbols = ("AUSDT", "BUSDT", "CUSDT")
+    feature_rows = []
+    kline_rows = []
+    mark_rows = []
+    index_rows = []
+    premium_rows = []
+    for day_index in range(10):
+        day_start = day_index * day
+        ts_ms = (day_index + 1) * day
+        for symbol_index, symbol in enumerate(symbols):
+            rank = (220 - 20 * day_index) if symbol == "AUSDT" else 60 + symbol_index * 20
+            turnover = 1_000_000.0 + day_index * 50_000.0 + symbol_index * 10_000.0
+            feature_rows.append(
+                {
+                    "ts_ms": ts_ms,
+                    "symbol": symbol,
+                    "turnover_quote": turnover,
+                    "log_turnover": float(symbol_index + day_index),
+                    "volume_change_1d_z": float(symbol_index + 1),
+                    "volume_change_3d_z": float(symbol_index),
+                    "volume_persistence_z": float(day_index - symbol_index),
+                    "dollar_volume_rank_z": float(3 - symbol_index),
+                    "liquidity_rank": rank,
+                    "liquidity_rank_pct": rank / 300.0,
+                    "volume_composite": float(symbol_index + 1),
+                }
+            )
+            open_price = 100.0 + symbol_index
+            close_price = open_price * (1.0 + 0.01 * day_index + (0.03 if symbol == "AUSDT" else 0.0))
+            for hour_index in range(24):
+                kline_rows.append(
+                    {
+                        "symbol": symbol,
+                        "ts_ms": day_start + hour_index * hour,
+                        "open": open_price,
+                        "high": close_price * 1.04,
+                        "low": open_price * 0.96,
+                        "close": close_price,
+                        "turnover_quote": turnover / 24.0,
+                        "date": "2024-01-01",
+                    }
+                )
+            mark_rows.append({"symbol": symbol, "ts_ms": day_start + 23 * hour, "close": close_price * 1.002})
+            index_rows.append({"symbol": symbol, "ts_ms": day_start + 23 * hour, "close": close_price})
+            premium_rows.append({"symbol": symbol, "ts_ms": day_start + 23 * hour, "close": 0.001 * (symbol_index + 1)})
+
+    enriched = _enriched_event_features(
+        pl.DataFrame(feature_rows),
+        pl.DataFrame(kline_rows),
+        pl.DataFrame(),
+        mark_price_1h=pl.DataFrame(mark_rows),
+        index_price_1h=pl.DataFrame(index_rows),
+        premium_index_1h=pl.DataFrame(premium_rows),
+    )
+    last_a = enriched.filter((pl.col("symbol") == "AUSDT") & (pl.col("ts_ms") == 10 * day)).to_dicts()[0]
+
+    assert last_a["liquidity_rank_improvement_1d"] == pytest.approx(20.0)
+    assert last_a["liquidity_rank_improvement_3d"] == pytest.approx(60.0)
+    assert last_a["liquidity_rank_speed_3d"] == pytest.approx(20.0)
+    assert last_a["intraday_range_expansion_7d"] > 0.0
+    assert 0.0 <= last_a["event_uniqueness_score"] <= 1.0
+    assert last_a["mark_index_basis_last"] == pytest.approx(0.002)
 
 
 def test_bar_extreme_stop_fill_uses_adverse_hourly_extreme_for_short() -> None:

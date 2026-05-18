@@ -65,6 +65,39 @@ and the worst same-hour entry cluster still contains 3 losing trades for
 -5.15% additive net return. That is a research warning, not a live-execution
 fault.
 
+## Feature Factory Research
+
+Feature-factory tooling was added on 2026-05-18 as a shadow research surface,
+not as a new live gate. It adds causal ledger columns for rank-migration speed,
+local volatility expansion, event uniqueness, and optional perp basis/premium
+aggregates. Live/default trading logic is unchanged.
+
+Latest promoted rerun with the new columns:
+
+```text
+report: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/feature_factory_promoted_20260518
+trades: 444
+total return: +1853.99%
+max drawdown: -13.72%
+worst 90d return: -6.29%
+worst split return: +122.17%
+OOS return: +175.32%
+```
+
+Feature report:
+
+```text
+/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/feature_factory_promoted_20260518/feature_factory/feature_factory_report.md
+```
+
+Coverage is currently 16/27 audited features with non-null data. The missing
+surfaces are not code failures: this funded PIT root does not contain
+mark/index premium, open-interest, or signed-flow datasets. The strongest
+shadow-only feature screens were funding sums, residual return, and
+close-to-30d-high. New rank-speed, range-expansion, and event-uniqueness
+columns populated correctly, but did not beat their shuffled-feature controls.
+Do not promote any feature gate from this report alone.
+
 ## Demo-Relaxed Profile Evidence
 
 The active VPS entry service is intentionally configured for a higher-frequency
