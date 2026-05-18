@@ -696,6 +696,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Union crowding veto weak-tape regime minimum entry-hour average final-6h turnover share.",
     )
     volume_events.add_argument(
+        "--liquidity-migration-signal-last6h-turnover-share-max",
+        type=float,
+        default=event_defaults.liquidity_migration_signal_last6h_turnover_share_max,
+        help="Research gate: maximum fraction of signal-day turnover in the final 6h; 1 disables.",
+    )
+    volume_events.add_argument(
         "--market-median-return-1d-min",
         type=float,
         default=event_defaults.market_median_return_1d_min,
@@ -1530,6 +1536,9 @@ def main(argv: list[str] | None = None) -> int:
             ),
             liquidity_migration_crowding_weak_avg_turnover_share_min=(
                 args.liquidity_migration_crowding_weak_avg_turnover_share_min
+            ),
+            liquidity_migration_signal_last6h_turnover_share_max=(
+                args.liquidity_migration_signal_last6h_turnover_share_max
             ),
             market_median_return_1d_min=args.market_median_return_1d_min,
             market_median_return_1d_max=args.market_median_return_1d_max,

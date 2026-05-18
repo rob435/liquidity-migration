@@ -46,6 +46,7 @@ entry policy: promoted_quality_squeeze
 standard entry: 1 hour after daily signal close
 promoted-grade squeeze entry: if the first completed 1h post-signal bar is up >= 50 bps from signal close and closes >= 0.85 inside its own high-low range, wait for a causal high-since-signal giveback of 25 bps after at least a 25 bps pop, otherwise enter on the 4h deadline
 research-only execution variants: execution_pullback_guard, tiered_execution_sniper, and entry_execution_veto_close_location_max exist for audits only and are not deployed
+research-only late-turnover concentration gate: --liquidity-migration-signal-last6h-turnover-share-max exists for audits only and defaults disabled at 1.0
 max hold: 3 days
 stop: 12% fixed
 take profit: 25% fixed

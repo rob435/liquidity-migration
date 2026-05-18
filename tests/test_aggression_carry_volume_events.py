@@ -1379,6 +1379,64 @@ def test_liquidity_migration_can_require_idiosyncratic_residual_return() -> None
     assert migration["symbol"].to_list() == ["IDIOUSDT"]
 
 
+def test_liquidity_migration_can_reject_late_day_turnover_concentration() -> None:
+    frame = pl.DataFrame(
+        [
+            {
+                "symbol": "ORDERLYUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 3.0,
+                "dollar_volume_rank_z_rank_frac": 0.86,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 80,
+                "prior7_liquidity_rank": 240,
+                "turnover_quote": 3_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "daily_return_1d": 0.14,
+                "residual_return_1d": 0.09,
+                "market_pct_up_1d": 0.55,
+                "signal_day_last6h_turnover_share": 0.42,
+                "tradable_membership_flag": True,
+            },
+            {
+                "symbol": "LATEBLOWOFFUSDT",
+                "ts_ms": 1,
+                "dollar_volume_rank_z": 3.1,
+                "dollar_volume_rank_z_rank_frac": 0.87,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 75,
+                "prior7_liquidity_rank": 240,
+                "turnover_quote": 3_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "daily_return_1d": 0.14,
+                "residual_return_1d": 0.09,
+                "market_pct_up_1d": 0.55,
+                "signal_day_last6h_turnover_share": 0.82,
+                "tradable_membership_flag": True,
+            },
+        ]
+    )
+
+    migration = _event_filter(
+        frame,
+        "liquidity_migration",
+        score_col="dollar_volume_rank_z",
+        rank_col="dollar_volume_rank_z_rank_frac",
+        top_cut=0.80,
+        config=_migration_unit_config(
+            liquidity_migration_rank_improvement_min=100,
+            liquidity_migration_turnover_ratio_min=2.0,
+            liquidity_migration_event_rank_fraction_max=0.90,
+            liquidity_migration_residual_return_min=0.08,
+            liquidity_migration_market_pct_up_max=1.0,
+            liquidity_migration_hot_market_day_return_min=10.0,
+            liquidity_migration_signal_last6h_turnover_share_max=0.70,
+        ),
+    )
+
+    assert migration["symbol"].to_list() == ["ORDERLYUSDT"]
+
+
 def test_daily_return_frame_adds_quant_state_features() -> None:
     rows = []
     start = 1_704_067_200_000

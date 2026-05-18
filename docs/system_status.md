@@ -127,6 +127,26 @@ close-to-30d-high. New rank-speed, range-expansion, and event-uniqueness
 columns populated correctly, but did not beat their shuffled-feature controls.
 Do not promote any feature gate from this report alone.
 
+## Alpha Sweep Status
+
+Alpha work on 2026-05-18 did not produce a replacement for the current promoted
+strategy. Funding gates, close-to-high/residual gates, late-day turnover-share
+filters, wider strict rank bands, and wider-rank plus late-turnover
+interactions were all tested as exact full-PIT lifecycle runs. None beat the
+current funded promoted baseline of +1853.99% total return, -13.72% max
+drawdown, -6.29% worst 90d, +122.17% minimum split, and +175.32% OOS.
+
+The best-looking rejected variants were:
+
+```text
+rank31_220_strict: +1807.79%, -16.85% max DD, -16.21% worst 90d, +209.43% OOS
+last6h_share_le090: +1671.00%, -14.00% max DD, -6.62% worst 90d, +140.74% OOS
+funding_7d_ge0: +718.21%, -9.07% max DD, -7.43% worst 90d, +90.90% OOS
+```
+
+A disabled research-only flag now exists for late-day turnover concentration:
+`--liquidity-migration-signal-last6h-turnover-share-max`. It is not deployed.
+
 ## Demo-Relaxed Profile Evidence
 
 The active VPS entry service is intentionally configured for a higher-frequency

@@ -650,6 +650,64 @@ the promoted ledger. Funding features, residual return, and close-to-30d-high
 screened strongest, but that is still shadow evidence. Any future feature gate
 must go through the Model Court with data coverage and stress evidence.
 
+## Alpha Sweep 2026-05-18
+
+After the feature-factory screen, three alpha branches were tested against the
+current funded promoted baseline:
+
+```text
+baseline: +1853.99% total, -13.72% max DD, -6.29% worst 90d, +122.17% min split, +175.32% OOS, 444 trades
+```
+
+Funding/extension gates were rejected. They made the book cleaner but not
+better:
+
+```text
+funding_7d_sum >= 0: +718.21%, -9.07% max DD, +90.90% min split, +90.90% OOS, 256 trades
+funding_rate_last >= 0: +705.26%, -7.87% max DD, +74.31% min split, +74.31% OOS, 244 trades
+residual_return_1d >= 15%: +825.33%, -14.28% max DD, +66.29% min split, +123.74% OOS, 353 trades
+```
+
+A late-day turnover concentration control was added as disabled-by-default
+research tooling:
+
+```text
+--liquidity-migration-signal-last6h-turnover-share-max
+```
+
+It rejects single-name blowoff events where too much of the signal-day turnover
+arrives in the final six hours. The idea was plausible because high final-6h
+turnover-share trades had a materially higher stop rate in the promoted ledger,
+but exact lifecycle tests still failed to beat the baseline:
+
+```text
+last6h share <= 0.90: +1671.00%, -14.00% max DD, +129.21% min split, +140.74% OOS, 427 trades
+last6h share <= 0.80: +1319.62%, -14.00% max DD, +99.85% min split, +99.85% OOS, 398 trades
+```
+
+Wider strict PIT rank bands were also rejected. They added trades and sometimes
+lifted OOS, but worsened path risk:
+
+```text
+rank 31-220 strict: +1807.79%, -16.85% max DD, -16.21% worst 90d, +209.43% OOS, 450 trades
+rank 11-260 strict: +1768.80%, -17.28% max DD, -14.95% worst 90d, +228.44% OOS, 451 trades
+```
+
+Combining wider rank bands with the late-turnover guard did not rescue the
+idea:
+
+```text
+rank 31-220 + last6h <= 0.90: +1614.37%, -15.68% max DD, +133.05% min split, +169.89% OOS
+rank 11-260 + last6h <= 0.90: +1545.37%, -16.61% max DD, +132.46% min split, +180.69% OOS
+```
+
+Decision: reject these as alpha upgrades. The useful lesson is that the current
+edge depends on keeping a surprisingly broad set of ugly-looking trades; most
+obvious filters improve average trade quality while damaging compounding. Future
+alpha work should prioritize new entry/exit mechanics or genuinely new data
+surfaces such as OI, basis, and signed flow, not more hard filters on the
+existing daily ledger.
+
 ## Champion / Challenger Stack
 
 `champion-challenger` writes the current live research stack manifest:

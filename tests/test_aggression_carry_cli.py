@@ -215,6 +215,7 @@ def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Pa
     assert args.liquidity_migration_close_location_min == 0.45
     assert args.liquidity_migration_pit_age_days_min == 90
     assert args.liquidity_migration_crowding_filter == "union_pathology"
+    assert args.liquidity_migration_signal_last6h_turnover_share_max == 1.0
     assert args.stop_pressure_window_days == 10
     assert args.stop_pressure_stop_count == 7
     assert args.exclude_symbols == ",".join(DEFAULT_EXCLUDED_SYMBOLS)

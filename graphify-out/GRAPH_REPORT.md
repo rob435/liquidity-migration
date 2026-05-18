@@ -1,12 +1,12 @@
 # Graph Report - MODEL050426  (2026-05-18)
 
 ## Corpus Check
-- 41 files · ~87,042 words
+- 41 files · ~87,676 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 929 nodes · 2880 edges · 14 communities detected
-- Extraction: 69% EXTRACTED · 31% INFERRED · 0% AMBIGUOUS · INFERRED: 888 edges (avg confidence: 0.77)
+- 930 nodes · 2883 edges · 14 communities detected
+- Extraction: 69% EXTRACTED · 31% INFERRED · 0% AMBIGUOUS · INFERRED: 889 edges (avg confidence: 0.77)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -20,7 +20,7 @@
 - [[_COMMUNITY_Community 7|Community 7]]
 - [[_COMMUNITY_Community 8|Community 8]]
 - [[_COMMUNITY_Community 9|Community 9]]
-- [[_COMMUNITY_Community 11|Community 11]]
+- [[_COMMUNITY_Community 10|Community 10]]
 - [[_COMMUNITY_Community 12|Community 12]]
 - [[_COMMUNITY_Community 13|Community 13]]
 - [[_COMMUNITY_Community 16|Community 16]]
@@ -40,12 +40,12 @@
 ## Surprising Connections (you probably didn't know these)
 - `build_parser()` --calls--> `test_cli_strategy_tribunal_parses_research_controls()`  [INFERRED]
   aggression_carry/cli.py → tests/test_aggression_carry_strategy_tribunal.py
-- `build_ledger_position_pnl_snapshot()` --calls--> `test_ledger_position_snapshot_marks_short_pnl_from_current_price()`  [INFERRED]
-  aggression_carry/event_demo.py → tests/test_aggression_carry_event_demo.py
 - `trades_to_frame()` --calls--> `test_trade_parser_handles_websocket_aliases_and_string_booleans()`  [INFERRED]
   aggression_carry/ingestion.py → tests/test_aggression_carry_ingestion.py
-- `densify_trade_klines_1h()` --calls--> `test_trade_klines_1h_aggregates_and_densifies_utc_day()`  [INFERRED]
-  aggression_carry/ingestion.py → tests/test_aggression_carry_ingestion.py
+- `generate_fixture_data()` --calls--> `test_volume_event_research_writes_reports_on_fixture()`  [INFERRED]
+  aggression_carry/ingestion.py → tests/test_aggression_carry_volume_events.py
+- `generate_fixture_data()` --calls--> `test_volume_event_research_requires_full_pit_by_default()`  [INFERRED]
+  aggression_carry/ingestion.py → tests/test_aggression_carry_volume_events.py
 - `generate_fixture_data()` --calls--> `test_volume_features_build_daily_liquidity_ranks()`  [INFERRED]
   aggression_carry/ingestion.py → tests/test_aggression_carry_volume_features.py
 
@@ -53,31 +53,31 @@
 
 ### Community 0 - "Community 0"
 Cohesion: 0.03
-Nodes (162): TradeLifecycleConfig, FixtureSpec, generate_fixture_data(), _bar_excursion(), _bar_exit_hits(), build_equity_curve(), _daily_equity_values(), _date_boundary_ms() (+154 more)
+Nodes (173): TradeLifecycleConfig, _cooldown_until(), _empty_skip_counts(), _realized_stop_exit_ts(), select_demo_entry_candidates(), _trade_id(), _bar_excursion(), _bar_exit_hits() (+165 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.04
-Nodes (106): _active_position_by_symbol(), _base36(), _bool(), _build_demo_features(), _build_demo_universe(), build_event_risk_private_client(), build_ledger_position_pnl_snapshot(), build_position_pnl_snapshot() (+98 more)
+Nodes (113): _normalize_instruments(), _active_position_by_symbol(), _base36(), _bool(), _build_demo_features(), _build_demo_universe(), build_event_risk_private_client(), build_ledger_position_pnl_snapshot() (+105 more)
 
 ### Community 2 - "Community 2"
-Cohesion: 0.07
-Nodes (79): _decimal_text(), EventDemoCycleConfig, EventRiskCycleConfig, _execute_entries(), _execute_exits(), _execute_risk_exits(), _execution_summary(), _fallback_tick_size() (+71 more)
+Cohesion: 0.05
+Nodes (89): download_archive_bytes(), _download_archive_to_path(), download_public_trade_archive(), _archive_kline_skip_rows(), ArchiveHourlyKlineApiDownloadConfig, ArchiveHourlyKlineDownloadConfig, ArchiveKlineDownloadConfig, ArchiveManifestConfig (+81 more)
 
 ### Community 3 - "Community 3"
-Cohesion: 0.06
-Nodes (81): download_public_trade_archive(), _archive_kline_skip_rows(), ArchiveHourlyKlineApiDownloadConfig, ArchiveHourlyKlineDownloadConfig, ArchiveKlineDownloadConfig, ArchiveManifestConfig, build_archive_trade_manifest(), _bybit_api_kline_url() (+73 more)
+Cohesion: 0.04
+Nodes (23): BybitDataError, BybitMarketData, BybitPrivateClient, BybitPrivateWebSocketStream, BybitPublicTickerStream, BybitPublicTradeStream, BybitWebSocketTradeClient, _close_ws_client() (+15 more)
 
 ### Community 4 - "Community 4"
-Cohesion: 0.05
-Nodes (71): download_archive_bytes(), _download_archive_to_path(), _public_trade_text_handle(), read_public_trade_archive(), read_public_trade_archive_klines_1h(), _read_public_trade_archive_klines_1h_vectorized(), CostConfig, ExchangeConfig (+63 more)
-
-### Community 5 - "Community 5"
-Cohesion: 0.04
-Nodes (35): BybitDataError, BybitPrivateClient, BybitPrivateWebSocketStream, BybitPublicTickerStream, BybitPublicTradeStream, BybitWebSocketTradeClient, _close_ws_client(), _is_rate_limit() (+27 more)
-
-### Community 6 - "Community 6"
 Cohesion: 0.14
 Nodes (62): ResearchConfig, read_dataset(), EventWebSocketRiskConfig, EventWebSocketRiskEngine, test_archive_download_can_build_1m_klines_from_public_trades(), test_rest_kline_download_only_marks_successful_symbols(), test_rest_kline_download_writes_each_symbol_and_resumes(), test_demo_kline_cache_fetches_only_new_hour() (+54 more)
+
+### Community 5 - "Community 5"
+Cohesion: 0.08
+Nodes (63): UniverseConfig, _demo_event_config(), _demo_strategy_id(), EventDemoCycleConfig, EventRiskCycleConfig, _execute_entries(), _normalize_demo_strategy_profile(), order_quantity_for_notional() (+55 more)
+
+### Community 6 - "Community 6"
+Cohesion: 0.06
+Nodes (54): CostConfig, ExchangeConfig, load_config(), _merge_dataclass(), _merge_universe_config(), TradeFlowConfig, _tuple_str(), _archive_filename() (+46 more)
 
 ### Community 7 - "Community 7"
 Cohesion: 0.1
@@ -88,20 +88,20 @@ Cohesion: 0.07
 Nodes (43): _audit_violations(), ChallengerSpec, champion_challenger_specs(), format_champion_challenger_manifest(), run_champion_challenger_audit(), build_parser(), _csv_float(), _csv_int() (+35 more)
 
 ### Community 9 - "Community 9"
+Cohesion: 0.16
+Nodes (17): _age_filter_label(), build_current_universe_table(), _empty_universe_table(), format_universe_report(), run_discover_universe(), _safe_name(), _add_cross_sectional_z(), _add_liquidity_rank() (+9 more)
+
+### Community 10 - "Community 10"
 Cohesion: 0.21
 Nodes (19): _coverage_rows(), _crowded_edge(), _entry_date_expr(), _feature_edge(), _feature_verdict(), FeatureSpec, _filter_split(), _finite_float() (+11 more)
 
-### Community 11 - "Community 11"
-Cohesion: 0.2
-Nodes (1): BybitMarketData
-
 ### Community 12 - "Community 12"
-Cohesion: 0.33
-Nodes (9): audit_crowding_model(), classify_liquidity_migration_crowding(), _crowding_reason_expr(), _entry_hour_expr(), format_crowding_model_report(), _pct(), summarize_crowding_classes(), _with_numeric_columns() (+1 more)
+Cohesion: 0.35
+Nodes (11): _dedupe_recent_klines(), _demo_kline_compact_cache_paths(), _demo_kline_compact_metadata(), _demo_kline_fetch_ranges(), _download_recent_1h_klines(), _empty_klines(), _fetch_recent_1h_klines(), _read_demo_kline_cache() (+3 more)
 
 ### Community 13 - "Community 13"
-Cohesion: 0.36
-Nodes (7): _add_cross_sectional_z(), _add_liquidity_rank(), build_volume_features(), _daily_bars(), _rolling_mean(), _rolling_sum(), test_volume_features_build_daily_liquidity_ranks()
+Cohesion: 0.33
+Nodes (9): audit_crowding_model(), classify_liquidity_migration_crowding(), _crowding_reason_expr(), _entry_hour_expr(), format_crowding_model_report(), _pct(), summarize_crowding_classes(), _with_numeric_columns() (+1 more)
 
 ### Community 16 - "Community 16"
 Cohesion: 1.0
@@ -110,19 +110,17 @@ Nodes (1): Bybit liquidity-migration research package.
 ## Knowledge Gaps
 - **3 isolated node(s):** `ExchangeConfig`, `Bybit liquidity-migration research package.`, `FeatureSpec`
   These have ≤1 connection - possible missing edges or undocumented components.
-- **Thin community `Community 11`** (18 nodes): `BybitMarketData`, `._get()`, `.get_funding_history()`, `.get_index_price_klines()`, `.get_instruments_info()`, `.get_klines()`, `.get_mark_price_klines()`, `.get_open_interest()`, `.get_orderbook()`, `.get_premium_index_klines()`, `._get_price_index_klines()`, `.get_recent_trades()`, `.get_tickers()`, `._paged_time_range()`, `.__post_init__()`, `._record_call()`, `.reset_stats()`, `.stats()`
-  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 16`** (2 nodes): `__init__.py`, `Bybit liquidity-migration research package.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `main()` connect `Community 8` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 9`?**
+- **Why does `main()` connect `Community 8` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 9`, `Community 10`?**
   _High betweenness centrality (0.120) - this node is a cross-community bridge._
-- **Why does `EventWebSocketRiskEngine` connect `Community 6` to `Community 1`, `Community 2`, `Community 5`?**
+- **Why does `EventWebSocketRiskEngine` connect `Community 4` to `Community 1`, `Community 2`, `Community 3`, `Community 5`?**
   _High betweenness centrality (0.067) - this node is a cross-community bridge._
-- **Why does `read_dataset()` connect `Community 6` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 7`, `Community 13`?**
+- **Why does `read_dataset()` connect `Community 4` to `Community 0`, `Community 1`, `Community 2`, `Community 5`, `Community 7`, `Community 9`, `Community 12`?**
   _High betweenness centrality (0.067) - this node is a cross-community bridge._
 - **Are the 59 inferred relationships involving `EventWebSocketRiskEngine` (e.g. with `BybitPrivateClient` and `BybitPrivateWebSocketStream`) actually correct?**
   _`EventWebSocketRiskEngine` has 59 INFERRED edges - model-reasoned connections that need verification._

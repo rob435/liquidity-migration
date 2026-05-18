@@ -166,6 +166,7 @@ class VolumeEventResearchConfig:
     liquidity_migration_crowding_late_turnover_ratio_min: float = 12.0
     liquidity_migration_crowding_weak_market_pct_up_max: float = 0.65
     liquidity_migration_crowding_weak_avg_turnover_share_min: float = 0.50
+    liquidity_migration_signal_last6h_turnover_share_max: float = 1.0
     market_median_return_1d_min: float = -1.0
     market_median_return_1d_max: float = 1.0
     market_pct_up_1d_min: float = 0.0
@@ -1872,6 +1873,8 @@ def _event_filter(
             or config.liquidity_migration_close_location_max < 1.0
         ):
             required_cols.append("signal_day_close_location")
+        if config.liquidity_migration_signal_last6h_turnover_share_max < 1.0:
+            required_cols.append("signal_day_last6h_turnover_share")
         if config.liquidity_migration_pit_age_days_min > 0 or config.liquidity_migration_pit_age_days_max > 0:
             required_cols.append("pit_age_days")
         if not _has_columns(base, *required_cols):
@@ -2068,6 +2071,15 @@ def _event_filter(
                 & pl.col("signal_day_close_location").is_not_null()
                 & (pl.col("signal_day_close_location") >= config.liquidity_migration_close_location_min)
                 & (pl.col("signal_day_close_location") <= config.liquidity_migration_close_location_max)
+            )
+        if config.liquidity_migration_signal_last6h_turnover_share_max < 1.0:
+            predicate = (
+                predicate
+                & pl.col("signal_day_last6h_turnover_share").is_not_null()
+                & (
+                    pl.col("signal_day_last6h_turnover_share")
+                    <= config.liquidity_migration_signal_last6h_turnover_share_max
+                )
             )
         if config.liquidity_migration_pit_age_days_min > 0 or config.liquidity_migration_pit_age_days_max > 0:
             predicate = predicate & pl.col("pit_age_days").is_not_null()

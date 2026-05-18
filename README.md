@@ -43,6 +43,9 @@ The `volume-events` defaults are the selected strategy:
 - Research-only execution variants: `execution_pullback_guard`,
   `tiered_execution_sniper`, and `entry_execution_veto_close_location_max`
   exist for audits, but are not promoted or deployed
+- Research-only late-turnover concentration gate:
+  `--liquidity-migration-signal-last6h-turnover-share-max` exists for audits,
+  defaults disabled, and is not promoted or deployed
 - Exit: event decay, rank exit, 12% fixed stop, 25% fixed take profit, or 3-day max hold
 - Capacity: max 5 active symbols, 5-day symbol cooldown
 - Stop-pressure throttle: pause new entries after 7 realized stops inside 10 days
