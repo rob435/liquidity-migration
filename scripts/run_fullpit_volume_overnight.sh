@@ -183,11 +183,11 @@ if missing:
 PY
 
 EVENT_REPORT_INDEX="$DATA_ROOT/reports/fullpit_volume_event_runs_$(date -u +%Y%m%dT%H%M%SZ).csv"
-echo "run_type,max_active_symbols,cooldown_days,entry_delay_hours,rank_exit_threshold,universe_rank_min,universe_rank_max,liquidity_migration_rank_improvement_min,liquidity_migration_turnover_ratio_min,liquidity_migration_event_rank_fraction_max,liquidity_migration_day_return_min,liquidity_migration_residual_return_min,liquidity_migration_market_pct_up_max,liquidity_migration_hot_market_day_return_min,liquidity_migration_hot_market_day_return_band,liquidity_migration_close_location_min,liquidity_migration_pit_age_days_min,liquidity_migration_crowding_filter,stop_pressure_window_days,stop_pressure_stop_count,realized_loss_pressure_window_days,realized_loss_pressure_loss_count,event_types,thresholds,hold_days,sides,stop_loss_pcts,take_profit_pcts,cost_multipliers,gross_exposure,report_dir" > "$EVENT_REPORT_INDEX"
+echo "run_type,max_active_symbols,cooldown_days,entry_delay_hours,entry_policy,rank_exit_threshold,universe_rank_min,universe_rank_max,liquidity_migration_rank_improvement_min,liquidity_migration_turnover_ratio_min,liquidity_migration_event_rank_fraction_max,liquidity_migration_day_return_min,liquidity_migration_residual_return_min,liquidity_migration_market_pct_up_max,liquidity_migration_hot_market_day_return_min,liquidity_migration_hot_market_day_return_band,liquidity_migration_close_location_min,liquidity_migration_pit_age_days_min,liquidity_migration_crowding_filter,stop_pressure_window_days,stop_pressure_stop_count,realized_loss_pressure_window_days,realized_loss_pressure_loss_count,event_types,thresholds,hold_days,sides,stop_loss_pcts,take_profit_pcts,cost_multipliers,gross_exposure,report_dir" > "$EVENT_REPORT_INDEX"
 
 if [ "$RUN_CHAMPION_BACKTEST" != "0" ]; then
   section "Run selected full PIT volume event backtest"
-  CHAMPION_REPORT_DIR="$DATA_ROOT/reports/SELECTED_liqmig_union_q40_h3_tp25_g100_$(date -u +%Y%m%dT%H%M%SZ)"
+  CHAMPION_REPORT_DIR="$DATA_ROOT/reports/SELECTED_liqmig_union_q40_h3_tp25_g100_qsqueeze_$(date -u +%Y%m%dT%H%M%SZ)"
   python -m aggression_carry \
     --data-root "$DATA_ROOT" \
     --config "$CONFIG_PATH" \
@@ -201,6 +201,7 @@ if [ "$RUN_CHAMPION_BACKTEST" != "0" ]; then
     --cost-multipliers 3 \
     --gross-exposure "$CHAMPION_GROSS_EXPOSURE" \
     --entry-delay-hours 1 \
+    --entry-policy promoted_quality_squeeze \
     --max-active-symbols 5 \
     --cooldown-days 5 \
     --rank-exit-threshold 0.55 \
@@ -225,7 +226,7 @@ if [ "$RUN_CHAMPION_BACKTEST" != "0" ]; then
     --realized-loss-pressure-loss-count 6 \
     --realized-loss-pressure-min-loss-abs 0.0 \
     --report-dir "$CHAMPION_REPORT_DIR"
-  echo "champion,5,5,1,0.55,31,150,150,6.0,0.90,0.0,0.08,0.65,0.16,0.015,0.45,90,union_pathology,10,7,5,6,liquidity_migration,0.4,3,reversal,0.12,0.25,3,$CHAMPION_GROSS_EXPOSURE,$CHAMPION_REPORT_DIR" >> "$EVENT_REPORT_INDEX"
+  echo "champion,5,5,1,promoted_quality_squeeze,0.55,31,150,150,6.0,0.90,0.0,0.08,0.65,0.16,0.015,0.45,90,union_pathology,10,7,5,6,liquidity_migration,0.4,3,reversal,0.12,0.25,3,$CHAMPION_GROSS_EXPOSURE,$CHAMPION_REPORT_DIR" >> "$EVENT_REPORT_INDEX"
 fi
 
 section "Done"

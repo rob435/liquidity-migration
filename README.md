@@ -35,7 +35,7 @@ The `volume-events` defaults are the selected strategy:
 - Strong-close gate: signal-day close location at least 0.45
 - Maturity gate: PIT/listing age at least 90 days
 - Crowding veto: `union_pathology` same-entry-hour pathology filter
-- Entry: 1 hour after the daily signal close
+- Entry policy: `promoted_quality_squeeze`; standard events enter 1 hour after the daily signal close, while promoted-grade squeeze events wait for a causal 25 bps high-since-signal giveback after a 25 bps pop or enter on the 4h deadline
 - Exit: event decay, rank exit, 12% fixed stop, 25% fixed take profit, or 3-day max hold
 - Capacity: max 5 active symbols, 5-day symbol cooldown
 - Stop-pressure throttle: pause new entries after 7 realized stops inside 10 days
@@ -62,21 +62,24 @@ Reference report:
 data/research_reports/research_20260516_promoted_default_after_patch
 ```
 
-Promoted research frontier after the same-hour crowding audit:
+Promoted research frontier after the same-hour crowding audit and conservative
+quality-squeeze entry router:
 
 - Variant: adaptive hot-band liquidity migration with `union_pathology` crowding veto
-- Report: `data/research_reports/frontier_union_crowding_promoted_20260517`
+- Report: `/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md`
 - Trades: 444
-- Total return: +2143.28%
-- Max drawdown: -11.05%
-- Worst 90d return: -4.80%
-- Worst split return: +118.65%
-- Average split Sharpe-like: 3.72
-- OOS return: +186.06%
+- Total return, no funding: +2285.54%
+- Max drawdown, no funding: -11.05%
+- Worst 90d return, no funding: -5.02%
+- Worst split return, no funding: +118.81%
+- OOS return, no funding: +210.35%
+- Total return, funding stress: +1853.99%
+- Max drawdown, funding stress: -13.72%
+- OOS return, funding stress: +175.32%
 
-These promoted frontier metrics are the clean `1.00` gross exposure rescale of
-the existing full-PIT ledger; the event set, exits, cooldowns, and crowding
-decisions are unchanged by the gross cleanup.
+The event set, exits, cooldowns, gross exposure, and crowding decisions are
+unchanged versus the union promoted path; only the causal post-signal entry
+timing changed for promoted-grade squeeze bars.
 
 This remains the promoted research default for `volume-events`. The live demo
 entry service can run a separate higher-frequency observation profile, described
@@ -125,11 +128,11 @@ bash scripts/run_bybit_demo_event_engine.sh
 
 Default forward-test behavior:
 
-- `STRATEGY_PROFILE=observe` is a test-only relaxed-gate profile. It keeps the same short liquidity-migration idea and `union_pathology` crowding veto, but uses ranks 11-260, no extra current 24h turnover floor, 80-rank improvement, 3.0x turnover expansion, -3% day-return floor, +3% residual-return floor, 0.25 close-location floor, 10 max active symbols, and 2-day cooldown.
-- full-PIT funded observation evidence: 1,268 trades, +211.78% total return, -21.34% max drawdown, -18.90% worst 90d, +12.33% worst split, +134.17% OOS, promotion gate pass. Report: `/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/observe_mode_sweep_20260517/observe_c`.
+- `STRATEGY_PROFILE=observe` is a test-only relaxed-gate profile. It keeps the same short liquidity-migration idea, `union_pathology` crowding veto, and conservative `promoted_quality_squeeze` router for promoted-grade events, but uses ranks 11-260, no extra current 24h turnover floor, 80-rank improvement, 3.0x turnover expansion, -3% day-return floor, +3% residual-return floor, 0.25 close-location floor, 10 max active symbols, and 2-day cooldown.
+- full-PIT funded observation evidence: 1,268 trades, +221.29% total return, -21.32% max drawdown, -18.90% worst 90d, +12.36% worst split, +142.92% OOS, promotion gate pass. Report: `/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md`.
 - pulls current Bybit USDT perp ranks 1-300 for observe mode, then applies the selected strategy profile's rank filter
 - rebuilds recent 1h volume features each cycle from a 45-day lookback, using a forward-demo kline cache to fetch only missing/new bars on normal cycles
-- enters eligible events after the 1-hour signal delay, with stale entries skipped after 15 minutes by default
+- enters eligible events through the causal entry router, with stale entries skipped after 15 minutes by default
 - sizes each coin from the backtest weight: `gross_exposure / max_active_symbols`, currently `1.00 / 10 = 10.00%` of current Bybit demo USDT equity in observe mode
 - uses 2x entry leverage in the continuous runner for margin headroom without changing the notional sizing
 - exits first on every cycle using fixed stop reconciliation, event decay, rank exit, or 3-day max hold

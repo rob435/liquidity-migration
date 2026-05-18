@@ -185,11 +185,11 @@ if missing:
     Invoke-Checked $VenvPython @($ValidationFile)
 
     $EventReportIndex = Join-Path (Join-Path $DataRoot "reports") ("fullpit_volume_event_runs_{0}.csv" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
-    Set-Content -Path $EventReportIndex -Value "run_type,max_active_symbols,cooldown_days,entry_delay_hours,rank_exit_threshold,universe_rank_min,universe_rank_max,liquidity_migration_rank_improvement_min,liquidity_migration_turnover_ratio_min,liquidity_migration_event_rank_fraction_max,liquidity_migration_day_return_min,liquidity_migration_residual_return_min,liquidity_migration_market_pct_up_max,liquidity_migration_hot_market_day_return_min,liquidity_migration_hot_market_day_return_band,liquidity_migration_close_location_min,liquidity_migration_pit_age_days_min,liquidity_migration_crowding_filter,stop_pressure_window_days,stop_pressure_stop_count,realized_loss_pressure_window_days,realized_loss_pressure_loss_count,event_types,thresholds,hold_days,sides,stop_loss_pcts,take_profit_pcts,cost_multipliers,gross_exposure,report_dir" -Encoding UTF8
+    Set-Content -Path $EventReportIndex -Value "run_type,max_active_symbols,cooldown_days,entry_delay_hours,entry_policy,rank_exit_threshold,universe_rank_min,universe_rank_max,liquidity_migration_rank_improvement_min,liquidity_migration_turnover_ratio_min,liquidity_migration_event_rank_fraction_max,liquidity_migration_day_return_min,liquidity_migration_residual_return_min,liquidity_migration_market_pct_up_max,liquidity_migration_hot_market_day_return_min,liquidity_migration_hot_market_day_return_band,liquidity_migration_close_location_min,liquidity_migration_pit_age_days_min,liquidity_migration_crowding_filter,stop_pressure_window_days,stop_pressure_stop_count,realized_loss_pressure_window_days,realized_loss_pressure_loss_count,event_types,thresholds,hold_days,sides,stop_loss_pcts,take_profit_pcts,cost_multipliers,gross_exposure,report_dir" -Encoding UTF8
 
     if ($RunChampionBacktest) {
         Section "Run selected full PIT volume event backtest"
-        $ChampionReportDir = Join-Path (Join-Path $DataRoot "reports") ("SELECTED_liqmig_union_q40_h3_tp25_g100_{0}" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
+        $ChampionReportDir = Join-Path (Join-Path $DataRoot "reports") ("SELECTED_liqmig_union_q40_h3_tp25_g100_qsqueeze_{0}" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
         Invoke-Checked $VenvPython @(
             "-m", "aggression_carry",
             "--data-root", $DataRoot,
@@ -204,6 +204,7 @@ if missing:
             "--cost-multipliers", "3",
             "--gross-exposure", "$ChampionGrossExposure",
             "--entry-delay-hours", "1",
+            "--entry-policy", "promoted_quality_squeeze",
             "--max-active-symbols", "5",
             "--cooldown-days", "5",
             "--rank-exit-threshold", "0.55",
@@ -229,7 +230,7 @@ if missing:
             "--realized-loss-pressure-min-loss-abs", "0.0",
             "--report-dir", $ChampionReportDir
         )
-        Add-Content -Path $EventReportIndex -Value "champion,5,5,1,0.55,31,150,150,6.0,0.90,0.0,0.08,0.65,0.16,0.015,0.45,90,union_pathology,10,7,5,6,liquidity_migration,0.4,3,reversal,0.12,0.25,3,$ChampionGrossExposure,$ChampionReportDir"
+        Add-Content -Path $EventReportIndex -Value "champion,5,5,1,promoted_quality_squeeze,0.55,31,150,150,6.0,0.90,0.0,0.08,0.65,0.16,0.015,0.45,90,union_pathology,10,7,5,6,liquidity_migration,0.4,3,reversal,0.12,0.25,3,$ChampionGrossExposure,$ChampionReportDir"
     }
 
     Section "Done"

@@ -29,8 +29,10 @@ position reconciliation, or position-report errors. Quiet no-trade cycles still
 write local reports but must not notify. The services submit demo orders only.
 The entry service currently uses `STRATEGY_PROFILE=observe`, a higher-frequency
 test-only profile with separate full-PIT evidence in `docs/system_status.md`.
-It is not the promoted research default. The risk service does not open entries;
-it repairs exchange-native stop/TP state, listens to
+It shares the promoted strategy's conservative `promoted_quality_squeeze` entry
+router for promoted-grade events but keeps relaxed observe-only gates for
+forward plumbing visibility. It is not the promoted research default. The risk
+service does not open entries; it repairs exchange-native stop/TP state, listens to
 demo private WebSocket position/order/execution streams plus the mainnet public
 ticker stream, and submits reduce-only exits. On the demo account, WebSocket
 decides exits while REST remains the order-submit fallback because Bybit

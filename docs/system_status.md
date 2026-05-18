@@ -1,12 +1,13 @@
 # System Status
 
-Current as of 2026-05-17.
+Current as of 2026-05-18.
 
 ## Active System
 
 - Research default: full-PIT liquidity-migration short, `union_pathology` crowding veto.
-- Promoted research strategy id: `liqmig_union_q40_h3_tp25_g100_crowd_union`.
-- Live demo entry profile: `observe`, strategy id `observe_liqmig_q40_h3_tp25_g100_relaxed`.
+- Entry policy: `promoted_quality_squeeze` conservative router.
+- Promoted research strategy id: `liqmig_union_q40_h3_tp25_g100_qsqueeze`.
+- Live demo entry profile: `observe`, strategy id `observe_liqmig_q40_h3_tp25_g100_relaxed_qsqueeze`.
 - Gross exposure: `1.00`, split across `10` max active symbols in observe mode.
 - Per-entry target: `10.00%` of current Bybit demo USDT equity in observe mode.
 - Entry service: `model050426-bybit-demo.service`.
@@ -19,24 +20,28 @@ Current as of 2026-05-17.
 Promoted report:
 
 ```text
-data/research_reports/frontier_union_crowding_promoted_20260517
+/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md
 ```
 
-Full-PIT result on `2023-05-03` to `2026-05-03`:
+Full-PIT exact-stop, 3x-cost, no-funding result on `2023-05-03` to `2026-05-03`:
 
 ```text
 trades: 444
-total return: +2143.28%
+total return: +2285.54%
 max drawdown: -11.05%
 max no-new-high stretch: 51 days
-worst 90d return: -4.80%
-worst split return: +118.65%
-average split Sharpe-like: 3.72
-OOS return: +186.06%
+worst 90d return: -5.02%
+worst split return: +118.81%
+average split Sharpe-like: 3.78
+OOS return: +210.35%
 promotion gate: pass
 ```
 
-This is a `1.00` gross exposure rescale of the promoted full-PIT ledger. Candidate selection, exits, cooldowns, and crowding decisions are unchanged by the gross cleanup.
+Funding stress on the same conservative router produced 444 trades, +1853.99%
+total return, -13.72% max drawdown, -6.29% worst 90d, +122.17% worst split,
+and +175.32% OOS. Candidate selection, exits, cooldowns, gross exposure, and
+crowding decisions are unchanged; only entry timing for promoted-grade squeeze
+bars changed.
 
 ## Observe-Mode Evidence
 
@@ -44,24 +49,26 @@ The active VPS entry service is intentionally configured for a higher-frequency
 demo-only observation profile. This profile is not the promoted research
 default. It lowers the entry gates while keeping the same short
 liquidity-migration premise, fixed exits, stop/loss throttles, and
-`union_pathology` same-hour crowding veto.
+`union_pathology` same-hour crowding veto. It uses the same conservative
+`promoted_quality_squeeze` router for promoted-grade events and normal 1h entry
+for lower-tier observe-only events.
 
-Full-PIT funded report:
+Full-PIT funded stress report:
 
 ```text
-/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/observe_mode_sweep_20260517/observe_c
+/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md
 ```
 
 ```text
 trades: 1268
 candidate events: 1603
-total return: +211.78%
-max drawdown: -21.34%
+total return: +221.29%
+max drawdown: -21.32%
 worst 90d return: -18.90%
-train return: +12.33%
-validation return: +17.84%
-OOS return: +134.17%
-average split Sharpe-like: 1.02
+train return: +12.36%
+validation return: +17.02%
+OOS return: +142.92%
+average split Sharpe-like: 1.04
 promotion gate: pass
 ```
 

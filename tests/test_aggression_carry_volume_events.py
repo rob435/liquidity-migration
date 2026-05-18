@@ -9,8 +9,10 @@ from aggression_carry.config import TradeLifecycleConfig
 from aggression_carry.ingestion import generate_fixture_data
 from aggression_carry.trade_lifecycle import _funding_lookup, _perp_funding_return
 from aggression_carry.volume_events import (
+    ENTRY_POLICY_FIXED_DELAY,
     _attach_event_archive_membership,
     _daily_return_frame,
+    _entry_decision_for_event,
     _event_decay_exit_hit,
     _event_filter,
     _execution_ordered_events,
@@ -143,6 +145,75 @@ def test_bar_extreme_stop_fill_uses_adverse_hourly_extreme_for_short() -> None:
     assert normal["exit_price"] == pytest.approx(112.0)
     assert stressed["exit_price"] == pytest.approx(130.0)
     assert stressed["gross_trade_return"] == pytest.approx(-0.30)
+
+
+def test_promoted_quality_entry_waits_for_completed_giveback() -> None:
+    hour = 60 * 60 * 1000
+    symbol_bars = {
+        "rows": [],
+        "ends": [0, hour, 2 * hour, 3 * hour],
+        "by_end": {
+            0: {"bar_end_ts_ms": 0, "high": 101.0, "low": 99.0, "close": 100.0},
+            hour: {"bar_end_ts_ms": hour, "high": 101.2, "low": 100.0, "close": 101.1},
+            2 * hour: {"bar_end_ts_ms": 2 * hour, "high": 101.6, "low": 101.0, "close": 101.5},
+            3 * hour: {"bar_end_ts_ms": 3 * hour, "high": 101.6, "low": 100.9, "close": 101.1},
+        },
+    }
+    event = {
+        "ts_ms": 0,
+        "symbol": "AAAUSDT",
+        "dollar_volume_rank_z_rank_frac": 0.85,
+        "liquidity_rank": 50,
+        "prior7_liquidity_rank": 225,
+        "turnover_quote": 7_000_000.0,
+        "prior7_turnover_quote_mean": 1_000_000.0,
+        "daily_return_1d": 0.02,
+        "residual_return_1d": 0.09,
+        "market_pct_up_1d": 0.55,
+        "signal_day_close_location": 0.70,
+        "pit_age_days": 120.0,
+    }
+
+    pending = _entry_decision_for_event(
+        event,
+        symbol_bars,
+        config=VolumeEventResearchConfig(),
+        score_col="dollar_volume_rank_z",
+        now_ms=2 * hour + 30_000,
+    )
+    ready = _entry_decision_for_event(
+        event,
+        symbol_bars,
+        config=VolumeEventResearchConfig(),
+        score_col="dollar_volume_rank_z",
+        now_ms=3 * hour + 30_000,
+    )
+
+    assert pending["pending"] is True
+    assert ready["entry_ts_ms"] == 3 * hour
+    assert ready["entry_rule"] == "quality_squeeze_giveback"
+    assert ready["actual_entry_delay_hours"] == pytest.approx(3.0)
+
+
+def test_fixed_entry_policy_keeps_plain_delay() -> None:
+    hour = 60 * 60 * 1000
+    symbol_bars = {
+        "rows": [],
+        "ends": [hour],
+        "by_end": {hour: {"bar_end_ts_ms": hour, "high": 101.0, "low": 99.0, "close": 100.0}},
+    }
+
+    decision = _entry_decision_for_event(
+        {"ts_ms": 0, "symbol": "AAAUSDT"},
+        symbol_bars,
+        config=VolumeEventResearchConfig(entry_policy=ENTRY_POLICY_FIXED_DELAY),
+        score_col="dollar_volume_rank_z",
+        now_ms=hour + 1,
+    )
+
+    assert decision["entry_policy"] == ENTRY_POLICY_FIXED_DELAY
+    assert decision["entry_ts_ms"] == hour
+    assert decision["entry_bar"]["close"] == 100.0
 
 
 def test_funding_lookup_marks_symbol_or_date_gaps_as_missing_or_partial() -> None:
@@ -335,6 +406,15 @@ def test_event_filter_excludes_default_stable_and_peg_symbols() -> None:
 def test_volume_event_config_validates_new_research_knobs() -> None:
     with pytest.raises(ValueError, match="entry_delay_hours"):
         _validate_event_config(VolumeEventResearchConfig(entry_delay_hours=-1))
+
+    with pytest.raises(ValueError, match="entry_policy"):
+        _validate_event_config(VolumeEventResearchConfig(entry_policy="bad_policy"))
+
+    with pytest.raises(ValueError, match="entry_quality_squeeze_h1_close_location_min"):
+        _validate_event_config(VolumeEventResearchConfig(entry_quality_squeeze_h1_close_location_min=1.1))
+
+    with pytest.raises(ValueError, match="entry_quality_squeeze_wait_hours"):
+        _validate_event_config(VolumeEventResearchConfig(entry_quality_squeeze_wait_hours=0))
 
     with pytest.raises(ValueError, match="rank_exit_threshold"):
         _validate_event_config(VolumeEventResearchConfig(rank_exit_threshold=0.0))

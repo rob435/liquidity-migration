@@ -112,7 +112,7 @@ signal timestamp:
   daily close after all inputs are known
 
 entry:
-  next available 1h bar after signal close, or configured delay
+  next available 1h bar after signal close, or configured causal entry router
   no duplicate entry while symbol already has exposure
 
 side:
@@ -209,11 +209,11 @@ the active workflow. New ideas should be run as named, foreground
 `volume-events` commands with explicit event families, parameters, and report
 directories.
 
-`volume-events` also exposes research controls for entry delay, rank-decay exit
-threshold, global liquidity filters, tail-liquidity rank bounds, rank
-improvement, absorption move caps, dry-up quiet-regime filters, and exhaustion
-day-return thresholds. Use these to test whether an edge is immediate, delayed,
-concentrated in tails, or only an exhaustion artifact.
+`volume-events` also exposes research controls for entry delay, entry policy,
+rank-decay exit threshold, global liquidity filters, tail-liquidity rank bounds,
+rank improvement, absorption move caps, dry-up quiet-regime filters, and
+exhaustion day-return thresholds. Use these to test whether an edge is
+immediate, delayed, concentrated in tails, or only an exhaustion artifact.
 
 Full PIT data build for event research:
 
@@ -292,7 +292,9 @@ service intentionally overrides this to `INTERVAL_SECONDS=60` and
 test system: rank 11-260, 80-rank improvement, 3.0 turnover ratio, -3% day-return
 floor, +3% residual-return floor, 0.25 close-location floor, no extra current
 24h turnover floor, 10 max active symbols, 2-day cooldown, and the
-`union_pathology` crowding veto still enabled.
+`union_pathology` crowding veto still enabled. It uses the same conservative
+`promoted_quality_squeeze` entry router for promoted-grade events and keeps the
+normal 1h entry for lower-tier observe-only events.
 It sizes each accepted coin from the backtest weight (`gross_exposure /
 max_active_symbols`, currently 10.00% of current Bybit demo USDT equity), exits
 before entries, sends Telegram only for material events when enabled, and records
@@ -307,10 +309,11 @@ rather than trusting the ledger alone or sizing from stale equity.
 Position and wallet snapshot failures during open-trade handling are surfaced
 in the cycle report and keep the cycle alive, so an outage cannot crash exits,
 report writing, or the entry guard.
-Observe-mode full-PIT funded evidence on 2023-05-03 to 2026-05-03: 1,268 trades,
-+211.78% total return, -21.34% max drawdown, -18.90% worst 90d, +12.33% worst
-split, +134.17% OOS, and promotion gate pass. Report:
-`/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/observe_mode_sweep_20260517/observe_c`.
+Observe-mode full-PIT funded evidence on 2023-05-03 to 2026-05-03 with the
+conservative entry router: 1,268 trades, +221.29% total return, -21.32% max
+drawdown, -18.90% worst 90d, +12.36% worst split, +142.92% OOS, and promotion
+gate pass. Stress report:
+`/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md`.
 Recent 1h bars are cached in `event_demo_klines_1h`, keeping the forward-demo
 cache separate from the full-PIT research `klines_1h` dataset.
 Entry orders attach native stop/TP immediately, then confirmed fills recompute
@@ -422,7 +425,9 @@ filters:
   signal-day close location >= 0.45
   PIT/listing age >= 90 days
   union_pathology crowding veto
-entry delay: 1 hour after signal close
+entry policy: promoted_quality_squeeze
+standard entry: 1 hour after signal close
+promoted-grade squeeze entry: if the first completed 1h post-signal bar is up >= 50 bps from signal close and closes >= 0.85 inside its own high-low range, wait for a 25 bps high-since-signal giveback after at least a 25 bps pop, otherwise enter on the 4h deadline
 hold: 3 days max
 stop: 12% fixed
 take profit: 25% fixed
@@ -449,6 +454,12 @@ python -m aggression_carry \
   --take-profit-pcts 0.25 \
   --cost-multipliers 3 \
   --entry-delay-hours 1 \
+  --entry-policy promoted_quality_squeeze \
+  --entry-quality-squeeze-h1-return-bps 50 \
+  --entry-quality-squeeze-h1-close-location-min 0.85 \
+  --entry-quality-squeeze-pop-bps 25 \
+  --entry-quality-squeeze-giveback-bps 25 \
+  --entry-quality-squeeze-wait-hours 4 \
   --gross-exposure 1.0 \
   --max-active-symbols 5 \
   --cooldown-days 5 \
@@ -477,17 +488,17 @@ python -m aggression_carry \
 Promoted frontier result on `2023-05-03` to `2026-05-03`:
 
 ```text
-report: data/research_reports/frontier_union_crowding_promoted_20260517
+report: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md
 trades: 444
-total return: +2143.28%
+total return: +2285.54%
 max drawdown: -11.05%
 max no-new-high stretch: 51 days
-worst 90d return: -4.80%
-worst split return: +118.65%
-average split Sharpe-like: 3.72
-train return: +118.65%
-validation return: +258.65%
-OOS return: +186.06%
+worst 90d return: -5.02%
+worst split return: +118.81%
+average split Sharpe-like: 3.77
+train return: +118.81%
+validation return: +251.29%
+OOS return: +210.35%
 default chart: volume_event_best_equity_btc.png with BTC overlay and monthly/growth gridlines
 promotion gate: pass
 ```

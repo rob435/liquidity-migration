@@ -25,9 +25,11 @@ from .volume_events import (
     EventScenario,
     VolumeEventResearchConfig,
     _enriched_event_features,
+    _entry_decision_for_event,
     _event_decay_exit_hit,
     _event_score,
     _execution_ordered_events,
+    _indexed_price_bars_by_symbol,
     _rank_lookup_cache,
     _realized_loss_pressure_active,
     _scenario_side,
@@ -38,8 +40,8 @@ from .volume_events import (
 
 
 MS_PER_MINUTE = 60_000
-PROMOTED_DEMO_STRATEGY_ID = "liqmig_union_q40_h3_tp25_g100_crowd_union"
-OBSERVE_DEMO_STRATEGY_ID = "observe_liqmig_q40_h3_tp25_g100_relaxed"
+PROMOTED_DEMO_STRATEGY_ID = "liqmig_union_q40_h3_tp25_g100_qsqueeze"
+OBSERVE_DEMO_STRATEGY_ID = "observe_liqmig_q40_h3_tp25_g100_relaxed_qsqueeze"
 DEMO_STRATEGY_PROFILES = ("promoted", "observe")
 PENDING_ORDER_STATUSES = {"submitted", "submitted_unconfirmed", "partial", "fallback_market"}
 PENDING_ORDER_GUARD_MS = 15 * MS_PER_MINUTE
@@ -139,6 +141,7 @@ def run_event_demo_cycle(
         order_notional_pct_equity = target_order_notional_pct_equity(demo, strategy)
         order_initial_margin_pct_equity = target_initial_margin_pct_equity(demo, strategy)
         rank_lookup = _rank_lookup_cache(features, config=strategy).get(score_col, {})
+        entry_bars_by_symbol = _indexed_price_bars_by_symbol(klines)
         price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, klines)
         contract_by_symbol = _contract_lookup(universe)
         all_trades = read_dataset(root, "event_demo_trades")
@@ -239,6 +242,7 @@ def run_event_demo_cycle(
             scenario=scenario,
             max_entry_lag_minutes=demo.max_entry_lag_minutes,
             max_new_entries=demo.max_new_entries_per_cycle,
+            entry_bars_by_symbol=entry_bars_by_symbol,
         )
         free_slots = max(int(strategy.max_active_symbols) - refreshed_open.height, 0)
         entry_candidates = entry_candidates[:free_slots]
@@ -588,6 +592,7 @@ def select_demo_entry_candidates(
     scenario: EventScenario,
     max_entry_lag_minutes: int,
     max_new_entries: int,
+    entry_bars_by_symbol: dict[str, dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     score_name, score_col = _event_score(scenario.event_type)
     events = _select_events(features, scenario=scenario, config=config, score_col=score_col)
@@ -604,7 +609,32 @@ def select_demo_entry_candidates(
 
     for event in _execution_ordered_events(events).to_dicts():
         signal_ts_ms = int(event["ts_ms"])
-        ready_ts_ms = signal_ts_ms + config.entry_delay_hours * MS_PER_HOUR
+        symbol = str(event["symbol"])
+        symbol_bars = (entry_bars_by_symbol or {}).get(symbol)
+        if symbol_bars is not None:
+            entry_decision = _entry_decision_for_event(
+                event,
+                symbol_bars,
+                config=config,
+                score_col=score_col,
+                now_ms=now_ms,
+            )
+            ready_ts_ms = int(entry_decision["entry_ready_ts_ms"])
+            if bool(entry_decision.get("pending")):
+                skips["not_ready"] += 1
+                continue
+            if entry_decision.get("entry_bar") is None:
+                skips["no_entry_bar"] += 1
+                continue
+        else:
+            ready_ts_ms = signal_ts_ms + config.entry_delay_hours * MS_PER_HOUR
+            entry_decision = {
+                "entry_ready_ts_ms": ready_ts_ms,
+                "entry_policy": config.entry_policy,
+                "entry_rule": "fixed_delay_no_entry_bars",
+                "entry_quality_tier": "unknown",
+                "actual_entry_delay_hours": (ready_ts_ms - signal_ts_ms) / MS_PER_HOUR,
+            }
         if ready_ts_ms > now_ms:
             skips["not_ready"] += 1
             continue
@@ -617,7 +647,6 @@ def select_demo_entry_candidates(
         if _realized_loss_pressure_active(realized_loss_exit_ts, signal_ts_ms=signal_ts_ms, config=config):
             skips["realized_loss_pressure"] += 1
             continue
-        symbol = str(event["symbol"])
         trade_id = _trade_id(scenario, symbol=symbol, signal_ts_ms=signal_ts_ms)
         if trade_id in existing_ids:
             skips["already_traded"] += 1
@@ -646,6 +675,10 @@ def select_demo_entry_candidates(
                 "signal_ts_ms": signal_ts_ms,
                 "entry_ready_ts_ms": ready_ts_ms,
                 "planned_exit_ts_ms": ready_ts_ms + scenario.hold_days * MS_PER_DAY,
+                "entry_policy": str(entry_decision.get("entry_policy", config.entry_policy)),
+                "entry_rule": str(entry_decision.get("entry_rule", "")),
+                "entry_quality_tier": str(entry_decision.get("entry_quality_tier", "")),
+                "actual_entry_delay_hours": _float(entry_decision.get("actual_entry_delay_hours")),
                 "score_name": score_name,
                 "score": _float(event.get(score_col)),
                 "event_rank": int(event.get("event_rank", 0) or 0),
@@ -1618,6 +1651,10 @@ def _execute_entries(
                 "status": order_status,
                 "trade_side": side,
                 "signal_ts_ms": int(candidate["signal_ts_ms"]),
+                "entry_ready_ts_ms": int(candidate.get("entry_ready_ts_ms") or 0),
+                "entry_policy": str(candidate.get("entry_policy", "")),
+                "entry_rule": str(candidate.get("entry_rule", "")),
+                "entry_quality_tier": str(candidate.get("entry_quality_tier", "")),
                 "equity_usdt": equity_usdt,
                 "tick_size": tick_size,
                 "qty_step": qty_step,
@@ -3320,6 +3357,7 @@ def _empty_skip_counts() -> dict[str, int]:
         "already_traded": 0,
         "active_symbol": 0,
         "cooldown": 0,
+        "no_entry_bar": 0,
     }
 
 

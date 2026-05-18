@@ -187,7 +187,18 @@ def _patch_minimal_event_cycle(monkeypatch: pytest.MonkeyPatch, candidate: dict[
     monkeypatch.setattr(
         "aggression_carry.event_demo._download_recent_1h_klines",
         lambda *args, **kwargs: (
-            pl.DataFrame([{"symbol": "AAAUSDT", "ts_ms": 1_700_000_000_000, "close": 100.0}]),
+            pl.DataFrame(
+                [
+                    {
+                        "symbol": "AAAUSDT",
+                        "ts_ms": 1_700_000_000_000,
+                        "open": 100.0,
+                        "high": 101.0,
+                        "low": 99.0,
+                        "close": 100.0,
+                    }
+                ]
+            ),
             {"cache_rows": 0, "cache_symbols": 0, "fetch_symbols": 0, "fetched_rows": 0, "output_rows": 1},
         ),
     )
@@ -1243,6 +1254,103 @@ def test_select_demo_entry_candidates_uses_selected_liquidity_migration_filters(
     assert candidates[0]["stop_loss_pct"] == 0.12
     assert candidates[0]["take_profit_pct"] == 0.20
     assert skips["not_ready"] == 0
+
+
+def test_select_demo_entry_candidates_waits_for_quality_squeeze_giveback() -> None:
+    signal_ts = 1_700_000_000_000
+    hour = MS_PER_HOUR
+    scenario = EventScenario(
+        event_type="liquidity_migration",
+        threshold=0.40,
+        side_hypothesis="reversal",
+        hold_days=3,
+        stop_loss_pct=0.12,
+        cost_multiplier=3.0,
+        take_profit_pct=0.25,
+    )
+    config = VolumeEventResearchConfig(
+        require_pit_membership=False,
+        require_full_pit_universe=False,
+        liquidity_migration_crowding_filter="none",
+    )
+    features = pl.DataFrame(
+        [
+            {
+                "ts_ms": signal_ts,
+                "symbol": "AAAUSDT",
+                "dollar_volume_rank_z": 3.0,
+                "dollar_volume_rank_z_rank_frac": 0.85,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 50,
+                "prior7_liquidity_rank": 225,
+                "turnover_quote": 7_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "daily_return_1d": 0.02,
+                "residual_return_1d": 0.09,
+                "market_pct_up_1d": 0.55,
+                "signal_day_close_location": 0.70,
+                "pit_age_days": 120.0,
+                "tradable_membership_flag": False,
+            }
+        ]
+    )
+    bars = {
+        "AAAUSDT": {
+            "rows": [],
+            "ends": [signal_ts, signal_ts + hour, signal_ts + 2 * hour, signal_ts + 3 * hour],
+            "by_end": {
+                signal_ts: {"bar_end_ts_ms": signal_ts, "high": 101.0, "low": 99.0, "close": 100.0},
+                signal_ts + hour: {
+                    "bar_end_ts_ms": signal_ts + hour,
+                    "high": 101.2,
+                    "low": 100.0,
+                    "close": 101.1,
+                },
+                signal_ts + 2 * hour: {
+                    "bar_end_ts_ms": signal_ts + 2 * hour,
+                    "high": 101.6,
+                    "low": 101.0,
+                    "close": 101.5,
+                },
+                signal_ts + 3 * hour: {
+                    "bar_end_ts_ms": signal_ts + 3 * hour,
+                    "high": 101.6,
+                    "low": 100.9,
+                    "close": 101.1,
+                },
+            },
+        }
+    }
+
+    pending_candidates, pending_skips = select_demo_entry_candidates(
+        features,
+        pl.DataFrame(),
+        now_ms=signal_ts + 2 * hour + 30_000,
+        config=config,
+        scenario=scenario,
+        max_entry_lag_minutes=240,
+        max_new_entries=6,
+        entry_bars_by_symbol=bars,
+    )
+    ready_candidates, ready_skips = select_demo_entry_candidates(
+        features,
+        pl.DataFrame(),
+        now_ms=signal_ts + 3 * hour + 30_000,
+        config=config,
+        scenario=scenario,
+        max_entry_lag_minutes=240,
+        max_new_entries=6,
+        entry_bars_by_symbol=bars,
+    )
+
+    assert pending_candidates == []
+    assert pending_skips["not_ready"] == 1
+    assert ready_skips["not_ready"] == 0
+    assert len(ready_candidates) == 1
+    assert ready_candidates[0]["entry_ready_ts_ms"] == signal_ts + 3 * hour
+    assert ready_candidates[0]["entry_rule"] == "quality_squeeze_giveback"
+    assert ready_candidates[0]["entry_quality_tier"] == "promoted_quality"
+    assert ready_candidates[0]["actual_entry_delay_hours"] == 3.0
 
 
 def test_plan_demo_exits_detects_rank_decay_before_max_hold() -> None:

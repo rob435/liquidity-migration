@@ -110,6 +110,12 @@ def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Pa
     assert args.cost_multipliers == "3.0"
     assert args.gross_exposure == 1.0
     assert args.entry_delay_hours == 1
+    assert args.entry_policy == "promoted_quality_squeeze"
+    assert args.entry_quality_squeeze_h1_return_bps == 50.0
+    assert args.entry_quality_squeeze_h1_close_location_min == 0.85
+    assert args.entry_quality_squeeze_pop_bps == 25.0
+    assert args.entry_quality_squeeze_giveback_bps == 25.0
+    assert args.entry_quality_squeeze_wait_hours == 4
     assert args.max_active_symbols == 5
     assert args.cooldown_days == 5
     assert args.rank_exit_threshold == 0.55
@@ -225,6 +231,18 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
             "0.5",
             "--entry-delay-hours",
             "6",
+            "--entry-policy",
+            "fixed_delay",
+            "--entry-quality-squeeze-h1-return-bps",
+            "75",
+            "--entry-quality-squeeze-h1-close-location-min",
+            "0.9",
+            "--entry-quality-squeeze-pop-bps",
+            "35",
+            "--entry-quality-squeeze-giveback-bps",
+            "45",
+            "--entry-quality-squeeze-wait-hours",
+            "5",
             "--max-active-symbols",
             "8",
             "--cooldown-days",
@@ -308,6 +326,12 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
     assert args.take_profit_pcts == "0,0.2"
     assert args.gross_exposure == 0.5
     assert args.entry_delay_hours == 6
+    assert args.entry_policy == "fixed_delay"
+    assert args.entry_quality_squeeze_h1_return_bps == 75
+    assert args.entry_quality_squeeze_h1_close_location_min == 0.9
+    assert args.entry_quality_squeeze_pop_bps == 35
+    assert args.entry_quality_squeeze_giveback_bps == 45
+    assert args.entry_quality_squeeze_wait_hours == 5
     assert args.max_active_symbols == 8
     assert args.cooldown_days == 2
     assert args.rank_exit_threshold == 0.6

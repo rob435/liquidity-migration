@@ -25,7 +25,7 @@ from .event_demo import (
 )
 from .ingestion import generate_fixture_data
 from .universe import run_discover_universe
-from .volume_events import VolumeEventResearchConfig, run_volume_event_research
+from .volume_events import ENTRY_POLICIES, VolumeEventResearchConfig, run_volume_event_research
 from .ws_risk import EventWebSocketRiskConfig, run_event_ws_risk
 
 
@@ -251,6 +251,37 @@ def build_parser() -> argparse.ArgumentParser:
     volume_events.add_argument("--start", default="", help="Inclusive UTC signal start date/timestamp.")
     volume_events.add_argument("--end", default="", help="Exclusive UTC signal end date/timestamp.")
     volume_events.add_argument("--entry-delay-hours", type=int, default=event_defaults.entry_delay_hours, help="Hours after signal close before entry.")
+    volume_events.add_argument(
+        "--entry-policy",
+        default=event_defaults.entry_policy,
+        choices=ENTRY_POLICIES,
+        help="Entry timing policy. promoted_quality_squeeze delays promoted-grade squeeze bars for a causal giveback/deadline.",
+    )
+    volume_events.add_argument(
+        "--entry-quality-squeeze-h1-return-bps",
+        type=float,
+        default=event_defaults.entry_quality_squeeze_h1_return_bps,
+    )
+    volume_events.add_argument(
+        "--entry-quality-squeeze-h1-close-location-min",
+        type=float,
+        default=event_defaults.entry_quality_squeeze_h1_close_location_min,
+    )
+    volume_events.add_argument(
+        "--entry-quality-squeeze-pop-bps",
+        type=float,
+        default=event_defaults.entry_quality_squeeze_pop_bps,
+    )
+    volume_events.add_argument(
+        "--entry-quality-squeeze-giveback-bps",
+        type=float,
+        default=event_defaults.entry_quality_squeeze_giveback_bps,
+    )
+    volume_events.add_argument(
+        "--entry-quality-squeeze-wait-hours",
+        type=int,
+        default=event_defaults.entry_quality_squeeze_wait_hours,
+    )
     volume_events.add_argument("--gross-exposure", type=float, default=event_defaults.gross_exposure, help="Portfolio gross exposure cap, e.g. 0.5.")
     volume_events.add_argument("--max-active-symbols", type=int, default=event_defaults.max_active_symbols)
     volume_events.add_argument("--cooldown-days", type=int, default=event_defaults.cooldown_days)
@@ -1255,6 +1286,12 @@ def main(argv: list[str] | None = None) -> int:
             start_date=args.start,
             end_date=args.end,
             entry_delay_hours=args.entry_delay_hours,
+            entry_policy=args.entry_policy,
+            entry_quality_squeeze_h1_return_bps=args.entry_quality_squeeze_h1_return_bps,
+            entry_quality_squeeze_h1_close_location_min=args.entry_quality_squeeze_h1_close_location_min,
+            entry_quality_squeeze_pop_bps=args.entry_quality_squeeze_pop_bps,
+            entry_quality_squeeze_giveback_bps=args.entry_quality_squeeze_giveback_bps,
+            entry_quality_squeeze_wait_hours=args.entry_quality_squeeze_wait_hours,
             gross_exposure=args.gross_exposure,
             max_active_symbols=args.max_active_symbols,
             cooldown_days=args.cooldown_days,

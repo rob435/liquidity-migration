@@ -53,6 +53,9 @@ EVENT_TYPES = (
 )
 SIDE_HYPOTHESES = ("continuation", "reversal")
 LIQUIDITY_MIGRATION_CROWDING_FILTERS = ("none", "union_pathology")
+ENTRY_POLICY_FIXED_DELAY = "fixed_delay"
+ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE = "promoted_quality_squeeze"
+ENTRY_POLICIES = (ENTRY_POLICY_FIXED_DELAY, ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE)
 SPLITS = (
     ("train_2023_2024", "2023-05-03", "2024-05-03"),
     ("validation_2024_2025", "2024-05-03", "2025-05-03"),
@@ -75,6 +78,12 @@ class VolumeEventResearchConfig:
     start_date: str = ""
     end_date: str = ""
     entry_delay_hours: int = 1
+    entry_policy: str = ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE
+    entry_quality_squeeze_h1_return_bps: float = 50.0
+    entry_quality_squeeze_h1_close_location_min: float = 0.85
+    entry_quality_squeeze_pop_bps: float = 25.0
+    entry_quality_squeeze_giveback_bps: float = 25.0
+    entry_quality_squeeze_wait_hours: int = 4
     gross_exposure: float = 1.0
     max_active_symbols: int = 5
     cooldown_days: int = 5
@@ -449,16 +458,17 @@ def _run_event_scenario(
         if len(active_until) >= config.max_active_symbols:
             skipped_capacity += 1
             continue
-        entry_ts_ms = signal_ts_ms + config.entry_delay_hours * MS_PER_HOUR
-        planned_exit_ts_ms = entry_ts_ms + scenario.hold_days * MS_PER_DAY
         symbol_bars = bars.get(symbol)
         if symbol_bars is None:
             skipped_no_entry += 1
             continue
-        entry_bar = symbol_bars["by_end"].get(entry_ts_ms)
+        entry_decision = _entry_decision_for_event(event, symbol_bars, config=config, score_col=score_col)
+        entry_bar = entry_decision["entry_bar"]
         if entry_bar is None:
             skipped_no_entry += 1
             continue
+        entry_ts_ms = int(entry_decision["entry_ts_ms"])
+        planned_exit_ts_ms = entry_ts_ms + scenario.hold_days * MS_PER_DAY
         basket_id = f"{scenario.scenario_id}-{_iso_date(signal_ts_ms)}-{symbol}"
         trade = _simulate_indexed_trade(
             symbol=symbol,
@@ -526,6 +536,11 @@ def _run_event_scenario(
                     event.get("prior7_turnover_quote_mean"),
                 ),
                 "tradable_membership_flag": bool(event.get("tradable_membership_flag", False)),
+                "entry_policy": str(entry_decision["entry_policy"]),
+                "entry_rule": str(entry_decision["entry_rule"]),
+                "entry_quality_tier": str(entry_decision["entry_quality_tier"]),
+                "entry_ready_ts_ms": int(entry_decision["entry_ready_ts_ms"]),
+                "actual_entry_delay_hours": float(entry_decision["actual_entry_delay_hours"]),
             }
         )
         rows.append(trade)
@@ -570,6 +585,12 @@ def _run_event_scenario(
             full_pit_universe_pass=full_pit_universe_pass,
         ),
         **_exit_reason_fields(trades),
+        "avg_actual_entry_delay_hours": float(trades["actual_entry_delay_hours"].mean())
+        if not trades.is_empty() and "actual_entry_delay_hours" in trades.columns
+        else 0.0,
+        "entry_promoted_quality_trades": int(trades.filter(pl.col("entry_quality_tier") == "promoted_quality").height)
+        if not trades.is_empty() and "entry_quality_tier" in trades.columns
+        else 0,
     }
     return {"row": row, "trades": trades, "baskets": baskets, "equity": equity, "monthly": monthly, "splits": split_rows}
 
@@ -638,6 +659,244 @@ def _indexed_price_bars_by_symbol(klines: pl.DataFrame) -> dict[str, dict[str, A
             "by_end": {end: row for end, row in zip(ends, rows)},
         }
     return indexed
+
+
+def _entry_decision_for_event(
+    event: dict[str, Any],
+    symbol_bars: dict[str, Any],
+    *,
+    config: VolumeEventResearchConfig,
+    score_col: str,
+    now_ms: int | None = None,
+) -> dict[str, Any]:
+    signal_ts_ms = int(event["ts_ms"])
+    base_ready_ts_ms = signal_ts_ms + config.entry_delay_hours * MS_PER_HOUR
+    if config.entry_policy == ENTRY_POLICY_FIXED_DELAY:
+        return _fixed_delay_entry_decision(symbol_bars, ready_ts_ms=base_ready_ts_ms, signal_ts_ms=signal_ts_ms, now_ms=now_ms)
+    if config.entry_policy != ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE:
+        raise ValueError(f"Unknown entry_policy: {config.entry_policy}")
+    if not _promoted_quality_entry_event(event, score_col=score_col):
+        return _fixed_delay_entry_decision(
+            symbol_bars,
+            ready_ts_ms=base_ready_ts_ms,
+            signal_ts_ms=signal_ts_ms,
+            now_ms=now_ms,
+            quality_tier="standard",
+            entry_rule="standard_fixed_delay",
+        )
+    return _quality_squeeze_entry_decision(event, symbol_bars, config=config, now_ms=now_ms)
+
+
+def _fixed_delay_entry_decision(
+    symbol_bars: dict[str, Any],
+    *,
+    ready_ts_ms: int,
+    signal_ts_ms: int,
+    now_ms: int | None,
+    quality_tier: str = "standard",
+    entry_rule: str = "fixed_delay",
+) -> dict[str, Any]:
+    pending = now_ms is not None and ready_ts_ms > now_ms
+    entry_bar = None if pending else symbol_bars["by_end"].get(ready_ts_ms)
+    return {
+        "entry_bar": entry_bar,
+        "entry_ts_ms": ready_ts_ms,
+        "entry_ready_ts_ms": ready_ts_ms,
+        "entry_policy": ENTRY_POLICY_FIXED_DELAY if entry_rule == "fixed_delay" else ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE,
+        "entry_rule": entry_rule,
+        "entry_quality_tier": quality_tier,
+        "actual_entry_delay_hours": (ready_ts_ms - signal_ts_ms) / MS_PER_HOUR,
+        "pending": pending,
+    }
+
+
+def _quality_squeeze_entry_decision(
+    event: dict[str, Any],
+    symbol_bars: dict[str, Any],
+    *,
+    config: VolumeEventResearchConfig,
+    now_ms: int | None,
+) -> dict[str, Any]:
+    signal_ts_ms = int(event["ts_ms"])
+    signal_bar = symbol_bars["by_end"].get(signal_ts_ms)
+    if signal_bar is None:
+        base_ready_ts_ms = signal_ts_ms + config.entry_delay_hours * MS_PER_HOUR
+        return _fixed_delay_entry_decision(
+            symbol_bars,
+            ready_ts_ms=base_ready_ts_ms,
+            signal_ts_ms=signal_ts_ms,
+            now_ms=now_ms,
+            quality_tier="promoted_quality",
+            entry_rule="quality_missing_signal_fixed_delay",
+        )
+    signal_close = float(signal_bar["close"])
+    first_h = max(int(config.entry_delay_hours), 1)
+    first_ts_ms = signal_ts_ms + first_h * MS_PER_HOUR
+    if now_ms is not None and first_ts_ms > now_ms:
+        return _pending_entry_decision(
+            signal_ts_ms=signal_ts_ms,
+            ready_ts_ms=first_ts_ms,
+            entry_rule="quality_wait_first_bar",
+        )
+    first_bar = symbol_bars["by_end"].get(first_ts_ms)
+    if first_bar is None:
+        return _missing_entry_decision(
+            signal_ts_ms=signal_ts_ms,
+            ready_ts_ms=first_ts_ms,
+            entry_rule="quality_missing_first_bar",
+        )
+    h1_return = float(first_bar["close"]) / signal_close - 1.0 if signal_close > 0.0 else 0.0
+    h1_close_location = _bar_close_location(first_bar)
+    squeeze = (
+        h1_return >= config.entry_quality_squeeze_h1_return_bps / 10_000.0
+        and h1_close_location >= config.entry_quality_squeeze_h1_close_location_min
+    )
+    if not squeeze:
+        return {
+            "entry_bar": first_bar,
+            "entry_ts_ms": first_ts_ms,
+            "entry_ready_ts_ms": first_ts_ms,
+            "entry_policy": ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE,
+            "entry_rule": "quality_fixed_delay",
+            "entry_quality_tier": "promoted_quality",
+            "actual_entry_delay_hours": (first_ts_ms - signal_ts_ms) / MS_PER_HOUR,
+            "pending": False,
+        }
+
+    deadline_h = max(int(config.entry_quality_squeeze_wait_hours), first_h)
+    high_since_signal = signal_close
+    popped = False
+    pop_threshold = signal_close * (1.0 + config.entry_quality_squeeze_pop_bps / 10_000.0)
+    giveback_multiplier = 1.0 - config.entry_quality_squeeze_giveback_bps / 10_000.0
+    for hour in range(first_h, deadline_h + 1):
+        ts_ms = signal_ts_ms + hour * MS_PER_HOUR
+        if now_ms is not None and ts_ms > now_ms:
+            return _pending_entry_decision(
+                signal_ts_ms=signal_ts_ms,
+                ready_ts_ms=ts_ms,
+                entry_rule="quality_squeeze_wait_giveback",
+            )
+        bar = symbol_bars["by_end"].get(ts_ms)
+        if bar is None:
+            return _missing_entry_decision(
+                signal_ts_ms=signal_ts_ms,
+                ready_ts_ms=ts_ms,
+                entry_rule="quality_squeeze_missing_bar",
+            )
+        high_since_signal = max(high_since_signal, float(bar["high"]))
+        if high_since_signal >= pop_threshold:
+            popped = True
+        if popped and float(bar["close"]) <= high_since_signal * giveback_multiplier:
+            return {
+                "entry_bar": bar,
+                "entry_ts_ms": ts_ms,
+                "entry_ready_ts_ms": ts_ms,
+                "entry_policy": ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE,
+                "entry_rule": "quality_squeeze_giveback",
+                "entry_quality_tier": "promoted_quality",
+                "actual_entry_delay_hours": (ts_ms - signal_ts_ms) / MS_PER_HOUR,
+                "pending": False,
+            }
+
+    deadline_ts_ms = signal_ts_ms + deadline_h * MS_PER_HOUR
+    deadline_bar = symbol_bars["by_end"].get(deadline_ts_ms)
+    return {
+        "entry_bar": deadline_bar,
+        "entry_ts_ms": deadline_ts_ms,
+        "entry_ready_ts_ms": deadline_ts_ms,
+        "entry_policy": ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE,
+        "entry_rule": "quality_squeeze_deadline",
+        "entry_quality_tier": "promoted_quality",
+        "actual_entry_delay_hours": (deadline_ts_ms - signal_ts_ms) / MS_PER_HOUR,
+        "pending": False,
+    }
+
+
+def _pending_entry_decision(*, signal_ts_ms: int, ready_ts_ms: int, entry_rule: str) -> dict[str, Any]:
+    return {
+        "entry_bar": None,
+        "entry_ts_ms": ready_ts_ms,
+        "entry_ready_ts_ms": ready_ts_ms,
+        "entry_policy": ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE,
+        "entry_rule": entry_rule,
+        "entry_quality_tier": "promoted_quality",
+        "actual_entry_delay_hours": (ready_ts_ms - signal_ts_ms) / MS_PER_HOUR,
+        "pending": True,
+    }
+
+
+def _missing_entry_decision(*, signal_ts_ms: int, ready_ts_ms: int, entry_rule: str) -> dict[str, Any]:
+    return {
+        "entry_bar": None,
+        "entry_ts_ms": ready_ts_ms,
+        "entry_ready_ts_ms": ready_ts_ms,
+        "entry_policy": ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE,
+        "entry_rule": entry_rule,
+        "entry_quality_tier": "promoted_quality",
+        "actual_entry_delay_hours": (ready_ts_ms - signal_ts_ms) / MS_PER_HOUR,
+        "pending": False,
+    }
+
+
+def _bar_close_location(bar: dict[str, Any]) -> float:
+    high = float(bar["high"])
+    low = float(bar["low"])
+    close = float(bar["close"])
+    if abs(high - low) <= 1e-12:
+        return 0.5
+    return max(0.0, min(1.0, (close - low) / (high - low)))
+
+
+def _promoted_quality_entry_event(event: dict[str, Any], *, score_col: str) -> bool:
+    reference = VolumeEventResearchConfig(entry_policy=ENTRY_POLICY_FIXED_DELAY)
+    rank_fraction = _float_or_nan(event.get(f"{score_col}_rank_frac"))
+    liquidity_rank = _float_or_nan(event.get("liquidity_rank"))
+    prior_rank = _float_or_nan(event.get("prior7_liquidity_rank"))
+    day_return = _float_or_nan(event.get("daily_return_1d"))
+    residual_return = _float_or_nan(event.get("residual_return_1d"))
+    close_location = _float_or_nan(event.get("signal_day_close_location"))
+    pit_age_days = _float_or_nan(event.get("pit_age_days"))
+    turnover_ratio = _safe_ratio(event.get("turnover_quote"), event.get("prior7_turnover_quote_mean"))
+    market_pct_up = _float_or_nan(event.get("market_pct_up_1d"))
+    if not all(
+        math.isfinite(value)
+        for value in (
+            rank_fraction,
+            liquidity_rank,
+            prior_rank,
+            day_return,
+            residual_return,
+            close_location,
+            pit_age_days,
+            turnover_ratio,
+            market_pct_up,
+        )
+    ):
+        return False
+    market_ok = market_pct_up <= reference.liquidity_migration_market_pct_up_max
+    hot_coin_ok = day_return >= _liquidity_migration_hot_return_threshold_value(market_pct_up, reference)
+    return (
+        liquidity_rank >= reference.universe_rank_min
+        and liquidity_rank <= reference.universe_rank_max
+        and prior_rank - liquidity_rank >= reference.liquidity_migration_rank_improvement_min
+        and turnover_ratio >= reference.liquidity_migration_turnover_ratio_min
+        and rank_fraction <= reference.liquidity_migration_event_rank_fraction_max
+        and day_return >= reference.liquidity_migration_day_return_min
+        and residual_return >= reference.liquidity_migration_residual_return_min
+        and close_location >= reference.liquidity_migration_close_location_min
+        and pit_age_days >= reference.liquidity_migration_pit_age_days_min
+        and (market_ok or hot_coin_ok)
+    )
+
+
+def _liquidity_migration_hot_return_threshold_value(market_pct_up: float, config: VolumeEventResearchConfig) -> float:
+    base = config.liquidity_migration_hot_market_day_return_min
+    band = config.liquidity_migration_hot_market_day_return_band
+    if band <= 0.0 or config.liquidity_migration_market_pct_up_max >= 1.0:
+        return base
+    breadth_span = max(1.0 - config.liquidity_migration_market_pct_up_max, 1e-9)
+    hot_breadth_position = max(0.0, min(breadth_span, market_pct_up - config.liquidity_migration_market_pct_up_max)) / breadth_span
+    return base - band + hot_breadth_position * (2.0 * band)
 
 
 def _simulate_indexed_trade(
@@ -2682,6 +2941,7 @@ def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) 
         f"- Feature rows: {metadata['rows']['features']}",
         f"- Scenarios: {metadata['rows']['scenarios']}",
         f"- Stop fill mode: `{metadata['config'].get('stop_fill_mode', 'stop')}`",
+        f"- Entry policy: `{metadata['config'].get('entry_policy', ENTRY_POLICY_FIXED_DELAY)}`",
         f"- Pre-PIT promotable rows: {metadata['rows']['pre_pit_promotable']}",
         f"- Promotable rows: {metadata['rows']['promotable']}",
         f"- Date range: {metadata['date_range']['start']} to {metadata['date_range']['end']}",
@@ -2693,8 +2953,8 @@ def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) 
         "",
         "## Top Scenarios",
         "",
-        "| Rank | Promote | Event | Side | Threshold | Hold | Stop | TP | Cost | Trades | Return | Max DD | Max UW Days | Worst 90d | Sharpe | Pos Splits | Min Split | Avg Split Sharpe | Reason |",
-        "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
+        "| Rank | Promote | Event | Side | Threshold | Hold | Stop | TP | Cost | Trades | Return | Max DD | Max UW Days | Worst 90d | Sharpe | Pos Splits | Min Split | Avg Split Sharpe | Avg Entry Delay | Reason |",
+        "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|",
     ]
     for index, row in enumerate(summary.head(50).to_dicts() if not summary.is_empty() else [], start=1):
         lines.append(
@@ -2706,10 +2966,11 @@ def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) 
             f"{row.get('max_underwater_days', 0)} | {_pct(row.get('worst_90d_return'))} | "
             f"{_num(row.get('sharpe_like'))} | "
             f"{row.get('positive_splits', 0)}/{len(SPLITS)} | {_pct(row.get('min_split_return'))} | "
-            f"{_num(row.get('avg_split_sharpe'))} | {row.get('promotion_reason', '')} |"
+            f"{_num(row.get('avg_split_sharpe'))} | {_num(row.get('avg_actual_entry_delay_hours'))} | "
+            f"{row.get('promotion_reason', '')} |"
         )
     if summary.is_empty():
-        lines.append("|  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |")
+        lines.append("|  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |")
     lines.extend(
         [
             "",
@@ -2764,6 +3025,21 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("cooldown_days must be non-negative")
     if config.entry_delay_hours < 0:
         raise ValueError("entry_delay_hours must be non-negative")
+    if config.entry_policy not in ENTRY_POLICIES:
+        raise ValueError(f"entry_policy must be one of: {', '.join(ENTRY_POLICIES)}")
+    if config.entry_quality_squeeze_h1_return_bps < 0.0:
+        raise ValueError("entry_quality_squeeze_h1_return_bps must be non-negative")
+    if not 0.0 <= config.entry_quality_squeeze_h1_close_location_min <= 1.0:
+        raise ValueError("entry_quality_squeeze_h1_close_location_min must be in [0, 1]")
+    if config.entry_quality_squeeze_pop_bps < 0.0:
+        raise ValueError("entry_quality_squeeze_pop_bps must be non-negative")
+    if config.entry_quality_squeeze_giveback_bps < 0.0:
+        raise ValueError("entry_quality_squeeze_giveback_bps must be non-negative")
+    if (
+        config.entry_policy == ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE
+        and config.entry_quality_squeeze_wait_hours < max(config.entry_delay_hours, 1)
+    ):
+        raise ValueError("entry_quality_squeeze_wait_hours must be at least the first post-signal entry hour")
     if not 0.0 < config.rank_exit_threshold <= 1.0:
         raise ValueError("rank_exit_threshold must be in (0, 1]")
     if config.universe_rank_min <= 0:
