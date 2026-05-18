@@ -601,6 +601,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum signal-day quote turnover divided by estimated quote OI; 0 with min 0 disables.",
     )
     volume_events.add_argument(
+        "--liquidity-migration-mark-index-basis-3d-mean-min",
+        type=float,
+        default=event_defaults.liquidity_migration_mark_index_basis_3d_mean_min,
+        help="Minimum 3d mean mark/index basis at signal close; -10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-mark-index-basis-3d-mean-max",
+        type=float,
+        default=event_defaults.liquidity_migration_mark_index_basis_3d_mean_max,
+        help="Maximum 3d mean mark/index basis at signal close; 10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-premium-index-3d-mean-min",
+        type=float,
+        default=event_defaults.liquidity_migration_premium_index_3d_mean_min,
+        help="Minimum 3d mean premium index at signal close; -10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-premium-index-3d-mean-max",
+        type=float,
+        default=event_defaults.liquidity_migration_premium_index_3d_mean_max,
+        help="Maximum 3d mean premium index at signal close; 10 disables.",
+    )
+    volume_events.add_argument(
         "--liquidity-migration-taker-imbalance-1d-min",
         type=float,
         default=event_defaults.liquidity_migration_taker_imbalance_1d_min,
@@ -1570,6 +1594,10 @@ def main(argv: list[str] | None = None) -> int:
             liquidity_migration_open_interest_return_7d_max=args.liquidity_migration_open_interest_return_7d_max,
             liquidity_migration_volume_to_oi_quote_min=args.liquidity_migration_volume_to_oi_quote_min,
             liquidity_migration_volume_to_oi_quote_max=args.liquidity_migration_volume_to_oi_quote_max,
+            liquidity_migration_mark_index_basis_3d_mean_min=args.liquidity_migration_mark_index_basis_3d_mean_min,
+            liquidity_migration_mark_index_basis_3d_mean_max=args.liquidity_migration_mark_index_basis_3d_mean_max,
+            liquidity_migration_premium_index_3d_mean_min=args.liquidity_migration_premium_index_3d_mean_min,
+            liquidity_migration_premium_index_3d_mean_max=args.liquidity_migration_premium_index_3d_mean_max,
             liquidity_migration_taker_imbalance_1d_min=args.liquidity_migration_taker_imbalance_1d_min,
             liquidity_migration_taker_imbalance_1d_max=args.liquidity_migration_taker_imbalance_1d_max,
             liquidity_migration_taker_imbalance_3d_min=args.liquidity_migration_taker_imbalance_3d_min,

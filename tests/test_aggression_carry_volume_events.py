@@ -840,6 +840,20 @@ def test_volume_event_config_validates_new_research_knobs() -> None:
                 liquidity_migration_prior30_max_return_max=0.2,
             )
         )
+    with pytest.raises(ValueError, match="liquidity_migration_mark_index_basis_3d_mean_min"):
+        _validate_event_config(
+            VolumeEventResearchConfig(
+                liquidity_migration_mark_index_basis_3d_mean_min=0.002,
+                liquidity_migration_mark_index_basis_3d_mean_max=0.001,
+            )
+        )
+    with pytest.raises(ValueError, match="liquidity_migration_premium_index_3d_mean_min"):
+        _validate_event_config(
+            VolumeEventResearchConfig(
+                liquidity_migration_premium_index_3d_mean_min=0.002,
+                liquidity_migration_premium_index_3d_mean_max=0.001,
+            )
+        )
     with pytest.raises(ValueError, match="liquidity_migration_prior7_return_volatility"):
         _validate_event_config(VolumeEventResearchConfig(liquidity_migration_prior7_return_volatility_min=-0.01))
     with pytest.raises(ValueError, match="liquidity_migration_intraday_range_max"):

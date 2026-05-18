@@ -145,6 +145,10 @@ class VolumeEventResearchConfig:
     liquidity_migration_open_interest_return_7d_max: float = 10.0
     liquidity_migration_volume_to_oi_quote_min: float = 0.0
     liquidity_migration_volume_to_oi_quote_max: float = 0.0
+    liquidity_migration_mark_index_basis_3d_mean_min: float = -10.0
+    liquidity_migration_mark_index_basis_3d_mean_max: float = 10.0
+    liquidity_migration_premium_index_3d_mean_min: float = -10.0
+    liquidity_migration_premium_index_3d_mean_max: float = 10.0
     liquidity_migration_taker_imbalance_1d_min: float = -1.0
     liquidity_migration_taker_imbalance_1d_max: float = 1.0
     liquidity_migration_taker_imbalance_3d_min: float = -1.0
@@ -1855,6 +1859,16 @@ def _event_filter(
         if config.liquidity_migration_volume_to_oi_quote_min > 0.0 or config.liquidity_migration_volume_to_oi_quote_max > 0.0:
             required_cols.append("volume_to_open_interest_quote")
         if (
+            config.liquidity_migration_mark_index_basis_3d_mean_min > -10.0
+            or config.liquidity_migration_mark_index_basis_3d_mean_max < 10.0
+        ):
+            required_cols.append("mark_index_basis_3d_mean")
+        if (
+            config.liquidity_migration_premium_index_3d_mean_min > -10.0
+            or config.liquidity_migration_premium_index_3d_mean_max < 10.0
+        ):
+            required_cols.append("premium_index_3d_mean")
+        if (
             config.liquidity_migration_taker_imbalance_1d_min > -1.0
             or config.liquidity_migration_taker_imbalance_1d_max < 1.0
         ):
@@ -2031,6 +2045,26 @@ def _event_filter(
                 predicate = predicate & (
                     pl.col("volume_to_open_interest_quote") <= config.liquidity_migration_volume_to_oi_quote_max
                 )
+        if (
+            config.liquidity_migration_mark_index_basis_3d_mean_min > -10.0
+            or config.liquidity_migration_mark_index_basis_3d_mean_max < 10.0
+        ):
+            predicate = (
+                predicate
+                & pl.col("mark_index_basis_3d_mean").is_not_null()
+                & (pl.col("mark_index_basis_3d_mean") >= config.liquidity_migration_mark_index_basis_3d_mean_min)
+                & (pl.col("mark_index_basis_3d_mean") <= config.liquidity_migration_mark_index_basis_3d_mean_max)
+            )
+        if (
+            config.liquidity_migration_premium_index_3d_mean_min > -10.0
+            or config.liquidity_migration_premium_index_3d_mean_max < 10.0
+        ):
+            predicate = (
+                predicate
+                & pl.col("premium_index_3d_mean").is_not_null()
+                & (pl.col("premium_index_3d_mean") >= config.liquidity_migration_premium_index_3d_mean_min)
+                & (pl.col("premium_index_3d_mean") <= config.liquidity_migration_premium_index_3d_mean_max)
+            )
         if (
             config.liquidity_migration_taker_imbalance_1d_min > -1.0
             or config.liquidity_migration_taker_imbalance_1d_max < 1.0
@@ -3803,6 +3837,22 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         and config.liquidity_migration_volume_to_oi_quote_min > config.liquidity_migration_volume_to_oi_quote_max
     ):
         raise ValueError("liquidity_migration_volume_to_oi_quote_min must be <= liquidity_migration_volume_to_oi_quote_max")
+    if (
+        config.liquidity_migration_mark_index_basis_3d_mean_min
+        > config.liquidity_migration_mark_index_basis_3d_mean_max
+    ):
+        raise ValueError(
+            "liquidity_migration_mark_index_basis_3d_mean_min must be <= "
+            "liquidity_migration_mark_index_basis_3d_mean_max"
+        )
+    if (
+        config.liquidity_migration_premium_index_3d_mean_min
+        > config.liquidity_migration_premium_index_3d_mean_max
+    ):
+        raise ValueError(
+            "liquidity_migration_premium_index_3d_mean_min must be <= "
+            "liquidity_migration_premium_index_3d_mean_max"
+        )
     if not -1.0 <= config.liquidity_migration_taker_imbalance_1d_min <= 1.0:
         raise ValueError("liquidity_migration_taker_imbalance_1d_min must be in [-1, 1]")
     if not -1.0 <= config.liquidity_migration_taker_imbalance_1d_max <= 1.0:

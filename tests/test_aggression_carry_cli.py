@@ -230,6 +230,10 @@ def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Pa
     assert args.entry_execution_giveback_bps == 25.0
     assert args.entry_execution_max_range_bps == 1200.0
     assert args.entry_execution_min_turnover_quote == 0.0
+    assert args.liquidity_migration_mark_index_basis_3d_mean_min == -10.0
+    assert args.liquidity_migration_mark_index_basis_3d_mean_max == 10.0
+    assert args.liquidity_migration_premium_index_3d_mean_min == -10.0
+    assert args.liquidity_migration_premium_index_3d_mean_max == 10.0
     assert args.entry_execution_veto_close_location_max == 1.0
     assert args.max_active_symbols == 5
     assert args.cooldown_days == 5
@@ -429,6 +433,14 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
             "0.5",
             "--liquidity-migration-volume-to-oi-quote-max",
             "5.0",
+            "--liquidity-migration-mark-index-basis-3d-mean-min",
+            "-0.001",
+            "--liquidity-migration-mark-index-basis-3d-mean-max",
+            "0.002",
+            "--liquidity-migration-premium-index-3d-mean-min",
+            "-0.0005",
+            "--liquidity-migration-premium-index-3d-mean-max",
+            "0.0007",
             "--liquidity-migration-taker-imbalance-1d-min",
             "-0.25",
             "--liquidity-migration-taker-imbalance-3d-max",
@@ -499,6 +511,10 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
     assert args.liquidity_migration_open_interest_return_7d_max == 0.8
     assert args.liquidity_migration_volume_to_oi_quote_min == 0.5
     assert args.liquidity_migration_volume_to_oi_quote_max == 5.0
+    assert args.liquidity_migration_mark_index_basis_3d_mean_min == -0.001
+    assert args.liquidity_migration_mark_index_basis_3d_mean_max == 0.002
+    assert args.liquidity_migration_premium_index_3d_mean_min == -0.0005
+    assert args.liquidity_migration_premium_index_3d_mean_max == 0.0007
     assert args.liquidity_migration_taker_imbalance_1d_min == -0.25
     assert args.liquidity_migration_taker_imbalance_3d_max == 0.5
     assert args.liquidity_migration_market_pct_up_max == 0.6

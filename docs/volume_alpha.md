@@ -759,6 +759,67 @@ Binance OI/taker proxy pilot: BTCUSDT/ETHUSDT, 2026-04-18..2026-05-02 only
 decision: usable for exploratory feature tests only, not promotion evidence
 ```
 
+Full OOS Bybit-native basis/premium expansion on `2026-05-18`:
+
+```text
+coverage report: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/data_layer_full_oos_basis_coverage_20260518/data_layer_audit.md
+window: 2025-05-03 to 2026-05-03 end-exclusive
+reference symbol-days: 123,421
+mark_price_1h / index_price_1h / premium_index_1h: 99.86% native OOS coverage
+open_interest: 24.23% native OOS coverage
+signed_flow_1h: missing
+decision: native basis/premium is usable for OOS feature falsification; promotion still needs full-window native coverage and Model Court evidence
+```
+
+Auxiliary alpha readout from the expanded OOS store:
+
+```text
+feature report: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/aux_alpha_full_oos_pit_20260518/feature_factory/feature_factory_report.md
+baseline OOS: +175.32%, -13.72% max DD, -2.47% worst 90d, 161 trades
+basis_3d_mean >= -0.00037613: +74.47%, -6.53% max DD, 57 trades
+basis_3d_mean >= 0.00008507: +70.93%, -9.42% max DD, 36 trades
+premium_3d_mean >= -0.00003028: +63.15%, -4.85% max DD, 35 trades
+volume_to_oi_quote >= 6.55: +60.05%, -4.96% max DD, 45 trades
+```
+
+Decision: reject basis, premium, and OI-ratio gates as promoted alpha. They
+create cleaner small sleeves, but they cut too many trades and do not beat the
+current book. The result also invalidated the earlier traded-symbol-only basis
+screen, which was selection-biased because auxiliary data had first been pulled
+only for symbols the baseline already traded.
+
+Rank/shape follow-up from the same research pass:
+
+```text
+OOS sweep: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/aux_alpha_full_oos_pit_20260518/research_sweep/candidate_sweep.csv
+full sweep: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/alpha_rank_sensitivity_20260518/full_research_sweep/full_candidate_sweep.csv
+shape sweep: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/alpha_shape_filters_20260518/shape_filter_full_sweep.csv
+```
+
+The tempting OOS result was `liquidity_migration_rank_improvement_min=184`:
+`+159.67%` OOS with `-9.62%` max DD versus the baseline `+175.32%` and
+`-13.72%`. Full PIT rejected it: `+769.06%`, `-16.21%` max DD, `+51.68%`
+train return, and `+159.67%` OOS versus the current baseline `+1853.99%`,
+`-13.72%` max DD, `+122.17%` train return, and `+175.32%` OOS. The failure is
+exactly why OOS-only parameter promotion is not allowed.
+
+Additional full-window shape filters were also rejected:
+
+```text
+rank1_improvement >= 99: +1246.05%, -12.32% max DD, +75.25% min split
+residual_return_1d >= 12%: +1309.78%, -12.91% max DD, +101.17% min split
+prior30_max_daily_return >= 7.3%: +947.50%, -10.62% max DD, +91.67% min split
+event_uniqueness_score >= 0.87705: +608.15%, -20.95% max DD, +40.79% min split
+signal_day_last6h_return >= 0.00769: +600.49%, -21.56% max DD, +69.17% min split
+```
+
+Decision: keep the active promoted strategy unchanged. The useful discovery is
+negative: the current edge is broad and compounding-sensitive, so most obvious
+"quality" gates improve per-trade averages but damage full-period growth or
+older splits. Future alpha should focus on execution mechanics, new Bybit-native
+signed-flow/OI archives, or portfolio overlay construction, not another hard
+filter on the existing daily ledger unless it clears the full Model Court.
+
 ## Champion / Challenger Stack
 
 `champion-challenger` writes the current live research stack manifest:
