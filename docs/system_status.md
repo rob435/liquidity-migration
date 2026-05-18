@@ -106,6 +106,37 @@ same-hour entry cluster contains 6 losing trades for -5.35% additive net
 return. Treat `demo_relaxed` as a higher-frequency plumbing and observation
 profile, not promoted alpha.
 
+## Execution Alpha Research
+
+Execution variants added on 2026-05-18 are research-only and are not deployed.
+The live/default entry policy remains `promoted_quality_squeeze`.
+
+Tested variants:
+
+```text
+execution_pullback_guard:
+  keeps promoted-quality events on the proven squeeze router
+  tries to delay lower-tier unresolved-continuation bars for a micro pullback
+
+tiered_execution_sniper:
+  keeps promoted-quality events on the proven squeeze router
+  tests bounded lower-tier continuation-pop entries
+
+entry_execution_veto_close_location_max:
+  optional completed-entry-bar high-close veto
+  disabled by default
+```
+
+Honest result: none of these clears promotion. The blunt pullback guard cut the
+promoted book to +569.77% before composition was fixed, and still hurt
+`demo_relaxed`. The first tiered-pop result looked attractive, but the fallback
+was lookahead; after fixing it to enter the deadline bar causally, the relaxed
+pop150/wait2 run fell to +202.75%, below the current +221.29%. The selective
+causal version reproduced the current relaxed result rather than improving it.
+The high-close veto looked good in a static ledger slice, but a real backtest at
+0.85 cut promoted to +1152.68% and relaxed to +200.44%. These are useful
+falsification tools, not live alpha.
+
 ## Crowding Model Research
 
 The first cross-sectional crowding classifier, `model_v1`, was added on

@@ -38,6 +38,9 @@ The `volume-events` defaults are the selected strategy:
 - Research-only crowding classifier: `model_v1` exists for audits and
   experiments, but is not promoted or deployed
 - Entry policy: `promoted_quality_squeeze`; standard events enter 1 hour after the daily signal close, while promoted-grade squeeze events wait for a causal 25 bps high-since-signal giveback after a 25 bps pop or enter on the 4h deadline
+- Research-only execution variants: `execution_pullback_guard`,
+  `tiered_execution_sniper`, and `entry_execution_veto_close_location_max`
+  exist for audits, but are not promoted or deployed
 - Exit: event decay, rank exit, 12% fixed stop, 25% fixed take profit, or 3-day max hold
 - Capacity: max 5 active symbols, 5-day symbol cooldown
 - Stop-pressure throttle: pause new entries after 7 realized stops inside 10 days

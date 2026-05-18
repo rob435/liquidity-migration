@@ -25,6 +25,7 @@ from .volume_events import (
     EventScenario,
     VolumeEventResearchConfig,
     _enriched_event_features,
+    _apply_entry_execution_veto,
     _entry_decision_for_event,
     _event_decay_exit_hit,
     _event_score,
@@ -648,14 +649,19 @@ def select_demo_entry_candidates(
     for event in _execution_ordered_events(events).to_dicts():
         signal_ts_ms = int(event["ts_ms"])
         symbol = str(event["symbol"])
+        side = _scenario_side(scenario.event_type, scenario.side_hypothesis)
         symbol_bars = (entry_bars_by_symbol or {}).get(symbol)
         if symbol_bars is not None:
-            entry_decision = _entry_decision_for_event(
-                event,
-                symbol_bars,
+            entry_decision = _apply_entry_execution_veto(
+                _entry_decision_for_event(
+                    event,
+                    symbol_bars,
+                    config=config,
+                    score_col=score_col,
+                    side=side,
+                    now_ms=now_ms,
+                ),
                 config=config,
-                score_col=score_col,
-                now_ms=now_ms,
             )
             ready_ts_ms = int(entry_decision["entry_ready_ts_ms"])
             if bool(entry_decision.get("pending")):
@@ -695,7 +701,6 @@ def select_demo_entry_candidates(
         if cooldown_until.get(symbol, 0) > signal_ts_ms:
             skips["cooldown"] += 1
             continue
-        side = _scenario_side(scenario.event_type, scenario.side_hypothesis)
         rank_col = f"{score_col}_rank_frac"
         candidates.append(
             {
@@ -717,6 +722,13 @@ def select_demo_entry_candidates(
                 "entry_rule": str(entry_decision.get("entry_rule", "")),
                 "entry_quality_tier": str(entry_decision.get("entry_quality_tier", "")),
                 "actual_entry_delay_hours": _float(entry_decision.get("actual_entry_delay_hours")),
+                "entry_price_move_bps": _float(entry_decision.get("entry_price_move_bps")),
+                "entry_continuation_bps": _float(entry_decision.get("entry_continuation_bps")),
+                "entry_giveback_bps": _float(entry_decision.get("entry_giveback_bps")),
+                "entry_pop_bps": _float(entry_decision.get("entry_pop_bps")),
+                "entry_bar_range_bps": _float(entry_decision.get("entry_bar_range_bps")),
+                "entry_bar_close_location": _float(entry_decision.get("entry_bar_close_location")),
+                "entry_bar_turnover_quote": _float(entry_decision.get("entry_bar_turnover_quote")),
                 "score_name": score_name,
                 "score": _float(event.get(score_col)),
                 "event_rank": int(event.get("event_rank", 0) or 0),

@@ -346,6 +346,15 @@ conservative entry router: 1,268 trades, +221.29% total return, -21.32% max
 drawdown, -18.90% worst 90d, +12.36% worst split, +142.92% OOS, and promotion
 gate pass. Stress report:
 `/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md`.
+Research-only execution variants now exist behind
+`--entry-policy execution_pullback_guard`,
+`--entry-policy tiered_execution_sniper`, and
+`--entry-execution-veto-close-location-max`. They are disabled in the active
+profile. The 2026-05-18 execution-alpha audit rejected them for deployment:
+pullback gating damaged the book, the first tiered-pop result contained a
+lookahead fallback that was fixed, the causal tiered-pop result did not beat the
+current relaxed profile, and the high-close veto failed in real backtests
+despite looking attractive in a static ledger slice.
 Recent 1h bars are cached in `event_demo_klines_1h`, keeping the forward-demo
 cache separate from the full-PIT research `klines_1h` dataset.
 Entry orders attach native stop/TP immediately, then confirmed fills recompute

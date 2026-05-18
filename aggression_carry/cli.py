@@ -276,7 +276,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--entry-policy",
         default=event_defaults.entry_policy,
         choices=ENTRY_POLICIES,
-        help="Entry timing policy. promoted_quality_squeeze delays promoted-grade squeeze bars for a causal giveback/deadline.",
+        help=(
+            "Entry timing policy. promoted_quality_squeeze delays promoted-grade squeeze bars for a causal "
+            "giveback/deadline; execution_pullback_guard and tiered_execution_sniper are research-only "
+            "post-signal execution variants."
+        ),
     )
     volume_events.add_argument(
         "--entry-quality-squeeze-h1-return-bps",
@@ -302,6 +306,54 @@ def build_parser() -> argparse.ArgumentParser:
         "--entry-quality-squeeze-wait-hours",
         type=int,
         default=event_defaults.entry_quality_squeeze_wait_hours,
+    )
+    volume_events.add_argument(
+        "--entry-execution-wait-hours",
+        type=int,
+        default=event_defaults.entry_execution_wait_hours,
+        help="execution_pullback_guard: final post-signal hour to wait for a pullback before fallback/skip.",
+    )
+    volume_events.add_argument(
+        "--entry-execution-pullback-close-location-max",
+        type=float,
+        default=event_defaults.entry_execution_pullback_close_location_max,
+        help="execution_pullback_guard: accept a completed entry bar at or below this close-location.",
+    )
+    volume_events.add_argument(
+        "--entry-execution-unresolved-move-bps-max",
+        type=float,
+        default=event_defaults.entry_execution_unresolved_move_bps_max,
+        help="execution_pullback_guard: delay unresolved continuation beyond this side-aware move.",
+    )
+    volume_events.add_argument(
+        "--entry-execution-pop-bps",
+        type=float,
+        default=event_defaults.entry_execution_pop_bps,
+        help="execution_pullback_guard: post-signal pop threshold before giveback can trigger.",
+    )
+    volume_events.add_argument(
+        "--entry-execution-giveback-bps",
+        type=float,
+        default=event_defaults.entry_execution_giveback_bps,
+        help="execution_pullback_guard: giveback from post-signal high/low needed for trigger.",
+    )
+    volume_events.add_argument(
+        "--entry-execution-max-range-bps",
+        type=float,
+        default=event_defaults.entry_execution_max_range_bps,
+        help="execution_pullback_guard: delay/skip completed bars wider than this range; 0 disables.",
+    )
+    volume_events.add_argument(
+        "--entry-execution-min-turnover-quote",
+        type=float,
+        default=event_defaults.entry_execution_min_turnover_quote,
+        help="execution_pullback_guard: delay/skip entry bars below this quote turnover; 0 disables.",
+    )
+    volume_events.add_argument(
+        "--entry-execution-veto-close-location-max",
+        type=float,
+        default=event_defaults.entry_execution_veto_close_location_max,
+        help="Research-only: skip entries whose completed entry bar closes above this high-low location; 1 disables.",
     )
     volume_events.add_argument("--gross-exposure", type=float, default=event_defaults.gross_exposure, help="Portfolio gross exposure cap, e.g. 0.5.")
     volume_events.add_argument("--max-active-symbols", type=int, default=event_defaults.max_active_symbols)
@@ -1349,6 +1401,14 @@ def main(argv: list[str] | None = None) -> int:
             entry_quality_squeeze_pop_bps=args.entry_quality_squeeze_pop_bps,
             entry_quality_squeeze_giveback_bps=args.entry_quality_squeeze_giveback_bps,
             entry_quality_squeeze_wait_hours=args.entry_quality_squeeze_wait_hours,
+            entry_execution_wait_hours=args.entry_execution_wait_hours,
+            entry_execution_pullback_close_location_max=args.entry_execution_pullback_close_location_max,
+            entry_execution_unresolved_move_bps_max=args.entry_execution_unresolved_move_bps_max,
+            entry_execution_pop_bps=args.entry_execution_pop_bps,
+            entry_execution_giveback_bps=args.entry_execution_giveback_bps,
+            entry_execution_max_range_bps=args.entry_execution_max_range_bps,
+            entry_execution_min_turnover_quote=args.entry_execution_min_turnover_quote,
+            entry_execution_veto_close_location_max=args.entry_execution_veto_close_location_max,
             gross_exposure=args.gross_exposure,
             max_active_symbols=args.max_active_symbols,
             cooldown_days=args.cooldown_days,
