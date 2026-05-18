@@ -13,6 +13,7 @@ from aggression_carry.event_demo import (
     EventRiskCycleConfig,
     PENDING_ORDER_GUARD_MS,
     _demo_event_config,
+    _demo_kline_fetch_ranges,
     _execute_entries,
     _execute_exits,
     _execute_risk_exits,
@@ -346,6 +347,30 @@ def test_demo_kline_cache_fetches_only_new_hour(tmp_path: Path) -> None:
     assert stats["fetch_symbols"] == 1
     assert stats["fetched_rows"] == 1
     assert read_dataset(tmp_path, "event_demo_klines_1h").height == 3
+
+
+def test_demo_kline_fetch_ranges_uses_latest_bar_per_symbol() -> None:
+    cached = pl.DataFrame(
+        [
+            {"symbol": "AAAUSDT", "ts_ms": 0},
+            {"symbol": "AAAUSDT", "ts_ms": 2 * MS_PER_HOUR},
+            {"symbol": "BBBUSDT", "ts_ms": 0},
+            {"symbol": "CCCUSDT", "ts_ms": 3 * MS_PER_HOUR},
+        ]
+    )
+
+    ranges = _demo_kline_fetch_ranges(
+        ["AAAUSDT", "BBBUSDT", "DDDUSDT"],
+        cached,
+        start_ms=0,
+        end_ms=3 * MS_PER_HOUR,
+    )
+
+    assert ranges == {
+        "AAAUSDT": (3 * MS_PER_HOUR, 3 * MS_PER_HOUR),
+        "BBBUSDT": (MS_PER_HOUR, 3 * MS_PER_HOUR),
+        "DDDUSDT": (0, 3 * MS_PER_HOUR),
+    }
 
 
 def test_event_demo_cycle_skips_entry_when_live_position_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

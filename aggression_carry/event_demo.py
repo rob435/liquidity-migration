@@ -1400,16 +1400,19 @@ def _demo_kline_fetch_ranges(
     start_ms: int,
     end_ms: int,
 ) -> dict[str, tuple[int, int]]:
+    if cached.is_empty() or "symbol" not in cached.columns or "ts_ms" not in cached.columns:
+        return {symbol: (start_ms, end_ms) for symbol in symbols}
+
+    latest_by_symbol = {
+        str(row["symbol"]): int(row["latest_ts_ms"])
+        for row in cached.group_by("symbol").agg(pl.col("ts_ms").max().alias("latest_ts_ms")).iter_rows(named=True)
+    }
     ranges: dict[str, tuple[int, int]] = {}
     for symbol in symbols:
-        if cached.is_empty():
+        latest = latest_by_symbol.get(symbol)
+        if latest is None:
             ranges[symbol] = (start_ms, end_ms)
             continue
-        symbol_cache = cached.filter(pl.col("symbol") == symbol)
-        if symbol_cache.is_empty():
-            ranges[symbol] = (start_ms, end_ms)
-            continue
-        latest = _max_int(symbol_cache, "ts_ms")
         fetch_start = max(latest + MS_PER_HOUR, start_ms)
         if fetch_start <= end_ms:
             ranges[symbol] = (fetch_start, end_ms)
