@@ -110,15 +110,20 @@ Run an adversarial audit after a `volume-events` report exists:
 python -m aggression_carry \
   --data-root DATA_ROOT \
   strategy-tribunal \
-  --report-dir DATA_ROOT/reports/volume_event_research
+  --report-dir DATA_ROOT/reports/volume_event_research \
+  --comparison-csv DATA_ROOT/reports/stress_summary.csv \
+  --comparison-family promoted_funding
 ```
 
 The tribunal reads the scenario summary, best trades, baskets, equity curve, and
 optional stress/sweep CSVs. It writes `strategy_tribunal_report.md/json` with
-artifact checks, promotion recap, block-bootstrap left-tail stress, random-sign
-and inverted-edge negative controls, parameter sensitivity, symbol
-concentration, and same-hour entry crowding. Use `--comparison-csv` to attach a
-stress matrix such as quality-tier or entry-router sweeps.
+artifact checks, promotion recap, recomputed-vs-reported path consistency,
+block-bootstrap left-tail stress, random-sign and inverted-edge negative
+controls, filtered stress matrix diagnostics, monthly regime diagnostics,
+parameter sensitivity, symbol concentration, and same-hour entry crowding. Use
+`--comparison-csv` to attach a stress matrix such as quality-tier or
+entry-router sweeps, and `--comparison-family` to keep the audit on the exact
+strategy family being judged.
 
 ## Bybit Demo Forward Runner
 

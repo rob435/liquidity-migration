@@ -43,13 +43,16 @@ and +175.32% OOS. Candidate selection, exits, cooldowns, gross exposure, and
 crowding decisions are unchanged; only entry timing for promoted-grade squeeze
 bars changed.
 
-The first `strategy-tribunal` audit was added on 2026-05-18. With the
-quality-tier stress matrix attached as a comparison CSV, the promoted current
-report passed artifacts, promotion, block-bootstrap left-tail, random-sign,
-inverted-edge, parameter-sensitivity, and symbol-concentration checks. It
-remains `WATCH`, not `PASS`, because the worst same-hour entry cluster still
-contains 3 losing trades for -5.15% additive net return. That is a research
-warning, not a live-execution fault.
+The stricter `strategy-tribunal` audit was rerun on 2026-05-18 with the
+quality-tier stress matrix filtered to `--comparison-family promoted_funding`.
+The promoted current report passed artifacts, comparison-family filtering,
+promotion, recomputed path consistency, block-bootstrap left-tail, random-sign,
+inverted-edge, parameter-sensitivity, monthly-regime, and symbol-concentration
+checks. It remains `WATCH`, not `PASS`, because funding coverage is still
+partial, the filtered stress matrix reaches -30.82% drawdown despite +299.01%
+minimum return, and the worst same-hour entry cluster still contains 3 losing
+trades for -5.15% additive net return. That is a research warning, not a
+live-execution fault.
 
 ## Demo-Relaxed Profile Evidence
 
@@ -80,10 +83,16 @@ average split Sharpe-like: 1.04
 promotion gate: pass
 ```
 
-The same first `strategy-tribunal` audit also leaves `demo_relaxed` at `WATCH`:
-its artifacts, promotion, bootstrap, negative controls, sensitivity, and symbol
-concentration passed, but the worst same-hour entry cluster contains 6 losing
-trades for -5.35% additive net return.
+The stricter `strategy-tribunal` rerun with
+`--comparison-family observe_funding` fails `demo_relaxed`. Its artifacts,
+comparison-family filtering, promotion, bootstrap, negative controls,
+sensitivity, monthly-regime, and symbol-concentration checks pass, but the
+recomputed basket drawdown differs from the report row by 0.70 percentage
+points, funding coverage is partial, the filtered stress matrix includes
+-28.67% total return and -51.02% drawdown, and the worst same-hour entry
+cluster contains 6 losing trades for -5.35% additive net return. Treat
+`demo_relaxed` as a higher-frequency plumbing and observation profile, not
+promoted alpha.
 
 `demo_relaxed` relaxed gates:
 
@@ -156,5 +165,6 @@ report, and candidate-state refresh.
 
 - This proves demo execution plumbing, not future profitability.
 - This does not prove real-money venue behavior.
-- Funding is not part of the active demo gate yet. The research notes show funding can materially affect the short strategy.
+- Funding is only partially covered in the tribunal evidence. The active demo
+  gate is still for Bybit-demo observation, not real-money promotion.
 - Adverse hourly stop-fill stress is still the hardest negative result for the older baseline; do not use exact-stop fills as sole promotion evidence for future variants.

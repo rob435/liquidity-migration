@@ -23,6 +23,10 @@ class StrategyTribunalConfig:
     symbol_concentration_watch: float = 0.35
     symbol_concentration_fail: float = 0.50
     clustered_loss_min_trades: int = 3
+    stress_return_fail: float = 0.0
+    stress_drawdown_watch: float = -0.25
+    stress_drawdown_fail: float = -0.35
+    min_positive_month_rate: float = 0.55
 
 
 def run_strategy_tribunal(
@@ -30,6 +34,7 @@ def run_strategy_tribunal(
     *,
     output_dir: str | Path | None = None,
     comparison_csvs: tuple[str | Path, ...] = (),
+    comparison_families: tuple[str, ...] = (),
     config: StrategyTribunalConfig | None = None,
 ) -> dict[str, Any]:
     tribunal_config = config or StrategyTribunalConfig()
@@ -39,26 +44,38 @@ def run_strategy_tribunal(
 
     artifacts = _read_artifacts(source_dir, comparison_csvs=comparison_csvs)
     summary = artifacts["summary"]
-    sensitivity_source = artifacts["comparison_summary"] if not artifacts["comparison_summary"].is_empty() else summary
     trades = artifacts["trades"]
     baskets = artifacts["baskets"]
     best = _best_summary_row(summary, artifacts["research_report"])
+    comparison = _comparison_family_frame(
+        artifacts["comparison_summary"],
+        best=best,
+        requested_families=comparison_families,
+    )
+    sensitivity_source = comparison["frame"] if not comparison["frame"].is_empty() else summary
     returns = _basket_returns(baskets)
     actual_metrics = _return_path_metrics(returns)
+    consistency = _report_consistency(best, actual_metrics)
     bootstrap = _block_bootstrap(returns, config=tribunal_config)
     random_sign = _random_sign_control(returns, config=tribunal_config)
     inverted = _inverted_edge_control(baskets)
     sensitivity = _sensitivity_report(sensitivity_source, best=best, config=tribunal_config)
+    stress = _stress_report(comparison["frame"], best=best)
+    regime = _regime_report(baskets)
     concentration = _concentration_report(trades)
     clustering = _cluster_report(trades, baskets)
     findings = _findings(
         artifact_checks=artifacts["checks"],
+        comparison_metadata=comparison["metadata"],
         best=best,
         actual_metrics=actual_metrics,
+        consistency=consistency,
         bootstrap=bootstrap,
         random_sign=random_sign,
         inverted=inverted,
         sensitivity=sensitivity,
+        stress=stress,
+        regime=regime,
         concentration=concentration,
         clustering=clustering,
         config=tribunal_config,
@@ -70,14 +87,19 @@ def run_strategy_tribunal(
         "config": asdict(tribunal_config),
         "artifact_checks": artifacts["checks"],
         "comparison_csvs": [str(Path(path).expanduser()) for path in comparison_csvs],
+        "comparison_family_request": list(comparison_families),
+        "comparison_family": comparison["metadata"],
         "best_scenario": best,
         "actual_path": actual_metrics,
+        "report_consistency": consistency,
         "bootstrap": bootstrap,
         "negative_controls": {
             "random_sign": random_sign,
             "inverted_edge": inverted,
         },
         "sensitivity": sensitivity,
+        "stress": stress,
+        "regime": regime,
         "concentration": concentration,
         "clustering": clustering,
         "findings": findings,
@@ -94,9 +116,13 @@ def run_strategy_tribunal(
 def format_strategy_tribunal_report(payload: dict[str, Any]) -> str:
     best = payload.get("best_scenario", {})
     actual = payload.get("actual_path", {})
+    consistency = payload.get("report_consistency", {})
+    comparison = payload.get("comparison_family", {})
     bootstrap = payload.get("bootstrap", {})
     controls = payload.get("negative_controls", {})
     sensitivity = payload.get("sensitivity", {})
+    stress = payload.get("stress", {})
+    regime = payload.get("regime", {})
     concentration = payload.get("concentration", {})
     clustering = payload.get("clustering", {})
     lines = [
@@ -109,6 +135,7 @@ def format_strategy_tribunal_report(payload: dict[str, Any]) -> str:
         f"- Verdict: **{payload.get('verdict', 'UNKNOWN')}**",
         f"- Source: `{payload.get('source_report_dir', '')}`",
         f"- Comparison CSVs: {len(payload.get('comparison_csvs', []))}",
+        f"- Comparison family: `{comparison.get('status', 'none')}` ({_comparison_family_label(comparison)})",
         f"- Scenario: `{best.get('scenario_id', best.get('strategy', 'unknown'))}`",
         f"- Promotion gate: `{best.get('promotion_gate_pass', 'unknown')}` ({best.get('promotion_reason', 'unknown')})",
         f"- Total return: {_pct(best.get('total_return', actual.get('total_return', 0.0)))}",
@@ -136,6 +163,29 @@ def format_strategy_tribunal_report(payload: dict[str, Any]) -> str:
             f"| Inverted edge | total return | {_pct(controls.get('inverted_edge', {}).get('total_return'))} |",
             f"| Inverted edge | max drawdown | {_pct(controls.get('inverted_edge', {}).get('max_drawdown'))} |",
             "",
+            "## Path Consistency",
+            "",
+            "| Metric | Reported | Recomputed | Absolute Diff |",
+            "|---|---:|---:|---:|",
+            (
+                f"| Total return | {_pct(consistency.get('total_return_reported'))} | "
+                f"{_pct(consistency.get('total_return_recomputed'))} | "
+                f"{_pct(consistency.get('total_return_abs_diff'))} |"
+            ),
+            (
+                f"| Max drawdown | {_pct(consistency.get('max_drawdown_reported'))} | "
+                f"{_pct(consistency.get('max_drawdown_recomputed'))} | "
+                f"{_pct(consistency.get('max_drawdown_abs_diff'))} |"
+            ),
+            "",
+            "## Stress Matrix",
+            "",
+            f"- Status: `{stress.get('status', 'missing')}`",
+            f"- Rows: {stress.get('rows', 0)}",
+            f"- Min stress return: {_pct(stress.get('min_total_return'))}",
+            f"- Worst stress drawdown: {_pct(stress.get('worst_max_drawdown'))}",
+            f"- Promotion pass rate: {_pct(stress.get('promotion_pass_rate'))}",
+            "",
             "## Sensitivity",
             "",
             f"- Status: `{sensitivity.get('status', 'unknown')}`",
@@ -155,6 +205,16 @@ def format_strategy_tribunal_report(payload: dict[str, Any]) -> str:
         lines.append("")
     lines.extend(
         [
+            "## Regime Path",
+            "",
+            "| Check | Value |",
+            "|---|---:|",
+            f"| Months | {regime.get('months', 0)} |",
+            f"| Positive month rate | {_pct(regime.get('positive_month_rate'))} |",
+            f"| Worst month | `{regime.get('worst_month', '')}` |",
+            f"| Worst month return | {_pct(regime.get('worst_month_return'))} |",
+            f"| Max monthly no-new-high stretch | {regime.get('max_monthly_underwater_months', 0)} |",
+            "",
             "## Concentration And Crowding",
             "",
             "| Check | Value |",
@@ -228,6 +288,78 @@ def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _comparison_family_frame(
+    comparison: pl.DataFrame,
+    *,
+    best: dict[str, Any],
+    requested_families: tuple[str, ...],
+) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "status": "missing",
+        "requested_families": list(requested_families),
+        "selected_families": [],
+        "rows_before": comparison.height,
+        "rows_after": 0,
+    }
+    if comparison.is_empty():
+        return {"frame": comparison, "metadata": metadata}
+    frame = comparison
+    selected = tuple(item for item in requested_families if item)
+    if not selected:
+        selected = _infer_comparison_families(comparison, best=best)
+        metadata["inferred_families"] = list(selected)
+    if selected and "strategy" in comparison.columns:
+        frame = comparison.filter(pl.col("strategy").is_in(list(selected)))
+        metadata["status"] = "explicit" if requested_families else "inferred"
+    else:
+        metadata["status"] = "unfiltered"
+    metadata["selected_families"] = list(selected)
+    metadata["rows_after"] = frame.height
+    if frame.is_empty():
+        metadata["status"] = "empty_after_filter"
+    return {"frame": frame, "metadata": metadata}
+
+
+def _infer_comparison_families(comparison: pl.DataFrame, *, best: dict[str, Any]) -> tuple[str, ...]:
+    if comparison.is_empty() or "strategy" not in comparison.columns:
+        return ()
+    strategies = sorted(str(item) for item in comparison["strategy"].drop_nulls().unique().to_list())
+    if not strategies:
+        return ()
+    trade_count = int(_finite_float(best.get("trades")))
+    funding_mode = str(best.get("funding_mode", "")).lower()
+    candidate = strategies
+    if trade_count >= 1000:
+        candidate = [item for item in candidate if item.startswith("observe")]
+    elif trade_count > 0:
+        near = [
+            item
+            for item in candidate
+            if _strategy_trade_distance(comparison, strategy=item, trade_count=trade_count) <= max(5, int(trade_count * 0.05))
+        ]
+        if near:
+            candidate = near
+    if funding_mode in {"modeled", "partial"}:
+        funded = [item for item in candidate if "funding" in item and "nofunding" not in item]
+        if funded:
+            candidate = funded
+    elif funding_mode == "missing":
+        nofunding = [item for item in candidate if "nofunding" in item]
+        if nofunding:
+            candidate = nofunding
+    return tuple(candidate[:3])
+
+
+def _strategy_trade_distance(comparison: pl.DataFrame, *, strategy: str, trade_count: int) -> int:
+    if "trades" not in comparison.columns:
+        return 0
+    rows = comparison.filter(pl.col("strategy") == strategy)
+    if rows.is_empty():
+        return 1_000_000_000
+    values = [abs(int(_finite_float(item)) - trade_count) for item in rows["trades"].drop_nulls().to_list()]
+    return min(values) if values else 1_000_000_000
+
+
 def _artifact_check(name: str, artifact: pl.DataFrame | dict[str, Any]) -> dict[str, Any]:
     if isinstance(artifact, pl.DataFrame):
         return {"name": name, "present": not artifact.is_empty(), "rows": artifact.height}
@@ -270,6 +402,21 @@ def _return_path_metrics(returns: list[float]) -> dict[str, Any]:
         "sharpe_like": float(mean / stdev * math.sqrt(365.0)) if stdev > 1e-12 else 0.0,
         "worst_return": float(worst),
         "observations": len(returns),
+    }
+
+
+def _report_consistency(best: dict[str, Any], actual: dict[str, Any]) -> dict[str, Any]:
+    expected_return = _finite_float(best.get("total_return"))
+    expected_dd = _finite_float(best.get("max_drawdown"))
+    actual_return = _finite_float(actual.get("total_return"))
+    actual_dd = _finite_float(actual.get("max_drawdown"))
+    return {
+        "total_return_reported": expected_return,
+        "total_return_recomputed": actual_return,
+        "total_return_abs_diff": abs(expected_return - actual_return),
+        "max_drawdown_reported": expected_dd,
+        "max_drawdown_recomputed": actual_dd,
+        "max_drawdown_abs_diff": abs(expected_dd - actual_dd),
     }
 
 
@@ -409,6 +556,91 @@ def _sensitivity_report(
     }
 
 
+def _stress_report(summary: pl.DataFrame, *, best: dict[str, Any]) -> dict[str, Any]:
+    if summary.is_empty():
+        return {"status": "missing", "rows": 0}
+    out: dict[str, Any] = {"status": "present", "rows": summary.height}
+    if "total_return" in summary.columns:
+        out["min_total_return"] = float(summary["total_return"].min())
+        out["median_total_return"] = float(summary["total_return"].median())
+    else:
+        out["min_total_return"] = 0.0
+        out["median_total_return"] = 0.0
+    if "max_drawdown" in summary.columns:
+        out["worst_max_drawdown"] = float(summary["max_drawdown"].min())
+        out["median_max_drawdown"] = float(summary["max_drawdown"].median())
+    else:
+        out["worst_max_drawdown"] = 0.0
+        out["median_max_drawdown"] = 0.0
+    if "promotion_gate_pass" in summary.columns:
+        out["promotion_pass_rate"] = float(summary["promotion_gate_pass"].cast(pl.Float64).mean())
+        out["promotion_passes"] = int(summary["promotion_gate_pass"].sum())
+    else:
+        out["promotion_pass_rate"] = 0.0
+        out["promotion_passes"] = 0
+    stress_axes = []
+    for column in ("strategy", "stop_fill_mode", "cost_multiplier", "entry_selector"):
+        if column not in summary.columns or summary[column].n_unique() <= 1:
+            continue
+        grouped = (
+            summary.group_by(column)
+            .agg(
+                [
+                    pl.len().alias("rows"),
+                    pl.col("total_return").min().alias("min_total_return")
+                    if "total_return" in summary.columns
+                    else pl.lit(0.0).alias("min_total_return"),
+                    pl.col("max_drawdown").min().alias("worst_max_drawdown")
+                    if "max_drawdown" in summary.columns
+                    else pl.lit(0.0).alias("worst_max_drawdown"),
+                    pl.col("promotion_gate_pass").sum().alias("promotion_passes")
+                    if "promotion_gate_pass" in summary.columns
+                    else pl.lit(0).alias("promotion_passes"),
+                ]
+            )
+            .sort("min_total_return")
+        )
+        stress_axes.append({"axis": column, "levels": _json_ready(grouped.to_dicts())})
+    out["axes"] = stress_axes
+    out["reported_best_total_return"] = _finite_float(best.get("total_return"))
+    return out
+
+
+def _regime_report(baskets: pl.DataFrame) -> dict[str, Any]:
+    if baskets.is_empty() or not {"exit_ts_ms", "basket_return"}.issubset(set(baskets.columns)):
+        return {"status": "missing", "months": 0}
+    monthly = (
+        baskets.with_columns(pl.from_epoch(pl.col("exit_ts_ms"), time_unit="ms").dt.strftime("%Y-%m").alias("month"))
+        .group_by("month")
+        .agg([((pl.col("basket_return") + 1.0).product() - 1.0).alias("return"), pl.len().alias("baskets")])
+        .sort("month")
+    )
+    returns = [float(item) for item in monthly["return"].to_list()]
+    equity = 1.0
+    peak = 1.0
+    underwater = 0
+    max_underwater = 0
+    for value in returns:
+        equity *= 1.0 + value
+        if equity >= peak - 1e-12:
+            peak = equity
+            underwater = 0
+        else:
+            underwater += 1
+            max_underwater = max(max_underwater, underwater)
+    worst = monthly.sort("return").head(1).to_dicts()[0] if not monthly.is_empty() else {}
+    return {
+        "status": "ok",
+        "months": monthly.height,
+        "positive_months": int(sum(1 for value in returns if value > 0.0)),
+        "positive_month_rate": float(np.mean(np.asarray(returns) > 0.0)) if returns else 0.0,
+        "worst_month": str(worst.get("month", "")),
+        "worst_month_return": _finite_float(worst.get("return")),
+        "worst_month_baskets": int(worst.get("baskets", 0) or 0),
+        "max_monthly_underwater_months": max_underwater,
+    }
+
+
 def _concentration_report(trades: pl.DataFrame) -> dict[str, Any]:
     if trades.is_empty() or not {"symbol", "net_return"}.issubset(set(trades.columns)):
         return {"trades": trades.height, "status": "missing"}
@@ -488,12 +720,16 @@ def _cluster_report(trades: pl.DataFrame, baskets: pl.DataFrame) -> dict[str, An
 def _findings(
     *,
     artifact_checks: list[dict[str, Any]],
+    comparison_metadata: dict[str, Any],
     best: dict[str, Any],
     actual_metrics: dict[str, Any],
+    consistency: dict[str, Any],
     bootstrap: dict[str, Any],
     random_sign: dict[str, Any],
     inverted: dict[str, Any],
     sensitivity: dict[str, Any],
+    stress: dict[str, Any],
+    regime: dict[str, Any],
     concentration: dict[str, Any],
     clustering: dict[str, Any],
     config: StrategyTribunalConfig,
@@ -507,12 +743,52 @@ def _findings(
             f"Missing required report artifacts: {', '.join(missing)}" if missing else "All core volume-event artifacts are present.",
         )
     )
+    requested_families = [str(item) for item in comparison_metadata.get("requested_families", []) if item]
+    comparison_status = str(comparison_metadata.get("status", "missing"))
+    comparison_rows = int(comparison_metadata.get("rows_after", 0) or 0)
+    if requested_families and comparison_rows <= 0:
+        comparison_level = "FAIL"
+        comparison_message = f"Requested comparison family produced no rows: {', '.join(requested_families)}."
+    elif requested_families:
+        comparison_level = "PASS"
+        comparison_message = f"Comparison family filter selected {_comparison_family_label(comparison_metadata)}."
+    elif comparison_status in {"inferred", "unfiltered"} and comparison_rows > 0:
+        comparison_level = "WATCH" if comparison_status == "unfiltered" else "PASS"
+        comparison_message = f"Comparison family status `{comparison_status}` selected {_comparison_family_label(comparison_metadata)}."
+    else:
+        comparison_level = "WATCH"
+        comparison_message = "No comparison family stress evidence was attached."
+    findings.append(_finding(comparison_level, "comparison_family", comparison_message))
     promotion = _boolish(best.get("promotion_gate_pass"))
     findings.append(
         _finding(
             "PASS" if promotion else "FAIL",
             "promotion_gate",
             f"Best scenario promotion gate is {best.get('promotion_gate_pass')} with reason `{best.get('promotion_reason', 'unknown')}`.",
+        )
+    )
+    consistency_ok = (
+        _finite_float(consistency.get("total_return_abs_diff")) < 1e-6
+        and _finite_float(consistency.get("max_drawdown_abs_diff")) < 1e-6
+    )
+    findings.append(
+        _finding(
+            "PASS" if consistency_ok else "FAIL",
+            "report_consistency",
+            "Recomputed basket path matches the reported best row."
+            if consistency_ok
+            else (
+                f"Recomputed path differs: return diff {_pct(consistency.get('total_return_abs_diff'))}, "
+                f"drawdown diff {_pct(consistency.get('max_drawdown_abs_diff'))}."
+            ),
+        )
+    )
+    funding_mode = str(best.get("funding_mode", "missing"))
+    findings.append(
+        _finding(
+            "PASS" if funding_mode == "modeled" else "WATCH" if funding_mode == "partial" else "FAIL",
+            "funding_coverage",
+            f"Funding mode is `{funding_mode}`.",
         )
     )
     p05 = _finite_float(bootstrap.get("p05_total_return"))
@@ -553,6 +829,32 @@ def _findings(
             level,
             "parameter_sensitivity",
             f"Sensitivity status `{sensitivity_status}` with {robust_count} robust same-family variants.",
+        )
+    )
+    stress_status = str(stress.get("status", "missing"))
+    min_stress_return = _finite_float(stress.get("min_total_return"))
+    worst_stress_dd = _finite_float(stress.get("worst_max_drawdown"))
+    if stress_status == "missing":
+        stress_level = "WATCH"
+    elif min_stress_return < config.stress_return_fail or worst_stress_dd < config.stress_drawdown_fail:
+        stress_level = "FAIL"
+    elif worst_stress_dd < config.stress_drawdown_watch:
+        stress_level = "WATCH"
+    else:
+        stress_level = "PASS"
+    findings.append(
+        _finding(
+            stress_level,
+            "stress_matrix",
+            f"Filtered stress matrix rows={stress.get('rows', 0)}, min return {_pct(min_stress_return)}, worst drawdown {_pct(worst_stress_dd)}.",
+        )
+    )
+    positive_month_rate = _finite_float(regime.get("positive_month_rate"))
+    findings.append(
+        _finding(
+            "PASS" if positive_month_rate >= config.min_positive_month_rate else "WATCH",
+            "monthly_regime",
+            f"Positive month rate is {_pct(positive_month_rate)}; worst month is `{regime.get('worst_month', '')}` at {_pct(regime.get('worst_month_return'))}.",
         )
     )
     top_share = _finite_float(concentration.get("top_symbol_abs_share"))
@@ -632,3 +934,11 @@ def _boolish(value: Any) -> bool:
 def _pct(value: Any) -> str:
     number = _finite_float(value)
     return f"{number:.2%}"
+
+
+def _comparison_family_label(comparison: dict[str, Any]) -> str:
+    selected = [str(item) for item in comparison.get("selected_families", []) if item]
+    if not selected:
+        selected = [str(item) for item in comparison.get("inferred_families", []) if item]
+    family = ", ".join(selected) if selected else "all rows"
+    return f"{family}; rows {comparison.get('rows_after', 0)}/{comparison.get('rows_before', 0)}"

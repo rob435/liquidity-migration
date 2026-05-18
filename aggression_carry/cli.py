@@ -963,6 +963,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional comma-separated stress/sweep CSVs used for sensitivity checks.",
     )
+    tribunal.add_argument(
+        "--comparison-family",
+        default="",
+        help="Optional comma-separated strategy family names from comparison CSVs, such as promoted_funding or observe_funding.",
+    )
     tribunal.add_argument("--bootstrap-samples", type=int, default=tribunal_defaults.bootstrap_samples)
     tribunal.add_argument("--bootstrap-block-size", type=int, default=tribunal_defaults.bootstrap_block_size)
     tribunal.add_argument("--random-seed", type=int, default=tribunal_defaults.random_seed)
@@ -1489,6 +1494,7 @@ def main(argv: list[str] | None = None) -> int:
             report_dir,
             output_dir=args.output_dir,
             comparison_csvs=tuple(Path(item).expanduser() for item in _csv_str(args.comparison_csv, ())),
+            comparison_families=_csv_str(args.comparison_family, ()),
             config=StrategyTribunalConfig(
                 bootstrap_samples=args.bootstrap_samples,
                 bootstrap_block_size=args.bootstrap_block_size,

@@ -23,9 +23,10 @@ def _write_tribunal_fixture(report_dir: Path) -> None:
                 "stop_loss_pct": 0.12,
                 "take_profit_pct": 0.25,
                 "cost_multiplier": 3.0,
-                "total_return": 0.18,
-                "max_drawdown": -0.07,
+                "total_return": 0.1304953753267999,
+                "max_drawdown": 0.0,
                 "trades": 6,
+                "funding_mode": "modeled",
                 "promotion_gate_pass": True,
                 "promotion_reason": "pass",
                 "min_split_return": 0.04,
@@ -44,6 +45,7 @@ def _write_tribunal_fixture(report_dir: Path) -> None:
                 "total_return": 0.13,
                 "max_drawdown": -0.08,
                 "trades": 5,
+                "funding_mode": "modeled",
                 "promotion_gate_pass": True,
                 "promotion_reason": "pass",
                 "min_split_return": 0.02,
@@ -62,6 +64,7 @@ def _write_tribunal_fixture(report_dir: Path) -> None:
                 "total_return": 0.10,
                 "max_drawdown": -0.06,
                 "trades": 4,
+                "funding_mode": "modeled",
                 "promotion_gate_pass": True,
                 "promotion_reason": "pass",
                 "min_split_return": 0.01,
@@ -107,6 +110,7 @@ def _write_tribunal_fixture(report_dir: Path) -> None:
         json.dumps({"best_scenario": summary.head(1).to_dicts()[0]}),
         encoding="utf-8",
     )
+    summary.with_columns(pl.lit("fixture_family").alias("strategy")).write_csv(report_dir / "comparison.csv")
 
 
 def test_strategy_tribunal_writes_adversarial_report(tmp_path: Path) -> None:
@@ -115,12 +119,15 @@ def test_strategy_tribunal_writes_adversarial_report(tmp_path: Path) -> None:
 
     payload = run_strategy_tribunal(
         report_dir,
-        comparison_csvs=(report_dir / "volume_event_scenario_summary.csv",),
+        comparison_csvs=(report_dir / "comparison.csv",),
+        comparison_families=("fixture_family",),
         config=StrategyTribunalConfig(bootstrap_samples=50, bootstrap_block_size=2, random_seed=1),
     )
 
     assert payload["verdict"] == "PASS"
     assert len(payload["comparison_csvs"]) == 1
+    assert payload["comparison_family"]["selected_families"] == ["fixture_family"]
+    assert payload["stress"]["min_total_return"] == 0.10
     assert payload["sensitivity"]["robust_family_variants"] == 3
     assert payload["negative_controls"]["inverted_edge"]["total_return"] < 0.0
     assert (report_dir / "strategy_tribunal" / "strategy_tribunal_report.md").exists()
@@ -141,6 +148,8 @@ def test_cli_strategy_tribunal_parses_research_controls(tmp_path: Path) -> None:
             "3",
             "--comparison-csv",
             str(tmp_path / "stress.csv"),
+            "--comparison-family",
+            "promoted_funding",
             "--random-seed",
             "9",
         ]
@@ -150,4 +159,62 @@ def test_cli_strategy_tribunal_parses_research_controls(tmp_path: Path) -> None:
     assert args.bootstrap_samples == 25
     assert args.bootstrap_block_size == 3
     assert args.comparison_csv == str(tmp_path / "stress.csv")
+    assert args.comparison_family == "promoted_funding"
     assert args.random_seed == 9
+
+
+def test_strategy_tribunal_fails_negative_filtered_stress_family(tmp_path: Path) -> None:
+    report_dir = tmp_path / "reports" / "volume_event_research"
+    _write_tribunal_fixture(report_dir)
+    comparison = pl.DataFrame(
+        [
+            {
+                "strategy": "bad_family",
+                "event_type": "liquidity_migration",
+                "side_hypothesis": "reversal",
+                "side": "short",
+                "total_return": -0.05,
+                "max_drawdown": -0.40,
+                "trades": 6,
+                "promotion_gate_pass": False,
+            },
+            {
+                "strategy": "other_family",
+                "event_type": "liquidity_migration",
+                "side_hypothesis": "reversal",
+                "side": "short",
+                "total_return": 1.0,
+                "max_drawdown": -0.05,
+                "trades": 6,
+                "promotion_gate_pass": True,
+            },
+        ]
+    )
+    comparison.write_csv(report_dir / "stress.csv")
+
+    payload = run_strategy_tribunal(
+        report_dir,
+        comparison_csvs=(report_dir / "stress.csv",),
+        comparison_families=("bad_family",),
+        config=StrategyTribunalConfig(bootstrap_samples=20, bootstrap_block_size=2, random_seed=1),
+    )
+
+    assert payload["verdict"] == "FAIL"
+    assert payload["stress"]["min_total_return"] == -0.05
+    assert any(item["check"] == "stress_matrix" and item["level"] == "FAIL" for item in payload["findings"])
+
+
+def test_strategy_tribunal_fails_empty_requested_comparison_family(tmp_path: Path) -> None:
+    report_dir = tmp_path / "reports" / "volume_event_research"
+    _write_tribunal_fixture(report_dir)
+
+    payload = run_strategy_tribunal(
+        report_dir,
+        comparison_csvs=(report_dir / "comparison.csv",),
+        comparison_families=("not_in_file",),
+        config=StrategyTribunalConfig(bootstrap_samples=20, bootstrap_block_size=2, random_seed=1),
+    )
+
+    assert payload["verdict"] == "FAIL"
+    assert payload["comparison_family"]["status"] == "empty_after_filter"
+    assert any(item["check"] == "comparison_family" and item["level"] == "FAIL" for item in payload["findings"])
