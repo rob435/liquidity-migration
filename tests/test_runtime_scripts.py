@@ -32,5 +32,5 @@ def test_systemd_entry_runner_uses_vps_cadence() -> None:
     )
 
     assert "Environment=INTERVAL_SECONDS=60" in text
-    assert "Environment=STRATEGY_PROFILE=observe" in text
+    assert "Environment=STRATEGY_PROFILE=demo_relaxed" in text
     assert "Environment=UNIVERSE_RANK_END=300" in text

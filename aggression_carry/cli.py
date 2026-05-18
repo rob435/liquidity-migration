@@ -16,7 +16,7 @@ from .config import (
 )
 from .downloaders import download_market_data, parse_date_ms
 from .event_demo import (
-    DEMO_STRATEGY_PROFILES,
+    DEMO_STRATEGY_PROFILE_CHOICES,
     EventDemoCycleConfig,
     EventRiskCycleConfig,
     build_event_risk_private_client,
@@ -978,9 +978,9 @@ def build_parser() -> argparse.ArgumentParser:
     event_demo.add_argument("--data-name", default=demo_defaults.data_name)
     event_demo.add_argument(
         "--strategy-profile",
-        choices=DEMO_STRATEGY_PROFILES,
+        choices=DEMO_STRATEGY_PROFILE_CHOICES,
         default=demo_defaults.strategy_profile,
-        help="Demo entry profile. promoted is the sparse production alpha; observe is a higher-frequency test-only variant.",
+        help="Demo entry profile. promoted is the sparse production alpha; demo_relaxed is a higher-frequency demo-trading variant. observe is accepted as a deprecated alias.",
     )
 
     event_risk = subparsers.add_parser(

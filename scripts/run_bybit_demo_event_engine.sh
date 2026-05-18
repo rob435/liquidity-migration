@@ -10,14 +10,14 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 CONFIG_PATH="${CONFIG_PATH:-configs/volume_alpha.default.yaml}"
 DATA_ROOT="${DATA_ROOT:-data/bybit-demo-event}"
-STRATEGY_PROFILE="${STRATEGY_PROFILE:-observe}"
+STRATEGY_PROFILE="${STRATEGY_PROFILE:-demo_relaxed}"
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-300}"
 if ! [[ "$INTERVAL_SECONDS" =~ ^[0-9]+$ ]]; then
     echo "INTERVAL_SECONDS must be a non-negative integer number of seconds." >&2
     exit 2
 fi
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-45}"
-if [[ "$STRATEGY_PROFILE" == "observe" ]]; then
+if [[ "$STRATEGY_PROFILE" == "demo_relaxed" || "$STRATEGY_PROFILE" == "observe" ]]; then
     UNIVERSE_RANK_END="${UNIVERSE_RANK_END:-300}"
     UNIVERSE_MAX_SYMBOLS="${UNIVERSE_MAX_SYMBOLS:-300}"
     UNIVERSE_MIN_TURNOVER_24H="${UNIVERSE_MIN_TURNOVER_24H:-0}"

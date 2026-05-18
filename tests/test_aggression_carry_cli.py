@@ -162,14 +162,14 @@ def test_cli_event_ws_risk_exposes_stream_start_timeout(tmp_path: Path) -> None:
     assert args.stream_start_timeout_seconds == 0.25
 
 
-def test_cli_event_demo_parses_observe_profile(tmp_path: Path) -> None:
+def test_cli_event_demo_parses_demo_relaxed_profile(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [
             "--data-root",
             str(tmp_path),
             "event-demo-cycle",
             "--strategy-profile",
-            "observe",
+            "demo_relaxed",
             "--universe-rank-end",
             "300",
             "--universe-max-symbols",
@@ -180,7 +180,7 @@ def test_cli_event_demo_parses_observe_profile(tmp_path: Path) -> None:
     )
 
     assert args.command == "event-demo-cycle"
-    assert args.strategy_profile == "observe"
+    assert args.strategy_profile == "demo_relaxed"
     assert args.universe_rank_end == 300
     assert args.universe_max_symbols == 300
     assert args.submit_orders is True

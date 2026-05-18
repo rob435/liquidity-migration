@@ -14,7 +14,7 @@ Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
 Environment=SUBMIT_ORDERS=1
 Environment=CONFIRM_DEMO_ORDERS=1
 Environment=TELEGRAM_ENABLED=1
-Environment=STRATEGY_PROFILE=observe
+Environment=STRATEGY_PROFILE=demo_relaxed
 Environment=INTERVAL_SECONDS=60
 Environment=MAX_ORDER_NOTIONAL_PCT_EQUITY=0
 Environment=MAX_ENTRY_LAG_MINUTES=15

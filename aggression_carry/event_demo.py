@@ -41,8 +41,10 @@ from .volume_events import (
 
 MS_PER_MINUTE = 60_000
 PROMOTED_DEMO_STRATEGY_ID = "liqmig_union_q40_h3_tp25_g100_qsqueeze"
-OBSERVE_DEMO_STRATEGY_ID = "observe_liqmig_q40_h3_tp25_g100_relaxed_qsqueeze"
-DEMO_STRATEGY_PROFILES = ("promoted", "observe")
+DEMO_RELAXED_STRATEGY_ID = "demo_relaxed_liqmig_q40_h3_tp25_g100_qsqueeze"
+DEMO_STRATEGY_PROFILE_ALIASES = {"observe": "demo_relaxed"}
+DEMO_STRATEGY_PROFILES = ("promoted", "demo_relaxed")
+DEMO_STRATEGY_PROFILE_CHOICES = DEMO_STRATEGY_PROFILES + tuple(DEMO_STRATEGY_PROFILE_ALIASES)
 PENDING_ORDER_STATUSES = {"submitted", "submitted_unconfirmed", "partial", "fallback_market"}
 PENDING_ORDER_GUARD_MS = 15 * MS_PER_MINUTE
 
@@ -105,6 +107,9 @@ def run_event_demo_cycle(
     now_ms: int | None = None,
 ) -> dict[str, Any]:
     demo = demo_config or EventDemoCycleConfig()
+    normalized_profile = _normalize_demo_strategy_profile(demo.strategy_profile)
+    if normalized_profile != demo.strategy_profile:
+        demo = replace(demo, strategy_profile=normalized_profile)
     strategy = _demo_event_config(event_config or VolumeEventResearchConfig(), profile=demo.strategy_profile)
     strategy_id = _demo_strategy_id(demo.strategy_profile)
     _validate_event_config(strategy)
@@ -1222,14 +1227,20 @@ def format_event_risk_cycle_report(payload: dict[str, Any]) -> str:
 
 
 def _demo_strategy_id(profile: str) -> str:
+    profile = _normalize_demo_strategy_profile(profile)
     if profile == "promoted":
         return PROMOTED_DEMO_STRATEGY_ID
-    if profile == "observe":
-        return OBSERVE_DEMO_STRATEGY_ID
+    if profile == "demo_relaxed":
+        return DEMO_RELAXED_STRATEGY_ID
     raise ValueError(f"Unknown demo strategy profile: {profile}")
 
 
+def _normalize_demo_strategy_profile(profile: str) -> str:
+    return DEMO_STRATEGY_PROFILE_ALIASES.get(profile, profile)
+
+
 def _demo_event_config(config: VolumeEventResearchConfig, *, profile: str) -> VolumeEventResearchConfig:
+    profile = _normalize_demo_strategy_profile(profile)
     promoted = VolumeEventResearchConfig()
     base = replace(
         promoted,
@@ -1239,7 +1250,7 @@ def _demo_event_config(config: VolumeEventResearchConfig, *, profile: str) -> Vo
     )
     if profile == "promoted":
         return base
-    if profile == "observe":
+    if profile == "demo_relaxed":
         return replace(
             base,
             max_active_symbols=10,
@@ -1268,15 +1279,16 @@ def _selected_scenario(config: VolumeEventResearchConfig) -> EventScenario:
 
 
 def _validate_demo_config(config: EventDemoCycleConfig) -> None:
-    if config.strategy_profile not in DEMO_STRATEGY_PROFILES:
+    strategy_profile = _normalize_demo_strategy_profile(config.strategy_profile)
+    if strategy_profile not in DEMO_STRATEGY_PROFILES:
         raise ValueError(f"strategy_profile must be one of: {', '.join(DEMO_STRATEGY_PROFILES)}")
     if config.lookback_days < 25:
         raise ValueError("lookback_days must be at least 25 so 20d persistence and 7d prior ranks are populated")
-    required_rank_end = 260 if config.strategy_profile == "observe" else 150
+    required_rank_end = 260 if strategy_profile == "demo_relaxed" else 150
     if config.universe_rank_end < required_rank_end:
-        raise ValueError(f"universe_rank_end must cover at least rank {required_rank_end} for {config.strategy_profile}")
+        raise ValueError(f"universe_rank_end must cover at least rank {required_rank_end} for {strategy_profile}")
     if config.universe_max_symbols < required_rank_end:
-        raise ValueError(f"universe_max_symbols must cover at least rank {required_rank_end} for {config.strategy_profile}")
+        raise ValueError(f"universe_max_symbols must cover at least rank {required_rank_end} for {strategy_profile}")
     if not 0.0 <= config.max_order_notional_pct_equity <= 1.0:
         raise ValueError("max_order_notional_pct_equity must be in [0, 1]")
     if not 0.0 < config.wallet_balance_fraction <= 1.0:

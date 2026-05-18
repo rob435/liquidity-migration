@@ -7,9 +7,9 @@ Current as of 2026-05-18.
 - Research default: full-PIT liquidity-migration short, `union_pathology` crowding veto.
 - Entry policy: `promoted_quality_squeeze` conservative router.
 - Promoted research strategy id: `liqmig_union_q40_h3_tp25_g100_qsqueeze`.
-- Live demo entry profile: `observe`, strategy id `observe_liqmig_q40_h3_tp25_g100_relaxed_qsqueeze`.
-- Gross exposure: `1.00`, split across `10` max active symbols in observe mode.
-- Per-entry target: `10.00%` of current Bybit demo USDT equity in observe mode.
+- Live demo entry profile: `demo_relaxed`, strategy id `demo_relaxed_liqmig_q40_h3_tp25_g100_qsqueeze`.
+- Gross exposure: `1.00`, split across `10` max active symbols in demo_relaxed mode.
+- Per-entry target: `10.00%` of current Bybit demo USDT equity in demo_relaxed mode.
 - Entry service: `model050426-bybit-demo.service`.
 - Risk service: `model050426-bybit-risk.service`.
 - Venue mode: Bybit demo only. `demo=False` is still refused by the private client.
@@ -43,7 +43,7 @@ and +175.32% OOS. Candidate selection, exits, cooldowns, gross exposure, and
 crowding decisions are unchanged; only entry timing for promoted-grade squeeze
 bars changed.
 
-## Observe-Mode Evidence
+## Demo-Relaxed Profile Evidence
 
 The active VPS entry service is intentionally configured for a higher-frequency
 demo-only observation profile. This profile is not the promoted research
@@ -51,7 +51,7 @@ default. It lowers the entry gates while keeping the same short
 liquidity-migration premise, fixed exits, stop/loss throttles, and
 `union_pathology` same-hour crowding veto. It uses the same conservative
 `promoted_quality_squeeze` router for promoted-grade events and normal 1h entry
-for lower-tier observe-only events.
+for lower-tier `demo_relaxed` events.
 
 Full-PIT funded stress report:
 
@@ -72,7 +72,7 @@ average split Sharpe-like: 1.04
 promotion gate: pass
 ```
 
-Observe-mode relaxed gates:
+`demo_relaxed` relaxed gates:
 
 ```text
 PIT liquidity rank: 11-260
@@ -123,24 +123,19 @@ Bybit demo WebSocket Trade order entry was attempted and was unavailable or reje
 
 ## Deployed State
 
-Last verified VPS state after quality-squeeze deployment:
+Expected VPS state for the active demo deployment:
 
 ```text
 path: /opt/MODEL050426
 branch: main
-commit: 29549ec
 services: model050426-bybit-demo.service, model050426-bybit-risk.service
-entry strategy id: observe_liqmig_q40_h3_tp25_g100_relaxed_qsqueeze
+entry strategy id: demo_relaxed_liqmig_q40_h3_tp25_g100_qsqueeze
 entry policy: promoted_quality_squeeze
-latest entry cycle: 20260518014729-1779068849417571413
-latest risk cycle: ws-risk-1779068939808
 service state: active / active
-latest report position errors: none
-open trades after restart proof: 0
 ```
 
 The VPS entry service intentionally runs at `INTERVAL_SECONDS=60` and
-`STRATEGY_PROFILE=observe`. Fast exits are still handled by the separate
+`STRATEGY_PROFILE=demo_relaxed`. Fast exits are still handled by the separate
 websocket risk service; the one-minute entry cadence is for quicker stale-order,
 report, and candidate-state refresh.
 

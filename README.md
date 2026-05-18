@@ -115,7 +115,7 @@ python -m aggression_carry \
 
 Continuous demo runner, checking every 5 minutes by script default. The VPS
 systemd entry service intentionally overrides this to `INTERVAL_SECONDS=60` and
-`STRATEGY_PROFILE=observe`:
+`STRATEGY_PROFILE=demo_relaxed`:
 
 ```bash
 TELEGRAM_ENABLED=1 \
@@ -128,12 +128,12 @@ bash scripts/run_bybit_demo_event_engine.sh
 
 Default forward-test behavior:
 
-- `STRATEGY_PROFILE=observe` is a test-only relaxed-gate profile. It keeps the same short liquidity-migration idea, `union_pathology` crowding veto, and conservative `promoted_quality_squeeze` router for promoted-grade events, but uses ranks 11-260, no extra current 24h turnover floor, 80-rank improvement, 3.0x turnover expansion, -3% day-return floor, +3% residual-return floor, 0.25 close-location floor, 10 max active symbols, and 2-day cooldown.
+- `STRATEGY_PROFILE=demo_relaxed` is a test-only relaxed-gate profile. It keeps the same short liquidity-migration idea, `union_pathology` crowding veto, and conservative `promoted_quality_squeeze` router for promoted-grade events, but uses ranks 11-260, no extra current 24h turnover floor, 80-rank improvement, 3.0x turnover expansion, -3% day-return floor, +3% residual-return floor, 0.25 close-location floor, 10 max active symbols, and 2-day cooldown.
 - full-PIT funded observation evidence: 1,268 trades, +221.29% total return, -21.32% max drawdown, -18.90% worst 90d, +12.36% worst split, +142.92% OOS, promotion gate pass. Report: `/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md`.
-- pulls current Bybit USDT perp ranks 1-300 for observe mode, then applies the selected strategy profile's rank filter
+- pulls current Bybit USDT perp ranks 1-300 for demo_relaxed mode, then applies the selected strategy profile's rank filter
 - rebuilds recent 1h volume features each cycle from a 45-day lookback, using a forward-demo kline cache to fetch only missing/new bars on normal cycles
 - enters eligible events through the causal entry router, with stale entries skipped after 15 minutes by default
-- sizes each coin from the backtest weight: `gross_exposure / max_active_symbols`, currently `1.00 / 10 = 10.00%` of current Bybit demo USDT equity in observe mode
+- sizes each coin from the backtest weight: `gross_exposure / max_active_symbols`, currently `1.00 / 10 = 10.00%` of current Bybit demo USDT equity in demo_relaxed mode
 - uses 2x entry leverage in the continuous runner for margin headroom without changing the notional sizing
 - exits first on every cycle using fixed stop reconciliation, event decay, rank exit, or 3-day max hold
 - sends Telegram status with Bybit demo wallet equity, open positions, position value, and unrealized PnL when `TELEGRAM_ENABLED=1`

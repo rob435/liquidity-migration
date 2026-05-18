@@ -9,12 +9,13 @@ import pytest
 from aggression_carry.cli import build_parser
 from aggression_carry.config import ResearchConfig
 from aggression_carry.event_demo import (
-    OBSERVE_DEMO_STRATEGY_ID,
+    DEMO_RELAXED_STRATEGY_ID,
     EventDemoCycleConfig,
     EventRiskCycleConfig,
     PENDING_ORDER_GUARD_MS,
     _demo_event_config,
     _demo_kline_fetch_ranges,
+    _demo_strategy_id,
     _execute_entries,
     _execute_exits,
     _execute_risk_exits,
@@ -23,6 +24,7 @@ from aggression_carry.event_demo import (
     _limit_chase_price,
     _live_open_order_symbols,
     _maybe_notify,
+    _normalize_demo_strategy_profile,
     _reconcile_pending_order_fills,
     _submit_reduce_only_exit,
     _telegram_notification_reason,
@@ -797,7 +799,7 @@ def test_execute_entries_sizes_notional_before_leverage_margin() -> None:
         price_by_symbol={"AAAUSDT": 100.0},
         contract_by_symbol={"AAAUSDT": {"qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}},
         now_ms=1_700_000_060_000,
-        strategy_id=OBSERVE_DEMO_STRATEGY_ID,
+        strategy_id=DEMO_RELAXED_STRATEGY_ID,
     )
 
     assert rows[0]["qty"] == "20"
@@ -835,7 +837,7 @@ def test_execute_entry_attaches_native_stop_and_requires_fill_confirmation() -> 
         price_by_symbol={"AAAUSDT": 100.0},
         contract_by_symbol={"AAAUSDT": {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}},
         now_ms=1_700_000_060_000,
-        strategy_id=OBSERVE_DEMO_STRATEGY_ID,
+        strategy_id=DEMO_RELAXED_STRATEGY_ID,
     )
 
     assert rows == []
@@ -871,7 +873,7 @@ def test_execute_entry_records_only_confirmed_fill() -> None:
         price_by_symbol={"AAAUSDT": 100.0},
         contract_by_symbol={"AAAUSDT": {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}},
         now_ms=1_700_000_060_000,
-        strategy_id=OBSERVE_DEMO_STRATEGY_ID,
+        strategy_id=DEMO_RELAXED_STRATEGY_ID,
     )
 
     assert rows[0]["qty"] == "1"
@@ -917,7 +919,7 @@ def test_execute_entry_records_leverage_error_without_raising() -> None:
         price_by_symbol={"AAAUSDT": 100.0},
         contract_by_symbol={"AAAUSDT": {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}},
         now_ms=1_700_000_060_000,
-        strategy_id=OBSERVE_DEMO_STRATEGY_ID,
+        strategy_id=DEMO_RELAXED_STRATEGY_ID,
     )
 
     assert rows == []
@@ -979,7 +981,7 @@ def test_execute_entry_records_order_error_and_continues() -> None:
             "BBBUSDT": {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0},
         },
         now_ms=1_700_000_120_000,
-        strategy_id=OBSERVE_DEMO_STRATEGY_ID,
+        strategy_id=DEMO_RELAXED_STRATEGY_ID,
     )
 
     assert [row["trade_id"] for row in rows] == ["t2"]
@@ -1020,7 +1022,7 @@ def test_execute_entry_fill_confirmation_error_leaves_pending_order_for_reconcil
         price_by_symbol={"AAAUSDT": 100.0},
         contract_by_symbol={"AAAUSDT": {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}},
         now_ms=1_700_000_060_000,
-        strategy_id=OBSERVE_DEMO_STRATEGY_ID,
+        strategy_id=DEMO_RELAXED_STRATEGY_ID,
     )
 
     assert rows == []
@@ -2855,8 +2857,8 @@ def test_submit_orders_requires_explicit_confirmation() -> None:
         _validate_demo_config(config)
 
 
-def test_observe_profile_lowers_gates_for_more_demo_trades() -> None:
-    strategy = _demo_event_config(VolumeEventResearchConfig(), profile="observe")
+def test_demo_relaxed_profile_lowers_gates_for_more_demo_trades() -> None:
+    strategy = _demo_event_config(VolumeEventResearchConfig(), profile="demo_relaxed")
 
     assert strategy.max_active_symbols == 10
     assert strategy.cooldown_days == 2
@@ -2870,11 +2872,20 @@ def test_observe_profile_lowers_gates_for_more_demo_trades() -> None:
     assert strategy.liquidity_migration_crowding_filter == "union_pathology"
 
 
-def test_observe_profile_requires_wide_forward_universe() -> None:
+def test_demo_relaxed_profile_requires_wide_forward_universe() -> None:
     with pytest.raises(ValueError, match="rank 260"):
         _validate_demo_config(
-            EventDemoCycleConfig(strategy_profile="observe", universe_rank_end=220, universe_max_symbols=220)
+            EventDemoCycleConfig(strategy_profile="demo_relaxed", universe_rank_end=220, universe_max_symbols=220)
         )
+
+
+def test_observe_alias_maps_to_canonical_demo_relaxed_profile() -> None:
+    strategy = _demo_event_config(VolumeEventResearchConfig(), profile="observe")
+
+    assert _normalize_demo_strategy_profile("observe") == "demo_relaxed"
+    assert _demo_strategy_id("observe") == DEMO_RELAXED_STRATEGY_ID
+    assert strategy.max_active_symbols == 10
+    _validate_demo_config(EventDemoCycleConfig(strategy_profile="observe", universe_rank_end=300, universe_max_symbols=300))
 
 
 def test_event_demo_rejects_non_positive_entry_leverage() -> None:
