@@ -43,16 +43,27 @@ and +175.32% OOS. Candidate selection, exits, cooldowns, gross exposure, and
 crowding decisions are unchanged; only entry timing for promoted-grade squeeze
 bars changed.
 
-The stricter `strategy-tribunal` audit was rerun on 2026-05-18 with the
-quality-tier stress matrix filtered to `--comparison-family promoted_funding`.
+The stricter model court was rerun on 2026-05-18 with the quality-tier stress
+matrix filtered to `--comparison-family promoted_funding` and explicit
+pre-registered windows:
+
+```text
+train:      2023-05-03 to 2024-05-03, +122.17%, -4.86% max drawdown
+validation: 2024-05-03 to 2025-05-03, +219.44%, -12.54% max drawdown
+oos:        2025-05-03 to 2026-05-03, +175.32%, -13.72% max drawdown
+```
+
 The promoted current report passed artifacts, comparison-family filtering,
-promotion, recomputed path consistency, block-bootstrap left-tail, random-sign,
-inverted-edge, parameter-sensitivity, monthly-regime, and symbol-concentration
+promotion, recomputed path consistency, pre-registered windows,
+block-bootstrap left-tail, random-sign, inverted-edge, shuffled-time,
+shuffled-symbol, shuffled-event, parameter-sensitivity, parameter-heatmap,
+cost/funding/slippage presence, monthly-regime, and symbol-concentration
 checks. It remains `WATCH`, not `PASS`, because funding coverage is still
 partial, the filtered stress matrix reaches -30.82% drawdown despite +299.01%
-minimum return, and the worst same-hour entry cluster still contains 3 losing
-trades for -5.15% additive net return. That is a research warning, not a
-live-execution fault.
+minimum return, live-vs-backtest execution drift evidence was not attached,
+and the worst same-hour entry cluster still contains 3 losing trades for
+-5.15% additive net return. That is a research warning, not a live-execution
+fault.
 
 ## Demo-Relaxed Profile Evidence
 
@@ -83,16 +94,17 @@ average split Sharpe-like: 1.04
 promotion gate: pass
 ```
 
-The stricter `strategy-tribunal` rerun with
-`--comparison-family observe_funding` fails `demo_relaxed`. Its artifacts,
-comparison-family filtering, promotion, bootstrap, negative controls,
-sensitivity, monthly-regime, and symbol-concentration checks pass, but the
-recomputed basket drawdown differs from the report row by 0.70 percentage
-points, funding coverage is partial, the filtered stress matrix includes
--28.67% total return and -51.02% drawdown, and the worst same-hour entry
-cluster contains 6 losing trades for -5.35% additive net return. Treat
-`demo_relaxed` as a higher-frequency plumbing and observation profile, not
-promoted alpha.
+The stricter model-court rerun with `--comparison-family observe_funding` fails
+`demo_relaxed`. Its artifacts, comparison-family filtering, promotion,
+pre-registered windows, bootstrap, shuffled negative controls, sensitivity,
+parameter heatmaps, cost/funding/slippage presence, monthly-regime, and
+symbol-concentration checks pass, but the recomputed basket drawdown differs
+from the report row by 0.70 percentage points, funding coverage is partial, the
+filtered stress matrix includes -28.67% total return and -51.02% drawdown,
+live-vs-backtest execution drift evidence was not attached, and the worst
+same-hour entry cluster contains 6 losing trades for -5.35% additive net
+return. Treat `demo_relaxed` as a higher-frequency plumbing and observation
+profile, not promoted alpha.
 
 `demo_relaxed` relaxed gates:
 

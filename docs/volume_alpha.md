@@ -180,7 +180,7 @@ python -m aggression_carry \
   volume-events
 ```
 
-After any serious run, audit the report with the strategy tribunal:
+After any serious run, audit the report with the model court:
 
 ```bash
 python -m aggression_carry \
@@ -188,18 +188,23 @@ python -m aggression_carry \
   strategy-tribunal \
   --report-dir DATA_ROOT/reports/volume_event_research \
   --comparison-csv DATA_ROOT/reports/stress_summary.csv \
-  --comparison-family promoted_funding
+  --comparison-family promoted_funding \
+  --pre-registered-window train:2023-05-03:2024-05-03,validation:2024-05-03:2025-05-03,oos:2025-05-03:2026-05-03 \
+  --execution-data-root DATA_ROOT
 ```
 
-`strategy-tribunal` is the first adversarial research court for this repo. It
+`strategy-tribunal` is the formal adversarial model court for this repo. It
 does not search for a better parameter; it tries to falsify a candidate by
-checking report artifacts, promotion gates, recomputed-vs-reported path
-consistency, bootstrap left tails, random-sign and inverted-edge negative
-controls, stress matrices filtered by `--comparison-family`, monthly regime
-coverage, parameter sensitivity, symbol concentration, and same-hour entry
-crowding. A strategy with a beautiful equity curve but one-row evidence, bad
-negative controls, stale/mixed stress evidence, or clustered loss pathology
-should remain blocked or at least `WATCH`.
+checking report artifacts, promotion gates, explicit preregistered test
+windows, recomputed-vs-reported path consistency, bootstrap left tails,
+random-sign, inverted-edge, shuffled-symbol, shuffled-time, and shuffled-event
+negative controls, pairwise parameter heatmap CSVs, stress matrices filtered by
+`--comparison-family`, cost/funding/slippage diagnostics, monthly regime
+coverage, live-vs-backtest execution drift, symbol concentration, and same-hour
+entry crowding. A strategy with a beautiful equity curve but one-row evidence,
+bad negative controls, missing execution-drift evidence, stale/mixed stress
+evidence, or clustered loss pathology should remain blocked or at least
+`WATCH`.
 
 Overnight full-PIT runner:
 

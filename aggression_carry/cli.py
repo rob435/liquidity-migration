@@ -968,6 +968,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="",
         help="Optional comma-separated strategy family names from comparison CSVs, such as promoted_funding or observe_funding.",
     )
+    tribunal.add_argument(
+        "--pre-registered-window",
+        default="",
+        help="Optional comma-separated model-court windows as name:start:end, such as train:2023-05-03:2024-05-03.",
+    )
+    tribunal.add_argument(
+        "--execution-data-root",
+        default="",
+        help="Optional demo execution data root containing event_demo_orders/trades/cycles for live-vs-backtest drift checks.",
+    )
     tribunal.add_argument("--bootstrap-samples", type=int, default=tribunal_defaults.bootstrap_samples)
     tribunal.add_argument("--bootstrap-block-size", type=int, default=tribunal_defaults.bootstrap_block_size)
     tribunal.add_argument("--random-seed", type=int, default=tribunal_defaults.random_seed)
@@ -1495,6 +1505,8 @@ def main(argv: list[str] | None = None) -> int:
             output_dir=args.output_dir,
             comparison_csvs=tuple(Path(item).expanduser() for item in _csv_str(args.comparison_csv, ())),
             comparison_families=_csv_str(args.comparison_family, ()),
+            court_windows=_csv_str(args.pre_registered_window, ()),
+            execution_data_root=Path(args.execution_data_root).expanduser() if args.execution_data_root else None,
             config=StrategyTribunalConfig(
                 bootstrap_samples=args.bootstrap_samples,
                 bootstrap_block_size=args.bootstrap_block_size,

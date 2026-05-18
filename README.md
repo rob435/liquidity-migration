@@ -102,9 +102,9 @@ powershell -ExecutionPolicy Bypass -File scripts\run_fullpit_volume_overnight.ps
 
 The runner syncs `main`, installs the local Python environment, runs smoke tests, builds/resumes the full Bybit public archive manifest, fills full PIT 1h klines from the Bybit v5 API, validates manifest coverage, then runs the selected liquidity-migration strategy.
 
-## Strategy Tribunal
+## Model Court
 
-Run an adversarial audit after a `volume-events` report exists:
+Run the formal promotion court after a `volume-events` report exists:
 
 ```bash
 python -m aggression_carry \
@@ -112,18 +112,21 @@ python -m aggression_carry \
   strategy-tribunal \
   --report-dir DATA_ROOT/reports/volume_event_research \
   --comparison-csv DATA_ROOT/reports/stress_summary.csv \
-  --comparison-family promoted_funding
+  --comparison-family promoted_funding \
+  --pre-registered-window train:2023-05-03:2024-05-03,validation:2024-05-03:2025-05-03,oos:2025-05-03:2026-05-03 \
+  --execution-data-root DATA_ROOT
 ```
 
-The tribunal reads the scenario summary, best trades, baskets, equity curve, and
-optional stress/sweep CSVs. It writes `strategy_tribunal_report.md/json` with
-artifact checks, promotion recap, recomputed-vs-reported path consistency,
-block-bootstrap left-tail stress, random-sign and inverted-edge negative
-controls, filtered stress matrix diagnostics, monthly regime diagnostics,
-parameter sensitivity, symbol concentration, and same-hour entry crowding. Use
-`--comparison-csv` to attach a stress matrix such as quality-tier or
-entry-router sweeps, and `--comparison-family` to keep the audit on the exact
-strategy family being judged.
+The court reads the scenario summary, best trades, baskets, equity curve, and
+stress/sweep CSVs. It writes `strategy_tribunal_report.md/json` plus pairwise
+parameter heatmap CSVs with artifact checks, promotion recap,
+recomputed-vs-reported path consistency, explicit preregistered window results,
+block-bootstrap left-tail stress, random-sign/inverted-edge/shuffled-symbol/
+shuffled-time/shuffled-event negative controls, filtered cost/funding/slippage
+stress diagnostics, monthly regime diagnostics, live-vs-backtest execution
+drift, symbol concentration, and same-hour entry crowding. Use
+`--comparison-family` to keep the audit on the exact strategy family being
+judged. Missing execution data is a `WATCH`, not proof.
 
 ## Bybit Demo Forward Runner
 

@@ -3,13 +3,17 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import polars as pl
 
+from aggression_carry.storage import read_dataset
+
 MS_PER_HOUR = 60 * 60 * 1000
+MS_PER_DAY = 24 * MS_PER_HOUR
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +31,13 @@ class StrategyTribunalConfig:
     stress_drawdown_watch: float = -0.25
     stress_drawdown_fail: float = -0.35
     min_positive_month_rate: float = 0.55
+    shuffled_time_worse_rate_watch: float = 0.95
+    shuffled_symbol_top_share_buffer: float = 0.05
+    shuffled_event_worst_hour_buffer: float = 0.0025
+    execution_price_drift_watch_bps: float = 50.0
+    execution_price_drift_fail_bps: float = 150.0
+    execution_delay_drift_watch_minutes: float = 15.0
+    execution_delay_drift_fail_minutes: float = 60.0
 
 
 def run_strategy_tribunal(
@@ -35,6 +46,8 @@ def run_strategy_tribunal(
     output_dir: str | Path | None = None,
     comparison_csvs: tuple[str | Path, ...] = (),
     comparison_families: tuple[str, ...] = (),
+    court_windows: tuple[str, ...] = (),
+    execution_data_root: str | Path | None = None,
     config: StrategyTribunalConfig | None = None,
 ) -> dict[str, Any]:
     tribunal_config = config or StrategyTribunalConfig()
@@ -56,12 +69,19 @@ def run_strategy_tribunal(
     returns = _basket_returns(baskets)
     actual_metrics = _return_path_metrics(returns)
     consistency = _report_consistency(best, actual_metrics)
+    windows = _pre_registered_window_report(baskets, best=best, window_specs=court_windows)
     bootstrap = _block_bootstrap(returns, config=tribunal_config)
     random_sign = _random_sign_control(returns, config=tribunal_config)
     inverted = _inverted_edge_control(baskets)
+    shuffled_time = _shuffled_time_control(returns, config=tribunal_config)
+    shuffled_symbol = _shuffled_symbol_control(trades, config=tribunal_config)
+    shuffled_event = _shuffled_event_control(trades, config=tribunal_config)
     sensitivity = _sensitivity_report(sensitivity_source, best=best, config=tribunal_config)
+    heatmaps = _sensitivity_heatmaps(sensitivity_source, target_dir=target_dir)
     stress = _stress_report(comparison["frame"], best=best)
+    cost_funding_slippage = _cost_funding_slippage_report(comparison["frame"], best=best)
     regime = _regime_report(baskets)
+    execution_drift = _execution_drift_report(execution_data_root, trades=trades)
     concentration = _concentration_report(trades)
     clustering = _cluster_report(trades, baskets)
     findings = _findings(
@@ -70,12 +90,19 @@ def run_strategy_tribunal(
         best=best,
         actual_metrics=actual_metrics,
         consistency=consistency,
+        windows=windows,
         bootstrap=bootstrap,
         random_sign=random_sign,
         inverted=inverted,
+        shuffled_time=shuffled_time,
+        shuffled_symbol=shuffled_symbol,
+        shuffled_event=shuffled_event,
         sensitivity=sensitivity,
+        heatmaps=heatmaps,
         stress=stress,
+        cost_funding_slippage=cost_funding_slippage,
         regime=regime,
+        execution_drift=execution_drift,
         concentration=concentration,
         clustering=clustering,
         config=tribunal_config,
@@ -92,14 +119,21 @@ def run_strategy_tribunal(
         "best_scenario": best,
         "actual_path": actual_metrics,
         "report_consistency": consistency,
+        "pre_registered_windows": windows,
         "bootstrap": bootstrap,
         "negative_controls": {
             "random_sign": random_sign,
             "inverted_edge": inverted,
+            "shuffled_time": shuffled_time,
+            "shuffled_symbol": shuffled_symbol,
+            "shuffled_event": shuffled_event,
         },
         "sensitivity": sensitivity,
+        "sensitivity_heatmaps": heatmaps,
         "stress": stress,
+        "cost_funding_slippage": cost_funding_slippage,
         "regime": regime,
+        "execution_drift": execution_drift,
         "concentration": concentration,
         "clustering": clustering,
         "findings": findings,
@@ -117,18 +151,22 @@ def format_strategy_tribunal_report(payload: dict[str, Any]) -> str:
     best = payload.get("best_scenario", {})
     actual = payload.get("actual_path", {})
     consistency = payload.get("report_consistency", {})
+    windows = payload.get("pre_registered_windows", {})
     comparison = payload.get("comparison_family", {})
     bootstrap = payload.get("bootstrap", {})
     controls = payload.get("negative_controls", {})
     sensitivity = payload.get("sensitivity", {})
+    heatmaps = payload.get("sensitivity_heatmaps", {})
     stress = payload.get("stress", {})
+    cost_funding_slippage = payload.get("cost_funding_slippage", {})
     regime = payload.get("regime", {})
+    execution_drift = payload.get("execution_drift", {})
     concentration = payload.get("concentration", {})
     clustering = payload.get("clustering", {})
     lines = [
-        "# Strategy Tribunal",
+        "# Model Court",
         "",
-        "Adversarial research audit for a completed `volume-events` report. This does not prove future PnL; it looks for ways the backtest could be fragile.",
+        "Formal promotion court for a completed `volume-events` report. This does not prove future PnL; it looks for ways the backtest could be fragile.",
         "",
         "## Verdict",
         "",
@@ -162,6 +200,9 @@ def format_strategy_tribunal_report(payload: dict[str, Any]) -> str:
             f"| Random sign | exceed actual rate | {_pct(controls.get('random_sign', {}).get('exceed_actual_rate'))} |",
             f"| Inverted edge | total return | {_pct(controls.get('inverted_edge', {}).get('total_return'))} |",
             f"| Inverted edge | max drawdown | {_pct(controls.get('inverted_edge', {}).get('max_drawdown'))} |",
+            f"| Shuffled time | p05 max drawdown | {_pct(controls.get('shuffled_time', {}).get('p05_max_drawdown'))} |",
+            f"| Shuffled symbol | p95 top-symbol share | {_pct(controls.get('shuffled_symbol', {}).get('p95_top_symbol_abs_share'))} |",
+            f"| Shuffled event | p05 worst hour return | {_pct(controls.get('shuffled_event', {}).get('p05_worst_entry_hour_return'))} |",
             "",
             "## Path Consistency",
             "",
@@ -178,6 +219,25 @@ def format_strategy_tribunal_report(payload: dict[str, Any]) -> str:
                 f"{_pct(consistency.get('max_drawdown_abs_diff'))} |"
             ),
             "",
+            "## Pre-Registered Windows",
+            "",
+            f"- Status: `{windows.get('status', 'missing')}`",
+            f"- Window count: {windows.get('window_count', 0)}",
+            f"- Positive windows: {windows.get('positive_windows', 0)}",
+            f"- Minimum window return: {_pct(windows.get('min_total_return'))}",
+            "",
+            "| Window | Start | End | Baskets | Total Return | Max Drawdown |",
+            "|---|---|---|---:|---:|---:|",
+        ]
+    )
+    for row in windows.get("windows", []):
+        lines.append(
+            f"| `{row.get('name', '')}` | {row.get('start_date', '')} | {row.get('end_date', '')} | "
+            f"{row.get('basket_count', 0)} | {_pct(row.get('total_return'))} | {_pct(row.get('max_drawdown'))} |"
+        )
+    lines.extend(
+        [
+            "",
             "## Stress Matrix",
             "",
             f"- Status: `{stress.get('status', 'missing')}`",
@@ -186,6 +246,13 @@ def format_strategy_tribunal_report(payload: dict[str, Any]) -> str:
             f"- Worst stress drawdown: {_pct(stress.get('worst_max_drawdown'))}",
             f"- Promotion pass rate: {_pct(stress.get('promotion_pass_rate'))}",
             "",
+            "## Cost Funding Slippage",
+            "",
+            f"- Status: `{cost_funding_slippage.get('status', 'missing')}`",
+            f"- Cost levels: {', '.join(str(item) for item in cost_funding_slippage.get('cost_levels', []))}",
+            f"- Stop/slippage modes: {', '.join(str(item) for item in cost_funding_slippage.get('stop_fill_modes', []))}",
+            f"- Funding modes: {', '.join(str(item) for item in cost_funding_slippage.get('funding_modes', []))}",
+            "",
             "## Sensitivity",
             "",
             f"- Status: `{sensitivity.get('status', 'unknown')}`",
@@ -193,6 +260,7 @@ def format_strategy_tribunal_report(payload: dict[str, Any]) -> str:
             f"- Robust same-family variants: {sensitivity.get('robust_family_variants', 0)}",
             f"- Robust return cutoff: {_pct(sensitivity.get('robust_return_cutoff'))}",
             f"- Robust max-drawdown cutoff: {_pct(sensitivity.get('robust_drawdown_cutoff'))}",
+            f"- Heatmaps: {heatmaps.get('heatmap_count', 0)}",
             "",
         ]
     )
@@ -214,6 +282,14 @@ def format_strategy_tribunal_report(payload: dict[str, Any]) -> str:
             f"| Worst month | `{regime.get('worst_month', '')}` |",
             f"| Worst month return | {_pct(regime.get('worst_month_return'))} |",
             f"| Max monthly no-new-high stretch | {regime.get('max_monthly_underwater_months', 0)} |",
+            "",
+            "## Execution Drift",
+            "",
+            f"- Status: `{execution_drift.get('status', 'missing')}`",
+            f"- Execution root: `{execution_drift.get('execution_data_root', '')}`",
+            f"- Matched entry orders: {execution_drift.get('matched_entry_orders', 0)}",
+            f"- P95 absolute entry price drift: {_num(execution_drift.get('p95_abs_entry_price_drift_bps'))} bps",
+            f"- P95 absolute entry delay drift: {_num(execution_drift.get('p95_abs_entry_delay_drift_minutes'))} minutes",
             "",
             "## Concentration And Crowding",
             "",
@@ -420,6 +496,110 @@ def _report_consistency(best: dict[str, Any], actual: dict[str, Any]) -> dict[st
     }
 
 
+def _pre_registered_window_report(
+    baskets: pl.DataFrame,
+    *,
+    best: dict[str, Any],
+    window_specs: tuple[str, ...],
+) -> dict[str, Any]:
+    windows, errors = _parse_window_specs(window_specs)
+    if errors:
+        return {"status": "invalid", "errors": errors, "windows": [], "window_count": 0, "positive_windows": 0}
+    if not windows:
+        legacy = _legacy_split_window_report(best)
+        if legacy["window_count"] > 0:
+            return legacy
+        return {"status": "missing", "windows": [], "window_count": 0, "positive_windows": 0}
+    rows = []
+    sorted_baskets = baskets.sort("entry_signal_ts_ms") if not baskets.is_empty() and "entry_signal_ts_ms" in baskets.columns else baskets
+    for window in windows:
+        part = pl.DataFrame()
+        if not sorted_baskets.is_empty() and "entry_signal_ts_ms" in sorted_baskets.columns:
+            part = sorted_baskets.filter(
+                (pl.col("entry_signal_ts_ms") >= window["start_ms"]) & (pl.col("entry_signal_ts_ms") < window["end_ms"])
+            )
+        metrics = _return_path_metrics(_basket_returns(part))
+        rows.append(
+            {
+                "name": window["name"],
+                "start_date": window["start_date"],
+                "end_date": window["end_date"],
+                "basket_count": int(metrics.get("observations", 0) or 0),
+                "total_return": _finite_float(metrics.get("total_return")),
+                "max_drawdown": _finite_float(metrics.get("max_drawdown")),
+                "sharpe_like": _finite_float(metrics.get("sharpe_like")),
+            }
+        )
+    returns = [_finite_float(row.get("total_return")) for row in rows]
+    drawdowns = [_finite_float(row.get("max_drawdown")) for row in rows]
+    return {
+        "status": "explicit",
+        "windows": rows,
+        "window_count": len(rows),
+        "positive_windows": int(sum(1 for value in returns if value > 0.0)),
+        "complete_windows": int(sum(1 for row in rows if int(row.get("basket_count", 0) or 0) > 0)),
+        "min_total_return": min(returns, default=0.0),
+        "worst_max_drawdown": min(drawdowns, default=0.0),
+    }
+
+
+def _parse_window_specs(window_specs: tuple[str, ...]) -> tuple[list[dict[str, Any]], list[str]]:
+    rows: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for raw in window_specs:
+        spec = str(raw).strip()
+        if not spec:
+            continue
+        parts = spec.split(":")
+        if len(parts) != 3:
+            errors.append(f"`{spec}` must be name:start:end")
+            continue
+        name, start, end = (part.strip() for part in parts)
+        if not name or not start or not end:
+            errors.append(f"`{spec}` must include non-empty name, start, and end")
+            continue
+        start_ms = _date_ms(start)
+        end_ms = _date_ms(end)
+        if start_ms >= end_ms:
+            errors.append(f"`{spec}` has start >= end")
+            continue
+        rows.append({"name": name, "start_date": start, "end_date": end, "start_ms": start_ms, "end_ms": end_ms})
+    return rows, errors
+
+
+def _legacy_split_window_report(best: dict[str, Any]) -> dict[str, Any]:
+    rows = []
+    for name, start, end in (
+        ("train_2023_2024", "2023-05-03", "2024-05-03"),
+        ("validation_2024_2025", "2024-05-03", "2025-05-03"),
+        ("oos_2025_2026", "2025-05-03", "2026-05-03"),
+    ):
+        key = f"{name}_return"
+        if key not in best:
+            continue
+        rows.append(
+            {
+                "name": name,
+                "start_date": start,
+                "end_date": end,
+                "basket_count": None,
+                "total_return": _finite_float(best.get(key)),
+                "max_drawdown": None,
+                "sharpe_like": _finite_float(best.get(f"{name}_sharpe")),
+            }
+        )
+    returns = [_finite_float(row.get("total_return")) for row in rows]
+    return {
+        "status": "legacy_summary_only" if rows else "missing",
+        "windows": rows,
+        "window_count": len(rows),
+        "positive_windows": int(sum(1 for value in returns if value > 0.0)),
+        "complete_windows": 0,
+        "min_total_return": min(returns, default=0.0),
+        "worst_max_drawdown": None,
+    }
+
+
 def _block_bootstrap(returns: list[float], *, config: StrategyTribunalConfig) -> dict[str, Any]:
     if not returns or config.bootstrap_samples <= 0:
         return {"samples": 0}
@@ -482,6 +662,84 @@ def _inverted_edge_control(baskets: pl.DataFrame) -> dict[str, Any]:
     else:
         returns = [-value for value in _basket_returns(baskets)]
     return _return_path_metrics(returns)
+
+
+def _shuffled_time_control(returns: list[float], *, config: StrategyTribunalConfig) -> dict[str, Any]:
+    if not returns or config.bootstrap_samples <= 0:
+        return {"samples": 0}
+    rng = np.random.default_rng(config.random_seed + 2)
+    values = np.asarray(returns, dtype=float)
+    actual = _return_path_metrics(values.tolist())
+    drawdowns = []
+    for _ in range(config.bootstrap_samples):
+        metrics = _return_path_metrics(rng.permutation(values).tolist())
+        drawdowns.append(float(metrics["max_drawdown"]))
+    arr = np.asarray(drawdowns, dtype=float)
+    return {
+        "samples": config.bootstrap_samples,
+        "actual_max_drawdown": _finite_float(actual.get("max_drawdown")),
+        "p05_max_drawdown": float(np.quantile(arr, 0.05)),
+        "median_max_drawdown": float(np.quantile(arr, 0.50)),
+        "p95_max_drawdown": float(np.quantile(arr, 0.95)),
+        "shuffled_worse_or_equal_actual_rate": float(np.mean(arr <= _finite_float(actual.get("max_drawdown")))),
+    }
+
+
+def _shuffled_symbol_control(trades: pl.DataFrame, *, config: StrategyTribunalConfig) -> dict[str, Any]:
+    if trades.is_empty() or config.bootstrap_samples <= 0 or not {"symbol", "net_return"}.issubset(set(trades.columns)):
+        return {"samples": 0}
+    symbols = [str(item) for item in trades["symbol"].to_list()]
+    returns = np.asarray([_finite_float(item) for item in trades["net_return"].to_list()], dtype=float)
+    actual_share = _symbol_top_abs_share(symbols, returns.tolist())
+    rng = np.random.default_rng(config.random_seed + 3)
+    shares = []
+    for _ in range(config.bootstrap_samples):
+        shares.append(_symbol_top_abs_share(symbols, rng.permutation(returns).tolist()))
+    arr = np.asarray(shares, dtype=float)
+    return {
+        "samples": config.bootstrap_samples,
+        "actual_top_symbol_abs_share": actual_share,
+        "median_top_symbol_abs_share": float(np.quantile(arr, 0.50)),
+        "p95_top_symbol_abs_share": float(np.quantile(arr, 0.95)),
+        "shuffled_exceed_actual_rate": float(np.mean(arr >= actual_share)),
+    }
+
+
+def _symbol_top_abs_share(symbols: list[str], returns: list[float]) -> float:
+    by_symbol: dict[str, float] = {}
+    for symbol, value in zip(symbols, returns):
+        by_symbol[symbol] = by_symbol.get(symbol, 0.0) + float(value)
+    abs_values = [abs(value) for value in by_symbol.values()]
+    total_abs = sum(abs_values)
+    return max(abs_values, default=0.0) / total_abs if total_abs > 0.0 else 0.0
+
+
+def _shuffled_event_control(trades: pl.DataFrame, *, config: StrategyTribunalConfig) -> dict[str, Any]:
+    if trades.is_empty() or config.bootstrap_samples <= 0 or not {"entry_ts_ms", "net_return"}.issubset(set(trades.columns)):
+        return {"samples": 0}
+    hours = np.asarray([int(_finite_float(item)) // MS_PER_HOUR for item in trades["entry_ts_ms"].to_list()], dtype=np.int64)
+    returns = np.asarray([_finite_float(item) for item in trades["net_return"].to_list()], dtype=float)
+    actual_worst = _worst_group_sum(hours, returns)
+    rng = np.random.default_rng(config.random_seed + 4)
+    worst_returns = []
+    for _ in range(config.bootstrap_samples):
+        worst_returns.append(_worst_group_sum(hours, rng.permutation(returns)))
+    arr = np.asarray(worst_returns, dtype=float)
+    return {
+        "samples": config.bootstrap_samples,
+        "actual_worst_entry_hour_return": actual_worst,
+        "p05_worst_entry_hour_return": float(np.quantile(arr, 0.05)),
+        "median_worst_entry_hour_return": float(np.quantile(arr, 0.50)),
+        "p95_worst_entry_hour_return": float(np.quantile(arr, 0.95)),
+        "shuffled_worse_or_equal_actual_rate": float(np.mean(arr <= actual_worst)),
+    }
+
+
+def _worst_group_sum(groups: np.ndarray, returns: np.ndarray) -> float:
+    totals: dict[int, float] = {}
+    for group, value in zip(groups.tolist(), returns.tolist()):
+        totals[int(group)] = totals.get(int(group), 0.0) + float(value)
+    return min(totals.values(), default=0.0)
 
 
 def _sensitivity_report(
@@ -556,6 +814,61 @@ def _sensitivity_report(
     }
 
 
+def _sensitivity_heatmaps(summary: pl.DataFrame, *, target_dir: Path) -> dict[str, Any]:
+    axes = [
+        column
+        for column in (
+            "threshold",
+            "hold_days",
+            "stop_loss_pct",
+            "take_profit_pct",
+            "cost_multiplier",
+            "entry_selector",
+            "stop_fill_mode",
+        )
+        if column in summary.columns and summary[column].n_unique() > 1
+    ]
+    heatmaps = []
+    if summary.is_empty() or len(axes) < 2:
+        return {"status": "insufficient_axes", "heatmap_count": 0, "heatmaps": []}
+    for left_index, left in enumerate(axes):
+        for right in axes[left_index + 1 :]:
+            grouped = (
+                summary.group_by([left, right])
+                .agg(
+                    [
+                        pl.len().alias("rows"),
+                        pl.col("total_return").max().alias("best_total_return")
+                        if "total_return" in summary.columns
+                        else pl.lit(0.0).alias("best_total_return"),
+                        pl.col("total_return").min().alias("worst_total_return")
+                        if "total_return" in summary.columns
+                        else pl.lit(0.0).alias("worst_total_return"),
+                        pl.col("max_drawdown").min().alias("worst_max_drawdown")
+                        if "max_drawdown" in summary.columns
+                        else pl.lit(0.0).alias("worst_max_drawdown"),
+                        pl.col("promotion_gate_pass").cast(pl.Int64).sum().alias("promotion_passes")
+                        if "promotion_gate_pass" in summary.columns
+                        else pl.lit(0).alias("promotion_passes"),
+                    ]
+                )
+                .sort([left, right])
+            )
+            filename = f"sensitivity_heatmap_{_safe_name(left)}_x_{_safe_name(right)}.csv"
+            path = target_dir / filename
+            grouped.write_csv(path)
+            heatmaps.append(
+                {
+                    "axes": [left, right],
+                    "rows": grouped.height,
+                    "path": str(path),
+                    "min_total_return": float(grouped["worst_total_return"].min()) if "worst_total_return" in grouped.columns else 0.0,
+                    "worst_max_drawdown": float(grouped["worst_max_drawdown"].min()) if "worst_max_drawdown" in grouped.columns else 0.0,
+                }
+            )
+    return {"status": "present", "heatmap_count": len(heatmaps), "heatmaps": heatmaps}
+
+
 def _stress_report(summary: pl.DataFrame, *, best: dict[str, Any]) -> dict[str, Any]:
     if summary.is_empty():
         return {"status": "missing", "rows": 0}
@@ -604,6 +917,112 @@ def _stress_report(summary: pl.DataFrame, *, best: dict[str, Any]) -> dict[str, 
     out["axes"] = stress_axes
     out["reported_best_total_return"] = _finite_float(best.get("total_return"))
     return out
+
+
+def _cost_funding_slippage_report(summary: pl.DataFrame, *, best: dict[str, Any]) -> dict[str, Any]:
+    if summary.is_empty():
+        return {"status": "missing"}
+    report: dict[str, Any] = {
+        "status": "present",
+        "rows": summary.height,
+        "reported_best_total_return": _finite_float(best.get("total_return")),
+    }
+    if "cost_multiplier" in summary.columns:
+        cost_levels = sorted({_finite_float(item) for item in summary["cost_multiplier"].drop_nulls().to_list()})
+        report["cost_levels"] = cost_levels
+        if cost_levels:
+            max_cost = max(cost_levels)
+            high_cost = summary.filter(pl.col("cost_multiplier") == max_cost)
+            report["max_cost_multiplier"] = max_cost
+            report["max_cost_min_total_return"] = float(high_cost["total_return"].min()) if "total_return" in high_cost.columns else 0.0
+            report["max_cost_worst_drawdown"] = float(high_cost["max_drawdown"].min()) if "max_drawdown" in high_cost.columns else 0.0
+    else:
+        report["cost_levels"] = []
+    if "stop_fill_mode" in summary.columns:
+        report["stop_fill_modes"] = sorted(str(item) for item in summary["stop_fill_mode"].drop_nulls().unique().to_list())
+    else:
+        report["stop_fill_modes"] = []
+    if "funding_mode" in summary.columns:
+        report["funding_modes"] = sorted(str(item) for item in summary["funding_mode"].drop_nulls().unique().to_list())
+    else:
+        report["funding_modes"] = []
+    if "funding_return" in summary.columns:
+        report["worst_funding_return"] = float(summary["funding_return"].min())
+        report["median_funding_return"] = float(summary["funding_return"].median())
+    return report
+
+
+def _execution_drift_report(execution_data_root: str | Path | None, *, trades: pl.DataFrame) -> dict[str, Any]:
+    if execution_data_root is None or str(execution_data_root).strip() == "":
+        return {"status": "missing", "execution_data_root": ""}
+    root = Path(execution_data_root).expanduser()
+    orders = read_dataset(root, "event_demo_orders")
+    demo_trades = read_dataset(root, "event_demo_trades")
+    cycles = read_dataset(root, "event_demo_cycles")
+    report: dict[str, Any] = {
+        "status": "missing",
+        "execution_data_root": str(root),
+        "orders": orders.height,
+        "demo_trades": demo_trades.height,
+        "cycles": cycles.height,
+    }
+    if orders.is_empty():
+        return report
+    if trades.is_empty() or not {"symbol", "entry_signal_ts_ms", "entry_ts_ms", "entry_price"}.issubset(set(trades.columns)):
+        report["status"] = "missing_backtest_join_keys"
+        return report
+    entry_orders = orders
+    if "reduce_only" in entry_orders.columns:
+        entry_orders = entry_orders.filter(pl.col("reduce_only") == False)  # noqa: E712
+    if "status" in entry_orders.columns:
+        entry_orders = entry_orders.filter(pl.col("status").is_in(["filled", "partial", "planned"]))
+    if entry_orders.is_empty() or not {"symbol", "signal_ts_ms", "avg_price", "ts_ms"}.issubset(set(entry_orders.columns)):
+        report["status"] = "no_entry_orders"
+        return report
+    backtest = trades.select(
+        [
+            pl.col("symbol"),
+            pl.col("entry_signal_ts_ms").alias("signal_ts_ms"),
+            pl.col("entry_ts_ms").alias("backtest_entry_ts_ms"),
+            pl.col("entry_price").alias("backtest_entry_price"),
+            pl.col("side").alias("backtest_side") if "side" in trades.columns else pl.lit("").alias("backtest_side"),
+        ]
+    )
+    joined = entry_orders.join(backtest, on=["symbol", "signal_ts_ms"], how="left")
+    matched = joined.filter(pl.col("backtest_entry_price").is_not_null())
+    report["entry_orders"] = entry_orders.height
+    report["matched_entry_orders"] = matched.height
+    report["unmatched_entry_orders"] = entry_orders.height - matched.height
+    if matched.is_empty():
+        report["status"] = "no_matches"
+        return report
+    matched = matched.with_columns(
+        [
+            ((pl.col("avg_price").cast(pl.Float64) / pl.col("backtest_entry_price").cast(pl.Float64) - 1.0) * 10_000.0).alias(
+                "entry_price_drift_bps"
+            ),
+            ((pl.col("ts_ms").cast(pl.Float64) - pl.col("backtest_entry_ts_ms").cast(pl.Float64)) / 60_000.0).alias(
+                "entry_delay_drift_minutes"
+            ),
+        ]
+    ).with_columns(
+        [
+            pl.col("entry_price_drift_bps").abs().alias("abs_entry_price_drift_bps"),
+            pl.col("entry_delay_drift_minutes").abs().alias("abs_entry_delay_drift_minutes"),
+        ]
+    )
+    report.update(
+        {
+            "status": "present",
+            "median_abs_entry_price_drift_bps": float(matched["abs_entry_price_drift_bps"].median()),
+            "p95_abs_entry_price_drift_bps": _quantile(matched["abs_entry_price_drift_bps"].to_list(), 0.95),
+            "median_abs_entry_delay_drift_minutes": float(matched["abs_entry_delay_drift_minutes"].median()),
+            "p95_abs_entry_delay_drift_minutes": _quantile(matched["abs_entry_delay_drift_minutes"].to_list(), 0.95),
+            "max_abs_entry_price_drift_bps": float(matched["abs_entry_price_drift_bps"].max()),
+            "max_abs_entry_delay_drift_minutes": float(matched["abs_entry_delay_drift_minutes"].max()),
+        }
+    )
+    return report
 
 
 def _regime_report(baskets: pl.DataFrame) -> dict[str, Any]:
@@ -724,12 +1143,19 @@ def _findings(
     best: dict[str, Any],
     actual_metrics: dict[str, Any],
     consistency: dict[str, Any],
+    windows: dict[str, Any],
     bootstrap: dict[str, Any],
     random_sign: dict[str, Any],
     inverted: dict[str, Any],
+    shuffled_time: dict[str, Any],
+    shuffled_symbol: dict[str, Any],
+    shuffled_event: dict[str, Any],
     sensitivity: dict[str, Any],
+    heatmaps: dict[str, Any],
     stress: dict[str, Any],
+    cost_funding_slippage: dict[str, Any],
     regime: dict[str, Any],
+    execution_drift: dict[str, Any],
     concentration: dict[str, Any],
     clustering: dict[str, Any],
     config: StrategyTribunalConfig,
@@ -783,6 +1209,28 @@ def _findings(
             ),
         )
     )
+    window_status = str(windows.get("status", "missing"))
+    window_count = int(windows.get("window_count", 0) or 0)
+    positive_windows = int(windows.get("positive_windows", 0) or 0)
+    complete_windows = int(windows.get("complete_windows", 0) or 0)
+    if window_status == "explicit":
+        if window_count > 0 and positive_windows == window_count and complete_windows == window_count:
+            window_level = "PASS"
+        else:
+            window_level = "FAIL"
+    elif window_status == "legacy_summary_only":
+        window_level = "WATCH"
+    elif window_status == "invalid":
+        window_level = "FAIL"
+    else:
+        window_level = "WATCH"
+    findings.append(
+        _finding(
+            window_level,
+            "pre_registered_windows",
+            f"Window status `{window_status}` with {positive_windows}/{window_count} positive windows.",
+        )
+    )
     funding_mode = str(best.get("funding_mode", "missing"))
     findings.append(
         _finding(
@@ -816,6 +1264,38 @@ def _findings(
             f"Gross-return inverted edge total return is {_pct(inverted_total)}.",
         )
     )
+    shuffled_time_worse_rate = _finite_float(shuffled_time.get("shuffled_worse_or_equal_actual_rate"))
+    shuffled_time_level = (
+        "WATCH"
+        if _finite_float(shuffled_time.get("actual_max_drawdown")) < 0.0
+        and shuffled_time_worse_rate >= config.shuffled_time_worse_rate_watch
+        else "PASS"
+    )
+    findings.append(
+        _finding(
+            shuffled_time_level,
+            "shuffled_time_control",
+            f"Shuffled-time paths are worse than actual drawdown in {_pct(shuffled_time_worse_rate)} of samples.",
+        )
+    )
+    actual_symbol_share = _finite_float(shuffled_symbol.get("actual_top_symbol_abs_share"))
+    symbol_p95 = _finite_float(shuffled_symbol.get("p95_top_symbol_abs_share"))
+    findings.append(
+        _finding(
+            "WATCH" if actual_symbol_share > symbol_p95 + config.shuffled_symbol_top_share_buffer else "PASS",
+            "shuffled_symbol_control",
+            f"Actual top-symbol share {_pct(actual_symbol_share)} versus shuffled p95 {_pct(symbol_p95)}.",
+        )
+    )
+    actual_worst_hour = _finite_float(shuffled_event.get("actual_worst_entry_hour_return"))
+    shuffled_hour_p05 = _finite_float(shuffled_event.get("p05_worst_entry_hour_return"))
+    findings.append(
+        _finding(
+            "WATCH" if actual_worst_hour < shuffled_hour_p05 - config.shuffled_event_worst_hour_buffer else "PASS",
+            "shuffled_event_control",
+            f"Actual worst entry hour {_pct(actual_worst_hour)} versus shuffled p05 {_pct(shuffled_hour_p05)}.",
+        )
+    )
     robust_count = int(sensitivity.get("robust_family_variants", 0) or 0)
     sensitivity_status = str(sensitivity.get("status", "missing"))
     if sensitivity_status == "robust":
@@ -829,6 +1309,14 @@ def _findings(
             level,
             "parameter_sensitivity",
             f"Sensitivity status `{sensitivity_status}` with {robust_count} robust same-family variants.",
+        )
+    )
+    heatmap_count = int(heatmaps.get("heatmap_count", 0) or 0)
+    findings.append(
+        _finding(
+            "PASS" if heatmap_count > 0 else "WATCH",
+            "parameter_heatmaps",
+            f"Generated {heatmap_count} pairwise parameter heatmap CSVs.",
         )
     )
     stress_status = str(stress.get("status", "missing"))
@@ -849,12 +1337,43 @@ def _findings(
             f"Filtered stress matrix rows={stress.get('rows', 0)}, min return {_pct(min_stress_return)}, worst drawdown {_pct(worst_stress_dd)}.",
         )
     )
+    cfs_status = str(cost_funding_slippage.get("status", "missing"))
+    cost_levels = cost_funding_slippage.get("cost_levels", [])
+    stop_modes = cost_funding_slippage.get("stop_fill_modes", [])
+    funding_modes = cost_funding_slippage.get("funding_modes", [])
+    cfs_level = "PASS" if cfs_status == "present" and cost_levels and stop_modes and funding_modes else "WATCH"
+    findings.append(
+        _finding(
+            cfs_level,
+            "cost_funding_slippage",
+            f"Cost levels={len(cost_levels)}, stop/slippage modes={len(stop_modes)}, funding modes={len(funding_modes)}.",
+        )
+    )
     positive_month_rate = _finite_float(regime.get("positive_month_rate"))
     findings.append(
         _finding(
             "PASS" if positive_month_rate >= config.min_positive_month_rate else "WATCH",
             "monthly_regime",
             f"Positive month rate is {_pct(positive_month_rate)}; worst month is `{regime.get('worst_month', '')}` at {_pct(regime.get('worst_month_return'))}.",
+        )
+    )
+    drift_status = str(execution_drift.get("status", "missing"))
+    p95_price_drift = _finite_float(execution_drift.get("p95_abs_entry_price_drift_bps"))
+    p95_delay_drift = _finite_float(execution_drift.get("p95_abs_entry_delay_drift_minutes"))
+    if drift_status == "present":
+        if p95_price_drift >= config.execution_price_drift_fail_bps or p95_delay_drift >= config.execution_delay_drift_fail_minutes:
+            drift_level = "FAIL"
+        elif p95_price_drift >= config.execution_price_drift_watch_bps or p95_delay_drift >= config.execution_delay_drift_watch_minutes:
+            drift_level = "WATCH"
+        else:
+            drift_level = "PASS"
+    else:
+        drift_level = "WATCH"
+    findings.append(
+        _finding(
+            drift_level,
+            "execution_drift",
+            f"Execution drift status `{drift_status}`; p95 price drift {_num(p95_price_drift)} bps, p95 delay drift {_num(p95_delay_drift)} minutes.",
         )
     )
     top_share = _finite_float(concentration.get("top_symbol_abs_share"))
@@ -923,6 +1442,24 @@ def _finite_float(value: Any) -> float:
     return output if math.isfinite(output) else 0.0
 
 
+def _quantile(values: list[Any], q: float) -> float:
+    clean = [_finite_float(value) for value in values if value is not None]
+    return float(np.quantile(np.asarray(clean, dtype=float), q)) if clean else 0.0
+
+
+def _date_ms(value: str) -> int:
+    raw = value.strip()
+    if len(raw) == 10:
+        dt = datetime.fromisoformat(raw).replace(tzinfo=timezone.utc)
+    else:
+        dt = datetime.fromisoformat(raw)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
+    return int(dt.timestamp() * 1000)
+
+
 def _boolish(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -934,6 +1471,14 @@ def _boolish(value: Any) -> bool:
 def _pct(value: Any) -> str:
     number = _finite_float(value)
     return f"{number:.2%}"
+
+
+def _num(value: Any) -> str:
+    return f"{_finite_float(value):.2f}"
+
+
+def _safe_name(value: str) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in value).strip("_") or "axis"
 
 
 def _comparison_family_label(comparison: dict[str, Any]) -> str:
