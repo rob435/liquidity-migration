@@ -43,5 +43,11 @@ demo private socket rejects that topic.
 blocked subscription is reported while REST reconciliation and exchange-native
 stops keep covering open risk.
 
+Champion/challenger safety: `scripts/run_bybit_demo_event_engine.sh` refuses
+`SUBMIT_ORDERS=1` unless `STRATEGY_PROFILE=demo_relaxed` or the deprecated
+`observe` alias is used. Promoted, no-crowding, sniper, execution-only, and
+hedge candidates are shadow-only until the manifest in
+`champion-challenger` is intentionally updated and re-audited.
+
 The retired `model050426-bybit-demo-signal.timer` / `.service` daily signal scan
 must stay disabled; the active runner is the event-driven loop above.

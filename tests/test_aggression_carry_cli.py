@@ -140,6 +140,21 @@ def test_cli_feature_factory_parses_report_options(tmp_path: Path) -> None:
     assert args.shuffle_samples == 16
 
 
+def test_cli_champion_challenger_parses_output_dir(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "champion-challenger",
+            "--output-dir",
+            str(tmp_path / "manifest"),
+        ]
+    )
+
+    assert args.command == "champion-challenger"
+    assert args.output_dir == str(tmp_path / "manifest")
+
+
 def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [

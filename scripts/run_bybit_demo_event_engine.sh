@@ -52,6 +52,10 @@ fi
 
 order_args=()
 if [[ "${SUBMIT_ORDERS:-0}" == "1" ]]; then
+    if [[ "$STRATEGY_PROFILE" != "demo_relaxed" && "$STRATEGY_PROFILE" != "observe" ]]; then
+        echo "Only STRATEGY_PROFILE=demo_relaxed is allowed to submit demo entry orders in the champion/challenger stack." >&2
+        exit 2
+    fi
     if [[ "${CONFIRM_DEMO_ORDERS:-0}" != "1" ]]; then
         echo "Set CONFIRM_DEMO_ORDERS=1 with SUBMIT_ORDERS=1 to submit Bybit demo orders." >&2
         exit 2

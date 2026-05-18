@@ -9,6 +9,7 @@ from .archive_manifest import ArchiveHourlyKlineApiDownloadConfig, ArchiveHourly
 from .archive_manifest import ArchiveKlineDownloadConfig, ArchiveManifestConfig, run_archive_manifest
 from .archive_manifest import run_archive_hourly_klines_api_download, run_archive_hourly_klines_download
 from .archive_manifest import run_archive_klines_download
+from .champion_challenger import run_champion_challenger_audit
 from .config import (
     DEFAULT_EXCLUDED_SYMBOLS,
     UniverseConfig,
@@ -1064,6 +1065,16 @@ def build_parser() -> argparse.ArgumentParser:
     feature_factory.add_argument("--shuffle-samples", type=int, default=64, help="Shuffled-feature controls per feature.")
     feature_factory.add_argument("--random-seed", type=int, default=17)
 
+    champion_challenger = subparsers.add_parser(
+        "champion-challenger",
+        help="Write and audit the active demo champion plus dry-run shadow challenger manifest.",
+    )
+    champion_challenger.add_argument(
+        "--output-dir",
+        default=None,
+        help="Where to write the manifest. Defaults to DATA_ROOT/reports/champion_challenger.",
+    )
+
     event_demo = subparsers.add_parser(
         "event-demo-cycle",
         help="Run one frequent Bybit demo forward-testing cycle for the selected event strategy.",
@@ -1638,6 +1649,17 @@ def main(argv: list[str] | None = None) -> int:
             "feature factory "
             f"features={payload['features_with_coverage']}/{payload['features_expected']} "
             f"rows={payload['rows']} "
+            f"path={payload['output_files']['markdown']}"
+        )
+        return 0
+
+    if args.command == "champion-challenger":
+        output_dir = Path(args.output_dir).expanduser() if args.output_dir else data_root / "reports" / "champion_challenger"
+        payload = run_champion_challenger_audit(output_dir)
+        print(
+            "champion challenger "
+            f"status={payload['status']} "
+            f"specs={len(payload['specs'])} "
             f"path={payload['output_files']['markdown']}"
         )
         return 0

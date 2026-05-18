@@ -649,3 +649,20 @@ are useful audit dimensions, but they did not beat shuffled-feature controls on
 the promoted ledger. Funding features, residual return, and close-to-30d-high
 screened strongest, but that is still shadow evidence. Any future feature gate
 must go through the Model Court with data coverage and stress evidence.
+
+## Champion / Challenger Stack
+
+`champion-challenger` writes the current live research stack manifest:
+
+```bash
+python -m aggression_carry \
+  --data-root data/bybit-demo-event \
+  champion-challenger
+```
+
+The active order-submitting champion is `demo_relaxed` only. Shadow challengers
+exist for current promoted, relaxed-without-crowding, tiered sniper execution,
+pullback-guard execution, and the volume-shelf hedge overlay. Their commands do
+not contain `--submit-orders` or `SUBMIT_ORDERS=1`, and the live runner refuses
+order submission for non-`demo_relaxed` profiles. This is intentionally
+conservative: challengers are evidence generators, not trading authority.

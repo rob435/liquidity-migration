@@ -162,6 +162,7 @@ bash scripts/run_bybit_demo_event_engine.sh
 Default forward-test behavior:
 
 - `STRATEGY_PROFILE=demo_relaxed` is a test-only relaxed-gate profile. It keeps the same short liquidity-migration idea, `union_pathology` crowding veto, and conservative `promoted_quality_squeeze` router for promoted-grade events, but uses ranks 11-260, no extra current 24h turnover floor, 80-rank improvement, 3.0x turnover expansion, -3% day-return floor, +3% residual-return floor, 0.25 close-location floor, 10 max active symbols, and 2-day cooldown.
+- `demo_relaxed` is the only profile allowed to submit demo entry orders through the live runner. Promoted and experimental variants are shadow challengers unless the champion/challenger manifest is intentionally changed and re-audited.
 - full-PIT funded observation evidence: 1,268 trades, +221.29% total return, -21.32% max drawdown, -18.90% worst 90d, +12.36% worst split, +142.92% OOS, promotion gate pass. Report: `/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md`.
 - pulls current Bybit USDT perp ranks 1-300 for demo_relaxed mode, then applies the selected strategy profile's rank filter
 - rebuilds recent 1h volume features each cycle from a 45-day lookback, using a forward-demo kline cache to fetch only missing/new bars on normal cycles
@@ -173,10 +174,24 @@ Default forward-test behavior:
 - writes ledgers under `event_demo_trades`, `event_demo_orders`, and `event_demo_cycles`
 - the separate websocket risk watchdog writes latest reports under `reports/event-risk-ws` and keeps timestamped audit copies for startup/material events
 
+Champion/challenger manifest:
+
+```bash
+python -m aggression_carry \
+  --data-root data/bybit-demo-event \
+  champion-challenger
+```
+
+This writes `reports/champion_challenger/champion_challenger_manifest.md/json`
+with the single order-submitting champion and dry-run/research-only challenger
+commands for current promoted, relaxed-without-crowding, sniper/execution
+variants, and the current hedge overlay.
+
 ## Useful Files
 
 - `aggression_carry/volume_events.py`: active event-driven strategy, full-PIT gates, ledger, reports
 - `aggression_carry/strategy_tribunal.py`: adversarial robustness audit for completed strategy reports
+- `aggression_carry/champion_challenger.py`: active demo champion and shadow challenger manifest/audit
 - `aggression_carry/event_demo.py`: Bybit demo forward-cycle runner for the selected event strategy
 - `aggression_carry/ws_risk.py`: websocket-first risk watchdog with REST fallback and audit reports
 - `aggression_carry/archive_manifest.py`: PIT manifest and 1h kline builders

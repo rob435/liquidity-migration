@@ -15,6 +15,35 @@ Current as of 2026-05-18.
 - Venue mode: Bybit demo only. `demo=False` is still refused by the private client.
 - Paper shadow was intentionally skipped by user decision; keep the risk contained to demo-only trading.
 
+## Champion / Challenger Stack
+
+The order-submitting champion is the VPS `demo_relaxed` entry service only.
+`scripts/run_bybit_demo_event_engine.sh` now refuses `SUBMIT_ORDERS=1` unless
+`STRATEGY_PROFILE=demo_relaxed` or the deprecated `observe` alias is used.
+
+Manifest/audit command:
+
+```bash
+python -m aggression_carry \
+  --data-root data/bybit-demo-event \
+  champion-challenger
+```
+
+The current shadow challengers are:
+
+```text
+shadow_current_promoted
+shadow_demo_relaxed_without_crowding
+shadow_tiered_execution_sniper
+shadow_execution_pullback_guard
+shadow_volume_shelf_hedge_overlay
+```
+
+These are dry-run or research-only by definition. None contains an order-submit
+flag in the manifest. A challenger should not be wired into the live service
+unless the manifest is intentionally changed, the Model Court is rerun where
+relevant, and this safety audit still passes.
+
 ## Promoted Evidence
 
 Promoted report:

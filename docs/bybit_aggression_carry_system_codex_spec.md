@@ -167,7 +167,14 @@ Each cycle:
 8. Sends Telegram only for material events when enabled: entries, exits, failed entry stop updates, position reconciliation, or position-report errors. Quiet cycles still write local reports but do not notify.
 9. Writes expected/submitted order state into `event_demo_orders`, trade state into `event_demo_trades`, cycle telemetry into `event_demo_cycles`, and Markdown/JSON reports under `reports/event-demo`. Stale unconfirmed entry rows are terminalized only when successful Bybit position and open-order snapshots prove the symbol has no live position and no active entry order, preventing false pending ledger state without erasing possible live exposure.
 
-Order submission is still fail-closed: `--submit-orders` requires `--confirm-demo-orders`, `BYBIT_DEMO_API_KEY`, and `BYBIT_DEMO_API_SECRET`. Without those, the command is a dry-run scan.
+Order submission is still fail-closed: `--submit-orders` requires
+`--confirm-demo-orders`, `BYBIT_DEMO_API_KEY`, and `BYBIT_DEMO_API_SECRET`.
+Without those, the command is a dry-run scan. In the champion/challenger stack,
+the live runner also refuses `SUBMIT_ORDERS=1` unless
+`STRATEGY_PROFILE=demo_relaxed` or its deprecated `observe` alias is used.
+Promoted, no-crowding, sniper, execution-only, and hedge variants are shadow
+challengers until the manifest and Model Court evidence are intentionally
+updated.
 
 Telegram may notify on material events, but it must not approve or submit orders. The continuous runner still fails startup when `TELEGRAM_ENABLED=1` but Telegram or Bybit demo credentials are missing, because event alerts include position/PnL context.
 
