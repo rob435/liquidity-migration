@@ -136,6 +136,13 @@ Serious strategy runs must use:
 
 `volume-events` requires full PIT coverage by default. `--allow-partial-pit` is only for explicitly biased diagnostics and must not be used as promotion evidence.
 
+Auxiliary alpha research must run `data-layer-audit` before claiming evidence
+from funding, open interest, mark/index basis, premium, or taker-flow features.
+Bybit-native datasets can support promotion only when the audited feature pack
+has full-window coverage. Binance USD-M proxy datasets are stored under
+`binance_usdm_*` tables and are exploratory support only unless a separate Model
+Court exception explicitly accepts the proxy risk.
+
 ## Execution Status
 
 The old daily-close demo executor was intentionally removed because it encoded the retired calendar-clock candidate scan and sleeve assumptions. Do not revive it.

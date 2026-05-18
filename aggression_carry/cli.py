@@ -15,7 +15,8 @@ from .config import (
     UniverseConfig,
     load_config,
 )
-from .downloaders import download_market_data, parse_date_ms
+from .data_layer import DEFAULT_DATA_LAYER_DATASETS, DataLayerAuditConfig, run_data_layer_audit
+from .downloaders import BINANCE_PROXY_DATASET_MAP, download_binance_usdm_proxy_data, download_market_data, parse_date_ms
 from .event_demo import (
     DEMO_STRATEGY_PROFILE_CHOICES,
     EventDemoCycleConfig,
@@ -109,7 +110,7 @@ def build_parser() -> argparse.ArgumentParser:
     download.add_argument(
         "--datasets",
         default="instruments,klines_1h",
-        help="Comma-separated datasets: instruments, klines_1m, klines_1h, klines_5m, funding, open_interest, ticker_snapshots, recent_trades, archive_trades, archive_klines_1m.",
+        help="Comma-separated datasets: instruments, klines_1m, klines_1h, klines_5m, funding, open_interest, mark_price_1h, index_price_1h, premium_index_1h, ticker_snapshots, recent_trades, archive_trades, archive_klines_1m.",
     )
     download.add_argument(
         "--archive-url-template",
@@ -132,6 +133,39 @@ def build_parser() -> argparse.ArgumentParser:
         default="1h",
         help="Bybit open-interest interval for download-data open_interest: 5min, 15min, 30min, 1h, 4h, or 1d.",
     )
+
+    binance_proxy = subparsers.add_parser(
+        "download-binance-proxy",
+        help="Download Binance USD-M proxy datasets into separate non-Bybit-native tables.",
+    )
+    binance_proxy.add_argument("--symbols", required=True, help="Comma-separated Binance USD-M symbols.")
+    binance_proxy.add_argument("--start", required=True, help="Inclusive ISO start timestamp/date.")
+    binance_proxy.add_argument("--end", required=True, help="ISO end timestamp/date used as the upper bound for paged REST requests.")
+    binance_proxy.add_argument(
+        "--datasets",
+        default="klines_1h,funding,mark_price_1h,index_price_1h,premium_index_1h",
+        help=(
+            "Comma-separated proxy datasets. Aliases: "
+            + ",".join(sorted(BINANCE_PROXY_DATASET_MAP))
+            + ". Full names binance_usdm_* also accepted."
+        ),
+    )
+    binance_proxy.add_argument("--workers", type=int, default=1, help="Concurrent per-symbol workers; keep low for public REST.")
+    binance_proxy.add_argument("--interval", default="1h", help="Binance kline interval for kline-like datasets.")
+    binance_proxy.add_argument("--period", default="1h", help="Binance period for open_interest and taker_flow_1h.")
+
+    data_layer = subparsers.add_parser("data-layer-audit", help="Audit native/proxy data coverage and usable partial windows.")
+    data_layer.add_argument("--name", default="serious_data_layer", help="Name used for report folder.")
+    data_layer.add_argument("--start", default=None, help="Inclusive date/timestamp filter.")
+    data_layer.add_argument("--end", default=None, help="Exclusive date/timestamp filter.")
+    data_layer.add_argument("--symbols", default="", help="Optional comma-separated symbol filter.")
+    data_layer.add_argument(
+        "--datasets",
+        default=",".join(DEFAULT_DATA_LAYER_DATASETS),
+        help="Comma-separated datasets to audit.",
+    )
+    data_layer.add_argument("--min-full-coverage", type=float, default=0.95, help="Coverage threshold for *_FULL status.")
+    data_layer.add_argument("--output-dir", default=None, help="Where to write data-layer audit output.")
 
     universe = subparsers.add_parser("discover-universe", help="Build a current Bybit USDT perp universe snapshot.")
     universe.add_argument("--name", default="auto", help="Name used for universe report files.")
@@ -1212,6 +1246,42 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{action} under {data_root}")
         for dataset, path in sorted(outputs.items()):
             print(f"{dataset}: {path}")
+        return 0
+
+    if args.command == "download-binance-proxy":
+        outputs = download_binance_usdm_proxy_data(
+            data_root,
+            symbols=[item.strip().upper() for item in args.symbols.split(",") if item.strip()],
+            start_ms=parse_date_ms(args.start),
+            end_ms=parse_date_ms(args.end),
+            datasets={item.strip() for item in args.datasets.split(",") if item.strip()},
+            workers=args.workers,
+            interval=args.interval,
+            period=args.period,
+        )
+        print(f"Binance USD-M proxy datasets written under {data_root}")
+        for dataset, path in sorted(outputs.items()):
+            print(f"{dataset}: {path}")
+        return 0
+
+    if args.command == "data-layer-audit":
+        payload = run_data_layer_audit(
+            data_root,
+            config=DataLayerAuditConfig(
+                name=args.name,
+                start=args.start,
+                end=args.end,
+                symbols=_csv_str(args.symbols, ()),
+                datasets=_csv_str(args.datasets, DEFAULT_DATA_LAYER_DATASETS),
+                min_full_coverage=args.min_full_coverage,
+                output_dir=args.output_dir,
+            ),
+        )
+        print(
+            "data layer audit "
+            f"reference_pairs={payload['reference_pair_count']} "
+            f"path={payload['output_files']['markdown']}"
+        )
         return 0
 
     if args.command == "discover-universe":

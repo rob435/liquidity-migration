@@ -90,6 +90,48 @@ def test_cli_download_data_default_open_interest_interval(tmp_path: Path) -> Non
     assert args.open_interest_interval == "1h"
 
 
+def test_cli_binance_proxy_parses_defaults(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "download-binance-proxy",
+            "--symbols",
+            "BTCUSDT",
+            "--start",
+            "2026-01-01",
+            "--end",
+            "2026-01-02",
+        ]
+    )
+
+    assert args.command == "download-binance-proxy"
+    assert args.interval == "1h"
+    assert args.period == "1h"
+    assert "mark_price_1h" in args.datasets
+
+
+def test_cli_data_layer_audit_parses_options(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "data-layer-audit",
+            "--name",
+            "coverage",
+            "--symbols",
+            "BTCUSDT,ETHUSDT",
+            "--min-full-coverage",
+            "0.9",
+        ]
+    )
+
+    assert args.command == "data-layer-audit"
+    assert args.name == "coverage"
+    assert args.symbols == "BTCUSDT,ETHUSDT"
+    assert args.min_full_coverage == 0.9
+
+
 def test_cli_portfolio_hedge_parses_paths(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [

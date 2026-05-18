@@ -708,6 +708,57 @@ alpha work should prioritize new entry/exit mechanics or genuinely new data
 surfaces such as OI, basis, and signed flow, not more hard filters on the
 existing daily ledger.
 
+## Serious Data Layer
+
+`data-layer-audit` is the gatekeeper for any new OI, basis, premium, funding, or
+flow research. It writes exact coverage tables for Bybit-native datasets and
+Binance USD-M proxy datasets, then labels each feature pack as full-window,
+partial-window, missing, or proxy-only.
+
+```bash
+python -m aggression_carry \
+  --data-root /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503 \
+  data-layer-audit \
+  --start 2023-05-03 \
+  --end 2026-05-03 \
+  --name fullpit_aux_coverage
+```
+
+Binance proxy downloads are intentionally stored in separate tables such as
+`binance_usdm_mark_price_1h` and `binance_usdm_funding`; they do not overwrite
+or pretend to be Bybit-native datasets:
+
+```bash
+python -m aggression_carry \
+  --data-root /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503 \
+  download-binance-proxy \
+  --symbols BTCUSDT,ETHUSDT,SOLUSDT \
+  --start 2025-05-03 \
+  --end 2026-05-03 \
+  --datasets klines_1h,funding,mark_price_1h,index_price_1h,premium_index_1h,open_interest,taker_flow_1h \
+  --workers 1
+```
+
+Research rule: Binance proxy features can justify building a hypothesis, but
+they cannot promote a Bybit strategy on their own. Promotion still requires
+Bybit-native PIT coverage or a separately argued Model Court exception. Binance
+USD-M open-interest and taker-flow REST history are recent-window only in the
+official docs, so treat them as live calibration / short-window validation
+unless archived continuously.
+
+Current `2026-05-18` data-layer audit after the pilot pull:
+
+```text
+report: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/data_layer_post_pilot_aux_coverage/data_layer_audit.md
+full-PIT reference symbol-days: 367,533
+Bybit klines/funding: full coverage
+Bybit native basis/premium pilot: 5 symbols, 2025-05-03..2026-05-02, 0.47% full-root symbol-day coverage
+Bybit signed_flow_1h: missing
+Binance basis/funding proxy pilot: BTCUSDT/ETHUSDT, 2025-05-03..2026-05-02
+Binance OI/taker proxy pilot: BTCUSDT/ETHUSDT, 2026-04-18..2026-05-02 only
+decision: usable for exploratory feature tests only, not promotion evidence
+```
+
 ## Champion / Challenger Stack
 
 `champion-challenger` writes the current live research stack manifest:

@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 import polars as pl
 
 from .archive import download_public_trade_archive, read_public_trade_archive
+from .binance import BinanceUSDMData
 from .bybit import BybitMarketData
 from .config import ResearchConfig
 from .ingestion import aggregate_signed_flow_1h, aggregate_signed_flow_1m, aggregate_trade_klines_1m, normalize_funding_history, trades_to_frame
@@ -39,6 +40,15 @@ PER_SYMBOL_REST_DATASETS = {
     "index_price_1h",
     "premium_index_1h",
     "recent_trades",
+}
+BINANCE_PROXY_DATASET_MAP = {
+    "klines_1h": "binance_usdm_klines_1h",
+    "funding": "binance_usdm_funding",
+    "open_interest": "binance_usdm_open_interest",
+    "mark_price_1h": "binance_usdm_mark_price_1h",
+    "index_price_1h": "binance_usdm_index_price_1h",
+    "premium_index_1h": "binance_usdm_premium_index_1h",
+    "taker_flow_1h": "binance_usdm_taker_flow_1h",
 }
 MARKER_DIR = "_download_markers"
 
@@ -161,6 +171,61 @@ def download_market_data(
                 del trades
                 gc.collect()
 
+    return outputs
+
+
+def download_binance_usdm_proxy_data(
+    data_root: str | Path,
+    *,
+    symbols: Iterable[str],
+    start_ms: int,
+    end_ms: int,
+    datasets: set[str],
+    workers: int = 1,
+    interval: str = "1h",
+    period: str = "1h",
+) -> dict[str, Path]:
+    resolved = {_resolve_binance_dataset_name(item) for item in datasets}
+    symbols = tuple(dict.fromkeys(symbol.upper() for symbol in symbols))
+    outputs: dict[str, Path] = {}
+    if workers > 1:
+        max_workers = max(1, min(workers, len(symbols)))
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    _download_binance_symbol_datasets,
+                    data_root,
+                    symbol=symbol,
+                    index=index,
+                    total=len(symbols),
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    datasets=resolved,
+                    interval=interval,
+                    period=period,
+                ): symbol
+                for index, symbol in enumerate(symbols, start=1)
+            }
+            for future in as_completed(futures):
+                outputs.update(future.result())
+        return outputs
+
+    client = BinanceUSDMData()
+    for index, symbol in enumerate(symbols, start=1):
+        outputs.update(
+            _download_binance_symbol_datasets(
+                data_root,
+                client=client,
+                symbol=symbol,
+                index=index,
+                total=len(symbols),
+                start_ms=start_ms,
+                end_ms=end_ms,
+                datasets=resolved,
+                interval=interval,
+                period=period,
+            )
+        )
     return outputs
 
 
@@ -313,6 +378,131 @@ def _download_rest_symbol_datasets(
     return outputs
 
 
+def _download_binance_symbol_datasets(
+    data_root: str | Path,
+    *,
+    symbol: str,
+    index: int,
+    total: int,
+    start_ms: int,
+    end_ms: int,
+    datasets: set[str],
+    interval: str,
+    period: str,
+    client: BinanceUSDMData | None = None,
+) -> dict[str, Path]:
+    local_client = client or BinanceUSDMData()
+    outputs: dict[str, Path] = {}
+    if "binance_usdm_klines_1h" in datasets:
+        outputs["binance_usdm_klines_1h"] = _download_symbol_dataset(
+            data_root,
+            dataset="binance_usdm_klines_1h",
+            symbol=symbol,
+            index=index,
+            total=total,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            fetch=lambda: _normalize_binance_klines(
+                symbol,
+                local_client.get_klines(symbol, interval, start_ms, end_ms),
+                source="binance_usdm_klines",
+            ),
+            marker_suffix=f"_{interval}",
+        )
+    if "binance_usdm_mark_price_1h" in datasets:
+        outputs["binance_usdm_mark_price_1h"] = _download_symbol_dataset(
+            data_root,
+            dataset="binance_usdm_mark_price_1h",
+            symbol=symbol,
+            index=index,
+            total=total,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            fetch=lambda: _normalize_binance_price_klines(
+                symbol,
+                local_client.get_mark_price_klines(symbol, interval, start_ms, end_ms),
+                source="binance_usdm_mark_price",
+            ),
+            marker_suffix=f"_{interval}",
+        )
+    if "binance_usdm_index_price_1h" in datasets:
+        outputs["binance_usdm_index_price_1h"] = _download_symbol_dataset(
+            data_root,
+            dataset="binance_usdm_index_price_1h",
+            symbol=symbol,
+            index=index,
+            total=total,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            fetch=lambda: _normalize_binance_price_klines(
+                symbol,
+                local_client.get_index_price_klines(symbol, interval, start_ms, end_ms),
+                source="binance_usdm_index_price",
+            ),
+            marker_suffix=f"_{interval}",
+        )
+    if "binance_usdm_premium_index_1h" in datasets:
+        outputs["binance_usdm_premium_index_1h"] = _download_symbol_dataset(
+            data_root,
+            dataset="binance_usdm_premium_index_1h",
+            symbol=symbol,
+            index=index,
+            total=total,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            fetch=lambda: _normalize_binance_price_klines(
+                symbol,
+                local_client.get_premium_index_klines(symbol, interval, start_ms, end_ms),
+                source="binance_usdm_premium_index",
+            ),
+            marker_suffix=f"_{interval}",
+        )
+    if "binance_usdm_funding" in datasets:
+        outputs["binance_usdm_funding"] = _download_symbol_dataset(
+            data_root,
+            dataset="binance_usdm_funding",
+            symbol=symbol,
+            index=index,
+            total=total,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            fetch=lambda: _normalize_binance_funding(symbol, local_client.get_funding_history(symbol, start_ms, end_ms)),
+        )
+    if "binance_usdm_open_interest" in datasets:
+        outputs["binance_usdm_open_interest"] = _download_symbol_dataset(
+            data_root,
+            dataset="binance_usdm_open_interest",
+            symbol=symbol,
+            index=index,
+            total=total,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            fetch=lambda: _normalize_binance_open_interest(
+                symbol,
+                local_client.get_open_interest_hist(symbol, period, start_ms, end_ms),
+                period=period,
+            ),
+            marker_suffix=f"_{period}",
+        )
+    if "binance_usdm_taker_flow_1h" in datasets:
+        outputs["binance_usdm_taker_flow_1h"] = _download_symbol_dataset(
+            data_root,
+            dataset="binance_usdm_taker_flow_1h",
+            symbol=symbol,
+            index=index,
+            total=total,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            fetch=lambda: _normalize_binance_taker_flow(
+                symbol,
+                local_client.get_taker_buy_sell_volume(symbol, period, start_ms, end_ms),
+                period=period,
+            ),
+            marker_suffix=f"_{period}",
+        )
+    return outputs
+
+
 def _download_symbol_dataset(
     data_root: str | Path,
     *,
@@ -400,6 +590,95 @@ def _normalize_price_index_klines(symbol: str, rows: list, *, source: str) -> li
                 "low": float(row[3]),
                 "close": float(row[4]),
                 "source": source,
+            }
+        )
+    return sorted(output, key=lambda item: item["ts_ms"])
+
+
+def _normalize_binance_klines(symbol: str, rows: list, *, source: str) -> list[dict]:
+    output = []
+    for row in rows:
+        output.append(
+            {
+                "ts_ms": int(row[0]),
+                "symbol": symbol,
+                "open": float(row[1]),
+                "high": float(row[2]),
+                "low": float(row[3]),
+                "close": float(row[4]),
+                "volume_base": float(row[5]),
+                "turnover_quote": float(row[7]),
+                "trade_count": int(row[8]),
+                "taker_buy_volume_base": float(row[9]),
+                "taker_buy_turnover_quote": float(row[10]),
+                "source": source,
+            }
+        )
+    return sorted(output, key=lambda item: item["ts_ms"])
+
+
+def _normalize_binance_price_klines(symbol: str, rows: list, *, source: str) -> list[dict]:
+    output = []
+    for row in rows:
+        output.append(
+            {
+                "ts_ms": int(row[0]),
+                "symbol": symbol,
+                "open": float(row[1]),
+                "high": float(row[2]),
+                "low": float(row[3]),
+                "close": float(row[4]),
+                "source": source,
+            }
+        )
+    return sorted(output, key=lambda item: item["ts_ms"])
+
+
+def _normalize_binance_funding(symbol: str, rows: list[dict]) -> list[dict]:
+    return [
+        {
+            "ts_ms": int(row["fundingTime"]),
+            "symbol": symbol,
+            "funding_rate": float(row["fundingRate"]),
+            "mark_price": float(row["markPrice"]) if row.get("markPrice") not in (None, "") else None,
+            "funding_interval_min": 8 * 60,
+            "source": "binance_usdm_funding",
+        }
+        for row in rows
+    ]
+
+
+def _normalize_binance_open_interest(symbol: str, rows: list[dict], *, period: str) -> list[dict]:
+    return [
+        {
+            "ts_ms": int(row["timestamp"]),
+            "symbol": symbol,
+            "open_interest": float(row.get("sumOpenInterest", 0.0)),
+            "open_interest_value": float(row.get("sumOpenInterestValue", 0.0)),
+            "open_interest_interval": period,
+            "source": "binance_usdm_open_interest",
+        }
+        for row in rows
+    ]
+
+
+def _normalize_binance_taker_flow(symbol: str, rows: list[dict], *, period: str) -> list[dict]:
+    output = []
+    for row in rows:
+        buy_volume = float(row.get("buyVol", 0.0))
+        sell_volume = float(row.get("sellVol", 0.0))
+        total = buy_volume + sell_volume
+        output.append(
+            {
+                "ts_ms": int(row["timestamp"]),
+                "symbol": symbol,
+                "buy_volume_base": buy_volume,
+                "sell_volume_base": sell_volume,
+                "signed_volume_base": buy_volume - sell_volume,
+                "taker_imbalance": (buy_volume - sell_volume) / total if total > 0 else 0.0,
+                "buy_sell_ratio": float(row.get("buySellRatio", 0.0)),
+                "flow_interval": period,
+                "source": "binance_usdm_taker_flow",
             }
         )
     return sorted(output, key=lambda item: item["ts_ms"])
@@ -534,3 +813,8 @@ def _partition_exists(data_root: str | Path, *, dataset: str, symbol: str, date:
 
 def _float_or_none(value) -> float | None:
     return float(value) if value not in (None, "") else None
+
+
+def _resolve_binance_dataset_name(dataset: str) -> str:
+    normalized = dataset.strip()
+    return BINANCE_PROXY_DATASET_MAP.get(normalized, normalized)

@@ -30,6 +30,13 @@ DATASETS = {
     "event_demo_trades",
     "event_demo_orders",
     "event_demo_cycles",
+    "binance_usdm_klines_1h",
+    "binance_usdm_mark_price_1h",
+    "binance_usdm_index_price_1h",
+    "binance_usdm_premium_index_1h",
+    "binance_usdm_funding",
+    "binance_usdm_open_interest",
+    "binance_usdm_taker_flow_1h",
 }
 
 DATASET_KEYS = {
@@ -52,6 +59,13 @@ DATASET_KEYS = {
     "event_demo_trades": ("trade_id",),
     "event_demo_orders": ("order_link_id",),
     "event_demo_cycles": ("cycle_id",),
+    "binance_usdm_klines_1h": ("ts_ms", "symbol"),
+    "binance_usdm_mark_price_1h": ("ts_ms", "symbol"),
+    "binance_usdm_index_price_1h": ("ts_ms", "symbol"),
+    "binance_usdm_premium_index_1h": ("ts_ms", "symbol"),
+    "binance_usdm_funding": ("ts_ms", "symbol"),
+    "binance_usdm_open_interest": ("ts_ms", "symbol"),
+    "binance_usdm_taker_flow_1h": ("ts_ms", "symbol"),
 }
 
 
