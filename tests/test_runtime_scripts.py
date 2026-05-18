@@ -34,3 +34,18 @@ def test_systemd_entry_runner_uses_vps_cadence() -> None:
     assert "Environment=INTERVAL_SECONDS=60" in text
     assert "Environment=STRATEGY_PROFILE=demo_relaxed" in text
     assert "Environment=UNIVERSE_RANK_END=300" in text
+    assert "Environment=PYTHONDONTWRITEBYTECODE=1" in text
+
+
+def test_live_runners_do_not_write_repo_bytecode() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    paths = [
+        repo / "scripts" / "run_bybit_demo_event_engine.sh",
+        repo / "scripts" / "run_bybit_demo_ws_risk_engine.sh",
+        repo / "deploy" / "systemd" / "model050426-bybit-demo.service",
+        repo / "deploy" / "systemd" / "model050426-bybit-risk.service",
+    ]
+
+    for path in paths:
+        text = path.read_text(encoding="utf-8")
+        assert "PYTHONDONTWRITEBYTECODE" in text
