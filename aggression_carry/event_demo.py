@@ -115,8 +115,18 @@ def run_event_demo_cycle(
     report_dir.mkdir(parents=True, exist_ok=True)
     cycle_now_ms = now_ms if now_ms is not None else _utc_now_ms()
     cycle_id = f"{_yyyymmddhhmmss(cycle_now_ms)}-{int(time.time_ns())}"
+    cycle_perf_start = time.perf_counter()
+    stage_perf_start = cycle_perf_start
+    stage_timings_ms: dict[str, float] = {}
+
+    def mark_stage(name: str) -> None:
+        nonlocal stage_perf_start
+        now = time.perf_counter()
+        stage_timings_ms[f"timing_{name}_ms"] = round((now - stage_perf_start) * 1000.0, 3)
+        stage_perf_start = now
 
     with exclusive_file_lock(root / ".locks" / "event_demo_cycle.lock", stale_seconds=900):
+        mark_stage("cycle_lock_wait")
         public = market_client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
         instruments = _normalize_instruments(public.get_instruments_info())
         tickers = _normalize_tickers(public.get_tickers())
@@ -124,6 +134,7 @@ def run_event_demo_cycle(
         symbols = universe["symbol"].to_list() if not universe.is_empty() else []
         if not symbols:
             raise RuntimeError("Bybit demo event cycle found no current tradable symbols after universe filters")
+        mark_stage("universe")
 
         start_ms, end_ms = _kline_window(cycle_now_ms, lookback_days=demo.lookback_days)
         klines, kline_cache_stats = _download_recent_1h_klines(
@@ -135,7 +146,9 @@ def run_event_demo_cycle(
             market_client=public if market_client is not None else None,
             cache_root=root,
         )
+        mark_stage("klines")
         features = _build_demo_features(klines, universe)
+        mark_stage("features")
         score_name, score_col = _event_score(strategy.event_types[0])
         scenario = _selected_scenario(strategy)
         order_notional_pct_equity = target_order_notional_pct_equity(demo, strategy)
@@ -146,6 +159,7 @@ def run_event_demo_cycle(
         contract_by_symbol = _contract_lookup(universe)
         all_trades = read_dataset(root, "event_demo_trades")
         all_orders = read_dataset(root, "event_demo_orders")
+        mark_stage("signal_prep")
 
         trading_client = private_client
         if trading_client is None and (demo.submit_orders or (demo.telegram and _private_credentials_present())):
@@ -161,6 +175,7 @@ def run_event_demo_cycle(
         live_entry_order_symbols = _live_open_order_symbols(raw_open_orders, reduce_only=False)
         raw_positions, bybit_position_error = _safe_raw_positions(trading_client, settle_coin=demo.settle_coin)
         live_position_symbols = set(_active_position_by_symbol(raw_positions))
+        mark_stage("private_snapshots")
 
         pending_fill_trades, pending_fill_orders = _reconcile_pending_order_fills(
             all_orders,
@@ -181,6 +196,7 @@ def run_event_demo_cycle(
         if pending_fill_orders:
             all_orders = _upsert_rows(all_orders, pending_fill_orders, key="order_link_id")
             _write_order_rows(root, pl.DataFrame(pending_fill_orders, infer_schema_length=None))
+        mark_stage("pending_fill_reconcile")
 
         reconciled_trades, reconcile_rows, reconcile_position_error = _reconcile_open_trades(
             all_trades,
@@ -193,6 +209,7 @@ def run_event_demo_cycle(
         if reconcile_rows:
             all_trades = _upsert_rows(all_trades, reconcile_rows, key="trade_id")
             _write_trade_rows(root, pl.DataFrame(reconcile_rows, infer_schema_length=None))
+        mark_stage("open_trade_reconcile")
 
         exits = plan_demo_exits(
             reconciled_trades,
@@ -220,6 +237,7 @@ def run_event_demo_cycle(
             all_orders = _upsert_rows(all_orders, exit_order_rows, key="order_link_id")
             if demo.submit_orders or demo.record_dry_run:
                 _write_order_rows(root, pl.DataFrame(exit_order_rows, infer_schema_length=None))
+        mark_stage("exits")
 
         refreshed_open = _open_trades(all_trades)
         position_snapshot_error = _combine_errors(reconcile_position_error, bybit_position_error)
@@ -289,6 +307,7 @@ def run_event_demo_cycle(
             all_orders = _upsert_rows(all_orders, entry_order_rows, key="order_link_id")
             if demo.submit_orders or demo.record_dry_run:
                 _write_order_rows(root, pl.DataFrame(entry_order_rows, infer_schema_length=None))
+        mark_stage("entries")
 
         if trading_client is None and demo.telegram:
             bybit_position_error = "Bybit private client unavailable; set BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET"
@@ -312,6 +331,7 @@ def run_event_demo_cycle(
         bybit_position_summary = summarize_position_pnl(bybit_positions)
         ledger_positions = build_ledger_position_pnl_snapshot(_open_trades(all_trades), price_by_symbol)
         ledger_position_summary = summarize_position_pnl(ledger_positions)
+        mark_stage("summaries")
         cycle_row = {
             "cycle_id": cycle_id,
             "ts_ms": cycle_now_ms,
@@ -370,6 +390,8 @@ def run_event_demo_cycle(
             "skipped_position_snapshot_error": snapshot_error_entry_skips,
             "skipped_open_order_snapshot_error": open_order_error_entry_skips,
             "skipped_wallet_snapshot_error": wallet_error_entry_skips,
+            **stage_timings_ms,
+            "cycle_elapsed_pre_persist_ms": round((time.perf_counter() - cycle_perf_start) * 1000.0, 3),
         }
 
         payload = {
@@ -399,14 +421,21 @@ def run_event_demo_cycle(
             "report_dir": str(report_dir),
         }
         telegram_sent, telegram_error = _maybe_notify(payload, enabled=demo.telegram)
+        mark_stage("telegram")
         cycle_row["telegram_sent"] = telegram_sent
         cycle_row["telegram_error"] = telegram_error
+        cycle_row.update(stage_timings_ms)
+        cycle_row["cycle_elapsed_pre_persist_ms"] = round((time.perf_counter() - cycle_perf_start) * 1000.0, 3)
         payload["cycle"] = cycle_row
+        persist_perf_start = time.perf_counter()
         write_dataset(pl.DataFrame([cycle_row]), root, "event_demo_cycles", partition_by=())
         report_path = report_dir / f"event_demo_cycle_{cycle_id}.json"
         report_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         (report_dir / "latest_event_demo_cycle.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         (report_dir / "latest_event_demo_cycle.md").write_text(format_event_demo_cycle_report(payload), encoding="utf-8")
+        cycle_row["timing_persist_ms"] = round((time.perf_counter() - persist_perf_start) * 1000.0, 3)
+        cycle_row["cycle_elapsed_ms"] = round((time.perf_counter() - cycle_perf_start) * 1000.0, 3)
+        payload["cycle"] = cycle_row
         return payload
 
 
