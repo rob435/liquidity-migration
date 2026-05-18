@@ -24,6 +24,7 @@ from .event_demo import (
     run_event_risk_cycle,
 )
 from .ingestion import generate_fixture_data
+from .portfolio_hedge import run_portfolio_hedge_report
 from .strategy_tribunal import StrategyTribunalConfig, run_strategy_tribunal
 from .universe import run_discover_universe
 from .volume_events import ENTRY_POLICIES, VolumeEventResearchConfig, run_volume_event_research
@@ -1034,6 +1035,19 @@ def build_parser() -> argparse.ArgumentParser:
     tribunal.add_argument("--bootstrap-block-size", type=int, default=tribunal_defaults.bootstrap_block_size)
     tribunal.add_argument("--random-seed", type=int, default=tribunal_defaults.random_seed)
 
+    hedge = subparsers.add_parser(
+        "portfolio-hedge",
+        help="Overlay candidate long ledgers on a promoted short report and score hedge behavior.",
+    )
+    hedge.add_argument("--short-report-dir", required=True, help="Completed short volume-events report directory.")
+    hedge.add_argument(
+        "--long-report-dir",
+        required=True,
+        help="Comma-separated completed long volume-events report directories.",
+    )
+    hedge.add_argument("--hedge-weights", default="0.25,0.5,1.0", help="Comma-separated long overlay weights.")
+    hedge.add_argument("--report-dir", required=True, help="Directory for portfolio hedge report output.")
+
     event_demo = subparsers.add_parser(
         "event-demo-cycle",
         help="Run one frequent Bybit demo forward-testing cycle for the selected event strategy.",
@@ -1577,6 +1591,20 @@ def main(argv: list[str] | None = None) -> int:
             "strategy tribunal "
             f"verdict={payload['verdict']} "
             f"path={payload['output_files']['markdown']}"
+        )
+        return 0
+
+    if args.command == "portfolio-hedge":
+        payload = run_portfolio_hedge_report(
+            short_report_dir=Path(args.short_report_dir).expanduser(),
+            long_report_dirs=[Path(item).expanduser() for item in _csv_str(args.long_report_dir, ())],
+            hedge_weights=list(_csv_float(args.hedge_weights, (0.25, 0.5, 1.0))),
+            report_dir=Path(args.report_dir).expanduser(),
+        )
+        print(
+            "portfolio hedge "
+            f"rows={len(payload['rows'])} "
+            f"path={payload['report_path']}"
         )
         return 0
 

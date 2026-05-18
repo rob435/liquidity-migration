@@ -137,6 +137,37 @@ The high-close veto looked good in a static ledger slice, but a real backtest at
 0.85 cut promoted to +1152.68% and relaxed to +200.44%. These are useful
 falsification tools, not live alpha.
 
+## Hedge Research
+
+Portfolio hedge tooling was added on 2026-05-18 through `portfolio-hedge`.
+It overlays candidate long basket ledgers on the promoted short book and
+reports blended return, drawdown, rolling-window loss, split returns, common-day
+correlation, and long PnL on the short book's worst days.
+
+Initial long sweep:
+
+```text
+report: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/hedge_long_sweep_20260518
+scenarios: 48
+promotable standalone longs: 0
+best promotion-ranked long: volume_shelf_reclaim continuation, q20, 3d hold
+standalone result: +23.00% total return, -23.96% max drawdown, -7.23% min split
+model court: FAIL
+```
+
+The only useful hedge candidate so far is `volume_shelf_reclaim` q20/h3 as a
+small overlay, not as standalone alpha. At 0.50 overlay weight against the
+current promoted short report, it produced +2065.44% combined return and
+-12.32% max drawdown versus the short book's +1810.43% and -13.69% in the same
+daily overlay method. Its common-day correlation to the short book was -0.347
+and it made +4.18% additive return on the short book's worst 10% exit days.
+Under bar-extreme stop stress for the long leg, the 0.50 overlay still improved
+combined drawdown to -12.46% but reduced return to +1726.53%.
+
+Status: shadow portfolio challenger only. Do not deploy it until the standalone
+long leg or the combined portfolio clears stress evidence and model-court
+promotion gates.
+
 ## Crowding Model Research
 
 The first cross-sectional crowding classifier, `model_v1`, was added on

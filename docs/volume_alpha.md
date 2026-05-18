@@ -206,6 +206,24 @@ bad negative controls, missing execution-drift evidence, stale/mixed stress
 evidence, or clustered loss pathology should remain blocked or at least
 `WATCH`.
 
+Portfolio hedge candidates should also be checked as overlays instead of only
+standalone long curves:
+
+```bash
+python -m aggression_carry \
+  --data-root DATA_ROOT \
+  portfolio-hedge \
+  --short-report-dir DATA_ROOT/reports/current_qsqueeze_promoted_20260518 \
+  --long-report-dir DATA_ROOT/reports/hedge_volume_shelf_q20_h3_20260518 \
+  --hedge-weights 0.25,0.5,1.0 \
+  --report-dir DATA_ROOT/reports/portfolio_hedge
+```
+
+The first useful hedge candidate is `volume_shelf_reclaim` q20/h3. It is not a
+promoted standalone long because model court failed it, but as a 0.25-0.50
+overlay it reduced the promoted short book's daily-overlay drawdown and had
+negative common-day correlation. Keep it as a shadow challenger only.
+
 Overnight full-PIT runner:
 
 ```bash

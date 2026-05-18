@@ -11,6 +11,8 @@ The private Bybit client remains demo-only by design: `demo=False` is refused in
 Current operational proof and deployment status are summarized in
 `docs/system_status.md`; dated one-off audit logs have been retired from the
 repo surface.
+Research-only portfolio hedge overlays are available through
+`portfolio-hedge`; the current candidate is shadow-only and not deployed.
 
 ## Active Strategy
 

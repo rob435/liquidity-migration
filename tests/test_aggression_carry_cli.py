@@ -90,6 +90,30 @@ def test_cli_download_data_default_open_interest_interval(tmp_path: Path) -> Non
     assert args.open_interest_interval == "1h"
 
 
+def test_cli_portfolio_hedge_parses_paths(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "portfolio-hedge",
+            "--short-report-dir",
+            str(tmp_path / "short"),
+            "--long-report-dir",
+            f"{tmp_path / 'long_a'},{tmp_path / 'long_b'}",
+            "--hedge-weights",
+            "0.25,0.5",
+            "--report-dir",
+            str(tmp_path / "hedge"),
+        ]
+    )
+
+    assert args.command == "portfolio-hedge"
+    assert args.short_report_dir == str(tmp_path / "short")
+    assert args.long_report_dir == f"{tmp_path / 'long_a'},{tmp_path / 'long_b'}"
+    assert args.hedge_weights == "0.25,0.5"
+    assert args.report_dir == str(tmp_path / "hedge")
+
+
 def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [
