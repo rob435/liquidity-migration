@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import polars as pl
@@ -371,6 +372,52 @@ def test_demo_kline_fetch_ranges_uses_latest_bar_per_symbol() -> None:
         "BBBUSDT": (MS_PER_HOUR, 3 * MS_PER_HOUR),
         "DDDUSDT": (0, 3 * MS_PER_HOUR),
     }
+
+
+def test_demo_kline_compact_cache_serves_repeat_window(tmp_path: Path) -> None:
+    cached_rows = []
+    for symbol in ("AAAUSDT", "BBBUSDT"):
+        for ts_ms in (0, MS_PER_HOUR, 2 * MS_PER_HOUR):
+            cached_rows.append(
+                {
+                    "symbol": symbol,
+                    "ts_ms": ts_ms,
+                    "open": 100.0,
+                    "high": 110.0,
+                    "low": 90.0,
+                    "close": 105.0,
+                    "volume": 1.5,
+                    "turnover": 157.5,
+                }
+            )
+    write_dataset(pl.DataFrame(cached_rows), tmp_path, "event_demo_klines_1h")
+
+    first, first_stats = _download_recent_1h_klines(
+        ["AAAUSDT", "BBBUSDT"],
+        start_ms=0,
+        end_ms=2 * MS_PER_HOUR,
+        config=ResearchConfig(data_root=tmp_path),
+        workers=1,
+        market_client=FailingKlineMarket(),
+        cache_root=tmp_path,
+    )
+    shutil.rmtree(tmp_path / "event_demo_klines_1h")
+
+    second, second_stats = _download_recent_1h_klines(
+        ["AAAUSDT", "BBBUSDT"],
+        start_ms=0,
+        end_ms=2 * MS_PER_HOUR,
+        config=ResearchConfig(data_root=tmp_path),
+        workers=1,
+        market_client=FailingKlineMarket(),
+        cache_root=tmp_path,
+    )
+
+    assert first.height == 6
+    assert first_stats["fetch_symbols"] == 0
+    assert second.height == 6
+    assert second_stats["cache_rows"] == 6
+    assert second_stats["fetch_symbols"] == 0
 
 
 def test_event_demo_cycle_skips_entry_when_live_position_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1376,6 +1423,85 @@ def test_select_demo_entry_candidates_waits_for_quality_squeeze_giveback() -> No
     assert ready_candidates[0]["entry_rule"] == "quality_squeeze_giveback"
     assert ready_candidates[0]["entry_quality_tier"] == "promoted_quality"
     assert ready_candidates[0]["actual_entry_delay_hours"] == 3.0
+
+
+def test_select_demo_entry_candidates_builds_entry_bars_from_klines() -> None:
+    signal_ts = 1_700_000_000_000
+    hour = MS_PER_HOUR
+    scenario = EventScenario(
+        event_type="liquidity_migration",
+        threshold=0.40,
+        side_hypothesis="reversal",
+        hold_days=3,
+        stop_loss_pct=0.12,
+        cost_multiplier=3.0,
+        take_profit_pct=0.25,
+    )
+    config = VolumeEventResearchConfig(
+        require_pit_membership=False,
+        require_full_pit_universe=False,
+        liquidity_migration_crowding_filter="none",
+    )
+    features = pl.DataFrame(
+        [
+            {
+                "ts_ms": signal_ts,
+                "symbol": "AAAUSDT",
+                "dollar_volume_rank_z": 3.0,
+                "dollar_volume_rank_z_rank_frac": 0.85,
+                "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+                "liquidity_rank": 50,
+                "prior7_liquidity_rank": 225,
+                "turnover_quote": 7_000_000.0,
+                "prior7_turnover_quote_mean": 1_000_000.0,
+                "daily_return_1d": 0.02,
+                "residual_return_1d": 0.09,
+                "market_pct_up_1d": 0.55,
+                "signal_day_close_location": 0.70,
+                "pit_age_days": 120.0,
+                "tradable_membership_flag": False,
+            }
+        ]
+    )
+    klines = pl.DataFrame(
+        [
+            {"symbol": "AAAUSDT", "ts_ms": signal_ts - hour, "open": 99.0, "high": 101.0, "low": 99.0, "close": 100.0},
+            {"symbol": "AAAUSDT", "ts_ms": signal_ts, "open": 100.0, "high": 101.2, "low": 100.0, "close": 101.1},
+            {
+                "symbol": "AAAUSDT",
+                "ts_ms": signal_ts + hour,
+                "open": 101.1,
+                "high": 101.6,
+                "low": 101.0,
+                "close": 101.5,
+            },
+            {
+                "symbol": "AAAUSDT",
+                "ts_ms": signal_ts + 2 * hour,
+                "open": 101.5,
+                "high": 101.6,
+                "low": 100.9,
+                "close": 101.1,
+            },
+            {"symbol": "ZZZUSDT", "ts_ms": signal_ts, "open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0},
+        ]
+    )
+
+    candidates, skips = select_demo_entry_candidates(
+        features,
+        pl.DataFrame(),
+        now_ms=signal_ts + 3 * hour + 30_000,
+        config=config,
+        scenario=scenario,
+        max_entry_lag_minutes=240,
+        max_new_entries=6,
+        klines=klines,
+    )
+
+    assert skips["not_ready"] == 0
+    assert len(candidates) == 1
+    assert candidates[0]["entry_ready_ts_ms"] == signal_ts + 3 * hour
+    assert candidates[0]["entry_rule"] == "quality_squeeze_giveback"
 
 
 def test_plan_demo_exits_detects_rank_decay_before_max_hold() -> None:

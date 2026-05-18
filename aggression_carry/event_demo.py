@@ -154,7 +154,6 @@ def run_event_demo_cycle(
         order_notional_pct_equity = target_order_notional_pct_equity(demo, strategy)
         order_initial_margin_pct_equity = target_initial_margin_pct_equity(demo, strategy)
         rank_lookup = _rank_lookup_cache(features, config=strategy).get(score_col, {})
-        entry_bars_by_symbol = _indexed_price_bars_by_symbol(klines)
         price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, klines)
         contract_by_symbol = _contract_lookup(universe)
         all_trades = read_dataset(root, "event_demo_trades")
@@ -260,7 +259,7 @@ def run_event_demo_cycle(
             scenario=scenario,
             max_entry_lag_minutes=demo.max_entry_lag_minutes,
             max_new_entries=demo.max_new_entries_per_cycle,
-            entry_bars_by_symbol=entry_bars_by_symbol,
+            klines=klines,
         )
         free_slots = max(int(strategy.max_active_symbols) - refreshed_open.height, 0)
         entry_candidates = entry_candidates[:free_slots]
@@ -622,11 +621,16 @@ def select_demo_entry_candidates(
     max_entry_lag_minutes: int,
     max_new_entries: int,
     entry_bars_by_symbol: dict[str, dict[str, Any]] | None = None,
+    klines: pl.DataFrame | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     score_name, score_col = _event_score(scenario.event_type)
     events = _select_events(features, scenario=scenario, config=config, score_col=score_col)
     if events.is_empty():
         return [], _empty_skip_counts()
+    if entry_bars_by_symbol is None and klines is not None and not klines.is_empty() and "symbol" in events.columns:
+        event_symbols = [str(symbol) for symbol in events.select("symbol").unique().get_column("symbol").to_list()]
+        if event_symbols:
+            entry_bars_by_symbol = _indexed_price_bars_by_symbol(klines.filter(pl.col("symbol").is_in(event_symbols)))
     existing_ids = set(_column_values(all_trades, "trade_id"))
     open_symbols = set(_column_values(_open_trades(all_trades), "symbol"))
     cooldown_until = _cooldown_until(all_trades, config=config)
@@ -1374,6 +1378,7 @@ def _download_recent_1h_klines(
 
     frames = [frame for frame in (cached, fetched) if not frame.is_empty()]
     output = _dedupe_recent_klines(pl.concat(frames, how="diagonal_relaxed") if frames else _empty_klines())
+    _write_demo_kline_compact_cache(cache_root, symbols=symbols, start_ms=start_ms, end_ms=end_ms, klines=output)
     stats["output_rows"] = output.height
     return output, stats
 
@@ -1387,10 +1392,79 @@ def _read_demo_kline_cache(
 ) -> pl.DataFrame:
     if cache_root is None:
         return _empty_klines()
+    compact = _read_demo_kline_compact_cache(cache_root, symbols=symbols, start_ms=start_ms, end_ms=end_ms)
+    if not compact.is_empty():
+        return compact
     cached = read_dataset(cache_root, "event_demo_klines_1h")
     if cached.is_empty() or "symbol" not in cached.columns or "ts_ms" not in cached.columns:
         return _empty_klines()
+    output = cached.filter(pl.col("symbol").is_in(symbols) & pl.col("ts_ms").is_between(start_ms, end_ms))
+    _write_demo_kline_compact_cache(cache_root, symbols=symbols, start_ms=start_ms, end_ms=end_ms, klines=output)
+    return output
+
+
+def _demo_kline_compact_cache_paths(cache_root: Path) -> tuple[Path, Path]:
+    root = Path(cache_root).expanduser() / ".cache" / "event_demo_klines_1h"
+    return root / "latest_window.parquet", root / "latest_window.json"
+
+
+def _demo_kline_compact_metadata(*, symbols: list[str], start_ms: int, end_ms: int) -> dict[str, Any]:
+    return {
+        "symbols": sorted({str(symbol) for symbol in symbols}),
+        "start_ms": int(start_ms),
+        "end_ms": int(end_ms),
+    }
+
+
+def _read_demo_kline_compact_cache(
+    cache_root: Path,
+    *,
+    symbols: list[str],
+    start_ms: int,
+    end_ms: int,
+) -> pl.DataFrame:
+    parquet_path, metadata_path = _demo_kline_compact_cache_paths(cache_root)
+    if not parquet_path.exists() or not metadata_path.exists():
+        return _empty_klines()
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return _empty_klines()
+    if metadata != _demo_kline_compact_metadata(symbols=symbols, start_ms=start_ms, end_ms=end_ms):
+        return _empty_klines()
+    try:
+        cached = pl.read_parquet(parquet_path)
+    except (OSError, pl.exceptions.PolarsError):
+        return _empty_klines()
+    if cached.is_empty() or "symbol" not in cached.columns or "ts_ms" not in cached.columns:
+        return _empty_klines()
     return cached.filter(pl.col("symbol").is_in(symbols) & pl.col("ts_ms").is_between(start_ms, end_ms))
+
+
+def _write_demo_kline_compact_cache(
+    cache_root: Path | None,
+    *,
+    symbols: list[str],
+    start_ms: int,
+    end_ms: int,
+    klines: pl.DataFrame,
+) -> None:
+    if cache_root is None or klines.is_empty():
+        return
+    parquet_path, metadata_path = _demo_kline_compact_cache_paths(cache_root)
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    metadata = _demo_kline_compact_metadata(symbols=symbols, start_ms=start_ms, end_ms=end_ms)
+    output = _dedupe_recent_klines(klines)
+    temp_parquet = parquet_path.with_name(f".{parquet_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    temp_metadata = metadata_path.with_name(f".{metadata_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        output.write_parquet(temp_parquet)
+        temp_metadata.write_text(json.dumps(metadata, sort_keys=True), encoding="utf-8")
+        temp_parquet.replace(parquet_path)
+        temp_metadata.replace(metadata_path)
+    except (OSError, pl.exceptions.PolarsError):
+        temp_parquet.unlink(missing_ok=True)
+        temp_metadata.unlink(missing_ok=True)
 
 
 def _demo_kline_fetch_ranges(
