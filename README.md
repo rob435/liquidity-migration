@@ -102,6 +102,24 @@ powershell -ExecutionPolicy Bypass -File scripts\run_fullpit_volume_overnight.ps
 
 The runner syncs `main`, installs the local Python environment, runs smoke tests, builds/resumes the full Bybit public archive manifest, fills full PIT 1h klines from the Bybit v5 API, validates manifest coverage, then runs the selected liquidity-migration strategy.
 
+## Strategy Tribunal
+
+Run an adversarial audit after a `volume-events` report exists:
+
+```bash
+python -m aggression_carry \
+  --data-root DATA_ROOT \
+  strategy-tribunal \
+  --report-dir DATA_ROOT/reports/volume_event_research
+```
+
+The tribunal reads the scenario summary, best trades, baskets, equity curve, and
+optional stress/sweep CSVs. It writes `strategy_tribunal_report.md/json` with
+artifact checks, promotion recap, block-bootstrap left-tail stress, random-sign
+and inverted-edge negative controls, parameter sensitivity, symbol
+concentration, and same-hour entry crowding. Use `--comparison-csv` to attach a
+stress matrix such as quality-tier or entry-router sweeps.
+
 ## Bybit Demo Forward Runner
 
 One dry-run cycle:
@@ -143,6 +161,7 @@ Default forward-test behavior:
 ## Useful Files
 
 - `aggression_carry/volume_events.py`: active event-driven strategy, full-PIT gates, ledger, reports
+- `aggression_carry/strategy_tribunal.py`: adversarial robustness audit for completed strategy reports
 - `aggression_carry/event_demo.py`: Bybit demo forward-cycle runner for the selected event strategy
 - `aggression_carry/ws_risk.py`: websocket-first risk watchdog with REST fallback and audit reports
 - `aggression_carry/archive_manifest.py`: PIT manifest and 1h kline builders

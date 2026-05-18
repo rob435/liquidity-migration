@@ -180,6 +180,24 @@ python -m aggression_carry \
   volume-events
 ```
 
+After any serious run, audit the report with the strategy tribunal:
+
+```bash
+python -m aggression_carry \
+  --data-root DATA_ROOT \
+  strategy-tribunal \
+  --report-dir DATA_ROOT/reports/volume_event_research
+```
+
+`strategy-tribunal` is the first adversarial research court for this repo. It
+does not search for a better parameter; it tries to falsify a candidate by
+checking report artifacts, promotion gates, bootstrap left tails, random-sign
+and inverted-edge negative controls, parameter sensitivity from optional
+`--comparison-csv` sweep/stress matrices, symbol concentration, and same-hour
+entry crowding. A strategy with a beautiful equity curve but one-row evidence,
+bad negative controls, or clustered loss pathology should remain blocked or at
+least `WATCH`.
+
 Overnight full-PIT runner:
 
 ```bash

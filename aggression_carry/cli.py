@@ -24,6 +24,7 @@ from .event_demo import (
     run_event_risk_cycle,
 )
 from .ingestion import generate_fixture_data
+from .strategy_tribunal import StrategyTribunalConfig, run_strategy_tribunal
 from .universe import run_discover_universe
 from .volume_events import ENTRY_POLICIES, VolumeEventResearchConfig, run_volume_event_research
 from .ws_risk import EventWebSocketRiskConfig, run_event_ws_risk
@@ -946,6 +947,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     volume_events.add_argument("--report-dir", default=None)
 
+    tribunal_defaults = StrategyTribunalConfig()
+    tribunal = subparsers.add_parser(
+        "strategy-tribunal",
+        help="Run adversarial robustness checks against a completed volume-events report directory.",
+    )
+    tribunal.add_argument(
+        "--report-dir",
+        default=None,
+        help="Completed volume-events report directory. Defaults to DATA_ROOT/reports/volume_event_research.",
+    )
+    tribunal.add_argument("--output-dir", default=None, help="Where to write tribunal output. Defaults under --report-dir.")
+    tribunal.add_argument(
+        "--comparison-csv",
+        default="",
+        help="Optional comma-separated stress/sweep CSVs used for sensitivity checks.",
+    )
+    tribunal.add_argument("--bootstrap-samples", type=int, default=tribunal_defaults.bootstrap_samples)
+    tribunal.add_argument("--bootstrap-block-size", type=int, default=tribunal_defaults.bootstrap_block_size)
+    tribunal.add_argument("--random-seed", type=int, default=tribunal_defaults.random_seed)
+
     event_demo = subparsers.add_parser(
         "event-demo-cycle",
         help="Run one frequent Bybit demo forward-testing cycle for the selected event strategy.",
@@ -1459,6 +1480,25 @@ def main(argv: list[str] | None = None) -> int:
             f"promotable={payload['rows']['promotable']} "
             f"best_return={best.get('total_return', 0.0):.2%} "
             f"path={Path(payload['report_dir']) / 'volume_event_research_report.md'}"
+        )
+        return 0
+
+    if args.command == "strategy-tribunal":
+        report_dir = Path(args.report_dir).expanduser() if args.report_dir else data_root / "reports" / "volume_event_research"
+        payload = run_strategy_tribunal(
+            report_dir,
+            output_dir=args.output_dir,
+            comparison_csvs=tuple(Path(item).expanduser() for item in _csv_str(args.comparison_csv, ())),
+            config=StrategyTribunalConfig(
+                bootstrap_samples=args.bootstrap_samples,
+                bootstrap_block_size=args.bootstrap_block_size,
+                random_seed=args.random_seed,
+            ),
+        )
+        print(
+            "strategy tribunal "
+            f"verdict={payload['verdict']} "
+            f"path={payload['output_files']['markdown']}"
         )
         return 0
 

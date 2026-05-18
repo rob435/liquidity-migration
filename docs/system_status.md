@@ -43,6 +43,14 @@ and +175.32% OOS. Candidate selection, exits, cooldowns, gross exposure, and
 crowding decisions are unchanged; only entry timing for promoted-grade squeeze
 bars changed.
 
+The first `strategy-tribunal` audit was added on 2026-05-18. With the
+quality-tier stress matrix attached as a comparison CSV, the promoted current
+report passed artifacts, promotion, block-bootstrap left-tail, random-sign,
+inverted-edge, parameter-sensitivity, and symbol-concentration checks. It
+remains `WATCH`, not `PASS`, because the worst same-hour entry cluster still
+contains 3 losing trades for -5.15% additive net return. That is a research
+warning, not a live-execution fault.
+
 ## Demo-Relaxed Profile Evidence
 
 The active VPS entry service is intentionally configured for a higher-frequency
@@ -71,6 +79,11 @@ OOS return: +142.92%
 average split Sharpe-like: 1.04
 promotion gate: pass
 ```
+
+The same first `strategy-tribunal` audit also leaves `demo_relaxed` at `WATCH`:
+its artifacts, promotion, bootstrap, negative controls, sensitivity, and symbol
+concentration passed, but the worst same-hour entry cluster contains 6 losing
+trades for -5.35% additive net return.
 
 `demo_relaxed` relaxed gates:
 
