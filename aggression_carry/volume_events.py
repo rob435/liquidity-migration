@@ -13,6 +13,7 @@ import numpy as np
 import polars as pl
 
 from .config import CostConfig, DEFAULT_EXCLUDED_SYMBOLS, TradeLifecycleConfig
+from .crowding import classify_liquidity_migration_crowding
 from .storage import read_dataset
 from .trade_lifecycle import (
     _bar_excursion,
@@ -52,7 +53,7 @@ EVENT_TYPES = (
     "selloff_exhaustion",
 )
 SIDE_HYPOTHESES = ("continuation", "reversal")
-LIQUIDITY_MIGRATION_CROWDING_FILTERS = ("none", "union_pathology")
+LIQUIDITY_MIGRATION_CROWDING_FILTERS = ("none", "union_pathology", "model_v1")
 ENTRY_POLICY_FIXED_DELAY = "fixed_delay"
 ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE = "promoted_quality_squeeze"
 ENTRY_POLICIES = (ENTRY_POLICY_FIXED_DELAY, ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE)
@@ -536,6 +537,15 @@ def _run_event_scenario(
                     event.get("prior7_turnover_quote_mean"),
                 ),
                 "tradable_membership_flag": bool(event.get("tradable_membership_flag", False)),
+                "crowding_class": str(event.get("crowding_class", "")),
+                "crowding_tradeable": bool(event.get("crowding_tradeable", True)),
+                "crowding_reason": str(event.get("crowding_reason", "")),
+                "crowding_entry_hour_signal_count": int(event.get("crowding_entry_hour_signal_count", 0) or 0),
+                "crowding_hour_market_pct_up_mean": _float_or_nan(event.get("crowding_hour_market_pct_up_mean")),
+                "crowding_hour_residual_return_mean": _float_or_nan(event.get("crowding_hour_residual_return_mean")),
+                "crowding_hour_last6h_turnover_share_max": _float_or_nan(
+                    event.get("crowding_hour_last6h_turnover_share_max")
+                ),
                 "entry_policy": str(entry_decision["entry_policy"]),
                 "entry_rule": str(entry_decision["entry_rule"]),
                 "entry_quality_tier": str(entry_decision["entry_quality_tier"]),
@@ -1087,6 +1097,14 @@ def _apply_liquidity_migration_crowding_filter(events: pl.DataFrame, *, config: 
     mode = config.liquidity_migration_crowding_filter
     if mode == "none" or events.is_empty():
         return events
+    if mode == "model_v1":
+        classified = classify_liquidity_migration_crowding(
+            events,
+            entry_delay_hours=config.entry_delay_hours,
+            signal_ts_col="ts_ms",
+            entry_ts_col="",
+        )
+        return classified.filter(pl.col("crowding_tradeable"))
     if mode != "union_pathology":
         raise ValueError(f"Unknown liquidity migration crowding filter: {mode}")
     required_cols = {

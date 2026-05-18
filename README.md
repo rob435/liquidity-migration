@@ -35,6 +35,8 @@ The `volume-events` defaults are the selected strategy:
 - Strong-close gate: signal-day close location at least 0.45
 - Maturity gate: PIT/listing age at least 90 days
 - Crowding veto: `union_pathology` same-entry-hour pathology filter
+- Research-only crowding classifier: `model_v1` exists for audits and
+  experiments, but is not promoted or deployed
 - Entry policy: `promoted_quality_squeeze`; standard events enter 1 hour after the daily signal close, while promoted-grade squeeze events wait for a causal 25 bps high-since-signal giveback after a 25 bps pop or enter on the 4h deadline
 - Exit: event decay, rank exit, 12% fixed stop, 25% fixed take profit, or 3-day max hold
 - Capacity: max 5 active symbols, 5-day symbol cooldown

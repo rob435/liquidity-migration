@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from aggression_carry.crowding import audit_crowding_model
 from aggression_carry.storage import read_dataset
 
 MS_PER_HOUR = 60 * 60 * 1000
@@ -82,6 +83,7 @@ def run_strategy_tribunal(
     cost_funding_slippage = _cost_funding_slippage_report(comparison["frame"], best=best)
     regime = _regime_report(baskets)
     execution_drift = _execution_drift_report(execution_data_root, trades=trades)
+    crowding_model = audit_crowding_model(trades, output_dir=target_dir)
     concentration = _concentration_report(trades)
     clustering = _cluster_report(trades, baskets)
     findings = _findings(
@@ -103,6 +105,7 @@ def run_strategy_tribunal(
         cost_funding_slippage=cost_funding_slippage,
         regime=regime,
         execution_drift=execution_drift,
+        crowding_model=crowding_model,
         concentration=concentration,
         clustering=clustering,
         config=tribunal_config,
@@ -134,6 +137,7 @@ def run_strategy_tribunal(
         "cost_funding_slippage": cost_funding_slippage,
         "regime": regime,
         "execution_drift": execution_drift,
+        "crowding_model": crowding_model,
         "concentration": concentration,
         "clustering": clustering,
         "findings": findings,
@@ -161,6 +165,7 @@ def format_strategy_tribunal_report(payload: dict[str, Any]) -> str:
     cost_funding_slippage = payload.get("cost_funding_slippage", {})
     regime = payload.get("regime", {})
     execution_drift = payload.get("execution_drift", {})
+    crowding_model = payload.get("crowding_model", {})
     concentration = payload.get("concentration", {})
     clustering = payload.get("clustering", {})
     lines = [
@@ -290,6 +295,24 @@ def format_strategy_tribunal_report(payload: dict[str, Any]) -> str:
             f"- Matched entry orders: {execution_drift.get('matched_entry_orders', 0)}",
             f"- P95 absolute entry price drift: {_num(execution_drift.get('p95_abs_entry_price_drift_bps'))} bps",
             f"- P95 absolute entry delay drift: {_num(execution_drift.get('p95_abs_entry_delay_drift_minutes'))} minutes",
+            "",
+            "## Crowding Model",
+            "",
+            f"- Status: `{crowding_model.get('status', 'missing')}`",
+            f"- Tradeable rows: {crowding_model.get('tradeable_rows', 0)}",
+            f"- Non-tradeable rows: {crowding_model.get('non_tradeable_rows', 0)}",
+            "",
+            "| Class | Rows | Additive Return | Compounded Return |",
+            "|---|---:|---:|---:|",
+        ]
+    )
+    for row in crowding_model.get("summary", []):
+        lines.append(
+            f"| `{row.get('crowding_class', '')}` | {row.get('rows', 0)} | "
+            f"{_pct(row.get('additive_return'))} | {_pct(row.get('compounded_return'))} |"
+        )
+    lines.extend(
+        [
             "",
             "## Concentration And Crowding",
             "",
@@ -1156,6 +1179,7 @@ def _findings(
     cost_funding_slippage: dict[str, Any],
     regime: dict[str, Any],
     execution_drift: dict[str, Any],
+    crowding_model: dict[str, Any],
     concentration: dict[str, Any],
     clustering: dict[str, Any],
     config: StrategyTribunalConfig,
@@ -1374,6 +1398,16 @@ def _findings(
             drift_level,
             "execution_drift",
             f"Execution drift status `{drift_status}`; p95 price drift {_num(p95_price_drift)} bps, p95 delay drift {_num(p95_delay_drift)} minutes.",
+        )
+    )
+    crowding_status = str(crowding_model.get("status", "missing"))
+    non_tradeable_rows = int(crowding_model.get("non_tradeable_rows", 0) or 0)
+    crowding_level = "PASS" if crowding_status == "present" and non_tradeable_rows == 0 else "WATCH"
+    findings.append(
+        _finding(
+            crowding_level,
+            "crowding_model",
+            f"Cross-sectional crowding model status `{crowding_status}` flags {non_tradeable_rows} non-tradeable rows.",
         )
     )
     top_share = _finite_float(concentration.get("top_symbol_abs_share"))

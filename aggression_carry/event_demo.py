@@ -736,6 +736,13 @@ def select_demo_entry_candidates(
                 "signal_day_last6h_turnover_share": _float(event.get("signal_day_last6h_turnover_share")),
                 "signal_day_range_pct": _float(event.get("signal_day_range_pct")),
                 "pit_age_days": _float(event.get("pit_age_days")),
+                "crowding_class": str(event.get("crowding_class", "")),
+                "crowding_tradeable": bool(event.get("crowding_tradeable", True)),
+                "crowding_reason": str(event.get("crowding_reason", "")),
+                "crowding_entry_hour_signal_count": int(event.get("crowding_entry_hour_signal_count", 0) or 0),
+                "crowding_hour_market_pct_up_mean": _float(event.get("crowding_hour_market_pct_up_mean")),
+                "crowding_hour_residual_return_mean": _float(event.get("crowding_hour_residual_return_mean")),
+                "crowding_hour_last6h_turnover_share_max": _float(event.get("crowding_hour_last6h_turnover_share_max")),
             }
         )
         if len(candidates) >= max_new_entries:

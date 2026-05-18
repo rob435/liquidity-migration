@@ -87,6 +87,12 @@ trades, +1853.99% total return, -13.72% max drawdown, -6.29% worst 90d,
 crowding decisions, and gross exposure remain unchanged; only entry timing
 within the post-signal causal window changed.
 
+`model_v1` is a research-only cross-sectional crowding classifier, not the
+active promoted filter. Its first full-PIT run traded only idiosyncratic /
+liquidity-migration classes and stayed profitable, but return fell too far
+versus the promoted strategy, so `union_pathology` remains the deployed
+crowding veto.
+
 Superseded baseline full-PIT report after the earlier hold/exit frontier
 confirmation:
 

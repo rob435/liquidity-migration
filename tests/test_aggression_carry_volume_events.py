@@ -11,6 +11,7 @@ from aggression_carry.trade_lifecycle import _funding_lookup, _perp_funding_retu
 from aggression_carry.volume_events import (
     ENTRY_POLICY_FIXED_DELAY,
     _attach_event_archive_membership,
+    _apply_liquidity_migration_crowding_filter,
     _daily_return_frame,
     _entry_decision_for_event,
     _event_decay_exit_hit,
@@ -56,6 +57,69 @@ def test_add_rank_fraction_scales_cross_section_to_zero_one() -> None:
     ranked = _add_rank_fraction(frame, "score", "score_rank_frac").sort("symbol")
 
     assert ranked["score_rank_frac"].to_list() == pytest.approx([0.0, 0.5, 1.0])
+
+
+def test_model_v1_crowding_filter_keeps_only_idiosyncratic_events() -> None:
+    events = pl.DataFrame(
+        [
+            {
+                "symbol": "IDIOUSDT",
+                "ts_ms": 1_700_000_000_000,
+                "market_pct_up_1d": 0.45,
+                "btc_return_1d": 0.01,
+                "daily_return_1d": 0.13,
+                "residual_return_1d": 0.11,
+                "signal_day_last6h_turnover_share": 0.25,
+                "signal_day_last6h_return": 0.02,
+                "liquidity_migration_turnover_ratio": 8.0,
+                "pit_age_days": 120.0,
+            },
+            {
+                "symbol": "MARKET1USDT",
+                "ts_ms": 1_700_003_600_000,
+                "market_pct_up_1d": 0.82,
+                "btc_return_1d": 0.04,
+                "daily_return_1d": 0.08,
+                "residual_return_1d": 0.03,
+                "signal_day_last6h_turnover_share": 0.20,
+                "signal_day_last6h_return": 0.01,
+                "liquidity_migration_turnover_ratio": 7.0,
+                "pit_age_days": 120.0,
+            },
+            {
+                "symbol": "MARKET2USDT",
+                "ts_ms": 1_700_003_600_000,
+                "market_pct_up_1d": 0.82,
+                "btc_return_1d": 0.04,
+                "daily_return_1d": 0.09,
+                "residual_return_1d": 0.04,
+                "signal_day_last6h_turnover_share": 0.24,
+                "signal_day_last6h_return": 0.01,
+                "liquidity_migration_turnover_ratio": 7.0,
+                "pit_age_days": 120.0,
+            },
+            {
+                "symbol": "ARTUSDT",
+                "ts_ms": 1_700_007_200_000,
+                "market_pct_up_1d": 0.50,
+                "btc_return_1d": 0.00,
+                "daily_return_1d": 0.14,
+                "residual_return_1d": 0.10,
+                "signal_day_last6h_turnover_share": 0.96,
+                "signal_day_last6h_return": 0.08,
+                "liquidity_migration_turnover_ratio": 100.0,
+                "pit_age_days": 120.0,
+            },
+        ]
+    )
+
+    filtered = _apply_liquidity_migration_crowding_filter(
+        events,
+        config=_migration_unit_config(liquidity_migration_crowding_filter="model_v1"),
+    )
+
+    assert filtered["symbol"].to_list() == ["IDIOUSDT"]
+    assert filtered["crowding_class"].to_list() == ["isolated_idiosyncratic_event"]
 
 
 def test_float_or_nan_handles_missing_context_values() -> None:

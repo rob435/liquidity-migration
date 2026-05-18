@@ -240,6 +240,12 @@ rank-decay exit threshold, global liquidity filters, tail-liquidity rank bounds,
 rank improvement, absorption move caps, dry-up quiet-regime filters, and
 exhaustion day-return thresholds. Use these to test whether an edge is
 immediate, delayed, concentrated in tails, or only an exhaustion artifact.
+`--liquidity-migration-crowding-filter model_v1` enables the research-only
+cross-sectional crowding classifier. It labels isolated idiosyncratic events,
+liquidity-migration idiosyncratic events, sector/theme waves, broad-market
+impulses, exchange/liquidity artifacts, and uncertain clusters. The first
+full-PIT `model_v1` run was profitable but rejected as a promoted replacement
+because it cut too much return from the current strategy.
 
 Full PIT data build for event research:
 

@@ -584,7 +584,7 @@ def build_parser() -> argparse.ArgumentParser:
     volume_events.add_argument(
         "--liquidity-migration-crowding-filter",
         default=event_defaults.liquidity_migration_crowding_filter,
-        help="Liquidity-migration same-hour crowding veto mode: none or union_pathology.",
+        help="Liquidity-migration crowding veto mode: none, union_pathology, or model_v1.",
     )
     volume_events.add_argument(
         "--liquidity-migration-crowding-min-signals",

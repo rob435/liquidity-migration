@@ -106,6 +106,29 @@ same-hour entry cluster contains 6 losing trades for -5.35% additive net
 return. Treat `demo_relaxed` as a higher-frequency plumbing and observation
 profile, not promoted alpha.
 
+## Crowding Model Research
+
+The first cross-sectional crowding classifier, `model_v1`, was added on
+2026-05-18 as research-only tooling. It classifies signals as:
+
+```text
+isolated_idiosyncratic_event
+liquidity_migration_idiosyncratic
+sector_theme_wave
+full_market_impulse
+exchange_liquidity_artifact
+uncertain_cluster
+```
+
+It is available through `--liquidity-migration-crowding-filter model_v1`, but
+it is not promoted and not deployed. A full-PIT run that traded only the
+idiosyncratic/liquidity-migration classes produced 211 trades, +269.95% total
+return, -10.32% max drawdown, -6.94% worst 90d, +50.54% worst split, and
++58.91% OOS. That is profitable, but it discards too much of the promoted edge
+versus the current 444-trade funding-stressed promoted report at +1853.99%.
+The honest conclusion is that classification is useful diagnostics; `model_v1`
+is not a replacement crowding filter.
+
 `demo_relaxed` relaxed gates:
 
 ```text
