@@ -149,8 +149,12 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "CLEAN_DIRTY_CHECKOUT" in text
     assert "SYSTEMD_SETTLE_SECONDS" in text
     assert "99-model050426-recovery.conf" in text
+    assert "chmod 700 /root" in text
+    assert "usermod -U root" in text
     assert "PermitRootLogin prohibit-password" in text
     assert "PubkeyAuthentication yes" in text
+    assert "AuthenticationMethods publickey" in text
+    assert "sshd -T" in text
     assert "systemctl restart ssh.service" in text
     assert "model050426-deploy-backups" in text
     assert "non-git-checkout-" in text

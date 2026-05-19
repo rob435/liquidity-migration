@@ -35,6 +35,9 @@ if [ "${#missing_prereqs[@]}" -gt 0 ] || ! python3 -m venv --help >/dev/null 2>&
   fi
 fi
 
+chown root:root /root
+chmod 700 /root
+usermod -U root 2>/dev/null || true
 mkdir -p /root/.ssh
 chmod 700 /root/.ssh
 touch /root/.ssh/authorized_keys
@@ -46,15 +49,18 @@ for public_key in "$LOCAL_SSH_PUBLIC_KEY" "$GITHUB_ACTIONS_SSH_PUBLIC_KEY"; do
 done
 chown -R root:root /root/.ssh
 
-if [ -d /etc/ssh/sshd_config.d ]; then
+if [ -d /etc/ssh ]; then
+  mkdir -p /etc/ssh/sshd_config.d
   cat >/etc/ssh/sshd_config.d/99-model050426-recovery.conf <<'SSH_CONFIG'
 PubkeyAuthentication yes
 PermitRootLogin prohibit-password
 AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2
+AuthenticationMethods publickey
 SSH_CONFIG
 fi
 if command -v sshd >/dev/null 2>&1; then
   sshd -t
+  sshd -T | grep -E '^(pubkeyauthentication|permitrootlogin|authorizedkeysfile|authenticationmethods) '
 fi
 if command -v systemctl >/dev/null 2>&1; then
   systemctl restart ssh.service || systemctl restart sshd.service || true
