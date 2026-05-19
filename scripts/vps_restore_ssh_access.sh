@@ -58,6 +58,7 @@ SSH_CONFIG
 fi
 
 if command -v sshd >/dev/null 2>&1; then
+  mkdir -p /run/sshd
   sshd -t
   sshd_root_context="user=root,host=localhost,addr=127.0.0.1"
   effective_sshd_config="$(sshd -T -C "$sshd_root_context")"
