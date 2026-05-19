@@ -26,6 +26,19 @@ ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp
 On the VPS, the target file is normally `/root/.ssh/authorized_keys` for the
 default `SSH_TARGET=root@204.168.202.167`.
 
+If SSH is unavailable but provider console root access works, run the recovery
+deploy directly on the VPS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/rob435/MODEL05042026/main/scripts/vps_console_recover_and_deploy.sh | bash
+```
+
+That restores the public key, clones/pulls `/opt/MODEL050426`, builds the local
+venv if needed, validates the promoted TP26 and live TP21+FF6 constants,
+refreshes systemd, restarts both live services, and prints non-secret service
+state. Set `EXPECTED_COMMIT=<full sha>` before `bash` if you want the console
+deploy to refuse anything except one pinned commit.
+
 Manual install or refresh on the VPS:
 
 ```bash

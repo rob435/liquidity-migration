@@ -75,3 +75,21 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "model050426-bybit-demo.service" in text
     assert "model050426-bybit-risk.service" in text
     assert "--property=Environment" not in text
+
+
+def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    text = (repo / "scripts" / "vps_console_recover_and_deploy.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "/root/.ssh/authorized_keys" in text
+    assert "AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp" in text
+    assert "git clone" in text
+    assert "git pull --ff-only" in text
+    assert "pip install -e \".[dev]\"" in text
+    assert "liqmig_union_q40_h3_tp26_g100_qsqueeze" in text
+    assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text
+    assert "model050426-bybit-demo.service" in text
+    assert "model050426-bybit-risk.service" in text
+    assert "--property=Environment" not in text
