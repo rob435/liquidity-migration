@@ -58,3 +58,19 @@ def test_live_runners_do_not_write_repo_bytecode() -> None:
     for path in paths:
         text = path.read_text(encoding="utf-8")
         assert "PYTHONDONTWRITEBYTECODE" in text
+
+
+def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    text = (repo / "scripts" / "deploy_vps_live.sh").read_text(encoding="utf-8")
+
+    assert "EXPECTED_COMMIT" in text
+    assert "git pull --ff-only" in text
+    assert "liqmig_union_q40_h3_tp26_g100_qsqueeze" in text
+    assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text
+    assert "demo.take_profit_pcts == (0.21,)" in text
+    assert "demo.failed_fade_exit_hours == 6" in text
+    assert "TELEGRAM_CHAT_ID" in text
+    assert "model050426-bybit-demo.service" in text
+    assert "model050426-bybit-risk.service" in text
+    assert "--property=Environment" not in text

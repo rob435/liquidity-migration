@@ -5,7 +5,18 @@ The active VPS services are:
 - `model050426-bybit-demo.service`: event entry/normal lifecycle runner.
 - `model050426-bybit-risk.service`: fast exit-only risk runner.
 
-Install or refresh it on the VPS:
+Install or refresh it on the VPS from a trusted local checkout:
+
+```bash
+EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/deploy_vps_live.sh
+```
+
+The script refuses a dirty VPS checkout, pulls `main`, runs focused runtime
+tests, checks the promoted TP26 and live TP21+FF6 strategy constants, verifies
+the Telegram chat ID, refreshes both systemd units, restarts both services, and
+prints the active systemd state plus non-secret entry-profile settings.
+
+Manual install or refresh on the VPS:
 
 ```bash
 cp deploy/systemd/model050426-bybit-demo.service /etc/systemd/system/model050426-bybit-demo.service
