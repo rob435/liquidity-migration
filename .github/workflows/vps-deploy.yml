@@ -26,6 +26,17 @@ on:
         options:
           - verify
           - deploy
+          - wait-deploy
+      wait_timeout_seconds:
+        description: Seconds to wait for VPS SSH before wait-deploy gives up.
+        required: false
+        default: "1800"
+        type: string
+      wait_interval_seconds:
+        description: Seconds between VPS SSH probes during wait-deploy.
+        required: false
+        default: "15"
+        type: string
 
 jobs:
   vps:
@@ -70,6 +81,17 @@ jobs:
           SSH_TARGET="$VPS_USER@$VPS_HOST" \
           SSH_OPTS="-i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10" \
           scripts/deploy_vps_live.sh
+
+      - name: Wait for SSH recovery then deploy
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'wait-deploy'
+        run: |
+          EXPECTED_COMMIT="$GITHUB_SHA" \
+          EXPECTED_TELEGRAM_CHAT_ID="$EXPECTED_TELEGRAM_CHAT_ID" \
+          WAIT_TIMEOUT_SECONDS="${{ inputs.wait_timeout_seconds }}" \
+          WAIT_INTERVAL_SECONDS="${{ inputs.wait_interval_seconds }}" \
+          SSH_TARGET="$VPS_USER@$VPS_HOST" \
+          SSH_OPTS="-i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10" \
+          scripts/wait_for_vps_recovery_and_deploy.sh
 
       - name: Read-only verify
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'verify'

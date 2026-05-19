@@ -117,7 +117,14 @@ def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
     assert '"deploy/systemd/*.service"' in text
     assert '"deploy/systemd/**"' not in text
     assert '"scripts/**"' not in text
+    assert "wait-deploy" in text
+    assert "wait_timeout_seconds" in text
+    assert "wait_interval_seconds" in text
     assert "github.event_name == 'push' || inputs.mode == 'deploy'" in text
+    assert (
+        "github.event_name == 'workflow_dispatch' && inputs.mode == 'wait-deploy'"
+        in text
+    )
     assert "github.event_name == 'workflow_dispatch' && inputs.mode == 'verify'" in text
     assert "VPS_SSH_PRIVATE_KEY" in text
     assert "GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT" in text
@@ -128,6 +135,7 @@ def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
     assert "SHA256:c4K1qg1rx5kH/706qNTdsHYsCDP/o5GIHW1GAHCjwgY" in text
     assert "scripts/deploy_vps_live.sh" in text
     assert "scripts/verify_vps_live.sh" in text
+    assert "scripts/wait_for_vps_recovery_and_deploy.sh" in text
     assert "EXPECTED_COMMIT=\"$GITHUB_SHA\"" in text
     assert "EXPECTED_TELEGRAM_CHAT_ID" in text
 
