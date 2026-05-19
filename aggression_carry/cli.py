@@ -1262,6 +1262,16 @@ def build_parser() -> argparse.ArgumentParser:
     event_ws_risk.add_argument("--exit-untracked-positions", dest="exit_untracked_positions", action="store_true")
     event_ws_risk.add_argument("--no-exit-untracked-positions", dest="exit_untracked_positions", action="store_false")
     event_ws_risk.set_defaults(exit_untracked_positions=ws_risk_defaults.exit_untracked_positions)
+    event_ws_risk.add_argument(
+        "--untracked-position-grace-seconds",
+        type=float,
+        default=ws_risk_defaults.untracked_position_grace_seconds,
+        help=(
+            "Seconds a Bybit position must remain untracked by trade/order ledgers before "
+            "the risk engine submits a reduce-only close. Set above the demo entry cycle "
+            "interval to avoid closing positions before the entry runner finishes recording them."
+        ),
+    )
     event_ws_risk.add_argument("--data-name", default=ws_risk_defaults.data_name)
 
     return parser
@@ -1539,6 +1549,7 @@ def main(argv: list[str] | None = None) -> int:
             stop_tolerance_bps=args.stop_tolerance_bps,
             pending_exit_guard_seconds=args.pending_exit_guard_seconds,
             exit_untracked_positions=args.exit_untracked_positions,
+            untracked_position_grace_seconds=args.untracked_position_grace_seconds,
             data_name=args.data_name,
         )
         payload = run_event_ws_risk(data_root, config=config, risk_config=risk_config)

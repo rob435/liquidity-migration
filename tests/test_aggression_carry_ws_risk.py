@@ -137,6 +137,7 @@ def test_ws_risk_triggers_rest_fallback_exit_from_ticker(tmp_path: Path) -> None
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -180,6 +181,7 @@ def test_ws_risk_bootstrap_exits_crossed_stop_before_stop_repair(tmp_path: Path)
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -247,6 +249,7 @@ def test_ws_risk_skips_stop_repair_when_exit_order_pending(tmp_path: Path) -> No
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -282,6 +285,7 @@ def test_ws_risk_live_open_exit_order_blocks_duplicate_tracked_exit(tmp_path: Pa
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -321,6 +325,7 @@ def test_ws_risk_manual_reduce_only_order_does_not_block_emergency_exit(tmp_path
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -349,6 +354,7 @@ def test_ws_then_rest_records_demo_trade_socket_limit_and_uses_rest(tmp_path: Pa
             order_submit_mode="ws_then_rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -381,6 +387,7 @@ def test_ws_risk_uses_mainnet_public_ticker_stream_for_demo_market_data(tmp_path
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=FakePrivateClient(),
         private_stream=FakePrivateStream(),
@@ -405,6 +412,7 @@ def test_ws_risk_run_does_not_hang_when_private_stream_subscription_blocks(tmp_p
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
             max_runtime_seconds=0.05,
             stream_start_timeout_seconds=0.01,
             exit_untracked_positions=False,
@@ -435,6 +443,7 @@ def test_ws_risk_public_ticker_subscription_timeout_does_not_block_bootstrap(tmp
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
             stream_start_timeout_seconds=0.01,
             exit_untracked_positions=False,
         ),
@@ -470,6 +479,7 @@ def test_ws_risk_ws_order_closes_from_execution_stream(tmp_path: Path) -> None:
             exit_untracked_positions=False,
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=FakePrivateClient(),
         private_stream=FakePrivateStream(),
@@ -507,6 +517,7 @@ def test_ws_risk_execution_stream_partial_fill_reduces_trade_qty(tmp_path: Path)
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -564,6 +575,7 @@ def test_ws_then_rest_falls_back_after_failed_ws_order_ack(tmp_path: Path) -> No
             exit_untracked_positions=False,
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -607,6 +619,7 @@ def test_ws_ack_rest_fallback_failure_keeps_trade_open_with_context(tmp_path: Pa
             exit_untracked_positions=False,
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -650,6 +663,7 @@ def test_ws_order_ack_failure_without_rest_marks_order_rejected(tmp_path: Path) 
             exit_untracked_positions=False,
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=FakePrivateClient(),
         private_stream=FakePrivateStream(),
@@ -682,6 +696,7 @@ def test_ws_risk_rest_fallback_order_closes_from_execution_stream(tmp_path: Path
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -717,6 +732,7 @@ def test_ws_risk_order_stream_fill_closes_trade_when_execution_lags(tmp_path: Pa
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -765,6 +781,7 @@ def test_ws_risk_order_stream_partial_fill_reduces_trade_qty(tmp_path: Path) -> 
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -836,6 +853,7 @@ def test_ws_risk_bootstrap_loads_pending_exit_order_after_restart(tmp_path: Path
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -904,6 +922,7 @@ def test_ws_risk_rejected_pending_exit_unblocks_retry_after_restart(tmp_path: Pa
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -932,6 +951,122 @@ def test_ws_risk_rejected_pending_exit_unblocks_retry_after_restart(tmp_path: Pa
     assert "AAAUSDT" in engine.state.submitted_symbols
 
 
+def test_ws_risk_logs_untracked_close_to_logger(tmp_path: Path, caplog) -> None:
+    """The risk engine had no journal output for 12+ hours pre-fix because it
+    relied only on parquet reports. Every untracked_position close must now
+    emit a WARNING log line carrying symbol, side, status, grace_seconds, and
+    error so systemd journalctl tells the operator immediately when positions
+    are being flattened.
+    """
+    import logging as _logging
+    private_client = FakePrivateClient()
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    with caplog.at_level(_logging.WARNING, logger="aggression_carry.ws_risk"):
+        engine.bootstrap()
+
+    close_records = [
+        record for record in caplog.records
+        if record.name == "aggression_carry.ws_risk" and "untracked_position close" in record.getMessage()
+    ]
+    assert close_records, "expected an untracked_position close log line"
+    msg = close_records[0].getMessage()
+    assert "symbol=AAAUSDT" in msg
+    assert "side=Buy" in msg
+    assert "grace_seconds=0.0" in msg
+
+
+def test_ws_risk_untracked_grace_period_defers_close_then_fires(tmp_path: Path) -> None:
+    """A freshly opened Bybit position appears via WS before the demo engine
+    writes the trade/order rows. With grace_seconds=90, the first
+    exit_untracked_positions call must only stamp first_seen and NOT submit a
+    close; once the grace window elapses, the next call submits the close.
+    This is the defense-in-depth half of the close-on-open fix.
+    """
+    private_client = FakePrivateClient()
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=90.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    assert private_client.orders == [], "first sighting must defer the close"
+    assert engine.state.untracked_first_seen_ms.get("AAAUSDT") is not None
+
+    # A second call within the grace window must still defer.
+    engine.exit_untracked_positions()
+    assert private_client.orders == []
+
+    # Backdate first_seen by more than the grace and re-run — close must fire.
+    engine.state.untracked_first_seen_ms["AAAUSDT"] -= 91_000
+    engine.exit_untracked_positions()
+    assert len(private_client.orders) == 1
+    assert private_client.orders[0]["reduceOnly"] is True
+    assert private_client.orders[0]["side"] == "Buy"
+
+    stored_orders = read_dataset(tmp_path, "event_demo_orders")
+    assert stored_orders.select("exit_reason").item() == "untracked_position"
+
+
+def test_ws_risk_untracked_grace_cleared_when_symbol_becomes_tracked(tmp_path: Path) -> None:
+    """If the demo engine's pending entry row lands in parquet during the grace
+    window, the next reconcile populates pending_entry_symbols and the grace
+    timer must be dropped (so a future, unrelated untracked re-sighting starts
+    fresh)."""
+    private_client = FakePrivateClient()
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=90.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    assert "AAAUSDT" in engine.state.untracked_first_seen_ms
+
+    engine.state.pending_entry_symbols.add("AAAUSDT")
+    engine.exit_untracked_positions()
+    assert "AAAUSDT" not in engine.state.untracked_first_seen_ms
+    assert private_client.orders == []
+
+
 def test_ws_risk_flattens_untracked_position_on_bootstrap(tmp_path: Path) -> None:
     private_client = FakePrivateClient()
     engine = EventWebSocketRiskEngine(
@@ -944,6 +1079,7 @@ def test_ws_risk_flattens_untracked_position_on_bootstrap(tmp_path: Path) -> Non
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -973,6 +1109,7 @@ def test_ws_risk_pending_entry_position_is_not_flattened_before_entry_reconcile(
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1001,6 +1138,7 @@ def test_ws_risk_reconciles_pending_entry_fill_before_untracked_guard(tmp_path: 
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1034,6 +1172,7 @@ def test_ws_risk_reconciles_stale_pending_entry_when_position_live(tmp_path: Pat
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1067,6 +1206,7 @@ def test_ws_risk_stale_pending_entry_no_longer_blocks_untracked_flatten(tmp_path
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1093,6 +1233,7 @@ def test_ws_risk_terminalizes_stale_pending_entry_when_exchange_flat(tmp_path: P
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1131,6 +1272,7 @@ def test_ws_risk_keeps_stale_pending_entry_when_live_order_exists(tmp_path: Path
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1156,6 +1298,7 @@ def test_ws_risk_untracked_exit_blocks_duplicate_until_fill(tmp_path: Path) -> N
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1183,6 +1326,7 @@ def test_ws_risk_untracked_exit_history_error_stays_pending(tmp_path: Path) -> N
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1214,6 +1358,7 @@ def test_ws_risk_untracked_execution_partial_keeps_duplicate_guard(tmp_path: Pat
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1273,6 +1418,7 @@ def test_ws_risk_bootstrap_loads_pending_untracked_exit_after_restart(tmp_path: 
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1311,6 +1457,7 @@ def test_ws_risk_live_open_untracked_exit_blocks_duplicate_after_restart(tmp_pat
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1364,6 +1511,7 @@ def test_ws_risk_stale_untracked_exit_is_filled_when_exchange_is_flat(tmp_path: 
             pending_exit_guard_seconds=1.0,
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1418,6 +1566,7 @@ def test_ws_risk_stale_exit_stays_pending_when_open_order_snapshot_fails(tmp_pat
             pending_exit_guard_seconds=1.0,
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1472,6 +1621,7 @@ def test_ws_risk_stale_tracked_exit_closes_trade_when_exchange_is_flat(tmp_path:
             pending_exit_guard_seconds=1.0,
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1503,6 +1653,7 @@ def test_ws_risk_untracked_exit_retries_after_pending_guard(tmp_path: Path) -> N
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
             pending_exit_guard_seconds=1.0,
         ),
         private_client=private_client,
@@ -1532,6 +1683,7 @@ def test_ws_risk_untracked_reconcile_history_error_keeps_pending(tmp_path: Path)
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1560,6 +1712,7 @@ def test_ws_risk_untracked_reconcile_flattens_when_position_missing_even_if_hist
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1588,6 +1741,7 @@ def test_ws_risk_reconciles_untracked_exit_when_position_is_flat(tmp_path: Path)
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1829,6 +1983,7 @@ def test_ws_risk_position_stream_zero_closes_missing_ledger_position(tmp_path: P
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1859,6 +2014,7 @@ def test_ws_risk_stale_stream_forces_rest_reconcile(tmp_path: Path) -> None:
             order_submit_mode="rest",
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
             stale_ws_seconds=0.1,
         ),
         private_client=private_client,

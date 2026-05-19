@@ -136,3 +136,73 @@ def test_exclusive_file_lock_recovers_malformed_lock_after_grace_without_stale_t
         assert payload["pid"] == os.getpid()
 
     assert not lock_path.exists()
+
+
+def test_event_demo_orders_concurrent_writers_do_not_lose_rows(tmp_path: Path) -> None:
+    """The demo (entry) and risk (exit) services BOTH write to
+    event_demo_orders. The write path is read-modify-write under a per-dataset
+    exclusive file lock with temp-file-rename atomicity. This test pins that
+    contract: 8 threads writing 25 unique order_link_ids each must produce a
+    final parquet with exactly 200 rows, no duplicates, no torn writes.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    rows_per_writer = 25
+    writer_count = 8
+
+    def write_batch(writer_id: int) -> None:
+        batch = pl.DataFrame(
+            [
+                {
+                    "order_link_id": f"link-w{writer_id}-r{i}",
+                    "ts_ms": 1_700_000_000_000 + writer_id * 1000 + i,
+                    "symbol": "AAAUSDT",
+                    "status": "submitted",
+                }
+                for i in range(rows_per_writer)
+            ]
+        )
+        write_dataset(batch, tmp_path, "event_demo_orders", partition_by=())
+
+    with ThreadPoolExecutor(max_workers=writer_count) as executor:
+        list(executor.map(write_batch, range(writer_count)))
+
+    stored = read_dataset(tmp_path, "event_demo_orders")
+    assert stored.height == writer_count * rows_per_writer
+    unique_links = stored.select("order_link_id").unique().height
+    assert unique_links == writer_count * rows_per_writer
+
+
+def test_event_demo_orders_lock_serializes_concurrent_writers(tmp_path: Path) -> None:
+    """No reader should ever observe a torn/partial event_demo_orders parquet:
+    while writer A is replacing the file, writer B must either see the
+    pre-write contents or block. Implemented via O_CREAT|O_EXCL lock plus
+    temp-file rename — verify by reading the dataset between concurrent writes
+    and checking row counts are always multiples of the batch size.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+    batch_size = 10
+
+    def write_batch(writer_id: int) -> None:
+        batch = pl.DataFrame(
+            [
+                {
+                    "order_link_id": f"link-w{writer_id}-r{i}",
+                    "ts_ms": 1_700_000_000_000 + writer_id * 1000 + i,
+                    "symbol": "AAAUSDT",
+                    "status": "submitted",
+                }
+                for i in range(batch_size)
+            ]
+        )
+        write_dataset(batch, tmp_path, "event_demo_orders", partition_by=())
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(write_batch, w) for w in range(4)]
+        for _ in range(20):
+            stored = read_dataset(tmp_path, "event_demo_orders")
+            if not stored.is_empty():
+                assert stored.height % batch_size == 0
+                assert stored.select("order_link_id").n_unique() == stored.height
+            time.sleep(0.005)
+        for future in futures:
+            future.result()

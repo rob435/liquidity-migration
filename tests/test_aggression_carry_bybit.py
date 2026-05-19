@@ -466,3 +466,59 @@ def _newest_first_page(timestamps: list[int], params: dict, timestamp_key: str, 
     limit = int(params[limit_key])
     rows = [{timestamp_key: str(ts), "fundingRate": "0.0001", "openInterest": "100"} for ts in timestamps if start <= ts <= end]
     return {"retCode": 0, "result": {"list": list(reversed(rows))[:limit]}}
+
+
+def test_bybit_rest_rate_limiter_throttles_within_window() -> None:
+    import time as _time
+    limiter = bybit.BybitRestRateLimiter(max_requests=3, per_seconds=0.2)
+    started = _time.monotonic()
+    for _ in range(6):
+        limiter.acquire()
+    elapsed = _time.monotonic() - started
+    # 6 acquires at 3 per 0.2s must take at least one full window beyond the
+    # first 3 immediate acquires; anything below 0.18s means the limiter is
+    # silently letting bursts through.
+    assert elapsed >= 0.18, f"limiter let burst through in {elapsed:.3f}s"
+    stats = limiter.stats()
+    assert stats["throttle_events"] >= 1
+    assert stats["throttled_seconds"] > 0.0
+
+
+def test_bybit_rest_rate_limiter_no_throttle_under_budget() -> None:
+    limiter = bybit.BybitRestRateLimiter(max_requests=10, per_seconds=1.0)
+    for _ in range(5):
+        limiter.acquire()
+    assert limiter.stats()["throttle_events"] == 0
+
+
+def test_bybit_market_data_routes_get_through_rate_limiter(monkeypatch) -> None:
+    """BybitMarketData must call rate_limiter.acquire() before each pybit HTTP
+    call. This is the only way concurrent kline workers stay under Bybit's
+    public REST budget; without it, pybit handles the 429 by sleeping 2s per
+    retry, which previously caused ~30 spam lines per demo entry cycle.
+    """
+    class FakeHTTP:
+        def __init__(self, *, testnet: bool):
+            self.testnet = testnet
+            self.calls = 0
+
+        def get_tickers(self, **_kwargs):
+            self.calls += 1
+            return {"retCode": 0, "result": {"list": []}}
+
+    class RecordingLimiter:
+        def __init__(self) -> None:
+            self.acquires = 0
+
+        def acquire(self) -> None:
+            self.acquires += 1
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    limiter = RecordingLimiter()
+    client = bybit.BybitMarketData(rate_limiter=limiter)  # type: ignore[arg-type]
+
+    client.get_tickers()
+    client.get_tickers()
+
+    assert limiter.acquires == 2
+    assert client._client.calls == 2

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
+import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -11,7 +13,7 @@ from typing import Any
 
 import polars as pl
 
-from .bybit import BybitPrivateClient, BybitPrivateWebSocketStream, BybitPublicTickerStream, BybitWebSocketTradeClient
+from .bybit import BybitPrivateWebSocketStream, BybitPublicTickerStream, BybitWebSocketTradeClient
 from .config import ResearchConfig
 from .event_demo import (
     EventDemoCycleConfig,
@@ -53,6 +55,25 @@ from .event_demo import (
 from .storage import exclusive_file_lock, read_dataset, write_dataset
 
 
+_logger = logging.getLogger("aggression_carry.ws_risk")
+
+
+def _ensure_default_log_handler() -> None:
+    """Attach a stderr handler to the package root logger when nothing else
+    has configured logging. systemd captures stderr → journald, so this is
+    what makes journalctl show risk-engine events. Idempotent: only adds a
+    handler once per process and only if no upstream handler is configured.
+    """
+    root_pkg_logger = logging.getLogger("aggression_carry")
+    if root_pkg_logger.handlers:
+        return
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    root_pkg_logger.addHandler(handler)
+    level_name = os.environ.get("AGGRESSION_CARRY_LOG_LEVEL", "INFO").upper()
+    root_pkg_logger.setLevel(getattr(logging, level_name, logging.INFO))
+
+
 @dataclass(frozen=True, slots=True)
 class EventWebSocketRiskConfig:
     submit_orders: bool = False
@@ -73,6 +94,7 @@ class EventWebSocketRiskConfig:
     stop_tolerance_bps: float = 1.0
     pending_exit_guard_seconds: float = 120.0
     exit_untracked_positions: bool = True
+    untracked_position_grace_seconds: float = 90.0
 
 
 @dataclass(slots=True)
@@ -86,6 +108,7 @@ class WebSocketRiskState:
     live_entry_order_symbols: set[str] = field(default_factory=set)
     live_exit_order_symbols: set[str] = field(default_factory=set)
     submitted_symbol_ts_ms: dict[str, int] = field(default_factory=dict)
+    untracked_first_seen_ms: dict[str, int] = field(default_factory=dict)
     submitted_link_to_trade_id: dict[str, str] = field(default_factory=dict)
     submitted_link_submit_mode: dict[str, str] = field(default_factory=dict)
     executions_by_link: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
@@ -171,6 +194,16 @@ class EventWebSocketRiskEngine:
         self.exit_untracked_positions()
         self.start_streams()
         self.state.last_reconcile_monotonic = time.monotonic()
+        _logger.info(
+            "bootstrap complete positions=%d open_trades=%d pending_entry_symbols=%d errors=%d",
+            len(self.state.positions_by_symbol),
+            self.state.open_trades.height if not self.state.open_trades.is_empty() else 0,
+            len(self.state.pending_entry_symbols),
+            len(self.state.errors),
+        )
+        if self.state.errors:
+            for err in self.state.errors[-5:]:
+                _logger.error("bootstrap_error: %s", err)
 
     def start_streams(self) -> None:
         if self.private_stream is None:
@@ -297,9 +330,22 @@ class EventWebSocketRiskEngine:
             if not link:
                 continue
             status = str(row.get("orderStatus") or row.get("order_status") or "").lower()
-            if status in {"rejected", "cancelled", "canceled", "deactivated"}:
-                updates.extend(self.mark_order_terminal_from_order_update(order_link_id=link, status=status, row=row))
-            elif status in {"filled", "partiallyfilled", "partial"}:
+            terminal_statuses = {
+                "rejected",
+                "cancelled",
+                "canceled",
+                "deactivated",
+                "partiallyfilledcanceled",
+                "partiallyfilledcancelled",
+            }
+            fill_statuses = {
+                "filled",
+                "partiallyfilled",
+                "partial",
+                "partiallyfilledcanceled",
+                "partiallyfilledcancelled",
+            }
+            if status in fill_statuses:
                 filled_qty = _float(
                     row.get("cumExecQty")
                     or row.get("cum_exec_qty")
@@ -308,25 +354,26 @@ class EventWebSocketRiskEngine:
                 )
                 if filled_qty <= 0.0 and status == "filled":
                     filled_qty = _float(row.get("qty")) or self.order_target_qty(link)
-                if filled_qty <= 0.0:
-                    continue
-                avg_price = _float(row.get("avgPrice") or row.get("price")) or self.order_avg_price(link)
-                if link in self.state.submitted_link_to_trade_id:
-                    self.record_tracked_exit_stream_fill(
-                        order_link_id=link,
-                        filled_qty=filled_qty,
-                        exit_price=avg_price,
-                        source="order",
-                    )
-                else:
-                    updates.extend(
-                        self.mark_order_filled_from_execution(
+                if filled_qty > 0.0:
+                    avg_price = _float(row.get("avgPrice") or row.get("price")) or self.order_avg_price(link)
+                    if link in self.state.submitted_link_to_trade_id:
+                        self.record_tracked_exit_stream_fill(
                             order_link_id=link,
                             filled_qty=filled_qty,
                             exit_price=avg_price,
+                            source="order",
                         )
-                    )
-                    self.update_stream_order_guards(updates)
+                    else:
+                        updates.extend(
+                            self.mark_order_filled_from_execution(
+                                order_link_id=link,
+                                filled_qty=filled_qty,
+                                exit_price=avg_price,
+                            )
+                        )
+                        self.update_stream_order_guards(updates)
+            if status in terminal_statuses:
+                updates.extend(self.mark_order_terminal_from_order_update(order_link_id=link, status=status, row=row))
         if updates:
             _write_order_rows(self.root, pl.DataFrame(updates, infer_schema_length=None))
 
@@ -417,6 +464,10 @@ class EventWebSocketRiskEngine:
             return
         trades = {str(row["trade_id"]): row for row in self.state.all_trades.to_dicts()}
         trade = dict(trades.get(trade_id, {}))
+        # Load-bearing: REST fallback (on_ws_order_ack -> rest_exit) may have
+        # already closed this trade. A late `execution` stream message for the
+        # same order_link_id must not append a second close to state.exits. Do
+        # not remove this guard without re-checking the WS-then-REST race.
         if not trade or str(trade.get("status")) == "closed":
             return
         if filled_qty <= 0.0:
@@ -774,6 +825,9 @@ class EventWebSocketRiskEngine:
         self.repair_exchange_stops()
         self.reconcile_untracked_exit_orders()
         self.exit_untracked_positions()
+        # rest_reconcile is also the recovery path when reconcile_stale_websocket
+        # fires after a WS silence: this call re-subscribes any tickers that the
+        # public stream dropped. Don't move it out of rest_reconcile.
         self.subscribe_tickers(set(self.state.positions_by_symbol) | set(_column_values(self.state.open_trades, "symbol")))
         self.state.last_reconcile_monotonic = time.monotonic()
 
@@ -783,17 +837,24 @@ class EventWebSocketRiskEngine:
         self.expire_stale_submitted_symbols()
         open_symbols = set(_column_values(self.state.open_trades, "symbol"))
         now_ms = _now_ms()
+        grace_ms = int(max(self.risk.untracked_position_grace_seconds, 0.0) * 1000.0)
         rows: list[dict[str, Any]] = []
+        active_position_symbols: set[str] = set()
         for position in list(self.state.positions_by_symbol.values()):
             symbol = str(position.get("symbol", ""))
             qty = str(position.get("size") or "")
+            if not symbol or _float(qty) <= 0.0:
+                continue
+            active_position_symbols.add(symbol)
             if (
-                not symbol
-                or symbol in open_symbols
+                symbol in open_symbols
                 or symbol in self.state.pending_entry_symbols
                 or self.exit_submission_active(symbol)
-                or _float(qty) <= 0.0
             ):
+                self.state.untracked_first_seen_ms.pop(symbol, None)
+                continue
+            first_seen = self.state.untracked_first_seen_ms.setdefault(symbol, now_ms)
+            if now_ms - first_seen < grace_ms:
                 continue
             side_text = str(position.get("side") or "").lower()
             close_side = "Sell" if side_text in {"buy", "long"} else "Buy"
@@ -876,10 +937,23 @@ class EventWebSocketRiskEngine:
                     "error": error,
                 }
             )
+        for stale_symbol in [s for s in self.state.untracked_first_seen_ms if s not in active_position_symbols]:
+            self.state.untracked_first_seen_ms.pop(stale_symbol, None)
         if not rows:
             return
         _write_order_rows(self.root, pl.DataFrame(rows, infer_schema_length=None))
         self.state.orders.extend(rows)
+        for row in rows:
+            _logger.warning(
+                "untracked_position close symbol=%s side=%s qty=%s status=%s submit_mode=%s grace_seconds=%.1f error=%s",
+                row.get("symbol"),
+                row.get("side"),
+                row.get("qty"),
+                row.get("status"),
+                row.get("submit_mode"),
+                self.risk.untracked_position_grace_seconds,
+                row.get("error") or "",
+            )
         self.write_report(reason="untracked_exit_submitted")
 
     def reconcile_untracked_exit_orders(self) -> None:
@@ -1292,7 +1366,17 @@ def run_event_ws_risk(
     public_stream: Any | None = None,
     trade_client: Any | None = None,
 ) -> dict[str, Any]:
+    _ensure_default_log_handler()
     root = Path(data_root).expanduser()
+    _logger.info(
+        "event_ws_risk starting data_root=%s submit_orders=%s order_submit_mode=%s "
+        "rest_reconcile_seconds=%.1f untracked_position_grace_seconds=%.1f",
+        root,
+        (risk_config or EventWebSocketRiskConfig()).submit_orders,
+        (risk_config or EventWebSocketRiskConfig()).order_submit_mode,
+        (risk_config or EventWebSocketRiskConfig()).rest_reconcile_seconds,
+        (risk_config or EventWebSocketRiskConfig()).untracked_position_grace_seconds,
+    )
     with exclusive_file_lock(root / ".locks" / "event_ws_risk_cycle.lock", stale_seconds=0, poll_seconds=0.05):
         engine = EventWebSocketRiskEngine(
             root,
@@ -1355,6 +1439,8 @@ def _validate_ws_risk_config(config: EventWebSocketRiskConfig) -> None:
         raise ValueError("pending_exit_guard_seconds must be non-negative")
     if config.exit_untracked_positions and config.order_submit_mode == "ws" and not config.rest_fallback:
         raise ValueError("exit_untracked_positions requires REST fallback in Bybit demo mode")
+    if config.untracked_position_grace_seconds < 0.0:
+        raise ValueError("untracked_position_grace_seconds must be non-negative")
 
 
 _DEMO_WS_TRADE_UNAVAILABLE = (

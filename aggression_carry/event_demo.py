@@ -9,11 +9,11 @@ from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import polars as pl
 
-from .bybit import BybitMarketData, BybitPrivateClient
+from .bybit import BybitMarketData, BybitPrivateClient, BybitRestRateLimiter
 from .config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig, UniverseConfig
 from .downloaders import _normalize_instruments, _normalize_klines, _normalize_tickers
 from .storage import exclusive_file_lock, read_dataset, write_dataset
@@ -293,6 +293,12 @@ def run_event_demo_cycle(
                 entry_candidates,
                 live_entry_order_symbols,
             )
+        if demo.submit_orders or demo.record_dry_run:
+            def _record_preflight_entry_order(row: dict[str, Any]) -> None:
+                _write_order_rows(root, pl.DataFrame([row], infer_schema_length=None))
+            preflight_callback: Callable[[dict[str, Any]], None] | None = _record_preflight_entry_order
+        else:
+            preflight_callback = None
         executed_entries, entry_order_rows = _execute_entries(
             entry_candidates,
             trading_client=trading_client,
@@ -303,6 +309,7 @@ def run_event_demo_cycle(
             contract_by_symbol=contract_by_symbol,
             now_ms=cycle_now_ms,
             strategy_id=strategy_id,
+            record_preflight=preflight_callback,
         )
         if executed_entries:
             all_trades = _upsert_rows(all_trades, executed_entries, key="trade_id")
@@ -1564,8 +1571,22 @@ def _fetch_recent_1h_klines(
             rows.extend(fetch_with_client(client, symbol, window))
         return _dedupe_recent_klines(pl.DataFrame(rows, infer_schema_length=None)) if rows else _empty_klines()
 
+    # Share one rate limiter across all worker threads. Each thread instantiates
+    # its own BybitMarketData but routes _get() through this shared limiter so
+    # the process as a whole stays under Bybit's public REST budget
+    # (~120 req/5s per IP per category). Without this, 8 workers x 300 symbols
+    # saturate the budget in seconds and pybit then sleeps 2s per 429.
+    shared_limiter = BybitRestRateLimiter(
+        max_requests=_demo_rest_rate_limit_per_second(),
+        per_seconds=1.0,
+    )
+
     def fetch_symbol(symbol: str) -> list[dict[str, Any]]:
-        local_client = BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
+        local_client = BybitMarketData(
+            category=config.exchange.category,
+            testnet=config.exchange.testnet,
+            rate_limiter=shared_limiter,
+        )
         return fetch_with_client(local_client, symbol, fetch_ranges[symbol])
 
     max_workers = max(1, min(workers, len(fetch_ranges)))
@@ -1574,6 +1595,17 @@ def _fetch_recent_1h_klines(
         for future in as_completed(futures):
             rows.extend(future.result())
     return _dedupe_recent_klines(pl.DataFrame(rows, infer_schema_length=None)) if rows else _empty_klines()
+
+
+def _demo_rest_rate_limit_per_second() -> int:
+    raw = os.environ.get("BYBIT_REST_RATE_LIMIT_PER_SECOND", "").strip()
+    if not raw:
+        return 18
+    try:
+        value = int(raw)
+    except ValueError:
+        return 18
+    return value if value > 0 else 18
 
 
 def _dedupe_recent_klines(klines: pl.DataFrame) -> pl.DataFrame:
@@ -1604,6 +1636,67 @@ def _build_demo_features(klines: pl.DataFrame, universe: pl.DataFrame) -> pl.Dat
     )
 
 
+def _preflight_entry_order_row(
+    *,
+    entry_link: str,
+    now_ms: int,
+    candidate: dict[str, Any],
+    strategy_id: str,
+    symbol: str,
+    bybit_side: str,
+    side: str,
+    order_type: str,
+    qty: str,
+    price: float,
+    actual_notional: float,
+    order_notional_pct_equity: float,
+    entry_leverage: float,
+    initial_margin_usdt: float,
+    equity_usdt: float,
+    tick_size: float,
+    qty_step: float,
+    stop_price: float,
+    take_profit_price: float,
+    stop_loss_pct: float,
+    take_profit_pct: float,
+) -> dict[str, Any]:
+    return {
+        "order_link_id": entry_link,
+        "ts_ms": now_ms,
+        "trade_id": str(candidate["trade_id"]),
+        "strategy_id": strategy_id,
+        "symbol": symbol,
+        "side": bybit_side,
+        "order_type": order_type,
+        "qty": qty,
+        "reduce_only": False,
+        "order_id": "",
+        "submit_mode": "preflight",
+        "avg_price": price,
+        "notional_usdt": actual_notional,
+        "target_notional_pct_equity": order_notional_pct_equity,
+        "entry_leverage": entry_leverage,
+        "initial_margin_usdt": initial_margin_usdt,
+        "status": "submitted",
+        "trade_side": side,
+        "signal_ts_ms": int(candidate["signal_ts_ms"]),
+        "entry_ready_ts_ms": int(candidate.get("entry_ready_ts_ms") or 0),
+        "entry_policy": str(candidate.get("entry_policy", "")),
+        "entry_rule": str(candidate.get("entry_rule", "")),
+        "entry_quality_tier": str(candidate.get("entry_quality_tier", "")),
+        "equity_usdt": equity_usdt,
+        "tick_size": tick_size,
+        "qty_step": qty_step,
+        "stop_price": stop_price,
+        "take_profit_price": take_profit_price,
+        "stop_loss_pct": stop_loss_pct,
+        "take_profit_pct": take_profit_pct,
+        "entry_stop_update_status": "",
+        "entry_stop_update_error": "",
+        "error": "",
+    }
+
+
 def _execute_entries(
     candidates: list[dict[str, Any]],
     *,
@@ -1615,6 +1708,7 @@ def _execute_entries(
     contract_by_symbol: dict[str, dict[str, Any]],
     now_ms: int,
     strategy_id: str,
+    record_preflight: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     rows: list[dict[str, Any]] = []
     orders: list[dict[str, Any]] = []
@@ -1637,6 +1731,8 @@ def _execute_entries(
         if quantity is None:
             continue
         qty, actual_notional = quantity
+        # demo.entry_leverage > 0 is a config invariant — _validate_demo_config
+        # rejects non-positive values at parse time, so no zero-guard here.
         initial_margin_usdt = actual_notional / demo.entry_leverage
         side = str(candidate["side"])
         bybit_side = "Sell" if side == "short" else "Buy"
@@ -1686,6 +1782,32 @@ def _execute_entries(
                     stop_loss=stop_price,
                     take_profit=take_profit_price if take_profit_price > 0.0 else None,
                 )
+                if record_preflight is not None:
+                    record_preflight(
+                        _preflight_entry_order_row(
+                            entry_link=entry_link,
+                            now_ms=now_ms,
+                            candidate=candidate,
+                            strategy_id=strategy_id,
+                            symbol=symbol,
+                            bybit_side=bybit_side,
+                            side=side,
+                            order_type=demo.entry_order_type,
+                            qty=qty,
+                            price=price,
+                            actual_notional=actual_notional,
+                            order_notional_pct_equity=order_notional_pct_equity,
+                            entry_leverage=demo.entry_leverage,
+                            initial_margin_usdt=initial_margin_usdt,
+                            equity_usdt=equity_usdt,
+                            tick_size=tick_size,
+                            qty_step=qty_step,
+                            stop_price=stop_price,
+                            take_profit_price=take_profit_price,
+                            stop_loss_pct=stop_loss_pct,
+                            take_profit_pct=take_profit_pct,
+                        )
+                    )
                 try:
                     order_result = trading_client.place_order(**order_params)
                     submit_mode = "submitted"
@@ -3122,6 +3244,10 @@ def _wait_for_execution_summary(
     poll_seconds: float,
     poll_interval_seconds: float,
 ) -> dict[str, Any]:
+    # `while True` is bounded: the deadline check below returns once
+    # `time.monotonic() >= deadline`, so the loop runs at most `poll_seconds`
+    # wall time regardless of what the venue returns. The sleep also clamps to
+    # the time remaining before the deadline so we don't oversleep past it.
     deadline = time.monotonic() + max(poll_seconds, 0.0)
     interval = max(poll_interval_seconds, 0.01)
     while True:

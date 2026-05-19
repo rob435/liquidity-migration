@@ -232,15 +232,23 @@ def read_dataset(data_root: str | Path, dataset: str) -> pl.DataFrame:
     path = dataset_path(data_root, dataset)
     if not path.exists():
         return pl.DataFrame()
-    files = sorted(path.glob("**/*.parquet"))
-    if not files:
-        return pl.DataFrame()
-    file_paths = [str(file) for file in files]
-    try:
-        return pl.scan_parquet(file_paths).collect()
-    except pl.exceptions.SchemaError:
-        frames = [pl.read_parquet(file) for file in file_paths]
-        return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+    # Take the same per-dataset lock that writers hold. write_dataset performs
+    # read-modify-write under this lock, and writers replace files atomically
+    # via temp-file rename; without a reader-side lock, a reader's
+    # scan_parquet -> collect can straddle a rename and observe a torn file
+    # ("Invalid thrift: end of file"). Acquiring the lock here serialises with
+    # writers cheaply (<10ms typical) and guarantees readers see a consistent
+    # snapshot of the dataset.
+    with exclusive_file_lock(dataset_lock_path(data_root, dataset), stale_seconds=21_600, poll_seconds=0.01):
+        files = sorted(path.glob("**/*.parquet"))
+        if not files:
+            return pl.DataFrame()
+        file_paths = [str(file) for file in files]
+        try:
+            return pl.scan_parquet(file_paths).collect()
+        except pl.exceptions.SchemaError:
+            frames = [pl.read_parquet(file) for file in file_paths]
+            return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
 
 def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> None:

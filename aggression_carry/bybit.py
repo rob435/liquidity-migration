@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import threading
 import time
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -17,6 +18,62 @@ except ModuleNotFoundError:  # pragma: no cover - dependency may be absent befor
 
 class BybitDataError(RuntimeError):
     pass
+
+
+class BybitRestRateLimiter:
+    """Thread-safe sliding-window rate limiter shared across BybitMarketData
+    instances. Bybit public REST endpoints allow ~120 requests / 5 seconds per
+    IP per category; we default to a conservative 18 req/s so concurrent demo
+    workers don't sustain 429s that pybit then handles by sleeping 2 seconds
+    per retry — the dominant tail in entry-cycle latency. Stays out of the
+    way (no waiting, no lock contention) when callers stay under budget.
+    """
+
+    __slots__ = ("_max", "_per", "_timestamps", "_lock", "_throttle_events", "_throttled_seconds")
+
+    def __init__(self, max_requests: int = 18, per_seconds: float = 1.0) -> None:
+        if max_requests <= 0:
+            raise ValueError("max_requests must be positive")
+        if per_seconds <= 0.0:
+            raise ValueError("per_seconds must be positive")
+        self._max = max_requests
+        self._per = per_seconds
+        self._timestamps: deque[float] = deque()
+        self._lock = threading.Lock()
+        self._throttle_events = 0
+        self._throttled_seconds = 0.0
+
+    def acquire(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            cutoff = now - self._per
+            while self._timestamps and self._timestamps[0] < cutoff:
+                self._timestamps.popleft()
+            if len(self._timestamps) >= self._max:
+                wait = self._per - (now - self._timestamps[0])
+                if wait > 0.0:
+                    self._throttle_events += 1
+                    self._throttled_seconds += wait
+                    time.sleep(wait)
+                    now = time.monotonic()
+                    cutoff = now - self._per
+                    while self._timestamps and self._timestamps[0] < cutoff:
+                        self._timestamps.popleft()
+            self._timestamps.append(now)
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "max_requests": self._max,
+                "per_seconds": self._per,
+                "throttle_events": self._throttle_events,
+                "throttled_seconds": round(self._throttled_seconds, 3),
+            }
+
+    def reset_stats(self) -> None:
+        with self._lock:
+            self._throttle_events = 0
+            self._throttled_seconds = 0.0
 
 
 INTERVAL_MS = {
@@ -41,6 +98,7 @@ class BybitMarketData:
     retries: int = 3
     retry_sleep_seconds: float = 0.5
     slow_call_threshold_ms: float = 1000.0
+    rate_limiter: BybitRestRateLimiter | None = None
     logical_calls: int = field(init=False, default=0)
     http_calls: int = field(init=False, default=0)
     retry_events: int = field(init=False, default=0)
@@ -189,6 +247,10 @@ class BybitMarketData:
                 if start <= ts <= end:
                     rows_by_ts[ts] = item
             oldest = min(timestamps)
+            # Safe to exit on `oldest <= start`: rows_by_ts is keyed by ts, so
+            # any duplicates from overlapping pages overwrite cleanly, and the
+            # next cursor_end would be `oldest - 1 < start`, exiting the outer
+            # `while cursor_end >= start` loop on the following iteration anyway.
             if len(batch) < limit or oldest <= start:
                 break
             next_cursor_end = oldest - 1
@@ -202,6 +264,8 @@ class BybitMarketData:
         last_error: Exception | None = None
         self.logical_calls += 1
         for attempt in range(self.retries):
+            if self.rate_limiter is not None:
+                self.rate_limiter.acquire()
             started = time.perf_counter()
             try:
                 self.http_calls += 1

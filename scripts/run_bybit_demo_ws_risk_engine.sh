@@ -20,6 +20,7 @@ STOP_TOLERANCE_BPS="${STOP_TOLERANCE_BPS:-1}"
 FAST_EXECUTION_STREAM="${FAST_EXECUTION_STREAM:-0}"
 PENDING_EXIT_GUARD_SECONDS="${PENDING_EXIT_GUARD_SECONDS:-120}"
 EXIT_UNTRACKED_POSITIONS="${EXIT_UNTRACKED_POSITIONS:-1}"
+UNTRACKED_POSITION_GRACE_SECONDS="${UNTRACKED_POSITION_GRACE_SECONDS:-90}"
 
 telegram_args=()
 if [[ "${TELEGRAM_ENABLED:-1}" == "1" ]]; then
@@ -75,6 +76,7 @@ echo "data_root=$DATA_ROOT submit_orders=${SUBMIT_ORDERS:-0} order_submit_mode=$
     --stream-start-timeout-seconds "$STREAM_START_TIMEOUT_SECONDS" \
     --stop-tolerance-bps "$STOP_TOLERANCE_BPS" \
     --pending-exit-guard-seconds "$PENDING_EXIT_GUARD_SECONDS" \
+    --untracked-position-grace-seconds "$UNTRACKED_POSITION_GRACE_SECONDS" \
     "${telegram_args[@]}" \
     "${order_args[@]}" \
     "${fallback_args[@]}" \

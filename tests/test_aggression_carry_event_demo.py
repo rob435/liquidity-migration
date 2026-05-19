@@ -2960,3 +2960,104 @@ def test_observe_alias_maps_to_canonical_demo_relaxed_profile() -> None:
 def test_event_demo_rejects_non_positive_entry_leverage() -> None:
     with pytest.raises(ValueError, match="entry_leverage"):
         _validate_demo_config(EventDemoCycleConfig(entry_leverage=0.0))
+
+
+def test_execute_entries_records_preflight_row_before_place_order(tmp_path: Path) -> None:
+    """Risk engine relies on event_demo_orders containing a pending row at the
+    instant Bybit fills an entry. If the demo engine writes only the post-fill
+    row, the risk engine will treat the brand-new position as untracked and
+    close it. This test pins the preflight write order: parquet must contain a
+    PENDING_ORDER_STATUSES row keyed by order_link_id BEFORE place_order returns.
+    """
+    from aggression_carry.event_demo import PENDING_ORDER_STATUSES, _write_order_rows
+
+    observed_at_place_order: dict[str, pl.DataFrame] = {}
+
+    class PreflightInspectingClient:
+        def __init__(self) -> None:
+            self.orders: list[dict[str, object]] = []
+
+        def set_leverage(self, **params: object) -> dict[str, str]:
+            return {}
+
+        def place_order(self, **params: object) -> dict[str, str]:
+            observed_at_place_order["orders"] = read_dataset(tmp_path, "event_demo_orders")
+            self.orders.append(params)
+            return {"orderId": "order-1"}
+
+        def get_trade_history(self, **_: object) -> list[dict[str, str]]:
+            return []
+
+    client = PreflightInspectingClient()
+    candidate = {
+        "trade_id": "t-preflight",
+        "symbol": "AAAUSDT",
+        "side": "short",
+        "signal_ts_ms": 1_700_000_000_000,
+        "stop_loss_pct": 0.12,
+        "take_profit_pct": 0.20,
+    }
+    rows, orders = _execute_entries(
+        [candidate],
+        trading_client=client,
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.20,
+        price_by_symbol={"AAAUSDT": 100.0},
+        contract_by_symbol={
+            "AAAUSDT": {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}
+        },
+        now_ms=1_700_000_060_000,
+        strategy_id=DEMO_RELAXED_STRATEGY_ID,
+        record_preflight=lambda row: _write_order_rows(
+            tmp_path, pl.DataFrame([row], infer_schema_length=None)
+        ),
+    )
+
+    observed = observed_at_place_order["orders"]
+    assert not observed.is_empty(), "preflight row must be in parquet before place_order"
+    preflight = observed.filter(pl.col("symbol") == "AAAUSDT").to_dicts()
+    assert len(preflight) == 1
+    assert preflight[0]["status"] in PENDING_ORDER_STATUSES
+    assert preflight[0]["submit_mode"] == "preflight"
+    assert preflight[0]["reduce_only"] is False
+    assert preflight[0]["trade_id"] == "t-preflight"
+    assert preflight[0]["order_link_id"].startswith("agc-en-")
+
+    # Final post-loop write upserts the same order_link_id; status must transition
+    # away from preflight so pending_entry_symbols drops it once the open trade
+    # row is in event_demo_trades.
+    assert len(orders) == 1
+    assert orders[0]["order_link_id"] == preflight[0]["order_link_id"]
+    assert orders[0]["submit_mode"] in {"submitted", "filled", "partial", "submitted_unconfirmed"}
+
+
+def test_execute_entries_preflight_skipped_when_no_callback() -> None:
+    """Callers that don't pass record_preflight (e.g. dry-run unit tests) must
+    behave exactly as before — no parquet writes attempted, no exceptions."""
+    rows, orders = _execute_entries(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "signal_ts_ms": 1_700_000_000_000,
+                "stop_loss_pct": 0.12,
+                "take_profit_pct": 0.20,
+            }
+        ],
+        trading_client=None,
+        demo=EventDemoCycleConfig(entry_leverage=2.0),
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.20,
+        price_by_symbol={"AAAUSDT": 100.0},
+        contract_by_symbol={"AAAUSDT": {"qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}},
+        now_ms=1_700_000_060_000,
+        strategy_id=DEMO_RELAXED_STRATEGY_ID,
+    )
+    assert orders[0]["submit_mode"] == "dry_run"
+    assert rows[0]["submit_mode"] == "dry_run"
