@@ -8,6 +8,7 @@ REMOTE="${REMOTE:-origin}"
 EXPECTED_COMMIT="${EXPECTED_COMMIT:-}"
 EXPECTED_TELEGRAM_CHAT_ID="${EXPECTED_TELEGRAM_CHAT_ID:-8388367561}"
 SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp hetzner}"
+CLEAN_DIRTY_CHECKOUT="${CLEAN_DIRTY_CHECKOUT:-0}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this from the VPS provider console as root." >&2
@@ -48,9 +49,20 @@ fi
 cd "$REPO_DIR"
 
 if [ -n "$(git status --short)" ]; then
-  echo "Refusing deploy: VPS git checkout is dirty." >&2
-  git status --short >&2
-  exit 1
+  if [ "$CLEAN_DIRTY_CHECKOUT" != "1" ]; then
+    echo "Refusing deploy: VPS git checkout is dirty." >&2
+    echo "Rerun with CLEAN_DIRTY_CHECKOUT=1 to save a patch, reset tracked files, and clean untracked non-ignored files." >&2
+    git status --short >&2
+    exit 1
+  fi
+  backup_dir="/root/model050426-deploy-backups"
+  mkdir -p "$backup_dir"
+  backup_patch="$backup_dir/dirty-checkout-$(date -u +%Y%m%dT%H%M%SZ).patch"
+  git diff > "$backup_patch"
+  git status --short > "$backup_patch.status"
+  git reset --hard
+  git clean -fd
+  echo "Cleaned dirty checkout; saved diff/status under $backup_dir"
 fi
 
 git fetch "$REMOTE" "$BRANCH"

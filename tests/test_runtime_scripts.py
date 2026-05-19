@@ -86,6 +86,10 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "/root/.ssh/authorized_keys" in text
     assert "AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp" in text
     assert "apt-get install -y ca-certificates git python3 python3-venv python3-pip" in text
+    assert "CLEAN_DIRTY_CHECKOUT" in text
+    assert "model050426-deploy-backups" in text
+    assert "git reset --hard" in text
+    assert "git clean -fd" in text
     assert "git clone" in text
     assert "git pull --ff-only" in text
     assert "pip install -e \".[dev]\"" in text

@@ -41,6 +41,12 @@ live services, and prints non-secret service state. Set
 `EXPECTED_COMMIT=<full sha>` before `bash` if you want the console deploy to
 refuse anything except one pinned commit.
 
+If the existing `/opt/MODEL050426` checkout is dirty and you intend to overwrite
+local repo edits, prefix the command with `CLEAN_DIRTY_CHECKOUT=1`. The script
+saves a diff and status under `/root/model050426-deploy-backups` before running
+`git reset --hard` and `git clean -fd`. Ignored live data such as
+`data/bybit-demo-event` is not removed by that clean command.
+
 Manual install or refresh on the VPS:
 
 ```bash
