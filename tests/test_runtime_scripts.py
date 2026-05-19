@@ -65,6 +65,7 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     text = (repo / "scripts" / "deploy_vps_live.sh").read_text(encoding="utf-8")
 
     assert "EXPECTED_COMMIT" in text
+    assert "BatchMode=yes" in text
     assert "git pull --ff-only" in text
     assert "liqmig_union_q40_h3_tp26_g100_qsqueeze" in text
     assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text
