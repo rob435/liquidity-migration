@@ -139,6 +139,9 @@ def test_vps_recovery_command_printer_uses_pinned_commit_url() -> None:
     )
 
     assert "git rev-parse" in text
+    assert "--recommended-only" in text
+    assert "recommended_only" in text
+    assert "recommended_command=" in text
     assert "raw.githubusercontent.com/rob435/MODEL05042026" in text
     assert "scripts/vps_restore_ssh_access.sh" in text
     assert "scripts/vps_console_recover_and_deploy.sh" in text
