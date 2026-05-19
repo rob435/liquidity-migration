@@ -15,10 +15,12 @@ EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/verify_vps_live.sh
 The script refuses a dirty VPS checkout, forces the configured remote URL,
 resets the deploy branch to `origin/main`, runs focused runtime tests, checks
 the promoted TP26 and live TP21+FF6 strategy constants, verifies the Telegram
-chat ID, refreshes both systemd units, restarts both services, and prints the
-active systemd state plus non-secret entry-profile settings. The verify script
-is read-only and checks the same commit, strategy constants, Telegram chat ID,
-systemd unit settings, and active service state without pulling or restarting.
+chat ID, disables retired legacy units (`model050426.service` plus the old
+daily signal timer/service), refreshes both active systemd units, restarts both
+services, and prints the active systemd state plus non-secret entry-profile
+settings. The verify script is read-only and checks the same commit, strategy
+constants, Telegram chat ID, systemd unit settings, and active service state
+without pulling or restarting.
 Both scripts wait briefly before checking service activity so a process that
 dies immediately after startup does not produce a false pass. Override with
 `SYSTEMD_SETTLE_SECONDS=<seconds>` if needed.

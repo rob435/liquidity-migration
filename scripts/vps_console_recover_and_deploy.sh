@@ -159,6 +159,11 @@ fi
 cp deploy/systemd/model050426-bybit-demo.service /etc/systemd/system/model050426-bybit-demo.service
 cp deploy/systemd/model050426-bybit-risk.service /etc/systemd/system/model050426-bybit-risk.service
 systemctl daemon-reload
+systemctl disable --now \
+  model050426.service \
+  model050426-bybit-demo-signal.timer \
+  model050426-bybit-demo-signal.service \
+  2>/dev/null || true
 systemctl enable model050426-bybit-demo.service
 systemctl enable model050426-bybit-risk.service
 systemctl restart model050426-bybit-demo.service

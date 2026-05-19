@@ -74,6 +74,9 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "demo.failed_fade_exit_hours == 6" in text
     assert "TELEGRAM_CHAT_ID" in text
     assert "SYSTEMD_SETTLE_SECONDS" in text
+    assert "systemctl disable --now" in text
+    assert "model050426.service" in text
+    assert "model050426-bybit-demo-signal.timer" in text
     assert "model050426-bybit-demo.service" in text
     assert "model050426-bybit-risk.service" in text
     assert "--property=Environment" not in text
@@ -160,6 +163,9 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "pip install -e \".[dev]\"" in text
     assert "liqmig_union_q40_h3_tp26_g100_qsqueeze" in text
     assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text
+    assert "systemctl disable --now" in text
+    assert "model050426.service" in text
+    assert "model050426-bybit-demo-signal.timer" in text
     assert "model050426-bybit-demo.service" in text
     assert "model050426-bybit-risk.service" in text
     assert "--property=Environment" not in text
