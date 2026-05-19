@@ -377,10 +377,10 @@ root@204.168.202.167: Permission denied (publickey,password).
 The GitHub `VPS Deploy` workflow is configured to deploy on guarded `main`
 pushes. The first push-triggered run for `db9ade8` failed in `Configure SSH
 key`; after that, repository secret `VPS_SSH_PRIVATE_KEY` was set to a dedicated
-GitHub Actions deploy key. The push-triggered run for `11c46f8` then passed
-`Configure SSH key` and `Verify VPS host key`, and failed in `Checked deploy`
+GitHub Actions deploy key. Later push-triggered and manual deploy runs pass
+`Configure SSH key` and `Verify VPS host key`, then fail in `Checked deploy`
 with the same `Permission denied (publickey,password)` response. The VPS does
-not accept that new key yet. Run
+not accept the configured deploy keys yet. Run
 `scripts/vps_console_recover_and_deploy.sh` from the provider console to restore
 both the local public key and the GitHub Actions public key in
 `/root/.ssh/authorized_keys`, then run `scripts/verify_vps_live.sh` to prove the
