@@ -48,6 +48,15 @@ for public_key in "$LOCAL_SSH_PUBLIC_KEY" "$GITHUB_ACTIONS_SSH_PUBLIC_KEY"; do
   fi
 done
 chown -R root:root /root/.ssh
+if command -v ssh-keygen >/dev/null 2>&1; then
+  echo "Restored authorized key fingerprints:"
+  for public_key in "$LOCAL_SSH_PUBLIC_KEY" "$GITHUB_ACTIONS_SSH_PUBLIC_KEY"; do
+    tmp_public_key="$(mktemp)"
+    printf '%s\n' "$public_key" > "$tmp_public_key"
+    ssh-keygen -lf "$tmp_public_key" -E sha256
+    rm -f "$tmp_public_key"
+  done
+fi
 
 if [ -d /etc/ssh ]; then
   mkdir -p /etc/ssh/sshd_config.d

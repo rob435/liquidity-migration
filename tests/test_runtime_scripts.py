@@ -157,6 +157,8 @@ def test_vps_ssh_restore_script_only_restores_access() -> None:
     assert "AuthenticationMethods publickey" in text
     assert "Include /etc/ssh/sshd_config.d/*.conf" in text
     assert "sshd_config.model050426-backup" in text
+    assert "Restored authorized key fingerprints:" in text
+    assert 'ssh-keygen -lf "$tmp_public_key" -E sha256' in text
     assert "effective_sshd_config" in text
     assert "grep -Eq '^authenticationmethods publickey$'" in text
     assert 'sshd_root_context="user=root,host=localhost,addr=127.0.0.1"' in text
@@ -188,6 +190,8 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "AuthenticationMethods publickey" in text
     assert "Include /etc/ssh/sshd_config.d/*.conf" in text
     assert "sshd_config.model050426-backup" in text
+    assert "Restored authorized key fingerprints:" in text
+    assert 'ssh-keygen -lf "$tmp_public_key" -E sha256' in text
     assert "effective_sshd_config" in text
     assert "grep -Eq '^authenticationmethods publickey$'" in text
     assert 'sshd_root_context="user=root,host=localhost,addr=127.0.0.1"' in text
