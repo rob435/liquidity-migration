@@ -1,0 +1,59 @@
+name: VPS Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Run checked deployment or read-only verification.
+        required: true
+        default: verify
+        type: choice
+        options:
+          - verify
+          - deploy
+
+jobs:
+  vps:
+    runs-on: ubuntu-latest
+    env:
+      VPS_HOST: ${{ vars.VPS_HOST || '204.168.202.167' }}
+      VPS_USER: ${{ vars.VPS_USER || 'root' }}
+      VPS_ED25519_FINGERPRINT: ${{ vars.VPS_ED25519_FINGERPRINT || 'SHA256:c4K1qg1rx5kH/706qNTdsHYsCDP/o5GIHW1GAHCjwgY' }}
+      EXPECTED_TELEGRAM_CHAT_ID: ${{ vars.EXPECTED_TELEGRAM_CHAT_ID || '8388367561' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH key
+        env:
+          VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+        run: |
+          test -n "$VPS_SSH_PRIVATE_KEY"
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > ~/.ssh/vps_deploy_key
+          chmod 600 ~/.ssh/vps_deploy_key
+
+      - name: Verify VPS host key
+        run: |
+          ssh-keyscan -T 10 -t ed25519 "$VPS_HOST" > ~/.ssh/known_hosts.tmp
+          ssh-keygen -lf ~/.ssh/known_hosts.tmp | grep -F "$VPS_ED25519_FINGERPRINT"
+          mv ~/.ssh/known_hosts.tmp ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+
+      - name: Checked deploy
+        if: inputs.mode == 'deploy'
+        run: |
+          EXPECTED_COMMIT="$GITHUB_SHA" \
+          EXPECTED_TELEGRAM_CHAT_ID="$EXPECTED_TELEGRAM_CHAT_ID" \
+          SSH_TARGET="$VPS_USER@$VPS_HOST" \
+          SSH_OPTS="-i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10" \
+          scripts/deploy_vps_live.sh
+
+      - name: Read-only verify
+        if: inputs.mode == 'verify'
+        run: |
+          EXPECTED_COMMIT="$GITHUB_SHA" \
+          EXPECTED_TELEGRAM_CHAT_ID="$EXPECTED_TELEGRAM_CHAT_ID" \
+          SSH_TARGET="$VPS_USER@$VPS_HOST" \
+          SSH_OPTS="-i ~/.ssh/vps_deploy_key -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10" \
+          scripts/verify_vps_live.sh

@@ -20,6 +20,13 @@ verify script is read-only and checks the same commit, strategy constants,
 Telegram chat ID, systemd unit settings, and active service state without
 pulling or restarting.
 
+GitHub Actions can also run the same checked path from
+`.github/workflows/vps-deploy.yml`. Configure repository secret
+`VPS_SSH_PRIVATE_KEY` with an SSH private key accepted by the VPS, then run the
+`VPS Deploy` workflow manually in `verify` or `deploy` mode. Optional repository
+variables: `VPS_HOST`, `VPS_USER`, `VPS_ED25519_FINGERPRINT`, and
+`EXPECTED_TELEGRAM_CHAT_ID`.
+
 If the VPS was rebuilt and SSH rejects the local key, add this public key back
 to the VPS through the provider console before running the deploy script:
 

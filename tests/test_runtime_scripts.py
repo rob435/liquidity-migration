@@ -94,6 +94,22 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "--property=Environment" not in text
 
 
+def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    text = (repo / ".github" / "workflows" / "vps-deploy.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "workflow_dispatch" in text
+    assert "VPS_SSH_PRIVATE_KEY" in text
+    assert "ssh-keyscan -T 10 -t ed25519" in text
+    assert "SHA256:c4K1qg1rx5kH/706qNTdsHYsCDP/o5GIHW1GAHCjwgY" in text
+    assert "scripts/deploy_vps_live.sh" in text
+    assert "scripts/verify_vps_live.sh" in text
+    assert "EXPECTED_COMMIT=\"$GITHUB_SHA\"" in text
+    assert "EXPECTED_TELEGRAM_CHAT_ID" in text
+
+
 def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     repo = Path(__file__).resolve().parents[1]
     text = (repo / "scripts" / "vps_console_recover_and_deploy.sh").read_text(
