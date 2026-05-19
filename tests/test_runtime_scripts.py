@@ -150,6 +150,8 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "PubkeyAuthentication yes" in text
     assert "systemctl restart ssh.service" in text
     assert "model050426-deploy-backups" in text
+    assert "non-git-checkout-" in text
+    assert 'mv "$REPO_DIR" "$backup_path"' in text
     assert "git reset --hard" in text
     assert "git clean -fd" in text
     assert "git clone" in text

@@ -62,6 +62,14 @@ else
   service ssh restart || service sshd restart || true
 fi
 
+if [ -e "$REPO_DIR" ] && [ ! -d "$REPO_DIR/.git" ]; then
+  backup_dir="/root/model050426-deploy-backups"
+  mkdir -p "$backup_dir"
+  backup_path="$backup_dir/non-git-checkout-$(date -u +%Y%m%dT%H%M%SZ)"
+  mv "$REPO_DIR" "$backup_path"
+  echo "Moved non-git checkout to $backup_path"
+fi
+
 if [ ! -d "$REPO_DIR/.git" ]; then
   mkdir -p "$(dirname "$REPO_DIR")"
   git clone "$REPO_URL" "$REPO_DIR"
