@@ -1204,6 +1204,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=demo_defaults.strategy_profile,
         help="Demo entry profile. promoted is the sparse production alpha; demo_relaxed is a higher-frequency demo-trading variant.",
     )
+    event_demo.add_argument(
+        "--daemon",
+        action="store_true",
+        help=(
+            "Run as a long-running daemon: keeps a single Python process up, "
+            "subscribes once to the Bybit private execution WebSocket, and "
+            "routes execution events through ExecutionEventRouter so cycle "
+            "code prefers WS over REST for fill confirmation. REST polling "
+            "remains the fallback. Opt-in; the legacy bash-loop runner is "
+            "unchanged."
+        ),
+    )
+    event_demo.add_argument(
+        "--interval-seconds",
+        type=float,
+        default=60.0,
+        help="Seconds between cycles in --daemon mode. Ignored otherwise.",
+    )
 
     event_risk = subparsers.add_parser(
         "event-risk-cycle",
@@ -1476,6 +1494,24 @@ def main(argv: list[str] | None = None) -> int:
             data_name=args.data_name,
             strategy_profile=args.strategy_profile,
         )
+        if getattr(args, "daemon", False):
+            from liquidity_migration.event_demo_daemon import EventDemoDaemon
+            daemon = EventDemoDaemon(
+                data_root,
+                config=config,
+                demo_config=demo_config,
+                interval_seconds=args.interval_seconds,
+            )
+            daemon.install_signal_handlers()
+            stats = daemon.run()
+            print(
+                "event demo daemon stopped "
+                f"cycles_run={stats['cycles_run']} "
+                f"cycle_errors={stats['cycle_errors']} "
+                f"router={stats['router_stats']}",
+                flush=True,
+            )
+            return 0
         payload = run_event_demo_cycle(data_root, config=config, demo_config=demo_config)
         cycle = payload["cycle"]
         print(
