@@ -140,8 +140,11 @@ def test_vps_recovery_command_printer_uses_pinned_commit_url() -> None:
 
     assert "git rev-parse" in text
     assert "--recommended-only" in text
+    assert "--rescue-only" in text
     assert "recommended_only" in text
+    assert "rescue_only" in text
     assert "recommended_command=" in text
+    assert "rescue_command=" in text
     assert "raw.githubusercontent.com/rob435/MODEL05042026" in text
     assert "scripts/vps_restore_ssh_access.sh" in text
     assert "scripts/vps_rescue_restore_ssh_access.sh" in text
@@ -152,6 +155,7 @@ def test_vps_recovery_command_printer_uses_pinned_commit_url() -> None:
     assert "Strict full recovery" in text
     assert "CLEAN_DIRTY_CHECKOUT=1" in text
     assert 'EXPECTED_COMMIT="$commit_sha" CLEAN_DIRTY_CHECKOUT=1 bash' in text
+    assert 'curl -fsSL $rescue_script_url | bash' in text
     assert 'EXPECTED_COMMIT="$commit_sha" bash' in text
     assert "scripts/verify_vps_live.sh" in text
 

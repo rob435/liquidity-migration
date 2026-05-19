@@ -5,10 +5,16 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 mode="all"
-if [ "${1:-}" = "--recommended-only" ]; then
-  mode="recommended_only"
-  shift
-fi
+case "${1:-}" in
+  --recommended-only)
+    mode="recommended_only"
+    shift
+    ;;
+  --rescue-only)
+    mode="rescue_only"
+    shift
+    ;;
+esac
 
 commit_ref="${1:-HEAD}"
 commit_sha="$(git rev-parse "${commit_ref}^{commit}")"
@@ -23,8 +29,19 @@ curl -fsSL $script_url | EXPECTED_COMMIT="$commit_sha" CLEAN_DIRTY_CHECKOUT=1 ba
 EOF
 )"
 
+rescue_command="$(cat <<EOF
+apt-get update && apt-get install -y ca-certificates curl
+curl -fsSL $rescue_script_url | bash
+EOF
+)"
+
 if [ "$mode" = "recommended_only" ]; then
   printf '%s\n' "$recommended_command"
+  exit 0
+fi
+
+if [ "$mode" = "rescue_only" ]; then
+  printf '%s\n' "$rescue_command"
   exit 0
 fi
 
@@ -34,8 +51,7 @@ apt-get update && apt-get install -y ca-certificates curl
 curl -fsSL $ssh_script_url | bash
 
 # Hetzner Rescue SSH-key restore, as rescue root:
-apt-get update && apt-get install -y ca-certificates curl
-curl -fsSL $rescue_script_url | bash
+$rescue_command
 
 # Checked deploy from this checkout after SSH-only recovery:
 EXPECTED_COMMIT="$commit_sha" scripts/deploy_vps_live.sh

@@ -56,6 +56,7 @@ deploy directly on the VPS:
 ```bash
 scripts/print_vps_recovery_command.sh
 scripts/print_vps_recovery_command.sh --recommended-only
+scripts/print_vps_recovery_command.sh --rescue-only
 
 apt-get update && apt-get install -y ca-certificates curl
 curl -fsSL https://raw.githubusercontent.com/rob435/MODEL05042026/main/scripts/vps_restore_ssh_access.sh | bash
@@ -72,7 +73,9 @@ curl -fsSL https://raw.githubusercontent.com/rob435/MODEL05042026/main/scripts/v
 
 Prefer the generated pinned command from `scripts/print_vps_recovery_command.sh`
 when possible; use `scripts/print_vps_recovery_command.sh --recommended-only`
-when you want only the command to paste into the provider console.
+when you want only the full installed-OS command to paste into the provider
+console, or `scripts/print_vps_recovery_command.sh --rescue-only` when you want
+only the Hetzner Rescue SSH-key restore command.
 `scripts/vps_restore_ssh_access.sh` only restores root public-key SSH access,
 prints the restored authorized-key fingerprints, and exits, which is useful
 when you want this local checkout or GitHub Actions to run the checked deploy
