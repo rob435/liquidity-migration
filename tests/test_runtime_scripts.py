@@ -112,6 +112,9 @@ def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
     assert "workflow_dispatch" in text
     assert "push:" in text
     assert "branches:" in text
+    assert '"deploy/systemd/*.service"' in text
+    assert '"deploy/systemd/**"' not in text
+    assert '"scripts/**"' not in text
     assert "github.event_name == 'push' || inputs.mode == 'deploy'" in text
     assert "github.event_name == 'workflow_dispatch' && inputs.mode == 'verify'" in text
     assert "VPS_SSH_PRIVATE_KEY" in text
