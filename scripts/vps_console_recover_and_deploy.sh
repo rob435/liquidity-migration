@@ -14,6 +14,24 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
+missing_prereqs=()
+for binary in git python3; do
+  if ! command -v "$binary" >/dev/null 2>&1; then
+    missing_prereqs+=("$binary")
+  fi
+done
+
+if [ "${#missing_prereqs[@]}" -gt 0 ] || ! python3 -m venv --help >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update
+    apt-get install -y ca-certificates git python3 python3-venv python3-pip
+  else
+    echo "Missing deploy prerequisites and apt-get is unavailable: ${missing_prereqs[*]:-python3-venv}" >&2
+    exit 1
+  fi
+fi
+
 mkdir -p /root/.ssh
 chmod 700 /root/.ssh
 touch /root/.ssh/authorized_keys
