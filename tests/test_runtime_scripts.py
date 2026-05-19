@@ -144,8 +144,10 @@ def test_vps_recovery_command_printer_uses_pinned_commit_url() -> None:
     assert "recommended_command=" in text
     assert "raw.githubusercontent.com/rob435/MODEL05042026" in text
     assert "scripts/vps_restore_ssh_access.sh" in text
+    assert "scripts/vps_rescue_restore_ssh_access.sh" in text
     assert "scripts/vps_console_recover_and_deploy.sh" in text
     assert "scripts/deploy_vps_live.sh" in text
+    assert "Hetzner Rescue SSH-key restore" in text
     assert "Recommended full VPS provider console recovery" in text
     assert "Strict full recovery" in text
     assert "CLEAN_DIRTY_CHECKOUT=1" in text
@@ -176,6 +178,34 @@ def test_vps_ssh_restore_script_only_restores_access() -> None:
     assert 'sshd -T -C "$sshd_root_context"' in text
     assert "systemctl restart ssh.service" in text
     assert "ssh-restore-ok" in text
+    assert "model050426-bybit-demo.service" not in text
+    assert "pip install" not in text
+
+
+def test_vps_rescue_restore_script_mounts_installed_root_and_restores_keys() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    text = (repo / "scripts" / "vps_rescue_restore_ssh_access.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "TARGET_ROOT" in text
+    assert "MOUNT_ROOT" in text
+    assert "is_installed_root" in text
+    assert "lsblk -rpno NAME,FSTYPE,TYPE,MOUNTPOINT" in text
+    assert "vgchange -ay" in text
+    assert 'mount "$device" "$MOUNT_ROOT"' in text
+    assert "/root/.ssh/authorized_keys" in text
+    assert "AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp" in text
+    assert "AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX" in text
+    assert "chroot \"$target_root\" usermod -U root" in text
+    assert "99-model050426-recovery.conf" in text
+    assert "PermitRootLogin prohibit-password" in text
+    assert "AuthenticationMethods publickey" in text
+    assert "Include /etc/ssh/sshd_config.d/*.conf" in text
+    assert "sshd_config.model050426-backup" in text
+    assert "Restored authorized key fingerprints" in text
+    assert "rescue-ssh-restore-ok" in text
+    assert "Reboot the VPS from local disk" in text
     assert "model050426-bybit-demo.service" not in text
     assert "pip install" not in text
 

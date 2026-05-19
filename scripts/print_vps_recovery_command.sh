@@ -15,6 +15,7 @@ commit_sha="$(git rev-parse "${commit_ref}^{commit}")"
 raw_base="${RAW_BASE:-https://raw.githubusercontent.com/rob435/MODEL05042026}"
 script_url="$raw_base/$commit_sha/scripts/vps_console_recover_and_deploy.sh"
 ssh_script_url="$raw_base/$commit_sha/scripts/vps_restore_ssh_access.sh"
+rescue_script_url="$raw_base/$commit_sha/scripts/vps_rescue_restore_ssh_access.sh"
 
 recommended_command="$(cat <<EOF
 apt-get update && apt-get install -y ca-certificates curl
@@ -31,6 +32,10 @@ cat <<EOF
 # Minimal SSH-only recovery, as root:
 apt-get update && apt-get install -y ca-certificates curl
 curl -fsSL $ssh_script_url | bash
+
+# Hetzner Rescue SSH-key restore, as rescue root:
+apt-get update && apt-get install -y ca-certificates curl
+curl -fsSL $rescue_script_url | bash
 
 # Checked deploy from this checkout after SSH-only recovery:
 EXPECTED_COMMIT="$commit_sha" scripts/deploy_vps_live.sh
