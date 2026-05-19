@@ -67,9 +67,10 @@ curl -fsSL https://raw.githubusercontent.com/rob435/MODEL05042026/main/scripts/v
 
 Prefer the generated pinned command from `scripts/print_vps_recovery_command.sh`
 when possible. `scripts/vps_restore_ssh_access.sh` only restores root public-key
-SSH access and exits, which is useful when you want this local checkout or
-GitHub Actions to run the checked deploy after access is fixed. The full console
-recovery restores the same SSH access, clones or repairs `/opt/MODEL050426`,
+SSH access, prints the restored authorized-key fingerprints, and exits, which
+is useful when you want this local checkout or GitHub Actions to run the checked
+deploy after access is fixed. The full console recovery restores the same SSH
+access, prints the same fingerprints, clones or repairs `/opt/MODEL050426`,
 forces the configured remote URL, resets the deploy branch to `origin/main`,
 builds the local venv if needed, installs missing Ubuntu deploy prerequisites,
 writes an sshd recovery override for root public-key login, prints the effective
