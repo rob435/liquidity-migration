@@ -363,7 +363,7 @@ service state: active / active
 ```
 
 Current verification status: not proven. Local `main` and `origin/main` are at
-`db9ade813720ec784e41b8fb310073f559b644ad`, but the VPS live checkout and
+`11c46f84b15953d29213ce6878aa0df3bff4215b`, but the VPS live checkout and
 service state are not verified. Local SSH reaches
 `204.168.202.167`, the ED25519 host fingerprint is stable at
 `SHA256:c4K1qg1rx5kH/706qNTdsHYsCDP/o5GIHW1GAHCjwgY`, but the VPS rejects the
@@ -376,7 +376,10 @@ root@204.168.202.167: Permission denied (publickey,password).
 The GitHub `VPS Deploy` workflow is configured to deploy on guarded `main`
 pushes. The first push-triggered run for `db9ade8` failed in `Configure SSH
 key`; after that, repository secret `VPS_SSH_PRIVATE_KEY` was set to a dedicated
-GitHub Actions deploy key. The VPS does not accept that new key yet. Run
+GitHub Actions deploy key. The push-triggered run for `11c46f8` then passed
+`Configure SSH key` and `Verify VPS host key`, and failed in `Checked deploy`
+with the same `Permission denied (publickey,password)` response. The VPS does
+not accept that new key yet. Run
 `scripts/vps_console_recover_and_deploy.sh` from the provider console to restore
 both the local public key and the GitHub Actions public key in
 `/root/.ssh/authorized_keys`, then run `scripts/verify_vps_live.sh` to prove the
