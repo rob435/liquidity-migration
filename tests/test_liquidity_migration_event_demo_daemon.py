@@ -224,6 +224,157 @@ def test_daemon_prints_event_demo_cycle_summary_per_cycle(tmp_path: Path, capsys
     assert "slowest=universe:0.8s" in out  # top-3 stages from cycle dict
 
 
+def test_daemon_sends_telegram_on_startup_and_shutdown(tmp_path: Path) -> None:
+    """When demo_config.telegram is enabled, the daemon emits one telegram at
+    startup (announcing readiness + WS status) and one at shutdown (with
+    cycles/errors/router stats). Without these the operator can't tell from
+    Telegram alone whether systemd auto-restarted the process, whether the
+    WS path is engaging, or what the previous session did.
+    """
+    ws = _RecordingWsStream()
+    messages: list[str] = []
+
+    def fake_sender(text: str) -> bool:
+        messages.append(text)
+        return True
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(telegram=True, submit_orders=True),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_stub_cycle_runner([]),
+        telegram_sender=fake_sender,
+    )
+    runner = threading.Thread(target=daemon.run, daemon=True)
+    runner.start()
+    time.sleep(0.05)
+    daemon.request_shutdown()
+    runner.join(timeout=2.0)
+    assert not runner.is_alive()
+
+    assert len(messages) == 2, f"expected 1 start + 1 stop telegram, got {messages}"
+    start_msg, stop_msg = messages
+    assert "daemon started" in start_msg
+    assert "submit_orders=on" in start_msg
+    assert "ws=ok" in start_msg
+    assert "daemon stopped" in stop_msg
+    assert "cycles=" in stop_msg
+    assert "errors=" in stop_msg
+    assert "ws_events=" in stop_msg
+    assert "ws_satisfied=" in stop_msg
+
+
+def test_daemon_telegram_disabled_sends_nothing(tmp_path: Path) -> None:
+    """demo_config.telegram=False (the default) must not send anything, even
+    if a sender is wired. Important: a noisy startup telegram on every test
+    or dev run would be operator-confusing."""
+    ws = _RecordingWsStream()
+    messages: list[str] = []
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(telegram=False),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_stub_cycle_runner([]),
+        telegram_sender=lambda t: (messages.append(t) or True),
+    )
+    runner = threading.Thread(target=daemon.run, daemon=True)
+    runner.start()
+    time.sleep(0.05)
+    daemon.request_shutdown()
+    runner.join(timeout=2.0)
+    assert messages == []
+
+
+def test_daemon_telegrams_cycle_exception(tmp_path: Path) -> None:
+    """Cycles that crash before producing a payload never reach the cycle's
+    own _maybe_notify, so the daemon must surface the failure to telegram so
+    the operator knows without SSH-ing in."""
+    ws = _RecordingWsStream()
+    messages: list[str] = []
+    call_count = {"n": 0}
+
+    def _exploding_runner(data_root, **kwargs):
+        call_count["n"] += 1
+        raise RuntimeError("synthetic boom for the test")
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(telegram=True),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_exploding_runner,
+        telegram_sender=lambda t: (messages.append(t) or True),
+    )
+    runner = threading.Thread(target=daemon.run, daemon=True)
+    runner.start()
+    time.sleep(0.1)
+    daemon.request_shutdown()
+    runner.join(timeout=2.0)
+    assert not runner.is_alive()
+
+    crash_msgs = [m for m in messages if "cycle failed" in m]
+    assert crash_msgs, f"expected at least one cycle-failure telegram, got {messages}"
+    assert "synthetic boom for the test" in crash_msgs[0]
+
+
+def test_daemon_continues_running_when_telegram_send_raises(tmp_path: Path) -> None:
+    """Telegram outages must not break trading. A sender that raises on every
+    call must not prevent the daemon from running cycles and shutting down
+    cleanly."""
+    ws = _RecordingWsStream()
+
+    def broken_sender(text: str) -> bool:
+        raise RuntimeError("telegram api down")
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(telegram=True),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_stub_cycle_runner([]),
+        telegram_sender=broken_sender,
+    )
+    runner = threading.Thread(target=daemon.run, daemon=True)
+    runner.start()
+    time.sleep(0.1)
+    daemon.request_shutdown()
+    runner.join(timeout=2.0)
+    assert not runner.is_alive()
+    # No assertion needed beyond "daemon exits cleanly"; the test fails on
+    # timeout if a telegram exception breaks the loop.
+
+
+def test_daemon_telegram_startup_reports_ws_unavailable_when_factory_fails(tmp_path: Path) -> None:
+    """If WS opening failed, the startup telegram must say so — operator
+    needs to know they're in REST-fallback mode without checking journal."""
+    def _broken_factory(_config):
+        raise RuntimeError("ws unavailable")
+
+    messages: list[str] = []
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(telegram=True),
+        interval_seconds=0.0,
+        ws_stream_factory=_broken_factory,
+        cycle_runner=_stub_cycle_runner([]),
+        telegram_sender=lambda t: (messages.append(t) or True),
+    )
+    runner = threading.Thread(target=daemon.run, daemon=True)
+    runner.start()
+    time.sleep(0.05)
+    daemon.request_shutdown()
+    runner.join(timeout=2.0)
+    start = next((m for m in messages if "started" in m), "")
+    assert "ws=unavailable" in start, f"expected ws=unavailable in startup msg, got {start!r}"
+
+
 def test_daemon_run_returns_summary_stats(tmp_path: Path) -> None:
     ws = _RecordingWsStream()
     daemon = EventDemoDaemon(

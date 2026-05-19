@@ -72,6 +72,7 @@ class EventDemoDaemon:
         interval_seconds: float = 60.0,
         ws_stream_factory: Callable[[ResearchConfig], Any] | None = None,
         cycle_runner: Callable[..., dict[str, Any]] = run_event_demo_cycle,
+        telegram_sender: Callable[[str], bool] | None = None,
     ) -> None:
         if interval_seconds < 0.0:
             raise ValueError("interval_seconds must be non-negative")
@@ -82,6 +83,10 @@ class EventDemoDaemon:
         self.interval_seconds = float(interval_seconds)
         self._ws_stream_factory = ws_stream_factory or _build_private_ws_stream
         self._cycle_runner = cycle_runner
+        # telegram_sender is injectable for tests; production path calls
+        # liquidity_migration.telegram.send_telegram_message lazily so this
+        # module stays importable without env vars set.
+        self._telegram_sender = telegram_sender
         self.router = ExecutionEventRouter()
         self._shutdown = threading.Event()
         self._ws_stream: Any | None = None
@@ -98,6 +103,26 @@ class EventDemoDaemon:
         if not self._shutdown.is_set():
             _logger.info("shutdown requested; will drain current cycle and exit")
         self._shutdown.set()
+
+    def _send_telegram(self, text: str) -> None:
+        """Daemon-level operator notification. Cycle-level events already
+        telegram via the existing _maybe_notify path; this method only covers
+        the gaps that don't have a per-cycle payload (startup, shutdown,
+        cycle crashes before the cycle builds its own payload). Always wrapped
+        in try/except so a telegram outage never affects trading."""
+        if not self.demo_config.telegram:
+            return
+        sender = self._telegram_sender
+        if sender is None:
+            try:
+                from .telegram import send_telegram_message
+            except Exception:  # noqa: BLE001 - telegram is optional
+                return
+            sender = lambda t: send_telegram_message(t, enabled=True)
+        try:
+            sender(text)
+        except Exception as exc:  # noqa: BLE001 - telegram failures must not break the loop
+            _logger.warning("telegram send failed: %s", exc)
 
     def _open_ws(self) -> None:
         try:
@@ -144,6 +169,13 @@ class EventDemoDaemon:
             self.demo_config.max_concurrent_entries,
         )
         self._open_ws()
+        ws_status = "ok" if self._ws_stream is not None else "unavailable (REST fallback)"
+        self._send_telegram(
+            f"\U0001f7e2 liquidity-migration daemon started "
+            f"interval={self.interval_seconds:.0f}s "
+            f"submit_orders={'on' if self.demo_config.submit_orders else 'off'} "
+            f"ws={ws_status}"
+        )
         try:
             while not self._shutdown.is_set():
                 self._run_one_cycle()
@@ -152,16 +184,24 @@ class EventDemoDaemon:
                 self._sleep_interruptible(self.interval_seconds)
         finally:
             self._close_ws()
+        router_stats = self.router.stats()
         _logger.info(
             "event_demo_daemon stopped cycles_run=%d cycle_errors=%d router_stats=%s",
             self._cycles_run,
             self._cycle_errors,
-            self.router.stats(),
+            router_stats,
+        )
+        self._send_telegram(
+            f"\U0001f6d1 liquidity-migration daemon stopped "
+            f"cycles={self._cycles_run} "
+            f"errors={self._cycle_errors} "
+            f"ws_events={router_stats['events_received']} "
+            f"ws_satisfied={router_stats['waits_satisfied_by_ws']}"
         )
         return {
             "cycles_run": self._cycles_run,
             "cycle_errors": self._cycle_errors,
-            "router_stats": self.router.stats(),
+            "router_stats": router_stats,
         }
 
     def _run_one_cycle(self) -> None:
@@ -179,6 +219,12 @@ class EventDemoDaemon:
         except Exception as exc:  # noqa: BLE001 - never let a single cycle kill the daemon
             self._cycle_errors += 1
             _logger.exception("cycle failed: %s", exc)
+            # A cycle that crashed BEFORE producing a payload never gets a
+            # _maybe_notify telegram from within run_event_demo_cycle. This is
+            # the only signal the operator gets without SSH-ing in.
+            self._send_telegram(
+                f"❌ liquidity-migration cycle failed: {str(exc)[:200]}"
+            )
         elapsed = time.monotonic() - cycle_started
         if payload is not None:
             # Emit the same `event demo cycle ...` summary the legacy bash-loop
