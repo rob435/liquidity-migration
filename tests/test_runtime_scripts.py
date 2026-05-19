@@ -131,11 +131,30 @@ def test_vps_recovery_command_printer_uses_pinned_commit_url() -> None:
 
     assert "git rev-parse" in text
     assert "raw.githubusercontent.com/rob435/MODEL05042026" in text
+    assert "scripts/vps_restore_ssh_access.sh" in text
     assert "scripts/vps_console_recover_and_deploy.sh" in text
     assert 'EXPECTED_COMMIT="$commit_sha" bash' in text
     assert "CLEAN_DIRTY_CHECKOUT=1" in text
     assert 'EXPECTED_COMMIT="$commit_sha" CLEAN_DIRTY_CHECKOUT=1 bash' in text
     assert "scripts/verify_vps_live.sh" in text
+
+
+def test_vps_ssh_restore_script_only_restores_access() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    text = (repo / "scripts" / "vps_restore_ssh_access.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "/root/.ssh/authorized_keys" in text
+    assert "AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp" in text
+    assert "AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX" in text
+    assert "PermitRootLogin prohibit-password" in text
+    assert "AuthenticationMethods publickey" in text
+    assert "sshd -T" in text
+    assert "systemctl restart ssh.service" in text
+    assert "ssh-restore-ok" in text
+    assert "model050426-bybit-demo.service" not in text
+    assert "pip install" not in text
 
 
 def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
