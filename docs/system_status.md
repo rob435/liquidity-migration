@@ -369,8 +369,9 @@ passes. The GitHub `VPS Deploy` workflow now also triggers when its own
 workflow file or VPS recovery/deploy helper scripts change, so recovery-tool
 edits exercise the same checked deploy path automatically. Latest checked
 deploy evidence before final console recovery: CI passes on the pushed `main`
-head, the `VPS_SSH_PRIVATE_KEY` repository secret derives to the expected
-GitHub Actions deploy-key fingerprint
+head, the active `wait-deploy` workflow is pinned to that same head, the
+`VPS_SSH_PRIVATE_KEY` repository secret derives to the expected GitHub Actions
+deploy-key fingerprint
 `SHA256:oC3JWnYE9LTto1dHEkdT+puS1n4z1qm2EWjQ+QUEf0s`, and the VPS ED25519 host
 fingerprint is stable at
 `SHA256:c4K1qg1rx5kH/706qNTdsHYsCDP/o5GIHW1GAHCjwgY`. Both local SSH and
@@ -392,13 +393,16 @@ fingerprints. The full recovery command also clones/repairs `/opt/MODEL050426`,
 saves tracked and untracked checkout dirt before cleaning when
 `CLEAN_DIRTY_CHECKOUT=1` is set, pins the expected commit, backs up
 `/etc/model050426/bybit-demo.env`, enforces `TELEGRAM_CHAT_ID=8388367561`,
-restarts the active services, and verifies the live state. After SSH access is
-restored, `scripts/wait_for_vps_recovery_and_deploy.sh` can be left running
-locally to deploy and verify the current pinned commit automatically. The
-GitHub `VPS Deploy` workflow also has a manual `wait-deploy` mode that runs the
-same wait/deploy/verify helper from Actions, which is the preferred option if
-you want the recovery deploy to continue without this local session staying
-open.
+restarts the active services, and verifies the live state. It prints
+`deploy-verify-ok` only after both active services are active and enabled, the
+retired legacy units are inactive and disabled, the demo service has the
+expected `demo_relaxed` one-minute profile, and the risk service has
+`ORDER_SUBMIT_MODE=ws_then_rest`. After SSH access is restored,
+`scripts/wait_for_vps_recovery_and_deploy.sh` can be left running locally to
+deploy and verify the current pinned commit automatically. The GitHub `VPS
+Deploy` workflow also has a manual `wait-deploy` mode that runs the same
+wait/deploy/verify helper from Actions, which is the preferred option if you
+want the recovery deploy to continue without this local session staying open.
 
 The VPS entry service intentionally runs at `INTERVAL_SECONDS=60` and
 `STRATEGY_PROFILE=demo_relaxed`. Fast exits are still handled by the separate

@@ -61,25 +61,19 @@ scripts/print_vps_recovery_command.sh
 scripts/print_vps_recovery_command.sh --recommended-only
 scripts/print_vps_recovery_command.sh --rescue-only
 
-apt-get update && apt-get install -y ca-certificates curl
-curl -fsSL https://raw.githubusercontent.com/rob435/MODEL05042026/main/scripts/vps_restore_ssh_access.sh | bash
-
-apt-get update && apt-get install -y ca-certificates curl
-curl -fsSL https://raw.githubusercontent.com/rob435/MODEL05042026/main/scripts/vps_rescue_restore_ssh_access.sh | bash
-
 EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/deploy_vps_live.sh
 EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/verify_vps_live.sh
 EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/wait_for_vps_recovery_and_deploy.sh
-
-apt-get update && apt-get install -y ca-certificates curl
-curl -fsSL https://raw.githubusercontent.com/rob435/MODEL05042026/main/scripts/vps_console_recover_and_deploy.sh | CLEAN_DIRTY_CHECKOUT=1 bash
 ```
 
 Prefer the generated pinned command from `scripts/print_vps_recovery_command.sh`
 when possible; use `scripts/print_vps_recovery_command.sh --recommended-only`
 when you want only the full installed-OS command to paste into the provider
 console, or `scripts/print_vps_recovery_command.sh --rescue-only` when you want
-only the Hetzner Rescue SSH-key restore command.
+only the Hetzner Rescue SSH-key restore command. Do not paste a raw `main`
+branch `raw.githubusercontent.com` recovery URL unless you intentionally want a
+moving-target deploy; the generated command pins the exact commit and passes
+`EXPECTED_COMMIT` so the VPS refuses stale or unexpected code.
 `scripts/vps_restore_ssh_access.sh` only restores root public-key SSH access,
 prints the restored authorized-key fingerprints, and exits, which is useful
 when you want this local checkout or GitHub Actions to run the checked deploy
@@ -98,8 +92,12 @@ builds the local venv if needed, installs missing Ubuntu deploy prerequisites,
 writes an sshd recovery override for root public-key login, prints the effective
 sshd root-login settings, validates the promoted TP26 and live TP21+FF6
 constants, refreshes systemd, restarts both live services, and prints non-secret
-service state. Set `EXPECTED_COMMIT=<full sha>` before `bash` if you want the
-console deploy to refuse anything except one pinned commit.
+service state. It prints `deploy-verify-ok` only after it has also verified the
+active units are enabled, retired legacy units are inactive and disabled, the
+demo service has the expected one-minute `demo_relaxed` settings, and the risk
+service uses `ORDER_SUBMIT_MODE=ws_then_rest`. Set
+`EXPECTED_COMMIT=<full sha>` before `bash` if you want the console deploy to
+refuse anything except one pinned commit.
 The console script also waits before checking active service state; override
 with `SYSTEMD_SETTLE_SECONDS=<seconds>` if needed.
 
