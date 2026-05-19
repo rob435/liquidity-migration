@@ -50,7 +50,8 @@ fi
 
 if command -v sshd >/dev/null 2>&1; then
   sshd -t
-  effective_sshd_config="$(sshd -T)"
+  sshd_root_context="user=root,host=localhost,addr=127.0.0.1"
+  effective_sshd_config="$(sshd -T -C "$sshd_root_context")"
   printf '%s\n' "$effective_sshd_config" | grep -E '^(pubkeyauthentication|permitrootlogin|authorizedkeysfile|authenticationmethods) '
   printf '%s\n' "$effective_sshd_config" | grep -Eq '^pubkeyauthentication yes$'
   printf '%s\n' "$effective_sshd_config" | grep -Eq '^permitrootlogin (yes|without-password|prohibit-password)$'
