@@ -28,6 +28,7 @@ jobs:
       VPS_USER: ${{ vars.VPS_USER || 'root' }}
       VPS_ED25519_FINGERPRINT: ${{ vars.VPS_ED25519_FINGERPRINT || 'SHA256:c4K1qg1rx5kH/706qNTdsHYsCDP/o5GIHW1GAHCjwgY' }}
       EXPECTED_TELEGRAM_CHAT_ID: ${{ vars.EXPECTED_TELEGRAM_CHAT_ID || '8388367561' }}
+      GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT: SHA256:oC3JWnYE9LTto1dHEkdT+puS1n4z1qm2EWjQ+QUEf0s
     steps:
       - uses: actions/checkout@v4
 
@@ -40,6 +41,12 @@ jobs:
           chmod 700 ~/.ssh
           printf '%s\n' "$VPS_SSH_PRIVATE_KEY" > ~/.ssh/vps_deploy_key
           chmod 600 ~/.ssh/vps_deploy_key
+
+      - name: Verify deploy key fingerprint
+        run: |
+          ssh-keygen -y -f ~/.ssh/vps_deploy_key > ~/.ssh/vps_deploy_key.pub
+          ssh-keygen -lf ~/.ssh/vps_deploy_key.pub -E sha256 | tee ~/.ssh/vps_deploy_key.fingerprint
+          grep -F "$GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT" ~/.ssh/vps_deploy_key.fingerprint
 
       - name: Verify VPS host key
         run: |

@@ -115,6 +115,10 @@ def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
     assert "github.event_name == 'push' || inputs.mode == 'deploy'" in text
     assert "github.event_name == 'workflow_dispatch' && inputs.mode == 'verify'" in text
     assert "VPS_SSH_PRIVATE_KEY" in text
+    assert "GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT" in text
+    assert "SHA256:oC3JWnYE9LTto1dHEkdT+puS1n4z1qm2EWjQ+QUEf0s" in text
+    assert "ssh-keygen -y -f ~/.ssh/vps_deploy_key" in text
+    assert "ssh-keygen -lf ~/.ssh/vps_deploy_key.pub -E sha256" in text
     assert "ssh-keyscan -T 10 -t ed25519" in text
     assert "SHA256:c4K1qg1rx5kH/706qNTdsHYsCDP/o5GIHW1GAHCjwgY" in text
     assert "scripts/deploy_vps_live.sh" in text

@@ -29,8 +29,10 @@ dies immediately after startup does not produce a false pass. Override with
 GitHub Actions can also run the same checked path from
 `.github/workflows/vps-deploy.yml`. Repository secret `VPS_SSH_PRIVATE_KEY`
 holds the dedicated GitHub Actions deploy key; the console recovery script adds
-the matching public key to `/root/.ssh/authorized_keys`. Run the `VPS Deploy`
-workflow manually in `verify` or `deploy` mode, or let guarded `main` pushes to
+the matching public key to `/root/.ssh/authorized_keys`. The workflow derives
+the secret's public key and checks its fingerprint before SSH, so a rotated or
+mis-pasted secret fails before deployment. Run the `VPS Deploy` workflow
+manually in `verify` or `deploy` mode, or let guarded `main` pushes to
 live-code/deploy paths trigger deployment. Optional repository variables:
 `VPS_HOST`, `VPS_USER`, `VPS_ED25519_FINGERPRINT`, and
 `EXPECTED_TELEGRAM_CHAT_ID`.
