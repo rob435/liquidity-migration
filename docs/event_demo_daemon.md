@@ -15,26 +15,26 @@ remains the fallback if WS hasn't delivered within the existing
 
 ## Running it
 
-The legacy `event-demo-cycle` subcommand still works exactly as before. To
-opt in to daemon mode, swap the systemd `ExecStart` to use `--daemon`:
+The runner script `scripts/run_bybit_demo_event_engine.sh` has a `USE_DAEMON`
+toggle. When `USE_DAEMON=1`, it `exec`s a single long-running Python process
+with `--daemon --interval-seconds $INTERVAL_SECONDS`, replacing the bash loop.
+Default is the legacy bash-loop runner — flipping is a one-line env-var
+change to the systemd unit:
 
 ```ini
 # /etc/systemd/system/liquidity-migration-bybit-demo.service
 [Service]
 Environment=INTERVAL_SECONDS=60
-ExecStart=/opt/liquidity_migration/.venv/bin/python -m liquidity_migration \
-    --config configs/volume_alpha.default.yaml \
-    --data-root data/bybit-demo-event \
-    event-demo-cycle \
-    --submit-orders --confirm-demo-orders \
-    --strategy-profile demo_relaxed \
-    --daemon \
-    --interval-seconds 60
+Environment=USE_DAEMON=1                       # <-- add this line
+ExecStart=/opt/liquidity-migration/scripts/run_bybit_demo_event_engine.sh
 ```
 
-The bash-loop wrapper script (`scripts/run_bybit_demo_event_engine.sh`) is
-unchanged; you swap the systemd unit to point at the daemon path when you're
-ready. Until then, the previous behavior is untouched.
+Then `systemctl daemon-reload && systemctl restart liquidity-migration-bybit-demo.service`.
+Rollback is `Environment=USE_DAEMON=0` (or remove the line) and the same
+two-command restart.
+
+All other env vars (`STRATEGY_PROFILE`, `INTERVAL_SECONDS`, `WORKERS`,
+`SUBMIT_ORDERS`, etc.) work identically in both modes.
 
 ## Safety boundaries
 

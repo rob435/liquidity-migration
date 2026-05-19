@@ -66,10 +66,42 @@ fi
 echo "event demo engine starting"
 echo "repo=$REPO_ROOT"
 echo "strategy_profile=$STRATEGY_PROFILE"
-echo "data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS submit_orders=${SUBMIT_ORDERS:-0}"
+echo "data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS submit_orders=${SUBMIT_ORDERS:-0} use_daemon=${USE_DAEMON:-0}"
 
 mkdir -p "$DATA_ROOT/.locks"
 
+# USE_DAEMON=1: single long-running Python process that subscribes once to the
+# Bybit private execution WebSocket, runs cycles internally, and routes
+# WS-pushed fills through ExecutionEventRouter so _wait_for_execution_summary
+# returns in <30ms instead of REST-polling get_trade_history. REST is the
+# fallback, never the sole path. SIGTERM drains the current cycle and exits
+# cleanly so `systemctl stop` is safe. Drop USE_DAEMON to fall back to the
+# legacy bash-loop runner below — rollback is a single env-var change.
+if [[ "${USE_DAEMON:-0}" == "1" ]]; then
+    echo "event demo engine: daemon mode (long-running, WS fill confirmation)"
+    exec "$PYTHON_BIN" -m liquidity_migration \
+        --config "$CONFIG_PATH" \
+        --data-root "$DATA_ROOT" \
+        event-demo-cycle \
+        --lookback-days "$LOOKBACK_DAYS" \
+        --universe-rank-end "$UNIVERSE_RANK_END" \
+        --universe-max-symbols "$UNIVERSE_MAX_SYMBOLS" \
+        --universe-min-turnover-24h "$UNIVERSE_MIN_TURNOVER_24H" \
+        --workers "$WORKERS" \
+        --max-order-notional-pct-equity "$MAX_ORDER_NOTIONAL_PCT_EQUITY" \
+        --max-entry-lag-minutes "$MAX_ENTRY_LAG_MINUTES" \
+        --max-new-entries-per-cycle "$MAX_NEW_ENTRIES_PER_CYCLE" \
+        --entry-leverage "$ENTRY_LEVERAGE" \
+        --order-fill-confirm-seconds "$ORDER_FILL_CONFIRM_SECONDS" \
+        --order-fill-poll-interval-seconds "$ORDER_FILL_POLL_INTERVAL_SECONDS" \
+        --fallback-equity-usdt "$FALLBACK_EQUITY_USDT" \
+        --strategy-profile "$STRATEGY_PROFILE" \
+        --daemon --interval-seconds "$INTERVAL_SECONDS" \
+        "${telegram_args[@]}" \
+        "${order_args[@]}"
+fi
+
+echo "event demo engine: legacy bash-loop mode (USE_DAEMON=1 to enable daemon)"
 while true; do
     cycle_start_epoch="$(date +%s)"
     set +e
