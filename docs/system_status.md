@@ -362,9 +362,10 @@ entry policy: promoted_quality_squeeze
 service state: active / active
 ```
 
-Current verification status: not proven. Local `main` and `origin/main` are at
-`11c46f84b15953d29213ce6878aa0df3bff4215b`, but the VPS live checkout and
-service state are not verified. Local SSH reaches
+Current verification status: not proven. Confirm local/origin parity with
+`git rev-parse HEAD` and `git ls-remote origin refs/heads/main`; the VPS live
+checkout and service state remain unverified until `scripts/verify_vps_live.sh`
+passes. Local SSH reaches
 `204.168.202.167`, the ED25519 host fingerprint is stable at
 `SHA256:c4K1qg1rx5kH/706qNTdsHYsCDP/o5GIHW1GAHCjwgY`, but the VPS rejects the
 available local key before any deploy or verify command can run:
