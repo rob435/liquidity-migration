@@ -20,7 +20,8 @@ daily signal timer/service), refreshes both active systemd units, restarts both
 services, and prints the active systemd state plus non-secret entry-profile
 settings. The verify script is read-only and checks the same commit, strategy
 constants, Telegram chat ID, systemd unit settings, and active service state
-without pulling or restarting.
+without pulling or restarting; it also fails if retired legacy units are still
+active or enabled.
 Both scripts wait briefly before checking service activity so a process that
 dies immediately after startup does not produce a false pass. Override with
 `SYSTEMD_SETTLE_SECONDS=<seconds>` if needed.

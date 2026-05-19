@@ -88,6 +88,9 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
 
     assert "git pull" not in text
     assert "systemctl restart" not in text
+    assert "retired unit" in text
+    assert "model050426.service" in text
+    assert "model050426-bybit-demo-signal.timer" in text
     assert "liqmig_union_q40_h3_tp26_g100_qsqueeze" in text
     assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text
     assert "TELEGRAM_CHAT_ID" in text
