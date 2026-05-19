@@ -139,6 +139,8 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
 
     assert "/root/.ssh/authorized_keys" in text
     assert "AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp" in text
+    assert "AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX" in text
+    assert "GITHUB_ACTIONS_SSH_PUBLIC_KEY" in text
     assert "apt-get install -y ca-certificates git openssh-server python3 python3-venv python3-pip" in text
     assert "CLEAN_DIRTY_CHECKOUT" in text
     assert "SYSTEMD_SETTLE_SECONDS" in text

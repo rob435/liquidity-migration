@@ -24,17 +24,21 @@ dies immediately after startup does not produce a false pass. Override with
 `SYSTEMD_SETTLE_SECONDS=<seconds>` if needed.
 
 GitHub Actions can also run the same checked path from
-`.github/workflows/vps-deploy.yml`. Configure repository secret
-`VPS_SSH_PRIVATE_KEY` with an SSH private key accepted by the VPS, then run the
-`VPS Deploy` workflow manually in `verify` or `deploy` mode. Optional repository
-variables: `VPS_HOST`, `VPS_USER`, `VPS_ED25519_FINGERPRINT`, and
+`.github/workflows/vps-deploy.yml`. Repository secret `VPS_SSH_PRIVATE_KEY`
+holds the dedicated GitHub Actions deploy key; the console recovery script adds
+the matching public key to `/root/.ssh/authorized_keys`. Run the `VPS Deploy`
+workflow manually in `verify` or `deploy` mode, or let guarded `main` pushes to
+live-code/deploy paths trigger deployment. Optional repository variables:
+`VPS_HOST`, `VPS_USER`, `VPS_ED25519_FINGERPRINT`, and
 `EXPECTED_TELEGRAM_CHAT_ID`.
 
 If the VPS was rebuilt and SSH rejects the local key, add this public key back
-to the VPS through the provider console before running the deploy script:
+to the VPS through the provider console before running the deploy script. The
+recovery script also installs the GitHub Actions public deploy key shown below.
 
 ```text
 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp hetzner
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX model050426-github-actions-20260519
 ```
 
 On the VPS, the target file is normally `/root/.ssh/authorized_keys` for the
