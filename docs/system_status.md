@@ -366,8 +366,11 @@ Current verification status: not proven. Confirm local/origin parity with
 `git rev-parse HEAD` and `git ls-remote origin refs/heads/main`; the VPS live
 checkout and service state remain unverified until `scripts/verify_vps_live.sh`
 passes. The latest checked deploy-tooling commit at the time of this note was
-`0fd11d467177912128503dac63585029ecffa0d1`: CI passed, but the push-triggered
-`VPS Deploy` workflow still failed before any remote command ran. Local SSH reaches
+`787a3ae0502bce5397df5a137d3bbb50f2af7858`: CI passed, and the push-triggered
+`VPS Deploy` workflow proved the `VPS_SSH_PRIVATE_KEY` secret derives to the
+expected GitHub Actions deploy-key fingerprint
+`SHA256:oC3JWnYE9LTto1dHEkdT+puS1n4z1qm2EWjQ+QUEf0s`, then still failed before
+any remote command ran. Local SSH reaches
 `204.168.202.167`, the ED25519 host fingerprint is stable at
 `SHA256:c4K1qg1rx5kH/706qNTdsHYsCDP/o5GIHW1GAHCjwgY`, but the VPS rejects the
 available local key before any deploy or verify command can run:
@@ -380,9 +383,10 @@ The GitHub `VPS Deploy` workflow is configured to deploy on guarded `main`
 pushes. The first push-triggered run for `db9ade8` failed in `Configure SSH
 key`; after that, repository secret `VPS_SSH_PRIVATE_KEY` was set to a dedicated
 GitHub Actions deploy key. Later push-triggered and manual deploy runs pass
-`Configure SSH key` and `Verify VPS host key`, then fail in `Checked deploy`
-with the same `Permission denied (publickey,password)` response. The VPS does
-not accept the configured deploy keys yet. Run `scripts/print_vps_recovery_command.sh`
+`Configure SSH key`, the deploy-key fingerprint check, and `Verify VPS host
+key`, then fail in `Checked deploy` with the same
+`Permission denied (publickey,password)` response. The VPS does not accept the
+configured deploy keys yet. Run `scripts/print_vps_recovery_command.sh`
 from the local checkout and paste the pinned console command into the VPS
 provider console as root. That restores both the local public key and the GitHub
 Actions public key in `/root/.ssh/authorized_keys`; the full recovery command
