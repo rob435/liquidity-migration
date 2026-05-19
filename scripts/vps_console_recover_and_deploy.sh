@@ -18,7 +18,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 missing_prereqs=()
-for binary in git python3; do
+for binary in git python3 sshd; do
   if ! command -v "$binary" >/dev/null 2>&1; then
     missing_prereqs+=("$binary")
   fi
