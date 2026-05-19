@@ -365,36 +365,36 @@ service state: active / active
 Current verification status: not proven. Confirm local/origin parity with
 `git rev-parse HEAD` and `git ls-remote origin refs/heads/main`; the VPS live
 checkout and service state remain unverified until `scripts/verify_vps_live.sh`
-passes. Latest checked deploy evidence before final console recovery: commit
-`e67d06448a94c1d498f2ead09bdd5e2e10b79dda` is on `origin/main`, passed CI run
-`26072987760`, and manual `VPS Deploy` run `26073039056` proved the
-`VPS_SSH_PRIVATE_KEY` secret derives to the expected GitHub Actions deploy-key
-fingerprint `SHA256:oC3JWnYE9LTto1dHEkdT+puS1n4z1qm2EWjQ+QUEf0s`, then still
-failed before any remote command ran. Local SSH reaches
-`204.168.202.167`, the ED25519 host fingerprint is stable at
-`SHA256:c4K1qg1rx5kH/706qNTdsHYsCDP/o5GIHW1GAHCjwgY`, but the VPS rejects the
-available local key before any deploy or verify command can run:
+passes. The GitHub `VPS Deploy` workflow now also triggers when its own
+workflow file or VPS recovery/deploy helper scripts change, so recovery-tool
+edits exercise the same checked deploy path automatically. Latest checked
+deploy evidence before final console recovery: CI passes on the pushed `main`
+head, the `VPS_SSH_PRIVATE_KEY` repository secret derives to the expected
+GitHub Actions deploy-key fingerprint
+`SHA256:oC3JWnYE9LTto1dHEkdT+puS1n4z1qm2EWjQ+QUEf0s`, and the VPS ED25519 host
+fingerprint is stable at
+`SHA256:c4K1qg1rx5kH/706qNTdsHYsCDP/o5GIHW1GAHCjwgY`. Both local SSH and
+GitHub Actions deploy still fail before any remote command runs because the VPS
+rejects the available keys:
 
 ```text
 root@204.168.202.167: Permission denied (publickey,password).
 ```
 
-The GitHub `VPS Deploy` workflow is configured to deploy on guarded `main`
-pushes. The first push-triggered run for `db9ade8` failed in `Configure SSH
-key`; after that, repository secret `VPS_SSH_PRIVATE_KEY` was set to a dedicated
-GitHub Actions deploy key. Later push-triggered and manual deploy runs pass
-`Configure SSH key`, the deploy-key fingerprint check, and `Verify VPS host
-key`, then fail in `Checked deploy` with the same
-`Permission denied (publickey,password)` response. The VPS does not accept the
-configured deploy keys yet. Run `scripts/print_vps_recovery_command.sh`
-from the local checkout and paste the pinned console command into the VPS
-provider console as root. That restores both the local public key and the GitHub
-Actions public key in `/root/.ssh/authorized_keys` and prints both restored
-authorized-key fingerprints. The full recovery command also clones/repairs
-`/opt/MODEL050426`, saves tracked and untracked checkout dirt before cleaning
-when `CLEAN_DIRTY_CHECKOUT=1` is set, pins the expected commit, backs up
+The VPS does not accept the configured deploy keys yet, and no repository
+variable, environment, self-hosted runner, deployment object, or provider API
+secret is available as an alternate control path. Run
+`scripts/print_vps_recovery_command.sh` from the local checkout and paste the
+pinned console command into the VPS provider console as root. That restores
+both the local public key and the GitHub Actions public key in
+`/root/.ssh/authorized_keys` and prints both restored authorized-key
+fingerprints. The full recovery command also clones/repairs `/opt/MODEL050426`,
+saves tracked and untracked checkout dirt before cleaning when
+`CLEAN_DIRTY_CHECKOUT=1` is set, pins the expected commit, backs up
 `/etc/model050426/bybit-demo.env`, enforces `TELEGRAM_CHAT_ID=8388367561`,
-restarts the active services, and verifies the live state.
+restarts the active services, and verifies the live state. After SSH access is
+restored, `scripts/wait_for_vps_recovery_and_deploy.sh` can be left running
+locally to deploy and verify the current pinned commit automatically.
 
 The VPS entry service intentionally runs at `INTERVAL_SECONDS=60` and
 `STRATEGY_PROFILE=demo_relaxed`. Fast exits are still handled by the separate
