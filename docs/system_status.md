@@ -365,9 +365,9 @@ service state: active / active
 Current verification status: not proven. Confirm local/origin parity with
 `git rev-parse HEAD` and `git ls-remote origin refs/heads/main`; the VPS live
 checkout and service state remain unverified until `scripts/verify_vps_live.sh`
-passes. Latest local/GitHub evidence before final console recovery: commit
-`5894662eff2a639bb40d1da8e761d4c884a3c98d` is on `origin/main`, CI run
-`26072787882` passed, and manual `VPS Deploy` run `26072902385` proved the
+passes. Latest checked deploy evidence before final console recovery: deploy
+attempt commit `5894662eff2a639bb40d1da8e761d4c884a3c98d` passed CI run
+`26072787882`, and manual `VPS Deploy` run `26072902385` proved the
 `VPS_SSH_PRIVATE_KEY` secret derives to the expected GitHub Actions deploy-key
 fingerprint `SHA256:oC3JWnYE9LTto1dHEkdT+puS1n4z1qm2EWjQ+QUEf0s`, then still
 failed before any remote command ran. Local SSH reaches
