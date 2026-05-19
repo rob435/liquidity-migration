@@ -136,7 +136,14 @@ def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
     assert "github.event_name == 'workflow_dispatch' && inputs.mode == 'verify'" in text
     assert "VPS_SSH_PRIVATE_KEY" in text
     assert "GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT" in text
-    assert "SHA256:oC3JWnYE9LTto1dHEkdT+puS1n4z1qm2EWjQ+QUEf0s" in text
+    # Pin the CI deploy key fingerprint so accidental rotations or tampering
+    # of the workflow file get flagged. When you intentionally rotate the
+    # deploy key, update this constant in lockstep with the
+    # GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT line in
+    # .github/workflows/vps-deploy.yml AND the public key in
+    # /root/.ssh/authorized_keys on the VPS AND the VPS_SSH_PRIVATE_KEY
+    # secret in GitHub.
+    assert "SHA256:1cXHoJyRyTR2dx1Yp2ql4nRgA2VHFDDngkzJFcZp+c4" in text
     assert "ssh-keygen -y -f ~/.ssh/vps_deploy_key" in text
     assert "ssh-keygen -lf ~/.ssh/vps_deploy_key.pub -E sha256" in text
     assert "ssh-keyscan -T 10 -t ed25519" in text
