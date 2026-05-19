@@ -16,6 +16,16 @@ tests, checks the promoted TP26 and live TP21+FF6 strategy constants, verifies
 the Telegram chat ID, refreshes both systemd units, restarts both services, and
 prints the active systemd state plus non-secret entry-profile settings.
 
+If the VPS was rebuilt and SSH rejects the local key, add this public key back
+to the VPS through the provider console before running the deploy script:
+
+```text
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp hetzner
+```
+
+On the VPS, the target file is normally `/root/.ssh/authorized_keys` for the
+default `SSH_TARGET=root@204.168.202.167`.
+
 Manual install or refresh on the VPS:
 
 ```bash
