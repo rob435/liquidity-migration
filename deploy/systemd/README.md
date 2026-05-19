@@ -53,8 +53,9 @@ ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX
 On the VPS, the target file is normally `/root/.ssh/authorized_keys` for the
 default `SSH_TARGET=root@204.168.202.167`.
 
-If SSH is unavailable but provider console root access works, run the recovery
-deploy directly on the VPS:
+The current VPS address `204.168.202.167` resolves to Hetzner Online's
+Helsinki cloud network. If SSH is unavailable but the Hetzner Cloud web console
+opens the installed OS as root, run the recovery deploy directly on the VPS:
 
 ```bash
 scripts/print_vps_recovery_command.sh
@@ -68,12 +69,16 @@ EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/wait_for_vps_recovery_and_deploy
 
 Prefer the generated pinned command from `scripts/print_vps_recovery_command.sh`
 when possible; use `scripts/print_vps_recovery_command.sh --recommended-only`
-when you want only the full installed-OS command to paste into the provider
+when you want only the full installed-OS command to paste into the Hetzner Cloud
 console, or `scripts/print_vps_recovery_command.sh --rescue-only` when you want
-only the Hetzner Rescue SSH-key restore command. Do not paste a raw `main`
-branch `raw.githubusercontent.com` recovery URL unless you intentionally want a
-moving-target deploy; the generated command pins the exact commit and passes
-`EXPECTED_COMMIT` so the VPS refuses stale or unexpected code.
+only the Hetzner Rescue SSH-key restore command. If the installed OS console is
+unavailable, enable Hetzner Rescue for the server, boot into rescue root, run
+the rescue command, reboot back to the installed OS, and let the existing
+`wait-deploy` job or `scripts/wait_for_vps_recovery_and_deploy.sh` finish the
+checked deploy. Do not paste a raw `main` branch `raw.githubusercontent.com`
+recovery URL unless you intentionally want a moving-target deploy; the generated
+command pins the exact commit and passes `EXPECTED_COMMIT` so the VPS refuses
+stale or unexpected code.
 `scripts/vps_restore_ssh_access.sh` only restores root public-key SSH access,
 prints the restored authorized-key fingerprints, and exits, which is useful
 when you want this local checkout or GitHub Actions to run the checked deploy

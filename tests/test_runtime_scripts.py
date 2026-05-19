@@ -172,7 +172,10 @@ def test_vps_recovery_command_printer_uses_pinned_commit_url() -> None:
     assert "scripts/wait_for_vps_recovery_and_deploy.sh" in text
     assert "Wait locally for restored SSH access" in text
     assert "Hetzner Rescue SSH-key restore" in text
-    assert "Recommended full VPS provider console recovery" in text
+    assert "Recommended full Hetzner Cloud console recovery" in text
+    assert "Open the Hetzner Cloud web console for 204.168.202.167" in text
+    assert "enable" in text
+    assert "Hetzner Rescue" in text
     assert "Strict full recovery" in text
     assert "CLEAN_DIRTY_CHECKOUT=1" in text
     assert 'EXPECTED_COMMIT="$commit_sha" CLEAN_DIRTY_CHECKOUT=1 bash' in text

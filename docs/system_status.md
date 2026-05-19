@@ -384,10 +384,14 @@ root@204.168.202.167: Permission denied (publickey,password).
 
 The VPS does not accept the configured deploy keys yet, and no repository
 variable, environment, self-hosted runner, deployment object, or provider API
-secret is available as an alternate control path. Run
+secret is available as an alternate control path. RDAP/IP metadata identifies
+`204.168.202.167` as Hetzner Online's Helsinki cloud network. Run
 `scripts/print_vps_recovery_command.sh` from the local checkout and paste the
-pinned console command into the VPS provider console as root. That restores
-both the local public key and the GitHub Actions public key in
+pinned console command into the Hetzner Cloud web console as root. If the
+installed OS console is unavailable, boot Hetzner Rescue, run the generated
+`--rescue-only` command as rescue root, reboot back to the installed OS, and let
+the active `wait-deploy` job finish the checked deploy. That restores both the
+local public key and the GitHub Actions public key in
 `/root/.ssh/authorized_keys` and prints both restored authorized-key
 fingerprints. The full recovery command also clones/repairs `/opt/MODEL050426`,
 saves tracked and untracked checkout dirt before cleaning when
