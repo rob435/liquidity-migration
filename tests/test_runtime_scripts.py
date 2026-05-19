@@ -141,9 +141,11 @@ def test_vps_recovery_command_printer_uses_pinned_commit_url() -> None:
     assert "scripts/vps_restore_ssh_access.sh" in text
     assert "scripts/vps_console_recover_and_deploy.sh" in text
     assert "scripts/deploy_vps_live.sh" in text
-    assert 'EXPECTED_COMMIT="$commit_sha" bash' in text
+    assert "Recommended full VPS provider console recovery" in text
+    assert "Strict full recovery" in text
     assert "CLEAN_DIRTY_CHECKOUT=1" in text
     assert 'EXPECTED_COMMIT="$commit_sha" CLEAN_DIRTY_CHECKOUT=1 bash' in text
+    assert 'EXPECTED_COMMIT="$commit_sha" bash' in text
     assert "scripts/verify_vps_live.sh" in text
 
 
@@ -205,6 +207,8 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert 'mv "$REPO_DIR" "$backup_path"' in text
     assert "git reset --hard" in text
     assert "git clean -fd" in text
+    assert "git ls-files --others --exclude-standard -z" in text
+    assert 'tar --null -czf "$untracked_archive" --files-from "$untracked_nul"' in text
     assert "git clone" in text
     assert "git remote set-url" in text
     assert 'git checkout -B "$BRANCH" "$REMOTE/$BRANCH"' in text

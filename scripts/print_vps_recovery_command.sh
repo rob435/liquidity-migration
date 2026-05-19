@@ -19,13 +19,13 @@ curl -fsSL $ssh_script_url | bash
 EXPECTED_COMMIT="$commit_sha" scripts/deploy_vps_live.sh
 EXPECTED_COMMIT="$commit_sha" scripts/verify_vps_live.sh
 
-# VPS provider console recovery, as root:
-apt-get update && apt-get install -y ca-certificates curl
-curl -fsSL $script_url | EXPECTED_COMMIT="$commit_sha" bash
-
-# If /opt/MODEL050426 is dirty and should be reset after saving a patch:
+# Recommended full VPS provider console recovery, as root:
 apt-get update && apt-get install -y ca-certificates curl
 curl -fsSL $script_url | EXPECTED_COMMIT="$commit_sha" CLEAN_DIRTY_CHECKOUT=1 bash
+
+# Strict full recovery that refuses a dirty /opt/MODEL050426 checkout:
+apt-get update && apt-get install -y ca-certificates curl
+curl -fsSL $script_url | EXPECTED_COMMIT="$commit_sha" bash
 
 # Read-only verification from this checkout after full console recovery:
 EXPECTED_COMMIT="$commit_sha" scripts/verify_vps_live.sh

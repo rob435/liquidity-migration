@@ -118,6 +118,16 @@ if [ -n "$(git status --short)" ]; then
   backup_patch="$backup_dir/dirty-checkout-$(date -u +%Y%m%dT%H%M%SZ).patch"
   git diff > "$backup_patch"
   git status --short > "$backup_patch.status"
+  untracked_nul="$backup_patch.untracked-files.nul"
+  untracked_list="$backup_patch.untracked-files.txt"
+  untracked_archive="$backup_patch.untracked-files.tgz"
+  git ls-files --others --exclude-standard -z > "$untracked_nul"
+  if [ -s "$untracked_nul" ]; then
+    tr '\0' '\n' < "$untracked_nul" > "$untracked_list"
+    tar --null -czf "$untracked_archive" --files-from "$untracked_nul"
+  else
+    rm -f "$untracked_nul"
+  fi
   git reset --hard
   git clean -fd
   echo "Cleaned dirty checkout; saved diff/status under $backup_dir"

@@ -365,10 +365,9 @@ service state: active / active
 Current verification status: not proven. Confirm local/origin parity with
 `git rev-parse HEAD` and `git ls-remote origin refs/heads/main`; the VPS live
 checkout and service state remain unverified until `scripts/verify_vps_live.sh`
-passes. The latest checked deploy/recovery tooling commit at the time of this
-note was `5873be0f0c480c5514e35c1e00c2cb9397d53234`: CI passed, and the
-push-triggered `VPS Deploy` workflow proved the `VPS_SSH_PRIVATE_KEY` secret
-derives to the expected GitHub Actions deploy-key fingerprint
+passes. Latest local/GitHub evidence before final console recovery: CI passed,
+and the latest push-triggered `VPS Deploy` workflow proved the
+`VPS_SSH_PRIVATE_KEY` secret derives to the expected GitHub Actions deploy-key fingerprint
 `SHA256:oC3JWnYE9LTto1dHEkdT+puS1n4z1qm2EWjQ+QUEf0s`, then still failed before
 any remote command ran. Local SSH reaches
 `204.168.202.167`, the ED25519 host fingerprint is stable at
@@ -391,8 +390,9 @@ from the local checkout and paste the pinned console command into the VPS
 provider console as root. That restores both the local public key and the GitHub
 Actions public key in `/root/.ssh/authorized_keys` and prints both restored
 authorized-key fingerprints. The full recovery command also clones/repairs
-`/opt/MODEL050426`, pins the expected commit, restarts the active services, and
-verifies the live state.
+`/opt/MODEL050426`, saves tracked and untracked checkout dirt before cleaning
+when `CLEAN_DIRTY_CHECKOUT=1` is set, pins the expected commit, restarts the
+active services, and verifies the live state.
 
 The VPS entry service intentionally runs at `INTERVAL_SECONDS=60` and
 `STRATEGY_PROFILE=demo_relaxed`. Fast exits are still handled by the separate

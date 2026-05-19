@@ -62,7 +62,7 @@ EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/deploy_vps_live.sh
 EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/verify_vps_live.sh
 
 apt-get update && apt-get install -y ca-certificates curl
-curl -fsSL https://raw.githubusercontent.com/rob435/MODEL05042026/main/scripts/vps_console_recover_and_deploy.sh | bash
+curl -fsSL https://raw.githubusercontent.com/rob435/MODEL05042026/main/scripts/vps_console_recover_and_deploy.sh | CLEAN_DIRTY_CHECKOUT=1 bash
 ```
 
 Prefer the generated pinned command from `scripts/print_vps_recovery_command.sh`
@@ -81,11 +81,13 @@ console deploy to refuse anything except one pinned commit.
 The console script also waits before checking active service state; override
 with `SYSTEMD_SETTLE_SECONDS=<seconds>` if needed.
 
-If the existing `/opt/MODEL050426` checkout is dirty and you intend to overwrite
-local repo edits, prefix the command with `CLEAN_DIRTY_CHECKOUT=1`. The script
-saves a diff and status under `/root/model050426-deploy-backups` before running
-`git reset --hard` and `git clean -fd`. Ignored live data such as
-`data/bybit-demo-event` is not removed by that clean command.
+The generated full recovery command sets `CLEAN_DIRTY_CHECKOUT=1` by default.
+If the existing `/opt/MODEL050426` checkout is dirty, the script saves tracked
+diffs, status, and a tarball/list of untracked non-ignored files under
+`/root/model050426-deploy-backups` before running `git reset --hard` and
+`git clean -fd`. Ignored live data such as `data/bybit-demo-event` is not
+removed by that clean command. The generated strict command omits
+`CLEAN_DIRTY_CHECKOUT=1` and refuses a dirty checkout.
 
 Manual install or refresh on the VPS:
 
