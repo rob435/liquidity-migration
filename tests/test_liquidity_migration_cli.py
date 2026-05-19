@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from aggression_carry.config import DEFAULT_EXCLUDED_SYMBOLS
-from aggression_carry.cli import _print_event_risk_summary, build_parser, main
+from liquidity_migration.config import DEFAULT_EXCLUDED_SYMBOLS
+from liquidity_migration.cli import _print_event_risk_summary, build_parser, main
 
 
 def test_cli_fixture_pipeline_runs_volume_events(tmp_path: Path) -> None:
@@ -541,3 +541,41 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
     assert args.dryup_prior_volume_rank_max == 0.25
     assert args.dryup_prior_abs_day_return_max == 0.015
     assert args.allow_partial_pit is True
+
+
+def test_event_demo_timing_text_shows_top3_stages_and_parallel_workers() -> None:
+    """The demo cycle summary printed to journald must surface the top-3
+    slowest stages (not just the worst) so operators can spot the next
+    optimization target, and must show parallel_workers when the parallel
+    entry path engaged. Pins the format so log scrapers can parse it.
+    """
+    from liquidity_migration.cli import _event_demo_timing_text
+
+    cycle = {
+        "cycle_elapsed_ms": 4321.0,
+        "timing_klines_ms": 2500.0,
+        "timing_entries_ms": 800.0,
+        "timing_features_ms": 400.0,
+        "timing_universe_ms": 200.0,
+        "timing_exits_ms": 100.0,
+        "entries_parallel_workers": 4,
+    }
+    text = _event_demo_timing_text(cycle)
+    assert "elapsed=4.3s" in text
+    assert "slowest=klines:2.5s,entries:0.8s,features:0.4s" in text
+    assert "parallel_workers=4" in text
+
+
+def test_event_demo_timing_text_omits_parallel_workers_when_serial() -> None:
+    """Serial cycles (1 worker or none) must not print parallel_workers — keeps
+    the log line tight when there's nothing parallel to report."""
+    from liquidity_migration.cli import _event_demo_timing_text
+
+    cycle = {
+        "cycle_elapsed_ms": 1000.0,
+        "timing_klines_ms": 500.0,
+        "entries_parallel_workers": 1,
+    }
+    text = _event_demo_timing_text(cycle)
+    assert "parallel_workers" not in text
+    assert "slowest=klines:0.5s" in text

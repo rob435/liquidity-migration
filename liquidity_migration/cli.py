@@ -78,8 +78,13 @@ def _event_demo_timing_text(cycle: dict) -> str:
             continue
     parts = [f"elapsed={elapsed_ms / 1000.0:.1f}s"] if elapsed_ms > 0 else []
     if timing_items:
-        name, ms = max(timing_items, key=lambda item: item[1])
-        parts.append(f"slowest={name}:{ms / 1000.0:.1f}s")
+        # Top-3 slowest stages, descending. Makes it obvious from journalctl
+        # which phase to target next (klines vs entries vs reconciles).
+        top = sorted(timing_items, key=lambda item: item[1], reverse=True)[:3]
+        parts.append("slowest=" + ",".join(f"{name}:{ms / 1000.0:.1f}s" for name, ms in top))
+    workers = cycle.get("entries_parallel_workers")
+    if workers and int(workers) > 1:
+        parts.append(f"parallel_workers={int(workers)}")
     return (" ".join(parts) + " ") if parts else ""
 
 

@@ -6,9 +6,9 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from aggression_carry.cli import build_parser
-from aggression_carry.config import ResearchConfig
-from aggression_carry.event_demo import (
+from liquidity_migration.cli import build_parser
+from liquidity_migration.config import ResearchConfig
+from liquidity_migration.event_demo import (
     DEMO_RELAXED_STRATEGY_ID,
     EventDemoCycleConfig,
     EventRiskCycleConfig,
@@ -43,9 +43,9 @@ from aggression_carry.event_demo import (
     target_order_notional_pct_equity,
     wallet_equity_usdt,
 )
-from aggression_carry.storage import read_dataset, write_dataset
-from aggression_carry.volume_features import MS_PER_HOUR
-from aggression_carry.volume_events import EventScenario, VolumeEventResearchConfig
+from liquidity_migration.storage import read_dataset, write_dataset
+from liquidity_migration.volume_features import MS_PER_HOUR
+from liquidity_migration.volume_events import EventScenario, VolumeEventResearchConfig
 
 
 class FakeRiskClient:
@@ -54,7 +54,7 @@ class FakeRiskClient:
         *,
         positions: list[dict[str, str]] | None = None,
         fill_market_orders: bool = False,
-        fill_order_prefixes: tuple[str, ...] = ("agc-lm-",),
+        fill_order_prefixes: tuple[str, ...] = ("lm-lm-",),
         fill_qty: str = "1",
         fill_price: str = "100.5",
         fail_leverage_symbols: set[str] | None = None,
@@ -173,7 +173,7 @@ class MinimalEventMarket:
 
 def _patch_minimal_event_cycle(monkeypatch: pytest.MonkeyPatch, candidate: dict[str, object]) -> None:
     monkeypatch.setattr(
-        "aggression_carry.event_demo._build_demo_universe",
+        "liquidity_migration.event_demo._build_demo_universe",
         lambda *args, **kwargs: pl.DataFrame(
             [
                 {
@@ -187,7 +187,7 @@ def _patch_minimal_event_cycle(monkeypatch: pytest.MonkeyPatch, candidate: dict[
         ),
     )
     monkeypatch.setattr(
-        "aggression_carry.event_demo._download_recent_1h_klines",
+        "liquidity_migration.event_demo._download_recent_1h_klines",
         lambda *args, **kwargs: (
             pl.DataFrame(
                 [
@@ -205,11 +205,11 @@ def _patch_minimal_event_cycle(monkeypatch: pytest.MonkeyPatch, candidate: dict[
         ),
     )
     monkeypatch.setattr(
-        "aggression_carry.event_demo._build_demo_features",
+        "liquidity_migration.event_demo._build_demo_features",
         lambda klines, universe=None: pl.DataFrame([{"symbol": "AAAUSDT"}]),
     )
     monkeypatch.setattr(
-        "aggression_carry.event_demo.select_demo_entry_candidates",
+        "liquidity_migration.event_demo.select_demo_entry_candidates",
         lambda *args, **kwargs: ([candidate], {}),
     )
 
@@ -631,7 +631,7 @@ def test_event_demo_cycle_still_exits_when_wallet_snapshot_fails(
             }
         ],
         fill_market_orders=True,
-        fill_order_prefixes=("agc-ex-",),
+        fill_order_prefixes=("lm-ex-",),
         fail_wallet=True,
     )
     _patch_minimal_event_cycle(monkeypatch, candidate)
@@ -679,7 +679,7 @@ def test_event_demo_cycle_skips_entry_when_live_open_entry_order_exists(
             {
                 "symbol": "AAAUSDT",
                 "side": "Sell",
-                "orderLinkId": "agc-en-existing",
+                "orderLinkId": "lm-en-existing",
                 "orderStatus": "New",
                 "reduceOnly": False,
             }
@@ -751,13 +751,13 @@ def test_live_open_exit_order_filter_only_blocks_own_reduce_only_order() -> None
             },
             {
                 "symbol": "BBBUSDT",
-                "orderLinkId": "agc-ex-existing",
+                "orderLinkId": "lm-ex-existing",
                 "orderStatus": "New",
                 "reduceOnly": True,
             },
             {
                 "symbol": "CCCUSDT",
-                "orderLinkId": "agc-ex-filled",
+                "orderLinkId": "lm-ex-filled",
                 "orderStatus": "Filled",
                 "reduceOnly": True,
             },
@@ -856,7 +856,7 @@ def test_execute_entry_records_only_confirmed_fill() -> None:
             "take_profit_pct": 0.20,
         }
     ]
-    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-en-",))
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("lm-en-",))
 
     rows, orders = _execute_entries(
         candidates,
@@ -957,7 +957,7 @@ def test_execute_entry_records_order_error_and_continues() -> None:
     ]
     client = FakeRiskClient(
         fill_market_orders=True,
-        fill_order_prefixes=("agc-en-",),
+        fill_order_prefixes=("lm-en-",),
         fill_qty="1",
         fill_price="100",
         fail_order_symbols={"AAAUSDT"},
@@ -1162,7 +1162,7 @@ def test_telegram_notify_only_for_material_events(monkeypatch: pytest.MonkeyPatc
         sent.append(text)
         return enabled
 
-    monkeypatch.setattr("aggression_carry.event_demo.send_telegram_message", fake_send)
+    monkeypatch.setattr("liquidity_migration.event_demo.send_telegram_message", fake_send)
     quiet_payload = {
         "cycle": {
             "ts_ms": 1_700_000_000_000,
@@ -1984,7 +1984,7 @@ def test_event_exit_partial_fill_reduces_trade_qty_immediately() -> None:
             }
         ],
         all_trades,
-        trading_client=FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-ex-",), fill_qty="0.4"),
+        trading_client=FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("lm-ex-",), fill_qty="0.4"),
         demo=EventDemoCycleConfig(
             submit_orders=True,
             confirm_demo_orders=True,
@@ -2029,7 +2029,7 @@ def test_event_exit_closes_after_confirmed_fill() -> None:
             }
         ],
         all_trades,
-        trading_client=FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-ex-",)),
+        trading_client=FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("lm-ex-",)),
         demo=EventDemoCycleConfig(
             submit_orders=True,
             confirm_demo_orders=True,
@@ -2048,7 +2048,7 @@ def test_pending_entry_fill_reconciles_to_open_trade() -> None:
     orders = pl.DataFrame(
         [
             {
-                "order_link_id": "agc-en-pending",
+                "order_link_id": "lm-en-pending",
                 "ts_ms": 1_700_000_060_000,
                 "trade_id": "t1",
                 "symbol": "AAAUSDT",
@@ -2074,7 +2074,7 @@ def test_pending_entry_fill_reconciles_to_open_trade() -> None:
             }
         ]
     )
-    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-en-",))
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("lm-en-",))
 
     trades, order_updates = _reconcile_pending_order_fills(
         orders,
@@ -2096,7 +2096,7 @@ def test_pending_entry_fill_recomputes_protection_from_confirmed_fill() -> None:
     orders = pl.DataFrame(
         [
             {
-                "order_link_id": "agc-en-pending",
+                "order_link_id": "lm-en-pending",
                 "ts_ms": 1_700_000_060_000,
                 "trade_id": "t1",
                 "symbol": "AAAUSDT",
@@ -2124,7 +2124,7 @@ def test_pending_entry_fill_recomputes_protection_from_confirmed_fill() -> None:
             }
         ]
     )
-    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-en-",))
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("lm-en-",))
 
     trades, order_updates = _reconcile_pending_order_fills(
         orders,
@@ -2148,7 +2148,7 @@ def test_pending_fill_history_error_keeps_order_pending() -> None:
     orders = pl.DataFrame(
         [
             {
-                "order_link_id": "agc-en-pending",
+                "order_link_id": "lm-en-pending",
                 "ts_ms": 1_700_000_060_000,
                 "trade_id": "t1",
                 "symbol": "AAAUSDT",
@@ -2176,7 +2176,7 @@ def test_pending_fill_history_error_keeps_order_pending() -> None:
 
     assert trades == []
     assert order_updates[0]["status"] == "submitted_unconfirmed"
-    assert order_updates[0]["order_link_id"] == "agc-en-pending"
+    assert order_updates[0]["order_link_id"] == "lm-en-pending"
     assert "fill reconciliation failed" in order_updates[0]["error"]
     assert "history unavailable" in order_updates[0]["error"]
 
@@ -2185,7 +2185,7 @@ def test_stale_pending_order_fill_is_not_polled_forever() -> None:
     orders = pl.DataFrame(
         [
             {
-                "order_link_id": "agc-en-stale",
+                "order_link_id": "lm-en-stale",
                 "ts_ms": 1_700_000_000_000,
                 "trade_id": "t1",
                 "symbol": "AAAUSDT",
@@ -2196,7 +2196,7 @@ def test_stale_pending_order_fill_is_not_polled_forever() -> None:
             }
         ]
     )
-    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-en-",))
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("lm-en-",))
 
     trades, order_updates = _reconcile_pending_order_fills(
         orders,
@@ -2215,7 +2215,7 @@ def test_stale_pending_order_fill_reconciles_when_live_position_exists() -> None
     orders = pl.DataFrame(
         [
             {
-                "order_link_id": "agc-en-stale-live",
+                "order_link_id": "lm-en-stale-live",
                 "ts_ms": 1_700_000_000_000,
                 "trade_id": "t-live",
                 "symbol": "AAAUSDT",
@@ -2243,7 +2243,7 @@ def test_stale_pending_order_fill_reconciles_when_live_position_exists() -> None
             }
         ]
     )
-    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-en-",))
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("lm-en-",))
 
     trades, order_updates = _reconcile_pending_order_fills(
         orders,
@@ -2254,7 +2254,7 @@ def test_stale_pending_order_fill_reconciles_when_live_position_exists() -> None
         live_position_symbols={"AAAUSDT"},
     )
 
-    assert client.trade_history_calls == ["agc-en-stale-live"]
+    assert client.trade_history_calls == ["lm-en-stale-live"]
     assert trades[0]["status"] == "open"
     assert trades[0]["trade_id"] == "t-live"
     assert trades[0]["qty"] == "1"
@@ -2267,7 +2267,7 @@ def test_stale_pending_entry_terminalizes_only_when_exchange_flat() -> None:
     orders = pl.DataFrame(
         [
             {
-                "order_link_id": "agc-en-stale-flat",
+                "order_link_id": "lm-en-stale-flat",
                 "ts_ms": now_ms - PENDING_ORDER_GUARD_MS - 1,
                 "trade_id": "t-flat",
                 "symbol": "AAAUSDT",
@@ -2277,7 +2277,7 @@ def test_stale_pending_entry_terminalizes_only_when_exchange_flat() -> None:
                 "status": "submitted_unconfirmed",
             },
             {
-                "order_link_id": "agc-en-fresh",
+                "order_link_id": "lm-en-fresh",
                 "ts_ms": now_ms - PENDING_ORDER_GUARD_MS,
                 "trade_id": "t-fresh",
                 "symbol": "BBBUSDT",
@@ -2287,7 +2287,7 @@ def test_stale_pending_entry_terminalizes_only_when_exchange_flat() -> None:
                 "status": "submitted_unconfirmed",
             },
             {
-                "order_link_id": "agc-ex-stale",
+                "order_link_id": "lm-ex-stale",
                 "ts_ms": now_ms - PENDING_ORDER_GUARD_MS - 1,
                 "trade_id": "t-exit",
                 "symbol": "CCCUSDT",
@@ -2318,7 +2318,7 @@ def test_stale_pending_entry_terminalizes_only_when_exchange_flat() -> None:
         now_ms=now_ms,
     )
 
-    assert [row["order_link_id"] for row in updates] == ["agc-en-stale-flat"]
+    assert [row["order_link_id"] for row in updates] == ["lm-en-stale-flat"]
     assert updates[0]["status"] == "expired_unconfirmed"
     assert "flat Bybit position and no open order" in updates[0]["error"]
     assert blocked_by_position == []
@@ -2334,7 +2334,7 @@ def test_event_demo_cycle_terminalizes_stale_pending_entry_when_exchange_flat(
         pl.DataFrame(
             [
                 {
-                    "order_link_id": "agc-en-stale-flat",
+                    "order_link_id": "lm-en-stale-flat",
                     "ts_ms": now_ms - PENDING_ORDER_GUARD_MS - 1,
                     "trade_id": "t-flat",
                     "symbol": "AAAUSDT",
@@ -2365,7 +2365,7 @@ def test_event_demo_cycle_terminalizes_stale_pending_entry_when_exchange_flat(
         "take_profit_pct": 0.20,
     }
     _patch_minimal_event_cycle(monkeypatch, candidate)
-    monkeypatch.setattr("aggression_carry.event_demo.select_demo_entry_candidates", lambda *args, **kwargs: ([], {}))
+    monkeypatch.setattr("liquidity_migration.event_demo.select_demo_entry_candidates", lambda *args, **kwargs: ([], {}))
     client = FakeRiskClient()
 
     payload = run_event_demo_cycle(
@@ -2379,7 +2379,7 @@ def test_event_demo_cycle_terminalizes_stale_pending_entry_when_exchange_flat(
 
     orders = read_dataset(tmp_path, "event_demo_orders")
     assert client.trade_history_calls == []
-    assert orders.filter(pl.col("order_link_id") == "agc-en-stale-flat").select("status").item() == "expired_unconfirmed"
+    assert orders.filter(pl.col("order_link_id") == "lm-en-stale-flat").select("status").item() == "expired_unconfirmed"
     assert payload["cycle"]["stale_pending_entry_orders_terminalized"] == 1
 
 
@@ -2392,7 +2392,7 @@ def test_event_demo_cycle_reconciles_stale_pending_entry_when_position_live(
         pl.DataFrame(
             [
                 {
-                    "order_link_id": "agc-en-stale-live",
+                    "order_link_id": "lm-en-stale-live",
                     "ts_ms": now_ms - PENDING_ORDER_GUARD_MS - 1,
                     "trade_id": "t-live",
                     "symbol": "AAAUSDT",
@@ -2433,10 +2433,10 @@ def test_event_demo_cycle_reconciles_stale_pending_entry_when_position_live(
         "take_profit_pct": 0.20,
     }
     _patch_minimal_event_cycle(monkeypatch, candidate)
-    monkeypatch.setattr("aggression_carry.event_demo.select_demo_entry_candidates", lambda *args, **kwargs: ([], {}))
+    monkeypatch.setattr("liquidity_migration.event_demo.select_demo_entry_candidates", lambda *args, **kwargs: ([], {}))
     client = FakeRiskClient(
         fill_market_orders=True,
-        fill_order_prefixes=("agc-en-",),
+        fill_order_prefixes=("lm-en-",),
         positions=[
             {
                 "symbol": "AAAUSDT",
@@ -2462,11 +2462,11 @@ def test_event_demo_cycle_reconciles_stale_pending_entry_when_position_live(
     trades = read_dataset(tmp_path, "event_demo_trades")
     orders = read_dataset(tmp_path, "event_demo_orders")
     trade = trades.filter(pl.col("trade_id") == "t-live").to_dicts()[0]
-    assert client.trade_history_calls == ["agc-en-stale-live"]
+    assert client.trade_history_calls == ["lm-en-stale-live"]
     assert client.orders == []
     assert trade["status"] == "open"
     assert trade["qty"] == "1"
-    assert orders.filter(pl.col("order_link_id") == "agc-en-stale-live").select("status").item() == "filled"
+    assert orders.filter(pl.col("order_link_id") == "lm-en-stale-live").select("status").item() == "filled"
     assert payload["cycle"]["pending_entry_fills_reconciled"] == 1
     assert payload["cycle"]["stale_pending_entry_orders_terminalized"] == 0
 
@@ -2475,7 +2475,7 @@ def test_pending_exit_fill_reconciles_to_closed_trade() -> None:
     orders = pl.DataFrame(
         [
             {
-                "order_link_id": "agc-ex-pending",
+                "order_link_id": "lm-ex-pending",
                 "ts_ms": 1_700_000_060_000,
                 "trade_id": "t1",
                 "symbol": "AAAUSDT",
@@ -2507,7 +2507,7 @@ def test_pending_exit_fill_reconciles_to_closed_trade() -> None:
             }
         ]
     )
-    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-ex-",))
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("lm-ex-",))
 
     trades, order_updates = _reconcile_pending_order_fills(
         orders,
@@ -2529,7 +2529,7 @@ def test_pending_exit_partial_fill_reduces_open_trade_qty() -> None:
     orders = pl.DataFrame(
         [
             {
-                "order_link_id": "agc-ex-pending",
+                "order_link_id": "lm-ex-pending",
                 "ts_ms": 1_700_000_060_000,
                 "trade_id": "t1",
                 "symbol": "AAAUSDT",
@@ -2560,7 +2560,7 @@ def test_pending_exit_partial_fill_reduces_open_trade_qty() -> None:
             }
         ]
     )
-    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-ex-",), fill_qty="0.4")
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("lm-ex-",), fill_qty="0.4")
 
     trades, order_updates = _reconcile_pending_order_fills(
         orders,
@@ -2581,7 +2581,7 @@ def test_pending_entry_additional_fill_updates_open_trade_qty() -> None:
     orders = pl.DataFrame(
         [
             {
-                "order_link_id": "agc-en-pending",
+                "order_link_id": "lm-en-pending",
                 "ts_ms": 1_700_000_060_000,
                 "trade_id": "t1",
                 "symbol": "AAAUSDT",
@@ -2616,7 +2616,7 @@ def test_pending_entry_additional_fill_updates_open_trade_qty() -> None:
             }
         ]
     )
-    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-en-",), fill_qty="0.7")
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("lm-en-",), fill_qty="0.7")
 
     trades, order_updates = _reconcile_pending_order_fills(
         orders,
@@ -2749,7 +2749,7 @@ def test_risk_exit_partial_fill_reduces_trade_qty_immediately() -> None:
             }
         ],
         all_trades,
-        trading_client=FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-rx-",), fill_qty="0.4"),
+        trading_client=FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("lm-rx-",), fill_qty="0.4"),
         risk=EventRiskCycleConfig(submit_orders=True, confirm_demo_orders=True),
         now_ms=1_700_000_060_000,
         price_by_symbol={"AAAUSDT": 113.0},
@@ -2796,7 +2796,7 @@ def test_limit_chase_partial_fills_keep_child_order_quantities() -> None:
             }
         ],
         all_trades,
-        trading_client=FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-lc-",), fill_qty="0.4"),
+        trading_client=FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("lm-lc-",), fill_qty="0.4"),
         risk=EventRiskCycleConfig(
             submit_orders=True,
             confirm_demo_orders=True,
@@ -2847,7 +2847,7 @@ def test_risk_exit_records_filled_order_after_confirmed_fill() -> None:
             }
         ],
         all_trades,
-        trading_client=FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("agc-rx-",)),
+        trading_client=FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("lm-rx-",)),
         risk=EventRiskCycleConfig(submit_orders=True, confirm_demo_orders=True),
         now_ms=1_700_000_060_000,
         price_by_symbol={"AAAUSDT": 113.0},
@@ -2957,7 +2957,7 @@ def test_execute_entries_records_preflight_row_before_place_order(tmp_path: Path
     close it. This test pins the preflight write order: parquet must contain a
     PENDING_ORDER_STATUSES row keyed by order_link_id BEFORE place_order returns.
     """
-    from aggression_carry.event_demo import PENDING_ORDER_STATUSES, _write_order_rows
+    from liquidity_migration.event_demo import PENDING_ORDER_STATUSES, _write_order_rows
 
     observed_at_place_order: dict[str, pl.DataFrame] = {}
 
@@ -3014,7 +3014,7 @@ def test_execute_entries_records_preflight_row_before_place_order(tmp_path: Path
     assert preflight[0]["submit_mode"] == "preflight"
     assert preflight[0]["reduce_only"] is False
     assert preflight[0]["trade_id"] == "t-preflight"
-    assert preflight[0]["order_link_id"].startswith("agc-en-")
+    assert preflight[0]["order_link_id"].startswith("lm-en-")
 
     # Final post-loop write upserts the same order_link_id; status must transition
     # away from preflight so pending_entry_symbols drops it once the open trade
@@ -3051,7 +3051,7 @@ def test_execute_entries_parallel_path_runs_concurrent_candidates() -> None:
 
     class SlowClient(FakeRiskClient):
         def __init__(self):
-            super().__init__(fill_market_orders=True, fill_order_prefixes=("agc-en-",))
+            super().__init__(fill_market_orders=True, fill_order_prefixes=("lm-en-",))
 
         def place_order(self, **params):
             _time.sleep(0.1)
@@ -3120,6 +3120,252 @@ def test_execute_entries_falls_back_to_serial_when_submit_orders_off() -> None:
     )
     assert [o["symbol"] for o in orders] == ["BBB0USDT", "BBB1USDT", "BBB2USDT"]
     assert all(o["submit_mode"] == "dry_run" for o in orders)
+
+
+def test_execute_entries_parallel_records_preflight_for_every_candidate(tmp_path: Path) -> None:
+    """The preflight callback must fire once per candidate even on the parallel
+    path, and the resulting parquet must contain a preflight row for each
+    order_link_id BEFORE place_order returns for that candidate. Pins the
+    contract between fix #1 (close-on-open preflight) and speed #1 (parallel).
+    """
+    import threading as _threading
+    from liquidity_migration.event_demo import _write_order_rows
+
+    candidates = [
+        {
+            "trade_id": f"t-pp-{i}",
+            "symbol": f"PRE{i}USDT",
+            "side": "short",
+            "signal_ts_ms": 1_700_000_000_000 + i,
+            "stop_loss_pct": 0.12,
+            "take_profit_pct": 0.20,
+        }
+        for i in range(3)
+    ]
+
+    place_order_started = _threading.Event()
+
+    class PreflightAwareClient:
+        def __init__(self) -> None:
+            self.orders: list[dict[str, object]] = []
+
+        def set_leverage(self, **_kwargs) -> dict[str, str]:
+            return {}
+
+        def place_order(self, **params) -> dict[str, str]:
+            place_order_started.set()
+            self.orders.append(params)
+            return {"orderId": f"order-{params.get('orderLinkId')}"}
+
+        def get_trade_history(self, **_kwargs) -> list[dict[str, str]]:
+            return []
+
+    def _record_preflight(row: dict[str, object]) -> None:
+        _write_order_rows(tmp_path, pl.DataFrame([row], infer_schema_length=None))
+
+    rows, orders = _execute_entries(
+        candidates,
+        trading_client=None,
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+            max_concurrent_entries=3,
+        ),
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.20,
+        price_by_symbol={c["symbol"]: 100.0 for c in candidates},
+        contract_by_symbol={
+            c["symbol"]: {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}
+            for c in candidates
+        },
+        now_ms=1_700_000_060_000,
+        strategy_id=DEMO_RELAXED_STRATEGY_ID,
+        record_preflight=_record_preflight,
+        private_client_factory=PreflightAwareClient,
+    )
+
+    stored = read_dataset(tmp_path, "event_demo_orders").sort("order_link_id")
+    preflights = stored.filter(pl.col("submit_mode") == "preflight").to_dicts()
+    # Three preflights written, one per candidate.
+    assert len(preflights) == 3
+    assert {p["symbol"] for p in preflights} == {"PRE0USDT", "PRE1USDT", "PRE2USDT"}
+    assert all(p["status"] in {"submitted", "submitted_unconfirmed", "partial", "fallback_market"} for p in preflights)
+    # Final returned orders match candidate order (deterministic).
+    assert [o["symbol"] for o in orders] == ["PRE0USDT", "PRE1USDT", "PRE2USDT"]
+
+
+def test_execute_entries_parallel_isolates_place_order_failure(tmp_path: Path) -> None:
+    """One candidate failing place_order must NOT abort the cycle for the others
+    when running in parallel. Each ledgered as its own row with its own status.
+    """
+    candidates = [
+        {
+            "trade_id": f"t-iso-{i}",
+            "symbol": symbol,
+            "side": "short",
+            "signal_ts_ms": 1_700_000_000_000 + i,
+            "stop_loss_pct": 0.12,
+            "take_profit_pct": 0.20,
+        }
+        for i, symbol in enumerate(["BADUSDT", "OKUSDT"])
+    ]
+
+    class SelectiveClient(FakeRiskClient):
+        def __init__(self):
+            super().__init__(
+                fill_market_orders=True,
+                fill_order_prefixes=("lm-en-",),
+                fail_order_symbols={"BADUSDT"},
+            )
+
+    rows, orders = _execute_entries(
+        candidates,
+        trading_client=None,
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+            max_concurrent_entries=2,
+        ),
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.20,
+        price_by_symbol={c["symbol"]: 100.0 for c in candidates},
+        contract_by_symbol={
+            c["symbol"]: {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}
+            for c in candidates
+        },
+        now_ms=1_700_000_060_000,
+        strategy_id=DEMO_RELAXED_STRATEGY_ID,
+        private_client_factory=SelectiveClient,
+    )
+
+    by_symbol = {o["symbol"]: o for o in orders}
+    assert by_symbol["BADUSDT"]["status"] == "failed"
+    assert "place_order failed" in by_symbol["BADUSDT"]["error"]
+    assert by_symbol["OKUSDT"]["status"] in {"filled", "partial", "submitted_unconfirmed"}
+    assert by_symbol["OKUSDT"]["error"] == ""
+
+
+def test_execute_entries_parallel_isolates_set_leverage_failure(tmp_path: Path) -> None:
+    """Same isolation but for set_leverage failures: one candidate's leverage
+    rejection must not bleed into another worker's path."""
+    candidates = [
+        {
+            "trade_id": f"t-lev-{i}",
+            "symbol": symbol,
+            "side": "short",
+            "signal_ts_ms": 1_700_000_000_000 + i,
+            "stop_loss_pct": 0.12,
+            "take_profit_pct": 0.20,
+        }
+        for i, symbol in enumerate(["LEVBADUSDT", "LEVOKUSDT"])
+    ]
+
+    class LeverageFlakyClient(FakeRiskClient):
+        def __init__(self):
+            super().__init__(
+                fill_market_orders=True,
+                fill_order_prefixes=("lm-en-",),
+                fail_leverage_symbols={"LEVBADUSDT"},
+            )
+
+    rows, orders = _execute_entries(
+        candidates,
+        trading_client=None,
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+            max_concurrent_entries=2,
+        ),
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.20,
+        price_by_symbol={c["symbol"]: 100.0 for c in candidates},
+        contract_by_symbol={
+            c["symbol"]: {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}
+            for c in candidates
+        },
+        now_ms=1_700_000_060_000,
+        strategy_id=DEMO_RELAXED_STRATEGY_ID,
+        private_client_factory=LeverageFlakyClient,
+    )
+
+    by_symbol = {o["symbol"]: o for o in orders}
+    assert by_symbol["LEVBADUSDT"]["status"] == "failed"
+    assert "set_leverage failed" in by_symbol["LEVBADUSDT"]["error"]
+    assert by_symbol["LEVOKUSDT"]["status"] in {"filled", "partial", "submitted_unconfirmed"}
+
+
+def test_wait_for_execution_summary_fast_window_then_slow_interval() -> None:
+    """Until fast_poll_seconds elapses, polls happen every ~fast_poll_interval;
+    after, they fall back to poll_interval. Verify by counting calls in the
+    fast window and the slow window against a client that never returns a fill.
+    """
+    import time as _time
+    from liquidity_migration.event_demo import _wait_for_execution_summary
+
+    call_times: list[float] = []
+
+    class CountingClient:
+        def get_trade_history(self, *, symbol, order_link_id, limit=50):
+            call_times.append(_time.monotonic())
+            return []
+
+    started = _time.monotonic()
+    summary = _wait_for_execution_summary(
+        CountingClient(),
+        symbol="AAAUSDT",
+        order_link_id="lm-test-poll",
+        poll_seconds=0.6,
+        poll_interval_seconds=0.2,
+        fast_poll_interval_seconds=0.05,
+        fast_poll_seconds=0.3,
+    )
+    elapsed = _time.monotonic() - started
+
+    assert float(summary.get("qty") or 0.0) == 0.0, "no fills -> no qty at deadline"
+    # ~0.6 seconds total wallclock.
+    assert 0.55 < elapsed < 1.0, f"expected ~0.6s wallclock, got {elapsed:.3f}s"
+    # Fast window is 0.3s @ 0.05s = ~6 calls; slow window is 0.3s @ 0.2s = ~2 calls.
+    # Allow ±2 jitter for scheduler latency on macOS CI.
+    fast_window_calls = sum(1 for t in call_times if t - started < 0.3)
+    slow_window_calls = sum(1 for t in call_times if t - started >= 0.3)
+    assert 4 <= fast_window_calls <= 8, f"fast window expected 4-8 calls, got {fast_window_calls}"
+    assert 1 <= slow_window_calls <= 4, f"slow window expected 1-4 calls, got {slow_window_calls}"
+
+
+def test_wait_for_execution_summary_returns_immediately_on_fill() -> None:
+    """A fill landing on the first poll must return without burning the rest of
+    the poll budget."""
+    import time as _time
+    from liquidity_migration.event_demo import _wait_for_execution_summary
+
+    class InstantFillClient:
+        def get_trade_history(self, *, symbol, order_link_id, limit=50):
+            return [
+                {
+                    "execQty": "1",
+                    "execPrice": "100",
+                    "execValue": "100",
+                    "execFee": "0.1",
+                }
+            ]
+
+    started = _time.monotonic()
+    summary = _wait_for_execution_summary(
+        InstantFillClient(),
+        symbol="AAAUSDT",
+        order_link_id="lm-test-instant",
+        poll_seconds=5.0,
+        poll_interval_seconds=0.2,
+        fast_poll_interval_seconds=0.05,
+        fast_poll_seconds=0.5,
+    )
+    elapsed = _time.monotonic() - started
+
+    assert float(summary.get("qty") or 0.0) == 1.0
+    assert elapsed < 0.05, f"instant fill should return immediately, took {elapsed:.3f}s"
 
 
 def test_execute_entries_preflight_skipped_when_no_callback() -> None:

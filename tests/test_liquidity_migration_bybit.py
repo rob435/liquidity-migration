@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 from types import SimpleNamespace
 
-from aggression_carry import bybit
+from liquidity_migration import bybit
 
 
 def test_bybit_market_data_constructs_with_slotted_client(monkeypatch) -> None:
@@ -221,16 +221,16 @@ def test_bybit_private_client_wraps_order_and_trade_history(monkeypatch) -> None
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
 
     client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
-    orders = client.get_order_history(symbol="BTCUSDT", order_link_id="agc-link")
-    trades = client.get_trade_history(symbol="BTCUSDT", order_link_id="agc-link")
+    orders = client.get_order_history(symbol="BTCUSDT", order_link_id="lm-link")
+    trades = client.get_trade_history(symbol="BTCUSDT", order_link_id="lm-link")
 
     assert orders[0]["orderStatus"] == "Filled"
     assert trades[0]["execQty"] == "1"
     assert client._client.order_history_calls == [
-        {"category": "linear", "limit": 50, "symbol": "BTCUSDT", "orderLinkId": "agc-link"}
+        {"category": "linear", "limit": 50, "symbol": "BTCUSDT", "orderLinkId": "lm-link"}
     ]
     assert client._client.execution_calls == [
-        {"category": "linear", "limit": 50, "symbol": "BTCUSDT", "orderLinkId": "agc-link"}
+        {"category": "linear", "limit": 50, "symbol": "BTCUSDT", "orderLinkId": "lm-link"}
     ]
 
 
@@ -522,3 +522,87 @@ def test_bybit_market_data_routes_get_through_rate_limiter(monkeypatch) -> None:
 
     assert limiter.acquires == 2
     assert client._client.calls == 2
+
+
+def test_bybit_private_client_routes_call_through_rate_limiter(monkeypatch) -> None:
+    """BybitPrivateClient must acquire the shared rate limiter before every
+    pybit HTTP call on BOTH _call and _call_once paths. Mirrors the public-side
+    test. Without this, parallel place_orders bypass the budget that protects
+    against Bybit's per-account REST throttles.
+    """
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.calls = 0
+
+        def place_order(self, **_kwargs):
+            self.calls += 1
+            return {"retCode": 0, "result": {"orderId": "x"}}
+
+        def get_wallet_balance(self, **_kwargs):
+            self.calls += 1
+            return {"retCode": 0, "result": {"list": []}}
+
+    class RecordingLimiter:
+        def __init__(self) -> None:
+            self.acquires = 0
+
+        def acquire(self) -> None:
+            self.acquires += 1
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    limiter = RecordingLimiter()
+    client = bybit.BybitPrivateClient(
+        api_key="k",
+        api_secret="s",
+        demo=True,
+        rate_limiter=limiter,  # type: ignore[arg-type]
+    )
+
+    # place_order goes through _call_once (single-shot, no retries).
+    client.place_order(symbol="AAAUSDT", side="Buy", qty="1", orderType="Market", orderLinkId="lm-test-1")
+    # get_wallet_balance goes through _call (retry-capable).
+    client.get_wallet_balance()
+
+    assert limiter.acquires == 2
+    assert client._client.calls == 2
+
+
+def test_bybit_private_client_rate_limiter_acquires_each_retry(monkeypatch) -> None:
+    """When _call retries on a failed pybit call, each attempt must hit the
+    limiter — otherwise a tight retry burst escapes the budget that's there to
+    protect us.
+    """
+    attempt_counter = {"n": 0}
+
+    class FlakyHTTP:
+        def __init__(self, **kwargs):
+            pass
+
+        def get_wallet_balance(self, **_kwargs):
+            attempt_counter["n"] += 1
+            if attempt_counter["n"] < 2:
+                return {"retCode": 10006, "retMsg": "rate limit"}
+            return {"retCode": 0, "result": {"list": []}}
+
+    class RecordingLimiter:
+        def __init__(self) -> None:
+            self.acquires = 0
+
+        def acquire(self) -> None:
+            self.acquires += 1
+
+    monkeypatch.setattr(bybit, "HTTP", FlakyHTTP)
+    limiter = RecordingLimiter()
+    client = bybit.BybitPrivateClient(
+        api_key="k",
+        api_secret="s",
+        demo=True,
+        retries=3,
+        retry_sleep_seconds=0.0,
+        rate_limiter=limiter,  # type: ignore[arg-type]
+    )
+
+    client.get_wallet_balance()
+    assert attempt_counter["n"] == 2
+    assert limiter.acquires == 2

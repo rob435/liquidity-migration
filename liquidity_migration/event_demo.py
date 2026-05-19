@@ -316,8 +316,10 @@ def run_event_demo_cycle(
                 client.rate_limiter = shared_private_limiter
                 return client
             private_factory = _build_worker_private_client
+            entries_parallel_workers = min(demo.max_concurrent_entries, len(entry_candidates))
         else:
             private_factory = None
+            entries_parallel_workers = 1
         executed_entries, entry_order_rows = _execute_entries(
             entry_candidates,
             trading_client=trading_client,
@@ -380,6 +382,7 @@ def run_event_demo_cycle(
             "latest_feature_ts_ms": _max_int(features, "ts_ms"),
             "entry_candidates": len(entry_candidates),
             "entries_executed": len(executed_entries),
+            "entries_parallel_workers": entries_parallel_workers,
             "exit_candidates": len(exits),
             "exits_executed": len(executed_exits),
             "pending_order_fills_reconciled": pending_order_fills_reconciled,
@@ -586,6 +589,7 @@ def run_event_risk_cycle(
             "latest_feature_ts_ms": 0,
             "entry_candidates": 0,
             "entries_executed": 0,
+            "entries_parallel_workers": 1,
             "exit_candidates": len(exits),
             "exits_executed": len(executed_exits),
             "stop_repairs": len(repair_rows),
@@ -2232,7 +2236,7 @@ def _open_order_active(row: dict[str, Any]) -> bool:
 
 def _is_own_exit_order(row: dict[str, Any]) -> bool:
     link = str(row.get("orderLinkId") or row.get("order_link_id") or "")
-    return link.startswith(("agc-ex-", "agc-rx-", "agc-wx-", "agc-ux-"))
+    return link.startswith(("lm-ex-", "lm-rx-", "lm-wx-", "lm-ux-"))
 
 
 def _execute_exits(
@@ -3696,13 +3700,13 @@ def _trade_id(scenario: EventScenario, *, symbol: str, signal_ts_ms: int) -> str
 def _order_link_id(prefix: str, *, symbol: str, signal_ts_ms: int) -> str:
     base = symbol.replace("USDT", "")[-10:]
     encoded_ts = _base36(max(signal_ts_ms // 1000, 0))
-    return f"agc-{prefix}-{base}-{encoded_ts}"[:36]
+    return f"lm-{prefix}-{base}-{encoded_ts}"[:36]
 
 
 def _risk_order_link_id(prefix: str, *, symbol: str, ts_ms: int, attempt: int) -> str:
     base = symbol.replace("USDT", "")[-8:]
     encoded_ts = _base36(max(ts_ms // 1000, 0))
-    return f"agc-{prefix}-{base}-{encoded_ts}-{attempt}"[:36]
+    return f"lm-{prefix}-{base}-{encoded_ts}-{attempt}"[:36]
 
 
 def _base36(value: int) -> str:
