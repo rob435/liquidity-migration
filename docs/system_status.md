@@ -391,8 +391,9 @@ provider console as root. That restores both the local public key and the GitHub
 Actions public key in `/root/.ssh/authorized_keys` and prints both restored
 authorized-key fingerprints. The full recovery command also clones/repairs
 `/opt/MODEL050426`, saves tracked and untracked checkout dirt before cleaning
-when `CLEAN_DIRTY_CHECKOUT=1` is set, pins the expected commit, restarts the
-active services, and verifies the live state.
+when `CLEAN_DIRTY_CHECKOUT=1` is set, pins the expected commit, backs up
+`/etc/model050426/bybit-demo.env`, enforces `TELEGRAM_CHAT_ID=8388367561`,
+restarts the active services, and verifies the live state.
 
 The VPS entry service intentionally runs at `INTERVAL_SECONDS=60` and
 `STRATEGY_PROFILE=demo_relaxed`. Fast exits are still handled by the separate

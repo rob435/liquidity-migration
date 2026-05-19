@@ -73,6 +73,8 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "demo.take_profit_pcts == (0.21,)" in text
     assert "demo.failed_fade_exit_hours == 6" in text
     assert "TELEGRAM_CHAT_ID" in text
+    assert "bybit-demo.env.backup" in text
+    assert "sed -i \"s/^TELEGRAM_CHAT_ID=" in text
     assert "SYSTEMD_SETTLE_SECONDS" in text
     assert "systemctl disable --now" in text
     assert "model050426.service" in text
@@ -188,6 +190,8 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "apt-get install -y ca-certificates git openssh-server python3 python3-venv python3-pip" in text
     assert "CLEAN_DIRTY_CHECKOUT" in text
     assert "SYSTEMD_SETTLE_SECONDS" in text
+    assert "bybit-demo.env.backup" in text
+    assert "sed -i \"s/^TELEGRAM_CHAT_ID=" in text
     assert "99-model050426-recovery.conf" in text
     assert "chmod 700 /root" in text
     assert "usermod -U root" in text

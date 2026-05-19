@@ -14,11 +14,12 @@ EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/verify_vps_live.sh
 
 The script refuses a dirty VPS checkout, forces the configured remote URL,
 resets the deploy branch to `origin/main`, runs focused runtime tests, checks
-the promoted TP26 and live TP21+FF6 strategy constants, verifies the Telegram
-chat ID, disables retired legacy units (`model050426.service` plus the old
-daily signal timer/service), refreshes both active systemd units, restarts both
-services, and prints the active systemd state plus non-secret entry-profile
-settings. The verify script is read-only and checks the same commit, strategy
+the promoted TP26 and live TP21+FF6 strategy constants, backs up
+`/etc/model050426/bybit-demo.env`, enforces the expected Telegram chat ID,
+disables retired legacy units (`model050426.service` plus the old daily signal
+timer/service), refreshes both active systemd units, restarts both services, and
+prints the active systemd state plus non-secret entry-profile settings. The
+verify script is read-only and checks the same commit, strategy
 constants, Telegram chat ID, systemd unit settings, and active service state
 without pulling or restarting; it also fails if retired legacy units are still
 active or enabled.
@@ -108,9 +109,11 @@ Required secrets live outside git in:
 ```
 
 That environment file must define the Bybit demo API credentials and Telegram
-credentials. Telegram is enabled for material alerts only: entries, exits,
-position reconciliation, or position-report errors. Quiet no-trade cycles still
-write local reports but must not notify. The services submit demo orders only.
+credentials. Deploy/recovery backs it up and sets only `TELEGRAM_CHAT_ID` to the
+expected target, preserving the API secrets and bot token. Telegram is enabled
+for material alerts only: entries, exits, position reconciliation, or
+position-report errors. Quiet no-trade cycles still write local reports but must
+not notify. The services submit demo orders only.
 The entry service currently uses `STRATEGY_PROFILE=demo_relaxed`, a higher-frequency
 test-only profile with separate full-PIT evidence in `docs/system_status.md`.
 It shares the promoted strategy's conservative `promoted_quality_squeeze` entry

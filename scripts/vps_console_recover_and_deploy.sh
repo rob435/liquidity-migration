@@ -186,6 +186,13 @@ if [ ! -f /etc/model050426/bybit-demo.env ]; then
   exit 1
 fi
 
+cp /etc/model050426/bybit-demo.env "/etc/model050426/bybit-demo.env.backup.$(date -u +%Y%m%dT%H%M%SZ)"
+if grep -Eq '^TELEGRAM_CHAT_ID=' /etc/model050426/bybit-demo.env; then
+  sed -i "s/^TELEGRAM_CHAT_ID=.*/TELEGRAM_CHAT_ID=$EXPECTED_TELEGRAM_CHAT_ID/" /etc/model050426/bybit-demo.env
+else
+  printf '\nTELEGRAM_CHAT_ID=%s\n' "$EXPECTED_TELEGRAM_CHAT_ID" >> /etc/model050426/bybit-demo.env
+fi
+
 set -a
 . /etc/model050426/bybit-demo.env
 set +a
