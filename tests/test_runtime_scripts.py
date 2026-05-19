@@ -112,6 +112,19 @@ def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
     assert "EXPECTED_TELEGRAM_CHAT_ID" in text
 
 
+def test_vps_recovery_command_printer_uses_pinned_commit_url() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    text = (repo / "scripts" / "print_vps_recovery_command.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "git rev-parse" in text
+    assert "raw.githubusercontent.com/rob435/MODEL05042026" in text
+    assert "scripts/vps_console_recover_and_deploy.sh" in text
+    assert "CLEAN_DIRTY_CHECKOUT=1" in text
+    assert "scripts/verify_vps_live.sh" in text
+
+
 def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     repo = Path(__file__).resolve().parents[1]
     text = (repo / "scripts" / "vps_console_recover_and_deploy.sh").read_text(
