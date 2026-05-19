@@ -86,9 +86,13 @@ if [ -n "$(git status --short)" ]; then
   echo "Cleaned dirty checkout; saved diff/status under $backup_dir"
 fi
 
+if git remote get-url "$REMOTE" >/dev/null 2>&1; then
+  git remote set-url "$REMOTE" "$REPO_URL"
+else
+  git remote add "$REMOTE" "$REPO_URL"
+fi
 git fetch "$REMOTE" "$BRANCH"
-git checkout "$BRANCH"
-git pull --ff-only "$REMOTE" "$BRANCH"
+git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
 
 if [ -n "$EXPECTED_COMMIT" ]; then
   actual_commit="$(git rev-parse HEAD)"

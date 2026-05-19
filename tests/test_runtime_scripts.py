@@ -66,7 +66,8 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
 
     assert "EXPECTED_COMMIT" in text
     assert "BatchMode=yes" in text
-    assert "git pull --ff-only" in text
+    assert "git remote set-url" in text
+    assert 'git checkout -B "$BRANCH" "$REMOTE/$BRANCH"' in text
     assert "liqmig_union_q40_h3_tp26_g100_qsqueeze" in text
     assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text
     assert "demo.take_profit_pcts == (0.21,)" in text
@@ -152,7 +153,8 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "git reset --hard" in text
     assert "git clean -fd" in text
     assert "git clone" in text
-    assert "git pull --ff-only" in text
+    assert "git remote set-url" in text
+    assert 'git checkout -B "$BRANCH" "$REMOTE/$BRANCH"' in text
     assert "pip install -e \".[dev]\"" in text
     assert "liqmig_union_q40_h3_tp26_g100_qsqueeze" in text
     assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text

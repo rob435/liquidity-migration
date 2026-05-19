@@ -3,6 +3,7 @@ set -euo pipefail
 
 SSH_TARGET="${SSH_TARGET:-root@204.168.202.167}"
 SSH_OPTS="${SSH_OPTS:--o BatchMode=yes -o ConnectTimeout=10}"
+REPO_URL="${REPO_URL:-https://github.com/rob435/MODEL05042026.git}"
 REPO_DIR="${REPO_DIR:-/opt/MODEL050426}"
 REMOTE="${REMOTE:-origin}"
 BRANCH="${BRANCH:-main}"
@@ -12,7 +13,7 @@ SYSTEMD_SETTLE_SECONDS="${SYSTEMD_SETTLE_SECONDS:-15}"
 
 # shellcheck disable=SC2086
 ssh $SSH_OPTS "$SSH_TARGET" \
-  "REPO_DIR='$REPO_DIR' REMOTE='$REMOTE' BRANCH='$BRANCH' EXPECTED_COMMIT='$EXPECTED_COMMIT' EXPECTED_TELEGRAM_CHAT_ID='$EXPECTED_TELEGRAM_CHAT_ID' SYSTEMD_SETTLE_SECONDS='$SYSTEMD_SETTLE_SECONDS' bash -s" <<'REMOTE_SCRIPT'
+  "REPO_URL='$REPO_URL' REPO_DIR='$REPO_DIR' REMOTE='$REMOTE' BRANCH='$BRANCH' EXPECTED_COMMIT='$EXPECTED_COMMIT' EXPECTED_TELEGRAM_CHAT_ID='$EXPECTED_TELEGRAM_CHAT_ID' SYSTEMD_SETTLE_SECONDS='$SYSTEMD_SETTLE_SECONDS' bash -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 cd "$REPO_DIR"
@@ -23,9 +24,13 @@ if [ -n "$(git status --short)" ]; then
   exit 1
 fi
 
+if git remote get-url "$REMOTE" >/dev/null 2>&1; then
+  git remote set-url "$REMOTE" "$REPO_URL"
+else
+  git remote add "$REMOTE" "$REPO_URL"
+fi
 git fetch "$REMOTE" "$BRANCH"
-git checkout "$BRANCH"
-git pull --ff-only "$REMOTE" "$BRANCH"
+git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
 
 if [ -n "$EXPECTED_COMMIT" ]; then
   actual_commit="$(git rev-parse HEAD)"

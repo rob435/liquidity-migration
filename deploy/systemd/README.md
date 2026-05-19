@@ -12,13 +12,13 @@ EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/deploy_vps_live.sh
 EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/verify_vps_live.sh
 ```
 
-The script refuses a dirty VPS checkout, pulls `main`, runs focused runtime
-tests, checks the promoted TP26 and live TP21+FF6 strategy constants, verifies
-the Telegram chat ID, refreshes both systemd units, restarts both services, and
-prints the active systemd state plus non-secret entry-profile settings. The
-verify script is read-only and checks the same commit, strategy constants,
-Telegram chat ID, systemd unit settings, and active service state without
-pulling or restarting.
+The script refuses a dirty VPS checkout, forces the configured remote URL,
+resets the deploy branch to `origin/main`, runs focused runtime tests, checks
+the promoted TP26 and live TP21+FF6 strategy constants, verifies the Telegram
+chat ID, refreshes both systemd units, restarts both services, and prints the
+active systemd state plus non-secret entry-profile settings. The verify script
+is read-only and checks the same commit, strategy constants, Telegram chat ID,
+systemd unit settings, and active service state without pulling or restarting.
 Both scripts wait briefly before checking service activity so a process that
 dies immediately after startup does not produce a false pass. Override with
 `SYSTEMD_SETTLE_SECONDS=<seconds>` if needed.
@@ -55,8 +55,9 @@ curl -fsSL https://raw.githubusercontent.com/rob435/MODEL05042026/main/scripts/v
 ```
 
 Prefer the generated pinned command from `scripts/print_vps_recovery_command.sh`
-when possible. The console recovery restores the public key, clones/pulls
-`/opt/MODEL050426`, builds the local venv if needed, installs missing Ubuntu
+when possible. The console recovery restores the public key, clones or repairs
+`/opt/MODEL050426`, forces the configured remote URL, resets the deploy branch
+to `origin/main`, builds the local venv if needed, installs missing Ubuntu
 deploy prerequisites, restores root public-key SSH access, validates the
 promoted TP26 and live TP21+FF6 constants, refreshes systemd, restarts both live
 services, and prints non-secret service state. Set `EXPECTED_COMMIT=<full sha>`
