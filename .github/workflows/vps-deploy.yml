@@ -1,6 +1,14 @@
 name: VPS Deploy
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/vps-deploy.yml"
+      - "aggression_carry/**"
+      - "deploy/systemd/**"
+      - "scripts/**"
   workflow_dispatch:
     inputs:
       mode:
@@ -41,7 +49,7 @@ jobs:
           chmod 600 ~/.ssh/known_hosts
 
       - name: Checked deploy
-        if: inputs.mode == 'deploy'
+        if: github.event_name == 'push' || inputs.mode == 'deploy'
         run: |
           EXPECTED_COMMIT="$GITHUB_SHA" \
           EXPECTED_TELEGRAM_CHAT_ID="$EXPECTED_TELEGRAM_CHAT_ID" \
@@ -50,7 +58,7 @@ jobs:
           scripts/deploy_vps_live.sh
 
       - name: Read-only verify
-        if: inputs.mode == 'verify'
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'verify'
         run: |
           EXPECTED_COMMIT="$GITHUB_SHA" \
           EXPECTED_TELEGRAM_CHAT_ID="$EXPECTED_TELEGRAM_CHAT_ID" \
