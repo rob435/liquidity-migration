@@ -72,6 +72,7 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "demo.take_profit_pcts == (0.21,)" in text
     assert "demo.failed_fade_exit_hours == 6" in text
     assert "TELEGRAM_CHAT_ID" in text
+    assert "SYSTEMD_SETTLE_SECONDS" in text
     assert "model050426-bybit-demo.service" in text
     assert "model050426-bybit-risk.service" in text
     assert "--property=Environment" not in text
@@ -86,6 +87,7 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "liqmig_union_q40_h3_tp26_g100_qsqueeze" in text
     assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text
     assert "TELEGRAM_CHAT_ID" in text
+    assert "SYSTEMD_SETTLE_SECONDS" in text
     assert "Environment=STRATEGY_PROFILE=demo_relaxed" in text
     assert "Environment=INTERVAL_SECONDS=60" in text
     assert "Environment=UNIVERSE_RANK_END=300" in text
@@ -120,6 +122,7 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp" in text
     assert "apt-get install -y ca-certificates git python3 python3-venv python3-pip" in text
     assert "CLEAN_DIRTY_CHECKOUT" in text
+    assert "SYSTEMD_SETTLE_SECONDS" in text
     assert "model050426-deploy-backups" in text
     assert "git reset --hard" in text
     assert "git clean -fd" in text

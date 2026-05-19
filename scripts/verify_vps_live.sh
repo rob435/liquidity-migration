@@ -6,10 +6,11 @@ SSH_OPTS="${SSH_OPTS:--o BatchMode=yes -o ConnectTimeout=10}"
 REPO_DIR="${REPO_DIR:-/opt/MODEL050426}"
 EXPECTED_COMMIT="${EXPECTED_COMMIT:-}"
 EXPECTED_TELEGRAM_CHAT_ID="${EXPECTED_TELEGRAM_CHAT_ID:-8388367561}"
+SYSTEMD_SETTLE_SECONDS="${SYSTEMD_SETTLE_SECONDS:-5}"
 
 # shellcheck disable=SC2086
 ssh $SSH_OPTS "$SSH_TARGET" \
-  "REPO_DIR='$REPO_DIR' EXPECTED_COMMIT='$EXPECTED_COMMIT' EXPECTED_TELEGRAM_CHAT_ID='$EXPECTED_TELEGRAM_CHAT_ID' bash -s" <<'REMOTE_SCRIPT'
+  "REPO_DIR='$REPO_DIR' EXPECTED_COMMIT='$EXPECTED_COMMIT' EXPECTED_TELEGRAM_CHAT_ID='$EXPECTED_TELEGRAM_CHAT_ID' SYSTEMD_SETTLE_SECONDS='$SYSTEMD_SETTLE_SECONDS' bash -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 cd "$REPO_DIR"
@@ -66,6 +67,11 @@ fi
 
 systemctl is-enabled --quiet model050426-bybit-demo.service
 systemctl is-enabled --quiet model050426-bybit-risk.service
+
+if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then
+  sleep "$SYSTEMD_SETTLE_SECONDS"
+fi
+
 systemctl is-active --quiet model050426-bybit-demo.service
 systemctl is-active --quiet model050426-bybit-risk.service
 

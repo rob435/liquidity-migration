@@ -9,6 +9,7 @@ EXPECTED_COMMIT="${EXPECTED_COMMIT:-}"
 EXPECTED_TELEGRAM_CHAT_ID="${EXPECTED_TELEGRAM_CHAT_ID:-8388367561}"
 SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp hetzner}"
 CLEAN_DIRTY_CHECKOUT="${CLEAN_DIRTY_CHECKOUT:-0}"
+SYSTEMD_SETTLE_SECONDS="${SYSTEMD_SETTLE_SECONDS:-15}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this from the VPS provider console as root." >&2
@@ -130,6 +131,10 @@ systemctl enable model050426-bybit-demo.service
 systemctl enable model050426-bybit-risk.service
 systemctl restart model050426-bybit-demo.service
 systemctl restart model050426-bybit-risk.service
+
+if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then
+  sleep "$SYSTEMD_SETTLE_SECONDS"
+fi
 
 systemctl is-active --quiet model050426-bybit-demo.service
 systemctl is-active --quiet model050426-bybit-risk.service

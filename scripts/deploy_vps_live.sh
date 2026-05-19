@@ -8,10 +8,11 @@ REMOTE="${REMOTE:-origin}"
 BRANCH="${BRANCH:-main}"
 EXPECTED_COMMIT="${EXPECTED_COMMIT:-}"
 EXPECTED_TELEGRAM_CHAT_ID="${EXPECTED_TELEGRAM_CHAT_ID:-8388367561}"
+SYSTEMD_SETTLE_SECONDS="${SYSTEMD_SETTLE_SECONDS:-15}"
 
 # shellcheck disable=SC2086
 ssh $SSH_OPTS "$SSH_TARGET" \
-  "REPO_DIR='$REPO_DIR' REMOTE='$REMOTE' BRANCH='$BRANCH' EXPECTED_COMMIT='$EXPECTED_COMMIT' EXPECTED_TELEGRAM_CHAT_ID='$EXPECTED_TELEGRAM_CHAT_ID' bash -s" <<'REMOTE_SCRIPT'
+  "REPO_DIR='$REPO_DIR' REMOTE='$REMOTE' BRANCH='$BRANCH' EXPECTED_COMMIT='$EXPECTED_COMMIT' EXPECTED_TELEGRAM_CHAT_ID='$EXPECTED_TELEGRAM_CHAT_ID' SYSTEMD_SETTLE_SECONDS='$SYSTEMD_SETTLE_SECONDS' bash -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
 
 cd "$REPO_DIR"
@@ -86,6 +87,10 @@ systemctl enable model050426-bybit-demo.service
 systemctl enable model050426-bybit-risk.service
 systemctl restart model050426-bybit-demo.service
 systemctl restart model050426-bybit-risk.service
+
+if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then
+  sleep "$SYSTEMD_SETTLE_SECONDS"
+fi
 
 systemctl is-active --quiet model050426-bybit-demo.service
 systemctl is-active --quiet model050426-bybit-risk.service
