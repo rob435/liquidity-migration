@@ -15,6 +15,10 @@ cat <<EOF
 apt-get update && apt-get install -y ca-certificates curl
 curl -fsSL $ssh_script_url | bash
 
+# Checked deploy from this checkout after SSH-only recovery:
+EXPECTED_COMMIT="$commit_sha" scripts/deploy_vps_live.sh
+EXPECTED_COMMIT="$commit_sha" scripts/verify_vps_live.sh
+
 # VPS provider console recovery, as root:
 apt-get update && apt-get install -y ca-certificates curl
 curl -fsSL $script_url | EXPECTED_COMMIT="$commit_sha" bash
@@ -23,6 +27,6 @@ curl -fsSL $script_url | EXPECTED_COMMIT="$commit_sha" bash
 apt-get update && apt-get install -y ca-certificates curl
 curl -fsSL $script_url | EXPECTED_COMMIT="$commit_sha" CLEAN_DIRTY_CHECKOUT=1 bash
 
-# Read-only verification from this checkout after SSH is restored:
+# Read-only verification from this checkout after full console recovery:
 EXPECTED_COMMIT="$commit_sha" scripts/verify_vps_live.sh
 EOF

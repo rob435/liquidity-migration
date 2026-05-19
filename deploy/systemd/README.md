@@ -56,6 +56,9 @@ scripts/print_vps_recovery_command.sh
 apt-get update && apt-get install -y ca-certificates curl
 curl -fsSL https://raw.githubusercontent.com/rob435/MODEL05042026/main/scripts/vps_restore_ssh_access.sh | bash
 
+EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/deploy_vps_live.sh
+EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/verify_vps_live.sh
+
 apt-get update && apt-get install -y ca-certificates curl
 curl -fsSL https://raw.githubusercontent.com/rob435/MODEL05042026/main/scripts/vps_console_recover_and_deploy.sh | bash
 ```
