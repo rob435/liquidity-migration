@@ -27,7 +27,7 @@ if [ "${#missing_prereqs[@]}" -gt 0 ] || ! python3 -m venv --help >/dev/null 2>&
   if command -v apt-get >/dev/null 2>&1; then
     export DEBIAN_FRONTEND=noninteractive
     apt-get update
-    apt-get install -y ca-certificates git python3 python3-venv python3-pip
+    apt-get install -y ca-certificates git openssh-server python3 python3-venv python3-pip
   else
     echo "Missing deploy prerequisites and apt-get is unavailable: ${missing_prereqs[*]:-python3-venv}" >&2
     exit 1
@@ -40,6 +40,23 @@ touch /root/.ssh/authorized_keys
 chmod 600 /root/.ssh/authorized_keys
 if ! grep -Fxq "$SSH_PUBLIC_KEY" /root/.ssh/authorized_keys; then
   printf '%s\n' "$SSH_PUBLIC_KEY" >> /root/.ssh/authorized_keys
+fi
+chown -R root:root /root/.ssh
+
+if [ -d /etc/ssh/sshd_config.d ]; then
+  cat >/etc/ssh/sshd_config.d/99-model050426-recovery.conf <<'SSH_CONFIG'
+PubkeyAuthentication yes
+PermitRootLogin prohibit-password
+AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2
+SSH_CONFIG
+fi
+if command -v sshd >/dev/null 2>&1; then
+  sshd -t
+fi
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl restart ssh.service || systemctl restart sshd.service || true
+else
+  service ssh restart || service sshd restart || true
 fi
 
 if [ ! -d "$REPO_DIR/.git" ]; then

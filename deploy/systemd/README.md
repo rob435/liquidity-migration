@@ -49,11 +49,11 @@ curl -fsSL https://raw.githubusercontent.com/rob435/MODEL05042026/main/scripts/v
 ```
 
 That restores the public key, clones/pulls `/opt/MODEL050426`, builds the local
-venv if needed, installs missing Ubuntu deploy prerequisites, validates the
-promoted TP26 and live TP21+FF6 constants, refreshes systemd, restarts both
-live services, and prints non-secret service state. Set
-`EXPECTED_COMMIT=<full sha>` before `bash` if you want the console deploy to
-refuse anything except one pinned commit.
+venv if needed, installs missing Ubuntu deploy prerequisites, restores root
+public-key SSH access, validates the promoted TP26 and live TP21+FF6 constants,
+refreshes systemd, restarts both live services, and prints non-secret service
+state. Set `EXPECTED_COMMIT=<full sha>` before `bash` if you want the console
+deploy to refuse anything except one pinned commit.
 The console script also waits before checking active service state; override
 with `SYSTEMD_SETTLE_SECONDS=<seconds>` if needed.
 
