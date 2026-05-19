@@ -81,6 +81,14 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "model050426-bybit-demo-signal.timer" in text
     assert "model050426-bybit-demo.service" in text
     assert "model050426-bybit-risk.service" in text
+    assert "retired unit" in text
+    assert "systemctl is-enabled --quiet model050426-bybit-demo.service" in text
+    assert "Environment=STRATEGY_PROFILE=demo_relaxed" in text
+    assert "Environment=INTERVAL_SECONDS=60" in text
+    assert "Environment=UNIVERSE_RANK_END=300" in text
+    assert "Environment=UNIVERSE_MAX_SYMBOLS=300" in text
+    assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
+    assert "deploy-verify-ok commit=" in text
     assert "--property=Environment" not in text
 
 
@@ -299,4 +307,12 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "model050426-bybit-demo-signal.timer" in text
     assert "model050426-bybit-demo.service" in text
     assert "model050426-bybit-risk.service" in text
+    assert "retired unit" in text
+    assert "systemctl is-enabled --quiet model050426-bybit-demo.service" in text
+    assert "Environment=STRATEGY_PROFILE=demo_relaxed" in text
+    assert "Environment=INTERVAL_SECONDS=60" in text
+    assert "Environment=UNIVERSE_RANK_END=300" in text
+    assert "Environment=UNIVERSE_MAX_SYMBOLS=300" in text
+    assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
+    assert "deploy-verify-ok commit=" in text
     assert "--property=Environment" not in text

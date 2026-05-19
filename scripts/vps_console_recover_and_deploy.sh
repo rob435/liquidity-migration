@@ -222,6 +222,22 @@ fi
 
 systemctl is-active --quiet model050426-bybit-demo.service
 systemctl is-active --quiet model050426-bybit-risk.service
+systemctl is-enabled --quiet model050426-bybit-demo.service
+systemctl is-enabled --quiet model050426-bybit-risk.service
+
+for legacy_unit in \
+  model050426.service \
+  model050426-bybit-demo-signal.timer \
+  model050426-bybit-demo-signal.service; do
+  if systemctl is-active --quiet "$legacy_unit" 2>/dev/null; then
+    echo "Verification failed: retired unit $legacy_unit is still active." >&2
+    exit 1
+  fi
+  if systemctl is-enabled --quiet "$legacy_unit" 2>/dev/null; then
+    echo "Verification failed: retired unit $legacy_unit is still enabled." >&2
+    exit 1
+  fi
+done
 
 systemctl show model050426-bybit-demo.service \
   --property=ActiveState \
@@ -235,6 +251,10 @@ systemctl show model050426-bybit-risk.service \
   --property=MainPID \
   --property=ExecMainStatus \
   --no-pager
-systemctl cat model050426-bybit-demo.service --no-pager | grep -E 'Environment=(STRATEGY_PROFILE|INTERVAL_SECONDS|UNIVERSE_RANK_END|UNIVERSE_MAX_SYMBOLS)='
+systemctl cat model050426-bybit-demo.service --no-pager | grep -E 'Environment=STRATEGY_PROFILE=demo_relaxed'
+systemctl cat model050426-bybit-demo.service --no-pager | grep -E 'Environment=INTERVAL_SECONDS=60'
+systemctl cat model050426-bybit-demo.service --no-pager | grep -E 'Environment=UNIVERSE_RANK_END=300'
+systemctl cat model050426-bybit-demo.service --no-pager | grep -E 'Environment=UNIVERSE_MAX_SYMBOLS=300'
+systemctl cat model050426-bybit-risk.service --no-pager | grep -E 'Environment=ORDER_SUBMIT_MODE=ws_then_rest'
 
-echo "deploy-ok commit=$(git rev-parse --short HEAD)"
+echo "deploy-verify-ok commit=$(git rev-parse --short HEAD)"
