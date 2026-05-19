@@ -57,6 +57,9 @@ $rescue_command
 EXPECTED_COMMIT="$commit_sha" scripts/deploy_vps_live.sh
 EXPECTED_COMMIT="$commit_sha" scripts/verify_vps_live.sh
 
+# Wait locally for restored SSH access, then deploy and verify:
+EXPECTED_COMMIT="$commit_sha" scripts/wait_for_vps_recovery_and_deploy.sh
+
 # Recommended full VPS provider console recovery, as root:
 $recommended_command
 

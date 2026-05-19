@@ -150,6 +150,8 @@ def test_vps_recovery_command_printer_uses_pinned_commit_url() -> None:
     assert "scripts/vps_rescue_restore_ssh_access.sh" in text
     assert "scripts/vps_console_recover_and_deploy.sh" in text
     assert "scripts/deploy_vps_live.sh" in text
+    assert "scripts/wait_for_vps_recovery_and_deploy.sh" in text
+    assert "Wait locally for restored SSH access" in text
     assert "Hetzner Rescue SSH-key restore" in text
     assert "Recommended full VPS provider console recovery" in text
     assert "Strict full recovery" in text
@@ -158,6 +160,28 @@ def test_vps_recovery_command_printer_uses_pinned_commit_url() -> None:
     assert 'curl -fsSL $rescue_script_url | bash' in text
     assert 'EXPECTED_COMMIT="$commit_sha" bash' in text
     assert "scripts/verify_vps_live.sh" in text
+
+
+def test_wait_for_vps_recovery_script_waits_then_runs_checked_deploy_and_verify() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    text = (repo / "scripts" / "wait_for_vps_recovery_and_deploy.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "WAIT_TIMEOUT_SECONDS" in text
+    assert "WAIT_INTERVAL_SECONDS" in text
+    assert "BatchMode=yes" in text
+    assert "ssh-ready" in text
+    assert "ssh-not-ready" in text
+    assert "accept SSH public-key auth" in text
+    assert "scripts/print_vps_recovery_command.sh --rescue-only" in text
+    assert "scripts/deploy_vps_live.sh" in text
+    assert "scripts/verify_vps_live.sh" in text
+    assert "EXPECTED_COMMIT" in text
+    assert "EXPECTED_TELEGRAM_CHAT_ID" in text
+    assert "SYSTEMD_SETTLE_SECONDS" in text
+    assert "wait-deploy-verify-ok" in text
+    assert "systemctl restart" not in text
 
 
 def test_vps_ssh_restore_script_only_restores_access() -> None:

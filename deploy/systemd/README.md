@@ -66,6 +66,7 @@ curl -fsSL https://raw.githubusercontent.com/rob435/MODEL05042026/main/scripts/v
 
 EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/deploy_vps_live.sh
 EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/verify_vps_live.sh
+EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/wait_for_vps_recovery_and_deploy.sh
 
 apt-get update && apt-get install -y ca-certificates curl
 curl -fsSL https://raw.githubusercontent.com/rob435/MODEL05042026/main/scripts/vps_console_recover_and_deploy.sh | CLEAN_DIRTY_CHECKOUT=1 bash
@@ -82,7 +83,10 @@ when you want this local checkout or GitHub Actions to run the checked deploy
 after access is fixed. `scripts/vps_rescue_restore_ssh_access.sh` is the
 Hetzner Rescue fallback: run it as rescue root when the installed OS console is
 unavailable, then reboot back to local disk and run the checked deploy from this
-checkout. The full console recovery restores the same SSH
+checkout. `scripts/wait_for_vps_recovery_and_deploy.sh` can be left running
+locally while you perform the console or Rescue step; it waits until public-key
+SSH works, then calls the checked deploy and read-only verifier with the pinned
+commit. The full console recovery restores the same SSH
 access, prints the same fingerprints, clones or repairs `/opt/MODEL050426`,
 forces the configured remote URL, resets the deploy branch to `origin/main`,
 builds the local venv if needed, installs missing Ubuntu deploy prerequisites,
