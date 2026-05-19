@@ -394,7 +394,11 @@ saves tracked and untracked checkout dirt before cleaning when
 `/etc/model050426/bybit-demo.env`, enforces `TELEGRAM_CHAT_ID=8388367561`,
 restarts the active services, and verifies the live state. After SSH access is
 restored, `scripts/wait_for_vps_recovery_and_deploy.sh` can be left running
-locally to deploy and verify the current pinned commit automatically.
+locally to deploy and verify the current pinned commit automatically. The
+GitHub `VPS Deploy` workflow also has a manual `wait-deploy` mode that runs the
+same wait/deploy/verify helper from Actions, which is the preferred option if
+you want the recovery deploy to continue without this local session staying
+open.
 
 The VPS entry service intentionally runs at `INTERVAL_SECONDS=60` and
 `STRATEGY_PROFILE=demo_relaxed`. Fast exits are still handled by the separate

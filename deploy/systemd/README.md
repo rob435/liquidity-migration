@@ -33,9 +33,12 @@ holds the dedicated GitHub Actions deploy key; the console recovery script adds
 the matching public key to `/root/.ssh/authorized_keys`. The workflow derives
 the secret's public key and checks its fingerprint before SSH, so a rotated or
 mis-pasted secret fails before deployment. Run the `VPS Deploy` workflow
-manually in `verify` or `deploy` mode, or let guarded `main` pushes to
-live-code/deploy paths trigger deployment. Optional repository variables:
-`VPS_HOST`, `VPS_USER`, `VPS_ED25519_FINGERPRINT`, and
+manually in `verify`, `deploy`, or `wait-deploy` mode, or let guarded `main`
+pushes to live-code/deploy paths trigger deployment. `wait-deploy` is the mode
+to start before or during provider-console recovery: it verifies the deploy key
+and host key, waits until public-key SSH starts working, then runs the same
+checked deploy plus read-only verifier against the pinned GitHub SHA. Optional
+repository variables: `VPS_HOST`, `VPS_USER`, `VPS_ED25519_FINGERPRINT`, and
 `EXPECTED_TELEGRAM_CHAT_ID`.
 
 If the VPS was rebuilt and SSH rejects the local key, add this public key back
@@ -86,8 +89,10 @@ unavailable, then reboot back to local disk and run the checked deploy from this
 checkout. `scripts/wait_for_vps_recovery_and_deploy.sh` can be left running
 locally while you perform the console or Rescue step; it waits until public-key
 SSH works, then calls the checked deploy and read-only verifier with the pinned
-commit. The full console recovery restores the same SSH
-access, prints the same fingerprints, clones or repairs `/opt/MODEL050426`,
+commit. The GitHub `VPS Deploy` workflow's `wait-deploy` mode wraps the same
+helper for cases where you want Actions to keep waiting instead of a local
+terminal. The full console recovery restores the same SSH access, prints the
+same fingerprints, clones or repairs `/opt/MODEL050426`,
 forces the configured remote URL, resets the deploy branch to `origin/main`,
 builds the local venv if needed, installs missing Ubuntu deploy prerequisites,
 writes an sshd recovery override for root public-key login, prints the effective
