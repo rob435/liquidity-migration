@@ -12,6 +12,7 @@ on:
       - "scripts/print_vps_recovery_command.sh"
       - "scripts/verify_vps_live.sh"
       - "scripts/vps_console_recover_and_deploy.sh"
+      - "scripts/vps_restore_ssh_access.sh"
       - "scripts/vps_rescue_restore_ssh_access.sh"
       - "scripts/wait_for_vps_recovery_and_deploy.sh"
       - "scripts/run_bybit_demo_event_engine.sh"
