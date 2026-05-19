@@ -166,8 +166,9 @@ class EventDemoDaemon:
 
     def _run_one_cycle(self) -> None:
         cycle_started = time.monotonic()
+        payload: dict[str, Any] | None = None
         try:
-            self._cycle_runner(
+            payload = self._cycle_runner(
                 self.data_root,
                 config=self.config,
                 event_config=self.event_config,
@@ -179,6 +180,15 @@ class EventDemoDaemon:
             self._cycle_errors += 1
             _logger.exception("cycle failed: %s", exc)
         elapsed = time.monotonic() - cycle_started
+        if payload is not None:
+            # Emit the same `event demo cycle ...` summary the legacy bash-loop
+            # runner prints, so operators don't lose visibility when flipping
+            # USE_DAEMON. Lazy import keeps cli a non-dependency for unit tests.
+            try:
+                from .cli import format_event_demo_cycle_summary
+                print(format_event_demo_cycle_summary(payload), flush=True)
+            except Exception:  # noqa: BLE001 - log-line formatting must never break the loop
+                _logger.exception("failed to format cycle summary")
         _logger.debug("cycle complete elapsed=%.2fs", elapsed)
 
     def _sleep_interruptible(self, seconds: float) -> None:

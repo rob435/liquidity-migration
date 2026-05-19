@@ -175,6 +175,55 @@ def test_daemon_rejects_negative_interval(tmp_path: Path) -> None:
         )
 
 
+def test_daemon_prints_event_demo_cycle_summary_per_cycle(tmp_path: Path, capsys) -> None:
+    """Every successful cycle must emit the same `event demo cycle ...` line
+    the legacy bash-loop runner prints, so journalctl scrapes and operator
+    dashboards keep working when USE_DAEMON=1 is flipped. Pre-fix, the daemon
+    was silent between startup and shutdown — operators flying blind.
+    """
+    ws = _RecordingWsStream()
+
+    def _runner_that_returns_payload(data_root, *, config, event_config, demo_config, execution_event_router):
+        return {
+            "cycle": {
+                "mode": "submit",
+                "strategy_profile": "demo_relaxed",
+                "symbols": 300,
+                "feature_rows": 13476,
+                "entries_executed": 0,
+                "entry_candidates": 0,
+                "exits_executed": 0,
+                "exit_candidates": 0,
+                "open_trades_after": 0,
+                "cycle_elapsed_pre_persist_ms": 4200.0,
+                "timing_universe_ms": 800.0,
+                "timing_features_ms": 700.0,
+                "entries_parallel_workers": 1,
+            },
+            "report_dir": str(data_root) + "/reports/event-demo",
+        }
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_runner_that_returns_payload,
+    )
+    runner = threading.Thread(target=daemon.run, daemon=True)
+    runner.start()
+    time.sleep(0.1)
+    daemon.request_shutdown()
+    runner.join(timeout=2.0)
+    assert not runner.is_alive()
+    out = capsys.readouterr().out
+    assert "event demo cycle" in out, f"daemon did not emit cycle summary: {out!r}"
+    assert "mode=submit" in out
+    assert "symbols=300" in out
+    assert "slowest=universe:0.8s" in out  # top-3 stages from cycle dict
+
+
 def test_daemon_run_returns_summary_stats(tmp_path: Path) -> None:
     ws = _RecordingWsStream()
     daemon = EventDemoDaemon(

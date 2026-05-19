@@ -63,6 +63,30 @@ def _event_risk_report_path(payload: dict) -> Path:
     return Path(payload["report_dir"]) / filename
 
 
+def format_event_demo_cycle_summary(payload: dict) -> str:
+    """One-line `event demo cycle ...` summary used by both the legacy bash-loop
+    runner (printed once per cycle, via main()) and the long-running daemon
+    (printed once per cycle, via EventDemoDaemon._run_one_cycle). Keeping the
+    format identical means operators don't need to learn a new line — the
+    grep patterns and dashboards they already have keep working when they
+    flip USE_DAEMON.
+    """
+    cycle = payload.get("cycle", {})
+    report_dir = payload.get("report_dir", "")
+    return (
+        "event demo cycle "
+        f"mode={cycle.get('mode')} "
+        f"profile={cycle.get('strategy_profile')} "
+        f"symbols={cycle.get('symbols')} "
+        f"features={cycle.get('feature_rows')} "
+        f"entries={cycle.get('entries_executed')}/{cycle.get('entry_candidates')} "
+        f"exits={cycle.get('exits_executed')}/{cycle.get('exit_candidates')} "
+        f"open={cycle.get('open_trades_after')} "
+        f"{_event_demo_timing_text(cycle)}"
+        f"path={Path(report_dir) / 'latest_event_demo_cycle.md'}"
+    )
+
+
 def _event_demo_timing_text(cycle: dict) -> str:
     try:
         elapsed_ms = float(cycle.get("cycle_elapsed_ms") or cycle.get("cycle_elapsed_pre_persist_ms"))
@@ -1513,19 +1537,7 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         payload = run_event_demo_cycle(data_root, config=config, demo_config=demo_config)
-        cycle = payload["cycle"]
-        print(
-            "event demo cycle "
-            f"mode={cycle['mode']} "
-            f"profile={cycle['strategy_profile']} "
-            f"symbols={cycle['symbols']} "
-            f"features={cycle['feature_rows']} "
-            f"entries={cycle['entries_executed']}/{cycle['entry_candidates']} "
-            f"exits={cycle['exits_executed']}/{cycle['exit_candidates']} "
-            f"open={cycle['open_trades_after']} "
-            f"{_event_demo_timing_text(cycle)}"
-            f"path={Path(payload['report_dir']) / 'latest_event_demo_cycle.md'}"
-        )
+        print(format_event_demo_cycle_summary(payload))
         return 0
 
     if args.command == "event-risk-cycle":
