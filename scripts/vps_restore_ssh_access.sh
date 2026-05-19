@@ -38,11 +38,24 @@ PermitRootLogin prohibit-password
 AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2
 AuthenticationMethods publickey
 SSH_CONFIG
+  if [ -f /etc/ssh/sshd_config ] && ! grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config; then
+    cp /etc/ssh/sshd_config "/etc/ssh/sshd_config.model050426-backup.$(date -u +%Y%m%dT%H%M%SZ)"
+    tmp_sshd_config="$(mktemp)"
+    printf '%s\n' 'Include /etc/ssh/sshd_config.d/*.conf' > "$tmp_sshd_config"
+    cat /etc/ssh/sshd_config >> "$tmp_sshd_config"
+    cat "$tmp_sshd_config" > /etc/ssh/sshd_config
+    rm -f "$tmp_sshd_config"
+  fi
 fi
 
 if command -v sshd >/dev/null 2>&1; then
   sshd -t
-  sshd -T | grep -E '^(pubkeyauthentication|permitrootlogin|authorizedkeysfile|authenticationmethods) '
+  effective_sshd_config="$(sshd -T)"
+  printf '%s\n' "$effective_sshd_config" | grep -E '^(pubkeyauthentication|permitrootlogin|authorizedkeysfile|authenticationmethods) '
+  printf '%s\n' "$effective_sshd_config" | grep -Eq '^pubkeyauthentication yes$'
+  printf '%s\n' "$effective_sshd_config" | grep -Eq '^permitrootlogin (yes|without-password|prohibit-password)$'
+  printf '%s\n' "$effective_sshd_config" | grep -Eq '^authorizedkeysfile .*[.]ssh/authorized_keys'
+  printf '%s\n' "$effective_sshd_config" | grep -Eq '^authenticationmethods publickey$'
 fi
 
 if command -v systemctl >/dev/null 2>&1; then

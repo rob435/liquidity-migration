@@ -151,6 +151,10 @@ def test_vps_ssh_restore_script_only_restores_access() -> None:
     assert "AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX" in text
     assert "PermitRootLogin prohibit-password" in text
     assert "AuthenticationMethods publickey" in text
+    assert "Include /etc/ssh/sshd_config.d/*.conf" in text
+    assert "sshd_config.model050426-backup" in text
+    assert "effective_sshd_config" in text
+    assert "grep -Eq '^authenticationmethods publickey$'" in text
     assert "sshd -T" in text
     assert "systemctl restart ssh.service" in text
     assert "ssh-restore-ok" in text
@@ -177,6 +181,10 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "PermitRootLogin prohibit-password" in text
     assert "PubkeyAuthentication yes" in text
     assert "AuthenticationMethods publickey" in text
+    assert "Include /etc/ssh/sshd_config.d/*.conf" in text
+    assert "sshd_config.model050426-backup" in text
+    assert "effective_sshd_config" in text
+    assert "grep -Eq '^authenticationmethods publickey$'" in text
     assert "sshd -T" in text
     assert "systemctl restart ssh.service" in text
     assert "model050426-deploy-backups" in text
