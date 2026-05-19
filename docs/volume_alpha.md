@@ -144,7 +144,8 @@ worst drawdown no worse than -25%
 average Sharpe-like >= 0.5
 cost multipliers of 1x and 3x reported
 trade ledger, equity curve, monthly table, and failure reasons saved
-equity chart with BTC overlay plus monthly/growth gridlines
+equity chart with BTC overlay, monthly/growth gridlines, and a monthly
+performance table
 ```
 
 ## Implementation Order
@@ -248,6 +249,12 @@ validate manifest-to-parquet coverage
 run the selected liquidity-migration reversal backtest only
 ```
 
+The canonical full-PIT research root is
+`~/SHARED_DATA/bybit_fullpit_1h`. It is shared by serious
+research runs and now includes the recent `2026-04-18` to `2026-05-18`
+Bybit-native download. Keep live demo ledgers separate under
+`data/bybit-demo-event`.
+
 The old background creative watcher and event-grid runner path are removed from
 the active workflow. New ideas should be run as named, foreground
 `volume-events` commands with explicit event families, parameters, and report
@@ -255,9 +262,9 @@ directories.
 
 `volume-events` also exposes research controls for entry delay, entry policy,
 rank-decay exit threshold, global liquidity filters, tail-liquidity rank bounds,
-rank improvement, absorption move caps, dry-up quiet-regime filters, and
-exhaustion day-return thresholds. Use these to test whether an edge is
-immediate, delayed, concentrated in tails, or only an exhaustion artifact.
+rank improvement, failed-fade exits, absorption move caps, dry-up quiet-regime
+filters, and exhaustion day-return thresholds. Use these to test whether an edge
+is immediate, delayed, concentrated in tails, or only an exhaustion artifact.
 `--liquidity-migration-crowding-filter model_v1` enables the research-only
 cross-sectional crowding classifier. It labels isolated idiosyncratic events,
 liquidity-migration idiosyncratic events, sector/theme waves, broad-market
@@ -269,21 +276,21 @@ Full PIT data build for event research:
 
 ```bash
 python -m aggression_carry \
-  --data-root DATA_ROOT \
+  --data-root ~/SHARED_DATA/bybit_fullpit_1h \
   --config configs/volume_alpha.default.yaml \
   archive-manifest \
-  --name pit-all-usdt-20230503-20260503 \
+  --name canonical-pit-all-usdt-20230503-20260518 \
   --start 2023-05-03 \
-  --end 2026-05-03 \
+  --end 2026-05-18 \
   --workers 32
 
 python -m aggression_carry \
-  --data-root DATA_ROOT \
+  --data-root ~/SHARED_DATA/bybit_fullpit_1h \
   --config configs/volume_alpha.default.yaml \
   archive-download-klines-1h-api \
-  --name fullpit-1h-all-usdt-20230503-20260503 \
+  --name canonical-fullpit-1h-all-usdt-20230503-20260518 \
   --start 2023-05-03 \
-  --end 2026-05-03 \
+  --end 2026-05-18 \
   --workers 16 \
   --min-existing-bars 1 \
   --limit 1000 \
@@ -363,7 +370,7 @@ report writing, or the entry guard.
 conservative entry router: 1,268 trades, +221.29% total return, -21.32% max
 drawdown, -18.90% worst 90d, +12.36% worst split, +142.92% OOS, and promotion
 gate pass. Stress report:
-`/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md`.
+`/Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md`.
 Research-only execution variants now exist behind
 `--entry-policy execution_pullback_guard`,
 `--entry-policy tiered_execution_sniper`, and
@@ -489,7 +496,7 @@ standard entry: 1 hour after signal close
 promoted-grade squeeze entry: if the first completed 1h post-signal bar is up >= 50 bps from signal close and closes >= 0.85 inside its own high-low range, wait for a 25 bps high-since-signal giveback after at least a 25 bps pop, otherwise enter on the 4h deadline
 hold: 3 days max
 stop: 12% fixed
-take profit: 25% fixed
+take profit: 26% fixed
 gross exposure: 1.00
 capacity: max 5 active symbols
 cooldown: 5 days
@@ -510,7 +517,7 @@ python -m aggression_carry \
   --hold-days 3 \
   --sides reversal \
   --stop-loss-pcts 0.12 \
-  --take-profit-pcts 0.25 \
+  --take-profit-pcts 0.26 \
   --cost-multipliers 3 \
   --entry-delay-hours 1 \
   --entry-policy promoted_quality_squeeze \
@@ -544,27 +551,31 @@ python -m aggression_carry \
   --realized-loss-pressure-loss-count 6
 ```
 
-Promoted frontier result on `2023-05-03` to `2026-05-03`:
+Promoted TP26 result on the canonical full-PIT root through `2026-05-18`:
 
 ```text
-report: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md
-trades: 444
-total return: +2285.54%
-max drawdown: -11.05%
-max no-new-high stretch: 51 days
-worst 90d return: -5.02%
-worst split return: +118.81%
-average split Sharpe-like: 3.77
-train return: +118.81%
-validation return: +251.29%
-OOS return: +210.35%
-default chart: volume_event_best_equity_btc.png with BTC overlay and monthly/growth gridlines
+report: /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/exit_alpha_20260519/promoted_tp_fine_245_280/volume_event_research_report.md
+trades: 448
+total return: +2022.17%
+max drawdown: -13.72%
+max no-new-high stretch: 54 days
+worst 90d return: -6.29%
+worst split return: +126.03%
+average split Sharpe-like: 3.62
+train return: +126.03%
+validation return: +224.90%
+OOS return: +183.27%
+default chart: volume_event_best_equity_btc.png with BTC overlay,
+monthly/growth gridlines, and a monthly performance table
 promotion gate: pass
 ```
 
-The metrics above are a gross-only rescale of the promoted full-PIT ledger to
-the active `1.00` gross exposure. Candidate selection, exits, cooldowns, and
-crowding decisions do not depend on this gross sizing constant.
+TP26 replaced TP25 because it improved exact-stop return, minimum split, OOS,
+and split Sharpe without worsening exact-stop max drawdown or worst-90d. It
+also beat TP25 under 1x/3x/5x cost stress and adverse hourly stop-fill stress,
+although the adverse stop-fill run still fails the formal drawdown gate for
+both TPs. Candidate selection, entries, cooldowns, crowding decisions, and
+gross exposure remain unchanged.
 
 Funding and execution-realism update from `2026-05-17`:
 
@@ -611,15 +622,15 @@ Current feature-factory promoted rerun:
 
 ```bash
 python -m aggression_carry \
-  --data-root /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503 \
+  --data-root /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h \
   volume-events \
-  --report-dir /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/feature_factory_promoted_20260518
+  --report-dir /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/feature_factory_promoted_20260518
 
 python -m aggression_carry \
-  --data-root /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503 \
+  --data-root /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h \
   feature-factory \
-  --report-dir /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/feature_factory_promoted_20260518 \
-  --output-dir /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/feature_factory_promoted_20260518/feature_factory \
+  --report-dir /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/feature_factory_promoted_20260518 \
+  --output-dir /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/feature_factory_promoted_20260518/feature_factory \
   --min-rows 24 \
   --shuffle-samples 128
 ```
@@ -629,7 +640,7 @@ Result:
 ```text
 promoted rerun: 444 trades, +1853.99% return, -13.72% max drawdown, -6.29% worst 90d, +175.32% OOS
 feature coverage: 16/27 non-null audited features
-report: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/feature_factory_promoted_20260518/feature_factory/feature_factory_report.md
+report: /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/feature_factory_promoted_20260518/feature_factory/feature_factory_report.md
 ```
 
 New causal columns now written to trade ledgers include:
@@ -708,6 +719,23 @@ alpha work should prioritize new entry/exit mechanics or genuinely new data
 surfaces such as OI, basis, and signed flow, not more hard filters on the
 existing daily ledger.
 
+### Exit Alpha 2026-05-19
+
+Failed-fade exit research on the current `demo_relaxed` VPS profile found a
+real candidate, but not a clean formal promotion. The current live demo profile
+exits a short after 6 completed post-entry hours when MFE is below 1% and the
+trade is already losing more than 4%, and uses 21% take-profit. Current
+Full-PIT report:
+`~/SHARED_DATA/bybit_fullpit_1h/reports/exit_alpha_20260519/demo_relaxed_failedfade_ff6_tp_sl_fine`.
+
+Result versus the older VPS baseline: TP21 + FF6 produced +353.46% total
+return vs +225.63%, -16.72% max DD vs -21.32%, -12.72% worst 90d vs -18.90%,
++23.53% min split vs +12.36%, +1.370 avg split Sharpe vs +1.042, and +165.57%
+OOS vs +142.92%. Focused model court verdict remains `WATCH`, not `PASS`:
+normal cost stress is strong, negative controls pass, but adverse
+hourly-extreme stop-fill stress remains the hard failure mode. Treat this as
+demo-only execution research, not real-money promotion.
+
 ## Serious Data Layer
 
 `data-layer-audit` is the gatekeeper for any new OI, basis, premium, funding, or
@@ -717,7 +745,7 @@ partial-window, missing, or proxy-only.
 
 ```bash
 python -m aggression_carry \
-  --data-root /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503 \
+  --data-root /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h \
   data-layer-audit \
   --start 2023-05-03 \
   --end 2026-05-03 \
@@ -730,7 +758,7 @@ or pretend to be Bybit-native datasets:
 
 ```bash
 python -m aggression_carry \
-  --data-root /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503 \
+  --data-root /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h \
   download-binance-proxy \
   --symbols BTCUSDT,ETHUSDT,SOLUSDT \
   --start 2025-05-03 \
@@ -749,7 +777,7 @@ unless archived continuously.
 Current `2026-05-18` data-layer audit after the pilot pull:
 
 ```text
-report: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/data_layer_post_pilot_aux_coverage/data_layer_audit.md
+report: /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/data_layer_post_pilot_aux_coverage/data_layer_audit.md
 full-PIT reference symbol-days: 367,533
 Bybit klines/funding: full coverage
 Bybit native basis/premium pilot: 5 symbols, 2025-05-03..2026-05-02, 0.47% full-root symbol-day coverage
@@ -762,7 +790,7 @@ decision: usable for exploratory feature tests only, not promotion evidence
 Full OOS Bybit-native basis/premium expansion on `2026-05-18`:
 
 ```text
-coverage report: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/data_layer_full_oos_basis_coverage_20260518/data_layer_audit.md
+coverage report: /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/data_layer_full_oos_basis_coverage_20260518/data_layer_audit.md
 window: 2025-05-03 to 2026-05-03 end-exclusive
 reference symbol-days: 123,421
 mark_price_1h / index_price_1h / premium_index_1h: 99.86% native OOS coverage
@@ -774,7 +802,7 @@ decision: native basis/premium is usable for OOS feature falsification; promotio
 Auxiliary alpha readout from the expanded OOS store:
 
 ```text
-feature report: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/aux_alpha_full_oos_pit_20260518/feature_factory/feature_factory_report.md
+feature report: /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/aux_alpha_full_oos_pit_20260518/feature_factory/feature_factory_report.md
 baseline OOS: +175.32%, -13.72% max DD, -2.47% worst 90d, 161 trades
 basis_3d_mean >= -0.00037613: +74.47%, -6.53% max DD, 57 trades
 basis_3d_mean >= 0.00008507: +70.93%, -9.42% max DD, 36 trades
@@ -791,9 +819,9 @@ only for symbols the baseline already traded.
 Rank/shape follow-up from the same research pass:
 
 ```text
-OOS sweep: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/aux_alpha_full_oos_pit_20260518/research_sweep/candidate_sweep.csv
-full sweep: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/alpha_rank_sensitivity_20260518/full_research_sweep/full_candidate_sweep.csv
-shape sweep: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/alpha_shape_filters_20260518/shape_filter_full_sweep.csv
+OOS sweep: /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/aux_alpha_full_oos_pit_20260518/research_sweep/candidate_sweep.csv
+full sweep: /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/alpha_rank_sensitivity_20260518/full_research_sweep/full_candidate_sweep.csv
+shape sweep: /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/alpha_shape_filters_20260518/shape_filter_full_sweep.csv
 ```
 
 The tempting OOS result was `liquidity_migration_rank_improvement_min=184`:

@@ -7,7 +7,7 @@ from typing import Any
 
 
 ACTIVE_ORDER_SUBMITTING_PROFILE = "demo_relaxed"
-ACTIVE_ORDER_SUBMITTING_STRATEGY_ID = "demo_relaxed_liqmig_q40_h3_tp25_g100_qsqueeze"
+ACTIVE_ORDER_SUBMITTING_STRATEGY_ID = "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6"
 
 
 @dataclass(frozen=True, slots=True)

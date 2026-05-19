@@ -476,7 +476,8 @@ def _best_summary_row(summary: pl.DataFrame, report: dict[str, Any]) -> dict[str
 def _basket_returns(baskets: pl.DataFrame) -> list[float]:
     if baskets.is_empty() or "basket_return" not in baskets.columns:
         return []
-    return [float(value) for value in baskets["basket_return"].to_list() if value is not None and math.isfinite(float(value))]
+    ordered = baskets.sort("exit_ts_ms") if "exit_ts_ms" in baskets.columns else baskets
+    return [float(value) for value in ordered["basket_return"].to_list() if value is not None and math.isfinite(float(value))]
 
 
 def _return_path_metrics(returns: list[float]) -> dict[str, Any]:

@@ -213,8 +213,12 @@ def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Pa
     assert args.sides == "reversal"
     assert args.stop_loss_pcts == "0.12"
     assert args.stop_fill_mode == "stop"
-    assert args.take_profit_pcts == "0.25"
+    assert args.take_profit_pcts == "0.26"
     assert args.cost_multipliers == "3.0"
+    assert args.failed_fade_exit_hours == 0
+    assert args.failed_fade_min_mfe_pct == 0.0
+    assert args.failed_fade_loss_pct == 0.0
+    assert args.failed_fade_close_location_min == 1.0
     assert args.gross_exposure == 1.0
     assert args.entry_delay_hours == 1
     assert args.entry_policy == "promoted_quality_squeeze"
@@ -347,6 +351,14 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
             "0,0.2",
             "--cost-multipliers",
             "1,3",
+            "--failed-fade-exit-hours",
+            "12",
+            "--failed-fade-min-mfe-pct",
+            "0.005",
+            "--failed-fade-loss-pct",
+            "0.025",
+            "--failed-fade-close-location-min",
+            "0.85",
             "--gross-exposure",
             "0.5",
             "--entry-delay-hours",
@@ -468,6 +480,10 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
     assert args.thresholds == "0.2"
     assert args.stop_fill_mode == "bar_extreme"
     assert args.take_profit_pcts == "0,0.2"
+    assert args.failed_fade_exit_hours == 12
+    assert args.failed_fade_min_mfe_pct == 0.005
+    assert args.failed_fade_loss_pct == 0.025
+    assert args.failed_fade_close_location_min == 0.85
     assert args.gross_exposure == 0.5
     assert args.entry_delay_hours == 6
     assert args.entry_policy == "fixed_delay"

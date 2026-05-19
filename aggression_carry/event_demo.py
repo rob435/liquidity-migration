@@ -18,7 +18,7 @@ from .config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig, UniverseConfig
 from .downloaders import _normalize_instruments, _normalize_klines, _normalize_tickers
 from .storage import exclusive_file_lock, read_dataset, write_dataset
 from .telegram import send_telegram_message
-from .trade_lifecycle import _rank_exit_hit
+from .trade_lifecycle import _bar_excursion, _rank_exit_hit, _side_return
 from .universe import build_current_universe_table
 from .volume_features import MS_PER_DAY, MS_PER_HOUR, build_volume_features
 from .volume_events import (
@@ -41,8 +41,8 @@ from .volume_events import (
 
 
 MS_PER_MINUTE = 60_000
-PROMOTED_DEMO_STRATEGY_ID = "liqmig_union_q40_h3_tp25_g100_qsqueeze"
-DEMO_RELAXED_STRATEGY_ID = "demo_relaxed_liqmig_q40_h3_tp25_g100_qsqueeze"
+PROMOTED_DEMO_STRATEGY_ID = "liqmig_union_q40_h3_tp26_g100_qsqueeze"
+DEMO_RELAXED_STRATEGY_ID = "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6"
 DEMO_STRATEGY_PROFILE_ALIASES = {"observe": "demo_relaxed"}
 DEMO_STRATEGY_PROFILES = ("promoted", "demo_relaxed")
 DEMO_STRATEGY_PROFILE_CHOICES = DEMO_STRATEGY_PROFILES + tuple(DEMO_STRATEGY_PROFILE_ALIASES)
@@ -818,6 +818,20 @@ def plan_demo_exits(
             ):
                 exit_checks.append((now_ms, 1, "take_profit", current_price))
 
+        entry_price = _float(trade.get("entry_price"))
+        failed_fade_hit = _failed_fade_exit_since_entry(
+            klines,
+            symbol=symbol,
+            side=side,
+            entry_ts_ms=entry_ts_ms,
+            now_ms=now_ms,
+            entry_price=entry_price,
+            config=config,
+        )
+        if failed_fade_hit is not None:
+            trigger_ts_ms, trigger_price = failed_fade_hit
+            exit_checks.append((trigger_ts_ms, 2, "failed_fade", trigger_price))
+
         for check_ts_ms, rank_fraction in _rank_checks_for_symbol(rank_lookup, symbol=symbol, entry_ts_ms=entry_ts_ms, now_ms=now_ms):
             if _event_decay_exit_hit(
                 symbol=symbol,
@@ -825,7 +839,7 @@ def plan_demo_exits(
                 rank_lookup=rank_lookup,
                 threshold=event_decay_threshold,
             ):
-                exit_checks.append((check_ts_ms, 2, "event_decay", current_price))
+                exit_checks.append((check_ts_ms, 3, "event_decay", current_price))
                 break
             if _rank_exit_hit(
                 symbol=symbol,
@@ -837,11 +851,11 @@ def plan_demo_exits(
                 threshold=config.rank_exit_threshold,
             ):
                 del rank_fraction
-                exit_checks.append((check_ts_ms, 3, "rank_exit", current_price))
+                exit_checks.append((check_ts_ms, 4, "rank_exit", current_price))
                 break
 
         if now_ms >= planned_exit_ts_ms:
-            exit_checks.append((planned_exit_ts_ms, 4, "max_hold", current_price))
+            exit_checks.append((planned_exit_ts_ms, 5, "max_hold", current_price))
         if not exit_checks:
             continue
 
@@ -1272,6 +1286,11 @@ def _demo_event_config(config: VolumeEventResearchConfig, *, profile: str) -> Vo
     if profile == "demo_relaxed":
         return replace(
             base,
+            take_profit_pcts=(0.21,),
+            failed_fade_exit_hours=6,
+            failed_fade_min_mfe_pct=0.01,
+            failed_fade_loss_pct=0.04,
+            failed_fade_close_location_min=0.0,
             max_active_symbols=10,
             cooldown_days=2,
             universe_rank_min=11,
@@ -3266,6 +3285,63 @@ def _stop_hit_since_entry(
         if side == "long" and _float(row.get("low")) <= stop_price:
             return int(row["bar_end_ts_ms"])
     return None
+
+
+def _failed_fade_exit_since_entry(
+    klines: pl.DataFrame,
+    *,
+    symbol: str,
+    side: str,
+    entry_ts_ms: int,
+    now_ms: int,
+    entry_price: float,
+    config: VolumeEventResearchConfig,
+) -> tuple[int, float] | None:
+    if (
+        klines.is_empty()
+        or entry_price <= 0.0
+        or config.failed_fade_exit_hours <= 0
+        or config.failed_fade_loss_pct <= 0.0
+    ):
+        return None
+    rows = (
+        klines.filter(pl.col("symbol") == symbol)
+        .with_columns((pl.col("ts_ms") + MS_PER_HOUR).alias("bar_end_ts_ms"))
+        .filter((pl.col("bar_end_ts_ms") > entry_ts_ms) & (pl.col("bar_end_ts_ms") <= now_ms))
+        .sort("bar_end_ts_ms")
+        .to_dicts()
+    )
+    mfe = 0.0
+    for bars_held, row in enumerate(rows, start=1):
+        _, favorable = _bar_excursion(
+            entry_price,
+            side=side,
+            high=_float(row.get("high")),
+            low=_float(row.get("low")),
+        )
+        mfe = max(mfe, favorable)
+        if bars_held < config.failed_fade_exit_hours or mfe >= config.failed_fade_min_mfe_pct:
+            continue
+        close = _float(row.get("close"))
+        close_return = _side_return(entry_price, close, side=side)
+        if close_return > -config.failed_fade_loss_pct:
+            continue
+        close_location = _completed_bar_close_location(row)
+        if side == "short" and close_location < config.failed_fade_close_location_min:
+            continue
+        if side == "long" and close_location > 1.0 - config.failed_fade_close_location_min:
+            continue
+        return int(row["bar_end_ts_ms"]), close
+    return None
+
+
+def _completed_bar_close_location(row: dict[str, Any]) -> float:
+    high = _float(row.get("high"))
+    low = _float(row.get("low"))
+    close = _float(row.get("close"))
+    if abs(high - low) <= 1e-12:
+        return 0.5
+    return max(0.0, min(1.0, (close - low) / (high - low)))
 
 
 def _take_profit_hit_since_entry(

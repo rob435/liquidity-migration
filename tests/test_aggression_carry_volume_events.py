@@ -311,6 +311,51 @@ def test_bar_extreme_stop_fill_uses_adverse_hourly_extreme_for_short() -> None:
     assert stressed["gross_trade_return"] == pytest.approx(-0.30)
 
 
+def test_failed_fade_exit_cuts_short_after_unresolved_continuation() -> None:
+    hour = 60 * 60 * 1000
+    symbol_bars = {
+        "rows": [
+            {"bar_end_ts_ms": hour, "high": 101.0, "low": 99.0, "close": 100.0},
+            {"bar_end_ts_ms": 2 * hour, "high": 101.2, "low": 99.7, "close": 101.0},
+            {"bar_end_ts_ms": 3 * hour, "high": 103.0, "low": 100.5, "close": 102.8},
+            {"bar_end_ts_ms": 4 * hour, "high": 104.0, "low": 100.0, "close": 101.0},
+        ],
+        "ends": [hour, 2 * hour, 3 * hour, 4 * hour],
+        "by_end": {},
+    }
+
+    trade = _simulate_indexed_trade(
+        symbol="AUSDT",
+        side="short",
+        score=1.0,
+        rank=1,
+        basket_id="basket",
+        signal_ts_ms=0,
+        entry_bar=symbol_bars["rows"][0],
+        symbol_bars=symbol_bars,
+        planned_exit_ts_ms=4 * hour,
+        notional_weight=1.0,
+        config=TradeLifecycleConfig(
+            take_profit_pct=0.0,
+            failed_fade_exit_hours=2,
+            failed_fade_min_mfe_pct=0.005,
+            failed_fade_loss_pct=0.025,
+            failed_fade_close_location_min=0.85,
+        ),
+        round_trip_cost_bps=0.0,
+        stop_pct=0.12,
+        rank_lookup={},
+        event_decay_threshold=-1.0,
+        funding_lookup=None,
+        stop_fill_mode="stop",
+    )
+
+    assert trade is not None
+    assert trade["exit_reason"] == "failed_fade"
+    assert trade["exit_ts_ms"] == 3 * hour
+    assert trade["exit_price"] == pytest.approx(102.8)
+
+
 def test_promoted_quality_entry_waits_for_completed_giveback() -> None:
     hour = 60 * 60 * 1000
     symbol_bars = {
@@ -644,13 +689,14 @@ def test_equity_benchmark_chart_writes_overlays_without_annotations(tmp_path: Pa
     assert Path(chart["png"]).exists()
     assert Path(chart["png"]).name == "volume_event_best_equity_btc.png"
     with Image.open(chart["png"]) as image:
-        assert image.size == (1600, 940)
+        assert image.size == (1600, 1460)
     assert not (output_dir / "volume_event_best_equity_btc_spy.png").exists()
     assert not (output_dir / "volume_event_best_equity_btc_spy.svg").exists()
     assert not (output_dir / "volume_event_best_equity_benchmarks.csv").exists()
     assert not (output_dir / "volume_event_best_equity_annotations.csv").exists()
     assert chart["series"]["strategy"] == 5
     assert chart["series"]["btc"] == 5
+    assert chart["monthly_rows"] == 1
     assert "spy" not in chart["series"]
     assert "spy_status" not in chart
     assert chart["annotations"] == []
@@ -784,6 +830,14 @@ def test_volume_event_config_validates_new_research_knobs() -> None:
 
     with pytest.raises(ValueError, match="rank_exit_threshold"):
         _validate_event_config(VolumeEventResearchConfig(rank_exit_threshold=0.0))
+    with pytest.raises(ValueError, match="failed_fade_exit_hours"):
+        _validate_event_config(VolumeEventResearchConfig(failed_fade_exit_hours=-1))
+    with pytest.raises(ValueError, match="failed_fade_min_mfe_pct"):
+        _validate_event_config(VolumeEventResearchConfig(failed_fade_min_mfe_pct=-0.1))
+    with pytest.raises(ValueError, match="failed_fade_loss_pct"):
+        _validate_event_config(VolumeEventResearchConfig(failed_fade_exit_hours=12, failed_fade_loss_pct=0.0))
+    with pytest.raises(ValueError, match="failed_fade_close_location_min"):
+        _validate_event_config(VolumeEventResearchConfig(failed_fade_close_location_min=1.1))
 
     with pytest.raises(ValueError, match="tail_rank_min"):
         _validate_event_config(VolumeEventResearchConfig(tail_rank_min=200, tail_rank_max=100))

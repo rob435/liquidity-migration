@@ -13,14 +13,21 @@ Current operational proof and deployment status are summarized in
 repo surface.
 Research-only portfolio hedge overlays are available through
 `portfolio-hedge`; the current candidate is shadow-only and not deployed.
+Canonical data-root rules are summarized in `docs/data_roots.md`. Serious
+research defaults to `~/SHARED_DATA/bybit_fullpit_1h`; the live
+demo ledgers intentionally stay under `data/bybit-demo-event`.
 
 ## Active Strategy
 
 Command:
 
 ```bash
-python -m aggression_carry --data-root DATA_ROOT --config configs/volume_alpha.default.yaml volume-events
+python -m aggression_carry --config configs/volume_alpha.default.yaml volume-events
 ```
+
+The default config resolves `DATA_ROOT` to
+`~/SHARED_DATA/bybit_fullpit_1h`. Pass `--data-root` only when
+intentionally running a different audited root.
 
 The `volume-events` defaults are the selected strategy:
 
@@ -46,7 +53,7 @@ The `volume-events` defaults are the selected strategy:
 - Research-only late-turnover concentration gate:
   `--liquidity-migration-signal-last6h-turnover-share-max` exists for audits,
   defaults disabled, and is not promoted or deployed
-- Exit: event decay, rank exit, 12% fixed stop, 25% fixed take profit, or 3-day max hold
+- Exit: event decay, rank exit, 12% fixed stop, 26% fixed take profit, or 3-day max hold
 - Capacity: max 5 active symbols, 5-day symbol cooldown
 - Stop-pressure throttle: pause new entries after 7 realized stops inside 10 days
 - Realized-loss throttle: pause new entries after 6 realized losses inside 5 days
@@ -63,7 +70,7 @@ Legacy full-PIT baseline run, 2023-05-03 to 2026-05-03:
 - Worst split return: +75.64%
 - Average split Sharpe-like: 2.67
 - OOS return: +111.75%
-- Default chart: `volume_event_best_equity_btc.png` with BTC overlay and monthly/growth gridlines
+- Default chart: `volume_event_best_equity_btc.png` with BTC overlay, monthly/growth gridlines, and a monthly performance table
 - Promotion gate: pass
 
 Reference report:
@@ -72,24 +79,25 @@ Reference report:
 data/research_reports/research_20260516_promoted_default_after_patch
 ```
 
-Promoted research frontier after the same-hour crowding audit and conservative
-quality-squeeze entry router:
+Promoted research frontier after the same-hour crowding audit, conservative
+quality-squeeze entry router, and TP26 exit update:
 
 - Variant: adaptive hot-band liquidity migration with `union_pathology` crowding veto
-- Report: `/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md`
-- Trades: 444
-- Total return, no funding: +2285.54%
-- Max drawdown, no funding: -11.05%
-- Worst 90d return, no funding: -5.02%
-- Worst split return, no funding: +118.81%
-- OOS return, no funding: +210.35%
-- Total return, funding stress: +1853.99%
-- Max drawdown, funding stress: -13.72%
-- OOS return, funding stress: +175.32%
+- Report: `/Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/exit_alpha_20260519/promoted_tp_fine_245_280/volume_event_research_report.md`
+- Trades: 448
+- Total return with partial funding data: +2022.17%
+- Max drawdown: -13.72%
+- Worst 90d return: -6.29%
+- Worst split return: +126.03%
+- OOS return: +183.27%
 
 The event set, exits, cooldowns, gross exposure, and crowding decisions are
-unchanged versus the union promoted path; only the causal post-signal entry
-timing changed for promoted-grade squeeze bars.
+unchanged versus the union promoted path except the fixed take-profit moved
+from 25% to 26%. TP26 improved exact-stop total return, minimum split, split
+Sharpe, and OOS without worsening exact-stop max drawdown or worst 90d versus
+TP25. The adverse hourly stop-fill stress family still fails the formal
+drawdown gate, so this remains demo/research evidence rather than real-money
+proof.
 
 This remains the promoted research default for `volume-events`. The live demo
 entry service can run a separate higher-frequency observation profile, described
@@ -111,6 +119,9 @@ powershell -ExecutionPolicy Bypass -File scripts\run_fullpit_volume_overnight.ps
 ```
 
 The runner syncs `main`, installs the local Python environment, runs smoke tests, builds/resumes the full Bybit public archive manifest, fills full PIT 1h klines from the Bybit v5 API, validates manifest coverage, then runs the selected liquidity-migration strategy.
+By default it targets the canonical funded root and the end-exclusive
+`2026-05-18` boundary, so the recent 30-day data is included without using the
+temporary recent-download root.
 
 ## Model Court
 
@@ -164,9 +175,9 @@ bash scripts/run_bybit_demo_event_engine.sh
 
 Default forward-test behavior:
 
-- `STRATEGY_PROFILE=demo_relaxed` is a test-only relaxed-gate profile. It keeps the same short liquidity-migration idea, `union_pathology` crowding veto, and conservative `promoted_quality_squeeze` router for promoted-grade events, but uses ranks 11-260, no extra current 24h turnover floor, 80-rank improvement, 3.0x turnover expansion, -3% day-return floor, +3% residual-return floor, 0.25 close-location floor, 10 max active symbols, and 2-day cooldown.
+- `STRATEGY_PROFILE=demo_relaxed` is a test-only relaxed-gate profile. It keeps the same short liquidity-migration idea, `union_pathology` crowding veto, and conservative `promoted_quality_squeeze` router for promoted-grade events, but uses ranks 11-260, no extra current 24h turnover floor, 80-rank improvement, 3.0x turnover expansion, -3% day-return floor, +3% residual-return floor, 0.25 close-location floor, 10 max active symbols, 2-day cooldown, 21% take-profit, and the FF6 failed-fade exit.
 - `demo_relaxed` is the only profile allowed to submit demo entry orders through the live runner. Promoted and experimental variants are shadow challengers unless the champion/challenger manifest is intentionally changed and re-audited.
-- full-PIT funded observation evidence: 1,268 trades, +221.29% total return, -21.32% max drawdown, -18.90% worst 90d, +12.36% worst split, +142.92% OOS, promotion gate pass. Report: `/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md`.
+- current full-PIT funded observation evidence for `demo_relaxed` TP21 + FF6: 1,300 trades, +353.46% total return, -16.72% max drawdown, -12.72% worst 90d, +23.53% worst split, +165.57% OOS, promotion gate pass. Report: `/Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/exit_alpha_20260519/demo_relaxed_failedfade_ff6_tp_sl_fine`.
 - pulls current Bybit USDT perp ranks 1-300 for demo_relaxed mode, then applies the selected strategy profile's rank filter
 - rebuilds recent 1h volume features each cycle from a 45-day lookback, using a forward-demo kline cache to fetch only missing/new bars on normal cycles
 - enters eligible events through the causal entry router, with stale entries skipped after 15 minutes by default
@@ -205,6 +216,7 @@ variants, and the current hedge overlay.
 - `scripts/run_fullpit_volume_overnight.sh`: selected full-PIT runner
 - `scripts/run_fullpit_volume_overnight.ps1`: PowerShell selected full-PIT runner
 - `deploy/systemd/model050426-bybit-demo.service`: VPS service definition for the active demo runner
+- `docs/data_roots.md`: canonical research root and live demo root contract
 - `docs/system_status.md`: current deployment and demo order-path proof summary
 - `docs/volume_alpha.md`: strategy notes and current result
 - `docs/bybit_aggression_carry_system_codex_spec.md`: active system spec

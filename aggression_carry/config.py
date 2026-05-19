@@ -29,6 +29,7 @@ DEFAULT_STABLECOIN_SYMBOLS = (
     "USDYUSDT",
 )
 DEFAULT_EXCLUDED_SYMBOLS = DEFAULT_STABLECOIN_SYMBOLS
+DEFAULT_RESEARCH_DATA_ROOT = Path("~/SHARED_DATA/bybit_fullpit_1h")
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +65,10 @@ class TradeLifecycleConfig:
     take_profit_pct: float = 0.0
     mfe_giveback_trigger_pct: float = 0.0
     mfe_giveback_retain_pct: float = 0.0
+    failed_fade_exit_hours: int = 0
+    failed_fade_min_mfe_pct: float = 0.0
+    failed_fade_loss_pct: float = 0.0
+    failed_fade_close_location_min: float = 1.0
     min_symbols: int = 4
     cost_multiplier: float = 1.0
     side_mode: str = "long_high_short_low"
@@ -112,7 +117,7 @@ class ResearchConfig:
     trade_flow: TradeFlowConfig = field(default_factory=TradeFlowConfig)
     universe: UniverseConfig = field(default_factory=UniverseConfig)
     costs: CostConfig = field(default_factory=CostConfig)
-    data_root: Path = Path("data/liquidity_migration")
+    data_root: Path = DEFAULT_RESEARCH_DATA_ROOT
 
 
 def _merge_dataclass(cls: type, payload: dict[str, Any] | None):
@@ -149,7 +154,7 @@ def load_config(path: str | Path | None = None, *, data_root: str | Path | None 
         if loaded:
             raw = dict(loaded)
 
-    root = Path(data_root or raw.get("data_root") or "data/liquidity_migration")
+    root = Path(data_root or raw.get("data_root") or DEFAULT_RESEARCH_DATA_ROOT).expanduser()
     return ResearchConfig(
         exchange=_merge_dataclass(ExchangeConfig, raw.get("exchange")),
         trade_flow=_merge_dataclass(TradeFlowConfig, raw.get("trade_flow")),

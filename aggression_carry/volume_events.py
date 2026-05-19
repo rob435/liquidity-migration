@@ -79,10 +79,14 @@ class VolumeEventResearchConfig:
     side_hypotheses: tuple[str, ...] = ("reversal",)
     stop_loss_pcts: tuple[float, ...] = (0.12,)
     stop_fill_mode: str = "stop"
-    take_profit_pcts: tuple[float, ...] = (0.25,)
+    take_profit_pcts: tuple[float, ...] = (0.26,)
     cost_multipliers: tuple[float, ...] = (3.0,)
     mfe_giveback_trigger_pct: float = 0.0
     mfe_giveback_retain_pct: float = 0.0
+    failed_fade_exit_hours: int = 0
+    failed_fade_min_mfe_pct: float = 0.0
+    failed_fade_loss_pct: float = 0.0
+    failed_fade_close_location_min: float = 1.0
     start_date: str = ""
     end_date: str = ""
     entry_delay_hours: int = 1
@@ -343,7 +347,13 @@ def run_volume_event_research(
             baskets.write_csv(output_dir / "volume_event_best_baskets.csv")
         if not equity.is_empty():
             equity.write_csv(output_dir / "volume_event_best_equity.csv")
-            best_chart = _write_equity_benchmark_chart(output_dir, root=root, equity=equity, raw_klines=raw_klines)
+            best_chart = _write_equity_benchmark_chart(
+                output_dir,
+                root=root,
+                equity=equity,
+                raw_klines=raw_klines,
+                monthly=monthly,
+            )
         if not monthly.is_empty():
             monthly.write_csv(output_dir / "volume_event_best_monthly.csv")
 
@@ -439,6 +449,10 @@ def _run_event_scenario(
         take_profit_pct=max(scenario.take_profit_pct, 0.0),
         mfe_giveback_trigger_pct=config.mfe_giveback_trigger_pct,
         mfe_giveback_retain_pct=config.mfe_giveback_retain_pct,
+        failed_fade_exit_hours=config.failed_fade_exit_hours,
+        failed_fade_min_mfe_pct=config.failed_fade_min_mfe_pct,
+        failed_fade_loss_pct=config.failed_fade_loss_pct,
+        failed_fade_close_location_min=config.failed_fade_close_location_min,
         min_symbols=4,
         cost_multiplier=scenario.cost_multiplier,
         side_mode=side_mode,
@@ -1431,6 +1445,18 @@ def _simulate_indexed_trade(
             exit_ts_ms = int(bar["bar_end_ts_ms"])
             exit_reason = "mfe_giveback"
             break
+        if _failed_fade_exit_hit(
+            side=side,
+            bar=bar,
+            bars_held=bars_held,
+            close_return=close_return,
+            mfe=mfe,
+            config=config,
+        ):
+            exit_price = float(bar["close"])
+            exit_ts_ms = int(bar["bar_end_ts_ms"])
+            exit_reason = "failed_fade"
+            break
         if _event_decay_exit_hit(
             symbol=symbol,
             bar_end_ts_ms=int(bar["bar_end_ts_ms"]),
@@ -1506,6 +1532,33 @@ def _simulate_indexed_trade(
         "bars_held": bars_held,
         "hold_hours": (int(exit_ts_ms) - entry_ts_ms) / MS_PER_HOUR,
     }
+
+
+def _failed_fade_exit_hit(
+    *,
+    side: str,
+    bar: dict[str, Any],
+    bars_held: int,
+    close_return: float,
+    mfe: float,
+    config: TradeLifecycleConfig,
+) -> bool:
+    if (
+        config.failed_fade_exit_hours <= 0
+        or config.failed_fade_loss_pct <= 0.0
+        or config.failed_fade_min_mfe_pct < 0.0
+        or not 0.0 <= config.failed_fade_close_location_min <= 1.0
+        or bars_held < config.failed_fade_exit_hours
+    ):
+        return False
+    if mfe >= config.failed_fade_min_mfe_pct:
+        return False
+    if close_return > -config.failed_fade_loss_pct:
+        return False
+    close_location = _bar_close_location(bar)
+    if side == "short":
+        return close_location >= config.failed_fade_close_location_min
+    return close_location <= 1.0 - config.failed_fade_close_location_min
 
 
 def _stop_fill_price(*, side: str, stop_price: float | None, high: float, low: float, mode: str) -> float:
@@ -3113,6 +3166,7 @@ def _write_equity_benchmark_chart(
     root: Path,
     equity: pl.DataFrame,
     raw_klines: pl.DataFrame,
+    monthly: pl.DataFrame | None = None,
 ) -> dict[str, Any]:
     strategy = _strategy_equity_series(equity)
     if not strategy:
@@ -3124,6 +3178,7 @@ def _write_equity_benchmark_chart(
         {"name": "Strategy", "color": (7, 14, 31), "alpha": 255, "width": 4, "points": strategy},
         {"name": "BTC", "color": (234, 88, 12), "alpha": 215, "width": 3, "points": btc},
     ]
+    monthly_rows = _monthly_table_rows(equity=equity, monthly=monthly)
     _remove_stale_chart_artifacts(output_dir)
     png_path = output_dir / "volume_event_best_equity_btc.png"
     _write_equity_benchmark_png(
@@ -3131,6 +3186,7 @@ def _write_equity_benchmark_chart(
         series=series,
         start=start,
         end=end,
+        monthly_rows=monthly_rows,
     )
     return {
         "png": str(png_path),
@@ -3138,6 +3194,7 @@ def _write_equity_benchmark_chart(
             "strategy": len(strategy),
             "btc": len(btc),
         },
+        "monthly_rows": len(monthly_rows),
         "annotations": [],
     }
 
@@ -3170,6 +3227,7 @@ def _write_equity_benchmark_png(
     series: list[dict[str, Any]],
     start: str,
     end: str,
+    monthly_rows: list[dict[str, Any]] | None = None,
 ) -> None:
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -3177,15 +3235,21 @@ def _write_equity_benchmark_png(
         raise RuntimeError("Pillow is required to write PNG equity charts") from exc
 
     scale = 2
-    width, height = 1600, 940
+    table_rows = monthly_rows or []
+    width = 1600
+    chart_height = 940
+    table_height = 520 if table_rows else 0
+    height = chart_height + table_height
     left, right, top, bottom = 120, 58, 150, 190
     plot_w = width - left - right
-    plot_h = height - top - bottom
+    plot_h = chart_height - top - bottom
     image = Image.new("RGBA", (width * scale, height * scale), (255, 255, 255, 255))
     draw = ImageDraw.Draw(image, "RGBA")
     font_regular = _chart_font(ImageFont, 22 * scale)
     font_small = _chart_font(ImageFont, 17 * scale)
     font_tiny = _chart_font(ImageFont, 14 * scale)
+    font_table = _chart_font(ImageFont, 16 * scale)
+    font_table_header = _chart_font(ImageFont, 15 * scale, bold=True)
     font_title = _chart_font(ImageFont, 32 * scale, bold=True)
 
     all_points = [point for item in series for point in item["points"]]
@@ -3290,18 +3354,110 @@ def _write_equity_benchmark_png(
 
     legend_x = left
     finals = _chart_final_values(series)
+    legend_y = chart_height - 56
     for item in series:
         if not item["points"]:
             continue
         rgb = tuple(item["color"])
         label = f"{item['name']} {finals.get(str(item['name']), 0.0):.2f}x"
-        line([(legend_x, height - 56), (legend_x + 42, height - 56)], (rgb[0], rgb[1], rgb[2], 230), 5)
-        text(legend_x + 54, height - 64, label, (17, 24, 39, 255), font_regular)
+        line([(legend_x, legend_y), (legend_x + 42, legend_y)], (rgb[0], rgb[1], rgb[2], 230), 5)
+        text(legend_x + 54, legend_y - 8, label, (17, 24, 39, 255), font_regular)
         legend_x += 230
+    if table_rows:
+        _draw_monthly_return_table(
+            text=text,
+            rect=rect,
+            rows=table_rows,
+            left=left,
+            top=chart_height + 130,
+            width=plot_w,
+            font_table=font_table,
+            font_table_header=font_table_header,
+        )
 
     image = image.resize((width, height), Image.Resampling.LANCZOS).convert("RGB")
     path.parent.mkdir(parents=True, exist_ok=True)
     image.save(path, format="PNG", optimize=True)
+
+
+def _monthly_table_rows(*, equity: pl.DataFrame, monthly: pl.DataFrame | None) -> list[dict[str, Any]]:
+    if monthly is not None and not monthly.is_empty() and _has_columns(monthly, "month", "strategy_return"):
+        columns = ["month", "strategy_return"]
+        if "trades" in monthly.columns:
+            columns.append("trades")
+        return [
+            {
+                "month": str(row["month"]),
+                "return": _float_or_nan(row.get("strategy_return")),
+                "trades": int(row.get("trades") or 0),
+            }
+            for row in monthly.select(columns).sort("month").to_dicts()
+            if math.isfinite(_float_or_nan(row.get("strategy_return")))
+        ]
+    if equity.is_empty() or not _has_columns(equity, "date", "basket_return"):
+        return []
+    frame = (
+        equity.with_columns(pl.col("date").cast(pl.Utf8).str.slice(0, 7).alias("month"))
+        .group_by("month")
+        .agg(
+            [
+                ((pl.col("basket_return") + 1.0).product() - 1.0).alias("strategy_return"),
+                pl.len().alias("trades"),
+            ]
+        )
+        .sort("month")
+    )
+    return [
+        {
+            "month": str(row["month"]),
+            "return": _float_or_nan(row.get("strategy_return")),
+            "trades": int(row.get("trades") or 0),
+        }
+        for row in frame.to_dicts()
+        if math.isfinite(_float_or_nan(row.get("strategy_return")))
+    ]
+
+
+def _draw_monthly_return_table(
+    *,
+    text: Any,
+    rect: Any,
+    rows: list[dict[str, Any]],
+    left: float,
+    top: float,
+    width: float,
+    font_table: Any,
+    font_table_header: Any,
+) -> None:
+    if not rows:
+        return
+    block_count = min(4, max(1, math.ceil(len(rows) / 9)))
+    rows_per_block = math.ceil(len(rows) / block_count)
+    gap = 24
+    block_w = (width - gap * (block_count - 1)) / block_count
+    row_h = 31
+    header_h = 34
+    for block_index in range(block_count):
+        start_index = block_index * rows_per_block
+        block_rows = rows[start_index : start_index + rows_per_block]
+        if not block_rows:
+            continue
+        x = left + block_index * (block_w + gap)
+        block_h = header_h + len(block_rows) * row_h
+        rect((x, top, x + block_w, top + block_h), (255, 255, 255, 255), (226, 232, 240, 255))
+        rect((x, top, x + block_w, top + header_h), (241, 245, 249, 255), (226, 232, 240, 255))
+        text(x + 10, top + 9, "Month", (51, 65, 85, 255), font_table_header)
+        text(x + block_w * 0.48, top + 9, "Return", (51, 65, 85, 255), font_table_header)
+        text(x + block_w - 10, top + 9, "Trades", (51, 65, 85, 255), font_table_header, anchor="ra")
+        for row_index, row in enumerate(block_rows):
+            y = top + header_h + row_index * row_h
+            if row_index % 2 == 1:
+                rect((x, y, x + block_w, y + row_h), (248, 250, 252, 255))
+            value = _float_or_nan(row.get("return"))
+            color = (22, 101, 52, 255) if value >= 0.0 else (185, 28, 28, 255)
+            text(x + 10, y + 7, str(row.get("month", "")), (51, 65, 85, 255), font_table)
+            text(x + block_w * 0.48, y + 7, f"{value:+.2%}", color, font_table)
+            text(x + block_w - 10, y + 7, str(int(row.get("trades") or 0)), (51, 65, 85, 255), font_table, anchor="ra")
 
 
 def _chart_font(image_font: Any, size: int, *, bold: bool = False) -> Any:
@@ -3697,6 +3853,16 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("mfe_giveback_retain_pct must be in [0, 1]")
     if config.mfe_giveback_retain_pct > 0.0 and config.mfe_giveback_trigger_pct <= 0.0:
         raise ValueError("mfe_giveback_trigger_pct must be positive when MFE giveback is enabled")
+    if config.failed_fade_exit_hours < 0:
+        raise ValueError("failed_fade_exit_hours must be non-negative")
+    if not 0.0 <= config.failed_fade_min_mfe_pct < 1.0:
+        raise ValueError("failed_fade_min_mfe_pct must be in [0, 1)")
+    if not 0.0 <= config.failed_fade_loss_pct < 1.0:
+        raise ValueError("failed_fade_loss_pct must be in [0, 1)")
+    if not 0.0 <= config.failed_fade_close_location_min <= 1.0:
+        raise ValueError("failed_fade_close_location_min must be in [0, 1]")
+    if config.failed_fade_exit_hours > 0 and config.failed_fade_loss_pct <= 0.0:
+        raise ValueError("failed_fade_loss_pct must be positive when failed fade exit is enabled")
     if config.gross_exposure <= 0.0:
         raise ValueError("gross_exposure must be positive")
     if config.max_active_symbols <= 0:

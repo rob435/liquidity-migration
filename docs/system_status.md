@@ -1,19 +1,28 @@
 # System Status
 
-Current as of 2026-05-18.
+Current as of 2026-05-19.
 
 ## Active System
 
 - Research default: full-PIT liquidity-migration short, `union_pathology` crowding veto.
 - Entry policy: `promoted_quality_squeeze` conservative router.
-- Promoted research strategy id: `liqmig_union_q40_h3_tp25_g100_qsqueeze`.
-- Live demo entry profile: `demo_relaxed`, strategy id `demo_relaxed_liqmig_q40_h3_tp25_g100_qsqueeze`.
+- Promoted research strategy id: `liqmig_union_q40_h3_tp26_g100_qsqueeze`.
+- Live demo entry profile: `demo_relaxed`, strategy id `demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6`.
 - Gross exposure: `1.00`, split across `10` max active symbols in demo_relaxed mode.
 - Per-entry target: `10.00%` of current Bybit demo USDT equity in demo_relaxed mode.
 - Entry service: `model050426-bybit-demo.service`.
 - Risk service: `model050426-bybit-risk.service`.
 - Venue mode: Bybit demo only. `demo=False` is still refused by the private client.
 - Paper shadow was intentionally skipped by user decision; keep the risk contained to demo-only trading.
+
+## Data Roots
+
+- Canonical research root: `~/SHARED_DATA/bybit_fullpit_1h`.
+- Current full-PIT manifest/klines coverage: `2023-05-03` through `2026-05-17`
+  completed bars, run commands using `--end 2026-05-18`.
+- Live demo operational root: `data/bybit-demo-event`.
+- Do not use temporary recent-download or current-universe roots as promotion
+  evidence.
 
 ## Champion / Challenger Stack
 
@@ -49,7 +58,7 @@ relevant, and this safety audit still passes.
 Promoted report:
 
 ```text
-/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md
+/Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md
 ```
 
 Full-PIT exact-stop, 3x-cost, no-funding result on `2023-05-03` to `2026-05-03`:
@@ -71,6 +80,26 @@ total return, -13.72% max drawdown, -6.29% worst 90d, +122.17% worst split,
 and +175.32% OOS. Candidate selection, exits, cooldowns, gross exposure, and
 crowding decisions are unchanged; only entry timing for promoted-grade squeeze
 bars changed.
+
+Canonical TP26 rerun after adding the recent full-PIT data through `2026-05-18`:
+
+```text
+report: /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/exit_alpha_20260519/promoted_tp_fine_245_280/volume_event_research_report.md
+trades: 448
+total return with partial funding data: +2022.17%
+max drawdown: -13.72%
+max no-new-high stretch: 54 days
+worst 90d return: -6.29%
+worst split return: +126.03%
+average split Sharpe-like: 3.62
+OOS return: +183.27%
+promotion gate: pass
+```
+
+TP26 replaced TP25 because it improved exact-stop return, minimum split, split
+Sharpe, and OOS without worsening exact-stop max drawdown or worst-90d. TP26
+also beat TP25 under 1x/3x/5x cost stress and adverse hourly stop-fill stress,
+although the adverse stop-fill family still fails the formal drawdown gate.
 
 The stricter model court was rerun on 2026-05-18 with the quality-tier stress
 matrix filtered to `--comparison-family promoted_funding` and explicit
@@ -104,7 +133,7 @@ aggregates. Live/default trading logic is unchanged.
 Latest promoted rerun with the new columns:
 
 ```text
-report: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/feature_factory_promoted_20260518
+report: /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/feature_factory_promoted_20260518
 trades: 444
 total return: +1853.99%
 max drawdown: -13.72%
@@ -116,7 +145,7 @@ OOS return: +175.32%
 Feature report:
 
 ```text
-/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/feature_factory_promoted_20260518/feature_factory/feature_factory_report.md
+/Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/feature_factory_promoted_20260518/feature_factory/feature_factory_report.md
 ```
 
 Coverage is currently 16/27 audited features with non-null data. The missing
@@ -160,7 +189,7 @@ for lower-tier `demo_relaxed` events.
 Full-PIT funded stress report:
 
 ```text
-/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md
+/Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md
 ```
 
 ```text
@@ -177,16 +206,12 @@ promotion gate: pass
 ```
 
 The stricter model-court rerun with `--comparison-family observe_funding` fails
-`demo_relaxed`. Its artifacts, comparison-family filtering, promotion,
-pre-registered windows, bootstrap, shuffled negative controls, sensitivity,
-parameter heatmaps, cost/funding/slippage presence, monthly-regime, and
-symbol-concentration checks pass, but the recomputed basket drawdown differs
-from the report row by 0.70 percentage points, funding coverage is partial, the
-filtered stress matrix includes -28.67% total return and -51.02% drawdown,
-live-vs-backtest execution drift evidence was not attached, and the worst
-same-hour entry cluster contains 6 losing trades for -5.35% additive net
-return. Treat `demo_relaxed` as a higher-frequency plumbing and observation
-profile, not promoted alpha.
+`demo_relaxed`. The current order-submitting demo profile is TP21 + FF6:
+1,300 trades, +353.46% total return, -16.72% max drawdown, -12.72% worst 90d,
++23.53% worst split, +165.57% OOS, and +1.370 average split Sharpe-like in the
+full-PIT exact-stop run. The stricter caveat remains: adverse hourly stop-fill
+stress is still the hard failure mode, so treat `demo_relaxed` as a
+higher-frequency plumbing and observation profile, not promoted alpha.
 
 ## Execution Alpha Research
 
@@ -229,7 +254,7 @@ correlation, and long PnL on the short book's worst days.
 Initial long sweep:
 
 ```text
-report: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/hedge_long_sweep_20260518
+report: /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/hedge_long_sweep_20260518
 scenarios: 48
 promotable standalone longs: 0
 best promotion-ranked long: volume_shelf_reclaim continuation, q20, 3d hold
@@ -268,10 +293,10 @@ It is available through `--liquidity-migration-crowding-filter model_v1`, but
 it is not promoted and not deployed. A full-PIT run that traded only the
 idiosyncratic/liquidity-migration classes produced 211 trades, +269.95% total
 return, -10.32% max drawdown, -6.94% worst 90d, +50.54% worst split, and
-+58.91% OOS. That is profitable, but it discards too much of the promoted edge
-versus the current 444-trade funding-stressed promoted report at +1853.99%.
-The honest conclusion is that classification is useful diagnostics; `model_v1`
-is not a replacement crowding filter.
++58.91% OOS. That is profitable, but it discards too much of the promoted edge;
+the current TP26 promoted run has 448 trades and +2022.17% total return. The
+honest conclusion is that classification is useful diagnostics; `model_v1` is
+not a replacement crowding filter.
 
 `demo_relaxed` relaxed gates:
 
@@ -283,6 +308,8 @@ turnover expansion: >= 3.0
 daily return floor: >= -3%
 residual return floor: >= +3%
 close-location floor: >= 0.25
+take profit: 21%
+failed-fade exit: after 6 completed hours when MFE < 1% and loss > 4%
 max active symbols: 10
 symbol cooldown: 2 days
 crowding veto: union_pathology kept
@@ -330,7 +357,7 @@ Expected VPS state for the active demo deployment:
 path: /opt/MODEL050426
 branch: main
 services: model050426-bybit-demo.service, model050426-bybit-risk.service
-entry strategy id: demo_relaxed_liqmig_q40_h3_tp25_g100_qsqueeze
+entry strategy id: demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6
 entry policy: promoted_quality_squeeze
 service state: active / active
 ```

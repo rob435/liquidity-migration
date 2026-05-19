@@ -1607,6 +1607,69 @@ def test_plan_demo_exits_detects_take_profit_before_max_hold() -> None:
     assert exits[0]["planned_exit_price"] == 80.0
 
 
+def test_plan_demo_exits_detects_failed_fade_on_completed_bar() -> None:
+    scenario = EventScenario(
+        event_type="liquidity_migration",
+        threshold=0.30,
+        side_hypothesis="reversal",
+        hold_days=1,
+        stop_loss_pct=0.12,
+        cost_multiplier=3.0,
+        take_profit_pct=0.0,
+    )
+    entry_ts = 1_700_000_000_000
+    open_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "entry_ts_ms": entry_ts,
+                "entry_price": 100.0,
+                "planned_exit_ts_ms": entry_ts + 24 * MS_PER_HOUR,
+                "qty": "1",
+                "stop_price": 112.0,
+                "take_profit_price": 0.0,
+            }
+        ]
+    )
+    klines = pl.DataFrame(
+        [
+            {"ts_ms": entry_ts, "symbol": "AAAUSDT", "open": 100.0, "high": 101.2, "low": 99.7, "close": 101.0},
+            {
+                "ts_ms": entry_ts + MS_PER_HOUR,
+                "symbol": "AAAUSDT",
+                "open": 101.0,
+                "high": 103.0,
+                "low": 100.5,
+                "close": 102.8,
+            },
+        ]
+    )
+
+    exits = plan_demo_exits(
+        open_trades,
+        rank_lookup={},
+        klines=klines,
+        price_by_symbol={"AAAUSDT": 102.8},
+        now_ms=entry_ts + 2 * MS_PER_HOUR,
+        config=VolumeEventResearchConfig(
+            require_pit_membership=False,
+            require_full_pit_universe=False,
+            failed_fade_exit_hours=2,
+            failed_fade_min_mfe_pct=0.005,
+            failed_fade_loss_pct=0.025,
+            failed_fade_close_location_min=0.85,
+        ),
+        scenario=scenario,
+    )
+
+    assert exits[0]["exit_reason"] == "failed_fade"
+    assert exits[0]["exit_trigger_ts_ms"] == entry_ts + 2 * MS_PER_HOUR
+    assert exits[0]["planned_exit_price"] == 102.8
+
+
 def test_plan_risk_exits_uses_live_position_price_for_stops() -> None:
     open_trades = pl.DataFrame(
         [
@@ -2860,6 +2923,11 @@ def test_submit_orders_requires_explicit_confirmation() -> None:
 def test_demo_relaxed_profile_lowers_gates_for_more_demo_trades() -> None:
     strategy = _demo_event_config(VolumeEventResearchConfig(), profile="demo_relaxed")
 
+    assert strategy.take_profit_pcts == (0.21,)
+    assert strategy.failed_fade_exit_hours == 6
+    assert strategy.failed_fade_min_mfe_pct == 0.01
+    assert strategy.failed_fade_loss_pct == 0.04
+    assert strategy.failed_fade_close_location_min == 0.0
     assert strategy.max_active_symbols == 10
     assert strategy.cooldown_days == 2
     assert strategy.universe_rank_min == 11
@@ -2884,6 +2952,7 @@ def test_observe_alias_maps_to_canonical_demo_relaxed_profile() -> None:
 
     assert _normalize_demo_strategy_profile("observe") == "demo_relaxed"
     assert _demo_strategy_id("observe") == DEMO_RELAXED_STRATEGY_ID
+    assert strategy.take_profit_pcts == (0.21,)
     assert strategy.max_active_symbols == 10
     _validate_demo_config(EventDemoCycleConfig(strategy_profile="observe", universe_rank_end=300, universe_max_symbols=300))
 

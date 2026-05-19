@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from aggression_carry.config import DEFAULT_EXCLUDED_SYMBOLS, load_config
+from aggression_carry.config import (
+    DEFAULT_EXCLUDED_SYMBOLS,
+    DEFAULT_RESEARCH_DATA_ROOT,
+    load_config,
+)
 
 
 def test_active_system_config_loads_from_yaml(tmp_path: Path) -> None:
@@ -32,6 +36,7 @@ cost_model:
 def test_default_config_excludes_only_stable_and_peg_symbols() -> None:
     config = load_config()
 
+    assert config.data_root == DEFAULT_RESEARCH_DATA_ROOT.expanduser()
     assert config.universe.exclude_symbols == DEFAULT_EXCLUDED_SYMBOLS
     assert {"USDCUSDT", "USDEUSDT", "USD1USDT", "USTCUSDT"}.issubset(
         set(config.universe.exclude_symbols)

@@ -3,10 +3,10 @@ param(
     [string]$Repo = "",
     [string]$DataRoot = "",
     [string]$ConfigPath = "configs/volume_alpha.default.yaml",
-    [string]$RunName = "fullpit-1h-all-usdt-20230503-20260503",
-    [string]$ManifestName = "pit-all-usdt-20230503-20260503",
+    [string]$RunName = "canonical-fullpit-1h-all-usdt-20230503-20260518",
+    [string]$ManifestName = "canonical-pit-all-usdt-20230503-20260518",
     [string]$StartDate = "2023-05-03",
-    [string]$EndDate = "2026-05-03",
+    [string]$EndDate = "2026-05-18",
     [int]$ManifestWorkers = 32,
     [int]$DownloadWorkers = 16,
     [int]$MinExistingBars = 1,
@@ -46,7 +46,7 @@ if ($Repo -eq "") {
     }
 }
 if ($DataRoot -eq "") {
-    $DataRoot = Join-Path $HOME "agc-bybit-fullpit-1h-20230503-20260503"
+    $DataRoot = Join-Path (Join-Path $HOME "SHARED_DATA") "bybit_fullpit_1h"
 }
 
 $LogDir = Join-Path $DataRoot "logs"
@@ -189,7 +189,7 @@ if missing:
 
     if ($RunChampionBacktest) {
         Section "Run selected full PIT volume event backtest"
-        $ChampionReportDir = Join-Path (Join-Path $DataRoot "reports") ("SELECTED_liqmig_union_q40_h3_tp25_g100_qsqueeze_{0}" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
+        $ChampionReportDir = Join-Path (Join-Path $DataRoot "reports") ("SELECTED_liqmig_union_q40_h3_tp26_g100_qsqueeze_{0}" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
         Invoke-Checked $VenvPython @(
             "-m", "aggression_carry",
             "--data-root", $DataRoot,
@@ -200,7 +200,7 @@ if missing:
             "--hold-days", "3",
             "--sides", "reversal",
             "--stop-loss-pcts", "0.12",
-            "--take-profit-pcts", "0.25",
+            "--take-profit-pcts", "0.26",
             "--cost-multipliers", "3",
             "--gross-exposure", "$ChampionGrossExposure",
             "--entry-delay-hours", "1",
@@ -230,7 +230,7 @@ if missing:
             "--realized-loss-pressure-min-loss-abs", "0.0",
             "--report-dir", $ChampionReportDir
         )
-        Add-Content -Path $EventReportIndex -Value "champion,5,5,1,promoted_quality_squeeze,0.55,31,150,150,6.0,0.90,0.0,0.08,0.65,0.16,0.015,0.45,90,union_pathology,10,7,5,6,liquidity_migration,0.4,3,reversal,0.12,0.25,3,$ChampionGrossExposure,$ChampionReportDir"
+        Add-Content -Path $EventReportIndex -Value "champion,5,5,1,promoted_quality_squeeze,0.55,31,150,150,6.0,0.90,0.0,0.08,0.65,0.16,0.015,0.45,90,union_pathology,10,7,5,6,liquidity_migration,0.4,3,reversal,0.12,0.26,3,$ChampionGrossExposure,$ChampionReportDir"
     }
 
     Section "Done"

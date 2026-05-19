@@ -1,4 +1,4 @@
-data_root: data/liquidity_migration
+data_root: ~/SHARED_DATA/bybit_fullpit_1h
 
 exchange:
   name: bybit

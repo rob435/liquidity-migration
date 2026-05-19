@@ -49,7 +49,7 @@ research-only execution variants: execution_pullback_guard, tiered_execution_sni
 research-only late-turnover concentration gate: --liquidity-migration-signal-last6h-turnover-share-max exists for audits only and defaults disabled at 1.0
 max hold: 3 days
 stop: 12% fixed
-take profit: 25% fixed
+take profit: 26% fixed
 gross exposure: 1.00
 max active symbols: 5
 symbol cooldown: 5 days
@@ -65,29 +65,29 @@ The strategy is short-only because the best full-PIT evidence is in reversal aft
 Current promoted frontier after the same-hour crowding audit, gross cleanup, and conservative quality-squeeze entry router:
 
 ```text
-report: /Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/entry_signal_cross_strategy_20260517/quality_tier_stress/quality_tier_stress_report.md
+report: /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/exit_alpha_20260519/promoted_tp_fine_245_280/volume_event_research_report.md
 event: liquidity_migration
 side: reversal / short
 threshold: top 40% dollar-volume rank migration
 gross exposure: 1.00
 max active symbols: 5
-trades: 444
-total return: +2285.54%
-max drawdown: -11.05%
-max no-new-high stretch: 51 days
-worst 90d return: -5.02%
-worst split return: +118.81%
-average split Sharpe-like: 3.78
-OOS return: +210.35%
+trades: 448
+total return: +2022.17%
+max drawdown: -13.72%
+max no-new-high stretch: 54 days
+worst 90d return: -6.29%
+worst split return: +126.03%
+average split Sharpe-like: 3.62
+OOS return: +183.27%
 promotion gate: pass
 ```
 
-Those frontier metrics use exact stop fills, 3x base round-trip costs, and no
-funding model. Funding stress on the same conservative router produced 444
-trades, +1853.99% total return, -13.72% max drawdown, -6.29% worst 90d,
-+122.17% worst split, and +175.32% OOS. The event set, exits, cooldowns,
-crowding decisions, and gross exposure remain unchanged; only entry timing
-within the post-signal causal window changed.
+Those frontier metrics use exact stop fills, 3x base round-trip costs, and
+partial funding where available. TP26 beat the former TP25 promoted default on
+headline return, minimum split, split Sharpe, and OOS without worsening max
+drawdown or worst-90d in exact-stop full-PIT tests. Adverse hourly stop-fill
+stress still fails the formal drawdown gate for both TP25 and TP26, so this is
+a demo/research promotion, not real-money evidence.
 
 `model_v1` is a research-only cross-sectional crowding classifier, not the
 active promoted filter. Its first full-PIT run traded only idiosyncratic /
@@ -115,7 +115,8 @@ average split Sharpe-like: 2.67
 train return: +75.64%
 validation return: +254.58%
 OOS return: +111.75%
-default chart: volume_event_best_equity_btc.png with BTC overlay and monthly/growth gridlines
+default chart: volume_event_best_equity_btc.png with BTC overlay,
+monthly/growth gridlines, and a monthly performance table
 promotion gate: pass
 ```
 
@@ -133,6 +134,12 @@ Serious strategy runs must use:
 - `klines_1h` coverage for every manifest symbol/date in the run window
 - causal daily signal features, with standard entry delayed to the next configured 1h bar and promoted-grade squeeze entries delayed only by the causal giveback/deadline router
 - full trade ledger, basket ledger, equity curve, BTC overlay chart, monthly returns, JSON config, and Markdown report
+
+The canonical shared research root is
+`~/SHARED_DATA/bybit_fullpit_1h`. It currently covers full-PIT
+manifest and 1h klines through the completed `2026-05-17` session, using
+`--end 2026-05-18` as the end-exclusive boundary. The live demo root remains
+`data/bybit-demo-event` and must not be mixed with research ledgers.
 
 `volume-events` requires full PIT coverage by default. `--allow-partial-pit` is only for explicitly biased diagnostics and must not be used as promotion evidence.
 
@@ -169,7 +176,7 @@ Each cycle:
 2. Excludes only stable/peg perps, including failed peg remnants such as USTCUSDT, before ranks/features are built.
 3. Rebuilds recent 1h volume features from a 45-day lookback, using the forward-demo kline cache so normal cycles fetch only missing/new 1h bars instead of the whole window.
 4. Exits existing demo positions first on fixed-stop/take-profit reconciliation, event decay, rank exit, or 3-day max hold.
-5. Enters accepted liquidity-migration events through the `promoted_quality_squeeze` router: standard events enter after the 1-hour signal delay, while promoted-grade squeeze events wait for the completed-bar giveback trigger or the 4h deadline. Entries remain subject to max-active, cooldown, stop-pressure, day-return, residual-return, stale-entry, pending-order, live-open-order, live-position, and wallet-equity gates. In demo_relaxed mode those gates are intentionally relaxed to rank 11-260, no extra current 24h turnover floor, 80-rank improvement, 3.0 turnover ratio, -3% day-return floor, +3% residual-return floor, 0.25 close-location floor, 10 max active symbols, and 2-day cooldown. The same `union_pathology` crowding veto stays active. Stale entries are skipped after 15 minutes by default so demo fills stay close to the backtest entry timestamp. In submit mode, the runner snapshots current Bybit positions, open orders, and wallet equity before entries; a live exchange position or non-reduce-only open order for the candidate symbol blocks a new entry, and a position/open-order/wallet snapshot error blocks all new entries for that cycle. Stale unconfirmed entry rows are normally not polled forever, but if a current Bybit position or active open order proves the stale row may still represent live exposure, fill reconciliation keeps polling it and reconstructs the missing trade ledger if Bybit reports a fill. Position and wallet snapshot failures during open-trade handling are reported and keep the cycle alive instead of crashing before exits, reports, or the entry guard can run.
+5. Enters accepted liquidity-migration events through the `promoted_quality_squeeze` router: standard events enter after the 1-hour signal delay, while promoted-grade squeeze events wait for the completed-bar giveback trigger or the 4h deadline. Entries remain subject to max-active, cooldown, stop-pressure, day-return, residual-return, stale-entry, pending-order, live-open-order, live-position, and wallet-equity gates. In demo_relaxed mode those gates are intentionally relaxed to rank 11-260, no extra current 24h turnover floor, 80-rank improvement, 3.0 turnover ratio, -3% day-return floor, +3% residual-return floor, 0.25 close-location floor, 10 max active symbols, 2-day cooldown, 21% take-profit, and the FF6 failed-fade exit. The same `union_pathology` crowding veto stays active. Stale entries are skipped after 15 minutes by default so demo fills stay close to the backtest entry timestamp. In submit mode, the runner snapshots current Bybit positions, open orders, and wallet equity before entries; a live exchange position or non-reduce-only open order for the candidate symbol blocks a new entry, and a position/open-order/wallet snapshot error blocks all new entries for that cycle. Stale unconfirmed entry rows are normally not polled forever, but if a current Bybit position or active open order proves the stale row may still represent live exposure, fill reconciliation keeps polling it and reconstructs the missing trade ledger if Bybit reports a fill. Position and wallet snapshot failures during open-trade handling are reported and keep the cycle alive instead of crashing before exits, reports, or the entry guard can run.
 6. Sizes each accepted coin from the same weight used by the active profile backtest: `gross_exposure / max_active_symbols`, currently `1.00 / 10 = 10.00%` of current Bybit demo USDT equity in demo_relaxed mode. If wallet equity cannot be read in submit mode, the cycle uses fallback equity only for telemetry and does not submit new entries. `--max-order-notional-pct-equity` is only an explicit override. The continuous runner defaults entry leverage to 2x so the 100% gross target can be submitted without changing notional sizing.
 7. Attaches exchange-native stop/take-profit to entry orders, then recomputes the ledger stop/take-profit from confirmed fill price. If the confirmed fill moves the rounded protection levels, the runner immediately updates Bybit trading-stop state and records the update status.
 8. Sends Telegram only for material events when enabled: entries, exits, failed entry stop updates, position reconciliation, or position-report errors. Quiet cycles still write local reports but do not notify.
@@ -189,7 +196,7 @@ Telegram may notify on material events, but it must not approve or submit orders
 The `demo_relaxed` profile is explicitly a demo-only test system, not a replacement
 promotion. Its full-PIT funded evidence is summarized in `docs/system_status.md`
 and reports under
-`/Users/jhbvdnsbkvnsd/agc-bybit-fullpit-funded-20230503-20260503/reports/observe_mode_sweep_20260517/observe_c`.
+`/Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/observe_mode_sweep_20260517/observe_c`.
 
 The exit-only risk watchdog is separate from the alpha loop:
 

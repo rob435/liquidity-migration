@@ -2,10 +2,10 @@
 set -euo pipefail
 
 REMOTE="${REMOTE:-https://github.com/rob435/MODEL05042026.git}"
-RUN_NAME="${RUN_NAME:-fullpit-1h-all-usdt-20230503-20260503}"
-MANIFEST_NAME="${MANIFEST_NAME:-pit-all-usdt-20230503-20260503}"
+RUN_NAME="${RUN_NAME:-canonical-fullpit-1h-all-usdt-20230503-20260518}"
+MANIFEST_NAME="${MANIFEST_NAME:-canonical-pit-all-usdt-20230503-20260518}"
 START_DATE="${START_DATE:-2023-05-03}"
-END_DATE="${END_DATE:-2026-05-03}"
+END_DATE="${END_DATE:-2026-05-18}"
 MANIFEST_WORKERS="${MANIFEST_WORKERS:-32}"
 DOWNLOAD_WORKERS="${DOWNLOAD_WORKERS:-16}"
 MIN_EXISTING_BARS="${MIN_EXISTING_BARS:-1}"
@@ -22,7 +22,7 @@ else
 fi
 
 REPO="${REPO:-${REPO_DIR:-$DEFAULT_REPO}}"
-DATA_ROOT="${DATA_ROOT:-$HOME/agc-bybit-fullpit-1h-20230503-20260503}"
+DATA_ROOT="${DATA_ROOT:-$HOME/SHARED_DATA/bybit_fullpit_1h}"
 CONFIG_PATH="${CONFIG_PATH:-configs/volume_alpha.default.yaml}"
 LOG_DIR="$DATA_ROOT/logs"
 export DATA_ROOT RUN_NAME
@@ -187,7 +187,7 @@ echo "run_type,max_active_symbols,cooldown_days,entry_delay_hours,entry_policy,r
 
 if [ "$RUN_CHAMPION_BACKTEST" != "0" ]; then
   section "Run selected full PIT volume event backtest"
-  CHAMPION_REPORT_DIR="$DATA_ROOT/reports/SELECTED_liqmig_union_q40_h3_tp25_g100_qsqueeze_$(date -u +%Y%m%dT%H%M%SZ)"
+  CHAMPION_REPORT_DIR="$DATA_ROOT/reports/SELECTED_liqmig_union_q40_h3_tp26_g100_qsqueeze_$(date -u +%Y%m%dT%H%M%SZ)"
   python -m aggression_carry \
     --data-root "$DATA_ROOT" \
     --config "$CONFIG_PATH" \
@@ -197,7 +197,7 @@ if [ "$RUN_CHAMPION_BACKTEST" != "0" ]; then
     --hold-days 3 \
     --sides reversal \
     --stop-loss-pcts 0.12 \
-    --take-profit-pcts 0.25 \
+    --take-profit-pcts 0.26 \
     --cost-multipliers 3 \
     --gross-exposure "$CHAMPION_GROSS_EXPOSURE" \
     --entry-delay-hours 1 \
@@ -226,7 +226,7 @@ if [ "$RUN_CHAMPION_BACKTEST" != "0" ]; then
     --realized-loss-pressure-loss-count 6 \
     --realized-loss-pressure-min-loss-abs 0.0 \
     --report-dir "$CHAMPION_REPORT_DIR"
-  echo "champion,5,5,1,promoted_quality_squeeze,0.55,31,150,150,6.0,0.90,0.0,0.08,0.65,0.16,0.015,0.45,90,union_pathology,10,7,5,6,liquidity_migration,0.4,3,reversal,0.12,0.25,3,$CHAMPION_GROSS_EXPOSURE,$CHAMPION_REPORT_DIR" >> "$EVENT_REPORT_INDEX"
+  echo "champion,5,5,1,promoted_quality_squeeze,0.55,31,150,150,6.0,0.90,0.0,0.08,0.65,0.16,0.015,0.45,90,union_pathology,10,7,5,6,liquidity_migration,0.4,3,reversal,0.12,0.26,3,$CHAMPION_GROSS_EXPOSURE,$CHAMPION_REPORT_DIR" >> "$EVENT_REPORT_INDEX"
 fi
 
 section "Done"

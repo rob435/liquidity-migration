@@ -306,6 +306,30 @@ def build_parser() -> argparse.ArgumentParser:
         default=event_defaults.mfe_giveback_retain_pct,
         help="After MFE activation, exit when close return retains no more than this fraction of MFE; 0 disables.",
     )
+    volume_events.add_argument(
+        "--failed-fade-exit-hours",
+        type=int,
+        default=event_defaults.failed_fade_exit_hours,
+        help="Exit after this many post-entry completed bars when a trade has failed to move in favor and is losing; 0 disables.",
+    )
+    volume_events.add_argument(
+        "--failed-fade-min-mfe-pct",
+        type=float,
+        default=event_defaults.failed_fade_min_mfe_pct,
+        help="Failed-fade exit: maximum favorable excursion allowed before the rule is disabled.",
+    )
+    volume_events.add_argument(
+        "--failed-fade-loss-pct",
+        type=float,
+        default=event_defaults.failed_fade_loss_pct,
+        help="Failed-fade exit: side-aware close loss threshold, e.g. 0.025 exits a short down 2.5%.",
+    )
+    volume_events.add_argument(
+        "--failed-fade-close-location-min",
+        type=float,
+        default=event_defaults.failed_fade_close_location_min,
+        help="Failed-fade exit: for shorts, require completed bar close-location at or above this value; longs invert it.",
+    )
     volume_events.add_argument("--start", default="", help="Inclusive UTC signal start date/timestamp.")
     volume_events.add_argument("--end", default="", help="Exclusive UTC signal end date/timestamp.")
     volume_events.add_argument("--entry-delay-hours", type=int, default=event_defaults.entry_delay_hours, help="Hours after signal close before entry.")
@@ -1533,6 +1557,10 @@ def main(argv: list[str] | None = None) -> int:
             cost_multipliers=_csv_float(args.cost_multipliers, VolumeEventResearchConfig().cost_multipliers),
             mfe_giveback_trigger_pct=args.mfe_giveback_trigger_pct,
             mfe_giveback_retain_pct=args.mfe_giveback_retain_pct,
+            failed_fade_exit_hours=args.failed_fade_exit_hours,
+            failed_fade_min_mfe_pct=args.failed_fade_min_mfe_pct,
+            failed_fade_loss_pct=args.failed_fade_loss_pct,
+            failed_fade_close_location_min=args.failed_fade_close_location_min,
             start_date=args.start,
             end_date=args.end,
             entry_delay_hours=args.entry_delay_hours,
