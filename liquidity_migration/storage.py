@@ -252,6 +252,11 @@ def read_dataset(data_root: str | Path, dataset: str) -> pl.DataFrame:
 
 
 def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> None:
+    # Invariant: only ever called from inside write_dataset, which holds
+    # `exclusive_file_lock(dataset_lock_path(...))`. The pid + nanosecond temp
+    # filename therefore can't collide with a concurrent writer — there ISN'T
+    # one. If this is ever called from outside that lock, switch to a uuid4
+    # temp name and re-derive the dedup story per dataset.
     output = df
     if append and path.exists():
         existing = pl.read_parquet(path)

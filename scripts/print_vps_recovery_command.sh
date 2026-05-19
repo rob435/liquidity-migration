@@ -66,7 +66,7 @@ EXPECTED_COMMIT="$commit_sha" scripts/wait_for_vps_recovery_and_deploy.sh
 # Hetzner Rescue and use the rescue command above first.
 $recommended_command
 
-# Strict full recovery that refuses a dirty /opt/MODEL050426 checkout:
+# Strict full recovery that refuses a dirty /opt/liquidity-migration checkout:
 apt-get update && apt-get install -y ca-certificates curl
 curl -fsSL $script_url | EXPECTED_COMMIT="$commit_sha" bash
 

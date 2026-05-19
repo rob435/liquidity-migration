@@ -4,9 +4,9 @@
 - Ask for exact intent, constraints, and success metrics when a request is vague.
 - Do not optimize for a vague goal; define the objective before expensive research.
 - This repo's primary objective is a profitable Bybit demo-account trading system.
-- Current implementation plan: `docs/bybit_aggression_carry_system_codex_spec.md`.
+- Current implementation plan: `docs/bybit_liquidity_migration_system_codex_spec.md`.
 - Active strategy notes: `docs/volume_alpha.md`.
-- Bybit venue/data reference: `docs/bybit_aggression_carry_system_codex_spec.md`.
+- Bybit venue/data reference: `docs/bybit_liquidity_migration_system_codex_spec.md`.
 - Before changing strategy, data ingestion, feature engineering, or backtesting logic, read both docs.
 - Demo-only Bybit order submission is in scope; the private client must keep refusing `demo=False` unless real-money support is explicitly requested.
 - Keep the active path on the selected full-PIT liquidity-migration short strategy unless a replacement has better full-PIT and forward/demo evidence.

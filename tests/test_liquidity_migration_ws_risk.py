@@ -5,10 +5,10 @@ from pathlib import Path
 
 import polars as pl
 
-from aggression_carry import ws_risk
-from aggression_carry.config import ResearchConfig
-from aggression_carry.storage import read_dataset, write_dataset
-from aggression_carry.ws_risk import (
+from liquidity_migration import ws_risk
+from liquidity_migration.config import ResearchConfig
+from liquidity_migration.storage import read_dataset, write_dataset
+from liquidity_migration.ws_risk import (
     EventWebSocketRiskConfig,
     EventWebSocketRiskEngine,
     _read_telegram_dedupe_keys,
@@ -204,7 +204,7 @@ def test_ws_risk_skips_stop_repair_when_exit_order_pending(tmp_path: Path) -> No
         pl.DataFrame(
             [
                 {
-                    "order_link_id": "agc-ex-pending",
+                    "order_link_id": "lm-ex-pending",
                     "ts_ms": 9_999_999_999_000,
                     "trade_id": "t1",
                     "symbol": "AAAUSDT",
@@ -269,7 +269,7 @@ def test_ws_risk_live_open_exit_order_blocks_duplicate_tracked_exit(tmp_path: Pa
         open_orders=[
             {
                 "symbol": "AAAUSDT",
-                "orderLinkId": "agc-ex-existing",
+                "orderLinkId": "lm-ex-existing",
                 "orderStatus": "New",
                 "reduceOnly": True,
             }
@@ -587,7 +587,7 @@ def test_ws_then_rest_falls_back_after_failed_ws_order_ack(tmp_path: Path) -> No
     engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
     ws_link = str(engine.state.orders[0]["order_link_id"])
     trigger_ts_ms = int(engine.state.orders[0]["exit_trigger_ts_ms"])
-    engine.on_ws_order_ack({"retCode": 10001, "retMsg": "demo ws rejected", "_agc_order_link_id": ws_link})
+    engine.on_ws_order_ack({"retCode": 10001, "retMsg": "demo ws rejected", "_lm_order_link_id": ws_link})
 
     stored = read_dataset(tmp_path, "event_demo_trades")
     stored_orders = read_dataset(tmp_path, "event_demo_orders")
@@ -631,7 +631,7 @@ def test_ws_ack_rest_fallback_failure_keeps_trade_open_with_context(tmp_path: Pa
     engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
     ws_link = str(engine.state.orders[0]["order_link_id"])
     trigger_ts_ms = int(engine.state.orders[0]["exit_trigger_ts_ms"])
-    engine.on_ws_order_ack({"retCode": 10001, "retMsg": "demo ws rejected", "_agc_order_link_id": ws_link})
+    engine.on_ws_order_ack({"retCode": 10001, "retMsg": "demo ws rejected", "_lm_order_link_id": ws_link})
 
     stored = read_dataset(tmp_path, "event_demo_trades")
     stored_orders = read_dataset(tmp_path, "event_demo_orders")
@@ -674,7 +674,7 @@ def test_ws_order_ack_failure_without_rest_marks_order_rejected(tmp_path: Path) 
     engine.bootstrap()
     engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
     ws_link = str(engine.state.orders[0]["order_link_id"])
-    engine.on_ws_order_ack({"retCode": 10001, "retMsg": "demo ws rejected", "_agc_order_link_id": ws_link})
+    engine.on_ws_order_ack({"retCode": 10001, "retMsg": "demo ws rejected", "_lm_order_link_id": ws_link})
 
     stored = read_dataset(tmp_path, "event_demo_trades")
     stored_orders = read_dataset(tmp_path, "event_demo_orders")
@@ -823,7 +823,7 @@ def test_ws_risk_bootstrap_loads_pending_exit_order_after_restart(tmp_path: Path
         pl.DataFrame(
             [
                 {
-                    "order_link_id": "agc-ex-pending",
+                    "order_link_id": "lm-ex-pending",
                     "ts_ms": 9_999_999_999_000,
                     "trade_id": "t1",
                     "symbol": "AAAUSDT",
@@ -868,7 +868,7 @@ def test_ws_risk_bootstrap_loads_pending_exit_order_after_restart(tmp_path: Path
             "data": [
                 {
                     "symbol": "AAAUSDT",
-                    "orderLinkId": "agc-ex-pending",
+                    "orderLinkId": "lm-ex-pending",
                     "execQty": "1",
                     "execPrice": "113",
                     "execValue": "113",
@@ -884,7 +884,7 @@ def test_ws_risk_bootstrap_loads_pending_exit_order_after_restart(tmp_path: Path
     assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
     assert stored.filter(pl.col("trade_id") == "t1").select("exit_reason").item() == "stop_loss"
     assert stored.filter(pl.col("trade_id") == "t1").select("exit_trigger_ts_ms").item() == 1_234_567_890
-    assert stored_orders.filter(pl.col("order_link_id") == "agc-ex-pending").select("status").item() == "filled"
+    assert stored_orders.filter(pl.col("order_link_id") == "lm-ex-pending").select("status").item() == "filled"
 
 
 def test_ws_risk_rejected_pending_exit_unblocks_retry_after_restart(tmp_path: Path) -> None:
@@ -893,7 +893,7 @@ def test_ws_risk_rejected_pending_exit_unblocks_retry_after_restart(tmp_path: Pa
         pl.DataFrame(
             [
                 {
-                    "order_link_id": "agc-ex-pending",
+                    "order_link_id": "lm-ex-pending",
                     "ts_ms": 9_999_999_999_000,
                     "trade_id": "t1",
                     "symbol": "AAAUSDT",
@@ -935,7 +935,7 @@ def test_ws_risk_rejected_pending_exit_unblocks_retry_after_restart(tmp_path: Pa
             "data": [
                 {
                     "symbol": "AAAUSDT",
-                    "orderLinkId": "agc-ex-pending",
+                    "orderLinkId": "lm-ex-pending",
                     "orderStatus": "Rejected",
                     "rejectReason": "insufficient margin",
                 }
@@ -945,9 +945,9 @@ def test_ws_risk_rejected_pending_exit_unblocks_retry_after_restart(tmp_path: Pa
     engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
 
     stored_orders = read_dataset(tmp_path, "event_demo_orders")
-    assert stored_orders.filter(pl.col("order_link_id") == "agc-ex-pending").select("status").item() == "rejected"
+    assert stored_orders.filter(pl.col("order_link_id") == "lm-ex-pending").select("status").item() == "rejected"
     assert len(private_client.orders) == 1
-    assert private_client.orders[0]["orderLinkId"] != "agc-ex-pending"
+    assert private_client.orders[0]["orderLinkId"] != "lm-ex-pending"
     assert "AAAUSDT" in engine.state.submitted_symbols
 
 
@@ -977,12 +977,12 @@ def test_ws_risk_logs_untracked_close_to_logger(tmp_path: Path, caplog) -> None:
         public_stream=FakePublicStream(),
     )
 
-    with caplog.at_level(_logging.WARNING, logger="aggression_carry.ws_risk"):
+    with caplog.at_level(_logging.WARNING, logger="liquidity_migration.ws_risk"):
         engine.bootstrap()
 
     close_records = [
         record for record in caplog.records
-        if record.name == "aggression_carry.ws_risk" and "untracked_position close" in record.getMessage()
+        if record.name == "liquidity_migration.ws_risk" and "untracked_position close" in record.getMessage()
     ]
     assert close_records, "expected an untracked_position close log line"
     msg = close_records[0].getMessage()
@@ -1154,7 +1154,7 @@ def test_ws_risk_reconciles_pending_entry_fill_before_untracked_guard(tmp_path: 
     assert trade["status"] == "open"
     assert trade["symbol"] == "AAAUSDT"
     assert trade["qty"] == "1"
-    assert stored_orders.filter(pl.col("order_link_id") == "agc-en-pending").select("status").item() == "filled"
+    assert stored_orders.filter(pl.col("order_link_id") == "lm-en-pending").select("status").item() == "filled"
     assert engine.state.open_trades.height == 1
     assert engine.state.pending_entry_symbols == set()
 
@@ -1188,7 +1188,7 @@ def test_ws_risk_reconciles_stale_pending_entry_when_position_live(tmp_path: Pat
     assert trade["status"] == "open"
     assert trade["symbol"] == "AAAUSDT"
     assert trade["qty"] == "1"
-    assert stored_orders.filter(pl.col("order_link_id") == "agc-en-pending").select("status").item() == "filled"
+    assert stored_orders.filter(pl.col("order_link_id") == "lm-en-pending").select("status").item() == "filled"
     assert engine.state.open_trades.height == 1
     assert engine.state.pending_entry_symbols == set()
 
@@ -1245,7 +1245,7 @@ def test_ws_risk_terminalizes_stale_pending_entry_when_exchange_flat(tmp_path: P
     stored_orders = read_dataset(tmp_path, "event_demo_orders")
     assert private_client.orders == []
     assert engine.state.pending_entry_symbols == set()
-    assert stored_orders.filter(pl.col("order_link_id") == "agc-en-pending").select("status").item() == "expired_unconfirmed"
+    assert stored_orders.filter(pl.col("order_link_id") == "lm-en-pending").select("status").item() == "expired_unconfirmed"
 
 
 def test_ws_risk_keeps_stale_pending_entry_when_live_order_exists(tmp_path: Path) -> None:
@@ -1256,7 +1256,7 @@ def test_ws_risk_keeps_stale_pending_entry_when_live_order_exists(tmp_path: Path
         open_orders=[
             {
                 "symbol": "AAAUSDT",
-                "orderLinkId": "agc-en-pending",
+                "orderLinkId": "lm-en-pending",
                 "orderStatus": "New",
                 "reduceOnly": False,
             }
@@ -1283,7 +1283,7 @@ def test_ws_risk_keeps_stale_pending_entry_when_live_order_exists(tmp_path: Path
 
     stored_orders = read_dataset(tmp_path, "event_demo_orders")
     assert private_client.orders == []
-    assert stored_orders.filter(pl.col("order_link_id") == "agc-en-pending").select("status").item() == "submitted_unconfirmed"
+    assert stored_orders.filter(pl.col("order_link_id") == "lm-en-pending").select("status").item() == "submitted_unconfirmed"
 
 
 def test_ws_risk_untracked_exit_blocks_duplicate_until_fill(tmp_path: Path) -> None:
@@ -1383,7 +1383,7 @@ def test_ws_risk_bootstrap_loads_pending_untracked_exit_after_restart(tmp_path: 
         pl.DataFrame(
             [
                 {
-                    "order_link_id": "agc-ux-pending",
+                    "order_link_id": "lm-ux-pending",
                     "ts_ms": 9_999_999_999_000,
                     "trade_id": "",
                     "symbol": "AAAUSDT",
@@ -1431,7 +1431,7 @@ def test_ws_risk_bootstrap_loads_pending_untracked_exit_after_restart(tmp_path: 
     assert private_client.orders == []
     assert stored_orders.height == 1
     assert len(engine.state.orders) == 1
-    assert engine.state.orders[0]["order_link_id"] == "agc-ux-pending"
+    assert engine.state.orders[0]["order_link_id"] == "lm-ux-pending"
     assert "AAAUSDT" in engine.state.submitted_symbols
 
 
@@ -1441,7 +1441,7 @@ def test_ws_risk_live_open_untracked_exit_blocks_duplicate_after_restart(tmp_pat
         open_orders=[
             {
                 "symbol": "AAAUSDT",
-                "orderLinkId": "agc-ux-existing",
+                "orderLinkId": "lm-ux-existing",
                 "orderStatus": "New",
                 "reduceOnly": True,
             }
@@ -1478,7 +1478,7 @@ def test_ws_risk_stale_untracked_exit_is_filled_when_exchange_is_flat(tmp_path: 
         pl.DataFrame(
             [
                 {
-                    "order_link_id": "agc-ux-stale",
+                    "order_link_id": "lm-ux-stale",
                     "ts_ms": 1,
                     "trade_id": "",
                     "symbol": "AAAUSDT",
@@ -1521,7 +1521,7 @@ def test_ws_risk_stale_untracked_exit_is_filled_when_exchange_is_flat(tmp_path: 
     engine.bootstrap()
 
     stored_orders = read_dataset(tmp_path, "event_demo_orders")
-    order = stored_orders.filter(pl.col("order_link_id") == "agc-ux-stale").to_dicts()[0]
+    order = stored_orders.filter(pl.col("order_link_id") == "lm-ux-stale").to_dicts()[0]
     assert private_client.orders == []
     assert order["status"] == "filled"
     assert order["filled_qty"] == "1"
@@ -1533,7 +1533,7 @@ def test_ws_risk_stale_exit_stays_pending_when_open_order_snapshot_fails(tmp_pat
         pl.DataFrame(
             [
                 {
-                    "order_link_id": "agc-ux-stale",
+                    "order_link_id": "lm-ux-stale",
                     "ts_ms": 1,
                     "trade_id": "",
                     "symbol": "AAAUSDT",
@@ -1576,7 +1576,7 @@ def test_ws_risk_stale_exit_stays_pending_when_open_order_snapshot_fails(tmp_pat
     engine.bootstrap()
 
     stored_orders = read_dataset(tmp_path, "event_demo_orders")
-    order = stored_orders.filter(pl.col("order_link_id") == "agc-ux-stale").to_dicts()[0]
+    order = stored_orders.filter(pl.col("order_link_id") == "lm-ux-stale").to_dicts()[0]
     assert order["status"] == "submitted_unconfirmed"
     assert "open orders unavailable" in "; ".join(engine.state.errors)
 
@@ -1587,7 +1587,7 @@ def test_ws_risk_stale_tracked_exit_closes_trade_when_exchange_is_flat(tmp_path:
         pl.DataFrame(
             [
                 {
-                    "order_link_id": "agc-ex-stale",
+                    "order_link_id": "lm-ex-stale",
                     "ts_ms": 1,
                     "trade_id": "t1",
                     "symbol": "AAAUSDT",
@@ -1633,7 +1633,7 @@ def test_ws_risk_stale_tracked_exit_closes_trade_when_exchange_is_flat(tmp_path:
     stored = read_dataset(tmp_path, "event_demo_trades")
     stored_orders = read_dataset(tmp_path, "event_demo_orders")
     trade = stored.filter(pl.col("trade_id") == "t1").to_dicts()[0]
-    order = stored_orders.filter(pl.col("order_link_id") == "agc-ex-stale").to_dicts()[0]
+    order = stored_orders.filter(pl.col("order_link_id") == "lm-ex-stale").to_dicts()[0]
     assert private_client.orders == []
     assert order["status"] == "filled"
     assert trade["status"] == "closed"
@@ -1765,7 +1765,7 @@ def test_ws_risk_telegram_material_events_are_deduped(tmp_path: Path, monkeypatc
         sent.append(text)
         return enabled
 
-    monkeypatch.setattr("aggression_carry.event_demo.send_telegram_message", fake_send)
+    monkeypatch.setattr("liquidity_migration.event_demo.send_telegram_message", fake_send)
     engine = EventWebSocketRiskEngine(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
@@ -1776,7 +1776,7 @@ def test_ws_risk_telegram_material_events_are_deduped(tmp_path: Path, monkeypatc
     )
     engine.state.orders.append(
         {
-            "order_link_id": "agc-ux-AAA-1",
+            "order_link_id": "lm-ux-AAA-1",
             "symbol": "AAAUSDT",
             "side": "Buy",
             "status": "filled",
@@ -1803,7 +1803,7 @@ def test_ws_risk_pending_fill_notification_is_deduped_across_heartbeats(tmp_path
         sent.append(text)
         return enabled
 
-    monkeypatch.setattr("aggression_carry.event_demo.send_telegram_message", fake_send)
+    monkeypatch.setattr("liquidity_migration.event_demo.send_telegram_message", fake_send)
     engine = EventWebSocketRiskEngine(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
@@ -1817,7 +1817,7 @@ def test_ws_risk_pending_fill_notification_is_deduped_across_heartbeats(tmp_path
             "trade_id": "t-entry",
             "symbol": "AAAUSDT",
             "status": "open",
-            "entry_order_link_id": "agc-en-pending",
+            "entry_order_link_id": "lm-en-pending",
         }
     )
 
@@ -1839,7 +1839,7 @@ def test_ws_risk_telegram_dedupe_survives_restart(tmp_path: Path, monkeypatch) -
         sent.append(text)
         return enabled
 
-    monkeypatch.setattr("aggression_carry.event_demo.send_telegram_message", fake_send)
+    monkeypatch.setattr("liquidity_migration.event_demo.send_telegram_message", fake_send)
     first_engine = EventWebSocketRiskEngine(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
@@ -1878,7 +1878,7 @@ def test_ws_risk_stop_repair_dedupe_ignores_synthetic_order_link(tmp_path: Path,
         sent.append(text)
         return enabled
 
-    monkeypatch.setattr("aggression_carry.event_demo.send_telegram_message", fake_send)
+    monkeypatch.setattr("liquidity_migration.event_demo.send_telegram_message", fake_send)
 
     def write_repair(order_link_id: str, *, stop_price: float = 112.0) -> dict[str, object]:
         engine = EventWebSocketRiskEngine(
@@ -1901,9 +1901,9 @@ def test_ws_risk_stop_repair_dedupe_ignores_synthetic_order_link(tmp_path: Path,
         )
         return engine.write_report(reason="heartbeat")
 
-    first = write_repair("agc-st-AAA-1")
-    duplicate = write_repair("agc-st-AAA-2")
-    changed_target = write_repair("agc-st-AAA-3", stop_price=113.0)
+    first = write_repair("lm-st-AAA-1")
+    duplicate = write_repair("lm-st-AAA-2")
+    changed_target = write_repair("lm-st-AAA-3", stop_price=113.0)
 
     assert first["cycle"]["telegram_sent"] is True
     assert duplicate["cycle"]["telegram_sent"] is False
@@ -2060,7 +2060,7 @@ def _write_pending_entry_order(root: Path, *, status: str, ts_ms: int) -> None:
         pl.DataFrame(
             [
                 {
-                    "order_link_id": "agc-en-pending",
+                    "order_link_id": "lm-en-pending",
                     "ts_ms": ts_ms,
                     "trade_id": "t-entry",
                     "symbol": "AAAUSDT",

@@ -10,8 +10,8 @@ Current as of 2026-05-19.
 - Live demo entry profile: `demo_relaxed`, strategy id `demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6`.
 - Gross exposure: `1.00`, split across `10` max active symbols in demo_relaxed mode.
 - Per-entry target: `10.00%` of current Bybit demo USDT equity in demo_relaxed mode.
-- Entry service: `model050426-bybit-demo.service`.
-- Risk service: `model050426-bybit-risk.service`.
+- Entry service: `liquidity-migration-bybit-demo.service`.
+- Risk service: `liquidity-migration-bybit-risk.service`.
 - Venue mode: Bybit demo only. `demo=False` is still refused by the private client.
 - Paper shadow was intentionally skipped by user decision; keep the risk contained to demo-only trading.
 
@@ -28,12 +28,12 @@ Current as of 2026-05-19.
 
 The order-submitting champion is the VPS `demo_relaxed` entry service only.
 `scripts/run_bybit_demo_event_engine.sh` now refuses `SUBMIT_ORDERS=1` unless
-`STRATEGY_PROFILE=demo_relaxed` or the deprecated `observe` alias is used.
+`STRATEGY_PROFILE=demo_relaxed`.
 
 Manifest/audit command:
 
 ```bash
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root data/bybit-demo-event \
   champion-challenger
 ```
@@ -205,8 +205,8 @@ average split Sharpe-like: 1.04
 promotion gate: pass
 ```
 
-The stricter model-court rerun with `--comparison-family observe_funding` fails
-`demo_relaxed`. The current order-submitting demo profile is TP21 + FF6:
+The stricter model-court rerun fails `demo_relaxed` on the funding-aware
+comparison family. The current order-submitting demo profile is TP21 + FF6:
 1,300 trades, +353.46% total return, -16.72% max drawdown, -12.72% worst 90d,
 +23.53% worst split, +165.57% OOS, and +1.370 average split Sharpe-like in the
 full-PIT exact-stop run. The stricter caveat remains: adverse hourly stop-fill
@@ -354,9 +354,9 @@ Bybit demo WebSocket Trade order entry was attempted and was unavailable or reje
 Target VPS state for the active demo deployment:
 
 ```text
-path: /opt/MODEL050426
+path: /opt/liquidity-migration
 branch: main
-services: model050426-bybit-demo.service, model050426-bybit-risk.service
+services: liquidity-migration-bybit-demo.service, liquidity-migration-bybit-risk.service
 entry strategy id: demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6
 entry policy: promoted_quality_squeeze
 service state: active / active
@@ -393,10 +393,10 @@ installed OS console is unavailable, boot Hetzner Rescue, run the generated
 the active `wait-deploy` job finish the checked deploy. That restores both the
 local public key and the GitHub Actions public key in
 `/root/.ssh/authorized_keys` and prints both restored authorized-key
-fingerprints. The full recovery command also clones/repairs `/opt/MODEL050426`,
+fingerprints. The full recovery command also clones/repairs `/opt/liquidity-migration`,
 saves tracked and untracked checkout dirt before cleaning when
 `CLEAN_DIRTY_CHECKOUT=1` is set, pins the expected commit, backs up
-`/etc/model050426/bybit-demo.env`, enforces `TELEGRAM_CHAT_ID=8388367561`,
+`/etc/liquidity-migration/bybit-demo.env`, enforces `TELEGRAM_CHAT_ID=8388367561`,
 restarts the active services, and verifies the live state. It prints
 `deploy-verify-ok` only after both active services are active and enabled, the
 retired legacy units are inactive and disabled, the demo service has the

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import polars as pl
 
-from aggression_carry.config import UniverseConfig
-from aggression_carry.universe import build_current_universe_table, format_universe_report
-from aggression_carry.volume_features import MS_PER_DAY
+from liquidity_migration.config import UniverseConfig
+from liquidity_migration.universe import build_current_universe_table, format_universe_report
+from liquidity_migration.volume_features import MS_PER_DAY
 
 
 def test_current_universe_table_filters_and_ranks() -> None:

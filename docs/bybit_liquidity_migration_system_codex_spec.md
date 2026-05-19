@@ -18,7 +18,7 @@ The current private Bybit client is demo-only and refuses `demo=False`. Real-mon
 Canonical command:
 
 ```bash
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root DATA_ROOT \
   --config configs/volume_alpha.default.yaml \
   volume-events
@@ -157,7 +157,7 @@ The old daily-close demo executor was intentionally removed because it encoded t
 The active demo execution path is `event-demo-cycle` plus the continuous runner:
 
 ```bash
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root data/bybit-demo-event \
   --config configs/volume_alpha.default.yaml \
   event-demo-cycle
@@ -186,17 +186,14 @@ Order submission is still fail-closed: `--submit-orders` requires
 `--confirm-demo-orders`, `BYBIT_DEMO_API_KEY`, and `BYBIT_DEMO_API_SECRET`.
 Without those, the command is a dry-run scan. In the champion/challenger stack,
 the live runner also refuses `SUBMIT_ORDERS=1` unless
-`STRATEGY_PROFILE=demo_relaxed` or its deprecated `observe` alias is used.
-Promoted, no-crowding, sniper, execution-only, and hedge variants are shadow
-challengers until the manifest and Model Court evidence are intentionally
-updated.
+`STRATEGY_PROFILE=demo_relaxed`. Promoted, no-crowding, sniper, execution-only,
+and hedge variants are shadow challengers until the manifest and Model Court
+evidence are intentionally updated.
 
 Telegram may notify on material events, but it must not approve or submit orders. The continuous runner still fails startup when `TELEGRAM_ENABLED=1` but Telegram or Bybit demo credentials are missing, because event alerts include position/PnL context.
 
 The `demo_relaxed` profile is explicitly a demo-only test system, not a replacement
-promotion. Its full-PIT funded evidence is summarized in `docs/system_status.md`
-and reports under
-`/Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/observe_mode_sweep_20260517/observe_c`.
+promotion. Its full-PIT funded evidence is summarized in `docs/system_status.md`.
 
 The exit-only risk watchdog is separate from the alpha loop:
 

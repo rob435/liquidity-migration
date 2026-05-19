@@ -6,7 +6,7 @@ on:
       - main
     paths:
       - ".github/workflows/vps-deploy.yml"
-      - "aggression_carry/**"
+      - "liquidity_migration/**"
       - "deploy/systemd/*.service"
       - "scripts/deploy_vps_live.sh"
       - "scripts/print_vps_recovery_command.sh"

@@ -66,7 +66,7 @@ echo "event websocket risk engine starting"
 echo "repo=$REPO_ROOT"
 echo "data_root=$DATA_ROOT submit_orders=${SUBMIT_ORDERS:-0} order_submit_mode=$ORDER_SUBMIT_MODE rest_fallback=${REST_FALLBACK:-1}"
 
-"$PYTHON_BIN" -m aggression_carry \
+"$PYTHON_BIN" -m liquidity_migration \
     --config "$CONFIG_PATH" \
     --data-root "$DATA_ROOT" \
     event-risk-ws \

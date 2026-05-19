@@ -5,10 +5,10 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from aggression_carry.config import TradeLifecycleConfig
-from aggression_carry.ingestion import generate_fixture_data
-from aggression_carry.trade_lifecycle import _funding_lookup, _perp_funding_return
-from aggression_carry.volume_events import (
+from liquidity_migration.config import TradeLifecycleConfig
+from liquidity_migration.ingestion import generate_fixture_data
+from liquidity_migration.trade_lifecycle import _funding_lookup, _perp_funding_return
+from liquidity_migration.volume_events import (
     ENTRY_POLICY_EXECUTION_PULLBACK_GUARD,
     ENTRY_POLICY_FIXED_DELAY,
     ENTRY_POLICY_TIERED_EXECUTION_SNIPER,

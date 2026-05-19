@@ -18,7 +18,7 @@ if ! [[ "$INTERVAL_SECONDS" =~ ^[0-9]+$ ]]; then
     exit 2
 fi
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-45}"
-if [[ "$STRATEGY_PROFILE" == "demo_relaxed" || "$STRATEGY_PROFILE" == "observe" ]]; then
+if [[ "$STRATEGY_PROFILE" == "demo_relaxed" ]]; then
     UNIVERSE_RANK_END="${UNIVERSE_RANK_END:-300}"
     UNIVERSE_MAX_SYMBOLS="${UNIVERSE_MAX_SYMBOLS:-300}"
     UNIVERSE_MIN_TURNOVER_24H="${UNIVERSE_MIN_TURNOVER_24H:-0}"
@@ -52,7 +52,7 @@ fi
 
 order_args=()
 if [[ "${SUBMIT_ORDERS:-0}" == "1" ]]; then
-    if [[ "$STRATEGY_PROFILE" != "demo_relaxed" && "$STRATEGY_PROFILE" != "observe" ]]; then
+    if [[ "$STRATEGY_PROFILE" != "demo_relaxed" ]]; then
         echo "Only STRATEGY_PROFILE=demo_relaxed is allowed to submit demo entry orders in the champion/challenger stack." >&2
         exit 2
     fi
@@ -73,7 +73,7 @@ mkdir -p "$DATA_ROOT/.locks"
 while true; do
     cycle_start_epoch="$(date +%s)"
     set +e
-    "$PYTHON_BIN" -m aggression_carry \
+    "$PYTHON_BIN" -m liquidity_migration \
         --config "$CONFIG_PATH" \
         --data-root "$DATA_ROOT" \
         event-demo-cycle \

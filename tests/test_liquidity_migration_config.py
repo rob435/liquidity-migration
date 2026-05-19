@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from aggression_carry.config import (
+from liquidity_migration.config import (
     DEFAULT_EXCLUDED_SYMBOLS,
     DEFAULT_RESEARCH_DATA_ROOT,
     load_config,

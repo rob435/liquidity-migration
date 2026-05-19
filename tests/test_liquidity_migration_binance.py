@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from aggression_carry import binance
+from liquidity_migration import binance
 
 
 def test_recent_history_start_clamps_to_latest_30_days(monkeypatch) -> None:

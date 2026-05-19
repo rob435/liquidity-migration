@@ -45,6 +45,11 @@ def run_portfolio_hedge_report(
         )
         long_metrics = _path_metrics(long_daily.rename({"long_return": "portfolio_return"}))
         for weight in hedge_weights:
+            # Additive sleeve overlay (NOT a sign-flipped hedge): both legs are
+            # already directional return series, so the portfolio's daily return
+            # is the short book's return plus the long book's return at `weight`.
+            # On a bad short day the long leg offsets via its own positive return,
+            # not via subtraction. Don't flip the sign here.
             combo = joined.select(
                 [
                     "exit_date",
@@ -153,10 +158,10 @@ def _path_metrics(daily: pl.DataFrame) -> dict[str, Any]:
 
 
 def _worst_rolling_return(returns: list[float], window: int) -> float:
-    if not returns:
+    if not returns or window <= 0 or len(returns) < window:
         return 0.0
     worst = 0.0
-    for index in range(len(returns)):
+    for index in range(len(returns) - window + 1):
         equity = 1.0
         for value in returns[index : index + window]:
             equity *= 1.0 + value

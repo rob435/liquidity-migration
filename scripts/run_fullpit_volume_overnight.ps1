@@ -42,7 +42,7 @@ if ($Repo -eq "") {
         $Repo = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
     }
     else {
-        $Repo = Join-Path $HOME "MODEL050426"
+        $Repo = Join-Path $HOME "liquidity-migration"
     }
 }
 if ($DataRoot -eq "") {
@@ -95,16 +95,16 @@ try {
         Section "Smoke tests"
         Invoke-Checked $VenvPython @(
             "-m", "pytest",
-            "tests/test_aggression_carry_cli.py::test_cli_parses_volume_events_research_overrides",
-            "tests/test_aggression_carry_archive.py::test_archive_hourly_kline_download_writes_1h_partitions",
-            "tests/test_aggression_carry_archive.py::test_archive_hourly_downloader_processes_each_symbol_in_date_order",
-            "tests/test_aggression_carry_volume_events.py"
+            "tests/test_liquidity_migration_cli.py::test_cli_parses_volume_events_research_overrides",
+            "tests/test_liquidity_migration_archive.py::test_archive_hourly_kline_download_writes_1h_partitions",
+            "tests/test_liquidity_migration_archive.py::test_archive_hourly_downloader_processes_each_symbol_in_date_order",
+            "tests/test_liquidity_migration_volume_events.py"
         )
     }
 
     Section "Build full PIT manifest"
     Invoke-Checked $VenvPython @(
-        "-m", "aggression_carry",
+        "-m", "liquidity_migration",
         "--data-root", $DataRoot,
         "--config", $ConfigPath,
         "archive-manifest",
@@ -116,7 +116,7 @@ try {
 
     Section "Fill full PIT 1h klines from Bybit v5 API"
     Invoke-Checked $VenvPython @(
-        "-m", "aggression_carry",
+        "-m", "liquidity_migration",
         "--data-root", $DataRoot,
         "--config", $ConfigPath,
         "archive-download-klines-1h-api",
@@ -143,7 +143,7 @@ from pathlib import Path
 
 from pyarrow import parquet as pq
 
-from aggression_carry.storage import dataset_path, read_dataset
+from liquidity_migration.storage import dataset_path, read_dataset
 
 root = Path(os.environ["DATA_ROOT"])
 run_name = os.environ["RUN_NAME"]
@@ -191,7 +191,7 @@ if missing:
         Section "Run selected full PIT volume event backtest"
         $ChampionReportDir = Join-Path (Join-Path $DataRoot "reports") ("SELECTED_liqmig_union_q40_h3_tp26_g100_qsqueeze_{0}" -f ([DateTime]::UtcNow.ToString("yyyyMMddTHHmmssZ")))
         Invoke-Checked $VenvPython @(
-            "-m", "aggression_carry",
+            "-m", "liquidity_migration",
             "--data-root", $DataRoot,
             "--config", $ConfigPath,
             "volume-events",

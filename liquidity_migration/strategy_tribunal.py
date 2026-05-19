@@ -10,8 +10,8 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from aggression_carry.crowding import audit_crowding_model
-from aggression_carry.storage import read_dataset
+from liquidity_migration.crowding import audit_crowding_model
+from liquidity_migration.storage import read_dataset
 
 MS_PER_HOUR = 60 * 60 * 1000
 MS_PER_DAY = 24 * MS_PER_HOUR
@@ -428,9 +428,7 @@ def _infer_comparison_families(comparison: pl.DataFrame, *, best: dict[str, Any]
     trade_count = int(_finite_float(best.get("trades")))
     funding_mode = str(best.get("funding_mode", "")).lower()
     candidate = strategies
-    if trade_count >= 1000:
-        candidate = [item for item in candidate if item.startswith("observe")]
-    elif trade_count > 0:
+    if trade_count > 0:
         near = [
             item
             for item in candidate
@@ -530,9 +528,6 @@ def _pre_registered_window_report(
     if errors:
         return {"status": "invalid", "errors": errors, "windows": [], "window_count": 0, "positive_windows": 0}
     if not windows:
-        legacy = _legacy_split_window_report(best)
-        if legacy["window_count"] > 0:
-            return legacy
         return {"status": "missing", "windows": [], "window_count": 0, "positive_windows": 0}
     rows = []
     sorted_baskets = baskets.sort("entry_signal_ts_ms") if not baskets.is_empty() and "entry_signal_ts_ms" in baskets.columns else baskets
@@ -589,39 +584,6 @@ def _parse_window_specs(window_specs: tuple[str, ...]) -> tuple[list[dict[str, A
             continue
         rows.append({"name": name, "start_date": start, "end_date": end, "start_ms": start_ms, "end_ms": end_ms})
     return rows, errors
-
-
-def _legacy_split_window_report(best: dict[str, Any]) -> dict[str, Any]:
-    rows = []
-    for name, start, end in (
-        ("train_2023_2024", "2023-05-03", "2024-05-03"),
-        ("validation_2024_2025", "2024-05-03", "2025-05-03"),
-        ("oos_2025_2026", "2025-05-03", "2026-05-03"),
-    ):
-        key = f"{name}_return"
-        if key not in best:
-            continue
-        rows.append(
-            {
-                "name": name,
-                "start_date": start,
-                "end_date": end,
-                "basket_count": None,
-                "total_return": _finite_float(best.get(key)),
-                "max_drawdown": None,
-                "sharpe_like": _finite_float(best.get(f"{name}_sharpe")),
-            }
-        )
-    returns = [_finite_float(row.get("total_return")) for row in rows]
-    return {
-        "status": "legacy_summary_only" if rows else "missing",
-        "windows": rows,
-        "window_count": len(rows),
-        "positive_windows": int(sum(1 for value in returns if value > 0.0)),
-        "complete_windows": 0,
-        "min_total_return": min(returns, default=0.0),
-        "worst_max_drawdown": None,
-    }
 
 
 def _block_bootstrap(returns: list[float], *, config: StrategyTribunalConfig) -> dict[str, Any]:
@@ -790,7 +752,7 @@ def _sensitivity_report(
     if "max_drawdown" in robust.columns:
         robust = robust.filter(pl.col("max_drawdown") >= dd_cutoff)
     if "promotion_gate_pass" in robust.columns:
-        robust = robust.filter(pl.col("promotion_gate_pass") == True)  # noqa: E712
+        robust = robust.filter(pl.col("promotion_gate_pass"))
     parameter_groups = []
     for column in (
         "threshold",
@@ -1243,8 +1205,6 @@ def _findings(
             window_level = "PASS"
         else:
             window_level = "FAIL"
-    elif window_status == "legacy_summary_only":
-        window_level = "WATCH"
     elif window_status == "invalid":
         window_level = "FAIL"
     else:

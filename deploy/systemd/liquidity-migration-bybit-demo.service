@@ -1,5 +1,5 @@
 [Unit]
-Description=MODEL050426 liquidity-migration Bybit demo event runner
+Description=liquidity-migration Bybit demo event runner
 Wants=network-online.target
 After=network-online.target
 
@@ -7,8 +7,8 @@ After=network-online.target
 Type=simple
 User=root
 Group=root
-WorkingDirectory=/opt/MODEL050426
-EnvironmentFile=/etc/model050426/bybit-demo.env
+WorkingDirectory=/opt/liquidity-migration
+EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 Environment=DATA_ROOT=data/bybit-demo-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
 Environment=SUBMIT_ORDERS=1
@@ -25,7 +25,7 @@ Environment=UNIVERSE_MAX_SYMBOLS=300
 Environment=UNIVERSE_MIN_TURNOVER_24H=0
 Environment=WORKERS=8
 Environment=ENTRY_LEVERAGE=2
-ExecStart=/opt/MODEL050426/scripts/run_bybit_demo_event_engine.sh
+ExecStart=/opt/liquidity-migration/scripts/run_bybit_demo_event_engine.sh
 Restart=always
 RestartSec=30
 KillMode=control-group
@@ -36,7 +36,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=false
-ReadWritePaths=/opt/MODEL050426
+ReadWritePaths=/opt/liquidity-migration
 
 [Install]
 WantedBy=multi-user.target

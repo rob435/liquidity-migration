@@ -3335,6 +3335,84 @@ def test_wait_for_execution_summary_fast_window_then_slow_interval() -> None:
     assert 1 <= slow_window_calls <= 4, f"slow window expected 1-4 calls, got {slow_window_calls}"
 
 
+def test_wait_for_execution_summary_uses_ws_router_when_available() -> None:
+    """When an ExecutionEventRouter is supplied AND has a fill for this
+    orderLinkId, _wait_for_execution_summary returns within ms — the REST
+    get_trade_history path is bypassed entirely on the fast path.
+    """
+    import time as _time
+    from liquidity_migration.event_demo import _wait_for_execution_summary
+    from liquidity_migration.execution_router import ExecutionEventRouter
+
+    router = ExecutionEventRouter()
+    router.on_execution_event(
+        {"data": [{"orderLinkId": "lm-en-WSAAA", "execQty": "1", "execPrice": "101", "execValue": "101", "execFee": "0.05"}]}
+    )
+
+    rest_calls: list[str | None] = []
+
+    class FailingRestClient:
+        def get_trade_history(self, *, symbol, order_link_id, limit=50):
+            rest_calls.append(order_link_id)
+            raise AssertionError("REST must not be hit when WS already has the fill")
+
+    started = _time.monotonic()
+    summary = _wait_for_execution_summary(
+        FailingRestClient(),
+        symbol="AAAUSDT",
+        order_link_id="lm-en-WSAAA",
+        poll_seconds=5.0,
+        poll_interval_seconds=0.2,
+        fast_poll_interval_seconds=0.05,
+        fast_poll_seconds=0.5,
+        execution_event_router=router,
+    )
+    elapsed = _time.monotonic() - started
+
+    assert float(summary["qty"] or 0) == 1.0
+    assert summary["avg_price"] == 101.0
+    assert elapsed < 0.05, f"WS fast-path should return immediately, took {elapsed:.3f}s"
+    assert rest_calls == []
+
+
+def test_wait_for_execution_summary_falls_back_to_rest_when_router_empty() -> None:
+    """If the router is supplied but doesn't have a fill within the WS short
+    wait, the function falls back to REST polling exactly as it would without
+    the router. Guarantees WS is a fast path, never the only path."""
+    import time as _time
+    from liquidity_migration.event_demo import _wait_for_execution_summary
+    from liquidity_migration.execution_router import ExecutionEventRouter
+
+    router = ExecutionEventRouter()  # No events delivered
+
+    call_count = {"n": 0}
+
+    class RestFillsAfterTwoCalls:
+        def get_trade_history(self, *, symbol, order_link_id, limit=50):
+            call_count["n"] += 1
+            if call_count["n"] >= 2:
+                return [{"execQty": "1", "execPrice": "102", "execValue": "102", "execFee": "0.05"}]
+            return []
+
+    started = _time.monotonic()
+    summary = _wait_for_execution_summary(
+        RestFillsAfterTwoCalls(),
+        symbol="AAAUSDT",
+        order_link_id="lm-en-WSBB",
+        poll_seconds=2.0,
+        poll_interval_seconds=0.2,
+        fast_poll_interval_seconds=0.05,
+        fast_poll_seconds=0.5,
+        execution_event_router=router,
+    )
+    elapsed = _time.monotonic() - started
+
+    assert float(summary["qty"] or 0) == 1.0
+    assert summary["avg_price"] == 102.0
+    assert call_count["n"] >= 2
+    assert elapsed < 0.5, f"REST fallback should still be reasonably fast, took {elapsed:.3f}s"
+
+
 def test_wait_for_execution_summary_returns_immediately_on_fill() -> None:
     """A fill landing on the first poll must return without burning the rest of
     the poll budget."""

@@ -2,8 +2,8 @@
 
 The active VPS services are:
 
-- `model050426-bybit-demo.service`: event entry/normal lifecycle runner.
-- `model050426-bybit-risk.service`: fast exit-only risk runner.
+- `liquidity-migration-bybit-demo.service`: event entry/normal lifecycle runner.
+- `liquidity-migration-bybit-risk.service`: fast exit-only risk runner.
 
 Install or refresh it on the VPS from a trusted local checkout:
 
@@ -15,7 +15,7 @@ EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/verify_vps_live.sh
 The script refuses a dirty VPS checkout, forces the configured remote URL,
 resets the deploy branch to `origin/main`, runs focused runtime tests, checks
 the promoted TP26 and live TP21+FF6 strategy constants, backs up
-`/etc/model050426/bybit-demo.env`, enforces the expected Telegram chat ID,
+`/etc/liquidity-migration/bybit-demo.env`, enforces the expected Telegram chat ID,
 disables retired legacy units (`model050426.service` plus the old daily signal
 timer/service), refreshes both active systemd units, restarts both services, and
 prints the active systemd state plus non-secret entry-profile settings. The
@@ -47,7 +47,7 @@ recovery script also installs the GitHub Actions public deploy key shown below.
 
 ```text
 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp hetzner
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX model050426-github-actions-20260519
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX liquidity-migration-github-actions-20260519
 ```
 
 On the VPS, the target file is normally `/root/.ssh/authorized_keys` for the
@@ -91,7 +91,7 @@ SSH works, then calls the checked deploy and read-only verifier with the pinned
 commit. The GitHub `VPS Deploy` workflow's `wait-deploy` mode wraps the same
 helper for cases where you want Actions to keep waiting instead of a local
 terminal. The full console recovery restores the same SSH access, prints the
-same fingerprints, clones or repairs `/opt/MODEL050426`,
+same fingerprints, clones or repairs `/opt/liquidity-migration`,
 forces the configured remote URL, resets the deploy branch to `origin/main`,
 builds the local venv if needed, installs missing Ubuntu deploy prerequisites,
 writes an sshd recovery override for root public-key login, prints the effective
@@ -107,9 +107,9 @@ The console script also waits before checking active service state; override
 with `SYSTEMD_SETTLE_SECONDS=<seconds>` if needed.
 
 The generated full recovery command sets `CLEAN_DIRTY_CHECKOUT=1` by default.
-If the existing `/opt/MODEL050426` checkout is dirty, the script saves tracked
+If the existing `/opt/liquidity-migration` checkout is dirty, the script saves tracked
 diffs, status, and a tarball/list of untracked non-ignored files under
-`/root/model050426-deploy-backups` before running `git reset --hard` and
+`/root/liquidity-migration-deploy-backups` before running `git reset --hard` and
 `git clean -fd`. Ignored live data such as `data/bybit-demo-event` is not
 removed by that clean command. The generated strict command omits
 `CLEAN_DIRTY_CHECKOUT=1` and refuses a dirty checkout.
@@ -117,19 +117,19 @@ removed by that clean command. The generated strict command omits
 Manual install or refresh on the VPS:
 
 ```bash
-cp deploy/systemd/model050426-bybit-demo.service /etc/systemd/system/model050426-bybit-demo.service
-cp deploy/systemd/model050426-bybit-risk.service /etc/systemd/system/model050426-bybit-risk.service
+cp deploy/systemd/liquidity-migration-bybit-demo.service /etc/systemd/system/liquidity-migration-bybit-demo.service
+cp deploy/systemd/liquidity-migration-bybit-risk.service /etc/systemd/system/liquidity-migration-bybit-risk.service
 systemctl daemon-reload
-systemctl enable --now model050426-bybit-demo.service
-systemctl enable --now model050426-bybit-risk.service
-systemctl restart model050426-bybit-demo.service
-systemctl restart model050426-bybit-risk.service
+systemctl enable --now liquidity-migration-bybit-demo.service
+systemctl enable --now liquidity-migration-bybit-risk.service
+systemctl restart liquidity-migration-bybit-demo.service
+systemctl restart liquidity-migration-bybit-risk.service
 ```
 
 Required secrets live outside git in:
 
 ```text
-/etc/model050426/bybit-demo.env
+/etc/liquidity-migration/bybit-demo.env
 ```
 
 That environment file must define the Bybit demo API credentials and Telegram
@@ -155,10 +155,9 @@ blocked subscription is reported while REST reconciliation and exchange-native
 stops keep covering open risk.
 
 Champion/challenger safety: `scripts/run_bybit_demo_event_engine.sh` refuses
-`SUBMIT_ORDERS=1` unless `STRATEGY_PROFILE=demo_relaxed` or the deprecated
-`observe` alias is used. Promoted, no-crowding, sniper, execution-only, and
-hedge candidates are shadow-only until the manifest in
-`champion-challenger` is intentionally updated and re-audited.
+`SUBMIT_ORDERS=1` unless `STRATEGY_PROFILE=demo_relaxed`. Promoted, no-crowding,
+sniper, execution-only, and hedge candidates are shadow-only until the manifest
+in `champion-challenger` is intentionally updated and re-audited.
 
 The retired `model050426-bybit-demo-signal.timer` / `.service` daily signal scan
 must stay disabled; the active runner is the event-driven loop above.

@@ -3,7 +3,7 @@ set -euo pipefail
 
 SSH_TARGET="${SSH_TARGET:-root@204.168.202.167}"
 SSH_OPTS="${SSH_OPTS:--o BatchMode=yes -o ConnectTimeout=10}"
-REPO_DIR="${REPO_DIR:-/opt/MODEL050426}"
+REPO_DIR="${REPO_DIR:-/opt/liquidity-migration}"
 EXPECTED_COMMIT="${EXPECTED_COMMIT:-}"
 EXPECTED_TELEGRAM_CHAT_ID="${EXPECTED_TELEGRAM_CHAT_ID:-8388367561}"
 SYSTEMD_SETTLE_SECONDS="${SYSTEMD_SETTLE_SECONDS:-5}"
@@ -34,8 +34,8 @@ else
 fi
 
 "$PYTHON" - <<'PY'
-from aggression_carry.event_demo import _demo_event_config, _demo_strategy_id
-from aggression_carry.volume_events import VolumeEventResearchConfig
+from liquidity_migration.event_demo import _demo_event_config, _demo_strategy_id
+from liquidity_migration.volume_events import VolumeEventResearchConfig
 
 promoted = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
 demo = _demo_event_config(VolumeEventResearchConfig(), profile="demo_relaxed")
@@ -51,13 +51,13 @@ assert demo.failed_fade_close_location_min == 0.0
 print("strategy-settings-ok")
 PY
 
-if [ ! -f /etc/model050426/bybit-demo.env ]; then
-  echo "Verification failed: missing /etc/model050426/bybit-demo.env" >&2
+if [ ! -f /etc/liquidity-migration/bybit-demo.env ]; then
+  echo "Verification failed: missing /etc/liquidity-migration/bybit-demo.env" >&2
   exit 1
 fi
 
 set -a
-. /etc/model050426/bybit-demo.env
+. /etc/liquidity-migration/bybit-demo.env
 set +a
 
 if [ "${TELEGRAM_CHAT_ID:-}" != "$EXPECTED_TELEGRAM_CHAT_ID" ]; then
@@ -65,8 +65,8 @@ if [ "${TELEGRAM_CHAT_ID:-}" != "$EXPECTED_TELEGRAM_CHAT_ID" ]; then
   exit 1
 fi
 
-systemctl is-enabled --quiet model050426-bybit-demo.service
-systemctl is-enabled --quiet model050426-bybit-risk.service
+systemctl is-enabled --quiet liquidity-migration-bybit-demo.service
+systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
 
 for legacy_unit in \
   model050426.service \
@@ -86,22 +86,22 @@ if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then
   sleep "$SYSTEMD_SETTLE_SECONDS"
 fi
 
-systemctl is-active --quiet model050426-bybit-demo.service
-systemctl is-active --quiet model050426-bybit-risk.service
+systemctl is-active --quiet liquidity-migration-bybit-demo.service
+systemctl is-active --quiet liquidity-migration-bybit-risk.service
 
-systemctl cat model050426-bybit-demo.service --no-pager | grep -E 'Environment=STRATEGY_PROFILE=demo_relaxed'
-systemctl cat model050426-bybit-demo.service --no-pager | grep -E 'Environment=INTERVAL_SECONDS=60'
-systemctl cat model050426-bybit-demo.service --no-pager | grep -E 'Environment=UNIVERSE_RANK_END=300'
-systemctl cat model050426-bybit-demo.service --no-pager | grep -E 'Environment=UNIVERSE_MAX_SYMBOLS=300'
-systemctl cat model050426-bybit-risk.service --no-pager | grep -E 'Environment=ORDER_SUBMIT_MODE=ws_then_rest'
+systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=STRATEGY_PROFILE=demo_relaxed'
+systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=INTERVAL_SECONDS=60'
+systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=UNIVERSE_RANK_END=300'
+systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=UNIVERSE_MAX_SYMBOLS=300'
+systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=ORDER_SUBMIT_MODE=ws_then_rest'
 
-systemctl show model050426-bybit-demo.service \
+systemctl show liquidity-migration-bybit-demo.service \
   --property=ActiveState \
   --property=SubState \
   --property=MainPID \
   --property=ExecMainStatus \
   --no-pager
-systemctl show model050426-bybit-risk.service \
+systemctl show liquidity-migration-bybit-risk.service \
   --property=ActiveState \
   --property=SubState \
   --property=MainPID \

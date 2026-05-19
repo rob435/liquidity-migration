@@ -5,10 +5,10 @@ import gzip
 import polars as pl
 import pytest
 
-from aggression_carry import archive as archive_module
-from aggression_carry import archive_manifest as manifest_module
-from aggression_carry.archive import download_public_trade_archive, read_public_trade_archive, read_public_trade_archive_klines_1h
-from aggression_carry.archive_manifest import (
+from liquidity_migration import archive as archive_module
+from liquidity_migration import archive_manifest as manifest_module
+from liquidity_migration.archive import download_public_trade_archive, read_public_trade_archive, read_public_trade_archive_klines_1h
+from liquidity_migration.archive_manifest import (
     ArchiveHourlyKlineApiDownloadConfig,
     ArchiveHourlyKlineDownloadConfig,
     ArchiveKlineDownloadConfig,
@@ -20,10 +20,10 @@ from aggression_carry.archive_manifest import (
     run_archive_klines_download,
     run_archive_manifest,
 )
-from aggression_carry.config import ResearchConfig
-from aggression_carry import downloaders
-from aggression_carry.downloaders import _archive_filename, download_market_data
-from aggression_carry.storage import read_dataset, write_dataset
+from liquidity_migration.config import ResearchConfig
+from liquidity_migration import downloaders
+from liquidity_migration.downloaders import _archive_filename, download_market_data
+from liquidity_migration.storage import read_dataset, write_dataset
 
 
 def test_archive_kline_default_requires_dense_utc_day() -> None:

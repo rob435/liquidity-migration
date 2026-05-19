@@ -27,7 +27,7 @@ def test_event_entry_runner_default_cadence_is_rate_limit_safe() -> None:
 
 def test_systemd_entry_runner_uses_vps_cadence() -> None:
     repo = Path(__file__).resolve().parents[1]
-    text = (repo / "deploy" / "systemd" / "model050426-bybit-demo.service").read_text(
+    text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-demo.service").read_text(
         encoding="utf-8"
     )
 
@@ -51,8 +51,8 @@ def test_live_runners_do_not_write_repo_bytecode() -> None:
     paths = [
         repo / "scripts" / "run_bybit_demo_event_engine.sh",
         repo / "scripts" / "run_bybit_demo_ws_risk_engine.sh",
-        repo / "deploy" / "systemd" / "model050426-bybit-demo.service",
-        repo / "deploy" / "systemd" / "model050426-bybit-risk.service",
+        repo / "deploy" / "systemd" / "liquidity-migration-bybit-demo.service",
+        repo / "deploy" / "systemd" / "liquidity-migration-bybit-risk.service",
     ]
 
     for path in paths:
@@ -79,10 +79,10 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "systemctl disable --now" in text
     assert "model050426.service" in text
     assert "model050426-bybit-demo-signal.timer" in text
-    assert "model050426-bybit-demo.service" in text
-    assert "model050426-bybit-risk.service" in text
+    assert "liquidity-migration-bybit-demo.service" in text
+    assert "liquidity-migration-bybit-risk.service" in text
     assert "retired unit" in text
-    assert "systemctl is-enabled --quiet model050426-bybit-demo.service" in text
+    assert "systemctl is-enabled --quiet liquidity-migration-bybit-demo.service" in text
     assert "Environment=STRATEGY_PROFILE=demo_relaxed" in text
     assert "Environment=INTERVAL_SECONDS=60" in text
     assert "Environment=UNIVERSE_RANK_END=300" in text
@@ -218,7 +218,7 @@ def test_vps_ssh_restore_script_only_restores_access() -> None:
     assert "PermitRootLogin prohibit-password" in text
     assert "AuthenticationMethods publickey" in text
     assert "Include /etc/ssh/sshd_config.d/*.conf" in text
-    assert "sshd_config.model050426-backup" in text
+    assert "sshd_config.liquidity-migration-backup" in text
     assert "Restored authorized key fingerprints:" in text
     assert 'ssh-keygen -lf "$tmp_public_key" -E sha256' in text
     assert "effective_sshd_config" in text
@@ -228,7 +228,7 @@ def test_vps_ssh_restore_script_only_restores_access() -> None:
     assert 'sshd -T -C "$sshd_root_context"' in text
     assert "systemctl restart ssh.service" in text
     assert "ssh-restore-ok" in text
-    assert "model050426-bybit-demo.service" not in text
+    assert "liquidity-migration-bybit-demo.service" not in text
     assert "pip install" not in text
 
 
@@ -248,15 +248,15 @@ def test_vps_rescue_restore_script_mounts_installed_root_and_restores_keys() -> 
     assert "AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp" in text
     assert "AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX" in text
     assert "chroot \"$target_root\" usermod -U root" in text
-    assert "99-model050426-recovery.conf" in text
+    assert "99-liquidity-migration-recovery.conf" in text
     assert "PermitRootLogin prohibit-password" in text
     assert "AuthenticationMethods publickey" in text
     assert "Include /etc/ssh/sshd_config.d/*.conf" in text
-    assert "sshd_config.model050426-backup" in text
+    assert "sshd_config.liquidity-migration-backup" in text
     assert "Restored authorized key fingerprints" in text
     assert "rescue-ssh-restore-ok" in text
     assert "Reboot the VPS from local disk" in text
-    assert "model050426-bybit-demo.service" not in text
+    assert "liquidity-migration-bybit-demo.service" not in text
     assert "pip install" not in text
 
 
@@ -276,14 +276,14 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "SYSTEMD_SETTLE_SECONDS" in text
     assert "bybit-demo.env.backup" in text
     assert "sed -i \"s/^TELEGRAM_CHAT_ID=" in text
-    assert "99-model050426-recovery.conf" in text
+    assert "99-liquidity-migration-recovery.conf" in text
     assert "chmod 700 /root" in text
     assert "usermod -U root" in text
     assert "PermitRootLogin prohibit-password" in text
     assert "PubkeyAuthentication yes" in text
     assert "AuthenticationMethods publickey" in text
     assert "Include /etc/ssh/sshd_config.d/*.conf" in text
-    assert "sshd_config.model050426-backup" in text
+    assert "sshd_config.liquidity-migration-backup" in text
     assert "Restored authorized key fingerprints:" in text
     assert 'ssh-keygen -lf "$tmp_public_key" -E sha256' in text
     assert "effective_sshd_config" in text
@@ -292,7 +292,7 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert 'sshd_root_context="user=root,host=localhost,addr=127.0.0.1"' in text
     assert 'sshd -T -C "$sshd_root_context"' in text
     assert "systemctl restart ssh.service" in text
-    assert "model050426-deploy-backups" in text
+    assert "liquidity-migration-deploy-backups" in text
     assert "non-git-checkout-" in text
     assert 'mv "$REPO_DIR" "$backup_path"' in text
     assert "git reset --hard" in text
@@ -308,10 +308,10 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "systemctl disable --now" in text
     assert "model050426.service" in text
     assert "model050426-bybit-demo-signal.timer" in text
-    assert "model050426-bybit-demo.service" in text
-    assert "model050426-bybit-risk.service" in text
+    assert "liquidity-migration-bybit-demo.service" in text
+    assert "liquidity-migration-bybit-risk.service" in text
     assert "retired unit" in text
-    assert "systemctl is-enabled --quiet model050426-bybit-demo.service" in text
+    assert "systemctl is-enabled --quiet liquidity-migration-bybit-demo.service" in text
     assert "Environment=STRATEGY_PROFILE=demo_relaxed" in text
     assert "Environment=INTERVAL_SECONDS=60" in text
     assert "Environment=UNIVERSE_RANK_END=300" in text

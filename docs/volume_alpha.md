@@ -55,8 +55,8 @@ old "run every combination overnight" workflow
 The legacy Python entrypoints are removed. The active shared code is now:
 
 ```text
-aggression_carry/volume_features.py
-aggression_carry/trade_lifecycle.py
+liquidity_migration/volume_features.py
+liquidity_migration/trade_lifecycle.py
 ```
 
 `volume_features.py` builds the causal daily liquidity/volume features.
@@ -175,7 +175,7 @@ cooldown and max-active-symbol logic included
 Current command, using the selected strategy defaults:
 
 ```bash
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root DATA_ROOT \
   --config configs/volume_alpha.default.yaml \
   volume-events
@@ -184,7 +184,7 @@ python -m aggression_carry \
 After any serious run, audit the report with the model court:
 
 ```bash
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root DATA_ROOT \
   strategy-tribunal \
   --report-dir DATA_ROOT/reports/volume_event_research \
@@ -211,7 +211,7 @@ Portfolio hedge candidates should also be checked as overlays instead of only
 standalone long curves:
 
 ```bash
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root DATA_ROOT \
   portfolio-hedge \
   --short-report-dir DATA_ROOT/reports/current_qsqueeze_promoted_20260518 \
@@ -275,7 +275,7 @@ because it cut too much return from the current strategy.
 Full PIT data build for event research:
 
 ```bash
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root ~/SHARED_DATA/bybit_fullpit_1h \
   --config configs/volume_alpha.default.yaml \
   archive-manifest \
@@ -284,7 +284,7 @@ python -m aggression_carry \
   --end 2026-05-18 \
   --workers 32
 
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root ~/SHARED_DATA/bybit_fullpit_1h \
   --config configs/volume_alpha.default.yaml \
   archive-download-klines-1h-api \
@@ -508,7 +508,7 @@ cost: 3x base round-trip cost
 Equivalent explicit command:
 
 ```bash
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root DATA_ROOT \
   --config configs/volume_alpha.default.yaml \
   volume-events \
@@ -621,12 +621,12 @@ split/interaction diagnostics. It does not change live trading.
 Current feature-factory promoted rerun:
 
 ```bash
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h \
   volume-events \
   --report-dir /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/feature_factory_promoted_20260518
 
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h \
   feature-factory \
   --report-dir /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/feature_factory_promoted_20260518 \
@@ -744,7 +744,7 @@ Binance USD-M proxy datasets, then labels each feature pack as full-window,
 partial-window, missing, or proxy-only.
 
 ```bash
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h \
   data-layer-audit \
   --start 2023-05-03 \
@@ -757,7 +757,7 @@ Binance proxy downloads are intentionally stored in separate tables such as
 or pretend to be Bybit-native datasets:
 
 ```bash
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root /Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h \
   download-binance-proxy \
   --symbols BTCUSDT,ETHUSDT,SOLUSDT \
@@ -853,7 +853,7 @@ filter on the existing daily ledger unless it clears the full Model Court.
 `champion-challenger` writes the current live research stack manifest:
 
 ```bash
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root data/bybit-demo-event \
   champion-challenger
 ```

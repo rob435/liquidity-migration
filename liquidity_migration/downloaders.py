@@ -555,6 +555,11 @@ def _marked_complete(
 
 
 def _mark_complete(marker: Path) -> None:
+    # Marker is written AFTER write_dataset on purpose. A crash between the two
+    # makes the next run refetch the same range, but storage.write_dataset holds
+    # an exclusive file lock and dedups by DATASET_KEYS — duplicates can't land,
+    # only wasted work. Don't "fix" the ordering without re-deriving the dedup
+    # guarantee for the affected dataset.
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.write_text(datetime.now(tz=UTC).isoformat(), encoding="utf-8")
 

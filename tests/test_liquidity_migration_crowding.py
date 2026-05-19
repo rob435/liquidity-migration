@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import polars as pl
 
-from aggression_carry.crowding import audit_crowding_model, classify_liquidity_migration_crowding
+from liquidity_migration.crowding import audit_crowding_model, classify_liquidity_migration_crowding
 
 
 def test_crowding_classifier_separates_idio_market_theme_and_artifact(tmp_path) -> None:

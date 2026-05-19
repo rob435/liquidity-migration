@@ -4,9 +4,9 @@ from pathlib import Path
 
 import polars as pl
 
-from aggression_carry.data_layer import DataLayerAuditConfig, run_data_layer_audit
-from aggression_carry.downloaders import download_binance_usdm_proxy_data
-from aggression_carry.storage import read_dataset, write_dataset
+from liquidity_migration.data_layer import DataLayerAuditConfig, run_data_layer_audit
+from liquidity_migration.downloaders import download_binance_usdm_proxy_data
+from liquidity_migration.storage import read_dataset, write_dataset
 
 
 def test_data_layer_audit_separates_native_partial_and_proxy(tmp_path: Path) -> None:
@@ -61,7 +61,7 @@ def test_download_binance_proxy_uses_separate_datasets(tmp_path: Path, monkeypat
         def get_funding_history(self, symbol, start, end):
             return [{"symbol": symbol, "fundingRate": "0.0001", "fundingTime": start, "markPrice": "1.5"}]
 
-    monkeypatch.setattr("aggression_carry.downloaders.BinanceUSDMData", FakeBinance)
+    monkeypatch.setattr("liquidity_migration.downloaders.BinanceUSDMData", FakeBinance)
 
     outputs = download_binance_usdm_proxy_data(
         tmp_path,

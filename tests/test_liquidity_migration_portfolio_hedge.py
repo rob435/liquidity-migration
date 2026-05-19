@@ -4,7 +4,7 @@ from pathlib import Path
 
 import polars as pl
 
-from aggression_carry.portfolio_hedge import run_portfolio_hedge_report
+from liquidity_migration.portfolio_hedge import run_portfolio_hedge_report
 
 
 def _write_baskets(path: Path, rows: list[dict]) -> None:

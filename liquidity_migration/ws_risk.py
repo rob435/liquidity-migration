@@ -55,7 +55,7 @@ from .event_demo import (
 from .storage import exclusive_file_lock, read_dataset, write_dataset
 
 
-_logger = logging.getLogger("aggression_carry.ws_risk")
+_logger = logging.getLogger("liquidity_migration.ws_risk")
 
 
 def _ensure_default_log_handler() -> None:
@@ -64,13 +64,13 @@ def _ensure_default_log_handler() -> None:
     what makes journalctl show risk-engine events. Idempotent: only adds a
     handler once per process and only if no upstream handler is configured.
     """
-    root_pkg_logger = logging.getLogger("aggression_carry")
+    root_pkg_logger = logging.getLogger("liquidity_migration")
     if root_pkg_logger.handlers:
         return
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
     root_pkg_logger.addHandler(handler)
-    level_name = os.environ.get("AGGRESSION_CARRY_LOG_LEVEL", "INFO").upper()
+    level_name = os.environ.get("LIQMIG_LOG_LEVEL", "INFO").upper()
     root_pkg_logger.setLevel(getattr(logging, level_name, logging.INFO))
 
 
@@ -712,7 +712,7 @@ class EventWebSocketRiskEngine:
         )
         def enqueue_ack(message: dict[str, Any]) -> None:
             payload = dict(message) if isinstance(message, dict) else {"message": message}
-            payload["_agc_order_link_id"] = link
+            payload["_lm_order_link_id"] = link
             self.events.put(("ws_order_ack", payload))
 
         self.trade_client.place_order(enqueue_ack, **order_params)
@@ -1461,7 +1461,7 @@ def _message_rows(message: dict[str, Any]) -> list[dict[str, Any]]:
 def _ack_order_link(message: dict[str, Any]) -> str:
     data = message.get("data") if isinstance(message.get("data"), dict) else {}
     return str(
-        message.get("_agc_order_link_id")
+        message.get("_lm_order_link_id")
         or message.get("orderLinkId")
         or message.get("order_link_id")
         or data.get("orderLinkId")
@@ -1597,7 +1597,7 @@ def _call_with_timeout(label: str, func: Any, *, timeout_seconds: float) -> tupl
         except Exception as exc:  # noqa: BLE001 - caller surfaces third-party transport failures
             result_queue.put((None, f"{label} failed: {exc}"[:500]))
 
-    thread = threading.Thread(target=worker, name=f"agc-{_thread_name(label)}", daemon=True)
+    thread = threading.Thread(target=worker, name=f"lm-{_thread_name(label)}", daemon=True)
     thread.start()
     try:
         return result_queue.get(timeout=timeout)

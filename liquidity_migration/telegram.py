@@ -19,6 +19,11 @@ def send_telegram_message(
     config: TelegramConfig | None = None,
     enabled: bool = True,
 ) -> bool:
+    # Contract: returns True on a 2xx response, False when disabled or when the
+    # token/chat_id env vars are absent. Transport errors (timeout, HTTPError,
+    # URLError) propagate to the caller — every call site wraps this in
+    # try/except and treats failure as cycle telemetry, not a crash. Don't add
+    # exception handling here without updating those call sites first.
     if not enabled:
         return False
     cfg = config or TelegramConfig()

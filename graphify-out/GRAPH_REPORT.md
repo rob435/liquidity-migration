@@ -1,4 +1,4 @@
-# Graph Report - MODEL050426  (2026-05-19)
+# Graph Report - liquidity-migration  (2026-05-19)
 
 ## Corpus Check
 - 45 files · ~96,899 words
@@ -41,15 +41,15 @@
 
 ## Surprising Connections (you probably didn't know these)
 - `build_parser()` --calls--> `test_cli_strategy_tribunal_parses_research_controls()`  [INFERRED]
-  aggression_carry/cli.py → tests/test_aggression_carry_strategy_tribunal.py
+  liquidity_migration/cli.py → tests/test_liquidity_migration_strategy_tribunal.py
 - `plan_risk_exits()` --calls--> `test_plan_risk_exits_uses_live_position_price_for_stops()`  [INFERRED]
-  aggression_carry/event_demo.py → tests/test_aggression_carry_event_demo.py
+  liquidity_migration/event_demo.py → tests/test_liquidity_migration_event_demo.py
 - `plan_stop_repairs()` --calls--> `test_plan_stop_repairs_detects_missing_exchange_stop()`  [INFERRED]
-  aggression_carry/event_demo.py → tests/test_aggression_carry_event_demo.py
+  liquidity_migration/event_demo.py → tests/test_liquidity_migration_event_demo.py
 - `build_ledger_position_pnl_snapshot()` --calls--> `test_ledger_position_snapshot_marks_short_pnl_from_current_price()`  [INFERRED]
-  aggression_carry/event_demo.py → tests/test_aggression_carry_event_demo.py
+  liquidity_migration/event_demo.py → tests/test_liquidity_migration_event_demo.py
 - `_terminalize_stale_pending_entry_orders()` --calls--> `test_stale_pending_entry_terminalizes_only_when_exchange_flat()`  [INFERRED]
-  aggression_carry/event_demo.py → tests/test_aggression_carry_event_demo.py
+  liquidity_migration/event_demo.py → tests/test_liquidity_migration_event_demo.py
 
 ## Communities
 

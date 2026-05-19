@@ -5,9 +5,9 @@ from pathlib import Path
 
 import polars as pl
 
-from aggression_carry.cli import build_parser
-from aggression_carry.storage import write_dataset
-from aggression_carry.strategy_tribunal import StrategyTribunalConfig, run_strategy_tribunal
+from liquidity_migration.cli import build_parser
+from liquidity_migration.storage import write_dataset
+from liquidity_migration.strategy_tribunal import StrategyTribunalConfig, run_strategy_tribunal
 
 
 def _write_tribunal_fixture(report_dir: Path) -> None:
@@ -200,7 +200,7 @@ def _write_execution_fixture(data_root: Path) -> None:
         pl.DataFrame(
             [
                 {
-                    "order_link_id": "agc-en-aaa",
+                    "order_link_id": "lm-en-aaa",
                     "ts_ms": 1_700_000_060_000,
                     "symbol": "AAAUSDT",
                     "signal_ts_ms": 1_699_996_400_000,

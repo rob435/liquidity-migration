@@ -7,7 +7,7 @@ from pathlib import Path
 
 import polars as pl
 
-from aggression_carry.storage import dataset_lock_path, exclusive_file_lock, read_dataset, write_dataset
+from liquidity_migration.storage import dataset_lock_path, exclusive_file_lock, read_dataset, write_dataset
 
 
 def test_incremental_parquet_writes_merge_existing_partition(tmp_path: Path) -> None:

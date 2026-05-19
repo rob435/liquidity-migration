@@ -178,7 +178,7 @@ class BinanceUSDMData:
         for attempt in range(self.retries):
             try:
                 self.calls += 1
-                request = Request(url, headers={"User-Agent": "model050426-data-layer/1.0"})
+                request = Request(url, headers={"User-Agent": "liquidity-migration-data-layer/1.0"})
                 with urlopen(request, timeout=self.timeout_seconds) as response:
                     payload = json.loads(response.read().decode("utf-8"))
                 if isinstance(payload, dict) and "code" in payload and int(payload.get("code") or 0) < 0:

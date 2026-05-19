@@ -2,7 +2,7 @@
 set -euo pipefail
 
 LOCAL_SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp hetzner}"
-GITHUB_ACTIONS_SSH_PUBLIC_KEY="${GITHUB_ACTIONS_SSH_PUBLIC_KEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX model050426-github-actions-20260519}"
+GITHUB_ACTIONS_SSH_PUBLIC_KEY="${GITHUB_ACTIONS_SSH_PUBLIC_KEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX liquidity-migration-github-actions-20260519}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this from the VPS provider console as root." >&2
@@ -41,14 +41,14 @@ fi
 
 if [ -d /etc/ssh ]; then
   mkdir -p /etc/ssh/sshd_config.d
-  cat >/etc/ssh/sshd_config.d/99-model050426-recovery.conf <<'SSH_CONFIG'
+  cat >/etc/ssh/sshd_config.d/99-liquidity-migration-recovery.conf <<'SSH_CONFIG'
 PubkeyAuthentication yes
 PermitRootLogin prohibit-password
 AuthorizedKeysFile .ssh/authorized_keys .ssh/authorized_keys2
 AuthenticationMethods publickey
 SSH_CONFIG
   if [ -f /etc/ssh/sshd_config ] && ! grep -Eq '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config; then
-    cp /etc/ssh/sshd_config "/etc/ssh/sshd_config.model050426-backup.$(date -u +%Y%m%dT%H%M%SZ)"
+    cp /etc/ssh/sshd_config "/etc/ssh/sshd_config.liquidity-migration-backup.$(date -u +%Y%m%dT%H%M%SZ)"
     tmp_sshd_config="$(mktemp)"
     printf '%s\n' 'Include /etc/ssh/sshd_config.d/*.conf' > "$tmp_sshd_config"
     cat /etc/ssh/sshd_config >> "$tmp_sshd_config"

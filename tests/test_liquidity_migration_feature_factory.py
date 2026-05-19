@@ -4,7 +4,7 @@ from pathlib import Path
 
 import polars as pl
 
-from aggression_carry.feature_factory import run_feature_factory_report
+from liquidity_migration.feature_factory import run_feature_factory_report
 
 
 def test_feature_factory_report_scores_edges_against_shuffle_control(tmp_path: Path) -> None:

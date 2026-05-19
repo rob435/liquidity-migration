@@ -1,4 +1,4 @@
-# MODEL050426
+# liquidity-migration
 
 Bybit demo-account research system for the selected full-PIT liquidity-migration short strategy.
 
@@ -22,7 +22,7 @@ demo ledgers intentionally stay under `data/bybit-demo-event`.
 Command:
 
 ```bash
-python -m aggression_carry --config configs/volume_alpha.default.yaml volume-events
+python -m liquidity_migration --config configs/volume_alpha.default.yaml volume-events
 ```
 
 The default config resolves `DATA_ROOT` to
@@ -128,7 +128,7 @@ temporary recent-download root.
 Run the formal promotion court after a `volume-events` report exists:
 
 ```bash
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root DATA_ROOT \
   strategy-tribunal \
   --report-dir DATA_ROOT/reports/volume_event_research \
@@ -154,7 +154,7 @@ judged. Missing execution data is a `WATCH`, not proof.
 One dry-run cycle:
 
 ```bash
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root data/bybit-demo-event \
   --config configs/volume_alpha.default.yaml \
   event-demo-cycle
@@ -191,7 +191,7 @@ Default forward-test behavior:
 Champion/challenger manifest:
 
 ```bash
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root data/bybit-demo-event \
   champion-challenger
 ```
@@ -203,20 +203,20 @@ variants, and the current hedge overlay.
 
 ## Useful Files
 
-- `aggression_carry/volume_events.py`: active event-driven strategy, full-PIT gates, ledger, reports
-- `aggression_carry/strategy_tribunal.py`: adversarial robustness audit for completed strategy reports
-- `aggression_carry/champion_challenger.py`: active demo champion and shadow challenger manifest/audit
-- `aggression_carry/event_demo.py`: Bybit demo forward-cycle runner for the selected event strategy
-- `aggression_carry/ws_risk.py`: websocket-first risk watchdog with REST fallback and audit reports
-- `aggression_carry/archive_manifest.py`: PIT manifest and 1h kline builders
-- `aggression_carry/volume_features.py`: active daily volume and liquidity-rank feature builder
-- `aggression_carry/trade_lifecycle.py`: active trade lifecycle, exit, basket, and equity helpers
+- `liquidity_migration/volume_events.py`: active event-driven strategy, full-PIT gates, ledger, reports
+- `liquidity_migration/strategy_tribunal.py`: adversarial robustness audit for completed strategy reports
+- `liquidity_migration/champion_challenger.py`: active demo champion and shadow challenger manifest/audit
+- `liquidity_migration/event_demo.py`: Bybit demo forward-cycle runner for the selected event strategy
+- `liquidity_migration/ws_risk.py`: websocket-first risk watchdog with REST fallback and audit reports
+- `liquidity_migration/archive_manifest.py`: PIT manifest and 1h kline builders
+- `liquidity_migration/volume_features.py`: active daily volume and liquidity-rank feature builder
+- `liquidity_migration/trade_lifecycle.py`: active trade lifecycle, exit, basket, and equity helpers
 - `scripts/run_bybit_demo_event_engine.sh`: continuous Bybit demo forward runner
 - `scripts/run_bybit_demo_ws_risk_engine.sh`: continuous websocket risk watchdog
 - `scripts/run_fullpit_volume_overnight.sh`: selected full-PIT runner
 - `scripts/run_fullpit_volume_overnight.ps1`: PowerShell selected full-PIT runner
-- `deploy/systemd/model050426-bybit-demo.service`: VPS service definition for the active demo runner
+- `deploy/systemd/liquidity-migration-bybit-demo.service`: VPS service definition for the active demo runner
 - `docs/data_roots.md`: canonical research root and live demo root contract
 - `docs/system_status.md`: current deployment and demo order-path proof summary
 - `docs/volume_alpha.md`: strategy notes and current result
-- `docs/bybit_aggression_carry_system_codex_spec.md`: active system spec
+- `docs/bybit_liquidity_migration_system_codex_spec.md`: active system spec

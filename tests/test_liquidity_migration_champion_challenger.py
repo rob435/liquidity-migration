@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from aggression_carry.champion_challenger import champion_challenger_specs, run_champion_challenger_audit
+from liquidity_migration.champion_challenger import champion_challenger_specs, run_champion_challenger_audit
 
 
 def test_champion_challenger_audit_allows_only_demo_relaxed_submitter(tmp_path: Path) -> None:

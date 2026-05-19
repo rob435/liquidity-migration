@@ -31,7 +31,7 @@ from .storage import dataset_path, read_dataset, write_dataset
 DEFAULT_BYBIT_PUBLIC_TRADING_URL = "https://public.bybit.com/trading/"
 DEFAULT_BYBIT_V5_KLINE_URL = "https://api.bybit.com/v5/market/kline"
 DEFAULT_TIMEOUT_SECONDS = 60
-ARCHIVE_KLINE_SKIP_ROWS_ENV = "AGC_ARCHIVE_KLINE_SKIP_ROWS_PATH"
+ARCHIVE_KLINE_SKIP_ROWS_ENV = "LIQMIG_ARCHIVE_KLINE_SKIP_ROWS_PATH"
 
 
 @dataclass(frozen=True, slots=True)
@@ -552,6 +552,10 @@ def _download_api_hourly_group(
     end_date = date.fromisoformat(str(pending_rows[-1]["date"])[:10])
     chunk_hours = max(1, min(int(config.limit), 1000))
     cursor = datetime.combine(start_date, datetime.min.time(), tzinfo=UTC)
+    # `end_dt` is the START timestamp of the final 1-hour bar on end_date
+    # (i.e. 23:00 UTC, same day — NOT next day). The loop condition is
+    # `cursor <= end_dt`, and the step `cursor = chunk_end + 1h` covers
+    # the full inclusive day [00:00..23:00] for any chunk_hours.
     end_dt = datetime.combine(end_date, datetime.min.time(), tzinfo=UTC) + timedelta(hours=23)
     while cursor <= end_dt:
         chunk_end = min(end_dt, cursor + timedelta(hours=chunk_hours - 1))

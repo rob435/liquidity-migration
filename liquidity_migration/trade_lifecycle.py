@@ -107,7 +107,7 @@ def summarize_trade_backtest(
     basket_returns = np.asarray(baskets["basket_return"].to_list(), dtype=float)
     mean_return = float(np.mean(basket_returns)) if basket_returns.size else 0.0
     vol = float(np.std(basket_returns, ddof=1)) if basket_returns.size > 1 else 0.0
-    annual_periods = 365.0 / config.rebalance_days
+    annual_periods = 365.0 / config.rebalance_days if config.rebalance_days > 0 else 0.0
     wins = trades.filter(pl.col("net_return") > 0.0)
     losses = trades.filter(pl.col("net_return") < 0.0)
     profit = float(wins["net_return"].sum()) if not wins.is_empty() else 0.0
@@ -370,6 +370,11 @@ def _bar_exit_hits(
 
 
 def _bar_excursion(entry_price: float, *, side: str, high: float, low: float) -> tuple[float, float]:
+    # Returns (adverse, favorable). Sign convention is the same for both sides:
+    #   adverse   <= 0  (loss-side excursion since entry)
+    #   favorable >= 0  (gain-side excursion since entry)
+    # For shorts, `1 - high/entry` is negative when price moved up (adverse),
+    # so callers can accumulate with `mae = min(0, adverse)` symmetrically.
     if side == "long":
         return low / entry_price - 1.0, high / entry_price - 1.0
     return 1.0 - high / entry_price, 1.0 - low / entry_price

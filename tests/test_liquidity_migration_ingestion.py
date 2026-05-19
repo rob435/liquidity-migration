@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import polars as pl
 
-from aggression_carry.config import TradeFlowConfig
-from aggression_carry.ingestion import (
+from liquidity_migration.config import TradeFlowConfig
+from liquidity_migration.ingestion import (
     aggregate_trade_klines_1h,
     aggregate_trade_klines_1m,
     aggregate_signed_flow_1h,

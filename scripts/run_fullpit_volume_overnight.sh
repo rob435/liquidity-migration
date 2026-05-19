@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel >/dev/null 2>&1; then
   DEFAULT_REPO="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel)"
 else
-  DEFAULT_REPO="$HOME/MODEL050426"
+  DEFAULT_REPO="$HOME/liquidity-migration"
 fi
 
 REPO="${REPO:-${REPO_DIR:-$DEFAULT_REPO}}"
@@ -97,14 +97,14 @@ python -m pip install -e ".[dev]"
 if [ "$RUN_TESTS" != "0" ]; then
   section "Smoke tests"
   python -m pytest \
-    tests/test_aggression_carry_cli.py::test_cli_parses_volume_events_research_overrides \
-    tests/test_aggression_carry_archive.py::test_archive_hourly_kline_download_writes_1h_partitions \
-    tests/test_aggression_carry_archive.py::test_archive_hourly_downloader_processes_each_symbol_in_date_order \
-    tests/test_aggression_carry_volume_events.py
+    tests/test_liquidity_migration_cli.py::test_cli_parses_volume_events_research_overrides \
+    tests/test_liquidity_migration_archive.py::test_archive_hourly_kline_download_writes_1h_partitions \
+    tests/test_liquidity_migration_archive.py::test_archive_hourly_downloader_processes_each_symbol_in_date_order \
+    tests/test_liquidity_migration_volume_events.py
 fi
 
 section "Build full PIT manifest"
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root "$DATA_ROOT" \
   --config "$CONFIG_PATH" \
   archive-manifest \
@@ -114,7 +114,7 @@ python -m aggression_carry \
   --workers "$MANIFEST_WORKERS"
 
 section "Fill full PIT 1h klines from Bybit v5 API"
-python -m aggression_carry \
+python -m liquidity_migration \
   --data-root "$DATA_ROOT" \
   --config "$CONFIG_PATH" \
   archive-download-klines-1h-api \
@@ -138,7 +138,7 @@ from pathlib import Path
 
 from pyarrow import parquet as pq
 
-from aggression_carry.storage import dataset_path, read_dataset
+from liquidity_migration.storage import dataset_path, read_dataset
 
 root = Path(os.environ["DATA_ROOT"])
 run_name = os.environ["RUN_NAME"]
@@ -188,7 +188,7 @@ echo "run_type,max_active_symbols,cooldown_days,entry_delay_hours,entry_policy,r
 if [ "$RUN_CHAMPION_BACKTEST" != "0" ]; then
   section "Run selected full PIT volume event backtest"
   CHAMPION_REPORT_DIR="$DATA_ROOT/reports/SELECTED_liqmig_union_q40_h3_tp26_g100_qsqueeze_$(date -u +%Y%m%dT%H%M%SZ)"
-  python -m aggression_carry \
+  python -m liquidity_migration \
     --data-root "$DATA_ROOT" \
     --config "$CONFIG_PATH" \
     volume-events \

@@ -41,7 +41,7 @@ def champion_challenger_specs() -> tuple[ChallengerSpec, ...]:
             surface="event_demo_cycle_dry_run",
             submits_orders=False,
             command=(
-                "python -m aggression_carry --config configs/volume_alpha.default.yaml "
+                "python -m liquidity_migration --config configs/volume_alpha.default.yaml "
                 "--data-root data/shadow-current-promoted event-demo-cycle --strategy-profile promoted --record-dry-run"
             ),
             purpose="Sparse promoted-grade signal stream for live-vs-backtest drift without orders.",
@@ -53,7 +53,7 @@ def champion_challenger_specs() -> tuple[ChallengerSpec, ...]:
             surface="volume_events_research",
             submits_orders=False,
             command=(
-                "python -m aggression_carry --config configs/volume_alpha.default.yaml --data-root DATA_ROOT "
+                "python -m liquidity_migration --config configs/volume_alpha.default.yaml --data-root DATA_ROOT "
                 "volume-events --liquidity-migration-crowding-filter none "
                 "--report-dir DATA_ROOT/reports/challenger_relaxed_no_crowding"
             ),
@@ -66,7 +66,7 @@ def champion_challenger_specs() -> tuple[ChallengerSpec, ...]:
             surface="volume_events_research",
             submits_orders=False,
             command=(
-                "python -m aggression_carry --config configs/volume_alpha.default.yaml --data-root DATA_ROOT "
+                "python -m liquidity_migration --config configs/volume_alpha.default.yaml --data-root DATA_ROOT "
                 "volume-events --entry-policy tiered_execution_sniper "
                 "--report-dir DATA_ROOT/reports/challenger_tiered_execution_sniper"
             ),
@@ -79,7 +79,7 @@ def champion_challenger_specs() -> tuple[ChallengerSpec, ...]:
             surface="volume_events_research",
             submits_orders=False,
             command=(
-                "python -m aggression_carry --config configs/volume_alpha.default.yaml --data-root DATA_ROOT "
+                "python -m liquidity_migration --config configs/volume_alpha.default.yaml --data-root DATA_ROOT "
                 "volume-events --entry-policy execution_pullback_guard "
                 "--report-dir DATA_ROOT/reports/challenger_execution_pullback_guard"
             ),
@@ -92,7 +92,7 @@ def champion_challenger_specs() -> tuple[ChallengerSpec, ...]:
             surface="portfolio_hedge_research",
             submits_orders=False,
             command=(
-                "python -m aggression_carry portfolio-hedge --short-report-dir SHORT_REPORT "
+                "python -m liquidity_migration portfolio-hedge --short-report-dir SHORT_REPORT "
                 "--long-report-dir LONG_VOLUME_SHELF_REPORT --hedge-weights 0.25,0.5,1.0 "
                 "--report-dir DATA_ROOT/reports/challenger_volume_shelf_hedge_overlay"
             ),

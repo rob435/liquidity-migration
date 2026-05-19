@@ -109,6 +109,7 @@ def run_event_demo_cycle(
     market_client: Any | None = None,
     private_client: Any | None = None,
     now_ms: int | None = None,
+    execution_event_router: Any | None = None,
 ) -> dict[str, Any]:
     demo = demo_config or EventDemoCycleConfig()
     strategy = _demo_event_config(event_config or VolumeEventResearchConfig(), profile=demo.strategy_profile)
@@ -233,6 +234,7 @@ def run_event_demo_cycle(
             trading_client=trading_client,
             demo=demo,
             now_ms=cycle_now_ms,
+            execution_event_router=execution_event_router,
         )
         if executed_exits:
             all_trades = _upsert_rows(all_trades, executed_exits, key="trade_id")
@@ -332,6 +334,7 @@ def run_event_demo_cycle(
             strategy_id=strategy_id,
             record_preflight=preflight_callback,
             private_client_factory=private_factory,
+            execution_event_router=execution_event_router,
         )
         if executed_entries:
             all_trades = _upsert_rows(all_trades, executed_entries, key="trade_id")
@@ -1744,6 +1747,7 @@ def _execute_entries(
     record_preflight: Callable[[dict[str, Any]], None] | None = None,
     private_client_factory: Callable[[], Any] | None = None,
     max_workers: int | None = None,
+    execution_event_router: Any | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if not candidates:
         return [], []
@@ -1766,6 +1770,7 @@ def _execute_entries(
                 now_ms=now_ms,
                 strategy_id=strategy_id,
                 record_preflight=record_preflight,
+                execution_event_router=execution_event_router,
             )
             if row is not None:
                 rows.append(row)
@@ -1799,6 +1804,7 @@ def _execute_entries(
             now_ms=now_ms,
             strategy_id=strategy_id,
             record_preflight=record_preflight,
+            execution_event_router=execution_event_router,
         )
 
     parallel_rows: list[dict[str, Any]] = []
@@ -1828,6 +1834,7 @@ def _execute_single_entry(
     now_ms: int,
     strategy_id: str,
     record_preflight: Callable[[dict[str, Any]], None] | None = None,
+    execution_event_router: Any | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     symbol = str(candidate["symbol"])
     price = price_by_symbol.get(symbol)
@@ -1943,6 +1950,7 @@ def _execute_single_entry(
                     poll_interval_seconds=demo.order_fill_poll_interval_seconds,
                     fast_poll_interval_seconds=demo.order_fill_fast_poll_interval_seconds,
                     fast_poll_seconds=demo.order_fill_fast_poll_seconds,
+                    execution_event_router=execution_event_router,
                 )
             except Exception as exc:  # noqa: BLE001 - order may still fill; pending reconciliation will retry
                 order_status = "submitted_unconfirmed"
@@ -2246,6 +2254,7 @@ def _execute_exits(
     trading_client: Any | None,
     demo: EventDemoCycleConfig,
     now_ms: int,
+    execution_event_router: Any | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if not exits:
         return [], []
@@ -2297,6 +2306,7 @@ def _execute_exits(
                         poll_interval_seconds=demo.order_fill_poll_interval_seconds,
                         fast_poll_interval_seconds=demo.order_fill_fast_poll_interval_seconds,
                         fast_poll_seconds=demo.order_fill_fast_poll_seconds,
+                        execution_event_router=execution_event_router,
                     )
                 except Exception as exc:  # noqa: BLE001 - order may still fill; pending reconciliation will retry
                     order_status = "submitted_unconfirmed"
@@ -3368,6 +3378,7 @@ def _wait_for_execution_summary(
     poll_interval_seconds: float,
     fast_poll_interval_seconds: float = 0.05,
     fast_poll_seconds: float = 0.5,
+    execution_event_router: Any | None = None,
 ) -> dict[str, Any]:
     # `while True` is bounded: the deadline check below returns once
     # `time.monotonic() >= deadline`, so the loop runs at most `poll_seconds`
@@ -3378,18 +3389,38 @@ def _wait_for_execution_summary(
     # up to a full poll period per candidate on the average fill; a 50ms fast
     # window for the first 500ms catches most fills near optimally, then we
     # back off to the slower interval to limit get_trade_history hits.
+    #
+    # When an execution_event_router is provided, the WS private execution
+    # stream is the fast path: each iteration first waits up to one slow_interval
+    # for the router to deliver an event matching this orderLinkId; if WS
+    # delivers, we return immediately without a REST call. REST polling remains
+    # the safety net — if WS is down, slow, or events are lost, the existing
+    # poll-deadline behavior is unchanged.
     start = time.monotonic()
     deadline = start + max(poll_seconds, 0.0)
     fast_deadline = start + max(fast_poll_seconds, 0.0)
     slow_interval = max(poll_interval_seconds, 0.01)
     fast_interval = max(fast_poll_interval_seconds, 0.005)
     while True:
+        if execution_event_router is not None:
+            now = time.monotonic()
+            ws_wait = min(
+                fast_interval if now < fast_deadline else slow_interval,
+                max(deadline - now, 0.0),
+            )
+            if ws_wait > 0.0:
+                ws_rows = execution_event_router.wait_for_fill_rows(order_link_id, ws_wait)
+                if ws_rows:
+                    summary = _execution_summary(ws_rows)
+                    if _float(summary.get("qty")) > 0.0:
+                        return summary
         summary = _execution_summary(trading_client.get_trade_history(symbol=symbol, order_link_id=order_link_id, limit=50))
         if _float(summary.get("qty")) > 0.0 or time.monotonic() >= deadline:
             return summary
-        now = time.monotonic()
-        interval = fast_interval if now < fast_deadline else slow_interval
-        time.sleep(min(interval, max(deadline - now, 0.0)))
+        if execution_event_router is None:
+            now = time.monotonic()
+            interval = fast_interval if now < fast_deadline else slow_interval
+            time.sleep(min(interval, max(deadline - now, 0.0)))
 
 
 def _position_size_by_symbol(positions: list[dict[str, Any]]) -> dict[str, float]:

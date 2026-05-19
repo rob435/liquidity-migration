@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from aggression_carry.ingestion import generate_fixture_data
-from aggression_carry.storage import read_dataset
-from aggression_carry.trade_lifecycle import _side_return, _stop_price, _take_profit_price
-from aggression_carry.volume_features import build_volume_features
+from liquidity_migration.ingestion import generate_fixture_data
+from liquidity_migration.storage import read_dataset
+from liquidity_migration.trade_lifecycle import _side_return, _stop_price, _take_profit_price
+from liquidity_migration.volume_features import build_volume_features
 
 
 def test_volume_features_build_daily_liquidity_ranks(tmp_path) -> None:
