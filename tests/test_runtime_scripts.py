@@ -77,6 +77,23 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "--property=Environment" not in text
 
 
+def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    text = (repo / "scripts" / "verify_vps_live.sh").read_text(encoding="utf-8")
+
+    assert "git pull" not in text
+    assert "systemctl restart" not in text
+    assert "liqmig_union_q40_h3_tp26_g100_qsqueeze" in text
+    assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text
+    assert "TELEGRAM_CHAT_ID" in text
+    assert "Environment=STRATEGY_PROFILE=demo_relaxed" in text
+    assert "Environment=INTERVAL_SECONDS=60" in text
+    assert "Environment=UNIVERSE_RANK_END=300" in text
+    assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
+    assert "verify-ok commit=" in text
+    assert "--property=Environment" not in text
+
+
 def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     repo = Path(__file__).resolve().parents[1]
     text = (repo / "scripts" / "vps_console_recover_and_deploy.sh").read_text(
