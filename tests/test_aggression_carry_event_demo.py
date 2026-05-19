@@ -15,7 +15,6 @@ from aggression_carry.event_demo import (
     PENDING_ORDER_GUARD_MS,
     _demo_event_config,
     _demo_kline_fetch_ranges,
-    _demo_strategy_id,
     _execute_entries,
     _execute_exits,
     _execute_risk_exits,
@@ -24,7 +23,6 @@ from aggression_carry.event_demo import (
     _limit_chase_price,
     _live_open_order_symbols,
     _maybe_notify,
-    _normalize_demo_strategy_profile,
     _reconcile_pending_order_fills,
     _submit_reduce_only_exit,
     _telegram_notification_reason,
@@ -2947,16 +2945,6 @@ def test_demo_relaxed_profile_requires_wide_forward_universe() -> None:
         )
 
 
-def test_observe_alias_maps_to_canonical_demo_relaxed_profile() -> None:
-    strategy = _demo_event_config(VolumeEventResearchConfig(), profile="observe")
-
-    assert _normalize_demo_strategy_profile("observe") == "demo_relaxed"
-    assert _demo_strategy_id("observe") == DEMO_RELAXED_STRATEGY_ID
-    assert strategy.take_profit_pcts == (0.21,)
-    assert strategy.max_active_symbols == 10
-    _validate_demo_config(EventDemoCycleConfig(strategy_profile="observe", universe_rank_end=300, universe_max_symbols=300))
-
-
 def test_event_demo_rejects_non_positive_entry_leverage() -> None:
     with pytest.raises(ValueError, match="entry_leverage"):
         _validate_demo_config(EventDemoCycleConfig(entry_leverage=0.0))
@@ -3034,6 +3022,104 @@ def test_execute_entries_records_preflight_row_before_place_order(tmp_path: Path
     assert len(orders) == 1
     assert orders[0]["order_link_id"] == preflight[0]["order_link_id"]
     assert orders[0]["submit_mode"] in {"submitted", "filled", "partial", "submitted_unconfirmed"}
+
+
+def test_execute_entries_parallel_path_runs_concurrent_candidates() -> None:
+    """With max_concurrent_entries > 1 and a private_client_factory, candidates
+    fan out across worker threads instead of running serially. Verify by giving
+    each candidate's place_order a 100ms sleep: serial would take >300ms for
+    three candidates, parallel must finish in roughly one slot.
+    """
+    import time as _time
+
+    candidates = [
+        {
+            "trade_id": f"t-par-{i}",
+            "symbol": f"AAA{i}USDT",
+            "side": "short",
+            "signal_ts_ms": 1_700_000_000_000 + i,
+            "stop_loss_pct": 0.12,
+            "take_profit_pct": 0.20,
+        }
+        for i in range(3)
+    ]
+    price_by_symbol = {c["symbol"]: 100.0 for c in candidates}
+    contract_by_symbol = {
+        c["symbol"]: {"tick_size": 0.1, "qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}
+        for c in candidates
+    }
+
+    class SlowClient(FakeRiskClient):
+        def __init__(self):
+            super().__init__(fill_market_orders=True, fill_order_prefixes=("agc-en-",))
+
+        def place_order(self, **params):
+            _time.sleep(0.1)
+            return super().place_order(**params)
+
+    factory_calls: list[int] = []
+    def factory() -> SlowClient:
+        factory_calls.append(1)
+        return SlowClient()
+
+    started = _time.monotonic()
+    rows, orders = _execute_entries(
+        candidates,
+        trading_client=None,
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+            max_concurrent_entries=3,
+        ),
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.20,
+        price_by_symbol=price_by_symbol,
+        contract_by_symbol=contract_by_symbol,
+        now_ms=1_700_000_060_000,
+        strategy_id=DEMO_RELAXED_STRATEGY_ID,
+        private_client_factory=factory,
+    )
+    elapsed = _time.monotonic() - started
+
+    assert len(orders) == 3
+    assert elapsed < 0.25, (
+        f"parallel path should finish under 250ms with 100ms place_order x 3 "
+        f"workers; took {elapsed:.3f}s"
+    )
+    assert len(factory_calls) == 3
+
+
+def test_execute_entries_falls_back_to_serial_when_submit_orders_off() -> None:
+    """If submit_orders=False the parallel path is bypassed regardless of
+    max_concurrent_entries (no live execution to fan out)."""
+    candidates = [
+        {
+            "trade_id": f"t-fb-{i}",
+            "symbol": f"BBB{i}USDT",
+            "side": "short",
+            "signal_ts_ms": 1_700_000_000_000 + i,
+            "stop_loss_pct": 0.12,
+            "take_profit_pct": 0.20,
+        }
+        for i in range(3)
+    ]
+    rows, orders = _execute_entries(
+        candidates,
+        trading_client=None,
+        demo=EventDemoCycleConfig(entry_leverage=2.0, max_concurrent_entries=4),
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.20,
+        price_by_symbol={c["symbol"]: 100.0 for c in candidates},
+        contract_by_symbol={
+            c["symbol"]: {"qty_step": 0.1, "min_order_qty": 0.1, "min_notional_value": 5.0}
+            for c in candidates
+        },
+        now_ms=1_700_000_060_000,
+        strategy_id=DEMO_RELAXED_STRATEGY_ID,
+    )
+    assert [o["symbol"] for o in orders] == ["BBB0USDT", "BBB1USDT", "BBB2USDT"]
+    assert all(o["submit_mode"] == "dry_run" for o in orders)
 
 
 def test_execute_entries_preflight_skipped_when_no_callback() -> None:

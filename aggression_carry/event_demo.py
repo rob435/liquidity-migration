@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, replace
@@ -43,9 +44,8 @@ from .volume_events import (
 MS_PER_MINUTE = 60_000
 PROMOTED_DEMO_STRATEGY_ID = "liqmig_union_q40_h3_tp26_g100_qsqueeze"
 DEMO_RELAXED_STRATEGY_ID = "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6"
-DEMO_STRATEGY_PROFILE_ALIASES = {"observe": "demo_relaxed"}
 DEMO_STRATEGY_PROFILES = ("promoted", "demo_relaxed")
-DEMO_STRATEGY_PROFILE_CHOICES = DEMO_STRATEGY_PROFILES + tuple(DEMO_STRATEGY_PROFILE_ALIASES)
+DEMO_STRATEGY_PROFILE_CHOICES = DEMO_STRATEGY_PROFILES
 PENDING_ORDER_STATUSES = {"submitted", "submitted_unconfirmed", "partial", "fallback_market"}
 PENDING_ORDER_GUARD_MS = 15 * MS_PER_MINUTE
 
@@ -67,6 +67,9 @@ class EventDemoCycleConfig:
     exit_order_type: str = "Market"
     order_fill_confirm_seconds: float = 2.0
     order_fill_poll_interval_seconds: float = 0.2
+    order_fill_fast_poll_interval_seconds: float = 0.05
+    order_fill_fast_poll_seconds: float = 0.5
+    max_concurrent_entries: int = 4
     submit_orders: bool = False
     confirm_demo_orders: bool = False
     telegram: bool = False
@@ -108,9 +111,6 @@ def run_event_demo_cycle(
     now_ms: int | None = None,
 ) -> dict[str, Any]:
     demo = demo_config or EventDemoCycleConfig()
-    normalized_profile = _normalize_demo_strategy_profile(demo.strategy_profile)
-    if normalized_profile != demo.strategy_profile:
-        demo = replace(demo, strategy_profile=normalized_profile)
     strategy = _demo_event_config(event_config or VolumeEventResearchConfig(), profile=demo.strategy_profile)
     strategy_id = _demo_strategy_id(demo.strategy_profile)
     _validate_event_config(strategy)
@@ -299,6 +299,25 @@ def run_event_demo_cycle(
             preflight_callback: Callable[[dict[str, Any]], None] | None = _record_preflight_entry_order
         else:
             preflight_callback = None
+        # When live-submitting orders, fan candidates out across a small worker
+        # pool: each worker owns its own private REST client so the place_order
+        # + fill-poll roundtrip pipelines across candidates instead of running
+        # strictly serially. Each worker shares the same shared private rate
+        # limiter so the process as a whole still stays under Bybit's
+        # per-account REST budget.
+        private_factory: Callable[[], Any] | None
+        if demo.submit_orders and demo.max_concurrent_entries > 1 and len(entry_candidates) > 1:
+            shared_private_limiter = BybitRestRateLimiter(
+                max_requests=_demo_private_rest_rate_limit_per_second(),
+                per_seconds=1.0,
+            )
+            def _build_worker_private_client() -> BybitPrivateClient:
+                client = _build_private_client(config)
+                client.rate_limiter = shared_private_limiter
+                return client
+            private_factory = _build_worker_private_client
+        else:
+            private_factory = None
         executed_entries, entry_order_rows = _execute_entries(
             entry_candidates,
             trading_client=trading_client,
@@ -310,6 +329,7 @@ def run_event_demo_cycle(
             now_ms=cycle_now_ms,
             strategy_id=strategy_id,
             record_preflight=preflight_callback,
+            private_client_factory=private_factory,
         )
         if executed_entries:
             all_trades = _upsert_rows(all_trades, executed_entries, key="trade_id")
@@ -1267,7 +1287,6 @@ def format_event_risk_cycle_report(payload: dict[str, Any]) -> str:
 
 
 def _demo_strategy_id(profile: str) -> str:
-    profile = _normalize_demo_strategy_profile(profile)
     if profile == "promoted":
         return PROMOTED_DEMO_STRATEGY_ID
     if profile == "demo_relaxed":
@@ -1275,12 +1294,7 @@ def _demo_strategy_id(profile: str) -> str:
     raise ValueError(f"Unknown demo strategy profile: {profile}")
 
 
-def _normalize_demo_strategy_profile(profile: str) -> str:
-    return DEMO_STRATEGY_PROFILE_ALIASES.get(profile, profile)
-
-
 def _demo_event_config(config: VolumeEventResearchConfig, *, profile: str) -> VolumeEventResearchConfig:
-    profile = _normalize_demo_strategy_profile(profile)
     promoted = VolumeEventResearchConfig()
     base = replace(
         promoted,
@@ -1324,7 +1338,7 @@ def _selected_scenario(config: VolumeEventResearchConfig) -> EventScenario:
 
 
 def _validate_demo_config(config: EventDemoCycleConfig) -> None:
-    strategy_profile = _normalize_demo_strategy_profile(config.strategy_profile)
+    strategy_profile = config.strategy_profile
     if strategy_profile not in DEMO_STRATEGY_PROFILES:
         raise ValueError(f"strategy_profile must be one of: {', '.join(DEMO_STRATEGY_PROFILES)}")
     if config.lookback_days < 25:
@@ -1608,6 +1622,21 @@ def _demo_rest_rate_limit_per_second() -> int:
     return value if value > 0 else 18
 
 
+def _demo_private_rest_rate_limit_per_second() -> int:
+    """Bybit per-account private REST budget for place_order et al is roughly
+    20 req/s sustained. We default to 15 to leave headroom for risk-engine
+    private calls hitting the same account from a separate process.
+    """
+    raw = os.environ.get("BYBIT_PRIVATE_REST_RATE_LIMIT_PER_SECOND", "").strip()
+    if not raw:
+        return 15
+    try:
+        value = int(raw)
+    except ValueError:
+        return 15
+    return value if value > 0 else 15
+
+
 def _dedupe_recent_klines(klines: pl.DataFrame) -> pl.DataFrame:
     if klines.is_empty():
         return _empty_klines()
@@ -1709,243 +1738,326 @@ def _execute_entries(
     now_ms: int,
     strategy_id: str,
     record_preflight: Callable[[dict[str, Any]], None] | None = None,
+    private_client_factory: Callable[[], Any] | None = None,
+    max_workers: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    rows: list[dict[str, Any]] = []
-    orders: list[dict[str, Any]] = []
-    for candidate in candidates:
-        symbol = str(candidate["symbol"])
-        price = price_by_symbol.get(symbol)
-        contract = contract_by_symbol.get(symbol, {})
-        if price is None or price <= 0.0:
-            continue
-        tick_size = _float(contract.get("tick_size")) or 0.0001
-        qty_step = _float(contract.get("qty_step")) or 0.001
-        capped_notional = equity_usdt * demo.wallet_balance_fraction * order_notional_pct_equity
-        quantity = order_quantity_for_notional(
-            notional_usdt=capped_notional,
-            price=price,
-            qty_step=qty_step,
-            min_order_qty=_float(contract.get("min_order_qty")),
-            min_notional_value=_float(contract.get("min_notional_value")),
+    if not candidates:
+        return [], []
+
+    effective_workers = int(max_workers if max_workers is not None else demo.max_concurrent_entries)
+    effective_workers = max(1, min(effective_workers, len(candidates)))
+
+    if effective_workers <= 1 or private_client_factory is None or not demo.submit_orders:
+        rows: list[dict[str, Any]] = []
+        orders: list[dict[str, Any]] = []
+        for candidate in candidates:
+            row, order = _execute_single_entry(
+                candidate,
+                trading_client=trading_client,
+                demo=demo,
+                equity_usdt=equity_usdt,
+                order_notional_pct_equity=order_notional_pct_equity,
+                price_by_symbol=price_by_symbol,
+                contract_by_symbol=contract_by_symbol,
+                now_ms=now_ms,
+                strategy_id=strategy_id,
+                record_preflight=record_preflight,
+            )
+            if row is not None:
+                rows.append(row)
+            if order is not None:
+                orders.append(order)
+        return rows, orders
+
+    # Parallel path. Each worker owns its own private REST client via the
+    # factory — `requests.Session` (which pybit's HTTP wraps) is not safe to
+    # share under heavy concurrent place_order load. Per-thread storage caches
+    # the client across multiple candidates handled by the same worker, so the
+    # TLS/auth handshake amortises.
+    thread_local = threading.local()
+
+    def _worker_client() -> Any:
+        client = getattr(thread_local, "client", None)
+        if client is None:
+            client = private_client_factory()
+            thread_local.client = client
+        return client
+
+    def _task(candidate: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        return _execute_single_entry(
+            candidate,
+            trading_client=_worker_client(),
+            demo=demo,
+            equity_usdt=equity_usdt,
+            order_notional_pct_equity=order_notional_pct_equity,
+            price_by_symbol=price_by_symbol,
+            contract_by_symbol=contract_by_symbol,
+            now_ms=now_ms,
+            strategy_id=strategy_id,
+            record_preflight=record_preflight,
         )
-        if quantity is None:
-            continue
-        qty, actual_notional = quantity
-        # demo.entry_leverage > 0 is a config invariant — _validate_demo_config
-        # rejects non-positive values at parse time, so no zero-guard here.
-        initial_margin_usdt = actual_notional / demo.entry_leverage
-        side = str(candidate["side"])
-        bybit_side = "Sell" if side == "short" else "Buy"
-        stop_loss_pct = float(candidate.get("stop_loss_pct") or 0.12)
-        take_profit_pct = float(candidate.get("take_profit_pct") or 0.0)
-        stop_price = _stop_price_for_entry(
-            entry_price=price,
-            side=side,
-            stop_loss_pct=stop_loss_pct,
-            tick_size=tick_size,
-        )
-        take_profit_price = _take_profit_price_for_entry(
-            entry_price=price,
-            side=side,
-            take_profit_pct=take_profit_pct,
-            tick_size=tick_size,
-        )
-        entry_link = _order_link_id("en", symbol=symbol, signal_ts_ms=int(candidate["signal_ts_ms"]))
-        order_result: dict[str, Any] = {}
-        exec_summary: dict[str, Any] = {}
-        protection_update_status = ""
-        protection_update_error = ""
-        submit_mode = "dry_run"
-        order_status = "planned"
-        error = ""
-        filled_qty = _float(qty)
-        entry_price = price
-        filled_notional = actual_notional
-        if demo.submit_orders:
-            assert trading_client is not None
+
+    parallel_rows: list[dict[str, Any]] = []
+    parallel_orders: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+        # Submit in candidate order, await in candidate order: preserves the
+        # row/order list ordering callers rely on for deterministic dedup.
+        futures = [executor.submit(_task, candidate) for candidate in candidates]
+        for future in futures:
+            row, order = future.result()
+            if row is not None:
+                parallel_rows.append(row)
+            if order is not None:
+                parallel_orders.append(order)
+    return parallel_rows, parallel_orders
+
+
+def _execute_single_entry(
+    candidate: dict[str, Any],
+    *,
+    trading_client: Any | None,
+    demo: EventDemoCycleConfig,
+    equity_usdt: float,
+    order_notional_pct_equity: float,
+    price_by_symbol: dict[str, float],
+    contract_by_symbol: dict[str, dict[str, Any]],
+    now_ms: int,
+    strategy_id: str,
+    record_preflight: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    symbol = str(candidate["symbol"])
+    price = price_by_symbol.get(symbol)
+    contract = contract_by_symbol.get(symbol, {})
+    if price is None or price <= 0.0:
+        return None, None
+    tick_size = _float(contract.get("tick_size")) or 0.0001
+    qty_step = _float(contract.get("qty_step")) or 0.001
+    capped_notional = equity_usdt * demo.wallet_balance_fraction * order_notional_pct_equity
+    quantity = order_quantity_for_notional(
+        notional_usdt=capped_notional,
+        price=price,
+        qty_step=qty_step,
+        min_order_qty=_float(contract.get("min_order_qty")),
+        min_notional_value=_float(contract.get("min_notional_value")),
+    )
+    if quantity is None:
+        return None, None
+    qty, actual_notional = quantity
+    # demo.entry_leverage > 0 is a config invariant — _validate_demo_config
+    # rejects non-positive values at parse time, so no zero-guard here.
+    initial_margin_usdt = actual_notional / demo.entry_leverage
+    side = str(candidate["side"])
+    bybit_side = "Sell" if side == "short" else "Buy"
+    stop_loss_pct = float(candidate.get("stop_loss_pct") or 0.12)
+    take_profit_pct = float(candidate.get("take_profit_pct") or 0.0)
+    stop_price = _stop_price_for_entry(
+        entry_price=price,
+        side=side,
+        stop_loss_pct=stop_loss_pct,
+        tick_size=tick_size,
+    )
+    take_profit_price = _take_profit_price_for_entry(
+        entry_price=price,
+        side=side,
+        take_profit_pct=take_profit_pct,
+        tick_size=tick_size,
+    )
+    entry_link = _order_link_id("en", symbol=symbol, signal_ts_ms=int(candidate["signal_ts_ms"]))
+    order_result: dict[str, Any] = {}
+    exec_summary: dict[str, Any] = {}
+    protection_update_status = ""
+    protection_update_error = ""
+    submit_mode = "dry_run"
+    order_status = "planned"
+    error = ""
+    filled_qty = _float(qty)
+    entry_price = price
+    filled_notional = actual_notional
+    if demo.submit_orders:
+        assert trading_client is not None
+        try:
+            trading_client.set_leverage(symbol=symbol, buy_leverage=demo.entry_leverage, sell_leverage=demo.entry_leverage)
+        except Exception as exc:  # noqa: BLE001 - failed entries must be ledgered without aborting the cycle
+            submit_mode = "error"
+            order_status = "failed"
+            error = f"set_leverage failed: {exc}"[:500]
+            filled_qty = 0.0
+            filled_notional = 0.0
+        if not error:
+            order_params = _order_params(
+                symbol=symbol,
+                side=bybit_side,
+                qty=qty,
+                order_type=demo.entry_order_type,
+                order_link_id=entry_link,
+                reduce_only=False,
+                stop_loss=stop_price,
+                take_profit=take_profit_price if take_profit_price > 0.0 else None,
+            )
+            if record_preflight is not None:
+                record_preflight(
+                    _preflight_entry_order_row(
+                        entry_link=entry_link,
+                        now_ms=now_ms,
+                        candidate=candidate,
+                        strategy_id=strategy_id,
+                        symbol=symbol,
+                        bybit_side=bybit_side,
+                        side=side,
+                        order_type=demo.entry_order_type,
+                        qty=qty,
+                        price=price,
+                        actual_notional=actual_notional,
+                        order_notional_pct_equity=order_notional_pct_equity,
+                        entry_leverage=demo.entry_leverage,
+                        initial_margin_usdt=initial_margin_usdt,
+                        equity_usdt=equity_usdt,
+                        tick_size=tick_size,
+                        qty_step=qty_step,
+                        stop_price=stop_price,
+                        take_profit_price=take_profit_price,
+                        stop_loss_pct=stop_loss_pct,
+                        take_profit_pct=take_profit_pct,
+                    )
+                )
             try:
-                trading_client.set_leverage(symbol=symbol, buy_leverage=demo.entry_leverage, sell_leverage=demo.entry_leverage)
+                order_result = trading_client.place_order(**order_params)
+                submit_mode = "submitted"
             except Exception as exc:  # noqa: BLE001 - failed entries must be ledgered without aborting the cycle
                 submit_mode = "error"
                 order_status = "failed"
-                error = f"set_leverage failed: {exc}"[:500]
+                error = f"place_order failed: {exc}"[:500]
                 filled_qty = 0.0
                 filled_notional = 0.0
-            if not error:
-                order_params = _order_params(
+        if submit_mode == "submitted":
+            try:
+                exec_summary = _wait_for_execution_summary(
+                    trading_client,
                     symbol=symbol,
-                    side=bybit_side,
-                    qty=qty,
-                    order_type=demo.entry_order_type,
                     order_link_id=entry_link,
-                    reduce_only=False,
-                    stop_loss=stop_price,
-                    take_profit=take_profit_price if take_profit_price > 0.0 else None,
+                    poll_seconds=demo.order_fill_confirm_seconds,
+                    poll_interval_seconds=demo.order_fill_poll_interval_seconds,
+                    fast_poll_interval_seconds=demo.order_fill_fast_poll_interval_seconds,
+                    fast_poll_seconds=demo.order_fill_fast_poll_seconds,
                 )
-                if record_preflight is not None:
-                    record_preflight(
-                        _preflight_entry_order_row(
-                            entry_link=entry_link,
-                            now_ms=now_ms,
-                            candidate=candidate,
-                            strategy_id=strategy_id,
-                            symbol=symbol,
-                            bybit_side=bybit_side,
-                            side=side,
-                            order_type=demo.entry_order_type,
-                            qty=qty,
-                            price=price,
-                            actual_notional=actual_notional,
-                            order_notional_pct_equity=order_notional_pct_equity,
-                            entry_leverage=demo.entry_leverage,
-                            initial_margin_usdt=initial_margin_usdt,
-                            equity_usdt=equity_usdt,
-                            tick_size=tick_size,
-                            qty_step=qty_step,
-                            stop_price=stop_price,
-                            take_profit_price=take_profit_price,
-                            stop_loss_pct=stop_loss_pct,
-                            take_profit_pct=take_profit_pct,
-                        )
-                    )
-                try:
-                    order_result = trading_client.place_order(**order_params)
-                    submit_mode = "submitted"
-                except Exception as exc:  # noqa: BLE001 - failed entries must be ledgered without aborting the cycle
-                    submit_mode = "error"
-                    order_status = "failed"
-                    error = f"place_order failed: {exc}"[:500]
-                    filled_qty = 0.0
-                    filled_notional = 0.0
-            if submit_mode == "submitted":
-                try:
-                    exec_summary = _wait_for_execution_summary(
-                        trading_client,
-                        symbol=symbol,
-                        order_link_id=entry_link,
-                        poll_seconds=demo.order_fill_confirm_seconds,
-                        poll_interval_seconds=demo.order_fill_poll_interval_seconds,
-                    )
-                except Exception as exc:  # noqa: BLE001 - order may still fill; pending reconciliation will retry
-                    order_status = "submitted_unconfirmed"
-                    error = f"fill confirmation failed: {exc}"[:500]
-                    filled_qty = 0.0
-                    filled_notional = 0.0
+            except Exception as exc:  # noqa: BLE001 - order may still fill; pending reconciliation will retry
+                order_status = "submitted_unconfirmed"
+                error = f"fill confirmation failed: {exc}"[:500]
+                filled_qty = 0.0
+                filled_notional = 0.0
+            else:
+                filled_qty = _float(exec_summary.get("qty"))
+                entry_price = _float(exec_summary.get("avg_price")) or price
+                filled_notional = abs(entry_price * filled_qty) if filled_qty > 0.0 else 0.0
+                target_qty = _float(qty)
+                qty_tolerance = max(target_qty * 1e-8, 1e-12)
+                if target_qty > 0.0 and filled_qty + qty_tolerance >= target_qty:
+                    order_status = "filled"
+                elif filled_qty > 0.0:
+                    order_status = "partial"
                 else:
-                    filled_qty = _float(exec_summary.get("qty"))
-                    entry_price = _float(exec_summary.get("avg_price")) or price
-                    filled_notional = abs(entry_price * filled_qty) if filled_qty > 0.0 else 0.0
-                    target_qty = _float(qty)
-                    qty_tolerance = max(target_qty * 1e-8, 1e-12)
-                    if target_qty > 0.0 and filled_qty + qty_tolerance >= target_qty:
-                        order_status = "filled"
-                    elif filled_qty > 0.0:
-                        order_status = "partial"
-                    else:
-                        order_status = "submitted_unconfirmed"
-                if filled_qty > 0.0:
-                    filled_stop_price = _stop_price_for_entry(
-                        entry_price=entry_price,
-                        side=side,
-                        stop_loss_pct=stop_loss_pct,
-                        tick_size=tick_size,
-                    )
-                    filled_take_profit_price = _take_profit_price_for_entry(
-                        entry_price=entry_price,
-                        side=side,
-                        take_profit_pct=take_profit_pct,
-                        tick_size=tick_size,
-                    )
-                    if not _prices_close(stop_price, filled_stop_price, tolerance_bps=0.0) or (
-                        filled_take_profit_price > 0.0
-                        and not _prices_close(take_profit_price, filled_take_profit_price, tolerance_bps=0.0)
-                    ):
-                        try:
-                            trading_client.set_trading_stop(
-                                symbol=symbol,
-                                stop_loss=_decimal_text(Decimal(str(filled_stop_price)))
-                                if filled_stop_price > 0.0
-                                else None,
-                                take_profit=_decimal_text(Decimal(str(filled_take_profit_price)))
-                                if filled_take_profit_price > 0.0
-                                else None,
-                            )
-                            protection_update_status = "submitted"
-                        except Exception as exc:  # noqa: BLE001 - venue repair daemon will retry from ledger state
-                            protection_update_status = "failed"
-                            protection_update_error = str(exc)[:500]
-                    stop_price = filled_stop_price
-                    take_profit_price = filled_take_profit_price
-        entry_qty = _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0.0 else ""
-        filled_initial_margin_usdt = filled_notional / demo.entry_leverage if demo.entry_leverage > 0.0 else 0.0
-        if not demo.submit_orders or filled_qty > 0.0:
-            row = {
-                **candidate,
-                "ts_ms": now_ms,
-                "strategy_id": strategy_id,
-                "status": "open",
-                "entry_ts_ms": now_ms,
-                "entry_price": entry_price,
-                "qty": entry_qty or qty,
-                "notional_usdt": filled_notional if demo.submit_orders else actual_notional,
-                "equity_usdt": equity_usdt,
-                "target_notional_pct_equity": order_notional_pct_equity,
-                "entry_leverage": demo.entry_leverage,
-                "initial_margin_usdt": filled_initial_margin_usdt if demo.submit_orders else initial_margin_usdt,
-                "initial_margin_pct_equity": (filled_initial_margin_usdt if demo.submit_orders else initial_margin_usdt) / equity_usdt
-                if equity_usdt > 0.0
-                else 0.0,
-                "tick_size": tick_size,
-                "qty_step": qty_step,
-                "stop_price": stop_price,
-                "take_profit_price": take_profit_price,
-                "entry_stop_update_status": protection_update_status,
-                "entry_stop_update_error": protection_update_error,
-                "entry_order_link_id": entry_link,
-                "entry_order_id": order_result.get("orderId", ""),
-                "submit_mode": submit_mode,
-                "opened_at_ms": now_ms,
-                "updated_at_ms": now_ms,
-            }
-            rows.append(row)
-        orders.append(
-            {
-                "order_link_id": entry_link,
-                "ts_ms": now_ms,
-                "trade_id": str(candidate["trade_id"]),
-                "strategy_id": strategy_id,
-                "symbol": symbol,
-                "side": bybit_side,
-                "order_type": demo.entry_order_type,
-                "qty": entry_qty or qty,
-                "reduce_only": False,
-                "order_id": order_result.get("orderId", ""),
-                "submit_mode": submit_mode,
-                "avg_price": entry_price,
-                "notional_usdt": filled_notional if demo.submit_orders else actual_notional,
-                "target_notional_pct_equity": order_notional_pct_equity,
-                "entry_leverage": demo.entry_leverage,
-                "initial_margin_usdt": filled_initial_margin_usdt if demo.submit_orders else initial_margin_usdt,
-                "status": order_status,
-                "trade_side": side,
-                "signal_ts_ms": int(candidate["signal_ts_ms"]),
-                "entry_ready_ts_ms": int(candidate.get("entry_ready_ts_ms") or 0),
-                "entry_policy": str(candidate.get("entry_policy", "")),
-                "entry_rule": str(candidate.get("entry_rule", "")),
-                "entry_quality_tier": str(candidate.get("entry_quality_tier", "")),
-                "equity_usdt": equity_usdt,
-                "tick_size": tick_size,
-                "qty_step": qty_step,
-                "stop_price": stop_price,
-                "take_profit_price": take_profit_price,
-                "stop_loss_pct": stop_loss_pct,
-                "take_profit_pct": take_profit_pct,
-                "entry_stop_update_status": protection_update_status,
-                "entry_stop_update_error": protection_update_error,
-                "error": error,
-            }
-        )
-    return rows, orders
+                    order_status = "submitted_unconfirmed"
+            if filled_qty > 0.0:
+                filled_stop_price = _stop_price_for_entry(
+                    entry_price=entry_price,
+                    side=side,
+                    stop_loss_pct=stop_loss_pct,
+                    tick_size=tick_size,
+                )
+                filled_take_profit_price = _take_profit_price_for_entry(
+                    entry_price=entry_price,
+                    side=side,
+                    take_profit_pct=take_profit_pct,
+                    tick_size=tick_size,
+                )
+                if not _prices_close(stop_price, filled_stop_price, tolerance_bps=0.0) or (
+                    filled_take_profit_price > 0.0
+                    and not _prices_close(take_profit_price, filled_take_profit_price, tolerance_bps=0.0)
+                ):
+                    try:
+                        trading_client.set_trading_stop(
+                            symbol=symbol,
+                            stop_loss=_decimal_text(Decimal(str(filled_stop_price)))
+                            if filled_stop_price > 0.0
+                            else None,
+                            take_profit=_decimal_text(Decimal(str(filled_take_profit_price)))
+                            if filled_take_profit_price > 0.0
+                            else None,
+                        )
+                        protection_update_status = "submitted"
+                    except Exception as exc:  # noqa: BLE001 - venue repair daemon will retry from ledger state
+                        protection_update_status = "failed"
+                        protection_update_error = str(exc)[:500]
+                stop_price = filled_stop_price
+                take_profit_price = filled_take_profit_price
+    entry_qty = _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0.0 else ""
+    filled_initial_margin_usdt = filled_notional / demo.entry_leverage if demo.entry_leverage > 0.0 else 0.0
+    trade_row: dict[str, Any] | None = None
+    if not demo.submit_orders or filled_qty > 0.0:
+        trade_row = {
+            **candidate,
+            "ts_ms": now_ms,
+            "strategy_id": strategy_id,
+            "status": "open",
+            "entry_ts_ms": now_ms,
+            "entry_price": entry_price,
+            "qty": entry_qty or qty,
+            "notional_usdt": filled_notional if demo.submit_orders else actual_notional,
+            "equity_usdt": equity_usdt,
+            "target_notional_pct_equity": order_notional_pct_equity,
+            "entry_leverage": demo.entry_leverage,
+            "initial_margin_usdt": filled_initial_margin_usdt if demo.submit_orders else initial_margin_usdt,
+            "initial_margin_pct_equity": (filled_initial_margin_usdt if demo.submit_orders else initial_margin_usdt) / equity_usdt
+            if equity_usdt > 0.0
+            else 0.0,
+            "tick_size": tick_size,
+            "qty_step": qty_step,
+            "stop_price": stop_price,
+            "take_profit_price": take_profit_price,
+            "entry_stop_update_status": protection_update_status,
+            "entry_stop_update_error": protection_update_error,
+            "entry_order_link_id": entry_link,
+            "entry_order_id": order_result.get("orderId", ""),
+            "submit_mode": submit_mode,
+            "opened_at_ms": now_ms,
+            "updated_at_ms": now_ms,
+        }
+    order_row = {
+        "order_link_id": entry_link,
+        "ts_ms": now_ms,
+        "trade_id": str(candidate["trade_id"]),
+        "strategy_id": strategy_id,
+        "symbol": symbol,
+        "side": bybit_side,
+        "order_type": demo.entry_order_type,
+        "qty": entry_qty or qty,
+        "reduce_only": False,
+        "order_id": order_result.get("orderId", ""),
+        "submit_mode": submit_mode,
+        "avg_price": entry_price,
+        "notional_usdt": filled_notional if demo.submit_orders else actual_notional,
+        "target_notional_pct_equity": order_notional_pct_equity,
+        "entry_leverage": demo.entry_leverage,
+        "initial_margin_usdt": filled_initial_margin_usdt if demo.submit_orders else initial_margin_usdt,
+        "status": order_status,
+        "trade_side": side,
+        "signal_ts_ms": int(candidate["signal_ts_ms"]),
+        "entry_ready_ts_ms": int(candidate.get("entry_ready_ts_ms") or 0),
+        "entry_policy": str(candidate.get("entry_policy", "")),
+        "entry_rule": str(candidate.get("entry_rule", "")),
+        "entry_quality_tier": str(candidate.get("entry_quality_tier", "")),
+        "equity_usdt": equity_usdt,
+        "tick_size": tick_size,
+        "qty_step": qty_step,
+        "stop_price": stop_price,
+        "take_profit_price": take_profit_price,
+        "stop_loss_pct": stop_loss_pct,
+        "take_profit_pct": take_profit_pct,
+        "entry_stop_update_status": protection_update_status,
+        "entry_stop_update_error": protection_update_error,
+        "error": error,
+    }
+    return trade_row, order_row
 
 
 def _filter_pending_entry_orders(
@@ -2179,6 +2291,8 @@ def _execute_exits(
                         order_link_id=exit_link,
                         poll_seconds=demo.order_fill_confirm_seconds,
                         poll_interval_seconds=demo.order_fill_poll_interval_seconds,
+                        fast_poll_interval_seconds=demo.order_fill_fast_poll_interval_seconds,
+                        fast_poll_seconds=demo.order_fill_fast_poll_seconds,
                     )
                 except Exception as exc:  # noqa: BLE001 - order may still fill; pending reconciliation will retry
                     order_status = "submitted_unconfirmed"
@@ -2330,6 +2444,11 @@ def _reconcile_pending_order_fills(
         qty_tolerance = max(target_qty * 1e-8, 1e-12)
         fully_filled = target_qty > 0.0 and filled_qty + qty_tolerance >= target_qty
         avg_price = _float(summary.get("avg_price")) or _float(order.get("avg_price"))
+        # `filled_qty` from summary is the cumulative venue qty as of NOW.
+        # `previous_filled_qty` is the cumulative we recorded last reconcile.
+        # delta_qty = filled_qty - previous_filled_qty is the new fill. Failed
+        # orders (status=failed) carry filled_qty="" and skip reconcile via the
+        # `if filled_qty <= 0.0: continue` guard above, so no double-counting.
         previous_filled_qty = _float(order.get("filled_qty"))
         entry_stop_price = _float(order.get("stop_price"))
         entry_take_profit_price = _float(order.get("take_profit_price"))
@@ -3243,18 +3362,30 @@ def _wait_for_execution_summary(
     order_link_id: str,
     poll_seconds: float,
     poll_interval_seconds: float,
+    fast_poll_interval_seconds: float = 0.05,
+    fast_poll_seconds: float = 0.5,
 ) -> dict[str, Any]:
     # `while True` is bounded: the deadline check below returns once
     # `time.monotonic() >= deadline`, so the loop runs at most `poll_seconds`
     # wall time regardless of what the venue returns. The sleep also clamps to
     # the time remaining before the deadline so we don't oversleep past it.
-    deadline = time.monotonic() + max(poll_seconds, 0.0)
-    interval = max(poll_interval_seconds, 0.01)
+    #
+    # Bybit demo fills typically land in 100-300ms. A uniform 200ms poll wastes
+    # up to a full poll period per candidate on the average fill; a 50ms fast
+    # window for the first 500ms catches most fills near optimally, then we
+    # back off to the slower interval to limit get_trade_history hits.
+    start = time.monotonic()
+    deadline = start + max(poll_seconds, 0.0)
+    fast_deadline = start + max(fast_poll_seconds, 0.0)
+    slow_interval = max(poll_interval_seconds, 0.01)
+    fast_interval = max(fast_poll_interval_seconds, 0.005)
     while True:
         summary = _execution_summary(trading_client.get_trade_history(symbol=symbol, order_link_id=order_link_id, limit=50))
         if _float(summary.get("qty")) > 0.0 or time.monotonic() >= deadline:
             return summary
-        time.sleep(min(interval, max(deadline - time.monotonic(), 0.0)))
+        now = time.monotonic()
+        interval = fast_interval if now < fast_deadline else slow_interval
+        time.sleep(min(interval, max(deadline - now, 0.0)))
 
 
 def _position_size_by_symbol(positions: list[dict[str, Any]]) -> dict[str, float]:

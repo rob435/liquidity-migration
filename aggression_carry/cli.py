@@ -1109,7 +1109,7 @@ def build_parser() -> argparse.ArgumentParser:
     tribunal.add_argument(
         "--comparison-family",
         default="",
-        help="Optional comma-separated strategy family names from comparison CSVs, such as promoted_funding or observe_funding.",
+        help="Optional comma-separated strategy family names from comparison CSVs, such as promoted_funding.",
     )
     tribunal.add_argument(
         "--pre-registered-window",
@@ -1197,7 +1197,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--strategy-profile",
         choices=DEMO_STRATEGY_PROFILE_CHOICES,
         default=demo_defaults.strategy_profile,
-        help="Demo entry profile. promoted is the sparse production alpha; demo_relaxed is a higher-frequency demo-trading variant. observe is accepted as a deprecated alias.",
+        help="Demo entry profile. promoted is the sparse production alpha; demo_relaxed is a higher-frequency demo-trading variant.",
     )
 
     event_risk = subparsers.add_parser(

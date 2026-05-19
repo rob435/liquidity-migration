@@ -335,6 +335,7 @@ class BybitPrivateClient:
     api_secret: str | None = None
     retries: int = 2
     retry_sleep_seconds: float = 0.5
+    rate_limiter: BybitRestRateLimiter | None = None
     _client: Any = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -486,6 +487,8 @@ class BybitPrivateClient:
     def _call_once(self, method_name: str, **params: Any) -> dict[str, Any]:
         method = getattr(self._client, method_name)
         try:
+            if self.rate_limiter is not None:
+                self.rate_limiter.acquire()
             payload = method(**params)
             ret_code = payload.get("retCode")
             if ret_code != 0:
@@ -501,6 +504,8 @@ class BybitPrivateClient:
         last_error: Exception | None = None
         for attempt in range(self.retries):
             try:
+                if self.rate_limiter is not None:
+                    self.rate_limiter.acquire()
                 payload = method(**params)
                 ret_code = payload.get("retCode")
                 if ret_code != 0:
