@@ -349,9 +349,9 @@ final open orders: 0
 
 Bybit demo WebSocket Trade order entry was attempted and was unavailable or rejected at `wss://stream-demo.bybit.com/v5/trade`. The deployed risk path remains `ORDER_SUBMIT_MODE=ws_then_rest`: WebSocket-first for state and exit decisions, REST fallback for demo order submission.
 
-## Deployed State
+## Deployment Target / Verification
 
-Expected VPS state for the active demo deployment:
+Target VPS state for the active demo deployment:
 
 ```text
 path: /opt/MODEL050426
@@ -361,6 +361,19 @@ entry strategy id: demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6
 entry policy: promoted_quality_squeeze
 service state: active / active
 ```
+
+Current verification status: not proven. Local SSH reaches
+`204.168.202.167`, the ED25519 host fingerprint is stable at
+`SHA256:c4K1qg1rx5kH/706qNTdsHYsCDP/o5GIHW1GAHCjwgY`, but the VPS rejects the
+available local key before any deploy or verify command can run:
+
+```text
+root@204.168.202.167: Permission denied (publickey,password).
+```
+
+Run `scripts/vps_console_recover_and_deploy.sh` from the provider console, or
+restore the local public key in `/root/.ssh/authorized_keys`, then run
+`scripts/verify_vps_live.sh` to prove the live state.
 
 The VPS entry service intentionally runs at `INTERVAL_SECONDS=60` and
 `STRATEGY_PROFILE=demo_relaxed`. Fast exits are still handled by the separate
