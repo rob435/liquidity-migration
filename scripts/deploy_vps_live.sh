@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SSH_TARGET="${SSH_TARGET:-root@204.168.202.167}"
+SSH_TARGET="${SSH_TARGET:-root@116.202.15.128}"
 SSH_OPTS="${SSH_OPTS:--o BatchMode=yes -o ConnectTimeout=10}"
-REPO_URL="${REPO_URL:-https://github.com/rob435/MODEL05042026.git}"
+REPO_URL="${REPO_URL:-https://github.com/rob435/liquidity-migration.git}"
 REPO_DIR="${REPO_DIR:-/opt/liquidity-migration}"
 REMOTE="${REMOTE:-origin}"
 BRANCH="${BRANCH:-main}"
