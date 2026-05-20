@@ -28,6 +28,8 @@ those pumps into real trends, hence the continuous regime scaler.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +73,11 @@ class ReversionConfig:
     regime_feature: str = "market_median_return_30d_sum"
     regime_full_at: float = -0.15       # full gross when 30d alt return <= this
     regime_zero_at: float = 0.10        # zero gross when 30d alt return >= this
+    # hard regime gate (WS-3): when set, overrides the continuous ramp — gross
+    # is full (1.0) when the 30d alt return <= threshold, else zero. v2 found a
+    # hard bear-only gate (threshold -0.05) cleanly excluded the alt-bull losses
+    # the continuous scaler still traded into.
+    regime_hard_threshold: float | None = None
 
     # --- Layer 3: execution / capacity ---
     max_active: int = 5
@@ -80,6 +87,11 @@ class ReversionConfig:
     stop_pct: float = 0.12
     take_profit_pct: float = 0.26
     cost_round_trip_bps: float = 28.8   # matches v1's 3x effective maker/taker blend
+    # stop fill model: "stop" fills the stop at exactly the trigger price (an
+    # optimistic best case); "bar_extreme" fills it at the bar's high — the
+    # worst case for a short — modelling adverse fills on fast moves. Methodology
+    # law #7 requires reporting every backtest under the adverse-fill stress.
+    stop_fill_mode: str = "stop"
 
     # --- window ---
     start: str = ""                     # inclusive signal date YYYY-MM-DD
@@ -166,9 +178,16 @@ def compute_reversion_score(features: pl.DataFrame, config: ReversionConfig) -> 
 # --------------------------------------------------------------------------
 
 def _regime_multiplier(alt_30d: float | None, config: ReversionConfig) -> float:
-    """Continuous gross scaler: 1.0 when alts are weak, 0.0 when alts are strong."""
+    """Gross scaler driven by the 30d alt regime.
+
+    Default: a continuous ramp from 1.0 (alts weak) to 0.0 (alts strong).
+    When `regime_hard_threshold` is set: a hard gate — full gross at/below the
+    threshold, zero above it (WS-3).
+    """
     if alt_30d is None or math.isnan(alt_30d):
         return 1.0  # no regime info -> do not throttle (conservative w.r.t. coverage)
+    if config.regime_hard_threshold is not None:
+        return 1.0 if alt_30d <= config.regime_hard_threshold else 0.0
     lo, hi = config.regime_full_at, config.regime_zero_at
     if alt_30d <= lo:
         return 1.0
@@ -263,39 +282,72 @@ def _scan_exit(bars: list[dict[str, float]], entry_idx: int, entry_price: float,
 
     Stop is above entry, take-profit below. If a bar touches both, the stop is
     taken (worst case for a short). Otherwise exit at max-hold close or data end.
+
+    `stop_fill_mode` controls the stop fill price: "stop" fills at the trigger
+    price; "bar_extreme" fills at the bar high — the adverse-fill stress.
     """
     stop = entry_price * (1.0 + config.stop_pct)
     take = entry_price * (1.0 - config.take_profit_pct)
+    adverse = config.stop_fill_mode == "bar_extreme"
     last = min(entry_idx + config.max_hold_hours, len(bars) - 1)
     for i in range(entry_idx, last + 1):
         bar = bars[i]
         hit_stop = bar["high"] >= stop
         hit_take = bar["low"] <= take
-        if hit_stop and hit_take:
-            return i, stop, "stop"        # conservative: assume the adverse fill
         if hit_stop:
-            return i, stop, "stop"
+            # stop priority over take-profit (worst case for a short); under
+            # the adverse-fill stress the stop fills at the bar high.
+            return i, (bar["high"] if adverse else stop), "stop"
         if hit_take:
             return i, take, "take_profit"
     return last, bars[last]["close"], ("max_hold" if last == entry_idx + config.max_hold_hours else "data_end")
 
 
+@lru_cache(maxsize=None)
+def _day_str_from_index(day_index: int) -> str:
+    return datetime.fromtimestamp(day_index * 86_400, tz=timezone.utc).strftime("%Y-%m-%d")
+
+
 def _day_str(ts_ms: int) -> str:
-    return pl.from_epoch(pl.Series([ts_ms]), time_unit="ms").dt.strftime("%Y-%m-%d")[0]
+    """UTC calendar date of an epoch-ms timestamp. Cached per day index — the
+    panel spans only ~1k distinct days, so this collapses millions of calls
+    down to ~1k strftimes."""
+    return _day_str_from_index(ts_ms // MS_PER_DAY)
 
 
-def simulate(book: pl.DataFrame, klines: pl.DataFrame, config: ReversionConfig) -> dict[str, Any]:
+def prepare_klines(klines: pl.DataFrame) -> dict[str, Any]:
+    """Build the per-symbol bar structures `simulate` needs, once. Reusing this
+    across a config grid avoids re-partitioning millions of klines per cell.
+    The result is config-independent — purely a function of the klines."""
+    bars_by_symbol = _hourly_bars_by_symbol(klines)
+    ts_index = {
+        sym: {b["ts_ms"]: i for i, b in enumerate(bars)} for sym, bars in bars_by_symbol.items()
+    }
+    daily_close: dict[str, dict[str, float]] = {}
+    for sym, bars in bars_by_symbol.items():
+        dd: dict[str, float] = {}
+        for b in bars:
+            dd[_day_str(b["ts_ms"])] = b["close"]   # later bars overwrite -> last close of day
+        daily_close[sym] = dd
+    return {"bars_by_symbol": bars_by_symbol, "ts_index": ts_index, "daily_close": daily_close}
+
+
+def simulate(book: pl.DataFrame, klines: pl.DataFrame, config: ReversionConfig,
+             *, prepared: dict[str, Any] | None = None) -> dict[str, Any]:
     """LAYER 3. Walk the hourly grid, admit entries under capacity + cooldown,
     run the exit scan, apply round-trip cost, and mark the book to market daily.
+
+    `prepared` is the optional output of `prepare_klines(klines)` — pass it to
+    reuse the bar index across many simulate calls (config grids). It must be
+    built from the SAME klines. When omitted it is built here.
 
     Returns dict with `trades` (ledger) and `equity` (daily curve) DataFrames
     plus summary metrics.
     """
-    bars_by_symbol = _hourly_bars_by_symbol(klines)
-    # index hourly bar ts -> position, per symbol, for O(1) entry lookup
-    ts_index: dict[str, dict[int, int]] = {
-        sym: {b["ts_ms"]: i for i, b in enumerate(bars)} for sym, bars in bars_by_symbol.items()
-    }
+    if prepared is None:
+        prepared = prepare_klines(klines)
+    bars_by_symbol = prepared["bars_by_symbol"]
+    ts_index = prepared["ts_index"]
 
     candidates = book.sort(["date", "rank"]).to_dicts()
     by_date: dict[str, list[dict[str, Any]]] = {}
@@ -307,9 +359,13 @@ def simulate(book: pl.DataFrame, klines: pl.DataFrame, config: ReversionConfig) 
     trades: list[dict[str, Any]] = []
 
     for date in sorted(by_date):
-        # signal day D closes at D 23:00; entry one hour later
+        # The daily bar is stamped at day_start + 24h, so `date` already marks
+        # the signal-close moment — `day_ms` IS when the signal is fully known.
+        # Entry is `entry_delay_hours` after it. (A prior version added a
+        # spurious `+23h` here, entering ~25h late instead of 1h; setting
+        # entry_delay_hours=24 reproduces that legacy behaviour exactly.)
         day_ms = int(pl.Series([date]).str.to_datetime().dt.timestamp("ms")[0])
-        entry_ts = day_ms + 23 * MS_PER_HOUR + config.entry_delay_hours * MS_PER_HOUR
+        entry_ts = day_ms + config.entry_delay_hours * MS_PER_HOUR
         # free capacity at this entry time
         active = sum(1 for s, x in open_until.items() if x > entry_ts)
         for cand in by_date[date]:
@@ -345,7 +401,7 @@ def simulate(book: pl.DataFrame, klines: pl.DataFrame, config: ReversionConfig) 
             cooldown_until[sym] = exit_ts + config.cooldown_days * MS_PER_DAY
             active += 1
 
-    equity = _daily_mtm(trades, bars_by_symbol, config)
+    equity = _daily_mtm(trades, bars_by_symbol, config, daily_close=prepared["daily_close"])
     metrics = _summary_metrics(trades, equity)
     return {
         "trades": pl.DataFrame(trades) if trades else pl.DataFrame(),
@@ -356,20 +412,25 @@ def simulate(book: pl.DataFrame, klines: pl.DataFrame, config: ReversionConfig) 
 
 
 def _daily_mtm(trades: list[dict[str, Any]], bars_by_symbol: dict[str, list[dict[str, float]]],
-               config: ReversionConfig) -> pl.DataFrame:
+               config: ReversionConfig,
+               *, daily_close: dict[str, dict[str, float]] | None = None) -> pl.DataFrame:
     """Correct overlapping-position accounting: each calendar day, sum every
     open position's weighted short return, compound the portfolio equity.
-    Round-trip cost is charged on the exit day."""
+    Round-trip cost is charged on the exit day.
+
+    `daily_close` (per-symbol date->close) may be supplied to skip rebuilding
+    it from every bar; when omitted it is built here."""
     if not trades:
         return pl.DataFrame(schema={"date": pl.Utf8, "equity": pl.Float64,
                                     "drawdown": pl.Float64, "portfolio_return": pl.Float64})
     # per-symbol daily close (close of the last bar each day)
-    daily_close: dict[str, dict[str, float]] = {}
-    for sym, bars in bars_by_symbol.items():
-        dd: dict[str, float] = {}
-        for b in bars:
-            dd[_day_str(b["ts_ms"])] = b["close"]   # later bars overwrite -> last close of day
-        daily_close[sym] = dd
+    if daily_close is None:
+        daily_close = {}
+        for sym, bars in bars_by_symbol.items():
+            dd: dict[str, float] = {}
+            for b in bars:
+                dd[_day_str(b["ts_ms"])] = b["close"]   # later bars overwrite -> last close of day
+            daily_close[sym] = dd
 
     # expand each trade into daily (date -> contribution) using its own price path
     day_returns: dict[str, float] = {}

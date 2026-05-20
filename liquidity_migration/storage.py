@@ -157,7 +157,16 @@ def _lock_owner_is_dead(lock_path: Path) -> bool:
         return False
     except OverflowError:
         return True
-    except OSError:
+    except OSError as exc:
+        # Windows: os.kill(pid, 0) on a non-existent pid raises a bare OSError
+        # with winerror 87 ("the parameter is incorrect"), NOT ProcessLookupError.
+        # Without this branch, stale-lock recovery never fires on Windows: a
+        # lock orphaned by a killed process is treated as live and every
+        # subsequent read_dataset/write_dataset blocks until the 6h stale
+        # timeout. winerror 87 from os.kill means the pid is not a live
+        # process -> treat the owner as dead.
+        if getattr(exc, "winerror", None) == 87:
+            return True
         return False
     return False
 

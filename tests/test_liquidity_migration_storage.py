@@ -119,6 +119,36 @@ def test_exclusive_file_lock_recovers_dead_pid_lock_even_without_stale_timeout(t
     assert not lock_path.exists()
 
 
+def test_exclusive_file_lock_recovers_windows_winerror_87_dead_pid(tmp_path: Path, monkeypatch) -> None:
+    # Regression: the test above used pid 2_147_483_647, which on Windows trips
+    # os.kill's OverflowError path — not the normal dead-pid path. A pid
+    # orphaned by a real killed process is an ordinary integer; on Windows
+    # os.kill(pid, 0) for a non-existent pid raises a bare OSError with
+    # winerror 87 ("the parameter is incorrect"), NOT ProcessLookupError.
+    # Stale-lock recovery must treat that as dead — otherwise every
+    # read_dataset/write_dataset blocks until the 6h stale timeout.
+    from liquidity_migration import storage
+
+    def fake_kill(pid: int, sig: int) -> None:  # simulate Windows non-existent pid
+        err = OSError("simulated non-existent pid")
+        err.winerror = 87  # type: ignore[attr-defined]
+        raise err
+
+    monkeypatch.setattr(storage.os, "kill", fake_kill)
+
+    lock_path = dataset_lock_path(tmp_path, "klines_1h")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(json.dumps({"pid": 4321, "created": 1}), encoding="utf-8")
+
+    # stale_seconds=0 disables the timeout path, so recovery MUST come from
+    # dead-owner detection alone.
+    with exclusive_file_lock(lock_path, stale_seconds=0, poll_seconds=0.0):
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        assert payload["pid"] == os.getpid()
+
+    assert not lock_path.exists()
+
+
 def test_exclusive_file_lock_recovers_malformed_lock_after_grace_without_stale_timeout(tmp_path: Path) -> None:
     lock_path = dataset_lock_path(tmp_path, "klines_1h")
     lock_path.parent.mkdir(parents=True, exist_ok=True)

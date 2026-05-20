@@ -15,6 +15,7 @@ from liquidity_migration.reversion_alpha import (
     _scan_exit,
     compute_reversion_score,
     construct_target_book,
+    prepare_klines,
     simulate,
 )
 
@@ -215,7 +216,7 @@ def _hourly_klines(symbol: str, start_day: str, hours: int, *, price_fn) -> pl.D
 
 
 def test_simulate_single_take_profit_trade():
-    # signal date 2024-01-01 -> entry bar at 2024-01-02 00:00 (= hour 24)
+    # signal date 2024-01-01 -> entry one hour after the signal close (hour 1)
     # price flat 100 until hour 30, then crashes so the short take-profit fills.
     def price_fn(i):
         return 100.0 if i < 30 else 70.0
@@ -232,6 +233,38 @@ def test_simulate_single_take_profit_trade():
     # short gross return = (100 - 74)/100 = 0.26 ; net = 0.26 - 0.003
     assert t["gross_return"] == pytest.approx(0.26, abs=1e-9)
     assert t["net_return"] == pytest.approx(0.26 - 0.003, abs=1e-9)
+
+
+def test_simulate_entry_timing_is_delay_after_signal_close():
+    # `date` is stamped at the signal-close moment, so entry is exactly
+    # entry_delay_hours after to_datetime(date). Regression for the +23h
+    # off-by-one that entered ~25h late instead of 1h.
+    klines = _hourly_klines("AAAUSDT", "2024-01-01", 100, price_fn=lambda i: 100.0)
+    book = pl.DataFrame([{"date": "2024-01-01", "symbol": "AAAUSDT", "rank": 1,
+                          "target_weight": 1.0, "regime_mult": 1.0}])
+    day_ms = int(pl.Series(["2024-01-01"]).str.to_datetime().dt.timestamp("ms")[0])
+
+    res1 = simulate(book, klines, ReversionConfig(entry_delay_hours=1))
+    assert res1["trades"].to_dicts()[0]["entry_ts_ms"] == day_ms + 1 * MS_PER_HOUR
+
+    # entry_delay_hours=24 reproduces the legacy (pre-fix) ~1-day-late entry
+    res24 = simulate(book, klines, ReversionConfig(entry_delay_hours=24))
+    assert res24["trades"].to_dicts()[0]["entry_ts_ms"] == day_ms + 24 * MS_PER_HOUR
+
+
+def test_simulate_prepared_matches_unprepared():
+    # prepare_klines() reuse must give bit-identical results to the internal build.
+    def price_fn(i):
+        return 100.0 if i < 30 else 70.0
+    klines = _hourly_klines("AAAUSDT", "2024-01-01", 120, price_fn=price_fn)
+    book = pl.DataFrame([{"date": "2024-01-01", "symbol": "AAAUSDT", "rank": 1,
+                          "target_weight": 1.0, "regime_mult": 1.0}])
+    cfg = ReversionConfig(cost_round_trip_bps=30.0)
+    a = simulate(book, klines, cfg)
+    b = simulate(book, klines, cfg, prepared=prepare_klines(klines))
+    assert a["metrics"] == b["metrics"]
+    assert a["trades"].to_dicts() == b["trades"].to_dicts()
+    assert a["equity"].to_dicts() == b["equity"].to_dicts()
 
 
 def test_simulate_capacity_blocks_extra_entries():
@@ -279,3 +312,42 @@ def test_simulate_equity_compounds_from_net_returns():
     # full-weight single trade: terminal equity within rounding of 1 + net_return
     net = res["trades"].to_dicts()[0]["net_return"]
     assert equity["equity"][-1] == pytest.approx(1.0 + net, rel=1e-6)
+
+
+# --------------------------------------------------------------------------
+# WS-1 — adverse stop-fill stress
+# --------------------------------------------------------------------------
+
+def test_scan_exit_bar_extreme_fills_at_bar_high():
+    # A bar gaps far above the stop trigger. Default mode fills at the trigger
+    # (112); the adverse-fill stress fills at the bar high (130) — a worse
+    # short loss, which is the point of the stress.
+    bars = [{"ts_ms": i, "open": 100.0, "high": 100.0, "low": 99.0, "close": 100.0}
+            for i in range(5)]
+    bars[2]["high"] = 130.0  # stop trigger is 112; bar high is 130
+
+    cfg_stop = ReversionConfig(stop_pct=0.12, stop_fill_mode="stop")
+    idx, price, reason = _scan_exit(bars, 0, 100.0, cfg_stop)
+    assert (idx, reason) == (2, "stop")
+    assert price == pytest.approx(112.0)
+
+    cfg_adverse = ReversionConfig(stop_pct=0.12, stop_fill_mode="bar_extreme")
+    idx, price, reason = _scan_exit(bars, 0, 100.0, cfg_adverse)
+    assert (idx, reason) == (2, "stop")
+    assert price == pytest.approx(130.0)   # adverse: filled at the bar high
+
+
+# --------------------------------------------------------------------------
+# WS-3 — hard regime gate
+# --------------------------------------------------------------------------
+
+def test_regime_multiplier_hard_gate():
+    cfg = ReversionConfig(regime_hard_threshold=-0.05)
+    assert _regime_multiplier(-0.10, cfg) == pytest.approx(1.0)   # bear -> trade
+    assert _regime_multiplier(-0.05, cfg) == pytest.approx(1.0)   # boundary inclusive
+    assert _regime_multiplier(-0.04, cfg) == pytest.approx(0.0)   # not bear -> flat
+    assert _regime_multiplier(0.20, cfg) == pytest.approx(0.0)    # bull -> flat
+    # the hard gate overrides the continuous ramp endpoints entirely
+    cfg2 = ReversionConfig(regime_hard_threshold=-0.05,
+                           regime_full_at=-0.15, regime_zero_at=0.10)
+    assert _regime_multiplier(-0.08, cfg2) == pytest.approx(1.0)
