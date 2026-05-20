@@ -270,12 +270,12 @@ Across all 8 gate features, the median value of v1's winning trades vs losing tr
 | residual_return | +1741% | +282pp | yes |
 | crowding | +1809% | +213pp | yes |
 | event_rank_fraction | +1813% | +209pp | yes |
-| **close_location** | **+2396%** | **−374pp (HURTS)** | yes |
+| **close_location** | **+2396%** | **−374pp on RETURN only** | yes |
 
 Three conclusions:
 1. **The Section 2 claim that `event_rank_fraction` contributes +961pp was an ordering artifact.** True LOO contribution: +209pp — one of the *least* important gates.
-2. **`close_location` is value-destroying.** Removing it *raises* IS return by +374pp. It should simply be deleted from v1 — a free, single-gate, verified improvement that still passes promotion (+2396%, Sharpe 3.10).
-3. **Every gate is individually removable** — all 8 LOO variants still pass the promotion gate. The strategy never depends on any single gate.
+2. **`close_location` trades return for risk — it is NOT free to remove.** Removing it *raises* IS total return by ~+400pp (+2022%→+2428% on a fresh verification run) BUT also widens max drawdown −13.72%→−17.99%, worsens worst-90d −6.29%→−8.54%, and lowers Sharpe 3.41→3.12. It is a risk-reducing filter, not dead weight. Looking at total return alone (as the LOO column does) is misleading: on a risk-adjusted basis, *keeping* `close_location` is better. **Decision (2026-05-20): keep the gate at 0.45.** Removing it is a return/risk lever equivalent to ~+20% sizing, and you would rather take that sizing at Sharpe 3.41 than 3.12.
+3. **Every gate is individually removable** — all 8 LOO variants still pass the promotion gate. The strategy never depends on any single gate. But "removable without failing promotion" is not the same as "should be removed" — see point 2.
 
 ### 9.4 The redundancy ratio
 
@@ -303,16 +303,15 @@ As event-quality filtering relaxes (v1→v3a→b→c→d→v2), IS return falls 
 
 These are opposite prescriptions. The IS/OOS divide is **not a tradeable regime signal** — we showed 30d alt-return doesn't separate the two epochs. It is an *epoch* difference (universe size, exchange composition, the 2023-2026 memecoin micro­structure). You cannot build a meta-strategy that detects "which epoch am I in" from market data alone; only forward time reveals it.
 
-### 9.7 Concrete, verified recommendations from this analysis
+### 9.7 Concrete recommendations from this analysis
 
-1. **Delete `close_location` from v1 immediately.** Single-gate change, +374pp IS improvement, still passes promotion. This is the one unambiguous win.
-2. **Stop treating any single gate as "the alpha" or "the curve-fit."** The gate stack is a correlated cluster; the IS edge is the *joint* selection. The honest IS expectancy of an event-quality strategy stripped of the value-destroying gate is ≈ +2400% (close_loc removed) — still an upper-tail, regime-favorable number.
+1. **Keep `close_location` at 0.45.** Earlier drafts of this report recommended deleting it for "+374pp" — that was a return-only read and is **rescinded**. A fresh verification run confirmed removing it lifts IS return to +2428% but also widens max drawdown to −17.99%, worsens worst-90d to −8.54%, and lowers Sharpe to 3.12. It is a risk-reducing gate; removing it is a +20%-sizing lever, not free alpha, and risk-adjusted it is mildly negative. Decision 2026-05-20: gate stays.
+2. **Stop treating any single gate as "the alpha" or "the curve-fit."** The gate stack is a correlated cluster; the IS edge is the *joint* selection. No single gate is the curve-fit culprit and no single gate is the alpha — the LOO marginals sum to 1.67× the total return precisely because they overlap.
 3. **The v1-vs-v2 choice is a bet on epoch, not a tunable.** No gate re-weighting reconciles them. Forward-test both (Section 7).
 4. **If you want one number for forward expectations**, use the OOS per-trade expectancy (~+0.1 to +0.26% net) — not IS. The IS Sharpe of 3+ is epoch-conditional.
 
 ## 8b. What I'd do next (not done here)
 
-- **Delete close_location and re-promote v1** — verified +374pp, do this now.
 - **Learned discriminant**: replace the correlated gate cluster with a single logistic-regression score fit on early IS, validated on late IS, tested OOS. It won't escape the Pareto frontier (the frontier is real), but it can find a *better point on it* than hand-tuned thresholds and removes the false comfort of "10 knobs."
 - **Add funding to OOS roots**; **capacity simulation**; **factor decomposition**; **v1+v2 portfolio** — as previously noted.
 
