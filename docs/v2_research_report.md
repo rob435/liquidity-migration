@@ -6,6 +6,8 @@
 
 ## 0. TL;DR
 
+> **Correction (appended after gate-correlation analysis — see Section 9).** The original claim below — that two specific gates carry the curve-fit — was an artifact of order-dependent incremental ablation. Order-independent leave-one-out attribution shows the v1 gates are heavily correlated and individually redundant; no single gate is the culprit. The deeper, correct finding is in Section 9: **IS and OOS reward opposite filtering**, and the strategy lives on a Pareto frontier with no interior win. Read Section 9 as the authoritative conclusion.
+
 The promoted strategy's +2022% IS performance is real but heavily curve-fit to a specific two-gate combination (`event_rank_fraction≤0.90` and `close_location≥0.45`) that does not generalize to either of the two independent PIT OOS windows tested. A simpler **v2** strategy with three concept-based knobs — top-40% turnover event, 30-day alt regime gate, same-day breadth backstop — generalizes positively to both OOS windows:
 
 | Strategy | Bybit IS 2023-26 | Bybit OOS 2022-23 | Binance OOS 2020-23 |
@@ -238,12 +240,88 @@ Two interpretations are possible:
 - **Factor decomposition**. Decompose v2 returns into "pure mean reversion alpha" vs "alt-short beta" vs "funding capture" — would inform portfolio combination with other strategies.
 - **Combine v1 + v2 as a portfolio** at different weights. If they pick different trades (regime-dependent), a portfolio could match v1 IS AND match v2 OOS.
 
+## 9. Gate-correlation analysis (authoritative — supersedes Sections 2-3 attribution)
+
+The Section 2 incremental ablation (A→G, adding one gate at a time) gave order-dependent — and in one case directionally WRONG — attribution. This section uses order-independent methods.
+
+### 9.1 PCA on the 6 quality-gate binary indicators (IS Bybit, 11,582 post-structural candidates)
+
+| Component | Variance | Dominant loadings |
+|---|---:|---|
+| PC1 | 30.4% | turnover_ratio (+0.58), rank_imp (+0.55), residual (+0.48) — "explosive event magnitude" |
+| PC2 | 20.5% | close_loc (−0.77), market_pct_up (+0.52) |
+| PC3 | 15.9% | event_rank_fraction (+0.74) |
+| PC4-6 | 33.2% | — |
+
+Pearson r: `rank_imp↔turnover` +0.44, `turnover↔residual` +0.35, `close_loc↔market_pct_up` −0.22. The gates are correlated — turnover/rank_imp/residual are effectively one axis — but do NOT collapse to 1-2 factors (4 PCs needed for 82%).
+
+### 9.2 Winners vs losers WITHIN the v1-selected population
+
+Across all 8 gate features, the median value of v1's winning trades vs losing trades differs by |separation| < 0.10 (essentially zero). **The gates select a population; they have no discriminative power between winners and losers inside it.** The 70% IS win rate is a property of the selected population, not of finer gate values.
+
+### 9.3 Leave-one-out attribution (order-independent), Bybit IS, v1 full = +2022%
+
+| Gate disabled | IS return | Contribution | Still promotes? |
+|---|---:|---:|---|
+| turnover_ratio | +1138% | +884pp | yes |
+| rank_improvement | +1355% | +667pp | yes |
+| market_pct_up | +1402% | +620pp | yes |
+| universe_rank (min+max) | +1524% | +498pp | yes |
+| residual_return | +1741% | +282pp | yes |
+| crowding | +1809% | +213pp | yes |
+| event_rank_fraction | +1813% | +209pp | yes |
+| **close_location** | **+2396%** | **−374pp (HURTS)** | yes |
+
+Three conclusions:
+1. **The Section 2 claim that `event_rank_fraction` contributes +961pp was an ordering artifact.** True LOO contribution: +209pp — one of the *least* important gates.
+2. **`close_location` is value-destroying.** Removing it *raises* IS return by +374pp. It should simply be deleted from v1 — a free, single-gate, verified improvement that still passes promotion (+2396%, Sharpe 3.10).
+3. **Every gate is individually removable** — all 8 LOO variants still pass the promotion gate. The strategy never depends on any single gate.
+
+### 9.4 The redundancy ratio
+
+Sum of positive LOO contributions = **3372pp** against a total v1 return of **2022pp** — a ratio of **1.67×**. When the marginal contributions sum to far more than the whole, the features are heavily positively correlated (each gate's "contribution" overlaps with others). This is the quantitative confirmation of the correlated-gates hypothesis.
+
+### 9.5 v3 — the Pareto frontier
+
+v3 candidates each combine event-quality gates with the regime gate, varying how strict the event-quality side is:
+
+| Variant | Event-quality strictness | IS Bybit | OOS Bybit | OOS Binance |
+|---|---|---:|---:|---:|
+| v1 | maximum (6 gates) | +2022% | ~+5% | ~+13% |
+| v3a | strict, −close_loc −evt_rank_frac, +regime | +335% (pass) | 0 trades | 0 trades |
+| v3b | rank/universe relaxed | +32% | +20% | +58% |
+| v3c | + universe-rank cap off | +20% | +24% | +59% |
+| v3d | + turnover≥4 residual≥0.05 (loosest) | −31% | +26% | +79% |
+| v2 | none (pure regime) | −76% | +155% | +150% |
+
+As event-quality filtering relaxes (v1→v3a→b→c→d→v2), IS return falls **monotonically** (+2022→−76%) and OOS return rises **monotonically** (+5→+155%). **There is no interior point that beats both ends.** The strategy lives on a strict Pareto frontier between IS and OOS performance.
+
+### 9.6 The deepest finding — IS and OOS reward opposite filtering
+
+- **IS edge is event-quality-driven**: filtering to high-turnover/high-rank-jump events is what produces +2022%. A regime gate only hurts IS (it removes profitable non-bear-regime trades — see Section "v1-only winners").
+- **OOS edge is regime-driven**: filtering to bear-regime days is what produces +150%. Event-quality filtering only hurts OOS (it removes profitable trades; OOS expectancy lives in the broad event population during bear regimes).
+
+These are opposite prescriptions. The IS/OOS divide is **not a tradeable regime signal** — we showed 30d alt-return doesn't separate the two epochs. It is an *epoch* difference (universe size, exchange composition, the 2023-2026 memecoin micro­structure). You cannot build a meta-strategy that detects "which epoch am I in" from market data alone; only forward time reveals it.
+
+### 9.7 Concrete, verified recommendations from this analysis
+
+1. **Delete `close_location` from v1 immediately.** Single-gate change, +374pp IS improvement, still passes promotion. This is the one unambiguous win.
+2. **Stop treating any single gate as "the alpha" or "the curve-fit."** The gate stack is a correlated cluster; the IS edge is the *joint* selection. The honest IS expectancy of an event-quality strategy stripped of the value-destroying gate is ≈ +2400% (close_loc removed) — still an upper-tail, regime-favorable number.
+3. **The v1-vs-v2 choice is a bet on epoch, not a tunable.** No gate re-weighting reconciles them. Forward-test both (Section 7).
+4. **If you want one number for forward expectations**, use the OOS per-trade expectancy (~+0.1 to +0.26% net) — not IS. The IS Sharpe of 3+ is epoch-conditional.
+
+## 8b. What I'd do next (not done here)
+
+- **Delete close_location and re-promote v1** — verified +374pp, do this now.
+- **Learned discriminant**: replace the correlated gate cluster with a single logistic-regression score fit on early IS, validated on late IS, tested OOS. It won't escape the Pareto frontier (the frontier is real), but it can find a *better point on it* than hand-tuned thresholds and removes the false comfort of "10 knobs."
+- **Add funding to OOS roots**; **capacity simulation**; **factor decomposition**; **v1+v2 portfolio** — as previously noted.
+
 ## Reports
 
 - v1 promoted: [reports/volume_event_research](../../SHARED_DATA/bybit_fullpit_1h/reports/volume_event_research/volume_event_research_report.md)
-- Ablation steps A-G: [reports/v_ablate_*](../../SHARED_DATA/bybit_fullpit_1h/reports/) (3 windows × 7 steps)
-- v2 threshold sweep r=0 / -0.05 / -0.10 / -0.15: [reports/v2_r*](../../SHARED_DATA/bybit_fullpit_1h/reports/)
-- v2 final (regime + breadth): [reports/v2_r005_pctup65](../../SHARED_DATA/bybit_fullpit_1h/reports/v2_r005_pctup65/)
-- Cost stress: [reports/v2_cost*](../../SHARED_DATA/bybit_fullpit_1h/reports/), [reports/v1_cost*](../../SHARED_DATA/bybit_fullpit_1h/reports/)
+- Ablation A-G, v2 sweep, v2/v1 cost + adverse stress: under each root's `reports/`
+- Gate PCA/correlation: `/tmp/gate_correlation.py` output (rerunnable)
+- Leave-one-out: `reports/v1_loo_*` (8 gates × 3 windows)
+- v3 candidates: `reports/v3{a,b,c,d}` (3 windows each)
 
-Built today, no PII or secrets, all derivable from public data sources.
+Built 2026-05-20, no PII or secrets, all derivable from public data sources.
