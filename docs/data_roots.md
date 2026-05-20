@@ -46,8 +46,40 @@ Do not point the live demo order/trade ledgers at the full-PIT research root.
 The demo root contains forward kline cache, order ledgers, trade ledgers, cycle
 reports, and risk-watchdog reports.
 
+## Out-of-Sample Roots
+
+Two pre-2023 PIT roots exist for genuine out-of-sample validation — both predate
+the canonical archive start (`2023-05-03`), and both reconstruct point-in-time
+membership from sources that include delisted/migrated symbols (no
+survivorship-biased `exchangeInfo`).
+
+```text
+~/SHARED_DATA/bybit_oos_pre2023    Bybit USD-M perps, 2021-01..2023-05
+                                   source: public.bybit.com/trading archive
+~/SHARED_DATA/binance_oos_pit      Binance USD-M perps, 2020-01..2023-04
+                                   source: data.binance.vision monthly archive
+                                   (includes 25 delisted symbols)
+```
+
+These roots are **not committed** (data, not code). Rebuild them on any machine:
+
+```bash
+bash scripts/build_oos_roots.sh
+```
+
+That script builds the Bybit OOS root via `archive-manifest` +
+`archive-download-klines-1h-api`, builds the Binance OOS root via
+`python -m liquidity_migration.binance_vision build-binance-oos`, and
+coverage-filters both manifests so they pass the full-PIT universe check.
+Funding/OI/mark are intentionally not filled for the OOS roots; the strategy
+degrades gracefully without them. Expect a 10-25 minute run.
+
+These OOS windows have been examined repeatedly in research and are no longer
+pristine — treat them as validation, not first-look OOS. See `docs/research_plan.md`.
+
 ## Retired Roots
 
 Do not use ad hoc current-universe or temporary recent roots for promotion
 evidence. Current-universe 120-symbol research is biased by construction unless
-the membership is point-in-time.
+the membership is point-in-time. A live `exchangeInfo` snapshot is never an
+acceptable cross-venue PIT source — see `docs/backtesting_errors_we_never_repeat.md`.
