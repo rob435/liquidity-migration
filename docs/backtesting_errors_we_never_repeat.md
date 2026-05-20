@@ -43,8 +43,17 @@ not be called proof, candidate alpha, promotion evidence, or real-money support.
   strategy being tested.
 - Every feature must be causal at `decision_ts`. A delayed copy of the feature
   must also be tested when data latency is uncertain.
-- Every universe must be point-in-time, or the run must carry an explicit
-  `current_universe_biased` label.
+- Every universe must be point-in-time. Full PIT is mandatory for any run that
+  will be cited as evidence, OOS, cross-venue validation, or promotion input.
+  The `current_universe_biased` label is reserved for throwaway scouting only
+  and must never be merged into a research report, dashboard, or comparison
+  table. A cross-exchange proxy run (e.g. Binance USD-M as OOS for Bybit) must
+  reconstruct PIT membership from a source that includes delisted, renamed,
+  migrated, and prelisted instruments. Reading a current `exchangeInfo` is not
+  PIT and is not acceptable. The accepted source for Binance USD-M historical
+  membership is the public `data.binance.vision` archive (or equivalent) which
+  enumerates every symbol that ever had bars, with first-bar and last-bar
+  dates used to gate tradability.
 - Every cost model must include venue fees, expected aggressive/passive mix,
   funding or carry, spread/slippage, and capacity limits.
 - Every adaptive exit, trailing stop, basket stop, cooldown, and protection

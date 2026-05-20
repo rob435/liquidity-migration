@@ -724,6 +724,30 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     volume_events.add_argument(
+        "--liquidity-migration-market-median-return-30d-max",
+        type=float,
+        default=event_defaults.liquidity_migration_market_median_return_30d_max,
+        help="Regime gate: max 30d cumulative market-median return at the signal day; 10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-market-median-return-7d-max",
+        type=float,
+        default=event_defaults.liquidity_migration_market_median_return_7d_max,
+        help="Regime gate: max 7d cumulative market-median return at the signal day; 10 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-market-pct-up-30d-max",
+        type=float,
+        default=event_defaults.liquidity_migration_market_pct_up_30d_max,
+        help="Regime gate: max 30d rolling-mean market pct-up at the signal day; 1 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-market-pct-up-7d-max",
+        type=float,
+        default=event_defaults.liquidity_migration_market_pct_up_7d_max,
+        help="Regime gate: max 7d rolling-mean market pct-up at the signal day; 1 disables.",
+    )
+    volume_events.add_argument(
         "--liquidity-migration-close-location-min",
         type=float,
         default=event_defaults.liquidity_migration_close_location_min,
@@ -1697,6 +1721,10 @@ def main(argv: list[str] | None = None) -> int:
             liquidity_migration_market_pct_up_max=args.liquidity_migration_market_pct_up_max,
             liquidity_migration_hot_market_day_return_min=args.liquidity_migration_hot_market_day_return_min,
             liquidity_migration_hot_market_day_return_band=args.liquidity_migration_hot_market_day_return_band,
+            liquidity_migration_market_median_return_30d_max=args.liquidity_migration_market_median_return_30d_max,
+            liquidity_migration_market_median_return_7d_max=args.liquidity_migration_market_median_return_7d_max,
+            liquidity_migration_market_pct_up_30d_max=args.liquidity_migration_market_pct_up_30d_max,
+            liquidity_migration_market_pct_up_7d_max=args.liquidity_migration_market_pct_up_7d_max,
             liquidity_migration_close_location_min=args.liquidity_migration_close_location_min,
             liquidity_migration_close_location_max=args.liquidity_migration_close_location_max,
             liquidity_migration_pit_age_days_min=args.liquidity_migration_pit_age_days_min,

@@ -160,6 +160,10 @@ class VolumeEventResearchConfig:
     liquidity_migration_market_pct_up_max: float = 0.65
     liquidity_migration_hot_market_day_return_min: float = 0.16
     liquidity_migration_hot_market_day_return_band: float = 0.015
+    liquidity_migration_market_median_return_30d_max: float = 10.0
+    liquidity_migration_market_median_return_7d_max: float = 10.0
+    liquidity_migration_market_pct_up_30d_max: float = 1.0
+    liquidity_migration_market_pct_up_7d_max: float = 1.0
     liquidity_migration_close_location_min: float = 0.45
     liquidity_migration_close_location_max: float = 1.0
     liquidity_migration_pit_age_days_min: int = 90
@@ -1935,6 +1939,14 @@ def _event_filter(
             required_cols.append("market_pct_up_1d")
             if config.liquidity_migration_hot_market_day_return_min < 10.0:
                 required_cols.append("daily_return_1d")
+        if config.liquidity_migration_market_median_return_30d_max < 10.0:
+            required_cols.append("market_median_return_30d_sum")
+        if config.liquidity_migration_market_median_return_7d_max < 10.0:
+            required_cols.append("market_median_return_7d_sum")
+        if config.liquidity_migration_market_pct_up_30d_max < 1.0:
+            required_cols.append("market_pct_up_30d_mean")
+        if config.liquidity_migration_market_pct_up_7d_max < 1.0:
+            required_cols.append("market_pct_up_7d_mean")
         if (
             config.liquidity_migration_close_location_min > 0.0
             or config.liquidity_migration_close_location_max < 1.0
@@ -2149,6 +2161,26 @@ def _event_filter(
                 predicate = predicate & (market_ok | hot_coin_ok)
             else:
                 predicate = predicate & market_ok
+        if config.liquidity_migration_market_median_return_30d_max < 10.0:
+            predicate = predicate & (
+                pl.col("market_median_return_30d_sum").is_not_null()
+                & (pl.col("market_median_return_30d_sum") <= config.liquidity_migration_market_median_return_30d_max)
+            )
+        if config.liquidity_migration_market_median_return_7d_max < 10.0:
+            predicate = predicate & (
+                pl.col("market_median_return_7d_sum").is_not_null()
+                & (pl.col("market_median_return_7d_sum") <= config.liquidity_migration_market_median_return_7d_max)
+            )
+        if config.liquidity_migration_market_pct_up_30d_max < 1.0:
+            predicate = predicate & (
+                pl.col("market_pct_up_30d_mean").is_not_null()
+                & (pl.col("market_pct_up_30d_mean") <= config.liquidity_migration_market_pct_up_30d_max)
+            )
+        if config.liquidity_migration_market_pct_up_7d_max < 1.0:
+            predicate = predicate & (
+                pl.col("market_pct_up_7d_mean").is_not_null()
+                & (pl.col("market_pct_up_7d_mean") <= config.liquidity_migration_market_pct_up_7d_max)
+            )
         if (
             config.liquidity_migration_close_location_min > 0.0
             or config.liquidity_migration_close_location_max < 1.0
@@ -2669,13 +2701,25 @@ def _add_liquidity_migration_speed_features(features: pl.DataFrame) -> pl.DataFr
 def _attach_market_context(features: pl.DataFrame) -> pl.DataFrame:
     if features.is_empty() or "daily_return_1d" not in features.columns:
         return features
-    market_context = features.group_by("ts_ms").agg(
-        [
-            pl.col("daily_return_1d").median().alias("market_median_return_1d"),
-            pl.col("daily_return_1d").mean().alias("market_mean_return_1d"),
-            (pl.col("daily_return_1d") > 0.0).mean().alias("market_pct_up_1d"),
-            pl.col("abs_daily_return_1d").median().alias("market_median_abs_return_1d"),
-        ]
+    market_context = (
+        features.group_by("ts_ms")
+        .agg(
+            [
+                pl.col("daily_return_1d").median().alias("market_median_return_1d"),
+                pl.col("daily_return_1d").mean().alias("market_mean_return_1d"),
+                (pl.col("daily_return_1d") > 0.0).mean().alias("market_pct_up_1d"),
+                pl.col("abs_daily_return_1d").median().alias("market_median_abs_return_1d"),
+            ]
+        )
+        .sort("ts_ms")
+        .with_columns(
+            [
+                pl.col("market_median_return_1d").rolling_sum(7).alias("market_median_return_7d_sum"),
+                pl.col("market_median_return_1d").rolling_sum(30).alias("market_median_return_30d_sum"),
+                pl.col("market_pct_up_1d").rolling_mean(7).alias("market_pct_up_7d_mean"),
+                pl.col("market_pct_up_1d").rolling_mean(30).alias("market_pct_up_30d_mean"),
+            ]
+        )
     )
     btc_context = features.filter(pl.col("symbol") == "BTCUSDT").select(
         [
