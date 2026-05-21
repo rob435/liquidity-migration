@@ -11,6 +11,17 @@ parameter sweep, and an adversarial `strategy-tribunal` review return a
 system "needs a regime overlay" is not supported by the evidence and has been
 removed.
 
+## Closing-bar setting — close_location_min = 0.30 (canonical as of 2026-05-21)
+
+The canonical close-location entry knob is now **0.30** (was 0.45), for research
+and for the VPS forward test. From an exploratory closing-bar sweep on the
+full-PIT IS root: 0.30 vs 0.45 gives more trades (510 vs 448) and higher total
+return (2637% vs 2022%) at the cost of deeper drawdown (-18.0% vs -13.7%) and
+marginally lower walk-forward split Sharpe (3.51 vs 3.62). It is a trade-count /
+return vs drawdown choice and is **not yet tribunal-validated** — the WATCH
+verdict and 81-scenario sweep below were run on the 0.45 config. See
+`docs/system_status.md`.
+
 ## Evidence
 
 - Full-PIT canonical backtest (460 symbols, 2023-05..2026-05): strongly

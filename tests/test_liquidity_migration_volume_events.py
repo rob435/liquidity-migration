@@ -1992,6 +1992,57 @@ def test_position_sizer_equal_mode_is_always_neutral() -> None:
         assert sizer.weight({"sigma": sigma}) == 1.0
 
 
+def test_position_sizing_quantity_taker_imbalance_weighted() -> None:
+    def q(imbalance: float) -> float | None:
+        return _position_sizing_quantity(
+            {"taker_imbalance_1d": imbalance},
+            mode="taker_imbalance_weighted",
+            vol_field="x",
+            score_col="s",
+            size_field="taker_imbalance_1d",
+            size_scale=0.03,
+        )
+
+    # quantity = exp(-imbalance / scale): 1.0 at zero, decreasing, always positive.
+    assert q(0.0) == pytest.approx(1.0)
+    q_sell, q_buy = q(-0.03), q(0.03)
+    # net aggressive selling -> larger short; net aggressive buying -> smaller short.
+    assert q_sell > 1.0 > q_buy > 0.0
+    assert q_sell * q_buy == pytest.approx(1.0)
+    # missing / non-finite imbalance -> None (neutral weight downstream).
+    for bad in ({}, {"taker_imbalance_1d": float("nan")}):
+        assert (
+            _position_sizing_quantity(
+                bad,
+                mode="taker_imbalance_weighted",
+                vol_field="x",
+                score_col="s",
+                size_field="taker_imbalance_1d",
+                size_scale=0.03,
+            )
+            is None
+        )
+
+
+def test_position_sizer_taker_imbalance_weighted_tilts_size() -> None:
+    sizer = _PositionSizer(
+        mode="taker_imbalance_weighted",
+        vol_field="x",
+        clamp=4.0,
+        score_col="s",
+        size_field="taker_imbalance_1d",
+        size_scale=0.03,
+    )
+    # first event: no prior history -> neutral weight.
+    assert sizer.weight({"taker_imbalance_1d": 0.0}) == 1.0
+    # net aggressive selling sizes above the prior mean.
+    assert sizer.weight({"taker_imbalance_1d": -0.03}) > 1.0
+    # a missing-imbalance event takes a neutral weight and must not poison the accumulator.
+    assert sizer.weight({}) == 1.0
+    # heavy taker buying sizes below the prior mean.
+    assert sizer.weight({"taker_imbalance_1d": 0.06}) < 1.0
+
+
 def test_position_weighting_config_is_validated() -> None:
     with pytest.raises(ValueError, match="position_weighting"):
         _validate_event_config(VolumeEventResearchConfig(position_weighting="bogus"))

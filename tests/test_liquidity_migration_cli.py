@@ -262,7 +262,7 @@ def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Pa
     assert args.liquidity_migration_market_pct_up_max == 0.65
     assert args.liquidity_migration_hot_market_day_return_min == 0.16
     assert args.liquidity_migration_hot_market_day_return_band == 0.015
-    assert args.liquidity_migration_close_location_min == 0.45
+    assert args.liquidity_migration_close_location_min == 0.30
     assert args.liquidity_migration_pit_age_days_min == 90
     assert args.liquidity_migration_crowding_filter == "union_pathology"
     assert args.liquidity_migration_signal_last6h_turnover_share_max == 1.0

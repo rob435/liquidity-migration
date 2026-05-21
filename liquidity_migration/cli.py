@@ -463,7 +463,8 @@ def _add_volume_events_parser(subparsers) -> None:
         "--position-weighting",
         choices=POSITION_WEIGHTINGS,
         default=event_defaults.position_weighting,
-        help="Per-trade position sizing: equal (baseline), inverse_vol, or signal_rank.",
+        help="Per-trade position sizing: equal (baseline), inverse_vol, signal_rank, "
+        "or taker_imbalance_weighted (size tilts down with signal-day taker buying).",
     )
     volume_events.add_argument(
         "--position-weight-vol-field",
@@ -475,6 +476,17 @@ def _add_volume_events_parser(subparsers) -> None:
         type=float,
         default=event_defaults.position_weight_clamp,
         help="Position weights are clamped to [1/clamp, clamp].",
+    )
+    volume_events.add_argument(
+        "--taker-imbalance-size-field",
+        default=event_defaults.taker_imbalance_size_field,
+        help="Imbalance feature used by taker_imbalance_weighted sizing (taker_imbalance_1d or _3d).",
+    )
+    volume_events.add_argument(
+        "--taker-imbalance-size-scale",
+        type=float,
+        default=event_defaults.taker_imbalance_size_scale,
+        help="Sensitivity of taker_imbalance_weighted sizing; quantity = exp(-imbalance/scale).",
     )
     volume_events.add_argument("--cooldown-days", type=int, default=event_defaults.cooldown_days)
     volume_events.add_argument("--rank-exit-threshold", type=float, default=event_defaults.rank_exit_threshold, help="Exit after event score rank decays below this fraction.")
@@ -787,6 +799,12 @@ def _add_volume_events_parser(subparsers) -> None:
         type=float,
         default=event_defaults.liquidity_migration_close_location_max,
         help="Maximum event-day close location inside the high-low range for liquidity-migration events; 1 disables.",
+    )
+    volume_events.add_argument(
+        "--liquidity-migration-up-volume-concentration-min",
+        type=float,
+        default=event_defaults.liquidity_migration_up_volume_concentration_min,
+        help="Minimum share of signal-day turnover traded in up-hours for liquidity-migration events; 0 disables.",
     )
     volume_events.add_argument(
         "--liquidity-migration-pit-age-days-min",
@@ -1795,6 +1813,8 @@ def main(argv: list[str] | None = None) -> int:
             position_weighting=args.position_weighting,
             position_weight_vol_field=args.position_weight_vol_field,
             position_weight_clamp=args.position_weight_clamp,
+            taker_imbalance_size_field=args.taker_imbalance_size_field,
+            taker_imbalance_size_scale=args.taker_imbalance_size_scale,
             cooldown_days=args.cooldown_days,
             rank_exit_threshold=args.rank_exit_threshold,
             require_full_pit_universe=not args.allow_partial_pit,
@@ -1854,6 +1874,7 @@ def main(argv: list[str] | None = None) -> int:
             liquidity_migration_market_pct_up_7d_max=args.liquidity_migration_market_pct_up_7d_max,
             liquidity_migration_close_location_min=args.liquidity_migration_close_location_min,
             liquidity_migration_close_location_max=args.liquidity_migration_close_location_max,
+            liquidity_migration_up_volume_concentration_min=args.liquidity_migration_up_volume_concentration_min,
             liquidity_migration_pit_age_days_min=args.liquidity_migration_pit_age_days_min,
             liquidity_migration_pit_age_days_max=args.liquidity_migration_pit_age_days_max,
             liquidity_migration_crowding_filter=args.liquidity_migration_crowding_filter,

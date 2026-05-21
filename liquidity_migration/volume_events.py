@@ -55,7 +55,7 @@ EVENT_TYPES = (
     "selloff_exhaustion",
 )
 SIDE_HYPOTHESES = ("continuation", "reversal")
-POSITION_WEIGHTINGS = ("equal", "inverse_vol", "signal_rank")
+POSITION_WEIGHTINGS = ("equal", "inverse_vol", "signal_rank", "taker_imbalance_weighted")
 LIQUIDITY_MIGRATION_CROWDING_FILTERS = ("none", "union_pathology", "model_v1")
 ENTRY_POLICY_FIXED_DELAY = "fixed_delay"
 ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE = "promoted_quality_squeeze"
@@ -112,6 +112,8 @@ class VolumeEventResearchConfig:
     position_weighting: str = "equal"
     position_weight_vol_field: str = "prior7_return_volatility"
     position_weight_clamp: float = 4.0
+    taker_imbalance_size_field: str = "taker_imbalance_1d"
+    taker_imbalance_size_scale: float = 0.03
     cooldown_days: int = 5
     rank_exit_threshold: float = 0.55
     require_pit_membership: bool = True
@@ -170,8 +172,9 @@ class VolumeEventResearchConfig:
     liquidity_migration_market_median_return_7d_max: float = 10.0
     liquidity_migration_market_pct_up_30d_max: float = 1.0
     liquidity_migration_market_pct_up_7d_max: float = 1.0
-    liquidity_migration_close_location_min: float = 0.45
+    liquidity_migration_close_location_min: float = 0.30
     liquidity_migration_close_location_max: float = 1.0
+    liquidity_migration_up_volume_concentration_min: float = 0.0
     liquidity_migration_pit_age_days_min: int = 90
     liquidity_migration_pit_age_days_max: int = 0
     liquidity_migration_crowding_filter: str = "union_pathology"
@@ -516,6 +519,8 @@ def _run_event_scenario(
         vol_field=config.position_weight_vol_field,
         clamp=config.position_weight_clamp,
         score_col=score_col,
+        size_field=config.taker_imbalance_size_field,
+        size_scale=config.taker_imbalance_size_scale,
     )
 
     for event in _execution_ordered_events(events).to_dicts():
@@ -1410,7 +1415,8 @@ def _liquidity_migration_hot_return_threshold_value(market_pct_up: float, config
 
 
 def _position_sizing_quantity(
-    event: dict[str, Any], *, mode: str, vol_field: str, score_col: str
+    event: dict[str, Any], *, mode: str, vol_field: str, score_col: str,
+    size_field: str = "taker_imbalance_1d", size_scale: float = 0.03,
 ) -> float | None:
     """Causal per-event quantity the position weight scales with; None -> neutral weight."""
     if mode == "inverse_vol":
@@ -1423,6 +1429,15 @@ def _position_sizing_quantity(
         if not math.isfinite(score) or score <= 0.0:
             return None
         return score
+    if mode == "taker_imbalance_weighted":
+        # Confidence-weighted sizing: low/negative signal-day taker imbalance
+        # (net aggressive selling) shorts larger, heavy taker-buying shorts
+        # smaller. Monotone-decreasing in imbalance and always positive, so
+        # every event still trades -- a size tilt, not a filter.
+        imbalance = _float_or_nan(event.get(size_field))
+        if not math.isfinite(imbalance) or size_scale <= 0.0:
+            return None
+        return math.exp(-imbalance / size_scale)
     return None
 
 
@@ -1433,11 +1448,16 @@ def _clamp_position_weight(weight: float, *, clamp: float) -> float:
 class _PositionSizer:
     """Per-scenario position-weight stream: expanding-mean normalized, clamped, point-in-time."""
 
-    def __init__(self, *, mode: str, vol_field: str, clamp: float, score_col: str) -> None:
+    def __init__(
+        self, *, mode: str, vol_field: str, clamp: float, score_col: str,
+        size_field: str = "taker_imbalance_1d", size_scale: float = 0.03,
+    ) -> None:
         self._mode = mode
         self._vol_field = vol_field
         self._clamp = clamp
         self._score_col = score_col
+        self._size_field = size_field
+        self._size_scale = size_scale
         self._prior_sum = 0.0
         self._prior_count = 0
 
@@ -1445,7 +1465,8 @@ class _PositionSizer:
         if self._mode == "equal":
             return 1.0
         quantity = _position_sizing_quantity(
-            event, mode=self._mode, vol_field=self._vol_field, score_col=self._score_col
+            event, mode=self._mode, vol_field=self._vol_field, score_col=self._score_col,
+            size_field=self._size_field, size_scale=self._size_scale,
         )
         if quantity is None:
             return 1.0
@@ -2064,6 +2085,8 @@ def _filter_liquidity_migration(
         required_cols.append("signal_day_close_location")
     if config.liquidity_migration_signal_last6h_turnover_share_max < 1.0:
         required_cols.append("signal_day_last6h_turnover_share")
+    if config.liquidity_migration_up_volume_concentration_min > 0.0:
+        required_cols.append("up_volume_concentration")
     if config.liquidity_migration_pit_age_days_min > 0 or config.liquidity_migration_pit_age_days_max > 0:
         required_cols.append("pit_age_days")
     if not _has_columns(base, *required_cols):
@@ -2159,6 +2182,12 @@ def _filter_liquidity_migration(
             predicate
             & pl.col("intraday_range_1d").is_not_null()
             & (pl.col("intraday_range_1d") <= config.liquidity_migration_intraday_range_max)
+        )
+    if config.liquidity_migration_up_volume_concentration_min > 0.0:
+        predicate = (
+            predicate
+            & pl.col("up_volume_concentration").is_not_null()
+            & (pl.col("up_volume_concentration") >= config.liquidity_migration_up_volume_concentration_min)
         )
     if (
         config.liquidity_migration_funding_rate_last_min > -10.0
@@ -2893,6 +2922,7 @@ def _daily_return_frame(klines: pl.DataFrame) -> pl.DataFrame:
                 pl.col("open").tail(6).first().alias("signal_day_last6h_open"),
                 pl.col("turnover_quote").sum().alias("signal_day_turnover"),
                 pl.col("turnover_quote").tail(6).sum().alias("signal_day_last6h_turnover"),
+                pl.col("turnover_quote").filter(pl.col("close") > pl.col("open")).sum().alias("signal_day_up_turnover"),
                 pl.len().alias("hourly_bars"),
             ]
         )
@@ -2938,6 +2968,14 @@ def _daily_return_frame(klines: pl.DataFrame) -> pl.DataFrame:
                 .then(pl.col("signal_day_last6h_turnover") / pl.col("signal_day_turnover"))
                 .otherwise(None)
                 .alias("signal_day_last6h_turnover_share"),
+                # Share of the signal day's turnover that traded in UP hours
+                # (hourly close > open). One-sided up-volume = FOMO chase, the
+                # unsustainable kind of pop -> a stronger fade. Causal: all of
+                # the signal day's hourly bars are complete at the decision ts.
+                pl.when(pl.col("signal_day_turnover") > 0.0)
+                .then(pl.col("signal_day_up_turnover") / pl.col("signal_day_turnover"))
+                .otherwise(None)
+                .alias("up_volume_concentration"),
                 pl.when(pl.col("close") > 0.0)
                 .then((pl.col("high") - pl.col("low")) / pl.col("close"))
                 .otherwise(None)
@@ -3017,6 +3055,7 @@ def _daily_return_frame(klines: pl.DataFrame) -> pl.DataFrame:
                 "signal_day_close_location",
                 "signal_day_last6h_return",
                 "signal_day_last6h_turnover_share",
+                "up_volume_concentration",
                 "signal_day_range_pct",
                 "close_to_high_7d",
                 "close_to_high_30d",
@@ -3369,6 +3408,8 @@ def _write_equity_benchmark_png(
     start: str,
     end: str,
     monthly_rows: list[dict[str, Any]] | None = None,
+    title: str = "Strategy Equity vs BTC",
+    subtitle: str = "Strategy and BTC are normalised to $1 at the strategy start; gridlines mark monthly dates and growth levels.",
 ) -> None:
     try:
         from PIL import Image, ImageDraw, ImageFont
@@ -3461,14 +3502,8 @@ def _write_equity_benchmark_png(
         )
 
     rect((0, 0, width, height), (255, 255, 255, 255))
-    text(left, 46, "Strategy Equity vs BTC", (7, 14, 31, 255), font_title)
-    text(
-        left,
-        78,
-        "Strategy and BTC are normalised to $1 at the strategy start; gridlines mark monthly dates and growth levels.",
-        (75, 85, 99, 255),
-        font_small,
-    )
+    text(left, 46, title, (7, 14, 31, 255), font_title)
+    text(left, 78, subtitle, (75, 85, 99, 255), font_small)
     rounded((left, top, left + plot_w, top + plot_h), 4, (249, 250, 251, 255), (229, 231, 235, 255))
 
     for value in y_ticks:
@@ -3503,7 +3538,8 @@ def _write_equity_benchmark_png(
         label = f"{item['name']} {finals.get(str(item['name']), 0.0):.2f}x"
         line([(legend_x, legend_y), (legend_x + 42, legend_y)], (rgb[0], rgb[1], rgb[2], 230), 5)
         text(legend_x + 54, legend_y - 8, label, (17, 24, 39, 255), font_regular)
-        legend_x += 230
+        label_w = draw.textlength(label, font=font_regular) / scale
+        legend_x += 54 + label_w + 48
     if table_rows:
         _draw_monthly_return_table(
             text=text,
