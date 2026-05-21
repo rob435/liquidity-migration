@@ -1809,7 +1809,15 @@ def _demo_feature_cache_fingerprint(klines: pl.DataFrame, universe: pl.DataFrame
     so 59 of every 60 cycles feed _build_demo_features identical inputs. Counts
     + min/max ts + column sums uniquely identify a kline set for this purpose:
     the only between-cycle change is appended bars, and any appended bar moves
-    row count, max ts, and the sums together. One aggregation pass, sub-ms."""
+    row count, max ts, and the sums together. One aggregation pass, sub-ms.
+
+    The universe is fingerprinted by row count plus the sum of WHOLE-day listing
+    ages. `listing_age_days` itself is `(snapshot_ts_ms - launch_time_ms)/day`,
+    which creeps up every single cycle — fingerprinting the raw float would miss
+    100% of the time. The feature build only consumes the age at day resolution
+    (symbol_age_days is an Int64 cast), and a membership change moves the kline
+    close/turnover sums anyway, so whole-day granularity is the correct key: it
+    holds steady across a trading hour and turns over only on a real day roll."""
     k = klines.select(
         pl.len().alias("rows"),
         pl.col("ts_ms").min().alias("min_ts"),
@@ -1829,13 +1837,13 @@ def _demo_feature_cache_fingerprint(klines: pl.DataFrame, universe: pl.DataFrame
     if not universe.is_empty() and "listing_age_days" in universe.columns:
         u = universe.select(
             pl.len().alias("rows"),
-            pl.col("listing_age_days").cast(pl.Float64, strict=False).sum().alias("age_sum"),
+            pl.col("listing_age_days").cast(pl.Int64, strict=False).sum().alias("age_days_sum"),
         ).row(0)
         fingerprint["universe_rows"] = int(u[0] or 0)
-        fingerprint["universe_age_sum"] = round(float(u[1] or 0.0), 3)
+        fingerprint["universe_age_days_sum"] = int(u[1] or 0)
     else:
         fingerprint["universe_rows"] = int(universe.height)
-        fingerprint["universe_age_sum"] = 0.0
+        fingerprint["universe_age_days_sum"] = 0
     return fingerprint
 
 

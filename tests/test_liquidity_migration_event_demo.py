@@ -499,6 +499,28 @@ def test_build_demo_features_cache_misses_when_a_bar_is_appended(tmp_path: Path)
     assert recomputed.equals(_build_demo_features(grown, universe))
 
 
+def test_build_demo_features_cache_survives_subday_age_drift(tmp_path: Path) -> None:
+    """listing_age_days creeps up every cycle — it is (now - launch_time)/day.
+    The cache fingerprint must key on whole-day ages, so an otherwise-unchanged
+    universe still hits across cycles. Without this the feature cache misses
+    100% of the time in production (the bug live telemetry caught)."""
+    klines = _feature_cache_klines()
+    universe = _feature_cache_universe()  # whole-number listing_age_days
+    drifted = universe.with_columns(
+        (pl.col("listing_age_days").cast(pl.Float64) + 0.37).alias("listing_age_days")
+    )
+    assert _demo_feature_cache_fingerprint(klines, universe) == _demo_feature_cache_fingerprint(klines, drifted)
+
+    fresh = _build_demo_features(klines, universe)
+    _build_demo_features(klines, universe, cache_root=tmp_path)  # miss -> compute + write
+    parquet_path, _ = _demo_feature_cache_paths(tmp_path)
+    written_at = parquet_path.stat().st_mtime_ns
+
+    warm = _build_demo_features(klines, drifted, cache_root=tmp_path)  # must HIT despite drift
+    assert parquet_path.stat().st_mtime_ns == written_at, "cache rewritten — fingerprint missed on sub-day drift"
+    assert warm.equals(fresh)
+
+
 def test_build_demo_features_without_cache_root_writes_nothing(tmp_path: Path) -> None:
     """cache_root=None (the default, used by tests and any non-cycle caller)
     must never touch disk."""
