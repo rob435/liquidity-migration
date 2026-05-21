@@ -21,7 +21,8 @@ from .storage import exclusive_file_lock, read_dataset, write_dataset
 from .telegram import send_telegram_message
 from .trade_lifecycle import _bar_excursion, _rank_exit_hit, _side_return
 from .universe import build_current_universe_table
-from .volume_features import MS_PER_DAY, MS_PER_HOUR, build_volume_features
+from ._common import MS_PER_DAY, MS_PER_HOUR, MS_PER_MINUTE
+from .volume_features import build_volume_features
 from .volume_events import (
     EventScenario,
     VolumeEventResearchConfig,
@@ -41,7 +42,6 @@ from .volume_events import (
 )
 
 
-MS_PER_MINUTE = 60_000
 PROMOTED_DEMO_STRATEGY_ID = "liqmig_union_q40_h3_tp26_g100_qsqueeze"
 DEMO_RELAXED_STRATEGY_ID = "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6"
 DEMO_STRATEGY_PROFILES = ("promoted", "demo_relaxed")

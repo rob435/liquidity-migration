@@ -34,8 +34,7 @@ import math
 import numpy as np
 import polars as pl
 
-MS_PER_HOUR = 3_600_000
-MS_PER_DAY = 24 * MS_PER_HOUR
+from ._common import MS_PER_HOUR
 
 
 # --------------------------------------------------------------------------

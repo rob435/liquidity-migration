@@ -19,6 +19,7 @@ import certifi
 import polars as pl
 from pyarrow import parquet as pq
 
+from ._common import safe_name
 from .archive import download_public_trade_archive, read_public_trade_archive, read_public_trade_archive_klines_1h
 from .ingestion import (
     aggregate_trade_klines_1m,
@@ -977,10 +978,6 @@ def _download_result(
     }
 
 
-def _kline_partition_exists(data_root: str | Path, *, symbol: str, date: str) -> bool:
-    return _kline_partition_bar_rows(data_root, dataset="klines_1m", symbol=symbol, date=date) > 0
-
-
 def _kline_partition_file_exists(data_root: str | Path, *, dataset: str, symbol: str, date: str) -> bool:
     part = dataset_path(data_root, dataset) / f"date={date}" / f"symbol={symbol}" / "part.parquet"
     return part.exists() and part.stat().st_size > 0
@@ -1110,4 +1107,4 @@ def _parse_date(value: str) -> date:
 
 
 def _safe_name(name: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_.-]+", "-", name.strip()).strip("-") or "bybit-public-trading"
+    return safe_name(name, fallback="bybit-public-trading")

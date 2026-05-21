@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
 import polars as pl
 import pyarrow.parquet as pq
 
+from ._common import date_ms, parse_date, pct
 from .storage import dataset_path
 
 
@@ -495,7 +496,7 @@ def _estimated_partition_rows(dataset: str) -> int:
 
 
 def _date_start_ms(value: str) -> int:
-    return int(datetime.fromisoformat(value).replace(tzinfo=UTC).timestamp() * 1000)
+    return date_ms(value)
 
 
 def _empty_snapshot(dataset: str) -> DatasetCoverageSnapshot:
@@ -522,12 +523,7 @@ def _empty_pairs() -> pl.DataFrame:
 
 
 def _parse_date(value: str | None) -> date | None:
-    if not value:
-        return None
-    text = value.replace("Z", "+00:00")
-    if "T" in text or "+" in text:
-        return datetime.fromisoformat(text).astimezone(UTC).date()
-    return date.fromisoformat(text[:10])
+    return parse_date(value)
 
 
 def _date_range(start: date, end_exclusive: date) -> list[date]:
@@ -568,6 +564,4 @@ def _date_span(row: dict[str, Any]) -> str:
 
 
 def _pct(value: Any) -> str:
-    if value is None:
-        return ""
-    return f"{float(value) * 100:.2f}%"
+    return pct(value)

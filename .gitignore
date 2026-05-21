@@ -7,6 +7,8 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .coverage
+.idea/
+.vscode/
 .venv/
 venv/
 .env
@@ -19,6 +21,7 @@ smoke-replay.sqlite3
 .tmp/
 data/
 reports/
+backtest-runs/
 *.sqlite3.gz
 backtest.sqlite3
 backtest-*.sqlite3

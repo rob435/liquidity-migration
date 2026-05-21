@@ -8,7 +8,7 @@ import numpy as np
 import polars as pl
 
 from .config import TradeLifecycleConfig
-from .volume_features import MS_PER_HOUR
+from ._common import MS_PER_HOUR, date_boundary_ms
 
 
 def summarize_baskets(trades: pl.DataFrame, *, config: TradeLifecycleConfig) -> pl.DataFrame:
@@ -218,15 +218,7 @@ def _filter_signal_window(features: pl.DataFrame, config: TradeLifecycleConfig) 
 
 
 def _date_boundary_ms(value: str) -> int | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=UTC)
-    else:
-        dt = dt.astimezone(UTC)
-    return int(dt.timestamp() * 1000)
+    return date_boundary_ms(value)
 
 
 def _filter_universe(part: pl.DataFrame, config: TradeLifecycleConfig) -> pl.DataFrame:

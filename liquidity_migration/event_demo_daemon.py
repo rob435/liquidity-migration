@@ -118,7 +118,8 @@ class EventDemoDaemon:
                 from .telegram import send_telegram_message
             except Exception:  # noqa: BLE001 - telegram is optional
                 return
-            sender = lambda t: send_telegram_message(t, enabled=True)
+            def sender(t):
+                return send_telegram_message(t, enabled=True)
         try:
             sender(text)
         except Exception as exc:  # noqa: BLE001 - telegram failures must not break the loop

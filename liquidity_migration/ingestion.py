@@ -12,8 +12,7 @@ from .config import TradeFlowConfig
 from .storage import write_dataset
 
 
-MS_PER_MINUTE = 60_000
-MS_PER_HOUR = 60 * MS_PER_MINUTE
+from ._common import MS_PER_HOUR, MS_PER_MINUTE
 
 
 @dataclass(frozen=True, slots=True)

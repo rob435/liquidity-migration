@@ -5,7 +5,7 @@ from typing import Any
 
 import polars as pl
 
-MS_PER_HOUR = 60 * 60 * 1000
+from ._common import MS_PER_HOUR, pct
 
 CROWDING_TRADEABLE_CLASSES = {
     "isolated_idiosyncratic_event",
@@ -255,8 +255,4 @@ def _crowding_reason_expr() -> pl.Expr:
 
 
 def _pct(value: Any) -> str:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        number = 0.0
-    return f"{number:.2%}"
+    return pct(value, invalid="0.00%")

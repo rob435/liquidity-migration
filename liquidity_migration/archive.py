@@ -17,7 +17,8 @@ from urllib.request import urlopen
 import certifi
 import polars as pl
 
-from .ingestion import MS_PER_HOUR, aggregate_trade_klines_1h, trades_to_frame
+from ._common import MS_PER_HOUR
+from .ingestion import aggregate_trade_klines_1h, trades_to_frame
 
 
 DEFAULT_TIMEOUT_SECONDS = 300

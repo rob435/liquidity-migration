@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,7 +12,7 @@ from .bybit import BybitMarketData
 from .config import ResearchConfig, UniverseConfig
 from .downloaders import _normalize_instruments, _normalize_tickers
 from .storage import write_dataset
-from .volume_features import MS_PER_DAY
+from ._common import MS_PER_DAY, safe_name
 
 
 def run_discover_universe(
@@ -199,4 +198,4 @@ def _age_filter_label(config: dict[str, Any]) -> str:
 
 
 def _safe_name(name: str) -> str:
-    return re.sub(r"[^a-zA-Z0-9_.-]+", "-", name.strip()).strip("-") or "auto"
+    return safe_name(name)

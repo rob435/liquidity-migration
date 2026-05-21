@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import polars as pl
+
+from ._common import finite_float, pct
 
 
 SPLITS = (
@@ -400,17 +401,8 @@ def _entry_date_expr() -> pl.Expr:
 
 
 def _finite_float(value: Any) -> float | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    if not math.isfinite(number):
-        return None
-    return number
+    return finite_float(value)
 
 
 def _pct(value: Any) -> str:
-    number = _finite_float(value)
-    if number is None:
-        return "n/a"
-    return f"{number:.2%}"
+    return pct(value, invalid="n/a")

@@ -6,8 +6,7 @@ import numpy as np
 import polars as pl
 
 
-MS_PER_HOUR = 60 * 60 * 1000
-MS_PER_DAY = 24 * MS_PER_HOUR
+from ._common import MS_PER_DAY
 
 VOLUME_SCORE_COLUMNS = {
     "volume_change_1d": "volume_change_1d_z",

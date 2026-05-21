@@ -44,7 +44,7 @@ from liquidity_migration.event_demo import (
     wallet_equity_usdt,
 )
 from liquidity_migration.storage import read_dataset, write_dataset
-from liquidity_migration.volume_features import MS_PER_HOUR
+from liquidity_migration._common import MS_PER_HOUR
 from liquidity_migration.volume_events import EventScenario, VolumeEventResearchConfig
 
 

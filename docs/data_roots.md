@@ -75,7 +75,7 @@ Funding/OI/mark are intentionally not filled for the OOS roots; the strategy
 degrades gracefully without them. Expect a 10-25 minute run.
 
 These OOS windows have been examined repeatedly in research and are no longer
-pristine — treat them as validation, not first-look OOS. See `docs/research_plan.md`.
+pristine — treat them as validation, not first-look OOS.
 
 ## Retired Roots
 

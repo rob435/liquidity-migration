@@ -18,7 +18,6 @@ from .storage import read_dataset
 from .trade_lifecycle import (
     _bar_excursion,
     _bar_exit_hits,
-    _date_boundary_ms,
     _empty_trades,
     _exit_reason_rows,
     _filter_signal_window,
@@ -34,7 +33,8 @@ from .trade_lifecycle import (
     summarize_baskets,
     summarize_trade_backtest,
 )
-from .volume_features import MS_PER_DAY, MS_PER_HOUR, VOLUME_SCORE_COLUMNS, build_volume_features
+from ._common import MS_PER_DAY, MS_PER_HOUR, date_ms, pct
+from .volume_features import VOLUME_SCORE_COLUMNS, build_volume_features
 
 
 EVENT_TYPES = (
@@ -1860,353 +1860,9 @@ def _event_filter(
             & (pl.col("close_vs_prior20_high") <= config.capitulation_reclaim_close_vs_prior20_high_max)
         )
     if event_type == "liquidity_migration":
-        required_cols = ["prior7_liquidity_rank", f"prior7_{rank_col}"]
-        if config.liquidity_migration_turnover_ratio_min > 0.0:
-            required_cols.append("prior7_turnover_quote_mean")
-        if config.liquidity_migration_day_return_min > -1.0 or config.liquidity_migration_day_return_max < 10.0:
-            required_cols.append("daily_return_1d")
-        if config.liquidity_migration_return_7d_min > -10.0 or config.liquidity_migration_return_7d_max < 10.0:
-            required_cols.append("return_7d")
-        if (
-            config.liquidity_migration_residual_return_min > -10.0
-            or config.liquidity_migration_residual_return_max < 10.0
-        ):
-            required_cols.append("residual_return_1d")
-        if config.liquidity_migration_close_to_high_7d_min > -10.0:
-            required_cols.append("close_to_high_7d")
-        if config.liquidity_migration_close_to_high_30d_min > -10.0:
-            required_cols.append("close_to_high_30d")
-        if (
-            config.liquidity_migration_prior30_max_return_min > -10.0
-            or config.liquidity_migration_prior30_max_return_max < 10.0
-        ):
-            required_cols.append("prior30_max_daily_return")
-        if (
-            config.liquidity_migration_prior7_return_volatility_min > 0.0
-            or config.liquidity_migration_prior7_return_volatility_max < 10.0
-        ):
-            required_cols.append("prior7_return_volatility")
-        if config.liquidity_migration_intraday_range_max < 10.0:
-            required_cols.append("intraday_range_1d")
-        if (
-            config.liquidity_migration_funding_rate_last_min > -10.0
-            or config.liquidity_migration_funding_rate_last_max < 10.0
-        ):
-            required_cols.append("funding_rate_last")
-        if (
-            config.liquidity_migration_funding_3d_sum_min > -10.0
-            or config.liquidity_migration_funding_3d_sum_max < 10.0
-        ):
-            required_cols.append("funding_rate_3d_sum")
-        if (
-            config.liquidity_migration_funding_7d_sum_min > -10.0
-            or config.liquidity_migration_funding_7d_sum_max < 10.0
-        ):
-            required_cols.append("funding_rate_7d_sum")
-        if (
-            config.liquidity_migration_open_interest_return_3d_min > -10.0
-            or config.liquidity_migration_open_interest_return_3d_max < 10.0
-        ):
-            required_cols.append("open_interest_return_3d")
-        if (
-            config.liquidity_migration_open_interest_return_7d_min > -10.0
-            or config.liquidity_migration_open_interest_return_7d_max < 10.0
-        ):
-            required_cols.append("open_interest_return_7d")
-        if config.liquidity_migration_volume_to_oi_quote_min > 0.0 or config.liquidity_migration_volume_to_oi_quote_max > 0.0:
-            required_cols.append("volume_to_open_interest_quote")
-        if (
-            config.liquidity_migration_mark_index_basis_3d_mean_min > -10.0
-            or config.liquidity_migration_mark_index_basis_3d_mean_max < 10.0
-        ):
-            required_cols.append("mark_index_basis_3d_mean")
-        if (
-            config.liquidity_migration_premium_index_3d_mean_min > -10.0
-            or config.liquidity_migration_premium_index_3d_mean_max < 10.0
-        ):
-            required_cols.append("premium_index_3d_mean")
-        if (
-            config.liquidity_migration_taker_imbalance_1d_min > -1.0
-            or config.liquidity_migration_taker_imbalance_1d_max < 1.0
-        ):
-            required_cols.append("taker_imbalance_1d")
-        if (
-            config.liquidity_migration_taker_imbalance_3d_min > -1.0
-            or config.liquidity_migration_taker_imbalance_3d_max < 1.0
-        ):
-            required_cols.append("taker_imbalance_3d")
-        if config.liquidity_migration_market_pct_up_max < 1.0:
-            required_cols.append("market_pct_up_1d")
-            if config.liquidity_migration_hot_market_day_return_min < 10.0:
-                required_cols.append("daily_return_1d")
-        if config.liquidity_migration_market_median_return_30d_max < 10.0:
-            required_cols.append("market_median_return_30d_sum")
-        if config.liquidity_migration_market_median_return_7d_max < 10.0:
-            required_cols.append("market_median_return_7d_sum")
-        if config.liquidity_migration_market_pct_up_30d_max < 1.0:
-            required_cols.append("market_pct_up_30d_mean")
-        if config.liquidity_migration_market_pct_up_7d_max < 1.0:
-            required_cols.append("market_pct_up_7d_mean")
-        if (
-            config.liquidity_migration_close_location_min > 0.0
-            or config.liquidity_migration_close_location_max < 1.0
-        ):
-            required_cols.append("signal_day_close_location")
-        if config.liquidity_migration_signal_last6h_turnover_share_max < 1.0:
-            required_cols.append("signal_day_last6h_turnover_share")
-        if config.liquidity_migration_pit_age_days_min > 0 or config.liquidity_migration_pit_age_days_max > 0:
-            required_cols.append("pit_age_days")
-        if not _has_columns(base, *required_cols):
-            return base.head(0)
-        predicate = (
-            (pl.col(rank_col) >= top_cut)
-            & (pl.col(f"prior7_{rank_col}") < top_cut)
-            & ((pl.col("prior7_liquidity_rank") - pl.col("liquidity_rank")) >= config.liquidity_migration_rank_improvement_min)
+        return _filter_liquidity_migration(
+            base, score_col=score_col, rank_col=rank_col, top_cut=top_cut, config=config
         )
-        if config.liquidity_migration_turnover_ratio_min > 0.0:
-            predicate = (
-                predicate
-                & (pl.col("prior7_turnover_quote_mean") > 0.0)
-                & (
-                    (pl.col("turnover_quote") / pl.col("prior7_turnover_quote_mean"))
-                    >= config.liquidity_migration_turnover_ratio_min
-                )
-            )
-        if config.liquidity_migration_prior_rank_min > 0:
-            predicate = predicate & (pl.col("prior7_liquidity_rank") >= config.liquidity_migration_prior_rank_min)
-        if config.liquidity_migration_current_rank_max > 0:
-            predicate = predicate & (pl.col("liquidity_rank") <= config.liquidity_migration_current_rank_max)
-        if config.liquidity_migration_event_rank_fraction_max > 0.0:
-            predicate = predicate & (pl.col(rank_col) <= config.liquidity_migration_event_rank_fraction_max)
-        if (
-            config.liquidity_migration_event_rank_fraction_exclude_min > 0.0
-            or config.liquidity_migration_event_rank_fraction_exclude_max > 0.0
-        ):
-            predicate = predicate & (
-                (pl.col(rank_col) <= config.liquidity_migration_event_rank_fraction_exclude_min)
-                | (pl.col(rank_col) >= config.liquidity_migration_event_rank_fraction_exclude_max)
-            )
-        if config.liquidity_migration_score_max > 0.0:
-            predicate = predicate & (pl.col(score_col) <= config.liquidity_migration_score_max)
-        if config.liquidity_migration_day_return_min > -1.0 or config.liquidity_migration_day_return_max < 10.0:
-            predicate = (
-                predicate
-                & pl.col("daily_return_1d").is_not_null()
-                & (pl.col("daily_return_1d") >= config.liquidity_migration_day_return_min)
-                & (pl.col("daily_return_1d") <= config.liquidity_migration_day_return_max)
-            )
-        if config.liquidity_migration_return_7d_min > -10.0 or config.liquidity_migration_return_7d_max < 10.0:
-            predicate = (
-                predicate
-                & pl.col("return_7d").is_not_null()
-                & (pl.col("return_7d") >= config.liquidity_migration_return_7d_min)
-                & (pl.col("return_7d") <= config.liquidity_migration_return_7d_max)
-            )
-        if (
-            config.liquidity_migration_residual_return_min > -10.0
-            or config.liquidity_migration_residual_return_max < 10.0
-        ):
-            predicate = (
-                predicate
-                & pl.col("residual_return_1d").is_not_null()
-                & (pl.col("residual_return_1d") >= config.liquidity_migration_residual_return_min)
-                & (pl.col("residual_return_1d") <= config.liquidity_migration_residual_return_max)
-            )
-        if config.liquidity_migration_close_to_high_7d_min > -10.0:
-            predicate = (
-                predicate
-                & pl.col("close_to_high_7d").is_not_null()
-                & (pl.col("close_to_high_7d") >= config.liquidity_migration_close_to_high_7d_min)
-            )
-        if config.liquidity_migration_close_to_high_30d_min > -10.0:
-            predicate = (
-                predicate
-                & pl.col("close_to_high_30d").is_not_null()
-                & (pl.col("close_to_high_30d") >= config.liquidity_migration_close_to_high_30d_min)
-            )
-        if (
-            config.liquidity_migration_prior30_max_return_min > -10.0
-            or config.liquidity_migration_prior30_max_return_max < 10.0
-        ):
-            predicate = (
-                predicate
-                & pl.col("prior30_max_daily_return").is_not_null()
-                & (pl.col("prior30_max_daily_return") >= config.liquidity_migration_prior30_max_return_min)
-                & (pl.col("prior30_max_daily_return") <= config.liquidity_migration_prior30_max_return_max)
-            )
-        if (
-            config.liquidity_migration_prior7_return_volatility_min > 0.0
-            or config.liquidity_migration_prior7_return_volatility_max < 10.0
-        ):
-            predicate = (
-                predicate
-                & pl.col("prior7_return_volatility").is_not_null()
-                & (pl.col("prior7_return_volatility") >= config.liquidity_migration_prior7_return_volatility_min)
-                & (pl.col("prior7_return_volatility") <= config.liquidity_migration_prior7_return_volatility_max)
-            )
-        if config.liquidity_migration_intraday_range_max < 10.0:
-            predicate = (
-                predicate
-                & pl.col("intraday_range_1d").is_not_null()
-                & (pl.col("intraday_range_1d") <= config.liquidity_migration_intraday_range_max)
-            )
-        if (
-            config.liquidity_migration_funding_rate_last_min > -10.0
-            or config.liquidity_migration_funding_rate_last_max < 10.0
-        ):
-            predicate = (
-                predicate
-                & pl.col("funding_rate_last").is_not_null()
-                & (pl.col("funding_rate_last") >= config.liquidity_migration_funding_rate_last_min)
-                & (pl.col("funding_rate_last") <= config.liquidity_migration_funding_rate_last_max)
-            )
-        if (
-            config.liquidity_migration_funding_3d_sum_min > -10.0
-            or config.liquidity_migration_funding_3d_sum_max < 10.0
-        ):
-            predicate = (
-                predicate
-                & pl.col("funding_rate_3d_sum").is_not_null()
-                & (pl.col("funding_rate_3d_sum") >= config.liquidity_migration_funding_3d_sum_min)
-                & (pl.col("funding_rate_3d_sum") <= config.liquidity_migration_funding_3d_sum_max)
-            )
-        if (
-            config.liquidity_migration_funding_7d_sum_min > -10.0
-            or config.liquidity_migration_funding_7d_sum_max < 10.0
-        ):
-            predicate = (
-                predicate
-                & pl.col("funding_rate_7d_sum").is_not_null()
-                & (pl.col("funding_rate_7d_sum") >= config.liquidity_migration_funding_7d_sum_min)
-                & (pl.col("funding_rate_7d_sum") <= config.liquidity_migration_funding_7d_sum_max)
-            )
-        if (
-            config.liquidity_migration_open_interest_return_3d_min > -10.0
-            or config.liquidity_migration_open_interest_return_3d_max < 10.0
-        ):
-            predicate = (
-                predicate
-                & pl.col("open_interest_return_3d").is_not_null()
-                & (pl.col("open_interest_return_3d") >= config.liquidity_migration_open_interest_return_3d_min)
-                & (pl.col("open_interest_return_3d") <= config.liquidity_migration_open_interest_return_3d_max)
-            )
-        if (
-            config.liquidity_migration_open_interest_return_7d_min > -10.0
-            or config.liquidity_migration_open_interest_return_7d_max < 10.0
-        ):
-            predicate = (
-                predicate
-                & pl.col("open_interest_return_7d").is_not_null()
-                & (pl.col("open_interest_return_7d") >= config.liquidity_migration_open_interest_return_7d_min)
-                & (pl.col("open_interest_return_7d") <= config.liquidity_migration_open_interest_return_7d_max)
-            )
-        if config.liquidity_migration_volume_to_oi_quote_min > 0.0 or config.liquidity_migration_volume_to_oi_quote_max > 0.0:
-            predicate = predicate & pl.col("volume_to_open_interest_quote").is_not_null()
-            if config.liquidity_migration_volume_to_oi_quote_min > 0.0:
-                predicate = predicate & (
-                    pl.col("volume_to_open_interest_quote") >= config.liquidity_migration_volume_to_oi_quote_min
-                )
-            if config.liquidity_migration_volume_to_oi_quote_max > 0.0:
-                predicate = predicate & (
-                    pl.col("volume_to_open_interest_quote") <= config.liquidity_migration_volume_to_oi_quote_max
-                )
-        if (
-            config.liquidity_migration_mark_index_basis_3d_mean_min > -10.0
-            or config.liquidity_migration_mark_index_basis_3d_mean_max < 10.0
-        ):
-            predicate = (
-                predicate
-                & pl.col("mark_index_basis_3d_mean").is_not_null()
-                & (pl.col("mark_index_basis_3d_mean") >= config.liquidity_migration_mark_index_basis_3d_mean_min)
-                & (pl.col("mark_index_basis_3d_mean") <= config.liquidity_migration_mark_index_basis_3d_mean_max)
-            )
-        if (
-            config.liquidity_migration_premium_index_3d_mean_min > -10.0
-            or config.liquidity_migration_premium_index_3d_mean_max < 10.0
-        ):
-            predicate = (
-                predicate
-                & pl.col("premium_index_3d_mean").is_not_null()
-                & (pl.col("premium_index_3d_mean") >= config.liquidity_migration_premium_index_3d_mean_min)
-                & (pl.col("premium_index_3d_mean") <= config.liquidity_migration_premium_index_3d_mean_max)
-            )
-        if (
-            config.liquidity_migration_taker_imbalance_1d_min > -1.0
-            or config.liquidity_migration_taker_imbalance_1d_max < 1.0
-        ):
-            predicate = (
-                predicate
-                & pl.col("taker_imbalance_1d").is_not_null()
-                & (pl.col("taker_imbalance_1d") >= config.liquidity_migration_taker_imbalance_1d_min)
-                & (pl.col("taker_imbalance_1d") <= config.liquidity_migration_taker_imbalance_1d_max)
-            )
-        if (
-            config.liquidity_migration_taker_imbalance_3d_min > -1.0
-            or config.liquidity_migration_taker_imbalance_3d_max < 1.0
-        ):
-            predicate = (
-                predicate
-                & pl.col("taker_imbalance_3d").is_not_null()
-                & (pl.col("taker_imbalance_3d") >= config.liquidity_migration_taker_imbalance_3d_min)
-                & (pl.col("taker_imbalance_3d") <= config.liquidity_migration_taker_imbalance_3d_max)
-            )
-        if config.liquidity_migration_market_pct_up_max < 1.0:
-            market_ok = pl.col("market_pct_up_1d").is_not_null() & (
-                pl.col("market_pct_up_1d") <= config.liquidity_migration_market_pct_up_max
-            )
-            if config.liquidity_migration_hot_market_day_return_min < 10.0:
-                hot_coin_ok = pl.col("daily_return_1d").is_not_null() & (
-                    pl.col("daily_return_1d") >= _liquidity_migration_hot_return_threshold_expr(config)
-                )
-                predicate = predicate & (market_ok | hot_coin_ok)
-            else:
-                predicate = predicate & market_ok
-        if config.liquidity_migration_market_median_return_30d_max < 10.0:
-            predicate = predicate & (
-                pl.col("market_median_return_30d_sum").is_not_null()
-                & (pl.col("market_median_return_30d_sum") <= config.liquidity_migration_market_median_return_30d_max)
-            )
-        if config.liquidity_migration_market_median_return_7d_max < 10.0:
-            predicate = predicate & (
-                pl.col("market_median_return_7d_sum").is_not_null()
-                & (pl.col("market_median_return_7d_sum") <= config.liquidity_migration_market_median_return_7d_max)
-            )
-        if config.liquidity_migration_market_pct_up_30d_max < 1.0:
-            predicate = predicate & (
-                pl.col("market_pct_up_30d_mean").is_not_null()
-                & (pl.col("market_pct_up_30d_mean") <= config.liquidity_migration_market_pct_up_30d_max)
-            )
-        if config.liquidity_migration_market_pct_up_7d_max < 1.0:
-            predicate = predicate & (
-                pl.col("market_pct_up_7d_mean").is_not_null()
-                & (pl.col("market_pct_up_7d_mean") <= config.liquidity_migration_market_pct_up_7d_max)
-            )
-        if (
-            config.liquidity_migration_close_location_min > 0.0
-            or config.liquidity_migration_close_location_max < 1.0
-        ):
-            predicate = (
-                predicate
-                & pl.col("signal_day_close_location").is_not_null()
-                & (pl.col("signal_day_close_location") >= config.liquidity_migration_close_location_min)
-                & (pl.col("signal_day_close_location") <= config.liquidity_migration_close_location_max)
-            )
-        if config.liquidity_migration_signal_last6h_turnover_share_max < 1.0:
-            predicate = (
-                predicate
-                & pl.col("signal_day_last6h_turnover_share").is_not_null()
-                & (
-                    pl.col("signal_day_last6h_turnover_share")
-                    <= config.liquidity_migration_signal_last6h_turnover_share_max
-                )
-            )
-        if config.liquidity_migration_pit_age_days_min > 0 or config.liquidity_migration_pit_age_days_max > 0:
-            predicate = predicate & pl.col("pit_age_days").is_not_null()
-            if config.liquidity_migration_pit_age_days_min > 0:
-                predicate = predicate & (pl.col("pit_age_days") >= float(config.liquidity_migration_pit_age_days_min))
-            if config.liquidity_migration_pit_age_days_max > 0:
-                predicate = predicate & (pl.col("pit_age_days") <= float(config.liquidity_migration_pit_age_days_max))
-        return base.filter(predicate)
     if event_type == "selloff_exhaustion":
         if not _has_columns(base, "daily_return_1d", "daily_return_rank_frac"):
             return base.head(0)
@@ -2216,6 +1872,363 @@ def _event_filter(
             & (pl.col("daily_return_rank_frac") <= _bottom_cut_from_top_cut(top_cut))
         )
     raise ValueError(f"Unknown event type: {event_type}")
+
+
+def _filter_liquidity_migration(
+    base: pl.DataFrame,
+    *,
+    score_col: str,
+    rank_col: str,
+    top_cut: float,
+    config: VolumeEventResearchConfig,
+) -> pl.DataFrame:
+    required_cols = ["prior7_liquidity_rank", f"prior7_{rank_col}"]
+    if config.liquidity_migration_turnover_ratio_min > 0.0:
+        required_cols.append("prior7_turnover_quote_mean")
+    if config.liquidity_migration_day_return_min > -1.0 or config.liquidity_migration_day_return_max < 10.0:
+        required_cols.append("daily_return_1d")
+    if config.liquidity_migration_return_7d_min > -10.0 or config.liquidity_migration_return_7d_max < 10.0:
+        required_cols.append("return_7d")
+    if (
+        config.liquidity_migration_residual_return_min > -10.0
+        or config.liquidity_migration_residual_return_max < 10.0
+    ):
+        required_cols.append("residual_return_1d")
+    if config.liquidity_migration_close_to_high_7d_min > -10.0:
+        required_cols.append("close_to_high_7d")
+    if config.liquidity_migration_close_to_high_30d_min > -10.0:
+        required_cols.append("close_to_high_30d")
+    if (
+        config.liquidity_migration_prior30_max_return_min > -10.0
+        or config.liquidity_migration_prior30_max_return_max < 10.0
+    ):
+        required_cols.append("prior30_max_daily_return")
+    if (
+        config.liquidity_migration_prior7_return_volatility_min > 0.0
+        or config.liquidity_migration_prior7_return_volatility_max < 10.0
+    ):
+        required_cols.append("prior7_return_volatility")
+    if config.liquidity_migration_intraday_range_max < 10.0:
+        required_cols.append("intraday_range_1d")
+    if (
+        config.liquidity_migration_funding_rate_last_min > -10.0
+        or config.liquidity_migration_funding_rate_last_max < 10.0
+    ):
+        required_cols.append("funding_rate_last")
+    if (
+        config.liquidity_migration_funding_3d_sum_min > -10.0
+        or config.liquidity_migration_funding_3d_sum_max < 10.0
+    ):
+        required_cols.append("funding_rate_3d_sum")
+    if (
+        config.liquidity_migration_funding_7d_sum_min > -10.0
+        or config.liquidity_migration_funding_7d_sum_max < 10.0
+    ):
+        required_cols.append("funding_rate_7d_sum")
+    if (
+        config.liquidity_migration_open_interest_return_3d_min > -10.0
+        or config.liquidity_migration_open_interest_return_3d_max < 10.0
+    ):
+        required_cols.append("open_interest_return_3d")
+    if (
+        config.liquidity_migration_open_interest_return_7d_min > -10.0
+        or config.liquidity_migration_open_interest_return_7d_max < 10.0
+    ):
+        required_cols.append("open_interest_return_7d")
+    if config.liquidity_migration_volume_to_oi_quote_min > 0.0 or config.liquidity_migration_volume_to_oi_quote_max > 0.0:
+        required_cols.append("volume_to_open_interest_quote")
+    if (
+        config.liquidity_migration_mark_index_basis_3d_mean_min > -10.0
+        or config.liquidity_migration_mark_index_basis_3d_mean_max < 10.0
+    ):
+        required_cols.append("mark_index_basis_3d_mean")
+    if (
+        config.liquidity_migration_premium_index_3d_mean_min > -10.0
+        or config.liquidity_migration_premium_index_3d_mean_max < 10.0
+    ):
+        required_cols.append("premium_index_3d_mean")
+    if (
+        config.liquidity_migration_taker_imbalance_1d_min > -1.0
+        or config.liquidity_migration_taker_imbalance_1d_max < 1.0
+    ):
+        required_cols.append("taker_imbalance_1d")
+    if (
+        config.liquidity_migration_taker_imbalance_3d_min > -1.0
+        or config.liquidity_migration_taker_imbalance_3d_max < 1.0
+    ):
+        required_cols.append("taker_imbalance_3d")
+    if config.liquidity_migration_market_pct_up_max < 1.0:
+        required_cols.append("market_pct_up_1d")
+        if config.liquidity_migration_hot_market_day_return_min < 10.0:
+            required_cols.append("daily_return_1d")
+    if config.liquidity_migration_market_median_return_30d_max < 10.0:
+        required_cols.append("market_median_return_30d_sum")
+    if config.liquidity_migration_market_median_return_7d_max < 10.0:
+        required_cols.append("market_median_return_7d_sum")
+    if config.liquidity_migration_market_pct_up_30d_max < 1.0:
+        required_cols.append("market_pct_up_30d_mean")
+    if config.liquidity_migration_market_pct_up_7d_max < 1.0:
+        required_cols.append("market_pct_up_7d_mean")
+    if (
+        config.liquidity_migration_close_location_min > 0.0
+        or config.liquidity_migration_close_location_max < 1.0
+    ):
+        required_cols.append("signal_day_close_location")
+    if config.liquidity_migration_signal_last6h_turnover_share_max < 1.0:
+        required_cols.append("signal_day_last6h_turnover_share")
+    if config.liquidity_migration_pit_age_days_min > 0 or config.liquidity_migration_pit_age_days_max > 0:
+        required_cols.append("pit_age_days")
+    if not _has_columns(base, *required_cols):
+        return base.head(0)
+    predicate = (
+        (pl.col(rank_col) >= top_cut)
+        & (pl.col(f"prior7_{rank_col}") < top_cut)
+        & ((pl.col("prior7_liquidity_rank") - pl.col("liquidity_rank")) >= config.liquidity_migration_rank_improvement_min)
+    )
+    if config.liquidity_migration_turnover_ratio_min > 0.0:
+        predicate = (
+            predicate
+            & (pl.col("prior7_turnover_quote_mean") > 0.0)
+            & (
+                (pl.col("turnover_quote") / pl.col("prior7_turnover_quote_mean"))
+                >= config.liquidity_migration_turnover_ratio_min
+            )
+        )
+    if config.liquidity_migration_prior_rank_min > 0:
+        predicate = predicate & (pl.col("prior7_liquidity_rank") >= config.liquidity_migration_prior_rank_min)
+    if config.liquidity_migration_current_rank_max > 0:
+        predicate = predicate & (pl.col("liquidity_rank") <= config.liquidity_migration_current_rank_max)
+    if config.liquidity_migration_event_rank_fraction_max > 0.0:
+        predicate = predicate & (pl.col(rank_col) <= config.liquidity_migration_event_rank_fraction_max)
+    if (
+        config.liquidity_migration_event_rank_fraction_exclude_min > 0.0
+        or config.liquidity_migration_event_rank_fraction_exclude_max > 0.0
+    ):
+        predicate = predicate & (
+            (pl.col(rank_col) <= config.liquidity_migration_event_rank_fraction_exclude_min)
+            | (pl.col(rank_col) >= config.liquidity_migration_event_rank_fraction_exclude_max)
+        )
+    if config.liquidity_migration_score_max > 0.0:
+        predicate = predicate & (pl.col(score_col) <= config.liquidity_migration_score_max)
+    if config.liquidity_migration_day_return_min > -1.0 or config.liquidity_migration_day_return_max < 10.0:
+        predicate = (
+            predicate
+            & pl.col("daily_return_1d").is_not_null()
+            & (pl.col("daily_return_1d") >= config.liquidity_migration_day_return_min)
+            & (pl.col("daily_return_1d") <= config.liquidity_migration_day_return_max)
+        )
+    if config.liquidity_migration_return_7d_min > -10.0 or config.liquidity_migration_return_7d_max < 10.0:
+        predicate = (
+            predicate
+            & pl.col("return_7d").is_not_null()
+            & (pl.col("return_7d") >= config.liquidity_migration_return_7d_min)
+            & (pl.col("return_7d") <= config.liquidity_migration_return_7d_max)
+        )
+    if (
+        config.liquidity_migration_residual_return_min > -10.0
+        or config.liquidity_migration_residual_return_max < 10.0
+    ):
+        predicate = (
+            predicate
+            & pl.col("residual_return_1d").is_not_null()
+            & (pl.col("residual_return_1d") >= config.liquidity_migration_residual_return_min)
+            & (pl.col("residual_return_1d") <= config.liquidity_migration_residual_return_max)
+        )
+    if config.liquidity_migration_close_to_high_7d_min > -10.0:
+        predicate = (
+            predicate
+            & pl.col("close_to_high_7d").is_not_null()
+            & (pl.col("close_to_high_7d") >= config.liquidity_migration_close_to_high_7d_min)
+        )
+    if config.liquidity_migration_close_to_high_30d_min > -10.0:
+        predicate = (
+            predicate
+            & pl.col("close_to_high_30d").is_not_null()
+            & (pl.col("close_to_high_30d") >= config.liquidity_migration_close_to_high_30d_min)
+        )
+    if (
+        config.liquidity_migration_prior30_max_return_min > -10.0
+        or config.liquidity_migration_prior30_max_return_max < 10.0
+    ):
+        predicate = (
+            predicate
+            & pl.col("prior30_max_daily_return").is_not_null()
+            & (pl.col("prior30_max_daily_return") >= config.liquidity_migration_prior30_max_return_min)
+            & (pl.col("prior30_max_daily_return") <= config.liquidity_migration_prior30_max_return_max)
+        )
+    if (
+        config.liquidity_migration_prior7_return_volatility_min > 0.0
+        or config.liquidity_migration_prior7_return_volatility_max < 10.0
+    ):
+        predicate = (
+            predicate
+            & pl.col("prior7_return_volatility").is_not_null()
+            & (pl.col("prior7_return_volatility") >= config.liquidity_migration_prior7_return_volatility_min)
+            & (pl.col("prior7_return_volatility") <= config.liquidity_migration_prior7_return_volatility_max)
+        )
+    if config.liquidity_migration_intraday_range_max < 10.0:
+        predicate = (
+            predicate
+            & pl.col("intraday_range_1d").is_not_null()
+            & (pl.col("intraday_range_1d") <= config.liquidity_migration_intraday_range_max)
+        )
+    if (
+        config.liquidity_migration_funding_rate_last_min > -10.0
+        or config.liquidity_migration_funding_rate_last_max < 10.0
+    ):
+        predicate = (
+            predicate
+            & pl.col("funding_rate_last").is_not_null()
+            & (pl.col("funding_rate_last") >= config.liquidity_migration_funding_rate_last_min)
+            & (pl.col("funding_rate_last") <= config.liquidity_migration_funding_rate_last_max)
+        )
+    if (
+        config.liquidity_migration_funding_3d_sum_min > -10.0
+        or config.liquidity_migration_funding_3d_sum_max < 10.0
+    ):
+        predicate = (
+            predicate
+            & pl.col("funding_rate_3d_sum").is_not_null()
+            & (pl.col("funding_rate_3d_sum") >= config.liquidity_migration_funding_3d_sum_min)
+            & (pl.col("funding_rate_3d_sum") <= config.liquidity_migration_funding_3d_sum_max)
+        )
+    if (
+        config.liquidity_migration_funding_7d_sum_min > -10.0
+        or config.liquidity_migration_funding_7d_sum_max < 10.0
+    ):
+        predicate = (
+            predicate
+            & pl.col("funding_rate_7d_sum").is_not_null()
+            & (pl.col("funding_rate_7d_sum") >= config.liquidity_migration_funding_7d_sum_min)
+            & (pl.col("funding_rate_7d_sum") <= config.liquidity_migration_funding_7d_sum_max)
+        )
+    if (
+        config.liquidity_migration_open_interest_return_3d_min > -10.0
+        or config.liquidity_migration_open_interest_return_3d_max < 10.0
+    ):
+        predicate = (
+            predicate
+            & pl.col("open_interest_return_3d").is_not_null()
+            & (pl.col("open_interest_return_3d") >= config.liquidity_migration_open_interest_return_3d_min)
+            & (pl.col("open_interest_return_3d") <= config.liquidity_migration_open_interest_return_3d_max)
+        )
+    if (
+        config.liquidity_migration_open_interest_return_7d_min > -10.0
+        or config.liquidity_migration_open_interest_return_7d_max < 10.0
+    ):
+        predicate = (
+            predicate
+            & pl.col("open_interest_return_7d").is_not_null()
+            & (pl.col("open_interest_return_7d") >= config.liquidity_migration_open_interest_return_7d_min)
+            & (pl.col("open_interest_return_7d") <= config.liquidity_migration_open_interest_return_7d_max)
+        )
+    if config.liquidity_migration_volume_to_oi_quote_min > 0.0 or config.liquidity_migration_volume_to_oi_quote_max > 0.0:
+        predicate = predicate & pl.col("volume_to_open_interest_quote").is_not_null()
+        if config.liquidity_migration_volume_to_oi_quote_min > 0.0:
+            predicate = predicate & (
+                pl.col("volume_to_open_interest_quote") >= config.liquidity_migration_volume_to_oi_quote_min
+            )
+        if config.liquidity_migration_volume_to_oi_quote_max > 0.0:
+            predicate = predicate & (
+                pl.col("volume_to_open_interest_quote") <= config.liquidity_migration_volume_to_oi_quote_max
+            )
+    if (
+        config.liquidity_migration_mark_index_basis_3d_mean_min > -10.0
+        or config.liquidity_migration_mark_index_basis_3d_mean_max < 10.0
+    ):
+        predicate = (
+            predicate
+            & pl.col("mark_index_basis_3d_mean").is_not_null()
+            & (pl.col("mark_index_basis_3d_mean") >= config.liquidity_migration_mark_index_basis_3d_mean_min)
+            & (pl.col("mark_index_basis_3d_mean") <= config.liquidity_migration_mark_index_basis_3d_mean_max)
+        )
+    if (
+        config.liquidity_migration_premium_index_3d_mean_min > -10.0
+        or config.liquidity_migration_premium_index_3d_mean_max < 10.0
+    ):
+        predicate = (
+            predicate
+            & pl.col("premium_index_3d_mean").is_not_null()
+            & (pl.col("premium_index_3d_mean") >= config.liquidity_migration_premium_index_3d_mean_min)
+            & (pl.col("premium_index_3d_mean") <= config.liquidity_migration_premium_index_3d_mean_max)
+        )
+    if (
+        config.liquidity_migration_taker_imbalance_1d_min > -1.0
+        or config.liquidity_migration_taker_imbalance_1d_max < 1.0
+    ):
+        predicate = (
+            predicate
+            & pl.col("taker_imbalance_1d").is_not_null()
+            & (pl.col("taker_imbalance_1d") >= config.liquidity_migration_taker_imbalance_1d_min)
+            & (pl.col("taker_imbalance_1d") <= config.liquidity_migration_taker_imbalance_1d_max)
+        )
+    if (
+        config.liquidity_migration_taker_imbalance_3d_min > -1.0
+        or config.liquidity_migration_taker_imbalance_3d_max < 1.0
+    ):
+        predicate = (
+            predicate
+            & pl.col("taker_imbalance_3d").is_not_null()
+            & (pl.col("taker_imbalance_3d") >= config.liquidity_migration_taker_imbalance_3d_min)
+            & (pl.col("taker_imbalance_3d") <= config.liquidity_migration_taker_imbalance_3d_max)
+        )
+    if config.liquidity_migration_market_pct_up_max < 1.0:
+        market_ok = pl.col("market_pct_up_1d").is_not_null() & (
+            pl.col("market_pct_up_1d") <= config.liquidity_migration_market_pct_up_max
+        )
+        if config.liquidity_migration_hot_market_day_return_min < 10.0:
+            hot_coin_ok = pl.col("daily_return_1d").is_not_null() & (
+                pl.col("daily_return_1d") >= _liquidity_migration_hot_return_threshold_expr(config)
+            )
+            predicate = predicate & (market_ok | hot_coin_ok)
+        else:
+            predicate = predicate & market_ok
+    if config.liquidity_migration_market_median_return_30d_max < 10.0:
+        predicate = predicate & (
+            pl.col("market_median_return_30d_sum").is_not_null()
+            & (pl.col("market_median_return_30d_sum") <= config.liquidity_migration_market_median_return_30d_max)
+        )
+    if config.liquidity_migration_market_median_return_7d_max < 10.0:
+        predicate = predicate & (
+            pl.col("market_median_return_7d_sum").is_not_null()
+            & (pl.col("market_median_return_7d_sum") <= config.liquidity_migration_market_median_return_7d_max)
+        )
+    if config.liquidity_migration_market_pct_up_30d_max < 1.0:
+        predicate = predicate & (
+            pl.col("market_pct_up_30d_mean").is_not_null()
+            & (pl.col("market_pct_up_30d_mean") <= config.liquidity_migration_market_pct_up_30d_max)
+        )
+    if config.liquidity_migration_market_pct_up_7d_max < 1.0:
+        predicate = predicate & (
+            pl.col("market_pct_up_7d_mean").is_not_null()
+            & (pl.col("market_pct_up_7d_mean") <= config.liquidity_migration_market_pct_up_7d_max)
+        )
+    if (
+        config.liquidity_migration_close_location_min > 0.0
+        or config.liquidity_migration_close_location_max < 1.0
+    ):
+        predicate = (
+            predicate
+            & pl.col("signal_day_close_location").is_not_null()
+            & (pl.col("signal_day_close_location") >= config.liquidity_migration_close_location_min)
+            & (pl.col("signal_day_close_location") <= config.liquidity_migration_close_location_max)
+        )
+    if config.liquidity_migration_signal_last6h_turnover_share_max < 1.0:
+        predicate = (
+            predicate
+            & pl.col("signal_day_last6h_turnover_share").is_not_null()
+            & (
+                pl.col("signal_day_last6h_turnover_share")
+                <= config.liquidity_migration_signal_last6h_turnover_share_max
+            )
+        )
+    if config.liquidity_migration_pit_age_days_min > 0 or config.liquidity_migration_pit_age_days_max > 0:
+        predicate = predicate & pl.col("pit_age_days").is_not_null()
+        if config.liquidity_migration_pit_age_days_min > 0:
+            predicate = predicate & (pl.col("pit_age_days") >= float(config.liquidity_migration_pit_age_days_min))
+        if config.liquidity_migration_pit_age_days_max > 0:
+            predicate = predicate & (pl.col("pit_age_days") <= float(config.liquidity_migration_pit_age_days_max))
+    return base.filter(predicate)
 
 
 def _has_columns(frame: pl.DataFrame, *columns: str) -> bool:
@@ -3872,7 +3885,7 @@ def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) 
     return "\n".join(lines)
 
 
-def _validate_event_config(config: VolumeEventResearchConfig) -> None:
+def _validate_scenario_config(config: VolumeEventResearchConfig) -> None:
     unknown_events = sorted(set(config.event_types) - set(EVENT_TYPES))
     if unknown_events:
         raise ValueError(f"Unknown event type(s): {unknown_events}")
@@ -3891,6 +3904,9 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("take profit pcts must be in [0, 1)")
     if any(item < 0.0 for item in config.cost_multipliers):
         raise ValueError("cost multipliers must be non-negative")
+
+
+def _validate_exit_config(config: VolumeEventResearchConfig) -> None:
     if config.mfe_giveback_trigger_pct < 0.0 or config.mfe_giveback_trigger_pct >= 1.0:
         raise ValueError("mfe_giveback_trigger_pct must be in [0, 1)")
     if not 0.0 <= config.mfe_giveback_retain_pct <= 1.0:
@@ -3907,6 +3923,9 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("failed_fade_close_location_min must be in [0, 1]")
     if config.failed_fade_exit_hours > 0 and config.failed_fade_loss_pct <= 0.0:
         raise ValueError("failed_fade_loss_pct must be positive when failed fade exit is enabled")
+
+
+def _validate_entry_config(config: VolumeEventResearchConfig) -> None:
     if config.gross_exposure <= 0.0:
         raise ValueError("gross_exposure must be positive")
     if config.max_active_symbols <= 0:
@@ -3949,6 +3968,9 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("entry_execution_min_turnover_quote must be non-negative")
     if not 0.0 <= config.entry_execution_veto_close_location_max <= 1.0:
         raise ValueError("entry_execution_veto_close_location_max must be in [0, 1]")
+
+
+def _validate_universe_config(config: VolumeEventResearchConfig) -> None:
     if not 0.0 < config.rank_exit_threshold <= 1.0:
         raise ValueError("rank_exit_threshold must be in (0, 1]")
     if config.universe_rank_min <= 0:
@@ -3963,6 +3985,9 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("tail_rank_min must be <= tail_rank_max")
     if config.tail_rank_improvement_min < 0:
         raise ValueError("tail_rank_improvement_min must be non-negative")
+
+
+def _validate_liquidity_migration_config(config: VolumeEventResearchConfig) -> None:
     if config.liquidity_migration_rank_improvement_min < 0:
         raise ValueError("liquidity_migration_rank_improvement_min must be non-negative")
     if config.liquidity_migration_turnover_ratio_min < 0.0:
@@ -4102,6 +4127,9 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("liquidity_migration_crowding_filter is unknown")
     if config.liquidity_migration_crowding_min_signals <= 0:
         raise ValueError("liquidity_migration_crowding_min_signals must be positive")
+
+
+def _validate_per_event_config(config: VolumeEventResearchConfig) -> None:
     if config.market_median_return_1d_min > config.market_median_return_1d_max:
         raise ValueError("market_median_return_1d_min must be <= market_median_return_1d_max")
     if not 0.0 <= config.market_pct_up_1d_min <= 1.0:
@@ -4186,15 +4214,21 @@ def _validate_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("long_breakout_prior20_high_buffer_min must be <= long_breakout_prior20_high_buffer_max")
 
 
+def _validate_event_config(config: VolumeEventResearchConfig) -> None:
+    _validate_scenario_config(config)
+    _validate_exit_config(config)
+    _validate_entry_config(config)
+    _validate_universe_config(config)
+    _validate_liquidity_migration_config(config)
+    _validate_per_event_config(config)
+
+
 def _window_config(config: VolumeEventResearchConfig) -> TradeLifecycleConfig:
     return TradeLifecycleConfig(start_date=config.start_date, end_date=config.end_date, min_symbols=4)
 
 
 def _date_ms(value: str) -> int:
-    parsed = _date_boundary_ms(value)
-    if parsed is None:
-        raise ValueError(f"Invalid date: {value}")
-    return parsed
+    return date_ms(value)
 
 
 def _date_range(df: pl.DataFrame) -> dict[str, str | None]:
@@ -4212,13 +4246,7 @@ def _iso_month(ts_ms: int) -> str:
 
 
 def _pct(value: Any) -> str:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return ""
-    if not math.isfinite(number):
-        return ""
-    return f"{number:.2%}"
+    return pct(value)
 
 
 def _num(value: Any) -> str:

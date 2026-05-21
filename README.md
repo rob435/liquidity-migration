@@ -1,222 +1,42 @@
 # liquidity-migration
 
-Bybit demo-account research system for the selected full-PIT liquidity-migration short strategy.
+A research codebase for a Bybit liquidity-migration short strategy — a
+cross-sectional strategy that ranks the perpetual-futures universe by a
+volume / liquidity-migration signal and shorts the weakest-ranked names.
 
-## Current Objective
+## Status: active research — refinement phase
 
-The repo now has one strategy focus: event-driven PIT liquidity migration. The old fixed daily-close short-fade demo stack has been removed from the active code path so it cannot keep steering work back to calendar-clock entries.
+Extensive point-in-time, costed backtesting and an adversarial model-court
+review (`strategy-tribunal`) established that the signal is **statistically
+real**: it has genuine cross-sectional rank skill and survives a full
+negative-control battery (block-bootstrap, random-sign, inverted-edge).
 
-The private Bybit client remains demo-only by design: `demo=False` is refused in code. Real-money trading requires a separate explicit implementation decision.
+It is **not yet deployable as a standalone strategy**. The edge is
+regime-conditional — it monetizes in crash regimes and is flat-to-negative
+through alt-bull markets — and the standalone configuration failed promotion
+in the tribunal (funding costs unmodeled; only 2 of 3 pre-registered
+out-of-sample windows positive).
 
-Current operational proof and deployment status are summarized in
-`docs/system_status.md`; dated one-off audit logs have been retired from the
-repo surface.
-Research-only portfolio hedge overlays are available through
-`portfolio-hedge`; the current candidate is shadow-only and not deployed.
-Canonical data-root rules are summarized in `docs/data_roots.md`. Serious
-research defaults to `~/SHARED_DATA/bybit_fullpit_1h`; the live
-demo ledgers intentionally stay under `data/bybit-demo-event`.
+The signal is real enough to be worth refining. The current research focus is
+**regime-aware refinement**: gating the strategy with a regime / crash detector
+so it is active only when the regime pays, and modeling funding costs. See
+`docs/research_findings.md` for the full verdict and the roadmap.
 
-## Active Strategy
+Nothing is deployed — no live or demo trading is running. The Bybit private
+client is demo-only by design (`demo=False` is refused in code).
 
-Command:
+## What the repo contains
 
-```bash
-python -m liquidity_migration --config configs/volume_alpha.default.yaml volume-events
-```
+- `liquidity_migration/` — Python package: data ingestion, point-in-time
+  archive builders, the backtest / event engine, and the
+  `python -m liquidity_migration` CLI (16 subcommands; run `--help`).
+- `tests/` — `.venv/bin/python -m pytest -q`.
+- `docs/research_findings.md` — current research verdict and refinement roadmap.
+- `docs/backtesting_errors_we_never_repeat.md` — research methodology standard.
+- `docs/data_roots.md` — data-root contract (research / live demo / OOS).
+- `docs/system_status.md` — strategy / deployment status.
+- `docs/event_demo_daemon.md` — demo forward-cycle daemon execution runbook.
+- `.claude/` — Claude Code skills and an MCP server for working in this repo.
+- `AGENTS.md` — repo rules.
 
-The default config resolves `DATA_ROOT` to
-`~/SHARED_DATA/bybit_fullpit_1h`. Pass `--data-root` only when
-intentionally running a different audited root.
-
-The `volume-events` defaults are the selected strategy:
-
-- Event: `liquidity_migration`
-- Side: reversal, which means short
-- Threshold: top 40% dollar-volume rank migration
-- Universe: point-in-time liquidity rank 31-150
-- Exclusions: stable/peg perps only, including failed peg remnants such as `USTCUSDT`
-- Rank improvement: at least 150 places versus the 7-day prior rank
-- Turnover expansion: current turnover / prior 7-day mean turnover at least 6.0
-- Overheat filter: event rank fraction no higher than 0.90
-- Idiosyncratic move gate: `daily_return_1d - market_median_return_1d >= +8%`
-- Regime gate: `market_pct_up_1d <= 0.65 OR coin daily_return_1d` clears the adaptive 16% +/- 1.5% hot-market band
-- Strong-close gate: signal-day close location at least 0.45
-- Maturity gate: PIT/listing age at least 90 days
-- Crowding veto: `union_pathology` same-entry-hour pathology filter
-- Research-only crowding classifier: `model_v1` exists for audits and
-  experiments, but is not promoted or deployed
-- Entry policy: `promoted_quality_squeeze`; standard events enter 1 hour after the daily signal close, while promoted-grade squeeze events wait for a causal 25 bps high-since-signal giveback after a 25 bps pop or enter on the 4h deadline
-- Research-only execution variants: `execution_pullback_guard`,
-  `tiered_execution_sniper`, and `entry_execution_veto_close_location_max`
-  exist for audits, but are not promoted or deployed
-- Research-only late-turnover concentration gate:
-  `--liquidity-migration-signal-last6h-turnover-share-max` exists for audits,
-  defaults disabled, and is not promoted or deployed
-- Exit: event decay, rank exit, 12% fixed stop, 26% fixed take profit, or 3-day max hold
-- Capacity: max 5 active symbols, 5-day symbol cooldown
-- Stop-pressure throttle: pause new entries after 7 realized stops inside 10 days
-- Realized-loss throttle: pause new entries after 6 realized losses inside 5 days
-- Cost model: 3x base round-trip costs
-- Gross exposure: 1.00, split across active capacity
-
-Legacy full-PIT baseline run, 2023-05-03 to 2026-05-03:
-
-- Trades: 516
-- Total return: +1218.79%
-- Max drawdown: -14.54%
-- Max no-new-high stretch: 90 days
-- Worst 90d return: -5.89%
-- Worst split return: +75.64%
-- Average split Sharpe-like: 2.67
-- OOS return: +111.75%
-- Default chart: `volume_event_best_equity_btc.png` with BTC overlay, monthly/growth gridlines, and a monthly performance table
-- Promotion gate: pass
-
-Reference report:
-
-```text
-data/research_reports/research_20260516_promoted_default_after_patch
-```
-
-Promoted research frontier after the same-hour crowding audit, conservative
-quality-squeeze entry router, and TP26 exit update:
-
-- Variant: adaptive hot-band liquidity migration with `union_pathology` crowding veto
-- Report: `/Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/exit_alpha_20260519/promoted_tp_fine_245_280/volume_event_research_report.md`
-- Trades: 448
-- Total return with partial funding data: +2022.17%
-- Max drawdown: -13.72%
-- Worst 90d return: -6.29%
-- Worst split return: +126.03%
-- OOS return: +183.27%
-
-The event set, exits, cooldowns, gross exposure, and crowding decisions are
-unchanged versus the union promoted path except the fixed take-profit moved
-from 25% to 26%. TP26 improved exact-stop total return, minimum split, split
-Sharpe, and OOS without worsening exact-stop max drawdown or worst 90d versus
-TP25. The adverse hourly stop-fill stress family still fails the formal
-drawdown gate, so this remains demo/research evidence rather than real-money
-proof.
-
-This remains the promoted research default for `volume-events`. The live demo
-entry service can run a separate higher-frequency observation profile, described
-below, but that profile is explicitly a demo test system rather than promoted
-alpha.
-
-## Full-PIT Runner
-
-Linux/macOS:
-
-```bash
-bash scripts/run_fullpit_volume_overnight.sh
-```
-
-PowerShell:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\run_fullpit_volume_overnight.ps1
-```
-
-The runner syncs `main`, installs the local Python environment, runs smoke tests, builds/resumes the full Bybit public archive manifest, fills full PIT 1h klines from the Bybit v5 API, validates manifest coverage, then runs the selected liquidity-migration strategy.
-By default it targets the canonical funded root and the end-exclusive
-`2026-05-18` boundary, so the recent 30-day data is included without using the
-temporary recent-download root.
-
-## Model Court
-
-Run the formal promotion court after a `volume-events` report exists:
-
-```bash
-python -m liquidity_migration \
-  --data-root DATA_ROOT \
-  strategy-tribunal \
-  --report-dir DATA_ROOT/reports/volume_event_research \
-  --comparison-csv DATA_ROOT/reports/stress_summary.csv \
-  --comparison-family promoted_funding \
-  --pre-registered-window train:2023-05-03:2024-05-03,validation:2024-05-03:2025-05-03,oos:2025-05-03:2026-05-03 \
-  --execution-data-root DATA_ROOT
-```
-
-The court reads the scenario summary, best trades, baskets, equity curve, and
-stress/sweep CSVs. It writes `strategy_tribunal_report.md/json` plus pairwise
-parameter heatmap CSVs with artifact checks, promotion recap,
-recomputed-vs-reported path consistency, explicit preregistered window results,
-block-bootstrap left-tail stress, random-sign/inverted-edge/shuffled-symbol/
-shuffled-time/shuffled-event negative controls, filtered cost/funding/slippage
-stress diagnostics, monthly regime diagnostics, live-vs-backtest execution
-drift, symbol concentration, and same-hour entry crowding. Use
-`--comparison-family` to keep the audit on the exact strategy family being
-judged. Missing execution data is a `WATCH`, not proof.
-
-## Bybit Demo Forward Runner
-
-One dry-run cycle:
-
-```bash
-python -m liquidity_migration \
-  --data-root data/bybit-demo-event \
-  --config configs/volume_alpha.default.yaml \
-  event-demo-cycle
-```
-
-Continuous demo runner, checking every 5 minutes by script default. The VPS
-systemd entry service intentionally overrides this to `INTERVAL_SECONDS=60` and
-`STRATEGY_PROFILE=demo_relaxed`:
-
-```bash
-TELEGRAM_ENABLED=1 \
-SUBMIT_ORDERS=1 \
-CONFIRM_DEMO_ORDERS=1 \
-BYBIT_DEMO_API_KEY=... \
-BYBIT_DEMO_API_SECRET=... \
-bash scripts/run_bybit_demo_event_engine.sh
-```
-
-Default forward-test behavior:
-
-- `STRATEGY_PROFILE=demo_relaxed` is a test-only relaxed-gate profile. It keeps the same short liquidity-migration idea, `union_pathology` crowding veto, and conservative `promoted_quality_squeeze` router for promoted-grade events, but uses ranks 11-260, no extra current 24h turnover floor, 80-rank improvement, 3.0x turnover expansion, -3% day-return floor, +3% residual-return floor, 0.25 close-location floor, 10 max active symbols, 2-day cooldown, 21% take-profit, and the FF6 failed-fade exit.
-- `demo_relaxed` is the only profile allowed to submit demo entry orders through the live runner. Promoted and experimental variants are shadow challengers unless the champion/challenger manifest is intentionally changed and re-audited.
-- current full-PIT funded observation evidence for `demo_relaxed` TP21 + FF6: 1,300 trades, +353.46% total return, -16.72% max drawdown, -12.72% worst 90d, +23.53% worst split, +165.57% OOS, promotion gate pass. Report: `/Users/jhbvdnsbkvnsd/SHARED_DATA/bybit_fullpit_1h/reports/exit_alpha_20260519/demo_relaxed_failedfade_ff6_tp_sl_fine`.
-- pulls current Bybit USDT perp ranks 1-300 for demo_relaxed mode, then applies the selected strategy profile's rank filter
-- rebuilds recent 1h volume features each cycle from a 45-day lookback, using a forward-demo kline cache to fetch only missing/new bars on normal cycles
-- enters eligible events through the causal entry router, with stale entries skipped after 15 minutes by default
-- sizes each coin from the backtest weight: `gross_exposure / max_active_symbols`, currently `1.00 / 10 = 10.00%` of current Bybit demo USDT equity in demo_relaxed mode
-- uses 2x entry leverage in the continuous runner for margin headroom without changing the notional sizing
-- exits first on every cycle using fixed stop reconciliation, event decay, rank exit, or 3-day max hold
-- sends Telegram status with Bybit demo wallet equity, open positions, position value, and unrealized PnL when `TELEGRAM_ENABLED=1`
-- writes ledgers under `event_demo_trades`, `event_demo_orders`, and `event_demo_cycles`
-- the separate websocket risk watchdog writes latest reports under `reports/event-risk-ws` and keeps timestamped audit copies for startup/material events
-
-Champion/challenger manifest:
-
-```bash
-python -m liquidity_migration \
-  --data-root data/bybit-demo-event \
-  champion-challenger
-```
-
-This writes `reports/champion_challenger/champion_challenger_manifest.md/json`
-with the single order-submitting champion and dry-run/research-only challenger
-commands for current promoted, relaxed-without-crowding, sniper/execution
-variants, and the current hedge overlay.
-
-## Useful Files
-
-- `liquidity_migration/volume_events.py`: active event-driven strategy, full-PIT gates, ledger, reports
-- `liquidity_migration/strategy_tribunal.py`: adversarial robustness audit for completed strategy reports
-- `liquidity_migration/champion_challenger.py`: active demo champion and shadow challenger manifest/audit
-- `liquidity_migration/event_demo.py`: Bybit demo forward-cycle runner for the selected event strategy
-- `liquidity_migration/ws_risk.py`: websocket-first risk watchdog with REST fallback and audit reports
-- `liquidity_migration/archive_manifest.py`: PIT manifest and 1h kline builders
-- `liquidity_migration/volume_features.py`: active daily volume and liquidity-rank feature builder
-- `liquidity_migration/trade_lifecycle.py`: active trade lifecycle, exit, basket, and equity helpers
-- `scripts/run_bybit_demo_event_engine.sh`: continuous Bybit demo forward runner
-- `scripts/run_bybit_demo_ws_risk_engine.sh`: continuous websocket risk watchdog
-- `scripts/run_fullpit_volume_overnight.sh`: selected full-PIT runner
-- `scripts/run_fullpit_volume_overnight.ps1`: PowerShell selected full-PIT runner
-- `deploy/systemd/liquidity-migration-bybit-demo.service`: VPS service definition for the active demo runner
-- `docs/data_roots.md`: canonical research root and live demo root contract
-- `docs/system_status.md`: current deployment and demo order-path proof summary
-- `docs/volume_alpha.md`: strategy notes and current result
-- `docs/bybit_liquidity_migration_system_codex_spec.md`: active system spec
+Python 3.11+.

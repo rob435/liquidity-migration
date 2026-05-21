@@ -27,7 +27,7 @@ those pumps into real trends, hence the continuous regime scaler.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
@@ -41,8 +41,7 @@ from .storage import read_dataset
 from .volume_features import build_volume_features
 from .volume_events import _enriched_event_features, DEFAULT_EXCLUDED_SYMBOLS
 
-MS_PER_HOUR = 3_600_000
-MS_PER_DAY = 24 * MS_PER_HOUR
+from ._common import MS_PER_DAY, MS_PER_HOUR
 
 
 @dataclass(frozen=True, slots=True)

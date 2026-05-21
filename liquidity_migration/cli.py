@@ -125,12 +125,7 @@ def _event_risk_payload_material(payload: dict) -> bool:
     )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Bybit liquidity-migration research CLI.")
-    parser.add_argument("--config", default=None, help="YAML config path. Defaults to built-in research settings.")
-    parser.add_argument("--data-root", default=None, help="Research data root. Overrides config data_root.")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
+def _add_download_data_parser(subparsers) -> None:
     download = subparsers.add_parser("download-data", help="Download or create research datasets.")
     download.add_argument("--fixture", action="store_true", help="Create deterministic tiny fixture data instead of calling Bybit.")
     download.add_argument("--symbols", default="", help="Comma-separated symbols for real Bybit downloads.")
@@ -163,6 +158,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Bybit open-interest interval for download-data open_interest: 5min, 15min, 30min, 1h, 4h, or 1d.",
     )
 
+
+def _add_download_binance_proxy_parser(subparsers) -> None:
     binance_proxy = subparsers.add_parser(
         "download-binance-proxy",
         help="Download Binance USD-M proxy datasets into separate non-Bybit-native tables.",
@@ -183,6 +180,8 @@ def build_parser() -> argparse.ArgumentParser:
     binance_proxy.add_argument("--interval", default="1h", help="Binance kline interval for kline-like datasets.")
     binance_proxy.add_argument("--period", default="1h", help="Binance period for open_interest and taker_flow_1h.")
 
+
+def _add_data_layer_audit_parser(subparsers) -> None:
     data_layer = subparsers.add_parser("data-layer-audit", help="Audit native/proxy data coverage and usable partial windows.")
     data_layer.add_argument("--name", default="serious_data_layer", help="Name used for report folder.")
     data_layer.add_argument("--start", default=None, help="Inclusive date/timestamp filter.")
@@ -196,6 +195,8 @@ def build_parser() -> argparse.ArgumentParser:
     data_layer.add_argument("--min-full-coverage", type=float, default=0.95, help="Coverage threshold for *_FULL status.")
     data_layer.add_argument("--output-dir", default=None, help="Where to write data-layer audit output.")
 
+
+def _add_discover_universe_parser(subparsers) -> None:
     universe = subparsers.add_parser("discover-universe", help="Build a current Bybit USDT perp universe snapshot.")
     universe.add_argument("--name", default="auto", help="Name used for universe report files.")
     universe.add_argument("--rank-start", type=int, default=None, help="First current 24h-turnover rank to include.")
@@ -220,6 +221,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     universe.add_argument("--include-majors", dest="include_majors", action="store_true", help=argparse.SUPPRESS)
 
+
+def _add_archive_manifest_parser(subparsers) -> None:
     archive_manifest = subparsers.add_parser(
         "archive-manifest",
         help="Build a point-in-time symbol/date manifest from Bybit public trade archives.",
@@ -233,6 +236,8 @@ def build_parser() -> argparse.ArgumentParser:
     archive_manifest.add_argument("--max-symbols", type=int, default=0, help="Maximum symbols to scan; 0 disables.")
     archive_manifest.add_argument("--workers", type=int, default=8, help="Directory fetch workers.")
 
+
+def _add_archive_download_klines_parser(subparsers) -> None:
     archive_klines = subparsers.add_parser(
         "archive-download-klines",
         help="Download manifest rows and build 1m klines from Bybit public trade archives.",
@@ -256,6 +261,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Delete locally downloaded raw trade archives after dense 1m klines are written successfully.",
     )
 
+
+def _add_archive_download_klines_1h_parser(subparsers) -> None:
     archive_klines_1h = subparsers.add_parser(
         "archive-download-klines-1h",
         help="Download manifest rows and build 1h klines directly from Bybit public trade archives.",
@@ -279,6 +286,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Delete locally downloaded raw trade archives after 1h klines are written successfully.",
     )
 
+
+def _add_archive_download_klines_1h_api_parser(subparsers) -> None:
     archive_klines_1h_api = subparsers.add_parser(
         "archive-download-klines-1h-api",
         help="Fill PIT 1h klines from Bybit v5 market kline API using archive manifest membership.",
@@ -309,6 +318,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     archive_klines_1h_api.add_argument("--timeout-seconds", type=int, default=30, help="HTTP timeout per API request.")
 
+
+def _add_volume_events_parser(subparsers) -> None:
     volume_events = subparsers.add_parser("volume-events", help="Run the selected event-driven liquidity-migration strategy.")
     event_defaults = VolumeEventResearchConfig()
     volume_events.add_argument("--event-types", default=",".join(event_defaults.event_types), help="Comma-separated event families.")
@@ -351,7 +362,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--failed-fade-loss-pct",
         type=float,
         default=event_defaults.failed_fade_loss_pct,
-        help="Failed-fade exit: side-aware close loss threshold, e.g. 0.025 exits a short down 2.5%.",
+        help="Failed-fade exit: side-aware close loss threshold, e.g. 0.025 exits a short down 2.5%%.",
     )
     volume_events.add_argument(
         "--failed-fade-close-location-min",
@@ -1143,6 +1154,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     volume_events.add_argument("--report-dir", default=None)
 
+
+def _add_strategy_tribunal_parser(subparsers) -> None:
     tribunal_defaults = StrategyTribunalConfig()
     tribunal = subparsers.add_parser(
         "strategy-tribunal",
@@ -1178,6 +1191,8 @@ def build_parser() -> argparse.ArgumentParser:
     tribunal.add_argument("--bootstrap-block-size", type=int, default=tribunal_defaults.bootstrap_block_size)
     tribunal.add_argument("--random-seed", type=int, default=tribunal_defaults.random_seed)
 
+
+def _add_portfolio_hedge_parser(subparsers) -> None:
     hedge = subparsers.add_parser(
         "portfolio-hedge",
         help="Overlay candidate long ledgers on a promoted short report and score hedge behavior.",
@@ -1191,6 +1206,8 @@ def build_parser() -> argparse.ArgumentParser:
     hedge.add_argument("--hedge-weights", default="0.25,0.5,1.0", help="Comma-separated long overlay weights.")
     hedge.add_argument("--report-dir", required=True, help="Directory for portfolio hedge report output.")
 
+
+def _add_feature_factory_parser(subparsers) -> None:
     feature_factory = subparsers.add_parser(
         "feature-factory",
         help="Audit causal research features in a completed volume-events trade ledger.",
@@ -1206,6 +1223,8 @@ def build_parser() -> argparse.ArgumentParser:
     feature_factory.add_argument("--shuffle-samples", type=int, default=64, help="Shuffled-feature controls per feature.")
     feature_factory.add_argument("--random-seed", type=int, default=17)
 
+
+def _add_champion_challenger_parser(subparsers) -> None:
     champion_challenger = subparsers.add_parser(
         "champion-challenger",
         help="Write and audit the active demo champion plus dry-run shadow challenger manifest.",
@@ -1216,6 +1235,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Where to write the manifest. Defaults to DATA_ROOT/reports/champion_challenger.",
     )
 
+
+def _add_event_demo_cycle_parser(subparsers) -> None:
     event_demo = subparsers.add_parser(
         "event-demo-cycle",
         help="Run one frequent Bybit demo forward-testing cycle for the selected event strategy.",
@@ -1271,6 +1292,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Seconds between cycles in --daemon mode. Ignored otherwise.",
     )
 
+
+def _add_event_risk_cycle_parser(subparsers) -> None:
     event_risk = subparsers.add_parser(
         "event-risk-cycle",
         help="Run one fast exit-only Bybit demo risk cycle for open event positions.",
@@ -1304,6 +1327,8 @@ def build_parser() -> argparse.ArgumentParser:
     event_risk.add_argument("--stop-tolerance-bps", type=float, default=risk_defaults.stop_tolerance_bps)
     event_risk.add_argument("--data-name", default=risk_defaults.data_name)
 
+
+def _add_event_risk_ws_parser(subparsers) -> None:
     event_ws_risk = subparsers.add_parser(
         "event-risk-ws",
         help="Run the exchange-stop-first WebSocket Bybit demo risk daemon.",
@@ -1344,6 +1369,30 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     event_ws_risk.add_argument("--data-name", default=ws_risk_defaults.data_name)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Bybit liquidity-migration research CLI.")
+    parser.add_argument("--config", default=None, help="YAML config path. Defaults to built-in research settings.")
+    parser.add_argument("--data-root", default=None, help="Research data root. Overrides config data_root.")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    _add_download_data_parser(subparsers)
+    _add_download_binance_proxy_parser(subparsers)
+    _add_data_layer_audit_parser(subparsers)
+    _add_discover_universe_parser(subparsers)
+    _add_archive_manifest_parser(subparsers)
+    _add_archive_download_klines_parser(subparsers)
+    _add_archive_download_klines_1h_parser(subparsers)
+    _add_archive_download_klines_1h_api_parser(subparsers)
+    _add_volume_events_parser(subparsers)
+    _add_strategy_tribunal_parser(subparsers)
+    _add_portfolio_hedge_parser(subparsers)
+    _add_feature_factory_parser(subparsers)
+    _add_champion_challenger_parser(subparsers)
+    _add_event_demo_cycle_parser(subparsers)
+    _add_event_risk_cycle_parser(subparsers)
+    _add_event_risk_ws_parser(subparsers)
 
     return parser
 

@@ -5,6 +5,8 @@ from typing import Any
 
 import polars as pl
 
+from ._common import pct
+
 SPLITS = (
     ("train_2023_2024", "2023-05-03", "2024-05-03"),
     ("validation_2024_2025", "2024-05-03", "2025-05-03"),
@@ -181,8 +183,4 @@ def _split_returns(daily: pl.DataFrame) -> list[tuple[str, float]]:
 
 
 def _pct(value: Any) -> str:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        number = 0.0
-    return f"{number:.2%}"
+    return pct(value, invalid="0.00%")

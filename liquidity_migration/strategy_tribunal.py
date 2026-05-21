@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +12,7 @@ import polars as pl
 from liquidity_migration.crowding import audit_crowding_model
 from liquidity_migration.storage import read_dataset
 
-MS_PER_HOUR = 60 * 60 * 1000
-MS_PER_DAY = 24 * MS_PER_HOUR
+from ._common import MS_PER_HOUR, date_ms, finite_float, pct
 
 
 @dataclass(frozen=True, slots=True)
@@ -1428,13 +1426,7 @@ def _json_ready(value: Any) -> Any:
 
 
 def _finite_float(value: Any) -> float:
-    if value is None:
-        return 0.0
-    try:
-        output = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    return output if math.isfinite(output) else 0.0
+    return finite_float(value, default=0.0)
 
 
 def _quantile(values: list[Any], q: float) -> float:
@@ -1443,16 +1435,7 @@ def _quantile(values: list[Any], q: float) -> float:
 
 
 def _date_ms(value: str) -> int:
-    raw = value.strip()
-    if len(raw) == 10:
-        dt = datetime.fromisoformat(raw).replace(tzinfo=timezone.utc)
-    else:
-        dt = datetime.fromisoformat(raw)
-        if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
-        else:
-            dt = dt.astimezone(timezone.utc)
-    return int(dt.timestamp() * 1000)
+    return date_ms(value)
 
 
 def _boolish(value: Any) -> bool:
@@ -1464,8 +1447,7 @@ def _boolish(value: Any) -> bool:
 
 
 def _pct(value: Any) -> str:
-    number = _finite_float(value)
-    return f"{number:.2%}"
+    return pct(value, invalid="0.00%")
 
 
 def _num(value: Any) -> str:
