@@ -36,8 +36,10 @@ through `strategy-tribunal`, and the forward test itself, is the open work.
 
 ## Deployment status
 
-- The Singapore VPS demo runs the canonical `promoted` + close-0.30 strategy in
-  paper forward testing against the Bybit demo account. No real-money trading;
-  the private client remains demo-only by design (`demo=False` is refused).
-- The earlier `demo_relaxed` plumbing-test profile was retired from the VPS on
-  2026-05-21 when the forward test switched to the canonical strategy.
+- The VPS demo currently still runs the `demo_relaxed` profile. Switching the
+  forward test to the canonical `promoted` + close-0.30 strategy is **pending**:
+  the runner (`scripts/run_bybit_demo_event_engine.sh`) hard-restricts demo order
+  submission to the `demo_relaxed` profile (the champion/challenger guard), so
+  running `promoted` as a submitting demo requires changing that guard first.
+- No real-money trading; the private client remains demo-only by design
+  (`demo=False` is refused).
