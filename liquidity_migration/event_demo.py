@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import threading
@@ -41,6 +42,8 @@ from .volume_events import (
     _validate_event_config,
 )
 
+
+_logger = logging.getLogger("liquidity_migration.event_demo")
 
 PROMOTED_DEMO_STRATEGY_ID = "liqmig_union_q40_h3_tp26_g100_qsqueeze"
 DEMO_RELAXED_STRATEGY_ID = "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6"
@@ -135,13 +138,35 @@ def run_event_demo_cycle(
     with exclusive_file_lock(root / ".locks" / "event_demo_cycle.lock", stale_seconds=900):
         mark_stage("cycle_lock_wait")
         public = market_client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
-        instruments = _normalize_instruments(public.get_instruments_info())
+        instruments = _demo_instruments(public, cache_root=root, now_ms=cycle_now_ms)
         tickers = _normalize_tickers(public.get_tickers())
         universe = _build_demo_universe(instruments, tickers, config=demo, snapshot_ts_ms=cycle_now_ms)
         symbols = universe["symbol"].to_list() if not universe.is_empty() else []
         if not symbols:
             raise RuntimeError("Bybit demo event cycle found no current tradable symbols after universe filters")
         mark_stage("universe")
+
+        # The private REST snapshots (wallet equity, open orders, positions) are
+        # independent of the public klines/features path, so we fetch them on a
+        # background thread that overlaps it. _build_private_client does no
+        # network in __init__; the worker is the only thread that touches the
+        # client, and the main thread joins before its first use below, so the
+        # client is never accessed concurrently. timing_private_snapshots_ms
+        # then measures only the residual wait left after the overlap.
+        trading_client = private_client
+        if trading_client is None and (demo.submit_orders or (demo.telegram and _private_credentials_present())):
+            trading_client = _build_private_client(config)
+        snapshot_result: dict[str, Any] = {}
+
+        def _run_private_snapshots() -> None:
+            try:
+                snapshot_result.update(_collect_private_snapshots(trading_client, demo))
+            except Exception as exc:  # noqa: BLE001 - a cycle must never crash on a dead snapshot thread
+                _logger.exception("private snapshot worker failed: %s", exc)
+                snapshot_result.update(_collect_private_snapshots(None, demo))
+
+        snapshot_thread = threading.Thread(target=_run_private_snapshots, daemon=True)
+        snapshot_thread.start()
 
         start_ms, end_ms = _kline_window(cycle_now_ms, lookback_days=demo.lookback_days)
         klines, kline_cache_stats = _download_recent_1h_klines(
@@ -154,7 +179,7 @@ def run_event_demo_cycle(
             cache_root=root,
         )
         mark_stage("klines")
-        features = _build_demo_features(klines, universe)
+        features = _build_demo_features(klines, universe, cache_root=root)
         mark_stage("features")
         score_name, score_col = _event_score(strategy.event_types[0])
         scenario = _selected_scenario(strategy)
@@ -167,19 +192,15 @@ def run_event_demo_cycle(
         all_orders = read_dataset(root, "event_demo_orders")
         mark_stage("signal_prep")
 
-        trading_client = private_client
-        if trading_client is None and (demo.submit_orders or (demo.telegram and _private_credentials_present())):
-            trading_client = _build_private_client(config)
-        wallet_error = ""
-        if trading_client is not None:
-            equity_usdt, wallet_error = _safe_wallet_equity_usdt(trading_client, demo=demo)
-        else:
-            equity_usdt = demo.fallback_equity_usdt
-
-        raw_open_orders, bybit_open_order_error = _safe_open_orders(trading_client, settle_coin=demo.settle_coin)
+        snapshot_thread.join()
+        equity_usdt = snapshot_result["equity_usdt"]
+        wallet_error = snapshot_result["wallet_error"]
+        raw_open_orders = snapshot_result["raw_open_orders"]
+        bybit_open_order_error = snapshot_result["open_order_error"]
+        raw_positions = snapshot_result["raw_positions"]
+        bybit_position_error = snapshot_result["position_error"]
         live_exit_order_symbols = _live_open_order_symbols(raw_open_orders, reduce_only=True)
         live_entry_order_symbols = _live_open_order_symbols(raw_open_orders, reduce_only=False)
-        raw_positions, bybit_position_error = _safe_raw_positions(trading_client, settle_coin=demo.settle_coin)
         live_position_symbols = set(_active_position_by_symbol(raw_positions))
         mark_stage("private_snapshots")
 
@@ -349,13 +370,15 @@ def run_event_demo_cycle(
         if trading_client is None and demo.telegram:
             bybit_position_error = "Bybit private client unavailable; set BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET"
         elif exit_order_rows or entry_order_rows:
-            refreshed_raw_positions, refreshed_position_error = _safe_raw_positions(trading_client, settle_coin=demo.settle_coin)
+            (
+                (refreshed_raw_positions, refreshed_position_error),
+                (refreshed_open_orders, refreshed_open_order_error),
+            ) = _refresh_positions_and_orders(trading_client, settle_coin=demo.settle_coin)
             if refreshed_position_error:
                 bybit_position_error = refreshed_position_error
             else:
                 raw_positions = refreshed_raw_positions
                 bybit_position_error = ""
-            refreshed_open_orders, refreshed_open_order_error = _safe_open_orders(trading_client, settle_coin=demo.settle_coin)
             if refreshed_open_order_error:
                 bybit_open_order_error = refreshed_open_order_error
             else:
@@ -466,7 +489,11 @@ def run_event_demo_cycle(
         cycle_row["cycle_elapsed_pre_persist_ms"] = round((time.perf_counter() - cycle_perf_start) * 1000.0, 3)
         payload["cycle"] = cycle_row
         persist_perf_start = time.perf_counter()
-        write_dataset(pl.DataFrame([cycle_row]), root, "event_demo_cycles", partition_by=())
+        # Partition by date: event_demo_cycles is append-only telemetry, never
+        # read back inside a cycle. With partition_by=() the whole dataset was
+        # read + rewritten every cycle, so the per-cycle write cost grew without
+        # bound. Date partitioning caps each write to the current day's rows.
+        write_dataset(pl.DataFrame([cycle_row]), root, "event_demo_cycles", partition_by=("date",))
         report_path = report_dir / f"event_demo_cycle_{cycle_id}.json"
         report_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         (report_dir / "latest_event_demo_cycle.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
@@ -475,6 +502,55 @@ def run_event_demo_cycle(
         cycle_row["cycle_elapsed_ms"] = round((time.perf_counter() - cycle_perf_start) * 1000.0, 3)
         payload["cycle"] = cycle_row
         return payload
+
+
+def warm_demo_kline_cache(
+    data_root: str | Path,
+    *,
+    config: ResearchConfig,
+    demo_config: EventDemoCycleConfig | None = None,
+    market_client: Any | None = None,
+    now_ms: int | None = None,
+) -> dict[str, int]:
+    """Pre-fetch the current universe's 1h klines into the demo kline cache.
+
+    When a 1h bar closes, the next cycle must REST-fetch one new bar for every
+    universe symbol — a rate-limited multi-second burst on the cycle's critical
+    path. Run from the daemon on a background thread shortly after each hour
+    boundary, this pre-populates the exact same cache the cycle reads, so the
+    cycle finds fetch_ranges empty and skips the burst.
+
+    This is a pure latency optimisation: it writes only the kline cache, never
+    touches orders/positions/ledgers, and takes no cycle lock. A cycle behaves
+    identically whether the bars were warmed here or fetched by the cycle
+    itself — the data and code path are the same _download_recent_1h_klines."""
+    demo = demo_config or EventDemoCycleConfig()
+    root = Path(data_root).expanduser()
+    root.mkdir(parents=True, exist_ok=True)
+    warm_now_ms = now_ms if now_ms is not None else _utc_now_ms()
+    public = market_client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
+    instruments = _demo_instruments(public, cache_root=root, now_ms=warm_now_ms)
+    tickers = _normalize_tickers(public.get_tickers())
+    universe = _build_demo_universe(instruments, tickers, config=demo, snapshot_ts_ms=warm_now_ms)
+    symbols = universe["symbol"].to_list() if not universe.is_empty() else []
+    if not symbols:
+        return {"symbols": 0, "fetch_symbols": 0, "fetched_rows": 0, "cache_rows": 0}
+    start_ms, end_ms = _kline_window(warm_now_ms, lookback_days=demo.lookback_days)
+    _klines, stats = _download_recent_1h_klines(
+        symbols,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        config=config,
+        workers=demo.workers,
+        market_client=public if market_client is not None else None,
+        cache_root=root,
+    )
+    return {
+        "symbols": len(symbols),
+        "fetch_symbols": int(stats["fetch_symbols"]),
+        "fetched_rows": int(stats["fetched_rows"]),
+        "cache_rows": int(stats["cache_rows"]),
+    }
 
 
 def run_event_risk_cycle(
@@ -635,7 +711,11 @@ def run_event_risk_cycle(
         cycle_row["telegram_sent"] = telegram_sent
         cycle_row["telegram_error"] = telegram_error
         payload["cycle"] = cycle_row
-        write_dataset(pl.DataFrame([cycle_row]), root, "event_demo_cycles", partition_by=())
+        # Partition by date: event_demo_cycles is append-only telemetry, never
+        # read back inside a cycle. With partition_by=() the whole dataset was
+        # read + rewritten every cycle, so the per-cycle write cost grew without
+        # bound. Date partitioning caps each write to the current day's rows.
+        write_dataset(pl.DataFrame([cycle_row]), root, "event_demo_cycles", partition_by=("date",))
         report_path = report_dir / f"event_risk_cycle_{cycle_id}.json"
         report_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         (report_dir / "latest_event_risk_cycle.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
@@ -1386,6 +1466,73 @@ def _validate_risk_config(config: EventRiskCycleConfig) -> None:
         raise ValueError("stop_tolerance_bps must be non-negative")
 
 
+_DEMO_INSTRUMENTS_CACHE_TTL_MS = 60 * 60 * 1000
+
+
+def _demo_instruments_cache_paths(cache_root: Path) -> tuple[Path, Path]:
+    root = Path(cache_root).expanduser() / ".cache" / "event_demo_instruments"
+    return root / "latest.parquet", root / "latest.json"
+
+
+def _read_demo_instruments_cache(cache_root: Path) -> tuple[pl.DataFrame | None, int]:
+    """Return (normalised instruments frame, fetched_ts_ms), or (None, 0)."""
+    parquet_path, metadata_path = _demo_instruments_cache_paths(cache_root)
+    if not parquet_path.exists() or not metadata_path.exists():
+        return None, 0
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        fetched_ts_ms = int(metadata.get("fetched_ts_ms", 0))
+        frame = pl.read_parquet(parquet_path)
+    except (OSError, json.JSONDecodeError, ValueError, TypeError, pl.exceptions.PolarsError):
+        return None, 0
+    if frame.is_empty():
+        return None, 0
+    return frame, fetched_ts_ms
+
+
+def _write_demo_instruments_cache(cache_root: Path, instruments: pl.DataFrame, fetched_ts_ms: int) -> None:
+    if instruments.is_empty():
+        return
+    parquet_path, metadata_path = _demo_instruments_cache_paths(cache_root)
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_parquet = parquet_path.with_name(f".{parquet_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    temp_metadata = metadata_path.with_name(f".{metadata_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        instruments.write_parquet(temp_parquet)
+        # Parquet first, metadata (the commit marker) last — see the feature cache.
+        temp_parquet.replace(parquet_path)
+        temp_metadata.write_text(json.dumps({"fetched_ts_ms": int(fetched_ts_ms)}, sort_keys=True), encoding="utf-8")
+        temp_metadata.replace(metadata_path)
+    except (OSError, pl.exceptions.PolarsError):
+        temp_parquet.unlink(missing_ok=True)
+        temp_metadata.unlink(missing_ok=True)
+
+
+def _demo_instruments(public: Any, *, cache_root: Path, now_ms: int) -> pl.DataFrame:
+    """Normalised Bybit instruments, cached with a TTL.
+
+    Contract specs (tick size, lot step, listing date, status) change roughly
+    daily, but get_instruments_info is a large multi-hundred-symbol REST call
+    otherwise made on every ~60s cycle. A 1h TTL removes it from ~99% of
+    cycles. Membership stays correct: the universe is instruments INNER JOIN
+    the always-fresh tickers snapshot, so a symbol that stops trading drops out
+    via tickers even while its cached instruments row lingers. On a fetch
+    failure with a cache present we serve the stale specs rather than failing
+    the whole cycle."""
+    cached, fetched_ts_ms = _read_demo_instruments_cache(cache_root)
+    if cached is not None and 0 <= now_ms - fetched_ts_ms < _DEMO_INSTRUMENTS_CACHE_TTL_MS:
+        return cached
+    try:
+        fresh = _normalize_instruments(public.get_instruments_info())
+    except Exception as exc:  # noqa: BLE001 - a stale spec cache beats failing the cycle
+        if cached is not None:
+            _logger.warning("instruments fetch failed; reusing cached specs: %s", exc)
+            return cached
+        raise
+    _write_demo_instruments_cache(cache_root, fresh, now_ms)
+    return fresh
+
+
 def _build_demo_universe(
     instruments: pl.DataFrame,
     tickers: pl.DataFrame,
@@ -1650,26 +1797,117 @@ def _dedupe_recent_klines(klines: pl.DataFrame) -> pl.DataFrame:
     return klines.unique(subset=["ts_ms", "symbol"], keep="last").sort(["symbol", "ts_ms"])
 
 
-def _build_demo_features(klines: pl.DataFrame, universe: pl.DataFrame) -> pl.DataFrame:
+def _demo_feature_cache_paths(cache_root: Path) -> tuple[Path, Path]:
+    root = Path(cache_root).expanduser() / ".cache" / "event_demo_features"
+    return root / "latest.parquet", root / "latest.json"
+
+
+def _demo_feature_cache_fingerprint(klines: pl.DataFrame, universe: pl.DataFrame) -> dict[str, Any]:
+    """Cheap content fingerprint of the (klines, universe) feature-build inputs.
+
+    The demo loop ticks every ~60s but 1h klines only change when a bar closes,
+    so 59 of every 60 cycles feed _build_demo_features identical inputs. Counts
+    + min/max ts + column sums uniquely identify a kline set for this purpose:
+    the only between-cycle change is appended bars, and any appended bar moves
+    row count, max ts, and the sums together. One aggregation pass, sub-ms."""
+    k = klines.select(
+        pl.len().alias("rows"),
+        pl.col("ts_ms").min().alias("min_ts"),
+        pl.col("ts_ms").max().alias("max_ts"),
+        pl.col("symbol").n_unique().alias("symbols"),
+        pl.col("close").sum().alias("close_sum"),
+        pl.col("turnover_quote").sum().alias("turnover_sum"),
+    ).row(0)
+    fingerprint: dict[str, Any] = {
+        "kline_rows": int(k[0] or 0),
+        "kline_min_ts": int(k[1] or 0),
+        "kline_max_ts": int(k[2] or 0),
+        "kline_symbols": int(k[3] or 0),
+        "kline_close_sum": round(float(k[4] or 0.0), 6),
+        "kline_turnover_sum": round(float(k[5] or 0.0), 3),
+    }
+    if not universe.is_empty() and "listing_age_days" in universe.columns:
+        u = universe.select(
+            pl.len().alias("rows"),
+            pl.col("listing_age_days").cast(pl.Float64, strict=False).sum().alias("age_sum"),
+        ).row(0)
+        fingerprint["universe_rows"] = int(u[0] or 0)
+        fingerprint["universe_age_sum"] = round(float(u[1] or 0.0), 3)
+    else:
+        fingerprint["universe_rows"] = int(universe.height)
+        fingerprint["universe_age_sum"] = 0.0
+    return fingerprint
+
+
+def _read_demo_feature_cache(cache_root: Path, fingerprint: dict[str, Any]) -> pl.DataFrame | None:
+    parquet_path, metadata_path = _demo_feature_cache_paths(cache_root)
+    if not parquet_path.exists() or not metadata_path.exists():
+        return None
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if metadata != fingerprint:
+        return None
+    try:
+        return pl.read_parquet(parquet_path)
+    except (OSError, pl.exceptions.PolarsError):
+        return None
+
+
+def _write_demo_feature_cache(cache_root: Path, fingerprint: dict[str, Any], features: pl.DataFrame) -> None:
+    if features.is_empty():
+        return
+    parquet_path, metadata_path = _demo_feature_cache_paths(cache_root)
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_parquet = parquet_path.with_name(f".{parquet_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    temp_metadata = metadata_path.with_name(f".{metadata_path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        features.write_parquet(temp_parquet)
+        # Replace the parquet first, then the metadata: the metadata file is the
+        # commit marker. A crash between the two replaces leaves stale metadata
+        # paired with fresh data -> next read mismatches -> safe recompute.
+        temp_parquet.replace(parquet_path)
+        temp_metadata.write_text(json.dumps(fingerprint, sort_keys=True), encoding="utf-8")
+        temp_metadata.replace(metadata_path)
+    except (OSError, pl.exceptions.PolarsError):
+        temp_parquet.unlink(missing_ok=True)
+        temp_metadata.unlink(missing_ok=True)
+
+
+def _build_demo_features(
+    klines: pl.DataFrame,
+    universe: pl.DataFrame,
+    *,
+    cache_root: Path | None = None,
+) -> pl.DataFrame:
     if klines.is_empty():
         return pl.DataFrame()
+    fingerprint: dict[str, Any] | None = None
+    if cache_root is not None:
+        fingerprint = _demo_feature_cache_fingerprint(klines, universe)
+        cached = _read_demo_feature_cache(cache_root, fingerprint)
+        if cached is not None:
+            return cached
     features = _enriched_event_features(build_volume_features(klines), klines, pl.DataFrame())
-    if universe.is_empty() or "listing_age_days" not in universe.columns:
-        return features
-    ages = universe.select(["symbol", "listing_age_days"]).unique(subset=["symbol"], keep="first")
-    for column in ("symbol_age_days", "pit_age_days"):
-        if column in features.columns:
-            features = features.drop(column)
-    return (
-        features.join(ages, on="symbol", how="left")
-        .with_columns(
-            [
-                pl.col("listing_age_days").cast(pl.Int64, strict=False).alias("symbol_age_days"),
-                pl.col("listing_age_days").cast(pl.Float64, strict=False).alias("pit_age_days"),
-            ]
+    if not universe.is_empty() and "listing_age_days" in universe.columns:
+        ages = universe.select(["symbol", "listing_age_days"]).unique(subset=["symbol"], keep="first")
+        for column in ("symbol_age_days", "pit_age_days"):
+            if column in features.columns:
+                features = features.drop(column)
+        features = (
+            features.join(ages, on="symbol", how="left")
+            .with_columns(
+                [
+                    pl.col("listing_age_days").cast(pl.Int64, strict=False).alias("symbol_age_days"),
+                    pl.col("listing_age_days").cast(pl.Float64, strict=False).alias("pit_age_days"),
+                ]
+            )
+            .drop("listing_age_days")
         )
-        .drop("listing_age_days")
-    )
+    if fingerprint is not None:
+        _write_demo_feature_cache(cache_root, fingerprint, features)
+    return features
 
 
 def _preflight_entry_order_row(
@@ -3156,6 +3394,54 @@ def _safe_open_orders(trading_client: Any | None, *, settle_coin: str) -> tuple[
         return get_open_orders(settle_coin=settle_coin), ""
     except Exception as exc:  # noqa: BLE001 - open-order snapshot failures should be reported, not hidden
         return [], str(exc)[:500]
+
+
+def _refresh_positions_and_orders(
+    trading_client: Any | None, *, settle_coin: str
+) -> tuple[tuple[list[dict[str, Any]], str], tuple[list[dict[str, Any]], str]]:
+    """Concurrently refetch positions and open orders after a cycle placed
+    orders. The two are independent read-only endpoints, so this costs one
+    roundtrip instead of two; thread-safety is the same as
+    _collect_private_snapshots. Returns ((positions, error), (orders, error))."""
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        positions_future = pool.submit(_safe_raw_positions, trading_client, settle_coin=settle_coin)
+        orders_future = pool.submit(_safe_open_orders, trading_client, settle_coin=settle_coin)
+        return positions_future.result(), orders_future.result()
+
+
+def _collect_private_snapshots(trading_client: Any | None, demo: EventDemoCycleConfig) -> dict[str, Any]:
+    """Fetch one cycle's three private REST snapshots — wallet equity, open
+    orders, positions — concurrently.
+
+    The three are independent endpoints, so the stage costs one roundtrip
+    (max) instead of three (sum). BybitPrivateClient._call holds no mutable
+    per-call state and pybit's HTTP wraps a requests.Session whose connection
+    pool is thread-safe, so concurrent reads on one client are safe. Each call
+    is wrapped by a _safe_* helper, so this never raises. run_event_demo_cycle
+    runs this on a background thread so it also overlaps the public
+    klines/features path; trading_client=None yields the same neutral snapshot
+    the serial path produced when no client was present."""
+
+    def _wallet() -> tuple[float, str]:
+        if trading_client is None:
+            return demo.fallback_equity_usdt, ""
+        return _safe_wallet_equity_usdt(trading_client, demo=demo)
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        wallet_future = pool.submit(_wallet)
+        orders_future = pool.submit(_safe_open_orders, trading_client, settle_coin=demo.settle_coin)
+        positions_future = pool.submit(_safe_raw_positions, trading_client, settle_coin=demo.settle_coin)
+        equity_usdt, wallet_error = wallet_future.result()
+        raw_open_orders, open_order_error = orders_future.result()
+        raw_positions, position_error = positions_future.result()
+    return {
+        "equity_usdt": equity_usdt,
+        "wallet_error": wallet_error,
+        "raw_open_orders": raw_open_orders,
+        "open_order_error": open_order_error,
+        "raw_positions": raw_positions,
+        "position_error": position_error,
+    }
 
 
 def _active_position_by_symbol(positions: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import numpy as np
@@ -54,23 +53,19 @@ def build_equity_curve(baskets: pl.DataFrame) -> pl.DataFrame:
                 "basket_return": pl.Series([], dtype=pl.Float64),
             }
         )
-    rows = []
-    equity = 1.0
-    peak = 1.0
-    for row in baskets.sort("exit_ts_ms").to_dicts():
-        basket_return = float(row["basket_return"])
-        equity *= 1.0 + basket_return
-        peak = max(peak, equity)
-        rows.append(
-            {
-                "ts_ms": int(row["exit_ts_ms"]),
-                "equity": equity,
-                "drawdown": equity / peak - 1.0,
-                "basket_return": basket_return,
-            }
+    return (
+        baskets.sort("exit_ts_ms")
+        .with_columns((pl.col("basket_return") + 1.0).cum_prod().alias("equity"))
+        .with_columns((pl.col("equity") / pl.col("equity").cum_max() - 1.0).alias("drawdown"))
+        .select(
+            pl.col("exit_ts_ms").alias("ts_ms"),
+            "equity",
+            "drawdown",
+            "basket_return",
         )
-    return pl.DataFrame(rows).with_columns(
-        pl.from_epoch(pl.col("ts_ms"), time_unit="ms").dt.strftime("%Y-%m-%d").alias("date")
+        .with_columns(
+            pl.from_epoch(pl.col("ts_ms"), time_unit="ms").dt.strftime("%Y-%m-%d").alias("date")
+        )
     )
 
 
@@ -103,6 +98,10 @@ def summarize_trade_backtest(
             "worst_60d_return": 0.0,
             "worst_90d_return": 0.0,
             "worst_120d_return": 0.0,
+            "position_weight_mean": 1.0,
+            "position_weight_std": 0.0,
+            "position_weight_min": 1.0,
+            "position_weight_max": 1.0,
         }
     basket_returns = np.asarray(baskets["basket_return"].to_list(), dtype=float)
     mean_return = float(np.mean(basket_returns)) if basket_returns.size else 0.0
@@ -136,6 +135,21 @@ def summarize_trade_backtest(
         "worst_60d_return": _worst_rolling_equity_return(equity, 60),
         "worst_90d_return": _worst_rolling_equity_return(equity, 90),
         "worst_120d_return": _worst_rolling_equity_return(equity, 120),
+        **_position_weight_stats(trades),
+    }
+
+
+def _position_weight_stats(trades: pl.DataFrame) -> dict[str, float]:
+    if "position_weight" not in trades.columns:
+        return {"position_weight_mean": 1.0, "position_weight_std": 0.0, "position_weight_min": 1.0, "position_weight_max": 1.0}
+    pw = trades["position_weight"].drop_nulls()
+    if pw.is_empty():
+        return {"position_weight_mean": 1.0, "position_weight_std": 0.0, "position_weight_min": 1.0, "position_weight_max": 1.0}
+    return {
+        "position_weight_mean": float(pw.mean()),
+        "position_weight_std": float(pw.std(ddof=1)) if pw.len() > 1 else 0.0,
+        "position_weight_min": float(pw.min()),
+        "position_weight_max": float(pw.max()),
     }
 
 
@@ -160,24 +174,23 @@ def _worst_volume_day_return(baskets: pl.DataFrame) -> float:
 def _daily_equity_values(equity: pl.DataFrame) -> list[float]:
     if equity.is_empty() or "ts_ms" not in equity.columns or "equity" not in equity.columns:
         return []
-    rows = [
-        (datetime.fromtimestamp(int(row["ts_ms"]) / 1000, tz=UTC).date(), float(row["equity"]))
-        for row in equity.sort("ts_ms").to_dicts()
-    ]
-    if not rows:
+    daily = (
+        equity.sort("ts_ms")
+        .with_columns(pl.from_epoch(pl.col("ts_ms"), time_unit="ms").dt.date().alias("_d"))
+        .group_by("_d")
+        .agg(pl.col("equity").last())
+        .sort("_d")
+    )
+    if daily.is_empty():
         return []
-    values: list[float] = []
-    current_equity = 1.0
-    index = 0
-    current_date = rows[0][0]
-    end_date = rows[-1][0]
-    while current_date <= end_date:
-        while index < len(rows) and rows[index][0] <= current_date:
-            current_equity = rows[index][1]
-            index += 1
-        values.append(current_equity)
-        current_date += timedelta(days=1)
-    return values
+    start_date = daily["_d"].min()
+    end_date = daily["_d"].max()
+    all_dates = pl.DataFrame({"_d": pl.date_range(start_date, end_date, interval="1d", eager=True)})
+    return (
+        all_dates.join(daily, on="_d", how="left")
+        .with_columns(pl.col("equity").forward_fill())
+        ["equity"].to_list()
+    )
 
 
 def _max_underwater_days(equity: pl.DataFrame) -> int:
@@ -411,6 +424,7 @@ def _empty_trades() -> pl.DataFrame:
             "stop_price": pl.Series([], dtype=pl.Float64),
             "take_profit_price": pl.Series([], dtype=pl.Float64),
             "notional_weight": pl.Series([], dtype=pl.Float64),
+            "position_weight": pl.Series([], dtype=pl.Float64),
             "gross_trade_return": pl.Series([], dtype=pl.Float64),
             "gross_return": pl.Series([], dtype=pl.Float64),
             "cost_return": pl.Series([], dtype=pl.Float64),

@@ -12,7 +12,11 @@ from liquidity_migration.volume_events import (
     ENTRY_POLICY_EXECUTION_PULLBACK_GUARD,
     ENTRY_POLICY_FIXED_DELAY,
     ENTRY_POLICY_TIERED_EXECUTION_SNIPER,
+    POSITION_WEIGHTINGS,
+    _PositionSizer,
     _apply_entry_execution_veto,
+    _clamp_position_weight,
+    _position_sizing_quantity,
     _attach_event_archive_membership,
     _apply_liquidity_migration_crowding_filter,
     _basis_feature_frame,
@@ -1904,3 +1908,162 @@ def test_monthly_returns_are_written_from_baskets() -> None:
     assert monthly["month"].to_list() == ["2024-01"]
     assert monthly["strategy_return"].to_list()[0] == pytest.approx(0.045)
     assert monthly["trades"].to_list()[0] == 3
+
+
+def test_clamp_position_weight_bounds_the_multiplier() -> None:
+    assert _clamp_position_weight(1.0, clamp=4.0) == 1.0
+    assert _clamp_position_weight(2.5, clamp=4.0) == 2.5
+    assert _clamp_position_weight(99.0, clamp=4.0) == 4.0
+    assert _clamp_position_weight(0.001, clamp=4.0) == pytest.approx(0.25)
+
+
+def test_position_sizing_quantity_inverse_vol_is_one_over_sigma() -> None:
+    quantity = _position_sizing_quantity(
+        {"prior7_return_volatility": 0.05},
+        mode="inverse_vol",
+        vol_field="prior7_return_volatility",
+        score_col="vol_score",
+    )
+    assert quantity == pytest.approx(20.0)
+    for bad in (
+        {},
+        {"prior7_return_volatility": 0.0},
+        {"prior7_return_volatility": -0.1},
+        {"prior7_return_volatility": float("nan")},
+    ):
+        assert (
+            _position_sizing_quantity(
+                bad,
+                mode="inverse_vol",
+                vol_field="prior7_return_volatility",
+                score_col="vol_score",
+            )
+            is None
+        )
+
+
+def test_position_sizing_quantity_signal_rank_and_equal() -> None:
+    assert _position_sizing_quantity(
+        {"vol_score": 0.8}, mode="signal_rank", vol_field="x", score_col="vol_score"
+    ) == pytest.approx(0.8)
+    assert (
+        _position_sizing_quantity(
+            {"vol_score": 0.0}, mode="signal_rank", vol_field="x", score_col="vol_score"
+        )
+        is None
+    )
+    # equal mode never derives a quantity -> the sizer short-circuits to a neutral weight.
+    assert (
+        _position_sizing_quantity(
+            {"vol_score": 0.8}, mode="equal", vol_field="x", score_col="vol_score"
+        )
+        is None
+    )
+
+
+def test_position_sizer_normalizes_by_expanding_mean_of_prior_events() -> None:
+    sizer = _PositionSizer(mode="inverse_vol", vol_field="sigma", clamp=4.0, score_col="vol_score")
+    # event 1: no prior history -> neutral weight (1/sigma = 10)
+    assert sizer.weight({"sigma": 0.10}) == 1.0
+    # event 2: prior mean of 1/sigma = 10, this 1/sigma = 10 -> weight 1.0
+    assert sizer.weight({"sigma": 0.10}) == pytest.approx(1.0)
+    # event 3: lower vol, 1/sigma = 20, prior mean = 10 -> weight 2.0
+    assert sizer.weight({"sigma": 0.05}) == pytest.approx(2.0)
+    # event 4: higher vol, 1/sigma = 5, prior mean = (10+10+20)/3 -> weight < 1
+    assert sizer.weight({"sigma": 0.20}) == pytest.approx(5.0 / (40.0 / 3.0))
+
+
+def test_position_sizer_clamps_and_ignores_missing_sigma() -> None:
+    sizer = _PositionSizer(mode="inverse_vol", vol_field="sigma", clamp=4.0, score_col="s")
+    sizer.weight({"sigma": 1.0})  # prior 1/sigma = 1
+    # a missing-sigma event takes a neutral weight and must not poison the accumulator
+    assert sizer.weight({}) == 1.0
+    # extreme low vol -> raw weight 1000, clamped to 4.0 (proves the prior mean stayed 1.0)
+    assert sizer.weight({"sigma": 0.001}) == pytest.approx(4.0)
+    # extreme high vol relative to a tiny-vol prior -> clamped to the 1/clamp floor
+    sizer2 = _PositionSizer(mode="inverse_vol", vol_field="sigma", clamp=4.0, score_col="s")
+    sizer2.weight({"sigma": 0.001})  # prior 1/sigma = 1000
+    assert sizer2.weight({"sigma": 10.0}) == pytest.approx(0.25)
+
+
+def test_position_sizer_equal_mode_is_always_neutral() -> None:
+    sizer = _PositionSizer(mode="equal", vol_field="sigma", clamp=4.0, score_col="s")
+    for sigma in (0.01, 5.0, 0.2):
+        assert sizer.weight({"sigma": sigma}) == 1.0
+
+
+def test_position_weighting_config_is_validated() -> None:
+    with pytest.raises(ValueError, match="position_weighting"):
+        _validate_event_config(VolumeEventResearchConfig(position_weighting="bogus"))
+    with pytest.raises(ValueError, match="position_weight_clamp"):
+        _validate_event_config(VolumeEventResearchConfig(position_weight_clamp=0.5))
+    for mode in POSITION_WEIGHTINGS:
+        _validate_event_config(VolumeEventResearchConfig(position_weighting=mode))
+
+
+def test_simulate_indexed_trade_scales_pnl_by_position_weight() -> None:
+    hour = 60 * 60 * 1000
+    symbol_bars = {
+        "rows": [
+            {"bar_end_ts_ms": hour, "high": 101.0, "low": 99.0, "close": 100.0},
+            {"bar_end_ts_ms": 2 * hour, "high": 100.5, "low": 97.0, "close": 98.0},
+        ],
+        "ends": [hour, 2 * hour],
+        "by_end": {},
+    }
+    base_kwargs = {
+        "symbol": "AUSDT",
+        "side": "short",
+        "score": 1.0,
+        "rank": 1,
+        "basket_id": "basket",
+        "signal_ts_ms": 0,
+        "entry_bar": symbol_bars["rows"][0],
+        "symbol_bars": symbol_bars,
+        "planned_exit_ts_ms": 2 * hour,
+        "notional_weight": 0.2,
+        "config": TradeLifecycleConfig(take_profit_pct=0.0),
+        "round_trip_cost_bps": 10.0,
+        "stop_pct": 0.5,
+        "rank_lookup": {},
+        "event_decay_threshold": -1.0,
+        "funding_lookup": None,
+        "stop_fill_mode": "stop",
+    }
+    flat = _simulate_indexed_trade(**base_kwargs, position_weight=1.0)
+    doubled = _simulate_indexed_trade(**base_kwargs, position_weight=2.0)
+    assert flat is not None and doubled is not None
+    assert flat["position_weight"] == 1.0
+    assert doubled["position_weight"] == 2.0
+    assert flat["notional_weight"] == pytest.approx(0.2)
+    # every P&L component scales linearly with the position weight
+    assert doubled["notional_weight"] == pytest.approx(2.0 * flat["notional_weight"])
+    assert doubled["net_return"] == pytest.approx(2.0 * flat["net_return"])
+    assert doubled["gross_return"] == pytest.approx(2.0 * flat["gross_return"])
+    assert doubled["cost_return"] == pytest.approx(2.0 * flat["cost_return"])
+    # the per-unit trade return is a market fact, unchanged by sizing
+    assert doubled["gross_trade_return"] == pytest.approx(flat["gross_trade_return"])
+    assert flat["net_return"] != 0.0
+
+
+def test_position_weighting_runs_through_full_pipeline(tmp_path: Path) -> None:
+    for mode in ("inverse_vol", "signal_rank"):
+        root = tmp_path / mode
+        root.mkdir()
+        generate_fixture_data(root)
+        payload = run_volume_event_research(
+            root,
+            event_config=VolumeEventResearchConfig(
+                event_types=("fresh_volume_spike",),
+                thresholds=(0.5,),
+                hold_days=(1,),
+                side_hypotheses=("continuation",),
+                stop_loss_pcts=(0.0,),
+                cost_multipliers=(1.0,),
+                max_active_symbols=4,
+                cooldown_days=0,
+                require_full_pit_universe=False,
+                position_weighting=mode,
+            ),
+        )
+        assert payload["rows"]["scenarios"] == 1

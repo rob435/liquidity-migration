@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import polars as pl
 
@@ -22,30 +20,38 @@ def build_volume_features(klines: pl.DataFrame) -> pl.DataFrame:
     if daily_rows.is_empty():
         return daily_rows
 
-    rows = []
+    symbol_frames = []
     for key, part in daily_rows.sort(["symbol", "ts_ms"]).partition_by("symbol", as_dict=True).items():
         symbol = str(key[0] if isinstance(key, tuple) else key)
         turnover = np.asarray(part["turnover_quote"].to_list(), dtype=float)
         log_turnover = np.log(turnover + 1.0)
         roll_3 = _rolling_sum(turnover, 3)
         roll_20_mean = _rolling_mean(turnover, 20)
-        for index, row in enumerate(part.to_dicts()):
-            volume_change_1d = math.log((turnover[index] + 1.0) / (turnover[index - 1] + 1.0)) if index >= 1 else float("nan")
-            volume_change_3d = math.log((roll_3[index] + 1.0) / (roll_3[index - 3] + 1.0)) if index >= 5 else float("nan")
-            volume_persistence = math.log((roll_3[index] / 3.0 + 1.0) / (roll_20_mean[index] + 1.0)) if index >= 19 else float("nan")
-            rows.append(
-                {
-                    "ts_ms": int(row["ts_ms"]),
-                    "symbol": symbol,
-                    "turnover_quote": float(turnover[index]),
-                    "log_turnover": float(log_turnover[index]),
-                    "volume_change_1d_raw": volume_change_1d,
-                    "volume_change_3d_raw": volume_change_3d,
-                    "volume_persistence_raw": volume_persistence,
-                    "dollar_volume_rank_raw": float(log_turnover[index]),
-                }
-            )
-    df = pl.DataFrame(rows).sort(["ts_ms", "symbol"])
+        n = turnover.size
+
+        vc1 = np.full(n, np.nan)
+        if n > 1:
+            vc1[1:] = np.log((turnover[1:] + 1.0) / (turnover[:-1] + 1.0))
+
+        vc3 = np.full(n, np.nan)
+        if n > 5:
+            vc3[5:] = np.log((roll_3[5:] + 1.0) / (roll_3[2:n - 3] + 1.0))
+
+        vp = np.full(n, np.nan)
+        if n > 19:
+            vp[19:] = np.log((roll_3[19:] / 3.0 + 1.0) / (roll_20_mean[19:] + 1.0))
+
+        symbol_frames.append(pl.DataFrame({
+            "ts_ms": part["ts_ms"],
+            "symbol": pl.Series([symbol] * n, dtype=pl.String),
+            "turnover_quote": pl.Series(turnover),
+            "log_turnover": pl.Series(log_turnover),
+            "volume_change_1d_raw": pl.Series(vc1),
+            "volume_change_3d_raw": pl.Series(vc3),
+            "volume_persistence_raw": pl.Series(vp),
+            "dollar_volume_rank_raw": pl.Series(log_turnover),
+        }))
+    df = pl.concat(symbol_frames).sort(["ts_ms", "symbol"])
     for raw_col in (
         "volume_change_1d_raw",
         "volume_change_3d_raw",
@@ -124,13 +130,17 @@ def _add_liquidity_rank(df: pl.DataFrame) -> pl.DataFrame:
 
 def _rolling_sum(values: np.ndarray, window: int) -> np.ndarray:
     output = np.full(values.shape, np.nan, dtype=float)
-    for index in range(window - 1, values.size):
-        output[index] = float(np.sum(values[index - window + 1 : index + 1]))
+    if window <= 0 or window > values.size:
+        return output
+    cs = np.cumsum(values)
+    output[window - 1] = cs[window - 1]
+    if window < values.size:
+        output[window:] = cs[window:] - cs[:-window]
     return output
 
 
 def _rolling_mean(values: np.ndarray, window: int) -> np.ndarray:
-    output = np.full(values.shape, np.nan, dtype=float)
-    for index in range(window - 1, values.size):
-        output[index] = float(np.mean(values[index - window + 1 : index + 1]))
-    return output
+    s = _rolling_sum(values, window)
+    valid = ~np.isnan(s)
+    s[valid] /= window
+    return s

@@ -45,7 +45,7 @@ from typing import Any, Callable
 
 from .bybit import BybitPrivateWebSocketStream
 from .config import ResearchConfig
-from .event_demo import EventDemoCycleConfig, run_event_demo_cycle
+from .event_demo import EventDemoCycleConfig, run_event_demo_cycle, warm_demo_kline_cache
 from .execution_router import ExecutionEventRouter
 from .volume_events import VolumeEventResearchConfig
 
@@ -74,6 +74,11 @@ class EventDemoDaemon:
         ws_stream_factory: Callable[[ResearchConfig], Any] | None = None,
         cycle_runner: Callable[..., dict[str, Any]] = run_event_demo_cycle,
         telegram_sender: Callable[[str], bool] | None = None,
+        enable_kline_warmer: bool = True,
+        kline_warmer: Callable[..., Any] | None = None,
+        kline_warm_settle_seconds: float = 5.0,
+        kline_warm_budget_seconds: float = 25.0,
+        kline_warm_interval_seconds: float | None = None,
     ) -> None:
         if interval_seconds < 0.0:
             raise ValueError("interval_seconds must be non-negative")
@@ -99,6 +104,37 @@ class EventDemoDaemon:
         self._last_ws_event_monotonic: float | None = None
         self._ws_gap_count = 0
         self._ws_max_gap_seconds = 0.0
+        # Cadence telemetry. A cycle that runs longer than interval_seconds is
+        # an "overrun": the next cycle fires immediately and the fixed-interval
+        # grid re-anchors, so a slow cycle never compounds into permanent drift.
+        self._cycle_overruns = 0
+        self._max_cycle_seconds = 0.0
+        # Kline cache warmer. When a 1h bar closes, a cycle would otherwise
+        # REST-fetch one new bar per universe symbol — a multi-second burst on
+        # the cycle critical path. A background thread pre-fetches those bars
+        # into the cache shortly after each hour boundary so the next cycle
+        # skips the burst. It is a pure cache-warm: it writes only the kline
+        # cache, never the order/trade ledgers, so it cannot change trading
+        # behaviour. It yields to cycles (see _kline_warmer_loop) so the two
+        # never both burst the kline endpoint at once.
+        self._enable_kline_warmer = bool(enable_kline_warmer)
+        self._kline_warmer = kline_warmer or warm_demo_kline_cache
+        self._kline_warm_settle_seconds = float(kline_warm_settle_seconds)
+        self._kline_warm_budget_seconds = float(kline_warm_budget_seconds)
+        self._kline_warm_interval_seconds = (
+            float(kline_warm_interval_seconds) if kline_warm_interval_seconds is not None else None
+        )
+        self._kline_warmer_thread: threading.Thread | None = None
+        self._kline_warms = 0
+        self._kline_warms_skipped = 0
+        self._kline_warm_errors = 0
+        # Set while a cycle is executing; the warmer skips warming then, since a
+        # running cycle is already fetching klines and a second concurrent burst
+        # would risk tripping the shared per-IP REST rate limit.
+        self._cycle_active = threading.Event()
+        # Monotonic timestamp of the next scheduled cycle start; the warmer reads
+        # it to be sure a warm finishes before the next cycle needs the cache.
+        self._next_cycle_at = 0.0
 
     def install_signal_handlers(self) -> None:
         """Wire SIGTERM/SIGINT to request_shutdown so systemd `systemctl stop`
@@ -200,26 +236,58 @@ class EventDemoDaemon:
         )
         self._open_ws()
         ws_status = "ok" if self._ws_stream is not None else "unavailable (REST fallback)"
+        self._start_kline_warmer()
         self._send_telegram(
             f"\U0001f7e2 liquidity-migration daemon started "
             f"interval={self.interval_seconds:.0f}s "
             f"submit_orders={'on' if self.demo_config.submit_orders else 'off'} "
-            f"ws={ws_status}"
+            f"ws={ws_status} "
+            f"kline_warmer={'on' if self._enable_kline_warmer else 'off'}"
         )
+        # Fixed-interval grid: cycle N+1 starts interval_seconds after cycle N
+        # STARTED, not after it finished. Sleeping a full interval after each
+        # cycle (the old behaviour) made the true period interval + cycle_time,
+        # so a 30s cycle on a 60s interval ran every 90s — operational drift
+        # that compounds signal staleness. We sleep only the remainder of the
+        # interval; if the cycle overran it, we fire the next one immediately
+        # and re-anchor the grid so one slow cycle never permanently shifts it.
         try:
+            self._next_cycle_at = time.monotonic()
             while not self._shutdown.is_set():
                 self._run_one_cycle()
                 if self._shutdown.is_set():
                     break
-                self._sleep_interruptible(self.interval_seconds)
+                self._next_cycle_at += self.interval_seconds
+                sleep_for = self._next_cycle_at - time.monotonic()
+                if sleep_for < 0.0:
+                    if self.interval_seconds > 0.0:
+                        self._cycle_overruns += 1
+                        _logger.warning(
+                            "cycle overran the %.0fs interval by %.1fs; next cycle "
+                            "starts immediately (overrun #%d)",
+                            self.interval_seconds,
+                            -sleep_for,
+                            self._cycle_overruns,
+                        )
+                    self._next_cycle_at = time.monotonic()
+                    sleep_for = 0.0
+                self._sleep_interruptible(sleep_for)
         finally:
+            self._stop_kline_warmer()
             self._close_ws()
         router_stats = self.router.stats()
         _logger.info(
             "event_demo_daemon stopped cycles_run=%d cycle_errors=%d "
+            "cycle_overruns=%d max_cycle_seconds=%.1f "
+            "kline_warms=%d kline_warms_skipped=%d kline_warm_errors=%d "
             "ws_gaps=%d ws_max_gap_seconds=%.1f router_stats=%s",
             self._cycles_run,
             self._cycle_errors,
+            self._cycle_overruns,
+            self._max_cycle_seconds,
+            self._kline_warms,
+            self._kline_warms_skipped,
+            self._kline_warm_errors,
             self._ws_gap_count,
             self._ws_max_gap_seconds,
             router_stats,
@@ -228,6 +296,7 @@ class EventDemoDaemon:
             f"\U0001f6d1 liquidity-migration daemon stopped "
             f"cycles={self._cycles_run} "
             f"errors={self._cycle_errors} "
+            f"overruns={self._cycle_overruns} "
             f"ws_events={router_stats['events_received']} "
             f"ws_satisfied={router_stats['waits_satisfied_by_ws']} "
             f"ws_gaps={self._ws_gap_count}"
@@ -235,6 +304,11 @@ class EventDemoDaemon:
         return {
             "cycles_run": self._cycles_run,
             "cycle_errors": self._cycle_errors,
+            "cycle_overruns": self._cycle_overruns,
+            "max_cycle_seconds": self._max_cycle_seconds,
+            "kline_warms": self._kline_warms,
+            "kline_warms_skipped": self._kline_warms_skipped,
+            "kline_warm_errors": self._kline_warm_errors,
             "ws_gap_count": self._ws_gap_count,
             "ws_max_gap_seconds": self._ws_max_gap_seconds,
             "router_stats": router_stats,
@@ -243,6 +317,9 @@ class EventDemoDaemon:
     def _run_one_cycle(self) -> None:
         cycle_started = time.monotonic()
         payload: dict[str, Any] | None = None
+        # Mark the cycle active so the kline warmer yields the REST endpoint to
+        # it. Cleared in finally so a crashed cycle never wedges the warmer off.
+        self._cycle_active.set()
         try:
             payload = self._cycle_runner(
                 self.data_root,
@@ -261,7 +338,10 @@ class EventDemoDaemon:
             self._send_telegram(
                 f"❌ liquidity-migration cycle failed: {str(exc)[:200]}"
             )
+        finally:
+            self._cycle_active.clear()
         elapsed = time.monotonic() - cycle_started
+        self._max_cycle_seconds = max(self._max_cycle_seconds, elapsed)
         if payload is not None:
             # Emit the same `event demo cycle ...` summary the legacy bash-loop
             # runner prints, so operators don't lose visibility when flipping
@@ -280,6 +360,62 @@ class EventDemoDaemon:
         if seconds <= 0.0:
             return
         self._shutdown.wait(timeout=seconds)
+
+    def _start_kline_warmer(self) -> None:
+        if not self._enable_kline_warmer:
+            return
+        self._kline_warmer_thread = threading.Thread(
+            target=self._kline_warmer_loop, name="kline-cache-warmer", daemon=True
+        )
+        self._kline_warmer_thread.start()
+
+    def _stop_kline_warmer(self) -> None:
+        thread = self._kline_warmer_thread
+        self._kline_warmer_thread = None
+        if thread is None:
+            return
+        # _shutdown is already set by the time the run() finally block calls
+        # this; the warmer loop waits on it, so it wakes promptly. Join with a
+        # timeout so a warm mid-REST-burst can't block daemon shutdown forever.
+        thread.join(timeout=self._kline_warm_budget_seconds + 5.0)
+
+    def _seconds_until_next_warm(self) -> float:
+        """Delay until the next warm attempt. By default it tracks UTC hour
+        boundaries (1h bars close on the hour, so that is when there is fresh
+        data to pre-fetch); a fixed interval can be injected for tests."""
+        if self._kline_warm_interval_seconds is not None:
+            return self._kline_warm_interval_seconds
+        now = time.time()
+        return 3600.0 - (now % 3600.0) + self._kline_warm_settle_seconds
+
+    def _kline_warmer_loop(self) -> None:
+        """Pre-warm the kline cache shortly after each hour boundary so the
+        cycle following a bar close skips the per-symbol REST burst.
+
+        Yields the kline endpoint to cycles: it skips a warm while a cycle is
+        running, and skips when the next cycle is too close to finish a warm
+        before it — so the warmer and a cycle never burst the rate-limited
+        endpoint at the same time, and a warm never delays a scheduled cycle."""
+        while not self._shutdown.is_set():
+            if self._shutdown.wait(timeout=self._seconds_until_next_warm()):
+                return
+            if self._cycle_active.is_set():
+                self._kline_warms_skipped += 1
+                _logger.debug("kline warm skipped: a cycle is running")
+                continue
+            room = self._next_cycle_at - time.monotonic()
+            if room < self._kline_warm_budget_seconds:
+                self._kline_warms_skipped += 1
+                _logger.debug("kline warm skipped: next cycle in %.1fs", room)
+                continue
+            try:
+                self._kline_warmer(
+                    self.data_root, config=self.config, demo_config=self.demo_config
+                )
+                self._kline_warms += 1
+            except Exception as exc:  # noqa: BLE001 - a warm failure must never break the daemon
+                self._kline_warm_errors += 1
+                _logger.warning("kline cache warm failed: %s", exc)
 
 
 def _build_private_ws_stream(config: ResearchConfig) -> BybitPrivateWebSocketStream:

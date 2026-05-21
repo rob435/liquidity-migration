@@ -1439,7 +1439,9 @@ class EventWebSocketRiskEngine:
             payload["history_report_path"] = str(history_md_path)
             history_json_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
             history_md_path.write_text(format_event_risk_cycle_report(payload), encoding="utf-8")
-        write_dataset(pl.DataFrame([cycle]), self.root, "event_demo_cycles", partition_by=())
+        # Date-partitioned: append-only telemetry, see event_demo.py. partition_by=()
+        # made every cycle read + rewrite the whole (unbounded) dataset.
+        write_dataset(pl.DataFrame([cycle]), self.root, "event_demo_cycles", partition_by=("date",))
         latest_json_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         latest_md_path.write_text(format_event_risk_cycle_report(payload), encoding="utf-8")
         self.state.last_report_monotonic = time.monotonic()

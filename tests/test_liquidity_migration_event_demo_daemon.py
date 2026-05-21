@@ -435,6 +435,170 @@ def test_daemon_telegram_startup_reports_ws_unavailable_when_factory_fails(tmp_p
     assert "ws=unavailable" in start, f"expected ws=unavailable in startup msg, got {start!r}"
 
 
+def test_daemon_holds_fixed_interval_cadence_without_drift(tmp_path: Path) -> None:
+    """Cycle N+1 must start interval_seconds after cycle N STARTED, not after
+    it finished. The old loop slept a full interval AFTER each cycle, so the
+    true period was interval + cycle_time — a 0.15s cycle on a 0.25s interval
+    drifted to a 0.40s period. With fixed-interval scheduling the period stays
+    at the interval as long as cycles fit inside it."""
+    ws = _RecordingWsStream()
+    cycle_starts: list[float] = []
+
+    def _slow_runner(data_root, **kwargs):
+        cycle_starts.append(time.monotonic())
+        time.sleep(0.15)  # cycle takes 0.15s — comfortably inside the interval
+        return {"cycle": {}, "report_dir": str(data_root)}
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(),
+        interval_seconds=0.25,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_slow_runner,
+    )
+    runner = threading.Thread(target=daemon.run, daemon=True)
+    runner.start()
+    time.sleep(1.1)  # enough wall time for ~4 cycles at a 0.25s cadence
+    daemon.request_shutdown()
+    runner.join(timeout=2.0)
+    assert not runner.is_alive()
+    assert len(cycle_starts) >= 3, f"expected several cycles, got {len(cycle_starts)}"
+
+    periods = [b - a for a, b in zip(cycle_starts, cycle_starts[1:])]
+    for period in periods:
+        # Fixed cadence -> ~0.25s. Old drift bug -> ~0.40s (interval+cycle).
+        assert 0.18 < period < 0.34, f"cycle period {period:.3f}s drifted from the 0.25s interval"
+    assert daemon._cycle_overruns == 0  # type: ignore[attr-defined]
+
+
+def test_daemon_overrun_fires_next_cycle_immediately_and_counts(tmp_path: Path) -> None:
+    """When a cycle runs longer than the interval, the next cycle must fire
+    immediately (no extra idle) and the overrun must be counted so operators
+    can see the daemon is interval-bound."""
+    ws = _RecordingWsStream()
+    cycle_starts: list[float] = []
+
+    def _overrunning_runner(data_root, **kwargs):
+        cycle_starts.append(time.monotonic())
+        time.sleep(0.15)  # cycle far exceeds the 0.05s interval every time
+        return {"cycle": {}, "report_dir": str(data_root)}
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(),
+        interval_seconds=0.05,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_overrunning_runner,
+    )
+    runner = threading.Thread(target=daemon.run, daemon=True)
+    runner.start()
+    time.sleep(0.8)
+    daemon.request_shutdown()
+    runner.join(timeout=2.0)
+    assert not runner.is_alive()
+    assert len(cycle_starts) >= 3
+    assert daemon._cycle_overruns >= 2  # type: ignore[attr-defined]
+
+    # Back-to-back cycles: period ~= cycle duration (0.15s), with no idle added.
+    periods = [b - a for a, b in zip(cycle_starts, cycle_starts[1:])]
+    for period in periods:
+        assert period < 0.30, f"overrunning cycles should run back-to-back, period was {period:.3f}s"
+
+
+def test_daemon_kline_warmer_runs_between_cycles(tmp_path: Path) -> None:
+    """The kline warmer pre-fetches the universe's bars between cycles so the
+    cycle after a bar close skips the per-symbol REST burst. With room in the
+    interval and no cycle running, it must actually fire."""
+    warm_calls: list[object] = []
+
+    def fake_warmer(data_root, *, config, demo_config):  # noqa: ANN001
+        warm_calls.append(data_root)
+        return {"symbols": 0}
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(),
+        interval_seconds=2.0,  # long gap so the room check passes
+        kline_warm_interval_seconds=0.03,  # test cadence (production tracks hour boundaries)
+        kline_warm_budget_seconds=0.01,
+        ws_stream_factory=lambda _config: _RecordingWsStream(),
+        cycle_runner=_stub_cycle_runner([]),
+        kline_warmer=fake_warmer,
+    )
+    runner = threading.Thread(target=daemon.run, daemon=True)
+    runner.start()
+    time.sleep(0.4)
+    daemon.request_shutdown()
+    runner.join(timeout=2.0)
+    assert not runner.is_alive()
+    assert len(warm_calls) >= 2, f"warmer should have fired between cycles, got {len(warm_calls)}"
+    assert daemon._kline_warms >= 2  # type: ignore[attr-defined]
+
+
+def test_daemon_kline_warmer_can_be_disabled(tmp_path: Path) -> None:
+    warm_calls: list[object] = []
+
+    def fake_warmer(data_root, *, config, demo_config):  # noqa: ANN001
+        warm_calls.append(data_root)
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(),
+        interval_seconds=2.0,
+        enable_kline_warmer=False,
+        kline_warm_interval_seconds=0.03,
+        ws_stream_factory=lambda _config: _RecordingWsStream(),
+        cycle_runner=_stub_cycle_runner([]),
+        kline_warmer=fake_warmer,
+    )
+    runner = threading.Thread(target=daemon.run, daemon=True)
+    runner.start()
+    time.sleep(0.3)
+    daemon.request_shutdown()
+    runner.join(timeout=2.0)
+    assert not runner.is_alive()
+    assert warm_calls == []
+    assert daemon._kline_warms == 0  # type: ignore[attr-defined]
+
+
+def test_daemon_kline_warmer_yields_while_a_cycle_runs(tmp_path: Path) -> None:
+    """The warmer and a cycle must never burst the rate-limited kline endpoint
+    at once. With cycles running back-to-back, the warmer must keep yielding —
+    never warm — and record the skips."""
+    warm_calls: list[object] = []
+
+    def fake_warmer(data_root, *, config, demo_config):  # noqa: ANN001
+        warm_calls.append(data_root)
+
+    def slow_runner(data_root, **kwargs):  # noqa: ANN001, ANN003
+        time.sleep(0.15)
+        return {"cycle": {}, "report_dir": str(data_root)}
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(),
+        interval_seconds=0.0,  # cycles run back-to-back: a cycle is ~always active
+        kline_warm_interval_seconds=0.02,
+        kline_warm_budget_seconds=0.01,
+        ws_stream_factory=lambda _config: _RecordingWsStream(),
+        cycle_runner=slow_runner,
+        kline_warmer=fake_warmer,
+    )
+    runner = threading.Thread(target=daemon.run, daemon=True)
+    runner.start()
+    time.sleep(0.5)
+    daemon.request_shutdown()
+    runner.join(timeout=2.0)
+    assert not runner.is_alive()
+    assert warm_calls == [], "warmer must not fire while cycles run continuously"
+    assert daemon._kline_warms_skipped > 0  # type: ignore[attr-defined]
+
+
 def test_daemon_run_returns_summary_stats(tmp_path: Path) -> None:
     ws = _RecordingWsStream()
     daemon = EventDemoDaemon(
@@ -450,5 +614,7 @@ def test_daemon_run_returns_summary_stats(tmp_path: Path) -> None:
     stats = daemon.run()
     assert "cycles_run" in stats
     assert "cycle_errors" in stats
+    assert "cycle_overruns" in stats
+    assert "max_cycle_seconds" in stats
     assert "router_stats" in stats
     assert stats["cycle_errors"] == 0

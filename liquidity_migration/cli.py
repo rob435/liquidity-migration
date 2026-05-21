@@ -31,7 +31,7 @@ from .portfolio_hedge import run_portfolio_hedge_report
 from .reconciliation import run_paper_demo_reconciliation
 from .strategy_tribunal import StrategyTribunalConfig, run_strategy_tribunal
 from .universe import run_discover_universe
-from .volume_events import ENTRY_POLICIES, VolumeEventResearchConfig, run_volume_event_research
+from .volume_events import ENTRY_POLICIES, POSITION_WEIGHTINGS, VolumeEventResearchConfig, run_volume_event_research
 from .ws_risk import EventWebSocketRiskConfig, run_event_ws_risk
 
 
@@ -459,6 +459,23 @@ def _add_volume_events_parser(subparsers) -> None:
     )
     volume_events.add_argument("--gross-exposure", type=float, default=event_defaults.gross_exposure, help="Portfolio gross exposure cap, e.g. 0.5.")
     volume_events.add_argument("--max-active-symbols", type=int, default=event_defaults.max_active_symbols)
+    volume_events.add_argument(
+        "--position-weighting",
+        choices=POSITION_WEIGHTINGS,
+        default=event_defaults.position_weighting,
+        help="Per-trade position sizing: equal (baseline), inverse_vol, or signal_rank.",
+    )
+    volume_events.add_argument(
+        "--position-weight-vol-field",
+        default=event_defaults.position_weight_vol_field,
+        help="Event volatility field used by inverse_vol position weighting.",
+    )
+    volume_events.add_argument(
+        "--position-weight-clamp",
+        type=float,
+        default=event_defaults.position_weight_clamp,
+        help="Position weights are clamped to [1/clamp, clamp].",
+    )
     volume_events.add_argument("--cooldown-days", type=int, default=event_defaults.cooldown_days)
     volume_events.add_argument("--rank-exit-threshold", type=float, default=event_defaults.rank_exit_threshold, help="Exit after event score rank decays below this fraction.")
     volume_events.add_argument("--universe-rank-min", type=int, default=event_defaults.universe_rank_min, help="Minimum liquidity rank to include; 1 disables lower bound.")
@@ -1153,6 +1170,12 @@ def _add_volume_events_parser(subparsers) -> None:
         action="store_true",
         help="Allow biased diagnostics when archive manifest coverage is incomplete. Do not use for real backtests.",
     )
+    volume_events.add_argument(
+        "--scenario-workers",
+        type=int,
+        default=event_defaults.workers,
+        help="Parallel workers for scenario sweep. 1 = serial (default). -1 = os.cpu_count().",
+    )
     volume_events.add_argument("--report-dir", default=None)
 
 
@@ -1769,6 +1792,9 @@ def main(argv: list[str] | None = None) -> int:
             entry_execution_veto_close_location_max=args.entry_execution_veto_close_location_max,
             gross_exposure=args.gross_exposure,
             max_active_symbols=args.max_active_symbols,
+            position_weighting=args.position_weighting,
+            position_weight_vol_field=args.position_weight_vol_field,
+            position_weight_clamp=args.position_weight_clamp,
             cooldown_days=args.cooldown_days,
             rank_exit_threshold=args.rank_exit_threshold,
             require_full_pit_universe=not args.allow_partial_pit,
@@ -1910,6 +1936,7 @@ def main(argv: list[str] | None = None) -> int:
             capitulation_reclaim_prior20_drawdown_max=args.capitulation_reclaim_prior20_drawdown_max,
             capitulation_reclaim_close_vs_prior20_high_max=args.capitulation_reclaim_close_vs_prior20_high_max,
             exclude_symbols=_csv_str(args.exclude_symbols, VolumeEventResearchConfig().exclude_symbols),
+            workers=args.scenario_workers,
         )
         payload = run_volume_event_research(
             data_root,

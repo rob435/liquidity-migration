@@ -43,11 +43,11 @@ jobs:
   vps:
     runs-on: ubuntu-latest
     env:
-      VPS_HOST: ${{ vars.VPS_HOST || '204.168.202.167' }}
+      VPS_HOST: ${{ vars.VPS_HOST || '5.223.42.109' }}
       VPS_USER: ${{ vars.VPS_USER || 'root' }}
-      VPS_ED25519_FINGERPRINT: ${{ vars.VPS_ED25519_FINGERPRINT || 'SHA256:c4K1qg1rx5kH/706qNTdsHYsCDP/o5GIHW1GAHCjwgY' }}
+      VPS_ED25519_FINGERPRINT: ${{ vars.VPS_ED25519_FINGERPRINT || 'SHA256:zQjT3bst/N43fyt5L4vRKmNDuwtxVuaPiHVINBO2elU' }}
       EXPECTED_TELEGRAM_CHAT_ID: ${{ vars.EXPECTED_TELEGRAM_CHAT_ID || '8388367561' }}
-      GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT: SHA256:1cXHoJyRyTR2dx1Yp2ql4nRgA2VHFDDngkzJFcZp+c4
+      GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT: SHA256:KpDkvlvmK93qXC9Ocvb9n4Zsk8Gn/pzDzdvAR0XHkgo
     steps:
       - uses: actions/checkout@v4
 

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import concurrent.futures
 import json
 import math
+import os
 from bisect import bisect_right
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime
@@ -53,6 +55,7 @@ EVENT_TYPES = (
     "selloff_exhaustion",
 )
 SIDE_HYPOTHESES = ("continuation", "reversal")
+POSITION_WEIGHTINGS = ("equal", "inverse_vol", "signal_rank")
 LIQUIDITY_MIGRATION_CROWDING_FILTERS = ("none", "union_pathology", "model_v1")
 ENTRY_POLICY_FIXED_DELAY = "fixed_delay"
 ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE = "promoted_quality_squeeze"
@@ -106,6 +109,9 @@ class VolumeEventResearchConfig:
     entry_execution_veto_close_location_max: float = 1.0
     gross_exposure: float = 1.0
     max_active_symbols: int = 5
+    position_weighting: str = "equal"
+    position_weight_vol_field: str = "prior7_return_volatility"
+    position_weight_clamp: float = 4.0
     cooldown_days: int = 5
     rank_exit_threshold: float = 0.55
     require_pit_membership: bool = True
@@ -232,6 +238,7 @@ class VolumeEventResearchConfig:
     exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
     promotion_max_drawdown: float = -0.25
     promotion_min_avg_sharpe: float = 0.50
+    workers: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,11 +314,17 @@ def run_volume_event_research(
     rank_lookup_cache = _rank_lookup_cache(features, config=config)
     event_cache: dict[tuple[str, float], pl.DataFrame] = {}
 
-    scenario_rows = []
-    best_payload: dict[str, Any] | None = None
-    best_rank_key: tuple[Any, ...] | None = None
-    for scenario in _iter_scenarios(config):
-        payload = _run_event_scenario(
+    scenarios = _iter_scenarios(config)
+
+    # Pre-populate the event cache so worker threads only read from it.
+    for scenario in scenarios:
+        key = (scenario.event_type, scenario.threshold)
+        if key not in event_cache:
+            _, _sc = _event_score(scenario.event_type)
+            event_cache[key] = _select_events(features, scenario=scenario, config=config, score_col=_sc)
+
+    def _run_one(scenario: EventScenario) -> dict[str, Any]:
+        return _run_event_scenario(
             features,
             bars,
             funding_lookup=funding_lookup,
@@ -322,6 +335,18 @@ def run_volume_event_research(
             scenario=scenario,
             config=config,
         )
+
+    n_workers = config.workers if config.workers > 0 else (os.cpu_count() or 1)
+    if n_workers == 1 or len(scenarios) <= 1:
+        payloads = [_run_one(s) for s in scenarios]
+    else:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n_workers) as pool:
+            payloads = list(pool.map(_run_one, scenarios))
+
+    scenario_rows = []
+    best_payload: dict[str, Any] | None = None
+    best_rank_key: tuple[Any, ...] | None = None
+    for payload in payloads:
         scenario_rows.append(payload["row"])
         rank_key = _scenario_rank_key(payload["row"])
         if best_rank_key is None or rank_key > best_rank_key:
@@ -486,6 +511,12 @@ def _run_event_scenario(
     realized_loss_exit_ts_ms: list[int] = []
     notional_weight = config.gross_exposure / max(config.max_active_symbols, 1)
     round_trip_cost_bps = base_cost_bps * scenario.cost_multiplier
+    position_sizer = _PositionSizer(
+        mode=config.position_weighting,
+        vol_field=config.position_weight_vol_field,
+        clamp=config.position_weight_clamp,
+        score_col=score_col,
+    )
 
     for event in _execution_ordered_events(events).to_dicts():
         signal_ts_ms = int(event["ts_ms"])
@@ -521,6 +552,7 @@ def _run_event_scenario(
         entry_ts_ms = int(entry_decision["entry_ts_ms"])
         planned_exit_ts_ms = entry_ts_ms + scenario.hold_days * MS_PER_DAY
         basket_id = f"{scenario.scenario_id}-{_iso_date(signal_ts_ms)}-{symbol}"
+        position_weight = position_sizer.weight(event)
         trade = _simulate_indexed_trade(
             symbol=symbol,
             side=side,
@@ -532,6 +564,7 @@ def _run_event_scenario(
             symbol_bars=symbol_bars,
             planned_exit_ts_ms=planned_exit_ts_ms,
             notional_weight=notional_weight,
+            position_weight=position_weight,
             config=bt_config,
             round_trip_cost_bps=round_trip_cost_bps,
             stop_pct=scenario.stop_loss_pct if scenario.stop_loss_pct > 0.0 else None,
@@ -1376,6 +1409,58 @@ def _liquidity_migration_hot_return_threshold_value(market_pct_up: float, config
     return base - band + hot_breadth_position * (2.0 * band)
 
 
+def _position_sizing_quantity(
+    event: dict[str, Any], *, mode: str, vol_field: str, score_col: str
+) -> float | None:
+    """Causal per-event quantity the position weight scales with; None -> neutral weight."""
+    if mode == "inverse_vol":
+        sigma = _float_or_nan(event.get(vol_field))
+        if not math.isfinite(sigma) or sigma <= 0.0:
+            return None
+        return 1.0 / sigma
+    if mode == "signal_rank":
+        score = _float_or_nan(event.get(score_col))
+        if not math.isfinite(score) or score <= 0.0:
+            return None
+        return score
+    return None
+
+
+def _clamp_position_weight(weight: float, *, clamp: float) -> float:
+    return max(1.0 / clamp, min(clamp, weight))
+
+
+class _PositionSizer:
+    """Per-scenario position-weight stream: expanding-mean normalized, clamped, point-in-time."""
+
+    def __init__(self, *, mode: str, vol_field: str, clamp: float, score_col: str) -> None:
+        self._mode = mode
+        self._vol_field = vol_field
+        self._clamp = clamp
+        self._score_col = score_col
+        self._prior_sum = 0.0
+        self._prior_count = 0
+
+    def weight(self, event: dict[str, Any]) -> float:
+        if self._mode == "equal":
+            return 1.0
+        quantity = _position_sizing_quantity(
+            event, mode=self._mode, vol_field=self._vol_field, score_col=self._score_col
+        )
+        if quantity is None:
+            return 1.0
+        # normalize by the expanding mean over prior events only -> point-in-time.
+        if self._prior_count == 0:
+            weight = 1.0
+        else:
+            weight = _clamp_position_weight(
+                quantity / (self._prior_sum / self._prior_count), clamp=self._clamp
+            )
+        self._prior_sum += quantity
+        self._prior_count += 1
+        return weight
+
+
 def _simulate_indexed_trade(
     *,
     symbol: str,
@@ -1388,6 +1473,7 @@ def _simulate_indexed_trade(
     symbol_bars: dict[str, Any],
     planned_exit_ts_ms: int,
     notional_weight: float,
+    position_weight: float = 1.0,
     config: TradeLifecycleConfig,
     round_trip_cost_bps: float,
     stop_pct: float | None,
@@ -1499,9 +1585,10 @@ def _simulate_indexed_trade(
         entry_ts_ms=entry_ts_ms,
         exit_ts_ms=int(exit_ts_ms),
     )
-    funding_return = abs(notional_weight) * raw_funding_return
-    cost_return = -abs(notional_weight) * round_trip_cost_bps / 10_000.0
-    gross_return = abs(notional_weight) * gross_trade_return
+    effective_weight = notional_weight * position_weight
+    funding_return = abs(effective_weight) * raw_funding_return
+    cost_return = -abs(effective_weight) * round_trip_cost_bps / 10_000.0
+    gross_return = abs(effective_weight) * gross_trade_return
     net_return = gross_return + cost_return + funding_return
     trade_id = f"{basket_id}-{side[0]}-{symbol}"
     return {
@@ -1523,7 +1610,8 @@ def _simulate_indexed_trade(
         "planned_exit_ts_ms": planned_exit_ts_ms,
         "stop_price": stop_price,
         "take_profit_price": take_profit_price,
-        "notional_weight": abs(notional_weight),
+        "notional_weight": abs(effective_weight),
+        "position_weight": position_weight,
         "gross_trade_return": gross_trade_return,
         "gross_return": gross_return,
         "cost_return": cost_return,
@@ -3152,22 +3240,18 @@ def _summarize_basket_split(part: pl.DataFrame, *, name: str, config: TradeLifec
             "max_drawdown": 0.0,
         }
     returns = np.asarray(part.sort("entry_signal_ts_ms")["basket_return"].to_list(), dtype=float)
-    equity = 1.0
-    peak = 1.0
-    max_dd = 0.0
-    for value in returns:
-        equity *= 1.0 + value
-        peak = max(peak, equity)
-        max_dd = min(max_dd, equity / peak - 1.0)
+    equity_curve = np.cumprod(1.0 + returns)
+    peaks = np.maximum.accumulate(equity_curve)
+    drawdowns = equity_curve / peaks - 1.0
     stdev = float(np.std(returns, ddof=1)) if returns.size > 1 else 0.0
     mean = float(np.mean(returns)) if returns.size else 0.0
     annual_periods = 365.0 / max(config.hold_days, 1)
     return {
         "name": name,
         "basket_count": int(returns.size),
-        "total_return": float(equity - 1.0),
+        "total_return": float(equity_curve[-1] - 1.0),
         "sharpe_like": float(mean / stdev * math.sqrt(annual_periods)) if stdev > 1e-12 else 0.0,
-        "max_drawdown": float(max_dd),
+        "max_drawdown": float(drawdowns.min()),
     }
 
 
@@ -3835,6 +3919,8 @@ def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) 
         f"- Scenarios: {metadata['rows']['scenarios']}",
         f"- Stop fill mode: `{metadata['config'].get('stop_fill_mode', 'stop')}`",
         f"- Entry policy: `{metadata['config'].get('entry_policy', ENTRY_POLICY_FIXED_DELAY)}`",
+        f"- Position weighting: `{metadata['config'].get('position_weighting', 'equal')}`"
+        + (f" (vol field: `{metadata['config'].get('position_weight_vol_field')}`, clamp: {metadata['config'].get('position_weight_clamp')})" if metadata['config'].get('position_weighting', 'equal') != 'equal' else ""),
         f"- Pre-PIT promotable rows: {metadata['rows']['pre_pit_promotable']}",
         f"- Promotable rows: {metadata['rows']['promotable']}",
         f"- Date range: {metadata['date_range']['start']} to {metadata['date_range']['end']}",
@@ -3864,6 +3950,25 @@ def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) 
         )
     if summary.is_empty():
         lines.append("|  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |")
+    pw_mode = metadata["config"].get("position_weighting", "equal")
+    if pw_mode != "equal" and not summary.is_empty():
+        best = metadata.get("best_scenario", {})
+        pw_mean = best.get("position_weight_mean", 1.0)
+        pw_std = best.get("position_weight_std", 0.0)
+        pw_min = best.get("position_weight_min", 1.0)
+        pw_max = best.get("position_weight_max", 1.0)
+        lines.extend([
+            "",
+            "## Position Sizing (best scenario)",
+            "",
+            f"Mode `{pw_mode}` — weights are reallocation of the fixed risk budget, "
+            "not leverage. Expanding-mean normalization keeps mean ≈ 1.",
+            "",
+            f"| mean | std | min | max |",
+            "| ---: | ---: | ---: | ---: |",
+            f"| {pw_mean:.3f} | {pw_std:.3f} | {pw_min:.3f} | {pw_max:.3f} |",
+            "",
+        ])
     lines.extend(
         [
             "",
@@ -3930,6 +4035,10 @@ def _validate_entry_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("gross_exposure must be positive")
     if config.max_active_symbols <= 0:
         raise ValueError("max_active_symbols must be positive")
+    if config.position_weighting not in POSITION_WEIGHTINGS:
+        raise ValueError(f"position_weighting must be one of: {', '.join(POSITION_WEIGHTINGS)}")
+    if config.position_weight_clamp < 1.0:
+        raise ValueError("position_weight_clamp must be >= 1.0")
     if config.cooldown_days < 0:
         raise ValueError("cooldown_days must be non-negative")
     if config.entry_delay_hours < 0:

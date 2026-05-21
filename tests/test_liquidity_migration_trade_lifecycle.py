@@ -19,6 +19,7 @@ from liquidity_migration.trade_lifecycle import (
     _funding_lookup,
     _max_underwater_days,
     _perp_funding_return,
+    _position_weight_stats,
     _rank_exit_hit,
     _side_return,
     _stop_price,
@@ -515,3 +516,51 @@ def test_summarize_trade_backtest_profit_factor_zero_without_losses():
     summary = summarize_trade_backtest(trades, baskets, equity, config=config)
     assert summary["profit_factor"] == 0.0
     assert summary["trade_win_rate"] == pytest.approx(1.0)
+
+
+# --------------------------------------------------------------------------
+# Position weight stats
+# --------------------------------------------------------------------------
+
+def test_position_weight_stats_defaults_when_column_absent() -> None:
+    trades = pl.DataFrame({"net_return": [0.01, -0.02]})
+    stats = _position_weight_stats(trades)
+    assert stats["position_weight_mean"] == pytest.approx(1.0)
+    assert stats["position_weight_std"] == pytest.approx(0.0)
+    assert stats["position_weight_min"] == pytest.approx(1.0)
+    assert stats["position_weight_max"] == pytest.approx(1.0)
+
+
+def test_position_weight_stats_computes_distribution() -> None:
+    trades = pl.DataFrame({"position_weight": [0.5, 1.0, 2.0, 1.5]})
+    stats = _position_weight_stats(trades)
+    assert stats["position_weight_mean"] == pytest.approx(1.25)
+    assert stats["position_weight_min"] == pytest.approx(0.5)
+    assert stats["position_weight_max"] == pytest.approx(2.0)
+    assert stats["position_weight_std"] > 0.0
+
+
+def test_summarize_trade_backtest_includes_position_weight_stats() -> None:
+    config = TradeLifecycleConfig(rebalance_days=7)
+    trades = pl.DataFrame(
+        [
+            {**_trade_row(net_return=0.04, gross_return=0.05, cost_return=-0.01), "position_weight": 0.5},
+            {**_trade_row(basket_id="B2", net_return=0.02, gross_return=0.03, cost_return=-0.01,
+                          exit_ts_ms=2 * MS_PER_DAY), "position_weight": 2.0},
+        ]
+    )
+    baskets = summarize_baskets(trades, config=config)
+    equity = build_equity_curve(baskets)
+    summary = summarize_trade_backtest(trades, baskets, equity, config=config)
+    assert summary["position_weight_mean"] == pytest.approx(1.25)
+    assert summary["position_weight_min"] == pytest.approx(0.5)
+    assert summary["position_weight_max"] == pytest.approx(2.0)
+
+
+def test_summarize_trade_backtest_empty_returns_default_position_weight_stats() -> None:
+    config = TradeLifecycleConfig()
+    summary = summarize_trade_backtest(
+        pl.DataFrame(), pl.DataFrame(), pl.DataFrame(), config=config
+    )
+    assert summary["position_weight_mean"] == pytest.approx(1.0)
+    assert summary["position_weight_std"] == pytest.approx(0.0)
