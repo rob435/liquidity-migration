@@ -101,7 +101,7 @@ sshd root-login settings, validates the promoted TP26 and live TP21+FF6
 constants, refreshes systemd, restarts both live services, and prints non-secret
 service state. It prints `deploy-verify-ok` only after it has also verified the
 active units are enabled, retired legacy units are inactive and disabled, the
-demo service has the expected one-minute `demo_relaxed` settings, and the risk
+demo service has the expected one-minute `promoted` settings, and the risk
 service uses `ORDER_SUBMIT_MODE=ws_then_rest`. Set
 `EXPECTED_COMMIT=<full sha>` before `bash` if you want the console deploy to
 refuse anything except one pinned commit.
@@ -143,11 +143,12 @@ expected target, preserving the API secrets and bot token. Telegram is enabled
 for material alerts only: entries, exits, position reconciliation, or
 position-report errors. Quiet no-trade cycles still write local reports but must
 not notify. The services submit demo orders only.
-The entry service currently uses `STRATEGY_PROFILE=demo_relaxed`, a higher-frequency
-test-only profile with separate full-PIT evidence in `docs/system_status.md`.
-It shares the promoted strategy's conservative `promoted_quality_squeeze` entry
-router for promoted-grade events but keeps relaxed `demo_relaxed` gates for
-forward plumbing visibility. It is not the promoted research default. The risk
+The entry service uses `STRATEGY_PROFILE=promoted`, the canonical research
+strategy: the conservative `promoted_quality_squeeze` entry router at
+`close_location_min = 0.30`. It fetches the top 220 turnover-ranked symbols so
+the strategy trades its rank 31-150 band, and submits demo (paper) orders only.
+This is a demo-only paper forward test — not Model-Court validated and not a
+real-money promotion. See `docs/system_status.md`. The risk
 service does not open entries; it repairs exchange-native stop/TP state, listens to
 demo private WebSocket position/order/execution streams plus the mainnet public
 ticker stream, and submits reduce-only exits. On the demo account, WebSocket
@@ -160,9 +161,9 @@ blocked subscription is reported while REST reconciliation and exchange-native
 stops keep covering open risk.
 
 Champion/challenger safety: `scripts/run_bybit_demo_event_engine.sh` refuses
-`SUBMIT_ORDERS=1` unless `STRATEGY_PROFILE=demo_relaxed`. Promoted, no-crowding,
-sniper, execution-only, and hedge candidates are shadow-only until the manifest
-in `champion-challenger` is intentionally updated and re-audited.
+`SUBMIT_ORDERS=1` unless `STRATEGY_PROFILE=promoted`. The `demo_relaxed`,
+no-crowding, sniper, execution-only, and hedge candidates are shadow-only until
+the manifest in `champion-challenger` is intentionally updated and re-audited.
 
 The retired `model050426-bybit-demo-signal.timer` / `.service` daily signal scan
 must stay disabled; the active runner is the event-driven loop above.

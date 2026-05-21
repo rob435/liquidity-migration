@@ -1,6 +1,6 @@
 # System Status
 
-Updated 2026-05-21.
+Updated 2026-05-22.
 
 The liquidity-migration short strategy is in **committed paper forward testing**
 on the Bybit demo account. The canonical configuration is the `promoted` profile
@@ -19,7 +19,8 @@ closing-bar sweep on the full-PIT IS root (2023-2026):
 This is a trade-count / return vs drawdown choice, not a strict improvement, and
 it is **not yet tribunal-validated** — the prior tribunal WATCH verdict and
 81-scenario sweep below were run on the 0.45 configuration. Validating 0.30
-through `strategy-tribunal`, and the forward test itself, is the open work.
+through `strategy-tribunal` is the open research work; the demo paper forward
+test of `promoted` + close-0.30 now runs on the VPS (see Deployment status).
 
 ## Research status (prior baseline — close 0.45)
 
@@ -36,10 +37,15 @@ through `strategy-tribunal`, and the forward test itself, is the open work.
 
 ## Deployment status
 
-- The VPS demo currently still runs the `demo_relaxed` profile. Switching the
-  forward test to the canonical `promoted` + close-0.30 strategy is **pending**:
-  the runner (`scripts/run_bybit_demo_event_engine.sh`) hard-restricts demo order
-  submission to the `demo_relaxed` profile (the champion/challenger guard), so
-  running `promoted` as a submitting demo requires changing that guard first.
+- The Bybit demo (paper) forward test runs the canonical `promoted` profile at
+  `close_location_min = 0.30` on the Singapore VPS. The champion/challenger
+  guard authorises `promoted` as the single order-submitting demo stack;
+  `demo_relaxed` and the other candidates are shadow/dry-run only. This is a
+  demo-only paper forward test — not Model-Court validated, not a real-money
+  promotion.
+- The demo cycle fetches the top 220 symbols by 24h turnover (≥ $2M) so the
+  `promoted` strategy can trade its rank 31–150 selection band;
+  `event-demo-cycle` refuses a forward universe narrower than rank 150 for
+  `promoted`.
 - No real-money trading; the private client remains demo-only by design
   (`demo=False` is refused).

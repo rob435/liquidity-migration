@@ -32,8 +32,8 @@ def test_systemd_entry_runner_uses_vps_cadence() -> None:
     )
 
     assert "Environment=INTERVAL_SECONDS=60" in text
-    assert "Environment=STRATEGY_PROFILE=demo_relaxed" in text
-    assert "Environment=UNIVERSE_RANK_END=300" in text
+    assert "Environment=STRATEGY_PROFILE=promoted" in text
+    assert "Environment=UNIVERSE_RANK_END=220" in text
     assert "Environment=PYTHONDONTWRITEBYTECODE=1" in text
 
 
@@ -42,7 +42,7 @@ def test_event_entry_runner_only_submits_active_champion_profile() -> None:
     text = (repo / "scripts" / "run_bybit_demo_event_engine.sh").read_text(encoding="utf-8")
 
     assert 'SUBMIT_ORDERS:-0}" == "1"' in text
-    assert '$STRATEGY_PROFILE" != "demo_relaxed"' in text
+    assert '$STRATEGY_PROFILE" != "promoted"' in text
     assert "champion/challenger stack" in text
 
 
@@ -83,10 +83,10 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "liquidity-migration-bybit-risk.service" in text
     assert "retired unit" in text
     assert "systemctl is-enabled --quiet liquidity-migration-bybit-demo.service" in text
-    assert "Environment=STRATEGY_PROFILE=demo_relaxed" in text
+    assert "Environment=STRATEGY_PROFILE=promoted" in text
     assert "Environment=INTERVAL_SECONDS=60" in text
-    assert "Environment=UNIVERSE_RANK_END=300" in text
-    assert "Environment=UNIVERSE_MAX_SYMBOLS=300" in text
+    assert "Environment=UNIVERSE_RANK_END=220" in text
+    assert "Environment=UNIVERSE_MAX_SYMBOLS=220" in text
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
     assert "deploy-verify-ok commit=" in text
     assert "--property=Environment" not in text
@@ -105,9 +105,9 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text
     assert "TELEGRAM_CHAT_ID" in text
     assert "SYSTEMD_SETTLE_SECONDS" in text
-    assert "Environment=STRATEGY_PROFILE=demo_relaxed" in text
+    assert "Environment=STRATEGY_PROFILE=promoted" in text
     assert "Environment=INTERVAL_SECONDS=60" in text
-    assert "Environment=UNIVERSE_RANK_END=300" in text
+    assert "Environment=UNIVERSE_RANK_END=220" in text
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
     assert "verify-ok commit=" in text
     assert "--property=Environment" not in text
@@ -319,10 +319,10 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "liquidity-migration-bybit-risk.service" in text
     assert "retired unit" in text
     assert "systemctl is-enabled --quiet liquidity-migration-bybit-demo.service" in text
-    assert "Environment=STRATEGY_PROFILE=demo_relaxed" in text
+    assert "Environment=STRATEGY_PROFILE=promoted" in text
     assert "Environment=INTERVAL_SECONDS=60" in text
-    assert "Environment=UNIVERSE_RANK_END=300" in text
-    assert "Environment=UNIVERSE_MAX_SYMBOLS=300" in text
+    assert "Environment=UNIVERSE_RANK_END=220" in text
+    assert "Environment=UNIVERSE_MAX_SYMBOLS=220" in text
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
     assert "deploy-verify-ok commit=" in text
     assert "--property=Environment" not in text

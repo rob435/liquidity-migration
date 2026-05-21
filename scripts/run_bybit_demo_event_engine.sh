@@ -11,7 +11,7 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
 fi
 CONFIG_PATH="${CONFIG_PATH:-configs/volume_alpha.default.yaml}"
 DATA_ROOT="${DATA_ROOT:-data/bybit-demo-event}"
-STRATEGY_PROFILE="${STRATEGY_PROFILE:-demo_relaxed}"
+STRATEGY_PROFILE="${STRATEGY_PROFILE:-promoted}"
 INTERVAL_SECONDS="${INTERVAL_SECONDS:-300}"
 if ! [[ "$INTERVAL_SECONDS" =~ ^[0-9]+$ ]]; then
     echo "INTERVAL_SECONDS must be a non-negative integer number of seconds." >&2
@@ -52,8 +52,8 @@ fi
 
 order_args=()
 if [[ "${SUBMIT_ORDERS:-0}" == "1" ]]; then
-    if [[ "$STRATEGY_PROFILE" != "demo_relaxed" ]]; then
-        echo "Only STRATEGY_PROFILE=demo_relaxed is allowed to submit demo entry orders in the champion/challenger stack." >&2
+    if [[ "$STRATEGY_PROFILE" != "promoted" ]]; then
+        echo "Only STRATEGY_PROFILE=promoted is allowed to submit demo entry orders in the champion/challenger stack." >&2
         exit 2
     fi
     if [[ "${CONFIRM_DEMO_ORDERS:-0}" != "1" ]]; then

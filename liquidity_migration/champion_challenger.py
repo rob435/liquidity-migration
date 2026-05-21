@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Any
 
 
-ACTIVE_ORDER_SUBMITTING_PROFILE = "demo_relaxed"
-ACTIVE_ORDER_SUBMITTING_STRATEGY_ID = "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6"
+ACTIVE_ORDER_SUBMITTING_PROFILE = "promoted"
+ACTIVE_ORDER_SUBMITTING_STRATEGY_ID = "liqmig_union_q40_h3_tp26_g100_qsqueeze"
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,27 +24,27 @@ class ChallengerSpec:
 def champion_challenger_specs() -> tuple[ChallengerSpec, ...]:
     return (
         ChallengerSpec(
-            challenger_id="champion_demo_relaxed_submit",
+            challenger_id="champion_promoted_submit",
             role="trade_champion",
             surface="bybit_demo_event_service",
             submits_orders=True,
             command=(
-                "STRATEGY_PROFILE=demo_relaxed SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 "
+                "STRATEGY_PROFILE=promoted SUBMIT_ORDERS=1 CONFIRM_DEMO_ORDERS=1 "
                 "scripts/run_bybit_demo_event_engine.sh"
             ),
-            purpose="Only live order-submitting entry stack; higher-frequency demo observation profile.",
-            promotion_gate="Already selected as demo-only champion; not real-money promoted.",
+            purpose="Only live order-submitting entry stack; promoted profile at close_location_min=0.30.",
+            promotion_gate="Demo-only paper forward test of the 0.30-close variant; not Model-Court validated and not real-money promoted.",
         ),
         ChallengerSpec(
-            challenger_id="shadow_current_promoted",
+            challenger_id="shadow_demo_relaxed",
             role="shadow_challenger",
             surface="event_demo_cycle_dry_run",
             submits_orders=False,
             command=(
                 "python -m liquidity_migration --config configs/volume_alpha.default.yaml "
-                "--data-root data/shadow-current-promoted event-demo-cycle --strategy-profile promoted --record-dry-run"
+                "--data-root data/shadow-demo-relaxed event-demo-cycle --strategy-profile demo_relaxed --record-dry-run"
             ),
-            purpose="Sparse promoted-grade signal stream for live-vs-backtest drift without orders.",
+            purpose="Higher-frequency demo_relaxed signal stream for live-vs-backtest drift without orders.",
             promotion_gate="Must clear Model Court with execution drift before it can submit orders.",
         ),
         ChallengerSpec(
@@ -164,7 +164,7 @@ def _audit_violations(specs: tuple[ChallengerSpec, ...]) -> list[str]:
     submitters = [spec for spec in specs if spec.submits_orders]
     if len(submitters) != 1:
         violations.append(f"Expected exactly one order-submitting champion; found {len(submitters)}.")
-    elif submitters[0].challenger_id != "champion_demo_relaxed_submit":
+    elif submitters[0].challenger_id != "champion_promoted_submit":
         violations.append(f"Unexpected order-submitting champion: {submitters[0].challenger_id}.")
     for spec in specs:
         command = spec.command
