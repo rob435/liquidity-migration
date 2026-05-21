@@ -46,6 +46,17 @@ Do not point the live demo order/trade ledgers at the full-PIT research root.
 The demo root contains forward kline cache, order ledgers, trade ledgers, cycle
 reports, and risk-watchdog reports.
 
+The parallel paper (dry-run) runner uses its own separate root:
+
+```text
+data/bybit-paper-event
+```
+
+It shadows the demo runner — same strategy profile, universe, and cadence — but
+submits no orders and records idealized fills at the signal price. Comparing the
+paper and demo ledgers measures demo-vs-paper execution slippage; the
+`reconcile-paper-demo` CLI command does that comparison.
+
 ## Out-of-Sample Roots
 
 Two pre-2023 PIT roots exist for genuine out-of-sample validation — both predate

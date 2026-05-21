@@ -256,7 +256,11 @@ def test_event_ws_risk_cli_defaults_to_ws_then_rest_demo_path() -> None:
     assert args.rest_reconcile_seconds == 30.0
     assert args.heartbeat_seconds == 10.0
     assert args.pending_exit_guard_seconds == 120.0
-    assert args.exit_untracked_positions is True
+    assert args.exit_untracked_positions is False
+    assert args.adopt_untracked_positions is True
+    assert args.adopt_stop_loss_pct == 0.12
+    assert args.adopt_take_profit_pct == 0.21
+    assert args.adopt_hold_days == 3.0
     assert args.fast_execution_stream is False
     assert args.submit_orders is False
     assert args.confirm_demo_orders is False

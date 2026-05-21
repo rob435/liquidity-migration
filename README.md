@@ -29,7 +29,7 @@ client is demo-only by design (`demo=False` is refused in code).
 
 - `liquidity_migration/` — Python package: data ingestion, point-in-time
   archive builders, the backtest / event engine, and the
-  `python -m liquidity_migration` CLI (16 subcommands; run `--help`).
+  `python -m liquidity_migration` CLI (17 subcommands; run `--help`).
 - `tests/` — `.venv/bin/python -m pytest -q`.
 - `docs/research_findings.md` — current research verdict and refinement roadmap.
 - `docs/backtesting_errors_we_never_repeat.md` — research methodology standard.

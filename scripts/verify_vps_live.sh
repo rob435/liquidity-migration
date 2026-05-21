@@ -67,6 +67,7 @@ fi
 
 systemctl is-enabled --quiet liquidity-migration-bybit-demo.service
 systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
+systemctl is-enabled --quiet liquidity-migration-bybit-paper.service
 
 for legacy_unit in \
   model050426.service \
@@ -88,6 +89,7 @@ fi
 
 systemctl is-active --quiet liquidity-migration-bybit-demo.service
 systemctl is-active --quiet liquidity-migration-bybit-risk.service
+systemctl is-active --quiet liquidity-migration-bybit-paper.service
 
 systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=STRATEGY_PROFILE=demo_relaxed'
 systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=INTERVAL_SECONDS=60'

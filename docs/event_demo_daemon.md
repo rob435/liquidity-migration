@@ -68,20 +68,29 @@ private REST rate budget is shared — the demo daemon uses
 `BybitPrivateRateLimiter` with a conservative 15 req/s (env
 `BYBIT_PRIVATE_REST_RATE_LIMIT_PER_SECOND`) to leave headroom.
 
-## What's NOT yet in this change
+## Design notes
 
-- **WS-driven fill confirmation for the risk engine's reduce-only exits.**
-  The risk engine already has its own WS execution subscription for
-  reconciliation but still submits orders via REST and polls REST for fill.
-  Same wiring would apply but is a separate refactor.
-- **Cross-process router sharing.** Each service has its own router; events
-  for orders submitted by the demo are not visible to the risk service and
-  vice versa. Acceptable today because the two sides write to separate
-  order-link-id prefixes (`lm-en-*` vs `lm-ux-*`/`lm-ex-*`), so neither
-  service would consume the other's WS events anyway.
-- **WS reconnect telemetry.** We rely on pybit's auto-reconnect and don't
-  surface a counter yet. If WS instability becomes a concern, add a hook in
-  `EventDemoDaemon._handle_execution_message` to record gaps.
+- **WS-driven fill confirmation covers the risk engine's reduce-only exits.**
+  The risk engine submits tracked exits through the WebSocket trade path
+  (`ws_exit`) and confirms fills from its private execution + order streams
+  (`on_execution_message` → `record_tracked_exit_stream_fill`); REST polling
+  remains the fallback. Leftover positions with no ledger trade are *adopted*
+  as tracked trades (`adopt_untracked_positions`) rather than flattened, so
+  they are managed and exited through that same WS-confirmed path.
+- **Cross-process router sharing is intentionally not implemented.** The demo
+  and risk services each own a router and a WS subscription. They write
+  disjoint order-link-id prefixes (`lm-en-*` for entries vs `lm-ux-*` /
+  `lm-ex-*` for exits) and each consumes only its own events, and each already
+  sees its own fills on its own subscription. Sharing a router across the two
+  processes would add inter-process plumbing for no functional gain, so it is
+  deliberately left out — not a pending TODO.
+- **WS gap telemetry.** `EventDemoDaemon._record_ws_event` tracks inter-event
+  gaps on the execution stream — pybit reconnects transparently, so a long
+  silence followed by a resumed event is the only observable symptom of a
+  dropped connection. Gaps beyond `ws_gap_threshold_seconds` (default 120s)
+  are counted and logged; `ws_gap_count` and `ws_max_gap_seconds` appear in the
+  shutdown summary and the `run()` stats dict. A long gap in a quiet market is
+  normal, so the counter is a coarse signal, not a definitive disconnect count.
 
 ## Shadow-testing checklist
 

@@ -118,6 +118,66 @@ def test_daemon_continues_running_when_cycle_raises(tmp_path: Path) -> None:
     assert stats["buffered_links"] == 0  # no events injected
 
 
+def test_daemon_ws_gap_telemetry_counts_long_gaps(tmp_path: Path) -> None:
+    """The execution stream is silent in quiet markets and pybit reconnects
+    transparently, so the daemon tracks inter-event gaps as a coarse WS-liveness
+    signal. A gap beyond the threshold is counted; the first event and short
+    gaps are not."""
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(),
+        interval_seconds=0.0,
+        ws_gap_threshold_seconds=120.0,
+        ws_stream_factory=lambda _config: _RecordingWsStream(),
+        cycle_runner=_stub_cycle_runner([]),
+    )
+    daemon._record_ws_event(100.0)  # first event — no prior gap
+    daemon._record_ws_event(150.0)  # 50s gap — under threshold
+    assert daemon._ws_gap_count == 0
+    daemon._record_ws_event(450.0)  # 300s gap — over threshold
+    assert daemon._ws_gap_count == 1
+    assert daemon._ws_max_gap_seconds == 300.0
+    daemon._record_ws_event(700.0)  # 250s gap — over threshold, not a new max
+    assert daemon._ws_gap_count == 2
+    assert daemon._ws_max_gap_seconds == 300.0
+
+
+def test_daemon_run_reports_ws_gap_stats(tmp_path: Path) -> None:
+    ws = _RecordingWsStream()
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_stub_cycle_runner([]),
+    )
+    result: dict = {}
+
+    def _run() -> None:
+        result["stats"] = daemon.run()
+
+    runner = threading.Thread(target=_run, daemon=True)
+    runner.start()
+    time.sleep(0.05)
+    daemon.request_shutdown()
+    runner.join(timeout=2.0)
+    assert not runner.is_alive()
+    assert result["stats"]["ws_gap_count"] == 0
+    assert result["stats"]["ws_max_gap_seconds"] == 0.0
+
+
+def test_daemon_rejects_nonpositive_ws_gap_threshold(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="ws_gap_threshold_seconds"):
+        EventDemoDaemon(
+            tmp_path,
+            config=ResearchConfig(data_root=tmp_path),
+            demo_config=EventDemoCycleConfig(),
+            ws_gap_threshold_seconds=0.0,
+        )
+
+
 def test_daemon_falls_back_to_rest_when_ws_factory_fails(tmp_path: Path) -> None:
     """If the WS stream cannot be opened (network down, auth fail), the daemon
     must still run cycles — they just lose the WS fast path and fall back to

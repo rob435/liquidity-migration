@@ -28,6 +28,7 @@ from .event_demo import (
 from .feature_factory import run_feature_factory_report
 from .ingestion import generate_fixture_data
 from .portfolio_hedge import run_portfolio_hedge_report
+from .reconciliation import run_paper_demo_reconciliation
 from .strategy_tribunal import StrategyTribunalConfig, run_strategy_tribunal
 from .universe import run_discover_universe
 from .volume_events import ENTRY_POLICIES, VolumeEventResearchConfig, run_volume_event_research
@@ -1355,6 +1356,27 @@ def _add_event_risk_ws_parser(subparsers) -> None:
     event_ws_risk.set_defaults(fast_execution_stream=ws_risk_defaults.fast_execution_stream)
     event_ws_risk.add_argument("--stop-tolerance-bps", type=float, default=ws_risk_defaults.stop_tolerance_bps)
     event_ws_risk.add_argument("--pending-exit-guard-seconds", type=float, default=ws_risk_defaults.pending_exit_guard_seconds)
+    event_ws_risk.add_argument("--adopt-untracked-positions", dest="adopt_untracked_positions", action="store_true")
+    event_ws_risk.add_argument("--no-adopt-untracked-positions", dest="adopt_untracked_positions", action="store_false")
+    event_ws_risk.set_defaults(adopt_untracked_positions=ws_risk_defaults.adopt_untracked_positions)
+    event_ws_risk.add_argument(
+        "--adopt-stop-loss-pct",
+        type=float,
+        default=ws_risk_defaults.adopt_stop_loss_pct,
+        help="Stop-loss fraction applied to adopted untracked positions.",
+    )
+    event_ws_risk.add_argument(
+        "--adopt-take-profit-pct",
+        type=float,
+        default=ws_risk_defaults.adopt_take_profit_pct,
+        help="Take-profit fraction applied to adopted untracked positions.",
+    )
+    event_ws_risk.add_argument(
+        "--adopt-hold-days",
+        type=float,
+        default=ws_risk_defaults.adopt_hold_days,
+        help="Max-hold days applied to adopted untracked positions.",
+    )
     event_ws_risk.add_argument("--exit-untracked-positions", dest="exit_untracked_positions", action="store_true")
     event_ws_risk.add_argument("--no-exit-untracked-positions", dest="exit_untracked_positions", action="store_false")
     event_ws_risk.set_defaults(exit_untracked_positions=ws_risk_defaults.exit_untracked_positions)
@@ -1364,11 +1386,36 @@ def _add_event_risk_ws_parser(subparsers) -> None:
         default=ws_risk_defaults.untracked_position_grace_seconds,
         help=(
             "Seconds a Bybit position must remain untracked by trade/order ledgers before "
-            "the risk engine submits a reduce-only close. Set above the demo entry cycle "
-            "interval to avoid closing positions before the entry runner finishes recording them."
+            "the risk engine adopts it (or, with --exit-untracked-positions, closes it). Set "
+            "above the demo entry cycle interval so the entry runner can finish recording its "
+            "own positions first."
         ),
     )
     event_ws_risk.add_argument("--data-name", default=ws_risk_defaults.data_name)
+
+
+def _add_reconcile_paper_demo_parser(subparsers) -> None:
+    reconcile = subparsers.add_parser(
+        "reconcile-paper-demo",
+        help="Measure execution slippage by reconciling the paper and demo trade ledgers.",
+    )
+    reconcile.add_argument(
+        "--paper-data-root",
+        default="data/bybit-paper-event",
+        help="Paper (dry-run) data root holding the idealized-fill ledger.",
+    )
+    reconcile.add_argument(
+        "--demo-data-root",
+        default="data/bybit-demo-event",
+        help="Demo data root holding the actual-fill ledger.",
+    )
+    reconcile.add_argument(
+        "--entry-tolerance-ms",
+        type=int,
+        default=600_000,
+        help="Max entry-time gap (ms) for pairing a paper trade with a demo trade.",
+    )
+    reconcile.add_argument("--output-dir", default=None, help="Where to write the reconciliation report.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1393,6 +1440,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_event_demo_cycle_parser(subparsers)
     _add_event_risk_cycle_parser(subparsers)
     _add_event_risk_ws_parser(subparsers)
+    _add_reconcile_paper_demo_parser(subparsers)
 
     return parser
 
@@ -1674,8 +1722,12 @@ def main(argv: list[str] | None = None) -> int:
             fast_execution_stream=args.fast_execution_stream,
             stop_tolerance_bps=args.stop_tolerance_bps,
             pending_exit_guard_seconds=args.pending_exit_guard_seconds,
+            adopt_untracked_positions=args.adopt_untracked_positions,
             exit_untracked_positions=args.exit_untracked_positions,
             untracked_position_grace_seconds=args.untracked_position_grace_seconds,
+            adopt_stop_loss_pct=args.adopt_stop_loss_pct,
+            adopt_take_profit_pct=args.adopt_take_profit_pct,
+            adopt_hold_days=args.adopt_hold_days,
             data_name=args.data_name,
         )
         payload = run_event_ws_risk(data_root, config=config, risk_config=risk_config)
@@ -1937,6 +1989,24 @@ def main(argv: list[str] | None = None) -> int:
             f"status={payload['status']} "
             f"specs={len(payload['specs'])} "
             f"path={payload['output_files']['markdown']}"
+        )
+        return 0
+
+    if args.command == "reconcile-paper-demo":
+        payload = run_paper_demo_reconciliation(
+            args.paper_data_root,
+            args.demo_data_root,
+            entry_tolerance_ms=args.entry_tolerance_ms,
+            output_dir=args.output_dir,
+        )
+        summary = payload["result"]["summary"]
+        print(
+            "paper-demo reconciliation "
+            f"paired={summary['paired']} "
+            f"paper_only={summary['paper_only']} "
+            f"demo_only={summary['demo_only']} "
+            f"entry_slip_bps_mean={summary['entry_slippage_bps_mean']:.2f} "
+            f"path={payload['report_path']}"
         )
         return 0
 

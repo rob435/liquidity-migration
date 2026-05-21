@@ -70,12 +70,15 @@ class EventDemoDaemon:
         event_config: VolumeEventResearchConfig | None = None,
         demo_config: EventDemoCycleConfig | None = None,
         interval_seconds: float = 60.0,
+        ws_gap_threshold_seconds: float = 120.0,
         ws_stream_factory: Callable[[ResearchConfig], Any] | None = None,
         cycle_runner: Callable[..., dict[str, Any]] = run_event_demo_cycle,
         telegram_sender: Callable[[str], bool] | None = None,
     ) -> None:
         if interval_seconds < 0.0:
             raise ValueError("interval_seconds must be non-negative")
+        if ws_gap_threshold_seconds <= 0.0:
+            raise ValueError("ws_gap_threshold_seconds must be positive")
         self.data_root = Path(data_root).expanduser()
         self.config = config
         self.event_config = event_config
@@ -92,6 +95,10 @@ class EventDemoDaemon:
         self._ws_stream: Any | None = None
         self._cycles_run = 0
         self._cycle_errors = 0
+        self._ws_gap_threshold_seconds = float(ws_gap_threshold_seconds)
+        self._last_ws_event_monotonic: float | None = None
+        self._ws_gap_count = 0
+        self._ws_max_gap_seconds = 0.0
 
     def install_signal_handlers(self) -> None:
         """Wire SIGTERM/SIGINT to request_shutdown so systemd `systemctl stop`
@@ -153,7 +160,29 @@ class EventDemoDaemon:
                     pass
                 return
 
+    def _record_ws_event(self, now: float) -> None:
+        """Track inter-event gaps on the execution stream as a coarse WS-liveness
+        signal. pybit reconnects transparently, so the daemon never observes an
+        explicit reconnect — a long silence followed by a resumed event is the
+        only symptom. A long gap in a quiet market is also normal, so this
+        counts gaps for telemetry; it does not by itself prove a disconnect."""
+        last = self._last_ws_event_monotonic
+        self._last_ws_event_monotonic = now
+        if last is None:
+            return
+        gap = now - last
+        if gap > self._ws_gap_threshold_seconds:
+            self._ws_gap_count += 1
+            self._ws_max_gap_seconds = max(self._ws_max_gap_seconds, gap)
+            _logger.warning(
+                "execution WS gap: %.1fs since previous event (threshold %.0fs, gap #%d)",
+                gap,
+                self._ws_gap_threshold_seconds,
+                self._ws_gap_count,
+            )
+
     def _handle_execution_message(self, message: dict[str, Any]) -> None:
+        self._record_ws_event(time.monotonic())
         try:
             self.router.on_execution_event(message)
         except Exception as exc:  # noqa: BLE001 - never let WS callback explode the stream thread
@@ -187,9 +216,12 @@ class EventDemoDaemon:
             self._close_ws()
         router_stats = self.router.stats()
         _logger.info(
-            "event_demo_daemon stopped cycles_run=%d cycle_errors=%d router_stats=%s",
+            "event_demo_daemon stopped cycles_run=%d cycle_errors=%d "
+            "ws_gaps=%d ws_max_gap_seconds=%.1f router_stats=%s",
             self._cycles_run,
             self._cycle_errors,
+            self._ws_gap_count,
+            self._ws_max_gap_seconds,
             router_stats,
         )
         self._send_telegram(
@@ -197,11 +229,14 @@ class EventDemoDaemon:
             f"cycles={self._cycles_run} "
             f"errors={self._cycle_errors} "
             f"ws_events={router_stats['events_received']} "
-            f"ws_satisfied={router_stats['waits_satisfied_by_ws']}"
+            f"ws_satisfied={router_stats['waits_satisfied_by_ws']} "
+            f"ws_gaps={self._ws_gap_count}"
         )
         return {
             "cycles_run": self._cycles_run,
             "cycle_errors": self._cycle_errors,
+            "ws_gap_count": self._ws_gap_count,
+            "ws_max_gap_seconds": self._ws_max_gap_seconds,
             "router_stats": router_stats,
         }
 

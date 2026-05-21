@@ -28,7 +28,7 @@ regime-conditional, and the current focus is regime-aware refinement (see
 
 ## Module map (`liquidity_migration/`)
 
-- `cli.py` — argparse entry point, 16 subcommands.
+- `cli.py` — argparse entry point, 17 subcommands.
 - `volume_events.py` — active event-driven strategy: full-PIT gates, ledger,
   reports.
 - `strategy_tribunal.py` — adversarial promotion court for completed reports.

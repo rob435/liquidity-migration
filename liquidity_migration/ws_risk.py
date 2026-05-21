@@ -13,6 +13,7 @@ from typing import Any
 
 import polars as pl
 
+from ._common import MS_PER_DAY
 from .bybit import BybitPrivateWebSocketStream, BybitPublicTickerStream, BybitWebSocketTradeClient
 from .config import ResearchConfig
 from .event_demo import (
@@ -29,6 +30,7 @@ from .event_demo import (
     _execute_risk_exits,
     _execute_stop_repairs,
     _float,
+    _normalized_position_side,
     _open_trades,
     _order_params,
     _price_lookup_from_positions,
@@ -39,6 +41,8 @@ from .event_demo import (
     _live_open_order_symbols,
     _safe_open_orders,
     _safe_raw_positions,
+    _stop_price_for_entry,
+    _take_profit_price_for_entry,
     _terminalize_stale_pending_entry_orders,
     _maybe_notify,
     _telegram_notification_reason,
@@ -93,8 +97,12 @@ class EventWebSocketRiskConfig:
     fast_execution_stream: bool = False
     stop_tolerance_bps: float = 1.0
     pending_exit_guard_seconds: float = 120.0
-    exit_untracked_positions: bool = True
+    adopt_untracked_positions: bool = True
+    exit_untracked_positions: bool = False
     untracked_position_grace_seconds: float = 90.0
+    adopt_stop_loss_pct: float = 0.12
+    adopt_take_profit_pct: float = 0.21
+    adopt_hold_days: float = 3.0
 
 
 @dataclass(slots=True)
@@ -191,6 +199,7 @@ class EventWebSocketRiskEngine:
         self.reconcile_positions(write=True)
         self.evaluate_symbols(set(self.state.positions_by_symbol))
         self.repair_exchange_stops()
+        self.adopt_untracked_positions()
         self.exit_untracked_positions()
         self.start_streams()
         self.state.last_reconcile_monotonic = time.monotonic()
@@ -310,6 +319,7 @@ class EventWebSocketRiskEngine:
         reconcile_rows = self.reconcile_positions(write=True)
         if reconcile_rows:
             self.write_report(reason="position_stream_reconcile")
+        self.adopt_untracked_positions()
         self.exit_untracked_positions()
         self.evaluate_symbols(changed_symbols)
 
@@ -824,12 +834,113 @@ class EventWebSocketRiskEngine:
         self.evaluate_symbols(set(self.state.positions_by_symbol))
         self.repair_exchange_stops()
         self.reconcile_untracked_exit_orders()
+        self.adopt_untracked_positions()
         self.exit_untracked_positions()
         # rest_reconcile is also the recovery path when reconcile_stale_websocket
         # fires after a WS silence: this call re-subscribes any tickers that the
         # public stream dropped. Don't move it out of rest_reconcile.
         self.subscribe_tickers(set(self.state.positions_by_symbol) | set(_column_values(self.state.open_trades, "symbol")))
         self.state.last_reconcile_monotonic = time.monotonic()
+
+    def adopt_untracked_positions(self) -> None:
+        """Adopt exchange positions that have no ledger trade as tracked trades,
+        so the normal stop-loss / take-profit / max-hold exit logic manages them.
+        Leftover positions after a restart are taken over rather than flattened.
+        Runs before exit_untracked_positions so an adopted position is no longer
+        seen as untracked."""
+        if not self.risk.adopt_untracked_positions:
+            return
+        self.expire_stale_submitted_symbols()
+        open_symbols = set(_column_values(self.state.open_trades, "symbol"))
+        now_ms = _now_ms()
+        grace_ms = int(max(self.risk.untracked_position_grace_seconds, 0.0) * 1000.0)
+        adopted: list[dict[str, Any]] = []
+        active_position_symbols: set[str] = set()
+        for position in list(self.state.positions_by_symbol.values()):
+            symbol = str(position.get("symbol", ""))
+            if not symbol or _float(position.get("size")) <= 0.0:
+                continue
+            active_position_symbols.add(symbol)
+            if (
+                symbol in open_symbols
+                or symbol in self.state.pending_entry_symbols
+                or self.exit_submission_active(symbol)
+            ):
+                self.state.untracked_first_seen_ms.pop(symbol, None)
+                continue
+            first_seen = self.state.untracked_first_seen_ms.setdefault(symbol, now_ms)
+            if now_ms - first_seen < grace_ms:
+                continue
+            trade = self._build_adopted_trade(position, now_ms=now_ms)
+            if trade is None:
+                continue
+            adopted.append(trade)
+            open_symbols.add(symbol)
+            self.state.untracked_first_seen_ms.pop(symbol, None)
+        for stale_symbol in [s for s in self.state.untracked_first_seen_ms if s not in active_position_symbols]:
+            self.state.untracked_first_seen_ms.pop(stale_symbol, None)
+        if not adopted:
+            return
+        self.state.all_trades = _upsert_rows(self.state.all_trades, adopted, key="trade_id")
+        self.state.open_trades = _open_trades(self.state.all_trades)
+        _write_trade_rows(self.root, pl.DataFrame(adopted, infer_schema_length=None))
+        for trade in adopted:
+            _logger.warning(
+                "untracked_position adopt symbol=%s side=%s qty=%s entry_price=%s stop=%s tp=%s planned_exit_ts_ms=%s",
+                trade.get("symbol"),
+                trade.get("side"),
+                trade.get("qty"),
+                trade.get("entry_price"),
+                trade.get("stop_price"),
+                trade.get("take_profit_price"),
+                trade.get("planned_exit_ts_ms"),
+            )
+        self.write_report(reason="untracked_positions_adopted")
+        self.evaluate_symbols({str(trade.get("symbol", "")) for trade in adopted})
+        self.repair_exchange_stops()
+
+    def _build_adopted_trade(self, position: dict[str, Any], *, now_ms: int) -> dict[str, Any] | None:
+        symbol = str(position.get("symbol", ""))
+        qty = str(position.get("size") or "")
+        entry_price = _first_price(position, ("avgPrice", "avg_price", "entryPrice", "entry_price"))
+        side = _normalized_position_side(position.get("side"))
+        if not symbol or _float(qty) <= 0.0 or entry_price <= 0.0 or side not in {"long", "short"}:
+            return None
+        opened_ms = _int(position.get("createdTime") or position.get("created_time")) or now_ms
+        stop_loss_pct = max(self.risk.adopt_stop_loss_pct, 0.0)
+        take_profit_pct = max(self.risk.adopt_take_profit_pct, 0.0)
+        tick_size = _float(position.get("tickSize") or position.get("tick_size"))
+        stop_price = (
+            _stop_price_for_entry(entry_price=entry_price, side=side, stop_loss_pct=stop_loss_pct, tick_size=tick_size)
+            if stop_loss_pct > 0.0
+            else 0.0
+        )
+        take_profit_price = _take_profit_price_for_entry(
+            entry_price=entry_price, side=side, take_profit_pct=take_profit_pct, tick_size=tick_size
+        )
+        planned_exit_ts_ms = opened_ms + int(max(self.risk.adopt_hold_days, 0.0) * MS_PER_DAY)
+        return {
+            "trade_id": f"adopted-{symbol}-{opened_ms}",
+            "strategy_id": "adopted",
+            "symbol": symbol,
+            "side": side,
+            "status": "open",
+            "qty": qty,
+            "entry_price": entry_price,
+            "notional_usdt": abs(entry_price * _float(qty)),
+            "ts_ms": now_ms,
+            "entry_ts_ms": opened_ms,
+            "opened_at_ms": opened_ms,
+            "updated_at_ms": now_ms,
+            "stop_price": stop_price,
+            "take_profit_price": take_profit_price,
+            "stop_loss_pct": stop_loss_pct,
+            "take_profit_pct": take_profit_pct,
+            "planned_exit_ts_ms": planned_exit_ts_ms,
+            "entry_order_link_id": "",
+            "entry_order_id": "",
+            "submit_mode": "adopted",
+        }
 
     def exit_untracked_positions(self) -> None:
         if not self.risk.exit_untracked_positions:
@@ -1441,6 +1552,10 @@ def _validate_ws_risk_config(config: EventWebSocketRiskConfig) -> None:
         raise ValueError("exit_untracked_positions requires REST fallback in Bybit demo mode")
     if config.untracked_position_grace_seconds < 0.0:
         raise ValueError("untracked_position_grace_seconds must be non-negative")
+    if config.adopt_stop_loss_pct < 0.0 or config.adopt_take_profit_pct < 0.0:
+        raise ValueError("adopt stop-loss and take-profit percentages must be non-negative")
+    if config.adopt_hold_days < 0.0:
+        raise ValueError("adopt_hold_days must be non-negative")
 
 
 _DEMO_WS_TRADE_UNAVAILABLE = (

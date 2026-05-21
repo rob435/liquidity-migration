@@ -971,6 +971,8 @@ def test_ws_risk_logs_untracked_close_to_logger(tmp_path: Path, caplog) -> None:
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
+            exit_untracked_positions=True,
+            adopt_untracked_positions=False,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1010,6 +1012,8 @@ def test_ws_risk_untracked_grace_period_defers_close_then_fires(tmp_path: Path) 
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=90.0,
+            exit_untracked_positions=True,
+            adopt_untracked_positions=False,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1052,6 +1056,8 @@ def test_ws_risk_untracked_grace_cleared_when_symbol_becomes_tracked(tmp_path: P
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=90.0,
+            exit_untracked_positions=True,
+            adopt_untracked_positions=False,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1080,6 +1086,8 @@ def test_ws_risk_flattens_untracked_position_on_bootstrap(tmp_path: Path) -> Non
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
+            exit_untracked_positions=True,
+            adopt_untracked_positions=False,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1207,6 +1215,8 @@ def test_ws_risk_stale_pending_entry_no_longer_blocks_untracked_flatten(tmp_path
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
+            exit_untracked_positions=True,
+            adopt_untracked_positions=False,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1299,6 +1309,8 @@ def test_ws_risk_untracked_exit_blocks_duplicate_until_fill(tmp_path: Path) -> N
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
+            exit_untracked_positions=True,
+            adopt_untracked_positions=False,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1327,6 +1339,8 @@ def test_ws_risk_untracked_exit_history_error_stays_pending(tmp_path: Path) -> N
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
+            exit_untracked_positions=True,
+            adopt_untracked_positions=False,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1359,6 +1373,8 @@ def test_ws_risk_untracked_execution_partial_keeps_duplicate_guard(tmp_path: Pat
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
+            exit_untracked_positions=True,
+            adopt_untracked_positions=False,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1655,6 +1671,8 @@ def test_ws_risk_untracked_exit_retries_after_pending_guard(tmp_path: Path) -> N
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
             pending_exit_guard_seconds=1.0,
+            exit_untracked_positions=True,
+            adopt_untracked_positions=False,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1684,6 +1702,8 @@ def test_ws_risk_untracked_reconcile_history_error_keeps_pending(tmp_path: Path)
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
+            exit_untracked_positions=True,
+            adopt_untracked_positions=False,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1713,6 +1733,8 @@ def test_ws_risk_untracked_reconcile_flattens_when_position_missing_even_if_hist
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
+            exit_untracked_positions=True,
+            adopt_untracked_positions=False,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -1742,6 +1764,8 @@ def test_ws_risk_reconciles_untracked_exit_when_position_is_flat(tmp_path: Path)
             rest_reconcile_seconds=0.0,
             heartbeat_seconds=0.0,
             untracked_position_grace_seconds=0.0,
+            exit_untracked_positions=True,
+            adopt_untracked_positions=False,
         ),
         private_client=private_client,
         private_stream=FakePrivateStream(),
@@ -2030,6 +2054,131 @@ def test_ws_risk_stale_stream_forces_rest_reconcile(tmp_path: Path) -> None:
     stored = read_dataset(tmp_path, "event_demo_trades")
     assert any("websocket stale" in error for error in engine.state.errors)
     assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
+
+
+def test_ws_risk_adopts_untracked_position_on_bootstrap(tmp_path: Path) -> None:
+    private_client = FakePrivateClient()
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=False,
+            repair_stops=False,
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    assert stored.height == 1
+    trade = stored.to_dicts()[0]
+    assert trade["symbol"] == "AAAUSDT"
+    assert trade["side"] == "short"
+    assert trade["status"] == "open"
+    assert trade["submit_mode"] == "adopted"
+    assert trade["strategy_id"] == "adopted"
+    assert trade["stop_price"] == 112.0
+    assert trade["take_profit_price"] == 79.0
+    assert trade["planned_exit_ts_ms"] > trade["entry_ts_ms"]
+    assert str(trade["trade_id"]).startswith("adopted-AAAUSDT-")
+    assert "AAAUSDT" not in engine.state.submitted_symbols
+
+
+def test_ws_risk_adopted_position_exits_on_stop(tmp_path: Path) -> None:
+    private_client = FakePrivateClient()
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    engine.on_ticker_message({"data": {"symbol": "AAAUSDT", "markPrice": "113"}})
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    adopted = stored.filter(pl.col("symbol") == "AAAUSDT").to_dicts()[0]
+    assert adopted["status"] == "closed"
+    assert adopted["exit_reason"] == "stop_loss"
+    assert private_client.orders and private_client.orders[0]["reduceOnly"] is True
+
+
+def test_ws_risk_does_not_adopt_already_tracked_position(tmp_path: Path) -> None:
+    _write_open_trade(tmp_path)
+    private_client = FakePrivateClient()
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=False,
+            repair_stops=False,
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    trade_ids = [str(tid) for tid in stored["trade_id"].to_list()]
+    assert trade_ids == ["t1"]
+    assert not any(tid.startswith("adopted-") for tid in trade_ids)
+
+
+def test_ws_risk_adoption_respects_grace_period(tmp_path: Path) -> None:
+    private_client = FakePrivateClient()
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=False,
+            repair_stops=False,
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=300.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    assert read_dataset(tmp_path, "event_demo_trades").is_empty()
+    assert "AAAUSDT" in engine.state.untracked_first_seen_ms
+
+
+def test_ws_risk_adopt_config_rejects_negative_pct(tmp_path: Path) -> None:
+    raised = ""
+    try:
+        EventWebSocketRiskEngine(
+            tmp_path,
+            config=ResearchConfig(data_root=tmp_path),
+            risk_config=EventWebSocketRiskConfig(adopt_stop_loss_pct=-0.05),
+        )
+    except ValueError as exc:
+        raised = str(exc)
+    assert "non-negative" in raised
 
 
 def _write_open_trade(root: Path) -> None:

@@ -4,6 +4,8 @@ The active VPS services are:
 
 - `liquidity-migration-bybit-demo.service`: event entry/normal lifecycle runner.
 - `liquidity-migration-bybit-risk.service`: fast exit-only risk runner.
+- `liquidity-migration-bybit-paper.service`: dry-run paper shadow of the demo
+  runner on a separate data root (`data/bybit-paper-event`) — submits no orders.
 
 Install or refresh it on the VPS from a trusted local checkout:
 
@@ -119,11 +121,14 @@ Manual install or refresh on the VPS:
 ```bash
 cp deploy/systemd/liquidity-migration-bybit-demo.service /etc/systemd/system/liquidity-migration-bybit-demo.service
 cp deploy/systemd/liquidity-migration-bybit-risk.service /etc/systemd/system/liquidity-migration-bybit-risk.service
+cp deploy/systemd/liquidity-migration-bybit-paper.service /etc/systemd/system/liquidity-migration-bybit-paper.service
 systemctl daemon-reload
 systemctl enable --now liquidity-migration-bybit-demo.service
 systemctl enable --now liquidity-migration-bybit-risk.service
+systemctl enable --now liquidity-migration-bybit-paper.service
 systemctl restart liquidity-migration-bybit-demo.service
 systemctl restart liquidity-migration-bybit-risk.service
+systemctl restart liquidity-migration-bybit-paper.service
 ```
 
 Required secrets live outside git in:

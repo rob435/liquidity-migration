@@ -19,7 +19,7 @@ regime-conditional, and the current focus is regime-aware refinement (see
 
 ## Running
 
-- CLI: `python -m liquidity_migration <subcommand>` (16 subcommands; see `--help`).
+- CLI: `python -m liquidity_migration <subcommand>` (17 subcommands; see `--help`).
 - Tests: `.venv/bin/python -m pytest -q`.
 
 ## Working here

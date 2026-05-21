@@ -93,6 +93,7 @@ fi
 
 cp deploy/systemd/liquidity-migration-bybit-demo.service /etc/systemd/system/liquidity-migration-bybit-demo.service
 cp deploy/systemd/liquidity-migration-bybit-risk.service /etc/systemd/system/liquidity-migration-bybit-risk.service
+cp deploy/systemd/liquidity-migration-bybit-paper.service /etc/systemd/system/liquidity-migration-bybit-paper.service
 systemctl daemon-reload
 systemctl disable --now \
   model050426.service \
@@ -101,8 +102,10 @@ systemctl disable --now \
   2>/dev/null || true
 systemctl enable liquidity-migration-bybit-demo.service
 systemctl enable liquidity-migration-bybit-risk.service
+systemctl enable liquidity-migration-bybit-paper.service
 systemctl restart liquidity-migration-bybit-demo.service
 systemctl restart liquidity-migration-bybit-risk.service
+systemctl restart liquidity-migration-bybit-paper.service
 
 if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then
   sleep "$SYSTEMD_SETTLE_SECONDS"
@@ -110,8 +113,10 @@ fi
 
 systemctl is-active --quiet liquidity-migration-bybit-demo.service
 systemctl is-active --quiet liquidity-migration-bybit-risk.service
+systemctl is-active --quiet liquidity-migration-bybit-paper.service
 systemctl is-enabled --quiet liquidity-migration-bybit-demo.service
 systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
+systemctl is-enabled --quiet liquidity-migration-bybit-paper.service
 
 for legacy_unit in \
   model050426.service \
