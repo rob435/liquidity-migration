@@ -17,6 +17,26 @@ and 81-scenario sweep under "Research status" **predate the fix** (over-charged
 funding understated return and overstated drawdown) and must be re-run before
 their verdict stands.
 
+## Audit-corrected re-baseline (2026-05-22)
+
+A full-codebase audit corrected several engine bugs that move backtest output
+(funding is now charged for the in-coverage window of trades that run past the
+funding-data edge; the equity curve compounds the portfolio on a daily grid
+rather than per-basket). The canonical `promoted` + close-0.30 single scenario
+was re-run on the corrected engine over the full-PIT IS root
+(2023-05-04 .. 2026-05-17):
+
+- 510 trades, total return 2750.38% (2850% pre-correction), max drawdown
+  -14.16%, walk-forward avg split Sharpe 3.59, 3/3 pre-registered windows
+  positive (train +139%, validation +257%, oos +239%).
+- `strategy-tribunal` on this re-baseline returns **WATCH** with no FAIL
+  findings: all negative controls pass and report-consistency reconciles. The
+  WATCH is driven only by evidence not attached to a single-scenario run — no
+  81-scenario sweep, no comparison family, no execution-drift data.
+
+Re-running the 81-scenario sweep on the corrected engine is the remaining
+re-baseline work.
+
 ## Canonical setting — close_location_min = 0.30
 
 As of 2026-05-21, **`0.30` is the canonical close-location setting** for research
@@ -27,11 +47,11 @@ closing-bar sweep on the full-PIT IS root (2023-2026):
   2212%), at the cost of deeper drawdown (-14.2% vs -11.6%) and marginally lower
   walk-forward split Sharpe (3.59 vs 3.71).
 
-This is a trade-count / return vs drawdown choice, not a strict improvement, and
-it is **not yet tribunal-validated** — the prior tribunal WATCH verdict and
-81-scenario sweep below were run on the 0.45 configuration. Validating 0.30
-through `strategy-tribunal` is the open research work; the demo paper forward
-test of `promoted` + close-0.30 now runs on the VPS (see Deployment status).
+This is a trade-count / return vs drawdown choice, not a strict improvement.
+Close-0.30 has now been through `strategy-tribunal` on the audit-corrected
+engine — see the re-baseline section above (WATCH, no FAIL findings; single
+scenario, the 81-scenario sweep still pending). The demo paper forward test of
+`promoted` + close-0.30 runs on the VPS (see Deployment status).
 
 ## Research status (prior baseline — close 0.45)
 

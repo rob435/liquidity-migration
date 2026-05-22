@@ -3915,14 +3915,16 @@ def _date_symbol_set(frame: pl.DataFrame) -> set[tuple[str, str]]:
 def _covered_kline_date_symbol_set(klines: pl.DataFrame, *, min_hourly_bars: int = 20) -> set[tuple[str, str]]:
     if klines.is_empty() or not _has_columns(klines, "date", "symbol"):
         return set()
-    # Count only bars with real traded volume. densify_trade_klines_1h pads
-    # missing hours with a flat carry price and zero volume; counting raw rows
-    # would let a near-empty day clear the PIT coverage gate on synthetic bars.
-    volume_col = next((col for col in ("volume_base", "turnover_quote") if col in klines.columns), None)
-    bar_count = ((pl.col(volume_col) > 0.0).sum() if volume_col is not None else pl.len()).alias("hourly_bars")
+    # Counts all rows, including densified padding -- intentionally. This is a
+    # data-PRESENCE gate ("is the archive kline partition downloaded?"), not a
+    # liquidity gate: densify only runs on dates that have a real archive file,
+    # so a 24-row day means the data exists. Counting only real-volume bars
+    # instead fails every symbol's genuine partial listing day (~1 per symbol),
+    # which the strategy already excludes via its 30-day min-age filter -- so
+    # that stricter count breaks the full-PIT gate for no real risk reduction.
     covered = (
         klines.group_by(["date", "symbol"])
-        .agg(bar_count)
+        .agg(pl.len().alias("hourly_bars"))
         .filter(pl.col("hourly_bars") >= min_hourly_bars)
         .select(["date", "symbol"])
     )

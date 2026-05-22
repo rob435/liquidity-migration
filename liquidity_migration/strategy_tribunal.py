@@ -11,6 +11,7 @@ import polars as pl
 
 from liquidity_migration.crowding import audit_crowding_model
 from liquidity_migration.storage import read_dataset
+from liquidity_migration.trade_lifecycle import build_equity_curve
 
 from ._common import MS_PER_HOUR, date_ms, finite_float, pct
 
@@ -66,7 +67,7 @@ def run_strategy_tribunal(
     )
     sensitivity_source = comparison["frame"] if not comparison["frame"].is_empty() else summary
     returns = _basket_returns(baskets)
-    actual_metrics = _return_path_metrics(returns)
+    actual_metrics = _actual_path_metrics(baskets, returns)
     consistency = _report_consistency(best, actual_metrics)
     windows = _pre_registered_window_report(baskets, best=best, window_specs=court_windows)
     bootstrap = _block_bootstrap(returns, config=tribunal_config)
@@ -498,6 +499,26 @@ def _return_path_metrics(returns: list[float]) -> dict[str, Any]:
         "sharpe_like": float(mean / stdev * math.sqrt(365.0)) if stdev > 1e-12 else 0.0,
         "worst_return": float(worst),
         "observations": len(returns),
+    }
+
+
+def _actual_path_metrics(baskets: pl.DataFrame, returns: list[float]) -> dict[str, Any]:
+    """Recompute the realised path the way volume-events reports it -- via
+    build_equity_curve (daily-grid compounding) -- so report_consistency
+    compares like with like. _return_path_metrics' per-basket cum_prod is kept
+    for the resampled negative-control series, which carry no exit dates to
+    compound on.
+    """
+    metrics = _return_path_metrics(returns)
+    if baskets.is_empty():
+        return metrics
+    equity = build_equity_curve(baskets)
+    if equity.is_empty():
+        return metrics
+    return {
+        **metrics,
+        "total_return": float(equity["equity"][-1] - 1.0),
+        "max_drawdown": float(equity["drawdown"].min()),
     }
 
 

@@ -1,12 +1,12 @@
 # Graph Report - liquidity-migration  (2026-05-22)
 
 ## Corpus Check
-- 66 files · ~126,868 words
+- 66 files · ~127,110 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 1753 nodes · 5595 edges · 25 communities detected
-- Extraction: 54% EXTRACTED · 46% INFERRED · 0% AMBIGUOUS · INFERRED: 2568 edges (avg confidence: 0.65)
+- 1755 nodes · 5599 edges · 25 communities detected
+- Extraction: 54% EXTRACTED · 46% INFERRED · 0% AMBIGUOUS · INFERRED: 2569 edges (avg confidence: 0.65)
 - Token cost: 0 input · 0 output
 
 ## Community Hubs (Navigation)
@@ -49,8 +49,6 @@
 10. `run_event_demo_cycle()` - 71 edges
 
 ## Surprising Connections (you probably didn't know these)
-- `TradeLifecycleConfig` --uses--> `Correctness tests for the trade lifecycle module.  The lifecycle helpers convert`  [INFERRED]
-  liquidity_migration/config.py → tests/test_liquidity_migration_trade_lifecycle.py
 - `build_parser()` --calls--> `test_cli_strategy_tribunal_parses_research_controls()`  [INFERRED]
   liquidity_migration/cli.py → tests/test_liquidity_migration_strategy_tribunal.py
 - `VolumeEventResearchConfig` --uses--> `Backtest a named demo strategy profile (promoted / demo_relaxed).  The volume-ev`  [INFERRED]
@@ -59,60 +57,62 @@
   liquidity_migration/event_demo.py → tests/test_liquidity_migration_event_demo.py
 - `plan_stop_repairs()` --calls--> `test_plan_stop_repairs_detects_missing_exchange_stop()`  [INFERRED]
   liquidity_migration/event_demo.py → tests/test_liquidity_migration_event_demo.py
+- `build_ledger_position_pnl_snapshot()` --calls--> `test_ledger_position_snapshot_marks_short_pnl_from_current_price()`  [INFERRED]
+  liquidity_migration/event_demo.py → tests/test_liquidity_migration_event_demo.py
 
 ## Communities
 
 ### Community 0 - "Community 0"
 Cohesion: 0.03
-Nodes (233): BybitPrivateWebSocketStream, BybitPublicTickerStream, BybitWebSocketTradeClient, _close_ws_client(), ResearchConfig, _collect_private_snapshots(), _build_private_ws_stream(), EventDemoDaemon (+225 more)
+Nodes (245): BybitPrivateWebSocketStream, BybitPublicTickerStream, BybitWebSocketTradeClient, _close_ws_client(), ResearchConfig, _collect_private_snapshots(), _build_private_ws_stream(), EventDemoDaemon (+237 more)
 
 ### Community 1 - "Community 1"
 Cohesion: 0.03
-Nodes (151): _env_flag(), True when environment variable ``name`` is set to a truthy value., Return ``(api_key, api_secret, demo)`` from the .env DEMO / REAL_MONEY toggle., resolve_private_credentials(), _active_position_by_symbol(), _base36(), _bool(), _build_demo_universe() (+143 more)
+Nodes (138): Return ``(api_key, api_secret, demo)`` from the .env DEMO / REAL_MONEY toggle., resolve_private_credentials(), _active_position_by_symbol(), _base36(), _bool(), _build_demo_universe(), build_event_risk_private_client(), build_ledger_position_pnl_snapshot() (+130 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.03
-Nodes (181): HTMLParser, download_archive_bytes(), _download_archive_to_path(), download_public_trade_archive(), _archive_kline_skip_rows(), ArchiveHourlyKlineApiDownloadConfig, ArchiveHourlyKlineDownloadConfig, ArchiveKlineDownloadConfig (+173 more)
+Nodes (164): _cooldown_until(), _empty_skip_counts(), _realized_stop_exit_ts(), select_demo_entry_candidates(), _trade_id(), FixtureSpec, generate_fixture_data(), _add_event_uniqueness_score() (+156 more)
 
 ### Community 3 - "Community 3"
 Cohesion: 0.03
-Nodes (177): CostConfig, TradeLifecycleConfig, FixtureSpec, generate_fixture_data(), _price_bars_by_symbol(), _add_event_uniqueness_score(), _add_liquidity_migration_speed_features(), _add_rank_fraction() (+169 more)
+Nodes (153): HTMLParser, download_archive_bytes(), _download_archive_to_path(), download_public_trade_archive(), _archive_kline_skip_rows(), ArchiveHourlyKlineApiDownloadConfig, ArchiveHourlyKlineDownloadConfig, ArchiveKlineDownloadConfig (+145 more)
 
 ### Community 4 - "Community 4"
 Cohesion: 0.04
-Nodes (77): BybitPublicTradeStream, _patch_pybit_daemon_ping_timer(), _build_demo_features(), _demo_feature_cache_fingerprint(), _demo_feature_cache_paths(), _execute_entries(), _read_demo_feature_cache(), _validate_demo_config() (+69 more)
+Nodes (97): BinanceDataError, BinanceUSDMData, _ceil_to_period(), _floor_to_period(), _recent_history_start(), TradeFlowConfig, _archive_filename(), _archive_outputs_exist() (+89 more)
 
 ### Community 5 - "Community 5"
-Cohesion: 0.04
-Nodes (82): BinanceDataError, BinanceUSDMData, _ceil_to_period(), _floor_to_period(), _recent_history_start(), Slugify `name` for use as a file or path component., safe_name(), _archive_filename() (+74 more)
+Cohesion: 0.03
+Nodes (88): _audit_violations(), ChallengerSpec, champion_challenger_specs(), format_champion_challenger_manifest(), _parse_command_tokens(), Split a manifest command into its leading ``KEY=value`` env assignments     and, True if the command carries an order-submission flag as a real token:     either, run_champion_challenger_audit() (+80 more)
 
 ### Community 6 - "Community 6"
-Cohesion: 0.11
-Nodes (69): read_dataset(), EventWebSocketRiskConfig, EventWebSocketRiskEngine, run_event_ws_risk(), BlockingPrivateStream, BlockingPublicStream, FakePrivateClient, FakePrivateStream (+61 more)
+Cohesion: 0.04
+Nodes (73): BybitPublicTradeStream, _patch_pybit_daemon_ping_timer(), _build_demo_features(), _demo_feature_cache_fingerprint(), _demo_feature_cache_paths(), _execute_exits(), _execute_risk_exits(), _partial_exit_trade_update() (+65 more)
 
 ### Community 7 - "Community 7"
-Cohesion: 0.04
-Nodes (75): _audit_violations(), ChallengerSpec, champion_challenger_specs(), format_champion_challenger_manifest(), _parse_command_tokens(), Split a manifest command into its leading ``KEY=value`` env assignments     and, True if the command carries an order-submission flag as a real token:     either, run_champion_challenger_audit() (+67 more)
+Cohesion: 0.11
+Nodes (70): read_dataset(), _ensure_default_log_handler(), EventWebSocketRiskConfig, EventWebSocketRiskEngine, run_event_ws_risk(), BlockingPrivateStream, BlockingPublicStream, FakePrivateClient (+62 more)
 
 ### Community 8 - "Community 8"
-Cohesion: 0.06
-Nodes (47): BybitDataError, BybitMarketData, BybitPrivateClient, BybitRestRateLimiter, _is_rate_limit(), _leverage_text(), Thread-safe sliding-window rate limiter shared across BybitMarketData     instan, UniverseConfig (+39 more)
+Cohesion: 0.05
+Nodes (82): CostConfig, TradeLifecycleConfig, _bar_excursion(), _bar_exit_hits(), build_equity_curve(), _daily_equity_values(), _date_boundary_ms(), _empty_baskets() (+74 more)
 
 ### Community 9 - "Community 9"
 Cohesion: 0.05
 Nodes (73): date_boundary_ms(), date_ms(), finite_float(), parse_date(), pct(), Shared low-level helpers and constants for the liquidity_migration package.  Cen, Coerce `value` to a finite float, returning `default` if missing/invalid., Format a fraction as a 2-decimal percentage, or `invalid` if not finite. (+65 more)
 
 ### Community 10 - "Community 10"
-Cohesion: 0.05
-Nodes (73): _bar_excursion(), _bar_exit_hits(), build_equity_curve(), _daily_equity_values(), _date_boundary_ms(), _empty_baskets(), _exit_reason_rows(), _filter_signal_window() (+65 more)
+Cohesion: 0.07
+Nodes (46): BybitDataError, BybitMarketData, BybitPrivateClient, BybitRestRateLimiter, _env_flag(), _is_rate_limit(), _leverage_text(), True when environment variable ``name`` is set to a truthy value. (+38 more)
 
 ### Community 11 - "Community 11"
-Cohesion: 0.1
-Nodes (51): _artifact_check(), _basket_returns(), _best_summary_row(), _block_bootstrap(), _boolish(), _cluster_report(), _comparison_family_frame(), _comparison_family_label() (+43 more)
+Cohesion: 0.07
+Nodes (59): compute_reversion_score(), construct_target_book(), _cross_sectional_z(), _daily_mtm(), _date_range(), _day_str(), _day_str_from_index(), _hourly_bars_by_symbol() (+51 more)
 
 ### Community 12 - "Community 12"
 Cohesion: 0.09
-Nodes (50): compute_reversion_score(), construct_target_book(), _cross_sectional_z(), _daily_mtm(), _date_range(), _day_str(), _day_str_from_index(), _hourly_bars_by_symbol() (+42 more)
+Nodes (53): _actual_path_metrics(), _artifact_check(), _basket_returns(), _best_summary_row(), _block_bootstrap(), _boolish(), _cluster_report(), _comparison_family_frame() (+45 more)
 
 ### Community 13 - "Community 13"
 Cohesion: 0.08
@@ -163,7 +163,7 @@ Cohesion: 1.0
 Nodes (1): When _call retries on a failed pybit call, each attempt must hit the     limiter
 
 ## Knowledge Gaps
-- **80 isolated node(s):** `ExchangeConfig`, `True when environment variable ``name`` is set to a truthy value.`, `Return ``(api_key, api_secret, demo)`` from the .env DEMO / REAL_MONEY toggle.`, `Thread-safe sliding-window rate limiter shared across BybitMarketData     instan`, `Information-coefficient diagnostics for the reversion-alpha signals.  WHY THIS M` (+75 more)
+- **81 isolated node(s):** `ExchangeConfig`, `True when environment variable ``name`` is set to a truthy value.`, `Return ``(api_key, api_secret, demo)`` from the .env DEMO / REAL_MONEY toggle.`, `Thread-safe sliding-window rate limiter shared across BybitMarketData     instan`, `Information-coefficient diagnostics for the reversion-alpha signals.  WHY THIS M` (+76 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **Thin community `Community 21`** (2 nodes): `__init__.py`, `Bybit liquidity-migration research package.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
@@ -183,12 +183,12 @@ Nodes (1): When _call retries on a failed pybit call, each attempt must hit the 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
-- **Why does `main()` connect `Community 7` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 9`, `Community 11`, `Community 17`?**
-  _High betweenness centrality (0.122) - this node is a cross-community bridge._
-- **Why does `EventDemoCycleConfig` connect `Community 0` to `Community 1`, `Community 4`, `Community 6`, `Community 7`, `Community 8`?**
-  _High betweenness centrality (0.115) - this node is a cross-community bridge._
-- **Why does `VolumeEventResearchConfig` connect `Community 0` to `Community 1`, `Community 3`, `Community 4`, `Community 7`, `Community 8`?**
-  _High betweenness centrality (0.086) - this node is a cross-community bridge._
+- **Why does `main()` connect `Community 5` to `Community 0`, `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 6`, `Community 7`, `Community 9`, `Community 12`, `Community 17`?**
+  _High betweenness centrality (0.123) - this node is a cross-community bridge._
+- **Why does `EventDemoCycleConfig` connect `Community 0` to `Community 1`, `Community 5`, `Community 6`, `Community 7`, `Community 10`?**
+  _High betweenness centrality (0.109) - this node is a cross-community bridge._
+- **Why does `VolumeEventResearchConfig` connect `Community 0` to `Community 1`, `Community 2`, `Community 5`, `Community 6`, `Community 8`, `Community 10`?**
+  _High betweenness centrality (0.098) - this node is a cross-community bridge._
 - **Are the 305 inferred relationships involving `ResearchConfig` (e.g. with `EventWebSocketRiskConfig` and `WebSocketRiskState`) actually correct?**
   _`ResearchConfig` has 305 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 238 inferred relationships involving `EventDemoCycleConfig` (e.g. with `EventWebSocketRiskConfig` and `WebSocketRiskState`) actually correct?**
