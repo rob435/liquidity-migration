@@ -1,6 +1,6 @@
 # Research Findings
 
-Updated 2026-05-21.
+Updated 2026-05-22.
 
 ## Verdict
 
@@ -11,13 +11,26 @@ parameter sweep, and an adversarial `strategy-tribunal` review return a
 system "needs a regime overlay" is not supported by the evidence and has been
 removed.
 
+## Funding-model correction (2026-05-22)
+
+The perpetual-funding model over-charged by up to 8x — `_funding_lookup` billed
+every funding row in a hold window, and 147 of 313 research-root symbols carry
+intra-interval snapshot rows (e.g. hourly rows of an 8h rate). Fixed in
+`008d34a`. The Verdict above and the Evidence / cross-family / tribunal numbers
+below **predate the fix**: they ran on over-charged funding, which understated
+return and overstated drawdown. The closing-bar figures in the next section are
+funding-corrected. Re-running `strategy-tribunal` on corrected funding is
+required before the WATCH verdict stands; the error is benign in direction —
+the fix made every backtest modestly better (close-0.30 / 5-pos drawdown
+-18.0% -> -14.2%, return 2637% -> 2850%).
+
 ## Closing-bar setting — close_location_min = 0.30 (canonical as of 2026-05-21)
 
 The canonical close-location entry knob is now **0.30** (was 0.45), for research
 and for the VPS forward test. From an exploratory closing-bar sweep on the
 full-PIT IS root: 0.30 vs 0.45 gives more trades (510 vs 448) and higher total
-return (2637% vs 2022%) at the cost of deeper drawdown (-18.0% vs -13.7%) and
-marginally lower walk-forward split Sharpe (3.51 vs 3.62). It is a trade-count /
+return (2850% vs 2212%) at the cost of deeper drawdown (-14.2% vs -11.6%) and
+marginally lower walk-forward split Sharpe (3.59 vs 3.71). It is a trade-count /
 return vs drawdown choice and is **not yet tribunal-validated** — the WATCH
 verdict and 81-scenario sweep below were run on the 0.45 config. See
 `docs/system_status.md`.

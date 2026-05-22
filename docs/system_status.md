@@ -6,15 +6,26 @@ The liquidity-migration short strategy is in **committed paper forward testing**
 on the Bybit demo account. The canonical configuration is the `promoted` profile
 with `liquidity_migration_close_location_min = 0.30`.
 
+## Funding-model correction (2026-05-22)
+
+The perpetual-funding model over-charged funding by up to 8x: `_funding_lookup`
+billed every funding row in a hold window, and 147 of 313 research-root symbols
+carry intra-interval snapshot rows (e.g. hourly rows of an 8h rate). Fixed in
+`008d34a` — funding is now charged once per settlement interval. The canonical
+figures in this document are funding-corrected; the `strategy-tribunal` review
+and 81-scenario sweep under "Research status" **predate the fix** (over-charged
+funding understated return and overstated drawdown) and must be re-run before
+their verdict stands.
+
 ## Canonical setting — close_location_min = 0.30
 
 As of 2026-05-21, **`0.30` is the canonical close-location setting** for research
 and for the forward test (previously 0.45). It was chosen from an exploratory
 closing-bar sweep on the full-PIT IS root (2023-2026):
 
-- 0.30 vs 0.45: more trades (510 vs 448) and higher total return (2637% vs
-  2022%), at the cost of deeper drawdown (-18.0% vs -13.7%) and marginally lower
-  walk-forward split Sharpe (3.51 vs 3.62).
+- 0.30 vs 0.45: more trades (510 vs 448) and higher total return (2850% vs
+  2212%), at the cost of deeper drawdown (-14.2% vs -11.6%) and marginally lower
+  walk-forward split Sharpe (3.59 vs 3.71).
 
 This is a trade-count / return vs drawdown choice, not a strict improvement, and
 it is **not yet tribunal-validated** — the prior tribunal WATCH verdict and
