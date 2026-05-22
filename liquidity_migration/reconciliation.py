@@ -106,8 +106,9 @@ def reconcile_paper_demo(
 ) -> dict[str, Any]:
     """Pair paper and demo trades by symbol/side/entry time and measure the
     fill-price slippage between them. Returns a JSON-serializable summary plus a
-    per-pair breakdown. Pairing is greedy nearest-entry-time within each
-    (symbol, side) group, bounded by ``entry_tolerance_ms``."""
+    per-pair breakdown. Pairing matches the globally smallest entry-time gaps
+    first within each (symbol, side) group, bounded by ``entry_tolerance_ms``,
+    so trades close in time cannot steal each other's better match."""
     paper = _clean_trades(paper_trades)
     demo = _clean_trades(demo_trades)
     tolerance = max(int(entry_tolerance_ms), 0)
@@ -118,24 +119,36 @@ def reconcile_paper_demo(
     for bucket in paper_by_key.values():
         bucket.sort(key=lambda item: item["entry_ts_ms"])
 
-    pairs: list[dict[str, Any]] = []
-    matched: set[tuple[str, str, int]] = set()
-    for demo_trade in sorted(demo, key=lambda item: item["entry_ts_ms"]):
-        key = (demo_trade["symbol"], demo_trade["side"])
-        bucket = paper_by_key.get(key, [])
-        best_idx = -1
-        best_gap = tolerance + 1
-        for idx, paper_trade in enumerate(bucket):
-            if (key[0], key[1], idx) in matched:
-                continue
+    # Build every (demo, paper) candidate within tolerance, then assign
+    # smallest-gap-first so the best global pairs win — a greedy per-demo
+    # nearest-time pass would let an earlier demo trade consume a paper trade
+    # that is a tighter match for a later one, biasing slippage.
+    candidates: list[tuple[int, int, int]] = []  # (gap, demo_idx, paper_idx)
+    for demo_idx, demo_trade in enumerate(demo):
+        bucket = paper_by_key.get((demo_trade["symbol"], demo_trade["side"]), [])
+        for paper_idx, paper_trade in enumerate(bucket):
             gap = abs(demo_trade["entry_ts_ms"] - paper_trade["entry_ts_ms"])
-            if gap <= tolerance and gap < best_gap:
-                best_gap = gap
-                best_idx = idx
-        if best_idx < 0:
+            if gap <= tolerance:
+                candidates.append((gap, demo_idx, paper_idx))
+    # Smallest gap first; ties broken by demo then paper index for determinism.
+    candidates.sort()
+
+    # Collected gap-first; re-sorted to demo entry-time order before returning
+    # so the per-pair report stays chronological.
+    matched_pairs: list[tuple[int, dict[str, Any]]] = []
+    used_demo: set[int] = set()
+    used_paper: dict[tuple[str, str], set[int]] = {}
+    for _gap, demo_idx, paper_idx in candidates:
+        if demo_idx in used_demo:
             continue
-        matched.add((key[0], key[1], best_idx))
-        paper_trade = bucket[best_idx]
+        demo_trade = demo[demo_idx]
+        key = (demo_trade["symbol"], demo_trade["side"])
+        paper_used = used_paper.setdefault(key, set())
+        if paper_idx in paper_used:
+            continue
+        used_demo.add(demo_idx)
+        paper_used.add(paper_idx)
+        paper_trade = paper_by_key[key][paper_idx]
         side = demo_trade["side"]
         both_closed = (
             demo_trade["status"] == "closed"
@@ -156,24 +169,28 @@ def reconcile_paper_demo(
             demo_return = _realized_return_pct(
                 side=side, entry_price=demo_trade["entry_price"], exit_price=demo_trade["exit_price"]
             )
-        pairs.append(
-            {
-                "symbol": demo_trade["symbol"],
-                "side": side,
-                "paper_trade_id": paper_trade["trade_id"],
-                "demo_trade_id": demo_trade["trade_id"],
-                "entry_gap_ms": abs(demo_trade["entry_ts_ms"] - paper_trade["entry_ts_ms"]),
-                "paper_entry_price": paper_trade["entry_price"],
-                "demo_entry_price": demo_trade["entry_price"],
-                "entry_slippage_bps": _entry_slippage_bps(
-                    side=side, paper_entry=paper_trade["entry_price"], demo_entry=demo_trade["entry_price"]
-                ),
-                "exit_slippage_bps": exit_bps,
-                "paper_return_pct": paper_return,
-                "demo_return_pct": demo_return,
-            }
+        matched_pairs.append(
+            (
+                demo_trade["entry_ts_ms"],
+                {
+                    "symbol": demo_trade["symbol"],
+                    "side": side,
+                    "paper_trade_id": paper_trade["trade_id"],
+                    "demo_trade_id": demo_trade["trade_id"],
+                    "entry_gap_ms": abs(demo_trade["entry_ts_ms"] - paper_trade["entry_ts_ms"]),
+                    "paper_entry_price": paper_trade["entry_price"],
+                    "demo_entry_price": demo_trade["entry_price"],
+                    "entry_slippage_bps": _entry_slippage_bps(
+                        side=side, paper_entry=paper_trade["entry_price"], demo_entry=demo_trade["entry_price"]
+                    ),
+                    "exit_slippage_bps": exit_bps,
+                    "paper_return_pct": paper_return,
+                    "demo_return_pct": demo_return,
+                },
+            )
         )
 
+    pairs: list[dict[str, Any]] = [pair for _ts, pair in sorted(matched_pairs, key=lambda item: item[0])]
     entry_bps = [pair["entry_slippage_bps"] for pair in pairs]
     exit_bps = [pair["exit_slippage_bps"] for pair in pairs if pair["exit_slippage_bps"] is not None]
     summary = {

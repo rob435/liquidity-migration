@@ -466,20 +466,37 @@ class BybitPrivateClient:
         effective_sell = buy_leverage if sell_leverage is None else sell_leverage
         if effective_sell <= 0.0:
             raise ValueError("sell_leverage must be positive")
-        try:
-            payload = self._call_once(
-                "set_leverage",
-                category=self.category,
-                symbol=symbol,
-                buyLeverage=_leverage_text(buy_leverage),
-                sellLeverage=_leverage_text(effective_sell),
-            )
-        except BybitDataError as exc:
-            message = str(exc).lower()
-            if "110043" in message or "not modified" in message:
-                return {"symbol": symbol, "buyLeverage": _leverage_text(buy_leverage), "sellLeverage": _leverage_text(effective_sell), "retCode": 110043}
-            raise
-        return payload.get("result", {})
+        # Retry a transient set_leverage failure rather than silently dropping an
+        # otherwise-valid entry. _call_once (not _call) keeps the original error
+        # text -- which carries the "110043 not modified" marker -- intact, and a
+        # 110043 reject returns immediately without wasting retries.
+        attempts = max(self.retries, 1)
+        last_error: BybitDataError = BybitDataError("Bybit set_leverage failed")
+        for attempt in range(attempts):
+            try:
+                payload = self._call_once(
+                    "set_leverage",
+                    category=self.category,
+                    symbol=symbol,
+                    buyLeverage=_leverage_text(buy_leverage),
+                    sellLeverage=_leverage_text(effective_sell),
+                )
+            except BybitDataError as exc:
+                message = str(exc).lower()
+                if "110043" in message or "not modified" in message:
+                    return {
+                        "symbol": symbol,
+                        "buyLeverage": _leverage_text(buy_leverage),
+                        "sellLeverage": _leverage_text(effective_sell),
+                        "retCode": 110043,
+                    }
+                last_error = exc
+                if attempt + 1 >= attempts:
+                    raise
+                time.sleep(self.retry_sleep_seconds * (2**attempt))
+                continue
+            return payload.get("result", {})
+        raise last_error  # pragma: no cover - the loop always returns or raises
 
     def set_trading_stop(
         self,
@@ -550,6 +567,11 @@ class BybitPrivateClient:
                 return payload
             except Exception as exc:  # noqa: BLE001 - pybit raises several transport types
                 last_error = exc
+                # A non-zero retCode that is not a rate-limit is a definite venue
+                # reject -- retrying the identical request only repeats it and
+                # wastes the backoff. Transport errors and rate-limits still retry.
+                if isinstance(exc, BybitDataError) and not _is_rate_limit(exc):
+                    raise
                 if attempt + 1 >= self.retries:
                     break
                 time.sleep(self.retry_sleep_seconds * (2**attempt))

@@ -1256,7 +1256,9 @@ def test_execute_entry_records_order_error_and_continues() -> None:
 
     assert [row["trade_id"] for row in rows] == ["t2"]
     assert [row["symbol"] for row in orders] == ["AAAUSDT", "BBBUSDT"]
-    assert orders[0]["status"] == "failed"
+    # A place_order exception is ledgered submitted_unconfirmed (a pending
+    # status) so reconciliation can adopt a lost-response fill -- not "failed".
+    assert orders[0]["status"] == "submitted_unconfirmed"
     assert orders[0]["submit_mode"] == "error"
     assert "place_order failed" in str(orders[0]["error"])
     assert "order rejected" in str(orders[0]["error"])
@@ -3524,7 +3526,8 @@ def test_execute_entries_parallel_isolates_place_order_failure(tmp_path: Path) -
     )
 
     by_symbol = {o["symbol"]: o for o in orders}
-    assert by_symbol["BADUSDT"]["status"] == "failed"
+    # place_order exception -> submitted_unconfirmed (pending) for reconciliation.
+    assert by_symbol["BADUSDT"]["status"] == "submitted_unconfirmed"
     assert "place_order failed" in by_symbol["BADUSDT"]["error"]
     assert by_symbol["OKUSDT"]["status"] in {"filled", "partial", "submitted_unconfirmed"}
     assert by_symbol["OKUSDT"]["error"] == ""

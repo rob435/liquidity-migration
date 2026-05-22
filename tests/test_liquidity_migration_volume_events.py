@@ -628,10 +628,12 @@ def test_funding_lookup_marks_symbol_or_date_gaps_as_missing_or_partial() -> Non
         "missing",
         0,
     )
+    # Entry precedes the first known funding stamp -> "partial", but the two
+    # covered stamps (day, 2*day) are still charged rather than zeroed.
     assert _perp_funding_return(lookup, symbol="AUSDT", side="short", entry_ts_ms=0, exit_ts_ms=2 * day) == (
-        0.0,
+        pytest.approx(0.003),
         "partial",
-        0,
+        2,
     )
     assert _perp_funding_return(lookup, symbol="AUSDT", side="short", entry_ts_ms=day, exit_ts_ms=2 * day) == (
         pytest.approx(0.002),

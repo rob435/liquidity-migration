@@ -233,7 +233,7 @@ def _add_archive_manifest_parser(subparsers) -> None:
     archive_manifest.add_argument("--quote-suffix", default="USDT", help="Symbol suffix to include, default USDT.")
     archive_manifest.add_argument("--symbols", default="", help="Optional comma-separated symbol allowlist.")
     archive_manifest.add_argument("--start", default=None, help="Inclusive archive start date YYYY-MM-DD.")
-    archive_manifest.add_argument("--end", default=None, help="Inclusive archive end date YYYY-MM-DD.")
+    archive_manifest.add_argument("--end", default=None, help="Exclusive archive end date YYYY-MM-DD (the named day is not included).")
     archive_manifest.add_argument("--max-symbols", type=int, default=0, help="Maximum symbols to scan; 0 disables.")
     archive_manifest.add_argument("--workers", type=int, default=8, help="Directory fetch workers.")
 
@@ -246,7 +246,7 @@ def _add_archive_download_klines_parser(subparsers) -> None:
     archive_klines.add_argument("--name", default="bybit-public-trading-klines", help="Name used for download report files.")
     archive_klines.add_argument("--symbols", default="", help="Optional comma-separated symbol allowlist.")
     archive_klines.add_argument("--start", default=None, help="Inclusive archive start date YYYY-MM-DD.")
-    archive_klines.add_argument("--end", default=None, help="Inclusive archive end date YYYY-MM-DD.")
+    archive_klines.add_argument("--end", default=None, help="Exclusive archive end date YYYY-MM-DD (the named day is not included).")
     archive_klines.add_argument("--max-rows", type=int, default=0, help="Maximum symbol/date manifest rows to process; 0 disables.")
     archive_klines.add_argument("--workers", type=int, default=8, help="Concurrent archive download workers.")
     archive_klines.add_argument("--include-existing", action="store_true", help="Rebuild rows even when the kline partition already exists.")
@@ -271,7 +271,7 @@ def _add_archive_download_klines_1h_parser(subparsers) -> None:
     archive_klines_1h.add_argument("--name", default="bybit-public-trading-klines-1h", help="Name used for download report files.")
     archive_klines_1h.add_argument("--symbols", default="", help="Optional comma-separated symbol allowlist.")
     archive_klines_1h.add_argument("--start", default=None, help="Inclusive archive start date YYYY-MM-DD.")
-    archive_klines_1h.add_argument("--end", default=None, help="Inclusive archive end date YYYY-MM-DD.")
+    archive_klines_1h.add_argument("--end", default=None, help="Exclusive archive end date YYYY-MM-DD (the named day is not included).")
     archive_klines_1h.add_argument("--max-rows", type=int, default=0, help="Maximum symbol/date manifest rows to process; 0 disables.")
     archive_klines_1h.add_argument("--workers", type=int, default=8, help="Concurrent archive download workers.")
     archive_klines_1h.add_argument("--include-existing", action="store_true", help="Rebuild rows even when the 1h partition already exists.")
@@ -299,7 +299,7 @@ def _add_archive_download_klines_1h_api_parser(subparsers) -> None:
     archive_klines_1h_api.add_argument("--interval", default="60", help="Bybit kline interval; default 60 minutes.")
     archive_klines_1h_api.add_argument("--symbols", default="", help="Optional comma-separated symbol allowlist.")
     archive_klines_1h_api.add_argument("--start", default=None, help="Inclusive archive start date YYYY-MM-DD.")
-    archive_klines_1h_api.add_argument("--end", default=None, help="Inclusive archive end date YYYY-MM-DD.")
+    archive_klines_1h_api.add_argument("--end", default=None, help="Exclusive archive end date YYYY-MM-DD (the named day is not included).")
     archive_klines_1h_api.add_argument("--max-rows", type=int, default=0, help="Maximum symbol/date manifest rows to process; 0 disables.")
     archive_klines_1h_api.add_argument("--workers", type=int, default=8, help="Concurrent per-symbol API workers.")
     archive_klines_1h_api.add_argument("--include-existing", action="store_true", help="Rebuild rows even when the 1h partition already exists.")
@@ -1582,6 +1582,9 @@ def main(argv: list[str] | None = None) -> int:
             f"symbols={payload['symbols']} "
             f"path={data_root / 'reports' / ('archive_manifest_' + args.name + '.md')}"
         )
+        survivorship_warning = payload.get("survivorship_warning")
+        if survivorship_warning:
+            print(f"WARNING: {survivorship_warning}")
         return 0
 
     if args.command == "archive-download-klines":

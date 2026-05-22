@@ -267,11 +267,13 @@ def test_perp_funding_return_partial_when_window_exceeds_coverage():
         {"symbol": ["AAA"], "ts_ms": [200], "funding_rate": [0.001]}
     )
     lookup = _funding_lookup(funding)
-    # Exit past the last known funding stamp -> coverage is incomplete.
+    # Exit past the last known funding stamp -> coverage is incomplete, so the
+    # trade is flagged "partial" -- but the funding that IS covered (the stamp
+    # at ts=200) is still charged rather than the whole trade being zeroed.
     ret, mode, count = _perp_funding_return(
         lookup, symbol="AAA", side="long", entry_ts_ms=100, exit_ts_ms=999
     )
-    assert (ret, mode, count) == (0.0, "partial", 0)
+    assert (ret, mode, count) == (pytest.approx(-0.001), "partial", 1)
     # An unknown symbol is reported as missing rather than partial.
     miss = _perp_funding_return(
         lookup, symbol="ZZZ", side="long", entry_ts_ms=100, exit_ts_ms=300

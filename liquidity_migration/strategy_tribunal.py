@@ -1170,18 +1170,34 @@ def _findings(
         comparison_level = "WATCH"
         comparison_message = "No comparison family stress evidence was attached."
     findings.append(_finding(comparison_level, "comparison_family", comparison_message))
-    promotion = _boolish(best.get("promotion_gate_pass"))
-    findings.append(
-        _finding(
-            "PASS" if promotion else "FAIL",
-            "promotion_gate",
-            f"Best scenario promotion gate is {best.get('promotion_gate_pass')} with reason `{best.get('promotion_reason', 'unknown')}`.",
-        )
-    )
     consistency_ok = (
         _finite_float(consistency.get("total_return_abs_diff")) < 1e-6
         and _finite_float(consistency.get("max_drawdown_abs_diff")) < 1e-6
     )
+    promotion = _boolish(best.get("promotion_gate_pass"))
+    promotion_reason = str(best.get("promotion_reason", "") or "").strip()
+    if promotion and (not promotion_reason or promotion_reason.lower() == "unknown"):
+        # A gate pass with no stated reason is not independently verifiable.
+        promotion_level = "FAIL"
+        promotion_message = (
+            f"Promotion gate is {best.get('promotion_gate_pass')} but the reason is empty/unknown "
+            "-- an unexplained gate pass is not trusted."
+        )
+    elif promotion and not consistency_ok:
+        # The reported gate is derived from the reported metrics; if the
+        # recomputed basket path does not reconcile with them, it is not trusted.
+        promotion_level = "FAIL"
+        promotion_message = (
+            f"Promotion gate is {best.get('promotion_gate_pass')} but the recomputed basket path "
+            "does not reconcile with the reported metrics -- the gate is not trusted."
+        )
+    else:
+        promotion_level = "PASS" if promotion else "FAIL"
+        promotion_message = (
+            f"Best scenario promotion gate is {best.get('promotion_gate_pass')} "
+            f"with reason `{best.get('promotion_reason', 'unknown')}`."
+        )
+    findings.append(_finding(promotion_level, "promotion_gate", promotion_message))
     findings.append(
         _finding(
             "PASS" if consistency_ok else "FAIL",
@@ -1222,31 +1238,63 @@ def _findings(
             f"Funding mode is `{funding_mode}`.",
         )
     )
-    p05 = _finite_float(bootstrap.get("p05_total_return"))
-    findings.append(
-        _finding(
-            "PASS" if p05 > 0.0 else "WATCH" if p05 > -0.10 else "FAIL",
-            "bootstrap_left_tail",
-            f"Block-bootstrap p05 total return is {_pct(p05)} across {bootstrap.get('samples', 0)} samples.",
+    # A control that did not run (0 samples / no basket data) must FAIL: it is
+    # absent evidence, never a defaulted pass. _block_bootstrap / _random_sign_control
+    # omit their metric key entirely when they do not run; _inverted_edge_control
+    # then carries no `total_return`.
+    if "p05_total_return" not in bootstrap:
+        findings.append(
+            _finding(
+                "FAIL",
+                "bootstrap_left_tail",
+                f"Block-bootstrap control did not run ({bootstrap.get('samples', 0)} samples) -- no left-tail evidence.",
+            )
         )
-    )
-    random_p95 = _finite_float(random_sign.get("p95_total_return"))
-    actual_total = _finite_float(best.get("total_return", actual_metrics.get("total_return")))
-    findings.append(
-        _finding(
-            "PASS" if random_p95 < actual_total else "FAIL",
-            "random_sign_control",
-            f"Random sign p95 total return is {_pct(random_p95)} versus actual {_pct(actual_total)}.",
+    else:
+        p05 = _finite_float(bootstrap.get("p05_total_return"))
+        findings.append(
+            _finding(
+                "PASS" if p05 > 0.0 else "WATCH" if p05 > -0.10 else "FAIL",
+                "bootstrap_left_tail",
+                f"Block-bootstrap p05 total return is {_pct(p05)} across {bootstrap.get('samples', 0)} samples.",
+            )
         )
-    )
-    inverted_total = _finite_float(inverted.get("total_return"))
-    findings.append(
-        _finding(
-            "PASS" if inverted_total < 0.0 else "FAIL",
-            "inverted_edge_control",
-            f"Gross-return inverted edge total return is {_pct(inverted_total)}.",
+    if "p95_total_return" not in random_sign:
+        findings.append(
+            _finding(
+                "FAIL",
+                "random_sign_control",
+                f"Random-sign control did not run ({random_sign.get('samples', 0)} samples) -- "
+                "the edge is not distinguished from noise.",
+            )
         )
-    )
+    else:
+        random_p95 = _finite_float(random_sign.get("p95_total_return"))
+        actual_total = _finite_float(best.get("total_return", actual_metrics.get("total_return")))
+        findings.append(
+            _finding(
+                "PASS" if random_p95 < actual_total else "FAIL",
+                "random_sign_control",
+                f"Random sign p95 total return is {_pct(random_p95)} versus actual {_pct(actual_total)}.",
+            )
+        )
+    if "total_return" not in inverted:
+        findings.append(
+            _finding(
+                "FAIL",
+                "inverted_edge_control",
+                "Inverted-edge control did not run (no basket observations).",
+            )
+        )
+    else:
+        inverted_total = _finite_float(inverted.get("total_return"))
+        findings.append(
+            _finding(
+                "PASS" if inverted_total < 0.0 else "FAIL",
+                "inverted_edge_control",
+                f"Gross-return inverted edge total return is {_pct(inverted_total)}.",
+            )
+        )
     shuffled_time_worse_rate = _finite_float(shuffled_time.get("shuffled_worse_or_equal_actual_rate"))
     shuffled_time_level = (
         "WATCH"

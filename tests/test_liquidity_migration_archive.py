@@ -115,12 +115,14 @@ def test_archive_manifest_parses_symbols_and_files() -> None:
     """
 
     assert parse_symbol_directories(root_html) == ["BTCUSDT", "ETHUSDT"]
+    # `--end` is end-exclusive (matches volume-events / docs/data_roots.md), so
+    # end must be the day after the last date we want included.
     rows = parse_trade_archive_entries(
         symbol_html,
         symbol="BTCUSDT",
         symbol_url="https://public.bybit.com/trading/BTCUSDT/",
         start="2025-01-02",
-        end="2025-01-02",
+        end="2025-01-03",
     )
 
     assert rows == [
@@ -148,7 +150,8 @@ def test_run_archive_manifest_writes_symbol_date_dataset(tmp_path, monkeypatch) 
 
     payload = run_archive_manifest(
         tmp_path,
-        config=ArchiveManifestConfig(start="2025-01-01", end="2025-01-01", workers=1, name="fixture"),
+        # `--end` is end-exclusive; end is the day after the manifest date.
+        config=ArchiveManifestConfig(start="2025-01-01", end="2025-01-02", workers=1, name="fixture"),
     )
 
     manifest = read_dataset(tmp_path, "archive_trade_manifest")
@@ -171,7 +174,8 @@ def test_archive_manifest_fetches_requested_symbol_missing_from_root_listing(tmp
         tmp_path,
         config=ArchiveManifestConfig(
             start="2025-07-21",
-            end="2025-07-21",
+            # `--end` is end-exclusive; end is the day after the archive date.
+            end="2025-07-22",
             symbols=("SPKUSDT",),
             workers=1,
             name="fixture",
@@ -260,7 +264,8 @@ def test_archive_kline_download_rebuilds_sparse_existing_partition(tmp_path, mon
         tmp_path,
         config=ArchiveKlineDownloadConfig(
             start="2025-01-01",
-            end="2025-01-01",
+            # `--end` is end-exclusive; end is the day after the manifest date.
+            end="2025-01-02",
             symbols=("AAAUSDT",),
             workers=1,
             missing_only=True,
@@ -360,7 +365,8 @@ def test_archive_hourly_kline_download_writes_1h_partitions(tmp_path, monkeypatc
         tmp_path,
         config=ArchiveHourlyKlineDownloadConfig(
             start="2025-01-02",
-            end="2025-01-02",
+            # `--end` is end-exclusive; end is the day after the manifest date.
+            end="2025-01-03",
             workers=1,
             discard_archives_after_success=True,
             name="fixture",
@@ -414,7 +420,8 @@ def test_archive_hourly_api_kline_download_writes_1h_partitions(tmp_path, monkey
         tmp_path,
         config=ArchiveHourlyKlineApiDownloadConfig(
             start="2025-01-01",
-            end="2025-01-02",
+            # `--end` is end-exclusive; end is the day after the last manifest date.
+            end="2025-01-03",
             workers=1,
             name="fixture",
         ),
@@ -497,7 +504,8 @@ def test_archive_hourly_downloader_processes_each_symbol_in_date_order(tmp_path,
         tmp_path,
         config=ArchiveHourlyKlineDownloadConfig(
             start="2025-01-01",
-            end="2025-01-02",
+            # `--end` is end-exclusive; end is the day after the last manifest date.
+            end="2025-01-03",
             workers=2,
             name="fixture",
         ),
@@ -749,7 +757,8 @@ def test_archive_manifest_downloader_resumes_and_writes_klines(tmp_path, monkeyp
     monkeypatch.setattr(manifest_module, "fetch_directory_html", lambda url, *, timeout_seconds=60: pages[url])
     run_archive_manifest(
         tmp_path,
-        config=ArchiveManifestConfig(start="2025-01-01", end="2025-01-01", workers=1, name="fixture"),
+        # `--end` is end-exclusive; end is the day after the archive date.
+        config=ArchiveManifestConfig(start="2025-01-01", end="2025-01-02", workers=1, name="fixture"),
     )
 
     monkeypatch.setattr(manifest_module, "download_public_trade_archive", lambda _url, destination: destination)
@@ -774,13 +783,14 @@ def test_archive_manifest_downloader_resumes_and_writes_klines(tmp_path, monkeyp
         ),
     )
 
+    # `--end` is end-exclusive; end is the day after the manifest date.
     payload = run_archive_klines_download(
         tmp_path,
-        config=ArchiveKlineDownloadConfig(start="2025-01-01", end="2025-01-01", workers=1, name="fixture"),
+        config=ArchiveKlineDownloadConfig(start="2025-01-01", end="2025-01-02", workers=1, name="fixture"),
     )
     cached_payload = run_archive_klines_download(
         tmp_path,
-        config=ArchiveKlineDownloadConfig(start="2025-01-01", end="2025-01-01", workers=1, name="fixture"),
+        config=ArchiveKlineDownloadConfig(start="2025-01-01", end="2025-01-02", workers=1, name="fixture"),
     )
 
     assert payload["downloaded"] == 1
@@ -847,7 +857,8 @@ def test_archive_manifest_downloader_seeds_dense_day_from_previous_close(tmp_pat
 
     payload = run_archive_klines_download(
         tmp_path,
-        config=ArchiveKlineDownloadConfig(start="2025-01-02", end="2025-01-02", workers=1, name="fixture"),
+        # `--end` is end-exclusive; end is the day after the manifest date.
+        config=ArchiveKlineDownloadConfig(start="2025-01-02", end="2025-01-03", workers=1, name="fixture"),
     )
 
     assert payload["downloaded"] == 1
@@ -920,7 +931,8 @@ def test_archive_manifest_downloader_processes_dates_in_order_for_previous_close
 
     payload = run_archive_klines_download(
         tmp_path,
-        config=ArchiveKlineDownloadConfig(start="2025-01-01", end="2025-01-02", workers=2, name="fixture"),
+        # `--end` is end-exclusive; end is the day after the last manifest date.
+        config=ArchiveKlineDownloadConfig(start="2025-01-01", end="2025-01-03", workers=2, name="fixture"),
     )
 
     assert payload["downloaded"] == 2
@@ -974,7 +986,8 @@ def test_archive_manifest_downloader_discards_local_archive_after_success(tmp_pa
         tmp_path,
         config=ArchiveKlineDownloadConfig(
             start="2025-01-01",
-            end="2025-01-01",
+            # `--end` is end-exclusive; end is the day after the manifest date.
+            end="2025-01-02",
             workers=1,
             discard_archives_after_success=True,
             name="fixture",
@@ -1028,7 +1041,8 @@ def test_archive_manifest_downloader_does_not_delete_external_archive_cache(tmp_
         tmp_path,
         config=ArchiveKlineDownloadConfig(
             start="2025-01-01",
-            end="2025-01-01",
+            # `--end` is end-exclusive; end is the day after the manifest date.
+            end="2025-01-02",
             workers=1,
             discard_archives_after_success=True,
             name="fixture",

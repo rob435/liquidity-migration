@@ -238,6 +238,24 @@ def _write_dataset_unlocked(
 
 
 def read_dataset(data_root: str | Path, dataset: str) -> pl.DataFrame:
+    return read_dataset_columns(data_root, dataset)
+
+
+def read_dataset_columns(
+    data_root: str | Path,
+    dataset: str,
+    *,
+    columns: list[str] | None = None,
+) -> pl.DataFrame:
+    """Eagerly read a dataset, optionally projecting only ``columns``.
+
+    ``columns=None`` reproduces ``read_dataset``'s full-frame contract exactly.
+    Passing an explicit list pushes the projection into ``scan_parquet`` so
+    polars only decodes the requested columns from each parquet file — a large
+    saving for wide datasets (e.g. klines_1h) on hot read paths. Any requested
+    column absent from a partition is tolerated; the projection is intersected
+    with the on-disk schema before collecting.
+    """
     path = dataset_path(data_root, dataset)
     if not path.exists():
         return pl.DataFrame()
@@ -247,17 +265,25 @@ def read_dataset(data_root: str | Path, dataset: str) -> pl.DataFrame:
     # scan_parquet -> collect can straddle a rename and observe a torn file
     # ("Invalid thrift: end of file"). Acquiring the lock here serialises with
     # writers cheaply (<10ms typical) and guarantees readers see a consistent
-    # snapshot of the dataset.
+    # snapshot of the dataset. The collect() below MUST stay inside the lock so
+    # the actual file reads complete before a writer can rename underneath us.
     with exclusive_file_lock(dataset_lock_path(data_root, dataset), stale_seconds=21_600, poll_seconds=0.01):
         files = sorted(path.glob("**/*.parquet"))
         if not files:
             return pl.DataFrame()
         file_paths = [str(file) for file in files]
         try:
-            return pl.scan_parquet(file_paths).collect()
+            lf = pl.scan_parquet(file_paths)
+            if columns is not None:
+                present = [col for col in columns if col in lf.collect_schema().names()]
+                lf = lf.select(present)
+            return lf.collect()
         except pl.exceptions.SchemaError:
             frames = [pl.read_parquet(file) for file in file_paths]
-            return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+            joined = pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+            if columns is not None and not joined.is_empty():
+                joined = joined.select([col for col in columns if col in joined.columns])
+            return joined
 
 
 def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import ssl
@@ -33,6 +34,8 @@ DEFAULT_BYBIT_PUBLIC_TRADING_URL = "https://public.bybit.com/trading/"
 DEFAULT_BYBIT_V5_KLINE_URL = "https://api.bybit.com/v5/market/kline"
 DEFAULT_TIMEOUT_SECONDS = 60
 ARCHIVE_KLINE_SKIP_ROWS_ENV = "LIQMIG_ARCHIVE_KLINE_SKIP_ROWS_PATH"
+
+_logger = logging.getLogger("liquidity_migration.archive_manifest")
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +148,9 @@ def parse_trade_archive_entries(
     end: str | None = None,
 ) -> list[dict[str, Any]]:
     start_date = _parse_date(start) if start else None
+    # `end` is end-exclusive (the day named by `end` is NOT included), matching
+    # the `volume-events` convention and the end-exclusive contract documented
+    # in docs/data_roots.md. This prevents ingesting a partial trailing day.
     end_date = _parse_date(end) if end else None
     pattern = re.compile(rf"^{re.escape(symbol.upper())}(?P<date>\d{{4}}-\d{{2}}-\d{{2}})\.csv(?:\.gz|\.zip)?$")
     rows: list[dict[str, Any]] = []
@@ -156,7 +162,7 @@ def parse_trade_archive_entries(
         file_date = _parse_date(match.group("date"))
         if start_date and file_date < start_date:
             continue
-        if end_date and file_date > end_date:
+        if end_date and file_date >= end_date:
             continue
         rows.append(
             {
@@ -229,6 +235,11 @@ def run_archive_manifest(
         workers=config.workers,
     )
     symbols = manifest["symbol"].unique().sort().to_list() if not manifest.is_empty() else []
+    # Survivorship guard: detect (and loudly warn about) any symbol the previous
+    # persisted manifest for this root covered but the new universe dropped. The
+    # Bybit archive root listing has historically lagged, so a silently shrinking
+    # universe is a survivorship hole, not necessarily a clean delisting.
+    survivorship_warning = _detect_universe_shrink(data_root, new_symbols=symbols)
     payload = {
         "name": config.name,
         "source_url": config.base_url,
@@ -245,6 +256,8 @@ def run_archive_manifest(
             "before the signal minute."
         ),
     }
+    if survivorship_warning:
+        payload["survivorship_warning"] = survivorship_warning
 
     output_dir = Path(report_dir or Path(data_root) / "reports")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -255,6 +268,39 @@ def run_archive_manifest(
         manifest.write_csv(output_dir / f"archive_manifest_{safe_name}.csv")
         write_dataset(manifest, data_root, "archive_trade_manifest", partition_by=("date",), append=False)
     return payload
+
+
+def _detect_universe_shrink(data_root: str | Path, *, new_symbols: list[str]) -> str:
+    """Warn when the new manifest universe is smaller than the previous one.
+
+    Compares the freshly resolved symbol set against the previously persisted
+    `archive_trade_manifest` for the same data root. Any symbol that was covered
+    before but is now absent is logged as a loud warning and returned as a
+    human-readable string for the manifest report. Returns "" when no symbol is
+    dropped (or there is no prior manifest to compare against).
+    """
+    try:
+        previous = read_dataset(data_root, "archive_trade_manifest")
+    except Exception as exc:  # noqa: BLE001 - a missing/unreadable prior manifest must not block a new one
+        _logger.debug("could not read previous archive_trade_manifest for survivorship check: %s", exc)
+        return ""
+    if previous.is_empty() or "symbol" not in previous.columns:
+        return ""
+    previous_symbols = set(previous["symbol"].unique().to_list())
+    dropped = sorted(previous_symbols - set(new_symbols))
+    if not dropped:
+        return ""
+    preview = ", ".join(dropped[:50])
+    if len(dropped) > 50:
+        preview += f", ... ({len(dropped) - 50} more)"
+    message = (
+        f"Universe shrank vs the previous manifest: {len(dropped)} symbol(s) present before are now "
+        f"missing ({preview}). The Bybit archive root listing has historically lagged, so this may be a "
+        f"survivorship hole rather than a real delisting. Pass an explicit --symbols allowlist to retain them "
+        f"if they still have archive directories."
+    )
+    _logger.warning("archive-manifest survivorship: %s", message)
+    return message
 
 
 def run_archive_klines_download(
@@ -727,7 +773,7 @@ def format_archive_manifest_report(payload: dict[str, Any]) -> str:
         "",
         f"Created: {payload['created_at']}",
         f"Source: {payload['source_url']}",
-        f"Date range: {payload.get('start') or 'all'} to {payload.get('end') or 'all'}",
+        f"Date range: {payload.get('start') or 'all'} to {payload.get('end') or 'all'} (end-exclusive)",
         f"Rows: {payload['rows']}",
         f"Symbols: {payload['symbols']}",
         "",
@@ -735,11 +781,11 @@ def format_archive_manifest_report(payload: dict[str, Any]) -> str:
         "",
         preview or "none",
         "",
-        "## Warning",
-        "",
-        payload["warning"],
-        "",
     ]
+    survivorship_warning = payload.get("survivorship_warning")
+    if survivorship_warning:
+        lines += ["## Survivorship Warning", "", survivorship_warning, ""]
+    lines += ["## Warning", "", payload["warning"], ""]
     return "\n".join(lines)
 
 
@@ -779,7 +825,11 @@ def _select_manifest_rows(
     if config.start:
         frame = frame.filter(pl.col("date") >= config.start[:10])
     if config.end:
-        frame = frame.filter(pl.col("date") <= config.end[:10])
+        # End-exclusive: the day named by `--end` is not downloaded, matching
+        # the `volume-events` convention (see docs/data_roots.md). An inclusive
+        # bound here would fabricate flat bars for a partial trailing day via
+        # kline densification.
+        frame = frame.filter(pl.col("date") < config.end[:10])
     symbols = tuple(dict.fromkeys(symbol.upper() for symbol in config.symbols if symbol.strip()))
     if symbols:
         frame = frame.filter(pl.col("symbol").is_in(symbols))

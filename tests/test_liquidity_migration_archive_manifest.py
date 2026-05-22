@@ -11,6 +11,7 @@ from liquidity_migration.archive_manifest import (
     _archive_kline_skip_rows,
     _bybit_api_kline_url,
     _date_from_ts_ms,
+    _detect_universe_shrink,
     _empty_manifest,
     _kline_partition_bar_rows,
     _kline_partition_file_exists,
@@ -92,7 +93,10 @@ def test_parse_trade_archive_entries_matches_dated_csv_and_sorts() -> None:
     assert rows[0]["url"] == f"{SYMBOL_URL}BTCUSDT2025-01-01.csv.gz"
 
 
-def test_parse_trade_archive_entries_applies_inclusive_date_window() -> None:
+def test_parse_trade_archive_entries_applies_start_inclusive_end_exclusive_window() -> None:
+    # `--end` is end-exclusive (matches volume-events and docs/data_roots.md):
+    # the day named by `end` is NOT included, so passing the same `--end` to the
+    # archive and volume-events commands no longer ingests a partial trailing day.
     html = """
     <a href="BTCUSDT2025-01-01.csv.gz">a</a>
     <a href="BTCUSDT2025-01-02.csv.gz">b</a>
@@ -104,7 +108,7 @@ def test_parse_trade_archive_entries_applies_inclusive_date_window() -> None:
         symbol="BTCUSDT",
         symbol_url=SYMBOL_URL,
         start="2025-01-02",
-        end="2025-01-02",
+        end="2025-01-03",
     )
 
     assert [row["date"] for row in rows] == ["2025-01-02"]
@@ -529,13 +533,28 @@ def _manifest_frame() -> pl.DataFrame:
 
 
 def test_select_manifest_rows_filters_date_window_and_sorts(tmp_path) -> None:
-    config = ArchiveKlineDownloadConfig(start="2025-01-02", end="2025-01-03", missing_only=False)
+    # `--end` is end-exclusive (matches volume-events and docs/data_roots.md), so
+    # end="2025-01-04" selects 01-02 and 01-03 but not 01-04.
+    config = ArchiveKlineDownloadConfig(start="2025-01-02", end="2025-01-04", missing_only=False)
 
     rows = _select_manifest_rows(_manifest_frame(), data_root=tmp_path, config=config, dataset="klines_1m")
 
     assert [(row["date"], row["symbol"]) for row in rows] == [
         ("2025-01-02", "BTCUSDT"),
         ("2025-01-03", "BTCUSDT"),
+    ]
+
+
+def test_select_manifest_rows_end_is_exclusive(tmp_path) -> None:
+    # Explicitly pin the exclusive boundary: end equal to a manifest date drops it.
+    config = ArchiveKlineDownloadConfig(start="2025-01-01", end="2025-01-03", missing_only=False)
+
+    rows = _select_manifest_rows(_manifest_frame(), data_root=tmp_path, config=config, dataset="klines_1m")
+
+    assert [(row["date"], row["symbol"]) for row in rows] == [
+        ("2025-01-01", "BTCUSDT"),
+        ("2025-01-01", "ETHUSDT"),
+        ("2025-01-02", "BTCUSDT"),
     ]
 
 
@@ -595,6 +614,31 @@ def test_select_manifest_rows_applies_skip_list(tmp_path, monkeypatch) -> None:
     assert ("2025-01-02", "BTCUSDT") in {(row["date"], row["symbol"]) for row in rows}
 
 
+# --- _detect_universe_shrink (survivorship guard) -------------------------
+
+
+def test_detect_universe_shrink_returns_empty_without_prior_manifest(tmp_path) -> None:
+    # No previous manifest persisted: nothing to compare against, no warning.
+    assert _detect_universe_shrink(tmp_path, new_symbols=["BTCUSDT", "ETHUSDT"]) == ""
+
+
+def test_detect_universe_shrink_silent_when_universe_stable_or_grows(tmp_path) -> None:
+    write_dataset(_manifest_frame(), tmp_path, "archive_trade_manifest", partition_by=("date",), append=False)
+    # Same symbols, and a superset, must both be silent (only shrinkage warns).
+    assert _detect_universe_shrink(tmp_path, new_symbols=["BTCUSDT", "ETHUSDT"]) == ""
+    assert _detect_universe_shrink(tmp_path, new_symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT"]) == ""
+
+
+def test_detect_universe_shrink_warns_and_names_dropped_symbols(tmp_path) -> None:
+    write_dataset(_manifest_frame(), tmp_path, "archive_trade_manifest", partition_by=("date",), append=False)
+
+    # ETHUSDT was covered before but is missing now: a survivorship hole.
+    warning = _detect_universe_shrink(tmp_path, new_symbols=["BTCUSDT"])
+
+    assert "ETHUSDT" in warning
+    assert "1 symbol" in warning
+
+
 # --- run_* error paths ----------------------------------------------------
 
 
@@ -628,7 +672,9 @@ def test_run_archive_api_download_marks_empty_when_api_returns_no_rows(tmp_path,
 
     payload = run_archive_hourly_klines_api_download(
         tmp_path,
-        config=ArchiveHourlyKlineApiDownloadConfig(start="2025-01-01", end="2025-01-01", workers=1, name="fixture"),
+        # `--end` is end-exclusive, so end must be the day after the manifest
+        # date (2025-01-01) for that row to be selected.
+        config=ArchiveHourlyKlineApiDownloadConfig(start="2025-01-01", end="2025-01-02", workers=1, name="fixture"),
     )
 
     assert payload["rows"] == 1

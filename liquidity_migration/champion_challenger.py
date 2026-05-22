@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -159,6 +160,40 @@ def format_champion_challenger_manifest(payload: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _parse_command_tokens(command: str) -> tuple[dict[str, str], list[str]]:
+    """Split a manifest command into its leading ``KEY=value`` env assignments
+    and the remaining argument tokens. Token-aware (via shlex) so audit checks
+    cannot be fooled by a substring that happens to appear inside another word
+    or value — e.g. a literal ``promoted`` inside a path is not an assignment."""
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        # Unparseable command — treat as having no recognizable structure so
+        # the audit fails loudly rather than silently passing.
+        return {}, []
+    env: dict[str, str] = {}
+    idx = 0
+    for idx, token in enumerate(tokens):  # noqa: B007 - idx reused after loop
+        key, sep, value = token.partition("=")
+        # Leading env assignments only: once a non-assignment token appears
+        # (the program/interpreter), the rest are arguments, not env.
+        if not sep or not key or not key.replace("_", "").isalnum():
+            break
+        env[key] = value
+    else:
+        idx = len(tokens)
+    return env, tokens[idx:]
+
+
+def _submits_orders_in_command(env: dict[str, str], args: list[str]) -> bool:
+    """True if the command carries an order-submission flag as a real token:
+    either a ``SUBMIT_ORDERS`` env assignment set to a truthy value, or an
+    explicit ``--submit-orders`` argument."""
+    if env.get("SUBMIT_ORDERS", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    return "--submit-orders" in args
+
+
 def _audit_violations(specs: tuple[ChallengerSpec, ...]) -> list[str]:
     violations = []
     submitters = [spec for spec in specs if spec.submits_orders]
@@ -167,11 +202,23 @@ def _audit_violations(specs: tuple[ChallengerSpec, ...]) -> list[str]:
     elif submitters[0].challenger_id != "champion_promoted_submit":
         violations.append(f"Unexpected order-submitting champion: {submitters[0].challenger_id}.")
     for spec in specs:
-        command = spec.command
+        env, args = _parse_command_tokens(spec.command)
+        carries_order_flag = _submits_orders_in_command(env, args)
         if spec.role == "shadow_challenger" and spec.submits_orders:
             violations.append(f"{spec.challenger_id} is a shadow challenger but submits_orders=true.")
-        if spec.role == "shadow_challenger" and ("--submit-orders" in command or "SUBMIT_ORDERS=1" in command):
+        if spec.role == "shadow_challenger" and carries_order_flag:
             violations.append(f"{spec.challenger_id} command contains an order-submission flag.")
-        if spec.submits_orders and ACTIVE_ORDER_SUBMITTING_PROFILE not in command:
-            violations.append(f"{spec.challenger_id} submits orders without the active profile.")
+        if not spec.submits_orders and carries_order_flag:
+            violations.append(f"{spec.challenger_id} declares submits_orders=false but its command submits orders.")
+        if spec.submits_orders:
+            if not carries_order_flag:
+                violations.append(f"{spec.challenger_id} submits orders but its command lacks an order-submission flag.")
+            # The single live submitter must run the designated promoted
+            # profile/strategy as a real STRATEGY_PROFILE=value assignment,
+            # not merely co-occur with the word somewhere in the string.
+            if env.get("STRATEGY_PROFILE") != ACTIVE_ORDER_SUBMITTING_PROFILE:
+                violations.append(
+                    f"{spec.challenger_id} submits orders but STRATEGY_PROFILE is not "
+                    f"'{ACTIVE_ORDER_SUBMITTING_PROFILE}' (got {env.get('STRATEGY_PROFILE')!r})."
+                )
     return violations

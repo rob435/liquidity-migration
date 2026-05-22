@@ -482,7 +482,7 @@ def _summary_metrics(trades: list[dict[str, Any]], equity: pl.DataFrame) -> dict
         "max_drawdown": equity["drawdown"].min(),
         "sharpe": sharpe,
         "win_rate": sum(1 for n in nets if n > 0) / len(nets),
-        "avg_net": mean if False else sum(nets) / len(nets),
+        "avg_net": sum(nets) / len(nets),
     }
 
 

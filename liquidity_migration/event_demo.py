@@ -193,6 +193,13 @@ def run_event_demo_cycle(
         contract_by_symbol = _contract_lookup(universe)
         all_trades = read_dataset(root, "event_demo_trades")
         all_orders = read_dataset(root, "event_demo_orders")
+        # Ledger rows produced during the cycle are accumulated and flushed once
+        # at the end. The cycle reads the ledgers only here and then operates on
+        # the in-memory all_trades/all_orders, so each step's own disk write was
+        # a redundant full read-modify-write. The preflight entry-order write
+        # stays immediate -- it is the crash-durability anchor before place_order.
+        cycle_trade_rows: list[dict[str, Any]] = []
+        cycle_order_rows: list[dict[str, Any]] = []
         mark_stage("signal_prep")
 
         snapshot_thread.join()
@@ -222,10 +229,10 @@ def run_event_demo_cycle(
         )
         if pending_fill_trades:
             all_trades = _upsert_rows(all_trades, pending_fill_trades, key="trade_id")
-            _write_trade_rows(root, pl.DataFrame(pending_fill_trades, infer_schema_length=None))
+            cycle_trade_rows.extend(pending_fill_trades)
         if pending_fill_orders:
             all_orders = _upsert_rows(all_orders, pending_fill_orders, key="order_link_id")
-            _write_order_rows(root, pl.DataFrame(pending_fill_orders, infer_schema_length=None))
+            cycle_order_rows.extend(pending_fill_orders)
         mark_stage("pending_fill_reconcile")
 
         reconciled_trades, reconcile_rows, reconcile_position_error = _reconcile_open_trades(
@@ -238,7 +245,7 @@ def run_event_demo_cycle(
         )
         if reconcile_rows:
             all_trades = _upsert_rows(all_trades, reconcile_rows, key="trade_id")
-            _write_trade_rows(root, pl.DataFrame(reconcile_rows, infer_schema_length=None))
+            cycle_trade_rows.extend(reconcile_rows)
         mark_stage("open_trade_reconcile")
 
         exits = plan_demo_exits(
@@ -263,11 +270,11 @@ def run_event_demo_cycle(
         if executed_exits:
             all_trades = _upsert_rows(all_trades, executed_exits, key="trade_id")
             if demo.submit_orders or demo.record_dry_run:
-                _write_trade_rows(root, pl.DataFrame(executed_exits, infer_schema_length=None))
+                cycle_trade_rows.extend(executed_exits)
         if exit_order_rows:
             all_orders = _upsert_rows(all_orders, exit_order_rows, key="order_link_id")
             if demo.submit_orders or demo.record_dry_run:
-                _write_order_rows(root, pl.DataFrame(exit_order_rows, infer_schema_length=None))
+                cycle_order_rows.extend(exit_order_rows)
         mark_stage("exits")
 
         refreshed_open = _open_trades(all_trades)
@@ -282,7 +289,7 @@ def run_event_demo_cycle(
             )
             if stale_entry_order_rows:
                 all_orders = _upsert_rows(all_orders, stale_entry_order_rows, key="order_link_id")
-                _write_order_rows(root, pl.DataFrame(stale_entry_order_rows, infer_schema_length=None))
+                cycle_order_rows.extend(stale_entry_order_rows)
         entry_candidates, skip_counts = select_demo_entry_candidates(
             features,
             all_trades,
@@ -363,12 +370,18 @@ def run_event_demo_cycle(
         if executed_entries:
             all_trades = _upsert_rows(all_trades, executed_entries, key="trade_id")
             if demo.submit_orders or demo.record_dry_run:
-                _write_trade_rows(root, pl.DataFrame(executed_entries, infer_schema_length=None))
+                cycle_trade_rows.extend(executed_entries)
         if entry_order_rows:
             all_orders = _upsert_rows(all_orders, entry_order_rows, key="order_link_id")
             if demo.submit_orders or demo.record_dry_run:
-                _write_order_rows(root, pl.DataFrame(entry_order_rows, infer_schema_length=None))
+                cycle_order_rows.extend(entry_order_rows)
         mark_stage("entries")
+
+        if cycle_trade_rows:
+            _write_trade_rows(root, pl.DataFrame(cycle_trade_rows, infer_schema_length=None))
+        if cycle_order_rows:
+            _write_order_rows(root, pl.DataFrame(cycle_order_rows, infer_schema_length=None))
+        mark_stage("ledger_flush")
 
         if trading_client is None and demo.telegram:
             bybit_position_error = "Bybit private client unavailable; set BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET"
@@ -578,6 +591,11 @@ def run_event_risk_cycle(
         trading_client = private_client if private_client is not None else build_event_risk_private_client(config, risk)
         all_trades = read_dataset(root, "event_demo_trades")
         all_orders = read_dataset(root, "event_demo_orders")
+        # Ledger rows are accumulated and flushed once at cycle end -- see the
+        # event-demo cycle for the rationale (the cycle reads the ledgers once
+        # and then works off the in-memory all_trades/all_orders).
+        cycle_trade_rows: list[dict[str, Any]] = []
+        cycle_order_rows: list[dict[str, Any]] = []
         open_trades = _open_trades(all_trades)
         raw_positions, position_error = _safe_raw_positions(trading_client, settle_coin=risk.settle_coin)
         if trading_client is None and (risk.telegram or risk.repair_stops):
@@ -600,7 +618,7 @@ def run_event_risk_cycle(
         )
         if reconcile_rows:
             all_trades = _upsert_rows(all_trades, reconcile_rows, key="trade_id")
-            _write_trade_rows(root, pl.DataFrame(reconcile_rows, infer_schema_length=None))
+            cycle_trade_rows.extend(reconcile_rows)
             open_trades = _open_trades(all_trades)
             reconciled_trades = _open_trades(all_trades)
 
@@ -626,7 +644,7 @@ def run_event_risk_cycle(
         if repair_rows:
             all_orders = _upsert_rows(all_orders, repair_rows, key="order_link_id")
             if risk.submit_orders or risk.record_dry_run:
-                _write_order_rows(root, pl.DataFrame(repair_rows, infer_schema_length=None))
+                cycle_order_rows.extend(repair_rows)
 
         executed_exits, exit_order_rows = _execute_risk_exits(
             exits,
@@ -640,11 +658,16 @@ def run_event_risk_cycle(
         if executed_exits:
             all_trades = _upsert_rows(all_trades, executed_exits, key="trade_id")
             if risk.submit_orders or risk.record_dry_run:
-                _write_trade_rows(root, pl.DataFrame(executed_exits, infer_schema_length=None))
+                cycle_trade_rows.extend(executed_exits)
         if exit_order_rows:
             all_orders = _upsert_rows(all_orders, exit_order_rows, key="order_link_id")
             if risk.submit_orders or risk.record_dry_run:
-                _write_order_rows(root, pl.DataFrame(exit_order_rows, infer_schema_length=None))
+                cycle_order_rows.extend(exit_order_rows)
+
+        if cycle_trade_rows:
+            _write_trade_rows(root, pl.DataFrame(cycle_trade_rows, infer_schema_length=None))
+        if cycle_order_rows:
+            _write_order_rows(root, pl.DataFrame(cycle_order_rows, infer_schema_length=None))
 
         pending_exit_symbols = {
             str(row.get("symbol", ""))
@@ -2186,8 +2209,14 @@ def _execute_single_entry(
                 order_result = trading_client.place_order(**order_params)
                 submit_mode = "submitted"
             except Exception as exc:  # noqa: BLE001 - failed entries must be ledgered without aborting the cycle
+                # The exception may be a lost response AFTER Bybit accepted the
+                # order, so the entry is ledgered submitted_unconfirmed (a pending
+                # status): next cycle _reconcile_pending_order_fills probes
+                # get_trade_history and adopts a real fill, or the pending guard
+                # expires it. A "failed" status is skipped by reconciliation and
+                # would orphan a live position.
                 submit_mode = "error"
-                order_status = "failed"
+                order_status = "submitted_unconfirmed"
                 error = f"place_order failed: {exc}"[:500]
                 filled_qty = 0.0
                 filled_notional = 0.0

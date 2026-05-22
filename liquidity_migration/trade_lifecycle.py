@@ -53,19 +53,26 @@ def build_equity_curve(baskets: pl.DataFrame) -> pl.DataFrame:
                 "basket_return": pl.Series([], dtype=pl.Float64),
             }
         )
+    # Compound the portfolio on a daily grid. Each basket is a fractional slice
+    # (weight ~ 1/max_active), so baskets realised on the same day are additive
+    # and equity only compounds across days. Per-basket cum_prod in exit order
+    # instead multiplied overlapping positions onto one another -- inventing
+    # spurious cross-terms and a path-dependent drawdown. (This is realised-PnL
+    # accounting: a basket's whole return lands on its exit day; intra-hold
+    # mark-to-market would additionally need a daily price path.)
     return (
-        baskets.sort("exit_ts_ms")
+        baskets.with_columns(
+            pl.from_epoch(pl.col("exit_ts_ms"), time_unit="ms").dt.strftime("%Y-%m-%d").alias("date")
+        )
+        .group_by("date")
+        .agg(
+            pl.col("basket_return").sum().alias("basket_return"),
+            pl.col("exit_ts_ms").max().alias("ts_ms"),
+        )
+        .sort("ts_ms")
         .with_columns((pl.col("basket_return") + 1.0).cum_prod().alias("equity"))
         .with_columns((pl.col("equity") / pl.col("equity").cum_max() - 1.0).alias("drawdown"))
-        .select(
-            pl.col("exit_ts_ms").alias("ts_ms"),
-            "equity",
-            "drawdown",
-            "basket_return",
-        )
-        .with_columns(
-            pl.from_epoch(pl.col("ts_ms"), time_unit="ms").dt.strftime("%Y-%m-%d").alias("date")
-        )
+        .select("ts_ms", "equity", "drawdown", "basket_return", "date")
     )
 
 
@@ -157,11 +164,11 @@ def _funding_mode_summary(trades: pl.DataFrame) -> str:
     if trades.is_empty() or "funding_mode" not in trades.columns:
         return "missing"
     modes = set(str(item) for item in trades["funding_mode"].to_list())
+    if not modes or modes == {"missing"}:
+        return "missing"
     if modes == {"modeled"}:
         return "modeled"
-    if "modeled" in modes:
-        return "partial"
-    return "missing"
+    return "partial"
 
 
 def _worst_volume_day_return(baskets: pl.DataFrame) -> float:
@@ -356,17 +363,20 @@ def _perp_funding_return(
     series = funding_lookup.get(symbol)
     if series is None:
         return 0.0, "missing", 0
-    if entry_ts_ms < int(series["start_ts_ms"]) or exit_ts_ms > int(series["end_ts_ms"]):
-        return 0.0, "partial", 0
+    # A trade whose window extends past the funding dataset is still charged the
+    # funding that IS covered, and flagged "partial" -- zeroing the whole trade
+    # would silently drop a real cost/credit from total_return.
+    fully_covered = entry_ts_ms >= int(series["start_ts_ms"]) and exit_ts_ms <= int(series["end_ts_ms"])
+    mode = "modeled" if fully_covered else "partial"
     events = [
         rate
         for ts_ms, rate in series["events"]
         if entry_ts_ms < ts_ms <= exit_ts_ms
     ]
     if not events:
-        return 0.0, "modeled", 0
+        return 0.0, mode, 0
     signed = sum(events)
-    return (float(-signed) if side == "long" else float(signed)), "modeled", len(events)
+    return (float(-signed) if side == "long" else float(signed)), mode, len(events)
 
 
 def _price_bars_by_symbol(klines: pl.DataFrame) -> dict[str, list[dict[str, Any]]]:

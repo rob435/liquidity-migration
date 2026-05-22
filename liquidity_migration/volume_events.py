@@ -16,7 +16,7 @@ import polars as pl
 
 from .config import CostConfig, DEFAULT_EXCLUDED_SYMBOLS, TradeLifecycleConfig
 from .crowding import classify_liquidity_migration_crowding
-from .storage import read_dataset
+from .storage import read_dataset, read_dataset_columns
 from .trade_lifecycle import (
     _bar_excursion,
     _bar_exit_hits,
@@ -277,7 +277,25 @@ def run_volume_event_research(
     output_dir = Path(report_dir) if report_dir else root / "reports" / "volume_event_research"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    raw_klines = read_dataset(root, "klines_1h")
+    # Project only the columns the backtest consumes; klines_1h is multi-GB and
+    # this is the single hottest read in the engine. The set spans price bars
+    # (_price_bars_by_symbol), daily aggregates (build_volume_features,
+    # _daily_return_frame) and PIT-coverage checks (_covered_kline_date_symbol_set).
+    raw_klines = read_dataset_columns(
+        root,
+        "klines_1h",
+        columns=[
+            "ts_ms",
+            "symbol",
+            "date",
+            "open",
+            "high",
+            "low",
+            "close",
+            "turnover_quote",
+            "volume_base",
+        ],
+    )
     if raw_klines.is_empty():
         raise RuntimeError("klines_1h is empty; run download-data first")
     funding = read_dataset(root, "funding")
@@ -3897,9 +3915,14 @@ def _date_symbol_set(frame: pl.DataFrame) -> set[tuple[str, str]]:
 def _covered_kline_date_symbol_set(klines: pl.DataFrame, *, min_hourly_bars: int = 20) -> set[tuple[str, str]]:
     if klines.is_empty() or not _has_columns(klines, "date", "symbol"):
         return set()
+    # Count only bars with real traded volume. densify_trade_klines_1h pads
+    # missing hours with a flat carry price and zero volume; counting raw rows
+    # would let a near-empty day clear the PIT coverage gate on synthetic bars.
+    volume_col = next((col for col in ("volume_base", "turnover_quote") if col in klines.columns), None)
+    bar_count = ((pl.col(volume_col) > 0.0).sum() if volume_col is not None else pl.len()).alias("hourly_bars")
     covered = (
         klines.group_by(["date", "symbol"])
-        .agg(pl.len().alias("hourly_bars"))
+        .agg(bar_count)
         .filter(pl.col("hourly_bars") >= min_hourly_bars)
         .select(["date", "symbol"])
     )

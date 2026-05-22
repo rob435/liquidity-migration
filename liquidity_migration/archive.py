@@ -70,7 +70,12 @@ def read_public_trade_archive(path: str | Path, *, symbol: str | None = None) ->
                 .unique(subset=["symbol", "trade_id"], keep="last")
                 .sort(["symbol", "ts_ms", "trade_id"])
             )
-    except Exception:
+    except (pl.exceptions.PolarsError, OSError, UnicodeDecodeError):
+        # Only fall through to the byte-reader for failures that legitimately
+        # mean "this is not a plain polars-readable CSV" — a malformed/empty
+        # CSV, a schema/cast mismatch, a compressed (.gz/.zip) archive, or an
+        # IO/decode error. Unexpected errors (e.g. MemoryError, real bugs) must
+        # propagate rather than be masked by a possibly-mis-parsing fallback.
         pass
 
     data = file_path.read_bytes()

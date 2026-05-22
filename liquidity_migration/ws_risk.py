@@ -107,6 +107,18 @@ class EventWebSocketRiskConfig:
 
 @dataclass(slots=True)
 class WebSocketRiskState:
+    """Mutable engine state for EventWebSocketRiskEngine.
+
+    THREADING INVARIANT: every field here is mutated ONLY by the single
+    consumer thread -- the EventWebSocketRiskEngine.run() loop that drains
+    self.events. pybit WebSocket callbacks fire on background threads and MUST
+    only enqueue onto that queue.Queue; they must never touch this state
+    directly. None of these fields is lock-protected, so a callback that called
+    a state-mutating method (on_*/mark_*/record_*) directly would race instantly
+    -- dict mutation during a to_dicts() snapshot, lost set updates. Keep all
+    mutation on the consumer thread; handle_event() asserts this.
+    """
+
     all_trades: pl.DataFrame = field(default_factory=pl.DataFrame)
     open_trades: pl.DataFrame = field(default_factory=_empty_trades)
     positions_by_symbol: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -119,7 +131,10 @@ class WebSocketRiskState:
     untracked_first_seen_ms: dict[str, int] = field(default_factory=dict)
     submitted_link_to_trade_id: dict[str, str] = field(default_factory=dict)
     submitted_link_submit_mode: dict[str, str] = field(default_factory=dict)
-    executions_by_link: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    # Running (filled_qty, value) aggregate per order link -- not the raw
+    # execution rows, so it grows with order count, not execution-message count,
+    # and needs no O(n) re-sum on each new execution.
+    executions_by_link: dict[str, dict[str, float]] = field(default_factory=dict)
     subscribed_symbols: set[str] = field(default_factory=set)
     last_ws_event_monotonic: float = field(default_factory=time.monotonic)
     last_stale_reconcile_monotonic: float = 0.0
@@ -161,8 +176,11 @@ class EventWebSocketRiskEngine:
         self.report_dir = self.root / "reports" / self.risk.data_name
         self.report_dir.mkdir(parents=True, exist_ok=True)
         self.state.telegram_keys_sent = set(_read_telegram_dedupe_keys(self.report_dir))
+        # Captured by run(): the one thread allowed to mutate self.state.
+        self._consumer_thread_ident: int | None = None
 
     def run(self) -> dict[str, Any]:
+        self._consumer_thread_ident = threading.get_ident()
         started = time.monotonic()
         self.bootstrap()
         self.write_report(reason="startup")
@@ -288,6 +306,11 @@ class EventWebSocketRiskEngine:
         self.state.subscribed_symbols.update(missing)
 
     def handle_event(self, event_type: str, message: dict[str, Any]) -> None:
+        if self._consumer_thread_ident is not None and threading.get_ident() != self._consumer_thread_ident:
+            raise RuntimeError(
+                "WebSocketRiskState mutated off the consumer thread -- WS callbacks "
+                "must enqueue onto self.events, never dispatch state changes directly."
+            )
         self.state.last_ws_event_monotonic = time.monotonic()
         if event_type == "position":
             self.on_position_message(message)
@@ -425,12 +448,11 @@ class EventWebSocketRiskEngine:
             link = str(row.get("orderLinkId") or row.get("order_link_id") or "")
             if not link:
                 continue
-            self.state.executions_by_link.setdefault(link, []).append(row)
-            filled_qty = sum(_float(item.get("execQty")) for item in self.state.executions_by_link.get(link, []))
-            value = sum(
-                _float(item.get("execValue")) or _float(item.get("execQty")) * _float(item.get("execPrice"))
-                for item in self.state.executions_by_link.get(link, [])
-            )
+            agg = self.state.executions_by_link.setdefault(link, {"filled_qty": 0.0, "value": 0.0})
+            agg["filled_qty"] += _float(row.get("execQty"))
+            agg["value"] += _float(row.get("execValue")) or _float(row.get("execQty")) * _float(row.get("execPrice"))
+            filled_qty = agg["filled_qty"]
+            value = agg["value"]
             exit_price = value / filled_qty if filled_qty > 0.0 else 0.0
             if link in self.state.submitted_link_to_trade_id:
                 self.record_tracked_exit_stream_fill(
@@ -450,9 +472,9 @@ class EventWebSocketRiskEngine:
                     _write_order_rows(self.root, pl.DataFrame(order_updates, infer_schema_length=None))
 
     def close_trade_from_execution(self, order_link_id: str) -> None:
-        executions = self.state.executions_by_link.get(order_link_id, [])
-        filled_qty = sum(_float(row.get("execQty")) for row in executions)
-        value = sum(_float(row.get("execValue")) or _float(row.get("execQty")) * _float(row.get("execPrice")) for row in executions)
+        agg = self.state.executions_by_link.get(order_link_id, {})
+        filled_qty = float(agg.get("filled_qty", 0.0))
+        value = float(agg.get("value", 0.0))
         exit_price = value / filled_qty if filled_qty > 0.0 else 0.0
         self.record_tracked_exit_stream_fill(
             order_link_id=order_link_id,
