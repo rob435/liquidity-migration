@@ -14,7 +14,7 @@ from typing import Any
 import polars as pl
 
 from ._common import MS_PER_DAY
-from .bybit import BybitPrivateWebSocketStream, BybitPublicTickerStream, BybitWebSocketTradeClient
+from .bybit import BybitPrivateWebSocketStream, BybitPublicTickerStream, BybitWebSocketTradeClient, resolve_private_credentials
 from .config import ResearchConfig
 from .event_demo import (
     EventDemoCycleConfig,
@@ -1507,24 +1507,22 @@ def run_event_ws_risk(
 
 
 def _build_private_stream(config: ResearchConfig) -> BybitPrivateWebSocketStream:
-    api_key = os.environ.get("BYBIT_DEMO_API_KEY")
-    api_secret = os.environ.get("BYBIT_DEMO_API_SECRET")
+    api_key, api_secret, demo = resolve_private_credentials()
     return BybitPrivateWebSocketStream(
         category=config.exchange.category,
         testnet=config.exchange.testnet,
-        demo=True,
+        demo=demo,
         api_key=api_key,
         api_secret=api_secret,
     )
 
 
 def _build_ws_trade_client(config: ResearchConfig) -> BybitWebSocketTradeClient:
-    api_key = os.environ.get("BYBIT_DEMO_API_KEY")
-    api_secret = os.environ.get("BYBIT_DEMO_API_SECRET")
+    api_key, api_secret, demo = resolve_private_credentials()
     return BybitWebSocketTradeClient(
         category=config.exchange.category,
         testnet=config.exchange.testnet,
-        demo=True,
+        demo=demo,
         api_key=api_key,
         api_secret=api_secret,
     )

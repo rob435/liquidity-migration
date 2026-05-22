@@ -61,5 +61,27 @@ test of `promoted` + close-0.30 now runs on the VPS (see Deployment status).
   `promoted` strategy can trade its rank 31–150 selection band;
   `event-demo-cycle` refuses a forward universe narrower than rank 150 for
   `promoted`.
-- No real-money trading; the private client remains demo-only by design
-  (`demo=False` is refused).
+- No real-money trading is active: demo is the default, and `demo=False` is
+  refused unless real-money mode is deliberately armed (see below).
+
+## Real-money path (built, disabled by default)
+
+A real-money (mainnet) execution path exists in the code but is **off by
+default and dormant**. `bybit.real_money_armed()` gates it: with the trading
+mode unset, every private client refuses `demo=False` exactly as before, and
+the VPS demo is unaffected.
+
+Arming real money is a deliberate, owner-only act requiring two independent
+signals, so no single stray environment variable can flip it on:
+
+- `LIQMIG_TRADING_MODE=real`
+- `LIQMIG_REAL_MONEY_ACK` set verbatim to `bybit.REAL_MONEY_ACK_PHRASE`
+
+When armed, private clients use mainnet keys (`BYBIT_REAL_API_KEY` /
+`BYBIT_REAL_API_SECRET`, kept separate from the demo keys), and every entry
+order is clamped to a hard ceiling `LIQMIG_REAL_MONEY_MAX_ORDER_USD` (required
+— no default). A half-armed state (mode set, acknowledgement missing) raises.
+
+**The strategy is NOT validated for real money** — the tribunal verdict is
+WATCH (not PASS), the edge is IS-era / regime-conditional, and there is no
+live-fill track record. Nothing in this repository sets the arming variables.

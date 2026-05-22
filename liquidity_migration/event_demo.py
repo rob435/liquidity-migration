@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 import polars as pl
 
-from .bybit import BybitMarketData, BybitPrivateClient, BybitRestRateLimiter
+from .bybit import BybitMarketData, BybitPrivateClient, BybitRestRateLimiter, real_money_armed, resolve_private_credentials
 from .config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig, UniverseConfig
 from .downloaders import _normalize_instruments, _normalize_klines, _normalize_tickers
 from .storage import exclusive_file_lock, read_dataset, write_dataset
@@ -1199,6 +1199,24 @@ def summarize_position_pnl(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _real_money_max_order_usd() -> float:
+    """Hard per-order USD notional ceiling for real-money trading.
+
+    Required when real money is armed -- there is no default, so the operator
+    must consciously choose the ceiling via LIQMIG_REAL_MONEY_MAX_ORDER_USD.
+    """
+    try:
+        cap = float(os.environ.get("LIQMIG_REAL_MONEY_MAX_ORDER_USD", ""))
+    except ValueError:
+        cap = 0.0
+    if cap <= 0.0:
+        raise RuntimeError(
+            "Real-money mode is armed but LIQMIG_REAL_MONEY_MAX_ORDER_USD is unset "
+            "or not a positive number -- set the per-order USD ceiling explicitly."
+        )
+    return cap
+
+
 def order_quantity_for_notional(
     *,
     notional_usdt: float,
@@ -1209,6 +1227,9 @@ def order_quantity_for_notional(
 ) -> tuple[str, float] | None:
     if notional_usdt <= 0.0 or price <= 0.0:
         return None
+    if real_money_armed():
+        # Real-money safety: clamp every order to the operator-set USD ceiling.
+        notional_usdt = min(notional_usdt, _real_money_max_order_usd())
     try:
         raw_qty = Decimal(str(notional_usdt)) / Decimal(str(price))
         step = Decimal(str(qty_step if qty_step > 0.0 else 0.001))
@@ -3544,14 +3565,17 @@ def _private_credentials_present() -> bool:
 
 
 def _build_private_client(config: ResearchConfig) -> BybitPrivateClient:
-    api_key = os.environ.get("BYBIT_DEMO_API_KEY")
-    api_secret = os.environ.get("BYBIT_DEMO_API_SECRET")
+    api_key, api_secret, demo = resolve_private_credentials()
     if not api_key or not api_secret:
-        raise RuntimeError("Set BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET before --submit-orders")
+        which = (
+            "BYBIT_DEMO_API_KEY and BYBIT_DEMO_API_SECRET" if demo
+            else "BYBIT_REAL_API_KEY and BYBIT_REAL_API_SECRET"
+        )
+        raise RuntimeError(f"Set {which} before submitting orders")
     return BybitPrivateClient(
         category=config.exchange.category,
         testnet=config.exchange.testnet,
-        demo=True,
+        demo=demo,
         api_key=api_key,
         api_secret=api_secret,
     )

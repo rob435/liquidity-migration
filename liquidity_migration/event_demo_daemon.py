@@ -43,7 +43,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
-from .bybit import BybitPrivateWebSocketStream
+from .bybit import BybitPrivateWebSocketStream, resolve_private_credentials
 from .config import ResearchConfig
 from .event_demo import EventDemoCycleConfig, run_event_demo_cycle, warm_demo_kline_cache
 from .execution_router import ExecutionEventRouter
@@ -419,15 +419,14 @@ class EventDemoDaemon:
 
 
 def _build_private_ws_stream(config: ResearchConfig) -> BybitPrivateWebSocketStream:
-    """Default factory. Builds a Bybit demo private WS stream from env-var
-    credentials. Imported lazily so unit tests can pass their own factory."""
-    import os
-    api_key = os.environ.get("BYBIT_DEMO_API_KEY")
-    api_secret = os.environ.get("BYBIT_DEMO_API_SECRET")
+    """Default factory. Builds a Bybit private WS stream from env-var
+    credentials -- demo by default, mainnet when real money is armed.
+    Passed as a factory so unit tests can substitute their own."""
+    api_key, api_secret, demo = resolve_private_credentials()
     return BybitPrivateWebSocketStream(
         category=config.exchange.category,
         testnet=config.exchange.testnet,
-        demo=True,
+        demo=demo,
         api_key=api_key,
         api_secret=api_secret,
     )

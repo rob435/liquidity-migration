@@ -4,7 +4,7 @@
 - Ask for exact intent, constraints, and success metrics when a request is vague.
 - Do not optimize for a vague goal; define the objective before expensive research.
 - The liquidity-migration short signal is statistically real but regime-conditional; the strategy is under active research — see `docs/research_findings.md`. It is not deployed, and the standalone strategy is not deployable as-is. Do not make deployment or promotion claims unless the regime overlay is validated out-of-sample and funding is costed.
-- Demo-only Bybit order submission is in scope; the private client must keep refusing `demo=False` unless real-money support is explicitly requested.
+- A real-money (mainnet) execution path exists but is **disabled by default** and gated behind `bybit.real_money_armed()`. Keep it disabled — never set the `LIQMIG_TRADING_MODE` / `LIQMIG_REAL_MONEY_ACK` arming variables without explicit owner instruction. Demo-only order submission is the operating default; the strategy is not validated for real money.
 - Telegram may notify; it must not approve or submit orders.
 - Serious research runs should leave enough report output to audit the decision.
 

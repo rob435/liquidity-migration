@@ -22,8 +22,10 @@ The signal is real enough to be worth refining. The current research focus is
 so it is active only when the regime pays, and modeling funding costs. See
 `docs/research_findings.md` for the full verdict and the roadmap.
 
-Nothing is deployed — no live or demo trading is running. The Bybit private
-client is demo-only by design (`demo=False` is refused in code).
+A demo (paper) forward test runs on a Bybit demo account. No real-money trading
+is active: a real-money execution path exists in the code but is disabled by
+default — `demo=False` is refused unless real-money mode is deliberately armed.
+The strategy is not validated for real money. See `docs/system_status.md`.
 
 ## What the repo contains
 

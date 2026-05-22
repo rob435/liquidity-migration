@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from types import SimpleNamespace
 
+import pytest
+
 from liquidity_migration import bybit
 
 
@@ -193,14 +195,61 @@ def test_bybit_private_client_refuses_non_demo_session(monkeypatch) -> None:
 
     monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
 
+    monkeypatch.delenv("LIQMIG_TRADING_MODE", raising=False)
     try:
         bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=False)
     except RuntimeError as exc:
-        assert "demo-only" in str(exc)
+        assert "refused" in str(exc)
     else:  # pragma: no cover - explicit failure branch
         raise AssertionError("private client should fail closed outside demo mode")
 
     assert constructed is False
+
+
+def test_real_money_armed_defaults_off(monkeypatch) -> None:
+    monkeypatch.delenv("LIQMIG_TRADING_MODE", raising=False)
+    monkeypatch.delenv("LIQMIG_REAL_MONEY_ACK", raising=False)
+    assert bybit.real_money_armed() is False
+
+
+def test_real_money_armed_requires_both_signals(monkeypatch) -> None:
+    # mode=real with the acknowledgement missing or wrong is a half-armed state
+    # and must fail loud rather than trade or silently downgrade.
+    monkeypatch.setenv("LIQMIG_TRADING_MODE", "real")
+    monkeypatch.delenv("LIQMIG_REAL_MONEY_ACK", raising=False)
+    with pytest.raises(RuntimeError, match="LIQMIG_REAL_MONEY_ACK"):
+        bybit.real_money_armed()
+    monkeypatch.setenv("LIQMIG_REAL_MONEY_ACK", "wrong phrase")
+    with pytest.raises(RuntimeError, match="LIQMIG_REAL_MONEY_ACK"):
+        bybit.real_money_armed()
+    monkeypatch.setenv("LIQMIG_REAL_MONEY_ACK", bybit.REAL_MONEY_ACK_PHRASE)
+    assert bybit.real_money_armed() is True
+
+
+def test_resolve_private_credentials_demo_vs_real(monkeypatch) -> None:
+    monkeypatch.setenv("BYBIT_DEMO_API_KEY", "demo-k")
+    monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "demo-s")
+    monkeypatch.setenv("BYBIT_REAL_API_KEY", "real-k")
+    monkeypatch.setenv("BYBIT_REAL_API_SECRET", "real-s")
+    monkeypatch.delenv("LIQMIG_TRADING_MODE", raising=False)
+    assert bybit.resolve_private_credentials() == ("demo-k", "demo-s", True)
+    monkeypatch.setenv("LIQMIG_TRADING_MODE", "real")
+    monkeypatch.setenv("LIQMIG_REAL_MONEY_ACK", bybit.REAL_MONEY_ACK_PHRASE)
+    assert bybit.resolve_private_credentials() == ("real-k", "real-s", False)
+
+
+def test_bybit_private_client_allows_mainnet_when_armed(monkeypatch) -> None:
+    constructed: dict = {}
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            constructed.update(kwargs)
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    monkeypatch.setenv("LIQMIG_TRADING_MODE", "real")
+    monkeypatch.setenv("LIQMIG_REAL_MONEY_ACK", bybit.REAL_MONEY_ACK_PHRASE)
+    bybit.BybitPrivateClient(api_key="k", api_secret="s", demo=False)
+    assert constructed["demo"] is False
 
 
 def test_bybit_private_client_wraps_order_and_trade_history(monkeypatch) -> None:

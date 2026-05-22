@@ -3233,6 +3233,28 @@ def test_event_demo_max_active_symbols_override() -> None:
         _validate_demo_config(EventDemoCycleConfig(max_active_symbols=-1))
 
 
+def test_real_money_order_cap_clamps_entry_notional(monkeypatch) -> None:
+    from liquidity_migration.bybit import REAL_MONEY_ACK_PHRASE
+    from liquidity_migration.event_demo import order_quantity_for_notional
+
+    # Not armed: the order notional passes through unclamped.
+    monkeypatch.delenv("LIQMIG_TRADING_MODE", raising=False)
+    result = order_quantity_for_notional(notional_usdt=5000.0, price=10.0, qty_step=0.001)
+    assert result is not None and result[1] == pytest.approx(5000.0)
+
+    # Armed with a USD ceiling: every order is clamped to it.
+    monkeypatch.setenv("LIQMIG_TRADING_MODE", "real")
+    monkeypatch.setenv("LIQMIG_REAL_MONEY_ACK", REAL_MONEY_ACK_PHRASE)
+    monkeypatch.setenv("LIQMIG_REAL_MONEY_MAX_ORDER_USD", "1000")
+    result = order_quantity_for_notional(notional_usdt=5000.0, price=10.0, qty_step=0.001)
+    assert result is not None and result[1] <= 1000.0
+
+    # Armed but the ceiling is unset: refuse loudly rather than guess.
+    monkeypatch.delenv("LIQMIG_REAL_MONEY_MAX_ORDER_USD", raising=False)
+    with pytest.raises(RuntimeError, match="LIQMIG_REAL_MONEY_MAX_ORDER_USD"):
+        order_quantity_for_notional(notional_usdt=5000.0, price=10.0, qty_step=0.001)
+
+
 def test_execute_entries_records_preflight_row_before_place_order(tmp_path: Path) -> None:
     """Risk engine relies on event_demo_orders containing a pending row at the
     instant Bybit fills an entry. If the demo engine writes only the post-fill
