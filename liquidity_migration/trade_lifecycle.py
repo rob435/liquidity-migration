@@ -304,16 +304,41 @@ def _funding_lookup(funding: pl.DataFrame | None) -> dict[str, dict[str, Any]] |
     rate_col = "funding_rate" if "funding_rate" in funding.columns else "funding_rate_8h_equiv"
     if rate_col not in funding.columns:
         return None
+    keep = ["symbol", "ts_ms", rate_col]
+    if "funding_interval_min" in funding.columns:
+        keep.append("funding_interval_min")
+    rows = funding.select(keep).drop_nulls(["symbol", "ts_ms"]).sort(["symbol", "ts_ms"])
+    # Raw first/last stamp per symbol — used for the coverage ("partial") check.
+    raw_span = {
+        str(row["symbol"]): (int(row["start_ts_ms"]), int(row["end_ts_ms"]))
+        for row in rows.group_by("symbol")
+        .agg(pl.col("ts_ms").min().alias("start_ts_ms"), pl.col("ts_ms").max().alias("end_ts_ms"))
+        .to_dicts()
+    }
+    if "funding_interval_min" in rows.columns:
+        # Funding settles once per `funding_interval_min`, but some symbols carry
+        # intra-interval snapshot rows (e.g. hourly rows of an 8h rate). Charging
+        # every row would bill the settlement rate up to 8x, so collapse each
+        # settlement window to its boundary-aligned row.
+        interval_ms = (
+            pl.col("funding_interval_min").cast(pl.Int64, strict=False).fill_null(480).clip(1) * 60_000
+        )
+        rows = (
+            rows.with_columns((pl.col("ts_ms") // interval_ms).alias("_settlement"))
+            .group_by(["symbol", "_settlement"], maintain_order=True)
+            .agg(pl.col("ts_ms").first(), pl.col(rate_col).first())
+            .sort(["symbol", "ts_ms"])
+        )
     output: dict[str, dict[str, Any]] = {}
-    rows = funding.select(["symbol", "ts_ms", rate_col]).drop_nulls(["symbol", "ts_ms"]).sort(["symbol", "ts_ms"])
     for key, part in rows.partition_by("symbol", as_dict=True, maintain_order=True).items():
         symbol = str(key[0] if isinstance(key, tuple) else key)
         events = [(int(row["ts_ms"]), float(row[rate_col])) for row in part.to_dicts()]
         if events:
+            start, end = raw_span.get(symbol, (events[0][0], events[-1][0]))
             output[symbol] = {
                 "events": events,
-                "start_ts_ms": events[0][0],
-                "end_ts_ms": events[-1][0],
+                "start_ts_ms": start,
+                "end_ts_ms": end,
             }
     return output
 

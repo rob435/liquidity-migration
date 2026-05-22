@@ -29,6 +29,8 @@ def main() -> int:
     ap.add_argument("--config", default="configs/volume_alpha.default.yaml")
     ap.add_argument("--position-weighting", default=None, help="Override profile sizing (e.g. equal).")
     ap.add_argument("--close-location-min", type=float, default=None, help="Override close-location knob.")
+    ap.add_argument("--max-active-symbols", type=int, default=None, help="Override max concurrent positions.")
+    ap.add_argument("--gross-exposure", type=float, default=None, help="Override gross exposure / leverage.")
     ap.add_argument("--taker-imbalance-1d-max", type=float, default=None,
                     help="Signed-flow filter: drop events with taker_imbalance_1d above this.")
     ap.add_argument("--taker-imbalance-3d-max", type=float, default=None,
@@ -43,6 +45,10 @@ def main() -> int:
         overrides["position_weighting"] = args.position_weighting
     if args.close_location_min is not None:
         overrides["liquidity_migration_close_location_min"] = args.close_location_min
+    if args.max_active_symbols is not None:
+        overrides["max_active_symbols"] = args.max_active_symbols
+    if args.gross_exposure is not None:
+        overrides["gross_exposure"] = args.gross_exposure
     if args.taker_imbalance_1d_max is not None:
         overrides["liquidity_migration_taker_imbalance_1d_max"] = args.taker_imbalance_1d_max
     if args.taker_imbalance_3d_max is not None:

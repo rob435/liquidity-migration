@@ -291,6 +291,32 @@ def test_perp_funding_return_modeled_with_zero_events_in_window():
     assert (ret, mode, count) == (0.0, "modeled", 0)
 
 
+def test_funding_lookup_collapses_intra_interval_snapshot_rows():
+    # Some symbols carry hourly snapshot rows of an 8h funding rate
+    # (funding_interval_min=480). Each settlement must be charged once, not once
+    # per snapshot row, or a multi-day hold is over-charged up to ~8x.
+    hour = 3_600_000
+    funding = pl.DataFrame(
+        {
+            "symbol": ["AAA"] * 24,
+            "ts_ms": [h * hour for h in range(24)],
+            "funding_rate": [0.001] * 24,
+            "funding_interval_min": [480] * 24,
+        }
+    )
+    lookup = _funding_lookup(funding)
+    # 24 hourly rows span three 8h settlements -> three events, not 24.
+    assert [ts for ts, _ in lookup["AAA"]["events"]] == [0, 8 * hour, 16 * hour]
+    # Coverage span stays the raw first/last stamp.
+    assert lookup["AAA"]["start_ts_ms"] == 0
+    assert lookup["AAA"]["end_ts_ms"] == 23 * hour
+    # A hold spanning two settlements is charged twice, not ~16x.
+    _, mode, count = _perp_funding_return(
+        lookup, symbol="AAA", side="short", entry_ts_ms=1, exit_ts_ms=23 * hour
+    )
+    assert (mode, count) == ("modeled", 2)
+
+
 # --------------------------------------------------------------------------
 # Basket summaries
 # --------------------------------------------------------------------------
