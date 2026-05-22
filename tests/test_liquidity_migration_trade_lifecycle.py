@@ -226,7 +226,8 @@ def test_funding_lookup_indexes_events_per_symbol():
     lookup = _funding_lookup(funding)
     assert lookup is not None
     assert set(lookup) == {"AAA", "BBB"}
-    assert lookup["AAA"]["events"] == [(100, 0.001), (200, 0.002)]
+    assert lookup["AAA"]["events_ts"] == [100, 200]
+    assert lookup["AAA"]["events_rate"] == [0.001, 0.002]
     assert lookup["AAA"]["start_ts_ms"] == 100
     assert lookup["AAA"]["end_ts_ms"] == 200
 
@@ -308,7 +309,7 @@ def test_funding_lookup_collapses_intra_interval_snapshot_rows():
     )
     lookup = _funding_lookup(funding)
     # 24 hourly rows span three 8h settlements -> three events, not 24.
-    assert [ts for ts, _ in lookup["AAA"]["events"]] == [0, 8 * hour, 16 * hour]
+    assert lookup["AAA"]["events_ts"] == [0, 8 * hour, 16 * hour]
     # Coverage span stays the raw first/last stamp.
     assert lookup["AAA"]["start_ts_ms"] == 0
     assert lookup["AAA"]["end_ts_ms"] == 23 * hour

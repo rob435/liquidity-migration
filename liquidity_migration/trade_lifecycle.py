@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from typing import Any
 
 import numpy as np
@@ -339,11 +340,16 @@ def _funding_lookup(funding: pl.DataFrame | None) -> dict[str, dict[str, Any]] |
     output: dict[str, dict[str, Any]] = {}
     for key, part in rows.partition_by("symbol", as_dict=True, maintain_order=True).items():
         symbol = str(key[0] if isinstance(key, tuple) else key)
-        events = [(int(row["ts_ms"]), float(row[rate_col])) for row in part.to_dicts()]
-        if events:
-            start, end = raw_span.get(symbol, (events[0][0], events[-1][0]))
+        # Store parallel sorted lists so _perp_funding_return can slice the
+        # in-window events in O(log n) via bisect instead of an O(n) scan per
+        # trade. ts_list is already sorted by the upstream `.sort(["symbol","ts_ms"])`.
+        ts_list = [int(row["ts_ms"]) for row in part.to_dicts()]
+        rate_list = [float(row[rate_col]) for row in part.to_dicts()]
+        if ts_list:
+            start, end = raw_span.get(symbol, (ts_list[0], ts_list[-1]))
             output[symbol] = {
-                "events": events,
+                "events_ts": ts_list,
+                "events_rate": rate_list,
                 "start_ts_ms": start,
                 "end_ts_ms": end,
             }
@@ -368,15 +374,14 @@ def _perp_funding_return(
     # would silently drop a real cost/credit from total_return.
     fully_covered = entry_ts_ms >= int(series["start_ts_ms"]) and exit_ts_ms <= int(series["end_ts_ms"])
     mode = "modeled" if fully_covered else "partial"
-    events = [
-        rate
-        for ts_ms, rate in series["events"]
-        if entry_ts_ms < ts_ms <= exit_ts_ms
-    ]
-    if not events:
+    # Bisect the pre-sorted ts_list to slice the in-window events in O(log n).
+    ts_list = series["events_ts"]
+    lo = bisect_right(ts_list, entry_ts_ms)
+    hi = bisect_right(ts_list, exit_ts_ms)
+    if lo >= hi:
         return 0.0, mode, 0
-    signed = sum(events)
-    return (float(-signed) if side == "long" else float(signed)), mode, len(events)
+    signed = sum(series["events_rate"][lo:hi])
+    return (float(-signed) if side == "long" else float(signed)), mode, hi - lo
 
 
 def _price_bars_by_symbol(klines: pl.DataFrame) -> dict[str, list[dict[str, Any]]]:
