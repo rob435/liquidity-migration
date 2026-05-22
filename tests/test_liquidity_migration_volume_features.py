@@ -57,7 +57,7 @@ def test_rolling_mean_matches_rolling_sum_divided_by_window() -> None:
         np.testing.assert_allclose(fast, expected, rtol=1e-12, equal_nan=True)
 
 
-def test_volume_features_build_daily_liquidity_ranks(tmp_path) -> None:
+def test_side_return_stop_and_take_profit_prices() -> None:
     assert _side_return(100.0, 115.0, side="long") == pytest.approx(0.15)
     assert _side_return(100.0, 85.0, side="long") == pytest.approx(-0.15)
     assert _side_return(100.0, 115.0, side="short") == pytest.approx(-0.15)

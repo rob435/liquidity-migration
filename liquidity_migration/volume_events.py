@@ -4000,7 +4000,7 @@ def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) 
             f"Mode `{pw_mode}` — weights are reallocation of the fixed risk budget, "
             "not leverage. Expanding-mean normalization keeps mean ≈ 1.",
             "",
-            f"| mean | std | min | max |",
+            "| mean | std | min | max |",
             "| ---: | ---: | ---: | ---: |",
             f"| {pw_mean:.3f} | {pw_std:.3f} | {pw_min:.3f} | {pw_max:.3f} |",
             "",
