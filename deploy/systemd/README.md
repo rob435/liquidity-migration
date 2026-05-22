@@ -143,12 +143,13 @@ expected target, preserving the API secrets and bot token. Telegram is enabled
 for material alerts only: entries, exits, position reconciliation, or
 position-report errors. Quiet no-trade cycles still write local reports but must
 not notify. The services submit demo orders only.
-The entry service uses `STRATEGY_PROFILE=promoted`, the canonical research
-strategy: the conservative `promoted_quality_squeeze` entry router at
-`close_location_min = 0.30`. It fetches the top 220 turnover-ranked symbols so
-the strategy trades its rank 31-150 band, and submits demo (paper) orders only.
-This is a demo-only paper forward test — not Model-Court validated and not a
-real-money promotion. See `docs/system_status.md`. The risk
+The entry service uses `STRATEGY_PROFILE=promoted` at `close_location_min = 0.30`
+with `MAX_ACTIVE_SYMBOLS=3` — a concentrated (3 concurrent positions) variant of
+the 5-position canonical config, on the conservative `promoted_quality_squeeze`
+entry router. It fetches the top 220 turnover-ranked symbols so the strategy
+trades its rank 31-150 band, and submits demo (paper) orders only. This is a
+demo-only paper forward test — not Model-Court validated and not a real-money
+promotion. See `docs/system_status.md`. The risk
 service does not open entries; it repairs exchange-native stop/TP state, listens to
 demo private WebSocket position/order/execution streams plus the mainnet public
 ticker stream, and submits reduce-only exits. On the demo account, WebSocket

@@ -30,6 +30,7 @@ else
     MAX_NEW_ENTRIES_PER_CYCLE="${MAX_NEW_ENTRIES_PER_CYCLE:-5}"
 fi
 WORKERS="${WORKERS:-8}"
+MAX_ACTIVE_SYMBOLS="${MAX_ACTIVE_SYMBOLS:-0}"
 MAX_ORDER_NOTIONAL_PCT_EQUITY="${MAX_ORDER_NOTIONAL_PCT_EQUITY:-0}"
 MAX_ENTRY_LAG_MINUTES="${MAX_ENTRY_LAG_MINUTES:-15}"
 ENTRY_LEVERAGE="${ENTRY_LEVERAGE:-2}"
@@ -91,6 +92,7 @@ if [[ "${USE_DAEMON:-0}" == "1" ]]; then
         --max-order-notional-pct-equity "$MAX_ORDER_NOTIONAL_PCT_EQUITY" \
         --max-entry-lag-minutes "$MAX_ENTRY_LAG_MINUTES" \
         --max-new-entries-per-cycle "$MAX_NEW_ENTRIES_PER_CYCLE" \
+        --max-active-symbols "$MAX_ACTIVE_SYMBOLS" \
         --entry-leverage "$ENTRY_LEVERAGE" \
         --order-fill-confirm-seconds "$ORDER_FILL_CONFIRM_SECONDS" \
         --order-fill-poll-interval-seconds "$ORDER_FILL_POLL_INTERVAL_SECONDS" \
@@ -117,6 +119,7 @@ while true; do
         --max-order-notional-pct-equity "$MAX_ORDER_NOTIONAL_PCT_EQUITY" \
         --max-entry-lag-minutes "$MAX_ENTRY_LAG_MINUTES" \
         --max-new-entries-per-cycle "$MAX_NEW_ENTRIES_PER_CYCLE" \
+        --max-active-symbols "$MAX_ACTIVE_SYMBOLS" \
         --entry-leverage "$ENTRY_LEVERAGE" \
         --order-fill-confirm-seconds "$ORDER_FILL_CONFIRM_SECONDS" \
         --order-fill-poll-interval-seconds "$ORDER_FILL_POLL_INTERVAL_SECONDS" \

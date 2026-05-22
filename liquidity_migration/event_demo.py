@@ -81,6 +81,7 @@ class EventDemoCycleConfig:
     settle_coin: str = "USDT"
     data_name: str = "event-demo"
     strategy_profile: str = "promoted"
+    max_active_symbols: int = 0  # 0 = use the strategy profile's value; >0 overrides it
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,6 +117,8 @@ def run_event_demo_cycle(
 ) -> dict[str, Any]:
     demo = demo_config or EventDemoCycleConfig()
     strategy = _demo_event_config(event_config or VolumeEventResearchConfig(), profile=demo.strategy_profile)
+    if demo.max_active_symbols > 0:
+        strategy = replace(strategy, max_active_symbols=demo.max_active_symbols)
     strategy_id = _demo_strategy_id(demo.strategy_profile)
     _validate_event_config(strategy)
     _validate_demo_config(demo)
@@ -1441,6 +1444,8 @@ def _validate_demo_config(config: EventDemoCycleConfig) -> None:
         raise ValueError("wallet_balance_fraction must be in (0, 1]")
     if config.max_new_entries_per_cycle <= 0:
         raise ValueError("max_new_entries_per_cycle must be positive")
+    if config.max_active_symbols < 0:
+        raise ValueError("max_active_symbols must be non-negative (0 keeps the profile value)")
     if config.entry_leverage <= 0.0:
         raise ValueError("entry_leverage must be positive")
     if config.order_fill_confirm_seconds < 0.0 or config.order_fill_poll_interval_seconds <= 0.0:

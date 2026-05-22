@@ -3222,6 +3222,17 @@ def test_event_demo_rejects_non_positive_entry_leverage() -> None:
         _validate_demo_config(EventDemoCycleConfig(entry_leverage=0.0))
 
 
+def test_event_demo_max_active_symbols_override() -> None:
+    # 0 keeps the strategy profile's value (promoted = 5); a positive value overrides it.
+    promoted = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
+    assert promoted.max_active_symbols == 5
+    assert EventDemoCycleConfig().max_active_symbols == 0
+    assert EventDemoCycleConfig(max_active_symbols=3).max_active_symbols == 3
+    _validate_demo_config(EventDemoCycleConfig(strategy_profile="promoted", max_active_symbols=3))
+    with pytest.raises(ValueError, match="max_active_symbols"):
+        _validate_demo_config(EventDemoCycleConfig(max_active_symbols=-1))
+
+
 def test_execute_entries_records_preflight_row_before_place_order(tmp_path: Path) -> None:
     """Risk engine relies on event_demo_orders containing a pending row at the
     instant Bybit fills an entry. If the demo engine writes only the post-fill

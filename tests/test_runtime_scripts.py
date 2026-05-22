@@ -23,6 +23,7 @@ def test_event_entry_runner_default_cadence_is_rate_limit_safe() -> None:
     assert 'INTERVAL_SECONDS="${INTERVAL_SECONDS:-300}"' in text
     assert "cycle_elapsed_seconds=$(($(date +%s) - cycle_start_epoch))" in text
     assert "starting next cycle immediately" in text
+    assert '--max-active-symbols "$MAX_ACTIVE_SYMBOLS"' in text
 
 
 def test_systemd_entry_runner_uses_vps_cadence() -> None:
@@ -34,6 +35,7 @@ def test_systemd_entry_runner_uses_vps_cadence() -> None:
     assert "Environment=INTERVAL_SECONDS=60" in text
     assert "Environment=STRATEGY_PROFILE=promoted" in text
     assert "Environment=UNIVERSE_RANK_END=220" in text
+    assert "Environment=MAX_ACTIVE_SYMBOLS=3" in text
     assert "Environment=PYTHONDONTWRITEBYTECODE=1" in text
 
 
@@ -86,6 +88,7 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "Environment=STRATEGY_PROFILE=promoted" in text
     assert "Environment=INTERVAL_SECONDS=60" in text
     assert "Environment=UNIVERSE_RANK_END=220" in text
+    assert "Environment=MAX_ACTIVE_SYMBOLS=3" in text
     assert "Environment=UNIVERSE_MAX_SYMBOLS=220" in text
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
     assert "deploy-verify-ok commit=" in text
@@ -108,6 +111,7 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "Environment=STRATEGY_PROFILE=promoted" in text
     assert "Environment=INTERVAL_SECONDS=60" in text
     assert "Environment=UNIVERSE_RANK_END=220" in text
+    assert "Environment=MAX_ACTIVE_SYMBOLS=3" in text
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
     assert "verify-ok commit=" in text
     assert "--property=Environment" not in text
@@ -322,6 +326,7 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "Environment=STRATEGY_PROFILE=promoted" in text
     assert "Environment=INTERVAL_SECONDS=60" in text
     assert "Environment=UNIVERSE_RANK_END=220" in text
+    assert "Environment=MAX_ACTIVE_SYMBOLS=3" in text
     assert "Environment=UNIVERSE_MAX_SYMBOLS=220" in text
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
     assert "deploy-verify-ok commit=" in text

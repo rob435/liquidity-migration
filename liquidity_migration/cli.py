@@ -1299,6 +1299,12 @@ def _add_event_demo_cycle_parser(subparsers) -> None:
     event_demo.add_argument("--fallback-equity-usdt", type=float, default=demo_defaults.fallback_equity_usdt)
     event_demo.add_argument("--max-entry-lag-minutes", type=int, default=demo_defaults.max_entry_lag_minutes)
     event_demo.add_argument("--max-new-entries-per-cycle", type=int, default=demo_defaults.max_new_entries_per_cycle)
+    event_demo.add_argument(
+        "--max-active-symbols",
+        type=int,
+        default=demo_defaults.max_active_symbols,
+        help="Override the strategy profile's concurrent-position cap. 0 keeps the profile value.",
+    )
     event_demo.add_argument("--entry-leverage", type=float, default=demo_defaults.entry_leverage)
     event_demo.add_argument("--entry-order-type", default=demo_defaults.entry_order_type)
     event_demo.add_argument("--exit-order-type", default=demo_defaults.exit_order_type)
@@ -1668,6 +1674,7 @@ def main(argv: list[str] | None = None) -> int:
             fallback_equity_usdt=args.fallback_equity_usdt,
             max_entry_lag_minutes=args.max_entry_lag_minutes,
             max_new_entries_per_cycle=args.max_new_entries_per_cycle,
+            max_active_symbols=args.max_active_symbols,
             entry_leverage=args.entry_leverage,
             entry_order_type=args.entry_order_type,
             exit_order_type=args.exit_order_type,
