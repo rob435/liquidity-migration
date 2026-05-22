@@ -54,7 +54,7 @@ fi
 order_args=()
 if [[ "${SUBMIT_ORDERS:-0}" == "1" ]]; then
     if [[ "$STRATEGY_PROFILE" != "promoted" ]]; then
-        echo "Only STRATEGY_PROFILE=promoted is allowed to submit demo entry orders in the champion/challenger stack." >&2
+        echo "Only STRATEGY_PROFILE=promoted is allowed to submit demo entry orders." >&2
         exit 2
     fi
     if [[ "${CONFIRM_DEMO_ORDERS:-0}" != "1" ]]; then

@@ -28,11 +28,10 @@ regime-conditional, and the current focus is regime-aware refinement (see
 
 ## Module map (`liquidity_migration/`)
 
-- `cli.py` — argparse entry point, 17 subcommands.
+- `cli.py` — argparse entry point, 16 subcommands.
 - `volume_events.py` — active event-driven strategy: full-PIT gates, ledger,
   reports.
 - `strategy_tribunal.py` — adversarial promotion court for completed reports.
-- `champion_challenger.py` — demo champion + shadow-challenger manifest/audit.
 - `event_demo.py` / `event_demo_daemon.py` — Bybit demo forward-cycle runner.
 - `ws_risk.py` — websocket-first risk watchdog with REST fallback.
 - `volume_features.py` / `feature_factory.py` — daily volume & liquidity-rank

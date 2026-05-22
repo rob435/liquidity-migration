@@ -1,6 +1,6 @@
 ---
 name: run-strategy
-description: "Correct command invocations for the liquidity_migration CLI: the volume-events backtest, strategy-tribunal promotion court, event-demo-cycle forward runner, champion-challenger manifest, data builders, and audits. Use whenever running or constructing a 'python -m liquidity_migration' command, so the right data root, end-date boundary, and point-in-time flags are applied."
+description: "Correct command invocations for the liquidity_migration CLI: the volume-events backtest, strategy-tribunal promotion court, event-demo-cycle forward runner, data builders, and audits. Use whenever running or constructing a 'python -m liquidity_migration' command, so the right data root, end-date boundary, and point-in-time flags are applied."
 ---
 
 # Running the liquidity_migration CLI
@@ -61,19 +61,13 @@ python -m liquidity_migration --data-root data/bybit-demo-event \
   --config configs/volume_alpha.default.yaml event-demo-cycle
 ```
 
-Champion / challenger manifest:
-
-```bash
-python -m liquidity_migration --data-root data/bybit-demo-event champion-challenger
-```
-
-## Subcommands (17)
+## Subcommands (16)
 
 `download-data` · `download-binance-proxy` · `data-layer-audit` ·
 `discover-universe` · `archive-manifest` · `archive-download-klines` ·
 `archive-download-klines-1h` · `archive-download-klines-1h-api` ·
 `volume-events` · `strategy-tribunal` · `portfolio-hedge` · `feature-factory` ·
-`champion-challenger` · `event-demo-cycle` · `event-risk-cycle` ·
+`event-demo-cycle` · `event-risk-cycle` ·
 `event-risk-ws` · `reconcile-paper-demo`
 
 ## Guardrails

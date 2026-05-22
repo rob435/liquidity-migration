@@ -9,9 +9,7 @@ from liquidity_migration.config import TradeLifecycleConfig
 from liquidity_migration.ingestion import generate_fixture_data
 from liquidity_migration.trade_lifecycle import _funding_lookup, _perp_funding_return
 from liquidity_migration.volume_events import (
-    ENTRY_POLICY_EXECUTION_PULLBACK_GUARD,
     ENTRY_POLICY_FIXED_DELAY,
-    ENTRY_POLICY_TIERED_EXECUTION_SNIPER,
     POSITION_WEIGHTINGS,
     _PositionSizer,
     _apply_entry_execution_veto,
@@ -429,171 +427,6 @@ def test_fixed_entry_policy_keeps_plain_delay() -> None:
     assert decision["entry_bar"]["close"] == 100.0
 
 
-def test_execution_pullback_guard_waits_for_micro_pullback() -> None:
-    hour = 60 * 60 * 1000
-    symbol_bars = {
-        "rows": [],
-        "ends": [0, hour, 2 * hour],
-        "by_end": {
-            0: {"bar_end_ts_ms": 0, "high": 101.0, "low": 99.0, "close": 100.0, "turnover_quote": 1_000_000.0},
-            hour: {
-                "bar_end_ts_ms": hour,
-                "high": 102.0,
-                "low": 100.6,
-                "close": 101.9,
-                "turnover_quote": 1_000_000.0,
-            },
-            2 * hour: {
-                "bar_end_ts_ms": 2 * hour,
-                "high": 102.1,
-                "low": 100.7,
-                "close": 101.0,
-                "turnover_quote": 1_000_000.0,
-            },
-        },
-    }
-
-    decision = _entry_decision_for_event(
-        {"ts_ms": 0, "symbol": "AAAUSDT"},
-        symbol_bars,
-        config=VolumeEventResearchConfig(
-            entry_policy=ENTRY_POLICY_EXECUTION_PULLBACK_GUARD,
-            entry_execution_wait_hours=2,
-            entry_execution_unresolved_move_bps_max=150.0,
-        ),
-        score_col="dollar_volume_rank_z",
-        side="short",
-        now_ms=2 * hour + 1,
-    )
-
-    assert decision["entry_policy"] == ENTRY_POLICY_EXECUTION_PULLBACK_GUARD
-    assert decision["entry_ts_ms"] == 2 * hour
-    assert decision["entry_rule"] == "execution_guard_pullback"
-    assert decision["entry_bar"]["close"] == pytest.approx(101.0)
-    assert decision["entry_bar_close_location"] < 0.70
-
-
-def test_execution_pullback_guard_skips_runaway_continuation() -> None:
-    hour = 60 * 60 * 1000
-    symbol_bars = {
-        "rows": [],
-        "ends": [0, hour],
-        "by_end": {
-            0: {"bar_end_ts_ms": 0, "high": 101.0, "low": 99.0, "close": 100.0, "turnover_quote": 1_000_000.0},
-            hour: {
-                "bar_end_ts_ms": hour,
-                "high": 104.5,
-                "low": 101.0,
-                "close": 104.0,
-                "turnover_quote": 1_000_000.0,
-            },
-        },
-    }
-
-    decision = _entry_decision_for_event(
-        {"ts_ms": 0, "symbol": "AAAUSDT"},
-        symbol_bars,
-        config=VolumeEventResearchConfig(
-            entry_policy=ENTRY_POLICY_EXECUTION_PULLBACK_GUARD,
-            entry_execution_wait_hours=1,
-            entry_execution_unresolved_move_bps_max=150.0,
-        ),
-        score_col="dollar_volume_rank_z",
-        side="short",
-        now_ms=hour + 1,
-    )
-
-    assert decision["entry_bar"] is None
-    assert decision["entry_rule"] == "execution_guard_skip_moved_too_far"
-    assert decision["entry_continuation_bps"] > 300.0
-
-
-def test_tiered_execution_sniper_waits_for_standard_pop() -> None:
-    hour = 60 * 60 * 1000
-    symbol_bars = {
-        "rows": [],
-        "ends": [0, hour, 2 * hour],
-        "by_end": {
-            0: {"bar_end_ts_ms": 0, "high": 101.0, "low": 99.0, "close": 100.0, "turnover_quote": 1_000_000.0},
-            hour: {
-                "bar_end_ts_ms": hour,
-                "high": 100.8,
-                "low": 99.8,
-                "close": 100.7,
-                "turnover_quote": 1_000_000.0,
-            },
-            2 * hour: {
-                "bar_end_ts_ms": 2 * hour,
-                "high": 101.3,
-                "low": 100.2,
-                "close": 101.0,
-                "turnover_quote": 1_000_000.0,
-            },
-        },
-    }
-
-    decision = _entry_decision_for_event(
-        {"ts_ms": 0, "symbol": "AAAUSDT"},
-        symbol_bars,
-        config=VolumeEventResearchConfig(
-            entry_policy=ENTRY_POLICY_TIERED_EXECUTION_SNIPER,
-            entry_execution_wait_hours=2,
-            entry_execution_pop_bps=100.0,
-            entry_execution_unresolved_move_bps_max=50.0,
-        ),
-        score_col="dollar_volume_rank_z",
-        side="short",
-        now_ms=2 * hour + 1,
-    )
-
-    assert decision["entry_policy"] == ENTRY_POLICY_TIERED_EXECUTION_SNIPER
-    assert decision["entry_ts_ms"] == 2 * hour
-    assert decision["entry_rule"] == "tiered_standard_pop"
-    assert decision["entry_pop_bps"] >= 100.0
-
-
-def test_tiered_execution_sniper_fallback_is_deadline_bar() -> None:
-    hour = 60 * 60 * 1000
-    symbol_bars = {
-        "rows": [],
-        "ends": [0, hour, 2 * hour],
-        "by_end": {
-            0: {"bar_end_ts_ms": 0, "high": 101.0, "low": 99.0, "close": 100.0, "turnover_quote": 1_000_000.0},
-            hour: {
-                "bar_end_ts_ms": hour,
-                "high": 102.0,
-                "low": 100.2,
-                "close": 101.8,
-                "turnover_quote": 1_000_000.0,
-            },
-            2 * hour: {
-                "bar_end_ts_ms": 2 * hour,
-                "high": 102.5,
-                "low": 100.3,
-                "close": 101.2,
-                "turnover_quote": 1_000_000.0,
-            },
-        },
-    }
-
-    decision = _entry_decision_for_event(
-        {"ts_ms": 0, "symbol": "AAAUSDT"},
-        symbol_bars,
-        config=VolumeEventResearchConfig(
-            entry_policy=ENTRY_POLICY_TIERED_EXECUTION_SNIPER,
-            entry_execution_wait_hours=2,
-            entry_execution_pop_bps=300.0,
-        ),
-        score_col="dollar_volume_rank_z",
-        side="short",
-        now_ms=2 * hour + 1,
-    )
-
-    assert decision["entry_ts_ms"] == 2 * hour
-    assert decision["entry_rule"] == "tiered_standard_deadline_fallback"
-    assert decision["entry_bar"]["close"] == pytest.approx(101.2)
-
-
 def test_entry_execution_veto_skips_high_close_location() -> None:
     decision = {
         "entry_bar": {"bar_end_ts_ms": 1, "high": 102.0, "low": 100.0, "close": 101.9},
@@ -813,14 +646,6 @@ def test_volume_event_config_validates_new_research_knobs() -> None:
 
     with pytest.raises(ValueError, match="entry_quality_squeeze_wait_hours"):
         _validate_event_config(VolumeEventResearchConfig(entry_quality_squeeze_wait_hours=0))
-
-    with pytest.raises(ValueError, match="entry_execution_wait_hours"):
-        _validate_event_config(
-            VolumeEventResearchConfig(
-                entry_policy=ENTRY_POLICY_EXECUTION_PULLBACK_GUARD,
-                entry_execution_wait_hours=0,
-            )
-        )
 
     with pytest.raises(ValueError, match="entry_execution_pullback_close_location_max"):
         _validate_event_config(VolumeEventResearchConfig(entry_execution_pullback_close_location_max=1.1))

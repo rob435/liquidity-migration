@@ -115,10 +115,11 @@ Deployment status).
   cap overridden to **3** (`MAX_ACTIVE_SYMBOLS=3`) — a concentrated variant of
   the 5-position canonical config (funding-corrected backtest drawdown -22.7%
   vs -14.2% at 5 positions; it clears the -25% promotion gate). The
-  champion/challenger guard authorises `promoted` as the single order-submitting
-  demo stack; `demo_relaxed` and the other candidates are shadow/dry-run only.
-  This is a demo-only paper forward test — not Model-Court validated, not a
-  real-money promotion.
+  systemd unit pins `STRATEGY_PROFILE=promoted` and the runner refuses
+  `SUBMIT_ORDERS=1` for any other profile, so `promoted` is the single
+  order-submitting demo stack; `demo_relaxed` and the other candidates are
+  shadow/dry-run only. This is a demo-only paper forward test — not
+  Model-Court validated, not a real-money promotion.
 - The demo cycle fetches the top 220 symbols by 24h turnover (≥ $2M) so the
   `promoted` strategy can trade its rank 31–150 selection band;
   `event-demo-cycle` refuses a forward universe narrower than rank 150 for

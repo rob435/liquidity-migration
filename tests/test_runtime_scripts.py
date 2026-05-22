@@ -39,13 +39,12 @@ def test_systemd_entry_runner_uses_vps_cadence() -> None:
     assert "Environment=PYTHONDONTWRITEBYTECODE=1" in text
 
 
-def test_event_entry_runner_only_submits_active_champion_profile() -> None:
+def test_event_entry_runner_only_submits_promoted_profile() -> None:
     repo = Path(__file__).resolve().parents[1]
     text = (repo / "scripts" / "run_bybit_demo_event_engine.sh").read_text(encoding="utf-8")
 
     assert 'SUBMIT_ORDERS:-0}" == "1"' in text
     assert '$STRATEGY_PROFILE" != "promoted"' in text
-    assert "champion/challenger stack" in text
 
 
 def test_live_runners_do_not_write_repo_bytecode() -> None:

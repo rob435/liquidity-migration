@@ -59,13 +59,9 @@ POSITION_WEIGHTINGS = ("equal", "inverse_vol", "signal_rank", "taker_imbalance_w
 LIQUIDITY_MIGRATION_CROWDING_FILTERS = ("none", "union_pathology", "model_v1")
 ENTRY_POLICY_FIXED_DELAY = "fixed_delay"
 ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE = "promoted_quality_squeeze"
-ENTRY_POLICY_EXECUTION_PULLBACK_GUARD = "execution_pullback_guard"
-ENTRY_POLICY_TIERED_EXECUTION_SNIPER = "tiered_execution_sniper"
 ENTRY_POLICIES = (
     ENTRY_POLICY_FIXED_DELAY,
     ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE,
-    ENTRY_POLICY_EXECUTION_PULLBACK_GUARD,
-    ENTRY_POLICY_TIERED_EXECUTION_SNIPER,
 )
 SPLITS = (
     ("train_2023_2024", "2023-05-03", "2024-05-03"),
@@ -813,42 +809,6 @@ def _entry_decision_for_event(
     base_ready_ts_ms = signal_ts_ms + config.entry_delay_hours * MS_PER_HOUR
     if config.entry_policy == ENTRY_POLICY_FIXED_DELAY:
         return _fixed_delay_entry_decision(symbol_bars, ready_ts_ms=base_ready_ts_ms, signal_ts_ms=signal_ts_ms, now_ms=now_ms)
-    if config.entry_policy == ENTRY_POLICY_EXECUTION_PULLBACK_GUARD:
-        if _promoted_quality_entry_event(event, score_col=score_col):
-            quality_decision = _quality_squeeze_entry_decision(event, symbol_bars, config=config, now_ms=now_ms)
-            quality_decision["entry_policy"] = ENTRY_POLICY_EXECUTION_PULLBACK_GUARD
-            quality_decision["entry_rule"] = f"execution_guard_promoted_{quality_decision['entry_rule']}"
-            return _attach_entry_execution_diagnostics(
-                quality_decision,
-                signal_ts_ms=signal_ts_ms,
-                symbol_bars=symbol_bars,
-                side=side,
-            )
-        return _execution_pullback_guard_entry_decision(
-            event,
-            symbol_bars,
-            config=config,
-            side=side,
-            now_ms=now_ms,
-        )
-    if config.entry_policy == ENTRY_POLICY_TIERED_EXECUTION_SNIPER:
-        if _promoted_quality_entry_event(event, score_col=score_col):
-            quality_decision = _quality_squeeze_entry_decision(event, symbol_bars, config=config, now_ms=now_ms)
-            quality_decision["entry_policy"] = ENTRY_POLICY_TIERED_EXECUTION_SNIPER
-            quality_decision["entry_rule"] = f"tiered_promoted_{quality_decision['entry_rule']}"
-            return _attach_entry_execution_diagnostics(
-                quality_decision,
-                signal_ts_ms=signal_ts_ms,
-                symbol_bars=symbol_bars,
-                side=side,
-            )
-        return _tiered_standard_pop_entry_decision(
-            event,
-            symbol_bars,
-            config=config,
-            side=side,
-            now_ms=now_ms,
-        )
     if config.entry_policy != ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE:
         raise ValueError(f"Unknown entry_policy: {config.entry_policy}")
     if not _promoted_quality_entry_event(event, score_col=score_col):
@@ -988,227 +948,6 @@ def _quality_squeeze_entry_decision(
     }
 
 
-def _execution_pullback_guard_entry_decision(
-    event: dict[str, Any],
-    symbol_bars: dict[str, Any],
-    *,
-    config: VolumeEventResearchConfig,
-    side: str,
-    now_ms: int | None,
-) -> dict[str, Any]:
-    signal_ts_ms = int(event["ts_ms"])
-    signal_bar = symbol_bars["by_end"].get(signal_ts_ms)
-    base_ready_ts_ms = signal_ts_ms + config.entry_delay_hours * MS_PER_HOUR
-    if signal_bar is None:
-        return _fixed_delay_entry_decision(
-            symbol_bars,
-            ready_ts_ms=base_ready_ts_ms,
-            signal_ts_ms=signal_ts_ms,
-            now_ms=now_ms,
-            quality_tier="execution_guard",
-            entry_rule="execution_guard_missing_signal_fixed_delay",
-        )
-    signal_close = float(signal_bar["close"])
-    if signal_close <= 0.0:
-        return _missing_entry_decision(
-            signal_ts_ms=signal_ts_ms,
-            ready_ts_ms=base_ready_ts_ms,
-            entry_rule="execution_guard_bad_signal_price",
-            quality_tier="execution_guard",
-        )
-    first_h = max(int(config.entry_delay_hours), 1)
-    deadline_h = max(int(config.entry_execution_wait_hours), first_h)
-    high_since_signal = signal_close
-    low_since_signal = signal_close
-    last_candidate: dict[str, Any] | None = None
-    for hour in range(first_h, deadline_h + 1):
-        ts_ms = signal_ts_ms + hour * MS_PER_HOUR
-        if now_ms is not None and ts_ms > now_ms:
-            return _pending_entry_decision(
-                signal_ts_ms=signal_ts_ms,
-                ready_ts_ms=ts_ms,
-                entry_rule="execution_guard_wait_pullback",
-                quality_tier="execution_guard",
-            )
-        bar = symbol_bars["by_end"].get(ts_ms)
-        if bar is None:
-            return _missing_entry_decision(
-                signal_ts_ms=signal_ts_ms,
-                ready_ts_ms=ts_ms,
-                entry_rule="execution_guard_missing_bar",
-                quality_tier="execution_guard",
-            )
-        high_since_signal = max(high_since_signal, float(bar["high"]))
-        low_since_signal = min(low_since_signal, float(bar["low"]))
-        diagnostics = _entry_bar_execution_diagnostics(
-            bar,
-            signal_close=signal_close,
-            side=side,
-            high_since_signal=high_since_signal,
-            low_since_signal=low_since_signal,
-        )
-        last_candidate = {
-            "entry_bar": bar,
-            "entry_ts_ms": ts_ms,
-            "entry_ready_ts_ms": ts_ms,
-            "entry_policy": ENTRY_POLICY_EXECUTION_PULLBACK_GUARD,
-            "entry_rule": "execution_guard_deadline",
-            "entry_quality_tier": "execution_guard",
-            "actual_entry_delay_hours": (ts_ms - signal_ts_ms) / MS_PER_HOUR,
-            "pending": False,
-            **diagnostics,
-        }
-        if _entry_bar_liquidity_reject(diagnostics, config=config):
-            last_candidate["entry_rule"] = "execution_guard_liquidity_delay"
-            continue
-        if _entry_bar_moved_too_far(diagnostics, config=config):
-            return {
-                "entry_bar": None,
-                "entry_ts_ms": ts_ms,
-                "entry_ready_ts_ms": ts_ms,
-                "entry_policy": ENTRY_POLICY_EXECUTION_PULLBACK_GUARD,
-                "entry_rule": "execution_guard_skip_moved_too_far",
-                "entry_quality_tier": "execution_guard",
-                "actual_entry_delay_hours": (ts_ms - signal_ts_ms) / MS_PER_HOUR,
-                "pending": False,
-                **diagnostics,
-            }
-        if _entry_pullback_triggered(diagnostics, config=config):
-            last_candidate["entry_rule"] = "execution_guard_pullback"
-            return last_candidate
-        if not _entry_bar_unresolved_continuation(diagnostics, config=config):
-            last_candidate["entry_rule"] = "execution_guard_first_clean" if hour == first_h else "execution_guard_resolved"
-            return last_candidate
-        last_candidate["entry_rule"] = "execution_guard_unresolved_delay"
-    if last_candidate is None:
-        return _missing_entry_decision(
-            signal_ts_ms=signal_ts_ms,
-            ready_ts_ms=base_ready_ts_ms,
-            entry_rule="execution_guard_no_bars",
-            quality_tier="execution_guard",
-        )
-    if _entry_bar_unresolved_continuation(last_candidate, config=config) or _entry_bar_liquidity_reject(
-        last_candidate, config=config
-    ):
-        return {
-            **last_candidate,
-            "entry_bar": None,
-            "entry_rule": "execution_guard_skip_unresolved",
-        }
-    return last_candidate
-
-
-def _tiered_standard_pop_entry_decision(
-    event: dict[str, Any],
-    symbol_bars: dict[str, Any],
-    *,
-    config: VolumeEventResearchConfig,
-    side: str,
-    now_ms: int | None,
-) -> dict[str, Any]:
-    signal_ts_ms = int(event["ts_ms"])
-    signal_bar = symbol_bars["by_end"].get(signal_ts_ms)
-    base_ready_ts_ms = signal_ts_ms + config.entry_delay_hours * MS_PER_HOUR
-    if signal_bar is None:
-        decision = _fixed_delay_entry_decision(
-            symbol_bars,
-            ready_ts_ms=base_ready_ts_ms,
-            signal_ts_ms=signal_ts_ms,
-            now_ms=now_ms,
-            quality_tier="standard",
-            entry_rule="tiered_standard_missing_signal_fixed_delay",
-        )
-        decision["entry_policy"] = ENTRY_POLICY_TIERED_EXECUTION_SNIPER
-        return decision
-    signal_close = float(signal_bar["close"])
-    if signal_close <= 0.0:
-        return _missing_entry_decision(
-            signal_ts_ms=signal_ts_ms,
-            ready_ts_ms=base_ready_ts_ms,
-            entry_rule="tiered_standard_bad_signal_price",
-            quality_tier="standard",
-            entry_policy=ENTRY_POLICY_TIERED_EXECUTION_SNIPER,
-        )
-    first_h = max(int(config.entry_delay_hours), 1)
-    deadline_h = max(int(config.entry_execution_wait_hours), first_h)
-    last_bar: dict[str, Any] | None = None
-    last_ts_ms = base_ready_ts_ms
-    high_since_signal = signal_close
-    low_since_signal = signal_close
-    for hour in range(first_h, deadline_h + 1):
-        ts_ms = signal_ts_ms + hour * MS_PER_HOUR
-        if now_ms is not None and ts_ms > now_ms:
-            return _pending_entry_decision(
-                signal_ts_ms=signal_ts_ms,
-                ready_ts_ms=ts_ms,
-                entry_rule="tiered_standard_wait_pop",
-                quality_tier="standard",
-                entry_policy=ENTRY_POLICY_TIERED_EXECUTION_SNIPER,
-            )
-        bar = symbol_bars["by_end"].get(ts_ms)
-        if bar is None:
-            return _missing_entry_decision(
-                signal_ts_ms=signal_ts_ms,
-                ready_ts_ms=ts_ms,
-                entry_rule="tiered_standard_missing_bar",
-                quality_tier="standard",
-                entry_policy=ENTRY_POLICY_TIERED_EXECUTION_SNIPER,
-            )
-        last_bar = bar
-        last_ts_ms = ts_ms
-        high_since_signal = max(high_since_signal, float(bar["high"]))
-        low_since_signal = min(low_since_signal, float(bar["low"]))
-        diagnostics = _entry_bar_execution_diagnostics(
-            bar,
-            signal_close=signal_close,
-            side=side,
-            high_since_signal=high_since_signal,
-            low_since_signal=low_since_signal,
-        )
-        if _entry_bar_pop_triggered(diagnostics, config=config):
-            return {
-                "entry_bar": bar,
-                "entry_ts_ms": ts_ms,
-                "entry_ready_ts_ms": ts_ms,
-                "entry_policy": ENTRY_POLICY_TIERED_EXECUTION_SNIPER,
-                "entry_rule": "tiered_standard_pop",
-                "entry_quality_tier": "standard",
-                "actual_entry_delay_hours": (ts_ms - signal_ts_ms) / MS_PER_HOUR,
-                "pending": False,
-                **diagnostics,
-            }
-        if hour == first_h and not _entry_bar_unresolved_continuation(diagnostics, config=config):
-            return {
-                "entry_bar": bar,
-                "entry_ts_ms": ts_ms,
-                "entry_ready_ts_ms": ts_ms,
-                "entry_policy": ENTRY_POLICY_TIERED_EXECUTION_SNIPER,
-                "entry_rule": "tiered_standard_first_clean",
-                "entry_quality_tier": "standard",
-                "actual_entry_delay_hours": (ts_ms - signal_ts_ms) / MS_PER_HOUR,
-                "pending": False,
-                **diagnostics,
-            }
-    fallback_ts_ms = last_ts_ms
-    fallback_bar = last_bar or symbol_bars["by_end"].get(fallback_ts_ms)
-    decision = {
-        "entry_bar": fallback_bar,
-        "entry_ts_ms": fallback_ts_ms,
-        "entry_ready_ts_ms": fallback_ts_ms,
-        "entry_policy": ENTRY_POLICY_TIERED_EXECUTION_SNIPER,
-        "entry_rule": "tiered_standard_deadline_fallback",
-        "entry_quality_tier": "standard",
-        "actual_entry_delay_hours": (fallback_ts_ms - signal_ts_ms) / MS_PER_HOUR,
-        "pending": False,
-    }
-    return _attach_entry_execution_diagnostics(
-        decision,
-        signal_ts_ms=signal_ts_ms,
-        symbol_bars=symbol_bars,
-        side=side,
-    )
-
-
 def _pending_entry_decision(
     *,
     signal_ts_ms: int,
@@ -1222,7 +961,7 @@ def _pending_entry_decision(
         "entry_ts_ms": ready_ts_ms,
         "entry_ready_ts_ms": ready_ts_ms,
         "entry_policy": entry_policy
-        or (ENTRY_POLICY_EXECUTION_PULLBACK_GUARD if quality_tier == "execution_guard" else ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE),
+        or ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE,
         "entry_rule": entry_rule,
         "entry_quality_tier": quality_tier,
         "actual_entry_delay_hours": (ready_ts_ms - signal_ts_ms) / MS_PER_HOUR,
@@ -1243,74 +982,11 @@ def _missing_entry_decision(
         "entry_ts_ms": ready_ts_ms,
         "entry_ready_ts_ms": ready_ts_ms,
         "entry_policy": entry_policy
-        or (ENTRY_POLICY_EXECUTION_PULLBACK_GUARD if quality_tier == "execution_guard" else ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE),
+        or ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE,
         "entry_rule": entry_rule,
         "entry_quality_tier": quality_tier,
         "actual_entry_delay_hours": (ready_ts_ms - signal_ts_ms) / MS_PER_HOUR,
         "pending": False,
-    }
-
-
-def _entry_bar_execution_diagnostics(
-    bar: dict[str, Any],
-    *,
-    signal_close: float,
-    side: str,
-    high_since_signal: float,
-    low_since_signal: float,
-) -> dict[str, float]:
-    close = float(bar["close"])
-    high = float(bar["high"])
-    low = float(bar["low"])
-    close_location = _bar_close_location(bar)
-    raw_move_bps = (close / signal_close - 1.0) * 10_000.0 if signal_close > 0.0 else 0.0
-    range_bps = (high - low) / close * 10_000.0 if close > 0.0 else 0.0
-    turnover = _float_or_nan(bar.get("turnover_quote", 0.0))
-    if side == "short":
-        continuation_bps = raw_move_bps
-        giveback_bps = (high_since_signal / close - 1.0) * 10_000.0 if close > 0.0 else 0.0
-        pop_bps = (high_since_signal / signal_close - 1.0) * 10_000.0
-    else:
-        continuation_bps = -raw_move_bps
-        giveback_bps = (close / low_since_signal - 1.0) * 10_000.0 if low_since_signal > 0.0 else 0.0
-        pop_bps = (signal_close / low_since_signal - 1.0) * 10_000.0 if low_since_signal > 0.0 else 0.0
-    return {
-        "entry_price_move_bps": raw_move_bps,
-        "entry_continuation_bps": continuation_bps,
-        "entry_giveback_bps": giveback_bps,
-        "entry_pop_bps": pop_bps,
-        "entry_bar_range_bps": range_bps,
-        "entry_bar_close_location": close_location,
-        "entry_bar_turnover_quote": turnover,
-    }
-
-
-def _attach_entry_execution_diagnostics(
-    decision: dict[str, Any],
-    *,
-    signal_ts_ms: int,
-    symbol_bars: dict[str, Any],
-    side: str,
-) -> dict[str, Any]:
-    entry_bar = decision.get("entry_bar")
-    signal_bar = symbol_bars["by_end"].get(signal_ts_ms)
-    if entry_bar is None or signal_bar is None:
-        return decision
-    signal_close = float(signal_bar["close"])
-    entry_ts_ms = int(decision["entry_ts_ms"])
-    path = [row for row in symbol_bars["rows"] if signal_ts_ms <= int(row["bar_end_ts_ms"]) <= entry_ts_ms]
-    path.append(entry_bar)
-    high_since_signal = max(float(row["high"]) for row in path)
-    low_since_signal = min(float(row["low"]) for row in path)
-    return {
-        **decision,
-        **_entry_bar_execution_diagnostics(
-            entry_bar,
-            signal_close=signal_close,
-            side=side,
-            high_since_signal=high_since_signal,
-            low_since_signal=low_since_signal,
-        ),
     }
 
 
@@ -1330,45 +1006,6 @@ def _apply_entry_execution_veto(decision: dict[str, Any], *, config: VolumeEvent
         "entry_rule": f"{decision.get('entry_rule', 'entry')}_veto_high_close_location",
         "pending": False,
     }
-
-
-def _entry_bar_liquidity_reject(diagnostics: dict[str, Any], *, config: VolumeEventResearchConfig) -> bool:
-    range_bps = _float_or_nan(diagnostics.get("entry_bar_range_bps"))
-    turnover = _float_or_nan(diagnostics.get("entry_bar_turnover_quote"))
-    return (
-        config.entry_execution_max_range_bps > 0.0
-        and range_bps > config.entry_execution_max_range_bps
-    ) or (
-        config.entry_execution_min_turnover_quote > 0.0
-        and turnover < config.entry_execution_min_turnover_quote
-    )
-
-
-def _entry_bar_unresolved_continuation(diagnostics: dict[str, Any], *, config: VolumeEventResearchConfig) -> bool:
-    continuation_bps = _float_or_nan(diagnostics.get("entry_continuation_bps"))
-    close_location = _float_or_nan(diagnostics.get("entry_bar_close_location"))
-    return (
-        continuation_bps > config.entry_execution_unresolved_move_bps_max
-        and close_location > config.entry_execution_pullback_close_location_max
-    )
-
-
-def _entry_bar_moved_too_far(diagnostics: dict[str, Any], *, config: VolumeEventResearchConfig) -> bool:
-    return _float_or_nan(diagnostics.get("entry_continuation_bps")) > 2.0 * config.entry_execution_unresolved_move_bps_max
-
-
-def _entry_pullback_triggered(diagnostics: dict[str, Any], *, config: VolumeEventResearchConfig) -> bool:
-    close_location = _float_or_nan(diagnostics.get("entry_bar_close_location"))
-    pop_bps = _float_or_nan(diagnostics.get("entry_pop_bps"))
-    giveback_bps = _float_or_nan(diagnostics.get("entry_giveback_bps"))
-    return (
-        close_location <= config.entry_execution_pullback_close_location_max
-        or (pop_bps >= config.entry_execution_pop_bps and giveback_bps >= config.entry_execution_giveback_bps)
-    ) and not _entry_bar_unresolved_continuation(diagnostics, config=config)
-
-
-def _entry_bar_pop_triggered(diagnostics: dict[str, Any], *, config: VolumeEventResearchConfig) -> bool:
-    return _float_or_nan(diagnostics.get("entry_pop_bps")) >= config.entry_execution_pop_bps
 
 
 def _bar_close_location(bar: dict[str, Any]) -> float:
@@ -4119,11 +3756,6 @@ def _validate_entry_config(config: VolumeEventResearchConfig) -> None:
         and config.entry_quality_squeeze_wait_hours < max(config.entry_delay_hours, 1)
     ):
         raise ValueError("entry_quality_squeeze_wait_hours must be at least the first post-signal entry hour")
-    if (
-        config.entry_policy == ENTRY_POLICY_EXECUTION_PULLBACK_GUARD
-        and config.entry_execution_wait_hours < max(config.entry_delay_hours, 1)
-    ):
-        raise ValueError("entry_execution_wait_hours must be at least the first post-signal entry hour")
     if not 0.0 <= config.entry_execution_pullback_close_location_max <= 1.0:
         raise ValueError("entry_execution_pullback_close_location_max must be in [0, 1]")
     if config.entry_execution_unresolved_move_bps_max < 0.0:
