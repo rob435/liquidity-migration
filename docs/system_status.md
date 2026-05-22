@@ -49,6 +49,34 @@ was re-run on the corrected engine over the full-PIT IS root
   data attached, and the comparison-family is `unfiltered` (the scenario
   summary has no family column).
 
+## 3-position re-baseline — the actual VPS config (2026-05-22)
+
+The VPS forward test runs the canonical `promoted` profile with
+`MAX_ACTIVE_SYMBOLS=3` (each trade ~33.3% of gross) — a concentrated variant
+of the 5-position canonical research config. Re-running the canonical scenario
++ 81-scenario sweep at `--max-active-symbols 3` on the corrected engine:
+
+- **Canonical cell** (threshold 0.4 / hold 3d / stop 0.12 / TP 0.26): 475
+  trades, total return 14568%, max drawdown -22.66% (within the -25%
+  promotion gate), avg split Sharpe 3.53, 3/3 pre-registered windows positive
+  (min split +267%). The operating point is sound.
+- **81-scenario sweep at 3 positions**: 46/81 promotable (vs 79/81 at 5
+  positions). All 35 non-promotable cells fail on the -25% drawdown gate
+  (returns span 1296%-15969%; median drawdown across the grid -24.9%, right
+  at the gate). The three worst corners (loose threshold 0.3, high TP 0.30)
+  hit -38% to -40.2%.
+- `strategy-tribunal` returns **FAIL**, driven by `stress_matrix`: the widest
+  drawdown corner (-40.24%) exceeds the -35% stress-fail threshold. The
+  canonical operating point itself passes (promotion gate, all six negative
+  controls, pre-registered windows 3/3 positive); the FAIL is a wide-grid
+  robustness signal, not a flaw at the canonical point.
+
+The 3-position concentration multiplies the edge (~14568% vs ~2750% at 5
+positions) but narrows the parameter-robustness band: the canonical cell sits
+right at the -25% gate, and the wide-grid corners blow well past it. Whether
+this is acceptable is a deployment-risk choice rather than a
+research-correctness question — same edge, just sized harder.
+
 ## Canonical setting — close_location_min = 0.30
 
 As of 2026-05-21, **`0.30` is the canonical close-location setting** for research
@@ -61,9 +89,11 @@ closing-bar sweep on the full-PIT IS root (2023-2026):
 
 This is a trade-count / return vs drawdown choice, not a strict improvement.
 Close-0.30 has now been through `strategy-tribunal` on the audit-corrected
-engine — see the re-baseline section above (WATCH, no FAIL findings; single
-scenario, the 81-scenario sweep still pending). The demo paper forward test of
-`promoted` + close-0.30 runs on the VPS (see Deployment status).
+engine at both 5 positions (WATCH, no FAIL findings, 79/81 sweep cells
+promotable) and 3 positions (FAIL on the wide-grid stress-matrix corner;
+canonical cell sound) — see the re-baseline sections above. The demo paper
+forward test of `promoted` + close-0.30 runs on the VPS at 3 positions (see
+Deployment status).
 
 ## Research status (prior baseline — close 0.45)
 
