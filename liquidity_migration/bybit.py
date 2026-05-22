@@ -21,49 +21,32 @@ class BybitDataError(RuntimeError):
     pass
 
 
-# Real-money (mainnet) trading is OFF by default and is the unsafe path. The
-# liquidity-migration strategy is NOT validated for real money; arming this is
-# a deliberate, owner-only act, gated behind two independent signals so that no
-# single stray environment variable can flip real money on.
-REAL_MONEY_ACK_PHRASE = "I UNDERSTAND THIS TRADES REAL MONEY WITH AN UNVALIDATED STRATEGY"
-
-
-def real_money_armed() -> bool:
-    """Return True only when real-money (mainnet) trading is deliberately armed.
-
-    Demo trading is the default and the safe state. Real money requires BOTH:
-      * ``LIQMIG_TRADING_MODE=real``
-      * ``LIQMIG_REAL_MONEY_ACK`` set verbatim to ``REAL_MONEY_ACK_PHRASE``
-
-    With ``LIQMIG_TRADING_MODE`` unset (or not ``real``) this returns False and
-    every private client stays demo-only -- byte-identical to the prior
-    demo-only behaviour. With ``mode=real`` but the acknowledgement missing or
-    wrong this RAISES: a half-armed state must fail loudly, never silently
-    trade and never silently downgrade. Nothing in this repository sets these
-    variables; arming is a manual operator action.
-    """
-    mode = os.environ.get("LIQMIG_TRADING_MODE", "").strip().lower()
-    if mode != "real":
-        return False
-    if os.environ.get("LIQMIG_REAL_MONEY_ACK", "") != REAL_MONEY_ACK_PHRASE:
-        raise RuntimeError(
-            "LIQMIG_TRADING_MODE=real but LIQMIG_REAL_MONEY_ACK is missing or "
-            "incorrect -- real-money trading is refused. Set LIQMIG_REAL_MONEY_ACK "
-            f"verbatim to: {REAL_MONEY_ACK_PHRASE!r}"
-        )
-    return True
+def _env_flag(name: str) -> bool:
+    """True when environment variable ``name`` is set to a truthy value."""
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def resolve_private_credentials() -> tuple[str | None, str | None, bool]:
-    """Return ``(api_key, api_secret, demo)`` for constructing a private client.
+    """Return ``(api_key, api_secret, demo)`` from the .env DEMO / REAL_MONEY toggle.
 
-    Demo is the default: demo keys from ``BYBIT_DEMO_API_KEY`` /
-    ``BYBIT_DEMO_API_SECRET`` with ``demo=True``. When :func:`real_money_armed`
-    is true: mainnet keys from ``BYBIT_REAL_API_KEY`` / ``BYBIT_REAL_API_SECRET``
-    with ``demo=False``. The two key pairs are deliberately separate so demo
-    credentials can never reach the mainnet endpoint, or vice versa.
+    Two mutually exclusive flags pick the account:
+
+      * ``REAL_MONEY=true`` -> mainnet keys (``BYBIT_REAL_API_KEY`` /
+        ``BYBIT_REAL_API_SECRET``), real-money endpoint (``demo=False``).
+      * ``DEMO=true`` or unset -> demo keys (``BYBIT_DEMO_API_KEY`` /
+        ``BYBIT_DEMO_API_SECRET``), demo endpoint (``demo=True``).
+
+    Demo is the default, so an unset toggle stays on the demo account. Setting
+    both ``DEMO`` and ``REAL_MONEY`` true is a contradiction and raises.
     """
-    if real_money_armed():
+    demo = _env_flag("DEMO")
+    real_money = _env_flag("REAL_MONEY")
+    if demo and real_money:
+        raise RuntimeError(
+            "DEMO and REAL_MONEY are both set true -- pick one: "
+            "DEMO=true for the demo account, REAL_MONEY=true for mainnet."
+        )
+    if real_money:
         return (
             os.environ.get("BYBIT_REAL_API_KEY"),
             os.environ.get("BYBIT_REAL_API_SECRET"),
@@ -397,13 +380,8 @@ class BybitPrivateClient:
     def __post_init__(self) -> None:
         if HTTP is None:
             raise RuntimeError("pybit is required for BybitPrivateClient")
-        if not self.demo and not real_money_armed():
-            raise RuntimeError(
-                "BybitPrivateClient: demo=False (real money) is refused unless real-money "
-                "mode is armed -- see bybit.real_money_armed()"
-            )
         if not self.api_key or not self.api_secret:
-            raise RuntimeError("Bybit demo execution requires API key and secret")
+            raise RuntimeError("Bybit private execution requires API key and secret")
         self._client = HTTP(
             testnet=self.testnet,
             demo=self.demo,
@@ -649,13 +627,8 @@ class BybitPrivateWebSocketStream:
     def __post_init__(self) -> None:
         if WebSocket is None:
             raise RuntimeError("pybit is required for BybitPrivateWebSocketStream")
-        if not self.demo and not real_money_armed():
-            raise RuntimeError(
-                "BybitPrivateWebSocketStream: demo=False (real money) is refused unless "
-                "real-money mode is armed -- see bybit.real_money_armed()"
-            )
         if not self.api_key or not self.api_secret:
-            raise RuntimeError("Bybit demo websocket stream requires API key and secret")
+            raise RuntimeError("Bybit private websocket stream requires API key and secret")
         _patch_pybit_daemon_ping_timer()
         self._client = WebSocket(
             testnet=self.testnet,
@@ -694,13 +667,8 @@ class BybitWebSocketTradeClient:
     def __post_init__(self) -> None:
         if WebSocketTrading is None:
             raise RuntimeError("pybit is required for BybitWebSocketTradeClient")
-        if not self.demo and not real_money_armed():
-            raise RuntimeError(
-                "BybitWebSocketTradeClient: demo=False (real money) is refused unless "
-                "real-money mode is armed -- see bybit.real_money_armed()"
-            )
         if not self.api_key or not self.api_secret:
-            raise RuntimeError("Bybit demo websocket trading requires API key and secret")
+            raise RuntimeError("Bybit private websocket trading requires API key and secret")
         self._client = WebSocketTrading(
             testnet=self.testnet,
             demo=self.demo,

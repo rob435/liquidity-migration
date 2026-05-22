@@ -420,7 +420,7 @@ class EventDemoDaemon:
 
 def _build_private_ws_stream(config: ResearchConfig) -> BybitPrivateWebSocketStream:
     """Default factory. Builds a Bybit private WS stream from env-var
-    credentials -- demo by default, mainnet when real money is armed.
+    credentials -- demo or mainnet per the DEMO / REAL_MONEY .env toggle.
     Passed as a factory so unit tests can substitute their own."""
     api_key, api_secret, demo = resolve_private_credentials()
     return BybitPrivateWebSocketStream(

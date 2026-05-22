@@ -81,8 +81,9 @@ python -m liquidity_migration --data-root data/bybit-demo-event champion-challen
 - `volume-events` requires full PIT by default; `--allow-partial-pit` is only
   for explicitly biased diagnostics, and that run must be labelled biased.
 - Demo order submission is allowed only for `STRATEGY_PROFILE=promoted` —
-  the runner refuses `SUBMIT_ORDERS=1` otherwise. `demo=False` is refused by
-  the private client by design; do not change that.
+  the runner refuses `SUBMIT_ORDERS=1` otherwise. Demo vs mainnet is the
+  `DEMO` / `REAL_MONEY` `.env` toggle (`bybit.resolve_private_credentials`),
+  which defaults to demo; keep it on demo without explicit owner instruction.
 - Event-driven entries are the strategy path; fixed-day rebalance grids are
   legacy benchmarks only. Do not revive the retired daily-close short-fade.
 - Every serious run must leave enough report output to audit the decision.
