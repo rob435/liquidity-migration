@@ -26,16 +26,28 @@ rather than per-basket). The canonical `promoted` + close-0.30 single scenario
 was re-run on the corrected engine over the full-PIT IS root
 (2023-05-04 .. 2026-05-17):
 
-- 510 trades, total return 2750.38% (2850% pre-correction), max drawdown
-  -14.16%, walk-forward avg split Sharpe 3.59, 3/3 pre-registered windows
-  positive (train +139%, validation +257%, oos +239%).
-- `strategy-tribunal` on this re-baseline returns **WATCH** with no FAIL
-  findings: all negative controls pass and report-consistency reconciles. The
-  WATCH is driven only by evidence not attached to a single-scenario run — no
-  81-scenario sweep, no comparison family, no execution-drift data.
-
-Re-running the 81-scenario sweep on the corrected engine is the remaining
-re-baseline work.
+- **Canonical single scenario** (`promoted` + close-0.30, threshold 0.4 / hold
+  3d / stop 0.12 / TP 0.26 / cost 3.0x): 510 trades, total return 2750.38%
+  (2850% pre-correction), max drawdown -14.16%, walk-forward avg split
+  Sharpe 3.59, 3/3 pre-registered windows positive (train +139%, validation
+  +257%, oos +239%).
+- **81-scenario robustness sweep** on the corrected engine — symmetric grid
+  threshold 0.3/0.4/0.5 × hold 2/3/4 d × stop 0.10/0.12/0.14 × take-profit
+  0.22/0.26/0.30, cost fixed 3.0x: **79/81 scenarios promotable**, returns
+  576%-2922%, drawdowns -29.5% to -12.9%. The 2 non-promotable cells are both
+  at the grid edge (threshold 0.3, hold 2 d, TP 0.30 — the loosest entry +
+  shortest hold) and fail the -25% promotion drawdown gate; they still earn
+  positive returns (+1139% and +577%).
+- `strategy-tribunal` on the canonical scenario with the sweep attached
+  returns **WATCH** with no FAIL findings: report-consistency reconciles,
+  promotion-gate passes, all six negative controls pass, **parameter
+  sensitivity is `robust`** (45 robust same-family variants vs the gate's
+  minimum of 3), parameter heatmaps and cost/funding/slippage matrices
+  populated. The residual WATCHes are honest gaps: funding mode `partial`
+  (trades past the funding-data edge are charged for the covered window only),
+  the widest stress-matrix corner hits -29.5% DD, no demo execution-drift
+  data attached, and the comparison-family is `unfiltered` (the scenario
+  summary has no family column).
 
 ## Canonical setting — close_location_min = 0.30
 
