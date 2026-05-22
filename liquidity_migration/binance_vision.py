@@ -10,8 +10,7 @@ survivorship-biased — forbidden by ``docs/backtesting_errors_we_never_repeat.m
 The ``data.binance.vision`` monthly archive enumerates every symbol that ever
 had bars. This module discovers that universe, downloads 1h klines, and writes a
 Bybit-shaped data root (``klines_1h`` + ``archive_trade_manifest``) so the
-existing ``volume-events`` / ``reversion_alpha`` engines can run against it
-unmodified.
+existing ``volume-events`` engine can run against it unmodified.
 
 CLI:
     python -m liquidity_migration.binance_vision build-binance-oos \\

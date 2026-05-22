@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REMOTE="${REMOTE:-https://github.com/rob435/MODEL05042026.git}"
+REMOTE="${REMOTE:-https://github.com/rob435/liquidity-migration.git}"
 RUN_NAME="${RUN_NAME:-canonical-fullpit-1h-all-usdt-20230503-20260518}"
 MANIFEST_NAME="${MANIFEST_NAME:-canonical-pit-all-usdt-20230503-20260518}"
 START_DATE="${START_DATE:-2023-05-03}"
@@ -202,7 +202,7 @@ if [ "$RUN_CHAMPION_BACKTEST" != "0" ]; then
     --gross-exposure "$CHAMPION_GROSS_EXPOSURE" \
     --entry-delay-hours 1 \
     --entry-policy promoted_quality_squeeze \
-    --max-active-symbols 5 \
+    --max-active-symbols 3 \
     --cooldown-days 5 \
     --rank-exit-threshold 0.55 \
     --universe-rank-min 31 \

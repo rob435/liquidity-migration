@@ -17,21 +17,12 @@ remains the fallback if WS hasn't delivered within the existing
 
 The runner script `scripts/run_bybit_demo_event_engine.sh` has a `USE_DAEMON`
 toggle. When `USE_DAEMON=1`, it `exec`s a single long-running Python process
-with `--daemon --interval-seconds $INTERVAL_SECONDS`, replacing the bash loop.
-Default is the legacy bash-loop runner — flipping is a one-line env-var
-change to the systemd unit:
-
-```ini
-# /etc/systemd/system/liquidity-migration-bybit-demo.service
-[Service]
-Environment=INTERVAL_SECONDS=60
-Environment=USE_DAEMON=1                       # <-- add this line
-ExecStart=/opt/liquidity-migration/scripts/run_bybit_demo_event_engine.sh
-```
-
-Then `systemctl daemon-reload && systemctl restart liquidity-migration-bybit-demo.service`.
-Rollback is `Environment=USE_DAEMON=0` (or remove the line) and the same
-two-command restart.
+with `--daemon --interval-seconds $INTERVAL_SECONDS`. **Daemon mode is the
+deployed default** — `deploy/systemd/liquidity-migration-bybit-demo.service`
+ships with `Environment=USE_DAEMON=1`. The bash-loop runner remains as a
+diagnostic fallback; to fall back, set `Environment=USE_DAEMON=0` on the
+systemd unit and run `systemctl daemon-reload && systemctl restart
+liquidity-migration-bybit-demo.service`.
 
 All other env vars (`STRATEGY_PROFILE`, `INTERVAL_SECONDS`, `WORKERS`,
 `SUBMIT_ORDERS`, etc.) work identically in both modes.

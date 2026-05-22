@@ -1,5 +1,5 @@
 param(
-    [string]$Remote = "https://github.com/rob435/MODEL05042026.git",
+    [string]$Remote = "https://github.com/rob435/liquidity-migration.git",
     [string]$Repo = "",
     [string]$DataRoot = "",
     [string]$ConfigPath = "configs/volume_alpha.default.yaml",

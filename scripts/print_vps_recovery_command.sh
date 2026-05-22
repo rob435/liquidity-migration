@@ -18,7 +18,7 @@ esac
 
 commit_ref="${1:-HEAD}"
 commit_sha="$(git rev-parse "${commit_ref}^{commit}")"
-raw_base="${RAW_BASE:-https://raw.githubusercontent.com/rob435/MODEL05042026}"
+raw_base="${RAW_BASE:-https://raw.githubusercontent.com/rob435/liquidity-migration}"
 script_url="$raw_base/$commit_sha/scripts/vps_console_recover_and_deploy.sh"
 ssh_script_url="$raw_base/$commit_sha/scripts/vps_restore_ssh_access.sh"
 rescue_script_url="$raw_base/$commit_sha/scripts/vps_rescue_restore_ssh_access.sh"

@@ -6,8 +6,8 @@ repo's own audited methodology (ic_diagnostic.cross_sectional_ic and
 add_forward_short_returns). It does NOT pool observations across days.
 
 Causal alignment: a feature aggregated over calendar day X is known at X's close,
-which is midnight of X+1. reversion_alpha/ic_diagnostic stamp a panel row's `date`
-at the signal-close moment and enter +1h after it, so the panel `date` is X+1.
+which is midnight of X+1. ic_diagnostic stamps a panel row's `date` at the
+signal-close moment and enters +1h after it, so the panel `date` is X+1.
 The feature therefore uses only day-X trades and the entry is 1h after day X ends.
 
 A shuffled `random_control` feature is included; its IC must sit near zero.

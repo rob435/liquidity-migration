@@ -110,8 +110,8 @@ def add_forward_short_returns(
 ) -> pl.DataFrame:
     """Attach `fwd_short_return_{h}d` columns to a signal panel.
 
-    The entry timing mirrors `reversion_alpha.simulate`: a panel row's `date`
-    is stamped at the signal-close moment, so entry is `entry_delay_hours` after
+    The entry timing matches the engine's panel convention: a panel row's
+    `date` is stamped at the signal-close moment, so entry is `entry_delay_hours` after
     `to_datetime(date)`. Entry price is that bar's open; the H-day exit price is
     the close H*24 hours later. The short return is (entry - exit) / entry —
     positive when the name falls, the sign convention every panel signal uses.

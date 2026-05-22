@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${REPO_URL:-https://github.com/rob435/MODEL05042026.git}"
+REPO_URL="${REPO_URL:-https://github.com/rob435/liquidity-migration.git}"
 REPO_DIR="${REPO_DIR:-/opt/liquidity-migration}"
 BRANCH="${BRANCH:-main}"
 REMOTE="${REMOTE:-origin}"

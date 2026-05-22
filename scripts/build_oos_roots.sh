@@ -63,5 +63,5 @@ echo "[3/3] Binance OOS — building PIT root from data.binance.vision ..."
 echo
 echo "=============================================================="
 echo "OOS roots rebuilt. Both pass the full-PIT universe check and are"
-echo "ready for volume-events / reversion_alpha backtests."
+echo "ready for volume-events backtests."
 echo "=============================================================="

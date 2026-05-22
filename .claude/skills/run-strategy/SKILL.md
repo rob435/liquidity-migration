@@ -67,14 +67,14 @@ Champion / challenger manifest:
 python -m liquidity_migration --data-root data/bybit-demo-event champion-challenger
 ```
 
-## Subcommands (16)
+## Subcommands (17)
 
 `download-data` · `download-binance-proxy` · `data-layer-audit` ·
 `discover-universe` · `archive-manifest` · `archive-download-klines` ·
 `archive-download-klines-1h` · `archive-download-klines-1h-api` ·
 `volume-events` · `strategy-tribunal` · `portfolio-hedge` · `feature-factory` ·
 `champion-challenger` · `event-demo-cycle` · `event-risk-cycle` ·
-`event-risk-ws`
+`event-risk-ws` · `reconcile-paper-demo`
 
 ## Guardrails
 
