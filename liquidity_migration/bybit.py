@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import logging
 import os
 import threading
 import time
@@ -15,6 +16,37 @@ except ModuleNotFoundError:  # pragma: no cover - dependency may be absent befor
     HTTP = None
     WebSocket = None
     WebSocketTrading = None
+
+
+class _PybitRateLimitLogFilter(logging.Filter):
+    """Drop pybit's 10006 (rate limit) retry chatter.
+
+    pybit's _handle_retryable_error logs at ERROR level twice for every 10006
+    retry -- once before sleeping ("Hit the API rate limit on <url>. Sleeping
+    then trying again.") and once after computing the reset window ("API rate
+    limit will reset at HH:MM:SS. Sleeping for Nms. Retrying..."). With ~180
+    demo symbols hitting the public kline endpoint at top-of-hour, plus pybit's
+    default max_retries=3, this produces 10K-22K identical lines per minute
+    in the journal. The retries themselves are working as intended (pybit
+    sleeps until X-Bapi-Limit-Reset-Timestamp and recovers without our
+    wrapper getting involved); the log volume just buries real errors and
+    fills disk. Filter only the 10006-specific lines; let other pybit errors
+    through untouched.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return (
+            "ErrCode: 10006" not in message
+            and "Hit the API rate limit" not in message
+            and "API rate limit will reset" not in message
+        )
+
+
+# Install the filter at module import. pybit instantiates its logger lazily on
+# first HTTP() call, but addFilter is idempotent on the named-logger handle
+# regardless of when the underlying logger picks up the filter.
+logging.getLogger("pybit._http_manager").addFilter(_PybitRateLimitLogFilter())
 
 
 class BybitDataError(RuntimeError):

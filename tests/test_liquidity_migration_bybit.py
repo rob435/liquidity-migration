@@ -1,11 +1,32 @@
 from __future__ import annotations
 
+import logging
 import sys
 from types import SimpleNamespace
 
 import pytest
 
 from liquidity_migration import bybit
+
+
+def test_pybit_rate_limit_log_filter_drops_10006_messages(caplog) -> None:
+    # pybit logs the rate-limit retries at ERROR level on its _http_manager
+    # logger; that produces tens of thousands of identical lines per minute on
+    # the demo VPS at top-of-hour. liquidity_migration.bybit installs a filter
+    # on pybit._http_manager that drops only the 10006 lines.
+    logger = logging.getLogger("pybit._http_manager")
+    with caplog.at_level(logging.ERROR, logger="pybit._http_manager"):
+        logger.error(
+            "Too many visits. Exceeded the API Rate Limit. (ErrCode: 10006). "
+            "Hit the API rate limit on https://api.bybit.com/v5/market/kline. "
+            "Sleeping then trying again."
+        )
+        logger.error("API rate limit will reset at 13:00:09. Sleeping for 2000 ms. Retrying...")
+        logger.error("connection reset by peer (ErrCode: 502). Retrying...")
+    messages = [record.getMessage() for record in caplog.records]
+    assert all("10006" not in m for m in messages), messages
+    assert all("rate limit" not in m.lower() for m in messages), messages
+    assert any("502" in m for m in messages), messages
 
 
 def test_bybit_market_data_constructs_with_slotted_client(monkeypatch) -> None:
