@@ -97,16 +97,24 @@ Deployment status).
 
 ## Research status (prior baseline — close 0.45)
 
+These figures predate the funding-model correction (see top of file) and the
+audit-corrected engine re-baseline — they are kept for historical context, not
+as live verdicts.
+
 - A full point-in-time costed backtest, an 81-scenario parameter sweep, and an
   adversarial `strategy-tribunal` review returned a **WATCH** verdict with no
   FAIL findings: 3/3 pre-registered windows positive, six negative controls
   pass, 81/81 sweep scenarios promotable. This evidence is for close 0.45.
-- The book carries almost no directional exposure (beta -0.03 to BTC, -0.07 to
-  the equal-weight universe); it needs neither a regime gate nor a hedge.
+- The unconditional beta is small (-0.03 to BTC, -0.07 to the equal-weight
+  universe), but this is **not** a universal market-neutrality result. The
+  retraction in [docs/research_findings.md](research_findings.md) shows
+  conditional beta is materially negative (~-0.45) on bear-universe days, so
+  the edge is short alt-beta in the bear/sideways alt regime, not regime-
+  agnostic — see that doc for the conditional split.
 - Caveat: true-OOS validation on the dedicated pre-2023 Bybit and Binance roots
   showed the edge does not clearly generalise before 2023 (walk-forward split
   Sharpe ~0). The edge is IS-era / regime-conditional — see
-  `~/SHARED_DATA/bybit_fullpit_1h/reports/signed_flow_research_verdict.md`.
+  `signed_flow_research_verdict.md` on the research data root (not in repo).
 
 ## Deployment status
 

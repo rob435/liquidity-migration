@@ -95,13 +95,6 @@ class VolumeEventResearchConfig:
     entry_quality_squeeze_pop_bps: float = 25.0
     entry_quality_squeeze_giveback_bps: float = 25.0
     entry_quality_squeeze_wait_hours: int = 4
-    entry_execution_wait_hours: int = 4
-    entry_execution_pullback_close_location_max: float = 0.70
-    entry_execution_unresolved_move_bps_max: float = 150.0
-    entry_execution_pop_bps: float = 25.0
-    entry_execution_giveback_bps: float = 25.0
-    entry_execution_max_range_bps: float = 1_200.0
-    entry_execution_min_turnover_quote: float = 0.0
     entry_execution_veto_close_location_max: float = 1.0
     gross_exposure: float = 1.0
     max_active_symbols: int = 5
@@ -3800,18 +3793,6 @@ def _validate_entry_config(config: VolumeEventResearchConfig) -> None:
         and config.entry_quality_squeeze_wait_hours < max(config.entry_delay_hours, 1)
     ):
         raise ValueError("entry_quality_squeeze_wait_hours must be at least the first post-signal entry hour")
-    if not 0.0 <= config.entry_execution_pullback_close_location_max <= 1.0:
-        raise ValueError("entry_execution_pullback_close_location_max must be in [0, 1]")
-    if config.entry_execution_unresolved_move_bps_max < 0.0:
-        raise ValueError("entry_execution_unresolved_move_bps_max must be non-negative")
-    if config.entry_execution_pop_bps < 0.0:
-        raise ValueError("entry_execution_pop_bps must be non-negative")
-    if config.entry_execution_giveback_bps < 0.0:
-        raise ValueError("entry_execution_giveback_bps must be non-negative")
-    if config.entry_execution_max_range_bps < 0.0:
-        raise ValueError("entry_execution_max_range_bps must be non-negative")
-    if config.entry_execution_min_turnover_quote < 0.0:
-        raise ValueError("entry_execution_min_turnover_quote must be non-negative")
     if not 0.0 <= config.entry_execution_veto_close_location_max <= 1.0:
         raise ValueError("entry_execution_veto_close_location_max must be in [0, 1]")
 

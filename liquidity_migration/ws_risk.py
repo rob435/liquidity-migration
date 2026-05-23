@@ -585,7 +585,18 @@ class EventWebSocketRiskEngine:
     def _record_orders(self, orders: list[dict[str, Any]]) -> None:
         # Append to state.orders and mirror into state.orders_by_link by
         # order_link_id. Single point of mutation so the list and the index
-        # stay in lockstep (the link-based lookups below assume this).
+        # stay in lockstep -- the link-based mutator methods below
+        # (mark_order_filled_from_execution, mark_order_terminal_from_order
+        # _update) assume the index points at the same dict that lives in
+        # the list, so dict-in-place updates flow both ways.
+        #
+        # Uniqueness invariant: at most one order per link_id. Bybit
+        # guarantees order_link_id uniqueness within 36 hours, and
+        # load_pending_exit_orders dedups on ingest. If a duplicate ever
+        # slipped in, the index would point at the last write and earlier
+        # copies in the list would become orphans -- mutator methods would
+        # silently only touch the latest. Don't introduce paths that add
+        # without dedup.
         self.state.orders.extend(orders)
         index = self.state.orders_by_link
         for order in orders:

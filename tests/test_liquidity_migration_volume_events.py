@@ -663,15 +663,6 @@ def test_volume_event_config_validates_new_research_knobs() -> None:
     with pytest.raises(ValueError, match="entry_quality_squeeze_wait_hours"):
         _validate_event_config(VolumeEventResearchConfig(entry_quality_squeeze_wait_hours=0))
 
-    with pytest.raises(ValueError, match="entry_execution_pullback_close_location_max"):
-        _validate_event_config(VolumeEventResearchConfig(entry_execution_pullback_close_location_max=1.1))
-
-    with pytest.raises(ValueError, match="entry_execution_unresolved_move_bps_max"):
-        _validate_event_config(VolumeEventResearchConfig(entry_execution_unresolved_move_bps_max=-1.0))
-
-    with pytest.raises(ValueError, match="entry_execution_max_range_bps"):
-        _validate_event_config(VolumeEventResearchConfig(entry_execution_max_range_bps=-1.0))
-
     with pytest.raises(ValueError, match="entry_execution_veto_close_location_max"):
         _validate_event_config(VolumeEventResearchConfig(entry_execution_veto_close_location_max=1.1))
 

@@ -212,13 +212,6 @@ def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Pa
     assert args.entry_quality_squeeze_pop_bps == 25.0
     assert args.entry_quality_squeeze_giveback_bps == 25.0
     assert args.entry_quality_squeeze_wait_hours == 4
-    assert args.entry_execution_wait_hours == 4
-    assert args.entry_execution_pullback_close_location_max == 0.70
-    assert args.entry_execution_unresolved_move_bps_max == 150.0
-    assert args.entry_execution_pop_bps == 25.0
-    assert args.entry_execution_giveback_bps == 25.0
-    assert args.entry_execution_max_range_bps == 1200.0
-    assert args.entry_execution_min_turnover_quote == 0.0
     assert args.liquidity_migration_mark_index_basis_3d_mean_min == -10.0
     assert args.liquidity_migration_mark_index_basis_3d_mean_max == 10.0
     assert args.liquidity_migration_premium_index_3d_mean_min == -10.0
@@ -360,20 +353,6 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
             "45",
             "--entry-quality-squeeze-wait-hours",
             "5",
-            "--entry-execution-wait-hours",
-            "6",
-            "--entry-execution-pullback-close-location-max",
-            "0.6",
-            "--entry-execution-unresolved-move-bps-max",
-            "120",
-            "--entry-execution-pop-bps",
-            "30",
-            "--entry-execution-giveback-bps",
-            "40",
-            "--entry-execution-max-range-bps",
-            "900",
-            "--entry-execution-min-turnover-quote",
-            "250000",
             "--entry-execution-veto-close-location-max",
             "0.82",
             "--max-active-symbols",
@@ -477,13 +456,6 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
     assert args.entry_quality_squeeze_pop_bps == 35
     assert args.entry_quality_squeeze_giveback_bps == 45
     assert args.entry_quality_squeeze_wait_hours == 5
-    assert args.entry_execution_wait_hours == 6
-    assert args.entry_execution_pullback_close_location_max == 0.6
-    assert args.entry_execution_unresolved_move_bps_max == 120
-    assert args.entry_execution_pop_bps == 30
-    assert args.entry_execution_giveback_bps == 40
-    assert args.entry_execution_max_range_bps == 900
-    assert args.entry_execution_min_turnover_quote == 250000
     assert args.entry_execution_veto_close_location_max == 0.82
     assert args.max_active_symbols == 8
     assert args.cooldown_days == 2
