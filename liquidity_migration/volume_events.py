@@ -329,16 +329,20 @@ def run_volume_event_research(
     bars = _indexed_price_bars_by_symbol(klines)
     funding_lookup = _funding_lookup(funding)
     rank_lookup_cache = _rank_lookup_cache(features, config=config)
-    event_cache: dict[tuple[str, float], pl.DataFrame] = {}
+    event_cache: dict[tuple[str, float], tuple[pl.DataFrame, list[dict[str, Any]]]] = {}
 
     scenarios = _iter_scenarios(config)
 
     # Pre-populate the event cache so worker threads only read from it.
+    # The sorted to_dicts() materialization is cached alongside the events frame
+    # so a sweep with N scenarios sharing K (event_type, threshold) keys does the
+    # sort+materialize K times instead of N.
     for scenario in scenarios:
         key = (scenario.event_type, scenario.threshold)
         if key not in event_cache:
             _, _sc = _event_score(scenario.event_type)
-            event_cache[key] = _select_events(features, scenario=scenario, config=config, score_col=_sc)
+            events_df = _select_events(features, scenario=scenario, config=config, score_col=_sc)
+            event_cache[key] = (events_df, _execution_ordered_events(events_df).to_dicts())
 
     def _run_one(scenario: EventScenario) -> dict[str, Any]:
         return _run_event_scenario(
@@ -476,7 +480,7 @@ def _run_event_scenario(
     funding_lookup: dict[str, dict[str, Any]] | None,
     base_cost_bps: float,
     rank_lookup_cache: dict[str, dict[tuple[str, int], float]],
-    event_cache: dict[tuple[str, float], pl.DataFrame],
+    event_cache: dict[tuple[str, float], tuple[pl.DataFrame, list[dict[str, Any]]]],
     full_pit_universe_pass: bool,
     scenario: EventScenario,
     config: VolumeEventResearchConfig,
@@ -510,10 +514,7 @@ def _run_event_scenario(
         exclude_symbols=config.exclude_symbols,
     )
     event_key = (scenario.event_type, scenario.threshold)
-    events = event_cache.get(event_key)
-    if events is None:
-        events = _select_events(features, scenario=scenario, config=config, score_col=score_col)
-        event_cache[event_key] = events
+    events, sorted_events = event_cache[event_key]
     rank_lookup = rank_lookup_cache.get(score_col, {})
     rows = []
     active_until: dict[str, int] = {}
@@ -537,7 +538,7 @@ def _run_event_scenario(
         size_scale=config.taker_imbalance_size_scale,
     )
 
-    for event in _execution_ordered_events(events).to_dicts():
+    for event in sorted_events:
         signal_ts_ms = int(event["ts_ms"])
         active_until = {symbol: exit_ts for symbol, exit_ts in active_until.items() if exit_ts > signal_ts_ms}
         if _stop_pressure_active(stop_exit_ts_ms, signal_ts_ms=signal_ts_ms, config=config):
@@ -2144,21 +2145,26 @@ def _enriched_event_features(
         "taker_imbalance_1d": "taker_imbalance_1d_rank_frac",
         "taker_imbalance_3d": "taker_imbalance_3d_rank_frac",
     }
-    for source, alias in rank_inputs.items():
-        if source in enriched.columns:
-            enriched = _add_rank_fraction(enriched, source, alias)
+    enriched = _add_rank_fractions_batch(
+        enriched,
+        [(source, alias) for source, alias in rank_inputs.items() if source in enriched.columns],
+    )
     enriched = _add_event_uniqueness_score(enriched)
     if "event_uniqueness_score" in enriched.columns:
-        enriched = _add_rank_fraction(enriched, "event_uniqueness_score", "event_uniqueness_score_rank_frac")
+        enriched = _add_rank_fractions_batch(
+            enriched, [("event_uniqueness_score", "event_uniqueness_score_rank_frac")]
+        )
     enriched = _add_reclaim_scores(enriched)
-    for source, alias in {
+    reclaim_rank_inputs = {
         "reclaim_breakout_score": "reclaim_breakout_score_rank_frac",
         "capitulation_reclaim_score": "capitulation_reclaim_score_rank_frac",
         "orderly_leadership_pullback_score": "orderly_leadership_pullback_score_rank_frac",
         "volume_shelf_reclaim_score": "volume_shelf_reclaim_score_rank_frac",
-    }.items():
-        if source in enriched.columns:
-            enriched = _add_rank_fraction(enriched, source, alias)
+    }
+    enriched = _add_rank_fractions_batch(
+        enriched,
+        [(source, alias) for source, alias in reclaim_rank_inputs.items() if source in enriched.columns],
+    )
     shift_cols = [
         "volume_change_1d_z_rank_frac",
         "volume_persistence_z_rank_frac",
@@ -2727,23 +2733,33 @@ def _daily_return_frame(klines: pl.DataFrame) -> pl.DataFrame:
 
 
 def _add_rank_fraction(frame: pl.DataFrame, source: str, alias: str) -> pl.DataFrame:
-    rank_col = f"_{alias}_rank"
-    count_col = f"_{alias}_count"
-    return (
-        frame.with_columns(
-            [
-                pl.col(source).rank("ordinal").over("ts_ms").alias(rank_col),
-                pl.col(source).count().over("ts_ms").alias(count_col),
-            ]
-        )
-        .with_columns(
+    return _add_rank_fractions_batch(frame, [(source, alias)])
+
+
+def _add_rank_fractions_batch(frame: pl.DataFrame, pairs: list[tuple[str, str]]) -> pl.DataFrame:
+    # Batched equivalent of N sequential _add_rank_fraction calls. Emits all
+    # rank/count window passes in a single with_columns, then all divisions in
+    # a single with_columns, then drops the scratch columns once. Polars can't
+    # fuse across separate with_columns calls so this collapses 2N+1 query
+    # plans into 3.
+    if not pairs:
+        return frame
+    rank_count_exprs: list[pl.Expr] = []
+    division_exprs: list[pl.Expr] = []
+    drop_cols: list[str] = []
+    for source, alias in pairs:
+        rank_col = f"_{alias}_rank"
+        count_col = f"_{alias}_count"
+        rank_count_exprs.append(pl.col(source).rank("ordinal").over("ts_ms").alias(rank_col))
+        rank_count_exprs.append(pl.col(source).count().over("ts_ms").alias(count_col))
+        division_exprs.append(
             pl.when(pl.col(count_col) > 1)
             .then((pl.col(rank_col) - 1) / (pl.col(count_col) - 1))
             .otherwise(None)
             .alias(alias)
         )
-        .drop([rank_col, count_col])
-    )
+        drop_cols.extend([rank_col, count_col])
+    return frame.with_columns(rank_count_exprs).with_columns(division_exprs).drop(drop_cols)
 
 
 def _add_reclaim_scores(features: pl.DataFrame) -> pl.DataFrame:
