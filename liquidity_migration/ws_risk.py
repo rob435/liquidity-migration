@@ -142,6 +142,11 @@ class WebSocketRiskState:
     last_reconcile_monotonic: float = 0.0
     exits: list[dict[str, Any]] = field(default_factory=list)
     orders: list[dict[str, Any]] = field(default_factory=list)
+    # Index from order_link_id -> the same dict that lives in `orders`. Maintained
+    # in lockstep with `orders` mutations (see _record_orders / _record_order on
+    # EventWebSocketRiskEngine). Lets link-based lookups be O(1) instead of
+    # scanning the growing orders list on every fill/cancel/reconcile.
+    orders_by_link: dict[str, dict[str, Any]] = field(default_factory=dict)
     repairs: list[dict[str, Any]] = field(default_factory=list)
     reconciliations: list[dict[str, Any]] = field(default_factory=list)
     pending_fill_reconciliations: list[dict[str, Any]] = field(default_factory=list)
@@ -577,19 +582,28 @@ class EventWebSocketRiskEngine:
             source="order",
         )
 
+    def _record_orders(self, orders: list[dict[str, Any]]) -> None:
+        # Append to state.orders and mirror into state.orders_by_link by
+        # order_link_id. Single point of mutation so the list and the index
+        # stay in lockstep (the link-based lookups below assume this).
+        self.state.orders.extend(orders)
+        index = self.state.orders_by_link
+        for order in orders:
+            link = str(order.get("order_link_id") or "")
+            if link:
+                index[link] = order
+
     def mark_order_filled_from_execution(self, *, order_link_id: str, filled_qty: float, exit_price: float) -> list[dict[str, Any]]:
-        updates: list[dict[str, Any]] = []
-        for order in self.state.orders:
-            if str(order.get("order_link_id") or "") != order_link_id:
-                continue
-            target_qty = _float(order.get("target_qty") or order.get("qty"))
-            fully_filled = target_qty > 0.0 and filled_qty + max(target_qty * 1e-8, 1e-12) >= target_qty
-            order["status"] = "filled" if fully_filled else "partial" if filled_qty > 0.0 else order.get("status", "")
-            order["filled_qty"] = _quantity_text(filled_qty) if filled_qty > 0.0 else ""
-            order["avg_price"] = exit_price
-            order["notional_usdt"] = abs(exit_price * filled_qty) if exit_price > 0.0 else 0.0
-            updates.append(order)
-        return updates
+        order = self.state.orders_by_link.get(order_link_id)
+        if order is None:
+            return []
+        target_qty = _float(order.get("target_qty") or order.get("qty"))
+        fully_filled = target_qty > 0.0 and filled_qty + max(target_qty * 1e-8, 1e-12) >= target_qty
+        order["status"] = "filled" if fully_filled else "partial" if filled_qty > 0.0 else order.get("status", "")
+        order["filled_qty"] = _quantity_text(filled_qty) if filled_qty > 0.0 else ""
+        order["avg_price"] = exit_price
+        order["notional_usdt"] = abs(exit_price * filled_qty) if exit_price > 0.0 else 0.0
+        return [order]
 
     def update_stream_order_guards(self, order_updates: list[dict[str, Any]]) -> None:
         for order in order_updates:
@@ -602,22 +616,19 @@ class EventWebSocketRiskEngine:
                 self.mark_submitted_symbol(symbol)
 
     def order_target_qty(self, order_link_id: str) -> float:
-        for order in self.state.orders:
-            if str(order.get("order_link_id") or "") == order_link_id:
-                return _float(order.get("target_qty") or order.get("qty"))
-        return 0.0
+        order = self.state.orders_by_link.get(order_link_id)
+        if order is None:
+            return 0.0
+        return _float(order.get("target_qty") or order.get("qty"))
 
     def order_avg_price(self, order_link_id: str) -> float:
-        for order in self.state.orders:
-            if str(order.get("order_link_id") or "") == order_link_id:
-                return _float(order.get("avg_price"))
-        return 0.0
+        order = self.state.orders_by_link.get(order_link_id)
+        if order is None:
+            return 0.0
+        return _float(order.get("avg_price"))
 
     def order_row(self, order_link_id: str) -> dict[str, Any]:
-        for order in self.state.orders:
-            if str(order.get("order_link_id") or "") == order_link_id:
-                return order
-        return {}
+        return self.state.orders_by_link.get(order_link_id) or {}
 
     def mark_order_terminal_from_order_update(
         self,
@@ -627,16 +638,14 @@ class EventWebSocketRiskEngine:
         row: dict[str, Any],
     ) -> list[dict[str, Any]]:
         normalized_status = "cancelled" if status in {"cancelled", "canceled", "deactivated"} else "rejected"
-        updates: list[dict[str, Any]] = []
-        for order in self.state.orders:
-            if str(order.get("order_link_id") or "") != order_link_id:
-                continue
-            symbol = str(row.get("symbol") or order.get("symbol") or "")
-            order["status"] = normalized_status
-            order["error"] = str(row.get("rejectReason") or row.get("cancelType") or row.get("orderStatus") or "")[:500]
-            self.clear_submitted_symbol(symbol)
-            updates.append(order)
-        return updates
+        order = self.state.orders_by_link.get(order_link_id)
+        if order is None:
+            return []
+        symbol = str(row.get("symbol") or order.get("symbol") or "")
+        order["status"] = normalized_status
+        order["error"] = str(row.get("rejectReason") or row.get("cancelType") or row.get("orderStatus") or "")[:500]
+        self.clear_submitted_symbol(symbol)
+        return [order]
 
     def evaluate_symbols(self, symbols: set[str]) -> None:
         if self.state.open_trades.is_empty() or not symbols:
@@ -697,7 +706,7 @@ class EventWebSocketRiskEngine:
                     self.state.submitted_link_to_trade_id[link] = trade_id
                     self.state.submitted_link_submit_mode[link] = str(order.get("submit_mode") or "submitted")
             _write_order_rows(self.root, pl.DataFrame(orders, infer_schema_length=None))
-            self.state.orders.extend(orders)
+            self._record_orders(orders)
         open_symbols = set(_column_values(self.state.open_trades, "symbol"))
         has_pending_order = any(str(order.get("status", "")) in PENDING_ORDER_STATUSES for order in orders)
         if symbol in open_symbols and has_pending_order:
@@ -1075,7 +1084,7 @@ class EventWebSocketRiskEngine:
         if not rows:
             return
         _write_order_rows(self.root, pl.DataFrame(rows, infer_schema_length=None))
-        self.state.orders.extend(rows)
+        self._record_orders(rows)
         for row in rows:
             _logger.warning(
                 "untracked_position close symbol=%s side=%s qty=%s status=%s submit_mode=%s grace_seconds=%.1f error=%s",
@@ -1171,13 +1180,11 @@ class EventWebSocketRiskEngine:
                 order_update["error"] = "filled inferred from flat Bybit position"
             order_updates.append(order_update)
             self.clear_submitted_symbol(symbol)
-            loaded = False
-            for state_order in self.state.orders:
-                if str(state_order.get("order_link_id") or "") == link:
-                    state_order.update(order_update)
-                    loaded = True
-            if not loaded:
-                self.state.orders.append(order_update)
+            existing = self.state.orders_by_link.get(link)
+            if existing is not None:
+                existing.update(order_update)
+            else:
+                self._record_orders([order_update])
 
             trade_id = str(order.get("trade_id") or "")
             trade = dict(trade_lookup.get(trade_id, {}))
@@ -1241,9 +1248,11 @@ class EventWebSocketRiskEngine:
         if order_rows:
             for update in order_rows:
                 link = str(update.get("order_link_id") or "")
-                for order in self.state.orders:
-                    if str(order.get("order_link_id") or "") == link:
-                        order.update(update)
+                if not link:
+                    continue
+                order = self.state.orders_by_link.get(link)
+                if order is not None:
+                    order.update(update)
             _write_order_rows(self.root, pl.DataFrame(order_rows, infer_schema_length=None))
 
     def terminalize_stale_pending_entry_orders(self, orders: pl.DataFrame) -> None:
@@ -1262,9 +1271,11 @@ class EventWebSocketRiskEngine:
             if symbol:
                 self.state.pending_entry_symbols.discard(symbol)
             link = str(update.get("order_link_id") or "")
-            for order in self.state.orders:
-                if str(order.get("order_link_id") or "") == link:
-                    order.update(update)
+            if not link:
+                continue
+            order = self.state.orders_by_link.get(link)
+            if order is not None:
+                order.update(update)
         _write_order_rows(self.root, pl.DataFrame(order_rows, infer_schema_length=None))
 
     def on_idle(self) -> None:
@@ -1294,7 +1305,7 @@ class EventWebSocketRiskEngine:
         if orders.is_empty():
             return
         open_trade_ids = set(_column_values(self.state.open_trades, "trade_id"))
-        loaded_order_links = {str(order.get("order_link_id") or "") for order in self.state.orders}
+        loaded_order_links = set(self.state.orders_by_link)
         now_ms = _now_ms()
         max_age_ms = max(self.risk.pending_exit_guard_seconds, 0.0) * 1000.0
         for row in orders.to_dicts():
@@ -1322,7 +1333,7 @@ class EventWebSocketRiskEngine:
             self.state.submitted_link_submit_mode[link] = str(row.get("submit_mode") or "submitted")
             self.mark_submitted_symbol(symbol, now_ms=ts_ms or now_ms)
             if link not in loaded_order_links:
-                self.state.orders.append(dict(row))
+                self._record_orders([dict(row)])
                 loaded_order_links.add(link)
 
     def load_pending_entry_orders(self, orders: pl.DataFrame) -> None:
