@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import polars as pl
 import pytest
 
@@ -1640,31 +1642,23 @@ def test_select_demo_entry_candidates_waits_for_quality_squeeze_giveback() -> No
             }
         ]
     )
-    bars = {
+    bar_dicts = [
+        {"bar_end_ts_ms": signal_ts, "high": 101.0, "low": 99.0, "close": 100.0},
+        {"bar_end_ts_ms": signal_ts + hour, "high": 101.2, "low": 100.0, "close": 101.1},
+        {"bar_end_ts_ms": signal_ts + 2 * hour, "high": 101.6, "low": 101.0, "close": 101.5},
+        {"bar_end_ts_ms": signal_ts + 3 * hour, "high": 101.6, "low": 100.9, "close": 101.1},
+    ]
+    ends = [int(b["bar_end_ts_ms"]) for b in bar_dicts]
+    bars: dict[str, dict[str, Any]] = {
         "AAAUSDT": {
-            "rows": [],
-            "ends": [signal_ts, signal_ts + hour, signal_ts + 2 * hour, signal_ts + 3 * hour],
-            "by_end": {
-                signal_ts: {"bar_end_ts_ms": signal_ts, "high": 101.0, "low": 99.0, "close": 100.0},
-                signal_ts + hour: {
-                    "bar_end_ts_ms": signal_ts + hour,
-                    "high": 101.2,
-                    "low": 100.0,
-                    "close": 101.1,
-                },
-                signal_ts + 2 * hour: {
-                    "bar_end_ts_ms": signal_ts + 2 * hour,
-                    "high": 101.6,
-                    "low": 101.0,
-                    "close": 101.5,
-                },
-                signal_ts + 3 * hour: {
-                    "bar_end_ts_ms": signal_ts + 3 * hour,
-                    "high": 101.6,
-                    "low": 100.9,
-                    "close": 101.1,
-                },
-            },
+            "ts_ms": np.array([end - hour for end in ends], dtype=np.int64),
+            "bar_end_ts_ms": np.array(ends, dtype=np.int64),
+            "open": np.array([b["close"] for b in bar_dicts], dtype=np.float64),
+            "high": np.array([b["high"] for b in bar_dicts], dtype=np.float64),
+            "low": np.array([b["low"] for b in bar_dicts], dtype=np.float64),
+            "close": np.array([b["close"] for b in bar_dicts], dtype=np.float64),
+            "ends": ends,
+            "by_end": {end: idx for idx, end in enumerate(ends)},
         }
     }
 

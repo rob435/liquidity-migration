@@ -384,16 +384,28 @@ def _perp_funding_return(
     return (float(-signed) if side == "long" else float(signed)), mode, hi - lo
 
 
-def _price_bars_by_symbol(klines: pl.DataFrame) -> dict[str, list[dict[str, Any]]]:
+def _price_bars_by_symbol(klines: pl.DataFrame) -> dict[str, dict[str, np.ndarray]]:
+    # Parallel numpy arrays per symbol: ts_ms / bar_end_ts_ms / open / high /
+    # low / close. Replaces an earlier dict-of-dicts layout that materialized
+    # ~12M Python dicts up front and forced float() casts on every hot-loop
+    # read; arrays let consumers index by position in C without a per-bar dict
+    # build or attribute access.
     required = {"ts_ms", "symbol", "open", "high", "low", "close"}
     missing = required - set(klines.columns)
     if missing:
         raise RuntimeError(f"klines_1h is missing required columns: {sorted(missing)}")
-    output: dict[str, list[dict[str, Any]]] = {}
+    output: dict[str, dict[str, np.ndarray]] = {}
     prepared = klines.with_columns((pl.col("ts_ms") + MS_PER_HOUR).alias("bar_end_ts_ms"))
     for key, part in prepared.sort(["symbol", "ts_ms"]).partition_by("symbol", as_dict=True).items():
         symbol = str(key[0] if isinstance(key, tuple) else key)
-        output[symbol] = part.to_dicts()
+        output[symbol] = {
+            "ts_ms": part["ts_ms"].to_numpy().astype(np.int64, copy=False),
+            "bar_end_ts_ms": part["bar_end_ts_ms"].to_numpy().astype(np.int64, copy=False),
+            "open": part["open"].to_numpy().astype(np.float64, copy=False),
+            "high": part["high"].to_numpy().astype(np.float64, copy=False),
+            "low": part["low"].to_numpy().astype(np.float64, copy=False),
+            "close": part["close"].to_numpy().astype(np.float64, copy=False),
+        }
     return output
 
 

@@ -801,6 +801,7 @@ def select_demo_entry_candidates(
                     side=side,
                     now_ms=now_ms,
                 ),
+                symbol_bars=symbol_bars,
                 config=config,
             )
             ready_ts_ms = int(entry_decision["entry_ready_ts_ms"])

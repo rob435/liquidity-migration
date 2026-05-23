@@ -563,6 +563,7 @@ def _run_event_scenario(
             continue
         entry_decision = _apply_entry_execution_veto(
             _entry_decision_for_event(event, symbol_bars, config=config, score_col=score_col, side=side),
+            symbol_bars=symbol_bars,
             config=config,
         )
         entry_bar = entry_decision["entry_bar"]
@@ -786,13 +787,17 @@ def _score_name_for_column(score_col: str) -> str:
 
 
 def _indexed_price_bars_by_symbol(klines: pl.DataFrame) -> dict[str, dict[str, Any]]:
-    indexed = {}
-    for symbol, rows in _price_bars_by_symbol(klines).items():
-        ends = [int(row["bar_end_ts_ms"]) for row in rows]
+    # Wraps the per-symbol parallel arrays from _price_bars_by_symbol with an
+    # `ends` Python-int list (for bisect_right against entry/exit ts) and a
+    # `by_end` map from bar_end_ts_ms -> row index. Downstream consumers read
+    # bar fields via symbol_bars["close"][idx] etc. -- no per-bar dict.
+    indexed: dict[str, dict[str, Any]] = {}
+    for symbol, arrays in _price_bars_by_symbol(klines).items():
+        ends = arrays["bar_end_ts_ms"].tolist()
         indexed[symbol] = {
-            "rows": rows,
+            **arrays,
             "ends": ends,
-            "by_end": {end: row for end, row in zip(ends, rows)},
+            "by_end": {end_ts: idx for idx, end_ts in enumerate(ends)},
         }
     return indexed
 
@@ -855,8 +860,11 @@ def _quality_squeeze_entry_decision(
     now_ms: int | None,
 ) -> dict[str, Any]:
     signal_ts_ms = int(event["ts_ms"])
-    signal_bar = symbol_bars["by_end"].get(signal_ts_ms)
-    if signal_bar is None:
+    by_end = symbol_bars["by_end"]
+    close_arr = symbol_bars["close"]
+    high_arr = symbol_bars["high"]
+    signal_idx = by_end.get(signal_ts_ms)
+    if signal_idx is None:
         base_ready_ts_ms = signal_ts_ms + config.entry_delay_hours * MS_PER_HOUR
         return _fixed_delay_entry_decision(
             symbol_bars,
@@ -866,7 +874,7 @@ def _quality_squeeze_entry_decision(
             quality_tier="promoted_quality",
             entry_rule="quality_missing_signal_fixed_delay",
         )
-    signal_close = float(signal_bar["close"])
+    signal_close = float(close_arr[signal_idx])
     first_h = max(int(config.entry_delay_hours), 1)
     first_ts_ms = signal_ts_ms + first_h * MS_PER_HOUR
     if now_ms is not None and first_ts_ms > now_ms:
@@ -875,22 +883,22 @@ def _quality_squeeze_entry_decision(
             ready_ts_ms=first_ts_ms,
             entry_rule="quality_wait_first_bar",
         )
-    first_bar = symbol_bars["by_end"].get(first_ts_ms)
-    if first_bar is None:
+    first_idx = by_end.get(first_ts_ms)
+    if first_idx is None:
         return _missing_entry_decision(
             signal_ts_ms=signal_ts_ms,
             ready_ts_ms=first_ts_ms,
             entry_rule="quality_missing_first_bar",
         )
-    h1_return = float(first_bar["close"]) / signal_close - 1.0 if signal_close > 0.0 else 0.0
-    h1_close_location = _bar_close_location(first_bar)
+    h1_return = float(close_arr[first_idx]) / signal_close - 1.0 if signal_close > 0.0 else 0.0
+    h1_close_location = _bar_close_location_at(symbol_bars, first_idx)
     squeeze = (
         h1_return >= config.entry_quality_squeeze_h1_return_bps / 10_000.0
         and h1_close_location >= config.entry_quality_squeeze_h1_close_location_min
     )
     if not squeeze:
         return {
-            "entry_bar": first_bar,
+            "entry_bar": first_idx,
             "entry_ts_ms": first_ts_ms,
             "entry_ready_ts_ms": first_ts_ms,
             "entry_policy": ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE,
@@ -913,19 +921,19 @@ def _quality_squeeze_entry_decision(
                 ready_ts_ms=ts_ms,
                 entry_rule="quality_squeeze_wait_giveback",
             )
-        bar = symbol_bars["by_end"].get(ts_ms)
-        if bar is None:
+        idx = by_end.get(ts_ms)
+        if idx is None:
             return _missing_entry_decision(
                 signal_ts_ms=signal_ts_ms,
                 ready_ts_ms=ts_ms,
                 entry_rule="quality_squeeze_missing_bar",
             )
-        high_since_signal = max(high_since_signal, float(bar["high"]))
+        high_since_signal = max(high_since_signal, float(high_arr[idx]))
         if high_since_signal >= pop_threshold:
             popped = True
-        if popped and float(bar["close"]) <= high_since_signal * giveback_multiplier:
+        if popped and float(close_arr[idx]) <= high_since_signal * giveback_multiplier:
             return {
-                "entry_bar": bar,
+                "entry_bar": idx,
                 "entry_ts_ms": ts_ms,
                 "entry_ready_ts_ms": ts_ms,
                 "entry_policy": ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE,
@@ -936,9 +944,9 @@ def _quality_squeeze_entry_decision(
             }
 
     deadline_ts_ms = signal_ts_ms + deadline_h * MS_PER_HOUR
-    deadline_bar = symbol_bars["by_end"].get(deadline_ts_ms)
+    deadline_idx = by_end.get(deadline_ts_ms)
     return {
-        "entry_bar": deadline_bar,
+        "entry_bar": deadline_idx,
         "entry_ts_ms": deadline_ts_ms,
         "entry_ready_ts_ms": deadline_ts_ms,
         "entry_policy": ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE,
@@ -991,13 +999,18 @@ def _missing_entry_decision(
     }
 
 
-def _apply_entry_execution_veto(decision: dict[str, Any], *, config: VolumeEventResearchConfig) -> dict[str, Any]:
+def _apply_entry_execution_veto(
+    decision: dict[str, Any],
+    *,
+    symbol_bars: dict[str, Any],
+    config: VolumeEventResearchConfig,
+) -> dict[str, Any]:
     if config.entry_execution_veto_close_location_max >= 1.0:
         return decision
     entry_bar = decision.get("entry_bar")
     if entry_bar is None:
         return decision
-    close_location = _bar_close_location(entry_bar)
+    close_location = _bar_close_location_at(symbol_bars, entry_bar)
     updated = {**decision, "entry_bar_close_location": close_location}
     if close_location <= config.entry_execution_veto_close_location_max:
         return updated
@@ -1009,13 +1022,18 @@ def _apply_entry_execution_veto(decision: dict[str, Any], *, config: VolumeEvent
     }
 
 
-def _bar_close_location(bar: dict[str, Any]) -> float:
-    high = float(bar["high"])
-    low = float(bar["low"])
-    close = float(bar["close"])
+def _bar_close_location(high: float, low: float, close: float) -> float:
     if abs(high - low) <= 1e-12:
         return 0.5
     return max(0.0, min(1.0, (close - low) / (high - low)))
+
+
+def _bar_close_location_at(symbol_bars: dict[str, Any], idx: int) -> float:
+    return _bar_close_location(
+        float(symbol_bars["high"][idx]),
+        float(symbol_bars["low"][idx]),
+        float(symbol_bars["close"][idx]),
+    )
 
 
 def _promoted_quality_entry_event(event: dict[str, Any], *, score_col: str) -> bool:
@@ -1146,7 +1164,7 @@ def _simulate_indexed_trade(
     rank: int,
     basket_id: str,
     signal_ts_ms: int,
-    entry_bar: dict[str, Any],
+    entry_bar: int,
     symbol_bars: dict[str, Any],
     planned_exit_ts_ms: int,
     notional_weight: float,
@@ -1159,16 +1177,18 @@ def _simulate_indexed_trade(
     funding_lookup: dict[str, dict[str, Any]] | None,
     stop_fill_mode: str = "stop",
 ) -> dict[str, Any] | None:
-    entry_ts_ms = int(entry_bar["bar_end_ts_ms"])
-    entry_price = float(entry_bar["close"])
+    bar_end_ts_arr = symbol_bars["bar_end_ts_ms"]
+    high_arr = symbol_bars["high"]
+    low_arr = symbol_bars["low"]
+    close_arr = symbol_bars["close"]
+    entry_ts_ms = int(bar_end_ts_arr[entry_bar])
+    entry_price = float(close_arr[entry_bar])
     if entry_price <= 0.0:
         return None
-    rows = symbol_bars["rows"]
     ends = symbol_bars["ends"]
     start = bisect_right(ends, entry_ts_ms)
     end = bisect_right(ends, planned_exit_ts_ms)
-    future_bars = rows[start:end]
-    if not future_bars:
+    if start >= end:
         return None
 
     stop_price = _stop_price(entry_price, side=side, stop_loss_pct=stop_pct or 0.0)
@@ -1179,78 +1199,84 @@ def _simulate_indexed_trade(
     mae = 0.0
     mfe = 0.0
     bars_held = 0
-    for bar in future_bars:
+    for idx in range(start, end):
         bars_held += 1
-        adverse, favorable = _bar_excursion(entry_price, side=side, high=float(bar["high"]), low=float(bar["low"]))
+        bar_high = float(high_arr[idx])
+        bar_low = float(low_arr[idx])
+        bar_close = float(close_arr[idx])
+        bar_end_ts_ms_val = int(bar_end_ts_arr[idx])
+        adverse, favorable = _bar_excursion(entry_price, side=side, high=bar_high, low=bar_low)
         mae = min(mae, adverse)
         mfe = max(mfe, favorable)
         stop_hit, take_profit_hit = _bar_exit_hits(
             side=side,
-            high=float(bar["high"]),
-            low=float(bar["low"]),
+            high=bar_high,
+            low=bar_low,
             stop_price=stop_price,
             take_profit_price=take_profit_price,
         )
         if stop_hit:
-            exit_price = _stop_fill_price(side=side, stop_price=stop_price, high=float(bar["high"]), low=float(bar["low"]), mode=stop_fill_mode)
-            exit_ts_ms = int(bar["bar_end_ts_ms"])
+            exit_price = _stop_fill_price(side=side, stop_price=stop_price, high=bar_high, low=bar_low, mode=stop_fill_mode)
+            exit_ts_ms = bar_end_ts_ms_val
             exit_reason = "stop_loss"
             break
         if take_profit_hit:
             exit_price = take_profit_price
-            exit_ts_ms = int(bar["bar_end_ts_ms"])
+            exit_ts_ms = bar_end_ts_ms_val
             exit_reason = "take_profit"
             break
-        close_return = _side_return(entry_price, float(bar["close"]), side=side)
+        close_return = _side_return(entry_price, bar_close, side=side)
         if (
             config.mfe_giveback_trigger_pct > 0.0
             and config.mfe_giveback_retain_pct > 0.0
             and mfe >= config.mfe_giveback_trigger_pct
             and close_return <= mfe * config.mfe_giveback_retain_pct
         ):
-            exit_price = float(bar["close"])
-            exit_ts_ms = int(bar["bar_end_ts_ms"])
+            exit_price = bar_close
+            exit_ts_ms = bar_end_ts_ms_val
             exit_reason = "mfe_giveback"
             break
         if _failed_fade_exit_hit(
             side=side,
-            bar=bar,
+            high=bar_high,
+            low=bar_low,
+            close=bar_close,
             bars_held=bars_held,
             close_return=close_return,
             mfe=mfe,
             config=config,
         ):
-            exit_price = float(bar["close"])
-            exit_ts_ms = int(bar["bar_end_ts_ms"])
+            exit_price = bar_close
+            exit_ts_ms = bar_end_ts_ms_val
             exit_reason = "failed_fade"
             break
         if _event_decay_exit_hit(
             symbol=symbol,
-            bar_end_ts_ms=int(bar["bar_end_ts_ms"]),
+            bar_end_ts_ms=bar_end_ts_ms_val,
             rank_lookup=rank_lookup,
             threshold=event_decay_threshold,
         ):
-            exit_price = float(bar["close"])
-            exit_ts_ms = int(bar["bar_end_ts_ms"])
+            exit_price = bar_close
+            exit_ts_ms = bar_end_ts_ms_val
             exit_reason = "event_decay"
             break
         if _rank_exit_hit(
             symbol=symbol,
             side=side,
             side_mode=config.side_mode,
-            bar_end_ts_ms=int(bar["bar_end_ts_ms"]),
+            bar_end_ts_ms=bar_end_ts_ms_val,
             rank_lookup=rank_lookup,
             enabled=config.rank_exit_enabled,
             threshold=config.rank_exit_threshold,
         ):
-            exit_price = float(bar["close"])
-            exit_ts_ms = int(bar["bar_end_ts_ms"])
+            exit_price = bar_close
+            exit_ts_ms = bar_end_ts_ms_val
             exit_reason = "rank_exit"
             break
     if exit_price is None:
-        last = future_bars[-1]
-        exit_price = float(last["close"])
-        exit_ts_ms = int(last["bar_end_ts_ms"])
+        last_idx = end - 1
+        exit_price = float(close_arr[last_idx])
+        exit_ts_ms = int(bar_end_ts_arr[last_idx])
         if exit_ts_ms < planned_exit_ts_ms:
             exit_reason = "data_end"
 
@@ -1306,7 +1332,9 @@ def _simulate_indexed_trade(
 def _failed_fade_exit_hit(
     *,
     side: str,
-    bar: dict[str, Any],
+    high: float,
+    low: float,
+    close: float,
     bars_held: int,
     close_return: float,
     mfe: float,
@@ -1324,7 +1352,7 @@ def _failed_fade_exit_hit(
         return False
     if close_return > -config.failed_fade_loss_pct:
         return False
-    close_location = _bar_close_location(bar)
+    close_location = _bar_close_location(high, low, close)
     if side == "short":
         return close_location >= config.failed_fade_close_location_min
     return close_location <= 1.0 - config.failed_fade_close_location_min

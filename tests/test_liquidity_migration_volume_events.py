@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import polars as pl
 import pytest
 
@@ -40,6 +42,23 @@ from liquidity_migration.volume_events import (
     _write_equity_benchmark_chart,
     run_volume_event_research,
 )
+
+
+def _make_symbol_bars(bars: list[dict[str, Any]], *, hour_ms: int = 60 * 60 * 1000) -> dict[str, Any]:
+    # Build the indexed-bars layout (numpy arrays + ts -> idx) from a list of
+    # bar dicts. Test helper that mirrors what _indexed_price_bars_by_symbol
+    # produces for live data.
+    ends = [int(bar["bar_end_ts_ms"]) for bar in bars]
+    return {
+        "ts_ms": np.array([int(bar.get("ts_ms", end - hour_ms)) for bar, end in zip(bars, ends)], dtype=np.int64),
+        "bar_end_ts_ms": np.array(ends, dtype=np.int64),
+        "open": np.array([float(bar.get("open", bar.get("close", 0.0))) for bar in bars], dtype=np.float64),
+        "high": np.array([float(bar.get("high", 0.0)) for bar in bars], dtype=np.float64),
+        "low": np.array([float(bar.get("low", 0.0)) for bar in bars], dtype=np.float64),
+        "close": np.array([float(bar.get("close", 0.0)) for bar in bars], dtype=np.float64),
+        "ends": ends,
+        "by_end": {end: idx for idx, end in enumerate(ends)},
+    }
 
 
 def _migration_unit_config(**overrides: object) -> VolumeEventResearchConfig:
@@ -276,14 +295,12 @@ def test_enriched_event_features_adds_feature_factory_columns() -> None:
 
 def test_bar_extreme_stop_fill_uses_adverse_hourly_extreme_for_short() -> None:
     hour = 60 * 60 * 1000
-    symbol_bars = {
-        "rows": [
+    symbol_bars = _make_symbol_bars(
+        [
             {"bar_end_ts_ms": hour, "high": 101.0, "low": 99.0, "close": 100.0},
             {"bar_end_ts_ms": 2 * hour, "high": 130.0, "low": 95.0, "close": 105.0},
-        ],
-        "ends": [hour, 2 * hour],
-        "by_end": {},
-    }
+        ]
+    )
     base_kwargs = {
         "symbol": "AUSDT",
         "side": "short",
@@ -291,7 +308,7 @@ def test_bar_extreme_stop_fill_uses_adverse_hourly_extreme_for_short() -> None:
         "rank": 1,
         "basket_id": "basket",
         "signal_ts_ms": 0,
-        "entry_bar": symbol_bars["rows"][0],
+        "entry_bar": 0,
         "symbol_bars": symbol_bars,
         "planned_exit_ts_ms": 2 * hour,
         "notional_weight": 1.0,
@@ -315,16 +332,14 @@ def test_bar_extreme_stop_fill_uses_adverse_hourly_extreme_for_short() -> None:
 
 def test_failed_fade_exit_cuts_short_after_unresolved_continuation() -> None:
     hour = 60 * 60 * 1000
-    symbol_bars = {
-        "rows": [
+    symbol_bars = _make_symbol_bars(
+        [
             {"bar_end_ts_ms": hour, "high": 101.0, "low": 99.0, "close": 100.0},
             {"bar_end_ts_ms": 2 * hour, "high": 101.2, "low": 99.7, "close": 101.0},
             {"bar_end_ts_ms": 3 * hour, "high": 103.0, "low": 100.5, "close": 102.8},
             {"bar_end_ts_ms": 4 * hour, "high": 104.0, "low": 100.0, "close": 101.0},
-        ],
-        "ends": [hour, 2 * hour, 3 * hour, 4 * hour],
-        "by_end": {},
-    }
+        ]
+    )
 
     trade = _simulate_indexed_trade(
         symbol="AUSDT",
@@ -333,7 +348,7 @@ def test_failed_fade_exit_cuts_short_after_unresolved_continuation() -> None:
         rank=1,
         basket_id="basket",
         signal_ts_ms=0,
-        entry_bar=symbol_bars["rows"][0],
+        entry_bar=0,
         symbol_bars=symbol_bars,
         planned_exit_ts_ms=4 * hour,
         notional_weight=1.0,
@@ -360,16 +375,14 @@ def test_failed_fade_exit_cuts_short_after_unresolved_continuation() -> None:
 
 def test_promoted_quality_entry_waits_for_completed_giveback() -> None:
     hour = 60 * 60 * 1000
-    symbol_bars = {
-        "rows": [],
-        "ends": [0, hour, 2 * hour, 3 * hour],
-        "by_end": {
-            0: {"bar_end_ts_ms": 0, "high": 101.0, "low": 99.0, "close": 100.0},
-            hour: {"bar_end_ts_ms": hour, "high": 101.2, "low": 100.0, "close": 101.1},
-            2 * hour: {"bar_end_ts_ms": 2 * hour, "high": 101.6, "low": 101.0, "close": 101.5},
-            3 * hour: {"bar_end_ts_ms": 3 * hour, "high": 101.6, "low": 100.9, "close": 101.1},
-        },
-    }
+    symbol_bars = _make_symbol_bars(
+        [
+            {"bar_end_ts_ms": 0, "high": 101.0, "low": 99.0, "close": 100.0},
+            {"bar_end_ts_ms": hour, "high": 101.2, "low": 100.0, "close": 101.1},
+            {"bar_end_ts_ms": 2 * hour, "high": 101.6, "low": 101.0, "close": 101.5},
+            {"bar_end_ts_ms": 3 * hour, "high": 101.6, "low": 100.9, "close": 101.1},
+        ]
+    )
     event = {
         "ts_ms": 0,
         "symbol": "AAAUSDT",
@@ -408,11 +421,9 @@ def test_promoted_quality_entry_waits_for_completed_giveback() -> None:
 
 def test_fixed_entry_policy_keeps_plain_delay() -> None:
     hour = 60 * 60 * 1000
-    symbol_bars = {
-        "rows": [],
-        "ends": [hour],
-        "by_end": {hour: {"bar_end_ts_ms": hour, "high": 101.0, "low": 99.0, "close": 100.0}},
-    }
+    symbol_bars = _make_symbol_bars(
+        [{"bar_end_ts_ms": hour, "high": 101.0, "low": 99.0, "close": 100.0}]
+    )
 
     decision = _entry_decision_for_event(
         {"ts_ms": 0, "symbol": "AAAUSDT"},
@@ -424,18 +435,23 @@ def test_fixed_entry_policy_keeps_plain_delay() -> None:
 
     assert decision["entry_policy"] == ENTRY_POLICY_FIXED_DELAY
     assert decision["entry_ts_ms"] == hour
-    assert decision["entry_bar"]["close"] == 100.0
+    assert decision["entry_bar"] == 0
+    assert symbol_bars["close"][decision["entry_bar"]] == 100.0
 
 
 def test_entry_execution_veto_skips_high_close_location() -> None:
+    symbol_bars = _make_symbol_bars(
+        [{"bar_end_ts_ms": 1, "high": 102.0, "low": 100.0, "close": 101.9}]
+    )
     decision = {
-        "entry_bar": {"bar_end_ts_ms": 1, "high": 102.0, "low": 100.0, "close": 101.9},
+        "entry_bar": 0,
         "entry_rule": "quality_fixed_delay",
         "pending": False,
     }
 
     vetoed = _apply_entry_execution_veto(
         decision,
+        symbol_bars=symbol_bars,
         config=VolumeEventResearchConfig(entry_execution_veto_close_location_max=0.90),
     )
 
@@ -1881,14 +1897,12 @@ def test_position_weighting_config_is_validated() -> None:
 
 def test_simulate_indexed_trade_scales_pnl_by_position_weight() -> None:
     hour = 60 * 60 * 1000
-    symbol_bars = {
-        "rows": [
+    symbol_bars = _make_symbol_bars(
+        [
             {"bar_end_ts_ms": hour, "high": 101.0, "low": 99.0, "close": 100.0},
             {"bar_end_ts_ms": 2 * hour, "high": 100.5, "low": 97.0, "close": 98.0},
-        ],
-        "ends": [hour, 2 * hour],
-        "by_end": {},
-    }
+        ]
+    )
     base_kwargs = {
         "symbol": "AUSDT",
         "side": "short",
@@ -1896,7 +1910,7 @@ def test_simulate_indexed_trade_scales_pnl_by_position_weight() -> None:
         "rank": 1,
         "basket_id": "basket",
         "signal_ts_ms": 0,
-        "entry_bar": symbol_bars["rows"][0],
+        "entry_bar": 0,
         "symbol_bars": symbol_bars,
         "planned_exit_ts_ms": 2 * hour,
         "notional_weight": 0.2,
