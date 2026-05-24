@@ -31,7 +31,6 @@ from .portfolio_hedge import run_portfolio_hedge_report
 from .reconciliation import run_paper_demo_reconciliation
 from .strategy_tribunal import StrategyTribunalConfig, run_strategy_tribunal
 from .universe import run_discover_universe
-from .momentum_signals import RANKERS as MOMENTUM_RANKERS
 from .volume_events import ENTRY_POLICIES, POSITION_WEIGHTINGS, VolumeEventResearchConfig, run_volume_event_research
 from .ws_risk import EventWebSocketRiskConfig, run_event_ws_risk
 
