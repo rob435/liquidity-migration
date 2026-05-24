@@ -454,3 +454,52 @@ def test_long_demo_cycle_summary_includes_key_fields() -> None:
     assert "long-native event demo cycle" in text
     assert "MultiStratV1" in text
     assert "entries=1/1" in text
+
+
+def test_long_kline_universe_fetcher_scopes_to_top_n_by_turnover() -> None:
+    """Long daemon's kline manager must NOT bootstrap all 567 USDT-perps.
+
+    The long sleeve only trades the top-10 by 24h turnover; scoping the
+    kline universe to the top-50 keeps memory under the systemd cap (was
+    OOM-killing at 1G with the full universe) while leaving 5x rank-shift
+    headroom. Anything beyond the top-50 falls back to per-cycle REST.
+    """
+    from liquidity_migration.long_native_event_demo_daemon import (
+        _LONG_KLINE_UNIVERSE_SIZE,
+        _build_long_kline_universe,
+    )
+
+    class _FakeMarket:
+        def get_tickers(self) -> list[dict]:
+            rows: list[dict] = []
+            for i in range(200):
+                rows.append({"symbol": f"SYM{i:03d}USDT", "turnover24h": str(1_000_000 - i)})
+            # Non-USDT pair — must be excluded.
+            rows.append({"symbol": "BTC-PERP", "turnover24h": "999"})
+            # Zero turnover + null turnover — must be excluded.
+            rows.append({"symbol": "DEADUSDT", "turnover24h": "0"})
+            rows.append({"symbol": "NULLUSDT", "turnover24h": None})
+            return rows
+
+    symbols = _build_long_kline_universe(_FakeMarket())
+    assert len(symbols) == _LONG_KLINE_UNIVERSE_SIZE
+    assert symbols[0] == "SYM000USDT"
+    assert symbols[-1] == f"SYM{_LONG_KLINE_UNIVERSE_SIZE - 1:03d}USDT"
+    assert "BTC-PERP" not in symbols
+    assert "DEADUSDT" not in symbols
+    assert "NULLUSDT" not in symbols
+
+
+def test_long_kline_universe_fetcher_returns_empty_on_rest_failure() -> None:
+    """Universe fetch errors must not crash the manager — empty list lets
+    the manager bootstrap nothing and the cycle's REST fallback supplies
+    everything that day."""
+    from liquidity_migration.long_native_event_demo_daemon import (
+        _build_long_kline_universe,
+    )
+
+    class _FailingMarket:
+        def get_tickers(self) -> list[dict]:
+            raise RuntimeError("simulated REST outage")
+
+    assert _build_long_kline_universe(_FailingMarket()) == []

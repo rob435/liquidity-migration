@@ -607,6 +607,47 @@ def _build_private_ws_stream(config: ResearchConfig) -> BybitPrivateWebSocketStr
     )
 
 
+# The long sleeve actually trades the top-10 USDT-perps by 24h turnover
+# (LongNativeDemoCycleConfig.universe_size=10). Subscribing the kline
+# manager to the full 567-symbol universe blew the 1G systemd cap (1.15M
+# bars × ~230b = 280MB just for the store, plus polars frames + ticker
+# cache). Scope the manager to the top-50 by turnover — 5x headroom for
+# rank shifts between universe-refresh ticks, and the cycle's REST
+# fallback still covers anything that drops in unexpectedly.
+_LONG_KLINE_UNIVERSE_SIZE = 50
+
+
+def _build_long_kline_universe(
+    market: BybitMarketData, *, top_n: int = _LONG_KLINE_UNIVERSE_SIZE,
+) -> list[str]:
+    """Top-N active linear USDT-perps by 24h turnover.
+
+    Returned to KlineStreamManager._fetch_universe via the manager's
+    ``universe_fetcher`` hook. Hourly refresh in the manager re-runs this,
+    so newly-promoted symbols join the bootstrap+WS stream within the
+    refresh interval. Anything not in the manager's universe falls back
+    to per-cycle REST on demand."""
+    try:
+        tickers = market.get_tickers()
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("long kline universe fetch failed (tickers): %s", exc)
+        return []
+    candidates: list[tuple[float, str]] = []
+    for row in tickers:
+        symbol = str(row.get("symbol") or "")
+        if not symbol or not symbol.endswith("USDT"):
+            continue
+        try:
+            turnover = float(row.get("turnover24h") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if turnover <= 0.0:
+            continue
+        candidates.append((turnover, symbol))
+    candidates.sort(reverse=True)
+    return [symbol for _, symbol in candidates[: max(top_n, 1)]]
+
+
 def _default_long_kline_stream_manager_factory(
     config: ResearchConfig,
     demo_config: LongNativeDemoCycleConfig,
@@ -624,6 +665,7 @@ def _default_long_kline_stream_manager_factory(
         topics_per_connection=demo_config.ws_klines_topics_per_connection,
         stale_warning_seconds=demo_config.ws_klines_stale_warning_seconds,
         stale_reconnect_seconds=demo_config.ws_klines_stale_reconnect_seconds,
+        universe_fetcher=lambda m=market: _build_long_kline_universe(m),
     )
 
 
