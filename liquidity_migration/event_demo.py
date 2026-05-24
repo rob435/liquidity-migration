@@ -149,6 +149,29 @@ def run_event_demo_cycle(
         instruments = _demo_instruments(public, cache_root=root, now_ms=cycle_now_ms)
         tickers = _normalize_tickers(public.get_tickers())
         universe = _build_demo_universe(instruments, tickers, config=demo, snapshot_ts_ms=cycle_now_ms)
+        # Defensive: if universe came back materially smaller than requested
+        # (e.g. stale instruments cache served pre-listing-day data, or Bybit
+        # ticker API returned partial response near UTC midnight), bust the
+        # instruments cache and try once more with a forced fresh fetch.
+        # Found 2026-05-24: cycles between 00:00-04:00 UTC silently produced
+        # ~168 symbols vs requested 400 for days, hiding every signal because
+        # the strategy needs rank_end=300 at minimum to observe rocket signals.
+        requested_universe_size = demo.universe_max_symbols or demo.universe_rank_end
+        if requested_universe_size > 0 and universe.height < int(requested_universe_size * 0.75):
+            _logger.warning(
+                "universe shrink detected: got %d symbols, requested %d; busting instruments cache and retrying",
+                universe.height, requested_universe_size,
+            )
+            _bust_demo_instruments_cache(root)
+            instruments = _demo_instruments(public, cache_root=root, now_ms=cycle_now_ms)
+            tickers = _normalize_tickers(public.get_tickers())
+            universe = _build_demo_universe(instruments, tickers, config=demo, snapshot_ts_ms=cycle_now_ms)
+            if universe.height < int(requested_universe_size * 0.75):
+                _logger.error(
+                    "universe shrink PERSISTS after cache bust: %d symbols (requested %d, instruments=%d, tickers=%d). "
+                    "Strategy cannot fire signals at this universe size — investigate Bybit API or filter logic.",
+                    universe.height, requested_universe_size, instruments.height, tickers.height,
+                )
         symbols = universe["symbol"].to_list() if not universe.is_empty() else []
         if not symbols:
             raise RuntimeError("Bybit demo event cycle found no current tradable symbols after universe filters")
@@ -1639,6 +1662,13 @@ def _read_demo_instruments_cache(cache_root: Path) -> tuple[pl.DataFrame | None,
     return frame, fetched_ts_ms
 
 
+def _bust_demo_instruments_cache(cache_root: Path) -> None:
+    """Delete the instruments cache so the next _demo_instruments call refetches."""
+    parquet_path, metadata_path = _demo_instruments_cache_paths(cache_root)
+    parquet_path.unlink(missing_ok=True)
+    metadata_path.unlink(missing_ok=True)
+
+
 def _write_demo_instruments_cache(cache_root: Path, instruments: pl.DataFrame, fetched_ts_ms: int) -> None:
     if instruments.is_empty():
         return
@@ -1697,28 +1727,12 @@ def _build_demo_universe(
         max_symbols=config.universe_max_symbols,
         exclude_symbols=DEFAULT_EXCLUDED_SYMBOLS,
     )
-    result = build_current_universe_table(
+    return build_current_universe_table(
         instruments,
         tickers,
         universe_config=universe_config,
         snapshot_ts_ms=snapshot_ts_ms,
     )
-    # Loud warning if the returned universe is materially below requested size.
-    # Found 2026-05-24 in live audit: cycles between 00:00-04:00 UTC produced
-    # only ~168 symbols vs requested 400, silently hiding every signal because
-    # the strategy's required_prior7_rank (300) was outside the visible universe.
-    # The fix root cause is upstream (likely Bybit ticker API partial response
-    # near UTC midnight or stale instruments cache); the warning surfaces the
-    # event so operators see it instead of a silent zero-trade day.
-    requested = config.universe_max_symbols or config.universe_rank_end
-    if requested > 0 and result.height < int(requested * 0.75):
-        _logger.warning(
-            "universe builder returned %d symbols, requested %d (instruments=%d, tickers=%d). "
-            "Strategies that need rank_end=%d cannot see signals at this universe size — "
-            "check Bybit ticker API health or instruments cache freshness.",
-            result.height, requested, instruments.height, tickers.height, requested,
-        )
-    return result
 
 
 def _download_recent_1h_klines(
