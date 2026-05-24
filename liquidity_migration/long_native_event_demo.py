@@ -47,7 +47,6 @@ from .event_demo import (
     _base36,
     _bool,
     _build_private_client,
-    _collect_private_snapshots,
     _column_values,
     _combine_errors,
     _contract_lookup,

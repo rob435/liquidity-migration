@@ -9,7 +9,6 @@ the cycle integration is a drop-in replacement.
 from __future__ import annotations
 
 import threading
-import time
 
 import pytest
 

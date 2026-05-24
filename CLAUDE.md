@@ -22,6 +22,20 @@ regime-conditional, and the current focus is regime-aware refinement (see
 - CLI: `python -m liquidity_migration <subcommand>` (17 subcommands; see `--help`).
 - Tests: `.venv/bin/python -m pytest -q`.
 
+## Mandatory pre-push gate (CI parity)
+
+**Before EVERY `git push` on this repo, run BOTH commands the CI workflow
+(`.github/workflows/ci.yml`) runs:**
+
+```bash
+.venv/bin/python -m ruff check liquidity_migration tests
+.venv/bin/python -m pytest -q
+```
+
+If `ruff` fails, fix with `ruff check --fix` and re-verify. If pytest fails,
+fix the tests before pushing. The user gets a GitHub email on every CI
+failure — pushing broken code is operator pain. No exceptions.
+
 ## Working here
 
 - Project skills in `.claude/skills/` load automatically when relevant:

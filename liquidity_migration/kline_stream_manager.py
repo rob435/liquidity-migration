@@ -41,7 +41,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import polars as pl
 
 from ._common import MS_PER_DAY, MS_PER_HOUR
 from .bybit import (
@@ -49,7 +48,7 @@ from .bybit import (
     BybitMarketData,
     BybitRestRateLimiter,
 )
-from .kline_store import KlineStore, WS_STORE_SOURCE
+from .kline_store import KlineStore
 
 
 _logger = logging.getLogger("liquidity_migration.kline_stream_manager")

@@ -21,8 +21,8 @@ from pathlib import Path
 
 import pytest
 
-from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
-from liquidity_migration.kline_store import KlineStore, WS_STORE_SOURCE
+from liquidity_migration._common import MS_PER_HOUR
+from liquidity_migration.kline_store import KlineStore
 from liquidity_migration.kline_stream_manager import (
     KlineStreamManager,
     _default_universe_filter,

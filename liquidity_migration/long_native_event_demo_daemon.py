@@ -33,7 +33,6 @@ from .bybit import (
     resolve_private_credentials,
 )
 from .config import ResearchConfig
-from .downloaders import _normalize_tickers
 from .execution_router import ExecutionEventRouter
 from .kline_stream_manager import KlineStreamManager
 from .long_native_event_demo import (
