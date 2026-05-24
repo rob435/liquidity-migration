@@ -36,6 +36,26 @@ MAX_NEW_ENTRIES_PER_CYCLE="${MAX_NEW_ENTRIES_PER_CYCLE:-5}"
 ORDER_FILL_CONFIRM_SECONDS="${ORDER_FILL_CONFIRM_SECONDS:-2}"
 ORDER_FILL_POLL_INTERVAL_SECONDS="${ORDER_FILL_POLL_INTERVAL_SECONDS:-0.2}"
 FALLBACK_EQUITY_USDT="${FALLBACK_EQUITY_USDT:-10000}"
+WS_KLINES_ENABLED="${WS_KLINES_ENABLED:-1}"
+WS_KLINES_BOOTSTRAP_WORKERS="${WS_KLINES_BOOTSTRAP_WORKERS:-16}"
+WS_KLINES_LOOKBACK_DAYS="${WS_KLINES_LOOKBACK_DAYS:-90}"
+WS_KLINES_UNIVERSE_REFRESH_SECONDS="${WS_KLINES_UNIVERSE_REFRESH_SECONDS:-3600}"
+WS_KLINES_TOPICS_PER_CONNECTION="${WS_KLINES_TOPICS_PER_CONNECTION:-180}"
+WS_KLINES_STALE_WARNING_SECONDS="${WS_KLINES_STALE_WARNING_SECONDS:-60}"
+WS_KLINES_STALE_RECONNECT_SECONDS="${WS_KLINES_STALE_RECONNECT_SECONDS:-180}"
+
+ws_klines_args=()
+if [[ "$WS_KLINES_ENABLED" == "1" ]]; then
+    ws_klines_args+=(--ws-klines-enabled)
+else
+    ws_klines_args+=(--no-ws-klines)
+fi
+ws_klines_args+=(--ws-klines-bootstrap-workers "$WS_KLINES_BOOTSTRAP_WORKERS")
+ws_klines_args+=(--ws-klines-lookback-days "$WS_KLINES_LOOKBACK_DAYS")
+ws_klines_args+=(--ws-klines-universe-refresh-seconds "$WS_KLINES_UNIVERSE_REFRESH_SECONDS")
+ws_klines_args+=(--ws-klines-topics-per-connection "$WS_KLINES_TOPICS_PER_CONNECTION")
+ws_klines_args+=(--ws-klines-stale-warning-seconds "$WS_KLINES_STALE_WARNING_SECONDS")
+ws_klines_args+=(--ws-klines-stale-reconnect-seconds "$WS_KLINES_STALE_RECONNECT_SECONDS")
 
 telegram_args=()
 if [[ "${TELEGRAM_ENABLED:-1}" == "1" ]]; then
@@ -101,7 +121,8 @@ if [[ "${USE_DAEMON:-1}" == "1" ]]; then
         --strategy-profile "$STRATEGY_PROFILE" \
         --daemon --interval-seconds "$INTERVAL_SECONDS" \
         "${telegram_args[@]}" \
-        "${order_args[@]}"
+        "${order_args[@]}" \
+        "${ws_klines_args[@]}"
 fi
 
 echo "long-native demo engine: legacy single-cycle loop (USE_DAEMON=1 enables daemon)"
@@ -124,7 +145,8 @@ while true; do
         --fallback-equity-usdt "$FALLBACK_EQUITY_USDT" \
         --strategy-profile "$STRATEGY_PROFILE" \
         "${telegram_args[@]}" \
-        "${order_args[@]}"
+        "${order_args[@]}" \
+        "${ws_klines_args[@]}"
     status=$?
     set -e
     if [[ "$status" -ne 0 ]]; then

@@ -87,6 +87,19 @@ class EventDemoCycleConfig:
     data_name: str = "event-demo"
     strategy_profile: str = "promoted"
     max_active_symbols: int = 0  # 0 = use the strategy profile's value; >0 overrides it
+    # WS-driven kline delivery. The daemon constructs a KlineStreamManager
+    # when ws_klines_enabled, bootstraps lookback_days of history, then keeps
+    # a hot in-memory store fed by Bybit's kline WS — cycle's
+    # _download_recent_1h_klines reads from the store first and only REST-
+    # fetches symbols not yet covered. Disable (env WS_KLINES_ENABLED=0) to
+    # revert to the legacy REST-on-cycle path.
+    ws_klines_enabled: bool = True
+    ws_klines_bootstrap_workers: int = 16
+    ws_klines_lookback_days: int = 45
+    ws_klines_universe_refresh_seconds: float = 3600.0
+    ws_klines_topics_per_connection: int = 180
+    ws_klines_stale_warning_seconds: float = 60.0
+    ws_klines_stale_reconnect_seconds: float = 180.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +132,10 @@ def run_event_demo_cycle(
     private_client: Any | None = None,
     now_ms: int | None = None,
     execution_event_router: Any | None = None,
+    kline_store: Any | None = None,
+    private_state_cache: Any | None = None,
+    ticker_cache: Any | None = None,
+    state_cache_stale_seconds: float = 120.0,
 ) -> dict[str, Any]:
     demo = demo_config or EventDemoCycleConfig()
     strategy = _demo_event_config(event_config or VolumeEventResearchConfig(), profile=demo.strategy_profile)
@@ -147,7 +164,12 @@ def run_event_demo_cycle(
         mark_stage("cycle_lock_wait")
         public = market_client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
         instruments = _demo_instruments(public, cache_root=root, now_ms=cycle_now_ms)
-        tickers = _normalize_tickers(public.get_tickers())
+        raw_tickers, ticker_source = _resolve_ticker_snapshot(
+            public,
+            ticker_cache=ticker_cache,
+            state_cache_stale_seconds=state_cache_stale_seconds,
+        )
+        tickers = _normalize_tickers(raw_tickers)
         universe = _build_demo_universe(instruments, tickers, config=demo, snapshot_ts_ms=cycle_now_ms)
         # Defensive: if universe came back materially smaller than requested
         # (e.g. stale instruments cache served pre-listing-day data, or Bybit
@@ -164,6 +186,8 @@ def run_event_demo_cycle(
             )
             _bust_demo_instruments_cache(root)
             instruments = _demo_instruments(public, cache_root=root, now_ms=cycle_now_ms)
+            # Universe shrink retry always uses fresh REST — bypass the cache
+            # in case the cache itself is stale and producing the shrunk view.
             tickers = _normalize_tickers(public.get_tickers())
             universe = _build_demo_universe(instruments, tickers, config=demo, snapshot_ts_ms=cycle_now_ms)
             if universe.height < int(requested_universe_size * 0.75):
@@ -189,12 +213,22 @@ def run_event_demo_cycle(
             trading_client = _build_private_client(config)
         snapshot_result: dict[str, Any] = {}
 
+        private_snapshot_source: dict[str, str] = {}
+
         def _run_private_snapshots() -> None:
             try:
-                snapshot_result.update(_collect_private_snapshots(trading_client, demo))
+                snap, source = _resolve_private_snapshot(
+                    trading_client,
+                    demo,
+                    private_state_cache=private_state_cache,
+                    state_cache_stale_seconds=state_cache_stale_seconds,
+                )
+                snapshot_result.update(snap)
+                private_snapshot_source["source"] = source
             except Exception as exc:  # noqa: BLE001 - a cycle must never crash on a dead snapshot thread
                 _logger.exception("private snapshot worker failed: %s", exc)
                 snapshot_result.update(_collect_private_snapshots(None, demo))
+                private_snapshot_source["source"] = "rest_after_error"
 
         snapshot_thread = threading.Thread(target=_run_private_snapshots, daemon=True)
         snapshot_thread.start()
@@ -208,6 +242,7 @@ def run_event_demo_cycle(
             workers=demo.workers,
             market_client=public if market_client is not None else None,
             cache_root=root,
+            kline_store=kline_store,
         )
         mark_stage("klines")
         features = _build_demo_features(klines, universe, cache_root=root)
@@ -452,6 +487,8 @@ def run_event_demo_cycle(
             "kline_cache_symbols": kline_cache_stats["cache_symbols"],
             "kline_fetch_symbols": kline_cache_stats["fetch_symbols"],
             "kline_fetched_rows": kline_cache_stats["fetched_rows"],
+            "kline_store_rows": kline_cache_stats.get("store_rows", 0),
+            "kline_store_symbols": kline_cache_stats.get("store_symbols", 0),
             "feature_rows": features.height,
             "latest_feature_ts_ms": _max_int(features, "ts_ms"),
             "events_pipeline": pipeline_diagnostics["events_pipeline"],
@@ -529,6 +566,10 @@ def run_event_demo_cycle(
             "ledger_positions": ledger_positions,
             "ledger_position_summary": ledger_position_summary,
             "bybit_public_stats": public.stats() if hasattr(public, "stats") else {},
+            "data_sources": {
+                "ticker_source": ticker_source,
+                "private_snapshot_source": private_snapshot_source.get("source", "rest"),
+            },
             "report_dir": str(report_dir),
         }
         telegram_sent, telegram_error = _maybe_notify(payload, enabled=demo.telegram)
@@ -1771,13 +1812,26 @@ def _download_recent_1h_klines(
     workers: int,
     market_client: Any | None,
     cache_root: Path | None = None,
+    kline_store: Any | None = None,
 ) -> tuple[pl.DataFrame, dict[str, int]]:
+    """Return the (symbol, ts_ms) rectangular klines for the demo cycle.
+
+    Sources tried in order:
+      1. If ``kline_store`` is supplied, query it first — the WS-driven path
+         delivers a hot in-memory window in <50ms vs the REST burst's
+         multi-second tail. Symbols not yet covered by the store fall through
+         to the REST path below.
+      2. The on-disk compact + parquet caches (legacy REST-only fast path).
+      3. REST fetches for any remaining ranges.
+    """
     stats = {
         "cache_rows": 0,
         "cache_symbols": 0,
         "fetch_symbols": len(symbols),
         "fetched_rows": 0,
         "output_rows": 0,
+        "store_rows": 0,
+        "store_symbols": 0,
     }
     if end_ms < start_ms:
         return _empty_klines(), stats
@@ -1785,18 +1839,49 @@ def _download_recent_1h_klines(
         stats["fetch_symbols"] = 0
         return _empty_klines(), stats
 
+    # 1) WS store fast path. The store may not cover every symbol (newly
+    # listed, mid-bootstrap), so we explicitly split into store-covered and
+    # store-uncovered subsets and fall back to REST only for the uncovered.
+    store_frame = _empty_klines()
+    if kline_store is not None:
+        try:
+            covered_set = kline_store.symbols_with_coverage_through(end_ms)
+        except Exception as exc:  # noqa: BLE001 - store must never break the cycle
+            _logger.warning("kline_store coverage query failed; ignoring store: %s", exc)
+            covered_set = set()
+        covered_symbols = [s for s in symbols if s in covered_set]
+        if covered_symbols:
+            try:
+                store_frame = kline_store.get_klines(
+                    covered_symbols, start_ms=start_ms, end_ms=end_ms,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("kline_store get_klines failed; ignoring store: %s", exc)
+                store_frame = _empty_klines()
+        if not store_frame.is_empty():
+            stats["store_rows"] = store_frame.height
+            stats["store_symbols"] = store_frame.select("symbol").unique().height
+
+    # 2) On-disk caches still apply to symbols not yet in the store, so the
+    # legacy fast path is preserved for the bootstrap window.
     cached = _read_demo_kline_cache(cache_root, symbols=symbols, start_ms=start_ms, end_ms=end_ms)
     if not cached.is_empty():
         stats["cache_rows"] = cached.height
         stats["cache_symbols"] = cached.select("symbol").unique().height
 
-    fetch_ranges = _demo_kline_fetch_ranges(symbols, cached, start_ms=start_ms, end_ms=end_ms)
+    # Merge what we have so far so the REST fetch only fills genuine gaps.
+    combined = _concat_recent_klines(store_frame, cached)
+    fetch_ranges = _demo_kline_fetch_ranges(symbols, combined, start_ms=start_ms, end_ms=end_ms)
     stats["fetch_symbols"] = len(fetch_ranges)
     if not fetch_ranges:
-        output = _dedupe_recent_klines(cached)
+        output = _dedupe_recent_klines(combined)
         stats["output_rows"] = output.height
+        _write_demo_kline_compact_cache(
+            cache_root, symbols=symbols, start_ms=start_ms, end_ms=end_ms, klines=output,
+        )
         return output, stats
 
+    # 3) REST fallback for remaining ranges.
     fetched = _fetch_recent_1h_klines(
         fetch_ranges,
         config=config,
@@ -1807,11 +1892,23 @@ def _download_recent_1h_klines(
     if cache_root is not None and not fetched.is_empty():
         write_dataset(fetched, cache_root, "event_demo_klines_1h")
 
-    frames = [frame for frame in (cached, fetched) if not frame.is_empty()]
-    output = _dedupe_recent_klines(pl.concat(frames, how="diagonal_relaxed") if frames else _empty_klines())
+    frames = [frame for frame in (store_frame, cached, fetched) if not frame.is_empty()]
+    output = _dedupe_recent_klines(
+        pl.concat(frames, how="diagonal_relaxed") if frames else _empty_klines()
+    )
     _write_demo_kline_compact_cache(cache_root, symbols=symbols, start_ms=start_ms, end_ms=end_ms, klines=output)
     stats["output_rows"] = output.height
     return output, stats
+
+
+def _concat_recent_klines(*frames: pl.DataFrame) -> pl.DataFrame:
+    """Concat any number of klines frames, skipping empties. Returns the
+    canonical empty-klines frame if all inputs are empty so downstream
+    schema-sensitive code (group_by, sort) doesn't blow up."""
+    populated = [frame for frame in frames if not frame.is_empty()]
+    if not populated:
+        return _empty_klines()
+    return _dedupe_recent_klines(pl.concat(populated, how="diagonal_relaxed"))
 
 
 def _read_demo_kline_cache(
@@ -3629,7 +3726,57 @@ def _refresh_positions_and_orders(
         return positions_future.result(), orders_future.result()
 
 
-def _collect_private_snapshots(trading_client: Any | None, demo: EventDemoCycleConfig) -> dict[str, Any]:
+def _resolve_private_snapshot(
+    trading_client: Any | None,
+    demo: Any,
+    *,
+    private_state_cache: Any | None,
+    state_cache_stale_seconds: float,
+) -> tuple[dict[str, Any], str]:
+    """Return the cycle's private snapshot, preferring the WS-fed cache.
+
+    Returns ``(snapshot_dict, source)`` where ``source`` is either
+    ``"ws_cache"`` (fast path) or ``"rest"`` (fallback). The cache is the
+    fast path; if it is missing, not yet seeded, or stale, the REST path
+    runs instead so the cycle never operates on stale state.
+    """
+    if private_state_cache is not None:
+        try:
+            if private_state_cache.is_seeded() and not private_state_cache.is_stale(
+                stale_seconds=state_cache_stale_seconds,
+            ):
+                return private_state_cache.snapshot(), "ws_cache"
+        except Exception as exc:  # noqa: BLE001 - cache must never break the cycle
+            _logger.warning("private state cache snapshot failed; REST fallback: %s", exc)
+    return _collect_private_snapshots(trading_client, demo), "rest"
+
+
+def _resolve_ticker_snapshot(
+    public: Any,
+    *,
+    ticker_cache: Any | None,
+    state_cache_stale_seconds: float,
+) -> tuple[list[dict[str, Any]], str]:
+    """Bulk tickers from the WS cache when fresh, otherwise from REST.
+
+    Returns ``(tickers_list, source)``. The returned list matches the shape
+    ``BybitMarketData.get_tickers()`` returns — a per-symbol list of raw
+    Bybit V5 ticker dicts, ready for ``_normalize_tickers``.
+    """
+    if ticker_cache is not None:
+        try:
+            if ticker_cache.is_seeded() and not ticker_cache.is_stale(
+                stale_seconds=state_cache_stale_seconds,
+            ):
+                snap = ticker_cache.snapshot_list()
+                if snap:
+                    return snap, "ws_cache"
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("ticker cache snapshot failed; REST fallback: %s", exc)
+    return public.get_tickers(), "rest"
+
+
+def _collect_private_snapshots(trading_client: Any | None, demo: Any) -> dict[str, Any]:
     """Fetch one cycle's three private REST snapshots — wallet equity, open
     orders, positions — concurrently.
 

@@ -90,6 +90,50 @@ def test_demo_services_use_unblocked_entry_lag() -> None:
         assert "Environment=MAX_ENTRY_LAG_MINUTES=360" in text, f"{unit}: MAX_ENTRY_LAG_MINUTES regression"
 
 
+def test_services_enable_ws_klines() -> None:
+    """All four demo services (short+long, demo+paper) must enable the WS
+    kline manager. WS_KLINES_ENABLED=1 flips the daemon onto the in-memory
+    store, eliminating the per-cycle REST kline burst that caused 3-4h late
+    entries on the legacy path."""
+    repo = Path(__file__).resolve().parents[1]
+    for unit in (
+        "liquidity-migration-bybit-demo.service",
+        "liquidity-migration-bybit-paper.service",
+        "liquidity-migration-bybit-long-demo.service",
+        "liquidity-migration-bybit-long-paper.service",
+    ):
+        text = (repo / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
+        assert "Environment=WS_KLINES_ENABLED=1" in text, f"{unit}: WS_KLINES_ENABLED not set"
+
+
+def test_bash_runners_wire_ws_klines_env() -> None:
+    """Both short + long bash runners must expose the WS_KLINES_* env vars
+    as CLI args. Without this, the systemd Environment lines are silently
+    dropped and the daemon stays on the legacy REST path."""
+    repo = Path(__file__).resolve().parents[1]
+    for script_name in (
+        "run_bybit_demo_event_engine.sh",
+        "run_bybit_long_demo_event_engine.sh",
+    ):
+        text = (repo / "scripts" / script_name).read_text(encoding="utf-8")
+        # Env vars are read with defaults.
+        assert 'WS_KLINES_ENABLED="${WS_KLINES_ENABLED:-1}"' in text, f"{script_name}: missing WS_KLINES_ENABLED default"
+        assert "WS_KLINES_BOOTSTRAP_WORKERS" in text, f"{script_name}: missing WS_KLINES_BOOTSTRAP_WORKERS"
+        assert "WS_KLINES_LOOKBACK_DAYS" in text, f"{script_name}: missing WS_KLINES_LOOKBACK_DAYS"
+        assert "WS_KLINES_UNIVERSE_REFRESH_SECONDS" in text, f"{script_name}: missing WS_KLINES_UNIVERSE_REFRESH_SECONDS"
+        assert "WS_KLINES_TOPICS_PER_CONNECTION" in text, f"{script_name}: missing WS_KLINES_TOPICS_PER_CONNECTION"
+        assert "WS_KLINES_STALE_WARNING_SECONDS" in text, f"{script_name}: missing WS_KLINES_STALE_WARNING_SECONDS"
+        # And they're passed through the CLI.
+        assert "--ws-klines-enabled" in text, f"{script_name}: missing --ws-klines-enabled"
+        assert "--no-ws-klines" in text, f"{script_name}: missing --no-ws-klines kill-switch"
+        assert "--ws-klines-bootstrap-workers" in text
+        assert "--ws-klines-lookback-days" in text
+        assert "--ws-klines-universe-refresh-seconds" in text
+        assert "--ws-klines-topics-per-connection" in text
+        assert "--ws-klines-stale-warning-seconds" in text
+        assert "--ws-klines-stale-reconnect-seconds" in text
+
+
 def test_demo_health_watchdog_units_present() -> None:
     """The hourly entry-health watchdog timer + service must ship together so
     'no entries in 24h' regressions don't go silent. Validates wire-up of the

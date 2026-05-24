@@ -1285,6 +1285,58 @@ def _add_event_demo_cycle_parser(subparsers) -> None:
         default=60.0,
         help="Seconds between cycles in --daemon mode. Ignored otherwise.",
     )
+    event_demo.add_argument(
+        "--ws-klines-enabled",
+        dest="ws_klines_enabled",
+        action="store_true",
+        help=(
+            "Enable the WS-driven kline manager (default). When on, the daemon "
+            "bootstraps history at startup and feeds an in-memory store from "
+            "Bybit's kline WS; cycles read from the store first, falling back "
+            "to REST only for symbols not yet covered."
+        ),
+    )
+    event_demo.add_argument(
+        "--no-ws-klines",
+        dest="ws_klines_enabled",
+        action="store_false",
+        help="Disable the WS kline manager and revert to the legacy REST-on-cycle path.",
+    )
+    event_demo.set_defaults(ws_klines_enabled=demo_defaults.ws_klines_enabled)
+    event_demo.add_argument(
+        "--ws-klines-bootstrap-workers",
+        type=int,
+        default=demo_defaults.ws_klines_bootstrap_workers,
+        help="Parallel REST workers for the WS kline bootstrap.",
+    )
+    event_demo.add_argument(
+        "--ws-klines-lookback-days",
+        type=int,
+        default=demo_defaults.ws_klines_lookback_days,
+        help="Days of 1h history to bootstrap into the WS kline store.",
+    )
+    event_demo.add_argument(
+        "--ws-klines-universe-refresh-seconds",
+        type=float,
+        default=demo_defaults.ws_klines_universe_refresh_seconds,
+        help="Seconds between WS kline universe-refresh polls.",
+    )
+    event_demo.add_argument(
+        "--ws-klines-topics-per-connection",
+        type=int,
+        default=demo_defaults.ws_klines_topics_per_connection,
+        help="Symbols per WS connection in the kline pool (Bybit cap ~200).",
+    )
+    event_demo.add_argument(
+        "--ws-klines-stale-warning-seconds",
+        type=float,
+        default=demo_defaults.ws_klines_stale_warning_seconds,
+    )
+    event_demo.add_argument(
+        "--ws-klines-stale-reconnect-seconds",
+        type=float,
+        default=demo_defaults.ws_klines_stale_reconnect_seconds,
+    )
 
 
 def _add_event_risk_cycle_parser(subparsers) -> None:
@@ -1501,6 +1553,27 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
     )
     long_demo.add_argument("--interval-seconds", type=float, default=60.0,
                            help="Seconds between cycles in --daemon mode.")
+    long_demo.add_argument(
+        "--ws-klines-enabled", dest="ws_klines_enabled", action="store_true",
+        help="Enable WS-driven kline manager (default).",
+    )
+    long_demo.add_argument(
+        "--no-ws-klines", dest="ws_klines_enabled", action="store_false",
+        help="Revert to legacy REST-on-cycle kline path.",
+    )
+    long_demo.set_defaults(ws_klines_enabled=demo_defaults.ws_klines_enabled)
+    long_demo.add_argument("--ws-klines-bootstrap-workers", type=int,
+                           default=demo_defaults.ws_klines_bootstrap_workers)
+    long_demo.add_argument("--ws-klines-lookback-days", type=int,
+                           default=demo_defaults.ws_klines_lookback_days)
+    long_demo.add_argument("--ws-klines-universe-refresh-seconds", type=float,
+                           default=demo_defaults.ws_klines_universe_refresh_seconds)
+    long_demo.add_argument("--ws-klines-topics-per-connection", type=int,
+                           default=demo_defaults.ws_klines_topics_per_connection)
+    long_demo.add_argument("--ws-klines-stale-warning-seconds", type=float,
+                           default=demo_defaults.ws_klines_stale_warning_seconds)
+    long_demo.add_argument("--ws-klines-stale-reconnect-seconds", type=float,
+                           default=demo_defaults.ws_klines_stale_reconnect_seconds)
 
 
 def _add_reconcile_paper_demo_parser(subparsers) -> None:
@@ -1762,6 +1835,13 @@ def main(argv: list[str] | None = None) -> int:
             record_dry_run=args.record_dry_run,
             data_name=args.data_name,
             strategy_profile=args.strategy_profile,
+            ws_klines_enabled=getattr(args, "ws_klines_enabled", True),
+            ws_klines_bootstrap_workers=getattr(args, "ws_klines_bootstrap_workers", EventDemoCycleConfig.ws_klines_bootstrap_workers),
+            ws_klines_lookback_days=getattr(args, "ws_klines_lookback_days", EventDemoCycleConfig.ws_klines_lookback_days),
+            ws_klines_universe_refresh_seconds=getattr(args, "ws_klines_universe_refresh_seconds", EventDemoCycleConfig.ws_klines_universe_refresh_seconds),
+            ws_klines_topics_per_connection=getattr(args, "ws_klines_topics_per_connection", EventDemoCycleConfig.ws_klines_topics_per_connection),
+            ws_klines_stale_warning_seconds=getattr(args, "ws_klines_stale_warning_seconds", EventDemoCycleConfig.ws_klines_stale_warning_seconds),
+            ws_klines_stale_reconnect_seconds=getattr(args, "ws_klines_stale_reconnect_seconds", EventDemoCycleConfig.ws_klines_stale_reconnect_seconds),
         )
         if getattr(args, "daemon", False):
             from liquidity_migration.event_demo_daemon import EventDemoDaemon
@@ -1920,6 +2000,13 @@ def main(argv: list[str] | None = None) -> int:
             record_dry_run=args.record_dry_run,
             data_name=args.data_name,
             strategy_profile=args.strategy_profile,
+            ws_klines_enabled=getattr(args, "ws_klines_enabled", True),
+            ws_klines_bootstrap_workers=getattr(args, "ws_klines_bootstrap_workers", LongNativeDemoCycleConfig.ws_klines_bootstrap_workers),
+            ws_klines_lookback_days=getattr(args, "ws_klines_lookback_days", LongNativeDemoCycleConfig.ws_klines_lookback_days),
+            ws_klines_universe_refresh_seconds=getattr(args, "ws_klines_universe_refresh_seconds", LongNativeDemoCycleConfig.ws_klines_universe_refresh_seconds),
+            ws_klines_topics_per_connection=getattr(args, "ws_klines_topics_per_connection", LongNativeDemoCycleConfig.ws_klines_topics_per_connection),
+            ws_klines_stale_warning_seconds=getattr(args, "ws_klines_stale_warning_seconds", LongNativeDemoCycleConfig.ws_klines_stale_warning_seconds),
+            ws_klines_stale_reconnect_seconds=getattr(args, "ws_klines_stale_reconnect_seconds", LongNativeDemoCycleConfig.ws_klines_stale_reconnect_seconds),
         )
         if getattr(args, "daemon", False):
             from liquidity_migration.long_native_event_demo_daemon import LongNativeDemoDaemon

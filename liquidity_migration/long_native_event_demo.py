@@ -65,6 +65,8 @@ from .event_demo import (
     _price_lookup_from_tickers_and_klines,
     _private_credentials_present,
     _refresh_positions_and_orders,
+    _resolve_private_snapshot,
+    _resolve_ticker_snapshot,
     _stop_price_for_entry,
     _take_profit_price_for_entry,
     _upsert_rows,
@@ -141,6 +143,18 @@ class LongNativeDemoCycleConfig:
     settle_coin: str = "USDT"
     data_name: str = "long-native-event-demo"
     strategy_profile: str = "MultiStratV1"
+    # Mirrors EventDemoCycleConfig — daemon constructs a KlineStreamManager
+    # to feed an in-memory store. The long sleeve's small universe makes
+    # this less critical than the short side, but consistency simplifies
+    # operator mental model + the long lookback_days=90 makes the bootstrap
+    # the dominant startup cost worth doing once.
+    ws_klines_enabled: bool = True
+    ws_klines_bootstrap_workers: int = 16
+    ws_klines_lookback_days: int = 90
+    ws_klines_universe_refresh_seconds: float = 3600.0
+    ws_klines_topics_per_connection: int = 180
+    ws_klines_stale_warning_seconds: float = 60.0
+    ws_klines_stale_reconnect_seconds: float = 180.0
 
 
 def _v11a_long_native_config() -> LongNativeConfig:
@@ -290,6 +304,10 @@ def run_long_native_demo_cycle(
     private_client: Any | None = None,
     now_ms: int | None = None,
     execution_event_router: Any | None = None,
+    kline_store: Any | None = None,
+    private_state_cache: Any | None = None,
+    ticker_cache: Any | None = None,
+    state_cache_stale_seconds: float = 120.0,
 ) -> dict[str, Any]:
     demo = demo_config or LongNativeDemoCycleConfig()
     strategy = strategy_config or _long_demo_event_config(demo.strategy_profile)
@@ -317,7 +335,12 @@ def run_long_native_demo_cycle(
         mark_stage("cycle_lock_wait")
         public = market_client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
         instruments = _demo_instruments(public, cache_root=root, now_ms=cycle_now_ms)
-        tickers = _normalize_tickers(public.get_tickers())
+        raw_tickers, ticker_source = _resolve_ticker_snapshot(
+            public,
+            ticker_cache=ticker_cache,
+            state_cache_stale_seconds=state_cache_stale_seconds,
+        )
+        tickers = _normalize_tickers(raw_tickers)
         universe = _build_long_universe(instruments, tickers, config=demo, snapshot_ts_ms=cycle_now_ms)
         symbols = universe["symbol"].to_list() if not universe.is_empty() else []
         if not symbols:
@@ -328,12 +351,16 @@ def run_long_native_demo_cycle(
         if trading_client is None and (demo.submit_orders or (demo.telegram and _private_credentials_present())):
             trading_client = _build_private_client(config)
 
-        # Synchronous private snapshot — the long cycle is signal-sparse so
-        # the extra latency of one serial REST call is in the noise relative
-        # to the kline pull below. _collect_private_snapshots is typed for
-        # EventDemoCycleConfig but only reads .account_type / .settle_coin /
-        # .fallback_equity_usdt; LongNativeDemoCycleConfig has all three.
-        snapshot = _collect_private_snapshots(trading_client, demo)  # type: ignore[arg-type]
+        # Private snapshot: prefer the WS-fed cache when fresh, else REST.
+        # _resolve_private_snapshot falls back to _collect_private_snapshots
+        # which reads .account_type / .settle_coin / .fallback_equity_usdt
+        # — all present on LongNativeDemoCycleConfig.
+        snapshot, private_snapshot_source = _resolve_private_snapshot(
+            trading_client,
+            demo,
+            private_state_cache=private_state_cache,
+            state_cache_stale_seconds=state_cache_stale_seconds,
+        )
         equity_usdt = snapshot.get("equity_usdt", demo.fallback_equity_usdt) or demo.fallback_equity_usdt
         wallet_error = snapshot.get("wallet_error", "")
         raw_open_orders = snapshot.get("raw_open_orders", [])
@@ -354,6 +381,7 @@ def run_long_native_demo_cycle(
             workers=demo.workers,
             market_client=public if market_client is not None else None,
             cache_root=root,
+            kline_store=kline_store,
         )
         mark_stage("klines")
 
@@ -538,6 +566,8 @@ def run_long_native_demo_cycle(
             "kline_rows": klines.height,
             "kline_cache_rows": kline_cache_stats["cache_rows"],
             "kline_fetched_rows": kline_cache_stats["fetched_rows"],
+            "kline_store_rows": kline_cache_stats.get("store_rows", 0),
+            "kline_store_symbols": kline_cache_stats.get("store_symbols", 0),
             "feature_rows": features.height if not features.is_empty() else 0,
             "latest_feature_ts_ms": _max_int(features, "ts_ms") if not features.is_empty() else 0,
             "entry_candidates": len(candidates),
@@ -585,6 +615,10 @@ def run_long_native_demo_cycle(
             "bybit_position_summary": bybit_position_summary,
             "ledger_positions": ledger_positions,
             "ledger_position_summary": ledger_position_summary,
+            "data_sources": {
+                "ticker_source": ticker_source,
+                "private_snapshot_source": private_snapshot_source,
+            },
             "report_dir": str(report_dir),
         }
 

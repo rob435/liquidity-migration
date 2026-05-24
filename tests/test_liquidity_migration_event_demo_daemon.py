@@ -31,7 +31,7 @@ class _RecordingWsStream:
 
 
 def _stub_cycle_runner(seen: list[dict]) -> None:
-    def _runner(data_root, *, config, event_config, demo_config, execution_event_router):
+    def _runner(data_root, *, config, event_config, demo_config, execution_event_router, **_kwargs):
         seen.append({
             "data_root": data_root,
             "router_id": id(execution_event_router),
@@ -46,7 +46,7 @@ def test_daemon_subscribes_to_ws_executions_on_start_and_closes_on_stop(tmp_path
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
         interval_seconds=0.0,
         ws_stream_factory=lambda _config: ws,
         cycle_runner=_stub_cycle_runner(seen_cycles),
@@ -72,7 +72,7 @@ def test_daemon_routes_ws_events_through_router(tmp_path: Path) -> None:
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
         interval_seconds=0.0,
         ws_stream_factory=lambda _config: ws,
         cycle_runner=_stub_cycle_runner([]),
@@ -102,7 +102,7 @@ def test_daemon_continues_running_when_cycle_raises(tmp_path: Path) -> None:
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
         interval_seconds=0.0,
         ws_stream_factory=lambda _config: ws,
         cycle_runner=_exploding_runner,
@@ -126,7 +126,7 @@ def test_daemon_ws_gap_telemetry_counts_long_gaps(tmp_path: Path) -> None:
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
         interval_seconds=0.0,
         ws_gap_threshold_seconds=120.0,
         ws_stream_factory=lambda _config: _RecordingWsStream(),
@@ -148,7 +148,7 @@ def test_daemon_run_reports_ws_gap_stats(tmp_path: Path) -> None:
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
         interval_seconds=0.0,
         ws_stream_factory=lambda _config: ws,
         cycle_runner=_stub_cycle_runner([]),
@@ -173,7 +173,7 @@ def test_daemon_rejects_nonpositive_ws_gap_threshold(tmp_path: Path) -> None:
         EventDemoDaemon(
             tmp_path,
             config=ResearchConfig(data_root=tmp_path),
-            demo_config=EventDemoCycleConfig(),
+            demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
             ws_gap_threshold_seconds=0.0,
         )
 
@@ -189,7 +189,7 @@ def test_daemon_falls_back_to_rest_when_ws_factory_fails(tmp_path: Path) -> None
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
         interval_seconds=0.0,
         ws_stream_factory=_broken_factory,
         cycle_runner=_stub_cycle_runner(seen),
@@ -210,7 +210,7 @@ def test_daemon_shutdown_during_sleep_returns_promptly(tmp_path: Path) -> None:
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
         interval_seconds=5.0,  # long sleep between cycles
         ws_stream_factory=lambda _config: ws,
         cycle_runner=_stub_cycle_runner([]),
@@ -243,7 +243,7 @@ def test_daemon_prints_event_demo_cycle_summary_per_cycle(tmp_path: Path, capsys
     """
     ws = _RecordingWsStream()
 
-    def _runner_that_returns_payload(data_root, *, config, event_config, demo_config, execution_event_router):
+    def _runner_that_returns_payload(data_root, *, config, event_config, demo_config, execution_event_router, **_kwargs):
         return {
             "cycle": {
                 "mode": "submit",
@@ -266,7 +266,7 @@ def test_daemon_prints_event_demo_cycle_summary_per_cycle(tmp_path: Path, capsys
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
         interval_seconds=0.0,
         ws_stream_factory=lambda _config: ws,
         cycle_runner=_runner_that_returns_payload,
@@ -285,12 +285,10 @@ def test_daemon_prints_event_demo_cycle_summary_per_cycle(tmp_path: Path, capsys
 
 
 def test_daemon_sends_telegram_on_startup_and_shutdown(tmp_path: Path) -> None:
-    """When demo_config.telegram is enabled, the daemon emits one telegram at
-    startup (announcing readiness + WS status) and one at shutdown (with
-    cycles/errors/router stats). Without these the operator can't tell from
-    Telegram alone whether systemd auto-restarted the process, whether the
-    WS path is engaging, or what the previous session did.
-    """
+    """When demo_config.telegram is enabled AND lifecycle_telegram is on,
+    the daemon emits one telegram at startup + one at shutdown. The default
+    is OFF — daemon restart-on-deploy would flood the channel otherwise.
+    Operators who want lifecycle telegrams opt in via the constructor."""
     ws = _RecordingWsStream()
     messages: list[str] = []
 
@@ -301,11 +299,12 @@ def test_daemon_sends_telegram_on_startup_and_shutdown(tmp_path: Path) -> None:
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(telegram=True, submit_orders=True),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False, telegram=True, submit_orders=True),
         interval_seconds=0.0,
         ws_stream_factory=lambda _config: ws,
         cycle_runner=_stub_cycle_runner([]),
         telegram_sender=fake_sender,
+        lifecycle_telegram=True,
     )
     runner = threading.Thread(target=daemon.run, daemon=True)
     runner.start()
@@ -335,7 +334,7 @@ def test_daemon_telegram_disabled_sends_nothing(tmp_path: Path) -> None:
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(telegram=False),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False, telegram=False),
         interval_seconds=0.0,
         ws_stream_factory=lambda _config: ws,
         cycle_runner=_stub_cycle_runner([]),
@@ -364,7 +363,7 @@ def test_daemon_telegrams_cycle_exception(tmp_path: Path) -> None:
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(telegram=True),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False, telegram=True),
         interval_seconds=0.0,
         ws_stream_factory=lambda _config: ws,
         cycle_runner=_exploding_runner,
@@ -394,7 +393,7 @@ def test_daemon_continues_running_when_telegram_send_raises(tmp_path: Path) -> N
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(telegram=True),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False, telegram=True),
         interval_seconds=0.0,
         ws_stream_factory=lambda _config: ws,
         cycle_runner=_stub_cycle_runner([]),
@@ -420,11 +419,12 @@ def test_daemon_telegram_startup_reports_ws_unavailable_when_factory_fails(tmp_p
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(telegram=True),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False, telegram=True),
         interval_seconds=0.0,
         ws_stream_factory=_broken_factory,
         cycle_runner=_stub_cycle_runner([]),
         telegram_sender=lambda t: (messages.append(t) or True),
+        lifecycle_telegram=True,
     )
     runner = threading.Thread(target=daemon.run, daemon=True)
     runner.start()
@@ -452,7 +452,7 @@ def test_daemon_holds_fixed_interval_cadence_without_drift(tmp_path: Path) -> No
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
         interval_seconds=0.25,
         ws_stream_factory=lambda _config: ws,
         cycle_runner=_slow_runner,
@@ -487,7 +487,7 @@ def test_daemon_overrun_fires_next_cycle_immediately_and_counts(tmp_path: Path) 
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
         interval_seconds=0.05,
         ws_stream_factory=lambda _config: ws,
         cycle_runner=_overrunning_runner,
@@ -520,7 +520,7 @@ def test_daemon_kline_warmer_runs_between_cycles(tmp_path: Path) -> None:
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
         interval_seconds=2.0,  # long gap so the room check passes
         kline_warm_interval_seconds=0.03,  # test cadence (production tracks hour boundaries)
         kline_warm_budget_seconds=0.01,
@@ -547,7 +547,7 @@ def test_daemon_kline_warmer_can_be_disabled(tmp_path: Path) -> None:
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
         interval_seconds=2.0,
         enable_kline_warmer=False,
         kline_warm_interval_seconds=0.03,
@@ -581,7 +581,7 @@ def test_daemon_kline_warmer_yields_while_a_cycle_runs(tmp_path: Path) -> None:
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
         interval_seconds=0.0,  # cycles run back-to-back: a cycle is ~always active
         kline_warm_interval_seconds=0.02,
         kline_warm_budget_seconds=0.01,
@@ -604,7 +604,7 @@ def test_daemon_run_returns_summary_stats(tmp_path: Path) -> None:
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
-        demo_config=EventDemoCycleConfig(),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
         interval_seconds=0.0,
         ws_stream_factory=lambda _config: ws,
         cycle_runner=_stub_cycle_runner([]),
@@ -618,3 +618,353 @@ def test_daemon_run_returns_summary_stats(tmp_path: Path) -> None:
     assert "max_cycle_seconds" in stats
     assert "router_stats" in stats
     assert stats["cycle_errors"] == 0
+
+
+class _StubKlineStreamManager:
+    """Fake KlineStreamManager: tracks lifecycle calls + exposes a stand-in
+    store. Used by the daemon-wiring tests to verify the manager start/stop +
+    cycle plumbing without spinning up a real Bybit WS pool."""
+
+    def __init__(self, *, fail_start: bool = False) -> None:
+        self.started = False
+        self.stopped = False
+        self.fail_start = fail_start
+        self._store = object()  # opaque sentinel passed to the cycle runner
+
+    def start(self) -> dict:
+        if self.fail_start:
+            raise RuntimeError("simulated bootstrap failure")
+        self.started = True
+        return {"blocked_on_bootstrap": True}
+
+    def stop(self) -> None:
+        self.stopped = True
+
+    def store(self) -> object:
+        return self._store
+
+    def stats(self) -> dict:
+        return {"started": self.started, "stopped": self.stopped}
+
+
+def test_daemon_passes_kline_store_into_cycle_runner(tmp_path: Path) -> None:
+    """When ws_klines_enabled and a manager is injected, the daemon must
+    pass manager.store() into every cycle invocation."""
+    ws = _RecordingWsStream()
+    manager = _StubKlineStreamManager()
+    seen: list[dict] = []
+
+    def _runner(data_root, *, config, event_config, demo_config, execution_event_router, **kwargs):
+        seen.append({"kline_store_id": id(kwargs.get("kline_store"))})
+        return {"cycle": {}, "report_dir": str(data_root)}
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=True),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_runner,
+        kline_stream_manager=manager,
+    )
+    threading.Timer(0.05, daemon.request_shutdown).start()
+    daemon.run()
+    assert manager.started is True
+    assert manager.stopped is True
+    assert seen and seen[0]["kline_store_id"] == id(manager.store())
+
+
+def test_daemon_disables_kline_warmer_when_kline_manager_active(tmp_path: Path) -> None:
+    """The pre-WS warmer pre-fetches REST klines on the hour. With the WS
+    manager live the store is already fresh, so the warmer becomes redundant
+    and must be skipped to avoid duplicate REST bursts."""
+    ws = _RecordingWsStream()
+    manager = _StubKlineStreamManager()
+    warmer_calls: list[None] = []
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=True),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_stub_cycle_runner([]),
+        kline_warmer=lambda *args, **kw: warmer_calls.append(None) or {},
+        kline_warm_interval_seconds=0.01,
+        kline_stream_manager=manager,
+    )
+    threading.Timer(0.1, daemon.request_shutdown).start()
+    daemon.run()
+    assert not warmer_calls  # warmer was disabled when WS klines came online
+
+
+def test_daemon_degrades_to_rest_when_manager_factory_fails(tmp_path: Path) -> None:
+    """A failing manager factory must NOT crash the daemon — it falls back
+    to the legacy REST path and the cycle keeps running."""
+    ws = _RecordingWsStream()
+    failed_calls: list[None] = []
+
+    def _broken_factory(config, demo_config, cache_root):
+        failed_calls.append(None)
+        raise RuntimeError("simulated factory error")
+
+    seen: list[dict] = []
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=True),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_stub_cycle_runner(seen),
+        kline_stream_manager_factory=_broken_factory,
+    )
+    threading.Timer(0.05, daemon.request_shutdown).start()
+    daemon.run()
+    # Factory was attempted; daemon kept going on REST fallback.
+    assert failed_calls
+    assert seen  # at least one cycle ran
+
+
+def test_daemon_does_not_build_manager_when_disabled(tmp_path: Path) -> None:
+    """ws_klines_enabled=False is a hard off switch: the factory must never
+    be called, and the cycle gets kline_store=None."""
+    ws = _RecordingWsStream()
+    factory_calls: list[None] = []
+
+    def _factory(config, demo_config, cache_root):
+        factory_calls.append(None)
+        return _StubKlineStreamManager()
+
+    seen_stores: list[object | None] = []
+
+    def _runner(data_root, *, config, event_config, demo_config, execution_event_router, **kwargs):
+        seen_stores.append(kwargs.get("kline_store"))
+        return {"cycle": {}, "report_dir": str(data_root)}
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_runner,
+        kline_stream_manager_factory=_factory,
+    )
+    threading.Timer(0.05, daemon.request_shutdown).start()
+    daemon.run()
+    assert not factory_calls  # never invoked
+    assert seen_stores and seen_stores[0] is None
+
+
+def test_daemon_attaches_ws_klines_stats_to_cycle_payload(tmp_path: Path) -> None:
+    """Cycle payloads must carry the WS kline stats so journalctl scrapers
+    see kline_store_symbols / kline_store_newest_ts_lag_seconds inline."""
+    ws = _RecordingWsStream()
+    manager = _StubKlineStreamManager()
+
+    captured_payload: dict = {}
+
+    def _runner(data_root, *, config, event_config, demo_config, execution_event_router, **kwargs):
+        payload = {"cycle": {}, "report_dir": str(data_root)}
+        captured_payload["p"] = payload
+        return payload
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=True),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_runner,
+        kline_stream_manager=manager,
+    )
+    threading.Timer(0.05, daemon.request_shutdown).start()
+    daemon.run()
+    payload = captured_payload["p"]
+    assert "ws_klines" in payload
+    assert payload["ws_klines"]["started"] is True
+
+
+def test_daemon_passes_private_state_and_ticker_caches_into_cycle(tmp_path: Path) -> None:
+    """The daemon must thread its PrivateStateCache + TickerCache through
+    every cycle invocation so the cycle can prefer WS snapshots over REST."""
+    from liquidity_migration.ws_state_cache import PrivateStateCache, TickerCache
+
+    ws = _RecordingWsStream()
+    seeded: list[None] = []
+
+    def _seeder(*, config, demo_config, private_state_cache, ticker_cache):
+        seeded.append(None)
+        # Simulate a successful REST seed.
+        private_state_cache.seed(equity_usdt=12_500.0)
+        ticker_cache.seed([{"symbol": "BTCUSDT", "lastPrice": "30000"}])
+
+    captured: dict = {}
+
+    def _runner(data_root, *, config, event_config, demo_config, execution_event_router, **kwargs):
+        captured["private_state_cache"] = kwargs.get("private_state_cache")
+        captured["ticker_cache"] = kwargs.get("ticker_cache")
+        captured["state_cache_stale_seconds"] = kwargs.get("state_cache_stale_seconds")
+        return {"cycle": {}, "report_dir": str(data_root)}
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_runner,
+        state_cache_seeder=_seeder,
+        # Disable the ticker stream factory so the seeder isn't expected
+        # to also open a real public WS connection.
+        ticker_stream_factory=lambda _config: _RecordingTickerStream(),
+    )
+    threading.Timer(0.15, daemon.request_shutdown).start()
+    daemon.run()
+    assert isinstance(captured["private_state_cache"], PrivateStateCache)
+    assert isinstance(captured["ticker_cache"], TickerCache)
+    assert captured["state_cache_stale_seconds"] > 0.0
+
+
+def test_daemon_attaches_ws_state_stats_to_cycle_payload(tmp_path: Path) -> None:
+    ws = _RecordingWsStream()
+    captured: dict = {}
+
+    def _runner(data_root, *, config, event_config, demo_config, execution_event_router, **kwargs):
+        payload = {"cycle": {}, "report_dir": str(data_root)}
+        captured["payload"] = payload
+        return payload
+
+    def _noop_seeder(**kw):
+        return None
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_runner,
+        state_cache_seeder=_noop_seeder,
+    )
+    threading.Timer(0.1, daemon.request_shutdown).start()
+    daemon.run()
+    payload = captured["payload"]
+    assert "ws_state" in payload
+    assert "private_cache" in payload["ws_state"]
+    assert "ticker_cache" in payload["ws_state"]
+
+
+def test_daemon_seed_runs_async_and_does_not_block_first_cycle(tmp_path: Path) -> None:
+    """If the seeder blocks (e.g. slow REST), the daemon must still run
+    cycles. The first cycle just sees an unseeded cache and REST-falls-back."""
+    import time as _time
+
+    ws = _RecordingWsStream()
+    seed_started = threading.Event()
+    seed_allow_complete = threading.Event()
+
+    def _slow_seeder(**kw):
+        seed_started.set()
+        # Block until the test explicitly allows the seed to complete.
+        seed_allow_complete.wait(timeout=2.0)
+
+    cycles_run: list[None] = []
+
+    def _runner(data_root, **kwargs):
+        cycles_run.append(None)
+        return {"cycle": {}, "report_dir": str(data_root)}
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_runner,
+        state_cache_seeder=_slow_seeder,
+    )
+    try:
+        runner = threading.Thread(target=daemon.run, daemon=True)
+        runner.start()
+        # The seed should start quickly...
+        assert seed_started.wait(timeout=1.0)
+        # ... and a cycle should run while the seed is still blocked.
+        deadline = _time.monotonic() + 1.0
+        while _time.monotonic() < deadline:
+            if cycles_run:
+                break
+            _time.sleep(0.01)
+        assert cycles_run, "cycle did not run while seed was blocked"
+    finally:
+        seed_allow_complete.set()
+        daemon.request_shutdown()
+        runner.join(timeout=2.0)
+
+
+class _RecordingTickerStream:
+    def __init__(self) -> None:
+        self.subscribed = []
+        self.closed = False
+
+    def subscribe_tickers(self, symbols, callback) -> None:
+        self.subscribed.extend(symbols)
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_daemon_lifecycle_telegram_off_by_default(tmp_path: Path) -> None:
+    """The default lifecycle_telegram=False suppresses startup + shutdown
+    telegrams so a CI deploy that restarts the daemon does not flood the
+    Telegram channel. Material cycle events still notify via the cycle's
+    own _maybe_notify path (not exercised here)."""
+    ws = _RecordingWsStream()
+    messages: list[str] = []
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False, telegram=True),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_stub_cycle_runner([]),
+        telegram_sender=lambda t: (messages.append(t) or True),
+        # lifecycle_telegram left as default (False).
+    )
+    runner = threading.Thread(target=daemon.run, daemon=True)
+    runner.start()
+    time.sleep(0.05)
+    daemon.request_shutdown()
+    runner.join(timeout=2.0)
+    # No startup or shutdown telegrams.
+    assert not any("started" in m for m in messages)
+    assert not any("stopped" in m for m in messages)
+
+
+def test_daemon_cycle_failure_telegram_fires_regardless_of_lifecycle_flag(tmp_path: Path) -> None:
+    """A cycle exception always telegrams — that path is the operator's
+    only out-of-band signal that something broke. lifecycle_telegram only
+    gates the silenced start/stop messages, not error telegrams."""
+    ws = _RecordingWsStream()
+    messages: list[str] = []
+
+    def _exploding_runner(data_root, **kwargs):
+        raise RuntimeError("cycle exploded")
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False, telegram=True),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_exploding_runner,
+        telegram_sender=lambda t: (messages.append(t) or True),
+        # lifecycle_telegram default False — error telegram should still fire.
+    )
+    runner = threading.Thread(target=daemon.run, daemon=True)
+    runner.start()
+    time.sleep(0.1)
+    daemon.request_shutdown()
+    runner.join(timeout=2.0)
+    error_msgs = [m for m in messages if "cycle failed" in m or "❌" in m]
+    assert error_msgs, f"expected at least one cycle-failed telegram, got {messages!r}"

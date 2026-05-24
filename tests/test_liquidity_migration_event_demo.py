@@ -437,6 +437,270 @@ def test_demo_kline_compact_cache_serves_repeat_window(tmp_path: Path) -> None:
     assert second_stats["fetch_symbols"] == 0
 
 
+def test_download_recent_1h_klines_uses_store_fast_path(tmp_path: Path) -> None:
+    """With a fully-covering kline_store, REST is never called and the output
+    is sourced entirely from the store."""
+    from liquidity_migration.kline_store import KlineStore
+
+    store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
+    for hour in range(3):
+        ts = hour * MS_PER_HOUR
+        for symbol in ("AAAUSDT", "BBBUSDT"):
+            store.add_bar(
+                symbol,
+                {
+                    "start": ts,
+                    "open": "100", "high": "110", "low": "90", "close": "105",
+                    "volume": "1.5", "turnover": "157.5",
+                },
+                confirmed=True,
+            )
+
+    output, stats = _download_recent_1h_klines(
+        ["AAAUSDT", "BBBUSDT"],
+        start_ms=0,
+        end_ms=2 * MS_PER_HOUR,
+        config=ResearchConfig(data_root=tmp_path),
+        workers=1,
+        market_client=FailingKlineMarket(),  # REST must NOT be called
+        cache_root=tmp_path,
+        kline_store=store,
+    )
+    assert output.height == 6
+    assert stats["store_rows"] == 6
+    assert stats["store_symbols"] == 2
+    assert stats["fetch_symbols"] == 0
+    assert stats["fetched_rows"] == 0
+
+
+def test_download_recent_1h_klines_falls_back_to_rest_for_uncovered_symbols(tmp_path: Path) -> None:
+    """Hybrid path: store covers one symbol, REST fills the other."""
+    from liquidity_migration.kline_store import KlineStore
+
+    store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
+    for hour in range(3):
+        store.add_bar(
+            "AAAUSDT",
+            {
+                "start": hour * MS_PER_HOUR,
+                "open": "1", "high": "1", "low": "1", "close": "1",
+                "volume": "1", "turnover": "1",
+            },
+            confirmed=True,
+        )
+
+    market = FakeKlineMarket()
+    output, stats = _download_recent_1h_klines(
+        ["AAAUSDT", "BBBUSDT"],
+        start_ms=0,
+        end_ms=2 * MS_PER_HOUR,
+        config=ResearchConfig(data_root=tmp_path),
+        workers=1,
+        market_client=market,
+        cache_root=tmp_path,
+        kline_store=store,
+    )
+    # BBBUSDT only — AAAUSDT was served from the store.
+    fetched_symbols = sorted({call[0] for call in market.calls})
+    assert fetched_symbols == ["BBBUSDT"]
+    # Output has bars for both symbols.
+    assert output.height == 6
+    assert sorted(output["symbol"].unique().to_list()) == ["AAAUSDT", "BBBUSDT"]
+    assert stats["store_rows"] == 3
+    assert stats["store_symbols"] == 1
+    assert stats["fetch_symbols"] == 1
+    assert stats["fetched_rows"] >= 3
+
+
+def test_download_recent_1h_klines_ignores_store_failure_gracefully(tmp_path: Path) -> None:
+    """A broken kline_store must never break the cycle — REST takes over."""
+
+    class _BrokenStore:
+        def symbols_with_coverage_through(self, ts_ms):
+            raise RuntimeError("store offline")
+
+        def get_klines(self, symbols, *, start_ms, end_ms):  # pragma: no cover
+            raise AssertionError("should not be called after coverage failure")
+
+    market = FakeKlineMarket()
+    output, stats = _download_recent_1h_klines(
+        ["AAAUSDT"],
+        start_ms=0,
+        end_ms=MS_PER_HOUR,
+        config=ResearchConfig(data_root=tmp_path),
+        workers=1,
+        market_client=market,
+        cache_root=tmp_path,
+        kline_store=_BrokenStore(),
+    )
+    assert output.height >= 1
+    assert stats["fetched_rows"] >= 1
+
+
+def test_download_recent_1h_klines_without_store_keeps_legacy_behavior(tmp_path: Path) -> None:
+    """Pre-existing call site (no kline_store) must behave identically to
+    before: cache + REST path, no new stats blow-up."""
+    market = FakeKlineMarket()
+    output, stats = _download_recent_1h_klines(
+        ["AAAUSDT"],
+        start_ms=0,
+        end_ms=MS_PER_HOUR,
+        config=ResearchConfig(data_root=tmp_path),
+        workers=1,
+        market_client=market,
+        cache_root=tmp_path,
+    )
+    assert output.height == 2
+    assert stats["fetched_rows"] == 2
+    # Store-related stat keys are present but zero when no store is wired.
+    assert stats["store_rows"] == 0
+    assert stats["store_symbols"] == 0
+
+
+def test_resolve_ticker_snapshot_prefers_fresh_cache() -> None:
+    """When the ticker cache is seeded + fresh, _resolve_ticker_snapshot
+    returns the cache snapshot and never touches REST."""
+    from liquidity_migration.event_demo import _resolve_ticker_snapshot
+    from liquidity_migration.ws_state_cache import TickerCache
+
+    cache = TickerCache()
+    cache.seed([{"symbol": "BTCUSDT", "lastPrice": "30000"}])
+
+    class _FailingPublic:
+        def get_tickers(self):
+            raise AssertionError("REST must not be called when cache is fresh")
+
+    rows, source = _resolve_ticker_snapshot(
+        _FailingPublic(), ticker_cache=cache, state_cache_stale_seconds=60.0,
+    )
+    assert source == "ws_cache"
+    assert rows[0]["symbol"] == "BTCUSDT"
+
+
+def test_resolve_ticker_snapshot_falls_back_to_rest_when_unseeded() -> None:
+    from liquidity_migration.event_demo import _resolve_ticker_snapshot
+    from liquidity_migration.ws_state_cache import TickerCache
+
+    cache = TickerCache()  # never seeded
+
+    class _RestPublic:
+        def get_tickers(self):
+            return [{"symbol": "RESTUSDT", "lastPrice": "1"}]
+
+    rows, source = _resolve_ticker_snapshot(
+        _RestPublic(), ticker_cache=cache, state_cache_stale_seconds=60.0,
+    )
+    assert source == "rest"
+    assert rows[0]["symbol"] == "RESTUSDT"
+
+
+def test_resolve_ticker_snapshot_falls_back_when_cache_stale() -> None:
+    """An old seed (stale) must trigger REST fallback even if the cache has
+    rows. Critical for safety: trading on a stale price snapshot is worse
+    than waiting one REST roundtrip."""
+    import time as _time
+    from liquidity_migration.event_demo import _resolve_ticker_snapshot
+    from liquidity_migration.ws_state_cache import TickerCache
+
+    cache = TickerCache()
+    cache.seed([{"symbol": "BTCUSDT", "lastPrice": "30000"}])
+    # Force last_event timestamp to be ancient.
+    cache._stats.last_event_monotonic = _time.monotonic() - 1000.0
+
+    class _RestPublic:
+        def get_tickers(self):
+            return [{"symbol": "FRESHUSDT", "lastPrice": "1"}]
+
+    rows, source = _resolve_ticker_snapshot(
+        _RestPublic(), ticker_cache=cache, state_cache_stale_seconds=60.0,
+    )
+    assert source == "rest"
+    assert rows[0]["symbol"] == "FRESHUSDT"
+
+
+def test_resolve_ticker_snapshot_with_no_cache_uses_rest() -> None:
+    from liquidity_migration.event_demo import _resolve_ticker_snapshot
+
+    class _RestPublic:
+        def get_tickers(self):
+            return [{"symbol": "X", "lastPrice": "1"}]
+
+    rows, source = _resolve_ticker_snapshot(
+        _RestPublic(), ticker_cache=None, state_cache_stale_seconds=60.0,
+    )
+    assert source == "rest"
+    assert rows[0]["symbol"] == "X"
+
+
+def test_resolve_private_snapshot_prefers_fresh_cache() -> None:
+    from liquidity_migration.event_demo import EventDemoCycleConfig, _resolve_private_snapshot
+    from liquidity_migration.ws_state_cache import PrivateStateCache
+
+    cache = PrivateStateCache()
+    cache.seed(
+        equity_usdt=12_500.0,
+        positions=[{"symbol": "BTCUSDT", "size": "1.0"}],
+        open_orders=[],
+    )
+
+    class _FailingClient:
+        def get_positions(self, **kwargs):
+            raise AssertionError("REST must not be called when cache is fresh")
+
+        def get_open_orders(self, **kwargs):
+            raise AssertionError("REST must not be called when cache is fresh")
+
+        def get_wallet_balance(self, **kwargs):
+            raise AssertionError("REST must not be called when cache is fresh")
+
+    snap, source = _resolve_private_snapshot(
+        _FailingClient(),
+        EventDemoCycleConfig(),
+        private_state_cache=cache,
+        state_cache_stale_seconds=60.0,
+    )
+    assert source == "ws_cache"
+    assert snap["equity_usdt"] == 12_500.0
+    assert snap["raw_positions"][0]["symbol"] == "BTCUSDT"
+    assert snap["raw_open_orders"] == []
+
+
+def test_resolve_private_snapshot_falls_back_to_rest_when_cache_stale() -> None:
+    import time as _time
+    from liquidity_migration.event_demo import EventDemoCycleConfig, _resolve_private_snapshot
+    from liquidity_migration.ws_state_cache import PrivateStateCache
+
+    cache = PrivateStateCache()
+    cache.seed(equity_usdt=10_000.0)
+    cache._stats.last_event_monotonic = _time.monotonic() - 1000.0
+
+    # trading_client=None hits the neutral REST snapshot path.
+    snap, source = _resolve_private_snapshot(
+        None,
+        EventDemoCycleConfig(fallback_equity_usdt=5_000.0),
+        private_state_cache=cache,
+        state_cache_stale_seconds=60.0,
+    )
+    assert source == "rest"
+    # REST neutral snapshot returns the fallback equity, not the cached 10_000.
+    assert snap["equity_usdt"] == 5_000.0
+
+
+def test_resolve_private_snapshot_falls_back_to_rest_when_cache_unseeded() -> None:
+    from liquidity_migration.event_demo import EventDemoCycleConfig, _resolve_private_snapshot
+    from liquidity_migration.ws_state_cache import PrivateStateCache
+
+    cache = PrivateStateCache()
+    snap, source = _resolve_private_snapshot(
+        None,
+        EventDemoCycleConfig(fallback_equity_usdt=5_000.0),
+        private_state_cache=cache,
+        state_cache_stale_seconds=60.0,
+    )
+    assert source == "rest"
+    assert snap["equity_usdt"] == 5_000.0
+
+
 def _feature_cache_klines(symbols: int = 4, days: int = 25) -> pl.DataFrame:
     rows = []
     for s in range(symbols):
@@ -738,6 +1002,60 @@ def test_event_demo_cycle_skips_entry_when_live_position_exists(tmp_path: Path, 
     assert payload["cycle"]["skipped_position_snapshot_error"] == 0
     assert payload["cycle"]["bybit_positions"] == 1
     assert read_dataset(tmp_path, "event_demo_orders").is_empty()
+
+
+def test_event_demo_cycle_skips_entry_when_live_position_in_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the WS-fed private cache shows a live position, the cycle MUST
+    skip the entry even though the trading client is set up to claim no
+    position. This is the cache-driven equivalent of the REST-snapshot
+    skip test — proves the cache is the source of truth on the hot path."""
+    from liquidity_migration.ws_state_cache import PrivateStateCache
+
+    now_ms = 1_700_000_060_000
+    candidate = {
+        "trade_id": "t-cache-live-position",
+        "symbol": "AAAUSDT",
+        "side": "short",
+        "signal_ts_ms": now_ms - MS_PER_HOUR,
+        "stop_loss_pct": 0.12,
+        "take_profit_pct": 0.20,
+    }
+    # Trading client reports NO position via REST — would let the entry through.
+    # But the CACHE shows a live AAAUSDT position, which must take precedence
+    # because it is fresh + seeded.
+    client = FakeRiskClient(positions=[])
+    cache = PrivateStateCache()
+    cache.seed(
+        equity_usdt=10_000.0,
+        positions=[{
+            "symbol": "AAAUSDT", "side": "Sell", "size": "1",
+            "avgPrice": "100", "markPrice": "100", "positionValue": "100",
+        }],
+        open_orders=[],
+    )
+    _patch_minimal_event_cycle(monkeypatch, candidate)
+
+    payload = run_event_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        market_client=MinimalEventMarket(),
+        private_client=client,
+        now_ms=now_ms,
+        private_state_cache=cache,
+        state_cache_stale_seconds=60.0,
+    )
+
+    # Entry skipped — cache reported a live position, even though REST client
+    # would have claimed none.
+    assert client.orders == []
+    assert payload["cycle"]["entries_executed"] == 0
+    assert payload["cycle"]["skipped_live_position_entry"] == 1
+    assert payload["cycle"]["bybit_positions"] == 1
+    # Telemetry confirms we used the cache.
+    assert payload["data_sources"]["private_snapshot_source"] == "ws_cache"
 
 
 def test_event_demo_cycle_skips_entries_when_position_snapshot_fails(

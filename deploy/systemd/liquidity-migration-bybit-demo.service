@@ -27,6 +27,7 @@ Environment=UNIVERSE_MAX_SYMBOLS=400
 Environment=UNIVERSE_MIN_TURNOVER_24H=0
 Environment=WORKERS=8
 Environment=ENTRY_LEVERAGE=2
+Environment=WS_KLINES_ENABLED=1
 ExecStart=/opt/liquidity-migration/scripts/run_bybit_demo_event_engine.sh
 Restart=always
 RestartSec=30
