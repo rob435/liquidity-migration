@@ -47,10 +47,20 @@ from typing import Any
 
 import polars as pl
 
-from ._common import MS_PER_DAY
+from ._common import MS_PER_DAY, MS_PER_HOUR
 
 
 _logger = logging.getLogger("liquidity_migration.kline_store")
+
+# Eviction is amortized: each insert only re-scans for stale bars when the
+# global newest_ts has advanced by at least this many ms since the last
+# eviction. At the WS path's 1-bar-per-symbol-per-hour cadence this fires
+# every hour; in bootstrap (which inserts bars OLDER than the current max)
+# it never fires per-bar, so a 1083-bar symbol load is O(bars) instead of
+# O(bars * symbols * bars_per_symbol). Stale bars accumulate for up to one
+# eviction-window before being purged — at 1h that's a single hour of
+# unrelated symbols × 567 symbols ≈ 567 bars ≈ 50KB of slack, acceptable.
+_EVICTION_INTERVAL_MS = MS_PER_HOUR
 
 WS_STORE_SOURCE = "bybit_ws_kline"
 
@@ -200,6 +210,15 @@ class KlineStore:
         self._flush_errors = 0
         self._last_flush_monotonic: float | None = None
         self._last_flush_rows = 0
+        # Incremental newest-ts cache: maintained in _insert_bar / recovery
+        # so _max_ts_with_new is O(1) instead of O(symbols * bars). At 567
+        # symbols × ~1000 bars/symbol this took the bootstrap hot path from
+        # tens of minutes to a few seconds.
+        self._global_max_ts_ms: int = 0
+        # Eviction is only rescanned when global_max_ts has advanced by at
+        # least _EVICTION_INTERVAL_MS since the last sweep — see the constant
+        # above for why this matters during bootstrap.
+        self._last_eviction_ref_ts_ms: int = 0
 
     # -- write path -----------------------------------------------------
 
@@ -222,44 +241,68 @@ class KlineStore:
 
     def bootstrap_symbol(self, symbol: str, bars: Iterable[Mapping[str, Any]]) -> int:
         """Bulk-load historical bars for ``symbol``. Caller is responsible for
-        confirming every bar is fully closed (REST-returned bars always are)."""
-        accepted = 0
+        confirming every bar is fully closed (REST-returned bars always are).
+
+        Single lock acquire + single deferred eviction sweep at the end —
+        per-bar eviction here was the bootstrap hot-spot before this
+        rewrite (each insert ran a full-store scan; 1083 bars × 567
+        symbols × O(N²) made the daemon take 20+ minutes per cold start).
+        """
+        if not symbol:
+            return 0
+        parsed_bars: list[_Bar] = []
         for bar in bars:
             parsed = _parse_ws_kline_event(bar)
-            if parsed is None:
-                continue
-            if self._insert_bar(symbol, parsed):
+            if parsed is not None:
+                parsed_bars.append(parsed)
+        if not parsed_bars:
+            return 0
+        accepted = 0
+        with self._lock:
+            reference_ts = max(self._global_max_ts_ms, max(p.ts_ms for p in parsed_bars))
+            symbol_bars = self._bars.setdefault(symbol, {})
+            for parsed in parsed_bars:
+                if reference_ts - parsed.ts_ms > self._retain_ms:
+                    continue
+                symbol_bars[parsed.ts_ms] = parsed
                 accepted += 1
+            self._adds_total += accepted
+            if reference_ts > self._global_max_ts_ms:
+                self._global_max_ts_ms = reference_ts
+            # Single amortized eviction at the end of the bulk load. During
+            # cold-start bootstrap this is the only sweep for the whole
+            # symbol; without it the loop above was effectively serialized
+            # under the store lock and starved every other worker.
+            if reference_ts - self._last_eviction_ref_ts_ms >= _EVICTION_INTERVAL_MS:
+                self._evict_old_locked(reference_ts_ms=reference_ts)
+                self._last_eviction_ref_ts_ms = reference_ts
         return accepted
 
     def _insert_bar(self, symbol: str, bar: _Bar) -> bool:
         if not symbol:
             return False
         with self._lock:
-            # A bar older than the retention window is dropped even on insert
-            # so a buggy upstream cannot indefinitely fill the store with
-            # already-expired data.
-            now_ms = self._max_ts_with_new(symbol, bar.ts_ms)
-            if now_ms - bar.ts_ms > self._retain_ms:
+            # Cached global newest_ts replaces the prior O(symbols * bars)
+            # scan. Reads + writes to _global_max_ts_ms happen only under
+            # the store lock so the value is always consistent with _bars.
+            reference_ts = self._global_max_ts_ms
+            if bar.ts_ms > reference_ts:
+                reference_ts = bar.ts_ms
+            if reference_ts - bar.ts_ms > self._retain_ms:
                 return False
             symbol_bars = self._bars.setdefault(symbol, {})
             symbol_bars[bar.ts_ms] = bar
             self._adds_total += 1
-            self._evict_old_locked(reference_ts_ms=now_ms)
+            if reference_ts > self._global_max_ts_ms:
+                self._global_max_ts_ms = reference_ts
+            # Amortized eviction — see _EVICTION_INTERVAL_MS comment. The WS
+            # path inserts 1 bar/symbol/hour so this fires every hour; the
+            # bootstrap path uses bootstrap_symbol() instead and only runs
+            # one sweep per symbol.
+            if reference_ts - self._last_eviction_ref_ts_ms >= _EVICTION_INTERVAL_MS:
+                self._evict_old_locked(reference_ts_ms=reference_ts)
+                self._last_eviction_ref_ts_ms = reference_ts
             return True
-
-    def _max_ts_with_new(self, symbol: str, new_ts_ms: int) -> int:
-        """Best estimate of "what time it is" for eviction. We use the
-        max(ts_ms) seen across all symbols + the new bar, so a fresh feed
-        keeps evicting stale symbols even if some go silent."""
-        max_seen = new_ts_ms
-        for sym, symbol_bars in self._bars.items():
-            if not symbol_bars:
-                continue
-            local_max = max(symbol_bars)
-            if local_max > max_seen:
-                max_seen = local_max
-        return max_seen
 
     def _evict_old_locked(self, *, reference_ts_ms: int) -> None:
         cutoff_ts = reference_ts_ms - self._retain_ms
@@ -347,14 +390,10 @@ class KlineStore:
 
     def newest_ts_ms(self) -> int | None:
         with self._lock:
-            best: int | None = None
-            for symbol_bars in self._bars.values():
-                if not symbol_bars:
-                    continue
-                local_max = max(symbol_bars)
-                if best is None or local_max > best:
-                    best = local_max
-            return best
+            # Cached: _global_max_ts_ms is updated incrementally on every
+            # insert and on recovery, so this is O(1). Returns None when the
+            # store has never received any bars.
+            return self._global_max_ts_ms if self._global_max_ts_ms > 0 else None
 
     def oldest_ts_ms(self) -> int | None:
         with self._lock:
@@ -490,6 +529,7 @@ class KlineStore:
             return 0
         with self._lock:
             recovered = 0
+            max_ts = self._global_max_ts_ms
             for row in frame.iter_rows(named=True):
                 symbol = str(row.get("symbol", "") or "")
                 if not symbol:
@@ -514,9 +554,12 @@ class KlineStore:
                 symbol_bars = self._bars.setdefault(symbol, {})
                 symbol_bars[ts_ms] = bar
                 recovered += 1
-            if self._bars:
-                reference = self.newest_ts_ms() or 0
-                self._evict_old_locked(reference_ts_ms=reference)
+                if ts_ms > max_ts:
+                    max_ts = ts_ms
+            self._global_max_ts_ms = max_ts
+            if self._bars and max_ts > 0:
+                self._evict_old_locked(reference_ts_ms=max_ts)
+                self._last_eviction_ref_ts_ms = max_ts
         return recovered
 
     # -- introspection --------------------------------------------------

@@ -355,6 +355,14 @@ class EventDemoDaemon:
 
     def run(self) -> dict[str, Any]:
         """Main loop. Returns a small stats dict on graceful shutdown."""
+        # Attach the package stderr handler BEFORE the kline manager starts:
+        # bootstrap calls _logger.info() heavily and ws_risk's
+        # _ensure_default_log_handler doesn't fire until the risk engine
+        # starts, which is well after bootstrap. Without this, a cold-start
+        # daemon looks completely silent for the entire bootstrap window
+        # and the operator can't tell whether it's working or hung.
+        from .ws_risk import _ensure_default_log_handler
+        _ensure_default_log_handler()
         _logger.info(
             "event_demo_daemon starting data_root=%s interval_seconds=%.1f "
             "submit_orders=%s max_concurrent_entries=%d",

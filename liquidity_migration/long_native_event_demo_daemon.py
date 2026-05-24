@@ -281,6 +281,10 @@ class LongNativeDemoDaemon:
             _logger.exception("long ticker cache crashed on event: %s", exc)
 
     def run(self) -> dict[str, Any]:
+        # Same reasoning as EventDemoDaemon.run: attach the package stderr
+        # handler before bootstrap so the operator can see progress.
+        from .ws_risk import _ensure_default_log_handler
+        _ensure_default_log_handler()
         _logger.info(
             "long_native_event_demo_daemon starting data_root=%s interval_seconds=%.1f "
             "submit_orders=%s profile=%s notional_x=%.1f leverage=%.1f",

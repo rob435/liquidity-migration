@@ -393,3 +393,47 @@ def test_parser_returns_none_for_negative_or_partial_payload() -> None:
     # Non-numeric float
     assert _parse_ws_kline_event({"start": 1, "open": "x", "high": "1", "low": "1",
                                   "close": "1", "volume": "1", "turnover": "1"}) is None
+
+
+def test_bootstrap_symbol_completes_full_universe_in_under_two_seconds() -> None:
+    """Regression guard for the O(N²) eviction bug that made cold-start
+    bootstrap take 15+ minutes in production.
+
+    The bug: _insert_bar called _max_ts_with_new (full scan of all symbols)
+    and _evict_old_locked (full scan of all symbols × all bars) on EVERY
+    inserted bar. With 567 symbols × 1083 bars/symbol, this was O(N²) under
+    the store's RLock — workers competed for the lock and effective
+    throughput collapsed.
+
+    Post-fix this completes in well under a second on commodity hardware;
+    the 2s budget is the slack for slower CI machines. If this test ever
+    exceeds 2s the eviction or max-ts amortization is broken.
+    """
+    store = KlineStore(cache_root=None, retain_days=90, flush_interval_seconds=0.0)
+    base_ts = 100 * MS_PER_DAY
+    bars = [_ws_bar(base_ts + i * MS_PER_HOUR) for i in range(1000)]
+    start = time.monotonic()
+    for i in range(500):
+        store.bootstrap_symbol(f"SYM{i:04d}USDT", bars)
+    elapsed = time.monotonic() - start
+    assert elapsed < 2.0, (
+        f"bootstrap of 500 × 1000 bars took {elapsed:.2f}s — eviction may have "
+        f"regressed to O(N²) (was 15+ minutes in production before the fix)"
+    )
+    assert store.row_count() == 500 * 1000
+
+
+def test_amortized_eviction_does_not_skip_long_overdue_purges() -> None:
+    """Eviction is amortized to fire once per hour-window, but bars that
+    have been stale for many hours still get purged the next time it fires.
+    A single very-old bar plus a much-later insert must still trigger
+    eviction of the old bar."""
+    store = KlineStore(cache_root=None, retain_days=1, flush_interval_seconds=0.0)
+    # Old bar at t=0, within retention as the only entry.
+    store.add_bar("OLD", _ws_bar(0, close=50.0), confirmed=True)
+    assert "OLD" in store.symbols_with_coverage_through(0)
+    # New bar 5 days later — eviction window threshold (1h) is crossed
+    # easily and the old bar (5d > retain_days=1) must be purged.
+    store.add_bar("NEW", _ws_bar(5 * MS_PER_DAY, close=100.0), confirmed=True)
+    assert "OLD" not in store.symbols_with_coverage_through(0)
+    assert "NEW" in store.symbols_with_coverage_through(5 * MS_PER_DAY)
