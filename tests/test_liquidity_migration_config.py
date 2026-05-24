@@ -2,9 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from liquidity_migration.config import (
+    CostConfig,
     DEFAULT_EXCLUDED_SYMBOLS,
     DEFAULT_RESEARCH_DATA_ROOT,
+    _merge_dataclass,
+    ensure_data_root_exists,
     load_config,
 )
 
@@ -44,3 +49,14 @@ def test_default_config_excludes_only_stable_and_peg_symbols() -> None:
     assert {"BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT", "TRXUSDT"}.isdisjoint(
         set(config.universe.exclude_symbols)
     )
+
+
+def test_merge_dataclass_rejects_unknown_keys() -> None:
+    with pytest.raises(TypeError, match="Unknown CostConfig keys"):
+        _merge_dataclass(CostConfig, {"maker_fee_bps": 1.0, "not_a_real_field": 99})
+
+
+def test_ensure_data_root_exists(tmp_path: Path) -> None:
+    assert ensure_data_root_exists(tmp_path) == tmp_path
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        ensure_data_root_exists(tmp_path / "missing")

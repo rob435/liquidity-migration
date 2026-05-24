@@ -12,6 +12,7 @@ from .archive_manifest import run_archive_klines_download
 from .config import (
     DEFAULT_EXCLUDED_SYMBOLS,
     UniverseConfig,
+    ensure_data_root_exists,
     load_config,
 )
 from .data_layer import DEFAULT_DATA_LAYER_DATASETS, DataLayerAuditConfig, run_data_layer_audit
@@ -30,28 +31,6 @@ from .portfolio_hedge import run_portfolio_hedge_report
 from .reconciliation import run_paper_demo_reconciliation
 from .strategy_tribunal import StrategyTribunalConfig, run_strategy_tribunal
 from .universe import run_discover_universe
-from .cross_sectional_momentum import (
-    POSITION_SIZINGS as MOMENTUM_POSITION_SIZINGS,
-    CrossSectionalMomentumConfig,
-    run_cross_sectional_momentum_research,
-)
-from .momentum_factor import (
-    FACTOR_PRESETS,
-    MODES as MOMENTUM_FACTOR_MODES,
-    PRESET_LO_CARRY0,
-    PRESET_LO_SHARPE3,
-    PRESET_LO_ADAPTIVE,
-    PRESET_LO_SHARPE3_ROBUST,
-    PRESET_LO_SKIP0,
-    SIZINGS as MOMENTUM_FACTOR_SIZINGS,
-    MomentumFactorConfig,
-    lo_carry0_preset,
-    lo_sharpe3_preset,
-    lo_adaptive_preset,
-    lo_sharpe3_robust_preset,
-    lo_skip0_preset,
-    run_momentum_factor_research,
-)
 from .momentum_signals import RANKERS as MOMENTUM_RANKERS
 from .volume_events import ENTRY_POLICIES, POSITION_WEIGHTINGS, VolumeEventResearchConfig, run_volume_event_research
 from .ws_risk import EventWebSocketRiskConfig, run_event_ws_risk
@@ -1177,301 +1156,6 @@ def _add_volume_events_parser(subparsers) -> None:
     volume_events.add_argument("--report-dir", default=None)
 
 
-def _add_cross_sectional_momentum_parser(subparsers) -> None:
-    momentum_defaults = CrossSectionalMomentumConfig()
-    momentum = subparsers.add_parser(
-        "cross-sectional-momentum",
-        help="Run the long-only event-triggered cross-sectional momentum sleeve.",
-    )
-    momentum.add_argument("--start", default="", help="Inclusive UTC signal start date.")
-    momentum.add_argument("--end", default="", help="Exclusive UTC signal end date.")
-    momentum.add_argument(
-        "--ranker",
-        default=momentum_defaults.ranker,
-        choices=MOMENTUM_RANKERS,
-        help="Cross-sectional ranker.",
-    )
-    momentum.add_argument(
-        "--ranker-lookback-days",
-        type=int,
-        default=momentum_defaults.ranker_lookback_days,
-        help="Lookback window for the ranker.",
-    )
-    momentum.add_argument(
-        "--liquidity-tier-size",
-        type=int,
-        default=momentum_defaults.liquidity_tier_size,
-        help="Top-N coins by trailing median turnover.",
-    )
-    momentum.add_argument(
-        "--liquidity-volume-window-days",
-        type=int,
-        default=momentum_defaults.liquidity_volume_window_days,
-        help="Trailing window for the liquidity-tier ranking.",
-    )
-    momentum.add_argument(
-        "--min-listing-history-days",
-        type=int,
-        default=momentum_defaults.min_listing_history_days,
-        help="Minimum trading history before a symbol is eligible.",
-    )
-    momentum.add_argument(
-        "--max-concurrent-positions",
-        type=int,
-        default=momentum_defaults.max_concurrent_positions,
-    )
-    momentum.add_argument(
-        "--gross-exposure",
-        type=float,
-        default=momentum_defaults.gross_exposure,
-    )
-    momentum.add_argument(
-        "--position-sizing",
-        default=momentum_defaults.position_sizing,
-        choices=MOMENTUM_POSITION_SIZINGS,
-    )
-    momentum.add_argument(
-        "--cost-multiplier",
-        type=float,
-        default=momentum_defaults.cost_multiplier,
-        help="Multiplier on the base round-trip cost from CostConfig.",
-    )
-    momentum.add_argument(
-        "--cooldown-days",
-        type=int,
-        default=momentum_defaults.cooldown_days,
-    )
-    momentum.add_argument(
-        "--entry-delay-hours",
-        type=int,
-        default=momentum_defaults.entry_delay_hours,
-    )
-    momentum.add_argument(
-        "--rank-entry-min-norm",
-        type=float,
-        default=momentum_defaults.rank_entry_min_norm,
-        help="Normalized rank (0-1) above which entries can fire.",
-    )
-    momentum.add_argument(
-        "--rank-exit-max-norm",
-        type=float,
-        default=momentum_defaults.rank_exit_max_norm,
-        help="Normalized rank below which positions are exited.",
-    )
-    momentum.add_argument(
-        "--trailing-atr-multiple",
-        type=float,
-        default=momentum_defaults.trailing_atr_multiple,
-    )
-    momentum.add_argument(
-        "--breakout-window-days",
-        type=int,
-        default=momentum_defaults.breakout_window_days,
-    )
-    momentum.add_argument(
-        "--sma-regime-days",
-        type=int,
-        default=momentum_defaults.sma_regime_days,
-    )
-    momentum.add_argument(
-        "--sma-trend-break-days",
-        type=int,
-        default=momentum_defaults.sma_trend_break_days,
-    )
-    momentum.add_argument(
-        "--coil-release-min-compress-days",
-        type=int,
-        default=momentum_defaults.coil_release_min_compress_days,
-    )
-    momentum.add_argument(
-        "--allow-partial-pit",
-        action="store_true",
-        help="Allow runs without full PIT universe coverage. The resulting report is labelled biased-diagnostic only.",
-    )
-    momentum.add_argument(
-        "--allow-funding-overheat",
-        action="store_true",
-        help="Disable the funding-overheat entry block (use when funding data is missing).",
-    )
-    momentum.add_argument(
-        "--ignore-btc-regime",
-        action="store_true",
-        help="Disable the BTC-SMA regime gate on entries.",
-    )
-    momentum.add_argument(
-        "--no-coil-release",
-        action="store_true",
-        help="Disable the coil-release (vol-compression → expansion) entry requirement.",
-    )
-    momentum.add_argument(
-        "--no-breakout",
-        action="store_true",
-        help="Disable the breakout (close > prior-N-day high) entry requirement.",
-    )
-    momentum.add_argument("--report-dir", default=None)
-
-
-def _add_momentum_factor_parser(subparsers) -> None:
-    factor_defaults = MomentumFactorConfig()
-    factor = subparsers.add_parser(
-        "momentum-factor",
-        help="Weekly-rebalance cross-sectional momentum factor (Liu-Tsyvinski / Carhart style).",
-    )
-    factor.add_argument("--start", default="", help="Inclusive UTC signal start date.")
-    factor.add_argument("--end", default="", help="Exclusive UTC signal end date.")
-    factor.add_argument(
-        "--preset",
-        default=None,
-        choices=FACTOR_PRESETS,
-        help="lo_skip0 | lo_carry0 | lo_sharpe3 | lo_sharpe3_robust (vol cap 1.6); overrides defaults when set.",
-    )
-    factor.add_argument(
-        "--mode",
-        default=factor_defaults.mode,
-        choices=MOMENTUM_FACTOR_MODES,
-        help="long_only or long_short.",
-    )
-    factor.add_argument(
-        "--universe-size",
-        type=int,
-        default=factor_defaults.universe_size,
-    )
-    factor.add_argument(
-        "--universe-volume-window-days",
-        type=int,
-        default=factor_defaults.universe_volume_window_days,
-    )
-    factor.add_argument(
-        "--min-listing-history-days",
-        type=int,
-        default=factor_defaults.min_listing_history_days,
-    )
-    factor.add_argument(
-        "--momentum-lookbacks",
-        default=",".join(str(x) for x in factor_defaults.momentum_lookbacks_days),
-        help="Comma-separated lookback windows in days for the momentum ensemble.",
-    )
-    factor.add_argument(
-        "--momentum-skip-days",
-        type=int,
-        default=factor_defaults.momentum_skip_days,
-        help="Carhart-style skip-N-days before measuring formation return.",
-    )
-    factor.add_argument(
-        "--carry-lookback-days",
-        type=int,
-        default=factor_defaults.carry_lookback_days,
-    )
-    factor.add_argument(
-        "--carry-weight",
-        type=float,
-        default=factor_defaults.carry_weight,
-        help="Weight of the carry penalty in composite score (0 disables).",
-    )
-    factor.add_argument(
-        "--ts-momentum-lookback-days",
-        type=int,
-        default=factor_defaults.ts_momentum_lookback_days,
-    )
-    factor.add_argument(
-        "--require-positive-ts-momentum-for-longs",
-        action="store_true",
-        help="Drop long candidates whose own N-day TS-momentum is non-positive.",
-    )
-    factor.add_argument(
-        "--require-negative-ts-momentum-for-shorts",
-        action="store_true",
-        help="Drop short candidates whose own N-day TS-momentum is non-negative (L/S mode only).",
-    )
-    factor.add_argument(
-        "--long-quantile",
-        type=float,
-        default=factor_defaults.long_quantile,
-    )
-    factor.add_argument(
-        "--short-quantile",
-        type=float,
-        default=factor_defaults.short_quantile,
-    )
-    factor.add_argument(
-        "--rebalance-days",
-        type=int,
-        default=factor_defaults.rebalance_days,
-    )
-    factor.add_argument(
-        "--entry-delay-hours",
-        type=int,
-        default=factor_defaults.entry_delay_hours,
-    )
-    factor.add_argument(
-        "--sizing",
-        default=factor_defaults.sizing,
-        choices=MOMENTUM_FACTOR_SIZINGS,
-    )
-    factor.add_argument(
-        "--vol-estimate-window-days",
-        type=int,
-        default=factor_defaults.vol_estimate_window_days,
-    )
-    factor.add_argument(
-        "--vol-floor-annual",
-        type=float,
-        default=factor_defaults.vol_floor_annual,
-    )
-    factor.add_argument(
-        "--gross-exposure",
-        type=float,
-        default=factor_defaults.gross_exposure,
-    )
-    factor.add_argument(
-        "--max-position-weight",
-        type=float,
-        default=factor_defaults.max_position_weight,
-    )
-    factor.add_argument(
-        "--vol-target-annual",
-        type=float,
-        default=factor_defaults.vol_target_annual,
-        help="Annualized portfolio vol target. 0 disables vol-targeting.",
-    )
-    factor.add_argument(
-        "--vol-target-max-scale",
-        type=float,
-        default=factor_defaults.vol_target_max_scale,
-    )
-    factor.add_argument(
-        "--regime-sma-days",
-        type=int,
-        default=factor_defaults.regime_sma_days,
-    )
-    factor.add_argument(
-        "--regime-off-scale",
-        type=float,
-        default=factor_defaults.regime_off_scale,
-    )
-    factor.add_argument(
-        "--no-regime-filter",
-        action="store_true",
-        help="Disable BTC SMA regime gate.",
-    )
-    factor.add_argument(
-        "--cost-multiplier",
-        type=float,
-        default=factor_defaults.cost_multiplier,
-    )
-    factor.add_argument(
-        "--allow-partial-pit",
-        action="store_true",
-        help="Allow runs without full PIT universe coverage. Run label downgraded.",
-    )
-    factor.add_argument("--max-realized-vol", type=float, default=None, help="Skip longs above this ann vol.")
-    factor.add_argument("--max-turnover-rank", type=int, default=None, help="Max liquidity rank (1=most liquid).")
-    factor.add_argument("--max-composite-score", type=float, default=None, help="Skip extreme momentum z-scores.")
-    factor.add_argument("--max-momentum-avg", type=float, default=None, help="Skip extreme formation momentum.")
-    factor.add_argument("--min-ts-momentum", type=float, default=None)
-    factor.add_argument("--report-dir", default=None)
-
-
 def _add_strategy_tribunal_parser(subparsers) -> None:
     tribunal_defaults = StrategyTribunalConfig()
     tribunal = subparsers.add_parser(
@@ -1737,12 +1421,15 @@ def _add_combined_book_report_parser(subparsers) -> None:
         help="Send a Telegram message with aggregate PnL across both sleeves.",
     )
     report.add_argument(
-        "--short-data-root", default="data/bybit-demo-event",
-        help="Data root of the short sleeve (event_demo_trades).",
+        "--short-data-root",
+        default=None,
+        help="Data root of the short sleeve (event_demo_trades). Defaults to global --data-root.",
     )
     report.add_argument(
-        "--long-data-root", default="data/bybit-long-demo-event",
-        help="Data root of the long sleeve (long_native_demo_trades).",
+        "--long-data-root",
+        default=None,
+        help="Data root of the long sleeve (long_native_demo_trades). "
+        "Defaults to <data-root parent>/bybit-long-demo-event.",
     )
     report.add_argument(
         "--include-live-positions", action="store_true",
@@ -1856,8 +1543,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_archive_download_klines_1h_parser(subparsers)
     _add_archive_download_klines_1h_api_parser(subparsers)
     _add_volume_events_parser(subparsers)
-    _add_cross_sectional_momentum_parser(subparsers)
-    _add_momentum_factor_parser(subparsers)
     _add_strategy_tribunal_parser(subparsers)
     _add_portfolio_hedge_parser(subparsers)
     _add_feature_factory_parser(subparsers)
@@ -1871,10 +1556,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+_COMMANDS_WITHOUT_DATA_ROOT = frozenset({"download-data"})
+
+
+def _expanded_report_dir(report_dir: str | Path | None, *, default: Path) -> Path:
+    return Path(report_dir).expanduser() if report_dir else default
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_config(args.config, data_root=args.data_root)
-    data_root = Path(config.data_root)
+    if args.command in _COMMANDS_WITHOUT_DATA_ROOT:
+        data_root = Path(config.data_root).expanduser()
+    else:
+        data_root = ensure_data_root_exists(config.data_root)
 
     if args.command == "download-data":
         if args.fixture:
@@ -2172,8 +1867,9 @@ def main(argv: list[str] | None = None) -> int:
         from liquidity_migration.event_demo import _build_private_client, _safe_raw_positions, _utc_now_ms
         from liquidity_migration.event_demo import build_position_pnl_snapshot, summarize_position_pnl
         from liquidity_migration.telegram import send_telegram_message
-        short_root = Path(args.short_data_root).expanduser()
-        long_root = Path(args.long_data_root).expanduser()
+        short_root = Path(args.short_data_root or config.data_root).expanduser()
+        long_default = data_root.parent / "bybit-long-demo-event"
+        long_root = Path(args.long_data_root or long_default).expanduser()
         bybit_position_summary: dict[str, object] | None = None
         bybit_positions: list[dict[str, object]] | None = None
         if args.include_live_positions:
@@ -2429,7 +2125,10 @@ def main(argv: list[str] | None = None) -> int:
             data_root,
             event_config=event_config,
             cost_config=config.costs,
-            report_dir=args.report_dir,
+            report_dir=_expanded_report_dir(
+                args.report_dir,
+                default=data_root / "reports" / "volume_event_research",
+            ),
         )
         best = payload.get("best_scenario", {})
         print(
@@ -2438,148 +2137,6 @@ def main(argv: list[str] | None = None) -> int:
             f"promotable={payload['rows']['promotable']} "
             f"best_return={best.get('total_return', 0.0):.2%} "
             f"path={Path(payload['report_dir']) / 'volume_event_research_report.md'}"
-        )
-        return 0
-
-    if args.command == "cross-sectional-momentum":
-        momentum_config = CrossSectionalMomentumConfig(
-            start_date=args.start,
-            end_date=args.end,
-            ranker=args.ranker,
-            ranker_lookback_days=args.ranker_lookback_days,
-            liquidity_tier_size=args.liquidity_tier_size,
-            liquidity_volume_window_days=args.liquidity_volume_window_days,
-            min_listing_history_days=args.min_listing_history_days,
-            max_concurrent_positions=args.max_concurrent_positions,
-            gross_exposure=args.gross_exposure,
-            position_sizing=args.position_sizing,
-            cost_multiplier=args.cost_multiplier,
-            cooldown_days=args.cooldown_days,
-            entry_delay_hours=args.entry_delay_hours,
-            rank_entry_min_norm=args.rank_entry_min_norm,
-            rank_exit_max_norm=args.rank_exit_max_norm,
-            trailing_atr_multiple=args.trailing_atr_multiple,
-            breakout_window_days=args.breakout_window_days,
-            sma_regime_days=args.sma_regime_days,
-            sma_trend_break_days=args.sma_trend_break_days,
-            coil_release_min_compress_days=args.coil_release_min_compress_days,
-            require_full_pit_universe=not args.allow_partial_pit,
-            require_funding_not_overheated=not args.allow_funding_overheat,
-            require_regime_on_entry=not args.ignore_btc_regime,
-            require_coil_release=not args.no_coil_release,
-            require_breakout=not args.no_breakout,
-        )
-        payload = run_cross_sectional_momentum_research(
-            data_root,
-            config=momentum_config,
-            cost_config=config.costs,
-            report_dir=args.report_dir,
-        )
-        summary = payload.get("summary", {})
-        promotion = payload.get("promotion", {})
-        print(
-            "cross-sectional momentum "
-            f"label={payload.get('run_label')} "
-            f"trades={payload['rows']['trades']} "
-            f"return={summary.get('total_return', 0.0):.2%} "
-            f"max_dd={summary.get('max_drawdown', 0.0):.2%} "
-            f"sharpe={summary.get('sharpe_like', 0.0):.2f} "
-            f"promotion={promotion.get('promotion_gate_pass', False)} "
-            f"path={Path(payload['report_dir']) / 'cross_sectional_momentum_research_report.md'}"
-        )
-        return 0
-
-    if args.command == "momentum-factor":
-        from dataclasses import replace
-
-        if args.preset == PRESET_LO_SKIP0:
-            factor_config = lo_skip0_preset(start_date=args.start, end_date=args.end)
-        elif args.preset == PRESET_LO_CARRY0:
-            factor_config = lo_carry0_preset(start_date=args.start, end_date=args.end)
-        elif args.preset == PRESET_LO_SHARPE3:
-            factor_config = lo_sharpe3_preset(start_date=args.start, end_date=args.end)
-        elif args.preset == PRESET_LO_SHARPE3_ROBUST:
-            factor_config = lo_sharpe3_robust_preset(start_date=args.start, end_date=args.end)
-        elif args.preset == PRESET_LO_ADAPTIVE:
-            factor_config = lo_adaptive_preset(start_date=args.start, end_date=args.end)
-        else:
-            lookbacks = tuple(
-                int(item.strip())
-                for item in args.momentum_lookbacks.split(",")
-                if item.strip()
-            )
-            factor_config = MomentumFactorConfig(
-                start_date=args.start,
-                end_date=args.end,
-                mode=args.mode,
-                universe_size=args.universe_size,
-                universe_volume_window_days=args.universe_volume_window_days,
-                min_listing_history_days=args.min_listing_history_days,
-                momentum_lookbacks_days=lookbacks,
-                momentum_skip_days=args.momentum_skip_days,
-                carry_lookback_days=args.carry_lookback_days,
-                carry_weight=args.carry_weight,
-                ts_momentum_lookback_days=args.ts_momentum_lookback_days,
-                require_positive_ts_momentum_for_longs=args.require_positive_ts_momentum_for_longs,
-                require_negative_ts_momentum_for_shorts=args.require_negative_ts_momentum_for_shorts,
-                long_quantile=args.long_quantile,
-                short_quantile=args.short_quantile,
-                rebalance_days=args.rebalance_days,
-                entry_delay_hours=args.entry_delay_hours,
-                sizing=args.sizing,
-                vol_estimate_window_days=args.vol_estimate_window_days,
-                vol_floor_annual=args.vol_floor_annual,
-                gross_exposure=args.gross_exposure,
-                max_position_weight=args.max_position_weight,
-                vol_target_annual=args.vol_target_annual,
-                vol_target_max_scale=args.vol_target_max_scale,
-                regime_sma_days=args.regime_sma_days,
-                regime_off_scale=args.regime_off_scale,
-                use_regime_filter=not args.no_regime_filter,
-                cost_multiplier=args.cost_multiplier,
-                require_full_pit_universe=not args.allow_partial_pit,
-                max_realized_vol=args.max_realized_vol,
-                max_turnover_rank=args.max_turnover_rank,
-                max_composite_score=args.max_composite_score,
-                max_momentum_avg=args.max_momentum_avg,
-                min_ts_momentum=args.min_ts_momentum,
-            )
-        if args.preset and any(
-            v is not None
-            for v in (
-                args.max_realized_vol,
-                args.max_turnover_rank,
-                args.max_composite_score,
-                args.max_momentum_avg,
-                args.min_ts_momentum,
-            )
-        ):
-            factor_config = replace(
-                factor_config,
-                max_realized_vol=args.max_realized_vol or factor_config.max_realized_vol,
-                max_turnover_rank=args.max_turnover_rank or factor_config.max_turnover_rank,
-                max_composite_score=args.max_composite_score or factor_config.max_composite_score,
-                max_momentum_avg=args.max_momentum_avg or factor_config.max_momentum_avg,
-                min_ts_momentum=args.min_ts_momentum or factor_config.min_ts_momentum,
-            )
-        payload = run_momentum_factor_research(
-            data_root,
-            config=factor_config,
-            cost_config=config.costs,
-            report_dir=args.report_dir,
-        )
-        summary = payload.get("summary", {})
-        promotion = payload.get("promotion", {})
-        print(
-            "momentum factor "
-            f"label={payload.get('run_label')} "
-            f"mode={factor_config.mode} "
-            f"trades={payload['rows']['trades']} "
-            f"return={summary.get('total_return', 0.0):.2%} "
-            f"max_dd={summary.get('max_drawdown', 0.0):.2%} "
-            f"sharpe={summary.get('sharpe_like', 0.0):.2f} "
-            f"promotion={promotion.get('promotion_gate_pass', False)} "
-            f"path={Path(payload['report_dir']) / 'momentum_factor_research_report.md'}"
         )
         return 0
 

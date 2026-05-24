@@ -143,7 +143,7 @@ def run_event_demo_cycle(
         stage_timings_ms[f"timing_{name}_ms"] = round((now - stage_perf_start) * 1000.0, 3)
         stage_perf_start = now
 
-    with exclusive_file_lock(root / ".locks" / "event_demo_cycle.lock", stale_seconds=900):
+    with exclusive_file_lock(root / ".locks" / "event_demo_ledger.lock", stale_seconds=900):
         mark_stage("cycle_lock_wait")
         public = market_client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
         instruments = _demo_instruments(public, cache_root=root, now_ms=cycle_now_ms)
@@ -598,7 +598,7 @@ def run_event_risk_cycle(
     cycle_now_ms = now_ms if now_ms is not None else _utc_now_ms()
     cycle_id = f"risk-{_yyyymmddhhmmss(cycle_now_ms)}-{int(time.time_ns())}"
 
-    with exclusive_file_lock(root / ".locks" / "event_risk_cycle.lock", stale_seconds=15, poll_seconds=0.001):
+    with exclusive_file_lock(root / ".locks" / "event_demo_ledger.lock", stale_seconds=900, poll_seconds=0.001):
         trading_client = private_client if private_client is not None else build_event_risk_private_client(config, risk)
         all_trades = read_dataset(root, "event_demo_trades")
         all_orders = read_dataset(root, "event_demo_orders")
@@ -1586,13 +1586,21 @@ def _validate_demo_config(config: EventDemoCycleConfig) -> None:
         raise ValueError("entry_leverage must be positive")
     if config.order_fill_confirm_seconds < 0.0 or config.order_fill_poll_interval_seconds <= 0.0:
         raise ValueError("order fill confirmation intervals must be non-negative with positive poll interval")
-    if config.submit_orders and not config.confirm_demo_orders:
-        raise RuntimeError("Refusing to submit demo orders without --confirm-demo-orders")
+    from .bybit import validate_order_submit_allowed
+
+    validate_order_submit_allowed(
+        submit_orders=config.submit_orders,
+        confirm_demo_orders=config.confirm_demo_orders,
+    )
 
 
 def _validate_risk_config(config: EventRiskCycleConfig) -> None:
-    if config.submit_orders and not config.confirm_demo_orders:
-        raise RuntimeError("Refusing to submit demo risk orders without --confirm-demo-orders")
+    from .bybit import validate_order_submit_allowed
+
+    validate_order_submit_allowed(
+        submit_orders=config.submit_orders,
+        confirm_demo_orders=config.confirm_demo_orders,
+    )
     if config.exit_order_mode not in {"market", "limit_chase"}:
         raise ValueError("exit_order_mode must be market or limit_chase")
     if config.limit_chase_attempts <= 0:
@@ -3682,7 +3690,10 @@ def _risk_reconcile_missing_positions(
 
 
 def _private_credentials_present() -> bool:
-    return bool(os.environ.get("BYBIT_DEMO_API_KEY") and os.environ.get("BYBIT_DEMO_API_SECRET"))
+    from .bybit import resolve_private_credentials
+
+    api_key, api_secret, _ = resolve_private_credentials()
+    return bool(api_key and api_secret)
 
 
 def _build_private_client(config: ResearchConfig) -> BybitPrivateClient:

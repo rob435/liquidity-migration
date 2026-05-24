@@ -240,12 +240,15 @@ def add_sharpe_score(daily: pl.DataFrame, *, lookback_days: int) -> pl.DataFrame
     """Trailing Sharpe-like = mean(log_return) / std(log_return), annualized."""
     if daily.is_empty():
         return daily.with_columns(pl.Series("sharpe_score", [], dtype=pl.Float64))
-    return daily.sort(["symbol", "ts_ms"]).with_columns(
+    scored = daily.sort(["symbol", "ts_ms"]).with_columns(
         (
             pl.col("log_return").rolling_mean(window_size=lookback_days, min_samples=lookback_days).over("symbol")
             / pl.col("log_return").rolling_std(window_size=lookback_days, min_samples=lookback_days).over("symbol")
             * ANNUALIZATION_SQRT
         ).alias("sharpe_score")
+    )
+    return scored.with_columns(
+        pl.when(pl.col("sharpe_score").is_finite()).then(pl.col("sharpe_score")).otherwise(None).alias("sharpe_score")
     ).sort(["ts_ms", "symbol"])
 
 

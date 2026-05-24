@@ -114,14 +114,13 @@ Stop iterating on this strategy class. The data is telling us:
 - The OOS validation has now been used on 3 strategies; the dedicated OOS roots are spent.
 - Further parameter tuning on canonical is parameter mining.
 
-The best honest long-only candidate that survives OOS is still `momentum_factor LO_skip0` from the previous round, with honest Sharpe ~0.9 across IS + 2 OOS. Sharpe 3.0 long-only by itself is not happening on the data we have without abandoning research integrity.
+Sharpe 3.0 long-only by itself is not happening on the data we have without abandoning research integrity.
 
 ## Artifacts
 
 ```
 liquidity_migration/long_native.py
 docs/long_native_findings.md (this file)
-scripts/sweep_long_events.sh
 ~/SHARED_DATA/bybit_fullpit_1h/reports/long_native_FC_15_5_hold3_tp40/
 ~/SHARED_DATA/bybit_fullpit_1h/reports/long_native_FC_15_5_hold3_canonical/
 ~/SHARED_DATA/bybit_oos_pre2023/reports/long_native_FC_15_5_hold3_OOS_bybit/

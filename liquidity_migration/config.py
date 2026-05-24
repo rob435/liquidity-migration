@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -136,7 +136,21 @@ class ResearchConfig:
 
 def _merge_dataclass(cls: type, payload: dict[str, Any] | None):
     payload = dict(payload or {})
-    return cls(**payload)
+    allowed = {item.name for item in fields(cls)}
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise TypeError(
+            f"Unknown {cls.__name__} keys in config: {unknown}. Allowed: {sorted(allowed)}"
+        )
+    return cls(**{key: payload[key] for key in allowed if key in payload})
+
+
+def ensure_data_root_exists(data_root: str | Path) -> Path:
+    """Raise FileNotFoundError when the research data root is missing."""
+    root = Path(data_root).expanduser()
+    if not root.is_dir():
+        raise FileNotFoundError(f"Data root does not exist: {root}")
+    return root
 
 
 def _tuple_str(payload: dict[str, Any], key: str, default: tuple[str, ...]) -> tuple[str, ...]:

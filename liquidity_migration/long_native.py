@@ -459,10 +459,19 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
                                                  min_samples=config.res_prior_rank_lookback_days)
          .over("symbol").alias("avg_rank_30d")
     )
-    # normalize the avg rank to a percentile (0=best, 1=worst) using universe size
+    # Normalize avg rank to a percentile (0=best, 1=worst) vs configured universe size.
     daily = daily.with_columns(
-        (pl.col("avg_rank_30d") / pl.col("today_volume_rank").max().over("ts_ms").cast(pl.Float64))
-         .alias("avg_rank_pct_30d")
+        (pl.col("avg_rank_30d") / pl.lit(float(config.universe_size))).clip(0.0, 1.0).alias("avg_rank_pct_30d")
+    )
+    daily = daily.with_columns([
+        pl.col("close").rolling_max(window_size=90, min_samples=30).over("symbol").alias("high_90d"),
+        pl.col("close").rolling_min(window_size=90, min_samples=30).over("symbol").alias("low_90d"),
+    ])
+    daily = daily.with_columns(
+        pl.when((pl.col("high_90d") - pl.col("low_90d")).abs() > 1e-12)
+        .then((pl.col("close") - pl.col("low_90d")) / (pl.col("high_90d") - pl.col("low_90d")))
+        .otherwise(None)
+        .alias("pos_in_90d_range")
     )
 
     # universe membership

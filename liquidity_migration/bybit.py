@@ -91,6 +91,20 @@ def resolve_private_credentials() -> tuple[str | None, str | None, bool]:
     )
 
 
+def validate_order_submit_allowed(*, submit_orders: bool, confirm_demo_orders: bool) -> None:
+    """Guard automated order submission: explicit confirm flag and demo account only."""
+    if not submit_orders:
+        return
+    if not confirm_demo_orders:
+        raise RuntimeError("Refusing to submit orders without --confirm-demo-orders")
+    _, _, demo = resolve_private_credentials()
+    if not demo:
+        raise RuntimeError(
+            "Refusing to submit orders with REAL_MONEY=true. "
+            "Unset REAL_MONEY or use demo credentials for automated cycles."
+        )
+
+
 class BybitRestRateLimiter:
     """Thread-safe sliding-window rate limiter shared across BybitMarketData
     instances. Bybit public REST endpoints allow ~120 requests / 5 seconds per

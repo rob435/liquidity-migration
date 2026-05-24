@@ -255,8 +255,12 @@ def _validate_long_demo_config(config: LongNativeDemoCycleConfig) -> None:
         raise ValueError("entry_leverage must be positive")
     if config.max_new_entries_per_cycle <= 0:
         raise ValueError("max_new_entries_per_cycle must be positive")
-    if config.submit_orders and not config.confirm_demo_orders:
-        raise RuntimeError("Refusing to submit demo orders without --confirm-demo-orders")
+    from .bybit import validate_order_submit_allowed
+
+    validate_order_submit_allowed(
+        submit_orders=config.submit_orders,
+        confirm_demo_orders=config.confirm_demo_orders,
+    )
 
 
 def target_long_order_notional_pct_equity(

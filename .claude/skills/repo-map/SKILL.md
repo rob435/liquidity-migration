@@ -41,7 +41,6 @@ regime-conditional, and the current focus is regime-aware refinement (see
 - `data_layer.py` / `ingestion.py` / `storage.py` — dataset read/write/audit.
 - `bybit.py` / `binance.py` / `binance_vision.py` — venue clients and PIT
   proxy archives.
-- `ic_diagnostic.py` — information-coefficient / multicollinearity diagnostics.
 - `crowding.py` / `portfolio_hedge.py` — research-only crowding classifier and
   hedge overlay.
 - `universe.py` / `downloaders.py` / `archive.py` — universe snapshots and

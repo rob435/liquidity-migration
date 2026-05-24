@@ -143,9 +143,7 @@ capacity-skipped). The 31-150 / ri=150 boundary is well-tuned for the
 benefit only materialises when hold/quality are also moved to the h=2 +
 close=0.50 operating point.
 
-Full sweep, decomposition, tribunal reports, and 105-cell evidence:
-[`docs/research_universe_rank_sweep.md`](research_universe_rank_sweep.md).
-Data persisted at
+Sweep data persisted at
 `~/SHARED_DATA/bybit_fullpit_1h/reports/universe_rank_sweep_20260523/combined_sweep.csv`.
 
 ## Variable-exit sweep (2026-05-23)
@@ -178,10 +176,9 @@ The new exit types (breakeven, profit-lock, time-adaptive stop) are now in
 the code with defaults of 0.0 (disabled), so canonical behavior is
 unchanged. Activate via the new config fields `breakeven_arm_pct`,
 `profit_lock_arm_pct`, `profit_lock_floor_pct`, `stop_loose_window_hours`,
-`stop_loose_pct`, or via the new CLI flags on `scripts/sweep_universe_rank.py`.
+`stop_loose_pct`.
 
-Full evidence: [`docs/research_exit_rules.md`](research_exit_rules.md);
-sweep data persisted at
+Sweep data persisted at
 `~/SHARED_DATA/bybit_fullpit_1h/reports/exit_research_20260523/combined_exit_sweep.csv`.
 
 ## What the VPS demo is for

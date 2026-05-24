@@ -1765,8 +1765,12 @@ def _ensure_sleeve_column(df: pl.DataFrame, default: str) -> pl.DataFrame:
 
 
 def _validate_ws_risk_config(config: EventWebSocketRiskConfig) -> None:
-    if config.submit_orders and not config.confirm_demo_orders:
-        raise RuntimeError("Refusing to submit demo websocket risk orders without --confirm-demo-orders")
+    from .bybit import validate_order_submit_allowed
+
+    validate_order_submit_allowed(
+        submit_orders=config.submit_orders,
+        confirm_demo_orders=config.confirm_demo_orders,
+    )
     if config.order_submit_mode not in {"ws", "ws_then_rest", "rest"}:
         raise ValueError("order_submit_mode must be ws, ws_then_rest, or rest")
     if config.order_submit_mode == "ws" and config.rest_fallback:

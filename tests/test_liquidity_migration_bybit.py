@@ -646,3 +646,31 @@ def test_bybit_private_client_rate_limiter_acquires_each_retry(monkeypatch) -> N
     client.get_wallet_balance()
     assert attempt_counter["n"] == 2
     assert limiter.acquires == 2
+
+
+def test_validate_order_submit_allowed_blocks_mainnet(monkeypatch) -> None:
+    monkeypatch.setenv("REAL_MONEY", "true")
+    monkeypatch.delenv("DEMO", raising=False)
+    monkeypatch.setenv("BYBIT_REAL_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_REAL_API_SECRET", "s")
+    with pytest.raises(RuntimeError, match="REAL_MONEY"):
+        bybit.validate_order_submit_allowed(submit_orders=True, confirm_demo_orders=True)
+
+
+def test_validate_order_submit_allowed_requires_confirm_flag(monkeypatch) -> None:
+    monkeypatch.delenv("REAL_MONEY", raising=False)
+    monkeypatch.setenv("BYBIT_DEMO_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_DEMO_API_SECRET", "s")
+    with pytest.raises(RuntimeError, match="confirm-demo-orders"):
+        bybit.validate_order_submit_allowed(submit_orders=True, confirm_demo_orders=False)
+
+
+def test_private_credentials_present_uses_active_account(monkeypatch) -> None:
+    from liquidity_migration.event_demo import _private_credentials_present
+
+    monkeypatch.setenv("REAL_MONEY", "true")
+    monkeypatch.delenv("DEMO", raising=False)
+    monkeypatch.delenv("BYBIT_DEMO_API_KEY", raising=False)
+    monkeypatch.setenv("BYBIT_REAL_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_REAL_API_SECRET", "s")
+    assert _private_credentials_present() is True
