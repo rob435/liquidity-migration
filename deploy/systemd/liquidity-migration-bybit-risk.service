@@ -20,6 +20,11 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=REST_RECONCILE_SECONDS=30
 Environment=HEARTBEAT_SECONDS=10
 Environment=FAST_EXECUTION_STREAM=0
+# Combined-book deployment: set LONG_DATA_ROOT so this single risk service
+# reads BOTH ledgers (short event_demo_* + long long_native_demo_*) and routes
+# WS fills per the per-row sleeve column. Owner picked "extend ws_risk to
+# handle both sides" over running two processes. Leave empty for short-only.
+Environment=LONG_DATA_ROOT=data/bybit-long-demo-event
 ExecStart=/opt/liquidity-migration/scripts/run_bybit_demo_ws_risk_engine.sh
 Restart=always
 RestartSec=2

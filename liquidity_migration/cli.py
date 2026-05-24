@@ -30,6 +30,18 @@ from .portfolio_hedge import run_portfolio_hedge_report
 from .reconciliation import run_paper_demo_reconciliation
 from .strategy_tribunal import StrategyTribunalConfig, run_strategy_tribunal
 from .universe import run_discover_universe
+from .cross_sectional_momentum import (
+    POSITION_SIZINGS as MOMENTUM_POSITION_SIZINGS,
+    CrossSectionalMomentumConfig,
+    run_cross_sectional_momentum_research,
+)
+from .momentum_factor import (
+    MODES as MOMENTUM_FACTOR_MODES,
+    SIZINGS as MOMENTUM_FACTOR_SIZINGS,
+    MomentumFactorConfig,
+    run_momentum_factor_research,
+)
+from .momentum_signals import RANKERS as MOMENTUM_RANKERS
 from .volume_events import ENTRY_POLICIES, POSITION_WEIGHTINGS, VolumeEventResearchConfig, run_volume_event_research
 from .ws_risk import EventWebSocketRiskConfig, run_event_ws_risk
 
@@ -1154,6 +1166,290 @@ def _add_volume_events_parser(subparsers) -> None:
     volume_events.add_argument("--report-dir", default=None)
 
 
+def _add_cross_sectional_momentum_parser(subparsers) -> None:
+    momentum_defaults = CrossSectionalMomentumConfig()
+    momentum = subparsers.add_parser(
+        "cross-sectional-momentum",
+        help="Run the long-only event-triggered cross-sectional momentum sleeve.",
+    )
+    momentum.add_argument("--start", default="", help="Inclusive UTC signal start date.")
+    momentum.add_argument("--end", default="", help="Exclusive UTC signal end date.")
+    momentum.add_argument(
+        "--ranker",
+        default=momentum_defaults.ranker,
+        choices=MOMENTUM_RANKERS,
+        help="Cross-sectional ranker.",
+    )
+    momentum.add_argument(
+        "--ranker-lookback-days",
+        type=int,
+        default=momentum_defaults.ranker_lookback_days,
+        help="Lookback window for the ranker.",
+    )
+    momentum.add_argument(
+        "--liquidity-tier-size",
+        type=int,
+        default=momentum_defaults.liquidity_tier_size,
+        help="Top-N coins by trailing median turnover.",
+    )
+    momentum.add_argument(
+        "--liquidity-volume-window-days",
+        type=int,
+        default=momentum_defaults.liquidity_volume_window_days,
+        help="Trailing window for the liquidity-tier ranking.",
+    )
+    momentum.add_argument(
+        "--min-listing-history-days",
+        type=int,
+        default=momentum_defaults.min_listing_history_days,
+        help="Minimum trading history before a symbol is eligible.",
+    )
+    momentum.add_argument(
+        "--max-concurrent-positions",
+        type=int,
+        default=momentum_defaults.max_concurrent_positions,
+    )
+    momentum.add_argument(
+        "--gross-exposure",
+        type=float,
+        default=momentum_defaults.gross_exposure,
+    )
+    momentum.add_argument(
+        "--position-sizing",
+        default=momentum_defaults.position_sizing,
+        choices=MOMENTUM_POSITION_SIZINGS,
+    )
+    momentum.add_argument(
+        "--cost-multiplier",
+        type=float,
+        default=momentum_defaults.cost_multiplier,
+        help="Multiplier on the base round-trip cost from CostConfig.",
+    )
+    momentum.add_argument(
+        "--cooldown-days",
+        type=int,
+        default=momentum_defaults.cooldown_days,
+    )
+    momentum.add_argument(
+        "--entry-delay-hours",
+        type=int,
+        default=momentum_defaults.entry_delay_hours,
+    )
+    momentum.add_argument(
+        "--rank-entry-min-norm",
+        type=float,
+        default=momentum_defaults.rank_entry_min_norm,
+        help="Normalized rank (0-1) above which entries can fire.",
+    )
+    momentum.add_argument(
+        "--rank-exit-max-norm",
+        type=float,
+        default=momentum_defaults.rank_exit_max_norm,
+        help="Normalized rank below which positions are exited.",
+    )
+    momentum.add_argument(
+        "--trailing-atr-multiple",
+        type=float,
+        default=momentum_defaults.trailing_atr_multiple,
+    )
+    momentum.add_argument(
+        "--breakout-window-days",
+        type=int,
+        default=momentum_defaults.breakout_window_days,
+    )
+    momentum.add_argument(
+        "--sma-regime-days",
+        type=int,
+        default=momentum_defaults.sma_regime_days,
+    )
+    momentum.add_argument(
+        "--sma-trend-break-days",
+        type=int,
+        default=momentum_defaults.sma_trend_break_days,
+    )
+    momentum.add_argument(
+        "--coil-release-min-compress-days",
+        type=int,
+        default=momentum_defaults.coil_release_min_compress_days,
+    )
+    momentum.add_argument(
+        "--allow-partial-pit",
+        action="store_true",
+        help="Allow runs without full PIT universe coverage. The resulting report is labelled biased-diagnostic only.",
+    )
+    momentum.add_argument(
+        "--allow-funding-overheat",
+        action="store_true",
+        help="Disable the funding-overheat entry block (use when funding data is missing).",
+    )
+    momentum.add_argument(
+        "--ignore-btc-regime",
+        action="store_true",
+        help="Disable the BTC-SMA regime gate on entries.",
+    )
+    momentum.add_argument(
+        "--no-coil-release",
+        action="store_true",
+        help="Disable the coil-release (vol-compression → expansion) entry requirement.",
+    )
+    momentum.add_argument(
+        "--no-breakout",
+        action="store_true",
+        help="Disable the breakout (close > prior-N-day high) entry requirement.",
+    )
+    momentum.add_argument("--report-dir", default=None)
+
+
+def _add_momentum_factor_parser(subparsers) -> None:
+    factor_defaults = MomentumFactorConfig()
+    factor = subparsers.add_parser(
+        "momentum-factor",
+        help="Weekly-rebalance cross-sectional momentum factor (Liu-Tsyvinski / Carhart style).",
+    )
+    factor.add_argument("--start", default="", help="Inclusive UTC signal start date.")
+    factor.add_argument("--end", default="", help="Exclusive UTC signal end date.")
+    factor.add_argument(
+        "--mode",
+        default=factor_defaults.mode,
+        choices=MOMENTUM_FACTOR_MODES,
+        help="long_only or long_short.",
+    )
+    factor.add_argument(
+        "--universe-size",
+        type=int,
+        default=factor_defaults.universe_size,
+    )
+    factor.add_argument(
+        "--universe-volume-window-days",
+        type=int,
+        default=factor_defaults.universe_volume_window_days,
+    )
+    factor.add_argument(
+        "--min-listing-history-days",
+        type=int,
+        default=factor_defaults.min_listing_history_days,
+    )
+    factor.add_argument(
+        "--momentum-lookbacks",
+        default=",".join(str(x) for x in factor_defaults.momentum_lookbacks_days),
+        help="Comma-separated lookback windows in days for the momentum ensemble.",
+    )
+    factor.add_argument(
+        "--momentum-skip-days",
+        type=int,
+        default=factor_defaults.momentum_skip_days,
+        help="Carhart-style skip-N-days before measuring formation return.",
+    )
+    factor.add_argument(
+        "--carry-lookback-days",
+        type=int,
+        default=factor_defaults.carry_lookback_days,
+    )
+    factor.add_argument(
+        "--carry-weight",
+        type=float,
+        default=factor_defaults.carry_weight,
+        help="Weight of the carry penalty in composite score (0 disables).",
+    )
+    factor.add_argument(
+        "--ts-momentum-lookback-days",
+        type=int,
+        default=factor_defaults.ts_momentum_lookback_days,
+    )
+    factor.add_argument(
+        "--require-positive-ts-momentum-for-longs",
+        action="store_true",
+        help="Drop long candidates whose own N-day TS-momentum is non-positive.",
+    )
+    factor.add_argument(
+        "--require-negative-ts-momentum-for-shorts",
+        action="store_true",
+        help="Drop short candidates whose own N-day TS-momentum is non-negative (L/S mode only).",
+    )
+    factor.add_argument(
+        "--long-quantile",
+        type=float,
+        default=factor_defaults.long_quantile,
+    )
+    factor.add_argument(
+        "--short-quantile",
+        type=float,
+        default=factor_defaults.short_quantile,
+    )
+    factor.add_argument(
+        "--rebalance-days",
+        type=int,
+        default=factor_defaults.rebalance_days,
+    )
+    factor.add_argument(
+        "--entry-delay-hours",
+        type=int,
+        default=factor_defaults.entry_delay_hours,
+    )
+    factor.add_argument(
+        "--sizing",
+        default=factor_defaults.sizing,
+        choices=MOMENTUM_FACTOR_SIZINGS,
+    )
+    factor.add_argument(
+        "--vol-estimate-window-days",
+        type=int,
+        default=factor_defaults.vol_estimate_window_days,
+    )
+    factor.add_argument(
+        "--vol-floor-annual",
+        type=float,
+        default=factor_defaults.vol_floor_annual,
+    )
+    factor.add_argument(
+        "--gross-exposure",
+        type=float,
+        default=factor_defaults.gross_exposure,
+    )
+    factor.add_argument(
+        "--max-position-weight",
+        type=float,
+        default=factor_defaults.max_position_weight,
+    )
+    factor.add_argument(
+        "--vol-target-annual",
+        type=float,
+        default=factor_defaults.vol_target_annual,
+        help="Annualized portfolio vol target. 0 disables vol-targeting.",
+    )
+    factor.add_argument(
+        "--vol-target-max-scale",
+        type=float,
+        default=factor_defaults.vol_target_max_scale,
+    )
+    factor.add_argument(
+        "--regime-sma-days",
+        type=int,
+        default=factor_defaults.regime_sma_days,
+    )
+    factor.add_argument(
+        "--regime-off-scale",
+        type=float,
+        default=factor_defaults.regime_off_scale,
+    )
+    factor.add_argument(
+        "--no-regime-filter",
+        action="store_true",
+        help="Disable BTC SMA regime gate.",
+    )
+    factor.add_argument(
+        "--cost-multiplier",
+        type=float,
+        default=factor_defaults.cost_multiplier,
+    )
+    factor.add_argument(
+        "--allow-partial-pit",
+        action="store_true",
+        help="Allow runs without full PIT universe coverage. Run label downgraded.",
+    )
+    factor.add_argument("--report-dir", default=None)
+
+
 def _add_strategy_tribunal_parser(subparsers) -> None:
     tribunal_defaults = StrategyTribunalConfig()
     tribunal = subparsers.add_parser(
@@ -1384,6 +1680,119 @@ def _add_event_risk_ws_parser(subparsers) -> None:
         ),
     )
     event_ws_risk.add_argument("--data-name", default=ws_risk_defaults.data_name)
+    event_ws_risk.add_argument(
+        "--long-data-root",
+        default=ws_risk_defaults.long_data_root,
+        help=(
+            "When set, ws_risk also reads/writes the long-sleeve ledger at this "
+            "data root and routes WS fill events per the per-row `sleeve` column. "
+            "Empty string keeps short-only behavior (legacy)."
+        ),
+    )
+    event_ws_risk.add_argument(
+        "--long-trades-dataset",
+        default=ws_risk_defaults.long_trades_dataset,
+        help="Dataset name for the long-side trades ledger (default: long_native_demo_trades).",
+    )
+    event_ws_risk.add_argument(
+        "--long-orders-dataset",
+        default=ws_risk_defaults.long_orders_dataset,
+        help="Dataset name for the long-side orders ledger (default: long_native_demo_orders).",
+    )
+
+
+def _add_combined_book_report_parser(subparsers) -> None:
+    """Daily/weekly aggregate report covering both sleeves.
+
+    Reads the short ledger from one data root and the long ledger from another,
+    computes realized + open PnL and live Bybit positions, and sends a single
+    Telegram message. Owner explicitly asked for "daily position notifications,
+    long would add ~weekly, aggregate pnl and everything, make new notifications".
+    Schedule on cron / systemd timer for the daily/weekly cadence.
+    """
+    report = subparsers.add_parser(
+        "combined-book-telegram-report",
+        help="Send a Telegram message with aggregate PnL across both sleeves.",
+    )
+    report.add_argument(
+        "--short-data-root", default="data/bybit-demo-event",
+        help="Data root of the short sleeve (event_demo_trades).",
+    )
+    report.add_argument(
+        "--long-data-root", default="data/bybit-long-demo-event",
+        help="Data root of the long sleeve (long_native_demo_trades).",
+    )
+    report.add_argument(
+        "--include-live-positions", action="store_true",
+        help="Also include a live Bybit REST snapshot of open positions in the message.",
+    )
+    report.add_argument(
+        "--print-only", action="store_true",
+        help="Print the message to stdout instead of sending via Telegram (for dry runs).",
+    )
+
+
+def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
+    """CLI for the v11a long sleeve forward-testing cycle. Mirrors event-demo-cycle.
+
+    Per owner: profile is `MultiStratV1` (v11a uni10 sniper retrace 1%/6h
+    fall-through). Per-position notional defaults to 10× the short sleeve's
+    base (notional_multiplier=10). Runs on the same Bybit demo account with
+    order-link prefix lm-en-l-* so the extended ws_risk routes fills back to
+    the long ledger.
+    """
+    from .long_native_event_demo import (
+        LONG_DEMO_STRATEGY_PROFILE_CHOICES,
+        LongNativeDemoCycleConfig,
+    )
+    long_demo = subparsers.add_parser(
+        "long-native-event-demo-cycle",
+        help="Run one forward-testing cycle for the v11a long sleeve (MultiStratV1).",
+    )
+    demo_defaults = LongNativeDemoCycleConfig()
+    long_demo.add_argument("--universe-size", type=int, default=demo_defaults.universe_size,
+                           help="Top-N by trailing 90d turnover (matches v11a universe_size=10).")
+    long_demo.add_argument("--lookback-days", type=int, default=demo_defaults.lookback_days,
+                           help="1h kline lookback in days. ≥60 so 30d returns and 30d vol populate.")
+    long_demo.add_argument("--workers", type=int, default=demo_defaults.workers)
+    long_demo.add_argument(
+        "--notional-multiplier",
+        type=float,
+        default=demo_defaults.notional_multiplier,
+        help="Per-position notional multiplier vs the base gross/max_concurrent. "
+             "Owner default 10× (research peak was 5×).",
+    )
+    long_demo.add_argument("--entry-leverage", type=float, default=demo_defaults.entry_leverage)
+    long_demo.add_argument(
+        "--max-order-notional-pct-equity",
+        type=float,
+        default=demo_defaults.max_order_notional_pct_equity,
+        help="Optional explicit per-entry equity-fraction cap. Default 0 = derive from notional_multiplier.",
+    )
+    long_demo.add_argument("--wallet-balance-fraction", type=float, default=demo_defaults.wallet_balance_fraction)
+    long_demo.add_argument("--fallback-equity-usdt", type=float, default=demo_defaults.fallback_equity_usdt)
+    long_demo.add_argument("--max-new-entries-per-cycle", type=int, default=demo_defaults.max_new_entries_per_cycle)
+    long_demo.add_argument("--entry-order-type", default=demo_defaults.entry_order_type)
+    long_demo.add_argument("--exit-order-type", default=demo_defaults.exit_order_type)
+    long_demo.add_argument("--order-fill-confirm-seconds", type=float, default=demo_defaults.order_fill_confirm_seconds)
+    long_demo.add_argument("--order-fill-poll-interval-seconds", type=float, default=demo_defaults.order_fill_poll_interval_seconds)
+    long_demo.add_argument("--submit-orders", action="store_true", help="Submit Bybit demo orders. Dry-run is the default.")
+    long_demo.add_argument("--confirm-demo-orders", action="store_true", help="Required with --submit-orders.")
+    long_demo.add_argument("--telegram", action="store_true", help="Send Telegram cycle summaries.")
+    long_demo.add_argument("--record-dry-run", action="store_true")
+    long_demo.add_argument("--data-name", default=demo_defaults.data_name)
+    long_demo.add_argument(
+        "--strategy-profile",
+        choices=LONG_DEMO_STRATEGY_PROFILE_CHOICES,
+        default=demo_defaults.strategy_profile,
+        help="Long-side demo entry profile. MultiStratV1 = v11a uni10 sniper retrace 1%%/6h fall-through.",
+    )
+    long_demo.add_argument(
+        "--daemon", action="store_true",
+        help="Long-running daemon mode mirroring event_demo_daemon: WS execution router + REST fallback.",
+    )
+    long_demo.add_argument("--interval-seconds", type=float, default=60.0,
+                           help="Seconds between cycles in --daemon mode.")
 
 
 def _add_reconcile_paper_demo_parser(subparsers) -> None:
@@ -1425,12 +1834,16 @@ def build_parser() -> argparse.ArgumentParser:
     _add_archive_download_klines_1h_parser(subparsers)
     _add_archive_download_klines_1h_api_parser(subparsers)
     _add_volume_events_parser(subparsers)
+    _add_cross_sectional_momentum_parser(subparsers)
+    _add_momentum_factor_parser(subparsers)
     _add_strategy_tribunal_parser(subparsers)
     _add_portfolio_hedge_parser(subparsers)
     _add_feature_factory_parser(subparsers)
     _add_event_demo_cycle_parser(subparsers)
     _add_event_risk_cycle_parser(subparsers)
     _add_event_risk_ws_parser(subparsers)
+    _add_long_native_event_demo_cycle_parser(subparsers)
+    _add_combined_book_report_parser(subparsers)
     _add_reconcile_paper_demo_parser(subparsers)
 
     return parser
@@ -1724,9 +2137,93 @@ def main(argv: list[str] | None = None) -> int:
             adopt_take_profit_pct=args.adopt_take_profit_pct,
             adopt_hold_days=args.adopt_hold_days,
             data_name=args.data_name,
+            long_data_root=args.long_data_root,
+            long_trades_dataset=args.long_trades_dataset,
+            long_orders_dataset=args.long_orders_dataset,
         )
         payload = run_event_ws_risk(data_root, config=config, risk_config=risk_config)
         _print_event_risk_summary(payload)
+        return 0
+
+    if args.command == "combined-book-telegram-report":
+        from liquidity_migration.long_native_event_demo import format_combined_book_summary
+        from liquidity_migration.event_demo import _build_private_client, _safe_raw_positions, _utc_now_ms
+        from liquidity_migration.event_demo import build_position_pnl_snapshot, summarize_position_pnl
+        from liquidity_migration.telegram import send_telegram_message
+        short_root = Path(args.short_data_root).expanduser()
+        long_root = Path(args.long_data_root).expanduser()
+        bybit_position_summary: dict[str, object] | None = None
+        bybit_positions: list[dict[str, object]] | None = None
+        if args.include_live_positions:
+            try:
+                client = _build_private_client(config)
+                raw_positions, error = _safe_raw_positions(client, settle_coin="USDT")
+                if not error:
+                    bybit_positions = build_position_pnl_snapshot(raw_positions)
+                    bybit_position_summary = summarize_position_pnl(bybit_positions)
+            except Exception as exc:  # noqa: BLE001 - aggregate roll-up must never fail on REST issues
+                print(f"WARN: failed to fetch live Bybit positions: {exc}", flush=True)
+        message = format_combined_book_summary(
+            short_root=short_root,
+            long_root=long_root,
+            now_ms=_utc_now_ms(),
+            bybit_position_summary=bybit_position_summary,
+            bybit_positions=bybit_positions,
+        )
+        if args.print_only:
+            print(message)
+            return 0
+        sent = send_telegram_message(message, enabled=True)
+        print(f"combined-book telegram report sent={sent} chars={len(message)}")
+        return 0 if sent else 1
+
+    if args.command == "long-native-event-demo-cycle":
+        from liquidity_migration.long_native_event_demo import (
+            LongNativeDemoCycleConfig,
+            format_long_demo_cycle_summary,
+            run_long_native_demo_cycle,
+        )
+        long_demo_config = LongNativeDemoCycleConfig(
+            universe_size=args.universe_size,
+            lookback_days=args.lookback_days,
+            workers=args.workers,
+            notional_multiplier=args.notional_multiplier,
+            entry_leverage=args.entry_leverage,
+            max_order_notional_pct_equity=args.max_order_notional_pct_equity,
+            wallet_balance_fraction=args.wallet_balance_fraction,
+            fallback_equity_usdt=args.fallback_equity_usdt,
+            max_new_entries_per_cycle=args.max_new_entries_per_cycle,
+            entry_order_type=args.entry_order_type,
+            exit_order_type=args.exit_order_type,
+            order_fill_confirm_seconds=args.order_fill_confirm_seconds,
+            order_fill_poll_interval_seconds=args.order_fill_poll_interval_seconds,
+            submit_orders=args.submit_orders,
+            confirm_demo_orders=args.confirm_demo_orders,
+            telegram=args.telegram,
+            record_dry_run=args.record_dry_run,
+            data_name=args.data_name,
+            strategy_profile=args.strategy_profile,
+        )
+        if getattr(args, "daemon", False):
+            from liquidity_migration.long_native_event_demo_daemon import LongNativeDemoDaemon
+            daemon = LongNativeDemoDaemon(
+                data_root,
+                config=config,
+                demo_config=long_demo_config,
+                interval_seconds=args.interval_seconds,
+            )
+            daemon.install_signal_handlers()
+            stats = daemon.run()
+            print(
+                "long-native event demo daemon stopped "
+                f"cycles_run={stats['cycles_run']} "
+                f"cycle_errors={stats['cycle_errors']} "
+                f"router={stats['router_stats']}",
+                flush=True,
+            )
+            return 0
+        payload = run_long_native_demo_cycle(data_root, config=config, demo_config=long_demo_config)
+        print(format_long_demo_cycle_summary(payload))
         return 0
 
     if args.command == "volume-events":
@@ -1919,6 +2416,112 @@ def main(argv: list[str] | None = None) -> int:
             f"promotable={payload['rows']['promotable']} "
             f"best_return={best.get('total_return', 0.0):.2%} "
             f"path={Path(payload['report_dir']) / 'volume_event_research_report.md'}"
+        )
+        return 0
+
+    if args.command == "cross-sectional-momentum":
+        momentum_config = CrossSectionalMomentumConfig(
+            start_date=args.start,
+            end_date=args.end,
+            ranker=args.ranker,
+            ranker_lookback_days=args.ranker_lookback_days,
+            liquidity_tier_size=args.liquidity_tier_size,
+            liquidity_volume_window_days=args.liquidity_volume_window_days,
+            min_listing_history_days=args.min_listing_history_days,
+            max_concurrent_positions=args.max_concurrent_positions,
+            gross_exposure=args.gross_exposure,
+            position_sizing=args.position_sizing,
+            cost_multiplier=args.cost_multiplier,
+            cooldown_days=args.cooldown_days,
+            entry_delay_hours=args.entry_delay_hours,
+            rank_entry_min_norm=args.rank_entry_min_norm,
+            rank_exit_max_norm=args.rank_exit_max_norm,
+            trailing_atr_multiple=args.trailing_atr_multiple,
+            breakout_window_days=args.breakout_window_days,
+            sma_regime_days=args.sma_regime_days,
+            sma_trend_break_days=args.sma_trend_break_days,
+            coil_release_min_compress_days=args.coil_release_min_compress_days,
+            require_full_pit_universe=not args.allow_partial_pit,
+            require_funding_not_overheated=not args.allow_funding_overheat,
+            require_regime_on_entry=not args.ignore_btc_regime,
+            require_coil_release=not args.no_coil_release,
+            require_breakout=not args.no_breakout,
+        )
+        payload = run_cross_sectional_momentum_research(
+            data_root,
+            config=momentum_config,
+            cost_config=config.costs,
+            report_dir=args.report_dir,
+        )
+        summary = payload.get("summary", {})
+        promotion = payload.get("promotion", {})
+        print(
+            "cross-sectional momentum "
+            f"label={payload.get('run_label')} "
+            f"trades={payload['rows']['trades']} "
+            f"return={summary.get('total_return', 0.0):.2%} "
+            f"max_dd={summary.get('max_drawdown', 0.0):.2%} "
+            f"sharpe={summary.get('sharpe_like', 0.0):.2f} "
+            f"promotion={promotion.get('promotion_gate_pass', False)} "
+            f"path={Path(payload['report_dir']) / 'cross_sectional_momentum_research_report.md'}"
+        )
+        return 0
+
+    if args.command == "momentum-factor":
+        lookbacks = tuple(
+            int(item.strip())
+            for item in args.momentum_lookbacks.split(",")
+            if item.strip()
+        )
+        factor_config = MomentumFactorConfig(
+            start_date=args.start,
+            end_date=args.end,
+            mode=args.mode,
+            universe_size=args.universe_size,
+            universe_volume_window_days=args.universe_volume_window_days,
+            min_listing_history_days=args.min_listing_history_days,
+            momentum_lookbacks_days=lookbacks,
+            momentum_skip_days=args.momentum_skip_days,
+            carry_lookback_days=args.carry_lookback_days,
+            carry_weight=args.carry_weight,
+            ts_momentum_lookback_days=args.ts_momentum_lookback_days,
+            require_positive_ts_momentum_for_longs=args.require_positive_ts_momentum_for_longs,
+            require_negative_ts_momentum_for_shorts=args.require_negative_ts_momentum_for_shorts,
+            long_quantile=args.long_quantile,
+            short_quantile=args.short_quantile,
+            rebalance_days=args.rebalance_days,
+            entry_delay_hours=args.entry_delay_hours,
+            sizing=args.sizing,
+            vol_estimate_window_days=args.vol_estimate_window_days,
+            vol_floor_annual=args.vol_floor_annual,
+            gross_exposure=args.gross_exposure,
+            max_position_weight=args.max_position_weight,
+            vol_target_annual=args.vol_target_annual,
+            vol_target_max_scale=args.vol_target_max_scale,
+            regime_sma_days=args.regime_sma_days,
+            regime_off_scale=args.regime_off_scale,
+            use_regime_filter=not args.no_regime_filter,
+            cost_multiplier=args.cost_multiplier,
+            require_full_pit_universe=not args.allow_partial_pit,
+        )
+        payload = run_momentum_factor_research(
+            data_root,
+            config=factor_config,
+            cost_config=config.costs,
+            report_dir=args.report_dir,
+        )
+        summary = payload.get("summary", {})
+        promotion = payload.get("promotion", {})
+        print(
+            "momentum factor "
+            f"label={payload.get('run_label')} "
+            f"mode={factor_config.mode} "
+            f"trades={payload['rows']['trades']} "
+            f"return={summary.get('total_return', 0.0):.2%} "
+            f"max_dd={summary.get('max_drawdown', 0.0):.2%} "
+            f"sharpe={summary.get('sharpe_like', 0.0):.2f} "
+            f"promotion={promotion.get('promotion_gate_pass', False)} "
+            f"path={Path(payload['report_dir']) / 'momentum_factor_research_report.md'}"
         )
         return 0
 

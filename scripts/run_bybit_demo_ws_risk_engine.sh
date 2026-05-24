@@ -21,6 +21,11 @@ FAST_EXECUTION_STREAM="${FAST_EXECUTION_STREAM:-0}"
 PENDING_EXIT_GUARD_SECONDS="${PENDING_EXIT_GUARD_SECONDS:-120}"
 EXIT_UNTRACKED_POSITIONS="${EXIT_UNTRACKED_POSITIONS:-1}"
 UNTRACKED_POSITION_GRACE_SECONDS="${UNTRACKED_POSITION_GRACE_SECONDS:-90}"
+# Dual-side support (combined-book deployment): set LONG_DATA_ROOT to the
+# long-sleeve data root (e.g. data/bybit-long-demo-event) and this single ws_risk
+# instance will read/write BOTH ledgers, routing by per-row `sleeve` column.
+# Leave empty to keep short-only behavior (legacy default).
+LONG_DATA_ROOT="${LONG_DATA_ROOT:-}"
 
 telegram_args=()
 if [[ "${TELEGRAM_ENABLED:-1}" == "1" ]]; then
@@ -60,11 +65,17 @@ if [[ "$EXIT_UNTRACKED_POSITIONS" != "1" ]]; then
     untracked_args+=(--no-exit-untracked-positions)
 fi
 
+dual_sleeve_args=()
+if [[ -n "$LONG_DATA_ROOT" ]]; then
+    dual_sleeve_args+=(--long-data-root "$LONG_DATA_ROOT")
+    mkdir -p "$LONG_DATA_ROOT/.locks"
+fi
+
 mkdir -p "$DATA_ROOT/.locks"
 
 echo "event websocket risk engine starting"
 echo "repo=$REPO_ROOT"
-echo "data_root=$DATA_ROOT submit_orders=${SUBMIT_ORDERS:-0} order_submit_mode=$ORDER_SUBMIT_MODE rest_fallback=${REST_FALLBACK:-1}"
+echo "data_root=$DATA_ROOT long_data_root=${LONG_DATA_ROOT:-(unset)} submit_orders=${SUBMIT_ORDERS:-0} order_submit_mode=$ORDER_SUBMIT_MODE rest_fallback=${REST_FALLBACK:-1}"
 
 "$PYTHON_BIN" -m liquidity_migration \
     --config "$CONFIG_PATH" \
@@ -81,4 +92,5 @@ echo "data_root=$DATA_ROOT submit_orders=${SUBMIT_ORDERS:-0} order_submit_mode=$
     "${order_args[@]}" \
     "${fallback_args[@]}" \
     "${execution_stream_args[@]}" \
-    "${untracked_args[@]}"
+    "${untracked_args[@]}" \
+    "${dual_sleeve_args[@]}"

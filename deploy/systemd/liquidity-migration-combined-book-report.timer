@@ -1,0 +1,14 @@
+[Unit]
+Description=Daily combined-book aggregate Telegram report (08:00 UTC)
+Requires=liquidity-migration-combined-book-report.service
+
+[Timer]
+# Fires daily at 08:00 UTC. Use OnCalendar=Mon *-*-* 08:00:00 for a
+# weekly-only schedule, or Persistent=true if you want missed firings to
+# run on next boot.
+OnCalendar=*-*-* 08:00:00
+AccuracySec=1m
+Unit=liquidity-migration-combined-book-report.service
+
+[Install]
+WantedBy=timers.target

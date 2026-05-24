@@ -4,6 +4,7 @@ from pathlib import Path
 
 from liquidity_migration.config import DEFAULT_EXCLUDED_SYMBOLS
 from liquidity_migration.cli import _print_event_risk_summary, build_parser, main
+from liquidity_migration.cross_sectional_momentum import CrossSectionalMomentumConfig
 
 
 def test_cli_fixture_pipeline_runs_volume_events(tmp_path: Path) -> None:
@@ -536,3 +537,70 @@ def test_event_demo_timing_text_omits_parallel_workers_when_serial() -> None:
     text = _event_demo_timing_text(cycle)
     assert "parallel_workers" not in text
     assert "slowest=klines:0.5s" in text
+
+
+def test_cli_cross_sectional_momentum_defaults() -> None:
+    defaults = CrossSectionalMomentumConfig()
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            "/tmp/momentum-fake-root",
+            "cross-sectional-momentum",
+        ]
+    )
+    assert args.command == "cross-sectional-momentum"
+    assert args.ranker == defaults.ranker
+    assert args.ranker_lookback_days == defaults.ranker_lookback_days
+    assert args.liquidity_tier_size == defaults.liquidity_tier_size
+    assert args.max_concurrent_positions == defaults.max_concurrent_positions
+    assert args.position_sizing == defaults.position_sizing
+    assert args.cost_multiplier == defaults.cost_multiplier
+    assert args.rank_entry_min_norm == defaults.rank_entry_min_norm
+    assert args.rank_exit_max_norm == defaults.rank_exit_max_norm
+    assert args.trailing_atr_multiple == defaults.trailing_atr_multiple
+    assert args.sma_regime_days == defaults.sma_regime_days
+    assert args.allow_partial_pit is False
+    assert args.allow_funding_overheat is False
+    assert args.ignore_btc_regime is False
+
+
+def test_cli_cross_sectional_momentum_runs_on_fixture(tmp_path: Path) -> None:
+    """End-to-end: download fixture, run the momentum CLI subcommand.
+
+    The 8-symbol 120h fixture is too small for default lookbacks, so most
+    knobs are dialled down. The test asserts the command exits 0 and writes
+    the expected report artifact.
+    """
+    data_root = tmp_path / "data"
+    assert main(["--data-root", str(data_root), "download-data", "--fixture"]) == 0
+    rc = main(
+        [
+            "--data-root",
+            str(data_root),
+            "cross-sectional-momentum",
+            "--ranker-lookback-days",
+            "3",
+            "--liquidity-tier-size",
+            "4",
+            "--liquidity-volume-window-days",
+            "2",
+            "--min-listing-history-days",
+            "2",
+            "--max-concurrent-positions",
+            "2",
+            "--breakout-window-days",
+            "2",
+            "--sma-regime-days",
+            "2",
+            "--sma-trend-break-days",
+            "2",
+            "--coil-release-min-compress-days",
+            "1",
+            "--ignore-btc-regime",
+            "--allow-funding-overheat",
+            "--allow-partial-pit",
+        ]
+    )
+    assert rc == 0
+    report = data_root / "reports" / "cross_sectional_momentum_research" / "cross_sectional_momentum_research_report.md"
+    assert report.exists()

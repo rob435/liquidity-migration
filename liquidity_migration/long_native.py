@@ -43,7 +43,6 @@ from .storage import read_dataset, read_dataset_columns
 from .trade_lifecycle import (
     _funding_lookup,
     _perp_funding_return,
-    _price_bars_by_symbol,
     build_equity_curve,
     summarize_baskets,
     summarize_trade_backtest,
@@ -1063,7 +1062,8 @@ def _run_long_pipeline(
             for cand in candidates:
                 if cand[1] == "fomo_chase":
                     if kept_fc < config.fc_daily_best_n:
-                        fc_kept.append(cand); kept_fc += 1
+                        fc_kept.append(cand)
+                        kept_fc += 1
                 else:
                     fc_kept.append(cand)
             candidates = fc_kept
@@ -1168,7 +1168,6 @@ def _run_long_pipeline(
 
     # Force-close at end
     if open_positions:
-        last_ts = dates_all[-1] if dates_all else 0
         for symbol, pos in list(open_positions.items()):
             bars = bars_by_symbol.get(symbol)
             if bars is None or len(bars["close"]) == 0:
@@ -1251,7 +1250,8 @@ def _empty_trades() -> pl.DataFrame:
 def _split_rows(baskets: pl.DataFrame, *, config: TradeLifecycleConfig) -> list[dict[str, Any]]:
     rows = []
     for name, start, end in SPLITS:
-        start_ms = date_ms(start); end_ms = date_ms(end)
+        start_ms = date_ms(start)
+        end_ms = date_ms(end)
         part = (baskets.filter((pl.col("entry_signal_ts_ms") >= start_ms) & (pl.col("entry_signal_ts_ms") < end_ms))
                 if not baskets.is_empty() else baskets)
         if part.is_empty():
@@ -1280,16 +1280,24 @@ def _evaluate_promotion(*, splits, summary, funding_mode, full_pit_universe_pass
     max_dd = float(summary.get("max_drawdown", 0.0))
     funding_ok = funding_mode != "missing"
     reasons = []
-    if not full_pit_universe_pass: reasons.append("full_pit_universe_missing")
-    if not all_pos: reasons.append("not_all_splits_positive")
-    if max_dd < -0.30: reasons.append("max_drawdown_too_deep")
-    if avg_sharpe < 1.0: reasons.append("avg_split_sharpe_below_threshold")
-    if not funding_ok: reasons.append("funding_missing")
+    if not full_pit_universe_pass:
+        reasons.append("full_pit_universe_missing")
+    if not all_pos:
+        reasons.append("not_all_splits_positive")
+    if max_dd < -0.30:
+        reasons.append("max_drawdown_too_deep")
+    if avg_sharpe < 1.0:
+        reasons.append("avg_split_sharpe_below_threshold")
+    if not funding_ok:
+        reasons.append("funding_missing")
     return {
         "promotion_gate_pass": bool(full_pit_universe_pass and all_pos and max_dd >= -0.30 and avg_sharpe >= 1.0 and funding_ok),
-        "all_splits_positive": all_pos, "splits_with_baskets": len(splits_b),
-        "avg_split_sharpe": avg_sharpe, "max_drawdown": max_dd,
-        "funding_mode": funding_mode, "promotion_reasons": reasons,
+        "all_splits_positive": all_pos,
+        "splits_with_baskets": len(splits_b),
+        "avg_split_sharpe": avg_sharpe,
+        "max_drawdown": max_dd,
+        "funding_mode": funding_mode,
+        "promotion_reasons": reasons,
     }
 
 
@@ -1321,18 +1329,26 @@ def _run_label(*, full_pit_universe_pass: bool, funding_mode: str, archive_manif
 
 
 def _safe_float(value: Any) -> float | None:
-    if value is None: return None
-    try: f = float(value)
-    except (TypeError, ValueError): return None
-    if f != f: return None
+    if value is None:
+        return None
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return None
+    if f != f:
+        return None
     return f
 
 
 def format_long_native_report(metadata: dict[str, Any]) -> str:
-    cfg = metadata.get("config", {}); summary = metadata.get("summary", {})
-    promo = metadata.get("promotion", {}); splits = metadata.get("splits", [])
-    lifecycle = metadata.get("lifecycle", {}); event_counts = metadata.get("event_counts", {})
-    pit = metadata.get("pit_manifest", {}); date_range = metadata.get("date_range", {})
+    cfg = metadata.get("config", {})
+    summary = metadata.get("summary", {})
+    promo = metadata.get("promotion", {})
+    splits = metadata.get("splits", [])
+    lifecycle = metadata.get("lifecycle", {})
+    event_counts = metadata.get("event_counts", {})
+    pit = metadata.get("pit_manifest", {})
+    date_range = metadata.get("date_range", {})
     lines = [
         "# Long-Native Long-Only Sleeve",
         "",

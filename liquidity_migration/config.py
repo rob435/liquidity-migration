@@ -69,6 +69,20 @@ class TradeLifecycleConfig:
     failed_fade_min_mfe_pct: float = 0.0
     failed_fade_loss_pct: float = 0.0
     failed_fade_close_location_min: float = 1.0
+    # Breakeven trailing stop: once MFE >= breakeven_arm_pct, exit if close
+    # returns to or past entry price. Disabled when 0.0.
+    breakeven_arm_pct: float = 0.0
+    # Profit-lock trailing stop: once MFE >= profit_lock_arm_pct, the effective
+    # stop becomes the larger of the original stop and a price that locks in
+    # profit_lock_floor_pct gain. So peak +10% with floor 5% means: trade
+    # cannot exit at less than +5% from this bar onward. Disabled when 0.0.
+    profit_lock_arm_pct: float = 0.0
+    profit_lock_floor_pct: float = 0.0
+    # Time-adaptive stop: for the first stop_loose_window_hours bars, use
+    # stop_loose_pct instead of stop_loss_pct. After the window, revert.
+    # Lets a trade breathe at entry. Disabled when 0.0.
+    stop_loose_window_hours: int = 0
+    stop_loose_pct: float = 0.0
     min_symbols: int = 4
     cost_multiplier: float = 1.0
     side_mode: str = "long_high_short_low"

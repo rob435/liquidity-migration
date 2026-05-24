@@ -86,6 +86,11 @@ class VolumeEventResearchConfig:
     failed_fade_min_mfe_pct: float = 0.0
     failed_fade_loss_pct: float = 0.0
     failed_fade_close_location_min: float = 1.0
+    breakeven_arm_pct: float = 0.0
+    profit_lock_arm_pct: float = 0.0
+    profit_lock_floor_pct: float = 0.0
+    stop_loose_window_hours: int = 0
+    stop_loose_pct: float = 0.0
     start_date: str = ""
     end_date: str = ""
     entry_delay_hours: int = 1
@@ -496,6 +501,11 @@ def _run_event_scenario(
         failed_fade_min_mfe_pct=config.failed_fade_min_mfe_pct,
         failed_fade_loss_pct=config.failed_fade_loss_pct,
         failed_fade_close_location_min=config.failed_fade_close_location_min,
+        breakeven_arm_pct=config.breakeven_arm_pct,
+        profit_lock_arm_pct=config.profit_lock_arm_pct,
+        profit_lock_floor_pct=config.profit_lock_floor_pct,
+        stop_loose_window_hours=config.stop_loose_window_hours,
+        stop_loose_pct=config.stop_loose_pct,
         min_symbols=4,
         cost_multiplier=scenario.cost_multiplier,
         side_mode=side_mode,
@@ -1185,6 +1195,11 @@ def _simulate_indexed_trade(
         return None
 
     stop_price = _stop_price(entry_price, side=side, stop_loss_pct=stop_pct or 0.0)
+    loose_stop_price = (
+        _stop_price(entry_price, side=side, stop_loss_pct=config.stop_loose_pct)
+        if config.stop_loose_window_hours > 0 and config.stop_loose_pct > 0.0
+        else None
+    )
     take_profit_price = _take_profit_price(entry_price, side=side, take_profit_pct=config.take_profit_pct)
     exit_price = None
     exit_ts_ms = None
@@ -1192,6 +1207,8 @@ def _simulate_indexed_trade(
     mae = 0.0
     mfe = 0.0
     bars_held = 0
+    breakeven_armed = False
+    profit_lock_armed = False
     for idx in range(start, end):
         bars_held += 1
         bar_high = float(high_arr[idx])
@@ -1201,15 +1218,20 @@ def _simulate_indexed_trade(
         adverse, favorable = _bar_excursion(entry_price, side=side, high=bar_high, low=bar_low)
         mae = min(mae, adverse)
         mfe = max(mfe, favorable)
+        effective_stop_price = (
+            loose_stop_price
+            if loose_stop_price is not None and bars_held <= config.stop_loose_window_hours
+            else stop_price
+        )
         stop_hit, take_profit_hit = _bar_exit_hits(
             side=side,
             high=bar_high,
             low=bar_low,
-            stop_price=stop_price,
+            stop_price=effective_stop_price,
             take_profit_price=take_profit_price,
         )
         if stop_hit:
-            exit_price = _stop_fill_price(side=side, stop_price=stop_price, high=bar_high, low=bar_low, mode=stop_fill_mode)
+            exit_price = _stop_fill_price(side=side, stop_price=effective_stop_price, high=bar_high, low=bar_low, mode=stop_fill_mode)
             exit_ts_ms = bar_end_ts_ms_val
             exit_reason = "stop_loss"
             break
@@ -1228,6 +1250,20 @@ def _simulate_indexed_trade(
             exit_price = bar_close
             exit_ts_ms = bar_end_ts_ms_val
             exit_reason = "mfe_giveback"
+            break
+        if config.profit_lock_arm_pct > 0.0 and not profit_lock_armed and mfe >= config.profit_lock_arm_pct:
+            profit_lock_armed = True
+        if profit_lock_armed and close_return <= config.profit_lock_floor_pct:
+            exit_price = bar_close
+            exit_ts_ms = bar_end_ts_ms_val
+            exit_reason = "profit_lock"
+            break
+        if config.breakeven_arm_pct > 0.0 and not breakeven_armed and mfe >= config.breakeven_arm_pct:
+            breakeven_armed = True
+        if breakeven_armed and close_return <= 0.0:
+            exit_price = bar_close
+            exit_ts_ms = bar_end_ts_ms_val
+            exit_reason = "breakeven_stop"
             break
         if _failed_fade_exit_hit(
             side=side,
@@ -3763,6 +3799,20 @@ def _validate_exit_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("failed_fade_close_location_min must be in [0, 1]")
     if config.failed_fade_exit_hours > 0 and config.failed_fade_loss_pct <= 0.0:
         raise ValueError("failed_fade_loss_pct must be positive when failed fade exit is enabled")
+    if not 0.0 <= config.breakeven_arm_pct < 1.0:
+        raise ValueError("breakeven_arm_pct must be in [0, 1)")
+    if not 0.0 <= config.profit_lock_arm_pct < 1.0:
+        raise ValueError("profit_lock_arm_pct must be in [0, 1)")
+    if not 0.0 <= config.profit_lock_floor_pct < 1.0:
+        raise ValueError("profit_lock_floor_pct must be in [0, 1)")
+    if config.profit_lock_arm_pct > 0.0 and config.profit_lock_floor_pct >= config.profit_lock_arm_pct:
+        raise ValueError("profit_lock_floor_pct must be less than profit_lock_arm_pct")
+    if config.stop_loose_window_hours < 0:
+        raise ValueError("stop_loose_window_hours must be non-negative")
+    if not 0.0 <= config.stop_loose_pct < 1.0:
+        raise ValueError("stop_loose_pct must be in [0, 1)")
+    if config.stop_loose_window_hours > 0 and config.stop_loose_pct <= 0.0:
+        raise ValueError("stop_loose_pct must be positive when stop_loose_window_hours is set")
 
 
 def _validate_entry_config(config: VolumeEventResearchConfig) -> None:

@@ -1,0 +1,48 @@
+[Unit]
+Description=liquidity-migration Bybit long-sleeve (MultiStratV1) demo event runner
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/liquidity-migration
+EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+Environment=DATA_ROOT=data/bybit-long-demo-event
+Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
+Environment=SUBMIT_ORDERS=1
+Environment=CONFIRM_DEMO_ORDERS=1
+Environment=TELEGRAM_ENABLED=1
+Environment=STRATEGY_PROFILE=MultiStratV1
+Environment=INTERVAL_SECONDS=60
+Environment=USE_DAEMON=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+# Per-position notional sizing: owner picked 10x of the short's base
+# per-position notional. With universe_size=10 and max_concurrent_positions=5,
+# entry_leverage=10 lets each position consume ~20% of equity margin.
+Environment=NOTIONAL_MULTIPLIER=10
+Environment=ENTRY_LEVERAGE=10
+Environment=MAX_ORDER_NOTIONAL_PCT_EQUITY=0
+Environment=MAX_NEW_ENTRIES_PER_CYCLE=5
+Environment=UNIVERSE_SIZE=10
+Environment=LOOKBACK_DAYS=90
+Environment=WORKERS=4
+ExecStart=/opt/liquidity-migration/scripts/run_bybit_long_demo_event_engine.sh
+Restart=always
+RestartSec=30
+KillMode=control-group
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/opt/liquidity-migration
+# Conservative memory cap per deployment-plan §7.2 (long unit must not OOM
+# the machine and take down the short).
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

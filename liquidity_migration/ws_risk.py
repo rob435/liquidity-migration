@@ -103,6 +103,15 @@ class EventWebSocketRiskConfig:
     adopt_stop_loss_pct: float = 0.12
     adopt_take_profit_pct: float = 0.21
     adopt_hold_days: float = 3.0
+    # Long-sleeve dual-side support: when long_data_root is set, this engine
+    # ALSO reads the long-side ledger (long_native_demo_trades /
+    # long_native_demo_orders by default) from that root and routes write
+    # updates back to it per the per-row `sleeve` column. Set to "" to keep
+    # short-only behavior. Per owner: extend ws_risk to handle both sides
+    # rather than running two processes.
+    long_data_root: str = ""
+    long_trades_dataset: str = "long_native_demo_trades"
+    long_orders_dataset: str = "long_native_demo_orders"
 
 
 @dataclass(slots=True)
@@ -172,6 +181,16 @@ class EventWebSocketRiskEngine:
         self.config = config
         self.risk = risk_config or EventWebSocketRiskConfig()
         _validate_ws_risk_config(self.risk)
+        # Dual-side support: when long_data_root is set, this engine also
+        # owns the long-sleeve ledger. Reads concat both sides (tagged by
+        # `sleeve` column); writes route per-row via _write_*_rows_routed.
+        # When long_data_root is "" / unset, the long_root is None and the
+        # engine behaves identically to the short-only legacy path.
+        self.long_root: Path | None = (
+            Path(self.risk.long_data_root).expanduser() if self.risk.long_data_root else None
+        )
+        if self.long_root is not None:
+            self.long_root.mkdir(parents=True, exist_ok=True)
         self.private_client = private_client
         self.private_stream = private_stream
         self.public_stream = public_stream
@@ -183,6 +202,93 @@ class EventWebSocketRiskEngine:
         self.state.telegram_keys_sent = set(_read_telegram_dedupe_keys(self.report_dir))
         # Captured by run(): the one thread allowed to mutate self.state.
         self._consumer_thread_ident: int | None = None
+
+    # ------------------------------------------------------------------
+    # Dual-side ledger routing
+    #
+    # ws_risk now reads the short ledger (self.root) and optionally the long
+    # ledger (self.long_root). Both are concatenated into self.state.all_trades
+    # with a `sleeve` column ("short" or "long"). All writes are routed via
+    # the two helpers below — they inspect each row's `sleeve` field and write
+    # to the appropriate root/dataset. Existing callsites that used to call
+    # _write_trade_rows / _write_order_rows directly are migrated to these
+    # helpers; the legacy module-level helpers are kept for callers outside
+    # this engine that already pass a per-root path.
+    # ------------------------------------------------------------------
+    def _read_trades_combined(self) -> pl.DataFrame:
+        short = read_dataset(self.root, "event_demo_trades")
+        short = _ensure_sleeve_column(short, "short")
+        if self.long_root is None:
+            return short
+        try:
+            long_trades = read_dataset(self.long_root, self.risk.long_trades_dataset)
+        except Exception:  # noqa: BLE001 - dual-ledger reads must fail open
+            long_trades = pl.DataFrame()
+        long_trades = _ensure_sleeve_column(long_trades, "long")
+        if short.is_empty():
+            return long_trades
+        if long_trades.is_empty():
+            return short
+        return pl.concat([short, long_trades], how="diagonal_relaxed")
+
+    def _read_orders_combined(self) -> pl.DataFrame:
+        short = read_dataset(self.root, "event_demo_orders")
+        short = _ensure_sleeve_column(short, "short")
+        if self.long_root is None:
+            return short
+        try:
+            long_orders = read_dataset(self.long_root, self.risk.long_orders_dataset)
+        except Exception:  # noqa: BLE001
+            long_orders = pl.DataFrame()
+        long_orders = _ensure_sleeve_column(long_orders, "long")
+        if short.is_empty():
+            return long_orders
+        if long_orders.is_empty():
+            return short
+        return pl.concat([short, long_orders], how="diagonal_relaxed")
+
+    @staticmethod
+    def _sleeve_of(row: dict[str, Any]) -> str:
+        sleeve = str(row.get("sleeve") or "").lower()
+        return sleeve if sleeve in {"long", "short"} else "short"
+
+    def _write_trade_rows_routed(self, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        short_rows: list[dict[str, Any]] = []
+        long_rows: list[dict[str, Any]] = []
+        for row in rows:
+            if self._sleeve_of(row) == "long" and self.long_root is not None:
+                long_rows.append(row)
+            else:
+                short_rows.append(row)
+        if short_rows:
+            _write_trade_rows(self.root, pl.DataFrame(short_rows, infer_schema_length=None))
+        if long_rows:
+            assert self.long_root is not None
+            write_dataset(
+                pl.DataFrame(long_rows, infer_schema_length=None),
+                self.long_root, self.risk.long_trades_dataset, partition_by=(),
+            )
+
+    def _write_order_rows_routed(self, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        short_rows: list[dict[str, Any]] = []
+        long_rows: list[dict[str, Any]] = []
+        for row in rows:
+            if self._sleeve_of(row) == "long" and self.long_root is not None:
+                long_rows.append(row)
+            else:
+                short_rows.append(row)
+        if short_rows:
+            _write_order_rows(self.root, pl.DataFrame(short_rows, infer_schema_length=None))
+        if long_rows:
+            assert self.long_root is not None
+            write_dataset(
+                pl.DataFrame(long_rows, infer_schema_length=None),
+                self.long_root, self.risk.long_orders_dataset, partition_by=(),
+            )
 
     def run(self) -> dict[str, Any]:
         self._consumer_thread_ident = threading.get_ident()
@@ -202,9 +308,9 @@ class EventWebSocketRiskEngine:
 
     def bootstrap(self) -> None:
         self.private_client = self.private_client or _build_private_client(self.config)
-        self.state.all_trades = read_dataset(self.root, "event_demo_trades")
+        self.state.all_trades = self._read_trades_combined()
         self.state.open_trades = _open_trades(self.state.all_trades)
-        orders = read_dataset(self.root, "event_demo_orders")
+        orders = self._read_orders_combined()
         raw_positions, error = _safe_raw_positions(self.private_client, settle_coin=self.risk.settle_coin)
         if error:
             self.state.errors.append(error)
@@ -212,12 +318,12 @@ class EventWebSocketRiskEngine:
         self.state.price_by_symbol.update(_price_lookup_from_positions(self.state.positions_by_symbol))
         open_orders_ok = self.refresh_live_exit_order_symbols()
         self.reconcile_pending_order_fills(orders)
-        orders = read_dataset(self.root, "event_demo_orders")
+        orders = self._read_orders_combined()
         self.load_pending_entry_orders(orders)
         self.load_pending_exit_orders(orders)
         if not error and open_orders_ok:
             self.reconcile_flat_pending_exit_orders(orders)
-            orders = read_dataset(self.root, "event_demo_orders")
+            orders = self._read_orders_combined()
             self.terminalize_stale_pending_entry_orders(orders)
         self.reconcile_positions(write=True)
         self.evaluate_symbols(set(self.state.positions_by_symbol))
@@ -413,7 +519,7 @@ class EventWebSocketRiskEngine:
             if status in terminal_statuses:
                 updates.extend(self.mark_order_terminal_from_order_update(order_link_id=link, status=status, row=row))
         if updates:
-            _write_order_rows(self.root, pl.DataFrame(updates, infer_schema_length=None))
+            self._write_order_rows_routed(updates)
 
     def on_ws_order_ack(self, message: dict[str, Any]) -> None:
         ret_code = _int(message.get("retCode"))
@@ -433,7 +539,7 @@ class EventWebSocketRiskEngine:
             row={"symbol": order.get("symbol", ""), "rejectReason": ret_msg},
         )
         if updates:
-            _write_order_rows(self.root, pl.DataFrame(updates, infer_schema_length=None))
+            self._write_order_rows_routed(updates)
         if (
             was_pending
             and self.risk.submit_orders
@@ -474,7 +580,7 @@ class EventWebSocketRiskEngine:
                 )
                 self.update_stream_order_guards(order_updates)
                 if order_updates:
-                    _write_order_rows(self.root, pl.DataFrame(order_updates, infer_schema_length=None))
+                    self._write_order_rows_routed(order_updates)
 
     def close_trade_from_execution(self, order_link_id: str) -> None:
         agg = self.state.executions_by_link.get(order_link_id, {})
@@ -564,14 +670,14 @@ class EventWebSocketRiskEngine:
             report_reason = f"ws_{source}_partial_fill"
         self.state.all_trades = _upsert_rows(self.state.all_trades, [trade], key="trade_id")
         self.state.open_trades = _open_trades(self.state.all_trades)
-        _write_trade_rows(self.root, pl.DataFrame([trade], infer_schema_length=None))
+        self._write_trade_rows_routed([trade])
         order_updates = self.mark_order_filled_from_execution(
             order_link_id=order_link_id,
             filled_qty=filled_qty,
             exit_price=exit_price,
         )
         if order_updates:
-            _write_order_rows(self.root, pl.DataFrame(order_updates, infer_schema_length=None))
+            self._write_order_rows_routed(order_updates)
         self.write_report(reason=report_reason)
 
     def close_trade_from_order_update(self, *, order_link_id: str, filled_qty: float, exit_price: float) -> None:
@@ -704,7 +810,7 @@ class EventWebSocketRiskEngine:
         if rows:
             self.state.all_trades = _upsert_rows(self.state.all_trades, rows, key="trade_id")
             self.state.open_trades = _open_trades(self.state.all_trades)
-            _write_trade_rows(self.root, pl.DataFrame(rows, infer_schema_length=None))
+            self._write_trade_rows_routed(rows)
             self.state.exits.extend(rows)
             for row in rows:
                 if str(row.get("status", "")) == "closed":
@@ -716,7 +822,7 @@ class EventWebSocketRiskEngine:
                 if link and trade_id:
                     self.state.submitted_link_to_trade_id[link] = trade_id
                     self.state.submitted_link_submit_mode[link] = str(order.get("submit_mode") or "submitted")
-            _write_order_rows(self.root, pl.DataFrame(orders, infer_schema_length=None))
+            self._write_order_rows_routed(orders)
             self._record_orders(orders)
         open_symbols = set(_column_values(self.state.open_trades, "symbol"))
         has_pending_order = any(str(order.get("status", "")) in PENDING_ORDER_STATUSES for order in orders)
@@ -833,7 +939,7 @@ class EventWebSocketRiskEngine:
             now_ms=_now_ms(),
         )
         if rows:
-            _write_order_rows(self.root, pl.DataFrame(rows, infer_schema_length=None))
+            self._write_order_rows_routed(rows)
             self.state.repairs.extend(rows)
 
     def reconcile_positions(self, *, write: bool) -> list[dict[str, Any]]:
@@ -850,7 +956,7 @@ class EventWebSocketRiskEngine:
             for row in rows:
                 self.clear_submitted_symbol(str(row.get("symbol", "")))
             if write:
-                _write_trade_rows(self.root, pl.DataFrame(rows, infer_schema_length=None))
+                self._write_trade_rows_routed(rows)
         return rows
 
     def rest_reconcile(self) -> None:
@@ -860,17 +966,17 @@ class EventWebSocketRiskEngine:
             return
         self.state.positions_by_symbol = _active_position_by_symbol(raw_positions)
         self.state.price_by_symbol.update(_price_lookup_from_positions(self.state.positions_by_symbol))
-        self.state.all_trades = read_dataset(self.root, "event_demo_trades")
+        self.state.all_trades = self._read_trades_combined()
         self.state.open_trades = _open_trades(self.state.all_trades)
-        orders = read_dataset(self.root, "event_demo_orders")
+        orders = self._read_orders_combined()
         open_orders_ok = self.refresh_live_exit_order_symbols()
         self.reconcile_pending_order_fills(orders)
-        orders = read_dataset(self.root, "event_demo_orders")
+        orders = self._read_orders_combined()
         self.load_pending_entry_orders(orders)
         self.load_pending_exit_orders(orders)
         if open_orders_ok:
             self.reconcile_flat_pending_exit_orders(orders)
-            orders = read_dataset(self.root, "event_demo_orders")
+            orders = self._read_orders_combined()
             self.terminalize_stale_pending_entry_orders(orders)
         self.reconcile_positions(write=True)
         self.evaluate_symbols(set(self.state.positions_by_symbol))
@@ -925,7 +1031,12 @@ class EventWebSocketRiskEngine:
             return
         self.state.all_trades = _upsert_rows(self.state.all_trades, adopted, key="trade_id")
         self.state.open_trades = _open_trades(self.state.all_trades)
-        _write_trade_rows(self.root, pl.DataFrame(adopted, infer_schema_length=None))
+        # Adopted trades default to sleeve="short" so they land in the short
+        # ledger via the routed writer — preserves existing behavior. If owner
+        # later wants long orphans adopted to the long ledger, _build_adopted_trade
+        # can tag the row with sleeve="long" based on position-side or other
+        # signal (entry order_link_id prefix lookup).
+        self._write_trade_rows_routed(adopted)
         for trade in adopted:
             _logger.warning(
                 "untracked_position adopt symbol=%s side=%s qty=%s entry_price=%s stop=%s tp=%s planned_exit_ts_ms=%s",
@@ -1094,7 +1205,7 @@ class EventWebSocketRiskEngine:
             self.state.untracked_first_seen_ms.pop(stale_symbol, None)
         if not rows:
             return
-        _write_order_rows(self.root, pl.DataFrame(rows, infer_schema_length=None))
+        self._write_order_rows_routed(rows)
         self._record_orders(rows)
         for row in rows:
             _logger.warning(
@@ -1151,7 +1262,7 @@ class EventWebSocketRiskEngine:
             else:
                 self.mark_submitted_symbol(symbol)
         if updates:
-            _write_order_rows(self.root, pl.DataFrame(updates, infer_schema_length=None))
+            self._write_order_rows_routed(updates)
 
     def reconcile_flat_pending_exit_orders(self, orders: pl.DataFrame) -> None:
         if orders.is_empty():
@@ -1217,12 +1328,12 @@ class EventWebSocketRiskEngine:
             )
             trade_updates.append(trade)
         if order_updates:
-            _write_order_rows(self.root, pl.DataFrame(order_updates, infer_schema_length=None))
+            self._write_order_rows_routed(order_updates)
         if trade_updates:
             self.state.all_trades = _upsert_rows(self.state.all_trades, trade_updates, key="trade_id")
             self.state.open_trades = _open_trades(self.state.all_trades)
             self.state.pending_fill_reconciliations.extend(trade_updates)
-            _write_trade_rows(self.root, pl.DataFrame(trade_updates, infer_schema_length=None))
+            self._write_trade_rows_routed(trade_updates)
 
     def refresh_live_exit_order_symbols(self) -> bool:
         open_orders, error = _safe_open_orders(self.private_client, settle_coin=self.risk.settle_coin)
@@ -1255,7 +1366,7 @@ class EventWebSocketRiskEngine:
             self.state.all_trades = _upsert_rows(self.state.all_trades, trade_rows, key="trade_id")
             self.state.open_trades = _open_trades(self.state.all_trades)
             self.state.pending_fill_reconciliations.extend(trade_rows)
-            _write_trade_rows(self.root, pl.DataFrame(trade_rows, infer_schema_length=None))
+            self._write_trade_rows_routed(trade_rows)
         if order_rows:
             for update in order_rows:
                 link = str(update.get("order_link_id") or "")
@@ -1264,7 +1375,7 @@ class EventWebSocketRiskEngine:
                 order = self.state.orders_by_link.get(link)
                 if order is not None:
                     order.update(update)
-            _write_order_rows(self.root, pl.DataFrame(order_rows, infer_schema_length=None))
+            self._write_order_rows_routed(order_rows)
 
     def terminalize_stale_pending_entry_orders(self, orders: pl.DataFrame) -> None:
         if orders.is_empty():
@@ -1287,7 +1398,7 @@ class EventWebSocketRiskEngine:
             order = self.state.orders_by_link.get(link)
             if order is not None:
                 order.update(update)
-        _write_order_rows(self.root, pl.DataFrame(order_rows, infer_schema_length=None))
+        self._write_order_rows_routed(order_rows)
 
     def on_idle(self) -> None:
         now = time.monotonic()
@@ -1575,6 +1686,19 @@ def _build_ws_trade_client(config: ResearchConfig) -> BybitWebSocketTradeClient:
 def _persist_ws_risk_history(payload: dict[str, Any]) -> bool:
     reason = str(payload.get("cycle", {}).get("reason") or "")
     return reason != "heartbeat" or bool(_telegram_notification_reason(payload))
+
+
+def _ensure_sleeve_column(df: pl.DataFrame, default: str) -> pl.DataFrame:
+    """Ensure the DataFrame has a `sleeve` column populated with `default`
+    for rows that don't already specify one. Used by _read_*_combined so
+    legacy short-side rows (written before the sleeve column existed) and
+    new long-side rows can be concatenated and routed correctly on write-back.
+    """
+    if df.is_empty():
+        return df
+    if "sleeve" not in df.columns:
+        return df.with_columns(pl.lit(default).alias("sleeve"))
+    return df.with_columns(pl.col("sleeve").fill_null(default))
 
 
 def _validate_ws_risk_config(config: EventWebSocketRiskConfig) -> None:

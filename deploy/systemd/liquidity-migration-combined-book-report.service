@@ -1,0 +1,22 @@
+[Unit]
+Description=liquidity-migration combined-book daily aggregate Telegram report
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/liquidity-migration
+EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/liquidity-migration/.venv/bin/python -m liquidity_migration \
+    combined-book-telegram-report \
+    --short-data-root data/bybit-demo-event \
+    --long-data-root data/bybit-long-demo-event \
+    --include-live-positions
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/opt/liquidity-migration
