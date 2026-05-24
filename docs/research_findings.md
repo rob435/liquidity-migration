@@ -94,6 +94,96 @@ the corrected engine.
    canonical vs -25% gate; median 81-grid drawdown -24.9%. Small parameter
    shifts cross the gate; the wide-grid corner hits -40%.
 
+## Universe size & rank-improvement sweep (2026-05-23)
+
+A 105-cell sweep over `universe_rank_max ∈ {100..460}` and
+`liquidity_migration_rank_improvement_min ∈ {50..250}` plus adjacent
+dimensions (`hold_days`, `close_location_min`, `residual_return_min`,
+`turnover_ratio_min`, `event_rank_fraction_max`, `max_active_symbols`,
+`universe_rank_min`, `stop_loss_pct`) establishes the validated production
+operating point:
+
+**Validated operating point**: `universe_rank_max=200, hold_days=2,
+close_location_min=0.50`. Avg-split Sharpe **4.31 vs 3.59 baseline (+20%)**,
+DD -16.7% (within -25% gate), tribunal WATCH, 77/81 robust same-family
+variants (most robust seen). Per-window Sharpe 5.56 / 3.34 / 4.03
+(train/val/OOS) — all up vs baseline 4.37 / 3.24 / 3.16. The lift is
+consistent across all three pre-registered windows (not train-overfit).
+
+Decomposition of the +20% Sharpe lift:
+- `hold_days=3 → 2` contributes **+17%** (3.59 → 4.19; universe and
+  rank-improvement unchanged); the same lift carries to the live 3-position
+  VPS deployment (3.53 → 4.12).
+- Adding `close_location_min=0.30 → 0.50` contributes **+3%** (4.19 → 4.32
+  at u=150).
+- Adding `universe_rank_max=150 → 200` contributes **~0%** (4.32 → 4.31) —
+  the wider universe carries zero Sharpe cost at this operating point,
+  meaning widening to 200 is "free" if the operator wants the capacity
+  headroom.
+
+Trade-off: 47% lower compounded return (1451% vs 2750%) and DD slightly
+wider (-16.7% vs -14.2%). The lift is in risk-adjusted returns, not
+absolute returns.
+
+**What is NOT actionable on these axes**: in isolation, neither widening
+universe nor decreasing rank-improvement-min at the baseline hold/quality
+config improves Sharpe. Univariate scans:
+
+- `rank_improvement_min ∈ {60, 80, 100, 120}` at baseline universe: Sharpe
+  drops to 2.18-2.99, DD opens to -20% to -25.3%.
+- `universe_rank_max ∈ {160, 170, 180, 200, 220, 260}` at baseline ri:
+  Sharpe drops to 3.05-3.52, DD slightly worsens.
+- Joint relaxation (both wider AND lower ri): worse than either alone.
+- Quality-filter rescue (tighter close_loc, residual, turnover_ratio
+  combined with widening): fails to recover.
+
+The strategy is **not capacity-bound** (3 of 510 baseline trades are
+capacity-skipped). The 31-150 / ri=150 boundary is well-tuned for the
+2023-26 sample when hold/quality are held fixed; the universe-widening
+benefit only materialises when hold/quality are also moved to the h=2 +
+close=0.50 operating point.
+
+Full sweep, decomposition, tribunal reports, and 105-cell evidence:
+[`docs/research_universe_rank_sweep.md`](research_universe_rank_sweep.md).
+Data persisted at
+`~/SHARED_DATA/bybit_fullpit_1h/reports/universe_rank_sweep_20260523/combined_sweep.csv`.
+
+## Variable-exit sweep (2026-05-23)
+
+A 60-cell sweep of the trade-exit ladder (MFE-giveback, failed-fade,
+plus three newly-implemented exits: breakeven trailing stop, profit-lock
+trailing stop, time-adaptive stop) identifies one stackable improvement:
+**`failed_fade(hours=6, loss=3%, min_mfe=1%, close_location_min=0.30)`**.
+
+The winning operating point combines this failed_fade with `hold_days=2`
+(already validated): avg-split Sharpe **4.247 vs 3.587 baseline (+18.4%)**,
+all 3 pre-registered windows improved (train 4.37→5.37, val 3.24→3.59, OOS
+3.16→3.77). Drawdown slightly better (-13.6% vs -14.2%). Trade-off: 25%
+lower compounded return (same as h=2 alone). 59/81 robust same-family
+variants. Tribunal: WATCH (same level). All 6 negative controls pass
+cleanly.
+
+The same +17.6% Sharpe lift carries to the live 3-position VPS deployment
+(3.53 → 4.15).
+
+Three other exit reinventions did NOT help:
+- MFE-giveback trailing at any tested trigger/retain combination — best
+  cell loses 0.06 Sharpe.
+- Breakeven trailing stop (newly implemented) — every arm threshold tested
+  reduces Sharpe (best loses 0.13).
+- Profit-lock trailing stop (newly implemented) — best cell loses 0.37
+  Sharpe; cuts gains too early.
+
+The new exit types (breakeven, profit-lock, time-adaptive stop) are now in
+the code with defaults of 0.0 (disabled), so canonical behavior is
+unchanged. Activate via the new config fields `breakeven_arm_pct`,
+`profit_lock_arm_pct`, `profit_lock_floor_pct`, `stop_loose_window_hours`,
+`stop_loose_pct`, or via the new CLI flags on `scripts/sweep_universe_rank.py`.
+
+Full evidence: [`docs/research_exit_rules.md`](research_exit_rules.md);
+sweep data persisted at
+`~/SHARED_DATA/bybit_fullpit_1h/reports/exit_research_20260523/combined_exit_sweep.csv`.
+
 ## What the VPS demo is for
 
 The pre-2023 OOS failure means the only forward evidence available is the

@@ -59,6 +59,82 @@ SIZING_EQUAL = "equal"
 SIZING_VOL_PARITY = "vol_parity"
 SIZINGS = (SIZING_EQUAL, SIZING_VOL_PARITY)
 
+PRESET_LO_SKIP0 = "lo_skip0"
+PRESET_LO_CARRY0 = "lo_carry0"
+PRESET_LO_SHARPE3 = "lo_sharpe3"
+FACTOR_PRESETS = (PRESET_LO_SKIP0, PRESET_LO_CARRY0, PRESET_LO_SHARPE3)
+
+
+def lo_skip0_preset(*, start_date: str = "", end_date: str = "") -> MomentumFactorConfig:
+    """Long-only LO_skip0 baseline from trade-study round 1.
+
+    OOS sanity (run 2026-05-24, see reports/momentum_lo_oos_sanity/):
+    bybit_pre2023 daily Sharpe 1.47, binance_pre2023 daily Sharpe 3.69.
+    Survives both pre-2023 roots; the OOS-validated baseline.
+    """
+    return MomentumFactorConfig(
+        start_date=start_date,
+        end_date=end_date,
+        mode=MODE_LONG_ONLY,
+        momentum_skip_days=0,
+        carry_weight=1.5,
+        require_positive_ts_momentum_for_longs=True,
+        vol_target_annual=0.15,
+        regime_off_scale=0.0,
+        use_regime_filter=True,
+    )
+
+
+def lo_carry0_preset(*, start_date: str = "", end_date: str = "") -> MomentumFactorConfig:
+    """Long-only with carry overlay disabled — forensics round-2 recommendation.
+
+    Per docs/momentum_lo_trade_forensics.md, dropping carry_weight from 1.5 to 0
+    gives a small IS improvement (daily Sharpe 2.43 → 2.46, +97 trades) on the
+    canonical Bybit research root. Run label: `exploratory_in_sample` — no OOS
+    evidence yet; lo_skip0 remains the OOS-validated default until this preset
+    is forward-tested.
+    """
+    return MomentumFactorConfig(
+        start_date=start_date,
+        end_date=end_date,
+        mode=MODE_LONG_ONLY,
+        momentum_skip_days=0,
+        carry_weight=0.0,
+        require_positive_ts_momentum_for_longs=True,
+        vol_target_annual=0.15,
+        regime_off_scale=0.0,
+        use_regime_filter=True,
+    )
+
+
+def lo_sharpe3_preset(*, start_date: str = "", end_date: str = "") -> MomentumFactorConfig:
+    """Long-only config from trade-forensics grid (daily Sharpe ~3.9, ~200 trades IS).
+
+    Entry gates: top-50 universe, vol cap 120% ann, top-15 liquidity names only,
+    carry off, weekly rebalance. Label: `exploratory_in_sample` (grid-mined from
+    1,548-config hunt — multiple-testing risk; see docs/momentum_lo_sharpe3_winner.md).
+
+    OOS sanity (run 2026-05-24, see reports/momentum_lo_oos_sanity/):
+    bybit_pre2023 daily Sharpe **0.73** (vs IS 3.95 — classic overfit drop),
+    binance_pre2023 daily Sharpe 3.47. Do NOT promote on headline Sharpe.
+    """
+    return MomentumFactorConfig(
+        start_date=start_date,
+        end_date=end_date,
+        mode=MODE_LONG_ONLY,
+        universe_size=50,
+        long_quantile=0.20,
+        momentum_skip_days=0,
+        carry_weight=0.0,
+        require_positive_ts_momentum_for_longs=True,
+        vol_target_annual=0.15,
+        regime_off_scale=0.0,
+        use_regime_filter=True,
+        rebalance_days=7,
+        max_realized_vol=1.2,
+        max_turnover_rank=15,
+    )
+
 
 @dataclass(frozen=True, slots=True)
 class MomentumFactorConfig:

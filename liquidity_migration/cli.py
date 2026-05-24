@@ -36,9 +36,16 @@ from .cross_sectional_momentum import (
     run_cross_sectional_momentum_research,
 )
 from .momentum_factor import (
+    FACTOR_PRESETS,
     MODES as MOMENTUM_FACTOR_MODES,
+    PRESET_LO_CARRY0,
+    PRESET_LO_SHARPE3,
+    PRESET_LO_SKIP0,
     SIZINGS as MOMENTUM_FACTOR_SIZINGS,
     MomentumFactorConfig,
+    lo_carry0_preset,
+    lo_sharpe3_preset,
+    lo_skip0_preset,
     run_momentum_factor_research,
 )
 from .momentum_signals import RANKERS as MOMENTUM_RANKERS
@@ -1309,6 +1316,12 @@ def _add_momentum_factor_parser(subparsers) -> None:
     factor.add_argument("--start", default="", help="Inclusive UTC signal start date.")
     factor.add_argument("--end", default="", help="Exclusive UTC signal end date.")
     factor.add_argument(
+        "--preset",
+        default=None,
+        choices=FACTOR_PRESETS,
+        help="lo_skip0 (OOS-validated baseline) | lo_carry0 (round-2 carry=0 tweak, IS only) | lo_sharpe3 (grid-mined, overfit risk); overrides defaults when set.",
+    )
+    factor.add_argument(
         "--mode",
         default=factor_defaults.mode,
         choices=MOMENTUM_FACTOR_MODES,
@@ -1447,6 +1460,11 @@ def _add_momentum_factor_parser(subparsers) -> None:
         action="store_true",
         help="Allow runs without full PIT universe coverage. Run label downgraded.",
     )
+    factor.add_argument("--max-realized-vol", type=float, default=None, help="Skip longs above this ann vol.")
+    factor.add_argument("--max-turnover-rank", type=int, default=None, help="Max liquidity rank (1=most liquid).")
+    factor.add_argument("--max-composite-score", type=float, default=None, help="Skip extreme momentum z-scores.")
+    factor.add_argument("--max-momentum-avg", type=float, default=None, help="Skip extreme formation momentum.")
+    factor.add_argument("--min-ts-momentum", type=float, default=None)
     factor.add_argument("--report-dir", default=None)
 
 
@@ -2468,42 +2486,74 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "momentum-factor":
-        lookbacks = tuple(
-            int(item.strip())
-            for item in args.momentum_lookbacks.split(",")
-            if item.strip()
-        )
-        factor_config = MomentumFactorConfig(
-            start_date=args.start,
-            end_date=args.end,
-            mode=args.mode,
-            universe_size=args.universe_size,
-            universe_volume_window_days=args.universe_volume_window_days,
-            min_listing_history_days=args.min_listing_history_days,
-            momentum_lookbacks_days=lookbacks,
-            momentum_skip_days=args.momentum_skip_days,
-            carry_lookback_days=args.carry_lookback_days,
-            carry_weight=args.carry_weight,
-            ts_momentum_lookback_days=args.ts_momentum_lookback_days,
-            require_positive_ts_momentum_for_longs=args.require_positive_ts_momentum_for_longs,
-            require_negative_ts_momentum_for_shorts=args.require_negative_ts_momentum_for_shorts,
-            long_quantile=args.long_quantile,
-            short_quantile=args.short_quantile,
-            rebalance_days=args.rebalance_days,
-            entry_delay_hours=args.entry_delay_hours,
-            sizing=args.sizing,
-            vol_estimate_window_days=args.vol_estimate_window_days,
-            vol_floor_annual=args.vol_floor_annual,
-            gross_exposure=args.gross_exposure,
-            max_position_weight=args.max_position_weight,
-            vol_target_annual=args.vol_target_annual,
-            vol_target_max_scale=args.vol_target_max_scale,
-            regime_sma_days=args.regime_sma_days,
-            regime_off_scale=args.regime_off_scale,
-            use_regime_filter=not args.no_regime_filter,
-            cost_multiplier=args.cost_multiplier,
-            require_full_pit_universe=not args.allow_partial_pit,
-        )
+        from dataclasses import replace
+
+        if args.preset == PRESET_LO_SKIP0:
+            factor_config = lo_skip0_preset(start_date=args.start, end_date=args.end)
+        elif args.preset == PRESET_LO_CARRY0:
+            factor_config = lo_carry0_preset(start_date=args.start, end_date=args.end)
+        elif args.preset == PRESET_LO_SHARPE3:
+            factor_config = lo_sharpe3_preset(start_date=args.start, end_date=args.end)
+        else:
+            lookbacks = tuple(
+                int(item.strip())
+                for item in args.momentum_lookbacks.split(",")
+                if item.strip()
+            )
+            factor_config = MomentumFactorConfig(
+                start_date=args.start,
+                end_date=args.end,
+                mode=args.mode,
+                universe_size=args.universe_size,
+                universe_volume_window_days=args.universe_volume_window_days,
+                min_listing_history_days=args.min_listing_history_days,
+                momentum_lookbacks_days=lookbacks,
+                momentum_skip_days=args.momentum_skip_days,
+                carry_lookback_days=args.carry_lookback_days,
+                carry_weight=args.carry_weight,
+                ts_momentum_lookback_days=args.ts_momentum_lookback_days,
+                require_positive_ts_momentum_for_longs=args.require_positive_ts_momentum_for_longs,
+                require_negative_ts_momentum_for_shorts=args.require_negative_ts_momentum_for_shorts,
+                long_quantile=args.long_quantile,
+                short_quantile=args.short_quantile,
+                rebalance_days=args.rebalance_days,
+                entry_delay_hours=args.entry_delay_hours,
+                sizing=args.sizing,
+                vol_estimate_window_days=args.vol_estimate_window_days,
+                vol_floor_annual=args.vol_floor_annual,
+                gross_exposure=args.gross_exposure,
+                max_position_weight=args.max_position_weight,
+                vol_target_annual=args.vol_target_annual,
+                vol_target_max_scale=args.vol_target_max_scale,
+                regime_sma_days=args.regime_sma_days,
+                regime_off_scale=args.regime_off_scale,
+                use_regime_filter=not args.no_regime_filter,
+                cost_multiplier=args.cost_multiplier,
+                require_full_pit_universe=not args.allow_partial_pit,
+                max_realized_vol=args.max_realized_vol,
+                max_turnover_rank=args.max_turnover_rank,
+                max_composite_score=args.max_composite_score,
+                max_momentum_avg=args.max_momentum_avg,
+                min_ts_momentum=args.min_ts_momentum,
+            )
+        if args.preset and any(
+            v is not None
+            for v in (
+                args.max_realized_vol,
+                args.max_turnover_rank,
+                args.max_composite_score,
+                args.max_momentum_avg,
+                args.min_ts_momentum,
+            )
+        ):
+            factor_config = replace(
+                factor_config,
+                max_realized_vol=args.max_realized_vol or factor_config.max_realized_vol,
+                max_turnover_rank=args.max_turnover_rank or factor_config.max_turnover_rank,
+                max_composite_score=args.max_composite_score or factor_config.max_composite_score,
+                max_momentum_avg=args.max_momentum_avg or factor_config.max_momentum_avg,
+                min_ts_momentum=args.min_ts_momentum or factor_config.min_ts_momentum,
+            )
         payload = run_momentum_factor_research(
             data_root,
             config=factor_config,
