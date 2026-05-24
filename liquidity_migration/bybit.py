@@ -740,6 +740,205 @@ class BybitPrivateWebSocketStream:
         _close_ws_client(self._client)
 
 
+class BybitTradeRouter:
+    """Route order placement + cancellation through WS first, REST as fallback.
+
+    Exposes the same surface as :class:`BybitPrivateClient` so cycle code
+    that calls ``trading_client.place_order(**params)`` is a drop-in user:
+    no caller change needed. Internally:
+
+      1. If a :class:`BybitWebSocketTradeClient` is wired AND ``order_submit_mode``
+         allows WS, try WS first. Bybit's WS trade ack arrives in <50ms.
+      2. If WS is unavailable, times out, or returns a non-zero retCode and
+         ``rest_fallback`` is true, fall back to ``BybitPrivateClient.place_order``.
+         The router never raises just because WS was unavailable — REST is
+         the safety net.
+      3. If ``order_submit_mode == "rest"``, skip WS entirely. This is the
+         opt-out for operators who want to run REST-only for safety.
+
+    Non-order methods (``set_leverage``, ``get_positions``, ``get_open_orders``,
+    ``get_wallet_balance``, ``get_trade_history``, ``get_order_history``) pass
+    straight through to REST — there is no WS equivalent for those at Bybit.
+
+    Bybit demo currently rejects WS trade order entry; on demo, the router's
+    first WS attempt typically returns a non-zero retCode and we transparently
+    fall back to REST. The same code path works unchanged when REAL_MONEY is
+    flipped on — WS placement starts succeeding and saves ~150-200ms per order.
+
+    Submission stats are exposed via :meth:`stats` so the operator can
+    observe whether placement is going WS or REST in production telemetry.
+    """
+
+    DEFAULT_TIMEOUT_SECONDS = 5.0
+
+    def __init__(
+        self,
+        *,
+        rest_client: Any,
+        ws_client: Any | None = None,
+        order_submit_mode: str = "ws_then_rest",
+        rest_fallback: bool = True,
+        ws_timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    ) -> None:
+        if rest_client is None:
+            raise ValueError("rest_client is required (it is the failsafe path)")
+        if order_submit_mode not in {"ws", "ws_then_rest", "rest"}:
+            raise ValueError("order_submit_mode must be ws, ws_then_rest, or rest")
+        if order_submit_mode == "ws" and rest_fallback:
+            raise ValueError("order_submit_mode='ws' is incompatible with rest_fallback=True")
+        if ws_timeout_seconds <= 0.0:
+            raise ValueError("ws_timeout_seconds must be positive")
+        self._rest = rest_client
+        self._ws = ws_client
+        self._mode = order_submit_mode
+        self._rest_fallback = bool(rest_fallback)
+        self._ws_timeout_seconds = float(ws_timeout_seconds)
+        self._lock = threading.Lock()
+        self._ws_attempts = 0
+        self._ws_successes = 0
+        self._ws_timeouts = 0
+        self._ws_rejects = 0
+        self._ws_exceptions = 0
+        self._rest_fallbacks = 0
+        self._rest_only = 0
+
+    # -- order placement / cancellation -------------------------------
+
+    def place_order(self, **params: Any) -> dict[str, Any]:
+        if "orderLinkId" not in params:
+            raise ValueError("orderLinkId is required for idempotent Bybit order submission")
+        if self._should_attempt_ws():
+            try:
+                return self._ws_call_sync("place_order", **params)
+            except _RouterWsFailed as failure:
+                if not self._rest_fallback:
+                    raise
+                _logger_trade_router.info(
+                    "place_order WS failed (%s); REST fallback symbol=%s link=%s",
+                    failure.kind, params.get("symbol"), params.get("orderLinkId"),
+                )
+                with self._lock:
+                    self._rest_fallbacks += 1
+        else:
+            with self._lock:
+                self._rest_only += 1
+        return self._rest.place_order(**params)
+
+    def cancel_order(self, *, symbol: str, order_link_id: str) -> dict[str, Any]:
+        if self._should_attempt_ws():
+            try:
+                return self._ws_call_sync(
+                    "cancel_order", symbol=symbol, orderLinkId=order_link_id,
+                )
+            except _RouterWsFailed as failure:
+                if not self._rest_fallback:
+                    raise
+                _logger_trade_router.info(
+                    "cancel_order WS failed (%s); REST fallback symbol=%s link=%s",
+                    failure.kind, symbol, order_link_id,
+                )
+                with self._lock:
+                    self._rest_fallbacks += 1
+        else:
+            with self._lock:
+                self._rest_only += 1
+        return self._rest.cancel_order(symbol=symbol, order_link_id=order_link_id)
+
+    # -- pass-throughs (no WS equivalent) -----------------------------
+
+    def __getattr__(self, name: str) -> Any:
+        # Forward any other attribute access to the REST client so this
+        # router is a true drop-in replacement. set_leverage, get_positions,
+        # get_open_orders, get_wallet_balance, get_trade_history,
+        # get_order_history, cancel_all_orders — all route through REST.
+        # __getattr__ is only invoked for attributes NOT found on the
+        # router itself, so place_order/cancel_order keep their override.
+        return getattr(self._rest, name)
+
+    # -- introspection ------------------------------------------------
+
+    def stats(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "mode": self._mode,
+                "rest_fallback": self._rest_fallback,
+                "ws_wired": self._ws is not None,
+                "ws_attempts": self._ws_attempts,
+                "ws_successes": self._ws_successes,
+                "ws_timeouts": self._ws_timeouts,
+                "ws_rejects": self._ws_rejects,
+                "ws_exceptions": self._ws_exceptions,
+                "rest_fallbacks": self._rest_fallbacks,
+                "rest_only": self._rest_only,
+            }
+
+    # -- internals ----------------------------------------------------
+
+    def _should_attempt_ws(self) -> bool:
+        return self._mode in {"ws", "ws_then_rest"} and self._ws is not None
+
+    def _ws_call_sync(self, method: str, **params: Any) -> dict[str, Any]:
+        """Issue a WS call and block (with timeout) for the ack.
+
+        Returns the ack's ``data`` field on success (mirroring REST's
+        ``result`` shape so the caller sees identical structure). Raises
+        ``_RouterWsFailed`` on any failure mode — timeout, non-zero
+        retCode, transport exception. The caller decides whether to
+        REST-fallback based on ``rest_fallback``."""
+        with self._lock:
+            self._ws_attempts += 1
+        completed = threading.Event()
+        ack_holder: dict[str, Any] = {}
+
+        def _on_ack(message: Any) -> None:
+            ack_holder["message"] = message
+            completed.set()
+
+        try:
+            ws_method = getattr(self._ws, method)
+            ws_method(_on_ack, **params)
+        except Exception as exc:  # noqa: BLE001
+            with self._lock:
+                self._ws_exceptions += 1
+            raise _RouterWsFailed("exception", str(exc)) from exc
+
+        if not completed.wait(timeout=self._ws_timeout_seconds):
+            with self._lock:
+                self._ws_timeouts += 1
+            raise _RouterWsFailed("timeout", f"no ack within {self._ws_timeout_seconds}s")
+
+        message = ack_holder.get("message")
+        if not isinstance(message, Mapping):
+            with self._lock:
+                self._ws_rejects += 1
+            raise _RouterWsFailed("malformed_ack", repr(message)[:200])
+        ret_code = message.get("retCode")
+        if ret_code != 0:
+            with self._lock:
+                self._ws_rejects += 1
+            ret_msg = str(message.get("retMsg") or message.get("ret_msg") or "")
+            raise _RouterWsFailed(
+                "rejected", f"retCode={ret_code} retMsg={ret_msg}",
+            )
+        with self._lock:
+            self._ws_successes += 1
+        data = message.get("data")
+        return dict(data) if isinstance(data, Mapping) else {}
+
+
+class _RouterWsFailed(RuntimeError):
+    """Internal signal that the WS submission failed — the router decides
+    whether to fall back to REST based on its configuration."""
+
+    def __init__(self, kind: str, detail: str = "") -> None:
+        super().__init__(f"{kind}: {detail}" if detail else kind)
+        self.kind = kind
+        self.detail = detail
+
+
+_logger_trade_router = logging.getLogger("liquidity_migration.bybit.trade_router")
+
+
 @dataclass(slots=True)
 class BybitWebSocketTradeClient:
     category: str = "linear"

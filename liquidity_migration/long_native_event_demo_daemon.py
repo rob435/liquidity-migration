@@ -30,6 +30,8 @@ from .bybit import (
     BybitPrivateClient,
     BybitPrivateWebSocketStream,
     BybitPublicTickerStream,
+    BybitTradeRouter,
+    BybitWebSocketTradeClient,
     resolve_private_credentials,
 )
 from .config import ResearchConfig
@@ -83,6 +85,14 @@ class LongNativeDemoDaemon:
         # (or the absent next startup IS the signal).
         startup_telegram: bool = True,
         shutdown_telegram: bool = False,
+        # Order-submission routing. See EventDemoDaemon for the full
+        # rationale. Default ws_then_rest: WS first, REST fallback. On
+        # demo this transparently REST-falls-back; on REAL_MONEY the WS
+        # path starts succeeding and saves ~150-200ms per order.
+        order_submit_mode: str = "ws_then_rest",
+        ws_trade_timeout_seconds: float = 5.0,
+        trade_router: Any | None = None,
+        trade_router_factory: Callable[..., Any] | None = None,
     ) -> None:
         if interval_seconds < 0.0:
             raise ValueError("interval_seconds must be non-negative")
@@ -142,6 +152,12 @@ class LongNativeDemoDaemon:
         self._reconcile_errors = 0
         self._startup_telegram = bool(startup_telegram)
         self._shutdown_telegram = bool(shutdown_telegram)
+        if order_submit_mode not in {"ws", "ws_then_rest", "rest"}:
+            raise ValueError("order_submit_mode must be ws, ws_then_rest, or rest")
+        self._order_submit_mode = order_submit_mode
+        self._ws_trade_timeout_seconds = float(ws_trade_timeout_seconds)
+        self._trade_router: Any | None = trade_router
+        self._trade_router_factory = trade_router_factory or _default_long_trade_router_factory
 
     def install_signal_handlers(self) -> None:
         signal.signal(signal.SIGTERM, lambda *_: self.request_shutdown())
@@ -349,6 +365,7 @@ class LongNativeDemoDaemon:
             if self._kline_stream_manager is not None
             else None
         )
+        trade_router = self._ensure_trade_router()
         try:
             payload = self._cycle_runner(
                 self.data_root,
@@ -359,6 +376,7 @@ class LongNativeDemoDaemon:
                 private_state_cache=self._private_state_cache,
                 ticker_cache=self._ticker_cache,
                 state_cache_stale_seconds=self._state_cache_stale_seconds,
+                private_client=trade_router,
             )
             self._cycles_run += 1
         except Exception as exc:  # noqa: BLE001
@@ -381,12 +399,38 @@ class LongNativeDemoDaemon:
                 "reconciles_total": self._reconciles_total,
                 "reconcile_errors": self._reconcile_errors,
             })
+        if payload is not None and self._trade_router is not None:
+            try:
+                payload.setdefault("ws_trade", self._trade_router.stats())
+            except Exception as exc:  # noqa: BLE001
+                _logger.debug("long trade_router stats fetch failed: %s", exc)
         if payload is not None:
             try:
                 print(format_long_demo_cycle_summary(payload), flush=True)
             except Exception:  # noqa: BLE001
                 _logger.exception("failed to format long cycle summary")
         _logger.debug("long cycle complete elapsed=%.2fs", elapsed)
+
+    # -- trade router (WS-first / REST-fallback order submission) ----
+
+    def _ensure_trade_router(self) -> Any | None:
+        """Lazily build the BybitTradeRouter on first cycle. Mirrors the
+        short daemon's _ensure_trade_router. See EventDemoDaemon for the
+        full rationale."""
+        if self._trade_router is not None:
+            return self._trade_router
+        try:
+            router = self._trade_router_factory(
+                self.config,
+                self.demo_config,
+                order_submit_mode=self._order_submit_mode,
+                ws_timeout_seconds=self._ws_trade_timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning("long trade router construction failed; cycle REST: %s", exc)
+            return None
+        self._trade_router = router
+        return router
 
     # -- state cache lifecycle ----------------------------------------
 
@@ -578,6 +622,52 @@ def _default_long_ticker_stream_factory(config: ResearchConfig) -> BybitPublicTi
         category=config.exchange.category,
         testnet=config.exchange.testnet,
         demo=False,
+    )
+
+
+def _default_long_trade_router_factory(
+    config: ResearchConfig,
+    demo_config: LongNativeDemoCycleConfig,
+    *,
+    order_submit_mode: str = "ws_then_rest",
+    ws_timeout_seconds: float = 5.0,
+) -> Any | None:
+    """Build a BybitTradeRouter for the long sleeve. Identical to the
+    short side's factory — Bybit's WS trade endpoint is the same for
+    both sleeves; the only difference is the data root + ledger paths
+    (which the cycle handles separately)."""
+    api_key, api_secret, demo = resolve_private_credentials()
+    if not api_key or not api_secret:
+        _logger.info("long trade router skipped: no private credentials configured")
+        return None
+    rest_client = BybitPrivateClient(
+        category=config.exchange.category,
+        testnet=config.exchange.testnet,
+        demo=demo,
+        api_key=api_key,
+        api_secret=api_secret,
+    )
+    ws_client: Any | None = None
+    if order_submit_mode in {"ws", "ws_then_rest"}:
+        try:
+            ws_client = BybitWebSocketTradeClient(
+                category=config.exchange.category,
+                testnet=config.exchange.testnet,
+                demo=demo,
+                api_key=api_key,
+                api_secret=api_secret,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "long WS trade client construction failed; router REST-only: %s", exc,
+            )
+            ws_client = None
+    return BybitTradeRouter(
+        rest_client=rest_client,
+        ws_client=ws_client,
+        order_submit_mode=order_submit_mode,
+        rest_fallback=(order_submit_mode != "ws"),
+        ws_timeout_seconds=ws_timeout_seconds,
     )
 
 

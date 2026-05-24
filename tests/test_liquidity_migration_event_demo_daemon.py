@@ -857,6 +857,144 @@ def test_daemon_attaches_ws_state_stats_to_cycle_payload(tmp_path: Path) -> None
     assert "ticker_cache" in payload["ws_state"]
 
 
+def test_daemon_passes_trade_router_as_cycle_private_client(tmp_path: Path) -> None:
+    """The daemon must lazily build a BybitTradeRouter and pass it to the
+    cycle as private_client so order placement routes through WS-then-REST
+    instead of bare REST. The cycle treats it as a drop-in private client."""
+    from liquidity_migration.bybit import BybitTradeRouter
+
+    ws = _RecordingWsStream()
+    seen_clients: list = []
+
+    def _runner(data_root, **kwargs):
+        seen_clients.append(kwargs.get("private_client"))
+        return {"cycle": {}, "report_dir": str(data_root)}
+
+    class _RestStub:
+        def place_order(self, **p): return {"orderId": "stub-1"}
+        def cancel_order(self, *, symbol, order_link_id): return {}
+
+    def _factory(cfg, demo_cfg, *, order_submit_mode, ws_timeout_seconds):
+        return BybitTradeRouter(
+            rest_client=_RestStub(),
+            ws_client=None,
+            order_submit_mode=order_submit_mode,
+            ws_timeout_seconds=ws_timeout_seconds,
+        )
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_runner,
+        state_cache_seeder=lambda **kw: None,
+        trade_router_factory=_factory,
+    )
+    threading.Timer(0.1, daemon.request_shutdown).start()
+    daemon.run()
+    assert seen_clients, "cycle never received a private_client"
+    assert isinstance(seen_clients[0], BybitTradeRouter)
+
+
+def test_daemon_attaches_ws_trade_stats_to_cycle_payload(tmp_path: Path) -> None:
+    """ws_trade stats must appear in the cycle payload so operators can
+    observe WS-vs-REST submission counts in the telemetry stream."""
+    from liquidity_migration.bybit import BybitTradeRouter
+
+    ws = _RecordingWsStream()
+    captured: dict = {}
+
+    def _runner(data_root, **kwargs):
+        # Simulate the cycle making one order placement so the router
+        # records an attempt in its stats.
+        client = kwargs.get("private_client")
+        if client is not None:
+            try:
+                client.place_order(symbol="X", side="Buy", orderType="Market",
+                                   qty="1", orderLinkId="lm-test")
+            except Exception:
+                pass
+        payload = {"cycle": {}, "report_dir": str(data_root)}
+        captured["payload"] = payload
+        return payload
+
+    class _RestStub:
+        def place_order(self, **p): return {"orderId": "rest-1"}
+        def cancel_order(self, *, symbol, order_link_id): return {}
+
+    def _factory(cfg, demo_cfg, *, order_submit_mode, ws_timeout_seconds):
+        return BybitTradeRouter(
+            rest_client=_RestStub(),
+            ws_client=None,  # forces REST-only path
+            order_submit_mode=order_submit_mode,
+            ws_timeout_seconds=ws_timeout_seconds,
+        )
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_runner,
+        state_cache_seeder=lambda **kw: None,
+        trade_router_factory=_factory,
+    )
+    threading.Timer(0.1, daemon.request_shutdown).start()
+    daemon.run()
+    payload = captured["payload"]
+    assert "ws_trade" in payload
+    stats = payload["ws_trade"]
+    assert stats["mode"] == "ws_then_rest"
+    assert stats["ws_wired"] is False  # we injected ws_client=None
+    assert stats["rest_only"] >= 1  # the order went REST-only
+
+
+def test_daemon_router_construction_failure_degrades_to_no_router(tmp_path: Path) -> None:
+    """A failing trade_router_factory must NOT crash the daemon — it just
+    means no router is passed to the cycle, which falls back to its own
+    _build_private_client path."""
+    ws = _RecordingWsStream()
+    seen_clients: list = []
+
+    def _runner(data_root, **kwargs):
+        seen_clients.append(kwargs.get("private_client"))
+        return {"cycle": {}, "report_dir": str(data_root)}
+
+    def _broken_factory(cfg, demo_cfg, **kw):
+        raise RuntimeError("simulated factory crash")
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_runner,
+        state_cache_seeder=lambda **kw: None,
+        trade_router_factory=_broken_factory,
+    )
+    threading.Timer(0.1, daemon.request_shutdown).start()
+    daemon.run()
+    # Cycle was called, with private_client=None (factory crashed, daemon
+    # logged the warning and kept running).
+    assert seen_clients
+    assert seen_clients[0] is None
+
+
+def test_daemon_rejects_invalid_order_submit_mode(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="order_submit_mode"):
+        EventDemoDaemon(
+            tmp_path,
+            config=ResearchConfig(data_root=tmp_path),
+            demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
+            interval_seconds=0.0,
+            order_submit_mode="invalid",
+        )
+
+
 def test_daemon_seed_runs_async_and_does_not_block_first_cycle(tmp_path: Path) -> None:
     """If the seeder blocks (e.g. slow REST), the daemon must still run
     cycles. The first cycle just sees an unseeded cache and REST-falls-back."""

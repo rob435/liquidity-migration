@@ -48,6 +48,8 @@ from .bybit import (
     BybitPrivateClient,
     BybitPrivateWebSocketStream,
     BybitPublicTickerStream,
+    BybitTradeRouter,
+    BybitWebSocketTradeClient,
     resolve_private_credentials,
 )
 from .config import ResearchConfig
@@ -109,6 +111,16 @@ class EventDemoDaemon:
         # errors) always telegram via _maybe_notify regardless of these.
         startup_telegram: bool = True,
         shutdown_telegram: bool = False,
+        # Order-submission routing. ws_then_rest tries Bybit WS Trade first
+        # (sub-50ms ack) and falls back to REST on failure. On the current
+        # demo account Bybit rejects WS trade entry so this transparently
+        # ends up REST; on REAL_MONEY it cuts ~150-200ms off every order.
+        # rest disables WS entirely (safety opt-out); ws is strict WS (no
+        # fallback — production-grade once Bybit accepts WS trade on demo).
+        order_submit_mode: str = "ws_then_rest",
+        ws_trade_timeout_seconds: float = 5.0,
+        trade_router: Any | None = None,
+        trade_router_factory: Callable[[ResearchConfig, EventDemoCycleConfig], Any] | None = None,
     ) -> None:
         if interval_seconds < 0.0:
             raise ValueError("interval_seconds must be non-negative")
@@ -199,6 +211,12 @@ class EventDemoDaemon:
         self._reconcile_errors = 0
         self._startup_telegram = bool(startup_telegram)
         self._shutdown_telegram = bool(shutdown_telegram)
+        if order_submit_mode not in {"ws", "ws_then_rest", "rest"}:
+            raise ValueError("order_submit_mode must be ws, ws_then_rest, or rest")
+        self._order_submit_mode = order_submit_mode
+        self._ws_trade_timeout_seconds = float(ws_trade_timeout_seconds)
+        self._trade_router: Any | None = trade_router
+        self._trade_router_factory = trade_router_factory or _default_trade_router_factory
 
     def install_signal_handlers(self) -> None:
         """Wire SIGTERM/SIGINT to request_shutdown so systemd `systemctl stop`
@@ -462,6 +480,11 @@ class EventDemoDaemon:
             if self._kline_stream_manager is not None
             else None
         )
+        # Build the trade router lazily on the first cycle so a daemon
+        # without credentials (or running pre-startup) doesn't try to
+        # open a WS trade connection. The router is cached after the
+        # first build so subsequent cycles share the same WS connection.
+        trade_router = self._ensure_trade_router()
         try:
             payload = self._cycle_runner(
                 self.data_root,
@@ -473,6 +496,7 @@ class EventDemoDaemon:
                 private_state_cache=self._private_state_cache,
                 ticker_cache=self._ticker_cache,
                 state_cache_stale_seconds=self._state_cache_stale_seconds,
+                private_client=trade_router,
             )
             self._cycles_run += 1
         except Exception as exc:  # noqa: BLE001 - never let a single cycle kill the daemon
@@ -501,6 +525,11 @@ class EventDemoDaemon:
                 "reconciles_total": self._reconciles_total,
                 "reconcile_errors": self._reconcile_errors,
             })
+        if payload is not None and self._trade_router is not None:
+            try:
+                payload.setdefault("ws_trade", self._trade_router.stats())
+            except Exception as exc:  # noqa: BLE001
+                _logger.debug("trade_router stats fetch failed: %s", exc)
         if payload is not None:
             # Emit the same `event demo cycle ...` summary the legacy bash-loop
             # runner prints, so operators don't lose visibility when flipping
@@ -562,6 +591,32 @@ class EventDemoDaemon:
             manager.stop()
         except Exception as exc:  # noqa: BLE001
             _logger.warning("kline_stream_manager.stop failed: %s", exc)
+
+    # -- trade router (WS-first / REST-fallback order submission) ----
+
+    def _ensure_trade_router(self) -> Any | None:
+        """Lazily build the BybitTradeRouter on first cycle.
+
+        Returns None when no credentials are available — the cycle's
+        normal _build_private_client path then takes over (REST-only).
+        When credentials ARE available, the router wraps a REST client +
+        an optional WS trade client. Bybit demo currently rejects WS
+        trade entry, so the router transparently REST-falls-back; on
+        REAL_MONEY the WS path starts succeeding."""
+        if self._trade_router is not None:
+            return self._trade_router
+        try:
+            router = self._trade_router_factory(
+                self.config,
+                self.demo_config,
+                order_submit_mode=self._order_submit_mode,
+                ws_timeout_seconds=self._ws_trade_timeout_seconds,
+            )
+        except Exception as exc:  # noqa: BLE001 - never let router failure kill the cycle
+            _logger.warning("trade router construction failed; cycle falls back to REST: %s", exc)
+            return None
+        self._trade_router = router
+        return router
 
     # -- state cache lifecycle (mirrors LongNativeDemoDaemon) ---------
 
@@ -772,6 +827,57 @@ def _default_short_ticker_stream_factory(config: ResearchConfig) -> BybitPublicT
         category=config.exchange.category,
         testnet=config.exchange.testnet,
         demo=False,
+    )
+
+
+def _default_trade_router_factory(
+    config: ResearchConfig,
+    demo_config: EventDemoCycleConfig,
+    *,
+    order_submit_mode: str = "ws_then_rest",
+    ws_timeout_seconds: float = 5.0,
+) -> Any | None:
+    """Build a BybitTradeRouter wrapping a REST private client + an
+    optional WS trade client.
+
+    Returns None when credentials are missing (the cycle falls back to its
+    own _build_private_client path, which also handles None). The router
+    is constructed once at the first cycle and reused across cycles so a
+    single WS trade connection serves the whole daemon lifetime."""
+    api_key, api_secret, demo = resolve_private_credentials()
+    if not api_key or not api_secret:
+        _logger.info("trade router skipped: no private credentials configured")
+        return None
+    rest_client = BybitPrivateClient(
+        category=config.exchange.category,
+        testnet=config.exchange.testnet,
+        demo=demo,
+        api_key=api_key,
+        api_secret=api_secret,
+    )
+    ws_client: Any | None = None
+    if order_submit_mode in {"ws", "ws_then_rest"}:
+        try:
+            ws_client = BybitWebSocketTradeClient(
+                category=config.exchange.category,
+                testnet=config.exchange.testnet,
+                demo=demo,
+                api_key=api_key,
+                api_secret=api_secret,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _logger.warning(
+                "WS trade client construction failed; router will REST-only: %s", exc,
+            )
+            ws_client = None
+    return BybitTradeRouter(
+        rest_client=rest_client,
+        ws_client=ws_client,
+        order_submit_mode=order_submit_mode,
+        # On ws_then_rest we ALWAYS allow REST fallback. On strict ws,
+        # rest_fallback=False is the safety invariant the router enforces.
+        rest_fallback=(order_submit_mode != "ws"),
+        ws_timeout_seconds=ws_timeout_seconds,
     )
 
 
