@@ -102,9 +102,17 @@ systemctl disable --now \
 systemctl enable liquidity-migration-bybit-demo.service
 systemctl enable liquidity-migration-bybit-risk.service
 systemctl enable liquidity-migration-bybit-paper.service
+systemctl enable liquidity-migration-bybit-long-demo.service
+systemctl enable liquidity-migration-bybit-long-paper.service
 systemctl restart liquidity-migration-bybit-demo.service
 systemctl restart liquidity-migration-bybit-risk.service
 systemctl restart liquidity-migration-bybit-paper.service
+# Long-sleeve services also need restart after a deploy — they share the
+# liquidity_migration package with the short side, so any Python change
+# requires restarting them too. Previously missed; the long daemon would
+# stay on the old code until the next manual restart.
+systemctl restart liquidity-migration-bybit-long-demo.service
+systemctl restart liquidity-migration-bybit-long-paper.service
 
 if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then
   sleep "$SYSTEMD_SETTLE_SECONDS"
@@ -113,9 +121,13 @@ fi
 systemctl is-active --quiet liquidity-migration-bybit-demo.service
 systemctl is-active --quiet liquidity-migration-bybit-risk.service
 systemctl is-active --quiet liquidity-migration-bybit-paper.service
+systemctl is-active --quiet liquidity-migration-bybit-long-demo.service
+systemctl is-active --quiet liquidity-migration-bybit-long-paper.service
 systemctl is-enabled --quiet liquidity-migration-bybit-demo.service
 systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
 systemctl is-enabled --quiet liquidity-migration-bybit-paper.service
+systemctl is-enabled --quiet liquidity-migration-bybit-long-demo.service
+systemctl is-enabled --quiet liquidity-migration-bybit-long-paper.service
 
 for legacy_unit in \
   model050426.service \

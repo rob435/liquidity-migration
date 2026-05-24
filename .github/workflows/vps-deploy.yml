@@ -17,6 +17,7 @@ on:
       - "scripts/wait_for_vps_recovery_and_deploy.sh"
       - "scripts/run_bybit_demo_event_engine.sh"
       - "scripts/run_bybit_demo_ws_risk_engine.sh"
+      - "scripts/run_bybit_long_demo_event_engine.sh"
   workflow_dispatch:
     inputs:
       mode:
