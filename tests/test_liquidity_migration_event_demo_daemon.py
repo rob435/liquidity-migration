@@ -795,7 +795,10 @@ def test_daemon_passes_private_state_and_ticker_caches_into_cycle(tmp_path: Path
     ws = _RecordingWsStream()
     seeded: list[None] = []
 
-    def _seeder(*, config, demo_config, private_state_cache, ticker_cache):
+    def _seeder(*, config, demo_config, private_state_cache, ticker_cache, **_):
+        # Accept (and ignore) the cached market_client / private_client
+        # kwargs that the daemon now passes through — see
+        # _default_short_state_cache_seeder for the production signature.
         seeded.append(None)
         # Simulate a successful REST seed.
         private_state_cache.seed(equity_usdt=12_500.0)
@@ -993,6 +996,63 @@ def test_daemon_rejects_invalid_order_submit_mode(tmp_path: Path) -> None:
             interval_seconds=0.0,
             order_submit_mode="invalid",
         )
+
+
+def test_daemon_reuses_seeder_rest_clients_across_reconciles(tmp_path: Path) -> None:
+    """Regression guard for the per-minute REST client churn fix.
+
+    Each reconcile used to construct a fresh BybitMarketData /
+    BybitPrivateClient, leaking one CLOSE_WAIT socket per call as the
+    prior session's TCP connection lingered in kernel keepalive. The
+    daemon now lazy-constructs the clients once and passes them through;
+    subsequent reconciles must see the SAME instances."""
+    ws = _RecordingWsStream()
+    seen_market_clients: list = []
+    seen_private_clients: list = []
+
+    def _seeder(*, config, demo_config, private_state_cache, ticker_cache,
+                market_client=None, private_client=None):
+        seen_market_clients.append(market_client)
+        seen_private_clients.append(private_client)
+        private_state_cache.seed(equity_usdt=10_000.0)
+        ticker_cache.seed([{"symbol": "BTCUSDT", "lastPrice": "30000"}])
+
+    def _runner(data_root, **kwargs):
+        return {"cycle": {}, "report_dir": str(data_root)}
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_runner,
+        state_cache_seeder=_seeder,
+        ticker_stream_factory=lambda _config: _RecordingTickerStream(),
+        # Force a fast reconcile so the test sees a second seed call.
+        ticker_reconcile_interval_seconds=0.05,
+    )
+    runner = threading.Thread(target=daemon.run, daemon=True)
+    runner.start()
+    try:
+        # Give the seeder enough time to fire at least twice (startup + 1 reconcile).
+        import time as _time
+        deadline = _time.monotonic() + 1.0
+        while _time.monotonic() < deadline:
+            if len(seen_market_clients) >= 2:
+                break
+            _time.sleep(0.02)
+    finally:
+        daemon.request_shutdown()
+        runner.join(timeout=2.0)
+    assert len(seen_market_clients) >= 2, (
+        f"seeder fired only {len(seen_market_clients)} times; expected >= 2"
+    )
+    # Every call must see the SAME market_client instance — no churn.
+    first = seen_market_clients[0]
+    assert all(c is first for c in seen_market_clients), (
+        "daemon constructed a new market_client per reconcile (the churn the fix targets)"
+    )
 
 
 def test_daemon_seed_runs_async_and_does_not_block_first_cycle(tmp_path: Path) -> None:
