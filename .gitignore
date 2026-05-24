@@ -32,3 +32,10 @@ graphify-out/cost.json
 graphify-out/graph.html
 graphify-out/graph.json
 graphify-out/.graphify_root
+
+# Runtime scratch files
+.claude/scheduled_tasks.lock
+# Research run logs (large, rotated by the analyst, not source-of-truth)
+docs/*.log
+# Scratch plot outputs at repo root (use docs/ for plots that belong in source control)
+/equity_*.png

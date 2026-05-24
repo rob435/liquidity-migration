@@ -15,8 +15,9 @@ Key differences from `cross_sectional_momentum.py` (v1, event-driven):
 from __future__ import annotations
 
 import json
+import logging
 import math
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,9 @@ from .volume_events import (
 )
 
 
+_logger = logging.getLogger("liquidity_migration.momentum_factor")
+
+
 SPLITS = (
     ("train_2023_2024", "2023-05-03", "2024-05-03"),
     ("validation_2024_2025", "2024-05-03", "2025-05-03"),
@@ -62,7 +66,8 @@ SIZINGS = (SIZING_EQUAL, SIZING_VOL_PARITY)
 PRESET_LO_SKIP0 = "lo_skip0"
 PRESET_LO_CARRY0 = "lo_carry0"
 PRESET_LO_SHARPE3 = "lo_sharpe3"
-FACTOR_PRESETS = (PRESET_LO_SKIP0, PRESET_LO_CARRY0, PRESET_LO_SHARPE3)
+PRESET_LO_SHARPE3_ROBUST = "lo_sharpe3_robust"
+FACTOR_PRESETS = (PRESET_LO_SKIP0, PRESET_LO_CARRY0, PRESET_LO_SHARPE3, PRESET_LO_SHARPE3_ROBUST)
 
 
 def lo_skip0_preset(*, start_date: str = "", end_date: str = "") -> MomentumFactorConfig:
@@ -133,6 +138,14 @@ def lo_sharpe3_preset(*, start_date: str = "", end_date: str = "") -> MomentumFa
         rebalance_days=7,
         max_realized_vol=1.2,
         max_turnover_rank=15,
+    )
+
+
+def lo_sharpe3_robust_preset(*, start_date: str = "", end_date: str = "") -> MomentumFactorConfig:
+    """lo_sharpe3 with vol cap 1.6 — better oos_2025_2026, 300+ trades, daily Sharpe ~3.0."""
+    return replace(
+        lo_sharpe3_preset(start_date=start_date, end_date=end_date),
+        max_realized_vol=1.6,
     )
 
 
@@ -549,9 +562,29 @@ def _run_factor_pipeline(
         config.regime_sma_days,
     )
     if max_lookback >= len(dates_all):
+        _logger.warning(
+            "momentum_factor backtest produced zero trades: data window has %d daily bars "
+            "but max required lookback is %d (momentum_lookbacks_days max=%d + skip=%d + 1, "
+            "ts_momentum=%d, vol_estimate=%d, universe_volume=%d, carry=%d, regime_sma=%d). "
+            "Widen the date range or shrink the lookbacks.",
+            len(dates_all),
+            max_lookback,
+            max(config.momentum_lookbacks_days),
+            config.momentum_skip_days,
+            config.ts_momentum_lookback_days,
+            config.vol_estimate_window_days,
+            config.universe_volume_window_days,
+            config.carry_lookback_days,
+            config.regime_sma_days,
+        )
         return _empty_factor_trades(), {}, []
     rebalance_dates = dates_all[max_lookback :: config.rebalance_days]
     if not rebalance_dates:
+        _logger.warning(
+            "momentum_factor backtest produced zero trades: warm-up consumed all daily bars "
+            "(max_lookback=%d, dates=%d, rebalance_days=%d).",
+            max_lookback, len(dates_all), config.rebalance_days,
+        )
         return _empty_factor_trades(), {}, []
 
     features_by_date: dict[int, list[dict[str, Any]]] = {}

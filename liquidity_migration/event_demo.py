@@ -40,6 +40,7 @@ from .volume_events import (
     _select_events,
     _stop_pressure_active,
     _validate_event_config,
+    select_events_with_stage_counts,
 )
 
 
@@ -190,6 +191,10 @@ def run_event_demo_cycle(
         mark_stage("features")
         score_name, score_col = _event_score(strategy.event_types[0])
         scenario = _selected_scenario(strategy)
+        pipeline_diagnostics = _compute_pipeline_diagnostics(
+            features, strategy=strategy, scenario=scenario, score_col=score_col,
+        )
+        _maybe_warn_universe_coverage_gap(pipeline_diagnostics, strategy=strategy)
         order_notional_pct_equity = target_order_notional_pct_equity(demo, strategy)
         order_initial_margin_pct_equity = target_initial_margin_pct_equity(demo, strategy)
         rank_lookup = _rank_lookup_cache(features, config=strategy).get(score_col, {})
@@ -426,6 +431,8 @@ def run_event_demo_cycle(
             "kline_fetched_rows": kline_cache_stats["fetched_rows"],
             "feature_rows": features.height,
             "latest_feature_ts_ms": _max_int(features, "ts_ms"),
+            "events_pipeline": pipeline_diagnostics["events_pipeline"],
+            "universe_coverage": pipeline_diagnostics["universe_coverage"],
             "entry_candidates": len(entry_candidates),
             "entries_executed": len(executed_entries),
             "entries_parallel_workers": entries_parallel_workers,
@@ -1452,6 +1459,82 @@ def _selected_scenario(config: VolumeEventResearchConfig) -> EventScenario:
         stop_loss_pct=config.stop_loss_pcts[0],
         cost_multiplier=config.cost_multipliers[0],
         take_profit_pct=config.take_profit_pcts[0],
+    )
+
+
+def _compute_pipeline_diagnostics(
+    features: pl.DataFrame,
+    *,
+    strategy: VolumeEventResearchConfig,
+    scenario: EventScenario,
+    score_col: str,
+) -> dict[str, Any]:
+    """Per-cycle visibility into the event-selection pipeline and universe coverage.
+
+    Surfaces stage-by-stage event counts (so operators can tell which filter
+    killed signals) and a universe-coverage check (so a future config drift
+    that recreates the 2026-05-24 narrow-universe bug is loud, not silent).
+
+    If `observed_prior7_rank_max < required_prior7_rank`, the strategy cannot
+    fire signals — the universe is too narrow to observe prior-week ranks of
+    rocket-symbols. The validator catches this at config time; this telemetry
+    catches the case where the validator passes but the live universe ends up
+    truncated anyway (e.g. min_turnover filter trimming below the rank ceiling).
+    """
+    # Skip the pipeline replay if features are missing the score column the
+    # filter would key on (happens in unit tests with stub frames; production
+    # features always carry the column).
+    if features.is_empty() or score_col not in features.columns:
+        stages = {
+            "features": features.height,
+            "after_threshold_filter": 0,
+            "after_crowding_filter": 0,
+            "final": 0,
+        }
+    else:
+        _, stages = select_events_with_stage_counts(features, scenario=scenario, config=strategy, score_col=score_col)
+    coverage: dict[str, Any] = {
+        "universe_rank_max": int(strategy.universe_rank_max),
+        "rank_improvement_min": int(strategy.liquidity_migration_rank_improvement_min),
+        "required_prior7_rank": int(strategy.universe_rank_max + strategy.liquidity_migration_rank_improvement_min),
+        "observed_prior7_rank_max": None,
+        "observed_prior7_rank_null_pct": None,
+        "coverage_gap": None,
+    }
+    if not features.is_empty() and "prior7_liquidity_rank" in features.columns:
+        col = features["prior7_liquidity_rank"]
+        observed = col.max()
+        observed_max = int(observed) if observed is not None else 0
+        coverage["observed_prior7_rank_max"] = observed_max
+        coverage["observed_prior7_rank_null_pct"] = round(100.0 * col.null_count() / max(col.len(), 1), 2)
+        coverage["coverage_gap"] = max(0, coverage["required_prior7_rank"] - observed_max)
+    return {"events_pipeline": stages, "universe_coverage": coverage}
+
+
+def _maybe_warn_universe_coverage_gap(
+    pipeline_diagnostics: dict[str, Any],
+    *,
+    strategy: VolumeEventResearchConfig,
+) -> None:
+    """Loud warning when actual universe coverage is below the strategy requirement.
+
+    Catches the failure mode where the validator passed config-time (rank_end
+    set high enough) but the live universe ends up truncated (e.g. turnover
+    floor trimmed below rank_end, or instruments API returned fewer symbols).
+    """
+    coverage = pipeline_diagnostics["universe_coverage"]
+    gap = coverage.get("coverage_gap")
+    if gap is None or gap <= 0:
+        return
+    _logger.warning(
+        "universe coverage gap: observed_prior7_rank_max=%s < required=%s "
+        "(universe_rank_max %s + liquidity_migration_rank_improvement_min %s). "
+        "Strategy cannot fire signals. Widen universe_rank_end or lower "
+        "universe_min_turnover_24h until observed reaches required.",
+        coverage.get("observed_prior7_rank_max"),
+        coverage["required_prior7_rank"],
+        strategy.universe_rank_max,
+        strategy.liquidity_migration_rank_improvement_min,
     )
 
 

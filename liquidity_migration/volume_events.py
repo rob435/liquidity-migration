@@ -1404,21 +1404,54 @@ def _select_events(
     config: VolumeEventResearchConfig,
     score_col: str,
 ) -> pl.DataFrame:
+    events, _ = select_events_with_stage_counts(features, scenario=scenario, config=config, score_col=score_col)
+    return events
+
+
+def select_events_with_stage_counts(
+    features: pl.DataFrame,
+    *,
+    scenario: EventScenario,
+    config: VolumeEventResearchConfig,
+    score_col: str,
+) -> tuple[pl.DataFrame, dict[str, int]]:
+    """Run the same filter chain as `_select_events` and also report per-stage row counts.
+
+    Operators can read the stages dict to tell *which* filter killed events when
+    the cycle reports `entries=0`. Hidden silent-zero failure modes
+    (universe too narrow, crowding filter rejects everything, threshold too
+    strict) all flatten into `events=0` otherwise.
+    """
+    stages = {
+        "features": features.height,
+        "after_threshold_filter": 0,
+        "after_crowding_filter": 0,
+        "final": 0,
+    }
     if features.is_empty():
-        return features
+        return features, stages
     rank_col = f"{score_col}_rank_frac"
     top_cut = 1.0 - scenario.threshold
     filtered = _event_filter(features, scenario.event_type, score_col=score_col, rank_col=rank_col, top_cut=top_cut, config=config)
+    stages["after_threshold_filter"] = filtered.height
     if filtered.is_empty():
-        return filtered
+        return filtered, stages
     if scenario.event_type == "liquidity_migration":
         filtered = _apply_liquidity_migration_crowding_filter(filtered, config=config)
+        stages["after_crowding_filter"] = filtered.height
         if filtered.is_empty():
-            return filtered
-    return (
+            return filtered, stages
+    else:
+        # Non-liquidity-migration scenarios skip the crowding filter — record the
+        # passthrough count so downstream diagnostics don't mistake "no filter
+        # applied" for "filter killed everything".
+        stages["after_crowding_filter"] = filtered.height
+    events = (
         filtered.sort(["ts_ms", rank_col, "turnover_quote"], descending=[False, True, True])
         .with_columns(pl.col(rank_col).rank("ordinal", descending=True).over("ts_ms").alias("event_rank"))
     )
+    stages["final"] = events.height
+    return events, stages
 
 
 def _apply_liquidity_migration_crowding_filter(events: pl.DataFrame, *, config: VolumeEventResearchConfig) -> pl.DataFrame:

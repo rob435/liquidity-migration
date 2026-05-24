@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from liquidity_migration.cli import build_parser
 from liquidity_migration.config import ResearchConfig
 from liquidity_migration.event_demo import (
     DEMO_RELAXED_STRATEGY_ID,
+    DEMO_STRATEGY_PROFILES,
     EventDemoCycleConfig,
     EventRiskCycleConfig,
     PENDING_ORDER_GUARD_MS,
@@ -31,6 +33,7 @@ from liquidity_migration.event_demo import (
     _live_open_order_symbols,
     _maybe_notify,
     _reconcile_pending_order_fills,
+    _required_universe_rank_end,
     _refresh_positions_and_orders,
     _submit_reduce_only_exit,
     _telegram_notification_reason,
@@ -3247,6 +3250,83 @@ def test_promoted_profile_requires_wide_forward_universe() -> None:
 def test_event_demo_rejects_non_positive_entry_leverage() -> None:
     with pytest.raises(ValueError, match="entry_leverage"):
         _validate_demo_config(EventDemoCycleConfig(entry_leverage=0.0))
+
+
+def test_default_demo_cycle_config_passes_validator_for_every_profile() -> None:
+    """Guard: shipping defaults must satisfy the per-profile minimum at all times.
+
+    If a future change tightens `liquidity_migration_rank_improvement_min` or
+    `universe_rank_max` without bumping `EventDemoCycleConfig.universe_rank_end`,
+    this test catches the drift before the demo VPS silently produces zero
+    signals again.
+    """
+    for profile in DEMO_STRATEGY_PROFILES:
+        config = replace(EventDemoCycleConfig(), strategy_profile=profile)
+        # If the dataclass defaults don't cover the per-profile minimum the
+        # validator raises here.
+        _validate_demo_config(config)
+
+
+def test_required_universe_rank_end_matches_strategy_math() -> None:
+    """The validator's derived requirement must equal the strategy-config math.
+
+    This guards against someone hardcoding a number into the validator that
+    drifts from the actual strategy field. Both numbers come from the same
+    `VolumeEventResearchConfig + profile overrides`, so they must agree.
+    """
+    for profile in DEMO_STRATEGY_PROFILES:
+        strategy = _demo_event_config(VolumeEventResearchConfig(), profile=profile)
+        derived = _required_universe_rank_end(profile)
+        expected = strategy.universe_rank_max + strategy.liquidity_migration_rank_improvement_min
+        assert derived == expected, (profile, derived, expected)
+
+
+def test_compute_pipeline_diagnostics_reports_zero_gap_for_synthetic_full_coverage() -> None:
+    """Diagnostics report zero coverage gap when the universe spans the required range."""
+    from liquidity_migration.event_demo import _compute_pipeline_diagnostics, _selected_scenario
+    from liquidity_migration.volume_events import _event_score
+
+    strategy = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
+    scenario = _selected_scenario(strategy)
+    _, score_col = _event_score(scenario.event_type)
+    required = strategy.universe_rank_max + strategy.liquidity_migration_rank_improvement_min
+    features = pl.DataFrame({
+        "symbol": ["S1", "S2", "S3"],
+        "ts_ms": [0, 0, 0],
+        "prior7_liquidity_rank": [1, required // 2, required],
+    })
+    diagnostics = _compute_pipeline_diagnostics(features, strategy=strategy, scenario=scenario, score_col=score_col)
+    coverage = diagnostics["universe_coverage"]
+    assert coverage["required_prior7_rank"] == required
+    assert coverage["observed_prior7_rank_max"] == required
+    assert coverage["coverage_gap"] == 0
+
+
+def test_compute_pipeline_diagnostics_reports_gap_when_universe_too_narrow() -> None:
+    """Diagnostics flag a non-zero coverage gap exactly when prior7 max < required.
+
+    Regression for the 2026-05-24 silent failure: the live demo had 165 symbols
+    and prior7_max=165 while promoted requires 300. The cycle JSON reported
+    `entries=0` with no clue why. This test pins the telemetry that exposes
+    that exact gap so a future regression is loud, not silent.
+    """
+    from liquidity_migration.event_demo import _compute_pipeline_diagnostics, _selected_scenario
+    from liquidity_migration.volume_events import _event_score
+
+    strategy = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
+    scenario = _selected_scenario(strategy)
+    _, score_col = _event_score(scenario.event_type)
+    required = strategy.universe_rank_max + strategy.liquidity_migration_rank_improvement_min
+    narrow_observed_max = required - 100
+    features = pl.DataFrame({
+        "symbol": ["S1", "S2"],
+        "ts_ms": [0, 0],
+        "prior7_liquidity_rank": [1, narrow_observed_max],
+    })
+    diagnostics = _compute_pipeline_diagnostics(features, strategy=strategy, scenario=scenario, score_col=score_col)
+    coverage = diagnostics["universe_coverage"]
+    assert coverage["observed_prior7_rank_max"] == narrow_observed_max
+    assert coverage["coverage_gap"] == 100
 
 
 def test_event_demo_max_active_symbols_override() -> None:

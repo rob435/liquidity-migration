@@ -807,6 +807,12 @@ class EventWebSocketRiskEngine:
         rows: list[dict[str, Any]],
         orders: list[dict[str, Any]],
     ) -> None:
+        # _execute_risk_exits / _execute_stop_repairs come from event_demo and
+        # don't know about the dual-sleeve world — they emit rows/orders
+        # without a `sleeve` column. Tag both lists from the originating trade
+        # so _write_*_rows_routed sends them to the correct ledger. Without
+        # this, every long-sleeve exit/repair lands in the short ledger.
+        self._tag_sleeve_from_trades(rows, orders, fallback_symbol=symbol)
         if rows:
             self.state.all_trades = _upsert_rows(self.state.all_trades, rows, key="trade_id")
             self.state.open_trades = _open_trades(self.state.all_trades)
@@ -830,6 +836,46 @@ class EventWebSocketRiskEngine:
             self.mark_submitted_symbol(symbol)
         else:
             self.clear_submitted_symbol(symbol)
+
+    def _tag_sleeve_from_trades(
+        self,
+        trade_rows: list[dict[str, Any]],
+        order_rows: list[dict[str, Any]],
+        *,
+        fallback_symbol: str = "",
+    ) -> None:
+        """Fill in the `sleeve` column on rows/orders from event_demo helpers
+        that don't carry it. Looks up the row's trade_id in the combined
+        ledger; falls back to the symbol lookup; final fallback is 'short'."""
+        if not trade_rows and not order_rows:
+            return
+        trade_index = {
+            str(row.get("trade_id") or ""): str(row.get("sleeve") or "")
+            for row in self.state.all_trades.to_dicts()
+        } if not self.state.all_trades.is_empty() else {}
+        symbol_index: dict[str, str] = {}
+        if not self.state.all_trades.is_empty():
+            for row in self.state.all_trades.to_dicts():
+                sym = str(row.get("symbol") or "")
+                sleeve = str(row.get("sleeve") or "")
+                if sym and sleeve and sym not in symbol_index:
+                    symbol_index[sym] = sleeve
+
+        def _resolve(row: dict[str, Any]) -> str:
+            existing = str(row.get("sleeve") or "")
+            if existing:
+                return existing
+            tid = str(row.get("trade_id") or "")
+            sleeve = trade_index.get(tid, "")
+            if sleeve:
+                return sleeve
+            sym = str(row.get("symbol") or fallback_symbol)
+            return symbol_index.get(sym, "short")
+
+        for row in trade_rows:
+            row["sleeve"] = _resolve(row)
+        for order in order_rows:
+            order["sleeve"] = _resolve(order)
 
     def exit_plan_from_order(self, order: dict[str, Any]) -> dict[str, Any] | None:
         trade_id = str(order.get("trade_id") or "")
@@ -859,6 +905,11 @@ class EventWebSocketRiskEngine:
         bybit_side = "Buy" if side == "short" else "Sell"
         symbol = str(exit_plan["symbol"])
         qty = str(exit_plan.get("qty") or trade.get("qty"))
+        # Propagate sleeve from the trade into the order so _write_order_rows_routed
+        # writes the exit back into the correct ledger. Without this, long-side
+        # WS exits land in the short ledger and the long sleeve's reconciliation
+        # never sees them.
+        sleeve = str(trade.get("sleeve") or ("long" if side == "long" else "short"))
         link = _risk_order_link_id("wx", symbol=symbol, ts_ms=_now_ms(), attempt=0)
         order_params = _order_params(
             symbol=symbol,
@@ -880,6 +931,7 @@ class EventWebSocketRiskEngine:
             "order_link_id": link,
             "ts_ms": _now_ms(),
             "trade_id": str(trade["trade_id"]),
+            "sleeve": sleeve,
             "symbol": symbol,
             "side": bybit_side,
             "order_type": "Market",
@@ -939,6 +991,10 @@ class EventWebSocketRiskEngine:
             now_ms=_now_ms(),
         )
         if rows:
+            # _execute_stop_repairs emits rows without `sleeve` (it lives in
+            # event_demo, which is short-only by design). Tag from the
+            # originating trade so the repair order routes to the right ledger.
+            self._tag_sleeve_from_trades([], rows)
             self._write_order_rows_routed(rows)
             self.state.repairs.extend(rows)
 
@@ -1031,11 +1087,9 @@ class EventWebSocketRiskEngine:
             return
         self.state.all_trades = _upsert_rows(self.state.all_trades, adopted, key="trade_id")
         self.state.open_trades = _open_trades(self.state.all_trades)
-        # Adopted trades default to sleeve="short" so they land in the short
-        # ledger via the routed writer — preserves existing behavior. If owner
-        # later wants long orphans adopted to the long ledger, _build_adopted_trade
-        # can tag the row with sleeve="long" based on position-side or other
-        # signal (entry order_link_id prefix lookup).
+        # _build_adopted_trade tags each row's `sleeve` from the venue position
+        # side, so a LONG orphan lands in the long ledger and a SHORT orphan
+        # in the short ledger via the routed writer below.
         self._write_trade_rows_routed(adopted)
         for trade in adopted:
             _logger.warning(
@@ -1072,8 +1126,17 @@ class EventWebSocketRiskEngine:
             entry_price=entry_price, side=side, take_profit_pct=take_profit_pct, tick_size=tick_size
         )
         planned_exit_ts_ms = opened_ms + int(max(self.risk.adopt_hold_days, 0.0) * MS_PER_DAY)
+        # Sleeve tag drives the routed writer: a LONG orphan must land in the
+        # long ledger, not the short. Without this tag _sleeve_of() defaults to
+        # 'short' and the adopted trade goes to event_demo_trades — downstream
+        # plan_risk_exits then correctly computes a Sell reduce-only (from the
+        # `side` column), but ws_risk would write the close into the wrong
+        # ledger so the long sleeve's open-trade tracking diverges from venue
+        # reality. Tag from the venue-observed position side.
+        sleeve = "long" if side == "long" else "short"
         return {
             "trade_id": f"adopted-{symbol}-{opened_ms}",
+            "sleeve": sleeve,
             "strategy_id": "adopted",
             "symbol": symbol,
             "side": side,
