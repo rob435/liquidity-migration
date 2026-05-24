@@ -308,11 +308,19 @@ class KlineStreamManager:
             return
         symbols_list = sorted(symbols)
         start = time.monotonic()
-        # Decide cutoff for "already covered": anything covering the most
-        # recent expected closed bar can skip the REST round-trip.
+        # "Already covered" must mean coverage of the FULL lookback window,
+        # not just the most recent bar. A daemon that just recovered a flush
+        # file with the latest hour but nothing older would otherwise skip
+        # bootstrap and operate on a near-empty store indefinitely. Check
+        # both ends of the window so bootstrap re-fills any historical gap.
         now_ms = _utc_now_ms()
         recent_bar_ts_ms = _floor_hour_ms(now_ms) - MS_PER_HOUR
-        already_covered = self._store.symbols_with_coverage_through(recent_bar_ts_ms)
+        lookback_ms = self.lookback_days * MS_PER_DAY
+        end_ms = recent_bar_ts_ms
+        start_ms = end_ms - lookback_ms
+        already_covered = self._store.symbols_with_coverage_in_window(
+            start_ms=start_ms, end_ms=end_ms,
+        )
         targets = [s for s in symbols_list if s not in already_covered]
         skipped = len(symbols_list) - len(targets)
         self._bootstrap_result.symbols_attempted += len(symbols_list)
@@ -323,9 +331,6 @@ class KlineStreamManager:
                 "%s skipped: all %d symbols already covered", label, len(symbols_list),
             )
             return
-        lookback_ms = self.lookback_days * MS_PER_DAY
-        end_ms = recent_bar_ts_ms
-        start_ms = end_ms - lookback_ms
         deadline = start + self.bootstrap_timeout_seconds
         # A separate rate-limiter for bootstrap so it doesn't fight the cycle's
         # demo rate-limiter at startup; conservative defaults so the bootstrap

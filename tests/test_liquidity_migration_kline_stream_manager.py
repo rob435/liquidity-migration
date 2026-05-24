@@ -189,33 +189,80 @@ def test_bootstrap_fills_store_with_history(tmp_path: Path) -> None:
     assert pool.closed is True
 
 
-def test_bootstrap_skips_symbols_already_covered_after_recovery(tmp_path: Path) -> None:
-    """Pre-flush the store, then verify bootstrap skips the recovered symbol."""
-    # Pre-populate the flush file by running a tiny store independently first.
-    pre_store = KlineStore(cache_root=tmp_path, flush_interval_seconds=0.0)
+def test_bootstrap_skips_symbols_with_full_window_coverage_after_recovery(tmp_path: Path) -> None:
+    """If a recovered symbol covers the FULL lookback window, bootstrap
+    skips it. Coverage must span both ends of the window (newest >= end_ms
+    AND oldest <= start_ms) — covering only the latest hour is NOT
+    enough; bootstrap fires for partial-coverage symbols too."""
     now_ms = int(time.time() * 1000)
-    bar_ts = (now_ms // MS_PER_HOUR) * MS_PER_HOUR - MS_PER_HOUR
-    # BTCUSDT is fully covered up to last_closed_bar.
+    end_ms = (now_ms // MS_PER_HOUR) * MS_PER_HOUR - MS_PER_HOUR
+    # lookback_days=5 in _build_manager defaults. Window = end_ms - 5d to end_ms.
+    five_days_ms = 5 * 24 * MS_PER_HOUR
+
+    pre_store = KlineStore(cache_root=tmp_path, flush_interval_seconds=0.0)
+    # BTCUSDT: bars at oldest + newest end → spans the full window → skip
     pre_store.add_bar(
         "BTCUSDT",
-        {
-            "start": bar_ts,
-            "open": "1", "high": "1", "low": "1", "close": "1",
-            "volume": "1", "turnover": "1",
-        },
+        {"start": end_ms - five_days_ms, "open": "1", "high": "1",
+         "low": "1", "close": "1", "volume": "1", "turnover": "1"},
         confirmed=True,
     )
-    rows_flushed = pre_store.flush_to_disk()
-    assert rows_flushed == 1
+    pre_store.add_bar(
+        "BTCUSDT",
+        {"start": end_ms, "open": "1", "high": "1",
+         "low": "1", "close": "1", "volume": "1", "turnover": "1"},
+        confirmed=True,
+    )
+    # ETHUSDT: ONLY the latest hour → does NOT span the window → bootstrap
+    pre_store.add_bar(
+        "ETHUSDT",
+        {"start": end_ms, "open": "1", "high": "1",
+         "low": "1", "close": "1", "volume": "1", "turnover": "1"},
+        confirmed=True,
+    )
+    pre_store.flush_to_disk()
+
     manager, pool, market = _build_manager(
         tmp_path=tmp_path, initial_symbols=["BTCUSDT", "ETHUSDT"],
     )
     manager.start()
     try:
-        # ETHUSDT must still be bootstrapped, BTCUSDT skipped.
+        # ETHUSDT must be bootstrapped (didn't span the window).
+        # BTCUSDT must NOT be (did span the window).
         assert "ETHUSDT" in market.kline_calls
         assert "BTCUSDT" not in market.kline_calls
         assert manager.stats()["bootstrap"]["symbols_skipped_already_covered"] >= 1
+    finally:
+        manager.stop()
+
+
+def test_bootstrap_does_not_skip_symbol_with_only_latest_hour(tmp_path: Path) -> None:
+    """Regression: previously, bootstrap-skip used coverage_through(end_ms),
+    so a symbol with just the latest hour was considered "covered" and
+    bootstrap was skipped. Restart-with-flush-file would then leave the
+    store on a tiny snapshot indefinitely. Now coverage_in_window is used,
+    so partial-coverage symbols re-bootstrap on every start."""
+    now_ms = int(time.time() * 1000)
+    end_ms = (now_ms // MS_PER_HOUR) * MS_PER_HOUR - MS_PER_HOUR
+
+    pre_store = KlineStore(cache_root=tmp_path, flush_interval_seconds=0.0)
+    # Just the latest hour — what a recovered short-lived flush would have.
+    pre_store.add_bar(
+        "BTCUSDT",
+        {"start": end_ms, "open": "1", "high": "1",
+         "low": "1", "close": "1", "volume": "1", "turnover": "1"},
+        confirmed=True,
+    )
+    pre_store.flush_to_disk()
+
+    manager, _pool, market = _build_manager(
+        tmp_path=tmp_path, initial_symbols=["BTCUSDT"],
+    )
+    manager.start()
+    try:
+        # Bootstrap MUST have fired for BTCUSDT to refill the window.
+        assert "BTCUSDT" in market.kline_calls
+        assert manager.stats()["bootstrap"]["symbols_skipped_already_covered"] == 0
     finally:
         manager.stop()
 

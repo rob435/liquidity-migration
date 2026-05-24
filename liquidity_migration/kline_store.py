@@ -326,6 +326,25 @@ class KlineStore:
                     covered.add(symbol)
         return covered
 
+    def symbols_with_coverage_in_window(self, *, start_ms: int, end_ms: int) -> set[str]:
+        """Symbols whose stored bars span the FULL ``[start_ms, end_ms]``
+        window — i.e. oldest bar <= start_ms AND newest bar >= end_ms.
+
+        Bootstrap uses this (not ``symbols_with_coverage_through``) so a
+        recovered store with only the latest hour does NOT prevent a fresh
+        bootstrap from filling in the historical window. Without this, a
+        daemon that restarts with a stale flush file skips bootstrap and
+        the cycle operates on a partial dataset indefinitely."""
+        covered: set[str] = set()
+        with self._lock:
+            for symbol, symbol_bars in self._bars.items():
+                if not symbol_bars:
+                    continue
+                ts_list = symbol_bars.keys()
+                if max(ts_list) >= end_ms and min(ts_list) <= start_ms:
+                    covered.add(symbol)
+        return covered
+
     def newest_ts_ms(self) -> int | None:
         with self._lock:
             best: int | None = None

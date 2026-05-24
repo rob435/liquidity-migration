@@ -974,17 +974,48 @@ class BybitWebSocketTradeClient:
         _close_ws_client(self._client)
 
 
-def _close_ws_client(client: Any) -> None:
+def _close_ws_client(client: Any, *, timeout_seconds: float = 3.0) -> None:
+    """Close a pybit WS client with a hard timeout.
+
+    pybit's exit/close/stop methods can occasionally hang (especially when
+    the underlying TCP socket is in a half-closed state). Without a
+    timeout, daemon shutdown waits indefinitely for the WS to die — and
+    systemd then SIGKILLs the whole process. Running the close on a
+    background thread with a join timeout means a stuck close costs us
+    `timeout_seconds` per WS instead of unbounded blocking; the resources
+    leak (until process exit) but shutdown proceeds."""
     timer = getattr(client, "_agc_ping_timer", None)
     if timer is not None:
         cancel = getattr(timer, "cancel", None)
         if callable(cancel):
-            cancel()
+            try:
+                cancel()
+            except Exception:  # noqa: BLE001
+                pass
+    closer = None
     for name in ("exit", "close", "stop"):
         method = getattr(client, name, None)
         if callable(method):
-            method()
-            return
+            closer = method
+            break
+    if closer is None:
+        return
+
+    def _run() -> None:
+        try:
+            closer()
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger("liquidity_migration.bybit").debug(
+                "ws close raised: %s", exc,
+            )
+
+    thread = threading.Thread(target=_run, name="ws-close", daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+    if thread.is_alive():
+        logging.getLogger("liquidity_migration.bybit").warning(
+            "ws close did not return within %.1fs; abandoning thread", timeout_seconds,
+        )
 
 
 def _patch_pybit_daemon_ping_timer() -> None:

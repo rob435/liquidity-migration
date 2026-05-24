@@ -173,6 +173,26 @@ def test_symbols_with_coverage_through_reflects_bar_freshness() -> None:
     assert store.symbols_with_coverage_through(MS_PER_HOUR) == {"BTCUSDT", "ETHUSDT"}
 
 
+def test_symbols_with_coverage_in_window_requires_both_ends() -> None:
+    """The bootstrap-skip check uses this: a symbol is "already covered"
+    only if its stored bars span the FULL [start_ms, end_ms] window.
+    Recovery from a flush file with only the latest hour must NOT make
+    the symbol look "covered" — otherwise bootstrap would skip and the
+    cycle would run on partial history forever."""
+    store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
+    # ABC has the full window (bars at hour 1 + hour 10).
+    store.add_bar("ABCUSDT", _ws_bar(MS_PER_HOUR), confirmed=True)
+    store.add_bar("ABCUSDT", _ws_bar(10 * MS_PER_HOUR), confirmed=True)
+    # DEF only has the latest bar.
+    store.add_bar("DEFUSDT", _ws_bar(10 * MS_PER_HOUR), confirmed=True)
+    # GHI only has the oldest bar (newest end not covered).
+    store.add_bar("GHIUSDT", _ws_bar(MS_PER_HOUR), confirmed=True)
+    covered = store.symbols_with_coverage_in_window(
+        start_ms=MS_PER_HOUR, end_ms=10 * MS_PER_HOUR,
+    )
+    assert covered == {"ABCUSDT"}, f"only ABC spans the window, got {covered}"
+
+
 def test_bootstrap_symbol_accepts_rest_bars_bulk() -> None:
     """Bootstrap is REST-fed: caller knows the bars are confirmed."""
     store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
