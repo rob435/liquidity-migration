@@ -49,6 +49,61 @@ def test_event_entry_runner_only_submits_promoted_profile() -> None:
     assert '$STRATEGY_PROFILE" != "promoted"' in text
 
 
+def test_event_entry_runner_wires_record_dry_run() -> None:
+    """Both short + long bash runners must surface --record-dry-run via the
+    RECORD_DRY_RUN env var so paper services can persist their planned
+    orders/trades for reconciliation against demo. Found 2026-05-24: paper
+    services were firing entries=1/1 every cycle but writing nothing to disk."""
+    repo = Path(__file__).resolve().parents[1]
+    for script_name in ("run_bybit_demo_event_engine.sh", "run_bybit_long_demo_event_engine.sh"):
+        text = (repo / "scripts" / script_name).read_text(encoding="utf-8")
+        assert 'RECORD_DRY_RUN:-0}" == "1"' in text, f"{script_name} missing RECORD_DRY_RUN gate"
+        assert "--record-dry-run" in text, f"{script_name} does not pass --record-dry-run"
+
+
+def test_paper_services_enable_record_dry_run() -> None:
+    """Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles
+    persist trades — otherwise paper-vs-demo reconciliation has no paper-side
+    data to pair against the live demo ledger."""
+    repo = Path(__file__).resolve().parents[1]
+    for unit in (
+        "liquidity-migration-bybit-paper.service",
+        "liquidity-migration-bybit-long-paper.service",
+    ):
+        text = (repo / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
+        assert "Environment=SUBMIT_ORDERS=0" in text, f"{unit}: paper service must not submit orders"
+        assert "Environment=RECORD_DRY_RUN=1" in text, f"{unit}: paper service must enable RECORD_DRY_RUN"
+
+
+def test_demo_services_use_unblocked_entry_lag() -> None:
+    """Live audit on 2026-05-24 found 15min lag rejected every signal as stale
+    (feature pipeline builds 3-4h after bar close). Both demo + paper must use
+    the unblocked 1440min (24h, full daily cadence) lag."""
+    repo = Path(__file__).resolve().parents[1]
+    for unit in (
+        "liquidity-migration-bybit-demo.service",
+        "liquidity-migration-bybit-paper.service",
+    ):
+        text = (repo / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
+        assert "Environment=MAX_ENTRY_LAG_MINUTES=1440" in text, f"{unit}: MAX_ENTRY_LAG_MINUTES regression"
+
+
+def test_demo_health_watchdog_units_present() -> None:
+    """The hourly entry-health watchdog timer + service must ship together so
+    'no entries in 24h' regressions don't go silent. Validates wire-up of the
+    check_demo_entry_health.py script behind a systemd timer + Telegram alert."""
+    repo = Path(__file__).resolve().parents[1]
+    service = (repo / "deploy" / "systemd" / "liquidity-migration-demo-health.service").read_text(encoding="utf-8")
+    timer = (repo / "deploy" / "systemd" / "liquidity-migration-demo-health.timer").read_text(encoding="utf-8")
+    script = (repo / "scripts" / "check_demo_entry_health.py").read_text(encoding="utf-8")
+
+    assert "check_demo_entry_health.py" in service
+    assert "--telegram" in service
+    assert "SuccessExitStatus=0 1" in service, "alert exit code 1 must not register as failure"
+    assert "OnCalendar=" in timer
+    assert "--window-hours" in script and "--telegram" in script
+
+
 def test_live_runners_do_not_write_repo_bytecode() -> None:
     repo = Path(__file__).resolve().parents[1]
     paths = [

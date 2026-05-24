@@ -614,6 +614,18 @@ def run_long_native_demo_cycle(
         (report_dir / "latest_long_native_cycle.md").write_text(
             format_long_demo_cycle_summary(payload), encoding="utf-8"
         )
+        # Prune older per-cycle JSON to keep the report dir bounded — at ~1cycle/min
+        # the snapshots would otherwise grow to half a million per year.
+        cutoff_ts = (cycle_now_ms / 1000.0) - 7 * 86400.0
+        try:
+            for old in report_dir.glob("long_native_cycle_*.json"):
+                try:
+                    if old.stat().st_mtime < cutoff_ts:
+                        old.unlink(missing_ok=True)
+                except OSError:
+                    continue
+        except OSError:
+            pass
         cycle_row["timing_persist_ms"] = round((time.perf_counter() - persist_perf_start) * 1000.0, 3)
         cycle_row["cycle_elapsed_ms"] = round((time.perf_counter() - cycle_perf_start) * 1000.0, 3)
         payload["cycle"] = cycle_row

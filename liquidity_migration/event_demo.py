@@ -548,10 +548,36 @@ def run_event_demo_cycle(
         report_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         (report_dir / "latest_event_demo_cycle.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         (report_dir / "latest_event_demo_cycle.md").write_text(format_event_demo_cycle_report(payload), encoding="utf-8")
+        # Cleanup older per-cycle JSON to keep the report dir bounded — found
+        # 2026-05-24: 5,243 files in reports/event-demo/ across 3.5 days
+        # (~1,500/day, would hit half a million in a year). Keep last 7 days
+        # of per-cycle snapshots; the latest pointer + the date-partitioned
+        # cycle ledger preserve full history.
+        _prune_cycle_reports(report_dir, prefix="event_demo_cycle_", keep_days=7, now_ms=cycle_now_ms)
         cycle_row["timing_persist_ms"] = round((time.perf_counter() - persist_perf_start) * 1000.0, 3)
         cycle_row["cycle_elapsed_ms"] = round((time.perf_counter() - cycle_perf_start) * 1000.0, 3)
         payload["cycle"] = cycle_row
         return payload
+
+
+def _prune_cycle_reports(report_dir: Path, *, prefix: str, keep_days: int, now_ms: int) -> None:
+    """Drop per-cycle JSON files older than ``keep_days`` to keep the report
+    directory bounded. The latest_*.json pointer and the partitioned cycle
+    ledger preserve full history; per-cycle snapshots are only useful for
+    inspecting a recent specific cycle. Best-effort: any unlink error is
+    swallowed so a noisy filesystem can't break the cycle."""
+    if keep_days <= 0:
+        return
+    cutoff_ts = (now_ms / 1000.0) - keep_days * 86400.0
+    try:
+        for path in report_dir.glob(f"{prefix}*.json"):
+            try:
+                if path.stat().st_mtime < cutoff_ts:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                continue
+    except OSError:
+        return
 
 
 def warm_demo_kline_cache(
@@ -780,6 +806,7 @@ def run_event_risk_cycle(
         report_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         (report_dir / "latest_event_risk_cycle.json").write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
         (report_dir / "latest_event_risk_cycle.md").write_text(format_event_risk_cycle_report(payload), encoding="utf-8")
+        _prune_cycle_reports(report_dir, prefix="event_risk_cycle_", keep_days=7, now_ms=cycle_now_ms)
         return payload
 
 
