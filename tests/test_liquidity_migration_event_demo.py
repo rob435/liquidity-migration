@@ -235,7 +235,7 @@ def test_event_demo_cli_defaults_to_frequent_demo_forward_cycle() -> None:
     assert args.universe_max_symbols == 400
     assert args.universe_min_turnover_24h == 0.0
     assert args.max_order_notional_pct_equity == 0.0
-    assert args.max_entry_lag_minutes == 1440
+    assert args.max_entry_lag_minutes == 360
     assert args.max_new_entries_per_cycle == 5
     assert args.entry_leverage == 2.0
     assert args.order_fill_confirm_seconds == 2.0

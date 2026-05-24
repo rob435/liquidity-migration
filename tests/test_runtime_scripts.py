@@ -77,15 +77,17 @@ def test_paper_services_enable_record_dry_run() -> None:
 
 def test_demo_services_use_unblocked_entry_lag() -> None:
     """Live audit on 2026-05-24 found 15min lag rejected every signal as stale
-    (feature pipeline builds 3-4h after bar close). Both demo + paper must use
-    the unblocked 1440min (24h, full daily cadence) lag."""
+    (feature pipeline builds 3-4h after bar close). Both demo + paper use 360min
+    (6h) — enough for the natural feature-build cadence (~218min) plus buffer,
+    while still skipping signals stale enough to have lost their entry alpha
+    (the backtest assumes T+1h fills; >6h late degrades the edge meaningfully)."""
     repo = Path(__file__).resolve().parents[1]
     for unit in (
         "liquidity-migration-bybit-demo.service",
         "liquidity-migration-bybit-paper.service",
     ):
         text = (repo / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
-        assert "Environment=MAX_ENTRY_LAG_MINUTES=1440" in text, f"{unit}: MAX_ENTRY_LAG_MINUTES regression"
+        assert "Environment=MAX_ENTRY_LAG_MINUTES=360" in text, f"{unit}: MAX_ENTRY_LAG_MINUTES regression"
 
 
 def test_demo_health_watchdog_units_present() -> None:

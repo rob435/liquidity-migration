@@ -68,7 +68,7 @@ class EventDemoCycleConfig:
     max_order_notional_pct_equity: float = 0.0
     wallet_balance_fraction: float = 1.0
     fallback_equity_usdt: float = 10_000.0
-    max_entry_lag_minutes: int = 1440  # 24h = one full daily-bar cycle. Was 15 — caused 4 days of zero entries because feature pipeline builds 3-4h after bar close. 360 was insufficient for the audited live state (freshest signal already 16h stale). 1440 matches the strategy's daily cadence so any cycle within the bar's day can pick up the entry.
+    max_entry_lag_minutes: int = 360  # 6h. Was 15 — too tight (feature pipeline builds 3-4h after bar close = 218min lag at first availability). 1440 was tried briefly to force a verification entry but degrades alpha — entries 16h late on the backtest's T+1h model trade away the edge. 360 fires entries within ~3-4h of ready_ts (acceptable decay), then skips truly stale signals.
     max_new_entries_per_cycle: int = 5
     entry_leverage: float = 2.0
     entry_order_type: str = "Market"
