@@ -188,8 +188,6 @@ def _path_stats(
 
     ends = bars["ends"]
     closes = bars["close"]
-    lo = 0
-    hi = len(ends)
     best = 0.0
     worst = 0.0
     for i in range(len(ends)):

@@ -288,7 +288,6 @@ def test_coil_release_fires_on_first_expansion_after_compression():
     # Build a synthetic daily series where realized_vol_30d compresses below
     # realized_vol_90d for 10 days, then expands above.
     n_days = 200
-    n_hours = 24 * n_days
     # Use a high-vol regime for first 60 days, low-vol for days 60..150, high-vol after.
     # That makes 30d vol cross under 90d after day ~150 of low-vol, then back over.
     # For simplicity, we directly construct daily bars with controlled log_returns.

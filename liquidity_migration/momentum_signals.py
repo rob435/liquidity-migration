@@ -379,10 +379,10 @@ def add_coil_release(daily: pl.DataFrame, *, config: MomentumSignalsConfig) -> p
     min_days = max(config.coil_release_min_compress_days, 1)
     for key, part in daily.sort(["symbol", "ts_ms"]).partition_by("symbol", as_dict=True).items():
         s = np.asarray(part[short_col].to_list(), dtype=float)
-        l = np.asarray(part[long_col].to_list(), dtype=float)
-        finite = np.isfinite(s) & np.isfinite(l)
-        above = finite & (s > l)
-        below = finite & (s <= l)
+        long_vol = np.asarray(part[long_col].to_list(), dtype=float)
+        finite = np.isfinite(s) & np.isfinite(long_vol)
+        above = finite & (s > long_vol)
+        below = finite & (s <= long_vol)
         n = above.size
         coil = np.zeros(n, dtype=bool)
         streak = 0
