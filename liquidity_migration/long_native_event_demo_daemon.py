@@ -144,6 +144,11 @@ class LongNativeDemoDaemon:
         self._ticker_stream: Any | None = None
         self._ticker_stream_factory = ticker_stream_factory or _default_long_ticker_stream_factory
         self._state_cache_seeder = state_cache_seeder or _default_long_state_cache_seeder
+        # See EventDemoDaemon for rationale: caching the seeder's REST
+        # clients across reconciles avoids the per-minute session churn
+        # that was leaking CLOSE_WAIT sockets.
+        self._seed_market_client: Any | None = None
+        self._seed_private_client: Any | None = None
         self._ticker_reconcile_interval_seconds = float(ticker_reconcile_interval_seconds)
         self._state_cache_stale_seconds = float(state_cache_stale_seconds)
         self._reconcile_thread: threading.Thread | None = None
@@ -453,12 +458,7 @@ class LongNativeDemoDaemon:
 
     def _run_state_cache_seed(self) -> None:
         try:
-            self._state_cache_seeder(
-                config=self.config,
-                demo_config=self.demo_config,
-                private_state_cache=self._private_state_cache,
-                ticker_cache=self._ticker_cache,
-            )
+            self._invoke_state_cache_seeder()
             self._reconciles_total += 1
         except Exception as exc:  # noqa: BLE001
             self._reconcile_errors += 1
@@ -528,16 +528,37 @@ class LongNativeDemoDaemon:
     def _reconcile_loop(self) -> None:
         while not self._reconcile_stop.wait(timeout=self._ticker_reconcile_interval_seconds):
             try:
-                self._state_cache_seeder(
-                    config=self.config,
-                    demo_config=self.demo_config,
-                    private_state_cache=self._private_state_cache,
-                    ticker_cache=self._ticker_cache,
-                )
+                self._invoke_state_cache_seeder()
                 self._reconciles_total += 1
             except Exception as exc:  # noqa: BLE001
                 self._reconcile_errors += 1
                 _logger.warning("long state cache reconcile failed: %s", exc)
+
+    def _invoke_state_cache_seeder(self) -> None:
+        """See EventDemoDaemon._invoke_state_cache_seeder for rationale."""
+        if self._seed_market_client is None:
+            self._seed_market_client = BybitMarketData(
+                category=self.config.exchange.category,
+                testnet=self.config.exchange.testnet,
+            )
+        if self._seed_private_client is None:
+            api_key, api_secret, demo = resolve_private_credentials()
+            if api_key and api_secret:
+                self._seed_private_client = BybitPrivateClient(
+                    category=self.config.exchange.category,
+                    testnet=self.config.exchange.testnet,
+                    demo=demo,
+                    api_key=api_key,
+                    api_secret=api_secret,
+                )
+        self._state_cache_seeder(
+            config=self.config,
+            demo_config=self.demo_config,
+            private_state_cache=self._private_state_cache,
+            ticker_cache=self._ticker_cache,
+            market_client=self._seed_market_client,
+            private_client=self._seed_private_client,
+        )
 
     def _start_kline_stream_manager(self) -> None:
         if not self.demo_config.ws_klines_enabled:
@@ -732,6 +753,8 @@ def _default_long_state_cache_seeder(
     demo_config: LongNativeDemoCycleConfig,
     private_state_cache: PrivateStateCache,
     ticker_cache: TickerCache,
+    market_client: Any | None = None,
+    private_client: Any | None = None,
 ) -> None:
     """One-shot REST snapshot to seed both caches.
 
@@ -739,14 +762,27 @@ def _default_long_state_cache_seeder(
     the reconcile thread to recover any events the WS missed. Reuses the
     cycle's existing `_collect_private_snapshots` so the contract stays
     identical between cache and REST paths.
+
+    ``market_client`` and ``private_client`` are optional caller-cached
+    clients reused across reconciles (the daemon passes them) so we don't
+    spin up a fresh HTTP session every minute.
     """
     from .event_demo import _collect_private_snapshots  # late import: dep cycle
 
-    public = BybitMarketData(
+    public = market_client or BybitMarketData(
         category=config.exchange.category, testnet=config.exchange.testnet,
     )
     tickers = public.get_tickers()
     ticker_cache.replace_with_rest_snapshot(tickers)
+    if private_client is not None:
+        snap = _collect_private_snapshots(private_client, demo_config)  # type: ignore[arg-type]
+        private_state_cache.replace_with_rest_snapshot(
+            equity_usdt=snap["equity_usdt"],
+            wallet_error=snap.get("wallet_error", ""),
+            positions=snap["raw_positions"],
+            open_orders=snap["raw_open_orders"],
+        )
+        return
     api_key, api_secret, demo = resolve_private_credentials()
     if api_key and api_secret:
         private = BybitPrivateClient(
