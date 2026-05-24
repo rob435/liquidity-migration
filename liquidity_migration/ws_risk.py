@@ -92,7 +92,14 @@ class EventWebSocketRiskConfig:
     rest_reconcile_seconds: float = 30.0
     heartbeat_seconds: float = 10.0
     max_runtime_seconds: float = 0.0
-    stale_ws_seconds: float = 15.0
+    # 15s was too tight on a quiet demo account: Bybit's private WS only
+    # pushes when state changes (orders, fills, balance moves). The ticker
+    # WS keeps last_ws_event_monotonic fresh under normal load but during
+    # deploy churn / pybit reconnects the gap can briefly exceed 15s,
+    # producing a false-positive "position_report_error: websocket stale"
+    # telegram. 60s is short enough to catch a real WS death (the WS
+    # backbone reconnects in <10s) but tolerates ordinary brief silences.
+    stale_ws_seconds: float = 60.0
     stream_start_timeout_seconds: float = 3.0
     fast_execution_stream: bool = False
     stop_tolerance_bps: float = 1.0

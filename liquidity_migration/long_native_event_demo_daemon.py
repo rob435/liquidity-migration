@@ -78,9 +78,12 @@ class LongNativeDemoDaemon:
         # See event_demo_daemon for the full reasoning.
         ticker_reconcile_interval_seconds: float = 60.0,
         state_cache_stale_seconds: float = 120.0,
-        # See EventDemoDaemon for rationale — restart-on-deploy telegrams
-        # would flood the channel; material cycle events still notify.
-        lifecycle_telegram: bool = False,
+        # See EventDemoDaemon for rationale — startup ON so the operator
+        # can confirm the daemon is alive after a deploy, shutdown OFF
+        # because every shutdown is followed immediately by a new startup
+        # (or the absent next startup IS the signal).
+        startup_telegram: bool = True,
+        shutdown_telegram: bool = False,
     ) -> None:
         if interval_seconds < 0.0:
             raise ValueError("interval_seconds must be non-negative")
@@ -138,7 +141,8 @@ class LongNativeDemoDaemon:
         self._reconcile_stop = threading.Event()
         self._reconciles_total = 0
         self._reconcile_errors = 0
-        self._lifecycle_telegram = bool(lifecycle_telegram)
+        self._startup_telegram = bool(startup_telegram)
+        self._shutdown_telegram = bool(shutdown_telegram)
 
     def install_signal_handlers(self) -> None:
         signal.signal(signal.SIGTERM, lambda *_: self.request_shutdown())
@@ -284,7 +288,7 @@ class LongNativeDemoDaemon:
             "on" if self._private_state_cache.is_seeded() and self._ticker_cache.is_seeded()
             else "partial"
         )
-        if self._lifecycle_telegram:
+        if self._startup_telegram:
             self._send_telegram(
                 f"\U0001f7e2 long-native MultiStratV1 daemon started "
                 f"interval={self.interval_seconds:.0f}s "
@@ -321,7 +325,7 @@ class LongNativeDemoDaemon:
             self._cycles_run, self._cycle_errors, self._cycle_overruns,
             self._max_cycle_seconds, self._ws_gap_count, self._ws_max_gap_seconds, router_stats,
         )
-        if self._lifecycle_telegram:
+        if self._shutdown_telegram:
             self._send_telegram(
                 f"\U0001f6d1 long-native MultiStratV1 daemon stopped "
                 f"cycles={self._cycles_run} errors={self._cycle_errors} "

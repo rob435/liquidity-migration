@@ -100,13 +100,15 @@ class EventDemoDaemon:
         # is always fresh and the cycle never REST-falls-back unnecessarily.
         ticker_reconcile_interval_seconds: float = 60.0,
         state_cache_stale_seconds: float = 120.0,
-        # Telegram-on-startup/shutdown defaults off because a single git push
-        # triggers a CI deploy that restarts every service. With deploys
-        # several times a day, on-restart telegrams generate 50+ messages
-        # daily that the operator has to scroll past to find real events.
-        # Material cycle events (entries, exits, errors, untracked positions)
-        # always telegram via _maybe_notify regardless of this flag.
-        lifecycle_telegram: bool = False,
+        # Lifecycle telegram policy. Two independent toggles because the
+        # operator needs to know when the daemon comes BACK UP after a
+        # deploy (an absent startup telegram looks like a dead process),
+        # but rarely cares about the shutdown side — the prior startup
+        # telegram already implies "the old one stopped". Default:
+        # startup ON, shutdown OFF. Material cycle events (entries, exits,
+        # errors) always telegram via _maybe_notify regardless of these.
+        startup_telegram: bool = True,
+        shutdown_telegram: bool = False,
     ) -> None:
         if interval_seconds < 0.0:
             raise ValueError("interval_seconds must be non-negative")
@@ -195,7 +197,8 @@ class EventDemoDaemon:
         self._reconcile_stop = threading.Event()
         self._reconciles_total = 0
         self._reconcile_errors = 0
-        self._lifecycle_telegram = bool(lifecycle_telegram)
+        self._startup_telegram = bool(startup_telegram)
+        self._shutdown_telegram = bool(shutdown_telegram)
 
     def install_signal_handlers(self) -> None:
         """Wire SIGTERM/SIGINT to request_shutdown so systemd `systemctl stop`
@@ -365,7 +368,7 @@ class EventDemoDaemon:
             "on" if self._private_state_cache.is_seeded() and self._ticker_cache.is_seeded()
             else "partial"
         )
-        if self._lifecycle_telegram:
+        if self._startup_telegram:
             self._send_telegram(
                 f"\U0001f7e2 liquidity-migration daemon started "
                 f"interval={self.interval_seconds:.0f}s "
@@ -425,7 +428,7 @@ class EventDemoDaemon:
             self._ws_max_gap_seconds,
             router_stats,
         )
-        if self._lifecycle_telegram:
+        if self._shutdown_telegram:
             self._send_telegram(
                 f"\U0001f6d1 liquidity-migration daemon stopped "
                 f"cycles={self._cycles_run} "

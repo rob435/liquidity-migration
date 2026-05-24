@@ -304,7 +304,8 @@ def test_daemon_sends_telegram_on_startup_and_shutdown(tmp_path: Path) -> None:
         ws_stream_factory=lambda _config: ws,
         cycle_runner=_stub_cycle_runner([]),
         telegram_sender=fake_sender,
-        lifecycle_telegram=True,
+        startup_telegram=True,
+        shutdown_telegram=True,
     )
     runner = threading.Thread(target=daemon.run, daemon=True)
     runner.start()
@@ -424,7 +425,8 @@ def test_daemon_telegram_startup_reports_ws_unavailable_when_factory_fails(tmp_p
         ws_stream_factory=_broken_factory,
         cycle_runner=_stub_cycle_runner([]),
         telegram_sender=lambda t: (messages.append(t) or True),
-        lifecycle_telegram=True,
+        startup_telegram=True,
+        shutdown_telegram=True,
     )
     runner = threading.Thread(target=daemon.run, daemon=True)
     runner.start()
@@ -914,11 +916,11 @@ class _RecordingTickerStream:
         self.closed = True
 
 
-def test_daemon_lifecycle_telegram_off_by_default(tmp_path: Path) -> None:
-    """The default lifecycle_telegram=False suppresses startup + shutdown
-    telegrams so a CI deploy that restarts the daemon does not flood the
-    Telegram channel. Material cycle events still notify via the cycle's
-    own _maybe_notify path (not exercised here)."""
+def test_daemon_startup_telegram_on_by_default_shutdown_off(tmp_path: Path) -> None:
+    """Defaults: startup ON (operator needs to see daemon came back after
+    a deploy), shutdown OFF (the next startup telegram already implies
+    the prior process stopped). Material cycle events always telegram
+    regardless of these flags."""
     ws = _RecordingWsStream()
     messages: list[str] = []
     daemon = EventDemoDaemon(
@@ -929,22 +931,67 @@ def test_daemon_lifecycle_telegram_off_by_default(tmp_path: Path) -> None:
         ws_stream_factory=lambda _config: ws,
         cycle_runner=_stub_cycle_runner([]),
         telegram_sender=lambda t: (messages.append(t) or True),
-        # lifecycle_telegram left as default (False).
+        # Defaults: startup_telegram=True, shutdown_telegram=False.
     )
     runner = threading.Thread(target=daemon.run, daemon=True)
     runner.start()
     time.sleep(0.05)
     daemon.request_shutdown()
     runner.join(timeout=2.0)
-    # No startup or shutdown telegrams.
+    assert any("started" in m for m in messages), f"expected startup telegram, got {messages!r}"
+    assert not any("stopped" in m for m in messages), f"shutdown telegram should be suppressed, got {messages!r}"
+
+
+def test_daemon_shutdown_telegram_can_be_re_enabled(tmp_path: Path) -> None:
+    """Operators who explicitly want shutdown telegrams can opt back in."""
+    ws = _RecordingWsStream()
+    messages: list[str] = []
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False, telegram=True),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_stub_cycle_runner([]),
+        telegram_sender=lambda t: (messages.append(t) or True),
+        shutdown_telegram=True,
+    )
+    runner = threading.Thread(target=daemon.run, daemon=True)
+    runner.start()
+    time.sleep(0.05)
+    daemon.request_shutdown()
+    runner.join(timeout=2.0)
+    assert any("stopped" in m for m in messages)
+
+
+def test_daemon_startup_telegram_can_be_suppressed(tmp_path: Path) -> None:
+    """Operators who want no lifecycle telegrams at all can opt out of both."""
+    ws = _RecordingWsStream()
+    messages: list[str] = []
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False, telegram=True),
+        interval_seconds=0.0,
+        ws_stream_factory=lambda _config: ws,
+        cycle_runner=_stub_cycle_runner([]),
+        telegram_sender=lambda t: (messages.append(t) or True),
+        startup_telegram=False,
+        shutdown_telegram=False,
+    )
+    runner = threading.Thread(target=daemon.run, daemon=True)
+    runner.start()
+    time.sleep(0.05)
+    daemon.request_shutdown()
+    runner.join(timeout=2.0)
     assert not any("started" in m for m in messages)
     assert not any("stopped" in m for m in messages)
 
 
 def test_daemon_cycle_failure_telegram_fires_regardless_of_lifecycle_flag(tmp_path: Path) -> None:
     """A cycle exception always telegrams — that path is the operator's
-    only out-of-band signal that something broke. lifecycle_telegram only
-    gates the silenced start/stop messages, not error telegrams."""
+    only out-of-band signal that something broke. startup/shutdown flags
+    only gate the silenced start/stop messages, not error telegrams."""
     ws = _RecordingWsStream()
     messages: list[str] = []
 
