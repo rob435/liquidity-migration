@@ -329,6 +329,51 @@ def test_failed_reconnect_keeps_slice_for_retry() -> None:
         pool.close()
 
 
+def test_new_symbol_subscribe_skips_closed_connection_in_retry_state() -> None:
+    """When a connection is mid-retry (closed=True but assigned_symbols
+    still populated waiting for the watchdog to rebuild), a new
+    subscribe must NOT pick it as the target.
+
+    Without this guard, the new symbol would be added to the dead
+    client's slot — kline_stream() on a closed pybit client either
+    no-ops or raises, silently losing the new symbol's WS feed until
+    the next universe refresh."""
+    factory = _FailingFactory(fail_on_call_n=2)
+    pool = BybitKlineStreamPool(
+        interval_minutes=60,
+        topics_per_connection=10,
+        stale_warning_seconds=0.01,
+        stale_reconnect_seconds=0.02,
+        watchdog_interval_seconds=0.05,
+        connection_spacing_seconds=0.0,
+        reconnect_backoff_seconds=0.0,
+        websocket_factory=factory,
+    )
+    pool.subscribe(["AAA_USDT"], lambda s, b, c: None)
+    try:
+        state = pool._connections[0]  # type: ignore[attr-defined]
+        # Force-stale + trigger failed reconnect → state.closed=True, assigned_symbols intact.
+        state.last_message_monotonic = time.monotonic() - 5.0
+        pool.check_stale_connections()
+        assert state.closed is True
+        assert "AAA_USDT" in state.assigned_symbols
+        # Now add a new symbol — must NOT land on the closed connection.
+        pool.subscribe(["BBB_USDT"], lambda s, b, c: None)
+        # BBB_USDT must have been placed on a fresh (open) connection.
+        bbb_state = None
+        for s in pool._connections:  # type: ignore[attr-defined]
+            if "BBB_USDT" in s.assigned_symbols:
+                bbb_state = s
+                break
+        assert bbb_state is not None, "BBB_USDT was not subscribed anywhere"
+        assert bbb_state is not state, (
+            "BBB_USDT was placed on the closed (retry-pending) connection"
+        )
+        assert bbb_state.closed is False
+    finally:
+        pool.close()
+
+
 def test_callback_updates_last_message_timestamp() -> None:
     """An incoming bar must reset the staleness clock so a healthy stream is
     never reconnected by accident."""

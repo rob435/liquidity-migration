@@ -1219,11 +1219,18 @@ class BybitKlineStreamPool:
         return state
 
     def _subscribe_symbol_locked(self, symbol: str) -> None:
-        # Find a connection under capacity, else open a new one.
+        # Find an OPEN connection under capacity, else open a new one.
+        # Previously the "find under capacity" check didn't filter on
+        # state.closed, so a connection waiting on a failed reconnect
+        # retry (closed=True, assigned_symbols < cap) could be picked
+        # as the target — and kline_stream() on a dead client would
+        # either no-op or raise, silently losing the new symbol's WS
+        # feed.
         target = next(
             (
                 state for state in self._connections
-                if len(state.assigned_symbols) < self.topics_per_connection
+                if not state.closed
+                and len(state.assigned_symbols) < self.topics_per_connection
             ),
             None,
         )
