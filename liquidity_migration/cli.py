@@ -40,11 +40,13 @@ from .momentum_factor import (
     MODES as MOMENTUM_FACTOR_MODES,
     PRESET_LO_CARRY0,
     PRESET_LO_SHARPE3,
+    PRESET_LO_SHARPE3_ROBUST,
     PRESET_LO_SKIP0,
     SIZINGS as MOMENTUM_FACTOR_SIZINGS,
     MomentumFactorConfig,
     lo_carry0_preset,
     lo_sharpe3_preset,
+    lo_sharpe3_robust_preset,
     lo_skip0_preset,
     run_momentum_factor_research,
 )
@@ -1319,7 +1321,7 @@ def _add_momentum_factor_parser(subparsers) -> None:
         "--preset",
         default=None,
         choices=FACTOR_PRESETS,
-        help="lo_skip0 (OOS-validated baseline) | lo_carry0 (round-2 carry=0 tweak, IS only) | lo_sharpe3 (grid-mined, overfit risk); overrides defaults when set.",
+        help="lo_skip0 | lo_carry0 | lo_sharpe3 | lo_sharpe3_robust (vol cap 1.6); overrides defaults when set.",
     )
     factor.add_argument(
         "--mode",
@@ -2494,6 +2496,8 @@ def main(argv: list[str] | None = None) -> int:
             factor_config = lo_carry0_preset(start_date=args.start, end_date=args.end)
         elif args.preset == PRESET_LO_SHARPE3:
             factor_config = lo_sharpe3_preset(start_date=args.start, end_date=args.end)
+        elif args.preset == PRESET_LO_SHARPE3_ROBUST:
+            factor_config = lo_sharpe3_robust_preset(start_date=args.start, end_date=args.end)
         else:
             lookbacks = tuple(
                 int(item.strip())
