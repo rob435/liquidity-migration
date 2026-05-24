@@ -142,7 +142,19 @@ def lo_sharpe3_preset(*, start_date: str = "", end_date: str = "") -> MomentumFa
 
 
 def lo_sharpe3_robust_preset(*, start_date: str = "", end_date: str = "") -> MomentumFactorConfig:
-    """lo_sharpe3 with vol cap 1.6 — better oos_2025_2026, 300+ trades, daily Sharpe ~3.0."""
+    """lo_sharpe3 with vol cap loosened 1.2 → 1.6 (round-3, 19-variant sensitivity hunt).
+
+    Picked because it had the best `oos_2025_2026` walk-forward Sharpe among 19
+    hand-picked variants around `lo_sharpe3`. Run label: `exploratory_in_sample`
+    until forward-tested. See docs/momentum_lo_sharpe3_robust.md.
+
+    Canonical (2023-05 → 2026-05): daily Sharpe 3.06, 307 trades, +49.7%.
+    OOS sanity (run 2026-05-24):
+    - bybit_pre2023 daily Sharpe **1.74** (vs lo_sharpe3 0.73 — vol-cap loosening
+      meaningfully recovers cleanest OOS root)
+    - binance_pre2023 daily Sharpe 4.12, +71.1%
+    First preset in the sharpe3 family with all three roots positive.
+    """
     return replace(
         lo_sharpe3_preset(start_date=start_date, end_date=end_date),
         max_realized_vol=1.6,
