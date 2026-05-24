@@ -1870,14 +1870,21 @@ def _download_recent_1h_klines(
     # dataset costs 5-10s for ~400 symbols × 45 days; the store
     # serves the same data in <50ms. Only matters once the bootstrap
     # has populated the store — until then we still hit the disk cache.
+    #
+    # Two further optimizations:
+    #   1. KlineStore.get_klines() already returns (symbol, ts_ms) sorted
+    #      + dedup'd (the store keys bars by ts_ms, so duplicates are
+    #      impossible by construction). Re-running unique()+sort() here is
+    #      a 100-300ms tax on the cycle's hot loop.
+    #   2. The on-disk compact cache is only read on the SLOW path (when
+    #      the store doesn't cover everything). On the fast path we don't
+    #      consume it, so writing it every cycle is pure I/O cost — the
+    #      store has its own flush file that bootstrap recovers from on
+    #      restart. Skip the write entirely under full coverage.
     if store_fully_covers and not store_frame.is_empty():
-        output = _dedupe_recent_klines(store_frame)
         stats["fetch_symbols"] = 0
-        stats["output_rows"] = output.height
-        _write_demo_kline_compact_cache(
-            cache_root, symbols=symbols, start_ms=start_ms, end_ms=end_ms, klines=output,
-        )
-        return output, stats
+        stats["output_rows"] = store_frame.height
+        return store_frame, stats
 
     # 2) On-disk caches still apply to symbols not yet in the store, so the
     # legacy fast path is preserved for the bootstrap window.
