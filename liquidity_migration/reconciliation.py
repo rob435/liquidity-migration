@@ -119,14 +119,55 @@ def reconcile_paper_demo(
     for bucket in paper_by_key.values():
         bucket.sort(key=lambda item: item["entry_ts_ms"])
 
-    # Build every (demo, paper) candidate within tolerance, then assign
+    # Index paper trades by trade_id within each bucket so trade-id pairing
+    # and gap pairing both use the SAME (key, bucket_idx) addressing scheme.
+    paper_tid_in_bucket: dict[tuple[str, str], dict[str, int]] = {}
+    for key, bucket in paper_by_key.items():
+        per_bucket: dict[str, int] = {}
+        for paper_idx, paper_trade in enumerate(bucket):
+            tid = str(paper_trade.get("trade_id") or "")
+            if tid:
+                per_bucket.setdefault(tid, paper_idx)
+        paper_tid_in_bucket[key] = per_bucket
+
+    # Pass 1: pair by exact trade_id. The id is deterministic from
+    # (scenario, symbol, signal_ts) so identical trades on paper and demo
+    # ledgers share the same id and pair cleanly regardless of fill-time
+    # divergence (e.g. paper restarted later than demo). This is the
+    # primary pairing path; gap-based pairing below is the fallback for
+    # rows without a trade_id (legacy ledgers).
+    candidates: list[tuple[int, int, int]] = []  # (gap, demo_idx, paper_bucket_idx)
+    tid_matched_demo: set[int] = set()
+    tid_matched_paper: dict[tuple[str, str], set[int]] = {}
+    for demo_idx, demo_trade in enumerate(demo):
+        tid = str(demo_trade.get("trade_id") or "")
+        if not tid:
+            continue
+        key = (demo_trade["symbol"], demo_trade["side"])
+        paper_idx = paper_tid_in_bucket.get(key, {}).get(tid)
+        if paper_idx is None:
+            continue
+        paper_trade = paper_by_key[key][paper_idx]
+        gap = abs(demo_trade["entry_ts_ms"] - paper_trade["entry_ts_ms"])
+        # Trade-id matches always pair; tolerance is irrelevant when the id is identical.
+        candidates.append((gap, demo_idx, paper_idx))
+        tid_matched_demo.add(demo_idx)
+        tid_matched_paper.setdefault(key, set()).add(paper_idx)
+
+    # Pass 2: gap-based pairing for trades without a matching trade_id (e.g.
+    # legacy ledger rows). Build every candidate within tolerance, then assign
     # smallest-gap-first so the best global pairs win — a greedy per-demo
     # nearest-time pass would let an earlier demo trade consume a paper trade
     # that is a tighter match for a later one, biasing slippage.
-    candidates: list[tuple[int, int, int]] = []  # (gap, demo_idx, paper_idx)
     for demo_idx, demo_trade in enumerate(demo):
-        bucket = paper_by_key.get((demo_trade["symbol"], demo_trade["side"]), [])
+        if demo_idx in tid_matched_demo:
+            continue
+        key = (demo_trade["symbol"], demo_trade["side"])
+        bucket = paper_by_key.get(key, [])
+        already_paired = tid_matched_paper.get(key, set())
         for paper_idx, paper_trade in enumerate(bucket):
+            if paper_idx in already_paired:
+                continue
             gap = abs(demo_trade["entry_ts_ms"] - paper_trade["entry_ts_ms"])
             if gap <= tolerance:
                 candidates.append((gap, demo_idx, paper_idx))
