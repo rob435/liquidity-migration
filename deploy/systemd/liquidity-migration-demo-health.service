@@ -1,0 +1,20 @@
+[Unit]
+Description=liquidity-migration demo paper-test entry-health watchdog
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/liquidity-migration
+EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/check_demo_entry_health.py \
+    --data-root /opt/liquidity-migration/data/bybit-demo-event \
+    --window-hours 24 \
+    --telegram
+# Exit code 1 = no entries (alert sent via Telegram); not a service "failure"
+SuccessExitStatus=0 1
+StandardOutput=journal
+StandardError=journal

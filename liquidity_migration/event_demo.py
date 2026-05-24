@@ -1697,12 +1697,28 @@ def _build_demo_universe(
         max_symbols=config.universe_max_symbols,
         exclude_symbols=DEFAULT_EXCLUDED_SYMBOLS,
     )
-    return build_current_universe_table(
+    result = build_current_universe_table(
         instruments,
         tickers,
         universe_config=universe_config,
         snapshot_ts_ms=snapshot_ts_ms,
     )
+    # Loud warning if the returned universe is materially below requested size.
+    # Found 2026-05-24 in live audit: cycles between 00:00-04:00 UTC produced
+    # only ~168 symbols vs requested 400, silently hiding every signal because
+    # the strategy's required_prior7_rank (300) was outside the visible universe.
+    # The fix root cause is upstream (likely Bybit ticker API partial response
+    # near UTC midnight or stale instruments cache); the warning surfaces the
+    # event so operators see it instead of a silent zero-trade day.
+    requested = config.universe_max_symbols or config.universe_rank_end
+    if requested > 0 and result.height < int(requested * 0.75):
+        _logger.warning(
+            "universe builder returned %d symbols, requested %d (instruments=%d, tickers=%d). "
+            "Strategies that need rank_end=%d cannot see signals at this universe size — "
+            "check Bybit ticker API health or instruments cache freshness.",
+            result.height, requested, instruments.height, tickers.height, requested,
+        )
+    return result
 
 
 def _download_recent_1h_klines(

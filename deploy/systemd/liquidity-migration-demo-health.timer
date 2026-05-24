@@ -1,0 +1,11 @@
+[Unit]
+Description=Run liquidity-migration demo health watchdog hourly
+
+[Timer]
+# Run hourly, 15 minutes past the hour (offset from cycle restarts at top of hour)
+OnCalendar=*-*-* *:15:00
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target
