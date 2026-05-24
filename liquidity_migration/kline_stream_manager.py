@@ -215,6 +215,16 @@ class KlineStreamManager:
         except Exception as exc:  # noqa: BLE001
             _logger.warning("final flush failed: %s", exc)
 
+    def universe_symbols(self) -> list[str]:
+        """Return the manager's current universe as a sorted list.
+
+        Used by daemons that want to keep their ticker WS subscriptions
+        in sync with the kline universe (e.g. long sleeve scopes both to
+        the top-N rather than all USDT-perps). Snapshot taken under the
+        lock so concurrent universe_refresh doesn't tear the view."""
+        with self._lock:
+            return sorted(self._universe)
+
     def force_refresh_universe(self) -> dict[str, int]:
         """Synchronously re-fetch the universe + diff against the pool.
 

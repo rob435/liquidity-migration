@@ -303,6 +303,24 @@ def test_universe_refresh_subscribes_new_listings_and_unsubscribes_delistings(tm
         manager.stop()
 
 
+def test_universe_symbols_returns_sorted_current_universe(tmp_path: Path) -> None:
+    """The long daemon scopes its public ticker WS to the same universe
+    the kline manager bootstraps. Manager exposes universe_symbols() as
+    the contract; must return a sorted snapshot consistent with stats."""
+    manager, _pool, _market = _build_manager(
+        tmp_path=tmp_path,
+        initial_symbols=["SOLUSDT", "BTCUSDT", "ETHUSDT"],
+    )
+    manager.start()
+    try:
+        syms = manager.universe_symbols()
+        assert syms == sorted(syms), "universe_symbols must be sorted for callers"
+        assert set(syms) == {"BTCUSDT", "ETHUSDT", "SOLUSDT"}
+        assert len(syms) == manager.stats()["universe_size"]
+    finally:
+        manager.stop()
+
+
 def test_on_bar_dispatch_adds_to_store(tmp_path: Path) -> None:
     """Verify the pool→store fan-in: the callback the pool would call must
     insert a confirmed bar and skip an unconfirmed one."""

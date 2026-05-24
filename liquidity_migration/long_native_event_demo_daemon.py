@@ -487,14 +487,45 @@ class LongNativeDemoDaemon:
             _logger.warning("long ticker WS stream failed to open; REST fallback: %s", exc)
             self._ticker_stream = None
             return
-        symbols = sorted({
-            str(row.get("symbol", "")) for row in self._ticker_cache.snapshot_list()
-        } - {""})
+        # Scope WS subscriptions to the same top-N universe the kline
+        # manager bootstraps (default 50). The ticker cache itself still
+        # carries the full 567-symbol REST snapshot for universe ranking,
+        # but only the symbols the long sleeve might actually trade need
+        # realtime updates — the other ~500 USDT-perps would generate
+        # hundreds of msg/sec we'd never read. The seeder's 60s REST
+        # refresh keeps the rest of the cache fresh enough for ranking.
+        symbols = self._select_ticker_subscription_symbols()
+        if not symbols:
+            _logger.info("long ticker subscribe skipped: no symbols in scoped universe")
+            self._close_ticker_stream()
+            return
         try:
             self._ticker_stream.subscribe_tickers(symbols, self._handle_ticker_message)
         except Exception as exc:  # noqa: BLE001
             _logger.warning("long ticker subscribe failed; REST fallback: %s", exc)
             self._close_ticker_stream()
+
+    def _select_ticker_subscription_symbols(self) -> list[str]:
+        """Pick the symbols to feed to the public ticker WS.
+
+        Prefer the kline manager's universe (already top-N by turnover)
+        when available — that keeps ticker + kline subscriptions in sync
+        across the same set of symbols the long sleeve actually trades.
+        Falls back to the full ticker cache when the kline manager is
+        disabled (legacy REST path) so the behavior matches the old
+        all-symbols subscription."""
+        manager = self._kline_stream_manager
+        if manager is not None:
+            try:
+                scoped = manager.universe_symbols()
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("kline manager universe_symbols failed; using full ticker cache: %s", exc)
+                scoped = []
+            if scoped:
+                return scoped
+        return sorted({
+            str(row.get("symbol", "")) for row in self._ticker_cache.snapshot_list()
+        } - {""})
 
     def _close_ticker_stream(self) -> None:
         stream = self._ticker_stream
