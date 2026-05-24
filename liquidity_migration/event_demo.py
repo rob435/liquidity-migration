@@ -56,9 +56,13 @@ PENDING_ORDER_GUARD_MS = 15 * MS_PER_MINUTE
 @dataclass(frozen=True, slots=True)
 class EventDemoCycleConfig:
     lookback_days: int = 45
-    universe_rank_end: int = 220
-    universe_max_symbols: int = 220
-    universe_min_turnover_24h: float = 2_000_000.0
+    # Universe must be wide enough for prior-week ranks of rocket-symbols to be
+    # observable. Promoted needs trade_rank_max(150) + rank_improvement_min(150) = 300;
+    # demo_relaxed needs 260 + 80 = 340. 400 covers both with buffer.
+    # See _validate_demo_config for the runtime check.
+    universe_rank_end: int = 400
+    universe_max_symbols: int = 400
+    universe_min_turnover_24h: float = 0.0
     workers: int = 8
     max_order_notional_pct_equity: float = 0.0
     wallet_balance_fraction: float = 1.0
@@ -1451,17 +1455,42 @@ def _selected_scenario(config: VolumeEventResearchConfig) -> EventScenario:
     )
 
 
+def _required_universe_rank_end(strategy_profile: str) -> int:
+    """Minimum forward-universe rank ceiling for the strategy profile.
+
+    The strategy fires when a symbol jumps from prior-week rank
+    `prior7_liquidity_rank` into the trading band `[universe_rank_min, universe_rank_max]`
+    by at least `liquidity_migration_rank_improvement_min` places. For the
+    demo's current-snapshot universe to *see* those jumps, prior-week ranks
+    must be observable up to `universe_rank_max + rank_improvement_min`. A
+    narrower universe makes rocket-symbols invisible (no signals ever fire).
+
+    Diagnosed 2026-05-24: demo VPS was set to `universe_rank_end=220` with the
+    promoted profile (`rank_max=150 + rank_improvement_min=150 = 300` required),
+    so every backtest entry's prior7_rank (189..287) was outside the demo
+    universe and the forward test stayed at zero signals for days.
+    """
+    strategy = _demo_event_config(VolumeEventResearchConfig(), profile=strategy_profile)
+    return strategy.universe_rank_max + strategy.liquidity_migration_rank_improvement_min
+
+
 def _validate_demo_config(config: EventDemoCycleConfig) -> None:
     strategy_profile = config.strategy_profile
     if strategy_profile not in DEMO_STRATEGY_PROFILES:
         raise ValueError(f"strategy_profile must be one of: {', '.join(DEMO_STRATEGY_PROFILES)}")
     if config.lookback_days < 25:
         raise ValueError("lookback_days must be at least 25 so 20d persistence and 7d prior ranks are populated")
-    required_rank_end = 260 if strategy_profile == "demo_relaxed" else 150
+    required_rank_end = _required_universe_rank_end(strategy_profile)
     if config.universe_rank_end < required_rank_end:
-        raise ValueError(f"universe_rank_end must cover at least rank {required_rank_end} for {strategy_profile}")
+        raise ValueError(
+            f"universe_rank_end={config.universe_rank_end} too narrow for {strategy_profile}: "
+            f"need at least rank {required_rank_end} so prior-week ranks of rocket-symbols are observable"
+        )
     if config.universe_max_symbols < required_rank_end:
-        raise ValueError(f"universe_max_symbols must cover at least rank {required_rank_end} for {strategy_profile}")
+        raise ValueError(
+            f"universe_max_symbols={config.universe_max_symbols} too narrow for {strategy_profile}: "
+            f"need at least {required_rank_end} so prior-week ranks of rocket-symbols are observable"
+        )
     if not 0.0 <= config.max_order_notional_pct_equity <= 1.0:
         raise ValueError("max_order_notional_pct_equity must be in [0, 1]")
     if not 0.0 < config.wallet_balance_fraction <= 1.0:

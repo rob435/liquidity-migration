@@ -18,15 +18,19 @@ if ! [[ "$INTERVAL_SECONDS" =~ ^[0-9]+$ ]]; then
     exit 2
 fi
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-45}"
+# Universe must cover prior-week ranks of rocket-symbols: promoted needs
+# rank_max(150) + rank_improvement_min(150) = 300, demo_relaxed needs
+# 260 + 80 = 340. 400 covers both with buffer; _validate_demo_config rejects
+# anything below the per-profile minimum.
 if [[ "$STRATEGY_PROFILE" == "demo_relaxed" ]]; then
-    UNIVERSE_RANK_END="${UNIVERSE_RANK_END:-300}"
-    UNIVERSE_MAX_SYMBOLS="${UNIVERSE_MAX_SYMBOLS:-300}"
+    UNIVERSE_RANK_END="${UNIVERSE_RANK_END:-400}"
+    UNIVERSE_MAX_SYMBOLS="${UNIVERSE_MAX_SYMBOLS:-400}"
     UNIVERSE_MIN_TURNOVER_24H="${UNIVERSE_MIN_TURNOVER_24H:-0}"
     MAX_NEW_ENTRIES_PER_CYCLE="${MAX_NEW_ENTRIES_PER_CYCLE:-10}"
 else
-    UNIVERSE_RANK_END="${UNIVERSE_RANK_END:-220}"
-    UNIVERSE_MAX_SYMBOLS="${UNIVERSE_MAX_SYMBOLS:-220}"
-    UNIVERSE_MIN_TURNOVER_24H="${UNIVERSE_MIN_TURNOVER_24H:-2000000}"
+    UNIVERSE_RANK_END="${UNIVERSE_RANK_END:-400}"
+    UNIVERSE_MAX_SYMBOLS="${UNIVERSE_MAX_SYMBOLS:-400}"
+    UNIVERSE_MIN_TURNOVER_24H="${UNIVERSE_MIN_TURNOVER_24H:-0}"
     MAX_NEW_ENTRIES_PER_CYCLE="${MAX_NEW_ENTRIES_PER_CYCLE:-5}"
 fi
 WORKERS="${WORKERS:-8}"

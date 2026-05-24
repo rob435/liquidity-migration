@@ -273,9 +273,9 @@ def test_cli_event_demo_parses_demo_relaxed_profile(tmp_path: Path) -> None:
             "--strategy-profile",
             "demo_relaxed",
             "--universe-rank-end",
-            "300",
+            "400",
             "--universe-max-symbols",
-            "300",
+            "400",
             "--submit-orders",
             "--confirm-demo-orders",
         ]
@@ -283,8 +283,8 @@ def test_cli_event_demo_parses_demo_relaxed_profile(tmp_path: Path) -> None:
 
     assert args.command == "event-demo-cycle"
     assert args.strategy_profile == "demo_relaxed"
-    assert args.universe_rank_end == 300
-    assert args.universe_max_symbols == 300
+    assert args.universe_rank_end == 400
+    assert args.universe_max_symbols == 400
     assert args.submit_orders is True
     assert args.confirm_demo_orders is True
 

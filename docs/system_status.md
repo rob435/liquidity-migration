@@ -128,10 +128,15 @@ as live verdicts.
   order-submitting demo stack; `demo_relaxed` and the other candidates are
   shadow/dry-run only. This is a demo-only paper forward test — not
   Model-Court validated, not a real-money promotion.
-- The demo cycle fetches the top 220 symbols by 24h turnover (≥ $2M) so the
-  `promoted` strategy can trade its rank 31–150 selection band;
-  `event-demo-cycle` refuses a forward universe narrower than rank 150 for
-  `promoted`.
+- The demo cycle fetches the top 400 symbols by 24h turnover (no absolute
+  floor) so the `promoted` strategy can both (a) trade its rank 31–150 selection
+  band and (b) observe prior-week ranks of rocket-symbols out to ~300 (the
+  trading-band ceiling + `rank_improvement_min`). `event-demo-cycle` refuses a
+  forward universe narrower than `universe_rank_max + liquidity_migration_rank_improvement_min`
+  for the active profile (promoted: 300, demo_relaxed: 340). The narrower
+  pre-2026-05-25 universe (top 220 ≥ $2M turnover → 165 symbols) silently
+  hid every signal because the prior-week rank could not reach 300 (see
+  `_validate_demo_config` and `_required_universe_rank_end`).
 - No real-money trading is active: demo is the default, and `demo=False` is
   refused unless real-money mode is deliberately armed (see below).
 

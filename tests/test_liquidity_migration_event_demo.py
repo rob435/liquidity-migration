@@ -228,8 +228,9 @@ def test_event_demo_cli_defaults_to_frequent_demo_forward_cycle() -> None:
 
     assert args.command == "event-demo-cycle"
     assert args.lookback_days == 45
-    assert args.universe_rank_end == 220
-    assert args.universe_max_symbols == 220
+    assert args.universe_rank_end == 400
+    assert args.universe_max_symbols == 400
+    assert args.universe_min_turnover_24h == 0.0
     assert args.max_order_notional_pct_equity == 0.0
     assert args.max_entry_lag_minutes == 15
     assert args.max_new_entries_per_cycle == 5
@@ -3207,10 +3208,40 @@ def test_demo_relaxed_profile_lowers_gates_for_more_demo_trades() -> None:
 
 
 def test_demo_relaxed_profile_requires_wide_forward_universe() -> None:
-    with pytest.raises(ValueError, match="rank 260"):
+    # demo_relaxed needs trade_rank_max(260) + rank_improvement_min(80) = 340
+    # so prior-week ranks of rocket-symbols are observable.
+    with pytest.raises(ValueError, match="rank 340"):
         _validate_demo_config(
-            EventDemoCycleConfig(strategy_profile="demo_relaxed", universe_rank_end=220, universe_max_symbols=220)
+            EventDemoCycleConfig(strategy_profile="demo_relaxed", universe_rank_end=220, universe_max_symbols=400)
         )
+    with pytest.raises(ValueError, match="340"):
+        _validate_demo_config(
+            EventDemoCycleConfig(strategy_profile="demo_relaxed", universe_rank_end=400, universe_max_symbols=220)
+        )
+    # exact minimum passes
+    _validate_demo_config(
+        EventDemoCycleConfig(strategy_profile="demo_relaxed", universe_rank_end=340, universe_max_symbols=340)
+    )
+
+
+def test_promoted_profile_requires_wide_forward_universe() -> None:
+    # Regression for the 2026-05-24 demo-VPS bug: rank_end=220 was passing the
+    # validator even though the promoted profile needs trade_rank_max(150) +
+    # rank_improvement_min(150) = 300 to observe prior-week ranks of
+    # rocket-symbols. With the old narrow universe the forward test could
+    # never fire a signal.
+    with pytest.raises(ValueError, match="rank 300"):
+        _validate_demo_config(
+            EventDemoCycleConfig(strategy_profile="promoted", universe_rank_end=220, universe_max_symbols=400)
+        )
+    with pytest.raises(ValueError, match="300"):
+        _validate_demo_config(
+            EventDemoCycleConfig(strategy_profile="promoted", universe_rank_end=400, universe_max_symbols=220)
+        )
+    # exact minimum passes
+    _validate_demo_config(
+        EventDemoCycleConfig(strategy_profile="promoted", universe_rank_end=300, universe_max_symbols=300)
+    )
 
 
 def test_event_demo_rejects_non_positive_entry_leverage() -> None:
