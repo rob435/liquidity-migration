@@ -13,6 +13,7 @@ Environment=DATA_ROOT=data/bybit-long-paper-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
 Environment=SUBMIT_ORDERS=0
 Environment=CONFIRM_DEMO_ORDERS=0
+Environment=RECORD_DRY_RUN=1
 Environment=TELEGRAM_ENABLED=0
 Environment=STRATEGY_PROFILE=MultiStratV1
 Environment=INTERVAL_SECONDS=60

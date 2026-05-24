@@ -62,6 +62,13 @@ if [[ "${SUBMIT_ORDERS:-0}" == "1" ]]; then
     fi
     order_args+=(--submit-orders --confirm-demo-orders)
 fi
+# RECORD_DRY_RUN=1 persists planned orders/trades to the long_native_demo_*
+# ledgers so the paper long sleeve has data to reconcile against the live
+# long demo. Found 2026-05-24: long-paper service had only kline cache, no
+# trades/orders/cycles, blocking any long-side slippage analysis.
+if [[ "${RECORD_DRY_RUN:-0}" == "1" ]]; then
+    order_args+=(--record-dry-run)
+fi
 
 echo "long-native demo engine starting"
 echo "repo=$REPO_ROOT"
