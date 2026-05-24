@@ -93,6 +93,13 @@ fi
 cp deploy/systemd/liquidity-migration-bybit-demo.service /etc/systemd/system/liquidity-migration-bybit-demo.service
 cp deploy/systemd/liquidity-migration-bybit-risk.service /etc/systemd/system/liquidity-migration-bybit-risk.service
 cp deploy/systemd/liquidity-migration-bybit-paper.service /etc/systemd/system/liquidity-migration-bybit-paper.service
+# Long-sleeve unit files were previously skipped here, so MemoryMax /
+# Environment changes made to the long demo/paper services in the repo
+# never took effect on the VPS until a manual `cp` — the long daemon
+# was OOM-killing in a loop while the new unit (MemoryMax=2G) sat on
+# disk unused. Always sync all five unit files.
+cp deploy/systemd/liquidity-migration-bybit-long-demo.service /etc/systemd/system/liquidity-migration-bybit-long-demo.service
+cp deploy/systemd/liquidity-migration-bybit-long-paper.service /etc/systemd/system/liquidity-migration-bybit-long-paper.service
 systemctl daemon-reload
 systemctl disable --now \
   model050426.service \
