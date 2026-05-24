@@ -351,6 +351,17 @@ def run_long_native_demo_cycle(
         )
         mark_stage("klines")
 
+        # `build_long_features` expects a `date` column on the 1h klines
+        # (research data layer adds it; the demo path doesn't). Derive it
+        # cheaply from the day-start of `ts_ms`. Otherwise the intraday-pump
+        # group_by inside build_long_features raises ColumnNotFoundError.
+        if not klines.is_empty() and "date" not in klines.columns:
+            klines = klines.with_columns(
+                pl.from_epoch(
+                    pl.col("ts_ms") - (pl.col("ts_ms") % MS_PER_DAY),
+                    time_unit="ms",
+                ).dt.strftime("%Y-%m-%d").alias("date")
+            )
         features = build_long_features(klines, funding=None, config=strategy)
         mark_stage("features")
 
@@ -409,7 +420,7 @@ def run_long_native_demo_cycle(
         candidates, pending_skips = _filter_pending_long_entries(candidates, all_orders, now_ms=cycle_now_ms)
         live_pos_skips = 0
         live_open_skips = 0
-        if position_error := _combine_errors(bybit_position_error, wallet_error, bybit_open_order_error):
+        if _combine_errors(bybit_position_error, wallet_error, bybit_open_order_error):
             if demo.submit_orders:
                 position_error_skips = len(candidates)
                 candidates = []
@@ -685,7 +696,6 @@ def _select_long_entry_candidates(
     open_symbols = set(_column_values(_open_long_trades(all_trades), "symbol"))
     cooldown_until = _cooldown_until_long(all_trades, cooldown_days=strategy.cooldown_days)
 
-    latest_ts = int(features["ts_ms"].max())
     # Look at the last 2 closed daily bars so we catch a signal that fired
     # yesterday and is still in its 6h sniper window today.
     eligible_ts = sorted(
