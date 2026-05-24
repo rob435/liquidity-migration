@@ -67,6 +67,12 @@ if [[ "${SUBMIT_ORDERS:-0}" == "1" ]]; then
     fi
     order_args+=(--submit-orders --confirm-demo-orders)
 fi
+# RECORD_DRY_RUN=1 persists the cycle's planned orders/trades to the same ledger
+# the submit path uses, so paper-vs-demo reconciliation can pair them. Wire the
+# CLI --record-dry-run flag through this env var (defaults to 0).
+if [[ "${RECORD_DRY_RUN:-0}" == "1" ]]; then
+    order_args+=(--record-dry-run)
+fi
 
 echo "event demo engine starting"
 echo "repo=$REPO_ROOT"
