@@ -27,9 +27,11 @@ Operating model
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
@@ -590,6 +592,31 @@ def run_long_native_demo_cycle(
         cycle_row["telegram_sent"] = telegram_sent
         cycle_row["telegram_error"] = telegram_error
         mark_stage("telegram")
+
+        # Persist cycle telemetry — matches the short sleeve's event_demo write path.
+        # Without this the long sleeve has zero observability: no cycle history,
+        # no skip diagnostics, no per-cycle equity tracking. Found 2026-05-24:
+        # the reports/long-native-event-demo/ dir stayed empty for the entire
+        # 11+h service runtime because the function returned the payload without
+        # ever writing it. Partition by date to cap per-write cost like the short.
+        cycle_date = datetime.fromtimestamp(cycle_now_ms / 1000, tz=UTC).strftime("%Y-%m-%d")
+        cycle_row_with_date = dict(cycle_row, date=cycle_date)
+        persist_perf_start = time.perf_counter()
+        write_dataset(
+            pl.DataFrame([cycle_row_with_date], infer_schema_length=None),
+            root, "long_native_demo_cycles", partition_by=("date",),
+        )
+        report_path = report_dir / f"long_native_cycle_{cycle_id}.json"
+        report_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        (report_dir / "latest_long_native_cycle.json").write_text(
+            json.dumps(payload, indent=2, default=str), encoding="utf-8"
+        )
+        (report_dir / "latest_long_native_cycle.md").write_text(
+            format_long_demo_cycle_summary(payload), encoding="utf-8"
+        )
+        cycle_row["timing_persist_ms"] = round((time.perf_counter() - persist_perf_start) * 1000.0, 3)
+        cycle_row["cycle_elapsed_ms"] = round((time.perf_counter() - cycle_perf_start) * 1000.0, 3)
+        payload["cycle"] = cycle_row
 
         return payload
 
