@@ -113,6 +113,8 @@ the dedicated pre-2023 OOS archives (untouched by the trade-study tuning):
 | **lo_skip0** | binance_pre2023 | 698 | **3.69** | 1.39 | +59.1% | −14.8% |
 | lo_sharpe3 | bybit_pre2023 | 120 | **0.73** | 0.58 | +7.0% | −13.7% |
 | lo_sharpe3 | binance_pre2023 | 183 | 3.47 | 1.30 | +44.9% | −11.7% |
+| **lo_sharpe3_robust** | bybit_pre2023 | 182 | **1.74** | 0.86 | +15.8% | −11.7% |
+| **lo_sharpe3_robust** | binance_pre2023 | 282 | **4.12** | 1.55 | +71.1% | −12.1% |
 
 **Read:** the simple `lo_skip0` baseline survives both pre-2023 roots. The
 grid-mined `lo_sharpe3` collapses to **Sharpe 0.73 on bybit_pre2023** (vs IS

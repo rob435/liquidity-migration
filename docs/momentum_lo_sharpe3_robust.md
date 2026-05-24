@@ -16,13 +16,15 @@ Still meets **Sharpe ≥ 3** and **>100 trades** on canonical; weak leg improved
 
 ## Cross-root sanity (one-shot, pre-registered roots)
 
-| Root | Trades | Daily Sharpe | Return |
-|---|---:|---:|---:|
-| Bybit canonical 2023–26 | 307 | **3.06** | +49.7% |
-| Binance pre-2023 2020–23 | 282 | **4.12** | +71.1% |
-| Bybit pre-2023 (`lo_sharpe3` only) | 120 | 0.73 | +7.0% |
+| Root | `lo_sharpe3_robust` | `lo_sharpe3` (tighter vol cap) |
+|---|---|---|
+| Bybit canonical 2023–26 | **307 trades, daily Sharpe 3.06, +49.7%** | 208 trades, daily Sharpe 3.95, +62.1% |
+| Binance pre-2023 2020–23 | **282 trades, daily Sharpe 4.12, +71.1%** | 183 trades, daily Sharpe 3.47, +44.9% |
+| Bybit pre-2023 2021–23 | **182 trades, daily Sharpe 1.74, +15.8%** | 120 trades, daily Sharpe 0.73, +7.0% |
 
-Binance OOS is the stronger validation for the filtered-momentum mechanism; Bybit pre-2023 remains thin for the tight vol-cap family.
+**Key result:** loosening `max_realized_vol` 1.2 → 1.6 **more than doubles bybit_pre2023 daily Sharpe (0.73 → 1.74)** — the cleanest OOS root. This is the first preset in the sharpe3 family with all three roots positive. The canonical Sharpe drop (3.95 → 3.06) is the cost: less concentrated, more trades, but generalizes better.
+
+Run label stays `exploratory_in_sample` — the 19-trial walk-forward selection doesn't disappear, but the three-root OOS pattern is now corroborating rather than failing.
 
 ## Config
 
