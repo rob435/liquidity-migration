@@ -303,6 +303,47 @@ def test_universe_refresh_subscribes_new_listings_and_unsubscribes_delistings(tm
         manager.stop()
 
 
+def test_universe_refresh_skips_diff_when_fetch_returns_empty(tmp_path: Path) -> None:
+    """A REST blip during universe refresh used to unsubscribe the pool
+    from every symbol because the empty fetch was diffed against the
+    existing universe (every previous symbol counted as "delisted").
+    That silently severed the WS kline feed until the next refresh
+    succeeded. Now an empty fetch is treated as a transient failure:
+    keep existing subscriptions, count an error, retry next tick."""
+    call_count = {"n": 0}
+
+    def _instruments_blip():
+        call_count["n"] += 1
+        if call_count["n"] >= 2:
+            return _instruments_payload([])  # simulate REST failure → empty
+        return _instruments_payload(["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+
+    manager, pool, _market = _build_manager(
+        tmp_path=tmp_path,
+        initial_symbols=["BTCUSDT", "ETHUSDT", "SOLUSDT"],
+        instruments_factory=lambda _: _instruments_blip(),
+    )
+    manager.start()
+    try:
+        # Sanity: pool starts with all three subscribed.
+        pre_universe = set(manager.universe_symbols())
+        assert pre_universe == {"BTCUSDT", "ETHUSDT", "SOLUSDT"}
+        # Refresh tick where REST returns nothing. Universe must stay intact.
+        result = manager.force_refresh_universe()
+        assert result == {"added": 0, "removed": 0, "size": 3}
+        post_universe = set(manager.universe_symbols())
+        assert post_universe == pre_universe, (
+            "empty universe fetch must NOT clear the existing universe"
+        )
+        # Error counter ticked up so operators can see the blip.
+        assert manager.stats()["universe_refresh_errors"] >= 1
+        # Pool's last update_subscriptions call must NOT be empty.
+        if pool.updates:
+            assert pool.updates[-1], "pool.update_subscriptions called with empty set"
+    finally:
+        manager.stop()
+
+
 def test_universe_symbols_returns_sorted_current_universe(tmp_path: Path) -> None:
     """The long daemon scopes its public ticker WS to the same universe
     the kline manager bootstraps. Manager exposes universe_symbols() as

@@ -230,6 +230,24 @@ class KlineStreamManager:
 
         Exposed for tests and operator-triggered manual refresh."""
         new_universe = set(self._fetch_universe())
+        # An empty fetch is almost always a transient REST failure (the
+        # default fetcher returns [] on exception, the long fetcher
+        # returns [] when the tickers REST call fails). Treating "no
+        # symbols" as "all symbols delisted" would unsubscribe the pool
+        # from every kline topic, killing the live feed until the next
+        # refresh succeeds — a single REST blip would silently sever
+        # the WS pipeline. Skip the diff in that case; existing
+        # subscriptions stay live, and the next refresh tick retries.
+        if not new_universe:
+            with self._lock:
+                size = len(self._universe)
+            _logger.warning(
+                "universe refresh returned empty set; keeping existing %d subscriptions",
+                size,
+            )
+            self._universe_refresh_errors += 1
+            self._last_universe_refresh_ms = _utc_now_ms()
+            return {"added": 0, "removed": 0, "size": size}
         with self._lock:
             previous = set(self._universe)
             additions = new_universe - previous
