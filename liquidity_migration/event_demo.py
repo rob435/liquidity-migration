@@ -68,7 +68,7 @@ class EventDemoCycleConfig:
     max_order_notional_pct_equity: float = 0.0
     wallet_balance_fraction: float = 1.0
     fallback_equity_usdt: float = 10_000.0
-    max_entry_lag_minutes: int = 15
+    max_entry_lag_minutes: int = 360  # was 15 — feature pipeline builds ~3-4h after bar close; 15min lag rejected every signal in live VPS audit 2026-05-24
     max_new_entries_per_cycle: int = 5
     entry_leverage: float = 2.0
     entry_order_type: str = "Market"
