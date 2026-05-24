@@ -1354,13 +1354,26 @@ class BybitKlineStreamPool:
     def check_stale_connections(self) -> int:
         """Inspect every connection's ``last_message_monotonic``. Connections
         idle past ``stale_reconnect_seconds`` are torn down and rebuilt with
-        the same slice. Returns the number of reconnects performed."""
+        the same slice. Returns the number of reconnects performed.
+
+        Also retries any connection where a PRIOR reconnect failed mid-way
+        (state.closed=True but assigned_symbols still set) — without this,
+        a single transient ``_websocket_factory`` failure would orphan
+        every symbol on that slice until the next hourly universe refresh
+        re-subscribed them. The watchdog ticks every ~10s, so persistent
+        outages still surface to logs while transient blips recover."""
         reconnects = 0
         now = time.monotonic()
         with self._lock:
             to_reconnect: list[int] = []
             for state in list(self._connections):
-                if state.closed or not state.assigned_symbols:
+                if not state.assigned_symbols:
+                    continue
+                if state.closed:
+                    # Prior reconnect failed and left this slice without a
+                    # live client. Retry now; the backoff inside the
+                    # reconnect path still protects the venue from a storm.
+                    to_reconnect.append(state.index)
                     continue
                 gap = now - state.last_message_monotonic
                 if gap >= self.stale_reconnect_seconds:
@@ -1380,19 +1393,22 @@ class BybitKlineStreamPool:
         if index >= len(self._connections):
             return
         state = self._connections[index]
+        # Snapshot the slice BEFORE clearing — we need to preserve it so a
+        # mid-reconnect failure leaves the watchdog enough state to retry
+        # on the next tick. Previously assigned_symbols was cleared
+        # eagerly; a transient _websocket_factory failure then orphaned
+        # every symbol on that slice until the next hourly universe
+        # refresh re-subscribed them. Now: keep assigned_symbols intact,
+        # only clear on a SUCCESSFUL resubscribe (which rebuilds the set
+        # in _subscribe_to_connection_locked).
         slice_symbols = sorted(state.assigned_symbols)
         _logger_ws_klines.warning(
             "kline connection reconnect conn=%d symbols=%d", index, len(slice_symbols),
         )
-        # Close the dead client, drop the symbol→conn mapping for the slice,
-        # then rebuild a fresh connection with the same slice.
         try:
             self._close_state(state)
         except Exception as exc:  # noqa: BLE001
             _logger_ws_klines.warning("close on reconnect failed conn=%d: %s", index, exc)
-        for symbol in list(state.assigned_symbols):
-            self._symbol_to_connection.pop(symbol, None)
-        state.assigned_symbols.clear()
         # Brief sleep so a reconnect storm doesn't pound the venue.
         if self.reconnect_backoff_seconds > 0.0:
             time.sleep(self.reconnect_backoff_seconds)
@@ -1402,9 +1418,18 @@ class BybitKlineStreamPool:
             )
         except Exception as exc:  # noqa: BLE001
             _logger_ws_klines.exception(
-                "kline reconnect failed to build new client conn=%d: %s", index, exc,
+                "kline reconnect failed to build new client conn=%d: %s; "
+                "watchdog will retry on next tick", index, exc,
             )
+            # State stays closed=True with assigned_symbols populated; the
+            # watchdog's closed+assigned branch above picks it up next tick.
             return
+        # Successful new client: clear the stale symbol→conn mapping (the
+        # closed client's entries are now invalid) and assigned_symbols
+        # (subscribe rebuilds it), then resubscribe.
+        for symbol in slice_symbols:
+            self._symbol_to_connection.pop(symbol, None)
+        state.assigned_symbols.clear()
         state.client = new_client
         state.closed = False
         state.last_message_monotonic = time.monotonic()
@@ -1415,8 +1440,13 @@ class BybitKlineStreamPool:
                 self._subscribe_to_connection_locked(state, slice_symbols)
             except Exception as exc:  # noqa: BLE001
                 _logger_ws_klines.exception(
-                    "kline reconnect resubscribe failed conn=%d: %s", index, exc,
+                    "kline reconnect resubscribe failed conn=%d: %s; "
+                    "marking closed for retry", index, exc,
                 )
+                # Subscribe failure: put the slice back on assigned_symbols
+                # and mark closed so the watchdog retries.
+                state.assigned_symbols.update(slice_symbols)
+                self._close_state(state)
 
     # -- shutdown -------------------------------------------------------
 

@@ -257,6 +257,78 @@ def test_reconnect_resubscribes_slice_on_stale_connection() -> None:
         pool.close()
 
 
+class _FailingFactory:
+    """Factory wrapper that fails the Nth build to simulate a transient
+    WS outage during reconnect."""
+
+    def __init__(self, *, fail_on_call_n: int = 2) -> None:
+        self.built: list[_FakeWebSocket] = []
+        self._fail_on_call_n = fail_on_call_n
+        self._calls = 0
+        self.fail_enabled = True
+
+    def __call__(self, *, testnet: bool, demo: bool, channel_type: str) -> _FakeWebSocket:
+        self._calls += 1
+        if self.fail_enabled and self._calls == self._fail_on_call_n:
+            raise RuntimeError("simulated WS server outage during reconnect")
+        ws = _FakeWebSocket()
+        self.built.append(ws)
+        return ws
+
+
+def test_failed_reconnect_keeps_slice_for_retry() -> None:
+    """Regression guard: a transient _websocket_factory failure during
+    reconnect MUST NOT orphan the slice's symbols.
+
+    Before the fix: _reconnect_connection_locked cleared assigned_symbols
+    eagerly + cleared the symbol→conn mapping, then tried to build a new
+    client. If the factory raised, the state was left closed=True with
+    assigned_symbols=empty — the watchdog's `closed or not assigned_symbols`
+    guard then skipped it forever. Symbols stuck without live data until
+    the next hourly universe refresh re-subscribed them.
+
+    After the fix: keep assigned_symbols + symbol→conn intact until a
+    successful new client is built. On factory failure, leave the slice
+    in a re-tryable state (closed=True + assigned_symbols populated) so
+    the watchdog picks it up next tick."""
+    factory = _FailingFactory(fail_on_call_n=2)
+    pool = BybitKlineStreamPool(
+        interval_minutes=60,
+        topics_per_connection=10,
+        stale_warning_seconds=0.01,
+        stale_reconnect_seconds=0.02,
+        watchdog_interval_seconds=0.05,
+        connection_spacing_seconds=0.0,
+        reconnect_backoff_seconds=0.0,
+        websocket_factory=factory,
+    )
+    pool.subscribe(["AAA_USDT", "BBB_USDT"], lambda s, b, c: None)
+    try:
+        state = pool._connections[0]  # type: ignore[attr-defined]
+        # Force-stale.
+        state.last_message_monotonic = time.monotonic() - 5.0
+        # First check_stale_connections call: reconnect attempt fails.
+        pool.check_stale_connections()
+        # State must STILL hold the slice symbols so the next tick retries.
+        assert state.closed is True, "closed should be True after failed reconnect"
+        assert set(state.assigned_symbols) == {"AAA_USDT", "BBB_USDT"}, (
+            "assigned_symbols must survive a failed reconnect for retry"
+        )
+        # Stop failing and run watchdog again — the closed-with-symbols
+        # branch must pick this up and successfully reconnect.
+        factory.fail_enabled = False
+        reconnects = pool.check_stale_connections()
+        assert reconnects == 1, "watchdog must retry the failed reconnect"
+        assert state.closed is False
+        assert set(state.assigned_symbols) == {"AAA_USDT", "BBB_USDT"}
+        # The new (last) WebSocket is subscribed.
+        assert sorted(factory.built[-1].subscribed_symbols) == ["AAA_USDT", "BBB_USDT"]
+        # Pool's public view of subscriptions is intact end-to-end.
+        assert pool.subscribed_symbols() == {"AAA_USDT", "BBB_USDT"}
+    finally:
+        pool.close()
+
+
 def test_callback_updates_last_message_timestamp() -> None:
     """An incoming bar must reset the staleness clock so a healthy stream is
     never reconnected by accident."""
