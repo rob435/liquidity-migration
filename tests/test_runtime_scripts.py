@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 
@@ -148,6 +149,113 @@ def test_demo_health_watchdog_units_present() -> None:
     assert "SuccessExitStatus=0 1" in service, "alert exit code 1 must not register as failure"
     assert "OnCalendar=" in timer
     assert "--window-hours" in script and "--telegram" in script
+
+
+def _write_demo_cycle_parquet(
+    root: Path,
+    *,
+    cycles: list[dict],
+    date: str = "2026-05-24",
+) -> None:
+    """Helper for the watchdog tests: write cycles to the date-partitioned
+    layout the script reads (data/{root}/event_demo_cycles/date=YYYY-MM-DD/*.parquet)."""
+    import polars as pl  # local: keep top-level imports lean
+
+    cycles_dir = root / "event_demo_cycles" / f"date={date}"
+    cycles_dir.mkdir(parents=True, exist_ok=True)
+    pl.DataFrame(cycles).write_parquet(cycles_dir / "cycles.parquet")
+
+
+def test_health_watchdog_alerts_on_universe_coverage_gap(tmp_path: Path) -> None:
+    """Even with entries > 0, a non-zero coverage_gap means the universe
+    doesn't reach the rank ceiling and the strategy is effectively
+    signal-starved. The Composer audit caught this: 1 entry/24h was
+    reported "healthy" while observed_prior7_rank_max=150 < required=300
+    blocked the entire signal pipeline.
+
+    The watchdog reads coverage_gap from the LATEST cycle (gap is a
+    point-in-time bootstrap state, not an accumulator) so a 24h window
+    with one early entry must still alert when the current cycle shows
+    the gap is back."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from check_demo_entry_health import check_entries
+
+    from datetime import datetime, timezone
+    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    ts_ms = int(time.time() * 1000) - 60_000
+    # Ascending ts_ms — first cycle had a working strategy (entry+no gap),
+    # latest cycle shows the coverage gap reopened.
+    cycles = [
+        {
+            "mode": "submit", "ts_ms": ts_ms - (1499 - i) * 60_000,
+            "entries_executed": 1 if i == 0 else 0,
+            "entry_candidates": 1 if i == 0 else 0,
+            "skipped_stale": 50,
+            "universe_coverage": {"coverage_gap": 0 if i < 1400 else 150},
+        }
+        for i in range(1500)  # ~25h of cycles
+    ]
+    _write_demo_cycle_parquet(tmp_path, cycles=cycles, date=today)
+
+    code, msg = check_entries(data_root=tmp_path, window_hours=24)
+    assert code == 1
+    assert "coverage gap=150" in msg
+
+
+def test_health_watchdog_alerts_on_cycle_starvation(tmp_path: Path) -> None:
+    """A daemon that's stuck in bootstrap or OOM-looping emits far fewer
+    cycles than the expected 60/h cadence. Composer's pre-fix snapshot
+    showed 19 minutes between cycles — the watchdog should catch this
+    rather than waiting 24h for the entries==0 alert to fire."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from check_demo_entry_health import check_entries
+
+    from datetime import datetime, timezone
+    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    ts_ms = int(time.time() * 1000) - 60_000
+    # Only 5 cycles in 24h — well below the 0.8/hr * 24h = ~19 expected.
+    cycles = [
+        {
+            "mode": "submit", "ts_ms": ts_ms - i * 3_600_000,
+            "entries_executed": 0, "entry_candidates": 0, "skipped_stale": 0,
+            "universe_coverage": {"coverage_gap": 0},
+        }
+        for i in range(5)
+    ]
+    _write_demo_cycle_parquet(tmp_path, cycles=cycles, date=today)
+
+    code, msg = check_entries(data_root=tmp_path, window_hours=24)
+    assert code == 1
+    assert "cycles in last 24h" in msg
+
+
+def test_health_watchdog_passes_when_coverage_ok_and_entries_present(tmp_path: Path) -> None:
+    """Sanity: the happy path still returns 0 when coverage gap is 0,
+    cycle cadence is healthy, and at least one entry fired."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from check_demo_entry_health import check_entries
+
+    from datetime import datetime, timezone
+    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    ts_ms = int(time.time() * 1000) - 60_000
+    cycles = [
+        {
+            "mode": "submit", "ts_ms": ts_ms - i * 60_000,
+            "entries_executed": 2 if i == 0 else 0,
+            "entry_candidates": 2 if i == 0 else 0,
+            "skipped_stale": 0,
+            "universe_coverage": {"coverage_gap": 0},
+        }
+        for i in range(60)  # 60 cycles in last hour
+    ]
+    _write_demo_cycle_parquet(tmp_path, cycles=cycles, date=today)
+
+    code, msg = check_entries(data_root=tmp_path, window_hours=1)
+    assert code == 0
+    assert "healthy" in msg
 
 
 def test_live_runners_do_not_write_repo_bytecode() -> None:

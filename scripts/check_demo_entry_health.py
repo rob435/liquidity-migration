@@ -32,7 +32,29 @@ def _latest_cycle_parquet(cycles_root: Path) -> Path | None:
     return parts[-1] if parts else None
 
 
-def check_entries(*, data_root: Path, window_hours: int) -> tuple[int, str]:
+def _last_coverage_gap(df: pl.DataFrame) -> int | None:
+    """Return the universe_coverage_gap from the most recent submit cycle.
+
+    The cycle telemetry serialises universe_coverage as a struct/dict per row;
+    we only need the latest reading because gaps are persistent until the
+    next bootstrap completes. A non-zero gap means the strategy is
+    signal-starved REGARDLESS of entry count — the watchdog must surface
+    this even when entries > 0 happen to slip through."""
+    if df.is_empty() or "universe_coverage" not in df.columns:
+        return None
+    last = df.tail(1).to_dicts()[0].get("universe_coverage")
+    if not isinstance(last, dict):
+        return None
+    gap = last.get("coverage_gap")
+    try:
+        return int(gap) if gap is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def check_entries(
+    *, data_root: Path, window_hours: int, min_cycles_per_hour: float = 0.8,
+) -> tuple[int, str]:
     cycles_root = data_root / "event_demo_cycles"
     latest = _latest_cycle_parquet(cycles_root)
     if latest is None:
@@ -57,17 +79,40 @@ def check_entries(*, data_root: Path, window_hours: int) -> tuple[int, str]:
     candidates = int(df.select(pl.col("entry_candidates").fill_null(0).sum()).item()) if cycles else 0
     # events pipeline rollup
     stale = int(df.select(pl.col("skipped_stale").fill_null(0).sum()).item()) if cycles else 0
+    coverage_gap = _last_coverage_gap(df)
+    expected_cycles = int(window_hours * 60 * min_cycles_per_hour)
+    suffix = (
+        f"({candidates} candidates seen, {cycles} cycles, {stale} stale-skips, "
+        f"coverage_gap={coverage_gap})"
+    )
 
     if cycles == 0:
         return 2, f"no submit-cycles in last {window_hours}h"
+    # Coverage gap means the universe doesn't reach the rank ceiling the
+    # strategy needs to identify rocket-symbols — entries CANNOT fire, so
+    # this is always an alert even when historical entries linger in the
+    # ledger from before the gap appeared.
+    if coverage_gap is not None and coverage_gap > 0:
+        return 1, (
+            f"ALERT: universe coverage gap={coverage_gap} prevents signal generation. "
+            f"Strategy needs prior7 rank coverage up to required threshold but the "
+            f"feature build only reaches the observed max. Bootstrap probably "
+            f"incomplete or universe_rank_end too low. {suffix}"
+        )
+    # Cycle starvation: the daemon may have stalled, been killed, or never
+    # restarted. Caught here distinct from "ran fine, zero signals."
+    if cycles < expected_cycles:
+        return 1, (
+            f"ALERT: only {cycles} cycles in last {window_hours}h "
+            f"(expected >= {expected_cycles}). Daemon may be crashing, OOM-looping, "
+            f"or stuck in bootstrap. {suffix}"
+        )
     if entries > 0:
         return 0, (
-            f"healthy: {entries} entries executed in last {window_hours}h "
-            f"({candidates} candidates seen, {cycles} cycles, {stale} stale-skips)"
+            f"healthy: {entries} entries executed in last {window_hours}h {suffix}"
         )
     return 1, (
-        f"ALERT: 0 entries in last {window_hours}h "
-        f"({candidates} candidates seen, {cycles} cycles, {stale} stale-skips). "
+        f"ALERT: 0 entries in last {window_hours}h {suffix}. "
         f"If stale-skips > 0, signals are being detected but rejected as too old — "
         f"check MAX_ENTRY_LAG_MINUTES vs the feature-build cadence. "
         f"If candidates also 0, no signals are firing — check universe coverage and event filters."
@@ -95,10 +140,20 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--data-root", required=True, type=Path, help="Demo data root (e.g. data/bybit-demo-event)")
     p.add_argument("--window-hours", type=int, default=24, help="Window to check for entries")
+    p.add_argument(
+        "--min-cycles-per-hour", type=float, default=0.8,
+        help="Alert if observed cycle/hour rate is below this. Default 0.8 "
+        "tolerates brief deploy gaps but catches a daemon stuck in bootstrap "
+        "or in an OOM/restart loop.",
+    )
     p.add_argument("--telegram", action="store_true", help="Post alert via Telegram if unhealthy")
     args = p.parse_args()
 
-    code, msg = check_entries(data_root=args.data_root, window_hours=args.window_hours)
+    code, msg = check_entries(
+        data_root=args.data_root,
+        window_hours=args.window_hours,
+        min_cycles_per_hour=args.min_cycles_per_hour,
+    )
     print(msg)
     if code != 0 and args.telegram:
         maybe_telegram(f"[liquidity-migration demo health] {msg}")
