@@ -40,12 +40,14 @@ from .momentum_factor import (
     MODES as MOMENTUM_FACTOR_MODES,
     PRESET_LO_CARRY0,
     PRESET_LO_SHARPE3,
+    PRESET_LO_ADAPTIVE,
     PRESET_LO_SHARPE3_ROBUST,
     PRESET_LO_SKIP0,
     SIZINGS as MOMENTUM_FACTOR_SIZINGS,
     MomentumFactorConfig,
     lo_carry0_preset,
     lo_sharpe3_preset,
+    lo_adaptive_preset,
     lo_sharpe3_robust_preset,
     lo_skip0_preset,
     run_momentum_factor_research,
@@ -2498,6 +2500,8 @@ def main(argv: list[str] | None = None) -> int:
             factor_config = lo_sharpe3_preset(start_date=args.start, end_date=args.end)
         elif args.preset == PRESET_LO_SHARPE3_ROBUST:
             factor_config = lo_sharpe3_robust_preset(start_date=args.start, end_date=args.end)
+        elif args.preset == PRESET_LO_ADAPTIVE:
+            factor_config = lo_adaptive_preset(start_date=args.start, end_date=args.end)
         else:
             lookbacks = tuple(
                 int(item.strip())
