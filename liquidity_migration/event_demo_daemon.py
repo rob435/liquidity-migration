@@ -556,7 +556,7 @@ class EventDemoDaemon:
         if self._kline_stream_manager is not None:
             # Already built (tests inject; or constructor was passed one).
             try:
-                self._kline_stream_manager.start()
+                self._safe_manager_start(self._kline_stream_manager)
             except Exception as exc:  # noqa: BLE001 - degrade to REST
                 _logger.exception("kline_stream_manager start failed: %s", exc)
                 self._kline_stream_manager_failed = True
@@ -571,7 +571,7 @@ class EventDemoDaemon:
             self._kline_stream_manager_failed = True
             return
         try:
-            manager.start()
+            self._safe_manager_start(manager)
         except Exception as exc:  # noqa: BLE001
             _logger.exception("kline_stream_manager.start failed; degrading to REST: %s", exc)
             self._kline_stream_manager_failed = True
@@ -581,6 +581,15 @@ class EventDemoDaemon:
                 pass
             return
         self._kline_stream_manager = manager
+
+    def _safe_manager_start(self, manager: Any) -> None:
+        """Call manager.start() passing the daemon shutdown event when the
+        manager supports it. Backwards-compatible with manager stubs that
+        don't accept the kwarg (tests use _StubKlineStreamManager)."""
+        try:
+            manager.start(shutdown_event=self._shutdown)
+        except TypeError:
+            manager.start()
 
     def _stop_kline_stream_manager(self) -> None:
         manager = self._kline_stream_manager

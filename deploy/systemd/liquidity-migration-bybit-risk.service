@@ -29,6 +29,10 @@ ExecStart=/opt/liquidity-migration/scripts/run_bybit_demo_ws_risk_engine.sh
 Restart=always
 RestartSec=2
 KillMode=control-group
+# Bootstrap can take 60-120s on a cold start with a large kline universe.
+# 90s default would SIGKILL the daemon if shutdown lands mid-bootstrap.
+# Manager now respects shutdown_event, but keep margin for very slow REST.
+TimeoutStopSec=180
 Nice=-5
 IOSchedulingClass=best-effort
 IOSchedulingPriority=4

@@ -148,13 +148,22 @@ class KlineStreamManager:
     def is_started(self) -> bool:
         return self._started and not self._stopped
 
-    def start(self) -> dict[str, Any]:
-        """Start the manager: recover, subscribe WS, bootstrap, start threads.
+    def start(self, *, shutdown_event: threading.Event | None = None) -> dict[str, Any]:
+        """Start the manager: recover, bootstrap, subscribe WS, start threads.
 
         Blocks until ``bootstrap_completion_threshold`` of the universe is
         covered or ``bootstrap_timeout_seconds`` elapses, whichever first.
+        If ``shutdown_event`` is supplied and gets set during bootstrap,
+        the method returns early so the daemon can stop responsively
+        instead of waiting for systemd's TimeoutStopSec to expire.
 
-        Returns a stats dict describing the bootstrap + initial subscription.
+        **Ordering is intentional:** bootstrap runs BEFORE pool subscribe.
+        Earlier ordering (pool first, then bootstrap) starved the REST
+        bootstrap workers via WS event GIL pressure — 567 symbols took
+        383s and only 100 succeeded before the deadline cancelled the
+        remaining 467. Bootstrap-first lets REST run uncontested in
+        ~100s; the brief window where a bar closes during bootstrap is
+        recovered by the cycle's REST fallback on the next tick.
         """
         if self._started:
             return self._start_stats(blocked=False)
@@ -166,8 +175,14 @@ class KlineStreamManager:
         universe = self._fetch_universe()
         with self._lock:
             self._universe = set(universe)
+        if shutdown_event is not None and shutdown_event.is_set():
+            _logger.info("kline_stream_manager start aborted: shutdown requested before bootstrap")
+            return self._start_stats(blocked=False)
+        self._bootstrap_universe(self._universe, shutdown_event=shutdown_event)
+        if shutdown_event is not None and shutdown_event.is_set():
+            _logger.info("kline_stream_manager start aborted: shutdown requested after bootstrap")
+            return self._start_stats(blocked=True)
         self._subscribe_pool(self._universe)
-        self._bootstrap_universe(self._universe)
         if self.flush_interval_seconds > 0.0:
             self._store.start_flush_thread()
         if self.pool is not None:
@@ -287,6 +302,7 @@ class KlineStreamManager:
         symbols: set[str] | list[str] | None,
         *,
         label: str = "bootstrap",
+        shutdown_event: threading.Event | None = None,
     ) -> None:
         if not symbols:
             return
@@ -345,7 +361,17 @@ class KlineStreamManager:
                 ): symbol
                 for symbol in targets
             }
+            shutdown_triggered = False
             for future in _as_completed_with_deadline(futures, deadline):
+                if shutdown_event is not None and shutdown_event.is_set():
+                    # Daemon shutdown requested mid-bootstrap. Cancel every
+                    # remaining future so the executor's `with` block exits
+                    # quickly instead of waiting on slow REST calls — this
+                    # is what was triggering systemd's 90s SIGKILL.
+                    shutdown_triggered = True
+                    for f in list(futures):
+                        f.cancel()
+                    break
                 symbol = futures[future]
                 try:
                     inserted = future.result()
@@ -374,6 +400,11 @@ class KlineStreamManager:
                             len(futures) - succeeded - failed,
                         )
                         threshold_logged = True
+            if shutdown_triggered:
+                _logger.info(
+                    "%s aborted: shutdown requested with %d/%d done",
+                    label, succeeded + failed, len(targets),
+                )
         elapsed = time.monotonic() - start
         self._bootstrap_result.symbols_succeeded += succeeded
         self._bootstrap_result.symbols_failed += failed

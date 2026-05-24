@@ -1843,6 +1843,7 @@ def _download_recent_1h_klines(
     # listed, mid-bootstrap), so we explicitly split into store-covered and
     # store-uncovered subsets and fall back to REST only for the uncovered.
     store_frame = _empty_klines()
+    store_fully_covers = False
     if kline_store is not None:
         try:
             covered_set = kline_store.symbols_with_coverage_through(end_ms)
@@ -1850,6 +1851,7 @@ def _download_recent_1h_klines(
             _logger.warning("kline_store coverage query failed; ignoring store: %s", exc)
             covered_set = set()
         covered_symbols = [s for s in symbols if s in covered_set]
+        store_fully_covers = len(covered_symbols) == len(symbols)
         if covered_symbols:
             try:
                 store_frame = kline_store.get_klines(
@@ -1858,9 +1860,24 @@ def _download_recent_1h_klines(
             except Exception as exc:  # noqa: BLE001
                 _logger.warning("kline_store get_klines failed; ignoring store: %s", exc)
                 store_frame = _empty_klines()
+                store_fully_covers = False
         if not store_frame.is_empty():
             stats["store_rows"] = store_frame.height
             stats["store_symbols"] = store_frame.select("symbol").unique().height
+
+    # FAST PATH: if the WS store fully covers the universe at end_ms,
+    # skip the on-disk cache read entirely. Reading the full parquet
+    # dataset costs 5-10s for ~400 symbols × 45 days; the store
+    # serves the same data in <50ms. Only matters once the bootstrap
+    # has populated the store — until then we still hit the disk cache.
+    if store_fully_covers and not store_frame.is_empty():
+        output = _dedupe_recent_klines(store_frame)
+        stats["fetch_symbols"] = 0
+        stats["output_rows"] = output.height
+        _write_demo_kline_compact_cache(
+            cache_root, symbols=symbols, start_ms=start_ms, end_ms=end_ms, klines=output,
+        )
+        return output, stats
 
     # 2) On-disk caches still apply to symbols not yet in the store, so the
     # legacy fast path is preserved for the bootstrap window.

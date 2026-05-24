@@ -541,7 +541,7 @@ class LongNativeDemoDaemon:
             return
         if self._kline_stream_manager is not None:
             try:
-                self._kline_stream_manager.start()
+                self._safe_manager_start(self._kline_stream_manager)
             except Exception as exc:  # noqa: BLE001
                 _logger.exception("long kline_stream_manager start failed: %s", exc)
                 self._kline_stream_manager_failed = True
@@ -556,7 +556,7 @@ class LongNativeDemoDaemon:
             self._kline_stream_manager_failed = True
             return
         try:
-            manager.start()
+            self._safe_manager_start(manager)
         except Exception as exc:  # noqa: BLE001
             _logger.exception("long kline_stream_manager.start failed; degrading: %s", exc)
             self._kline_stream_manager_failed = True
@@ -566,6 +566,15 @@ class LongNativeDemoDaemon:
                 pass
             return
         self._kline_stream_manager = manager
+
+    def _safe_manager_start(self, manager: Any) -> None:
+        """Pass the daemon's shutdown event through to manager.start()
+        so a SIGTERM mid-bootstrap exits responsively. Backwards-
+        compatible with manager stubs that don't accept the kwarg."""
+        try:
+            manager.start(shutdown_event=self._shutdown)
+        except TypeError:
+            manager.start()
 
     def _stop_kline_stream_manager(self) -> None:
         manager = self._kline_stream_manager

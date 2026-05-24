@@ -473,6 +473,54 @@ def test_download_recent_1h_klines_uses_store_fast_path(tmp_path: Path) -> None:
     assert stats["fetched_rows"] == 0
 
 
+def test_download_recent_1h_klines_store_full_coverage_skips_disk_cache(tmp_path: Path) -> None:
+    """When the WS store fully covers the universe at end_ms, the cycle
+    must skip the on-disk parquet cache read entirely. Reading the full
+    dataset costs 5-10s on a populated cache; the store serves the same
+    in <50ms. Asserted by writing a SENTINEL row to the disk cache that
+    would corrupt the output if read — the fast path must skip it."""
+    from liquidity_migration.kline_store import KlineStore
+    from liquidity_migration.storage import write_dataset
+
+    # Disk cache holds a sentinel row that would surface if read.
+    sentinel = pl.DataFrame([{
+        "symbol": "AAAUSDT", "ts_ms": 999 * MS_PER_HOUR,
+        "open": 0.0, "high": 0.0, "low": 0.0, "close": 0.0,
+        "volume_base": 0.0, "turnover_quote": 0.0, "source": "DISK_SENTINEL",
+    }])
+    write_dataset(sentinel, tmp_path, "event_demo_klines_1h")
+
+    # Store has the FULL universe covered at end_ms.
+    store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
+    for hour in range(3):
+        ts = hour * MS_PER_HOUR
+        for symbol in ("AAAUSDT", "BBBUSDT"):
+            store.add_bar(
+                symbol,
+                {"start": ts, "open": "100", "high": "110", "low": "90",
+                 "close": "105", "volume": "1", "turnover": "1"},
+                confirmed=True,
+            )
+
+    output, stats = _download_recent_1h_klines(
+        ["AAAUSDT", "BBBUSDT"],
+        start_ms=0,
+        end_ms=2 * MS_PER_HOUR,
+        config=ResearchConfig(data_root=tmp_path),
+        workers=1,
+        market_client=FailingKlineMarket(),
+        cache_root=tmp_path,
+        kline_store=store,
+    )
+    assert output.height == 6
+    # Disk cache stat shows 0 — we didn't read it.
+    assert stats["cache_rows"] == 0
+    assert stats["cache_symbols"] == 0
+    assert stats["store_rows"] == 6
+    # Sentinel never made it into the output.
+    assert "DISK_SENTINEL" not in output["source"].to_list()
+
+
 def test_download_recent_1h_klines_falls_back_to_rest_for_uncovered_symbols(tmp_path: Path) -> None:
     """Hybrid path: store covers one symbol, REST fills the other."""
     from liquidity_migration.kline_store import KlineStore

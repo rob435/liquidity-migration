@@ -486,6 +486,122 @@ def test_bootstrap_stats_count_every_completion_even_past_threshold(tmp_path: Pa
         manager.stop()
 
 
+def test_start_respects_shutdown_event_during_bootstrap(tmp_path: Path) -> None:
+    """Regression: when shutdown_event fires during bootstrap, manager.start
+    must exit promptly instead of blocking until every REST future finishes.
+    The previous behaviour blocked for 90+ seconds → systemd SIGKILL.
+
+    Triggered by setting the shutdown event AFTER the bootstrap loop has
+    picked up at least one future. The remaining futures get cancelled,
+    the for-loop breaks, and start() returns within seconds."""
+
+    # Slow REST: each fetch takes 0.5s so we can interleave the shutdown.
+    def _slow_klines(symbol, interval, start, end):
+        time.sleep(0.5)
+        return [
+            {"ts_ms": start + i * MS_PER_HOUR, "open": 1.0, "high": 1.0,
+             "low": 1.0, "close": 1.0, "volume_base": 1.0, "turnover_quote": 1.0}
+            for i in range(2)
+        ]
+
+    def _instruments(call_n):
+        return _instruments_payload([f"SYM{i:02d}USDT" for i in range(30)])
+
+    pool = _RecordingPool()
+    market = _FakeMarketData(
+        instruments_factory=_instruments, kline_factory=_slow_klines,
+    )
+    manager = KlineStreamManager(
+        market_data=market, cache_root=tmp_path,
+        lookback_days=2, bootstrap_workers=2,  # only 2 workers so we have queued futures
+        universe_refresh_interval_seconds=0.0,
+        bootstrap_completion_threshold=1.0,
+        bootstrap_timeout_seconds=60.0,
+        flush_interval_seconds=0.0, retain_days=30,
+        topics_per_connection=10, pool=pool,
+    )
+    shutdown = threading.Event()
+    # Fire the shutdown after 0.7s — after the first batch of futures
+    # has started but well before all 30 symbols finish.
+    threading.Timer(0.7, shutdown.set).start()
+
+    t = time.monotonic()
+    manager.start(shutdown_event=shutdown)
+    elapsed = time.monotonic() - t
+    try:
+        # start() should return WELL under the 60s bootstrap timeout —
+        # demonstrates the shutdown signal was honored.
+        assert elapsed < 30.0, f"start() blocked for {elapsed:.1f}s past shutdown"
+        # Some symbols processed before shutdown; the rest were cancelled.
+        # Loose bound — exact count depends on scheduler.
+        stats = manager.stats()["bootstrap"]
+        assert stats["symbols_succeeded"] >= 1, "no symbols succeeded before shutdown?"
+        assert stats["symbols_succeeded"] < 30, "shutdown ignored — all symbols completed"
+    finally:
+        manager.stop()
+
+
+def test_start_bootstraps_before_subscribing_pool(tmp_path: Path) -> None:
+    """Regression: the pool must be subscribed AFTER bootstrap, not before.
+
+    Earlier ordering (pool first, then bootstrap) starved REST workers via
+    WS GIL pressure — bootstrap got 100/567 symbols in 383s instead of
+    completing in ~95s. This test pins the order so a refactor can't
+    accidentally re-introduce the regression."""
+
+    call_order: list[str] = []
+
+    def _instruments(call_n):
+        call_order.append("instruments")
+        return _instruments_payload(["BTCUSDT", "ETHUSDT"])
+
+    def _klines(symbol, interval, start, end):
+        call_order.append(f"klines:{symbol}")
+        return [
+            {"ts_ms": start + i * MS_PER_HOUR, "open": 1.0, "high": 1.0,
+             "low": 1.0, "close": 1.0, "volume_base": 1.0, "turnover_quote": 1.0}
+            for i in range(3)
+        ]
+
+    class _OrderTrackingPool:
+        def __init__(self):
+            self.subscribed_at: int | None = None
+
+        def subscribe(self, symbols, callback):
+            self.subscribed_at = len(call_order)
+            call_order.append("pool.subscribe")
+
+        def update_subscriptions(self, syms): return {"added": 0, "removed": 0}
+        def close(self): pass
+        def start_watchdog(self): pass
+        def stop_watchdog(self): pass
+        def stats(self): return {}
+        def subscribed_symbols(self): return set()
+
+    pool = _OrderTrackingPool()
+    market = _FakeMarketData(instruments_factory=_instruments, kline_factory=_klines)
+    manager = KlineStreamManager(
+        market_data=market, cache_root=tmp_path,
+        lookback_days=2, bootstrap_workers=2,
+        universe_refresh_interval_seconds=0.0,
+        bootstrap_completion_threshold=1.0,
+        flush_interval_seconds=0.0,
+        topics_per_connection=10, pool=pool,
+    )
+    manager.start()
+    try:
+        # Kline fetches happen BEFORE pool.subscribe.
+        klines_indices = [i for i, c in enumerate(call_order) if c.startswith("klines:")]
+        subscribe_index = call_order.index("pool.subscribe")
+        assert klines_indices, "no klines fetched"
+        assert max(klines_indices) < subscribe_index, (
+            f"pool subscribed at index {subscribe_index} before last kline at "
+            f"{max(klines_indices)} — REST bootstrap will be starved"
+        )
+    finally:
+        manager.stop()
+
+
 def test_stats_reflect_ws_freshness_via_lag(tmp_path: Path) -> None:
     manager, pool, _market = _build_manager(
         tmp_path=tmp_path, initial_symbols=["BTCUSDT"],
