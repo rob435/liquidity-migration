@@ -67,7 +67,27 @@ PRESET_LO_SKIP0 = "lo_skip0"
 PRESET_LO_CARRY0 = "lo_carry0"
 PRESET_LO_SHARPE3 = "lo_sharpe3"
 PRESET_LO_SHARPE3_ROBUST = "lo_sharpe3_robust"
-FACTOR_PRESETS = (PRESET_LO_SKIP0, PRESET_LO_CARRY0, PRESET_LO_SHARPE3, PRESET_LO_SHARPE3_ROBUST)
+PRESET_LO_ADAPTIVE = "lo_adaptive"
+FACTOR_PRESETS = (
+    PRESET_LO_SKIP0,
+    PRESET_LO_CARRY0,
+    PRESET_LO_SHARPE3,
+    PRESET_LO_SHARPE3_ROBUST,
+    PRESET_LO_ADAPTIVE,
+)
+
+VARIANT_STANDARD = "standard"
+VARIANT_QUALITY_BLEND = "quality_blend"
+VARIANT_BTC_RESIDUAL = "btc_residual"
+VARIANT_ADAPTIVE_DUAL = "adaptive_dual"
+VARIANT_DISPERSION_GATED = "dispersion_gated"
+FACTOR_VARIANTS = (
+    VARIANT_STANDARD,
+    VARIANT_QUALITY_BLEND,
+    VARIANT_BTC_RESIDUAL,
+    VARIANT_ADAPTIVE_DUAL,
+    VARIANT_DISPERSION_GATED,
+)
 
 
 def lo_skip0_preset(*, start_date: str = "", end_date: str = "") -> MomentumFactorConfig:
@@ -138,6 +158,32 @@ def lo_sharpe3_preset(*, start_date: str = "", end_date: str = "") -> MomentumFa
         rebalance_days=7,
         max_realized_vol=1.2,
         max_turnover_rank=15,
+    )
+
+
+def lo_adaptive_preset(*, start_date: str = "", end_date: str = "") -> MomentumFactorConfig:
+    """Regime-adaptive dual book: momentum when BTC>50d SMA, liquidity-shelter when off.
+
+    Structural hypothesis for tri-root gate (Bybit IS 2023-26, Bybit OOS 2022,
+    Binance OOS 2020). Not a parameter grid — one pre-declared architecture.
+    """
+    return MomentumFactorConfig(
+        start_date=start_date,
+        end_date=end_date,
+        mode=MODE_LONG_ONLY,
+        universe_size=30,
+        long_quantile=0.20,
+        momentum_skip_days=0,
+        carry_weight=0.0,
+        reversal_lookback_days=3,
+        require_positive_ts_momentum_for_longs=True,
+        vol_target_annual=0.15,
+        regime_off_scale=1.0,
+        use_regime_filter=True,
+        rebalance_days=7,
+        max_realized_vol=1.4,
+        max_turnover_rank=10,
+        factor_variant=VARIANT_ADAPTIVE_DUAL,
     )
 
 
@@ -235,6 +281,10 @@ class MomentumFactorConfig:
     max_momentum_avg: float | None = None
     max_turnover_rank: int | None = None
     min_turnover_rank: int | None = None
+
+    # --- structural variants (hypothesis tests, not parameter grids) ---
+    factor_variant: str = VARIANT_STANDARD
+    min_momentum_dispersion: float | None = None  # skip rebalance if xs std(mom) below
 
     # --- promotion thresholds ---
     promotion_min_avg_sharpe: float = 1.0
@@ -386,6 +436,8 @@ def _validate_config(cfg: MomentumFactorConfig) -> None:
         raise ValueError("vol_floor_annual must be positive")
     if cfg.vol_target_annual < 0.0:
         raise ValueError("vol_target_annual must be non-negative (0 disables vol-targeting)")
+    if cfg.factor_variant not in FACTOR_VARIANTS:
+        raise ValueError(f"factor_variant must be one of {FACTOR_VARIANTS}")
 
 
 def build_factor_features(
@@ -504,8 +556,9 @@ def build_factor_features(
             .rolling_mean(window_size=config.regime_sma_days, min_samples=config.regime_sma_days)
             .alias("regime_sma")
         ).with_columns(
-            (pl.col("close") > pl.col("regime_sma")).alias("regime_on")
-        ).select(["ts_ms", "regime_sma", "regime_on"])
+            (pl.col("close") > pl.col("regime_sma")).alias("regime_on"),
+            (pl.col("close") / pl.col("close").shift(7) - 1.0).alias("btc_return_7d"),
+        ).select(["ts_ms", "regime_sma", "regime_on", "btc_return_7d"])
         daily = daily.join(btc, on="ts_ms", how="left").with_columns(
             pl.col("regime_on").fill_null(False)
         )
@@ -514,6 +567,7 @@ def build_factor_features(
             [
                 pl.lit(None, dtype=pl.Float64).alias("regime_sma"),
                 pl.lit(False).alias("regime_on"),
+                pl.lit(None, dtype=pl.Float64).alias("btc_return_7d"),
             ]
         )
 
@@ -624,9 +678,22 @@ def _run_factor_pipeline(
         if not rows_today:
             continue
 
+        if config.min_momentum_dispersion is not None:
+            moms = [
+                float(r.get("momentum_7d") or r.get("momentum_14d") or 0)
+                for r in rows_today
+                if r.get("in_universe")
+            ]
+            if len(moms) >= 5 and float(np.std(moms)) < config.min_momentum_dispersion:
+                stats["rebalances_total"] += 1
+                continue
+
         positions = _build_target_portfolio(rows_today, config=config)
         regime_on = bool(rows_today[0].get("regime_on", False)) if rows_today else False
-        regime_scale = 1.0 if (regime_on or not config.use_regime_filter) else config.regime_off_scale
+        if config.factor_variant == VARIANT_ADAPTIVE_DUAL:
+            regime_scale = 1.0
+        else:
+            regime_scale = 1.0 if (regime_on or not config.use_regime_filter) else config.regime_off_scale
         if regime_scale != 1.0:
             positions = [{**p, "weight": p["weight"] * regime_scale} for p in positions]
             stats["rebalances_regime_off"] += 1
@@ -702,6 +769,66 @@ def _run_factor_pipeline(
     return trades, stats, rebalance_log
 
 
+def _score_eligible_rows(
+    eligible: list[dict[str, Any]],
+    *,
+    config: MomentumFactorConfig,
+    regime_on: bool,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Return (scored rows with _composite, bear_mode flag)."""
+    momentum_scores: list[float] = []
+    carry_scores: list[float] = []
+    reversal_scores: list[float] = []
+    inv_vol_scores: list[float] = []
+    for r in eligible:
+        m_vals = [_safe_float(r.get(f"momentum_{lb}d")) for lb in config.momentum_lookbacks_days]
+        m_vals = [v for v in m_vals if v is not None]
+        momentum_scores.append(np.mean(m_vals) if m_vals else float("nan"))
+        carry_scores.append(_safe_float(r.get("carry")) if r.get("carry") is not None else float("nan"))
+        reversal_scores.append(
+            _safe_float(r.get("reversal_signal")) if r.get("reversal_signal") is not None else float("nan")
+        )
+        vol = _safe_float(r.get("realized_vol")) or config.vol_floor_annual
+        inv_vol_scores.append(1.0 / max(vol, config.vol_floor_annual))
+
+    mom_arr = np.asarray(momentum_scores, dtype=float)
+    carry_z = _zscore(np.asarray(carry_scores, dtype=float))
+    reversal_z = _zscore(np.asarray(reversal_scores, dtype=float))
+    inv_vol_z = _zscore(np.asarray(inv_vol_scores, dtype=float))
+
+    variant = config.factor_variant
+    bear_mode = False
+
+    if variant == VARIANT_ADAPTIVE_DUAL and not regime_on:
+        bear_mode = True
+        composite = -np.where(np.isfinite(reversal_z), reversal_z, 0.0) + 0.6 * inv_vol_z
+    elif variant == VARIANT_BTC_RESIDUAL:
+        btc_7d = _safe_float(eligible[0].get("btc_return_7d")) or 0.0
+        residual = mom_arr - btc_7d
+        composite = _zscore(residual)
+    elif variant == VARIANT_QUALITY_BLEND:
+        composite = _zscore(mom_arr)
+        composite = composite - config.carry_weight * np.where(np.isfinite(carry_z), carry_z, 0.0)
+        composite = composite + 0.4 * inv_vol_z
+    else:
+        composite = _zscore(mom_arr)
+        if config.carry_weight != 0.0:
+            composite = composite - config.carry_weight * np.where(np.isfinite(carry_z), carry_z, 0.0)
+        if config.reversal_weight != 0.0:
+            composite = composite - config.reversal_weight * np.where(np.isfinite(reversal_z), reversal_z, 0.0)
+
+    scored = [
+        {
+            **r,
+            "_composite": float(composite[i]),
+            "_momentum_avg": float(momentum_scores[i] if not np.isnan(momentum_scores[i]) else 0.0),
+        }
+        for i, r in enumerate(eligible)
+        if np.isfinite(composite[i])
+    ]
+    return scored, bear_mode
+
+
 def _build_target_portfolio(rows_today: list[dict[str, Any]], *, config: MomentumFactorConfig) -> list[dict[str, Any]]:
     """Compute target weights for this rebalance."""
     # Filter eligible universe.
@@ -712,46 +839,24 @@ def _build_target_portfolio(rows_today: list[dict[str, Any]], *, config: Momentu
     if not eligible:
         return []
 
-    # Composite score = z(avg momentum) - carry_weight * z(carry) - reversal_weight * z(reversal_signal).
-    momentum_scores = []
-    carry_scores = []
-    reversal_scores = []
-    for r in eligible:
-        m_vals = [
-            _safe_float(r.get(f"momentum_{lb}d"))
-            for lb in config.momentum_lookbacks_days
-        ]
-        m_vals = [v for v in m_vals if v is not None]
-        momentum_scores.append(np.mean(m_vals) if m_vals else float("nan"))
-        carry_scores.append(_safe_float(r.get("carry")) if r.get("carry") is not None else float("nan"))
-        reversal_scores.append(_safe_float(r.get("reversal_signal")) if r.get("reversal_signal") is not None else float("nan"))
-    momentum_z = _zscore(np.asarray(momentum_scores, dtype=float))
-    carry_z = _zscore(np.asarray(carry_scores, dtype=float))
-    reversal_z = _zscore(np.asarray(reversal_scores, dtype=float))
-    # Composite — penalize longs proportional to carry; reversal subtracts so
-    # recent losers get a positive tilt. Disabled signals contribute zero.
-    composite = momentum_z.copy()
-    if config.carry_weight != 0.0:
-        composite = composite - config.carry_weight * np.where(np.isfinite(carry_z), carry_z, 0.0)
-    if config.reversal_weight != 0.0:
-        composite = composite - config.reversal_weight * np.where(np.isfinite(reversal_z), reversal_z, 0.0)
-
-    # Pair (score, idx, row) for ranking.
-    scored = [
-        {**r, "_composite": float(composite[i]), "_momentum_avg": float(momentum_scores[i] if not np.isnan(momentum_scores[i]) else 0.0)}
-        for i, r in enumerate(eligible)
-        if np.isfinite(composite[i])
-    ]
+    regime_on = bool(eligible[0].get("regime_on", False))
+    scored, bear_mode = _score_eligible_rows(eligible, config=config, regime_on=regime_on)
     if not scored:
         return []
     scored.sort(key=lambda x: x["_composite"], reverse=True)
     n = len(scored)
 
     n_long = max(int(round(n * config.long_quantile)), 1)
+    if bear_mode:
+        n_long = min(n_long, 5)
     long_set = scored[:n_long]
-    # Optional time-series filter.
-    if config.require_positive_ts_momentum_for_longs:
+    if config.require_positive_ts_momentum_for_longs and not bear_mode:
         long_set = [r for r in long_set if (_safe_float(r.get("ts_momentum")) or 0.0) > 0.0]
+    if bear_mode:
+        long_set = [
+            r for r in long_set
+            if (_safe_float(r.get("realized_vol")) or 9.0) <= min(config.max_realized_vol or 1.4, 1.2)
+        ]
     long_set = [r for r in long_set if _passes_entry_filters(r, config)]
 
     short_set: list[dict[str, Any]] = []
