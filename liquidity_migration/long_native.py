@@ -58,11 +58,9 @@ from .volume_events import (
 )
 
 
-SPLITS = (
-    ("train_2023_2024", "2023-05-03", "2024-05-03"),
-    ("validation_2024_2025", "2024-05-03", "2025-05-03"),
-    ("oos_2025_2026", "2025-05-03", "2026-05-03"),
-)
+# Splits are now exclusively a per-run config: see LongNativeConfig.splits.
+# Default is `()` (whole-period reporting), which is the post-rebuild norm.
+# Pristine OOS lives on the forward demo/paper ledger, not in a backtest split.
 
 
 @dataclass(frozen=True, slots=True)
@@ -219,12 +217,34 @@ class LongNativeConfig:
     vol_floor_annual: float = 0.30
     max_position_weight: float = 0.30
 
+    # --- B.3 concentration limits ---
+    # max_per_symbol_concurrent: explicit cap on the same-symbol-twice case
+    #   (already implicit via skipped_already_held; set to 0 to disable, 1 to
+    #   keep the current behaviour, >1 to allow pyramiding).
+    # max_per_sector_concurrent: 0=disabled. e.g. 2 caps meme-coin concurrency.
+    # max_per_symbol_weight: per-trade cap on post-vol-parity weight as a
+    #   fraction of gross. The trade is sized down (not skipped) when this binds.
+    # sector_map_path: optional JSON {"WIFUSDT":"meme",...}; missing symbols
+    #   fall into bucket "unknown". Path relative to repo root unless absolute.
+    max_per_symbol_concurrent: int = 1
+    max_per_sector_concurrent: int = 0
+    max_per_symbol_weight: float = 0.30
+    sector_map_path: str | None = None
+
     # --- costs ---
     cost_multiplier: float = 3.0
 
     # --- gates ---
     require_pit_membership: bool = True
     require_full_pit_universe: bool = True
+
+    # --- reporting ---
+    # Whole-period only by default. There is no honest internal OOS surface;
+    # both per-venue datasets span their full available history and pristine
+    # OOS is the forward demo/paper ledger. Pass an explicit `splits` tuple
+    # only when you specifically want per-window reporting and have a
+    # pre-registered reason for that choice (see docs/parameter_pre_registration.md).
+    splits: tuple[tuple[str, str, str], ...] = ()
 
 
 def run_long_native_research(
@@ -281,7 +301,7 @@ def run_long_native_research(
     equity = build_equity_curve(baskets)
     summary = summarize_trade_backtest(trades, baskets, equity, config=bt_config)
     monthly = _monthly_returns(baskets)
-    splits = _split_rows(baskets, config=bt_config)
+    splits = _split_rows(baskets, config=bt_config, splits=cfg.splits)
     funding_mode = summary.get("funding_mode", "missing")
     promotion = _evaluate_promotion(splits=splits, summary=summary,
                                     funding_mode=funding_mode,
@@ -938,6 +958,37 @@ def _filter_signal_window(features: pl.DataFrame, *, start: str, end: str) -> pl
     return features
 
 
+def _load_sector_map(path: str | None) -> dict[str, str]:
+    """Load the symbol→sector map. Returns empty dict if path is None.
+
+    Bare symbol→sector JSON: {"WIFUSDT": "meme", "ETHUSDT": "core_l1", ...}.
+    Missing symbols become "unknown".
+    """
+    if not path:
+        return {}
+    p = Path(path).expanduser()
+    if not p.is_absolute():
+        # Try repo-relative first, then CWD-relative.
+        repo_root = Path(__file__).resolve().parent.parent
+        repo_candidate = repo_root / p
+        if repo_candidate.exists():
+            p = repo_candidate
+    if not p.exists():
+        raise RuntimeError(f"sector_map_path does not exist: {p}")
+    try:
+        payload = json.loads(p.read_text())
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"sector_map_path {p} is not valid JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"sector_map_path {p} must contain a JSON object, got {type(payload).__name__}")
+    out: dict[str, str] = {}
+    for k, v in payload.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            raise RuntimeError(f"sector_map_path {p}: all keys+values must be strings")
+        out[k.upper()] = v
+    return out
+
+
 def _run_long_pipeline(
     *,
     features: pl.DataFrame,
@@ -952,12 +1003,15 @@ def _run_long_pipeline(
         ts = int(part["ts_ms"][0])
         features_by_date[ts] = part.to_dicts()
 
+    sector_map = _load_sector_map(config.sector_map_path) if config.max_per_sector_concurrent > 0 else {}
+
     open_positions: dict[str, dict[str, Any]] = {}
     cooldown_until: dict[str, int] = {}
     trade_rows: list[dict[str, Any]] = []
     stats = {
         "candidates_total": 0, "skipped_capacity": 0, "skipped_cooldown": 0,
         "skipped_already_held": 0, "skipped_no_entry_bar": 0,
+        "skipped_sector_cap": 0, "skipped_symbol_cap": 0,
         "exits_stop": 0, "exits_take_profit": 0, "exits_time": 0,
     }
     event_counts = {"capitulation_rebound": 0, "funding_squeeze": 0, "volume_resurrection": 0,
@@ -1081,6 +1135,26 @@ def _run_long_pipeline(
             if symbol in open_positions:
                 stats["skipped_already_held"] += 1
                 continue
+            # B.3: explicit per-symbol concurrent cap (orthogonal to the
+            # "skipped_already_held" gate above, which only covers exact-symbol
+            # re-entry; the symbol cap is meant for the future case where the
+            # universe allows multiple positions in correlated derivatives of
+            # the same symbol, e.g. perp + dated future).
+            if config.max_per_symbol_concurrent > 0:
+                held_same_symbol = sum(1 for p in open_positions.values() if p["symbol"] == symbol)
+                if held_same_symbol >= config.max_per_symbol_concurrent:
+                    stats["skipped_symbol_cap"] += 1
+                    continue
+            # B.3: per-sector concurrent cap (disabled when 0).
+            if config.max_per_sector_concurrent > 0 and sector_map:
+                cand_sector = sector_map.get(symbol, "unknown")
+                held_in_sector = sum(
+                    1 for p in open_positions.values()
+                    if sector_map.get(p["symbol"], "unknown") == cand_sector
+                )
+                if held_in_sector >= config.max_per_sector_concurrent:
+                    stats["skipped_sector_cap"] += 1
+                    continue
             if cooldown_until.get(symbol, 0) > ts:
                 stats["skipped_cooldown"] += 1
                 continue
@@ -1154,6 +1228,15 @@ def _run_long_pipeline(
                     stats["skipped_already_held"] += 1  # repurpose counter for blacklist skips
                     continue
                 position_weight = position_weight * tr_scale
+
+            # B.3: per-symbol weight cap on gross exposure. notional_weight is
+            # the slot-fraction (gross_exposure / max_concurrent_positions);
+            # the effective gross share is notional_weight * position_weight.
+            # Cap that at max_per_symbol_weight by reducing position_weight.
+            if config.max_per_symbol_weight > 0.0:
+                effective_gross = notional_weight * position_weight
+                if effective_gross > config.max_per_symbol_weight:
+                    position_weight = config.max_per_symbol_weight / max(notional_weight, 1e-12)
 
             trailing_atr = _safe_float(row.get("atr_20d"))
             open_positions[symbol] = {
@@ -1256,56 +1339,87 @@ def _empty_trades() -> pl.DataFrame:
     })
 
 
-def _split_rows(baskets: pl.DataFrame, *, config: TradeLifecycleConfig) -> list[dict[str, Any]]:
+def _split_rows(
+    baskets: pl.DataFrame,
+    *,
+    config: TradeLifecycleConfig,
+    splits: tuple[tuple[str, str, str], ...] = (),
+) -> list[dict[str, Any]]:
+    from .trade_lifecycle import _daily_sharpe
     rows = []
-    for name, start, end in SPLITS:
+    for name, start, end in splits:
         start_ms = date_ms(start)
         end_ms = date_ms(end)
         part = (baskets.filter((pl.col("entry_signal_ts_ms") >= start_ms) & (pl.col("entry_signal_ts_ms") < end_ms))
                 if not baskets.is_empty() else baskets)
         if part.is_empty():
-            rows.append({"name": name, "basket_count": 0, "total_return": 0.0, "sharpe_like": 0.0, "max_drawdown": 0.0})
+            rows.append({
+                "name": name,
+                "basket_count": 0,
+                "total_return": 0.0,
+                "sharpe_like": 0.0,
+                "max_drawdown": 0.0,
+            })
             continue
         returns = np.asarray(part.sort("entry_signal_ts_ms")["basket_return"].to_list(), dtype=float)
         equity_curve = np.cumprod(1.0 + returns)
         peaks = np.maximum.accumulate(equity_curve)
         drawdowns = equity_curve / peaks - 1.0
-        stdev = float(np.std(returns, ddof=1)) if returns.size > 1 else 0.0
-        mean = float(np.mean(returns)) if returns.size else 0.0
-        annual_periods = 365.0 / max(config.hold_days, 1)
         rows.append({
-            "name": name, "basket_count": int(returns.size),
+            "name": name,
+            "basket_count": int(returns.size),
             "total_return": float(equity_curve[-1] - 1.0),
-            "sharpe_like": float(mean / stdev * math.sqrt(annual_periods)) if stdev > 1e-12 else 0.0,
+            "sharpe_like": _daily_sharpe(build_equity_curve(part)),
             "max_drawdown": float(drawdowns.min()),
         })
     return rows
 
 
+SHARPE_PROMOTION_THRESHOLD = 0.7  # Daily-aligned honest Sharpe; whole-period gate.
+
+
 def _evaluate_promotion(*, splits, summary, funding_mode, full_pit_universe_pass) -> dict[str, Any]:
-    splits_b = [r for r in splits if r["basket_count"] > 0]
-    all_pos = bool(splits_b) and all(r["total_return"] > 0 for r in splits_b)
-    avg_sharpe = float(np.mean([r["sharpe_like"] for r in splits_b])) if splits_b else 0.0
+    """Whole-period promotion gate. Splits are diagnostic only.
+
+    Pristine OOS lives on the forward demo/paper ledger, not in any internal
+    backtest split. The gate evaluates whole-period honest Sharpe, max DD and
+    funding-mode against the universe-pass precondition. When splits are
+    supplied, an additional all-positive check fires, but the threshold logic
+    remains whole-period.
+    """
+    whole_sharpe = float(summary.get("sharpe_like", 0.0))
     max_dd = float(summary.get("max_drawdown", 0.0))
     funding_ok = funding_mode != "missing"
-    reasons = []
+    splits_with_baskets = [r for r in splits if r["basket_count"] > 0]
+    all_pos = bool(splits_with_baskets) and all(r["total_return"] > 0 for r in splits_with_baskets)
+
+    reasons: list[str] = []
     if not full_pit_universe_pass:
         reasons.append("full_pit_universe_missing")
-    if not all_pos:
-        reasons.append("not_all_splits_positive")
     if max_dd < -0.30:
         reasons.append("max_drawdown_too_deep")
-    if avg_sharpe < 1.0:
-        reasons.append("avg_split_sharpe_below_threshold")
+    if whole_sharpe < SHARPE_PROMOTION_THRESHOLD:
+        reasons.append("whole_period_sharpe_below_threshold")
     if not funding_ok:
         reasons.append("funding_missing")
+    if splits_with_baskets and not all_pos:
+        reasons.append("not_all_splits_positive")
+
+    gate_pass = bool(
+        full_pit_universe_pass
+        and max_dd >= -0.30
+        and whole_sharpe >= SHARPE_PROMOTION_THRESHOLD
+        and funding_ok
+        and (not splits_with_baskets or all_pos)
+    )
     return {
-        "promotion_gate_pass": bool(full_pit_universe_pass and all_pos and max_dd >= -0.30 and avg_sharpe >= 1.0 and funding_ok),
-        "all_splits_positive": all_pos,
-        "splits_with_baskets": len(splits_b),
-        "avg_split_sharpe": avg_sharpe,
+        "promotion_gate_pass": gate_pass,
+        "whole_period_sharpe": whole_sharpe,
         "max_drawdown": max_dd,
         "funding_mode": funding_mode,
+        "sharpe_threshold": SHARPE_PROMOTION_THRESHOLD,
+        "splits_with_baskets": len(splits_with_baskets),
+        "all_splits_positive": all_pos,
         "promotion_reasons": reasons,
     }
 
@@ -1399,15 +1513,24 @@ def format_long_native_report(metadata: dict[str, Any]) -> str:
         "",
         "## Promotion gate",
         f"- Pass: **{promo.get('promotion_gate_pass', False)}**",
-        f"- All splits positive: {promo.get('all_splits_positive', False)} ({promo.get('splits_with_baskets', 0)}/{len(SPLITS)})",
+        f"- All splits positive: {promo.get('all_splits_positive', False)} ({promo.get('splits_with_baskets', 0)}/{len(splits)})",
         f"- Avg split sharpe: {promo.get('avg_split_sharpe', 0.0):.2f}",
         f"- Block reasons: {', '.join(promo.get('promotion_reasons', [])) or 'none'}",
         "",
-        "## Splits",
-        "| Split | Baskets | Return | Sharpe | Max DD |",
-        "|---|---:|---:|---:|---:|",
     ]
-    for r in splits:
-        lines.append(f"| {r.get('name')} | {r.get('basket_count', 0)} | {pct(r.get('total_return'))} | {r.get('sharpe_like', 0.0):.2f} | {pct(r.get('max_drawdown'))} |")
-    lines.append("")
+    if splits:
+        lines += [
+            "## Splits",
+            "| Split | Baskets | Return | Sharpe | Max DD |",
+            "|---|---:|---:|---:|---:|",
+        ]
+        for r in splits:
+            lines.append(f"| {r.get('name')} | {r.get('basket_count', 0)} | {pct(r.get('total_return'))} | {r.get('sharpe_like', 0.0):.2f} | {pct(r.get('max_drawdown'))} |")
+        lines.append("")
+    else:
+        lines += [
+            "## Splits",
+            "_None configured — whole-period reporting only. Pristine OOS = forward demo/paper._",
+            "",
+        ]
     return "\n".join(lines)

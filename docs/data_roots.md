@@ -1,40 +1,54 @@
 # Data Roots
 
-Current as of 2026-05-18.
+Current as of 2026-05-24 (rewritten for the full-PIT rebuild — see
+[docs/full_pit_rebuild_and_punchlist.md](full_pit_rebuild_and_punchlist.md)).
 
-## Canonical Research Root
+## Per-venue full-PIT working datasets
 
-Use this root for serious full-PIT research:
-
-```text
-~/SHARED_DATA/bybit_fullpit_1h
-```
-
-This is the canonical shared Bybit research archive. The current manifest and
-1h kline set covers `2023-05-03` through `2026-05-17`, with commands using
-`--end 2026-05-18` as the end-exclusive boundary for completed bars.
-
-Current contents:
+Two clean per-venue roots replace the previous three-root patchwork. There is
+no internal OOS/IS split: each per-venue dataset is the working surface and the
+two venues serve as side-by-side validation of any signal claim.
 
 ```text
-archive_trade_manifest: 371,769 rows, 465 symbols, 2023-05-03..2026-05-17
-klines_1h:              8,922,456 rows, 465 symbols, 2023-05-03..2026-05-17
-funding:                1,446,834 rows, 465 symbols, 2023-05-03..2026-05-18
-open_interest:            894,137 rows, 293 symbols, 2025-05-03..2026-05-18
-mark/index/premium 1h:  3,058,421 rows each, 388 symbols, 2025-05-03..2026-05-18
+~/SHARED_DATA/bybit_full_pit       Bybit USDT linear perpetuals, ~2021-01..today
+                                   source: public.bybit.com/trading archive
+                                   + Bybit v5 kline REST (manifest-gated)
+                                   + Bybit v5 REST funding/OI/mark/index/premium
+                                   + signed_flow_1h (from public archive trades)
+
+~/SHARED_DATA/binance_full_pit     Binance USD-M perpetuals, ~2019-09..today
+                                   source: data.binance.vision monthly archives
+                                   + Binance fapi REST funding/OI/mark/index/premium
+                                   + taker_flow_1h
 ```
 
-The recent 30-day Bybit-native audit for `2026-04-18` to `2026-05-18` is full
-for klines, funding, open interest, mark price, index price, and premium index:
+Both roots are perpetuals-only by construction. The build scripts assert
+USDT-quoted symbols and fail loudly if any non-USDT symbol slips through.
 
-```text
-~/SHARED_DATA/bybit_fullpit_1h/reports/canonical_recent_30d_coverage_20260418_20260518_v3_shared_root/data_layer_audit.md
+Rebuild on any machine (idempotent, resumable, takes ~17-31 hours unattended):
+
+```bash
+bash scripts/build_full_pit_roots.sh        # full pipeline
+# Or the per-venue stages individually:
+bash scripts/archive_pre_rebuild_reports.sh
+bash scripts/build_full_pit_bybit.sh
+bash scripts/build_full_pit_binance.sh
+bash scripts/verify_full_pit_rebuild.sh
 ```
 
-Signed trade flow is still missing. Do not claim native leverage-flow evidence
-until `signed_flow_1h` exists and passes `data-layer-audit`.
+These roots are **not committed** (data, not code).
 
-## Live Demo Root
+## Pristine out-of-sample = forward only
+
+Since both per-venue roots span their full available histories, there is no
+clean internal OOS window left in either venue. **Pristine OOS henceforth is
+the forward demo + paper ledgers, ticking from 2026-05-22.**
+
+When a candidate parameter set is promoted, the forward ledgers accumulate
+clean OOS PnL that no backtest sweep can touch. Cite forward returns as the
+OOS evidence; cite either per-venue root as working-dataset evidence.
+
+## Live demo + paper roots
 
 The live Bybit demo runner intentionally uses a separate operational root:
 
@@ -55,42 +69,24 @@ data/bybit-paper-event
 It shadows the demo runner — same strategy profile, universe, and cadence — but
 submits no orders and records idealized fills at the signal price. Comparing the
 paper and demo ledgers measures demo-vs-paper execution slippage; the
-`reconcile-paper-demo` CLI command does that comparison.
-
-## Out-of-Sample Roots
-
-Two pre-2023 PIT roots exist for genuine out-of-sample validation — both predate
-the canonical archive start (`2023-05-03`), and both reconstruct point-in-time
-membership from sources that include delisted/migrated symbols (no
-survivorship-biased `exchangeInfo`).
-
-```text
-~/SHARED_DATA/bybit_oos_pre2023    Bybit USD-M perps, 2021-01..2023-05
-                                   source: public.bybit.com/trading archive
-~/SHARED_DATA/binance_oos_pit      Binance USD-M perps, 2020-01..2023-04
-                                   source: data.binance.vision monthly archive
-                                   (includes 25 delisted symbols)
-```
-
-These roots are **not committed** (data, not code). Rebuild them on any machine:
-
-```bash
-bash scripts/build_oos_roots.sh
-```
-
-That script builds the Bybit OOS root via `archive-manifest` +
-`archive-download-klines-1h-api`, builds the Binance OOS root via
-`python -m liquidity_migration.binance_vision build-binance-oos`, and
-coverage-filters both manifests so they pass the full-PIT universe check.
-Funding/OI/mark are intentionally not filled for the OOS roots; the strategy
-degrades gracefully without them. Expect a 10-25 minute run.
-
-These OOS windows have been examined repeatedly in research and are no longer
-pristine — treat them as validation, not first-look OOS.
+`reconcile-paper-demo` CLI command does that comparison for the short sleeve;
+`reconcile-long-paper-demo` does the same for the long sleeve.
 
 ## Retired Roots
 
+The following roots are superseded by the rebuild and are scheduled for
+deletion after verification gates pass:
+
+```text
+~/SHARED_DATA/bybit_fullpit_1h     2023-05..2026-05 — superseded by bybit_full_pit
+~/SHARED_DATA/bybit_oos_pre2023    2021-01..2023-05 — superseded by bybit_full_pit
+~/SHARED_DATA/binance_oos_pit      2020-01..2023-04 — superseded by binance_full_pit
+```
+
+Do not cite these for new research after the rebuild. Reports/markers from
+them are archived under `~/SHARED_DATA/archive/` for audit trail.
+
 Do not use ad hoc current-universe or temporary recent roots for promotion
-evidence. Current-universe 120-symbol research is biased by construction unless
-the membership is point-in-time. A live `exchangeInfo` snapshot is never an
-acceptable cross-venue PIT source — see `docs/backtesting_errors_we_never_repeat.md`.
+evidence. Current-universe research is biased by construction unless membership
+is point-in-time. A live `exchangeInfo` snapshot is never an acceptable
+cross-venue PIT source — see `docs/backtesting_errors_we_never_repeat.md`.

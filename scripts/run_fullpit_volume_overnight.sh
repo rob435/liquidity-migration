@@ -22,7 +22,7 @@ else
 fi
 
 REPO="${REPO:-${REPO_DIR:-$DEFAULT_REPO}}"
-DATA_ROOT="${DATA_ROOT:-$HOME/SHARED_DATA/bybit_fullpit_1h}"
+DATA_ROOT="${DATA_ROOT:-$HOME/SHARED_DATA/bybit_full_pit}"
 CONFIG_PATH="${CONFIG_PATH:-configs/volume_alpha.default.yaml}"
 LOG_DIR="$DATA_ROOT/logs"
 export DATA_ROOT RUN_NAME

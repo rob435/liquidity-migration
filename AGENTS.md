@@ -8,6 +8,18 @@
 - Telegram may notify; it must not approve or submit orders.
 - Serious research runs should leave enough report output to audit the decision.
 
+## Parameter pre-registration
+
+Every parameter change that will touch a per-venue working dataset (the new
+`bybit_full_pit` / `binance_full_pit` roots) gets a pre-registration entry
+under `docs/preregistration/` BEFORE the run, and the receipt is committed in
+the same PR as the code change. Skipping pre-registration is allowed only for
+`EXPLORATORY` runs — those must not be cited as evidence in any decision to
+promote, deploy, or accept a parameter as alpha.
+
+The standard, template, and worked examples live in
+[docs/parameter_pre_registration.md](docs/parameter_pre_registration.md).
+
 ## graphify
 
 This project has a graphify knowledge graph at graphify-out/.

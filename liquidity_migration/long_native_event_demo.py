@@ -154,6 +154,32 @@ class LongNativeDemoCycleConfig:
     ws_klines_topics_per_connection: int = 180
     ws_klines_stale_warning_seconds: float = 60.0
     ws_klines_stale_reconnect_seconds: float = 180.0
+    # B.4: paper-shadow mode. When True the cycle writes to the
+    # long_native_paper_* dataset family, force-disables order submission,
+    # and force-enables dry-run recording so the runner pencils in an
+    # idealised fill at signal price. The reconcile-long-paper-demo CLI
+    # then pairs the paper ledger against the demo ledger to surface the
+    # demo execution slippage cost that the long-only sleeve pays.
+    paper_mode: bool = False
+
+
+def _long_demo_dataset_names(config: "LongNativeDemoCycleConfig") -> tuple[str, str, str]:
+    """Return (trades, orders, cycles) dataset names for this cycle config.
+
+    Paper-mode writes to a distinct family so demo and paper ledgers never
+    collide on disk. Both families share the same schema.
+    """
+    if config.paper_mode:
+        return (
+            "long_native_paper_trades",
+            "long_native_paper_orders",
+            "long_native_paper_cycles",
+        )
+    return (
+        "long_native_demo_trades",
+        "long_native_demo_orders",
+        "long_native_demo_cycles",
+    )
 
 
 def _v11a_long_native_config() -> LongNativeConfig:
@@ -270,6 +296,13 @@ def _validate_long_demo_config(config: LongNativeDemoCycleConfig) -> None:
         raise ValueError("entry_leverage must be positive")
     if config.max_new_entries_per_cycle <= 0:
         raise ValueError("max_new_entries_per_cycle must be positive")
+    # B.4: paper-shadow mode is a no-submit ledger writer. Refuse the
+    # paper_mode + submit_orders combo loudly so a misconfigured paper unit
+    # cannot fire real orders.
+    if config.paper_mode and config.submit_orders:
+        raise ValueError("paper_mode=True is incompatible with submit_orders=True")
+    if config.paper_mode and not config.record_dry_run:
+        raise ValueError("paper_mode=True requires record_dry_run=True so the paper ledger is written")
     from .bybit import validate_order_submit_allowed
 
     validate_order_submit_allowed(
@@ -312,6 +345,7 @@ def run_long_native_demo_cycle(
     strategy = strategy_config or _long_demo_event_config(demo.strategy_profile)
     strategy_id = _long_demo_strategy_id(demo.strategy_profile)
     _validate_long_demo_config(demo)
+    trades_dataset, orders_dataset, cycles_dataset = _long_demo_dataset_names(demo)
 
     root = Path(data_root).expanduser()
     root.mkdir(parents=True, exist_ok=True)
@@ -398,8 +432,8 @@ def run_long_native_demo_cycle(
         features = build_long_features(klines, funding=None, config=strategy)
         mark_stage("features")
 
-        all_trades = read_dataset(root, LONG_DEMO_TRADES_DATASET)
-        all_orders = read_dataset(root, LONG_DEMO_ORDERS_DATASET)
+        all_trades = read_dataset(root, trades_dataset)
+        all_orders = read_dataset(root, orders_dataset)
         order_notional_pct_equity = target_long_order_notional_pct_equity(demo, strategy)
 
         cycle_trade_rows: list[dict[str, Any]] = []
@@ -468,7 +502,7 @@ def run_long_native_demo_cycle(
             def _record_preflight(row: dict[str, Any]) -> None:
                 write_dataset(
                     pl.DataFrame([row], infer_schema_length=None),
-                    root, LONG_DEMO_ORDERS_DATASET, partition_by=(),
+                    root, orders_dataset, partition_by=(),
                 )
             preflight_callback: Callable[[dict[str, Any]], None] | None = _record_preflight
         else:
@@ -525,12 +559,12 @@ def run_long_native_demo_cycle(
         if cycle_trade_rows:
             write_dataset(
                 pl.DataFrame(cycle_trade_rows, infer_schema_length=None),
-                root, LONG_DEMO_TRADES_DATASET, partition_by=(),
+                root, trades_dataset, partition_by=(),
             )
         if cycle_order_rows:
             write_dataset(
                 pl.DataFrame(cycle_order_rows, infer_schema_length=None),
-                root, LONG_DEMO_ORDERS_DATASET, partition_by=(),
+                root, orders_dataset, partition_by=(),
             )
         mark_stage("ledger_flush")
 
@@ -637,7 +671,7 @@ def run_long_native_demo_cycle(
         persist_perf_start = time.perf_counter()
         write_dataset(
             pl.DataFrame([cycle_row_with_date], infer_schema_length=None),
-            root, "long_native_demo_cycles", partition_by=("date",),
+            root, cycles_dataset, partition_by=("date",),
         )
         report_path = report_dir / f"long_native_cycle_{cycle_id}.json"
         report_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")

@@ -36,16 +36,29 @@ RUN_LABELS = (
 
 DATA_ROOTS = [
     {
-        "id": "canonical_research",
-        "path": "~/SHARED_DATA/bybit_fullpit_1h",
+        "id": "bybit_full_pit",
+        "path": "~/SHARED_DATA/bybit_full_pit",
         "purpose": (
-            "Canonical full-PIT Bybit research archive. Required for serious "
-            "research and any promotion evidence; the default config resolves "
-            "DATA_ROOT here."
+            "Bybit USDT linear perpetuals full-PIT working dataset (~2021-01.."
+            "today). Default config resolves DATA_ROOT here; required for "
+            "serious research and as one of the two venue working datasets."
         ),
         "boundary": (
-            "Completed bars 2023-05-03..2026-05-17; run commands with "
-            "--end 2026-05-18 (end-exclusive)."
+            "End-exclusive on today's UTC date; rebuild idempotently via "
+            "bash scripts/build_full_pit_roots.sh."
+        ),
+    },
+    {
+        "id": "binance_full_pit",
+        "path": "~/SHARED_DATA/binance_full_pit",
+        "purpose": (
+            "Binance USD-M perpetuals full-PIT working dataset (~2019-09.."
+            "today). The cross-venue agreement check vs bybit_full_pit; "
+            "disagreement flags regime / microstructure artefact."
+        ),
+        "boundary": (
+            "End-exclusive on today's UTC date; rebuild via "
+            "scripts/build_full_pit_binance.sh."
         ),
     },
     {
@@ -58,22 +71,14 @@ DATA_ROOTS = [
         "boundary": "Operational forward ledgers only, not a research dataset.",
     },
     {
-        "id": "oos_bybit_pre2023",
-        "path": "~/SHARED_DATA/bybit_oos_pre2023",
+        "id": "paper_shadow",
+        "path": "data/bybit-paper-event",
         "purpose": (
-            "Bybit USD-M point-in-time out-of-sample, 2021-01..2023-05. "
-            "Validation only: examined repeatedly, no longer first-look OOS."
+            "Paper-shadow ledger: same profile as live_demo with no order "
+            "submission and idealised fills. Used by reconcile-paper-demo / "
+            "reconcile-long-paper-demo to measure execution slippage."
         ),
-        "boundary": "Rebuild via scripts/build_oos_roots.sh; no funding/OI/mark.",
-    },
-    {
-        "id": "oos_binance_pit",
-        "path": "~/SHARED_DATA/binance_oos_pit",
-        "purpose": (
-            "Binance USD-M point-in-time out-of-sample, 2020-01..2023-04, "
-            "includes 25 delisted symbols. Validation only."
-        ),
-        "boundary": "Rebuild via scripts/build_oos_roots.sh; no funding/OI/mark.",
+        "boundary": "Operational forward ledger, not a research dataset.",
     },
 ]
 

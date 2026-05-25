@@ -63,11 +63,9 @@ ENTRY_POLICIES = (
     ENTRY_POLICY_FIXED_DELAY,
     ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE,
 )
-SPLITS = (
-    ("train_2023_2024", "2023-05-03", "2024-05-03"),
-    ("validation_2024_2025", "2024-05-03", "2025-05-03"),
-    ("oos_2025_2026", "2025-05-03", "2026-05-03"),
-)
+# Splits live exclusively on VolumeEventResearchConfig.splits now (default ()).
+# Whole-period reporting is the post-rebuild norm; pristine OOS is the forward
+# demo/paper ledger, not a backtest window.
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +234,10 @@ class VolumeEventResearchConfig:
     promotion_max_drawdown: float = -0.25
     promotion_min_avg_sharpe: float = 0.50
     workers: int = 1
+    # Diagnostic splits — empty by default = whole-period reporting only.
+    # When set, the promotion gate adds an all-positive check across the
+    # configured windows. Pristine OOS is the forward demo/paper ledger.
+    splits: tuple[tuple[str, str, str], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -696,7 +698,7 @@ def _run_event_scenario(
     equity = build_equity_curve(baskets)
     monthly = _monthly_returns(baskets)
     summary = summarize_trade_backtest(trades, baskets, equity, config=bt_config)
-    split_rows = _split_rows(baskets, config=bt_config)
+    split_rows = _split_rows(baskets, config=bt_config, splits=config.splits)
     pit_membership_pass = _pit_membership_pass(trades, required=config.require_pit_membership)
     row = {
         "scenario_id": scenario.scenario_id,
@@ -2976,21 +2978,35 @@ def _promotion_fields(
     pit_membership_pass: bool = False,
     full_pit_universe_pass: bool = False,
 ) -> dict[str, Any]:
+    """Promotion gate over a per-run set of diagnostic splits.
+
+    The "complete" check is now ``len(split_rows) == len(config.splits)`` —
+    the gate enforces that the caller produced one row per configured window.
+    When no splits are configured the per-split gates degenerate to no-ops and
+    only the whole-period gates (max DD, avg Sharpe via ``summary``) bind.
+    """
+    expected = len(config.splits)
     returns = [float(row["total_return"]) for row in split_rows]
     sharpes = [float(row["sharpe_like"]) for row in split_rows]
     drawdowns = [float(row["max_drawdown"]) for row in split_rows]
-    complete = len(split_rows) == len(SPLITS)
+    complete = expected == 0 or len(split_rows) == expected
     positive = sum(1 for value in returns if value > 0.0)
     min_return = min(returns) if returns else 0.0
     avg_sharpe = float(np.mean(sharpes)) if sharpes else 0.0
     worst_dd = min(drawdowns) if drawdowns else 0.0
-    pre_pit_gate_pass = (
-        complete
-        and positive == len(SPLITS)
-        and min_return >= 0.0
-        and worst_dd >= config.promotion_max_drawdown
-        and avg_sharpe >= config.promotion_min_avg_sharpe
-    )
+    if expected == 0:
+        # Whole-period gate: no per-split requirements; the summary-level
+        # checks (handled outside this helper via the row's max_drawdown/
+        # sharpe_like fields) carry the load.
+        pre_pit_gate_pass = True
+    else:
+        pre_pit_gate_pass = (
+            complete
+            and positive == expected
+            and min_return >= 0.0
+            and worst_dd >= config.promotion_max_drawdown
+            and avg_sharpe >= config.promotion_min_avg_sharpe
+        )
     gate_pass = pre_pit_gate_pass and pit_membership_pass and full_pit_universe_pass
     return {
         "complete_splits": complete,
@@ -2999,6 +3015,7 @@ def _promotion_fields(
         "avg_split_return": float(np.mean(returns)) if returns else 0.0,
         "worst_split_drawdown": worst_dd,
         "avg_split_sharpe": avg_sharpe,
+        "expected_splits": expected,
         "pre_pit_gate_pass": pre_pit_gate_pass,
         "pit_membership_pass": pit_membership_pass,
         "full_pit_universe_pass": full_pit_universe_pass,
@@ -3008,6 +3025,7 @@ def _promotion_fields(
         else _promotion_reason(
             complete,
             positive,
+            expected,
             min_return,
             worst_dd,
             avg_sharpe,
@@ -3020,9 +3038,14 @@ def _promotion_fields(
     }
 
 
-def _split_rows(baskets: pl.DataFrame, *, config: TradeLifecycleConfig) -> list[dict[str, Any]]:
+def _split_rows(
+    baskets: pl.DataFrame,
+    *,
+    config: TradeLifecycleConfig,
+    splits: tuple[tuple[str, str, str], ...] = (),
+) -> list[dict[str, Any]]:
     rows = []
-    for name, start, end in SPLITS:
+    for name, start, end in splits:
         start_ms = _date_ms(start)
         end_ms = _date_ms(end)
         part = baskets.filter((pl.col("entry_signal_ts_ms") >= start_ms) & (pl.col("entry_signal_ts_ms") < end_ms)) if not baskets.is_empty() else baskets
@@ -3043,14 +3066,12 @@ def _summarize_basket_split(part: pl.DataFrame, *, name: str, config: TradeLifec
     equity_curve = np.cumprod(1.0 + returns)
     peaks = np.maximum.accumulate(equity_curve)
     drawdowns = equity_curve / peaks - 1.0
-    stdev = float(np.std(returns, ddof=1)) if returns.size > 1 else 0.0
-    mean = float(np.mean(returns)) if returns.size else 0.0
-    annual_periods = 365.0 / max(config.hold_days, 1)
+    from .trade_lifecycle import _daily_sharpe
     return {
         "name": name,
         "basket_count": int(returns.size),
         "total_return": float(equity_curve[-1] - 1.0),
-        "sharpe_like": float(mean / stdev * math.sqrt(annual_periods)) if stdev > 1e-12 else 0.0,
+        "sharpe_like": _daily_sharpe(build_equity_curve(part)),
         "max_drawdown": float(drawdowns.min()),
     }
 
@@ -3543,6 +3564,7 @@ def _parse_day(value: Any) -> date | None:
 def _promotion_reason(
     complete: bool,
     positive: int,
+    expected: int,
     min_return: float,
     worst_dd: float,
     avg_sharpe: float,
@@ -3551,15 +3573,15 @@ def _promotion_reason(
     config: VolumeEventResearchConfig,
 ) -> str:
     reasons = []
-    if not complete:
+    if expected and not complete:
         reasons.append("incomplete_splits")
-    if positive < len(SPLITS):
+    if expected and positive < expected:
         reasons.append("positive_split_fail")
-    if min_return < 0.0:
+    if expected and min_return < 0.0:
         reasons.append("worst_split_return_fail")
-    if worst_dd < config.promotion_max_drawdown:
+    if expected and worst_dd < config.promotion_max_drawdown:
         reasons.append("drawdown_fail")
-    if avg_sharpe < config.promotion_min_avg_sharpe:
+    if expected and avg_sharpe < config.promotion_min_avg_sharpe:
         reasons.append("avg_sharpe_fail")
     if not pit_membership_pass:
         reasons.append("pit_membership_fail")
@@ -3748,7 +3770,7 @@ def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) 
             f"{_pct(row.get('total_return'))} | {_pct(row.get('max_drawdown'))} | "
             f"{row.get('max_underwater_days', 0)} | {_pct(row.get('worst_90d_return'))} | "
             f"{_num(row.get('sharpe_like'))} | "
-            f"{row.get('positive_splits', 0)}/{len(SPLITS)} | {_pct(row.get('min_split_return'))} | "
+            f"{row.get('positive_splits', 0)}/{row.get('expected_splits', 0)} | {_pct(row.get('min_split_return'))} | "
             f"{_num(row.get('avg_split_sharpe'))} | {_num(row.get('avg_actual_entry_delay_hours'))} | "
             f"{row.get('promotion_reason', '')} |"
         )

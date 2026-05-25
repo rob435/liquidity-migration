@@ -7,19 +7,13 @@ import polars as pl
 
 from ._common import pct
 
-SPLITS = (
-    ("train_2023_2024", "2023-05-03", "2024-05-03"),
-    ("validation_2024_2025", "2024-05-03", "2025-05-03"),
-    ("oos_2025_2026", "2025-05-03", "2026-05-03"),
-)
-
-
 def run_portfolio_hedge_report(
     *,
     short_report_dir: str | Path,
     long_report_dirs: list[str | Path],
     hedge_weights: list[float],
     report_dir: str | Path,
+    splits: tuple[tuple[str, str, str], ...] = (),
 ) -> dict[str, Any]:
     target = Path(report_dir)
     target.mkdir(parents=True, exist_ok=True)
@@ -45,7 +39,7 @@ def run_portfolio_hedge_report(
         long_worst20_additive = float(
             joined.filter(pl.col("exit_date").is_in(_short_bad_dates(short_daily, count=20)))["long_return"].sum()
         )
-        long_metrics = _path_metrics(long_daily.rename({"long_return": "portfolio_return"}))
+        long_metrics = _path_metrics(long_daily.rename({"long_return": "portfolio_return"}), splits=splits)
         for weight in hedge_weights:
             # Additive sleeve overlay (NOT a sign-flipped hedge): both legs are
             # already directional return series, so the portfolio's daily return
@@ -58,7 +52,7 @@ def run_portfolio_hedge_report(
                     (pl.col("short_return") + weight * pl.col("long_return")).alias("portfolio_return"),
                 ]
             )
-            combo_metrics = _path_metrics(combo)
+            combo_metrics = _path_metrics(combo, splits=splits)
             rows.append(
                 {
                     "long_name": long_path.name,
@@ -134,7 +128,7 @@ def _short_bad_dates(short_daily: pl.DataFrame, *, count: int | None = None) -> 
     return short_daily.sort("short_return").head(row_count)["exit_date"].to_list()
 
 
-def _path_metrics(daily: pl.DataFrame) -> dict[str, Any]:
+def _path_metrics(daily: pl.DataFrame, *, splits: tuple[tuple[str, str, str], ...] = ()) -> dict[str, Any]:
     returns = [float(item) for item in daily["portfolio_return"].to_list()]
     dates = [str(item) for item in daily["exit_date"].to_list()]
     equity = 1.0
@@ -155,7 +149,7 @@ def _path_metrics(daily: pl.DataFrame) -> dict[str, Any]:
         "worst_30d_return": _worst_rolling_return(returns, 30),
         "worst_60d_return": _worst_rolling_return(returns, 60),
         "worst_90d_return": _worst_rolling_return(returns, 90),
-        "splits": _split_returns(daily),
+        "splits": _split_returns(daily, splits=splits),
     }
 
 
@@ -171,9 +165,13 @@ def _worst_rolling_return(returns: list[float], window: int) -> float:
     return worst
 
 
-def _split_returns(daily: pl.DataFrame) -> list[tuple[str, float]]:
+def _split_returns(
+    daily: pl.DataFrame,
+    *,
+    splits: tuple[tuple[str, str, str], ...] = (),
+) -> list[tuple[str, float]]:
     rows = []
-    for name, start, end in SPLITS:
+    for name, start, end in splits:
         split = daily.filter((pl.col("exit_date") >= start) & (pl.col("exit_date") < end))
         equity = 1.0
         for value in split["portfolio_return"].to_list():

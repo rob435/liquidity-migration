@@ -25,7 +25,7 @@ from liquidity_migration.volume_events import VolumeEventResearchConfig, run_vol
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--profile", required=True, choices=["promoted", "demo_relaxed"])
-    ap.add_argument("--data-root", default="~/SHARED_DATA/bybit_fullpit_1h")
+    ap.add_argument("--data-root", default="~/SHARED_DATA/bybit_full_pit")
     ap.add_argument("--config", default="configs/volume_alpha.default.yaml")
     ap.add_argument("--position-weighting", default=None, help="Override profile sizing (e.g. equal).")
     ap.add_argument("--close-location-min", type=float, default=None, help="Override close-location knob.")

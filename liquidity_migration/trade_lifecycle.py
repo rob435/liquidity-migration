@@ -8,7 +8,7 @@ import numpy as np
 import polars as pl
 
 from .config import TradeLifecycleConfig
-from ._common import MS_PER_HOUR, date_boundary_ms
+from ._common import MS_PER_DAY, MS_PER_HOUR, date_boundary_ms
 
 
 def summarize_baskets(trades: pl.DataFrame, *, config: TradeLifecycleConfig) -> pl.DataFrame:
@@ -77,6 +77,50 @@ def build_equity_curve(baskets: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _daily_sharpe(equity: pl.DataFrame) -> float:
+    """Annualised Sharpe from the daily equity series.
+
+    Honest across firing frequencies — does not assume `365 / rebalance_days`
+    periods per year. A strategy that fires 20 trades a year and a strategy
+    that fires 200 produce the same Sharpe scale when their daily PnL volatility
+    is the same.
+
+    `build_equity_curve` emits one row per exit-date (sparse for low-frequency
+    strategies), so we forward-fill onto the calendar-day grid between the
+    first and last exit before computing diffs. Otherwise the "daily" diff
+    is actually inter-exit and sparse strategies still inflate.
+    """
+    if equity.is_empty() or "equity" not in equity.columns:
+        return 0.0
+    eq_df = equity.sort("ts_ms")
+    ts = eq_df["ts_ms"].to_numpy().astype(np.int64)
+    eq = eq_df["equity"].to_numpy().astype(float)
+    if eq.size < 2:
+        return 0.0
+    first_ts, last_ts = int(ts[0]), int(ts[-1])
+    span_days = max(1, int(round((last_ts - first_ts) / MS_PER_DAY)) + 1)
+    if span_days < 2:
+        return 0.0
+    # Forward-fill onto the calendar-day grid: for each day in [first, last],
+    # equity equals the equity of the most recent exit at or before that day.
+    grid_eq = np.empty(span_days, dtype=float)
+    j = 0
+    for i in range(span_days):
+        day_ts = first_ts + i * MS_PER_DAY
+        while j + 1 < ts.size and ts[j + 1] <= day_ts:
+            j += 1
+        grid_eq[i] = eq[j]
+    daily_ret = np.diff(grid_eq) / grid_eq[:-1]
+    daily_ret = daily_ret[np.isfinite(daily_ret)]
+    if daily_ret.size < 2:
+        return 0.0
+    mu = float(daily_ret.mean())
+    sd = float(daily_ret.std(ddof=1))
+    if sd <= 1e-12:
+        return 0.0
+    return mu / sd * math.sqrt(365.0)
+
+
 def summarize_trade_backtest(
     trades: pl.DataFrame,
     baskets: pl.DataFrame,
@@ -113,15 +157,13 @@ def summarize_trade_backtest(
         }
     basket_returns = np.asarray(baskets["basket_return"].to_list(), dtype=float)
     mean_return = float(np.mean(basket_returns)) if basket_returns.size else 0.0
-    vol = float(np.std(basket_returns, ddof=1)) if basket_returns.size > 1 else 0.0
-    annual_periods = 365.0 / config.rebalance_days if config.rebalance_days > 0 else 0.0
     wins = trades.filter(pl.col("net_return") > 0.0)
     losses = trades.filter(pl.col("net_return") < 0.0)
     profit = float(wins["net_return"].sum()) if not wins.is_empty() else 0.0
     loss = float(losses["net_return"].sum()) if not losses.is_empty() else 0.0
     return {
         "total_return": float(equity["equity"][-1] - 1.0),
-        "sharpe_like": float(mean_return / vol * math.sqrt(annual_periods)) if vol > 1e-12 else 0.0,
+        "sharpe_like": _daily_sharpe(equity),
         "max_drawdown": float(equity["drawdown"].min()),
         "trades": trades.height,
         "baskets": baskets.height,

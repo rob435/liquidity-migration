@@ -28,7 +28,14 @@ def test_feature_factory_report_scores_edges_against_shuffle_control(tmp_path: P
             )
     pl.DataFrame(rows).write_csv(report_dir / "volume_event_best_trades.csv")
 
-    payload = run_feature_factory_report(report_dir, min_rows=9, shuffle_samples=16, random_seed=5)
+    splits = (
+        ("train_2023_2024", "2023-05-03", "2024-05-03"),
+        ("validation_2024_2025", "2024-05-03", "2025-05-03"),
+        ("oos_2025_2026", "2025-05-03", "2026-05-03"),
+    )
+    payload = run_feature_factory_report(
+        report_dir, min_rows=9, shuffle_samples=16, random_seed=5, splits=splits,
+    )
     edge_by_feature = {row["feature"]: row for row in payload["edges"]}
 
     assert Path(payload["output_files"]["markdown"]).exists()

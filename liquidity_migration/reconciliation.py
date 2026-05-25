@@ -304,18 +304,71 @@ def run_paper_demo_reconciliation(
 ) -> dict[str, Any]:
     """Read the paper and demo trade ledgers, reconcile them, write a markdown
     report, and return the result plus the report path."""
-    paper_root = Path(paper_root).expanduser()
-    demo_root = Path(demo_root).expanduser()
+    return _run_reconciliation(
+        paper_root=paper_root,
+        demo_root=demo_root,
+        paper_dataset="event_demo_trades",
+        demo_dataset="event_demo_trades",
+        report_subdir="paper_demo_reconciliation",
+        report_filename="paper_demo_reconciliation.md",
+        entry_tolerance_ms=entry_tolerance_ms,
+        output_dir=output_dir,
+    )
+
+
+def run_long_paper_demo_reconciliation(
+    paper_root: str | Path,
+    demo_root: str | Path,
+    *,
+    entry_tolerance_ms: int = DEFAULT_ENTRY_TOLERANCE_MS,
+    output_dir: str | Path | None = None,
+    min_pairs_warning: int = 30,
+) -> dict[str, Any]:
+    """B.4 — same pairing as the short reconciler but reads the long sleeve's
+    own ledger datasets (``long_native_paper_trades`` vs
+    ``long_native_demo_trades``). Emits an additional ``sample_warning`` flag
+    in the summary when fewer than ``min_pairs_warning`` pairs were matched —
+    surfacing the case where slippage statistics are not yet trustworthy.
+    """
+    payload = _run_reconciliation(
+        paper_root=paper_root,
+        demo_root=demo_root,
+        paper_dataset="long_native_paper_trades",
+        demo_dataset="long_native_demo_trades",
+        report_subdir="long_paper_demo_reconciliation",
+        report_filename="long_paper_demo_reconciliation.md",
+        entry_tolerance_ms=entry_tolerance_ms,
+        output_dir=output_dir,
+    )
+    summary = payload["result"]["summary"]
+    summary["min_pairs_warning_threshold"] = int(min_pairs_warning)
+    summary["sample_warning"] = bool(summary["paired"] < int(min_pairs_warning))
+    return payload
+
+
+def _run_reconciliation(
+    *,
+    paper_root: str | Path,
+    demo_root: str | Path,
+    paper_dataset: str,
+    demo_dataset: str,
+    report_subdir: str,
+    report_filename: str,
+    entry_tolerance_ms: int,
+    output_dir: str | Path | None,
+) -> dict[str, Any]:
+    paper_root_p = Path(paper_root).expanduser()
+    demo_root_p = Path(demo_root).expanduser()
     result = reconcile_paper_demo(
-        read_dataset(paper_root, "event_demo_trades"),
-        read_dataset(demo_root, "event_demo_trades"),
+        read_dataset(paper_root_p, paper_dataset),
+        read_dataset(demo_root_p, demo_dataset),
         entry_tolerance_ms=entry_tolerance_ms,
     )
     report = format_reconciliation_report(result)
     report_dir = (
-        Path(output_dir).expanduser() if output_dir else demo_root / "reports" / "paper_demo_reconciliation"
+        Path(output_dir).expanduser() if output_dir else demo_root_p / "reports" / report_subdir
     )
     report_dir.mkdir(parents=True, exist_ok=True)
-    report_path = report_dir / "paper_demo_reconciliation.md"
+    report_path = report_dir / report_filename
     report_path.write_text(report, encoding="utf-8")
     return {"result": result, "report": report, "report_path": str(report_path)}

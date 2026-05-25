@@ -28,7 +28,8 @@ from .event_demo import (
 from .feature_factory import run_feature_factory_report
 from .ingestion import generate_fixture_data
 from .portfolio_hedge import run_portfolio_hedge_report
-from .reconciliation import run_paper_demo_reconciliation
+from .reconciliation import run_long_paper_demo_reconciliation, run_paper_demo_reconciliation
+from .regime_durability import RegimeDurabilityConfig, run_regime_durability_from_paths
 from .strategy_tribunal import StrategyTribunalConfig, run_strategy_tribunal
 from .universe import run_discover_universe
 from .volume_events import ENTRY_POLICIES, POSITION_WEIGHTINGS, VolumeEventResearchConfig, run_volume_event_research
@@ -1576,6 +1577,32 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
                            default=demo_defaults.ws_klines_stale_reconnect_seconds)
 
 
+def _add_regime_durability_parser(subparsers) -> None:
+    rd = subparsers.add_parser(
+        "regime-durability",
+        help="B.2 — measure regime gate empirically: cohort trades by BTC/ETH SMA flip proximity.",
+    )
+    rd.add_argument(
+        "--trades-csv",
+        required=True,
+        help="Path to a long-native trade ledger CSV (e.g. <root>/reports/long_native_research/long_native_trades.csv).",
+    )
+    rd.add_argument("--btc-symbol", default="BTCUSDT", help="Symbol for the primary regime gate.")
+    rd.add_argument("--eth-symbol", default="ETHUSDT", help="Symbol for the secondary regime gate.")
+    rd.add_argument("--sma-days", type=int, default=30, help="SMA window for the regime gate.")
+    rd.add_argument(
+        "--flip-window-days",
+        type=int,
+        default=7,
+        help="Entries within N days *after* a regime-on flip are labelled fresh_regime.",
+    )
+    rd.add_argument(
+        "--output-dir",
+        default=None,
+        help="Where to write regime_durability_report.{json,md}. Defaults to <data-root>/reports/regime_durability/.",
+    )
+
+
 def _add_reconcile_paper_demo_parser(subparsers) -> None:
     reconcile = subparsers.add_parser(
         "reconcile-paper-demo",
@@ -1598,6 +1625,36 @@ def _add_reconcile_paper_demo_parser(subparsers) -> None:
         help="Max entry-time gap (ms) for pairing a paper trade with a demo trade.",
     )
     reconcile.add_argument("--output-dir", default=None, help="Where to write the reconciliation report.")
+
+
+def _add_reconcile_long_paper_demo_parser(subparsers) -> None:
+    reconcile = subparsers.add_parser(
+        "reconcile-long-paper-demo",
+        help="B.4 — long sleeve paper/demo execution slippage analyzer.",
+    )
+    reconcile.add_argument(
+        "--paper-data-root",
+        default="data/bybit-paper-event",
+        help="Paper data root holding the long_native_paper_trades ledger.",
+    )
+    reconcile.add_argument(
+        "--demo-data-root",
+        default="data/bybit-demo-event",
+        help="Demo data root holding the long_native_demo_trades ledger.",
+    )
+    reconcile.add_argument(
+        "--entry-tolerance-ms",
+        type=int,
+        default=600_000,
+        help="Max entry-time gap (ms) for pairing a paper trade with a demo trade.",
+    )
+    reconcile.add_argument(
+        "--min-pairs-warning",
+        type=int,
+        default=30,
+        help="Emit sample_warning when paired-trade count is below this threshold.",
+    )
+    reconcile.add_argument("--output-dir", default=None, help="Where to write the long reconciliation report.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1623,7 +1680,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_event_risk_ws_parser(subparsers)
     _add_long_native_event_demo_cycle_parser(subparsers)
     _add_combined_book_report_parser(subparsers)
+    _add_regime_durability_parser(subparsers)
     _add_reconcile_paper_demo_parser(subparsers)
+    _add_reconcile_long_paper_demo_parser(subparsers)
 
     return parser
 
@@ -2280,6 +2339,32 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
 
+    if args.command == "regime-durability":
+        output_dir = args.output_dir
+        if output_dir is None:
+            output_dir = str(data_root / "reports" / "regime_durability")
+        payload = run_regime_durability_from_paths(
+            trades_csv=args.trades_csv,
+            data_root=data_root,
+            output_dir=output_dir,
+            config=RegimeDurabilityConfig(
+                btc_symbol=args.btc_symbol,
+                eth_symbol=args.eth_symbol,
+                sma_days=args.sma_days,
+                flip_window_days=args.flip_window_days,
+            ),
+        )
+        cohorts = {row["cohort"]: row for row in payload.get("cohorts", [])}
+        print(
+            "regime-durability "
+            f"trades={payload.get('trade_count', 0)} "
+            f"fresh={cohorts.get('fresh_regime', {}).get('trades', 0)} "
+            f"held={cohorts.get('held_through_flip', {}).get('trades', 0)} "
+            f"std={cohorts.get('standard', {}).get('trades', 0)} "
+            f"path={output_dir}"
+        )
+        return 0
+
     if args.command == "reconcile-paper-demo":
         payload = run_paper_demo_reconciliation(
             args.paper_data_root,
@@ -2295,6 +2380,26 @@ def main(argv: list[str] | None = None) -> int:
             f"demo_only={summary['demo_only']} "
             f"entry_slip_bps_mean={summary['entry_slippage_bps_mean']:.2f} "
             f"path={payload['report_path']}"
+        )
+        return 0
+
+    if args.command == "reconcile-long-paper-demo":
+        payload = run_long_paper_demo_reconciliation(
+            args.paper_data_root,
+            args.demo_data_root,
+            entry_tolerance_ms=args.entry_tolerance_ms,
+            output_dir=args.output_dir,
+            min_pairs_warning=args.min_pairs_warning,
+        )
+        summary = payload["result"]["summary"]
+        warning = " [SAMPLE WARNING]" if summary.get("sample_warning") else ""
+        print(
+            "long paper-demo reconciliation "
+            f"paired={summary['paired']} "
+            f"paper_only={summary['paper_only']} "
+            f"demo_only={summary['demo_only']} "
+            f"entry_slip_bps_mean={summary['entry_slippage_bps_mean']:.2f} "
+            f"path={payload['report_path']}{warning}"
         )
         return 0
 

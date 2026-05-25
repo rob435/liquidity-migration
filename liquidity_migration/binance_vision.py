@@ -14,10 +14,10 @@ existing ``volume-events`` engine can run against it unmodified.
 
 CLI:
     python -m liquidity_migration.binance_vision build-binance-oos \\
-        --data-root ~/SHARED_DATA/binance_oos_pit --end 2023-05-01
+        --data-root ~/SHARED_DATA/binance_full_pit --end 2026-05-25
 
     python -m liquidity_migration.binance_vision filter-manifest \\
-        --data-root ~/SHARED_DATA/bybit_oos_pre2023        # generic coverage filter
+        --data-root ~/SHARED_DATA/bybit_full_pit        # generic coverage filter
 """
 from __future__ import annotations
 

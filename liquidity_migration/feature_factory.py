@@ -11,11 +11,8 @@ import polars as pl
 from ._common import finite_float, pct
 
 
-SPLITS = (
-    ("train_2023_2024", "2023-05-03", "2024-05-03"),
-    ("validation_2024_2025", "2024-05-03", "2025-05-03"),
-    ("oos_2025_2026", "2025-05-03", "2026-05-03"),
-)
+# Optional split layout for diagnostic edge stability. Callers pass `splits`
+# via run_feature_factory_report; the default is `()` (whole-period only).
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +61,7 @@ def run_feature_factory_report(
     min_rows: int = 12,
     shuffle_samples: int = 64,
     random_seed: int = 17,
+    splits: tuple[tuple[str, str, str], ...] = (),
 ) -> dict[str, Any]:
     source = Path(report_dir).expanduser()
     trades_path = source / "volume_event_best_trades.csv"
@@ -80,10 +78,10 @@ def run_feature_factory_report(
     for spec in FEATURE_SPECS:
         if spec.name not in trades.columns or target_col not in trades.columns:
             continue
-        edge = _feature_edge(trades, spec.name, target_col, min_rows=min_rows, rng=rng, shuffle_samples=shuffle_samples)
+        edge = _feature_edge(trades, spec.name, target_col, min_rows=min_rows, rng=rng, shuffle_samples=shuffle_samples, splits=splits)
         if edge:
             edge_rows.append({**edge, "family": spec.family, "causal_note": spec.causal_note})
-        split_rows.extend(_split_edges(trades, spec.name, target_col, min_rows=max(6, min_rows // 2)))
+        split_rows.extend(_split_edges(trades, spec.name, target_col, min_rows=max(6, min_rows // 2), splits=splits))
         interaction_rows.extend(_interaction_edges(trades, spec.name, target_col, min_rows=max(6, min_rows // 2)))
 
     coverage = pl.DataFrame(coverage_rows, infer_schema_length=None)
@@ -223,6 +221,7 @@ def _feature_edge(
     min_rows: int,
     rng: np.random.Generator,
     shuffle_samples: int,
+    splits: tuple[tuple[str, str, str], ...] = (),
 ) -> dict[str, Any] | None:
     pairs = _finite_pairs(trades, feature, target_col)
     rows = len(pairs)
@@ -239,7 +238,7 @@ def _feature_edge(
     shuffle_abs_median = float(np.median(shuffled_abs_edges)) if shuffled_abs_edges else 0.0
     split_edges = [
         row
-        for row in _split_edges(trades, feature, target_col, min_rows=max(6, min_rows // 2))
+        for row in _split_edges(trades, feature, target_col, min_rows=max(6, min_rows // 2), splits=splits)
         if row.get("high_low_edge") is not None
     ]
     split_consistency = _same_sign_count(edge["high_low_edge"], [float(row["high_low_edge"]) for row in split_edges])
@@ -260,11 +259,18 @@ def _feature_edge(
     }
 
 
-def _split_edges(trades: pl.DataFrame, feature: str, target_col: str, *, min_rows: int) -> list[dict[str, Any]]:
+def _split_edges(
+    trades: pl.DataFrame,
+    feature: str,
+    target_col: str,
+    *,
+    min_rows: int,
+    splits: tuple[tuple[str, str, str], ...] = (),
+) -> list[dict[str, Any]]:
     if feature not in trades.columns or target_col not in trades.columns:
         return []
     rows = []
-    for split_name, start, end in SPLITS:
+    for split_name, start, end in splits:
         split = _filter_split(trades, start, end)
         pairs = _finite_pairs(split, feature, target_col)
         if len(pairs) < min_rows:

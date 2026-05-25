@@ -33,6 +33,12 @@ DATASETS = {
     "long_native_demo_trades",
     "long_native_demo_orders",
     "long_native_demo_cycles",
+    # B.4: paper-shadow ledger for the long sleeve. Same schema as the demo
+    # ledger; written by the paper runner which records idealised fills at the
+    # signal price and never submits orders.
+    "long_native_paper_trades",
+    "long_native_paper_orders",
+    "long_native_paper_cycles",
     "binance_usdm_klines_1h",
     "binance_usdm_mark_price_1h",
     "binance_usdm_index_price_1h",
@@ -65,6 +71,9 @@ DATASET_KEYS = {
     "long_native_demo_trades": ("trade_id",),
     "long_native_demo_orders": ("order_link_id",),
     "long_native_demo_cycles": ("cycle_id",),
+    "long_native_paper_trades": ("trade_id",),
+    "long_native_paper_orders": ("order_link_id",),
+    "long_native_paper_cycles": ("cycle_id",),
     "binance_usdm_klines_1h": ("ts_ms", "symbol"),
     "binance_usdm_mark_price_1h": ("ts_ms", "symbol"),
     "binance_usdm_index_price_1h": ("ts_ms", "symbol"),

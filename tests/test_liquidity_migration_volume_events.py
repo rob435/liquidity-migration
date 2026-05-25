@@ -776,6 +776,13 @@ def test_volume_event_config_validates_new_research_knobs() -> None:
         _validate_event_config(VolumeEventResearchConfig(dryup_prior_volume_rank_max=1.5))
 
 
+_LEGACY_GATE_SPLITS = (
+    ("train_2023_2024", "2023-05-03", "2024-05-03"),
+    ("validation_2024_2025", "2024-05-03", "2025-05-03"),
+    ("oos_2025_2026", "2025-05-03", "2026-05-03"),
+)
+
+
 def test_volume_event_promotion_requires_all_splits_positive() -> None:
     fields = _promotion_fields(
         [
@@ -783,7 +790,7 @@ def test_volume_event_promotion_requires_all_splits_positive() -> None:
             {"name": "validation_2024_2025", "total_return": -0.01, "max_drawdown": -0.05, "sharpe_like": 0.8},
             {"name": "oos_2025_2026", "total_return": 0.03, "max_drawdown": -0.12, "sharpe_like": 0.7},
         ],
-        config=VolumeEventResearchConfig(),
+        config=VolumeEventResearchConfig(splits=_LEGACY_GATE_SPLITS),
     )
 
     assert fields["promotion_gate_pass"] is False
@@ -797,7 +804,7 @@ def test_volume_event_promotion_requires_pit_membership() -> None:
             {"name": "validation_2024_2025", "total_return": 0.08, "max_drawdown": -0.12, "sharpe_like": 0.8},
             {"name": "oos_2025_2026", "total_return": 0.03, "max_drawdown": -0.15, "sharpe_like": 0.7},
         ],
-        config=VolumeEventResearchConfig(),
+        config=VolumeEventResearchConfig(splits=_LEGACY_GATE_SPLITS),
         pit_membership_pass=False,
     )
 
@@ -814,7 +821,7 @@ def test_volume_event_promotion_requires_full_pit_universe() -> None:
             {"name": "validation_2024_2025", "total_return": 0.08, "max_drawdown": -0.12, "sharpe_like": 0.8},
             {"name": "oos_2025_2026", "total_return": 0.03, "max_drawdown": -0.15, "sharpe_like": 0.7},
         ],
-        config=VolumeEventResearchConfig(),
+        config=VolumeEventResearchConfig(splits=_LEGACY_GATE_SPLITS),
         pit_membership_pass=True,
         full_pit_universe_pass=False,
     )
@@ -832,13 +839,29 @@ def test_volume_event_promotion_uses_documented_drawdown_gate() -> None:
             {"name": "validation_2024_2025", "total_return": 0.08, "max_drawdown": -0.26, "sharpe_like": 0.8},
             {"name": "oos_2025_2026", "total_return": 0.03, "max_drawdown": -0.15, "sharpe_like": 0.7},
         ],
-        config=VolumeEventResearchConfig(),
+        config=VolumeEventResearchConfig(splits=_LEGACY_GATE_SPLITS),
         pit_membership_pass=True,
         full_pit_universe_pass=True,
     )
 
     assert fields["promotion_gate_pass"] is False
     assert "drawdown_fail" in fields["promotion_reason"]
+
+
+def test_volume_event_promotion_whole_period_only_passes_without_splits() -> None:
+    """When splits=() (default), the per-split gates degenerate to no-ops and
+    the gate passes once PIT preconditions are satisfied. Whole-period checks
+    on max DD / Sharpe live on the summary row, not in _promotion_fields."""
+    fields = _promotion_fields(
+        [],
+        config=VolumeEventResearchConfig(),
+        pit_membership_pass=True,
+        full_pit_universe_pass=True,
+    )
+    assert fields["pre_pit_gate_pass"] is True
+    assert fields["promotion_gate_pass"] is True
+    assert fields["promotion_reason"] == "pass"
+    assert fields["expected_splits"] == 0
 
 
 def test_attach_event_archive_membership_flags_symbol_dates() -> None:

@@ -17,13 +17,21 @@ python -m liquidity_migration <subcommand> --help
 
 ## Data root — pick the right one (critical)
 
-- **Serious research / promotion evidence** → `~/SHARED_DATA/bybit_fullpit_1h`.
-  The default config resolves `DATA_ROOT` here. Use `--end 2026-05-18`
-  (end-exclusive; completed bars run 2023-05-03..2026-05-17).
+- **Bybit working dataset** → `~/SHARED_DATA/bybit_full_pit`. The default
+  config resolves `DATA_ROOT` here. Use `--end` set to today's date in UTC
+  (end-exclusive) so the run captures the full history available.
+- **Binance working dataset** → `~/SHARED_DATA/binance_full_pit`. Same shape
+  as the Bybit root. Use it for side-by-side venue validation; agreement
+  across both venues is the robustness signal, disagreement flags a regime
+  or microstructure artefact.
 - **Live demo ledgers** → `data/bybit-demo-event`. NEVER point a research run
   here, and never point demo ledgers at the research root.
-- **Out-of-sample validation** → `~/SHARED_DATA/bybit_oos_pre2023`,
-  `~/SHARED_DATA/binance_oos_pit`. Validation only — no longer pristine.
+- **Paper-shadow ledgers** → `data/bybit-paper-event`. The
+  `reconcile-paper-demo` and `reconcile-long-paper-demo` commands compare
+  these against the demo ledgers to measure execution slippage.
+- **Pristine OOS** → forward demo / paper ledgers only. There is no internal
+  OOS surface; both per-venue roots span their full available history. Cite
+  the forward ledger as the OOS evidence.
 - Pass `--data-root` only when intentionally running a non-default audited
   root. See `docs/data_roots.md` and the `liqmig-research` MCP `data_roots`
   tool.

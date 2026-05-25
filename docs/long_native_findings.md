@@ -53,9 +53,19 @@ Ran 12 variants over 6 event types via the proven `volume-events` CLI. Best:
 
 The repo's pre-coded "long-continuation" events lose money systematically. The infrastructure was tuned for the liquidity_migration **short** trade; the long side is genuinely different and these signals don't translate.
 
-## The Sharpe annualization gotcha
+## The Sharpe annualization gotcha (HISTORICAL — fixed 2026-05-24)
 
-The repo's `summarize_trade_backtest` uses:
+> **Fix landed:** B.1 of [full_pit_rebuild_and_punchlist.md](full_pit_rebuild_and_punchlist.md).
+> `summarize_trade_backtest` and `_split_rows` now report daily-aligned
+> Sharpe under `sharpe_like` (annualised off the calendar-day equity curve,
+> forward-filled across exit days). The basket-frequency formula is gone
+> entirely — there is no `sharpe_basket_frequency_legacy` field anymore.
+> The promotion-gate threshold is 0.7 against the honest Sharpe (was 1.0
+> against inflated). Historical numbers below this footnote remain useful
+> as **directional** evidence; do not compare their magnitudes to runs
+> produced after 2026-05-24.
+
+The repo's `summarize_trade_backtest` used to use:
 ```python
 annual_periods = 365.0 / config.rebalance_days   # rebalance_days is the hold horizon
 sharpe = mean(basket_returns) / std(basket_returns) × sqrt(annual_periods)
