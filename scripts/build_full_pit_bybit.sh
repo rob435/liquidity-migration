@@ -34,14 +34,6 @@ CATEGORY="${BYBIT_CATEGORY:-linear}"   # perpetuals only; do not change
 MANIFEST_WORKERS="${MANIFEST_WORKERS:-16}"
 KLINE_WORKERS="${KLINE_WORKERS:-8}"
 ANCILLARY_WORKERS="${ANCILLARY_WORKERS:-4}"
-# signed_flow build is opt-in: across 5+ tests (standalone IC, hard filter,
-# feature-factory, sizing on 2 profiles, true-OOS) taker imbalance is NOT a
-# usable edge — see memory:signed-flow-state and
-# reports/signed_flow_research_verdict.md. The full PIT build is also costly
-# (~55k-132k daily archive files at Bybit's sustained 3.5-7 files/sec =
-# multi-hour/overnight). Set INCLUDE_SIGNED_FLOW=1 only if you have a
-# specific exploratory reason to rebuild it.
-INCLUDE_SIGNED_FLOW="${INCLUDE_SIGNED_FLOW:-0}"
 PYTHON_BIN="${PYTHON_BIN:-.venv/bin/python}"
 
 if [ "$CATEGORY" != "linear" ]; then
@@ -57,23 +49,22 @@ echo "Bybit full PIT build  (perpetuals-only, category=$CATEGORY)"
 echo "  root:        $ROOT"
 echo "  window:      $START → $END (exclusive)"
 echo "  workers:     manifest=$MANIFEST_WORKERS kline=$KLINE_WORKERS ancillary=$ANCILLARY_WORKERS"
-echo "  signed_flow: $INCLUDE_SIGNED_FLOW"
 echo "=============================================================="
 
 echo
-echo "[1/5] Bybit — PIT manifest from public.bybit.com archive (USDT perps only)"
+echo "[1/4] Bybit — PIT manifest from public.bybit.com archive (USDT perps only)"
 "$PYTHON_BIN" -m liquidity_migration --data-root "$ROOT" \
   archive-manifest --start "$START" --end "$END" --workers "$MANIFEST_WORKERS"
 
 echo
-echo "[2/5] Bybit — 1h klines via v5 kline API (category=$CATEGORY, manifest-gated)"
+echo "[2/4] Bybit — 1h klines via v5 kline API (category=$CATEGORY, manifest-gated)"
 "$PYTHON_BIN" -m liquidity_migration --data-root "$ROOT" \
   archive-download-klines-1h-api \
     --category "$CATEGORY" \
     --start "$START" --end "$END" --workers "$KLINE_WORKERS"
 
 echo
-echo "[3/5] Bybit — filter manifest to ≥20-bar coverage"
+echo "[3/4] Bybit — filter manifest to ≥20-bar coverage"
 "$PYTHON_BIN" -m liquidity_migration.binance_vision \
   filter-manifest --data-root "$ROOT"
 
@@ -96,33 +87,13 @@ PY
 N_SYMBOLS=$(echo "$SYMBOLS" | tr ',' '\n' | wc -l)
 
 echo
-echo "[4/5] Bybit — funding + open_interest + mark/index/premium for $N_SYMBOLS symbols"
+echo "[4/4] Bybit — funding + open_interest + mark/index/premium for $N_SYMBOLS symbols"
 "$PYTHON_BIN" -m liquidity_migration --data-root "$ROOT" \
   download-data \
     --symbols "$SYMBOLS" \
     --start "$START" --end "$END" \
     --datasets funding,open_interest,mark_price_1h,index_price_1h,premium_index_1h \
     --workers "$ANCILLARY_WORKERS"
-
-if [ "$INCLUDE_SIGNED_FLOW" = "1" ]; then
-  echo
-  echo "[5/5] Bybit — archive_trades → signed_flow_{1m,1h} (raw trades discarded)"
-  # download-data with archive_trades pulls the daily csv.gz, aggregates
-  # signed_flow_1m + signed_flow_1h via ingestion.aggregate_signed_flow_*, and
-  # --skip-raw-public-trades prevents persisting the raw-trades parquet
-  # (which would inflate disk ~10x for the same downstream feature surface).
-  "$PYTHON_BIN" -m liquidity_migration --data-root "$ROOT" \
-    download-data \
-      --symbols "$SYMBOLS" \
-      --start "$START" --end "$END" \
-      --datasets archive_trades \
-      --archive-url-template "https://public.bybit.com/trading/{symbol}/{symbol}{date}.csv.gz" \
-      --skip-raw-public-trades \
-      --workers "$KLINE_WORKERS"
-else
-  echo
-  echo "[5/5] signed_flow build skipped (INCLUDE_SIGNED_FLOW=0)"
-fi
 
 echo
 echo "=============================================================="

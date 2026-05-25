@@ -22,9 +22,9 @@ def test_incremental_parquet_writes_merge_existing_partition(tmp_path: Path) -> 
         ]
     )
 
-    write_dataset(first, tmp_path, "signed_flow_1m")
-    write_dataset(second, tmp_path, "signed_flow_1m")
-    stored = read_dataset(tmp_path, "signed_flow_1m")
+    write_dataset(first, tmp_path, "funding")
+    write_dataset(second, tmp_path, "funding")
+    stored = read_dataset(tmp_path, "funding")
 
     assert stored.height == 2
     assert stored["buy_quote"].sum() == 300.0
@@ -42,9 +42,9 @@ def test_incremental_parquet_writes_replace_duplicate_keys(tmp_path: Path) -> No
         ]
     )
 
-    write_dataset(first, tmp_path, "signed_flow_1m")
-    write_dataset(correction, tmp_path, "signed_flow_1m")
-    stored = read_dataset(tmp_path, "signed_flow_1m")
+    write_dataset(first, tmp_path, "funding")
+    write_dataset(correction, tmp_path, "funding")
+    stored = read_dataset(tmp_path, "funding")
 
     assert stored.height == 1
     assert stored["buy_quote"][0] == 125.0

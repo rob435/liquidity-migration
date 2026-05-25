@@ -15,14 +15,18 @@ DATASETS = {
     "klines_1m",
     "klines_1h",
     "klines_5m",
-    "raw_public_trades",
-    "signed_flow_1m",
-    "signed_flow_1h",
     "funding",
     "open_interest",
     "mark_price_1h",
     "index_price_1h",
     "premium_index_1h",
+    # Read-only legacy: download path was deleted with the signed_flow
+    # cleanup (validated as not-an-edge across 5+ tests, see commit
+    # 6e5e977). volume_events still consumes signed_flow_1h when present
+    # via _signed_flow_feature_frame for the taker_imbalance research
+    # knobs; without this allowlist entry read_dataset throws
+    # "Unknown dataset" on roots that have no signed_flow_1h directory.
+    "signed_flow_1h",
     "ticker_snapshots",
     "archive_trade_manifest",
     "universe_current",
@@ -53,14 +57,12 @@ DATASET_KEYS = {
     "klines_1m": ("ts_ms", "symbol"),
     "klines_1h": ("ts_ms", "symbol"),
     "klines_5m": ("ts_ms", "symbol"),
-    "raw_public_trades": ("symbol", "trade_id"),
-    "signed_flow_1m": ("ts_ms", "symbol"),
-    "signed_flow_1h": ("ts_ms", "symbol"),
     "funding": ("ts_ms", "symbol"),
     "open_interest": ("ts_ms", "symbol"),
     "mark_price_1h": ("ts_ms", "symbol"),
     "index_price_1h": ("ts_ms", "symbol"),
     "premium_index_1h": ("ts_ms", "symbol"),
+    "signed_flow_1h": ("ts_ms", "symbol"),
     "ticker_snapshots": ("ts_ms", "symbol"),
     "archive_trade_manifest": ("symbol", "date", "url"),
     "universe_current": ("snapshot_ts_ms", "symbol"),

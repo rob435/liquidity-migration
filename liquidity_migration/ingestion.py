@@ -8,7 +8,6 @@ from typing import Any
 
 import polars as pl
 
-from .config import TradeFlowConfig
 from .storage import write_dataset
 
 
@@ -73,43 +72,6 @@ def trades_to_frame(trades: list[dict[str, Any]], symbol: str | None = None) -> 
         .unique(subset=["symbol", "trade_id"], keep="last")
         .sort(["symbol", "ts_ms", "trade_id"])
     )
-
-
-def aggregate_signed_flow_1m(
-    trades: pl.DataFrame,
-    *,
-    config: TradeFlowConfig | None = None,
-) -> pl.DataFrame:
-    if trades.is_empty():
-        return pl.DataFrame()
-    cfg = config or TradeFlowConfig()
-    filtered = trades.unique(subset=["symbol", "trade_id"], keep="last") if "trade_id" in trades.columns else trades
-    if cfg.exclude_block_trades and "is_block_trade" in filtered.columns:
-        filtered = filtered.filter(~pl.col("is_block_trade"))
-    if cfg.exclude_rpi_trades and "is_rpi_trade" in filtered.columns:
-        filtered = filtered.filter(~pl.col("is_rpi_trade"))
-    filtered = filtered.with_columns((pl.col("ts_ms") // MS_PER_MINUTE * MS_PER_MINUTE).alias("ts_ms"))
-    grouped = (
-        filtered.group_by(["ts_ms", "symbol"])
-        .agg(
-            [
-                pl.when(pl.col("side") == "Buy").then(pl.col("quote_value")).otherwise(0.0).sum().alias("buy_quote"),
-                pl.when(pl.col("side") == "Sell").then(pl.col("quote_value")).otherwise(0.0).sum().alias("sell_quote"),
-                pl.when(pl.col("side") == "Buy").then(pl.col("size_base")).otherwise(0.0).sum().alias("buy_base"),
-                pl.when(pl.col("side") == "Sell").then(pl.col("size_base")).otherwise(0.0).sum().alias("sell_base"),
-                (pl.col("side") == "Buy").sum().alias("trade_count_buy"),
-                (pl.col("side") == "Sell").sum().alias("trade_count_sell"),
-            ]
-        )
-        .with_columns(
-            [
-                pl.when(pl.col("buy_base") > 0).then(pl.col("buy_quote") / pl.col("buy_base")).otherwise(None).alias("vwap_buy"),
-                pl.when(pl.col("sell_base") > 0).then(pl.col("sell_quote") / pl.col("sell_base")).otherwise(None).alias("vwap_sell"),
-            ]
-        )
-        .sort(["symbol", "ts_ms"])
-    )
-    return grouped
 
 
 def aggregate_trade_klines_1m(trades: pl.DataFrame) -> pl.DataFrame:
@@ -298,40 +260,6 @@ def _parse_ts_ms(value: Any) -> int:
     if ts < 10_000_000_000:
         ts *= 1000.0
     return int(ts)
-
-
-def aggregate_signed_flow_1h(flow_1m: pl.DataFrame) -> pl.DataFrame:
-    if flow_1m.is_empty():
-        return pl.DataFrame()
-    hourly = (
-        flow_1m.with_columns((pl.col("ts_ms") // MS_PER_HOUR * MS_PER_HOUR).alias("ts_ms"))
-        .group_by(["ts_ms", "symbol"])
-        .agg(
-            [
-                pl.col("buy_quote").sum(),
-                pl.col("sell_quote").sum(),
-                pl.col("buy_base").sum(),
-                pl.col("sell_base").sum(),
-                pl.col("trade_count_buy").sum(),
-                pl.col("trade_count_sell").sum(),
-            ]
-        )
-        .with_columns(
-            [
-                (pl.col("buy_quote") + pl.col("sell_quote")).alias("total_quote"),
-                (pl.col("buy_quote") - pl.col("sell_quote")).alias("signed_quote"),
-                (pl.col("trade_count_buy") + pl.col("trade_count_sell")).alias("trade_count"),
-            ]
-        )
-        .with_columns(
-            pl.when(pl.col("total_quote") > 0)
-            .then(pl.col("signed_quote") / pl.col("total_quote"))
-            .otherwise(0.0)
-            .alias("imbalance")
-        )
-        .sort(["symbol", "ts_ms"])
-    )
-    return hourly
 
 
 def normalize_funding_history(funding: pl.DataFrame, *, default_interval_min: int = 480) -> pl.DataFrame:

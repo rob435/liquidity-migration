@@ -136,17 +136,12 @@ def _add_download_data_parser(subparsers) -> None:
     download.add_argument(
         "--datasets",
         default="instruments,klines_1h",
-        help="Comma-separated datasets: instruments, klines_1m, klines_1h, klines_5m, funding, open_interest, mark_price_1h, index_price_1h, premium_index_1h, ticker_snapshots, recent_trades, archive_trades, archive_klines_1m.",
+        help="Comma-separated datasets: instruments, klines_1m, klines_1h, klines_5m, funding, open_interest, mark_price_1h, index_price_1h, premium_index_1h, ticker_snapshots, archive_klines_1m.",
     )
     download.add_argument(
         "--archive-url-template",
         default=None,
-        help="Optional public-trade archive URL template with {symbol} and {date}.",
-    )
-    download.add_argument(
-        "--skip-raw-public-trades",
-        action="store_true",
-        help="For archive ingestion, write signed-flow aggregates but skip raw_public_trades Parquet storage.",
+        help="Optional public-trade archive URL template with {symbol} and {date}. Used by archive_klines_1m.",
     )
     download.add_argument(
         "--workers",
@@ -1722,7 +1717,6 @@ def main(argv: list[str] | None = None) -> int:
                 end_ms=parse_date_ms(args.end),
                 datasets={item.strip() for item in args.datasets.split(",") if item.strip()},
                 archive_url_template=args.archive_url_template,
-                store_raw_public_trades=not args.skip_raw_public_trades,
                 workers=args.workers,
                 open_interest_interval=args.open_interest_interval,
             )

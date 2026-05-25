@@ -13,7 +13,7 @@ from .archive import ArchiveFileNotFoundError, download_public_trade_archive, re
 from .binance import BinanceUSDMData
 from .bybit import BybitMarketData
 from .config import ResearchConfig
-from .ingestion import aggregate_signed_flow_1h, aggregate_signed_flow_1m, aggregate_trade_klines_1m, normalize_funding_history, trades_to_frame
+from .ingestion import aggregate_trade_klines_1m, normalize_funding_history
 from .storage import dataset_path, write_dataset
 
 
@@ -28,7 +28,6 @@ REST_DATASETS = {
     "index_price_1h",
     "premium_index_1h",
     "ticker_snapshots",
-    "recent_trades",
 }
 PER_SYMBOL_REST_DATASETS = {
     "klines_1m",
@@ -39,7 +38,6 @@ PER_SYMBOL_REST_DATASETS = {
     "mark_price_1h",
     "index_price_1h",
     "premium_index_1h",
-    "recent_trades",
 }
 BINANCE_PROXY_DATASET_MAP = {
     "klines_1h": "binance_usdm_klines_1h",
@@ -69,7 +67,6 @@ def download_market_data(
     end_ms: int,
     datasets: set[str],
     archive_url_template: str | None = None,
-    store_raw_public_trades: bool = True,
     workers: int = 1,
     open_interest_interval: str = "1h",
 ) -> dict[str, Path]:
@@ -88,7 +85,7 @@ def download_market_data(
         outputs["ticker_snapshots"] = write_dataset(tickers, data_root, "ticker_snapshots")
 
     per_symbol_rest = datasets & PER_SYMBOL_REST_DATASETS
-    archive_requested = bool({"archive_trades", "archive_klines_1m"} & datasets)
+    archive_requested = "archive_klines_1m" in datasets
     if per_symbol_rest and workers > 1 and not archive_requested:
         max_workers = max(1, min(workers, len(symbols)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -103,7 +100,6 @@ def download_market_data(
                     start_ms=start_ms,
                     end_ms=end_ms,
                     datasets=per_symbol_rest,
-                    store_raw_public_trades=store_raw_public_trades,
                     open_interest_interval=open_interest_interval,
                 ): symbol
                 for index, symbol in enumerate(symbols, start=1)
@@ -126,59 +122,29 @@ def download_market_data(
                     start_ms=start_ms,
                     end_ms=end_ms,
                     datasets=per_symbol_rest,
-                    store_raw_public_trades=store_raw_public_trades,
                     open_interest_interval=open_interest_interval,
                 )
             )
         if archive_requested and archive_url_template:
-            include_flow = "archive_trades" in datasets
-            include_klines = "archive_klines_1m" in datasets
-            include_raw = include_flow and store_raw_public_trades
             for date in _dates_between(start_ms, end_ms):
                 url = archive_url_template.format(symbol=symbol, date=date)
                 local_path = Path(data_root) / "archives" / symbol / _archive_filename(url, date)
-                if _archive_outputs_exist(
-                    data_root,
-                    symbol=symbol,
-                    date=date,
-                    include_raw=include_raw,
-                    include_flow=include_flow,
-                    include_klines=include_klines,
-                ):
-                    print(f"archive_trades: {symbol} {date} cached", flush=True)
-                    if include_raw:
-                        outputs["raw_public_trades"] = dataset_path(data_root, "raw_public_trades")
-                    if include_flow:
-                        outputs["signed_flow_1m"] = dataset_path(data_root, "signed_flow_1m")
-                        outputs["signed_flow_1h"] = dataset_path(data_root, "signed_flow_1h")
-                    if include_klines:
-                        outputs["klines_1m"] = dataset_path(data_root, "klines_1m")
+                if _archive_outputs_exist(data_root, symbol=symbol, date=date):
+                    print(f"archive_klines_1m: {symbol} {date} cached", flush=True)
+                    outputs["klines_1m"] = dataset_path(data_root, "klines_1m")
                     continue
-                print(f"archive_trades: {symbol} {date}", flush=True)
+                print(f"archive_klines_1m: {symbol} {date}", flush=True)
                 try:
                     archive_path = download_public_trade_archive(url, local_path)
                 except ArchiveFileNotFoundError:
                     # 404 — symbol didn't trade on this date (commonly because
                     # it listed later). Permanent miss; skip and continue.
-                    # Without this skip the whole multi-day-multi-symbol
-                    # download crashes on the first such date, observed
-                    # 2026-05-25 at 10000000AIDOGEUSDT/2021-01-01.
-                    print(f"archive_trades: {symbol} {date} skipped (archive 404)", flush=True)
+                    print(f"archive_klines_1m: {symbol} {date} skipped (archive 404)", flush=True)
                     continue
                 trades = read_public_trade_archive(archive_path, symbol=symbol)
-                if include_klines:
-                    klines_1m = aggregate_trade_klines_1m(trades)
-                    outputs["klines_1m"] = write_dataset(klines_1m, data_root, "klines_1m", append=False)
-                    del klines_1m
-                if include_flow:
-                    flow_1m = aggregate_signed_flow_1m(trades, config=config.trade_flow)
-                    flow_1h = aggregate_signed_flow_1h(flow_1m)
-                    outputs["signed_flow_1m"] = write_dataset(flow_1m, data_root, "signed_flow_1m")
-                    outputs["signed_flow_1h"] = write_dataset(flow_1h, data_root, "signed_flow_1h")
-                    del flow_1m, flow_1h
-                if include_raw:
-                    outputs["raw_public_trades"] = write_dataset(trades, data_root, "raw_public_trades", append=False)
-                del trades
+                klines_1m = aggregate_trade_klines_1m(trades)
+                outputs["klines_1m"] = write_dataset(klines_1m, data_root, "klines_1m", append=False)
+                del trades, klines_1m
                 gc.collect()
 
     return outputs
@@ -249,7 +215,6 @@ def _download_rest_symbol_datasets(
     start_ms: int,
     end_ms: int,
     datasets: set[str],
-    store_raw_public_trades: bool,
     open_interest_interval: str = "1h",
     client: BybitMarketData | None = None,
 ) -> dict[str, Path]:
@@ -373,18 +338,6 @@ def _download_rest_symbol_datasets(
                 source="bybit_premium_index",
             ),
         )
-    if "recent_trades" in datasets:
-        print(f"recent_trades: {index}/{total} {symbol} downloading", flush=True)
-        trades = trades_to_frame(local_client.get_recent_trades(symbol))
-        flow_1m = aggregate_signed_flow_1m(trades, config=config.trade_flow)
-        flow_1h = aggregate_signed_flow_1h(flow_1m)
-        if store_raw_public_trades:
-            outputs["raw_public_trades"] = write_dataset(trades, data_root, "raw_public_trades")
-        outputs["signed_flow_1m"] = write_dataset(flow_1m, data_root, "signed_flow_1m")
-        outputs["signed_flow_1h"] = write_dataset(flow_1h, data_root, "signed_flow_1h")
-        print(f"recent_trades: {index}/{total} {symbol} rows={trades.height}", flush=True)
-        del trades, flow_1m, flow_1h
-        gc.collect()
     return outputs
 
 
@@ -800,25 +753,8 @@ def _archive_filename(url: str, fallback_stem: str) -> str:
     return name or f"{fallback_stem}.csv.gz"
 
 
-def _archive_outputs_exist(
-    data_root: str | Path,
-    *,
-    symbol: str,
-    date: str,
-    include_raw: bool,
-    include_flow: bool = True,
-    include_klines: bool = False,
-) -> bool:
-    datasets = []
-    if include_flow:
-        datasets.extend(["signed_flow_1m", "signed_flow_1h"])
-    if include_klines:
-        datasets.append("klines_1m")
-    if include_raw:
-        datasets.append("raw_public_trades")
-    if not datasets:
-        return False
-    return all(_partition_exists(data_root, dataset=dataset, symbol=symbol, date=date) for dataset in datasets)
+def _archive_outputs_exist(data_root: str | Path, *, symbol: str, date: str) -> bool:
+    return _partition_exists(data_root, dataset="klines_1m", symbol=symbol, date=date)
 
 
 def _partition_exists(data_root: str | Path, *, dataset: str, symbol: str, date: str) -> bool:

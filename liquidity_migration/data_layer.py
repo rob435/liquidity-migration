@@ -20,7 +20,6 @@ NATIVE_AUX_DATASETS = (
     "mark_price_1h",
     "index_price_1h",
     "premium_index_1h",
-    "signed_flow_1h",
 )
 BINANCE_PROXY_DATASETS = (
     "binance_usdm_klines_1h",
@@ -38,7 +37,6 @@ HOURLY_DATASETS = {
     "mark_price_1h",
     "index_price_1h",
     "premium_index_1h",
-    "signed_flow_1h",
     "binance_usdm_klines_1h",
     "binance_usdm_open_interest",
     "binance_usdm_mark_price_1h",
@@ -49,7 +47,6 @@ HOURLY_DATASETS = {
 MAX_EXACT_PARTITION_METADATA_FILES = 10_000
 FEATURE_PACKS = {
     "native_basis_funding": ("klines_1h", "funding", "mark_price_1h", "index_price_1h", "premium_index_1h"),
-    "native_leverage_flow": ("klines_1h", "open_interest", "signed_flow_1h"),
     "native_full_aux": NATIVE_AUX_DATASETS,
     "binance_basis_funding_proxy": (
         "binance_usdm_klines_1h",
@@ -552,8 +549,6 @@ def _dataset_notes(dataset: str) -> str:
         return "Binance REST history is recent-window only; archive separately for long tests"
     if dataset.startswith("binance_usdm_"):
         return "Binance USD-M proxy; do not treat as Bybit-native evidence"
-    if dataset == "signed_flow_1h":
-        return "Requires public trade archive ingestion or recent-trade snapshots"
     return ""
 
 

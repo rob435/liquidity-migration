@@ -567,115 +567,6 @@ def test_archive_download_retries_and_removes_partial_temp(tmp_path, monkeypatch
     assert not list(tmp_path.glob("*.tmp"))
 
 
-def test_archive_only_download_does_not_construct_rest_client(tmp_path, monkeypatch) -> None:
-    def fail_client(**_kwargs):
-        raise AssertionError("REST client should not be constructed for archive-only downloads")
-
-    def fake_download(_url, destination):
-        return destination
-
-    def fake_read(_path, *, symbol=None):
-        return pl.DataFrame(
-            [
-                {
-                    "trade_id": "1",
-                    "seq": None,
-                    "ts_ms": 1_735_689_600_000,
-                    "symbol": symbol,
-                    "side": "Buy",
-                    "price": 100.0,
-                    "size_base": 2.0,
-                    "quote_value": 200.0,
-                    "is_block_trade": False,
-                    "is_rpi_trade": False,
-                }
-            ]
-        )
-
-    monkeypatch.setattr(downloaders, "BybitMarketData", fail_client)
-    monkeypatch.setattr(downloaders, "download_public_trade_archive", fake_download)
-    monkeypatch.setattr(downloaders, "read_public_trade_archive", fake_read)
-
-    outputs = download_market_data(
-        tmp_path,
-        config=ResearchConfig(),
-        symbols=["BTCUSDT"],
-        start_ms=1_735_689_600_000,
-        end_ms=1_735_776_000_000,
-        datasets={"archive_trades"},
-        archive_url_template="https://public.bybit.com/trading/{symbol}/{symbol}{date}.csv.gz",
-    )
-
-    assert {"raw_public_trades", "signed_flow_1m", "signed_flow_1h"}.issubset(outputs)
-
-
-def test_archive_download_skips_completed_partitions(tmp_path, monkeypatch) -> None:
-    for dataset in ("signed_flow_1m", "signed_flow_1h"):
-        part = tmp_path / dataset / "date=2025-01-01" / "symbol=BTCUSDT" / "part.parquet"
-        part.parent.mkdir(parents=True)
-        pl.DataFrame({"ts_ms": [1_735_689_600_000], "symbol": ["BTCUSDT"]}).write_parquet(part)
-
-    def fail_download(_url, destination):
-        raise AssertionError("completed archive outputs should be reused")
-
-    monkeypatch.setattr(downloaders, "download_public_trade_archive", fail_download)
-
-    outputs = download_market_data(
-        tmp_path,
-        config=ResearchConfig(),
-        symbols=["BTCUSDT"],
-        start_ms=1_735_689_600_000,
-        end_ms=1_735_776_000_000,
-        datasets={"archive_trades"},
-        archive_url_template="https://public.bybit.com/trading/{symbol}/{symbol}{date}.csv.gz",
-        store_raw_public_trades=False,
-    )
-
-    assert {"signed_flow_1m", "signed_flow_1h"}.issubset(outputs)
-    assert "raw_public_trades" not in outputs
-
-
-def test_archive_download_can_skip_raw_public_trade_storage(tmp_path, monkeypatch) -> None:
-    def fake_download(_url, destination):
-        return destination
-
-    def fake_read(_path, *, symbol=None):
-        return pl.DataFrame(
-            [
-                {
-                    "trade_id": "1",
-                    "seq": None,
-                    "ts_ms": 1_735_689_600_000,
-                    "symbol": symbol,
-                    "side": "Buy",
-                    "price": 100.0,
-                    "size_base": 2.0,
-                    "quote_value": 200.0,
-                    "is_block_trade": False,
-                    "is_rpi_trade": False,
-                }
-            ]
-        )
-
-    monkeypatch.setattr(downloaders, "download_public_trade_archive", fake_download)
-    monkeypatch.setattr(downloaders, "read_public_trade_archive", fake_read)
-
-    outputs = download_market_data(
-        tmp_path,
-        config=ResearchConfig(),
-        symbols=["BTCUSDT"],
-        start_ms=1_735_689_600_000,
-        end_ms=1_735_776_000_000,
-        datasets={"archive_trades"},
-        archive_url_template="https://public.bybit.com/trading/{symbol}/{symbol}{date}.csv.gz",
-        store_raw_public_trades=False,
-    )
-
-    assert {"signed_flow_1m", "signed_flow_1h"}.issubset(outputs)
-    assert "raw_public_trades" not in outputs
-    assert not (tmp_path / "raw_public_trades").exists()
-
-
 def test_archive_download_can_build_1m_klines_from_public_trades(tmp_path, monkeypatch) -> None:
     def fail_client(**_kwargs):
         raise AssertionError("REST client should not be constructed for archive kline downloads")
@@ -1192,7 +1083,7 @@ def test_download_market_data_skips_archive_404_and_continues(tmp_path, monkeypa
     the missing symbol/date instead of aborting the whole multi-day
     download. Without this, a single missing-archive 404 (very common for
     symbols listed after the requested date) brings down the entire
-    pipeline."""
+    pipeline. Exercised via the surviving archive_klines_1m path."""
     seen_urls: list[str] = []
 
     def fake_download(url, destination, **_kwargs):
@@ -1207,10 +1098,10 @@ def test_download_market_data_skips_archive_404_and_continues(tmp_path, monkeypa
         symbols=["AAAUSDT", "BBBUSDT"],
         start_ms=1_735_689_600_000,
         end_ms=1_735_776_000_000,
-        datasets={"archive_trades"},
+        datasets={"archive_klines_1m"},
         archive_url_template="https://example.test/{symbol}/{symbol}{date}.csv.gz",
     )
     assert len(seen_urls) == 2, f"both symbols should be attempted, not aborted: {seen_urls}"
     assert "AAAUSDT" in seen_urls[0]
     assert "BBBUSDT" in seen_urls[1]
-    assert "signed_flow_1m" not in outputs, "no successful download should mean no signed_flow output"
+    assert "klines_1m" not in outputs, "no successful download should mean no klines output"
