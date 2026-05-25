@@ -14,7 +14,8 @@ two venues serve as side-by-side validation of any signal claim.
                                    source: public.bybit.com/trading archive
                                    + Bybit v5 kline REST (manifest-gated)
                                    + Bybit v5 REST funding/OI/mark/index/premium
-                                   + signed_flow_1h (from public archive trades)
+                                   (signed_flow build removed 2026-05-25 —
+                                    validated as not-an-edge across 5+ tests)
 
 ~/SHARED_DATA/binance_full_pit     Binance USD-M perpetuals, ~2019-09..today
                                    source: data.binance.vision monthly archives
