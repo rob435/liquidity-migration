@@ -39,7 +39,7 @@ With two clean per-venue roots:
 
 | New root | Coverage | Datasets to fill |
 |---|---|---|
-| `~/SHARED_DATA/bybit_full_pit/` | ~2021-01 → today | klines_1h, archive_trade_manifest, funding, open_interest, mark_price_1h, index_price_1h, premium_index_1h, signed_flow_1h, instruments |
+| `~/SHARED_DATA/bybit_full_pit/` | ~2021-01 → today | klines_1h, archive_trade_manifest, funding, open_interest, mark_price_1h, index_price_1h, premium_index_1h, instruments |
 | `~/SHARED_DATA/binance_full_pit/` | ~2019-09 → today | klines_1h, archive_trade_manifest, funding, open_interest, mark_price_1h, index_price_1h, premium_index_1h, instruments |
 
 Then:
@@ -136,8 +136,9 @@ echo "[5/5] Bybit — signed flow (optional but cheap)"
     --start "$START" --end "$END" \
     --datasets archive_klines_1m \
     --workers "$KLINE_WORKERS"
-# Signed-flow build follows naturally from raw_public_trades; see binance_vision.py for the recipe.
-# If signed_flow_1h has its own CLI stage in the future, slot it here.
+# signed_flow was deleted from the build pipeline (validated as not-an-edge
+# across 5+ tests). If a future research need re-introduces it, add a new CLI
+# stage here.
 
 echo
 echo "Bybit full PIT root ready at: $ROOT"
@@ -353,10 +354,9 @@ Disk pre-check: `df -h ~/SHARED_DATA` should show ≥40 GB free (new roots + old
 These had sensible defaults proposed but should be confirmed before someone executes:
 
 1. **Binance start date:** assumed 2019-09-01 (Binance USDM launch). Confirm or override.
-2. **Bybit signed_flow inclusion:** assumed yes (~1-2h extra). Confirm or skip.
-3. **Bybit REST mainnet vs testnet:** assumed mainnet (testnet has no historical depth). Confirm.
-4. **Parallelism:** kline workers 8, ancillary workers 4. Confirm or adjust.
-5. **Schedule:** kick off when manually triggered. Confirm timezone preference (US/EU off-peak ≈ 22:00-06:00 UTC).
+2. **Bybit REST mainnet vs testnet:** assumed mainnet (testnet has no historical depth). Confirm.
+3. **Parallelism:** kline workers 8, ancillary workers 4. Confirm or adjust.
+4. **Schedule:** kick off when manually triggered. Confirm timezone preference (US/EU off-peak ≈ 22:00-06:00 UTC).
 
 ---
 
