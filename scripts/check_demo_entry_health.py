@@ -122,18 +122,21 @@ def check_entries(
     # ledger from before the gap appeared.
     if coverage_gap is not None and coverage_gap > 0:
         return 1, (
-            f"ALERT: universe coverage gap={coverage_gap} prevents signal generation. "
-            f"Strategy needs prior7 rank coverage up to required threshold but the "
-            f"feature build only reaches the observed max. Bootstrap probably "
-            f"incomplete or universe_rank_end too low. {suffix}"
+            f"ALERT: universe coverage gap={coverage_gap} blocks signal generation. "
+            f"The strategy needs prior7 rank coverage up to the required threshold "
+            f"but the feature build only reaches the observed max. "
+            f"Action: wait for bootstrap to complete; if persistent, raise "
+            f"UNIVERSE_RANK_END in the demo service env. {suffix}"
         )
     # Cycle starvation: the daemon may have stalled, been killed, or never
     # restarted. Caught here distinct from "ran fine, zero signals."
     if cycles < expected_cycles:
         return 1, (
             f"ALERT: only {cycles} cycles in last {window_hours}h "
-            f"(expected >= {expected_cycles}). Daemon may be crashing, OOM-looping, "
-            f"or stuck in bootstrap. {suffix}"
+            f"(expected >= {expected_cycles}). The daemon may be crashing, "
+            f"OOM-looping, or stuck in bootstrap. "
+            f"Action: systemctl status liquidity-migration-bybit-demo + "
+            f"journalctl -u liquidity-migration-bybit-demo --since '1h ago'. {suffix}"
         )
     if entries > 0:
         return 0, (

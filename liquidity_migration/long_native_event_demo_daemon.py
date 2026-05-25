@@ -403,7 +403,7 @@ class LongNativeDemoDaemon:
             self._cycle_errors += 1
             _logger.exception("long cycle failed: %s", exc)
             self._send_telegram(
-                f"❌ long-native MultiStratV1 cycle failed: {str(exc)[:200]}"
+                f"❌ liquidity-migration | long sleeve cycle failed: {str(exc)[:200]}"
             )
         elapsed = time.monotonic() - cycle_started
         self._max_cycle_seconds = max(self._max_cycle_seconds, elapsed)
