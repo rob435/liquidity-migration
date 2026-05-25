@@ -441,7 +441,9 @@ def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
     assert "ssh-keygen -y -f ~/.ssh/vps_deploy_key" in text
     assert "ssh-keygen -lf ~/.ssh/vps_deploy_key.pub -E sha256" in text
     assert "ssh-keyscan -T 10 -t ed25519" in text
-    assert "SHA256:zQjT3bst/N43fyt5L4vRKmNDuwtxVuaPiHVINBO2elU" in text
+    # VPS host key fingerprint — update in lockstep with the rebuild.
+    # 2026-05-25 rebuild: SHA256:zQjT3bst... → SHA256:RzhZupfx...
+    assert "SHA256:RzhZupfx/+iShppNscC/gh318L6VxNdXdADfE8srMYw" in text
     assert "scripts/deploy_vps_live.sh" in text
     assert "scripts/verify_vps_live.sh" in text
     assert "scripts/wait_for_vps_recovery_and_deploy.sh" in text
