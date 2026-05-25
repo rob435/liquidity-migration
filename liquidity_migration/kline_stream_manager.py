@@ -395,7 +395,9 @@ class KlineStreamManager:
                 for symbol in targets
             }
             shutdown_triggered = False
-            for future in _as_completed_with_deadline(futures, deadline):
+            for future in _as_completed_with_deadline(
+                futures, deadline, shutdown_event=shutdown_event,
+            ):
                 if shutdown_event is not None and shutdown_event.is_set():
                     # Daemon shutdown requested mid-bootstrap. Cancel every
                     # remaining future so the executor's `with` block exits
@@ -560,16 +562,37 @@ def _kline_row_to_bar_dict(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _as_completed_with_deadline(futures: dict, deadline: float):
+def _as_completed_with_deadline(
+    futures: dict,
+    deadline: float,
+    *,
+    shutdown_event: threading.Event | None = None,
+):
     """Like ``concurrent.futures.as_completed`` but bounded by ``deadline``
     (a monotonic timestamp). Yields futures as they complete; stops when the
-    deadline is past."""
+    deadline is past.
+
+    Caps the per-call ``wait`` timeout at 1s and (when given a
+    ``shutdown_event``) checks it on every poll tick so a stalled REST
+    burst can't leave the bootstrap unresponsive to SIGTERM until the
+    next completion. The caller's per-yield shutdown check only fires
+    when a future is yielded — without this internal check, a worker
+    pool stuck in a slow REST batch could delay shutdown by tens of
+    seconds (each REST call's full duration)."""
     remaining = set(futures)
     while remaining:
         timeout = max(deadline - time.monotonic(), 0.0)
+        timeout = min(timeout, 1.0)
         from concurrent.futures import wait, FIRST_COMPLETED
         done, _ = wait(remaining, timeout=timeout, return_when=FIRST_COMPLETED)
         if not done:
+            # Poll tick. Surface shutdown immediately by stopping the
+            # generator — the executor's `with` block will then cancel
+            # the in-flight futures.
+            if shutdown_event is not None and shutdown_event.is_set():
+                return
+            if time.monotonic() < deadline:
+                continue
             # Deadline reached: cancel pending and stop.
             for fut in remaining:
                 fut.cancel()
