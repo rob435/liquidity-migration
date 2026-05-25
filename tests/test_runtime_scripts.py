@@ -758,3 +758,45 @@ def test_health_watchdog_silent_strategy_does_not_spam_telegram(tmp_path: Path) 
     assert code == 0
     assert "OK (silent)" in msg
     assert "ALERT" not in msg
+
+
+def test_health_watchdog_reports_per_cycle_stale_not_cumulative(tmp_path: Path) -> None:
+    """Pre-2026-05-25 the watchdog summed skipped_stale across all cycles
+    in the window. The cycle row's skipped_stale field is a PER-CYCLE
+    count (e.g. 44 candidates rejected this cycle), so summing 60 cycles
+    × 44 per cycle = 2640 "stale-skips" was wildly inflated and led to
+    the misleading 32833-magnitude alert chain. Now the watchdog reads
+    the LATEST cycle's per-cycle count and labels it accordingly.
+
+    This test pins the per-cycle semantics so a future refactor can't
+    silently re-introduce the cumulative-summing bug."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from check_demo_entry_health import check_entries
+
+    from datetime import datetime, timezone
+    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    now_ms = int(time.time() * 1000)
+    # 60 cycles, each reporting 44 stale-skips. Cumulative would be 2640.
+    # Per-cycle should report 44.
+    cycles = [
+        {
+            "mode": "submit",
+            "ts_ms": now_ms - i * 60_000,
+            "entries_executed": 0, "entry_candidates": 0, "skipped_stale": 44,
+            "universe_coverage": {"coverage_gap": 0},
+            "latest_feature_ts_ms": now_ms - 14 * 3_600_000,
+            "kline_store_max_ts_ms": now_ms - 15 * 60_000,
+        }
+        for i in range(60)
+    ]
+    _write_demo_cycle_parquet(tmp_path, cycles=cycles, date=today)
+    code, msg = check_entries(data_root=tmp_path, window_hours=1)
+    assert code == 0, "sparse strategy must not page (exit 0)"
+    assert "44 stale-skips/cycle" in msg, (
+        f"watchdog must report per-cycle stale, not cumulative — got: {msg!r}"
+    )
+    assert "2640" not in msg, "cumulative count must not appear"
+    assert "same 44 candidates" in msg, (
+        "OK (sparse) text must reference the per-cycle figure for clarity"
+    )

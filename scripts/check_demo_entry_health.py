@@ -77,8 +77,18 @@ def check_entries(
     cycles = df.height
     entries = int(df.select(pl.col("entries_executed").fill_null(0).sum()).item()) if cycles else 0
     candidates = int(df.select(pl.col("entry_candidates").fill_null(0).sum()).item()) if cycles else 0
-    # events pipeline rollup
-    stale = int(df.select(pl.col("skipped_stale").fill_null(0).sum()).item()) if cycles else 0
+    # `skipped_stale` in each cycle row is the PER-CYCLE count of candidates
+    # the cycle just rejected as stale. Summing across cycles (the old
+    # behavior) overstates magnitude wildly — the same 44 candidates from
+    # the 04:00 UTC bar got re-counted ~700 times to produce the misleading
+    # "32833 stale-skips" alert on 2026-05-25. Use the LATEST cycle's count
+    # as the representative per-cycle figure; if you want lifetime totals
+    # the daemon's own running stats are the right source, not this watchdog.
+    stale_per_cycle = (
+        int(df.tail(1).select(pl.col("skipped_stale").fill_null(0)).item())
+        if cycles and "skipped_stale" in df.columns
+        else 0
+    )
     coverage_gap = _last_coverage_gap(df)
     # Two ages we need to tell apart:
     #   - kline_age: how stale the WS-fed kline store is. >6h here = real
@@ -109,7 +119,7 @@ def check_entries(
     expected_cycles = int(effective_hours * 60 * min_cycles_per_hour)
     kline_age_text = f"{kline_age_hours:.1f}h" if kline_store_max_ts_ms > 0 else "unknown"
     suffix = (
-        f"({candidates} candidates seen, {cycles} cycles, {stale} stale-skips, "
+        f"({candidates} candidates seen, {cycles} cycles, {stale_per_cycle} stale-skips/cycle, "
         f"coverage_gap={coverage_gap}, kline_age={kline_age_text}, "
         f"latest_feature_age={feature_age_hours:.1f}h)"
     )
@@ -174,21 +184,21 @@ def check_entries(
     # telegram — they're just observed states, not problems. The text is
     # still printed to the journal in case an operator runs the script
     # manually or greps the timer's last run.
-    if stale > 0 and candidates == 0:
+    if stale_per_cycle > 0 and candidates == 0:
         return 0, (
-            f"OK (sparse): no new signals — same {stale} candidates from "
+            f"OK (sparse): no new signals — same {stale_per_cycle} candidates from "
             f"{feature_age_hours:.1f}h ago re-detected each cycle and rejected "
             f"as past MAX_ENTRY_LAG. Kline feed fresh; strategy is just quiet. {suffix}"
         )
-    if candidates == 0 and stale == 0:
+    if candidates == 0 and stale_per_cycle == 0:
         return 0, (
             f"OK (silent): no signals fired in {window_hours}h. Kline feed "
             f"fresh; strategy is just quiet. {suffix}"
         )
     return 1, (
         f"ALERT: 0 entries in last {window_hours}h with {candidates} candidates "
-        f"+ {stale} stale-skips — falls outside the known sparse / stale-feed "
-        f"patterns. Check universe coverage, event filters, and entry gates. {suffix}"
+        f"+ {stale_per_cycle} stale-skips/cycle — falls outside the known sparse / "
+        f"stale-feed patterns. Check universe coverage, event filters, and entry gates. {suffix}"
     )
 
 
