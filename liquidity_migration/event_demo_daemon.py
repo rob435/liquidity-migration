@@ -924,8 +924,18 @@ def _default_trade_router_factory(
                 api_secret=api_secret,
             )
         except Exception as exc:  # noqa: BLE001
-            _logger.warning(
-                "WS trade client construction failed; router will REST-only: %s", exc,
+            # Bybit's demo WS trade endpoint rejects auth — expected on
+            # demo, alarming on REAL_MONEY. Demote to INFO on demo so it
+            # doesn't drown the operator in unexpected-warning noise; on
+            # real money it stays a WARNING because WS trade should work
+            # and a failure means orders fall back to slower REST.
+            level = logging.INFO if demo else logging.WARNING
+            _logger.log(
+                level,
+                "WS trade client construction failed; router will REST-only "
+                "(%s): %s",
+                "expected on demo" if demo else "REAL_MONEY",
+                exc,
             )
             ws_client = None
     return BybitTradeRouter(

@@ -776,8 +776,14 @@ def _default_long_trade_router_factory(
                 api_secret=api_secret,
             )
         except Exception as exc:  # noqa: BLE001
-            _logger.warning(
-                "long WS trade client construction failed; router REST-only: %s", exc,
+            # See EventDemoDaemon for the demote-on-demo rationale.
+            level = logging.INFO if demo else logging.WARNING
+            _logger.log(
+                level,
+                "long WS trade client construction failed; router REST-only "
+                "(%s): %s",
+                "expected on demo" if demo else "REAL_MONEY",
+                exc,
             )
             ws_client = None
     return BybitTradeRouter(
