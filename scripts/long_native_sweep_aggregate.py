@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 import polars as pl
@@ -58,7 +57,7 @@ def main() -> int:
     lines = [
         "# Long-Native FC Daily-Increase Sweep — Combined Report",
         "",
-        f"Sweep of `fc_min_day_return` on the v11a long-only profile (only this single parameter varied).",
+        "Sweep of `fc_min_day_return` on the v11a long-only profile (only this single parameter varied).",
         f"Roots: {', '.join(label for label, _ in roots)}",
         "",
     ]
@@ -161,8 +160,8 @@ def main() -> int:
                 "",
                 f"- Mean net trade return: {net_mean*100:.2f}%",
                 f"- Median net trade return: {net_median*100:.2f}%",
-                f"- Top symbols: " + ", ".join(f"{row['symbol']}({row['len']})" for row in symbol_counts.iter_rows(named=True)),
-                f"- Pattern counts: " + ", ".join(f"{row['pattern']}={row['len']}" for row in pattern_counts.iter_rows(named=True)),
+                "- Top symbols: " + ", ".join(f"{row['symbol']}({row['len']})" for row in symbol_counts.iter_rows(named=True)),
+                "- Pattern counts: " + ", ".join(f"{row['pattern']}={row['len']}" for row in pattern_counts.iter_rows(named=True)),
                 "",
             ]
 

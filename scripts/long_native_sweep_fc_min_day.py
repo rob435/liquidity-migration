@@ -101,7 +101,7 @@ def main() -> int:
     md_lines = [
         f"# Long-Native FC sweep — {data_root.name}",
         "",
-        f"Sweep of `fc_min_day_return` on v11a long-only profile (all other settings unchanged).",
+        "Sweep of `fc_min_day_return` on v11a long-only profile (all other settings unchanged).",
         f"Values: {', '.join(f'{v:.2f}' for v in values)}",
         "",
         "## Overall metrics per value",
