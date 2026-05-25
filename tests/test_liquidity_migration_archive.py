@@ -8,6 +8,7 @@ import pytest
 from liquidity_migration import archive as archive_module
 from liquidity_migration import archive_manifest as manifest_module
 from liquidity_migration.archive import (
+    ArchiveFileNotFoundError,
     download_public_trade_archive,
     read_public_trade_archive,
     read_public_trade_archive_klines_1h,
