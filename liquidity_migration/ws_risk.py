@@ -1185,6 +1185,15 @@ class EventWebSocketRiskEngine:
         if recovered is not None:
             link, strategy_id, signal_ts_ms, decoded_sleeve = recovered
             trade_id = f"{strategy_id}-{symbol}-{signal_ts_ms}"
+            # entry_ts_ms must reflect the actual fill time (Bybit's
+            # createdTime) not signal_ts. The cycle's exit logic computes
+            # planned_exit_ts_ms = entry_ts_ms + hold_days*MS_PER_DAY and
+            # event_decay rank-checks start FROM entry_ts_ms — putting
+            # signal_ts (which can be 1-6h earlier than the actual fill)
+            # in entry_ts_ms makes the position look older than it is and
+            # trips both exits prematurely. Observed live 2026-05-25:
+            # WAVESUSDT got event_decay on demo ~13h after signal while
+            # paper (correct entry_ts) still held the position.
             return {
                 "trade_id": trade_id,
                 "sleeve": decoded_sleeve,
@@ -1196,14 +1205,14 @@ class EventWebSocketRiskEngine:
                 "entry_price": entry_price,
                 "notional_usdt": abs(entry_price * _float(qty)),
                 "ts_ms": now_ms,
-                "entry_ts_ms": signal_ts_ms,
+                "entry_ts_ms": opened_ms,
                 "opened_at_ms": opened_ms,
                 "updated_at_ms": now_ms,
                 "stop_price": stop_price,
                 "take_profit_price": take_profit_price,
                 "stop_loss_pct": stop_loss_pct,
                 "take_profit_pct": take_profit_pct,
-                "planned_exit_ts_ms": planned_exit_ts_ms,
+                "planned_exit_ts_ms": opened_ms + int(max(self.risk.adopt_hold_days, 0.0) * MS_PER_DAY),
                 "entry_order_link_id": link,
                 "entry_order_id": "",
                 "signal_ts_ms": signal_ts_ms,

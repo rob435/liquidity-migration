@@ -2115,7 +2115,25 @@ def test_ws_risk_recovers_strategy_trade_id_from_bot_order_link(tmp_path: Path) 
     promoted_scenario = _selected_scenario(promoted_strategy)
     expected_trade_id = f"{promoted_scenario.scenario_id}-AAAUSDT-{signal_ts_ms}"
 
+    # Bybit createdTime is typically 1-6h AFTER signal_ts (the cycle waits
+    # for the feature pipeline before submitting). Use a realistic offset so
+    # the test pins entry_ts_ms != signal_ts_ms — that gap was the bug.
+    bybit_created_ms = signal_ts_ms + 3 * 60 * 60 * 1000  # +3h
     private_client = FakePrivateClient(
+        positions=[
+            {
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "size": "1",
+                "avgPrice": "100",
+                "markPrice": "100",
+                "positionValue": "100",
+                "unrealisedPnl": "0",
+                "stopLoss": "112",
+                "takeProfit": "80",
+                "createdTime": str(bybit_created_ms),
+            },
+        ],
         order_history=[
             {
                 "symbol": "AAAUSDT",
@@ -2153,8 +2171,19 @@ def test_ws_risk_recovers_strategy_trade_id_from_bot_order_link(tmp_path: Path) 
         f"expected recovered trade_id {expected_trade_id!r}, got {trade['trade_id']!r}"
     )
     assert trade["strategy_id"] == promoted_scenario.scenario_id  # type: ignore[union-attr]
-    assert trade["entry_ts_ms"] == signal_ts_ms
+    # entry_ts_ms must reflect the actual venue fill time, NOT signal_ts.
+    # The cycle's exit logic computes planned_exit_ts_ms + event_decay rank
+    # checks from entry_ts_ms — putting signal_ts there (1-6h before fill)
+    # makes the position look older and trips exits prematurely. Observed
+    # live 2026-05-25: WAVESUSDT got event_decay on demo while paper still
+    # held the same position because paper's entry_ts was correct.
+    assert trade["entry_ts_ms"] == bybit_created_ms, (
+        f"entry_ts_ms must be Bybit createdTime ({bybit_created_ms}), "
+        f"got {trade['entry_ts_ms']} — and signal_ts ({signal_ts_ms}) is what we DON'T want"
+    )
+    assert trade["entry_ts_ms"] != signal_ts_ms, "entry_ts_ms must not collapse to signal_ts"
     assert trade["signal_ts_ms"] == signal_ts_ms
+    assert trade["opened_at_ms"] == bybit_created_ms
     assert trade["entry_order_link_id"] == entry_link
     assert trade["submit_mode"] == "adopted_recovered"
     assert not str(trade["trade_id"]).startswith("adopted-"), (
