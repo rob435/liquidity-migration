@@ -772,6 +772,20 @@ class EventWebSocketRiskEngine:
         return [order]
 
     def evaluate_symbols(self, symbols: set[str]) -> None:
+        """Plan + submit intrabar safety exits for the given symbols.
+
+        Exit-ownership contract (see event_demo.plan_demo_exits for the
+        peer half): this function owns stop_loss + take_profit (the
+        intrabar trigger checks) with order prefix `lm-ux-*`. The demo
+        cycle's plan_demo_exits owns cadence-based exits (event_decay,
+        rank_exit, failed_fade, time_stop) with prefix `lm-ex-*`.
+
+        Cross-process race protection: ``exit_submission_active(symbol)``
+        skips a symbol with an in-flight reduce-only order so we don't
+        submit a competing one while the cycle's submission is settling
+        (or vice versa). reduce_only=True caps both paths' worst case
+        at position size.
+        """
         if self.state.open_trades.is_empty() or not symbols:
             return
         self.expire_stale_submitted_symbols()

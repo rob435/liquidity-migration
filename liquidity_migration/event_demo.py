@@ -1015,6 +1015,41 @@ def plan_demo_exits(
     config: VolumeEventResearchConfig,
     scenario: EventScenario,
 ) -> list[dict[str, Any]]:
+    """Plan time-/event-/rank-based exits for the demo cycle.
+
+    Exit-ownership contract between the demo cycle and ws_risk (the
+    two processes that can both submit reduce-only orders against the
+    same account):
+
+    - ws_risk owns intrabar safety exits: stop_loss + take_profit fire
+      via the WS execution stream the moment a tick crosses; the risk
+      engine submits reduce-only there with prefix `lm-ux-*`.
+    - This function (demo cycle) owns the cadence-driven exits:
+      `event_decay`, `rank_exit`, `failed_fade`, `time_stop`. These
+      need access to the strategy state machine + rolling features and
+      fire only at 60s tick boundaries with prefix `lm-ex-*`.
+    - Stop/TP appear in both code paths as a SAFETY OVERLAP. ws_risk's
+      WS-driven check fires first in production (sub-second), but the
+      cycle's recheck catches cases where ws_risk was restarting or
+      missed a tick. Either path is correct.
+
+    Cross-process coordination relies on:
+      1. ``live_exit_order_symbols`` (in the cycle) and
+         ``exit_submission_active(symbol)`` (in ws_risk) — both query
+         the shared open-orders snapshot to skip symbols with an
+         in-flight reduce-only order.
+      2. orderLinkId is venue-unique; Bybit reject-by-duplicate on
+         re-submission of the same link.
+      3. reduce_only=True caps risk at position size, so a partial-
+         fill + retry race can't oversize.
+
+    The remaining race window: a fresh ws_risk submit AFTER the cycle
+    snapshotted open_orders but BEFORE the cycle's place_order. Bybit
+    rejects the second submission with insufficient-remaining-qty,
+    which the cycle catches as a place_order error and ledger-records
+    as such. This is correct behavior — no leakage, but the duplicate
+    submission burns a REST round-trip.
+    """
     if open_trades.is_empty():
         return []
     exits: list[dict[str, Any]] = []
