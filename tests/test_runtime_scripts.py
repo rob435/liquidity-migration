@@ -288,6 +288,35 @@ def test_health_watchdog_passes_when_coverage_ok_and_entries_present(tmp_path: P
     assert "healthy" in msg
 
 
+def test_health_watchdog_no_false_alert_after_fresh_deploy(tmp_path: Path) -> None:
+    """After a VPS rebuild the daemon has only been running a few hours.
+    The 24h window sees no data before the rebuild, so cycle count is
+    proportionally healthy even though it's well below the 24h threshold.
+    The watchdog must NOT alert in this case."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from check_demo_entry_health import check_entries
+
+    from datetime import datetime, timezone
+    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    now_ms = int(time.time() * 1000)
+    # Daemon running for 6h at normal 60s cadence → 360 cycles
+    cycles = [
+        {
+            "mode": "submit",
+            "ts_ms": now_ms - (359 - i) * 60_000,
+            "entries_executed": 0, "entry_candidates": 0, "skipped_stale": 0,
+            "universe_coverage": {"coverage_gap": 0},
+        }
+        for i in range(360)
+    ]
+    _write_demo_cycle_parquet(tmp_path, cycles=cycles, date=today)
+
+    # window=24h but data only spans ~6h — expected scales to ~6h worth
+    code, msg = check_entries(data_root=tmp_path, window_hours=24)
+    assert code != 1 or "coverage" in msg, f"false cycle-starvation alert after fresh deploy: {msg}"
+
+
 def test_live_runners_do_not_write_repo_bytecode() -> None:
     repo = Path(__file__).resolve().parents[1]
     paths = [

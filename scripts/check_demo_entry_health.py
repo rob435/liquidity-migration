@@ -80,7 +80,14 @@ def check_entries(
     # events pipeline rollup
     stale = int(df.select(pl.col("skipped_stale").fill_null(0).sum()).item()) if cycles else 0
     coverage_gap = _last_coverage_gap(df)
-    expected_cycles = int(window_hours * 60 * min_cycles_per_hour)
+    # Scale expected cycles by the actual data span within the window, not the
+    # full window_hours. After a fresh deploy the oldest data point is recent,
+    # so requiring a full 24h worth of cycles would always false-alert for the
+    # first 24h of a new deployment.
+    oldest_ts_ms = df.select(pl.col("ts_ms").min()).item() if cycles else cutoff_ms
+    data_span_hours = (time.time() * 1000 - oldest_ts_ms) / 3_600_000
+    effective_hours = min(window_hours, max(data_span_hours, 0.0))
+    expected_cycles = int(effective_hours * 60 * min_cycles_per_hour)
     suffix = (
         f"({candidates} candidates seen, {cycles} cycles, {stale} stale-skips, "
         f"coverage_gap={coverage_gap})"
