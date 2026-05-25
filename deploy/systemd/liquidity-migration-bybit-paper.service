@@ -17,10 +17,22 @@ Environment=RECORD_DRY_RUN=1
 Environment=TELEGRAM_ENABLED=0
 Environment=STRATEGY_PROFILE=promoted
 Environment=INTERVAL_SECONDS=60
-Environment=USE_DAEMON=0
+# USE_DAEMON=1 since 2026-05-25 — was 0 (legacy bash per-cycle bootstrap)
+# which added ~30-60s cycle latency. Daemon mode runs cycles in ~1-2s,
+# matching demo's latency. Reconciliation pairing now sees both sides
+# react to a signal within seconds, so MAX_ENTRY_LAG was lowered from
+# 360 → 180 below. Paper doesn't submit (SUBMIT_ORDERS=0) so the WS
+# trade client is unused; the WS klines + private state caches are
+# shared design with the demo daemon.
+Environment=USE_DAEMON=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=MAX_ORDER_NOTIONAL_PCT_EQUITY=0
-Environment=MAX_ENTRY_LAG_MINUTES=360
+# Was 360 (6h) when paper ran legacy non-daemon mode with ~30-60s cycle
+# latency. With paper now on USE_DAEMON=1 both daemons fire within seconds
+# of ready_ts, so the lag budget can shrink. 180 (3h) keeps a comfortable
+# buffer for occasional WS hiccups + restart bootstraps without chasing
+# stale-alpha signals. Per event_demo.py docstring, 3h decay is acceptable.
+Environment=MAX_ENTRY_LAG_MINUTES=180
 Environment=MAX_NEW_ENTRIES_PER_CYCLE=10
 Environment=MAX_ACTIVE_SYMBOLS=3
 Environment=UNIVERSE_RANK_END=400

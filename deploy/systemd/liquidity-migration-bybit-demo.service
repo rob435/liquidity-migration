@@ -19,7 +19,14 @@ Environment=INTERVAL_SECONDS=60
 Environment=USE_DAEMON=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=MAX_ORDER_NOTIONAL_PCT_EQUITY=0
-Environment=MAX_ENTRY_LAG_MINUTES=360
+# Was 360 (6h) when the feature pipeline could take 3-4h with the old
+# REST-only kline path. WS klines deliver bars within ms of close and the
+# daemon fires entries within ~20s of ready_ts (verified live 2026-05-25
+# at Bybit createdTime = ready_ts + 20s). 180 (3h) is the right budget
+# for the WS pipeline + occasional restart-bootstrap delays. Lowering
+# further (60-120) risks dropping entries during deploy churn — see
+# event_demo.py:71 for the alpha-decay rationale.
+Environment=MAX_ENTRY_LAG_MINUTES=180
 Environment=MAX_NEW_ENTRIES_PER_CYCLE=10
 Environment=MAX_ACTIVE_SYMBOLS=3
 Environment=UNIVERSE_RANK_END=400

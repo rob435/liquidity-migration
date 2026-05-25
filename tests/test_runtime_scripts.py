@@ -107,18 +107,31 @@ def test_long_runner_wires_paper_mode() -> None:
 
 
 def test_demo_services_use_unblocked_entry_lag() -> None:
-    """Live audit on 2026-05-24 found 15min lag rejected every signal as stale
-    (feature pipeline builds 3-4h after bar close). Both demo + paper use 360min
-    (6h) — enough for the natural feature-build cadence (~218min) plus buffer,
-    while still skipping signals stale enough to have lost their entry alpha
-    (the backtest assumes T+1h fills; >6h late degrades the edge meaningfully)."""
+    """2026-05-24 found 15min lag rejected every signal as stale (the legacy
+    REST-only kline path made the feature pipeline build 3-4h late). Demo
+    and paper were bumped to 360min (6h). 2026-05-25 follow-up: paper moved
+    to USE_DAEMON=1 so its cycle latency matches demo's ~20s, which let us
+    drop the lag back to 180min (3h) without losing entries. Anything tighter
+    than 180 risks dropping paper entries during deploy churn (cycle bootstrap
+    takes ~60s); 360 leaves too much room to chase stale-alpha signals."""
     repo = Path(__file__).resolve().parents[1]
     for unit in (
         "liquidity-migration-bybit-demo.service",
         "liquidity-migration-bybit-paper.service",
     ):
         text = (repo / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
-        assert "Environment=MAX_ENTRY_LAG_MINUTES=360" in text, f"{unit}: MAX_ENTRY_LAG_MINUTES regression"
+        assert "Environment=MAX_ENTRY_LAG_MINUTES=180" in text, f"{unit}: MAX_ENTRY_LAG_MINUTES regression"
+
+
+def test_paper_service_uses_daemon_mode() -> None:
+    """Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made
+    each cycle ~30-60s slower than demo's ~1-2s. The asymmetry forced
+    MAX_ENTRY_LAG_MINUTES=360 to keep paper from dropping entries, which
+    polluted the alert chain with stale re-detections. As of 2026-05-25 paper
+    runs the same daemon as demo so both fire within seconds of ready_ts."""
+    repo = Path(__file__).resolve().parents[1]
+    text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-paper.service").read_text(encoding="utf-8")
+    assert "Environment=USE_DAEMON=1" in text, "paper service must run in daemon mode (USE_DAEMON=1)"
 
 
 def test_services_enable_ws_klines() -> None:
