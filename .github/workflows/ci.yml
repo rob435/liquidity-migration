@@ -20,15 +20,29 @@ jobs:
       - name: Lint
         run: python -m ruff check liquidity_migration tests
       - name: Run tests
-        # -v + --tb=long surface every failing test name + traceback
-        # inline. On failure we copy the entire log to the job summary
-        # AND save it as a downloadable artifact so the failure can be
-        # diagnosed without admin-level log download access.
+        # Surface every failure as a publicly-visible workflow ::error::
+        # annotation. Default annotation just says 'Process completed
+        # with exit code 1' which makes triage impossible without admin
+        # log download. Also copies log to job summary + artifact.
         run: |
           set +e
           python -m pytest -v --tb=long --no-header 2>&1 | tee /tmp/pytest.log
           STATUS=${PIPESTATUS[0]}
           if [ "$STATUS" -ne 0 ]; then
+            # Extract failure section + emit each FAILED line as an annotation
+            grep -E "^FAILED " /tmp/pytest.log | while read -r line; do
+              # GitHub Actions annotation: ::error::message
+              # Escape newlines for the workflow command parser.
+              echo "::error::$line"
+            done
+            # Also dump the short summary as a single annotation block.
+            SHORT=$(awk '/^=+ short test summary info =+/,EOF' /tmp/pytest.log | head -50)
+            if [ -n "$SHORT" ]; then
+              # Newlines become %0A in workflow commands.
+              ESCAPED=$(printf '%s' "$SHORT" | python3 -c "import sys; print(sys.stdin.read().replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A'))")
+              echo "::error title=pytest short summary::${ESCAPED}"
+            fi
+            # And the job summary copy.
             {
               echo "## pytest failure (exit $STATUS)"
               echo ""
