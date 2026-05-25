@@ -1693,7 +1693,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-_COMMANDS_WITHOUT_DATA_ROOT = frozenset({"download-data"})
+_COMMANDS_WITHOUT_DATA_ROOT = frozenset({"download-data", "combined-book-telegram-report"})
 
 
 def _expanded_report_dir(report_dir: str | Path | None, *, default: Path) -> Path:
