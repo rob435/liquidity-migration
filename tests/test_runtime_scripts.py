@@ -295,6 +295,21 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "liquidity-migration-bybit-risk.service" in text
     assert "retired unit" in text
     assert "systemctl is-enabled --quiet liquidity-migration-bybit-demo.service" in text
+    # Recovery must bring up the same unit set as deploy_vps_live.sh — paper,
+    # both long sleeves, both timers — otherwise a console-recovered VPS sits
+    # in a partially-configured state until someone deploys again.
+    assert "systemctl enable liquidity-migration-bybit-paper.service" in text
+    assert "systemctl enable liquidity-migration-bybit-long-demo.service" in text
+    assert "systemctl enable liquidity-migration-bybit-long-paper.service" in text
+    assert "systemctl restart liquidity-migration-bybit-paper.service" in text
+    assert "systemctl restart liquidity-migration-bybit-long-demo.service" in text
+    assert "systemctl restart liquidity-migration-bybit-long-paper.service" in text
+    assert "systemctl is-active --quiet liquidity-migration-bybit-paper.service" in text
+    assert "systemctl is-active --quiet liquidity-migration-bybit-long-demo.service" in text
+    assert "systemctl is-active --quiet liquidity-migration-bybit-long-paper.service" in text
+    assert "systemctl is-enabled --quiet liquidity-migration-bybit-paper.service" in text
+    assert "systemctl is-enabled --quiet liquidity-migration-bybit-long-demo.service" in text
+    assert "systemctl is-enabled --quiet liquidity-migration-bybit-long-paper.service" in text
     # Timers ship with the unit files but `systemctl enable` is required to
     # actually schedule them. Pin both timers so a deploy can't silently leave
     # the demo-health watchdog or daily combined-book report inactive.
