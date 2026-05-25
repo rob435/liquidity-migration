@@ -4524,6 +4524,43 @@ def _base36(value: int) -> str:
     return "".join(reversed(output))
 
 
+def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int] | None:
+    """Recover (sleeve, signal_ts_ms) from a bot-generated entry orderLinkId.
+
+    The strategy generates entry orderLinkIds as
+    ``lm-en-{base}-{base36(signal_ts // 1000)}`` (short) or
+    ``lm-en-l-{base}-{base36(signal_ts // 1000)}`` (long). On a VPS rebuild
+    the local trade ledger is gone but Bybit retains the orderLinkId
+    indefinitely — looking it up + decoding it back to signal_ts is the
+    rebuild-safe way to reconstruct the deterministic strategy trade_id
+    (avoids the lossy ``adopted-*`` fallback that drops strategy context).
+
+    Returns ``("short", signal_ts_ms)`` or ``("long", signal_ts_ms)`` on a
+    successful decode, or ``None`` if the link does not match a bot-generated
+    entry pattern (e.g. hand-placed positions, risk-side ``lm-ux-*`` links,
+    legacy formats). Returning None means "fall back to adopted-*"."""
+    if not order_link_id or not order_link_id.startswith("lm-en"):
+        return None
+    parts = order_link_id.split("-")
+    # Short: lm-en-{base}-{ts36}        → 4 parts, sleeve="short"
+    # Long:  lm-en-l-{base}-{ts36}      → 5 parts, sleeve="long"
+    if len(parts) == 4 and parts[0] == "lm" and parts[1] == "en":
+        sleeve = "short"
+        ts36 = parts[3]
+    elif len(parts) == 5 and parts[0] == "lm" and parts[1] == "en" and parts[2] == "l":
+        sleeve = "long"
+        ts36 = parts[4]
+    else:
+        return None
+    try:
+        signal_ts_s = int(ts36, 36)
+    except ValueError:
+        return None
+    if signal_ts_s <= 0:
+        return None
+    return sleeve, signal_ts_s * 1000
+
+
 def _kline_window(now_ms: int, *, lookback_days: int) -> tuple[int, int]:
     end_ms = _floor_hour_ms(now_ms) - MS_PER_HOUR
     start_ms = end_ms - lookback_days * MS_PER_DAY

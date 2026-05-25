@@ -23,12 +23,14 @@ class FakePrivateClient:
         fail_trade_history: bool = False,
         positions: list[dict[str, object]] | None = None,
         open_orders: list[dict[str, object]] | None = None,
+        order_history: list[dict[str, object]] | None = None,
         fail_open_orders: bool = False,
         fail_order: bool = False,
     ) -> None:
         self.confirm_fills = confirm_fills
         self.fail_trade_history = fail_trade_history
         self.open_orders = open_orders or []
+        self.order_history = order_history or []
         self.fail_open_orders = fail_open_orders
         self.fail_order = fail_order
         self.positions = positions if positions is not None else [
@@ -73,6 +75,12 @@ class FakePrivateClient:
         if not self.confirm_fills:
             return []
         return [{"orderLinkId": order_link_id, "execQty": "1", "execPrice": "113", "execValue": "113", "execFee": "0.01"}]
+
+    def get_order_history(self, *, symbol: str | None = None, order_link_id: str | None = None, limit: int = 50):
+        rows = list(self.order_history)
+        if symbol:
+            rows = [row for row in rows if str(row.get("symbol") or "") == symbol]
+        return rows[:limit]
 
 
 class FakePrivateStream:
@@ -2088,6 +2096,109 @@ def test_ws_risk_adopts_untracked_position_on_bootstrap(tmp_path: Path) -> None:
     assert trade["planned_exit_ts_ms"] > trade["entry_ts_ms"]
     assert str(trade["trade_id"]).startswith("adopted-AAAUSDT-")
     assert "AAAUSDT" not in engine.state.submitted_symbols
+
+
+def test_ws_risk_recovers_strategy_trade_id_from_bot_order_link(tmp_path: Path) -> None:
+    """When an adopted position's symbol has a Bybit order history row whose
+    orderLinkId matches our bot-generated `lm-en-{base}-{ts36}` entry pattern,
+    ws_risk must decode the signal_ts and rebuild the deterministic strategy
+    trade_id verbatim — NOT the lossy `adopted-{symbol}-{opened_ms}` form.
+    This is what makes paper/demo reconciliation pair-able across a VPS
+    rebuild: same orderLinkId on Bybit's side → same signal_ts → same
+    trade_id on both ledgers."""
+    from liquidity_migration.event_demo import _order_link_id, _demo_event_config, _selected_scenario
+    from liquidity_migration.volume_events import VolumeEventResearchConfig
+
+    signal_ts_ms = 1_779_667_200_000
+    entry_link = _order_link_id("en", symbol="AAAUSDT", signal_ts_ms=signal_ts_ms)
+    promoted_strategy = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
+    promoted_scenario = _selected_scenario(promoted_strategy)
+    expected_trade_id = f"{promoted_scenario.scenario_id}-AAAUSDT-{signal_ts_ms}"
+
+    private_client = FakePrivateClient(
+        order_history=[
+            {
+                "symbol": "AAAUSDT",
+                "side": "Sell",  # short entry: bot sold to open
+                "orderLinkId": entry_link,
+                "orderStatus": "Filled",
+                "qty": "1",
+                "avgPrice": "100",
+            },
+        ],
+    )
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=False,
+            repair_stops=False,
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    assert stored.height == 1
+    trade = stored.to_dicts()[0]
+    # The recovered trade_id matches the deterministic one the paper sleeve
+    # would have written for the same signal — so reconciliation now pairs.
+    assert trade["trade_id"] == expected_trade_id, (
+        f"expected recovered trade_id {expected_trade_id!r}, got {trade['trade_id']!r}"
+    )
+    assert trade["strategy_id"] == promoted_scenario.scenario_id  # type: ignore[union-attr]
+    assert trade["entry_ts_ms"] == signal_ts_ms
+    assert trade["signal_ts_ms"] == signal_ts_ms
+    assert trade["entry_order_link_id"] == entry_link
+    assert trade["submit_mode"] == "adopted_recovered"
+    assert not str(trade["trade_id"]).startswith("adopted-"), (
+        "recovered trades must not use the lossy adopted-* prefix"
+    )
+
+
+def test_ws_risk_falls_back_to_adopted_when_order_history_has_no_bot_link(tmp_path: Path) -> None:
+    """Hand-placed positions (or positions older than the order history
+    window) lack a bot-formatted orderLinkId — recovery must NOT synthesize
+    a fake signal_ts in that case. Falls back to the legacy adopted-*
+    trade_id so the operator can still manage the position."""
+    private_client = FakePrivateClient(
+        order_history=[
+            {
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "orderLinkId": "manually-placed-order-xyz",  # not a bot pattern
+                "orderStatus": "Filled",
+            },
+        ],
+    )
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=False,
+            repair_stops=False,
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    trade = stored.to_dicts()[0]
+    assert str(trade["trade_id"]).startswith("adopted-AAAUSDT-")
+    assert trade["submit_mode"] == "adopted"
+    assert trade["strategy_id"] == "adopted"
 
 
 def test_ws_risk_adopted_position_exits_on_stop(tmp_path: Path) -> None:

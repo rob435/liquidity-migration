@@ -25,6 +25,7 @@ from .event_demo import (
     _bool,
     _build_private_client,
     _column_values,
+    _demo_event_config,
     _empty_trades,
     _execution_summary,
     _execute_risk_exits,
@@ -38,6 +39,7 @@ from .event_demo import (
     _risk_order_link_id,
     _risk_reconcile_missing_positions,
     _reconcile_pending_order_fills,
+    _selected_scenario,
     _live_open_order_symbols,
     _safe_open_orders,
     _safe_raw_positions,
@@ -51,11 +53,14 @@ from .event_demo import (
     _write_trade_rows,
     build_ledger_position_pnl_snapshot,
     build_position_pnl_snapshot,
+    decode_entry_order_link_id,
     format_event_risk_cycle_report,
     plan_risk_exits,
     plan_stop_repairs,
     summarize_position_pnl,
 )
+from .long_native_event_demo import MULTI_STRAT_V1_STRATEGY_ID
+from .volume_events import VolumeEventResearchConfig
 from .storage import exclusive_file_lock, read_dataset, write_dataset
 
 
@@ -110,6 +115,19 @@ class EventWebSocketRiskConfig:
     adopt_stop_loss_pct: float = 0.12
     adopt_take_profit_pct: float = 0.21
     adopt_hold_days: float = 3.0
+    # Strategy IDs used to reconstruct the deterministic trade_id when an
+    # adopted position's orderLinkId decodes back to a known signal_ts.
+    # Empty string means "use the canonical promoted scenario_id at startup"
+    # (derived once via _demo_event_config to avoid hardcoding it here).
+    # Set explicitly if running a non-default strategy profile.
+    adopt_short_strategy_id: str = ""
+    adopt_long_strategy_id: str = ""
+    # How many recent orders per symbol to scan when looking for the
+    # original entry order's orderLinkId. 50 is Bybit's default page;
+    # bigger is safer for older positions but adds REST cost per
+    # adoption. Adoption fires once per orphan + grace period, so even
+    # 100 is fine.
+    adopt_order_history_limit: int = 50
     # Long-sleeve dual-side support: when long_data_root is set, this engine
     # ALSO reads the long-side ledger (long_native_demo_trades /
     # long_native_demo_orders by default) from that root and routes write
@@ -1155,6 +1173,42 @@ class EventWebSocketRiskEngine:
         # ledger so the long sleeve's open-trade tracking diverges from venue
         # reality. Tag from the venue-observed position side.
         sleeve = "long" if side == "long" else "short"
+        # Rebuild-safe recovery: before falling back to the lossy adopted-*
+        # trade_id, look up Bybit's order history for this symbol and try to
+        # find the original entry order. Our entry order_link_ids encode
+        # signal_ts (lm-en-{base}-{ts36} short, lm-en-l-{base}-{ts36} long),
+        # so we can decode them back to (sleeve, signal_ts_ms) and rebuild
+        # the deterministic strategy trade_id verbatim — which is what the
+        # paper sleeve uses, so reconciliation can now pair on these post-
+        # rebuild positions instead of seeing 3 demo_only / 3 paper_only.
+        recovered = self._recover_entry_link_metadata(symbol=symbol, side=side)
+        if recovered is not None:
+            link, strategy_id, signal_ts_ms, decoded_sleeve = recovered
+            trade_id = f"{strategy_id}-{symbol}-{signal_ts_ms}"
+            return {
+                "trade_id": trade_id,
+                "sleeve": decoded_sleeve,
+                "strategy_id": strategy_id,
+                "symbol": symbol,
+                "side": side,
+                "status": "open",
+                "qty": qty,
+                "entry_price": entry_price,
+                "notional_usdt": abs(entry_price * _float(qty)),
+                "ts_ms": now_ms,
+                "entry_ts_ms": signal_ts_ms,
+                "opened_at_ms": opened_ms,
+                "updated_at_ms": now_ms,
+                "stop_price": stop_price,
+                "take_profit_price": take_profit_price,
+                "stop_loss_pct": stop_loss_pct,
+                "take_profit_pct": take_profit_pct,
+                "planned_exit_ts_ms": planned_exit_ts_ms,
+                "entry_order_link_id": link,
+                "entry_order_id": "",
+                "signal_ts_ms": signal_ts_ms,
+                "submit_mode": "adopted_recovered",
+            }
         return {
             "trade_id": f"adopted-{symbol}-{opened_ms}",
             "sleeve": sleeve,
@@ -1178,6 +1232,65 @@ class EventWebSocketRiskEngine:
             "entry_order_id": "",
             "submit_mode": "adopted",
         }
+
+    def _recover_entry_link_metadata(
+        self, *, symbol: str, side: str,
+    ) -> tuple[str, str, int, str] | None:
+        """Find the original bot-placed entry order for ``symbol`` and decode
+        its orderLinkId into (link, strategy_id, signal_ts_ms, sleeve).
+        Returns None when the symbol has no bot-generated entry in the recent
+        order history — the caller falls back to the lossy adopted-* path
+        (typically hand-placed positions or positions older than the order
+        history window)."""
+        client = self.private_client
+        if client is None:
+            return None
+        try:
+            history = client.get_order_history(
+                symbol=symbol, limit=int(self.risk.adopt_order_history_limit),
+            )
+        except Exception as exc:  # noqa: BLE001 - recovery is best-effort; never break adoption
+            _logger.warning(
+                "adoption recovery: get_order_history failed symbol=%s: %s; "
+                "falling back to adopted-*", symbol, exc,
+            )
+            return None
+        venue_side = "Buy" if side == "long" else "Sell"
+        for order in history:
+            order_side = str(order.get("side") or "")
+            if order_side != venue_side:
+                continue
+            link = str(order.get("orderLinkId") or order.get("order_link_id") or "")
+            decoded = decode_entry_order_link_id(link)
+            if decoded is None:
+                continue
+            decoded_sleeve, signal_ts_ms = decoded
+            strategy_id = self._adopt_strategy_id_for_sleeve(decoded_sleeve)
+            if not strategy_id:
+                continue
+            return link, strategy_id, signal_ts_ms, decoded_sleeve
+        return None
+
+    def _adopt_strategy_id_for_sleeve(self, sleeve: str) -> str:
+        """Resolve the strategy_id used to reconstruct a deterministic
+        trade_id for a recovered adoption. Falls back to canonical defaults
+        when adopt_*_strategy_id was left empty in EventWebSocketRiskConfig."""
+        if sleeve == "long":
+            return self.risk.adopt_long_strategy_id or MULTI_STRAT_V1_STRATEGY_ID
+        if sleeve == "short":
+            if self.risk.adopt_short_strategy_id:
+                return self.risk.adopt_short_strategy_id
+            # Match the canonical promoted scenario the live demo daemon runs.
+            # Derived via _selected_scenario(_demo_event_config(...)) so any
+            # change to the promoted scenario's deterministic id automatically
+            # flows through here.
+            try:
+                strategy = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
+                scenario = _selected_scenario(strategy)
+            except Exception:  # noqa: BLE001 - never let derivation break adoption
+                return ""
+            return str(getattr(scenario, "scenario_id", "") or "")
+        return ""
 
     def exit_untracked_positions(self) -> None:
         if not self.risk.exit_untracked_positions:

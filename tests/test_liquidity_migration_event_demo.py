@@ -34,6 +34,7 @@ from liquidity_migration.event_demo import (
     _maybe_notify,
     _prune_cycle_reports,
     _reconcile_pending_order_fills,
+    decode_entry_order_link_id,
     _required_universe_rank_end,
     _refresh_positions_and_orders,
     _submit_reduce_only_exit,
@@ -4338,6 +4339,41 @@ def test_prune_cycle_reports_amortizes_via_hourly_sentinel(tmp_path: Path) -> No
         tmp_path, prefix="long_native_cycle_", keep_days=7, now_ms=real_now_ms + 60_000,
     )
     assert not second_old.exists(), "prune must run again after the hour expires"
+
+
+def test_decode_entry_order_link_id_roundtrips_short_signal_ts() -> None:
+    """An orderLinkId produced by _order_link_id must decode back to the
+    same signal_ts_ms (within 1s — base36 encoding drops sub-second
+    resolution). This is the round-trip guarantee that the rebuild-safe
+    adoption recovery in ws_risk relies on."""
+    from liquidity_migration.event_demo import _order_link_id
+    signal_ts_ms = 1_779_667_200_000
+    link = _order_link_id("en", symbol="SUPERUSDT", signal_ts_ms=signal_ts_ms)
+    decoded = decode_entry_order_link_id(link)
+    assert decoded == ("short", 1_779_667_200_000)
+
+
+def test_decode_entry_order_link_id_roundtrips_long_signal_ts() -> None:
+    """Long-sleeve entry links carry an extra '-l' segment between 'en' and
+    the symbol base. Decoder must recognize both sleeves so a recovered long
+    position rebuilds with the long_native strategy_id, not the short one."""
+    from liquidity_migration.long_native_event_demo import _long_order_link_id, LONG_ENTRY_LINK_PREFIX
+    signal_ts_ms = 1_779_667_200_000
+    link = _long_order_link_id(LONG_ENTRY_LINK_PREFIX, symbol="ETHUSDT", signal_ts_ms=signal_ts_ms)
+    decoded = decode_entry_order_link_id(link)
+    assert decoded == ("long", 1_779_667_200_000)
+
+
+def test_decode_entry_order_link_id_returns_none_for_unknown_patterns() -> None:
+    """Hand-placed orders, risk-side exits (lm-ux-*), and legacy formats
+    must NOT decode — the caller relies on None to mean 'fall back to the
+    adopted-* lossy path' rather than synthesizing a wrong signal_ts."""
+    assert decode_entry_order_link_id("") is None
+    assert decode_entry_order_link_id("lm-ux-SUPER-abc123") is None  # exit link, not entry
+    assert decode_entry_order_link_id("lm-en-SUPER") is None  # missing ts
+    assert decode_entry_order_link_id("lm-en-SUPER-abc-xyz-extra") is None  # too many parts
+    assert decode_entry_order_link_id("manual-order-id") is None
+    assert decode_entry_order_link_id("lm-en-l-SUPER-not_base36!") is None  # invalid base36
 
 
 def test_execute_entries_preflight_skipped_when_no_callback() -> None:
