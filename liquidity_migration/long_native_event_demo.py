@@ -61,6 +61,7 @@ from .event_demo import (
     _max_int,
     _order_params,
     _prices_close,
+    _prune_cycle_reports,
     _price_lookup_from_tickers_and_klines,
     _private_credentials_present,
     _refresh_positions_and_orders,
@@ -682,17 +683,12 @@ def run_long_native_demo_cycle(
             format_long_demo_cycle_summary(payload), encoding="utf-8"
         )
         # Prune older per-cycle JSON to keep the report dir bounded — at ~1cycle/min
-        # the snapshots would otherwise grow to half a million per year.
-        cutoff_ts = (cycle_now_ms / 1000.0) - 7 * 86400.0
-        try:
-            for old in report_dir.glob("long_native_cycle_*.json"):
-                try:
-                    if old.stat().st_mtime < cutoff_ts:
-                        old.unlink(missing_ok=True)
-                except OSError:
-                    continue
-        except OSError:
-            pass
+        # the snapshots would otherwise grow to half a million per year. Shares
+        # the short sleeve's hourly-sentinel amortization so we don't stat
+        # thousands of files every 60s.
+        _prune_cycle_reports(
+            report_dir, prefix="long_native_cycle_", keep_days=7, now_ms=cycle_now_ms,
+        )
         cycle_row["timing_persist_ms"] = round((time.perf_counter() - persist_perf_start) * 1000.0, 3)
         cycle_row["cycle_elapsed_ms"] = round((time.perf_counter() - cycle_perf_start) * 1000.0, 3)
         payload["cycle"] = cycle_row

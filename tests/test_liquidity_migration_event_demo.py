@@ -32,6 +32,7 @@ from liquidity_migration.event_demo import (
     _limit_chase_price,
     _live_open_order_symbols,
     _maybe_notify,
+    _prune_cycle_reports,
     _reconcile_pending_order_fills,
     _required_universe_rank_end,
     _refresh_positions_and_orders,
@@ -4267,6 +4268,76 @@ def test_wait_for_execution_summary_returns_immediately_on_fill() -> None:
 
     assert float(summary.get("qty") or 0.0) == 1.0
     assert elapsed < 0.05, f"instant fill should return immediately, took {elapsed:.3f}s"
+
+
+def test_prune_cycle_reports_drops_files_older_than_keep_days(tmp_path: Path) -> None:
+    """Old snapshots beyond keep_days must be unlinked; latest pointer kept."""
+    now_ms = 1_700_000_000_000
+    keep_days = 7
+    old_age_seconds = (keep_days + 1) * 86400
+    fresh_age_seconds = 3600  # 1 hour old, well within window
+
+    old_file = tmp_path / "long_native_cycle_OLD.json"
+    fresh_file = tmp_path / "long_native_cycle_FRESH.json"
+    pointer = tmp_path / "latest_long_native_cycle.json"
+    for path in (old_file, fresh_file, pointer):
+        path.write_text("{}", encoding="utf-8")
+
+    now_s = now_ms / 1000.0
+    import os
+    os.utime(old_file, (now_s - old_age_seconds, now_s - old_age_seconds))
+    os.utime(fresh_file, (now_s - fresh_age_seconds, now_s - fresh_age_seconds))
+
+    _prune_cycle_reports(
+        tmp_path, prefix="long_native_cycle_", keep_days=keep_days, now_ms=now_ms,
+    )
+
+    assert not old_file.exists()
+    assert fresh_file.exists()
+    assert pointer.exists(), "latest_*.json pointer must not match the per-cycle prefix"
+
+
+def test_prune_cycle_reports_amortizes_via_hourly_sentinel(tmp_path: Path) -> None:
+    """Second call within an hour must be a no-op — even if a new old file
+    appears, the sentinel skips the scan. Prevents the 5500-stat-syscalls-per-
+    cycle waste from re-emerging in the long sleeve."""
+    import os
+    import time as _time
+
+    real_now_ms = int(_time.time() * 1000)
+    stale_s = real_now_ms / 1000.0 - 30 * 86400
+
+    first_old = tmp_path / "long_native_cycle_OLD1.json"
+    first_old.write_text("{}", encoding="utf-8")
+    os.utime(first_old, (stale_s, stale_s))
+
+    _prune_cycle_reports(
+        tmp_path, prefix="long_native_cycle_", keep_days=7, now_ms=real_now_ms,
+    )
+    assert not first_old.exists()
+    sentinel = tmp_path / ".long_native_cycle_prune_sentinel"
+    assert sentinel.exists(), "first prune must touch the sentinel"
+
+    second_old = tmp_path / "long_native_cycle_OLD2.json"
+    second_old.write_text("{}", encoding="utf-8")
+    os.utime(second_old, (stale_s, stale_s))
+
+    _prune_cycle_reports(
+        tmp_path, prefix="long_native_cycle_", keep_days=7, now_ms=real_now_ms + 60_000,
+    )
+    assert second_old.exists(), (
+        "second prune within the hour must skip the scan even if new old files appeared"
+    )
+
+    # Advance the sentinel mtime backwards by >1h so the gate releases. Cleaner
+    # than waiting an hour in a unit test.
+    past_mtime = (real_now_ms / 1000.0) - 3601
+    os.utime(sentinel, (past_mtime, past_mtime))
+
+    _prune_cycle_reports(
+        tmp_path, prefix="long_native_cycle_", keep_days=7, now_ms=real_now_ms + 60_000,
+    )
+    assert not second_old.exists(), "prune must run again after the hour expires"
 
 
 def test_execute_entries_preflight_skipped_when_no_callback() -> None:
