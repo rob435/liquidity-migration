@@ -8,6 +8,7 @@ on:
       - ".github/workflows/vps-deploy.yml"
       - "liquidity_migration/**"
       - "deploy/systemd/*.service"
+      - "deploy/systemd/*.timer"
       - "scripts/deploy_vps_live.sh"
       - "scripts/print_vps_recovery_command.sh"
       - "scripts/verify_vps_live.sh"
