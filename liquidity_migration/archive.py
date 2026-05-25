@@ -12,6 +12,7 @@ import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
 import certifi
@@ -29,6 +30,17 @@ ARCHIVE_BACKEND_ENV = "LIQMIG_ARCHIVE_DOWNLOAD_BACKEND"
 ARCHIVE_VECTORIZE_1H_ENV = "LIQMIG_ARCHIVE_VECTORIZE_1H"
 
 
+class ArchiveFileNotFoundError(LookupError):
+    """The requested archive URL returned HTTP 404.
+
+    Distinct from transient network failures: a 404 from Bybit's public
+    trading archive (e.g. requesting 2021-01-01 for a symbol that listed
+    in 2024) is permanent — retrying it will always 404. Callers should
+    treat this as "no archive for this symbol/date" and skip, not abort
+    the entire multi-day download.
+    """
+
+
 def _positive_int_env(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
@@ -42,8 +54,13 @@ def _positive_int_env(name: str, default: int) -> int:
 
 def download_archive_bytes(url: str, *, timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS) -> bytes:
     context = ssl.create_default_context(cafile=certifi.where())
-    with urlopen(url, timeout=timeout_seconds, context=context) as response:  # noqa: S310 - user-provided research archive URL
-        return response.read()
+    try:
+        with urlopen(url, timeout=timeout_seconds, context=context) as response:  # noqa: S310 - user-provided research archive URL
+            return response.read()
+    except HTTPError as exc:
+        if exc.code == 404:
+            raise ArchiveFileNotFoundError(url) from exc
+        raise
 
 
 def read_public_trade_archive(path: str | Path, *, symbol: str | None = None) -> pl.DataFrame:
@@ -232,6 +249,11 @@ def download_public_trade_archive(
                 return output
             temp_output.replace(output)
             return output
+        except ArchiveFileNotFoundError:
+            # 404 is permanent (symbol didn't trade on that date) — don't
+            # burn the retry budget hammering a URL that will keep 404'ing.
+            # Let the caller catch this and skip the symbol/date.
+            raise
         except Exception as exc:  # noqa: BLE001 - network failures vary by platform
             last_error = exc
             if attempt >= retries:

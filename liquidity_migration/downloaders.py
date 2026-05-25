@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 
 import polars as pl
 
-from .archive import download_public_trade_archive, read_public_trade_archive
+from .archive import ArchiveFileNotFoundError, download_public_trade_archive, read_public_trade_archive
 from .binance import BinanceUSDMData
 from .bybit import BybitMarketData
 from .config import ResearchConfig
@@ -155,7 +155,17 @@ def download_market_data(
                         outputs["klines_1m"] = dataset_path(data_root, "klines_1m")
                     continue
                 print(f"archive_trades: {symbol} {date}", flush=True)
-                trades = read_public_trade_archive(download_public_trade_archive(url, local_path), symbol=symbol)
+                try:
+                    archive_path = download_public_trade_archive(url, local_path)
+                except ArchiveFileNotFoundError:
+                    # 404 — symbol didn't trade on this date (commonly because
+                    # it listed later). Permanent miss; skip and continue.
+                    # Without this skip the whole multi-day-multi-symbol
+                    # download crashes on the first such date, observed
+                    # 2026-05-25 at 10000000AIDOGEUSDT/2021-01-01.
+                    print(f"archive_trades: {symbol} {date} skipped (archive 404)", flush=True)
+                    continue
+                trades = read_public_trade_archive(archive_path, symbol=symbol)
                 if include_klines:
                     klines_1m = aggregate_trade_klines_1m(trades)
                     outputs["klines_1m"] = write_dataset(klines_1m, data_root, "klines_1m", append=False)

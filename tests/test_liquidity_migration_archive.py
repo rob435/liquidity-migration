@@ -7,7 +7,11 @@ import pytest
 
 from liquidity_migration import archive as archive_module
 from liquidity_migration import archive_manifest as manifest_module
-from liquidity_migration.archive import download_public_trade_archive, read_public_trade_archive, read_public_trade_archive_klines_1h
+from liquidity_migration.archive import (
+    download_public_trade_archive,
+    read_public_trade_archive,
+    read_public_trade_archive_klines_1h,
+)
 from liquidity_migration.archive_manifest import (
     ArchiveHourlyKlineApiDownloadConfig,
     ArchiveHourlyKlineDownloadConfig,
@@ -1128,3 +1132,84 @@ def test_rest_kline_download_only_marks_successful_symbols(tmp_path, monkeypatch
     markers = sorted(path.name for path in (tmp_path / "_download_markers" / "klines_1h").glob("*.done"))
     assert markers == ["BTCUSDT_1735689600000_1735776000000.done"]
     assert read_dataset(tmp_path, "klines_1h").height == 1
+
+
+def test_download_archive_bytes_raises_archive_not_found_on_404(monkeypatch) -> None:
+    """A 404 from public.bybit.com (symbol didn't trade on that date) must
+    surface as ArchiveFileNotFoundError, not a generic HTTPError — callers
+    rely on the specific type to know "permanent miss, skip" vs "transient
+    network failure, retry."""
+    from urllib.error import HTTPError
+
+    def fake_urlopen(url, **_kwargs):
+        raise HTTPError(url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(archive_module, "urlopen", fake_urlopen)
+    with pytest.raises(ArchiveFileNotFoundError):
+        archive_module.download_archive_bytes("https://example.test/missing.csv.gz")
+
+
+def test_download_archive_bytes_propagates_non_404_http_errors(monkeypatch) -> None:
+    """A 500 / 502 / etc. is transient and the caller should keep retrying —
+    so the generic HTTPError must propagate unwrapped. Only 404 is special."""
+    from urllib.error import HTTPError
+
+    def fake_urlopen(url, **_kwargs):
+        raise HTTPError(url, 503, "Service Unavailable", {}, None)
+
+    monkeypatch.setattr(archive_module, "urlopen", fake_urlopen)
+    with pytest.raises(HTTPError) as info:
+        archive_module.download_archive_bytes("https://example.test/transient.csv.gz")
+    assert info.value.code == 503
+
+
+def test_download_public_trade_archive_does_not_retry_on_404(tmp_path, monkeypatch) -> None:
+    """A 404 must short-circuit the retry loop. Retrying a 404 wastes ~30+s of
+    backoff per skipped symbol/date and burns the per-day budget on a request
+    that will never succeed. Observed live 2026-05-25: the download crashed
+    on 10000000AIDOGEUSDT/2021-01-01 after retrying 5×."""
+    call_count = {"n": 0}
+
+    def fake_urlopen(url, **_kwargs):
+        from urllib.error import HTTPError
+        call_count["n"] += 1
+        raise HTTPError(url, 404, "Not Found", {}, None)
+
+    monkeypatch.setattr(archive_module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(archive_module, "_positive_int_env", lambda name, default: default)
+    out = tmp_path / "out.csv.gz"
+    with pytest.raises(ArchiveFileNotFoundError):
+        download_public_trade_archive("https://example.test/missing.csv.gz", out)
+    assert call_count["n"] == 1, (
+        f"404 should not retry; got {call_count['n']} urlopen calls"
+    )
+    assert not out.exists(), "no output file should be created on 404"
+
+
+def test_download_market_data_skips_archive_404_and_continues(tmp_path, monkeypatch) -> None:
+    """The downloaders caller must catch ArchiveFileNotFoundError and skip
+    the missing symbol/date instead of aborting the whole multi-day
+    download. Without this, a single missing-archive 404 (very common for
+    symbols listed after the requested date) brings down the entire
+    pipeline."""
+    seen_urls: list[str] = []
+
+    def fake_download(url, destination, **_kwargs):
+        seen_urls.append(url)
+        raise ArchiveFileNotFoundError(url)
+
+    monkeypatch.setattr(downloaders, "download_public_trade_archive", fake_download)
+
+    outputs = download_market_data(
+        tmp_path,
+        config=ResearchConfig(),
+        symbols=["AAAUSDT", "BBBUSDT"],
+        start_ms=1_735_689_600_000,
+        end_ms=1_735_776_000_000,
+        datasets={"archive_trades"},
+        archive_url_template="https://example.test/{symbol}/{symbol}{date}.csv.gz",
+    )
+    assert len(seen_urls) == 2, f"both symbols should be attempted, not aborted: {seen_urls}"
+    assert "AAAUSDT" in seen_urls[0]
+    assert "BBBUSDT" in seen_urls[1]
+    assert "signed_flow_1m" not in outputs, "no successful download should mean no signed_flow output"
