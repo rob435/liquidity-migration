@@ -228,14 +228,25 @@ class LongNativeDemoDaemon:
         self.router.clear_all()
         if stream is None:
             return
-        for closer in ("close", "exit"):
-            close = getattr(stream, closer, None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:  # noqa: BLE001
-                    pass
-                return
+        # See EventDemoDaemon._close_ws — wrap the pybit close in a
+        # threaded timeout so a stuck close doesn't stall shutdown.
+        def _run_close() -> None:
+            for closer in ("close", "exit"):
+                close = getattr(stream, closer, None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    return
+
+        thread = threading.Thread(target=_run_close, name="long-exec-ws-close", daemon=True)
+        thread.start()
+        thread.join(timeout=3.0)
+        if thread.is_alive():
+            _logger.warning(
+                "long execution WS close did not return within 3s; abandoning thread"
+            )
 
     def _record_ws_event(self, now: float) -> None:
         last = self._last_ws_event_monotonic

@@ -296,14 +296,29 @@ class EventDemoDaemon:
         self.router.clear_all()
         if stream is None:
             return
-        for closer in ("close", "exit"):
-            close = getattr(stream, closer, None)
-            if callable(close):
-                try:
-                    close()
-                except Exception:  # noqa: BLE001 - close errors should not block shutdown
-                    pass
-                return
+        # Run the close on a background thread with a hard timeout so a
+        # hung pybit close (TCP half-closed, recv blocking, etc.) cannot
+        # stall daemon shutdown indefinitely. systemd's TimeoutStopSec
+        # is 180s; abandoning the close after 3s leaves plenty of margin
+        # for the rest of the shutdown sequence. Resources may leak
+        # (until process exit) but the daemon exits cleanly.
+        def _run_close() -> None:
+            for closer in ("close", "exit"):
+                close = getattr(stream, closer, None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:  # noqa: BLE001 - close errors must not block shutdown
+                        pass
+                    return
+
+        thread = threading.Thread(target=_run_close, name="exec-ws-close", daemon=True)
+        thread.start()
+        thread.join(timeout=3.0)
+        if thread.is_alive():
+            _logger.warning(
+                "execution WS close did not return within 3s; abandoning thread"
+            )
 
     def _record_ws_event(self, now: float) -> None:
         """Track inter-event gaps on the execution stream as a coarse WS-liveness
