@@ -1213,6 +1213,21 @@ def _execute_single_long_entry(
         max_order_qty=max_qty,
     )
     if quantity is None:
+        # Mirrors event_demo._execute_single_entry's INFO log so the long
+        # sleeve's entries=0/candidates=N pattern is diagnosable. Most likely
+        # cause: max-qty cap drops the candidate when the cap-floored qty
+        # lands below min_order_qty.
+        _logger.info(
+            "long entry sizing rejected symbol=%s notional=%.2f price=%.6g "
+            "qty_step=%s min_qty=%s min_notional=%s max_qty=%s",
+            symbol,
+            capped_notional,
+            price,
+            qty_step,
+            _float(contract.get("min_order_qty")) or "-",
+            _float(contract.get("min_notional_value")) or "-",
+            max_qty or "-",
+        )
         return None, None
     qty, actual_notional = quantity
     initial_margin_usdt = actual_notional / demo.entry_leverage
