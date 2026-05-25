@@ -110,6 +110,12 @@ systemctl enable liquidity-migration-bybit-risk.service
 systemctl enable liquidity-migration-bybit-paper.service
 systemctl enable liquidity-migration-bybit-long-demo.service
 systemctl enable liquidity-migration-bybit-long-paper.service
+# Timers must be enabled --now: enable alone writes the symlink but does not
+# start the timer, so on a fresh VPS the demo-health watchdog + daily combined-
+# book Telegram report would sit dormant until someone ran systemctl by hand.
+# --now schedules them immediately; subsequent deploys are idempotent.
+systemctl enable --now liquidity-migration-demo-health.timer
+systemctl enable --now liquidity-migration-combined-book-report.timer
 systemctl restart liquidity-migration-bybit-demo.service
 systemctl restart liquidity-migration-bybit-risk.service
 systemctl restart liquidity-migration-bybit-paper.service
@@ -134,6 +140,13 @@ systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
 systemctl is-enabled --quiet liquidity-migration-bybit-paper.service
 systemctl is-enabled --quiet liquidity-migration-bybit-long-demo.service
 systemctl is-enabled --quiet liquidity-migration-bybit-long-paper.service
+# Timer verification: is-enabled catches "we never enabled it"; is-active
+# catches "we enabled it but something stopped it." Both are fail-loud here
+# so deploys can't silently leave the watchdog or daily report off.
+systemctl is-enabled --quiet liquidity-migration-demo-health.timer
+systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer
+systemctl is-active --quiet liquidity-migration-demo-health.timer
+systemctl is-active --quiet liquidity-migration-combined-book-report.timer
 
 for legacy_unit in \
   model050426.service \

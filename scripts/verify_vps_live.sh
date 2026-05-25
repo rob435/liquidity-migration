@@ -68,6 +68,13 @@ fi
 systemctl is-enabled --quiet liquidity-migration-bybit-demo.service
 systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
 systemctl is-enabled --quiet liquidity-migration-bybit-paper.service
+# Timer parity — read-only verify must catch a deploy that forgot to enable
+# (or someone manually disabled) the demo-health watchdog or daily
+# combined-book report. Both fail loud if missing.
+systemctl is-enabled --quiet liquidity-migration-demo-health.timer
+systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer
+systemctl is-active --quiet liquidity-migration-demo-health.timer
+systemctl is-active --quiet liquidity-migration-combined-book-report.timer
 
 for legacy_unit in \
   model050426.service \

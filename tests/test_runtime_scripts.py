@@ -295,6 +295,15 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "liquidity-migration-bybit-risk.service" in text
     assert "retired unit" in text
     assert "systemctl is-enabled --quiet liquidity-migration-bybit-demo.service" in text
+    # Timers ship with the unit files but `systemctl enable` is required to
+    # actually schedule them. Pin both timers so a deploy can't silently leave
+    # the demo-health watchdog or daily combined-book report inactive.
+    assert "systemctl enable --now liquidity-migration-demo-health.timer" in text
+    assert "systemctl enable --now liquidity-migration-combined-book-report.timer" in text
+    assert "systemctl is-enabled --quiet liquidity-migration-demo-health.timer" in text
+    assert "systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer" in text
+    assert "systemctl is-active --quiet liquidity-migration-demo-health.timer" in text
+    assert "systemctl is-active --quiet liquidity-migration-combined-book-report.timer" in text
     assert "Environment=STRATEGY_PROFILE=promoted" in text
     assert "Environment=INTERVAL_SECONDS=60" in text
     assert "Environment=UNIVERSE_RANK_END=400" in text
@@ -326,6 +335,12 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "Environment=UNIVERSE_MIN_TURNOVER_24H=0" in text
     assert "Environment=MAX_ACTIVE_SYMBOLS=3" in text
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
+    # Read-only verify must catch a missing-timer regression that the deploy
+    # script would have caused — parity check, no-write semantics.
+    assert "systemctl is-enabled --quiet liquidity-migration-demo-health.timer" in text
+    assert "systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer" in text
+    assert "systemctl is-active --quiet liquidity-migration-demo-health.timer" in text
+    assert "systemctl is-active --quiet liquidity-migration-combined-book-report.timer" in text
     assert "verify-ok commit=" in text
     assert "--property=Environment" not in text
 
