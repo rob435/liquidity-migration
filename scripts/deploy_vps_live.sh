@@ -90,16 +90,15 @@ if [ "${TELEGRAM_CHAT_ID:-}" != "$EXPECTED_TELEGRAM_CHAT_ID" ]; then
   exit 1
 fi
 
-cp deploy/systemd/liquidity-migration-bybit-demo.service /etc/systemd/system/liquidity-migration-bybit-demo.service
-cp deploy/systemd/liquidity-migration-bybit-risk.service /etc/systemd/system/liquidity-migration-bybit-risk.service
-cp deploy/systemd/liquidity-migration-bybit-paper.service /etc/systemd/system/liquidity-migration-bybit-paper.service
-# Long-sleeve unit files were previously skipped here, so MemoryMax /
-# Environment changes made to the long demo/paper services in the repo
-# never took effect on the VPS until a manual `cp` — the long daemon
-# was OOM-killing in a loop while the new unit (MemoryMax=2G) sat on
-# disk unused. Always sync all five unit files.
-cp deploy/systemd/liquidity-migration-bybit-long-demo.service /etc/systemd/system/liquidity-migration-bybit-long-demo.service
-cp deploy/systemd/liquidity-migration-bybit-long-paper.service /etc/systemd/system/liquidity-migration-bybit-long-paper.service
+# Sync every .service / .timer in deploy/systemd/ so any unit added
+# to the repo (e.g. demo-health, combined-book-report, future units)
+# auto-deploys instead of needing a one-off manual cp. The long
+# demo/paper omission previously caused MemoryMax=2G to sit on disk
+# unused for an OOM-loop cycle — globbing prevents that whole class
+# of "added a unit but forgot to wire it into deploy" misses.
+for unit in deploy/systemd/liquidity-migration-*.service deploy/systemd/liquidity-migration-*.timer; do
+    cp "$unit" "/etc/systemd/system/$(basename "$unit")"
+done
 systemctl daemon-reload
 systemctl disable --now \
   model050426.service \
