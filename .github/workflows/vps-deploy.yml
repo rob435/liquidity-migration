@@ -9,6 +9,11 @@ on:
       - "liquidity_migration/**"
       - "deploy/systemd/*.service"
       - "deploy/systemd/*.timer"
+      # Hand-list every script that is either invoked by this workflow
+      # OR launched by a deployed systemd unit. A glob would auto-deploy
+      # anything new in scripts/, which tests pin to a strict allowlist
+      # (see test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key).
+      # When adding a script that a unit calls, add it here too.
       - "scripts/deploy_vps_live.sh"
       - "scripts/print_vps_recovery_command.sh"
       - "scripts/verify_vps_live.sh"
@@ -19,6 +24,7 @@ on:
       - "scripts/run_bybit_demo_event_engine.sh"
       - "scripts/run_bybit_demo_ws_risk_engine.sh"
       - "scripts/run_bybit_long_demo_event_engine.sh"
+      - "scripts/check_demo_entry_health.py"
   workflow_dispatch:
     inputs:
       mode:

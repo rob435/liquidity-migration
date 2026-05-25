@@ -371,6 +371,9 @@ def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
     assert "scripts/vps_restore_ssh_access.sh" in text
     assert "scripts/vps_rescue_restore_ssh_access.sh" in text
     assert "scripts/vps_console_recover_and_deploy.sh" in text
+    # demo-health.service launches check_demo_entry_health.py; pin it so
+    # script-only changes to the health check still trigger the deploy.
+    assert "scripts/check_demo_entry_health.py" in text
     assert "EXPECTED_COMMIT=\"$GITHUB_SHA\"" in text
     assert "EXPECTED_TELEGRAM_CHAT_ID" in text
 
