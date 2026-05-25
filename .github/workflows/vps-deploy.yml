@@ -1,5 +1,8 @@
 name: VPS Deploy
 
+# Host key was last rotated 2026-05-25 after a Hetzner rebuild — pinned
+# fingerprint default is in the VPS_ED25519_FINGERPRINT env below.
+
 on:
   push:
     branches:
