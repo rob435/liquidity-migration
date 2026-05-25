@@ -489,6 +489,7 @@ def run_event_demo_cycle(
             "kline_fetched_rows": kline_cache_stats["fetched_rows"],
             "kline_store_rows": kline_cache_stats.get("store_rows", 0),
             "kline_store_symbols": kline_cache_stats.get("store_symbols", 0),
+            "kline_store_max_ts_ms": kline_cache_stats.get("store_max_ts_ms", 0),
             "feature_rows": features.height,
             "latest_feature_ts_ms": _max_int(features, "ts_ms"),
             "events_pipeline": pipeline_diagnostics["events_pipeline"],
@@ -1898,6 +1899,7 @@ def _download_recent_1h_klines(
         "output_rows": 0,
         "store_rows": 0,
         "store_symbols": 0,
+        "store_max_ts_ms": 0,
     }
     if end_ms < start_ms:
         return _empty_klines(), stats
@@ -1930,6 +1932,7 @@ def _download_recent_1h_klines(
         if not store_frame.is_empty():
             stats["store_rows"] = store_frame.height
             stats["store_symbols"] = store_frame.select("symbol").unique().height
+            stats["store_max_ts_ms"] = int(store_frame.select(pl.col("ts_ms").max()).item() or 0)
 
     # FAST PATH: if the WS store fully covers the universe at end_ms,
     # skip the on-disk cache read entirely. Reading the full parquet

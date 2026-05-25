@@ -80,17 +80,25 @@ def check_entries(
     # events pipeline rollup
     stale = int(df.select(pl.col("skipped_stale").fill_null(0).sum()).item()) if cycles else 0
     coverage_gap = _last_coverage_gap(df)
-    # Latest signal the feature pipeline produced. Distinguishes "no NEW
-    # signals (event-strategy sparsity)" from "feature pipeline lagging
-    # behind real-time" — both manifest as stale-skips but have very
-    # different remediation. Read from the most recent cycle row.
+    # Two ages we need to tell apart:
+    #   - kline_age: how stale the WS-fed kline store is. >6h here = real
+    #     feed bug (WS disconnected, bootstrap stuck).
+    #   - feature_age: how old the latest EVENT detected by the strategy
+    #     is. Sparse strategies (q40 promoted) can have feature_age >> 6h
+    #     while klines are perfectly fresh, just because no event passed
+    #     the filter for many hours.
+    # Reading just feature_age conflates the two and misdiagnoses sparse
+    # strategy as feed lag (observed 2026-05-25 alert chain).
+    now_ms = int(time.time() * 1000)
     latest_feature_ts_ms = 0
-    if cycles and "latest_feature_ts_ms" in df.columns:
-        latest_feature_ts_ms = int(df.tail(1).select(pl.col("latest_feature_ts_ms").fill_null(0)).item())
-    feature_age_hours = (
-        (time.time() * 1000 - latest_feature_ts_ms) / 3_600_000
-        if latest_feature_ts_ms > 0 else 0.0
-    )
+    kline_store_max_ts_ms = 0
+    if cycles:
+        if "latest_feature_ts_ms" in df.columns:
+            latest_feature_ts_ms = int(df.tail(1).select(pl.col("latest_feature_ts_ms").fill_null(0)).item())
+        if "kline_store_max_ts_ms" in df.columns:
+            kline_store_max_ts_ms = int(df.tail(1).select(pl.col("kline_store_max_ts_ms").fill_null(0)).item())
+    feature_age_hours = (now_ms - latest_feature_ts_ms) / 3_600_000 if latest_feature_ts_ms > 0 else 0.0
+    kline_age_hours = (now_ms - kline_store_max_ts_ms) / 3_600_000 if kline_store_max_ts_ms > 0 else float("nan")
     # Scale expected cycles by the actual data span within the window, not the
     # full window_hours. After a fresh deploy the oldest data point is recent,
     # so requiring a full 24h worth of cycles would always false-alert for the
@@ -99,9 +107,11 @@ def check_entries(
     data_span_hours = (time.time() * 1000 - oldest_ts_ms) / 3_600_000
     effective_hours = min(window_hours, max(data_span_hours, 0.0))
     expected_cycles = int(effective_hours * 60 * min_cycles_per_hour)
+    kline_age_text = f"{kline_age_hours:.1f}h" if kline_store_max_ts_ms > 0 else "unknown"
     suffix = (
         f"({candidates} candidates seen, {cycles} cycles, {stale} stale-skips, "
-        f"coverage_gap={coverage_gap}, latest_feature_age={feature_age_hours:.1f}h)"
+        f"coverage_gap={coverage_gap}, kline_age={kline_age_text}, "
+        f"latest_feature_age={feature_age_hours:.1f}h)"
     )
 
     if cycles == 0:
@@ -129,40 +139,45 @@ def check_entries(
         return 0, (
             f"healthy: {entries} entries executed in last {window_hours}h {suffix}"
         )
-    # Disambiguate the three failure modes:
-    #   - feature_age > MAX_ENTRY_LAG_MINUTES + small buffer: pipeline lag
-    #     (feature build hasn't progressed past an old bar). Real bug —
-    #     check kline store freshness, WS subscription state.
-    #   - feature_age <= MAX_ENTRY_LAG_MINUTES BUT stale-skips > 0 AND
-    #     candidates == 0: the same old signals are being re-detected but
-    #     rejected on staleness. Real bug — MAX_ENTRY_LAG_MINUTES is tighter
-    #     than the feature-build cadence.
-    #   - feature_age fresh AND stale-skips == 0 AND candidates == 0:
-    #     strategy is just sparse — no events fired in the window. Not a
-    #     bug, expected behavior for a q40 / promoted profile.
-    if feature_age_hours > 6.5:
+    # Diagnose using kline_age (real feed freshness) FIRST, then feature_age
+    # (which can lag for sparse strategies even when feed is fine):
+    #
+    #   - kline_age > 2h: the WS-fed kline store is genuinely behind. Real
+    #     bug; the rest of the cycle is doing what it can with stale data.
+    #   - kline_age fresh + feature_age old + stale > 0: same old signals
+    #     re-detected each cycle, all rejected as stale. Most commonly
+    #     just sparse-event strategy (q40 promoted typically fires 1-3
+    #     candidates per day and nothing more); bumping MAX_ENTRY_LAG
+    #     wouldn't help because those candidates are already-traded
+    #     symbols blocked by "open position blocks re-entry".
+    #   - kline_age fresh + candidates == 0 + stale == 0: truly silent.
+    #     Strategy is sparse; no events triggered. Normal.
+    #
+    # kline_age==NaN means an older cycle ledger doesn't carry the field
+    # yet — fall back to the old feature_age heuristic with a softer hint.
+    import math
+    have_kline_age = kline_store_max_ts_ms > 0 and not math.isnan(kline_age_hours)
+
+    if have_kline_age and kline_age_hours > 2.0:
         return 1, (
-            f"ALERT: 0 entries in last {window_hours}h, latest signal is "
-            f"{feature_age_hours:.1f}h old (feature pipeline behind). "
-            f"Check kline store freshness vs Bybit klines (ws_klines may be silently "
-            f"disconnected) and bootstrap completion. {suffix}"
+            f"ALERT: 0 entries in last {window_hours}h — KLINE STORE STALE "
+            f"({kline_age_hours:.1f}h behind, latest signal {feature_age_hours:.1f}h). "
+            f"WS klines silently disconnected or bootstrap stuck. "
+            f"Check journalctl -u liquidity-migration-bybit-demo for "
+            f"kline_stream_manager errors. {suffix}"
         )
     if stale > 0 and candidates == 0:
         return 1, (
-            f"ALERT: 0 entries in last {window_hours}h, {stale} stale-skips against "
-            f"fresh-ish features ({feature_age_hours:.1f}h old). "
-            f"MAX_ENTRY_LAG_MINUTES may be tighter than the feature-build cadence. "
-            f"{suffix}"
+            f"INFO: 0 entries in last {window_hours}h — same {stale} stale "
+            f"candidates re-detected each cycle (kline feed fresh, signal "
+            f"is {feature_age_hours:.1f}h old). Sparse strategy after the "
+            f"latest event was already taken — wait for the next event. "
+            f"Bumping MAX_ENTRY_LAG_MINUTES does NOT help here. {suffix}"
         )
     if candidates == 0 and stale == 0:
-        # Strategy is genuinely silent — sparse event firing, normal for
-        # the q40 promoted profile when no large-volume events trigger.
-        # Demote to info-level alert (still exit 1 so Telegram fires) but
-        # don't suggest a fix that doesn't apply.
         return 1, (
-            f"INFO: 0 entries in last {window_hours}h — no signals fired (sparse "
-            f"strategy, features fresh at {feature_age_hours:.1f}h old). "
-            f"{suffix}"
+            f"INFO: 0 entries in last {window_hours}h — no signals fired "
+            f"(sparse strategy, kline feed fresh). {suffix}"
         )
     return 1, (
         f"ALERT: 0 entries in last {window_hours}h {suffix}. "

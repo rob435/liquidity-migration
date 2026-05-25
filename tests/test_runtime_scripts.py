@@ -656,3 +656,62 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
     assert "deploy-verify-ok commit=" in text
     assert "--property=Environment" not in text
+
+
+def test_health_watchdog_distinguishes_stale_klines_from_sparse_strategy(tmp_path: Path) -> None:
+    """The 2026-05-25 alert chain confused operators by saying "feature
+    pipeline behind, check ws_klines may be disconnected" for what was
+    actually just a sparse-event strategy (q40 promoted, no new events
+    since 04:00 UTC, but klines themselves were perfectly fresh up to
+    13:00 UTC). The watchdog now reads kline_store_max_ts_ms separately
+    so it can:
+      - ALERT (kline stale) when the WS feed actually is behind
+      - INFO (sparse strategy) when feed is fresh but no events fire
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from check_demo_entry_health import check_entries
+
+    from datetime import datetime, timezone
+    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    now_ms = int(time.time() * 1000)
+
+    # Scenario 1: SPARSE STRATEGY — kline feed fresh (15min old), latest
+    # event 14h old, 44 stale-skips per cycle. Should produce INFO not
+    # ALERT — bumping MAX_ENTRY_LAG_MINUTES would not help.
+    sparse_cycles = [
+        {
+            "mode": "submit",
+            "ts_ms": now_ms - i * 60_000,
+            "entries_executed": 0, "entry_candidates": 0, "skipped_stale": 44,
+            "universe_coverage": {"coverage_gap": 0},
+            "latest_feature_ts_ms": now_ms - 14 * 3_600_000,
+            "kline_store_max_ts_ms": now_ms - 15 * 60_000,  # 15min old
+        }
+        for i in range(60)
+    ]
+    _write_demo_cycle_parquet(tmp_path / "sparse", cycles=sparse_cycles, date=today)
+    code, msg = check_entries(data_root=tmp_path / "sparse", window_hours=1)
+    assert "INFO" in msg, f"sparse strategy should be INFO not ALERT: {msg!r}"
+    assert "stale candidates re-detected" in msg or "Sparse" in msg
+    assert "WS klines" not in msg, "must not blame WS feed when kline is fresh"
+
+    # Scenario 2: KLINE FEED ACTUALLY STALE — kline_store_max_ts is 8h old.
+    # WS klines silently disconnected. Should ALERT with the right pointer.
+    stale_feed_cycles = [
+        {
+            "mode": "submit",
+            "ts_ms": now_ms - i * 60_000,
+            "entries_executed": 0, "entry_candidates": 0, "skipped_stale": 44,
+            "universe_coverage": {"coverage_gap": 0},
+            "latest_feature_ts_ms": now_ms - 14 * 3_600_000,
+            "kline_store_max_ts_ms": now_ms - 8 * 3_600_000,  # 8h old, real bug
+        }
+        for i in range(60)
+    ]
+    _write_demo_cycle_parquet(tmp_path / "stale_feed", cycles=stale_feed_cycles, date=today)
+    code, msg = check_entries(data_root=tmp_path / "stale_feed", window_hours=1)
+    assert "KLINE STORE STALE" in msg or "WS klines" in msg, (
+        f"stale feed should ALERT with WS-disconnect pointer: {msg!r}"
+    )
+    assert code == 1
