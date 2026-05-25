@@ -21,6 +21,21 @@ jobs:
         run: python -m ruff check liquidity_migration tests
       - name: Run tests
         # -v + --tb=short surface the failing test name and a short
-        # traceback in the public job summary so failures can be
-        # diagnosed without admin-level log download access.
-        run: python -m pytest -v --tb=short
+        # traceback inline in the job log. On failure we ALSO copy the
+        # entire pytest output into the job summary so it's visible
+        # without admin-level log download access (the annotation
+        # default just says "Process completed with exit code 1").
+        run: |
+          set +e
+          python -m pytest -v --tb=short 2>&1 | tee /tmp/pytest.log
+          STATUS=${PIPESTATUS[0]}
+          if [ "$STATUS" -ne 0 ]; then
+            {
+              echo "## pytest failure (exit $STATUS)"
+              echo ""
+              echo '```'
+              tail -200 /tmp/pytest.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit $STATUS
