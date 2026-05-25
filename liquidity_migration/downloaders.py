@@ -487,7 +487,14 @@ def _download_symbol_dataset(
 
     print(f"{dataset}: {index}/{total} {symbol} downloading", flush=True)
     rows = fetch()
-    frame = pl.DataFrame(rows)
+    # infer_schema_length=None scans ALL rows to pick the dtype. Default is
+    # 100, which is too tight for Bybit/Binance REST payloads where a field
+    # can be int-looking (e.g. "0") in the first 100 rows then turn float
+    # (e.g. "0.034552") in row 101. Observed 2026-05-25 on Binance funding
+    # — full PIT rebuild crashed mid-symbol with "could not append value
+    # 0.034552 of type f64 to the builder". Cheap to scan: payloads are
+    # ~thousands of rows, polars handles it in ms.
+    frame = pl.DataFrame(rows, infer_schema_length=None)
     if postprocess is not None and not frame.is_empty():
         frame = postprocess(frame)
     output = write_dataset(frame, data_root, dataset)
