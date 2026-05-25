@@ -1541,6 +1541,12 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
     long_demo.add_argument("--confirm-demo-orders", action="store_true", help="Required with --submit-orders.")
     long_demo.add_argument("--telegram", action="store_true", help="Send Telegram cycle summaries.")
     long_demo.add_argument("--record-dry-run", action="store_true")
+    long_demo.add_argument(
+        "--paper-mode", action="store_true",
+        help="Route writes to long_native_paper_* datasets so reconcile-long-paper-demo "
+        "can pair this run against the live long_native_demo_* ledger. Requires "
+        "--record-dry-run; incompatible with --submit-orders.",
+    )
     long_demo.add_argument("--data-name", default=demo_defaults.data_name)
     long_demo.add_argument(
         "--strategy-profile",
@@ -2057,6 +2063,7 @@ def main(argv: list[str] | None = None) -> int:
             confirm_demo_orders=args.confirm_demo_orders,
             telegram=args.telegram,
             record_dry_run=args.record_dry_run,
+            paper_mode=getattr(args, "paper_mode", False),
             data_name=args.data_name,
             strategy_profile=args.strategy_profile,
             ws_klines_enabled=getattr(args, "ws_klines_enabled", True),

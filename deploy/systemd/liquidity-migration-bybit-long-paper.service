@@ -14,6 +14,11 @@ Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
 Environment=SUBMIT_ORDERS=0
 Environment=CONFIRM_DEMO_ORDERS=0
 Environment=RECORD_DRY_RUN=1
+# PAPER_MODE=1 routes writes to long_native_paper_* datasets so the long
+# reconciler (reconcile-long-paper-demo) can pair this output against the
+# live long-demo ledger. Without it the paper service silently writes to
+# the demo dataset names and reconciliation finds paired=0.
+Environment=PAPER_MODE=1
 Environment=TELEGRAM_ENABLED=0
 Environment=STRATEGY_PROFILE=MultiStratV1
 Environment=INTERVAL_SECONDS=60

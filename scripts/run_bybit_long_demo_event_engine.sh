@@ -89,6 +89,14 @@ fi
 if [[ "${RECORD_DRY_RUN:-0}" == "1" ]]; then
     order_args+=(--record-dry-run)
 fi
+# PAPER_MODE=1 routes writes to long_native_paper_* datasets so the long-paper
+# service's output can be paired against the live long-demo ledger by
+# reconcile-long-paper-demo. Without this the paper service writes to the
+# same dataset name as live demo (long_native_demo_*), and the reconciler
+# finds nothing in the expected paper dataset → paired=0 silently.
+if [[ "${PAPER_MODE:-0}" == "1" ]]; then
+    order_args+=(--paper-mode)
+fi
 
 echo "long-native demo engine starting"
 echo "repo=$REPO_ROOT"

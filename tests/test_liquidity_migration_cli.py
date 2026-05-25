@@ -536,3 +536,32 @@ def test_event_demo_timing_text_omits_parallel_workers_when_serial() -> None:
     text = _event_demo_timing_text(cycle)
     assert "parallel_workers" not in text
     assert "slowest=klines:0.5s" in text
+
+
+def test_cli_long_native_paper_mode_flag_propagates_to_config(tmp_path: Path) -> None:
+    """The --paper-mode flag must surface on the parsed args so the long-paper
+    service writes to long_native_paper_* datasets. The bash runner gates this
+    behind PAPER_MODE=1 → --paper-mode; this test pins the CLI surface that
+    gate depends on."""
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "long-native-event-demo-cycle",
+            "--paper-mode",
+        ]
+    )
+    assert args.paper_mode is True
+
+
+def test_cli_long_native_paper_mode_defaults_off(tmp_path: Path) -> None:
+    """Live long-demo defaults to paper_mode=False so its writes land in the
+    long_native_demo_* family the reconciler treats as the ground truth."""
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "long-native-event-demo-cycle",
+        ]
+    )
+    assert args.paper_mode is False

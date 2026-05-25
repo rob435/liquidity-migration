@@ -76,6 +76,36 @@ def test_paper_services_enable_record_dry_run() -> None:
         assert "Environment=RECORD_DRY_RUN=1" in text, f"{unit}: paper service must enable RECORD_DRY_RUN"
 
 
+def test_long_paper_service_enables_paper_mode() -> None:
+    """Long-paper writes need to land in long_native_paper_* datasets so the
+    reconcile-long-paper-demo CLI can pair them against the live long-demo
+    ledger. The long reconciler looks for paper_dataset='long_native_paper_trades'
+    specifically (unlike the short reconciler which reads the same dataset
+    name from both roots); without PAPER_MODE=1 the long-paper service
+    writes to long_native_demo_trades and reconciliation silently returns
+    paired=0."""
+    repo = Path(__file__).resolve().parents[1]
+    text = (
+        repo / "deploy" / "systemd" / "liquidity-migration-bybit-long-paper.service"
+    ).read_text(encoding="utf-8")
+    assert "Environment=PAPER_MODE=1" in text, (
+        "long-paper service must set PAPER_MODE=1 so writes route to the "
+        "long_native_paper_* dataset family the reconciler expects."
+    )
+
+
+def test_long_runner_wires_paper_mode() -> None:
+    """The long-sleeve bash runner must surface --paper-mode via the
+    PAPER_MODE env var so the long-paper service can route writes to the
+    paper dataset family."""
+    repo = Path(__file__).resolve().parents[1]
+    text = (
+        repo / "scripts" / "run_bybit_long_demo_event_engine.sh"
+    ).read_text(encoding="utf-8")
+    assert 'PAPER_MODE:-0}" == "1"' in text, "long runner missing PAPER_MODE gate"
+    assert "--paper-mode" in text, "long runner does not pass --paper-mode"
+
+
 def test_demo_services_use_unblocked_entry_lag() -> None:
     """Live audit on 2026-05-24 found 15min lag rejected every signal as stale
     (feature pipeline builds 3-4h after bar close). Both demo + paper use 360min
