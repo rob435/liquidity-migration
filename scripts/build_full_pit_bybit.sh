@@ -34,7 +34,14 @@ CATEGORY="${BYBIT_CATEGORY:-linear}"   # perpetuals only; do not change
 MANIFEST_WORKERS="${MANIFEST_WORKERS:-16}"
 KLINE_WORKERS="${KLINE_WORKERS:-8}"
 ANCILLARY_WORKERS="${ANCILLARY_WORKERS:-4}"
-INCLUDE_SIGNED_FLOW="${INCLUDE_SIGNED_FLOW:-1}"
+# signed_flow build is opt-in: across 5+ tests (standalone IC, hard filter,
+# feature-factory, sizing on 2 profiles, true-OOS) taker imbalance is NOT a
+# usable edge — see memory:signed-flow-state and
+# reports/signed_flow_research_verdict.md. The full PIT build is also costly
+# (~55k-132k daily archive files at Bybit's sustained 3.5-7 files/sec =
+# multi-hour/overnight). Set INCLUDE_SIGNED_FLOW=1 only if you have a
+# specific exploratory reason to rebuild it.
+INCLUDE_SIGNED_FLOW="${INCLUDE_SIGNED_FLOW:-0}"
 PYTHON_BIN="${PYTHON_BIN:-.venv/bin/python}"
 
 if [ "$CATEGORY" != "linear" ]; then
