@@ -68,6 +68,11 @@ fi
 systemctl is-enabled --quiet liquidity-migration-bybit-demo.service
 systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
 systemctl is-enabled --quiet liquidity-migration-bybit-paper.service
+# Long-sleeve parity — deploy enables + restarts both long services too,
+# so verify needs to catch a missing or disabled long daemon for the same
+# reason it catches the short side.
+systemctl is-enabled --quiet liquidity-migration-bybit-long-demo.service
+systemctl is-enabled --quiet liquidity-migration-bybit-long-paper.service
 # Timer parity — read-only verify must catch a deploy that forgot to enable
 # (or someone manually disabled) the demo-health watchdog or daily
 # combined-book report. Both fail loud if missing.
@@ -97,6 +102,8 @@ fi
 systemctl is-active --quiet liquidity-migration-bybit-demo.service
 systemctl is-active --quiet liquidity-migration-bybit-risk.service
 systemctl is-active --quiet liquidity-migration-bybit-paper.service
+systemctl is-active --quiet liquidity-migration-bybit-long-demo.service
+systemctl is-active --quiet liquidity-migration-bybit-long-paper.service
 
 systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=STRATEGY_PROFILE=promoted'
 systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=INTERVAL_SECONDS=60'

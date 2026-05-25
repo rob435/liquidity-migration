@@ -350,6 +350,12 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "Environment=UNIVERSE_MIN_TURNOVER_24H=0" in text
     assert "Environment=MAX_ACTIVE_SYMBOLS=3" in text
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
+    # Long-sleeve parity — verify must catch a regression where the long
+    # services were stopped or disabled, since deploy enables + restarts them.
+    assert "systemctl is-enabled --quiet liquidity-migration-bybit-long-demo.service" in text
+    assert "systemctl is-enabled --quiet liquidity-migration-bybit-long-paper.service" in text
+    assert "systemctl is-active --quiet liquidity-migration-bybit-long-demo.service" in text
+    assert "systemctl is-active --quiet liquidity-migration-bybit-long-paper.service" in text
     # Read-only verify must catch a missing-timer regression that the deploy
     # script would have caused — parity check, no-write semantics.
     assert "systemctl is-enabled --quiet liquidity-migration-demo-health.timer" in text
