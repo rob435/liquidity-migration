@@ -678,8 +678,10 @@ def test_health_watchdog_distinguishes_stale_klines_from_sparse_strategy(tmp_pat
     since 04:00 UTC, but klines themselves were perfectly fresh up to
     13:00 UTC). The watchdog now reads kline_store_max_ts_ms separately
     so it can:
-      - ALERT (kline stale) when the WS feed actually is behind
-      - INFO (sparse strategy) when feed is fresh but no events fire
+      - ALERT (exit 1, telegram fires) when the WS feed actually is behind
+      - OK (exit 0, NO telegram) when feed is fresh but no events fire —
+        the sparse-strategy state isn't a bug worth pinging the operator
+        about hourly. The text still lands in journalctl for diagnosis.
     """
     import sys
     sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -690,8 +692,8 @@ def test_health_watchdog_distinguishes_stale_klines_from_sparse_strategy(tmp_pat
     now_ms = int(time.time() * 1000)
 
     # Scenario 1: SPARSE STRATEGY — kline feed fresh (15min old), latest
-    # event 14h old, 44 stale-skips per cycle. Should produce INFO not
-    # ALERT — bumping MAX_ENTRY_LAG_MINUTES would not help.
+    # event 14h old, 44 stale-skips per cycle. Should return exit 0 (no
+    # telegram spam) because the state is normal sparse-event behavior.
     sparse_cycles = [
         {
             "mode": "submit",
@@ -699,18 +701,19 @@ def test_health_watchdog_distinguishes_stale_klines_from_sparse_strategy(tmp_pat
             "entries_executed": 0, "entry_candidates": 0, "skipped_stale": 44,
             "universe_coverage": {"coverage_gap": 0},
             "latest_feature_ts_ms": now_ms - 14 * 3_600_000,
-            "kline_store_max_ts_ms": now_ms - 15 * 60_000,  # 15min old
+            "kline_store_max_ts_ms": now_ms - 15 * 60_000,
         }
         for i in range(60)
     ]
     _write_demo_cycle_parquet(tmp_path / "sparse", cycles=sparse_cycles, date=today)
     code, msg = check_entries(data_root=tmp_path / "sparse", window_hours=1)
-    assert "INFO" in msg, f"sparse strategy should be INFO not ALERT: {msg!r}"
-    assert "stale candidates re-detected" in msg or "Sparse" in msg
+    assert code == 0, f"sparse strategy should not spam telegram: code={code}, msg={msg!r}"
+    assert "OK (sparse)" in msg
     assert "WS klines" not in msg, "must not blame WS feed when kline is fresh"
+    assert "ALERT" not in msg
 
     # Scenario 2: KLINE FEED ACTUALLY STALE — kline_store_max_ts is 8h old.
-    # WS klines silently disconnected. Should ALERT with the right pointer.
+    # WS klines silently disconnected. Should ALERT (exit 1) with telegram.
     stale_feed_cycles = [
         {
             "mode": "submit",
@@ -718,13 +721,40 @@ def test_health_watchdog_distinguishes_stale_klines_from_sparse_strategy(tmp_pat
             "entries_executed": 0, "entry_candidates": 0, "skipped_stale": 44,
             "universe_coverage": {"coverage_gap": 0},
             "latest_feature_ts_ms": now_ms - 14 * 3_600_000,
-            "kline_store_max_ts_ms": now_ms - 8 * 3_600_000,  # 8h old, real bug
+            "kline_store_max_ts_ms": now_ms - 8 * 3_600_000,
         }
         for i in range(60)
     ]
     _write_demo_cycle_parquet(tmp_path / "stale_feed", cycles=stale_feed_cycles, date=today)
     code, msg = check_entries(data_root=tmp_path / "stale_feed", window_hours=1)
-    assert "KLINE STORE STALE" in msg or "WS klines" in msg, (
-        f"stale feed should ALERT with WS-disconnect pointer: {msg!r}"
-    )
-    assert code == 1
+    assert code == 1, f"stale feed should ALERT (exit 1): code={code}"
+    assert "kline feed stale" in msg.lower() or "WS klines" in msg
+
+
+def test_health_watchdog_silent_strategy_does_not_spam_telegram(tmp_path: Path) -> None:
+    """The truly-silent case (no candidates, no stale-skips, kline feed
+    fresh) is just a quiet hour — must return exit 0 so the telegram
+    timer doesn't ping every hour during low-activity periods."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from check_demo_entry_health import check_entries
+
+    from datetime import datetime, timezone
+    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    now_ms = int(time.time() * 1000)
+    cycles = [
+        {
+            "mode": "submit",
+            "ts_ms": now_ms - i * 60_000,
+            "entries_executed": 0, "entry_candidates": 0, "skipped_stale": 0,
+            "universe_coverage": {"coverage_gap": 0},
+            "latest_feature_ts_ms": now_ms - 60 * 60_000,
+            "kline_store_max_ts_ms": now_ms - 30 * 60_000,
+        }
+        for i in range(60)
+    ]
+    _write_demo_cycle_parquet(tmp_path, cycles=cycles, date=today)
+    code, msg = check_entries(data_root=tmp_path, window_hours=1)
+    assert code == 0
+    assert "OK (silent)" in msg
+    assert "ALERT" not in msg

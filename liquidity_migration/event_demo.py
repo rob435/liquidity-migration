@@ -4721,7 +4721,7 @@ def format_telegram_status_message(payload: dict[str, Any]) -> str:
     ledger_summary = payload.get("ledger_position_summary", {})
     reason = _telegram_notification_reason(payload)
     lines = [
-        "AGC Bybit demo status",
+        "liquidity-migration | Bybit demo cycle",
         f"time={_iso_dt(cycle['ts_ms'])}",
         f"reason={reason or 'manual_status'}",
         f"mode={cycle['mode']} equity=${_float(cycle['equity_usdt']):,.2f}",

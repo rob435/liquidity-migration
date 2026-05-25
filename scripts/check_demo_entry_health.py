@@ -160,28 +160,32 @@ def check_entries(
 
     if have_kline_age and kline_age_hours > 2.0:
         return 1, (
-            f"ALERT: 0 entries in last {window_hours}h — KLINE STORE STALE "
-            f"({kline_age_hours:.1f}h behind, latest signal {feature_age_hours:.1f}h). "
-            f"WS klines silently disconnected or bootstrap stuck. "
-            f"Check journalctl -u liquidity-migration-bybit-demo for "
-            f"kline_stream_manager errors. {suffix}"
+            f"ALERT: kline feed stale — store is {kline_age_hours:.1f}h behind "
+            f"real time. WS klines are silently disconnected or bootstrap stuck. "
+            f"0 entries fired in {window_hours}h. "
+            f"Action: journalctl -u liquidity-migration-bybit-demo for "
+            f"kline_stream_manager errors; restart the service if no recovery. {suffix}"
         )
+    # The remaining cases are NORMAL operating modes for a sparse-event
+    # strategy. Return exit code 0 so the watchdog timer does NOT send a
+    # telegram — they're just observed states, not problems. The text is
+    # still printed to the journal in case an operator runs the script
+    # manually or greps the timer's last run.
     if stale > 0 and candidates == 0:
-        return 1, (
-            f"INFO: 0 entries in last {window_hours}h — same {stale} stale "
-            f"candidates re-detected each cycle (kline feed fresh, signal "
-            f"is {feature_age_hours:.1f}h old). Sparse strategy after the "
-            f"latest event was already taken — wait for the next event. "
-            f"Bumping MAX_ENTRY_LAG_MINUTES does NOT help here. {suffix}"
+        return 0, (
+            f"OK (sparse): no new signals — same {stale} candidates from "
+            f"{feature_age_hours:.1f}h ago re-detected each cycle and rejected "
+            f"as past MAX_ENTRY_LAG. Kline feed fresh; strategy is just quiet. {suffix}"
         )
     if candidates == 0 and stale == 0:
-        return 1, (
-            f"INFO: 0 entries in last {window_hours}h — no signals fired "
-            f"(sparse strategy, kline feed fresh). {suffix}"
+        return 0, (
+            f"OK (silent): no signals fired in {window_hours}h. Kline feed "
+            f"fresh; strategy is just quiet. {suffix}"
         )
     return 1, (
-        f"ALERT: 0 entries in last {window_hours}h {suffix}. "
-        f"Check universe coverage, event filters, and entry gates."
+        f"ALERT: 0 entries in last {window_hours}h with {candidates} candidates "
+        f"+ {stale} stale-skips — falls outside the known sparse / stale-feed "
+        f"patterns. Check universe coverage, event filters, and entry gates. {suffix}"
     )
 
 
