@@ -358,6 +358,17 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
     assert "deploy-verify-ok commit=" in text
     assert "--property=Environment" not in text
+    # Daemons no longer fire startup telegrams (default off as of the
+    # rapid-deploy-spam fix), so the deploy script owns the single
+    # "deploy succeeded" signal — one telegram per deploy regardless of
+    # how many daemons restarted.
+    assert "api.telegram.org/bot" in text
+    assert "deploy-verify-ok commit=$python_commit" in text
+    assert "TELEGRAM_BOT_TOKEN" in text
+    # Best-effort: a curl failure must not flip the deploy result. The
+    # `|| echo WARN` clause keeps the script from exit-1-ing if Telegram is
+    # down; verify already passed before this line runs.
+    assert "deploy-confirm telegram send failed" in text
 
 
 def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:

@@ -184,4 +184,18 @@ systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Envir
 
 python_commit="$(git rev-parse --short HEAD)"
 echo "deploy-verify-ok commit=$python_commit"
+
+# Send ONE deploy-confirmation telegram after verify passes. Daemons no
+# longer fire startup telegrams (default off), so this is the operator's
+# only "deploy succeeded, services back up" signal. Best-effort: a curl
+# failure must not flip the deploy result — verify already passed.
+if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
+  deploy_msg="✅ liquidity-migration deploy-verify-ok commit=$python_commit (services restarted + healthy)"
+  curl --silent --show-error --max-time 10 \
+    --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
+    --data-urlencode "text=$deploy_msg" \
+    --data-urlencode "disable_web_page_preview=true" \
+    "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+    >/dev/null 2>&1 || echo "WARN: deploy-confirm telegram send failed (verify still passed)"
+fi
 REMOTE_SCRIPT

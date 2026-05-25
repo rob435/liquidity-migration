@@ -79,11 +79,11 @@ class LongNativeDemoDaemon:
         # See event_demo_daemon for the full reasoning.
         ticker_reconcile_interval_seconds: float = 60.0,
         state_cache_stale_seconds: float = 120.0,
-        # See EventDemoDaemon for rationale — startup ON so the operator
-        # can confirm the daemon is alive after a deploy, shutdown OFF
-        # because every shutdown is followed immediately by a new startup
-        # (or the absent next startup IS the signal).
-        startup_telegram: bool = True,
+        # Both default OFF — see EventDemoDaemon for the full rationale.
+        # The "deploy succeeded" signal lives in deploy_vps_live.sh's
+        # post-verify confirmation telegram so a single deploy fires one
+        # message regardless of how many daemons restarted.
+        startup_telegram: bool = False,
         shutdown_telegram: bool = False,
         # Order-submission routing. See EventDemoDaemon for the full
         # rationale. Default ws_then_rest: WS first, REST fallback. On

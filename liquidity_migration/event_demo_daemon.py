@@ -102,14 +102,15 @@ class EventDemoDaemon:
         # is always fresh and the cycle never REST-falls-back unnecessarily.
         ticker_reconcile_interval_seconds: float = 60.0,
         state_cache_stale_seconds: float = 120.0,
-        # Lifecycle telegram policy. Two independent toggles because the
-        # operator needs to know when the daemon comes BACK UP after a
-        # deploy (an absent startup telegram looks like a dead process),
-        # but rarely cares about the shutdown side — the prior startup
-        # telegram already implies "the old one stopped". Default:
-        # startup ON, shutdown OFF. Material cycle events (entries, exits,
-        # errors) always telegram via _maybe_notify regardless of these.
-        startup_telegram: bool = True,
+        # Lifecycle telegram policy. Both default OFF: a rapid series of
+        # deploys (each restarts every service) would otherwise flood the
+        # channel — observed 7 push-deploys in 15 minutes producing 14
+        # lifecycle telegrams. The "deploy succeeded, services back up"
+        # signal lives in scripts/deploy_vps_live.sh now, which sends ONE
+        # confirmation telegram after the verify block passes. Material
+        # cycle events (entries, exits, errors) always telegram via
+        # _maybe_notify regardless of these.
+        startup_telegram: bool = False,
         shutdown_telegram: bool = False,
         # Order-submission routing. ws_then_rest tries Bybit WS Trade first
         # (sub-50ms ack) and falls back to REST on failure. On the current

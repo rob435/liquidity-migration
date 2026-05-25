@@ -1114,11 +1114,15 @@ class _RecordingTickerStream:
         self.closed = True
 
 
-def test_daemon_startup_telegram_on_by_default_shutdown_off(tmp_path: Path) -> None:
-    """Defaults: startup ON (operator needs to see daemon came back after
-    a deploy), shutdown OFF (the next startup telegram already implies
-    the prior process stopped). Material cycle events always telegram
-    regardless of these flags."""
+def test_daemon_lifecycle_telegrams_default_off(tmp_path: Path) -> None:
+    """Defaults: BOTH startup and shutdown OFF. Rapid deploy series would
+    otherwise flood the channel — observed 7 push-deploys in 15 minutes
+    producing 14 lifecycle telegrams. The 'deploy succeeded, services back
+    up' signal lives in scripts/deploy_vps_live.sh's post-verify
+    confirmation telegram instead, so a single deploy fires ONE message
+    regardless of how many daemons restarted. Material cycle events
+    (entries, exits, errors) always telegram via _maybe_notify regardless
+    of these flags."""
     ws = _RecordingWsStream()
     messages: list[str] = []
     daemon = EventDemoDaemon(
@@ -1129,14 +1133,14 @@ def test_daemon_startup_telegram_on_by_default_shutdown_off(tmp_path: Path) -> N
         ws_stream_factory=lambda _config: ws,
         cycle_runner=_stub_cycle_runner([]),
         telegram_sender=lambda t: (messages.append(t) or True),
-        # Defaults: startup_telegram=True, shutdown_telegram=False.
+        # Defaults: startup_telegram=False, shutdown_telegram=False.
     )
     runner = threading.Thread(target=daemon.run, daemon=True)
     runner.start()
     time.sleep(0.05)
     daemon.request_shutdown()
     runner.join(timeout=2.0)
-    assert any("started" in m for m in messages), f"expected startup telegram, got {messages!r}"
+    assert not any("started" in m for m in messages), f"startup telegram should be suppressed, got {messages!r}"
     assert not any("stopped" in m for m in messages), f"shutdown telegram should be suppressed, got {messages!r}"
 
 
