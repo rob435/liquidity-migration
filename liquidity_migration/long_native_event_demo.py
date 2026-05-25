@@ -1201,12 +1201,20 @@ def _execute_single_long_entry(
     tick_size = _float(contract.get("tick_size")) or 0.0001
     qty_step = _float(contract.get("qty_step")) or 0.001
     capped_notional = equity_usdt * demo.wallet_balance_fraction * order_notional_pct_equity * _float(candidate.get("position_weight") or 1.0)
+    # See event_demo._execute_single_entry for the max-qty rationale —
+    # same bug class would bite the long sleeve on a high-notional ×
+    # low-price candidate if we didn't cap.
+    max_qty = (
+        _float(contract.get("max_market_order_qty"))
+        or _float(contract.get("max_order_qty"))
+    )
     quantity = order_quantity_for_notional(
         notional_usdt=capped_notional,
         price=price,
         qty_step=qty_step,
         min_order_qty=_float(contract.get("min_order_qty")),
         min_notional_value=_float(contract.get("min_notional_value")),
+        max_order_qty=max_qty,
     )
     if quantity is None:
         return None, None

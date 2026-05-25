@@ -430,6 +430,33 @@ def test_bootstrap_symbol_completes_full_universe_in_a_few_seconds() -> None:
     assert store.row_count() == n_symbols * n_bars
 
 
+def test_keep_only_symbols_drops_everything_outside_the_set() -> None:
+    """Used at manager startup to trim legacy bars when the universe
+    scope shrinks between runs (e.g. long sleeve recovered with 567
+    symbols' worth of data from a prior wider-universe daemon but now
+    only tracks the top-50)."""
+    store = KlineStore(cache_root=None, retain_days=90, flush_interval_seconds=0.0)
+    for sym in ("BTCUSDT", "ETHUSDT", "DOGEUSDT", "SHIBUSDT"):
+        store.add_bar(sym, _ws_bar(MS_PER_HOUR), confirmed=True)
+    assert store.symbol_count() == 4
+
+    dropped = store.keep_only_symbols(["BTCUSDT", "ETHUSDT"])
+    assert dropped == 2  # DOGE + SHIB had 1 bar each
+    assert store.symbol_count() == 2
+    assert {row["symbol"] for row in store.get_klines(
+        ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "SHIBUSDT"],
+        start_ms=0, end_ms=10 * MS_PER_HOUR,
+    ).to_dicts()} == {"BTCUSDT", "ETHUSDT"}
+
+
+def test_keep_only_symbols_is_a_noop_when_universe_unchanged() -> None:
+    store = KlineStore(cache_root=None, retain_days=90, flush_interval_seconds=0.0)
+    store.add_bar("BTCUSDT", _ws_bar(MS_PER_HOUR), confirmed=True)
+    dropped = store.keep_only_symbols(["BTCUSDT", "ETHUSDT"])
+    assert dropped == 0
+    assert store.symbol_count() == 1
+
+
 def test_amortized_eviction_does_not_skip_long_overdue_purges() -> None:
     """Eviction is amortized to fire once per hour-window, but bars that
     have been stale for many hours still get purged the next time it fires.

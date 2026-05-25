@@ -175,6 +175,21 @@ class KlineStreamManager:
         universe = self._fetch_universe()
         with self._lock:
             self._universe = set(universe)
+        # Trim the recovered store to the active universe — a prior
+        # daemon run may have subscribed a wider universe (e.g. before
+        # universe scoping landed on the long sleeve), and those legacy
+        # bars would otherwise sit in memory for 90 days waiting on
+        # retain_days eviction. Skipped when the universe is empty so
+        # a transient REST blip on the universe fetch doesn't blow the
+        # store away — the empty-universe-fetch protection in
+        # force_refresh_universe applies the same logic at runtime.
+        if self._universe:
+            dropped = self._store.keep_only_symbols(self._universe)
+            if dropped:
+                _logger.info(
+                    "kline_store trimmed %d legacy rows outside the %d-symbol universe",
+                    dropped, len(self._universe),
+                )
         if shutdown_event is not None and shutdown_event.is_set():
             _logger.info("kline_stream_manager start aborted: shutdown requested before bootstrap")
             return self._start_stats(blocked=False)

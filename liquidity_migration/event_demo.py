@@ -1332,7 +1332,18 @@ def order_quantity_for_notional(
     qty_step: float,
     min_order_qty: float = 0.0,
     min_notional_value: float = 0.0,
+    max_order_qty: float = 0.0,
 ) -> tuple[str, float] | None:
+    """Convert a notional target into a Bybit-acceptable qty string.
+
+    ``max_order_qty`` caps the result at Bybit's per-order maximum (use
+    ``maxMktOrderQty`` for Market orders, ``maxOrderQty`` for limit). If
+    the capped qty falls below ``min_order_qty`` (i.e. the gap between
+    min and max would force a sub-min order), returns None so the
+    caller skips the candidate rather than sending an order Bybit will
+    reject. Observed 2026-05-25: SUPERUSDT entry at 26477 contracts vs
+    Bybit's 21100 max → rejected; this cap prevents that.
+    """
     if notional_usdt <= 0.0 or price <= 0.0:
         return None
     try:
@@ -1340,8 +1351,12 @@ def order_quantity_for_notional(
         step = Decimal(str(qty_step if qty_step > 0.0 else 0.001))
         qty = (raw_qty // step) * step
         min_qty = Decimal(str(min_order_qty if min_order_qty > 0.0 else 0.0))
+        max_qty = Decimal(str(max_order_qty if max_order_qty > 0.0 else 0.0))
     except (InvalidOperation, ZeroDivisionError):
         return None
+    if max_qty > 0 and qty > max_qty:
+        # Floor to the step grid in case max_qty isn't already step-aligned.
+        qty = (max_qty // step) * step
     if qty <= 0 or (min_qty > 0 and qty < min_qty):
         return None
     actual_notional = float(qty) * price
@@ -2417,12 +2432,20 @@ def _execute_single_entry(
     tick_size = _float(contract.get("tick_size")) or 0.0001
     qty_step = _float(contract.get("qty_step")) or 0.001
     capped_notional = equity_usdt * demo.wallet_balance_fraction * order_notional_pct_equity
+    # Cap by Bybit's per-order MARKET max (cycle uses Market entries).
+    # Falling back to max_order_qty when max_market_order_qty is missing
+    # so the cap is enforced even on a partial instruments snapshot.
+    max_qty = (
+        _float(contract.get("max_market_order_qty"))
+        or _float(contract.get("max_order_qty"))
+    )
     quantity = order_quantity_for_notional(
         notional_usdt=capped_notional,
         price=price,
         qty_step=qty_step,
         min_order_qty=_float(contract.get("min_order_qty")),
         min_notional_value=_float(contract.get("min_notional_value")),
+        max_order_qty=max_qty,
     )
     if quantity is None:
         return None, None

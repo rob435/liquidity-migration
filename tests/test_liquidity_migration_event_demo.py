@@ -1904,6 +1904,72 @@ def test_order_quantity_for_notional_floors_to_qty_step_and_min_notional() -> No
     )
 
 
+def test_order_quantity_for_notional_caps_by_max_order_qty() -> None:
+    """Regression guard for the SUPERUSDT-2026-05-25 rejection.
+
+    Demo cycle sized a 26477-contract market entry on SUPERUSDT while
+    Bybit's maxMktOrderQty for the symbol is 21100. The order errored
+    with ErrCode 10001 ("number of contracts exceeds maximum limit");
+    the ledger row sat in submit_unconfirmed and the paper run still
+    "took" the entry, producing a reconciliation gap.
+
+    With max_order_qty supplied, the function must cap at the max
+    (floored to qty_step) instead of returning the over-cap value or
+    rejecting outright.
+    """
+    # Without the cap: the request rounds down to 26477 contracts.
+    uncapped = order_quantity_for_notional(
+        notional_usdt=3287.4951,  # 26477 × 0.12416
+        price=0.12416,
+        qty_step=1.0,
+        min_order_qty=1.0,
+    )
+    assert uncapped is not None
+    assert uncapped[0] == "26477"
+
+    # With the cap (Bybit's actual maxMktOrderQty for SUPERUSDT at the time
+    # of the incident): qty floors to 21100.
+    capped = order_quantity_for_notional(
+        notional_usdt=3287.4951,
+        price=0.12416,
+        qty_step=1.0,
+        min_order_qty=1.0,
+        max_order_qty=21100.0,
+    )
+    assert capped is not None
+    assert capped[0] == "21100"
+    assert capped[1] == pytest.approx(21100.0 * 0.12416, rel=1e-9)
+
+
+def test_order_quantity_for_notional_caps_floors_to_qty_step() -> None:
+    """max_order_qty may not be step-aligned (e.g. an exchange that
+    publishes 100 with a qty_step of 7). The cap must floor to the step
+    grid so the order_qty is always a valid multiple of qty_step."""
+    capped = order_quantity_for_notional(
+        notional_usdt=10_000.0,  # would buy 1000 @ $10 if uncapped
+        price=10.0,
+        qty_step=7.0,
+        max_order_qty=100.0,
+    )
+    assert capped is not None
+    # 100 // 7 * 7 = 98
+    assert capped[0] == "98"
+
+
+def test_order_quantity_for_notional_returns_none_when_cap_below_min() -> None:
+    """When max_order_qty < min_order_qty (unusual but possible during
+    a venue config change), skip the candidate rather than sending a
+    sub-min order Bybit will reject."""
+    result = order_quantity_for_notional(
+        notional_usdt=1_000_000.0,
+        price=1.0,
+        qty_step=1.0,
+        min_order_qty=100.0,
+        max_order_qty=50.0,
+    )
+    assert result is None
+
+
 def test_select_demo_entry_candidates_uses_selected_liquidity_migration_filters() -> None:
     signal_ts = 1_700_000_000_000
     scenario = EventScenario(

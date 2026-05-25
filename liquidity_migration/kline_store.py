@@ -411,6 +411,26 @@ class KlineStore:
                     covered.add(symbol)
         return covered
 
+    def keep_only_symbols(self, symbols: Iterable[str]) -> int:
+        """Drop every symbol NOT in ``symbols``. Returns rows dropped.
+
+        Called by the manager after the universe is set so the store
+        doesn't keep paying memory for symbols outside the active
+        universe (e.g. legacy data recovered from a prior daemon run
+        that subscribed a wider universe before scoping landed). Bars
+        for kept symbols are preserved exactly; this is a set-trim,
+        not an eviction-by-age."""
+        keep = set(symbols)
+        dropped = 0
+        with self._lock:
+            stale = [s for s in self._bars if s not in keep]
+            for symbol in stale:
+                dropped += len(self._bars[symbol])
+                del self._bars[symbol]
+            if dropped > 0:
+                self._adds_evicted += dropped
+        return dropped
+
     def symbols_with_coverage_in_window(self, *, start_ms: int, end_ms: int) -> set[str]:
         """Symbols whose stored bars span the FULL ``[start_ms, end_ms]``
         window — i.e. oldest bar <= start_ms AND newest bar >= end_ms.

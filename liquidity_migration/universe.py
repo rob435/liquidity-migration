@@ -122,6 +122,18 @@ def build_current_universe_table(
         "min_notional_value",
         "tick_size",
         "qty_step",
+        # Lot-size lower + upper bounds. Bybit returns minOrderQty,
+        # maxOrderQty (limit), and maxMktOrderQty (market) per linear
+        # perp. The cycle's entry sizing previously read min_order_qty
+        # off the contract dict and got 0 (no enforcement) because the
+        # universe table didn't propagate it; the max columns were
+        # parsed by _normalize_instruments but also dropped here, so a
+        # large position-sizing × low-price candidate could submit a
+        # qty exceeding Bybit's per-order cap and get rejected
+        # (observed 2026-05-25: SUPERUSDT, 26477 > max 21100).
+        "min_order_qty",
+        "max_order_qty",
+        "max_market_order_qty",
     ]
     return ranked.select([col for col in columns if col in ranked.columns]).sort("liquidity_rank")
 
