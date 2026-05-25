@@ -1213,3 +1213,44 @@ def test_daemon_cycle_failure_telegram_fires_regardless_of_lifecycle_flag(tmp_pa
     runner.join(timeout=2.0)
     error_msgs = [m for m in messages if "cycle failed" in m or "❌" in m]
     assert error_msgs, f"expected at least one cycle-failed telegram, got {messages!r}"
+
+
+def test_short_kline_universe_fetcher_scopes_top_n_by_turnover() -> None:
+    """Mirror of the long-sleeve scope test. Short daemon's kline
+    manager must NOT bootstrap every active USDT-perp — the cycle
+    only uses the top-universe_max_symbols (default 400), so the
+    other ~167 are wasted memory + WS bandwidth."""
+    from liquidity_migration.event_demo_daemon import _build_short_kline_universe
+
+    class _FakeMarket:
+        def get_tickers(self) -> list[dict]:
+            rows: list[dict] = []
+            for i in range(800):  # plenty more than top_n=500
+                rows.append({"symbol": f"SYM{i:03d}USDT", "turnover24h": str(1_000_000 - i)})
+            # Non-USDT pair — must be excluded.
+            rows.append({"symbol": "BTC-PERP", "turnover24h": "999999"})
+            # Zero / null turnover — must be excluded.
+            rows.append({"symbol": "DEADUSDT", "turnover24h": "0"})
+            rows.append({"symbol": "NULLUSDT", "turnover24h": None})
+            return rows
+
+    symbols = _build_short_kline_universe(_FakeMarket(), top_n=500)
+    assert len(symbols) == 500
+    assert symbols[0] == "SYM000USDT"
+    assert symbols[-1] == "SYM499USDT"
+    assert "BTC-PERP" not in symbols
+    assert "DEADUSDT" not in symbols
+    assert "NULLUSDT" not in symbols
+
+
+def test_short_kline_universe_fetcher_returns_empty_on_rest_failure() -> None:
+    """REST failures must return empty so the manager's empty-fetch
+    guard kicks in and keeps existing subscriptions — see
+    KlineStreamManager.force_refresh_universe."""
+    from liquidity_migration.event_demo_daemon import _build_short_kline_universe
+
+    class _FailingMarket:
+        def get_tickers(self) -> list[dict]:
+            raise RuntimeError("simulated REST outage")
+
+    assert _build_short_kline_universe(_FailingMarket(), top_n=500) == []

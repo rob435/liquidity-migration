@@ -856,16 +856,59 @@ def _build_private_ws_stream(config: ResearchConfig) -> BybitPrivateWebSocketStr
     )
 
 
+def _build_short_kline_universe(
+    market: BybitMarketData, *, top_n: int,
+) -> list[str]:
+    """Top-N active linear USDT-perps by 24h turnover.
+
+    Matches the cycle's universe selection (which sorts by turnover_24h
+    and takes the top universe_max_symbols). Without this scoping the
+    manager bootstrapped every active USDT-perp (~567) even though the
+    cycle only ever queries the top-400 — wasted ~30% of the kline
+    store on data the strategy never touched."""
+    try:
+        tickers = market.get_tickers()
+    except Exception as exc:  # noqa: BLE001
+        _logger.warning("short kline universe fetch failed (tickers): %s", exc)
+        return []
+    candidates: list[tuple[float, str]] = []
+    for row in tickers:
+        symbol = str(row.get("symbol") or "")
+        if not symbol or not symbol.endswith("USDT"):
+            continue
+        try:
+            turnover = float(row.get("turnover24h") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if turnover <= 0.0:
+            continue
+        candidates.append((turnover, symbol))
+    candidates.sort(reverse=True)
+    return [symbol for _, symbol in candidates[: max(top_n, 1)]]
+
+
 def _default_kline_stream_manager_factory(
     config: ResearchConfig,
     demo_config: EventDemoCycleConfig,
     cache_root: Path,
 ) -> KlineStreamManager:
     """Default builder. Construct a KlineStreamManager wired to a fresh
-    BybitMarketData using the same category/testnet as the rest of the cycle."""
+    BybitMarketData using the same category/testnet as the rest of the cycle.
+
+    The manager's universe is scoped to the cycle's
+    ``universe_max_symbols`` (default 400) with a small buffer for rank
+    drift between hourly refreshes. Anything not in the manager's
+    universe still gets served by the cycle's REST fallback so a brief
+    universe-edge rotation doesn't break feature builds."""
     market = BybitMarketData(
         category=config.exchange.category, testnet=config.exchange.testnet,
     )
+    # +25% buffer: 400 → 500. The buffer absorbs rank churn between
+    # hourly universe refreshes; without it a new symbol entering the
+    # top-400 mid-hour would have no kline history until the next
+    # refresh tick. With it, rank-401..500 are already bootstrapped
+    # so promotions are instantly feature-ready.
+    top_n = int(demo_config.universe_max_symbols * 1.25)
     return KlineStreamManager(
         market_data=market,
         cache_root=cache_root,
@@ -875,6 +918,7 @@ def _default_kline_stream_manager_factory(
         topics_per_connection=demo_config.ws_klines_topics_per_connection,
         stale_warning_seconds=demo_config.ws_klines_stale_warning_seconds,
         stale_reconnect_seconds=demo_config.ws_klines_stale_reconnect_seconds,
+        universe_fetcher=lambda m=market, n=top_n: _build_short_kline_universe(m, top_n=n),
     )
 
 
