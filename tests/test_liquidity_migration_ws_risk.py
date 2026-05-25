@@ -2381,3 +2381,193 @@ def _write_pending_entry_order(root: Path, *, status: str, ts_ms: int) -> None:
         "event_demo_orders",
         partition_by=(),
     )
+
+
+def test_validate_trade_row_invariants_catches_entry_before_signal() -> None:
+    """The 2026-05-25 WAVESUSDT premature-exit bug: entry_ts_ms set to
+    signal_ts_ms (i.e. before the actual fill). The validator must catch
+    this before the row is written to the ledger."""
+    from liquidity_migration.ws_risk import _validate_trade_row_invariants
+
+    signal_ts = 1_779_667_200_000
+    # Bad: entry_ts before signal_ts (the bug shape)
+    ok, reason = _validate_trade_row_invariants({
+        "signal_ts_ms": signal_ts,
+        "entry_ts_ms": signal_ts - 60_000,
+    })
+    assert not ok
+    assert "entry_ts_ms" in reason and "signal_ts_ms" in reason
+
+    # Bad: planned_exit_ts equals entry_ts (hold window <= 0)
+    ok, reason = _validate_trade_row_invariants({
+        "signal_ts_ms": signal_ts,
+        "entry_ts_ms": signal_ts + 60_000,
+        "planned_exit_ts_ms": signal_ts + 60_000,
+    })
+    assert not ok
+    assert "planned_exit_ts_ms" in reason
+
+    # Bad: opened_at_ms before signal_ts
+    ok, reason = _validate_trade_row_invariants({
+        "signal_ts_ms": signal_ts,
+        "entry_ts_ms": signal_ts + 60_000,
+        "opened_at_ms": signal_ts - 1,
+        "planned_exit_ts_ms": signal_ts + 86_400_000,
+    })
+    assert not ok
+    assert "opened_at_ms" in reason
+
+    # Good: all timestamps consistent
+    ok, reason = _validate_trade_row_invariants({
+        "signal_ts_ms": signal_ts,
+        "entry_ts_ms": signal_ts + 3 * 3600 * 1000,
+        "opened_at_ms": signal_ts + 3 * 3600 * 1000,
+        "planned_exit_ts_ms": signal_ts + 3 * 86_400_000,
+    })
+    assert ok, f"valid row should pass: reason={reason!r}"
+
+
+def test_validate_trade_row_invariants_tolerates_missing_fields() -> None:
+    """Legacy / hand-placed adopted-* rows may be missing signal_ts_ms or
+    planned_exit_ts_ms. The validator must not crash on those — only flag
+    when both sides of an invariant are present."""
+    from liquidity_migration.ws_risk import _validate_trade_row_invariants
+
+    ok, _ = _validate_trade_row_invariants({"entry_ts_ms": 1_779_667_200_000})
+    assert ok
+    ok, _ = _validate_trade_row_invariants({})
+    assert ok
+
+
+def test_rebuild_flow_end_to_end_preserves_trade_ids_for_reconciliation(tmp_path: Path) -> None:
+    """End-to-end simulation of a VPS rebuild's adoption + reconciliation
+    flow. Catches the cluster of bugs that surfaced 2026-05-25:
+
+      - adoption recovery decodes orderLinkId back to signal_ts so demo
+        and paper ledgers carry the SAME deterministic trade_id (was the
+        whole reason reconciliation could pair to begin with)
+      - entry_ts_ms reflects actual venue fill time, NOT signal_ts (the
+        bug that tripped event_decay prematurely on WAVES)
+      - the timestamp invariants in docs/timestamp_glossary.md actually
+        hold for the rows the adoption path writes
+
+    Failure modes this test catches:
+      - reconciliation pairs=0 (recovered trade_id != paper trade_id)
+      - event_decay fires hours early (entry_ts_ms collapsed onto signal_ts)
+      - planned_exit_ts_ms ≤ entry_ts_ms (hold-window math wrong)
+    """
+    import polars as pl
+    from liquidity_migration.event_demo import _order_link_id, _demo_event_config, _selected_scenario
+    from liquidity_migration.reconciliation import run_paper_demo_reconciliation
+    from liquidity_migration.storage import write_dataset
+    from liquidity_migration.volume_events import VolumeEventResearchConfig
+
+    # Three signals at the same 1h-bar boundary, three different symbols.
+    signal_ts_ms = 1_779_667_200_000
+    bybit_created_ms = signal_ts_ms + 3 * 3600 * 1000  # +3h, realistic fill lag
+    symbols = ["AAAUSDT", "BBBUSDT", "CCCUSDT"]
+    promoted_strategy = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
+    promoted_scenario = _selected_scenario(promoted_strategy)
+    scenario_id = promoted_scenario.scenario_id  # type: ignore[union-attr]
+
+    # Bybit state: 3 open short positions with valid bot orderLinkIds (this is
+    # what survives a VPS rebuild — Bybit retains state).
+    positions = []
+    order_history = []
+    expected_trade_ids = []
+    for sym in symbols:
+        link = _order_link_id("en", symbol=sym, signal_ts_ms=signal_ts_ms)
+        positions.append({
+            "symbol": sym,
+            "side": "Sell",
+            "size": "100",
+            "avgPrice": "1.00",
+            "markPrice": "1.00",
+            "positionValue": "100",
+            "unrealisedPnl": "0",
+            "stopLoss": "1.12",
+            "takeProfit": "0.79",
+            "createdTime": str(bybit_created_ms),
+        })
+        order_history.append({
+            "symbol": sym,
+            "side": "Sell",
+            "orderLinkId": link,
+            "orderStatus": "Filled",
+            "qty": "100",
+            "avgPrice": "1.00",
+        })
+        expected_trade_ids.append(f"{scenario_id}-{sym}-{signal_ts_ms}")
+
+    private_client = FakePrivateClient(
+        positions=positions,
+        order_history=order_history,
+    )
+
+    # Demo daemon comes back up post-rebuild → runs adoption → ledger is
+    # written from the recovered orderLinkIds.
+    demo_root = tmp_path / "demo"
+    demo_root.mkdir()
+    engine = EventWebSocketRiskEngine(
+        demo_root,
+        config=ResearchConfig(data_root=demo_root),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=False,
+            repair_stops=False,
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+    engine.bootstrap()
+
+    demo_trades = read_dataset(demo_root, "event_demo_trades")
+    assert demo_trades.height == 3, f"all 3 positions adopted, got {demo_trades.height}"
+
+    # Every adopted row must use the deterministic strategy trade_id (NOT
+    # the lossy adopted-*) AND obey the timestamp invariants.
+    from liquidity_migration.ws_risk import _validate_trade_row_invariants
+    for trade in demo_trades.to_dicts():
+        assert trade["trade_id"] in expected_trade_ids, (
+            f"recovered trade_id {trade['trade_id']!r} not in expected set"
+        )
+        assert not str(trade["trade_id"]).startswith("adopted-")
+        ok, reason = _validate_trade_row_invariants(trade)
+        assert ok, f"row failed invariant: {reason}; row={trade}"
+        # Specific assertion for the WAVES bug shape:
+        assert trade["entry_ts_ms"] != signal_ts_ms, (
+            "entry_ts_ms must NOT collapse onto signal_ts_ms — that's the bug "
+            "that tripped event_decay prematurely on 2026-05-25"
+        )
+        assert trade["entry_ts_ms"] == bybit_created_ms
+
+    # Paper ledger: same 3 deterministic trade_ids, fresh-cycle entry_ts
+    # (3h after signal, just like a real paper run would do).
+    paper_root = tmp_path / "paper"
+    paper_root.mkdir()
+    paper_rows = []
+    for sym, tid in zip(symbols, expected_trade_ids):
+        paper_rows.append({
+            "trade_id": tid,
+            "symbol": sym,
+            "side": "short",
+            "status": "open",
+            "qty": "100",
+            "entry_price": 1.00,
+            "entry_ts_ms": signal_ts_ms + 3 * 3600 * 1000,  # paper fires +3h after signal
+            "signal_ts_ms": signal_ts_ms,
+            "ts_ms": signal_ts_ms + 3 * 3600 * 1000,
+        })
+    write_dataset(pl.DataFrame(paper_rows), paper_root, "event_demo_trades", partition_by=())
+
+    # Reconciliation should pair all 3.
+    payload = run_paper_demo_reconciliation(paper_root=paper_root, demo_root=demo_root)
+    summary = payload["result"]["summary"]
+    assert summary["paired"] == 3, (
+        f"reconciliation must pair all 3 trades after rebuild; got {summary}"
+    )
+    assert summary["paper_only"] == 0
+    assert summary["demo_only"] == 0

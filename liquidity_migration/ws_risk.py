@@ -1117,6 +1117,13 @@ class EventWebSocketRiskEngine:
             trade = self._build_adopted_trade(position, now_ms=now_ms)
             if trade is None:
                 continue
+            ok, reason = _validate_trade_row_invariants(trade)
+            if not ok:
+                _logger.warning(
+                    "adoption: dropping trade for %s — invariant violation: %s; row=%s",
+                    symbol, reason, {k: trade.get(k) for k in ("trade_id", "signal_ts_ms", "entry_ts_ms", "opened_at_ms", "planned_exit_ts_ms")},
+                )
+                continue
             adopted.append(trade)
             open_symbols.add(symbol)
             self.state.untracked_first_seen_ms.pop(symbol, None)
@@ -1973,6 +1980,33 @@ def _first_price(row: dict[str, Any], keys: tuple[str, ...]) -> float:
         if value > 0.0:
             return value
     return 0.0
+
+
+def _validate_trade_row_invariants(row: dict[str, Any]) -> tuple[bool, str]:
+    """Cheap defensive check before writing a trade row to the ledger.
+
+    Catches the 2026-05-25 class of bug where entry_ts_ms collapsed onto
+    signal_ts_ms (1-6h before the actual venue fill), which made
+    planned_exit_ts_ms + event_decay trip prematurely. The cycle's exit
+    logic uses entry_ts as the basis for hold-window math; any divergence
+    between entry_ts and the actual fill time silently corrupts every
+    exit decision.
+
+    See docs/timestamp_glossary.md for the full reasoning. Returns
+    ``(ok, reason)`` — callers should log + skip the row on a failed
+    invariant rather than write it.
+    """
+    signal_ts = int(row.get("signal_ts_ms") or 0)
+    entry_ts = int(row.get("entry_ts_ms") or 0)
+    opened_at = int(row.get("opened_at_ms") or 0)
+    planned_exit = int(row.get("planned_exit_ts_ms") or 0)
+    if signal_ts > 0 and entry_ts > 0 and entry_ts < signal_ts:
+        return False, f"entry_ts_ms ({entry_ts}) < signal_ts_ms ({signal_ts})"
+    if planned_exit > 0 and entry_ts > 0 and planned_exit <= entry_ts:
+        return False, f"planned_exit_ts_ms ({planned_exit}) must exceed entry_ts_ms ({entry_ts})"
+    if signal_ts > 0 and opened_at > 0 and opened_at < signal_ts:
+        return False, f"opened_at_ms ({opened_at}) < signal_ts_ms ({signal_ts})"
+    return True, ""
 
 
 def _int(value: Any) -> int:
