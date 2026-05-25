@@ -400,39 +400,6 @@ def add_coil_release(daily: pl.DataFrame, *, config: MomentumSignalsConfig) -> p
     return pl.concat(frames).sort(["ts_ms", "symbol"])
 
 
-def build_momentum_features(
-    klines_1h: pl.DataFrame,
-    *,
-    funding: pl.DataFrame | None = None,
-    config: MomentumSignalsConfig | None = None,
-) -> pl.DataFrame:
-    """End-to-end feature build for the momentum sleeve.
-
-    Returns one row per (date, symbol) with everything the events module needs.
-    Caller is expected to have already excluded blacklisted symbols upstream.
-    """
-    cfg = config or MomentumSignalsConfig()
-    daily = daily_bars(klines_1h)
-    if daily.is_empty():
-        return daily
-    daily = add_returns_and_age(daily)
-    daily = add_liquidity_tier(daily, config=cfg)
-    daily = add_realized_vol(daily, window_days=cfg.vol_short_window_days)
-    daily = add_realized_vol(daily, window_days=cfg.vol_long_window_days)
-    daily = add_sma(daily, window_days=cfg.sma_trend_break_days)
-    daily = add_prior_high(daily, window_days=cfg.breakout_window_days)
-    daily = add_true_range_and_atr(daily, window_days=cfg.atr_window_days)
-    if cfg.ranker == RANKER_SHARPE:
-        daily = add_sharpe_score(daily, lookback_days=cfg.ranker_lookback_days)
-    else:
-        daily = add_clenow_score(daily, lookback_days=cfg.ranker_lookback_days)
-    daily = add_cross_sectional_rank(daily, config=cfg)
-    daily = add_btc_regime(daily, config=cfg)
-    daily = add_funding_overheat(daily, funding, config=cfg)
-    daily = add_coil_release(daily, config=cfg)
-    return daily.sort(["ts_ms", "symbol"])
-
-
 def _clenow_slope_r2(close: np.ndarray, *, lookback: int) -> np.ndarray:
     """Annualized exp(slope * 365) - 1 × R² of log(close) ~ time over a rolling `lookback`."""
     n = close.size

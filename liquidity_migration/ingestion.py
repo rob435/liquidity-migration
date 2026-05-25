@@ -30,10 +30,6 @@ class FixtureSpec:
     hours: int = 120
 
 
-def floor_timestamp_ms(ts_ms: int, interval_ms: int) -> int:
-    return ts_ms - (ts_ms % interval_ms)
-
-
 def normalize_trade(raw: dict[str, Any], symbol: str | None = None) -> dict[str, Any]:
     side = raw.get("side") or raw.get("S")
     price = float(_first_present(raw, "price", "p"))
