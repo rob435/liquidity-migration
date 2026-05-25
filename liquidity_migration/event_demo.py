@@ -606,8 +606,22 @@ def _prune_cycle_reports(report_dir: Path, *, prefix: str, keep_days: int, now_m
     directory bounded. The latest_*.json pointer and the partitioned cycle
     ledger preserve full history; per-cycle snapshots are only useful for
     inspecting a recent specific cycle. Best-effort: any unlink error is
-    swallowed so a noisy filesystem can't break the cycle."""
+    swallowed so a noisy filesystem can't break the cycle.
+
+    Amortized: only does the full directory scan when the last prune was
+    more than 1 hour ago. With 1500 cycles/day per daemon the directory
+    grows by ~1 file/cycle; pruning every cycle = N stat calls every
+    60s = wasted I/O. Hourly is plenty (files only need pruning when
+    crossing the keep_days boundary, which moves on hour-scale).
+    """
     if keep_days <= 0:
+        return
+    sentinel = report_dir / f".{prefix}prune_sentinel"
+    try:
+        sentinel_mtime_ms = int(sentinel.stat().st_mtime * 1000)
+    except OSError:
+        sentinel_mtime_ms = 0
+    if sentinel_mtime_ms > 0 and now_ms - sentinel_mtime_ms < 3_600_000:
         return
     cutoff_ts = (now_ms / 1000.0) - keep_days * 86400.0
     try:
@@ -617,6 +631,8 @@ def _prune_cycle_reports(report_dir: Path, *, prefix: str, keep_days: int, now_m
                     path.unlink(missing_ok=True)
             except OSError:
                 continue
+        # Touch the sentinel so the next call's gate fires off this run.
+        sentinel.touch()
     except OSError:
         return
 
