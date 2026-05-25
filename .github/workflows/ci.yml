@@ -20,22 +20,28 @@ jobs:
       - name: Lint
         run: python -m ruff check liquidity_migration tests
       - name: Run tests
-        # -v + --tb=short surface the failing test name and a short
-        # traceback inline in the job log. On failure we ALSO copy the
-        # entire pytest output into the job summary so it's visible
-        # without admin-level log download access (the annotation
-        # default just says "Process completed with exit code 1").
+        # -v + --tb=long surface every failing test name + traceback
+        # inline. On failure we copy the entire log to the job summary
+        # AND save it as a downloadable artifact so the failure can be
+        # diagnosed without admin-level log download access.
         run: |
           set +e
-          python -m pytest -v --tb=short 2>&1 | tee /tmp/pytest.log
+          python -m pytest -v --tb=long --no-header 2>&1 | tee /tmp/pytest.log
           STATUS=${PIPESTATUS[0]}
           if [ "$STATUS" -ne 0 ]; then
             {
               echo "## pytest failure (exit $STATUS)"
               echo ""
               echo '```'
-              tail -200 /tmp/pytest.log
+              tail -400 /tmp/pytest.log
               echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
           fi
           exit $STATUS
+      - name: Upload pytest log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-py${{ matrix.python-version }}
+          path: /tmp/pytest.log
+          retention-days: 7
