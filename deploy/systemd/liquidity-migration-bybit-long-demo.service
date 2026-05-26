@@ -45,15 +45,12 @@ PrivateTmp=true
 ProtectSystem=full
 ProtectHome=false
 ReadWritePaths=/opt/liquidity-migration
-# Bumped from 1G after observed OOM-kill loop: the kline manager subscribes
-# to the full 567-symbol USDT-perp universe at 90-day lookback (≈1.15M bars,
-# ~280MB just for the store) plus polars frames and seeded ticker cache.
-# 2G keeps the long sleeve well under the VPS's 2.7G free-memory budget
-# while leaving room for the short daemon (~250MB) and OS slack. Scoping
-# the manager's universe to just the long sleeve's top-N is the real fix —
-# see _default_long_universe_fetcher — but the cap stays generous in case
-# of future fan-out.
-MemoryMax=2G
+# Kline store: 567 symbols × 90-day lookback ≈ 280MB plus polars frames
+# and seeded ticker cache. MemoryMax=1.5G: tight enough that systemd
+# OOM-kills this service before the whole VPS crashes, with enough headroom
+# for a full bootstrap. The real fix is scoping the kline subscription to
+# just the long sleeve's top-N symbols (_default_long_universe_fetcher).
+MemoryMax=1500M
 
 [Install]
 WantedBy=multi-user.target
