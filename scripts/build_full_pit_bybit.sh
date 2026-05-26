@@ -21,7 +21,7 @@
 # A post-manifest sanity check rejects any symbol that does not end with USDT
 # (catches accidental categorical drift if upstream URL or filters change).
 #
-# See: docs/full_pit_rebuild_and_punchlist.md section A.3
+# See: docs/data_roots.md
 #
 # Usage:  bash scripts/build_full_pit_bybit.sh
 # Resumable: each stage skips work already done.

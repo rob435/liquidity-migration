@@ -2,7 +2,7 @@
 # Verify the new per-venue full-PIT roots before allowing old-root deletion.
 # Exits non-zero on any gate failure; gates print "PASS" on success.
 #
-# See: docs/full_pit_rebuild_and_punchlist.md section A.6
+# See: docs/data_roots.md
 set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-.venv/bin/python}"

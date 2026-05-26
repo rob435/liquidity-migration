@@ -15,7 +15,7 @@
 #     which target Binance's USD-M REST endpoints exclusively.
 # A post-manifest sanity check rejects any non-USDT symbol that slips through.
 #
-# See: docs/full_pit_rebuild_and_punchlist.md section A.4
+# See: docs/data_roots.md
 #
 # Usage:  bash scripts/build_full_pit_binance.sh
 # Resumable: each stage skips work already done.

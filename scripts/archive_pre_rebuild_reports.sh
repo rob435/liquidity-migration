@@ -3,7 +3,7 @@
 # destructive rebuild step. Preserves research history (~100 MB) without
 # carrying ~5 GB of raw data forward.
 #
-# See: docs/full_pit_rebuild_and_punchlist.md section A.2
+# See: docs/data_roots.md
 #
 # Usage:  bash scripts/archive_pre_rebuild_reports.sh
 # Override target via env:  ARCHIVE_DIR=~/custom/path bash scripts/archive_pre_rebuild_reports.sh

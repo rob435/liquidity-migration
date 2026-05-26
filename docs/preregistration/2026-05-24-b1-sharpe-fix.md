@@ -62,8 +62,9 @@ Implementation is the diff in this PR. To verify locally:
 - The legacy basket-frequency Sharpe formula and its
   `sharpe_basket_frequency_legacy` field are removed; the only Sharpe field
   in outputs is `sharpe_like` (daily-aligned).
-- See [docs/long_native_findings.md](../long_native_findings.md) — the
-  Sharpe-annualisation section is now footnoted with the fix date.
+- The Sharpe-annualisation history previously lived in
+  `docs/long_native_findings.md`, removed in the 2026-05-27 doc cleanup;
+  see git history for the fix narrative.
 
 ## Verdict
 **accepted.** The mechanism is mechanical (Sharpe formula change), the

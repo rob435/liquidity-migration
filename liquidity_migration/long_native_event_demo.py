@@ -186,8 +186,10 @@ def _long_demo_dataset_names(config: "LongNativeDemoCycleConfig") -> tuple[str, 
 def _v11a_long_native_config() -> LongNativeConfig:
     """The v11a uni10 sniper retrace 1%/6h fall-through config.
 
-    Sourced from long_native_FC_v11a_retrace1pct_6h_fallthru research run.
-    See docs/long_native_findings.md for provenance.
+    Sourced from the long_native_FC_v11a_retrace1pct_6h_fallthru research
+    run. Original provenance notes were in docs/long_native_findings.md;
+    that doc was removed in the 2026-05-27 doc cleanup. See the
+    LongNativeConfig defaults below + git history for the parameter origins.
     """
     return LongNativeConfig(
         universe_size=10,

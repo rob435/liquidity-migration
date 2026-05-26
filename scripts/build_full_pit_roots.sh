@@ -2,7 +2,7 @@
 # Orchestrator: archive old roots → build both new per-venue full-PIT roots
 # → run verification. Deletion of old roots is a deliberate manual step.
 #
-# See: docs/full_pit_rebuild_and_punchlist.md section A.5
+# See: docs/data_roots.md
 #
 # Usage:  bash scripts/build_full_pit_roots.sh
 #
