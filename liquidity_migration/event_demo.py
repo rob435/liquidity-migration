@@ -1722,16 +1722,27 @@ def _validate_demo_config(config: EventDemoCycleConfig) -> None:
     if config.lookback_days < 25:
         raise ValueError("lookback_days must be at least 25 so 20d persistence and 7d prior ranks are populated")
     required_rank_end = _required_universe_rank_end(strategy_profile)
-    if config.universe_rank_end < required_rank_end:
-        raise ValueError(
-            f"universe_rank_end={config.universe_rank_end} too narrow for {strategy_profile}: "
-            f"need at least rank {required_rank_end} so prior-week ranks of rocket-symbols are observable"
-        )
-    if config.universe_max_symbols < required_rank_end:
-        raise ValueError(
-            f"universe_max_symbols={config.universe_max_symbols} too narrow for {strategy_profile}: "
-            f"need at least {required_rank_end} so prior-week ranks of rocket-symbols are observable"
-        )
+    # universe_rank_end / universe_max_symbols == 0 is "match-the-backtest"
+    # mode: no ticker-turnover pre-filter, every active USDT-perp feeds into
+    # daily aggregation, the strategy's universe_rank_max applies on those
+    # daily ranks. That set (~750 active perps) trivially exceeds
+    # required_rank_end, so the universe-too-narrow check doesn't apply.
+    unlimited_universe = (
+        config.universe_rank_end == 0 and config.universe_max_symbols == 0
+    )
+    if not unlimited_universe:
+        if config.universe_rank_end < required_rank_end:
+            raise ValueError(
+                f"universe_rank_end={config.universe_rank_end} too narrow for {strategy_profile}: "
+                f"need at least rank {required_rank_end} so prior-week ranks of rocket-symbols are observable, "
+                f"or set both universe_rank_end and universe_max_symbols to 0 for match-the-backtest mode"
+            )
+        if config.universe_max_symbols < required_rank_end:
+            raise ValueError(
+                f"universe_max_symbols={config.universe_max_symbols} too narrow for {strategy_profile}: "
+                f"need at least {required_rank_end} so prior-week ranks of rocket-symbols are observable, "
+                f"or set both universe_rank_end and universe_max_symbols to 0 for match-the-backtest mode"
+            )
     if not 0.0 <= config.max_order_notional_pct_equity <= 1.0:
         raise ValueError("max_order_notional_pct_equity must be in [0, 1]")
     if not 0.0 < config.wallet_balance_fraction <= 1.0:
@@ -1854,9 +1865,20 @@ def _build_demo_universe(
     config: EventDemoCycleConfig,
     snapshot_ts_ms: int,
 ) -> pl.DataFrame:
+    # In match-the-backtest mode (universe_rank_end == universe_max_symbols
+    # == 0), drop the 30-day age floor so the demo includes the same
+    # 7-29-day-old listings the backtest would (the backtest doesn't pre-
+    # filter by age — it lets `prior7_liquidity_rank` being null exclude
+    # symbols with insufficient history naturally inside the strategy
+    # filter). When the legacy narrow-universe is active the 30-day
+    # safety floor stays in place to mirror prior demo behaviour.
+    unlimited_universe = (
+        config.universe_rank_end == 0 and config.universe_max_symbols == 0
+    )
+    min_age_days = 0 if unlimited_universe else 30
     universe_config = UniverseConfig(
         min_turnover_24h=config.universe_min_turnover_24h,
-        min_age_days=30,
+        min_age_days=min_age_days,
         rank_start=1,
         rank_end=config.universe_rank_end,
         max_symbols=config.universe_max_symbols,

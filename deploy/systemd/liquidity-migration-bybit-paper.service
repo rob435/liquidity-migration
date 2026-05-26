@@ -35,8 +35,13 @@ Environment=MAX_ORDER_NOTIONAL_PCT_EQUITY=0
 Environment=MAX_ENTRY_LAG_MINUTES=180
 Environment=MAX_NEW_ENTRIES_PER_CYCLE=10
 Environment=MAX_ACTIVE_SYMBOLS=3
-Environment=UNIVERSE_RANK_END=400
-Environment=UNIVERSE_MAX_SYMBOLS=400
+# UNIVERSE_RANK_END / UNIVERSE_MAX_SYMBOLS = 0 → match-the-backtest mode.
+# See liquidity-migration-bybit-demo.service for the rationale. The paper
+# sleeve shadows the demo, so it MUST match identically; if demo is in
+# match-the-backtest mode and paper isn't, demo↔paper slippage diagnostics
+# would compare against an apples-to-oranges baseline.
+Environment=UNIVERSE_RANK_END=0
+Environment=UNIVERSE_MAX_SYMBOLS=0
 Environment=UNIVERSE_MIN_TURNOVER_24H=0
 Environment=WORKERS=8
 Environment=ENTRY_LEVERAGE=2

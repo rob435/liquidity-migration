@@ -860,13 +860,26 @@ def _build_private_ws_stream(config: ResearchConfig) -> BybitPrivateWebSocketStr
 def _build_short_kline_universe(
     market: BybitMarketData, *, top_n: int,
 ) -> list[str]:
-    """Top-N active linear USDT-perps by 24h turnover.
+    """Active linear USDT-perp symbol set for WS kline subscription.
 
-    Matches the cycle's universe selection (which sorts by turnover_24h
-    and takes the top universe_max_symbols). Without this scoping the
-    manager bootstrapped every active USDT-perp (~567) even though the
-    cycle only ever queries the top-400 — wasted ~30% of the kline
-    store on data the strategy never touched."""
+    Two modes, controlled by ``top_n``:
+
+    * ``top_n <= 0``: return EVERY active USDT-perp from the ticker feed
+      (typically ~750 symbols). This is the demo↔backtest-aligned mode —
+      the backtest ranks `liquidity_rank` across the full point-in-time
+      manifest, so the demo must feed the same universe into
+      `build_volume_features` for the ranks to agree. Pre-filtering by
+      live ticker turnover changes the rank denominator and produces
+      diverging entry selections (observed 2026-05-26 with DRIFTUSDT:
+      demo rank 47 within a 400-symbol cap vs. backtest rank 47 within
+      the full 568-symbol universe disagreeing on prior7 by enough to
+      flip the migration filter pass/fail).
+
+    * ``top_n > 0``: legacy narrow-universe mode. Sorts by 24h ticker
+      turnover and takes the top N. Keeps the kline store ~30% smaller
+      but at the cost of demo and backtest picking different symbols
+      on the same signal date. Use only when memory pressure forces it.
+    """
     try:
         tickers = market.get_tickers()
     except Exception as exc:  # noqa: BLE001
@@ -884,6 +897,11 @@ def _build_short_kline_universe(
         if turnover <= 0.0:
             continue
         candidates.append((turnover, symbol))
+    if top_n <= 0:
+        # Full-universe mode: every active USDT-perp, no rank truncation.
+        # Sort still keeps a deterministic order for diagnostic logging.
+        candidates.sort(reverse=True)
+        return [symbol for _, symbol in candidates]
     candidates.sort(reverse=True)
     return [symbol for _, symbol in candidates[: max(top_n, 1)]]
 
@@ -904,12 +922,26 @@ def _default_kline_stream_manager_factory(
     market = BybitMarketData(
         category=config.exchange.category, testnet=config.exchange.testnet,
     )
-    # +25% buffer: 400 → 500. The buffer absorbs rank churn between
-    # hourly universe refreshes; without it a new symbol entering the
-    # top-400 mid-hour would have no kline history until the next
-    # refresh tick. With it, rank-401..500 are already bootstrapped
-    # so promotions are instantly feature-ready.
-    top_n = int(demo_config.universe_max_symbols * 1.25)
+    # When universe_max_symbols == 0 the cycle runs in
+    # "match-the-backtest" mode: feed every active USDT-perp into the
+    # WS kline store so the cycle's daily-aggregated liquidity_rank is
+    # computed across the same denominator the backtest sees. Without
+    # this widening, the demo's narrow universe gave different ranks
+    # (and therefore different prior7_liquidity_rank / migration filter
+    # behavior) than the backtest run on the same data — see commit
+    # message for the 2026-05-26 DRIFTUSDT divergence reproduction.
+    # Set ``universe_max_symbols=0`` in the systemd env to opt into
+    # this mode.
+    #
+    # Legacy narrow-universe mode (universe_max_symbols > 0): keep a
+    # +25% buffer over the cycle's universe so rank-edge symbols
+    # entering top-N mid-hour are already bootstrapped. With it,
+    # rank-401..500 are pre-warmed so promotions are instantly
+    # feature-ready.
+    top_n = (
+        0 if demo_config.universe_max_symbols <= 0
+        else int(demo_config.universe_max_symbols * 1.25)
+    )
     return KlineStreamManager(
         market_data=market,
         cache_root=cache_root,

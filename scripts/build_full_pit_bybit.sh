@@ -53,8 +53,14 @@ echo "=============================================================="
 
 echo
 echo "[1/4] Bybit — PIT manifest from public.bybit.com archive (USDT perps only)"
+# --include-v5-fallback supplements the archive scrape with currently-Trading
+# Bybit v5 perpetuals absent from public.bybit.com/trading. The archive root
+# has historically lagged new listings (observed 2026-05-25 with
+# BANUSDT/TRUSTUSDT, both demo-tradeable but never in the scrape). With
+# fallback on, those symbols enter the manifest and the universe.
 "$PYTHON_BIN" -m liquidity_migration --data-root "$ROOT" \
-  archive-manifest --start "$START" --end "$END" --workers "$MANIFEST_WORKERS"
+  archive-manifest --start "$START" --end "$END" --workers "$MANIFEST_WORKERS" \
+  --include-v5-fallback
 
 echo
 echo "[2/4] Bybit — 1h klines via v5 kline API (category=$CATEGORY, manifest-gated)"

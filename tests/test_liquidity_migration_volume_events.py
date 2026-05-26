@@ -14,6 +14,7 @@ from liquidity_migration.volume_events import (
     ENTRY_POLICY_FIXED_DELAY,
     POSITION_WEIGHTINGS,
     _PositionSizer,
+    _add_liquidity_migration_speed_features,
     _apply_entry_execution_veto,
     _clamp_position_weight,
     _position_sizing_quantity,
@@ -291,6 +292,146 @@ def test_enriched_event_features_adds_feature_factory_columns() -> None:
     assert last_a["intraday_range_expansion_7d"] > 0.0
     assert 0.0 <= last_a["event_uniqueness_score"] <= 1.0
     assert last_a["mark_index_basis_last"] == pytest.approx(0.002)
+
+
+def test_liquidity_rank_improvement_handles_rank_deterioration_without_u32_underflow() -> None:
+    # Regression test for the u32-underflow bug surfaced 2026-05-26 reconciling
+    # backtest vs. demo. `liquidity_rank` and the `priorN_liquidity_rank`
+    # columns come from `volume_features.build_volume_features` as u32. When
+    # a symbol's rank gets WORSE in the lookback window (current_rank >
+    # prior_rank), the unsigned `(prior - current)` subtraction wraps to a
+    # huge value near 2^32 instead of producing a negative delta. That made
+    # `improvement >= rank_improvement_min` falsely True for ranks that
+    # actually deteriorated — observed on WAVESUSDT prior7=111, current=201,
+    # raw subtraction = 4294967206 ≈ 2^32 - 90.
+    #
+    # _add_liquidity_migration_speed_features now casts to Int64 first so the
+    # delta carries its sign. Same Int64 cast lives inside
+    # _filter_liquidity_migration's predicate at the strategy filter site.
+    rows = pl.DataFrame({
+        "liquidity_rank": pl.Series([201, 47, 100], dtype=pl.UInt32),
+        "prior1_liquidity_rank": pl.Series([180, 70, 100], dtype=pl.UInt32),
+        "prior3_liquidity_rank": pl.Series([150, 90, 110], dtype=pl.UInt32),
+        "prior7_liquidity_rank": pl.Series([111, 135, 120], dtype=pl.UInt32),
+    })
+
+    result = _add_liquidity_migration_speed_features(rows)
+    improvements_1d = result["liquidity_rank_improvement_1d"].to_list()
+    improvements_3d = result["liquidity_rank_improvement_3d"].to_list()
+    improvements_7d = result["liquidity_rank_improvement_7d"].to_list()
+
+    # Row 0: rank deteriorated everywhere. All improvements must be negative.
+    assert improvements_1d[0] == 180 - 201 == -21
+    assert improvements_3d[0] == 150 - 201 == -51
+    assert improvements_7d[0] == 111 - 201 == -90  # the WAVESUSDT-like case
+    # Row 1: rank improved across all windows. Positive deltas.
+    assert improvements_1d[1] == 70 - 47 == 23
+    assert improvements_3d[1] == 90 - 47 == 43
+    assert improvements_7d[1] == 135 - 47 == 88
+    # Row 2: mixed. Negative on prior1 (100→100=0), positive elsewhere.
+    assert improvements_1d[2] == 0
+    assert improvements_3d[2] == 110 - 100 == 10
+    assert improvements_7d[2] == 120 - 100 == 20
+
+
+def test_filter_liquidity_migration_rejects_negative_rank_delta_after_u32_fix() -> None:
+    # Companion to the speed-features test: the filter predicate's own
+    # subtraction must also be sign-aware. Without the Int64 cast the
+    # 4294967206 wrap value sails through `>= 150` and a rank-deteriorating
+    # symbol falsely passes the migration filter.
+    from dataclasses import replace as dc_replace
+    base = pl.DataFrame({
+        "symbol": ["BAD", "GOOD"],
+        "date": ["2026-05-26", "2026-05-26"],
+        "ts_ms": [1779753600000, 1779753600000],
+        "liquidity_rank": pl.Series([201, 30], dtype=pl.UInt32),
+        "prior7_liquidity_rank": pl.Series([111, 250], dtype=pl.UInt32),
+        # Score gates / rank gates that the predicate also checks:
+        "dollar_volume_rank_z": [2.0, 2.0],
+        "dollar_volume_rank_z_rank_frac": [0.9, 0.9],
+        "prior7_dollar_volume_rank_z_rank_frac": [0.1, 0.1],
+        "tradable_membership_flag": [True, True],
+        "turnover_quote": [1.0e9, 1.0e9],
+        "market_pct_up_1d": [0.50, 0.50],
+        "market_median_return_30d_sum": [0.0, 0.0],
+        "market_median_return_7d_sum": [0.0, 0.0],
+        "market_pct_up_30d_mean": [0.5, 0.5],
+        "market_pct_up_7d_mean": [0.5, 0.5],
+    })
+    # Disable every additional liquidity_migration_* band the strategy might
+    # check so the test isolates the rank-delta predicate.
+    config = dc_replace(
+        VolumeEventResearchConfig(),
+        liquidity_migration_rank_improvement_min=150,
+        liquidity_migration_turnover_ratio_min=0.0,
+        liquidity_migration_current_rank_max=0,
+        liquidity_migration_event_rank_fraction_max=0.0,
+        liquidity_migration_event_rank_fraction_exclude_min=0.0,
+        liquidity_migration_event_rank_fraction_exclude_max=0.0,
+        liquidity_migration_score_max=0.0,
+        liquidity_migration_day_return_min=-10.0,
+        liquidity_migration_day_return_max=10.0,
+        liquidity_migration_return_7d_min=-10.0,
+        liquidity_migration_return_7d_max=10.0,
+        liquidity_migration_residual_return_min=-10.0,
+        liquidity_migration_residual_return_max=10.0,
+        liquidity_migration_close_to_high_7d_min=-10.0,
+        liquidity_migration_close_to_high_30d_min=-10.0,
+        liquidity_migration_prior30_max_return_min=-10.0,
+        liquidity_migration_prior30_max_return_max=10.0,
+        liquidity_migration_prior7_return_volatility_min=0.0,
+        liquidity_migration_prior7_return_volatility_max=10.0,
+        liquidity_migration_intraday_range_max=10.0,
+        liquidity_migration_funding_rate_last_min=-10.0,
+        liquidity_migration_funding_rate_last_max=10.0,
+        liquidity_migration_funding_3d_sum_min=-10.0,
+        liquidity_migration_funding_3d_sum_max=10.0,
+        liquidity_migration_funding_7d_sum_min=-10.0,
+        liquidity_migration_funding_7d_sum_max=10.0,
+        liquidity_migration_open_interest_return_3d_min=-10.0,
+        liquidity_migration_open_interest_return_3d_max=10.0,
+        liquidity_migration_open_interest_return_7d_min=-10.0,
+        liquidity_migration_open_interest_return_7d_max=10.0,
+        liquidity_migration_volume_to_oi_quote_min=0.0,
+        liquidity_migration_volume_to_oi_quote_max=0.0,
+        liquidity_migration_mark_index_basis_3d_mean_min=-10.0,
+        liquidity_migration_mark_index_basis_3d_mean_max=10.0,
+        liquidity_migration_premium_index_3d_mean_min=-10.0,
+        liquidity_migration_premium_index_3d_mean_max=10.0,
+        liquidity_migration_taker_imbalance_1d_min=-1.0,
+        liquidity_migration_taker_imbalance_1d_max=1.0,
+        liquidity_migration_taker_imbalance_3d_min=-1.0,
+        liquidity_migration_taker_imbalance_3d_max=1.0,
+        liquidity_migration_market_pct_up_max=1.0,
+        liquidity_migration_market_median_return_30d_max=10.0,
+        liquidity_migration_market_median_return_7d_max=10.0,
+        liquidity_migration_market_pct_up_30d_max=1.0,
+        liquidity_migration_market_pct_up_7d_max=1.0,
+        liquidity_migration_close_location_min=0.0,
+        liquidity_migration_close_location_max=1.0,
+        liquidity_migration_signal_last6h_turnover_share_max=1.0,
+        liquidity_migration_up_volume_concentration_min=0.0,
+        liquidity_migration_pit_age_days_min=0,
+        liquidity_migration_pit_age_days_max=0,
+        liquidity_migration_prior_rank_min=0,
+        require_pit_membership=False,
+        universe_rank_min=1,
+        universe_rank_max=400,
+        universe_min_daily_turnover=0.0,
+    )
+    result = _event_filter(
+        base,
+        "liquidity_migration",
+        score_col="dollar_volume_rank_z",
+        rank_col="dollar_volume_rank_z_rank_frac",
+        top_cut=0.60,
+        config=config,
+    )
+    survivors = result["symbol"].to_list()
+    # BAD (prior7=111, current=201) has delta=-90 (rank got worse), must NOT
+    # pass the >= 150 improvement gate. GOOD (prior7=250, current=30) has
+    # delta=220, must pass.
+    assert survivors == ["GOOD"], f"u32-underflow regression: {survivors}"
 
 
 def test_bar_extreme_stop_fill_uses_adverse_hourly_extreme_for_short() -> None:

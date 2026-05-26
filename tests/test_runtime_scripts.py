@@ -35,8 +35,13 @@ def test_systemd_entry_runner_uses_vps_cadence() -> None:
 
     assert "Environment=INTERVAL_SECONDS=60" in text
     assert "Environment=STRATEGY_PROFILE=promoted" in text
-    assert "Environment=UNIVERSE_RANK_END=400" in text
-    assert "Environment=UNIVERSE_MAX_SYMBOLS=400" in text
+    # Match-the-backtest mode: 0 disables the rank-end / max-symbols
+    # ticker-turnover pre-filter so the demo's daily-aggregated
+    # liquidity_rank is computed across the same denominator the
+    # backtest uses. See the service file's comment block for the
+    # 2026-05-26 DRIFTUSDT divergence that motivated the switch.
+    assert "Environment=UNIVERSE_RANK_END=0" in text
+    assert "Environment=UNIVERSE_MAX_SYMBOLS=0" in text
     assert "Environment=UNIVERSE_MIN_TURNOVER_24H=0" in text
     assert "Environment=MAX_ACTIVE_SYMBOLS=3" in text
     assert "Environment=PYTHONDONTWRITEBYTECODE=1" in text
@@ -393,8 +398,10 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "systemctl is-active --quiet liquidity-migration-combined-book-report.timer" in text
     assert "Environment=STRATEGY_PROFILE=promoted" in text
     assert "Environment=INTERVAL_SECONDS=60" in text
-    assert "Environment=UNIVERSE_RANK_END=400" in text
-    assert "Environment=UNIVERSE_MAX_SYMBOLS=400" in text
+    # Match-the-backtest mode: rank-end / max-symbols of 0 disables the
+    # ticker pre-filter so demo and backtest see the same symbol universe.
+    assert "Environment=UNIVERSE_RANK_END=0" in text
+    assert "Environment=UNIVERSE_MAX_SYMBOLS=0" in text
     assert "Environment=UNIVERSE_MIN_TURNOVER_24H=0" in text
     assert "Environment=MAX_ACTIVE_SYMBOLS=3" in text
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
@@ -428,8 +435,10 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "SYSTEMD_SETTLE_SECONDS" in text
     assert "Environment=STRATEGY_PROFILE=promoted" in text
     assert "Environment=INTERVAL_SECONDS=60" in text
-    assert "Environment=UNIVERSE_RANK_END=400" in text
-    assert "Environment=UNIVERSE_MAX_SYMBOLS=400" in text
+    # Match-the-backtest mode: rank-end / max-symbols of 0 disables the
+    # ticker pre-filter so demo and backtest see the same symbol universe.
+    assert "Environment=UNIVERSE_RANK_END=0" in text
+    assert "Environment=UNIVERSE_MAX_SYMBOLS=0" in text
     assert "Environment=UNIVERSE_MIN_TURNOVER_24H=0" in text
     assert "Environment=MAX_ACTIVE_SYMBOLS=3" in text
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
@@ -662,8 +671,10 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "systemctl is-enabled --quiet liquidity-migration-bybit-demo.service" in text
     assert "Environment=STRATEGY_PROFILE=promoted" in text
     assert "Environment=INTERVAL_SECONDS=60" in text
-    assert "Environment=UNIVERSE_RANK_END=400" in text
-    assert "Environment=UNIVERSE_MAX_SYMBOLS=400" in text
+    # Match-the-backtest mode: rank-end / max-symbols of 0 disables the
+    # ticker pre-filter so demo and backtest see the same symbol universe.
+    assert "Environment=UNIVERSE_RANK_END=0" in text
+    assert "Environment=UNIVERSE_MAX_SYMBOLS=0" in text
     assert "Environment=UNIVERSE_MIN_TURNOVER_24H=0" in text
     assert "Environment=MAX_ACTIVE_SYMBOLS=3" in text
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text

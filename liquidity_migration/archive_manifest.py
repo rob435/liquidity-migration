@@ -38,6 +38,10 @@ ARCHIVE_KLINE_SKIP_ROWS_ENV = "LIQMIG_ARCHIVE_KLINE_SKIP_ROWS_PATH"
 _logger = logging.getLogger("liquidity_migration.archive_manifest")
 
 
+DEFAULT_BYBIT_V5_INSTRUMENTS_URL = "https://api.bybit.com/v5/market/instruments-info"
+V5_FALLBACK_URL_SENTINEL = "bybit_v5_listing"
+
+
 @dataclass(frozen=True, slots=True)
 class ArchiveManifestConfig:
     base_url: str = DEFAULT_BYBIT_PUBLIC_TRADING_URL
@@ -48,6 +52,20 @@ class ArchiveManifestConfig:
     max_symbols: int = 0
     workers: int = 8
     name: str = "bybit-public-trading"
+    # When enabled, fetch Bybit v5 instruments-info and synthesize manifest rows
+    # for any Trading-status symbol whose archive directory is empty or absent
+    # from public.bybit.com/trading. This closes the gap where a freshly-listed
+    # demo-tradeable symbol (observed 2026-05-25 with BANUSDT/TRUSTUSDT) shows
+    # up in the live ticker stream but never reaches the archive scrape — and
+    # therefore never enters the backtest universe.
+    #
+    # Synthesized rows carry `url=bybit_v5_listing` (not a real archive zip).
+    # The downstream 1m archive download path bails on those rows; the v5 1h
+    # kline path treats `(symbol, date)` as the key and ignores `url`, so the
+    # full-PIT 1h pipeline picks them up transparently.
+    include_v5_fallback: bool = False
+    v5_instruments_url: str = DEFAULT_BYBIT_V5_INSTRUMENTS_URL
+    v5_category: str = "linear"
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +130,117 @@ def fetch_directory_html(url: str, *, timeout_seconds: int = DEFAULT_TIMEOUT_SEC
     context = ssl.create_default_context(cafile=certifi.where())
     with urlopen(url, timeout=timeout_seconds, context=context) as response:  # noqa: S310 - official public research archive
         return response.read().decode("utf-8", errors="replace")
+
+
+def fetch_v5_trading_perp_listings(
+    *,
+    base_url: str = DEFAULT_BYBIT_V5_INSTRUMENTS_URL,
+    category: str = "linear",
+    quote_suffix: str = "USDT",
+    timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+) -> dict[str, int]:
+    """Fetch currently-listed Bybit v5 perpetual symbols + their launchTime (ms).
+
+    Returns a mapping `{symbol -> launch_time_ms}` restricted to symbols whose
+    `status == "Trading"`, quote_suffix-quoted, and `contractType` is a perpetual
+    flavour. Used by ``supplement_manifest_with_v5_listings`` to discover
+    demo-tradeable symbols (BANUSDT, TRUSTUSDT, etc.) that the
+    ``public.bybit.com/trading`` archive hasn't yet exposed.
+
+    Network failures are caller's responsibility — this is read-only research
+    data, callers can swallow and degrade gracefully.
+    """
+    suffix = quote_suffix.upper()
+    listings: dict[str, int] = {}
+    cursor: str | None = None
+    context = ssl.create_default_context(cafile=certifi.where())
+    while True:
+        params: dict[str, str] = {"category": category, "limit": "1000"}
+        if cursor:
+            params["cursor"] = cursor
+        url = f"{base_url}?{urlencode(params)}"
+        with urlopen(url, timeout=timeout_seconds, context=context) as response:  # noqa: S310 - public bybit REST
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        result = payload.get("result", {}) if isinstance(payload, dict) else {}
+        rows = result.get("list") or []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            symbol = str(row.get("symbol", "")).upper()
+            if not symbol or not symbol.endswith(suffix):
+                continue
+            if str(row.get("status", "")) != "Trading":
+                continue
+            contract_type = str(row.get("contractType", "")).lower()
+            if "perp" not in contract_type:
+                # Filter inverse, delivery, futures — keep linear perps + perpetual flavours.
+                continue
+            launch_raw = row.get("launchTime")
+            try:
+                launch_ms = int(launch_raw) if launch_raw not in (None, "", "0") else 0
+            except (TypeError, ValueError):
+                launch_ms = 0
+            if launch_ms <= 0:
+                continue
+            listings[symbol] = launch_ms
+        cursor = result.get("nextPageCursor") or None
+        if not cursor:
+            break
+    return listings
+
+
+def synthesize_v5_fallback_manifest_rows(
+    listings: dict[str, int],
+    *,
+    existing_symbol_dates: set[tuple[str, str]],
+    start: str | None,
+    end: str | None,
+) -> list[dict[str, Any]]:
+    """Build synthetic manifest rows for v5-Trading symbols missing from the
+    archive scrape. Two patterns are filled in one pass:
+
+    1.  **Fully absent symbols** (BANUSDT, TRUSTUSDT on 2026-05-25): the public
+        archive doesn't list them at all. Rows are synthesized from
+        ``launch_date`` through ``end-1`` for the entire history.
+
+    2.  **Archive-lag tail** (every recently-traded symbol on the same day the
+        manifest is rebuilt): ``public.bybit.com/trading`` publishes the prior
+        day's CSV ~24h after close, so a same-day ``--end`` always has a one-
+        day gap for symbols the archive otherwise covers. Without this fill,
+        ``tradable_membership_flag`` is silently ``False`` for the current
+        day, the strategy treats every symbol as non-tradable, and live demo
+        signals (e.g. DRIFTUSDT 2026-05-26) never reconcile against the
+        backtest. The fallback now emits rows for any ``(symbol, day)`` that
+        is genuinely absent from ``existing_symbol_dates`` even when the
+        symbol itself is in the scrape.
+
+    ``existing_symbol_dates`` is the set of ``(symbol, date)`` tuples already
+    present in the HTML scrape — checked per-day instead of per-symbol so the
+    tail-fill case works.
+    """
+    if not listings:
+        return []
+    today = date.today()
+    start_date = date.fromisoformat(start) if start else None
+    end_date = date.fromisoformat(end) if end else None
+    rows: list[dict[str, Any]] = []
+    for symbol, launch_ms in sorted(listings.items()):
+        launch_date = datetime.fromtimestamp(launch_ms / 1000, tz=UTC).date()
+        coverage_start = max(d for d in (launch_date, start_date) if d is not None)
+        coverage_end = min(d for d in (today, end_date) if d is not None) if end_date else today
+        # `end` from ArchiveManifestConfig is exclusive (matches the rest of
+        # the codebase), so the inclusive last day is end - 1.
+        if end_date is not None:
+            coverage_end = min(coverage_end, end_date - timedelta(days=1))
+        if coverage_start > coverage_end:
+            continue
+        day = coverage_start
+        while day <= coverage_end:
+            key = (symbol, day.isoformat())
+            if key not in existing_symbol_dates:
+                rows.append({"symbol": symbol, "date": day.isoformat(), "url": V5_FALLBACK_URL_SENTINEL})
+            day += timedelta(days=1)
+    return rows
 
 
 def parse_directory_hrefs(html: str) -> list[str]:
@@ -184,6 +313,9 @@ def build_archive_trade_manifest(
     end: str | None = None,
     max_symbols: int = 0,
     workers: int = 8,
+    include_v5_fallback: bool = False,
+    v5_instruments_url: str = DEFAULT_BYBIT_V5_INSTRUMENTS_URL,
+    v5_category: str = "linear",
 ) -> pl.DataFrame:
     base_html = fetch_directory_html(base_url)
     available_symbols = parse_symbol_directories(base_html, quote_suffix=quote_suffix)
@@ -199,24 +331,44 @@ def build_archive_trade_manifest(
         selected = selected[:max_symbols]
 
     if not selected:
-        return _empty_manifest()
-
-    worker_count = max(1, min(workers, len(selected)))
-
-    def fetch_symbol(symbol: str) -> list[dict[str, Any]]:
-        symbol_url = urljoin(base_url, f"{symbol}/")
-        html = fetch_directory_html(symbol_url)
-        return parse_trade_archive_entries(html, symbol=symbol, symbol_url=symbol_url, start=start, end=end)
-
-    if worker_count == 1:
-        rows = [row for symbol in selected for row in fetch_symbol(symbol)]
+        scrape_rows: list[dict[str, Any]] = []
     else:
-        with ThreadPoolExecutor(max_workers=worker_count) as executor:
-            rows = [row for symbol_rows in executor.map(fetch_symbol, selected) for row in symbol_rows]
+        worker_count = max(1, min(workers, len(selected)))
 
-    if not rows:
+        def fetch_symbol(symbol: str) -> list[dict[str, Any]]:
+            symbol_url = urljoin(base_url, f"{symbol}/")
+            html = fetch_directory_html(symbol_url)
+            return parse_trade_archive_entries(html, symbol=symbol, symbol_url=symbol_url, start=start, end=end)
+
+        if worker_count == 1:
+            scrape_rows = [row for symbol in selected for row in fetch_symbol(symbol)]
+        else:
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                scrape_rows = [row for symbol_rows in executor.map(fetch_symbol, selected) for row in symbol_rows]
+
+    fallback_rows: list[dict[str, Any]] = []
+    if include_v5_fallback:
+        # Best-effort enrichment — a v5 endpoint blip must not fail a manifest
+        # build whose primary source (the archive scrape) already succeeded.
+        try:
+            listings = fetch_v5_trading_perp_listings(
+                base_url=v5_instruments_url, category=v5_category, quote_suffix=quote_suffix
+            )
+        except (HTTPError, URLError, TimeoutError, ssl.SSLError) as exc:
+            _logger.warning("v5 instruments-info enrichment skipped: %s", exc)
+            listings = {}
+        if listings:
+            existing_symbol_dates = {
+                (str(row["symbol"]).upper(), str(row["date"])) for row in scrape_rows
+            }
+            fallback_rows = synthesize_v5_fallback_manifest_rows(
+                listings, existing_symbol_dates=existing_symbol_dates, start=start, end=end
+            )
+
+    combined = scrape_rows + fallback_rows
+    if not combined:
         return _empty_manifest()
-    return pl.DataFrame(rows).sort(["date", "symbol", "url"])
+    return pl.DataFrame(combined).sort(["date", "symbol", "url"])
 
 
 def run_archive_manifest(
@@ -233,6 +385,9 @@ def run_archive_manifest(
         end=config.end,
         max_symbols=config.max_symbols,
         workers=config.workers,
+        include_v5_fallback=config.include_v5_fallback,
+        v5_instruments_url=config.v5_instruments_url,
+        v5_category=config.v5_category,
     )
     symbols = manifest["symbol"].unique().sort().to_list() if not manifest.is_empty() else []
     # Survivorship guard: detect (and loudly warn about) any symbol the previous

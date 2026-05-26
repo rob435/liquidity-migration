@@ -1567,13 +1567,17 @@ def _event_filter(
     if event_type == "tail_liquidity_jump":
         if "tradable_membership_flag" not in base.columns:
             return base.head(0)
+        # Same u32-underflow guard as _filter_liquidity_migration: cast both
+        # rank columns to Int64 so a deteriorating rank produces a negative
+        # delta instead of wrapping to ~2^32.
+        tail_rank_delta = pl.col("prior7_liquidity_rank").cast(pl.Int64) - pl.col("liquidity_rank").cast(pl.Int64)
         return base.filter(
             pl.col("tradable_membership_flag")
             & (pl.col("liquidity_rank") >= config.tail_rank_min)
             & (pl.col("liquidity_rank") <= config.tail_rank_max)
             & (pl.col(rank_col) >= top_cut)
             & (pl.col(f"prior7_{rank_col}") < top_cut)
-            & ((pl.col("prior7_liquidity_rank") - pl.col("liquidity_rank")) >= config.tail_rank_improvement_min)
+            & (tail_rank_delta >= config.tail_rank_improvement_min)
         )
     if event_type == "volume_exhaustion":
         return base.filter(
@@ -1839,10 +1843,18 @@ def _filter_liquidity_migration(
         required_cols.append("pit_age_days")
     if not _has_columns(base, *required_cols):
         return base.head(0)
+    # prior7_liquidity_rank and liquidity_rank are both u32. Subtracting them
+    # directly produces an unsigned result that wraps to ~2^32 when the
+    # current rank is numerically larger than the prior — meaning a symbol
+    # whose rank deteriorated would falsely satisfy the improvement-min
+    # threshold (huge wrapped value >= 150). Cast to Int64 first so the
+    # signed delta gives a real comparison. See `_add_liquidity_migration_
+    # speed_features` for the matching fix on the feature columns.
+    rank_delta = pl.col("prior7_liquidity_rank").cast(pl.Int64) - pl.col("liquidity_rank").cast(pl.Int64)
     predicate = (
         (pl.col(rank_col) >= top_cut)
         & (pl.col(f"prior7_{rank_col}") < top_cut)
-        & ((pl.col("prior7_liquidity_rank") - pl.col("liquidity_rank")) >= config.liquidity_migration_rank_improvement_min)
+        & (rank_delta >= config.liquidity_migration_rank_improvement_min)
     )
     if config.liquidity_migration_turnover_ratio_min > 0.0:
         predicate = (
@@ -2571,12 +2583,24 @@ def _add_liquidity_migration_speed_features(features: pl.DataFrame) -> pl.DataFr
         "prior7_liquidity_rank",
     ):
         return features
+    # liquidity_rank is u32 (it's a positive rank computed via volume_features).
+    # u32 - u32 in polars produces an unsigned result, so when current_rank is
+    # numerically larger than prior_rank (i.e. liquidity got WORSE in the
+    # period), the subtraction wraps to a huge value near 2^32 instead of
+    # going negative. That made `improvement >= rank_improvement_min` falsely
+    # True for symbols whose ranks actually deteriorated (observed 2026-05-26
+    # on WAVESUSDT: prior7=111, current=201, raw subtraction = 4294967206).
+    # Cast to Int64 first so the diff carries a real sign.
+    prior1 = pl.col("prior1_liquidity_rank").cast(pl.Int64)
+    prior3 = pl.col("prior3_liquidity_rank").cast(pl.Int64)
+    prior7 = pl.col("prior7_liquidity_rank").cast(pl.Int64)
+    current = pl.col("liquidity_rank").cast(pl.Int64)
     return features.with_columns(
         [
-            (pl.col("prior1_liquidity_rank") - pl.col("liquidity_rank")).alias("liquidity_rank_improvement_1d"),
-            (pl.col("prior3_liquidity_rank") - pl.col("liquidity_rank")).alias("liquidity_rank_improvement_3d"),
-            (pl.col("prior7_liquidity_rank") - pl.col("liquidity_rank")).alias("liquidity_rank_improvement_7d"),
-            ((pl.col("prior3_liquidity_rank") - pl.col("liquidity_rank")) / 3.0).alias("liquidity_rank_speed_3d"),
+            (prior1 - current).alias("liquidity_rank_improvement_1d"),
+            (prior3 - current).alias("liquidity_rank_improvement_3d"),
+            (prior7 - current).alias("liquidity_rank_improvement_7d"),
+            ((prior3 - current) / 3.0).alias("liquidity_rank_speed_3d"),
         ]
     )
 

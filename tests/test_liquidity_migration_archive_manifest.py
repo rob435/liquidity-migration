@@ -8,6 +8,7 @@ from liquidity_migration.archive_manifest import (
     ArchiveHourlyKlineApiDownloadConfig,
     ArchiveKlineDownloadConfig,
     ARCHIVE_KLINE_SKIP_ROWS_ENV,
+    V5_FALLBACK_URL_SENTINEL,
     _archive_kline_skip_rows,
     _bybit_api_kline_url,
     _date_from_ts_ms,
@@ -31,6 +32,7 @@ from liquidity_migration.archive_manifest import (
     previous_kline_close,
     run_archive_hourly_klines_api_download,
     run_archive_klines_download,
+    synthesize_v5_fallback_manifest_rows,
 )
 from liquidity_migration.storage import dataset_path, write_dataset
 
@@ -716,3 +718,91 @@ def test_download_api_hourly_group_caches_existing_partition_without_fetch(tmp_p
     assert len(results) == 1
     assert results[0]["status"] == "cached"
     assert results[0]["bar_rows"] == 1
+
+
+# --- v5 instruments-info fallback ------------------------------------------
+#
+# Pin the synthesis logic that turns Bybit v5 listings into manifest rows for
+# symbols absent from the public archive. Closes the gap discovered 2026-05-25
+# where BANUSDT/TRUSTUSDT were demo-tradeable but never reached the universe.
+
+
+def test_synthesize_v5_fallback_skips_symbol_dates_already_in_archive() -> None:
+    # BTCUSDT has scrape coverage on 2024-01-01..03; the fallback adds nothing
+    # for those days but still backfills BANUSDT in full.
+    rows = synthesize_v5_fallback_manifest_rows(
+        {"BTCUSDT": 1_600_000_000_000, "BANUSDT": 1_700_000_000_000},
+        existing_symbol_dates={
+            ("BTCUSDT", "2024-01-01"),
+            ("BTCUSDT", "2024-01-02"),
+            ("BTCUSDT", "2024-01-03"),
+        },
+        start="2024-01-01",
+        end="2024-01-04",
+    )
+    by_symbol: dict[str, list[str]] = {}
+    for row in rows:
+        by_symbol.setdefault(row["symbol"], []).append(row["date"])
+    assert "BTCUSDT" not in by_symbol  # fully covered by scrape, nothing to fill
+    assert sorted(by_symbol["BANUSDT"]) == ["2024-01-01", "2024-01-02", "2024-01-03"]
+
+
+def test_synthesize_v5_fallback_emits_one_row_per_day_in_window() -> None:
+    # end is exclusive in this codebase, so 2024-01-01..2024-01-04 means days
+    # 1, 2, 3 (not 4). Coverage starts at max(launch_date, start).
+    launch_ms = int(__import__("datetime").datetime(2024, 1, 2, tzinfo=__import__("datetime").timezone.utc).timestamp() * 1000)
+    rows = synthesize_v5_fallback_manifest_rows(
+        {"BANUSDT": launch_ms},
+        existing_symbol_dates=set(),
+        start="2024-01-01",
+        end="2024-01-04",
+    )
+    dates = sorted(row["date"] for row in rows)
+    assert dates == ["2024-01-02", "2024-01-03"]
+    assert all(row["url"] == V5_FALLBACK_URL_SENTINEL for row in rows)
+
+
+def test_synthesize_v5_fallback_returns_empty_when_no_listings() -> None:
+    assert (
+        synthesize_v5_fallback_manifest_rows({}, existing_symbol_dates=set(), start=None, end=None)
+        == []
+    )
+
+
+def test_synthesize_v5_fallback_handles_launch_in_the_future() -> None:
+    # A symbol whose launchTime is later than the end window contributes no rows.
+    future_ms = int(__import__("datetime").datetime(2099, 1, 1, tzinfo=__import__("datetime").timezone.utc).timestamp() * 1000)
+    assert synthesize_v5_fallback_manifest_rows(
+        {"FUTUREUSDT": future_ms},
+        existing_symbol_dates=set(),
+        start="2024-01-01",
+        end="2024-02-01",
+    ) == []
+
+
+def test_synthesize_v5_fallback_fills_archive_lag_tail_for_existing_symbol() -> None:
+    # Closes the bug surfaced 2026-05-26: public.bybit.com/trading publishes
+    # the prior day's CSV ~24h after close, so a same-day archive-manifest
+    # build has a one-day gap for every symbol. Without this tail-fill,
+    # tradable_membership_flag is silently False on the current day and the
+    # strategy treats DRIFTUSDT (and every other recently-traded symbol) as
+    # non-tradable, even when klines + v5 listings both confirm Trading.
+    launch_ms = int(__import__("datetime").datetime(2020, 1, 1, tzinfo=__import__("datetime").timezone.utc).timestamp() * 1000)
+    # DRIFTUSDT is in the scrape for 2026-05-23..25 (3 days) but the archive
+    # hasn't published 2026-05-26 yet.
+    rows = synthesize_v5_fallback_manifest_rows(
+        {"DRIFTUSDT": launch_ms},
+        existing_symbol_dates={
+            ("DRIFTUSDT", "2026-05-23"),
+            ("DRIFTUSDT", "2026-05-24"),
+            ("DRIFTUSDT", "2026-05-25"),
+        },
+        start="2026-05-23",
+        end="2026-05-27",
+    )
+    dates = sorted(row["date"] for row in rows)
+    # Only 2026-05-26 is filled — 2026-05-23..25 stay as the original scrape
+    # rows; we don't duplicate. The next-day exclusion (end=2026-05-27 ⇒ last
+    # inclusive day = 2026-05-26) caps the fill.
+    assert dates == ["2026-05-26"]
+    assert rows[0]["url"] == V5_FALLBACK_URL_SENTINEL

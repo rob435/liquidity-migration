@@ -5,7 +5,10 @@ import pytest
 from liquidity_migration.downloaders import (
     _archive_filename,
     _dates_between,
+    _download_symbol_dataset,
     _float_or_none,
+    _mark_complete,
+    _marker_coverage_end_ms,
     _marker_path,
     _normalize_binance_funding,
     _normalize_binance_klines,
@@ -468,3 +471,120 @@ def test_marker_path_sanitizes_symbol_and_suffix(tmp_path) -> None:
     assert marker.parent == tmp_path / "_download_markers" / "klines_1h"
     # Path stays under tmp_path: hermetic, no writes performed by the helper.
     assert str(marker).startswith(str(tmp_path))
+
+
+# --- _marker_coverage_end_ms ------------------------------------------------
+#
+# These tests pin the incremental-refresh behaviour: a daily refresh with a
+# slightly later --end must NOT refetch the full historical range. The marker
+# scheme used to key on exact (start_ms, end_ms) pairs so any change to either
+# bound caused a full re-fetch; the coverage check fixes that.
+
+
+def _write_marker(tmp_path, *, dataset: str, symbol: str, start_ms: int, end_ms: int, suffix: str = "") -> None:
+    _mark_complete(_marker_path(tmp_path, dataset=dataset, symbol=symbol, start_ms=start_ms, end_ms=end_ms, suffix=suffix))
+
+
+def test_marker_coverage_returns_none_when_directory_missing(tmp_path) -> None:
+    assert _marker_coverage_end_ms(tmp_path, dataset="funding", symbol="BTCUSDT", requested_start_ms=0) is None
+
+
+def test_marker_coverage_returns_max_end_ms_among_matching_markers(tmp_path) -> None:
+    _write_marker(tmp_path, dataset="funding", symbol="BTCUSDT", start_ms=100, end_ms=200)
+    _write_marker(tmp_path, dataset="funding", symbol="BTCUSDT", start_ms=100, end_ms=300)
+    _write_marker(tmp_path, dataset="funding", symbol="BTCUSDT", start_ms=100, end_ms=250)
+
+    assert _marker_coverage_end_ms(tmp_path, dataset="funding", symbol="BTCUSDT", requested_start_ms=100) == 300
+
+
+def test_marker_coverage_ignores_markers_starting_after_requested_start(tmp_path) -> None:
+    # A marker with start_ms=200 does not cover requested_start_ms=100 — the
+    # earlier history would not be downloaded by the partial-coverage path.
+    _write_marker(tmp_path, dataset="funding", symbol="BTCUSDT", start_ms=200, end_ms=400)
+
+    assert _marker_coverage_end_ms(tmp_path, dataset="funding", symbol="BTCUSDT", requested_start_ms=100) is None
+
+
+def test_marker_coverage_respects_suffix(tmp_path) -> None:
+    # `_1h` vs `_5m` markers must not pollute each other's coverage scan.
+    _write_marker(tmp_path, dataset="open_interest", symbol="BTCUSDT", start_ms=0, end_ms=500, suffix="_1h")
+    _write_marker(tmp_path, dataset="open_interest", symbol="BTCUSDT", start_ms=0, end_ms=999, suffix="_5m")
+
+    assert _marker_coverage_end_ms(
+        tmp_path, dataset="open_interest", symbol="BTCUSDT", requested_start_ms=0, suffix="_1h"
+    ) == 500
+    assert _marker_coverage_end_ms(
+        tmp_path, dataset="open_interest", symbol="BTCUSDT", requested_start_ms=0, suffix="_5m"
+    ) == 999
+
+
+def test_download_symbol_dataset_skips_fetch_when_range_fully_cached(tmp_path) -> None:
+    # Seed the marker as if a prior refresh covered the requested range exactly.
+    _write_marker(tmp_path, dataset="funding", symbol="BTCUSDT", start_ms=10, end_ms=20)
+    calls: list[tuple[int, int]] = []
+
+    def _fetch(s: int, e: int) -> list[dict]:
+        calls.append((s, e))
+        return []
+
+    _download_symbol_dataset(
+        tmp_path,
+        dataset="funding",
+        symbol="BTCUSDT",
+        index=1,
+        total=1,
+        start_ms=10,
+        end_ms=20,
+        fetch=_fetch,
+    )
+
+    assert calls == []
+
+
+def test_download_symbol_dataset_fetches_tail_only_on_extended_end(tmp_path) -> None:
+    # Prior refresh covered [10, 20]. A new refresh asks for [10, 30] — the
+    # closure must be invoked with the EFFECTIVE tail (20, 30), not the
+    # original (10, 30), so we don't waste bandwidth re-pulling the prefix.
+    _write_marker(tmp_path, dataset="funding", symbol="BTCUSDT", start_ms=10, end_ms=20)
+    calls: list[tuple[int, int]] = []
+
+    def _fetch(s: int, e: int) -> list[dict]:
+        calls.append((s, e))
+        return [{"ts_ms": 25, "symbol": "BTCUSDT", "funding_rate": 0.0001, "funding_interval_min": 480}]
+
+    _download_symbol_dataset(
+        tmp_path,
+        dataset="funding",
+        symbol="BTCUSDT",
+        index=1,
+        total=1,
+        start_ms=10,
+        end_ms=30,
+        fetch=_fetch,
+    )
+
+    assert calls == [(20, 30)]
+    # Full-range marker is written after the tail fetch so the next refresh
+    # with the same end_ms is a cache hit.
+    assert _marker_path(tmp_path, dataset="funding", symbol="BTCUSDT", start_ms=10, end_ms=30).exists()
+
+
+def test_download_symbol_dataset_fetches_full_range_when_no_coverage(tmp_path) -> None:
+    calls: list[tuple[int, int]] = []
+
+    def _fetch(s: int, e: int) -> list[dict]:
+        calls.append((s, e))
+        return [{"ts_ms": 15, "symbol": "BTCUSDT", "funding_rate": 0.0001, "funding_interval_min": 480}]
+
+    _download_symbol_dataset(
+        tmp_path,
+        dataset="funding",
+        symbol="BTCUSDT",
+        index=1,
+        total=1,
+        start_ms=10,
+        end_ms=30,
+        fetch=_fetch,
+    )
+
+    assert calls == [(10, 30)]

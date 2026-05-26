@@ -232,6 +232,20 @@ def _add_archive_manifest_parser(subparsers) -> None:
     archive_manifest.add_argument("--end", default=None, help="Exclusive archive end date YYYY-MM-DD (the named day is not included).")
     archive_manifest.add_argument("--max-symbols", type=int, default=0, help="Maximum symbols to scan; 0 disables.")
     archive_manifest.add_argument("--workers", type=int, default=8, help="Directory fetch workers.")
+    archive_manifest.add_argument(
+        "--include-v5-fallback",
+        action="store_true",
+        help=(
+            "Supplement the archive scrape with currently-Trading Bybit v5 perpetuals "
+            "that are absent from public.bybit.com/trading. Synthesizes manifest rows "
+            "from launchTime forward (url=bybit_v5_listing). Closes the gap where "
+            "demo-tradeable symbols (e.g. BANUSDT, TRUSTUSDT on 2026-05-25) never "
+            "reach the archive scrape — and therefore never enter the backtest "
+            "universe — even though the live daemon happily trades them. The v5 "
+            "1h kline downloader is keyed on (symbol, date) and ignores `url`, so "
+            "synthesized rows pick up klines via the v5 API without further setup."
+        ),
+    )
 
 
 def _add_archive_download_klines_parser(subparsers) -> None:
@@ -1779,6 +1793,7 @@ def main(argv: list[str] | None = None) -> int:
             max_symbols=args.max_symbols,
             workers=args.workers,
             name=args.name,
+            include_v5_fallback=getattr(args, "include_v5_fallback", False),
         )
         payload = run_archive_manifest(data_root, config=manifest_config)
         print(

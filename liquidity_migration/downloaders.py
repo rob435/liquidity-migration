@@ -244,9 +244,9 @@ def _download_rest_symbol_datasets(
             total=total,
             start_ms=start_ms,
             end_ms=end_ms,
-            fetch=lambda: _normalize_klines(
+            fetch=lambda s, e: _normalize_klines(
                 symbol,
-                local_client.get_klines(symbol, "1", start_ms, end_ms),
+                local_client.get_klines(symbol, "1", s, e),
                 source="bybit_rest",
             ),
         )
@@ -259,9 +259,9 @@ def _download_rest_symbol_datasets(
             total=total,
             start_ms=start_ms,
             end_ms=end_ms,
-            fetch=lambda: _normalize_klines(
+            fetch=lambda s, e: _normalize_klines(
                 symbol,
-                local_client.get_klines(symbol, "60", start_ms, end_ms),
+                local_client.get_klines(symbol, "60", s, e),
                 source="bybit_rest",
             ),
         )
@@ -274,9 +274,9 @@ def _download_rest_symbol_datasets(
             total=total,
             start_ms=start_ms,
             end_ms=end_ms,
-            fetch=lambda: _normalize_klines(
+            fetch=lambda s, e: _normalize_klines(
                 symbol,
-                local_client.get_klines(symbol, "5", start_ms, end_ms),
+                local_client.get_klines(symbol, "5", s, e),
                 source="bybit_rest",
             ),
         )
@@ -289,7 +289,7 @@ def _download_rest_symbol_datasets(
             total=total,
             start_ms=start_ms,
             end_ms=end_ms,
-            fetch=lambda: _normalize_funding(symbol, local_client.get_funding_history(symbol, start_ms, end_ms)),
+            fetch=lambda s, e: _normalize_funding(symbol, local_client.get_funding_history(symbol, s, e)),
             postprocess=normalize_funding_history,
         )
     if "open_interest" in datasets:
@@ -301,9 +301,9 @@ def _download_rest_symbol_datasets(
             total=total,
             start_ms=start_ms,
             end_ms=end_ms,
-            fetch=lambda: _normalize_open_interest(
+            fetch=lambda s, e: _normalize_open_interest(
                 symbol,
-                local_client.get_open_interest(symbol, open_interest_interval, start_ms, end_ms),
+                local_client.get_open_interest(symbol, open_interest_interval, s, e),
                 interval_time=open_interest_interval,
             ),
             marker_suffix=f"_{open_interest_interval}",
@@ -317,9 +317,9 @@ def _download_rest_symbol_datasets(
             total=total,
             start_ms=start_ms,
             end_ms=end_ms,
-            fetch=lambda: _normalize_price_index_klines(
+            fetch=lambda s, e: _normalize_price_index_klines(
                 symbol,
-                local_client.get_mark_price_klines(symbol, "60", start_ms, end_ms),
+                local_client.get_mark_price_klines(symbol, "60", s, e),
                 source="bybit_mark_price",
             ),
         )
@@ -332,9 +332,9 @@ def _download_rest_symbol_datasets(
             total=total,
             start_ms=start_ms,
             end_ms=end_ms,
-            fetch=lambda: _normalize_price_index_klines(
+            fetch=lambda s, e: _normalize_price_index_klines(
                 symbol,
-                local_client.get_index_price_klines(symbol, "60", start_ms, end_ms),
+                local_client.get_index_price_klines(symbol, "60", s, e),
                 source="bybit_index_price",
             ),
         )
@@ -347,9 +347,9 @@ def _download_rest_symbol_datasets(
             total=total,
             start_ms=start_ms,
             end_ms=end_ms,
-            fetch=lambda: _normalize_price_index_klines(
+            fetch=lambda s, e: _normalize_price_index_klines(
                 symbol,
-                local_client.get_premium_index_klines(symbol, "60", start_ms, end_ms),
+                local_client.get_premium_index_klines(symbol, "60", s, e),
                 source="bybit_premium_index",
             ),
         )
@@ -380,9 +380,9 @@ def _download_binance_symbol_datasets(
             total=total,
             start_ms=start_ms,
             end_ms=end_ms,
-            fetch=lambda: _normalize_binance_klines(
+            fetch=lambda s, e: _normalize_binance_klines(
                 symbol,
-                local_client.get_klines(symbol, interval, start_ms, end_ms),
+                local_client.get_klines(symbol, interval, s, e),
                 source="binance_usdm_klines",
             ),
             marker_suffix=f"_{interval}",
@@ -396,9 +396,9 @@ def _download_binance_symbol_datasets(
             total=total,
             start_ms=start_ms,
             end_ms=end_ms,
-            fetch=lambda: _normalize_binance_price_klines(
+            fetch=lambda s, e: _normalize_binance_price_klines(
                 symbol,
-                local_client.get_mark_price_klines(symbol, interval, start_ms, end_ms),
+                local_client.get_mark_price_klines(symbol, interval, s, e),
                 source="binance_usdm_mark_price",
             ),
             marker_suffix=f"_{interval}",
@@ -412,9 +412,9 @@ def _download_binance_symbol_datasets(
             total=total,
             start_ms=start_ms,
             end_ms=end_ms,
-            fetch=lambda: _normalize_binance_price_klines(
+            fetch=lambda s, e: _normalize_binance_price_klines(
                 symbol,
-                local_client.get_index_price_klines(symbol, interval, start_ms, end_ms),
+                local_client.get_index_price_klines(symbol, interval, s, e),
                 source="binance_usdm_index_price",
             ),
             marker_suffix=f"_{interval}",
@@ -428,9 +428,9 @@ def _download_binance_symbol_datasets(
             total=total,
             start_ms=start_ms,
             end_ms=end_ms,
-            fetch=lambda: _normalize_binance_price_klines(
+            fetch=lambda s, e: _normalize_binance_price_klines(
                 symbol,
-                local_client.get_premium_index_klines(symbol, interval, start_ms, end_ms),
+                local_client.get_premium_index_klines(symbol, interval, s, e),
                 source="binance_usdm_premium_index",
             ),
             marker_suffix=f"_{interval}",
@@ -444,7 +444,7 @@ def _download_binance_symbol_datasets(
             total=total,
             start_ms=start_ms,
             end_ms=end_ms,
-            fetch=lambda: _normalize_binance_funding(symbol, local_client.get_funding_history(symbol, start_ms, end_ms)),
+            fetch=lambda s, e: _normalize_binance_funding(symbol, local_client.get_funding_history(symbol, s, e)),
         )
     if "binance_usdm_open_interest" in datasets:
         outputs["binance_usdm_open_interest"] = _download_symbol_dataset(
@@ -455,9 +455,9 @@ def _download_binance_symbol_datasets(
             total=total,
             start_ms=start_ms,
             end_ms=end_ms,
-            fetch=lambda: _normalize_binance_open_interest(
+            fetch=lambda s, e: _normalize_binance_open_interest(
                 symbol,
-                local_client.get_open_interest_hist(symbol, period, start_ms, end_ms),
+                local_client.get_open_interest_hist(symbol, period, s, e),
                 period=period,
             ),
             marker_suffix=f"_{period}",
@@ -471,9 +471,9 @@ def _download_binance_symbol_datasets(
             total=total,
             start_ms=start_ms,
             end_ms=end_ms,
-            fetch=lambda: _normalize_binance_taker_flow(
+            fetch=lambda s, e: _normalize_binance_taker_flow(
                 symbol,
-                local_client.get_taker_buy_sell_volume(symbol, period, start_ms, end_ms),
+                local_client.get_taker_buy_sell_volume(symbol, period, s, e),
                 period=period,
             ),
             marker_suffix=f"_{period}",
@@ -490,18 +490,59 @@ def _download_symbol_dataset(
     total: int,
     start_ms: int,
     end_ms: int,
-    fetch: Callable[[], list[dict]],
+    fetch: Callable[[int, int], list[dict]],
     postprocess: Callable[[pl.DataFrame], pl.DataFrame] | None = None,
     marker_suffix: str = "",
 ) -> Path:
+    """Download a per-symbol dataset slice, with incremental tail-only refresh.
+
+    Markers are filename-encoded as `{symbol}_{start_ms}_{end_ms}{suffix}.done`.
+    Each marker records "I have rows for (symbol, dataset) covering exactly
+    [start_ms, end_ms]." On a daily refresh the caller asks for a wider end_ms
+    than any existing marker — the old behavior treated the new range as
+    "uncached" and refetched the full ~5 years. We now scan markers for this
+    (symbol, dataset, suffix) and:
+
+      * If any marker covers [<=start_ms, >=end_ms], the requested range is
+        a subset of cached coverage — skip the fetch entirely.
+      * Else if any marker covers [<=start_ms, >start_ms], compute
+        effective_start_ms = max(end_ms-of-such-markers); fetch only the
+        tail [effective_start_ms, end_ms]; write_dataset deduplicates by
+        partition key so overlaps are harmless.
+      * Else fetch the requested full range.
+
+    Coverage IS implicit-only — markers index attempts, storage is the source
+    of truth for rows. Deleting a dataset directory while keeping markers will
+    silently produce a stale skip on the next refresh; the operator must wipe
+    both `_download_markers/` and the dataset partition in that case.
+    """
     output = dataset_path(data_root, dataset)
-    marker = _marker_path(data_root, dataset=dataset, symbol=symbol, start_ms=start_ms, end_ms=end_ms, suffix=marker_suffix)
+
+    # Tail-extension fast path: if any prior marker fully covers [start_ms, end_ms],
+    # we're done before any HTTP call.
     if _marked_complete(data_root, dataset=dataset, symbol=symbol, start_ms=start_ms, end_ms=end_ms, suffix=marker_suffix):
         print(f"{dataset}: {index}/{total} {symbol} cached", flush=True)
         return output
 
-    print(f"{dataset}: {index}/{total} {symbol} downloading", flush=True)
-    rows = fetch()
+    # Tail-extension partial path: find the largest end_ms among markers that
+    # start at or before the requested start. The cached prefix is good; only
+    # the missing tail needs to be fetched.
+    coverage_end = _marker_coverage_end_ms(
+        data_root, dataset=dataset, symbol=symbol, requested_start_ms=start_ms, suffix=marker_suffix
+    )
+    if coverage_end is not None and coverage_end >= end_ms:
+        # A marker exists that covers the full requested range even though the
+        # exact (start_ms, end_ms) pair isn't on disk. Write the new exact-key
+        # marker for fast future lookup and return.
+        _mark_complete(_marker_path(data_root, dataset=dataset, symbol=symbol, start_ms=start_ms, end_ms=end_ms, suffix=marker_suffix))
+        print(f"{dataset}: {index}/{total} {symbol} cached (coverage_end={coverage_end})", flush=True)
+        return output
+
+    effective_start_ms = max(start_ms, coverage_end) if coverage_end is not None else start_ms
+    tail_only = effective_start_ms > start_ms
+    label = "downloading tail" if tail_only else "downloading"
+    print(f"{dataset}: {index}/{total} {symbol} {label} [{effective_start_ms}..{end_ms})", flush=True)
+    rows = fetch(effective_start_ms, end_ms)
     # infer_schema_length=None scans ALL rows to pick the dtype. Default is
     # 100, which is too tight for Bybit/Binance REST payloads where a field
     # can be int-looking (e.g. "0") in the first 100 rows then turn float
@@ -513,16 +554,24 @@ def _download_symbol_dataset(
     if postprocess is not None and not frame.is_empty():
         frame = postprocess(frame)
     output = write_dataset(frame, data_root, dataset)
-    _mark_complete(marker)
+    # Write the marker for the FULL requested range, not the effective tail.
+    # That way the next refresh sees "this range is fully covered" via a
+    # direct lookup (no glob scan), and the tail-only path will only fire
+    # when the requested end_ms moves forward again.
+    _mark_complete(_marker_path(data_root, dataset=dataset, symbol=symbol, start_ms=start_ms, end_ms=end_ms, suffix=marker_suffix))
     print(f"{dataset}: {index}/{total} {symbol} rows={frame.height}", flush=True)
     del rows, frame
     gc.collect()
     return output
 
 
+def _safe_token(text: str) -> str:
+    return "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in text)
+
+
 def _marker_path(data_root: str | Path, *, dataset: str, symbol: str, start_ms: int, end_ms: int, suffix: str = "") -> Path:
-    safe_symbol = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in symbol)
-    safe_suffix = "".join(char if char.isalnum() or char in ("-", "_") else "_" for char in suffix)
+    safe_symbol = _safe_token(symbol)
+    safe_suffix = _safe_token(suffix)
     return Path(data_root).expanduser() / MARKER_DIR / dataset / f"{safe_symbol}_{start_ms}_{end_ms}{safe_suffix}.done"
 
 
@@ -537,6 +586,52 @@ def _marked_complete(
 ) -> bool:
     marker = _marker_path(data_root, dataset=dataset, symbol=symbol, start_ms=start_ms, end_ms=end_ms, suffix=suffix)
     return marker.exists() and marker.stat().st_size > 0
+
+
+def _marker_coverage_end_ms(
+    data_root: str | Path,
+    *,
+    dataset: str,
+    symbol: str,
+    requested_start_ms: int,
+    suffix: str = "",
+) -> int | None:
+    """Maximum end_ms among existing markers for (symbol, dataset, suffix) whose
+    start_ms <= requested_start_ms. Returns None if no such marker exists.
+
+    Used to detect when a daily refresh's requested range is already partly
+    cached. The marker filename format is
+    `{safe_symbol}_{start_ms}_{end_ms}{safe_suffix}.done`; we glob the directory
+    once per call and parse the encoded timestamps.
+    """
+    marker_dir = Path(data_root).expanduser() / MARKER_DIR / dataset
+    if not marker_dir.exists():
+        return None
+    safe_symbol = _safe_token(symbol)
+    safe_suffix = _safe_token(suffix)
+    pattern = f"{safe_symbol}_*_*{safe_suffix}.done"
+    best: int | None = None
+    prefix = f"{safe_symbol}_"
+    suffix_full = f"{safe_suffix}.done"
+    for marker in marker_dir.glob(pattern):
+        name = marker.name
+        if not name.startswith(prefix) or not name.endswith(suffix_full):
+            continue
+        if marker.stat().st_size == 0:
+            continue
+        middle = name[len(prefix) : len(name) - len(suffix_full)]
+        parts = middle.split("_")
+        if len(parts) != 2:
+            continue
+        try:
+            mstart_ms = int(parts[0])
+            mend_ms = int(parts[1])
+        except ValueError:
+            continue
+        if mstart_ms <= requested_start_ms:
+            if best is None or mend_ms > best:
+                best = mend_ms
+    return best
 
 
 def _mark_complete(marker: Path) -> None:

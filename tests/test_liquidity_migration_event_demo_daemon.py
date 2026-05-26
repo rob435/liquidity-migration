@@ -1258,3 +1258,116 @@ def test_short_kline_universe_fetcher_returns_empty_on_rest_failure() -> None:
             raise RuntimeError("simulated REST outage")
 
     assert _build_short_kline_universe(_FailingMarket(), top_n=500) == []
+
+
+def test_short_kline_universe_fetcher_returns_full_set_when_top_n_zero() -> None:
+    """``top_n <= 0`` opts into match-the-backtest mode: every active
+    USDT-perp is returned, no rank truncation. Without this widening
+    the demo's daily-aggregated liquidity_rank used a 400-symbol
+    denominator while the backtest used the full PIT manifest, causing
+    DRIFTUSDT-like divergences where same data produced different
+    `prior7_liquidity_rank` and the migration filter passed in one but
+    not the other (2026-05-26 reconciliation gap).
+    """
+    from liquidity_migration.event_demo_daemon import _build_short_kline_universe
+
+    class _FakeMarket:
+        def get_tickers(self) -> list[dict]:
+            rows: list[dict] = []
+            for i in range(800):
+                rows.append({"symbol": f"SYM{i:03d}USDT", "turnover24h": str(1_000_000 - i)})
+            rows.append({"symbol": "BTC-PERP", "turnover24h": "999999"})  # non-USDT
+            rows.append({"symbol": "DEADUSDT", "turnover24h": "0"})  # zero turnover
+            return rows
+
+    symbols = _build_short_kline_universe(_FakeMarket(), top_n=0)
+
+    # All 800 USDT-perps with positive turnover. Non-USDT and zero-turnover
+    # symbols still filtered (they're not really trading).
+    assert len(symbols) == 800
+    assert "BTC-PERP" not in symbols
+    assert "DEADUSDT" not in symbols
+    # Deterministic ordering by turnover preserved for diagnostics.
+    assert symbols[0] == "SYM000USDT"
+    assert symbols[-1] == "SYM799USDT"
+
+
+def test_short_kline_universe_fetcher_treats_negative_top_n_as_full_set() -> None:
+    # Defensive: a negative top_n (e.g. propagated from an int(-1) misconfig)
+    # also opts into full-set mode rather than crashing on a slice of [:-1].
+    from liquidity_migration.event_demo_daemon import _build_short_kline_universe
+
+    class _SmallMarket:
+        def get_tickers(self) -> list[dict]:
+            return [
+                {"symbol": "AAAUSDT", "turnover24h": "3000"},
+                {"symbol": "BBBUSDT", "turnover24h": "2000"},
+                {"symbol": "CCCUSDT", "turnover24h": "1000"},
+            ]
+
+    assert _build_short_kline_universe(_SmallMarket(), top_n=-5) == [
+        "AAAUSDT", "BBBUSDT", "CCCUSDT",
+    ]
+
+
+def test_kline_stream_manager_factory_passes_top_n_zero_when_max_symbols_zero(monkeypatch) -> None:
+    """When ``universe_max_symbols == 0`` the factory must hand the manager a
+    ``top_n=0`` universe fetcher — that's the operator's signal that the demo
+    should track every Bybit USDT-perp (match-the-backtest mode). Without this,
+    a config of 0 would compute ``0 * 1.25 = 0`` and the manager would receive
+    a fetcher capped at top-0 → empty universe → no klines, no signals.
+    """
+    from liquidity_migration import event_demo_daemon
+    from liquidity_migration.event_demo import EventDemoCycleConfig
+    from liquidity_migration.config import ResearchConfig
+
+    captured_top_n: list[int] = []
+
+    class _FakeMarket:
+        def get_tickers(self) -> list[dict]:  # pragma: no cover - not exercised here
+            return []
+
+    def _spy_universe(market, *, top_n: int) -> list[str]:
+        captured_top_n.append(top_n)
+        return []
+
+    monkeypatch.setattr(event_demo_daemon, "_build_short_kline_universe", _spy_universe)
+    monkeypatch.setattr(event_demo_daemon, "BybitMarketData", lambda **kwargs: _FakeMarket())
+
+    config = ResearchConfig()
+    demo_config = EventDemoCycleConfig(universe_max_symbols=0)
+    manager = event_demo_daemon._default_kline_stream_manager_factory(
+        config, demo_config, Path("/tmp/lm-test-cache"),
+    )
+    # Trigger the lambda the factory injects so we can inspect the top_n it bound.
+    manager.universe_fetcher()
+    assert captured_top_n == [0], f"expected top_n=0, got {captured_top_n}"
+
+
+def test_kline_stream_manager_factory_preserves_buffer_when_max_symbols_positive(monkeypatch) -> None:
+    """Legacy narrow-universe mode still gets the +25% buffer so rank-edge
+    symbols are pre-warmed."""
+    from liquidity_migration import event_demo_daemon
+    from liquidity_migration.event_demo import EventDemoCycleConfig
+    from liquidity_migration.config import ResearchConfig
+
+    captured_top_n: list[int] = []
+
+    class _FakeMarket:
+        def get_tickers(self) -> list[dict]:
+            return []
+
+    def _spy_universe(market, *, top_n: int) -> list[str]:
+        captured_top_n.append(top_n)
+        return []
+
+    monkeypatch.setattr(event_demo_daemon, "_build_short_kline_universe", _spy_universe)
+    monkeypatch.setattr(event_demo_daemon, "BybitMarketData", lambda **kwargs: _FakeMarket())
+
+    config = ResearchConfig()
+    demo_config = EventDemoCycleConfig(universe_max_symbols=400)
+    manager = event_demo_daemon._default_kline_stream_manager_factory(
+        config, demo_config, Path("/tmp/lm-test-cache"),
+    )
+    manager.universe_fetcher()
+    assert captured_top_n == [500], f"expected 400*1.25=500, got {captured_top_n}"

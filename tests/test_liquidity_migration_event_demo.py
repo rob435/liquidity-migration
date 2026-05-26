@@ -18,6 +18,7 @@ from liquidity_migration.event_demo import (
     EventRiskCycleConfig,
     PENDING_ORDER_GUARD_MS,
     _build_demo_features,
+    _build_demo_universe,
     _collect_private_snapshots,
     _demo_event_config,
     _demo_feature_cache_fingerprint,
@@ -4401,3 +4402,140 @@ def test_execute_entries_preflight_skipped_when_no_callback() -> None:
     )
     assert orders[0]["submit_mode"] == "dry_run"
     assert rows[0]["submit_mode"] == "dry_run"
+
+
+# --- _build_demo_universe match-the-backtest mode --------------------------
+#
+# Pin the universe-construction divergence we found 2026-05-26: with
+# universe_rank_end / universe_max_symbols both 0, the demo must include the
+# same Trading-status USDT-perp universe the backtest manifests sees (no
+# ticker-turnover pre-filter, no rank-N cap, no 30-day-age floor) so the
+# downstream daily-aggregated `liquidity_rank` is computed across the same
+# denominator. Without this, DRIFTUSDT-style divergences reappear.
+
+
+def _make_instruments_frame() -> pl.DataFrame:
+    """Synthetic Bybit instruments-info frame covering the schema the
+    `build_current_universe_table` filter expects. Three USDT-perps, three
+    ages, one excluded (BUSDUSDT)."""
+    import polars as pl
+    return pl.DataFrame({
+        "symbol": ["BTCUSDT", "BANUSDT", "NEWUSDT", "BUSDUSDT"],
+        "status": ["Trading", "Trading", "Trading", "Trading"],
+        "settle_coin": ["USDT", "USDT", "USDT", "USDT"],
+        "is_prelisting": [False, False, False, False],
+        "contract_type": ["LinearPerpetual"] * 4,
+        "launch_time_ms": [
+            1_500_000_000_000,
+            1_731_919_190_000,  # 2024-11-18 - BAN's real launchTime
+            1_779_000_000_000,  # ~5 days before our snapshot
+            1_500_000_000_000,
+        ],
+        # Lot-size / tick-size / etc. columns the universe table propagates.
+        "min_order_qty": [0.001, 0.1, 0.1, 1.0],
+        "max_order_qty": [100.0, 1000.0, 1000.0, 100.0],
+        "max_market_order_qty": [100.0, 1000.0, 1000.0, 100.0],
+        "tick_size": [0.1, 0.001, 0.001, 0.01],
+        "qty_step": [0.001, 0.1, 0.1, 1.0],
+        "min_notional_value": [5.0, 5.0, 5.0, 5.0],
+    })
+
+
+def _make_tickers_frame() -> pl.DataFrame:
+    """Synthetic tickers with 24h turnover values. NEWUSDT has lower
+    turnover to verify the legacy narrow universe drops it while
+    match-the-backtest mode keeps it."""
+    import polars as pl
+    return pl.DataFrame({
+        "symbol": ["BTCUSDT", "BANUSDT", "NEWUSDT", "BUSDUSDT"],
+        "turnover_24h": [3.0e9, 2.0e7, 1.0e5, 5.0e6],
+        "volume_24h": [1.0e6, 1.0e4, 1.0e2, 1.0e3],
+        "open_interest": [1.0e6, 1.0e4, 1.0e2, 1.0e3],
+        "open_interest_value": [1.0e6, 1.0e4, 1.0e2, 1.0e3],
+        "funding_rate": [0.0001] * 4,
+    })
+
+
+def test_build_demo_universe_match_backtest_mode_includes_all_trading_perps() -> None:
+    """With universe_rank_end == universe_max_symbols == 0 the demo's
+    universe is every Trading USDT-perp (ex the hard exclusion list).
+    No turnover floor, no rank cap, no 30-day age filter — symbols are
+    only filtered out via the strategy's own rank/turnover/age gates
+    downstream (matching the backtest's path).
+    """
+    snapshot_ts_ms = 1_779_440_000_000  # 2026-05-22-ish, past NEWUSDT's launch
+    demo_config = EventDemoCycleConfig(
+        universe_rank_end=0,
+        universe_max_symbols=0,
+        universe_min_turnover_24h=0.0,
+    )
+    universe = _build_demo_universe(
+        _make_instruments_frame(),
+        _make_tickers_frame(),
+        config=demo_config,
+        snapshot_ts_ms=snapshot_ts_ms,
+    )
+    symbols = set(universe["symbol"].to_list())
+    # BTC, BAN, NEW all included. BUSDUSDT is on the hard-exclude list.
+    assert "BTCUSDT" in symbols
+    assert "BANUSDT" in symbols
+    assert "NEWUSDT" in symbols, "NEWUSDT (5 days old) must be included in match-the-backtest mode"
+    assert "BUSDUSDT" not in symbols
+
+
+def test_build_demo_universe_legacy_mode_applies_30_day_age_floor() -> None:
+    """Narrow-universe demo (universe_rank_end > 0) keeps the 30-day age
+    safety floor that pre-dates the match-the-backtest unification —
+    documents the behavior delta so operators downgrading to legacy
+    mode know what they get."""
+    snapshot_ts_ms = 1_779_440_000_000  # NEWUSDT is only ~5 days old here
+    demo_config = EventDemoCycleConfig(
+        universe_rank_end=400,
+        universe_max_symbols=400,
+        universe_min_turnover_24h=0.0,
+    )
+    universe = _build_demo_universe(
+        _make_instruments_frame(),
+        _make_tickers_frame(),
+        config=demo_config,
+        snapshot_ts_ms=snapshot_ts_ms,
+    )
+    symbols = set(universe["symbol"].to_list())
+    assert "BTCUSDT" in symbols
+    assert "BANUSDT" in symbols  # ~500 days old
+    assert "NEWUSDT" not in symbols, "Legacy narrow-universe mode keeps the 30-day age floor"
+
+
+def test_validate_demo_config_accepts_unlimited_universe_mode() -> None:
+    """universe_rank_end == universe_max_symbols == 0 must not trigger
+    the universe-too-narrow check — that check exists to catch operator
+    misconfig (rank_end=100) where prior-week ranks are unobservable,
+    but 0 explicitly opts into the full Bybit perp set which trivially
+    exceeds the required-rank threshold."""
+    config = EventDemoCycleConfig(
+        universe_rank_end=0,
+        universe_max_symbols=0,
+        universe_min_turnover_24h=0.0,
+    )
+    _validate_demo_config(config)  # must not raise
+
+
+def test_validate_demo_config_still_rejects_partially_unlimited_universe() -> None:
+    """Only the BOTH-zero case is the new escape hatch. A misconfig
+    where rank_end=0 but max_symbols=100 (or vice versa) still trips
+    the existing too-narrow check rather than silently becoming
+    a 100-symbol universe.
+    """
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="too narrow"):
+        _validate_demo_config(EventDemoCycleConfig(
+            universe_rank_end=0,
+            universe_max_symbols=100,
+            universe_min_turnover_24h=0.0,
+        ))
+    with _pytest.raises(ValueError, match="too narrow"):
+        _validate_demo_config(EventDemoCycleConfig(
+            universe_rank_end=100,
+            universe_max_symbols=0,
+            universe_min_turnover_24h=0.0,
+        ))
