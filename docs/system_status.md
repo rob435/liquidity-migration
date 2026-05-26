@@ -192,6 +192,18 @@ ledger could diverge from Bybit:
   failures and sends a one-shot telegram when the streak hits 3, so a
   sustained outage is operator-visible before cycles start REST-bursting on
   every bar close. Streak resets on the first success, alert rearms.
+- **Ledger write ordering.** End-of-cycle parquet writes flush the orders
+  dataset BEFORE the trades dataset (both cycles, both sleeves). A crash
+  between the two leaves the order ledger ahead of the trade ledger so the
+  next-cycle `_reconcile_pending_order_fills` adopts the order and
+  re-applies the trade-close. The reverse ordering would leave the trade
+  marked closed with the order detail (fill price, order_id) permanently
+  missing.
+- **Long sleeve ticker-stream recovery.** The long-native daemon's
+  `_reconcile_loop` now mirrors the short daemon's recovery-open: if the
+  ticker stream is unset and the cache has populated symbols, the loop
+  retries `_open_ticker_stream()`. Without this, a single REST seed failure
+  at startup would permanently disable the long sleeve's WS ticker feed.
 
 These are mechanical / engineering hardening — none touch the signal, the
 universe, or the parameters. Backtests and the `promoted` profile are

@@ -455,10 +455,19 @@ def run_event_demo_cycle(
                 cycle_order_rows.extend(entry_order_rows)
         mark_stage("entries")
 
-        if cycle_trade_rows:
-            _write_trade_rows(root, pl.DataFrame(cycle_trade_rows, infer_schema_length=None))
+        # Order rows MUST be written before trade rows so that a crash between
+        # the two writes leaves the order ledger ahead of the trade ledger
+        # rather than behind. The next cycle's _reconcile_pending_order_fills
+        # adopts an order whose trade-side update never landed and re-applies
+        # the trade-close from the order detail. The reverse ordering would
+        # leave a trade marked "closed" with the order detail (fill price,
+        # order_id) permanently missing -- recoverable only by re-querying
+        # Bybit's get_trade_history with the orderLinkId, which the cycle has
+        # forgotten by then.
         if cycle_order_rows:
             _write_order_rows(root, pl.DataFrame(cycle_order_rows, infer_schema_length=None))
+        if cycle_trade_rows:
+            _write_trade_rows(root, pl.DataFrame(cycle_trade_rows, infer_schema_length=None))
         mark_stage("ledger_flush")
 
         if trading_client is None and demo.telegram:
@@ -816,10 +825,11 @@ def run_event_risk_cycle(
             if risk.submit_orders or risk.record_dry_run:
                 cycle_order_rows.extend(exit_order_rows)
 
-        if cycle_trade_rows:
-            _write_trade_rows(root, pl.DataFrame(cycle_trade_rows, infer_schema_length=None))
+        # Orders before trades — see event-demo cycle for the rationale.
         if cycle_order_rows:
             _write_order_rows(root, pl.DataFrame(cycle_order_rows, infer_schema_length=None))
+        if cycle_trade_rows:
+            _write_trade_rows(root, pl.DataFrame(cycle_trade_rows, infer_schema_length=None))
 
         pending_exit_symbols = {
             str(row.get("symbol", ""))

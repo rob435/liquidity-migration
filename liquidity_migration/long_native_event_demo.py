@@ -561,15 +561,20 @@ def run_long_native_demo_cycle(
                 cycle_order_rows.extend(entry_order_rows)
         mark_stage("entries")
 
-        if cycle_trade_rows:
-            write_dataset(
-                pl.DataFrame(cycle_trade_rows, infer_schema_length=None),
-                root, trades_dataset, partition_by=(),
-            )
+        # Orders BEFORE trades: a crash between the two writes must leave the
+        # order ledger ahead of the trade ledger so the next-cycle pending-fill
+        # reconciler (ws_risk) can adopt the order and re-apply the trade close.
+        # The reverse ordering would leave the trade marked closed with the
+        # order detail (fill price, order_id) permanently missing.
         if cycle_order_rows:
             write_dataset(
                 pl.DataFrame(cycle_order_rows, infer_schema_length=None),
                 root, orders_dataset, partition_by=(),
+            )
+        if cycle_trade_rows:
+            write_dataset(
+                pl.DataFrame(cycle_trade_rows, infer_schema_length=None),
+                root, trades_dataset, partition_by=(),
             )
         mark_stage("ledger_flush")
 

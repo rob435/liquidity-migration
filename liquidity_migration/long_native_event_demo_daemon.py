@@ -575,6 +575,16 @@ class LongNativeDemoDaemon:
             except Exception as exc:  # noqa: BLE001
                 self._reconcile_errors += 1
                 _logger.warning("long state cache reconcile failed: %s", exc)
+                continue
+            # Recover from a startup ticker-stream skip — see
+            # EventDemoDaemon._reconcile_loop for the symmetric short-side fix.
+            # Without this retry, a single REST seed failure at startup would
+            # permanently disable the WS ticker feed for the daemon's lifetime.
+            if self._ticker_stream is None and self._ticker_cache.symbol_count() > 0:
+                try:
+                    self._open_ticker_stream()
+                except Exception as exc:  # noqa: BLE001
+                    _logger.warning("long ticker stream recovery-open failed: %s", exc)
 
     def _invoke_state_cache_seeder(self) -> None:
         """See EventDemoDaemon._invoke_state_cache_seeder for rationale."""
