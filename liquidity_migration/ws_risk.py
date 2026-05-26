@@ -607,18 +607,6 @@ class EventWebSocketRiskEngine:
                 if order_updates:
                     self._write_order_rows_routed(order_updates)
 
-    def close_trade_from_execution(self, order_link_id: str) -> None:
-        agg = self.state.executions_by_link.get(order_link_id, {})
-        filled_qty = float(agg.get("filled_qty", 0.0))
-        value = float(agg.get("value", 0.0))
-        exit_price = value / filled_qty if filled_qty > 0.0 else 0.0
-        self.record_tracked_exit_stream_fill(
-            order_link_id=order_link_id,
-            filled_qty=filled_qty,
-            exit_price=exit_price,
-            source="execution",
-        )
-
     def record_tracked_exit_stream_fill(
         self,
         *,
@@ -704,14 +692,6 @@ class EventWebSocketRiskEngine:
         if order_updates:
             self._write_order_rows_routed(order_updates)
         self.write_report(reason=report_reason)
-
-    def close_trade_from_order_update(self, *, order_link_id: str, filled_qty: float, exit_price: float) -> None:
-        self.record_tracked_exit_stream_fill(
-            order_link_id=order_link_id,
-            filled_qty=filled_qty,
-            exit_price=exit_price,
-            source="order",
-        )
 
     def _record_orders(self, orders: list[dict[str, Any]]) -> None:
         # Append to state.orders and mirror into state.orders_by_link by

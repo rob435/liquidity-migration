@@ -241,20 +241,12 @@ class BybitMarketData:
             cursor = next_cursor if next_cursor > cursor else cursor + interval_ms
         return [rows_by_ts[ts] for ts in sorted(rows_by_ts)]
 
-    def get_recent_trades(self, symbol: str, limit: int = 1000) -> list[dict[str, Any]]:
-        payload = self._get("get_public_trade_history", category=self.category, symbol=symbol, limit=limit)
-        return payload.get("result", {}).get("list", [])
-
     def get_funding_history(self, symbol: str, start: int, end: int, limit: int = 200) -> list[dict[str, Any]]:
         return self._paged_time_range("get_funding_rate_history", "fundingRateTimestamp", symbol=symbol, startTime=start, endTime=end, limit=limit)
 
     def get_tickers(self) -> list[dict[str, Any]]:
         payload = self._get("get_tickers", category=self.category)
         return payload.get("result", {}).get("list", [])
-
-    def get_orderbook(self, symbol: str, limit: int = 25) -> dict[str, Any]:
-        payload = self._get("get_orderbook", category=self.category, symbol=symbol, limit=limit)
-        return payload.get("result", {})
 
     def get_open_interest(self, symbol: str, interval_time: str, start: int, end: int, limit: int = 200) -> list[dict[str, Any]]:
         return self._paged_time_range(

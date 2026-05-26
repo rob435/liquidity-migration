@@ -57,12 +57,18 @@ PENDING_ORDER_GUARD_MS = 15 * MS_PER_MINUTE
 @dataclass(frozen=True, slots=True)
 class EventDemoCycleConfig:
     lookback_days: int = 45
-    # Universe must be wide enough for prior-week ranks of rocket-symbols to be
-    # observable. Promoted needs trade_rank_max(150) + rank_improvement_min(150) = 300;
-    # demo_relaxed needs 260 + 80 = 340. 400 covers both with buffer.
-    # See _validate_demo_config for the runtime check.
-    universe_rank_end: int = 400
-    universe_max_symbols: int = 400
+    # universe_rank_end / universe_max_symbols == 0 → match-the-backtest mode:
+    # no ticker-turnover pre-filter, every active USDT-perp feeds into daily
+    # aggregation, and the strategy's `universe_rank_max` applies on the
+    # resulting daily-ranked features. This mirrors the backtest's PIT-manifest
+    # behaviour so the same data + config produces the same entries on the
+    # same dates. Set a positive value (e.g. 400) to revert to the legacy
+    # narrow-universe demo — but the daemon and the backtest will then pick
+    # different symbols on the same signal date because the rank denominators
+    # differ (see commit 78df65a for the 2026-05-26 DRIFTUSDT divergence
+    # reproduction).
+    universe_rank_end: int = 0
+    universe_max_symbols: int = 0
     universe_min_turnover_24h: float = 0.0
     workers: int = 8
     max_order_notional_pct_equity: float = 0.0

@@ -234,8 +234,11 @@ def test_event_demo_cli_defaults_to_frequent_demo_forward_cycle() -> None:
 
     assert args.command == "event-demo-cycle"
     assert args.lookback_days == 45
-    assert args.universe_rank_end == 400
-    assert args.universe_max_symbols == 400
+    # Match-the-backtest mode: 0/0 disables the ticker pre-filter so the
+    # demo's daily-aggregated liquidity_rank is computed across the full
+    # Bybit perp universe (same denominator the backtest uses).
+    assert args.universe_rank_end == 0
+    assert args.universe_max_symbols == 0
     assert args.universe_min_turnover_24h == 0.0
     assert args.max_order_notional_pct_equity == 0.0
     assert args.max_entry_lag_minutes == 360
