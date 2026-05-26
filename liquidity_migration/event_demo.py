@@ -496,6 +496,16 @@ def run_event_demo_cycle(
             "kline_store_rows": kline_cache_stats.get("store_rows", 0),
             "kline_store_symbols": kline_cache_stats.get("store_symbols", 0),
             "kline_store_max_ts_ms": kline_cache_stats.get("store_max_ts_ms", 0),
+            # WS-vs-REST telemetry: ``ws_cache`` = served by the WS-fed
+            # PrivateStateCache / TickerCache (sub-50ms snapshot); ``rest`` =
+            # fallback because the cache was stale or unseeded (typically
+            # several hundred ms on the wire). Previously this only landed in
+            # the Telegram payload, so production WS health could not be
+            # queried via the cycle parquet. Persist alongside the kline
+            # cache stats so operators can audit "WS-first" reality vs
+            # design with a single polars filter.
+            "ticker_source": ticker_source,
+            "private_snapshot_source": private_snapshot_source.get("source", "rest"),
             "feature_rows": features.height,
             "latest_feature_ts_ms": _max_int(features, "ts_ms"),
             "events_pipeline": pipeline_diagnostics["events_pipeline"],

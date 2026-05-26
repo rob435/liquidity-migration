@@ -602,6 +602,11 @@ def run_long_native_demo_cycle(
             "kline_fetched_rows": kline_cache_stats["fetched_rows"],
             "kline_store_rows": kline_cache_stats.get("store_rows", 0),
             "kline_store_symbols": kline_cache_stats.get("store_symbols", 0),
+            # WS-vs-REST telemetry — mirrors the short sleeve so a single
+            # query covers both daemons. See event_demo.py for the cache-
+            # vs-fallback contract.
+            "ticker_source": ticker_source,
+            "private_snapshot_source": private_snapshot_source,
             "feature_rows": features.height if not features.is_empty() else 0,
             "latest_feature_ts_ms": _max_int(features, "ts_ms") if not features.is_empty() else 0,
             "entry_candidates": len(candidates),
