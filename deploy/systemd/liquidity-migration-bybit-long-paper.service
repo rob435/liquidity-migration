@@ -30,7 +30,7 @@ Environment=MAX_ORDER_NOTIONAL_PCT_EQUITY=0
 Environment=MAX_NEW_ENTRIES_PER_CYCLE=5
 Environment=UNIVERSE_SIZE=10
 Environment=LOOKBACK_DAYS=90
-Environment=WORKERS=8
+Environment=WORKERS=2
 Environment=WS_KLINES_ENABLED=1
 ExecStart=/opt/liquidity-migration/scripts/run_bybit_long_demo_event_engine.sh
 Restart=always
