@@ -28,6 +28,9 @@ from liquidity_migration.event_demo import (
     _execute_entries,
     _execute_exits,
     _execute_risk_exits,
+    _orphan_close_pnl_backfill,
+    _preflight_exit_order_row,
+    _risk_reconcile_missing_positions,
     _filter_live_open_exit_orders,
     _download_recent_1h_klines,
     _limit_chase_price,
@@ -4542,3 +4545,391 @@ def test_validate_demo_config_still_rejects_partially_unlimited_universe() -> No
             universe_max_symbols=0,
             universe_min_turnover_24h=0.0,
         ))
+
+
+# ---------------------------------------------------------------------------
+# Orphan reconciler — API-failure guard + closed-PnL backfill (B2/B3)
+# ---------------------------------------------------------------------------
+
+
+def _open_trade_row(**overrides: Any) -> dict[str, Any]:
+    row = {
+        "trade_id": "t1",
+        "symbol": "AAAUSDT",
+        "side": "short",
+        "status": "open",
+        "qty": "1",
+        "entry_price": 100.0,
+        "entry_ts_ms": 1_700_000_000_000,
+        "notional_usdt": 1_000.0,
+        "equity_usdt": 10_000.0,
+    }
+    row.update(overrides)
+    return row
+
+
+class _ClosedPnlClient:
+    """Minimal stub exposing only the closed-PnL endpoint the backfill uses."""
+
+    def __init__(
+        self,
+        *,
+        records: list[dict[str, Any]] | None = None,
+        raise_on_call: bool = False,
+    ) -> None:
+        self.records = records or []
+        self.raise_on_call = raise_on_call
+        self.calls: list[dict[str, Any]] = []
+
+    def get_closed_pnl(self, **kwargs: Any) -> list[dict[str, Any]]:
+        self.calls.append(kwargs)
+        if self.raise_on_call:
+            raise RuntimeError("closed-pnl unavailable")
+        symbol = kwargs.get("symbol")
+        if symbol:
+            return [r for r in self.records if str(r.get("symbol")) == symbol]
+        return list(self.records)
+
+
+def test_risk_reconciler_no_op_on_position_snapshot_error() -> None:
+    """A failed get_positions must NOT false-positive orphan-close every trade.
+
+    Without the position_error guard, a transient REST error makes
+    position_by_symbol={}, which the reconciler would interpret as "every open
+    trade has vanished" and close all of them — destroying the ledger on a
+    single API hiccup.
+    """
+    open_trades = pl.DataFrame([_open_trade_row()], infer_schema_length=None)
+
+    kept, updates = _risk_reconcile_missing_positions(
+        open_trades,
+        position_by_symbol={},
+        now_ms=1_700_000_100_000,
+        enabled=True,
+        position_error="positions unavailable",
+        trading_client=_ClosedPnlClient(),
+    )
+
+    assert updates == []
+    assert kept.height == 1
+    assert str(kept.row(0, named=True)["status"]) == "open"
+
+
+def test_risk_reconciler_closes_orphan_when_position_missing() -> None:
+    """Legitimate orphan close (no position_error, symbol gone from venue)."""
+    open_trades = pl.DataFrame([_open_trade_row()], infer_schema_length=None)
+
+    kept, updates = _risk_reconcile_missing_positions(
+        open_trades,
+        position_by_symbol={},
+        now_ms=1_700_000_100_000,
+        enabled=True,
+        position_error="",
+        trading_client=None,
+    )
+
+    assert kept.is_empty()
+    assert len(updates) == 1
+    assert updates[0]["status"] == "closed"
+    assert updates[0]["exit_reason"] == "bybit_position_missing"
+
+
+def test_orphan_close_pnl_backfill_pulls_exit_price_and_return() -> None:
+    """Happy path: get_closed_pnl returns a matching record → backfill populates
+    exit_price, gross_trade_return, net_return, exit_ts_ms, exit_order_id."""
+    trade = _open_trade_row(side="short", entry_price=100.0, notional_usdt=1_000.0, equity_usdt=10_000.0)
+    client = _ClosedPnlClient(
+        records=[
+            {
+                "symbol": "AAAUSDT",
+                "side": "Buy",  # close side for a short is Buy
+                "avgEntryPrice": "100.0",
+                "avgExitPrice": "95.0",
+                "closedPnl": "5.0",
+                "orderId": "exit-order-1",
+                "createdTime": "1700000050000",
+            }
+        ]
+    )
+
+    backfill = _orphan_close_pnl_backfill(trade, now_ms=1_700_000_100_000, trading_client=client)
+
+    assert backfill["exit_price"] == 95.0
+    # short return = (100 - 95) / 100 = 0.05
+    assert backfill["gross_trade_return"] == pytest.approx(0.05)
+    # net = gross * notional_weight = 0.05 * (1000 / 10000) = 0.005
+    assert backfill["net_return"] == pytest.approx(0.005)
+    assert backfill["exit_ts_ms"] == 1_700_000_050_000
+    assert backfill["closed_at_ms"] == 1_700_000_050_000
+    assert backfill["exit_order_id"] == "exit-order-1"
+    assert backfill["submit_mode"] == "orphan_reconciled"
+
+
+def test_orphan_close_pnl_backfill_returns_empty_when_endpoint_missing() -> None:
+    """Falls back silently when the client doesn't expose get_closed_pnl."""
+
+    class _NoEndpoint:
+        pass
+
+    trade = _open_trade_row()
+    assert _orphan_close_pnl_backfill(trade, now_ms=1_700_000_100_000, trading_client=_NoEndpoint()) == {}
+
+
+def test_orphan_close_pnl_backfill_returns_empty_on_api_failure() -> None:
+    """An API failure must not stop the orphan close — it just falls back to zero-PnL."""
+    trade = _open_trade_row()
+    client = _ClosedPnlClient(raise_on_call=True)
+
+    assert _orphan_close_pnl_backfill(trade, now_ms=1_700_000_100_000, trading_client=client) == {}
+
+
+def test_orphan_close_pnl_backfill_skips_records_before_entry() -> None:
+    """A closed-PnL record older than entry_ts_ms can't be our close — skip it."""
+    trade = _open_trade_row(side="short", entry_ts_ms=1_700_000_000_000)
+    client = _ClosedPnlClient(
+        records=[
+            {
+                "symbol": "AAAUSDT",
+                "side": "Buy",
+                "avgEntryPrice": "90.0",
+                "avgExitPrice": "80.0",
+                "orderId": "older-close",
+                "createdTime": "1_699_999_000_000",
+            }
+        ]
+    )
+
+    assert _orphan_close_pnl_backfill(trade, now_ms=1_700_000_100_000, trading_client=client) == {}
+
+
+def test_orphan_close_pnl_backfill_skips_wrong_side() -> None:
+    """A Sell-side close can't belong to our short trade (a short is closed by Buy)."""
+    trade = _open_trade_row(side="short")
+    client = _ClosedPnlClient(
+        records=[
+            {
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "avgEntryPrice": "100.0",
+                "avgExitPrice": "95.0",
+                "orderId": "wrong-side",
+                "createdTime": "1_700_000_050_000",
+            }
+        ]
+    )
+
+    assert _orphan_close_pnl_backfill(trade, now_ms=1_700_000_100_000, trading_client=client) == {}
+
+
+def test_risk_reconciler_backfills_pnl_when_trading_client_provided() -> None:
+    """End-to-end: reconciler closes the orphan AND fills in exit_price / returns."""
+    open_trades = pl.DataFrame([_open_trade_row()], infer_schema_length=None)
+    client = _ClosedPnlClient(
+        records=[
+            {
+                "symbol": "AAAUSDT",
+                "side": "Buy",
+                "avgEntryPrice": "100.0",
+                "avgExitPrice": "97.0",
+                "orderId": "exit-1",
+                "createdTime": "1_700_000_060_000",
+            }
+        ]
+    )
+
+    kept, updates = _risk_reconcile_missing_positions(
+        open_trades,
+        position_by_symbol={},
+        now_ms=1_700_000_100_000,
+        enabled=True,
+        position_error="",
+        trading_client=client,
+    )
+
+    assert kept.is_empty()
+    assert len(updates) == 1
+    update = updates[0]
+    assert update["status"] == "closed"
+    assert update["exit_reason"] == "bybit_position_missing"
+    assert update["exit_price"] == 97.0
+    assert update["gross_trade_return"] == pytest.approx(0.03)
+    assert update["submit_mode"] == "orphan_reconciled"
+    assert update["exit_order_id"] == "exit-1"
+
+
+# ---------------------------------------------------------------------------
+# Exit-path preflight (B4)
+# ---------------------------------------------------------------------------
+
+
+def test_execute_exits_writes_preflight_before_place_order() -> None:
+    """Preflight callback must be invoked BEFORE place_order so a crash between
+    the two still leaves the order_link_id discoverable in parquet."""
+    all_trades = pl.DataFrame([_open_trade_row()], infer_schema_length=None)
+    preflight_rows: list[dict[str, Any]] = []
+    client = FakeRiskClient()
+    # Wrap place_order to record the call order vs preflight invocations.
+    call_log: list[str] = []
+    orig_place_order = client.place_order
+
+    def _logged_place(**params: object) -> dict[str, str]:
+        call_log.append("place_order")
+        return orig_place_order(**params)
+
+    client.place_order = _logged_place  # type: ignore[method-assign]
+
+    def _record(row: dict[str, Any]) -> None:
+        call_log.append("preflight")
+        preflight_rows.append(row)
+
+    _execute_exits(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "qty": "1",
+                "exit_reason": "max_hold",
+                "exit_trigger_ts_ms": 1_700_000_000_000,
+                "planned_exit_price": 99.0,
+            }
+        ],
+        all_trades,
+        trading_client=client,
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        now_ms=1_700_000_060_000,
+        record_preflight=_record,
+    )
+
+    assert call_log[:2] == ["preflight", "place_order"], call_log
+    assert len(preflight_rows) == 1
+    pre = preflight_rows[0]
+    assert pre["submit_mode"] == "preflight"
+    assert pre["status"] == "submitted"
+    assert pre["reduce_only"] is True
+    assert pre["side"] == "Buy"  # short closes with Buy
+    assert pre["trade_id"] == "t1"
+    assert pre["exit_reason"] == "max_hold"
+
+
+def test_execute_exits_skips_preflight_on_dry_run() -> None:
+    """Dry-run (submit_orders=False) must not call the preflight callback —
+    nothing is being submitted to the venue, so there's no crash-window to guard."""
+    all_trades = pl.DataFrame([_open_trade_row()], infer_schema_length=None)
+    preflight_rows: list[dict[str, Any]] = []
+
+    def _record(row: dict[str, Any]) -> None:
+        preflight_rows.append(row)
+
+    _execute_exits(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "qty": "1",
+                "exit_reason": "max_hold",
+                "exit_trigger_ts_ms": 1_700_000_000_000,
+                "planned_exit_price": 99.0,
+            }
+        ],
+        all_trades,
+        trading_client=None,
+        demo=EventDemoCycleConfig(submit_orders=False),
+        now_ms=1_700_000_060_000,
+        record_preflight=_record,
+    )
+
+    assert preflight_rows == []
+
+
+def test_preflight_exit_order_row_uses_pending_status() -> None:
+    """The preflight row's status must be in PENDING_ORDER_STATUSES so the
+    next-cycle _reconcile_pending_order_fills picks it up if our cycle crashed."""
+    from liquidity_migration.event_demo import PENDING_ORDER_STATUSES
+
+    row = _preflight_exit_order_row(
+        exit_link="lm-ex-AAA-abc",
+        now_ms=1_700_000_060_000,
+        trade_id="t1",
+        symbol="AAAUSDT",
+        bybit_side="Buy",
+        order_type="Market",
+        qty="1",
+        exit_plan={"exit_reason": "max_hold", "exit_trigger_ts_ms": 1_700_000_000_000},
+    )
+
+    assert row["status"] in PENDING_ORDER_STATUSES
+    assert row["submit_mode"] == "preflight"
+    assert row["reduce_only"] is True
+
+
+# ---------------------------------------------------------------------------
+# wsrisk exit preflight (C1)
+# ---------------------------------------------------------------------------
+
+
+def test_submit_reduce_only_exit_writes_preflight_before_place_order_market() -> None:
+    """Market-mode reduce-only exit: record_preflight must fire before place_order."""
+    from liquidity_migration.event_demo import _submit_reduce_only_exit, EventRiskCycleConfig
+
+    call_log: list[str] = []
+    client = FakeRiskClient()
+    orig_place_order = client.place_order
+
+    def _logged_place(**params: object) -> dict[str, str]:
+        call_log.append("place_order")
+        return orig_place_order(**params)
+
+    client.place_order = _logged_place  # type: ignore[method-assign]
+
+    preflight_rows: list[dict[str, Any]] = []
+
+    def _record(row: dict[str, Any]) -> None:
+        call_log.append("preflight")
+        preflight_rows.append(row)
+
+    _submit_reduce_only_exit(
+        symbol="AAAUSDT",
+        bybit_side="Buy",
+        qty="1",
+        trading_client=client,
+        risk=EventRiskCycleConfig(submit_orders=True, exit_order_mode="market"),
+        now_ms=1_700_000_060_000,
+        reference_price=100.0,
+        tick_size=0.1,
+        record_preflight=_record,
+    )
+
+    assert call_log[:2] == ["preflight", "place_order"], call_log
+    assert len(preflight_rows) == 1
+    pre = preflight_rows[0]
+    assert pre["submit_mode"] == "preflight"
+    assert pre["status"] == "submitted"
+    assert pre["order_type"] == "Market"
+    assert pre["side"] == "Buy"
+
+
+def test_submit_reduce_only_exit_skips_preflight_on_dry_run() -> None:
+    """When submit_orders=False the helper returns a dry-run row directly;
+    no preflight callback should fire because nothing reaches the venue."""
+    from liquidity_migration.event_demo import _submit_reduce_only_exit, EventRiskCycleConfig
+
+    preflight_rows: list[dict[str, Any]] = []
+    _submit_reduce_only_exit(
+        symbol="AAAUSDT",
+        bybit_side="Buy",
+        qty="1",
+        trading_client=None,
+        risk=EventRiskCycleConfig(submit_orders=False),
+        now_ms=1_700_000_060_000,
+        reference_price=100.0,
+        tick_size=0.1,
+        record_preflight=lambda row: preflight_rows.append(row),
+    )
+
+    assert preflight_rows == []

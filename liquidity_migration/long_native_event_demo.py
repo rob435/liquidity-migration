@@ -448,6 +448,19 @@ def run_long_native_demo_cycle(
             now_ms=cycle_now_ms,
             live_exit_order_symbols=live_exit_order_symbols,
         )
+        # Shared preflight callback used by BOTH exits and entries: a row is
+        # flushed to the orders parquet BEFORE place_order so a crash between
+        # submission and the cycle's end-of-cycle flush leaves the order_link_id
+        # in the ledger for ws_risk's next-cycle pending-fill reconciliation.
+        if demo.submit_orders or demo.record_dry_run:
+            def _record_preflight(row: dict[str, Any]) -> None:
+                write_dataset(
+                    pl.DataFrame([row], infer_schema_length=None),
+                    root, orders_dataset, partition_by=(),
+                )
+            preflight_callback: Callable[[dict[str, Any]], None] | None = _record_preflight
+        else:
+            preflight_callback = None
         executed_exits, exit_order_rows = _execute_long_exits(
             exit_plans,
             all_trades,
@@ -455,6 +468,7 @@ def run_long_native_demo_cycle(
             demo=demo,
             now_ms=cycle_now_ms,
             execution_event_router=execution_event_router,
+            record_preflight=preflight_callback,
         )
         if executed_exits:
             all_trades = _upsert_rows(all_trades, executed_exits, key="trade_id")
@@ -498,16 +512,6 @@ def run_long_native_demo_cycle(
             position_error_skips = 0
             candidates, live_pos_skips = _filter_by_symbol_set(candidates, live_position_symbols)
             candidates, live_open_skips = _filter_by_symbol_set(candidates, live_entry_order_symbols)
-
-        if demo.submit_orders or demo.record_dry_run:
-            def _record_preflight(row: dict[str, Any]) -> None:
-                write_dataset(
-                    pl.DataFrame([row], infer_schema_length=None),
-                    root, orders_dataset, partition_by=(),
-                )
-            preflight_callback: Callable[[dict[str, Any]], None] | None = _record_preflight
-        else:
-            preflight_callback = None
 
         # Parallel entry submission (mirrors short side). Each worker owns
         # its own private REST client; they share a rate limiter so the
@@ -1013,6 +1017,47 @@ def _plan_time_stop_exits(
     return plans
 
 
+def _preflight_long_exit_order_row(
+    *,
+    exit_link: str,
+    now_ms: int,
+    trade_id: str,
+    symbol: str,
+    order_type: str,
+    qty: str,
+    plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Crash-durability preflight row for a long-side exit submission.
+
+    Mirrors the short-side _preflight_exit_order_row: a row with
+    ``status='submitted'`` and ``submit_mode='preflight'`` is flushed to the
+    orders parquet BEFORE place_order so a crash between submission and the
+    cycle's end-of-cycle flush still leaves the order_link_id discoverable
+    for ws_risk pending-fill reconciliation.
+    """
+    return {
+        "order_link_id": exit_link,
+        "ts_ms": now_ms,
+        "trade_id": trade_id,
+        "symbol": symbol,
+        "side": "Sell",
+        "order_type": order_type,
+        "qty": qty,
+        "reduce_only": True,
+        "order_id": "",
+        "submit_mode": "preflight",
+        "avg_price": 0.0,
+        "notional_usdt": 0.0,
+        "status": "submitted",
+        "trade_side": "long",
+        "exit_reason": str(plan.get("exit_reason", "time_stop")),
+        "target_qty": qty,
+        "filled_qty": "",
+        "error": "",
+        "sleeve": "long",
+    }
+
+
 def _execute_long_exits(
     exits: list[dict[str, Any]],
     all_trades: pl.DataFrame,
@@ -1021,6 +1066,7 @@ def _execute_long_exits(
     demo: LongNativeDemoCycleConfig,
     now_ms: int,
     execution_event_router: Any | None = None,
+    record_preflight: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if not exits:
         return [], []
@@ -1045,6 +1091,18 @@ def _execute_long_exits(
         filled_qty = _float(qty)
         if demo.submit_orders:
             assert trading_client is not None
+            if record_preflight is not None:
+                record_preflight(
+                    _preflight_long_exit_order_row(
+                        exit_link=exit_link,
+                        now_ms=now_ms,
+                        trade_id=trade_id,
+                        symbol=symbol,
+                        order_type=demo.exit_order_type,
+                        qty=qty,
+                        plan=plan,
+                    )
+                )
             try:
                 order_params = _order_params(
                     symbol=symbol,

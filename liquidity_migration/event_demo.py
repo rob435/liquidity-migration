@@ -332,6 +332,16 @@ def run_event_demo_cycle(
         )
         exits, pending_exit_skips = _filter_pending_exit_orders(exits, all_orders, now_ms=cycle_now_ms)
         exits, live_open_exit_skips = _filter_live_open_exit_orders(exits, live_exit_order_symbols)
+        # Shared preflight callback used by BOTH exits and entries: a row is
+        # flushed to the orders parquet BEFORE place_order so a crash between
+        # submission and the cycle's end-of-cycle ledger flush still leaves the
+        # order_link_id discoverable for next-cycle _reconcile_pending_order_fills.
+        if demo.submit_orders or demo.record_dry_run:
+            def _record_preflight_order(row: dict[str, Any]) -> None:
+                _write_order_rows(root, pl.DataFrame([row], infer_schema_length=None))
+            preflight_callback: Callable[[dict[str, Any]], None] | None = _record_preflight_order
+        else:
+            preflight_callback = None
         executed_exits, exit_order_rows = _execute_exits(
             exits,
             all_trades,
@@ -339,6 +349,7 @@ def run_event_demo_cycle(
             demo=demo,
             now_ms=cycle_now_ms,
             execution_event_router=execution_event_router,
+            record_preflight=preflight_callback,
         )
         if executed_exits:
             all_trades = _upsert_rows(all_trades, executed_exits, key="trade_id")
@@ -399,12 +410,6 @@ def run_event_demo_cycle(
                 entry_candidates,
                 live_entry_order_symbols,
             )
-        if demo.submit_orders or demo.record_dry_run:
-            def _record_preflight_entry_order(row: dict[str, Any]) -> None:
-                _write_order_rows(root, pl.DataFrame([row], infer_schema_length=None))
-            preflight_callback: Callable[[dict[str, Any]], None] | None = _record_preflight_entry_order
-        else:
-            preflight_callback = None
         # When live-submitting orders, fan candidates out across a small worker
         # pool: each worker owns its own private REST client so the place_order
         # + fill-poll roundtrip pipelines across candidates instead of running
@@ -749,6 +754,8 @@ def run_event_risk_cycle(
             position_by_symbol=position_by_symbol,
             now_ms=cycle_now_ms,
             enabled=risk.submit_orders and trading_client is not None,
+            position_error=position_error,
+            trading_client=trading_client,
         )
         if reconcile_rows:
             all_trades = _upsert_rows(all_trades, reconcile_rows, key="trade_id")
@@ -780,6 +787,16 @@ def run_event_risk_cycle(
             if risk.submit_orders or risk.record_dry_run:
                 cycle_order_rows.extend(repair_rows)
 
+        # Crash-durability preflight: write the order row to parquet BEFORE
+        # place_order. A cycle crash between submission and the end-of-cycle
+        # flush still leaves the order_link_id in the ledger for the next
+        # wsrisk cycle / event-demo cycle's pending-fill reconciler to adopt.
+        if risk.submit_orders:
+            def _record_risk_preflight(row: dict[str, Any]) -> None:
+                _write_order_rows(root, pl.DataFrame([row], infer_schema_length=None))
+            risk_preflight_callback: Callable[[dict[str, Any]], None] | None = _record_risk_preflight
+        else:
+            risk_preflight_callback = None
         executed_exits, exit_order_rows = _execute_risk_exits(
             exits,
             all_trades,
@@ -788,6 +805,7 @@ def run_event_risk_cycle(
             now_ms=cycle_now_ms,
             price_by_symbol=price_by_symbol,
             tick_size_by_symbol=tick_size_by_symbol,
+            record_preflight=risk_preflight_callback,
         )
         if executed_exits:
             all_trades = _upsert_rows(all_trades, executed_exits, key="trade_id")
@@ -2957,6 +2975,50 @@ def _is_own_exit_order(row: dict[str, Any]) -> bool:
     return link.startswith(("lm-ex-", "lm-rx-", "lm-wx-", "lm-ux-"))
 
 
+def _preflight_exit_order_row(
+    *,
+    exit_link: str,
+    now_ms: int,
+    trade_id: str,
+    symbol: str,
+    bybit_side: str,
+    order_type: str,
+    qty: str,
+    exit_plan: dict[str, Any],
+) -> dict[str, Any]:
+    """Crash-durability preflight row for an exit submission.
+
+    Mirrors the entry preflight: a row with ``status='submitted'`` and
+    ``submit_mode='preflight'`` is flushed to the orders parquet BEFORE
+    ``place_order`` runs, so a crash between submission and the cycle's
+    end-of-cycle flush still leaves ``exit_link`` in the ledger for the
+    next cycle's ``_reconcile_pending_order_fills`` to adopt.
+
+    Once the place_order returns, the row is overwritten by the real exit
+    order row (same ``order_link_id`` key) at the cycle's ledger flush.
+    """
+    return {
+        "order_link_id": exit_link,
+        "ts_ms": now_ms,
+        "trade_id": trade_id,
+        "symbol": symbol,
+        "side": bybit_side,
+        "order_type": order_type,
+        "qty": qty,
+        "reduce_only": True,
+        "order_id": "",
+        "submit_mode": "preflight",
+        "avg_price": 0.0,
+        "notional_usdt": 0.0,
+        "status": "submitted",
+        "exit_reason": str(exit_plan.get("exit_reason") or ""),
+        "exit_trigger_ts_ms": int(exit_plan.get("exit_trigger_ts_ms") or now_ms),
+        "target_qty": qty,
+        "filled_qty": "",
+        "error": "",
+    }
+
+
 def _execute_exits(
     exits: list[dict[str, Any]],
     all_trades: pl.DataFrame,
@@ -2965,6 +3027,7 @@ def _execute_exits(
     demo: EventDemoCycleConfig,
     now_ms: int,
     execution_event_router: Any | None = None,
+    record_preflight: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if not exits:
         return [], []
@@ -2990,6 +3053,19 @@ def _execute_exits(
         order_status = "planned"
         if demo.submit_orders:
             assert trading_client is not None
+            if record_preflight is not None:
+                record_preflight(
+                    _preflight_exit_order_row(
+                        exit_link=exit_link,
+                        now_ms=now_ms,
+                        trade_id=trade_id,
+                        symbol=symbol,
+                        bybit_side=bybit_side,
+                        order_type=demo.exit_order_type,
+                        qty=qty,
+                        exit_plan=exit_plan,
+                    )
+                )
             try:
                 order_result = trading_client.place_order(
                     **_order_params(
@@ -3344,6 +3420,7 @@ def _execute_risk_exits(
     now_ms: int,
     price_by_symbol: dict[str, float],
     tick_size_by_symbol: dict[str, float],
+    record_preflight: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     if not exits:
         return [], []
@@ -3362,6 +3439,16 @@ def _execute_risk_exits(
         side = str(exit_plan.get("side") or trade.get("side") or "short")
         bybit_side = "Buy" if side == "short" else "Sell"
         planned_price = _float(exit_plan.get("planned_exit_price")) or price_by_symbol.get(symbol, 0.0)
+        # Tag the preflight row with the trade context so the next-cycle
+        # reconciler can route the resolved fill back to the right trade.
+        def _record_with_context(row: dict[str, Any], _trade_id: str = trade_id, _exit_plan: dict[str, Any] = exit_plan) -> None:
+            if record_preflight is None:
+                return
+            tagged = dict(row)
+            tagged["trade_id"] = _trade_id
+            tagged["exit_reason"] = str(_exit_plan.get("exit_reason") or "")
+            tagged["exit_trigger_ts_ms"] = int(_exit_plan.get("exit_trigger_ts_ms") or now_ms)
+            record_preflight(tagged)
         try:
             submit = _submit_reduce_only_exit(
                 symbol=symbol,
@@ -3372,6 +3459,7 @@ def _execute_risk_exits(
                 now_ms=now_ms,
                 reference_price=planned_price,
                 tick_size=tick_size_by_symbol.get(symbol) or _float(trade.get("tick_size")) or 0.0,
+                record_preflight=_record_with_context if record_preflight is not None else None,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced in order telemetry so the loop can continue
             link = _risk_order_link_id("rx", symbol=symbol, ts_ms=now_ms, attempt=0)
@@ -3521,6 +3609,36 @@ def _execute_stop_repairs(
     return rows
 
 
+def _risk_preflight_order_row(
+    *,
+    link: str,
+    ts_ms: int,
+    symbol: str,
+    side: str,
+    qty: str,
+    order_type: str,
+) -> dict[str, Any]:
+    """Crash-durability preflight row for a wsrisk reduce-only exit submission.
+
+    Mirrors _preflight_exit_order_row on the main cycle: status='submitted' +
+    submit_mode='preflight' written BEFORE place_order so a crash between
+    submission and the cycle's end-of-cycle flush still leaves the order_link_id
+    in parquet for next-cycle pending-fill reconciliation.
+    """
+    row = _risk_order_row(
+        link=link,
+        ts_ms=ts_ms,
+        symbol=symbol,
+        side=side,
+        qty=qty,
+        order_type=order_type,
+        submit_mode="preflight",
+        status="submitted",
+    )
+    row.update({"target_qty": qty, "filled_qty": ""})
+    return row
+
+
 def _submit_reduce_only_exit(
     *,
     symbol: str,
@@ -3531,6 +3649,7 @@ def _submit_reduce_only_exit(
     now_ms: int,
     reference_price: float,
     tick_size: float,
+    record_preflight: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     if not risk.submit_orders:
         link = _risk_order_link_id("rx", symbol=symbol, ts_ms=now_ms, attempt=0)
@@ -3555,6 +3674,17 @@ def _submit_reduce_only_exit(
     assert trading_client is not None
     if risk.exit_order_mode == "market":
         link = _risk_order_link_id("rx", symbol=symbol, ts_ms=now_ms, attempt=0)
+        if record_preflight is not None:
+            record_preflight(
+                _risk_preflight_order_row(
+                    link=link,
+                    ts_ms=now_ms,
+                    symbol=symbol,
+                    side=bybit_side,
+                    qty=qty,
+                    order_type="Market",
+                )
+            )
         order_result = trading_client.place_order(
             **_order_params(
                 symbol=symbol,
@@ -3620,6 +3750,7 @@ def _submit_reduce_only_exit(
         now_ms=now_ms,
         reference_price=reference_price,
         tick_size=tick_size,
+        record_preflight=record_preflight,
     )
 
 
@@ -3633,6 +3764,7 @@ def _submit_limit_chase_exit(
     now_ms: int,
     reference_price: float,
     tick_size: float,
+    record_preflight: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     target_qty = _float(qty)
     filled_qty = 0.0
@@ -3649,6 +3781,17 @@ def _submit_limit_chase_exit(
         last_link = link
         bps = min(risk.limit_chase_max_bps, risk.limit_chase_initial_bps + attempt * risk.limit_chase_step_bps)
         limit_price = _limit_chase_price(bybit_side=bybit_side, reference_price=reference_price, bps=bps, tick_size=tick_size)
+        if record_preflight is not None:
+            record_preflight(
+                _risk_preflight_order_row(
+                    link=link,
+                    ts_ms=now_ms,
+                    symbol=symbol,
+                    side=bybit_side,
+                    qty=_decimal_text(Decimal(str(remaining_qty))),
+                    order_type="Limit",
+                )
+            )
         order_result = trading_client.place_order(
             **_order_params(
                 symbol=symbol,
@@ -3731,6 +3874,17 @@ def _submit_limit_chase_exit(
         link = _risk_order_link_id("lm", symbol=symbol, ts_ms=now_ms, attempt=attempts)
         last_link = link
         remaining_qty_text = _quantity_text(remaining_qty)
+        if record_preflight is not None:
+            record_preflight(
+                _risk_preflight_order_row(
+                    link=link,
+                    ts_ms=now_ms,
+                    symbol=symbol,
+                    side=bybit_side,
+                    qty=remaining_qty_text,
+                    order_type="Market",
+                )
+            )
         order_result = trading_client.place_order(
             **_order_params(
                 symbol=symbol,
@@ -3818,18 +3972,7 @@ def _reconcile_open_trades(
         if size_by_symbol.get(symbol, 0.0) > 0.0:
             kept.append(trade)
             continue
-        updated = dict(trade)
-        updated.update(
-            {
-                "status": "closed",
-                "exit_ts_ms": now_ms,
-                "exit_trigger_ts_ms": now_ms,
-                "exit_reason": "bybit_position_missing",
-                "closed_at_ms": now_ms,
-                "updated_at_ms": now_ms,
-            }
-        )
-        updates.append(updated)
+        updates.append(_orphan_close_trade_row(trade, now_ms=now_ms, trading_client=trading_client))
     return pl.DataFrame(kept, infer_schema_length=None) if kept else _empty_trades(), updates, ""
 
 
@@ -4023,8 +4166,26 @@ def _risk_reconcile_missing_positions(
     position_by_symbol: dict[str, dict[str, Any]],
     now_ms: int,
     enabled: bool,
+    position_error: str = "",
+    trading_client: Any | None = None,
 ) -> tuple[pl.DataFrame, list[dict[str, Any]]]:
+    """Close ledger rows whose Bybit position has vanished.
+
+    Skipped when ``position_error`` is set: a failed ``get_positions`` returns an
+    empty ``position_by_symbol`` that is indistinguishable from "no positions",
+    so without this guard every open trade would be false-positive orphan-closed
+    on a single transient API failure. The caller plumbs the error string from
+    :func:`_safe_raw_positions`.
+
+    When a ``trading_client`` is provided, queries ``get_closed_pnl`` per orphan
+    symbol to backfill ``exit_price`` / ``gross_trade_return`` / ``net_return``
+    / ``exit_order_id`` / ``exit_ts_ms`` from the actual close. Missing PnL data
+    is non-fatal -- the trade still closes with ``exit_reason='bybit_position_missing'``
+    and the previous zero-PnL defaults.
+    """
     if open_trades.is_empty() or not enabled:
+        return open_trades, []
+    if position_error:
         return open_trades, []
     updates: list[dict[str, Any]] = []
     kept = []
@@ -4033,19 +4194,107 @@ def _risk_reconcile_missing_positions(
         if symbol and symbol in position_by_symbol:
             kept.append(trade)
             continue
-        updated = dict(trade)
-        updated.update(
-            {
-                "status": "closed",
-                "exit_ts_ms": now_ms,
-                "exit_trigger_ts_ms": now_ms,
-                "exit_reason": "bybit_position_missing",
-                "closed_at_ms": now_ms,
-                "updated_at_ms": now_ms,
-            }
-        )
-        updates.append(updated)
+        updates.append(_orphan_close_trade_row(trade, now_ms=now_ms, trading_client=trading_client))
     return pl.DataFrame(kept, infer_schema_length=None) if kept else _empty_trades(), updates
+
+
+def _orphan_close_trade_row(
+    trade: dict[str, Any],
+    *,
+    now_ms: int,
+    trading_client: Any | None,
+) -> dict[str, Any]:
+    """Build an orphan-close trade row, backfilling PnL from Bybit when possible.
+
+    Falls back to the legacy zero-PnL row on any failure (missing endpoint,
+    transport error, no matching record). The reconciler must always be able to
+    close the ledger row -- a backfill failure cannot block the close.
+    """
+    updated = dict(trade)
+    updated.update(
+        {
+            "status": "closed",
+            "exit_ts_ms": now_ms,
+            "exit_trigger_ts_ms": now_ms,
+            "exit_reason": "bybit_position_missing",
+            "closed_at_ms": now_ms,
+            "updated_at_ms": now_ms,
+        }
+    )
+    backfill = _orphan_close_pnl_backfill(trade, now_ms=now_ms, trading_client=trading_client)
+    if backfill:
+        updated.update(backfill)
+    return updated
+
+
+def _orphan_close_pnl_backfill(
+    trade: dict[str, Any],
+    *,
+    now_ms: int,
+    trading_client: Any | None,
+) -> dict[str, Any]:
+    """Query Bybit closed-PnL for an orphan trade and return backfill fields.
+
+    Returns an empty dict on any failure -- the caller keeps the zero-PnL defaults.
+    """
+    if trading_client is None:
+        return {}
+    symbol = str(trade.get("symbol", ""))
+    if not symbol:
+        return {}
+    side = str(trade.get("side") or "short")
+    entry_ts_ms = int(trade.get("entry_ts_ms") or 0)
+    entry_price = _float(trade.get("entry_price"))
+    if entry_price <= 0.0:
+        return {}
+    get_closed_pnl = getattr(trading_client, "get_closed_pnl", None)
+    if not callable(get_closed_pnl):
+        return {}
+    # Pull the most recent closures for this symbol. Bybit returns up to 200
+    # records per call; the default limit=50 is more than enough to cover the
+    # closures since the trade opened on any realistic cycle cadence.
+    start_time_ms = max(entry_ts_ms - MS_PER_HOUR, 0) if entry_ts_ms > 0 else None
+    try:
+        records = get_closed_pnl(symbol=symbol, start_time_ms=start_time_ms, limit=50)
+    except Exception:  # noqa: BLE001 - reconciler must close the row even when backfill fails
+        return {}
+    if not records:
+        return {}
+    # Close side: for our short trade the closing order is Buy; for long it is Sell.
+    expected_close_side = "Buy" if side == "short" else "Sell"
+    candidates: list[tuple[int, dict[str, Any]]] = []
+    for record in records:
+        record_side = str(record.get("side") or "")
+        if record_side and record_side != expected_close_side:
+            continue
+        # Bybit returns createdTime / updatedTime as ms-since-epoch strings or ints.
+        created_ts = int(_float(record.get("createdTime") or record.get("updatedTime") or 0))
+        if entry_ts_ms > 0 and created_ts > 0 and created_ts < entry_ts_ms:
+            continue
+        candidates.append((created_ts, record))
+    if not candidates:
+        return {}
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    _, best = candidates[0]
+    exit_price = _float(best.get("avgExitPrice"))
+    if exit_price <= 0.0:
+        return {}
+    gross_trade_return = _trade_return(entry_price, exit_price, side=side)
+    notional_weight = _safe_ratio(trade.get("notional_usdt"), trade.get("equity_usdt"))
+    closed_at_ms = int(_float(best.get("createdTime") or best.get("updatedTime") or now_ms)) or now_ms
+    backfill: dict[str, Any] = {
+        "exit_price": exit_price,
+        "gross_trade_return": gross_trade_return,
+        "net_return": gross_trade_return * notional_weight,
+        "exit_ts_ms": closed_at_ms,
+        "exit_trigger_ts_ms": closed_at_ms,
+        "closed_at_ms": closed_at_ms,
+        "submit_mode": "orphan_reconciled",
+    }
+    exit_order_id = str(best.get("orderId") or "")
+    if exit_order_id:
+        backfill["exit_order_id"] = exit_order_id
+    return backfill
 
 
 def _private_credentials_present() -> bool:

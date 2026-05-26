@@ -82,6 +82,42 @@ private REST rate budget is shared — the demo daemon uses
   are counted and logged; `ws_gap_count` and `ws_max_gap_seconds` appear in the
   shutdown summary and the `run()` stats dict. A long gap in a quiet market is
   normal, so the counter is a coarse signal, not a definitive disconnect count.
+- **WS state caches** (`liquidity_migration/ws_state_cache.py`).
+  `PrivateStateCache` (positions / open orders / wallet) and `TickerCache`
+  are fed by the same private + public WS streams the daemon opens for
+  executions. Cycles read `_collect_private_snapshots` from the caches when
+  fresh (default `state_cache_stale_seconds=120`, reconciled every 60s by
+  the daemon's `_reconcile_loop`) and fall back to REST on a stale or empty
+  cache. The fallback is silent and per-call, so the cycle never blocks on
+  a degraded WS.
+- **Schema-drift safety.** Each `on_*_event` only bumps the cache's
+  `last_event_monotonic` when at least one row in the message applied
+  successfully. A Bybit schema change that drops every row no longer leaves
+  the cache reporting "fresh" forever — the existing stale check engages
+  REST fallback automatically.
+- **Ticker-stream startup recovery.** If the REST seed has no symbols at
+  daemon startup, the ticker WS subscribe is skipped (can't subscribe to
+  nothing). The reconcile loop retries `_open_ticker_stream()` after each
+  successful re-seed, so the daemon recovers from a transient startup
+  failure instead of permanently REST-falling-back.
+- **Crash-durability preflight.** Both cycles write the order row to parquet
+  with `submit_mode="preflight"` BEFORE calling `place_order`. A crash
+  between submission and the end-of-cycle ledger flush still leaves the
+  `orderLinkId` discoverable for the next cycle's
+  `_reconcile_pending_order_fills` to adopt the actual fill. Applies to
+  short entries + short exits + wsrisk reduce-only exits + long entries
+  + long exits.
+- **Orphan-close PnL backfill.** When the reconciler detects a Bybit
+  position that has vanished but the ledger still says open, it queries
+  `get_closed_pnl` and backfills `exit_price`, `gross_trade_return`,
+  `net_return`, `exit_ts_ms`, and `exit_order_id` from the actual close.
+  Stamped `submit_mode="orphan_reconciled"`. Falls back silently to the
+  legacy zero-PnL row when the endpoint, network, or matching record is
+  unavailable.
+- **Kline-warmer alert.** Consecutive warmer failures (default ≥3 in a row)
+  trigger a one-shot telegram so a sustained outage is operator-visible
+  before cycles start REST-bursting on every bar close. Streak resets on
+  the first success.
 
 ## Shadow-testing checklist
 

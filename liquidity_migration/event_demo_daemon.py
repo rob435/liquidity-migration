@@ -171,6 +171,16 @@ class EventDemoDaemon:
         self._kline_warms = 0
         self._kline_warms_skipped = 0
         self._kline_warm_errors = 0
+        # Sustained warmer failures (e.g. endpoint returning 500s, network
+        # outage, archive lag) silently starve the kline cache. Track a
+        # consecutive-error streak: when it crosses the threshold we send a
+        # one-shot telegram so the operator can investigate before the cycle
+        # starts REST-fetching on every bar close. Resets on the first
+        # successful warm. The threshold is deliberately set above 1 so a
+        # single transient 5xx does not page anyone.
+        self._kline_warm_consecutive_errors = 0
+        self._kline_warm_alert_threshold = 3
+        self._kline_warm_alert_sent = False
         # Set while a cycle is executing; the warmer skips warming then, since a
         # running cycle is already fetching klines and a second concurrent burst
         # would risk tripping the shared per-IP REST rate limit.
@@ -702,6 +712,11 @@ class EventDemoDaemon:
 
     def _open_ticker_stream(self) -> None:
         if self._ticker_cache.symbol_count() == 0:
+            # Cache empty: an earlier seed failed or returned no symbols.
+            # Skip subscribing now; the reconcile loop will retry on the
+            # next interval after re-seeding (see _reconcile_loop). Without
+            # this guarded retry a single startup seed failure would
+            # silently disable the ticker WS for the daemon's lifetime.
             _logger.info("short ticker stream skipped: cache has no seeded symbols")
             return
         try:
@@ -756,6 +771,16 @@ class EventDemoDaemon:
             except Exception as exc:  # noqa: BLE001
                 self._reconcile_errors += 1
                 _logger.warning("short state cache reconcile failed: %s", exc)
+                continue
+            # Recover from a startup ticker-stream skip: if the seed-then-open
+            # path skipped subscribing because the cache had no symbols at
+            # startup, this reconcile may have just populated them. Try to
+            # open the WS now so the daemon stops REST-falling-back forever.
+            if self._ticker_stream is None and self._ticker_cache.symbol_count() > 0:
+                try:
+                    self._open_ticker_stream()
+                except Exception as exc:  # noqa: BLE001
+                    _logger.warning("short ticker stream recovery-open failed: %s", exc)
 
     def _invoke_state_cache_seeder(self) -> None:
         """Single seeder entry point that lazily constructs and reuses the
@@ -838,9 +863,28 @@ class EventDemoDaemon:
                     self.data_root, config=self.config, demo_config=self.demo_config
                 )
                 self._kline_warms += 1
+                # Reset the consecutive-error streak on the first success and
+                # rearm the alert so a fresh outage can re-page.
+                self._kline_warm_consecutive_errors = 0
+                self._kline_warm_alert_sent = False
             except Exception as exc:  # noqa: BLE001 - a warm failure must never break the daemon
                 self._kline_warm_errors += 1
-                _logger.warning("kline cache warm failed: %s", exc)
+                self._kline_warm_consecutive_errors += 1
+                _logger.warning(
+                    "kline cache warm failed (consecutive=%d): %s",
+                    self._kline_warm_consecutive_errors,
+                    exc,
+                )
+                if (
+                    self._kline_warm_consecutive_errors >= self._kline_warm_alert_threshold
+                    and not self._kline_warm_alert_sent
+                ):
+                    self._send_telegram(
+                        "⚠️ kline-warmer failed "
+                        f"{self._kline_warm_consecutive_errors} cycles in a row; "
+                        f"cache will REST-fall-back on next bar close: {str(exc)[:200]}"
+                    )
+                    self._kline_warm_alert_sent = True
 
 
 def _build_private_ws_stream(config: ResearchConfig) -> BybitPrivateWebSocketStream:

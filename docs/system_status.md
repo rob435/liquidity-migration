@@ -1,6 +1,6 @@
 # System Status
 
-Updated 2026-05-22.
+Updated 2026-05-26.
 
 The liquidity-migration short strategy is in **committed paper forward testing**
 on the Bybit demo account. The canonical configuration is the `promoted` profile
@@ -147,6 +147,56 @@ as live verdicts.
   vars to 400 in the systemd unit and rebuild.
 - No real-money trading is active: demo is the default, and `demo=False` is
   refused unless real-money mode is deliberately armed (see below).
+
+## Execution-path resilience (2026-05-26)
+
+The demo loop is WS-first with REST as the safety net at every layer. Recent
+hardening pass shipped these crash-/drift-durability invariants — none of them
+change strategy or backtest output, but each closes a specific way the live
+ledger could diverge from Bybit:
+
+- **Preflight order rows.** Every `place_order` that submits to Bybit (both
+  cycles, both sleeves, including the wsrisk reduce-only exit path and the
+  limit-chase fallback-market) flushes a `status="submitted",
+  submit_mode="preflight"` row to the orders parquet *before* the venue call.
+  If the cycle dies between submission and the end-of-cycle ledger flush, the
+  `orderLinkId` is already on disk and the next cycle's
+  `_reconcile_pending_order_fills` adopts the actual fill from
+  `get_trade_history`. Without this, a crash-window fill would orphan on the
+  venue and the ledger would carry no trail.
+- **Orphan-close PnL backfill.** When `_risk_reconcile_missing_positions`
+  detects a Bybit position that has vanished but the ledger still says open,
+  it queries `get_closed_pnl` (filtered by symbol + close-side +
+  created-after-entry) and backfills `exit_price`, `gross_trade_return`,
+  `net_return`, `exit_ts_ms`, and `exit_order_id` from the actual close,
+  stamped with `submit_mode="orphan_reconciled"`. Falls back silently to the
+  legacy zero-PnL row on any failure — backfill can never block the close.
+- **Orphan-reconciler API-failure guard.** `_risk_reconcile_missing_positions`
+  takes a `position_error` argument and bails out (no orphan-closes) when the
+  upstream `get_positions` failed. Before this, a single transient REST
+  failure made `position_by_symbol={}` and false-positive orphan-closed every
+  open trade. The main demo cycle's `_reconcile_open_trades` already had this
+  guard; the wsrisk path now matches it.
+- **Cache schema-drift safety.** `PrivateStateCache` (positions/orders/wallet)
+  and `TickerCache` now only bump `last_event_monotonic` when at least one row
+  in a WS message was applied successfully. If a Bybit schema change causes
+  every row to drop, the cache goes stale on its existing timer and the cycle
+  falls back to REST — preventing the "silently-stuck cache, cycle reads
+  forever-fresh state" failure mode.
+- **Ticker-stream startup recovery.** A REST seed failure used to permanently
+  disable the WS ticker feed (the stream is skipped when the cache is empty
+  and never retried). The reconcile loop now retries
+  `_open_ticker_stream()` after each successful re-seed, so the daemon
+  recovers automatically instead of REST-falling-back for its full lifetime.
+- **Kline-warmer alert.** The hourly kline cache warmer now tracks consecutive
+  failures and sends a one-shot telegram when the streak hits 3, so a
+  sustained outage is operator-visible before cycles start REST-bursting on
+  every bar close. Streak resets on the first success, alert rearms.
+
+These are mechanical / engineering hardening — none touch the signal, the
+universe, or the parameters. Backtests and the `promoted` profile are
+unchanged. The relevant test suites (`tests/test_liquidity_migration_event_demo.py`,
+`tests/test_liquidity_migration_ws_state_cache.py`) cover each contract.
 
 ## Real-money path (built, demo by default)
 

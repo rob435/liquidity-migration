@@ -409,3 +409,77 @@ def test_ticker_thread_safety_concurrent_update_and_read() -> None:
     for t in threads:
         t.join(timeout=10.0)
     assert not errors, f"thread-safety violation: {errors!r}"
+
+
+# ---------------------------------------------------------------------------
+# Schema-drift safety (C3)
+# ---------------------------------------------------------------------------
+
+
+def test_position_event_does_not_bump_last_event_when_every_row_drops() -> None:
+    """If a Bybit schema change makes every row in the message raise on upsert,
+    the cache must NOT bump last_event_monotonic — otherwise the cycle's
+    stale-cache check never engages REST fallback and the cycle reads silently
+    stuck state forever."""
+
+    class _RaisingCache(PrivateStateCache):
+        def _upsert_position_locked(self, row):  # type: ignore[override]
+            raise RuntimeError("schema drift")
+
+    cache = _RaisingCache()
+    cache.seed()  # bumps last_event_monotonic and marks seeded
+    import time as _time
+    _time.sleep(0.01)
+    cache.on_position_event(_ws_message({"symbol": "BTCUSDT", "size": "1.0"}))
+    stats = cache.stats()
+    assert stats["position_events"] == 1
+    assert stats["dropped_events"] == 1
+    # The drop did NOT bump freshness: seconds_since_last_event remains >= sleep
+    assert stats["seconds_since_last_event"] >= 0.005
+
+
+def test_position_event_bumps_last_event_when_at_least_one_row_succeeds() -> None:
+    """Mixed success: one bad row + one good row → freshness IS bumped."""
+
+    class _SometimesRaising(PrivateStateCache):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def _upsert_position_locked(self, row):  # type: ignore[override]
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("first row drops")
+            super()._upsert_position_locked(row)
+
+    cache = _SometimesRaising()
+    cache.on_position_event(
+        _ws_message(
+            {"symbol": "BAD", "size": "1.0"},
+            {"symbol": "GOOD", "size": "1.0"},
+        )
+    )
+    stats = cache.stats()
+    assert stats["dropped_events"] == 1
+    assert stats["seconds_since_last_event"] is not None
+    # The GOOD row landed → freshness was bumped → seconds_since is near zero
+    assert stats["seconds_since_last_event"] < 1.0
+
+
+def test_ticker_event_does_not_bump_last_event_when_every_row_drops() -> None:
+    """TickerCache mirror of the PrivateStateCache schema-drift safety."""
+
+    class _RaisingTicker(TickerCache):
+        def _apply_ticker_update_locked(self, row):  # type: ignore[override]
+            raise RuntimeError("ticker schema drift")
+
+    cache = _RaisingTicker()
+    cache.seed([{"symbol": "BTCUSDT", "lastPrice": "100"}])
+    import time as _time
+    _time.sleep(0.01)
+    cache.on_ticker_event(_ws_message({"symbol": "BTCUSDT", "lastPrice": "101"}))
+    stats = cache.stats()
+    assert stats["events"] == 1
+    assert stats["dropped_events"] == 1
+    # The drop must NOT have re-bumped freshness — gap stays >= the sleep.
+    assert stats["seconds_since_last_event"] >= 0.005

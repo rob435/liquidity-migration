@@ -498,6 +498,36 @@ class BybitPrivateClient:
         payload = self._call("get_positions", **params)
         return payload.get("result", {}).get("list", [])
 
+    def get_closed_pnl(
+        self,
+        *,
+        symbol: str | None = None,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """Closed-PnL records for the account.
+
+        Used by the orphan reconciler to backfill exit_price / realized_pnl on
+        trades where the open position vanished from Bybit without our cycle
+        recording the close (eg. a manual close on the venue, a stop-loss that
+        fired between cycles, or a cycle crash mid-place-order whose order_link_id
+        we lost). Without this backfill the reconciler closes the ledger row with
+        no exit price and no PnL — accurate that the position is gone, but the
+        ledger loses the trade outcome.
+
+        Returns the result.list payload as-is (empty list on missing endpoint).
+        """
+        params: dict[str, Any] = {"category": self.category, "limit": max(1, min(int(limit), 200))}
+        if symbol:
+            params["symbol"] = symbol
+        if start_time_ms is not None:
+            params["startTime"] = int(start_time_ms)
+        if end_time_ms is not None:
+            params["endTime"] = int(end_time_ms)
+        payload = self._call_optional(("get_closed_pnl",), **params)
+        return payload.get("result", {}).get("list", []) if payload else []
+
     def set_leverage(self, *, symbol: str, buy_leverage: float = 1.0, sell_leverage: float | None = None) -> dict[str, Any]:
         if buy_leverage <= 0.0:
             raise ValueError("buy_leverage must be positive")

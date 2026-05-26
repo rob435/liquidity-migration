@@ -182,16 +182,25 @@ class PrivateStateCache:
 
     def on_position_event(self, message: Mapping[str, Any]) -> None:
         """Apply a position WS push. Bybit emits a row per symbol whose
-        size has changed; size==0 means the position has closed."""
+        size has changed; size==0 means the position has closed.
+
+        A schema drift that makes EVERY row in the message raise on upsert
+        does NOT bump ``last_event_monotonic`` -- the existing stale-cache
+        check then engages REST fallback rather than leaving the cycle
+        reading silently-stuck state.
+        """
         with self._lock:
+            applied = 0
             for row in _message_rows(message):
                 try:
                     self._upsert_position_locked(row)
+                    applied += 1
                 except Exception as exc:  # noqa: BLE001 - keep the WS thread alive
                     self._stats.dropped_events += 1
                     _logger.warning("private_state_cache position event drop: %s", exc)
             self._stats.position_events += 1
-            self._stats.last_event_monotonic = time.monotonic()
+            if applied > 0:
+                self._stats.last_event_monotonic = time.monotonic()
 
     def on_order_event(self, message: Mapping[str, Any]) -> None:
         """Apply an order WS push.
@@ -199,6 +208,8 @@ class PrivateStateCache:
         Bybit pushes order-state changes (new, partial, filled, cancelled,
         rejected). We keep only open orders so the snapshot mirrors
         ``get_open_orders()``: an order in a terminal state is removed.
+
+        Schema-drift safety: see ``on_position_event``.
         """
         terminal_statuses = {
             "filled",
@@ -211,14 +222,17 @@ class PrivateStateCache:
             "partiallyfilledcancelled",
         }
         with self._lock:
+            applied = 0
             for row in _message_rows(message):
                 try:
                     self._apply_order_update_locked(row, terminal_statuses)
+                    applied += 1
                 except Exception as exc:  # noqa: BLE001
                     self._stats.dropped_events += 1
                     _logger.warning("private_state_cache order event drop: %s", exc)
             self._stats.order_events += 1
-            self._stats.last_event_monotonic = time.monotonic()
+            if applied > 0:
+                self._stats.last_event_monotonic = time.monotonic()
 
     def on_wallet_event(self, message: Mapping[str, Any]) -> None:
         """Apply a wallet WS push.
@@ -226,16 +240,21 @@ class PrivateStateCache:
         Bybit pushes a per-account snapshot of every coin's equity on every
         balance change. We track totalEquity in USDT; secondary coins
         (BTC, ETH wallets) are not relevant to USDT-settled trading.
+
+        Schema-drift safety: see ``on_position_event``.
         """
         with self._lock:
+            applied = 0
             for row in _message_rows(message):
                 try:
                     self._apply_wallet_update_locked(row)
+                    applied += 1
                 except Exception as exc:  # noqa: BLE001
                     self._stats.dropped_events += 1
                     _logger.warning("private_state_cache wallet event drop: %s", exc)
             self._stats.wallet_events += 1
-            self._stats.last_event_monotonic = time.monotonic()
+            if applied > 0:
+                self._stats.last_event_monotonic = time.monotonic()
 
     # -- read accessors ------------------------------------------------
 
@@ -404,15 +423,21 @@ class TickerCache:
     # -- WS event update path ------------------------------------------
 
     def on_ticker_event(self, message: Mapping[str, Any]) -> None:
+        """Schema-drift safety: see PrivateStateCache.on_position_event --
+        if every row in this message raises, ``last_event_monotonic`` is
+        NOT bumped so the cycle's stale-cache check engages REST fallback."""
         with self._lock:
+            applied = 0
             for row in _message_rows(message):
                 try:
                     self._apply_ticker_update_locked(row)
+                    applied += 1
                 except Exception as exc:  # noqa: BLE001
                     self._stats.dropped_events += 1
                     _logger.warning("ticker_cache event drop: %s", exc)
             self._stats.events += 1
-            self._stats.last_event_monotonic = time.monotonic()
+            if applied > 0:
+                self._stats.last_event_monotonic = time.monotonic()
 
     # -- read accessors ------------------------------------------------
 
