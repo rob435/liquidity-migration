@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 import polars as pl
 
 from .archive import ArchiveFileNotFoundError, download_public_trade_archive, read_public_trade_archive
-from .binance import BinanceUSDMData
+from .binance import BinanceDataError, BinanceUSDMData
 from .bybit import BybitMarketData
 from .config import ResearchConfig
 from .ingestion import aggregate_trade_klines_1m, normalize_funding_history
@@ -183,25 +183,40 @@ def download_binance_usdm_proxy_data(
                 for index, symbol in enumerate(symbols, start=1)
             }
             for future in as_completed(futures):
-                outputs.update(future.result())
+                symbol = futures[future]
+                try:
+                    outputs.update(future.result())
+                except BinanceDataError as exc:
+                    # Per-symbol failure (rate limit, transient 5xx after
+                    # retries, etc.) — log + skip rather than aborting the
+                    # whole multi-hundred-symbol build. Re-running the
+                    # script will retry this symbol (markers gate the
+                    # already-finished ones). Observed 2026-05-26 on three
+                    # consecutive runs: a single symbol's premiumIndexKlines
+                    # / indexPriceKlines timeout brought down the entire
+                    # script via set -euo pipefail.
+                    print(f"WARN: binance symbol {symbol} failed; skipping. Re-run to retry: {exc}", flush=True)
         return outputs
 
     client = BinanceUSDMData()
     for index, symbol in enumerate(symbols, start=1):
-        outputs.update(
-            _download_binance_symbol_datasets(
-                data_root,
-                client=client,
-                symbol=symbol,
-                index=index,
-                total=len(symbols),
-                start_ms=start_ms,
-                end_ms=end_ms,
-                datasets=resolved,
-                interval=interval,
-                period=period,
+        try:
+            outputs.update(
+                _download_binance_symbol_datasets(
+                    data_root,
+                    client=client,
+                    symbol=symbol,
+                    index=index,
+                    total=len(symbols),
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    datasets=resolved,
+                    interval=interval,
+                    period=period,
+                )
             )
-        )
+        except BinanceDataError as exc:
+            print(f"WARN: binance symbol {symbol} failed; skipping. Re-run to retry: {exc}", flush=True)
     return outputs
 
 
