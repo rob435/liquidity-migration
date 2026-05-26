@@ -45,10 +45,9 @@ PrivateTmp=true
 ProtectSystem=full
 ProtectHome=false
 ReadWritePaths=/opt/liquidity-migration
-# 4GB RAM + 4GB swap gives 8GB virtual budget. 2.5G cap keeps this service
-# from consuming swap needed by short daemons while giving full headroom for
-# the 567-symbol 90-day kline store (~280MB) + polars frames + ticker cache.
-MemoryMax=2500M
+# 7.6GB RAM + 4GB swap. Cap at 4G so a runaway leak can't consume all RAM
+# before systemd intervenes; normal operation sits well under 1G.
+MemoryMax=4G
 
 [Install]
 WantedBy=multi-user.target

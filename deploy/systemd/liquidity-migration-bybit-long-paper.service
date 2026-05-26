@@ -48,7 +48,7 @@ PrivateTmp=true
 ProtectSystem=full
 ProtectHome=false
 ReadWritePaths=/opt/liquidity-migration
-MemoryMax=1500M
+MemoryMax=2G
 
 [Install]
 WantedBy=multi-user.target
