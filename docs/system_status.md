@@ -128,15 +128,23 @@ as live verdicts.
   order-submitting demo stack; `demo_relaxed` and the other candidates are
   shadow/dry-run only. This is a demo-only paper forward test — not
   Model-Court validated, not a real-money promotion.
-- The demo cycle fetches the top 400 symbols by 24h turnover (no absolute
-  floor) so the `promoted` strategy can both (a) trade its rank 31–150 selection
-  band and (b) observe prior-week ranks of rocket-symbols out to ~300 (the
-  trading-band ceiling + `rank_improvement_min`). `event-demo-cycle` refuses a
-  forward universe narrower than `universe_rank_max + liquidity_migration_rank_improvement_min`
-  for the active profile (promoted: 300, demo_relaxed: 340). The narrower
-  pre-2026-05-25 universe (top 220 ≥ $2M turnover → 165 symbols) silently
-  hid every signal because the prior-week rank could not reach 300 (see
-  `_validate_demo_config` and `_required_universe_rank_end`).
+- The demo cycle runs in **match-the-backtest mode** as of 2026-05-26
+  (commit `78df65a`): `UNIVERSE_RANK_END=0` and `UNIVERSE_MAX_SYMBOLS=0`
+  disable the live-ticker pre-filter so every active Bybit USDT-perp
+  (~750 symbols) feeds into daily aggregation. The strategy's
+  `universe_rank_max` then applies on the resulting daily-bar
+  `liquidity_rank`, exactly the same way the backtest does. Without
+  this widening the demo and backtest could pick different symbols on
+  the same signal date because the rank denominator differed (observed
+  2026-05-26 with DRIFTUSDT: same data, demo entered, backtest
+  rejected at `rank_improvement_min=150` because the prior7 rank was
+  computed within a 400-symbol vs 568-symbol universe). The validator
+  (`_validate_demo_config` / `_required_universe_rank_end`) accepts
+  `0/0` as the explicit unlimited-universe opt-in; partial misconfigs
+  (one zero, one positive) still trip the universe-too-narrow guard.
+  To revert to the legacy narrow-universe demo (top-400 by ticker
+  turnover, smaller kline store, but demo ≠ backtest), set both env
+  vars to 400 in the systemd unit and rebuild.
 - No real-money trading is active: demo is the default, and `demo=False` is
   refused unless real-money mode is deliberately armed (see below).
 
