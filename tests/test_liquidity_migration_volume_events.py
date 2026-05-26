@@ -692,6 +692,44 @@ def test_equity_benchmark_chart_writes_overlays_without_annotations(tmp_path: Pa
     assert not (output_dir / "volume_event_best_equity_annotations.csv").exists()
     assert chart["series"]["strategy"] == 5
     assert chart["series"]["btc"] == 5
+
+
+def test_equity_benchmark_chart_honours_custom_png_name(tmp_path: Path) -> None:
+    """Other sleeves (long_native) reuse this helper but want their own PNG
+    filename so the output dir doesn't collide with the short sleeve's
+    `volume_event_best_equity_btc.png`. The `png_name` kwarg overrides
+    the filename without changing any other rendering behaviour.
+    """
+    from PIL import Image
+
+    output_dir = tmp_path / "reports"
+    output_dir.mkdir()
+    equity = pl.DataFrame(
+        [
+            {"ts_ms": 1, "date": "2024-01-01", "equity": 1.0, "drawdown": 0.0, "basket_return": 0.0},
+            {"ts_ms": 2, "date": "2024-01-02", "equity": 1.05, "drawdown": 0.0, "basket_return": 0.05},
+        ]
+    )
+    raw_klines = pl.DataFrame(
+        [
+            {"ts_ms": 1, "date": "2024-01-01", "symbol": "BTCUSDT", "close": 100.0},
+            {"ts_ms": 2, "date": "2024-01-02", "symbol": "BTCUSDT", "close": 105.0},
+        ]
+    )
+
+    chart = _write_equity_benchmark_chart(
+        output_dir,
+        root=tmp_path,
+        equity=equity,
+        raw_klines=raw_klines,
+        png_name="long_native_equity_btc.png",
+    )
+
+    assert Path(chart["png"]).name == "long_native_equity_btc.png"
+    assert Path(chart["png"]).exists()
+    assert not (output_dir / "volume_event_best_equity_btc.png").exists()
+    with Image.open(chart["png"]) as image:
+        assert image.size == (1600, 1460)
     assert chart["monthly_rows"] == 1
     assert "spy" not in chart["series"]
     assert "spy_status" not in chart

@@ -55,6 +55,7 @@ from .volume_events import (
     _iso_date,
     _iso_month,
     _pit_manifest_metadata,
+    _write_equity_benchmark_chart,
 )
 
 
@@ -316,6 +317,25 @@ def run_long_native_research(
     if not monthly.is_empty():
         monthly.write_csv(output_dir / "long_native_monthly.csv")
 
+    # Equity-vs-BTC PNG mirrors the short-sleeve `volume_event_best_equity_btc.png`
+    # so operators get a comparable visual benchmark without a side-step renderer.
+    # The long-only sleeve fires sparse FOMO-chase setups so the strategy line is
+    # near-flat compared to BTC over the same window — that's the design (low DD,
+    # uncorrelated returns). For a purer view of strategy P&L use the CSVs.
+    chart_metadata: dict[str, Any] = {}
+    if not equity.is_empty() and not raw_klines.is_empty():
+        try:
+            chart_metadata = _write_equity_benchmark_chart(
+                output_dir,
+                root=root,
+                equity=equity,
+                raw_klines=raw_klines,
+                monthly=monthly if not monthly.is_empty() else None,
+                png_name="long_native_equity_btc.png",
+            )
+        except Exception:  # noqa: BLE001 - chart failure must not fail the run
+            chart_metadata = {}
+
     metadata = {
         "config": asdict(cfg),
         "rows": {"features": features.height, "trades": trades.height, "baskets": baskets.height},
@@ -330,6 +350,7 @@ def run_long_native_research(
         "event_counts": event_counts,
         "run_label": _run_label(full_pit_universe_pass=full_pit_universe_pass, funding_mode=funding_mode,
                                  archive_manifest_empty=archive_manifest.is_empty()),
+        "equity_chart": chart_metadata,
     }
     (output_dir / "long_native_research_report.json").write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
     (output_dir / "long_native_research_report.md").write_text(format_long_native_report(metadata), encoding="utf-8")

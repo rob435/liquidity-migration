@@ -3153,7 +3153,13 @@ def _write_equity_benchmark_chart(
     equity: pl.DataFrame,
     raw_klines: pl.DataFrame,
     monthly: pl.DataFrame | None = None,
+    png_name: str = "volume_event_best_equity_btc.png",
 ) -> dict[str, Any]:
+    """Write the strategy-vs-BTC equity PNG. ``png_name`` lets other sleeves
+    (e.g. ``long_native``) reuse this without inheriting the short-sleeve
+    filename — each sleeve drops its own ``*_equity_btc.png`` alongside its
+    research report.
+    """
     strategy = _strategy_equity_series(equity)
     if not strategy:
         return {}
@@ -3166,7 +3172,7 @@ def _write_equity_benchmark_chart(
     ]
     monthly_rows = _monthly_table_rows(equity=equity, monthly=monthly)
     _remove_stale_chart_artifacts(output_dir)
-    png_path = output_dir / "volume_event_best_equity_btc.png"
+    png_path = output_dir / png_name
     _write_equity_benchmark_png(
         png_path,
         series=series,
