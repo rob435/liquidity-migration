@@ -2441,6 +2441,49 @@ def _preflight_entry_order_row(
     }
 
 
+def _split_qty_for_max_order_size(
+    *,
+    target_qty: Decimal,
+    max_qty_per_order: float,
+    qty_step: float,
+) -> list[Decimal]:
+    """Split target_qty into N sub-quantities, each ≤ ``max_qty_per_order``.
+
+    Bybit caps market-order qty per-order (``maxMktOrderQty``) but allows the
+    same position to be built by N sequential orders each under the cap. By
+    splitting at the strategy boundary rather than the venue boundary we
+    capture the full target notional that the backtest assumed, instead of
+    the cap-and-reduce behaviour that silently under-sized live trades vs
+    backtest (observed live as REQUSDT entered at 53% of target notional).
+
+    Each sub-qty is floored to ``qty_step``. The last sub absorbs any
+    remainder from rounding so the total stays as close to ``target_qty`` as
+    the step grid allows. Returns ``[target_qty]`` (no split) when the cap
+    does not bind or is unknown (``max_qty_per_order <= 0``).
+    """
+    if max_qty_per_order <= 0.0:
+        return [target_qty]
+    cap = Decimal(str(max_qty_per_order))
+    if target_qty <= cap:
+        return [target_qty]
+    step = Decimal(str(qty_step if qty_step > 0.0 else 0.001))
+    n_subs = int(math.ceil(float(target_qty) / max_qty_per_order))
+    per_sub_raw = target_qty / n_subs
+    per_sub = (per_sub_raw // step) * step
+    if per_sub <= 0:
+        # Pathological: target_qty < step but > cap is impossible since cap > 0.
+        # Defensive: fall back to no split.
+        return [target_qty]
+    consumed = per_sub * (n_subs - 1)
+    last = target_qty - consumed
+    # Floor last to step (might equal per_sub if no remainder)
+    last = (last // step) * step
+    subs = [per_sub] * (n_subs - 1)
+    if last > 0:
+        subs.append(last)
+    return subs
+
+
 def _execute_entries(
     candidates: list[dict[str, Any]],
     *,
@@ -2467,7 +2510,7 @@ def _execute_entries(
         rows: list[dict[str, Any]] = []
         orders: list[dict[str, Any]] = []
         for candidate in candidates:
-            row, order = _execute_single_entry(
+            row, sub_orders = _execute_single_entry(
                 candidate,
                 trading_client=trading_client,
                 demo=demo,
@@ -2482,8 +2525,7 @@ def _execute_entries(
             )
             if row is not None:
                 rows.append(row)
-            if order is not None:
-                orders.append(order)
+            orders.extend(sub_orders)
         return rows, orders
 
     # Parallel path. Each worker owns its own private REST client via the
@@ -2500,7 +2542,7 @@ def _execute_entries(
             thread_local.client = client
         return client
 
-    def _task(candidate: dict[str, Any]) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    def _task(candidate: dict[str, Any]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
         return _execute_single_entry(
             candidate,
             trading_client=_worker_client(),
@@ -2522,11 +2564,10 @@ def _execute_entries(
         # row/order list ordering callers rely on for deterministic dedup.
         futures = [executor.submit(_task, candidate) for candidate in candidates]
         for future in futures:
-            row, order = future.result()
+            row, sub_orders = future.result()
             if row is not None:
                 parallel_rows.append(row)
-            if order is not None:
-                parallel_orders.append(order)
+            parallel_orders.extend(sub_orders)
     return parallel_rows, parallel_orders
 
 
@@ -2543,19 +2584,22 @@ def _execute_single_entry(
     strategy_id: str,
     record_preflight: Callable[[dict[str, Any]], None] | None = None,
     execution_event_router: Any | None = None,
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     symbol = str(candidate["symbol"])
     price = price_by_symbol.get(symbol)
     contract = contract_by_symbol.get(symbol, {})
     if price is None or price <= 0.0:
-        return None, None
+        return None, []
     tick_size = _float(contract.get("tick_size")) or 0.0001
     qty_step = _float(contract.get("qty_step")) or 0.001
     capped_notional = equity_usdt * demo.wallet_balance_fraction * order_notional_pct_equity
-    # Cap by Bybit's per-order MARKET max (cycle uses Market entries).
-    # Falling back to max_order_qty when max_market_order_qty is missing
-    # so the cap is enforced even on a partial instruments snapshot.
-    max_qty = (
+    # Compute the UNCAPPED target qty. We deliberately do NOT pass
+    # max_order_qty here -- when the venue's per-order cap binds, we split
+    # the entry into N sub-orders (each under the cap) below rather than
+    # reducing the trade's total notional. This eliminates a live-vs-backtest
+    # divergence where capped trades silently under-sized live exposure
+    # (observed REQUSDT live at 53% of target notional).
+    max_qty_per_order = (
         _float(contract.get("max_market_order_qty"))
         or _float(contract.get("max_order_qty"))
     )
@@ -2565,27 +2609,39 @@ def _execute_single_entry(
         qty_step=qty_step,
         min_order_qty=_float(contract.get("min_order_qty")),
         min_notional_value=_float(contract.get("min_notional_value")),
-        max_order_qty=max_qty,
+        max_order_qty=0.0,
     )
     if quantity is None:
-        # Log why so the operator can tell "candidate detected but
-        # skipped" from "no candidate" — without this the cycle's
-        # entries=0/candidates=N pattern is opaque. Most common
-        # cause now: max-qty cap drops the candidate when notional
-        # × cap-flooring lands the qty below min_order_qty.
         _logger.info(
             "entry sizing rejected symbol=%s notional=%.2f price=%.6g "
-            "qty_step=%s min_qty=%s min_notional=%s max_qty=%s",
+            "qty_step=%s min_qty=%s min_notional=%s",
             symbol,
             capped_notional,
             price,
             qty_step,
             _float(contract.get("min_order_qty")) or "-",
             _float(contract.get("min_notional_value")) or "-",
-            max_qty or "-",
         )
-        return None, None
+        return None, []
     qty, actual_notional = quantity
+    # Split the target qty across N sub-orders if the per-order cap binds.
+    target_qty_decimal = Decimal(qty)
+    sub_qty_decimals = _split_qty_for_max_order_size(
+        target_qty=target_qty_decimal,
+        max_qty_per_order=max_qty_per_order,
+        qty_step=qty_step,
+    )
+    sub_qty_strs = [_decimal_text(q) for q in sub_qty_decimals]
+    if len(sub_qty_strs) > 1:
+        _logger.info(
+            "entry split into %d sub-orders symbol=%s target_qty=%s "
+            "max_mkt_qty=%s sub_qtys=%s",
+            len(sub_qty_strs),
+            symbol,
+            qty,
+            max_qty_per_order,
+            sub_qty_strs,
+        )
     # demo.entry_leverage > 0 is a config invariant — _validate_demo_config
     # rejects non-positive values at parse time, so no zero-guard here.
     initial_margin_usdt = actual_notional / demo.entry_leverage
@@ -2606,16 +2662,32 @@ def _execute_single_entry(
         tick_size=tick_size,
     )
     entry_link = _order_link_id("en", symbol=symbol, signal_ts_ms=int(candidate["signal_ts_ms"]))
-    order_result: dict[str, Any] = {}
-    exec_summary: dict[str, Any] = {}
+    first_order_result: dict[str, Any] = {}
     protection_update_status = ""
     protection_update_error = ""
     submit_mode = "dry_run"
     order_status = "planned"
     error = ""
-    filled_qty = _float(qty)
-    entry_price = price
-    filled_notional = actual_notional
+    target_qty_total = sum(_float(s) for s in sub_qty_strs)
+    # Defaults: dry-run "fills" the full target at the candidate price (so the
+    # trade row reflects what would have happened); live path starts at zero
+    # filled and only accumulates from real venue fills, so a place_order or
+    # set_leverage failure leaves filled_qty=0 and the trade row is not built.
+    if demo.submit_orders:
+        filled_qty = 0.0
+        entry_price = price
+        filled_notional = 0.0
+    else:
+        filled_qty = target_qty_total
+        entry_price = price
+        filled_notional = actual_notional
+    sub_order_rows: list[dict[str, Any]] = []
+
+    def _sub_link(idx: int) -> str:
+        # Single-order path keeps the legacy entry_link verbatim for
+        # backward compat with tests + reconciler matching.
+        return entry_link if len(sub_qty_strs) == 1 else f"{entry_link}-s{idx}"
+
     if demo.submit_orders:
         assert trading_client is not None
         try:
@@ -2626,88 +2698,243 @@ def _execute_single_entry(
             error = f"set_leverage failed: {exc}"[:500]
             filled_qty = 0.0
             filled_notional = 0.0
+            # Emit a placeholder order row so the failure is auditable in the
+            # ledger (mirrors pre-split behaviour where one order_row was
+            # ALWAYS produced per candidate, even on set_leverage failure).
+            sub_order_rows.append({
+                "order_link_id": entry_link,
+                "ts_ms": now_ms,
+                "trade_id": str(candidate["trade_id"]),
+                "strategy_id": strategy_id,
+                "symbol": symbol,
+                "side": bybit_side,
+                "order_type": demo.entry_order_type,
+                "qty": qty,
+                "reduce_only": False,
+                "order_id": "",
+                "submit_mode": submit_mode,
+                "avg_price": 0.0,
+                "notional_usdt": 0.0,
+                "target_notional_pct_equity": order_notional_pct_equity,
+                "entry_leverage": demo.entry_leverage,
+                "initial_margin_usdt": 0.0,
+                "status": order_status,
+                "trade_side": side,
+                "signal_ts_ms": int(candidate["signal_ts_ms"]),
+                "entry_ready_ts_ms": int(candidate.get("entry_ready_ts_ms") or 0),
+                "entry_policy": str(candidate.get("entry_policy", "")),
+                "entry_rule": str(candidate.get("entry_rule", "")),
+                "entry_quality_tier": str(candidate.get("entry_quality_tier", "")),
+                "equity_usdt": equity_usdt,
+                "tick_size": tick_size,
+                "qty_step": qty_step,
+                "stop_price": stop_price,
+                "take_profit_price": take_profit_price,
+                "stop_loss_pct": stop_loss_pct,
+                "take_profit_pct": take_profit_pct,
+                "entry_stop_update_status": "",
+                "entry_stop_update_error": "",
+                "error": error,
+            })
+
         if not error:
-            order_params = _order_params(
-                symbol=symbol,
-                side=bybit_side,
-                qty=qty,
-                order_type=demo.entry_order_type,
-                order_link_id=entry_link,
-                reduce_only=False,
-                stop_loss=stop_price,
-                take_profit=take_profit_price if take_profit_price > 0.0 else None,
-            )
-            if record_preflight is not None:
-                record_preflight(
-                    _preflight_entry_order_row(
-                        entry_link=entry_link,
-                        now_ms=now_ms,
-                        candidate=candidate,
-                        strategy_id=strategy_id,
-                        symbol=symbol,
-                        bybit_side=bybit_side,
-                        side=side,
-                        order_type=demo.entry_order_type,
-                        qty=qty,
-                        price=price,
-                        actual_notional=actual_notional,
-                        order_notional_pct_equity=order_notional_pct_equity,
-                        entry_leverage=demo.entry_leverage,
-                        initial_margin_usdt=initial_margin_usdt,
-                        equity_usdt=equity_usdt,
-                        tick_size=tick_size,
-                        qty_step=qty_step,
-                        stop_price=stop_price,
-                        take_profit_price=take_profit_price,
-                        stop_loss_pct=stop_loss_pct,
-                        take_profit_pct=take_profit_pct,
+            total_filled_qty_acc = 0.0
+            total_fill_value_acc = 0.0
+            for idx, sub_qty_str in enumerate(sub_qty_strs):
+                is_first = idx == 0
+                sub_link = _sub_link(idx)
+                sub_target = _float(sub_qty_str)
+                sub_actual_notional = sub_target * price
+                sub_initial_margin = sub_actual_notional / demo.entry_leverage if demo.entry_leverage > 0.0 else 0.0
+
+                if record_preflight is not None:
+                    record_preflight(
+                        _preflight_entry_order_row(
+                            entry_link=sub_link,
+                            now_ms=now_ms,
+                            candidate=candidate,
+                            strategy_id=strategy_id,
+                            symbol=symbol,
+                            bybit_side=bybit_side,
+                            side=side,
+                            order_type=demo.entry_order_type,
+                            qty=sub_qty_str,
+                            price=price,
+                            actual_notional=sub_actual_notional,
+                            order_notional_pct_equity=order_notional_pct_equity,
+                            entry_leverage=demo.entry_leverage,
+                            initial_margin_usdt=sub_initial_margin,
+                            equity_usdt=equity_usdt,
+                            tick_size=tick_size,
+                            qty_step=qty_step,
+                            stop_price=stop_price,
+                            take_profit_price=take_profit_price,
+                            stop_loss_pct=stop_loss_pct,
+                            take_profit_pct=take_profit_pct,
+                        )
                     )
-                )
-            try:
-                order_result = trading_client.place_order(**order_params)
-                submit_mode = "submitted"
-            except Exception as exc:  # noqa: BLE001 - failed entries must be ledgered without aborting the cycle
-                # The exception may be a lost response AFTER Bybit accepted the
-                # order, so the entry is ledgered submitted_unconfirmed (a pending
-                # status): next cycle _reconcile_pending_order_fills probes
-                # get_trade_history and adopts a real fill, or the pending guard
-                # expires it. A "failed" status is skipped by reconciliation and
-                # would orphan a live position.
-                submit_mode = "error"
-                order_status = "submitted_unconfirmed"
-                error = f"place_order failed: {exc}"[:500]
-                filled_qty = 0.0
-                filled_notional = 0.0
-        if submit_mode == "submitted":
-            try:
-                exec_summary = _wait_for_execution_summary(
-                    trading_client,
+
+                # Bybit stops are position-level — attach to the FIRST sub-order
+                # only, so subsequent subs just add qty to the same position
+                # under the same protective stop. Avoids redundant set-trading-stop
+                # calls and matches Bybit's actual semantics.
+                sub_order_params = _order_params(
                     symbol=symbol,
-                    order_link_id=entry_link,
-                    poll_seconds=demo.order_fill_confirm_seconds,
-                    poll_interval_seconds=demo.order_fill_poll_interval_seconds,
-                    fast_poll_interval_seconds=demo.order_fill_fast_poll_interval_seconds,
-                    fast_poll_seconds=demo.order_fill_fast_poll_seconds,
-                    execution_event_router=execution_event_router,
+                    side=bybit_side,
+                    qty=sub_qty_str,
+                    order_type=demo.entry_order_type,
+                    order_link_id=sub_link,
+                    reduce_only=False,
+                    stop_loss=stop_price if is_first else None,
+                    take_profit=(take_profit_price if take_profit_price > 0.0 else None) if is_first else None,
                 )
-            except Exception as exc:  # noqa: BLE001 - order may still fill; pending reconciliation will retry
-                order_status = "submitted_unconfirmed"
-                error = f"fill confirmation failed: {exc}"[:500]
-                filled_qty = 0.0
-                filled_notional = 0.0
-            else:
-                filled_qty = _float(exec_summary.get("qty"))
-                entry_price = _float(exec_summary.get("avg_price")) or price
+
+                sub_order_result: dict[str, Any] = {}
+                sub_submit_mode = "submitted"
+                sub_error = ""
+                try:
+                    sub_order_result = trading_client.place_order(**sub_order_params)
+                    submit_mode = "submitted"
+                    if is_first:
+                        first_order_result = sub_order_result
+                except Exception as exc:  # noqa: BLE001
+                    sub_submit_mode = "error"
+                    sub_error = f"place_order failed: {exc}"[:500]
+                    # First-sub place_order failure mirrors the legacy single-order
+                    # behaviour: trade-level error + submitted_unconfirmed status so
+                    # reconciliation adopts any actual venue-side fill.
+                    if is_first and not error:
+                        submit_mode = "error"
+                        order_status = "submitted_unconfirmed"
+                        error = sub_error
+                    sub_order_rows.append({
+                        "order_link_id": sub_link,
+                        "ts_ms": now_ms,
+                        "trade_id": str(candidate["trade_id"]),
+                        "strategy_id": strategy_id,
+                        "symbol": symbol,
+                        "side": bybit_side,
+                        "order_type": demo.entry_order_type,
+                        "qty": sub_qty_str,
+                        "reduce_only": False,
+                        "order_id": "",
+                        "submit_mode": sub_submit_mode,
+                        "avg_price": 0.0,
+                        "notional_usdt": 0.0,
+                        "target_notional_pct_equity": order_notional_pct_equity,
+                        "entry_leverage": demo.entry_leverage,
+                        "initial_margin_usdt": 0.0,
+                        "status": "submitted_unconfirmed",
+                        "trade_side": side,
+                        "signal_ts_ms": int(candidate["signal_ts_ms"]),
+                        "entry_ready_ts_ms": int(candidate.get("entry_ready_ts_ms") or 0),
+                        "entry_policy": str(candidate.get("entry_policy", "")),
+                        "entry_rule": str(candidate.get("entry_rule", "")),
+                        "entry_quality_tier": str(candidate.get("entry_quality_tier", "")),
+                        "equity_usdt": equity_usdt,
+                        "tick_size": tick_size,
+                        "qty_step": qty_step,
+                        "stop_price": stop_price,
+                        "take_profit_price": take_profit_price,
+                        "stop_loss_pct": stop_loss_pct,
+                        "take_profit_pct": take_profit_pct,
+                        "entry_stop_update_status": "",
+                        "entry_stop_update_error": "",
+                        "error": sub_error,
+                    })
+                    continue
+
+                sub_filled_qty = 0.0
+                sub_avg_price = 0.0
+                sub_status = "submitted_unconfirmed"
+                try:
+                    sub_exec = _wait_for_execution_summary(
+                        trading_client,
+                        symbol=symbol,
+                        order_link_id=sub_link,
+                        poll_seconds=demo.order_fill_confirm_seconds,
+                        poll_interval_seconds=demo.order_fill_poll_interval_seconds,
+                        fast_poll_interval_seconds=demo.order_fill_fast_poll_interval_seconds,
+                        fast_poll_seconds=demo.order_fill_fast_poll_seconds,
+                        execution_event_router=execution_event_router,
+                    )
+                except Exception as exc:  # noqa: BLE001 - order may still fill; reconciliation will retry
+                    sub_status = "submitted_unconfirmed"
+                    sub_error = f"fill confirmation failed: {exc}"[:500]
+                    if is_first and not error:
+                        error = sub_error
+                        order_status = "submitted_unconfirmed"
+                else:
+                    sub_filled_qty = _float(sub_exec.get("qty"))
+                    sub_avg_price = _float(sub_exec.get("avg_price")) or price
+                    sub_tolerance = max(sub_target * 1e-8, 1e-12)
+                    if sub_target > 0.0 and sub_filled_qty + sub_tolerance >= sub_target:
+                        sub_status = "filled"
+                    elif sub_filled_qty > 0.0:
+                        sub_status = "partial"
+                    else:
+                        sub_status = "submitted_unconfirmed"
+
+                total_filled_qty_acc += sub_filled_qty
+                total_fill_value_acc += sub_avg_price * sub_filled_qty
+
+                sub_filled_str = _decimal_text(Decimal(str(sub_filled_qty))) if sub_filled_qty > 0.0 else ""
+                sub_notional = abs(sub_avg_price * sub_filled_qty) if sub_filled_qty > 0.0 else 0.0
+                sub_filled_initial_margin = sub_notional / demo.entry_leverage if demo.entry_leverage > 0.0 else 0.0
+                sub_order_rows.append({
+                    "order_link_id": sub_link,
+                    "ts_ms": now_ms,
+                    "trade_id": str(candidate["trade_id"]),
+                    "strategy_id": strategy_id,
+                    "symbol": symbol,
+                    "side": bybit_side,
+                    "order_type": demo.entry_order_type,
+                    "qty": sub_filled_str or sub_qty_str,
+                    "reduce_only": False,
+                    "order_id": sub_order_result.get("orderId", ""),
+                    "submit_mode": sub_submit_mode,
+                    "avg_price": sub_avg_price,
+                    "notional_usdt": sub_notional,
+                    "target_notional_pct_equity": order_notional_pct_equity,
+                    "entry_leverage": demo.entry_leverage,
+                    "initial_margin_usdt": sub_filled_initial_margin,
+                    "status": sub_status,
+                    "trade_side": side,
+                    "signal_ts_ms": int(candidate["signal_ts_ms"]),
+                    "entry_ready_ts_ms": int(candidate.get("entry_ready_ts_ms") or 0),
+                    "entry_policy": str(candidate.get("entry_policy", "")),
+                    "entry_rule": str(candidate.get("entry_rule", "")),
+                    "entry_quality_tier": str(candidate.get("entry_quality_tier", "")),
+                    "equity_usdt": equity_usdt,
+                    "tick_size": tick_size,
+                    "qty_step": qty_step,
+                    "stop_price": stop_price,
+                    "take_profit_price": take_profit_price,
+                    "stop_loss_pct": stop_loss_pct,
+                    "take_profit_pct": take_profit_pct,
+                    "entry_stop_update_status": "",
+                    "entry_stop_update_error": "",
+                    "error": sub_error,
+                })
+
+            # Aggregate the per-sub fills into the trade-level entry state.
+            if submit_mode == "submitted":
+                filled_qty = total_filled_qty_acc
+                if total_filled_qty_acc > 0.0:
+                    entry_price = total_fill_value_acc / total_filled_qty_acc
+                else:
+                    entry_price = price
                 filled_notional = abs(entry_price * filled_qty) if filled_qty > 0.0 else 0.0
-                target_qty = _float(qty)
-                qty_tolerance = max(target_qty * 1e-8, 1e-12)
-                if target_qty > 0.0 and filled_qty + qty_tolerance >= target_qty:
+                qty_tolerance = max(target_qty_total * 1e-8, 1e-12)
+                if target_qty_total > 0.0 and filled_qty + qty_tolerance >= target_qty_total:
                     order_status = "filled"
                 elif filled_qty > 0.0:
                     order_status = "partial"
                 else:
                     order_status = "submitted_unconfirmed"
+
             if filled_qty > 0.0:
+                # Stop-repair using the AGGREGATE avg fill price across all sub-orders.
                 filled_stop_price = _stop_price_for_entry(
                     entry_price=entry_price,
                     side=side,
@@ -2740,6 +2967,57 @@ def _execute_single_entry(
                         protection_update_error = str(exc)[:500]
                 stop_price = filled_stop_price
                 take_profit_price = filled_take_profit_price
+                # Propagate the stop-repair status onto every sub-order row so
+                # ledger consumers can audit the protection state per-sub.
+                for sub_row in sub_order_rows:
+                    sub_row["entry_stop_update_status"] = protection_update_status
+                    sub_row["entry_stop_update_error"] = protection_update_error
+                    sub_row["stop_price"] = stop_price
+                    sub_row["take_profit_price"] = take_profit_price
+
+    else:
+        # Dry-run / record-only: one order row per sub-qty, no venue calls.
+        for idx, sub_qty_str in enumerate(sub_qty_strs):
+            sub_link = _sub_link(idx)
+            sub_target = _float(sub_qty_str)
+            sub_actual_notional = sub_target * price
+            sub_initial_margin = sub_actual_notional / demo.entry_leverage if demo.entry_leverage > 0.0 else 0.0
+            sub_order_rows.append({
+                "order_link_id": sub_link,
+                "ts_ms": now_ms,
+                "trade_id": str(candidate["trade_id"]),
+                "strategy_id": strategy_id,
+                "symbol": symbol,
+                "side": bybit_side,
+                "order_type": demo.entry_order_type,
+                "qty": sub_qty_str,
+                "reduce_only": False,
+                "order_id": "",
+                "submit_mode": "dry_run",
+                "avg_price": price,
+                "notional_usdt": sub_actual_notional,
+                "target_notional_pct_equity": order_notional_pct_equity,
+                "entry_leverage": demo.entry_leverage,
+                "initial_margin_usdt": sub_initial_margin,
+                "status": "planned",
+                "trade_side": side,
+                "signal_ts_ms": int(candidate["signal_ts_ms"]),
+                "entry_ready_ts_ms": int(candidate.get("entry_ready_ts_ms") or 0),
+                "entry_policy": str(candidate.get("entry_policy", "")),
+                "entry_rule": str(candidate.get("entry_rule", "")),
+                "entry_quality_tier": str(candidate.get("entry_quality_tier", "")),
+                "equity_usdt": equity_usdt,
+                "tick_size": tick_size,
+                "qty_step": qty_step,
+                "stop_price": stop_price,
+                "take_profit_price": take_profit_price,
+                "stop_loss_pct": stop_loss_pct,
+                "take_profit_pct": take_profit_pct,
+                "entry_stop_update_status": "",
+                "entry_stop_update_error": "",
+                "error": "",
+            })
+
     entry_qty = _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0.0 else ""
     filled_initial_margin_usdt = filled_notional / demo.entry_leverage if demo.entry_leverage > 0.0 else 0.0
     trade_row: dict[str, Any] | None = None
@@ -2767,47 +3045,12 @@ def _execute_single_entry(
             "entry_stop_update_status": protection_update_status,
             "entry_stop_update_error": protection_update_error,
             "entry_order_link_id": entry_link,
-            "entry_order_id": order_result.get("orderId", ""),
+            "entry_order_id": first_order_result.get("orderId", ""),
             "submit_mode": submit_mode,
             "opened_at_ms": now_ms,
             "updated_at_ms": now_ms,
         }
-    order_row = {
-        "order_link_id": entry_link,
-        "ts_ms": now_ms,
-        "trade_id": str(candidate["trade_id"]),
-        "strategy_id": strategy_id,
-        "symbol": symbol,
-        "side": bybit_side,
-        "order_type": demo.entry_order_type,
-        "qty": entry_qty or qty,
-        "reduce_only": False,
-        "order_id": order_result.get("orderId", ""),
-        "submit_mode": submit_mode,
-        "avg_price": entry_price,
-        "notional_usdt": filled_notional if demo.submit_orders else actual_notional,
-        "target_notional_pct_equity": order_notional_pct_equity,
-        "entry_leverage": demo.entry_leverage,
-        "initial_margin_usdt": filled_initial_margin_usdt if demo.submit_orders else initial_margin_usdt,
-        "status": order_status,
-        "trade_side": side,
-        "signal_ts_ms": int(candidate["signal_ts_ms"]),
-        "entry_ready_ts_ms": int(candidate.get("entry_ready_ts_ms") or 0),
-        "entry_policy": str(candidate.get("entry_policy", "")),
-        "entry_rule": str(candidate.get("entry_rule", "")),
-        "entry_quality_tier": str(candidate.get("entry_quality_tier", "")),
-        "equity_usdt": equity_usdt,
-        "tick_size": tick_size,
-        "qty_step": qty_step,
-        "stop_price": stop_price,
-        "take_profit_price": take_profit_price,
-        "stop_loss_pct": stop_loss_pct,
-        "take_profit_pct": take_profit_pct,
-        "entry_stop_update_status": protection_update_status,
-        "entry_stop_update_error": protection_update_error,
-        "error": error,
-    }
-    return trade_row, order_row
+    return trade_row, sub_order_rows
 
 
 def _filter_pending_entry_orders(

@@ -31,6 +31,7 @@ from liquidity_migration.event_demo import (
     _orphan_close_pnl_backfill,
     _preflight_exit_order_row,
     _risk_reconcile_missing_positions,
+    _split_qty_for_max_order_size,
     _filter_live_open_exit_orders,
     _download_recent_1h_klines,
     _limit_chase_price,
@@ -4912,6 +4913,193 @@ def test_submit_reduce_only_exit_writes_preflight_before_place_order_market() ->
     assert pre["status"] == "submitted"
     assert pre["order_type"] == "Market"
     assert pre["side"] == "Buy"
+
+
+# ---------------------------------------------------------------------------
+# Sub-order split when target qty exceeds maxMktOrderQty (G1)
+# ---------------------------------------------------------------------------
+
+
+def test_split_qty_returns_single_qty_when_cap_does_not_bind() -> None:
+    """When target_qty <= max_qty_per_order, no split."""
+    from decimal import Decimal as D
+
+    result = _split_qty_for_max_order_size(
+        target_qty=D("1000"), max_qty_per_order=20000.0, qty_step=1.0
+    )
+    assert result == [D("1000")]
+
+
+def test_split_qty_returns_single_qty_when_cap_is_zero() -> None:
+    """max_qty_per_order=0 means unknown cap → don't split."""
+    from decimal import Decimal as D
+
+    result = _split_qty_for_max_order_size(
+        target_qty=D("100000"), max_qty_per_order=0.0, qty_step=1.0
+    )
+    assert result == [D("100000")]
+
+
+def test_split_qty_splits_into_two_evenly_when_target_is_1_5x_cap() -> None:
+    """target=30000, max=20000 → 2 subs of 15000 each (sum=30000)."""
+    from decimal import Decimal as D
+
+    result = _split_qty_for_max_order_size(
+        target_qty=D("30000"), max_qty_per_order=20000.0, qty_step=1.0
+    )
+    assert result == [D("15000"), D("15000")]
+    assert sum(result) == D("30000")
+    assert all(float(q) <= 20000.0 for q in result)
+
+
+def test_split_qty_splits_into_three_when_target_is_2_5x_cap() -> None:
+    """target=50000, max=20000 → 3 subs (each ≤ 20000) summing to 50000."""
+    from decimal import Decimal as D
+
+    result = _split_qty_for_max_order_size(
+        target_qty=D("50000"), max_qty_per_order=20000.0, qty_step=1.0
+    )
+    # 50000 / 3 = 16666.67 floored to step 1 = 16666; last sub absorbs
+    # the remainder: 50000 - 16666 * 2 = 16668, floored to step 1 = 16668
+    assert len(result) == 3
+    assert sum(result) == D("50000")
+    assert all(float(q) <= 20000.0 for q in result)
+
+
+def test_split_qty_respects_qty_step_with_step_alignment() -> None:
+    """Sub-qtys must be aligned to qty_step (here 0.1)."""
+    from decimal import Decimal as D
+
+    result = _split_qty_for_max_order_size(
+        target_qty=D("250.0"), max_qty_per_order=100.0, qty_step=0.1
+    )
+    # 250 / ceil(250/100)=3 = 83.33 → floored to 0.1 step = 83.3
+    # last = 250 - 83.3*2 = 83.4 → floored = 83.4
+    assert len(result) == 3
+    for q in result:
+        # every qty should be a multiple of 0.1
+        assert (q * 10) % 1 == 0
+
+
+def test_split_qty_matches_the_req_usdt_live_case() -> None:
+    """Reproduces the REQUSDT live case: target ~37500 contracts at max=20000.
+
+    Previously the order was capped-and-reduced to 20000 contracts (53% of
+    target notional). With split it becomes 2× ~18750 contracts (100% of
+    target notional)."""
+    from decimal import Decimal as D
+
+    result = _split_qty_for_max_order_size(
+        target_qty=D("37500"), max_qty_per_order=20000.0, qty_step=1.0
+    )
+    assert len(result) == 2
+    assert sum(result) == D("37500")
+    assert all(float(q) <= 20000.0 for q in result)
+    # Both sub-qtys should be roughly equal (within 1 step)
+    assert abs(float(result[0]) - float(result[1])) <= 1.0
+
+
+def test_execute_single_entry_splits_into_sub_orders_when_cap_binds() -> None:
+    """End-to-end: REQUSDT-like scenario produces 2 order rows + 1 trade row
+    with the FULL target qty filled (not capped-and-reduced)."""
+    candidate = {
+        "trade_id": "split-1",
+        "symbol": "REQUSDT",
+        "side": "short",
+        "signal_ts_ms": 1_700_000_000_000,
+        "stop_loss_pct": 0.12,
+        "take_profit_pct": 0.26,
+    }
+    # Use the FakeRiskClient that will fill_market_orders to simulate fills
+    client = FakeRiskClient(
+        fill_market_orders=True,
+        fill_order_prefixes=("lm-en-",),
+        fill_qty="18750",  # each sub-order returns this filled qty
+        fill_price="0.08676",
+    )
+    rows, orders = _execute_entries(
+        [candidate],
+        trading_client=client,
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        equity_usdt=9756.0,
+        order_notional_pct_equity=0.3333,
+        price_by_symbol={"REQUSDT": 0.08676},
+        contract_by_symbol={
+            "REQUSDT": {
+                "tick_size": 0.00001,
+                "qty_step": 1.0,
+                "min_order_qty": 1.0,
+                "min_notional_value": 5.0,
+                # The cap that binds — target qty ~37500, cap 20000 → split into 2
+                "max_market_order_qty": 20000.0,
+            },
+        },
+        now_ms=1_700_000_060_000,
+        strategy_id=DEMO_RELAXED_STRATEGY_ID,
+    )
+
+    # 1 trade row, 2 sub-order rows
+    assert len(rows) == 1, f"expected 1 aggregated trade row, got {len(rows)}"
+    assert len(orders) == 2, f"expected 2 sub-order rows, got {len(orders)}"
+    # Each sub-order under the cap
+    for o in orders:
+        # qty is the FILLED qty from the FakeRiskClient (18750 per fill)
+        assert float(o["qty"]) <= 20000.0
+    # Sub-orders share the base entry_link with -s0, -s1 suffixes
+    base_link = orders[0]["order_link_id"].rsplit("-s", 1)[0]
+    suffixes = sorted([o["order_link_id"].rsplit("-s", 1)[1] for o in orders])
+    assert suffixes == ["0", "1"]
+    assert all(o["order_link_id"].startswith(base_link) for o in orders)
+    # Aggregate trade row: qty = sum of filled qtys = 2 * 18750 = 37500
+    assert float(rows[0]["qty"]) == 37500.0
+
+
+def test_execute_single_entry_no_split_when_cap_does_not_bind() -> None:
+    """When target_qty <= max_market_order_qty, no split: 1 order row."""
+    candidate = {
+        "trade_id": "single-1",
+        "symbol": "AAAUSDT",
+        "side": "short",
+        "signal_ts_ms": 1_700_000_000_000,
+        "stop_loss_pct": 0.12,
+        "take_profit_pct": 0.26,
+    }
+    client = FakeRiskClient(
+        fill_market_orders=True,
+        fill_order_prefixes=("lm-en-",),
+        fill_qty="50",
+        fill_price="100",
+    )
+    rows, orders = _execute_entries(
+        [candidate],
+        trading_client=client,
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.5,  # target = 5000 / 100 = 50 contracts
+        price_by_symbol={"AAAUSDT": 100.0},
+        contract_by_symbol={
+            "AAAUSDT": {
+                "tick_size": 0.1, "qty_step": 0.1,
+                "min_order_qty": 0.1, "min_notional_value": 5.0,
+                "max_market_order_qty": 1000.0,  # well above target
+            },
+        },
+        now_ms=1_700_000_060_000,
+        strategy_id=DEMO_RELAXED_STRATEGY_ID,
+    )
+
+    assert len(rows) == 1
+    assert len(orders) == 1
+    # No -s suffix on the link (single-order path preserves legacy entry_link)
+    assert "-s" not in orders[0]["order_link_id"].rsplit("-", 1)[-1]
 
 
 def test_submit_reduce_only_exit_skips_preflight_on_dry_run() -> None:
