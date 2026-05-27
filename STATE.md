@@ -1,6 +1,6 @@
 # Research-program state
 
-**Last updated:** 2026-05-27 (post K1-K5 refactor + research-plan commit + 2026-05-28 sweep verdict)
+**Last updated:** 2026-05-27 (post code changes 1-4 + Phase 0 pre-reg)
 
 > If you are a Claude session opening this repo for the first time, read this
 > file FIRST. It tells you in 60 seconds what's been done, what's running,
@@ -15,8 +15,13 @@
 - Current research program: 7-phase rank-direction edge + universe isolation +
   filter audit + signal-research harness. Pre-reg at
   `docs/preregistration/2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md`.
-- Next action: implement the 4 code changes listed in the plan's "Code changes
-  required" section, then run phases on the 5950X workstation.
+- All 4 code changes are merged (`ef9d3aa`, `ed7c5d8`). Phase 0 (filter LOO
+  audit) pre-registered at
+  `docs/preregistration/2026-05-27-phase0-filter-loo-audit.md`, ready to
+  dispatch via `scripts/phase0_loo_sweep.py`.
+- Next action: dispatch Phase 0, then in parallel Phase 1 (universe-isolation
+  diagnostic; needs `scripts/build_legacy_archive_manifest.py` run first)
+  and Phase 5a (build feature panels).
 
 ## What's done
 
@@ -26,6 +31,9 @@
 | 2026-05-27 | Sweep orchestrator + 10-cell EXPLORATORY sweep on Mac (REJECTED) | commit `8fb61b5` (pre-reg), `2f67746` (verdict) |
 | 2026-05-27 | v5-listing supplement made always-on; "fallback" naming dropped | commit `17f55e5` |
 | 2026-05-27 | 7-phase research plan pre-registered (rank-direction + signal harness) | commit `e7dd104` |
+| 2026-05-27 | Code changes 1-3: rank-direction flag, sweep parallelism, legacy-archive manifest builder | commit `ef9d3aa` |
+| 2026-05-27 | Code change 4: signal_harness module (20 features + IC + portfolio + CLI) | commit `ed7c5d8` |
+| 2026-05-27 | Phase 0 pre-registered (filter LOO audit, 15 cells × 2 venues) | this commit |
 
 ## What's NOT done (the work)
 
@@ -33,21 +41,21 @@ The pre-registered plan at
 `docs/preregistration/2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md`.
 Open work:
 
-### Code changes (must precede any research run)
+### Code changes — all merged
 
-| Change | Effort | Status |
-|---|---:|---|
-| 1. `--liquidity-migration-rank-direction` flag | ~1h | TODO |
-| 2. `scripts/sweep_cells.py` parallelism (ThreadPoolExecutor) | ~2h | TODO |
-| 3. `scripts/build_legacy_archive_manifest.py` | ~30m | TODO |
-| 4. `liquidity_migration/signal_harness.py` module | ~1 day | TODO |
+| Change | Receipt |
+|---|---|
+| 1. `--liquidity-migration-rank-direction` flag | commit `ef9d3aa` |
+| 2. `scripts/sweep_cells.py` parallelism (ThreadPoolExecutor + shared `_sweep_runtime.py`) | commit `ef9d3aa` (+ this commit factors out the runtime) |
+| 3. `scripts/build_legacy_archive_manifest.py` | commit `ef9d3aa` |
+| 4. `liquidity_migration/signal_harness.py` module + CLI | commit `ed7c5d8` |
 
-### Phases (after code changes)
+### Phases
 
 | Phase | Purpose | Pre-requisites | Status |
 |---|---|---|---|
-| 0 | Filter LOO audit | none | not started |
-| 1 | Universe-isolation diagnostic | Change 3 | not started |
+| 0 | Filter LOO audit | none | **pre-registered, ready to dispatch** |
+| 1 | Universe-isolation diagnostic | Change 3 + run `build_legacy_archive_manifest.py` | not started |
 | 2 | Rank-direction full grid | Change 1 | not started |
 | 3 | Exit selection (conditional on P2 candidate) | P2 candidate | not started |
 | 4 | Hybrid event types (conditional on P2+P3) | P2+P3 | not started |

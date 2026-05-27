@@ -1,45 +1,32 @@
-"""15-cell × 2-venue parameter sweep dispatcher.
+"""15-cell × 2-venue parameter sweep dispatcher (LEGACY 2026-05-28 EXPLORATORY sweep).
 
 Pre-reg: docs/preregistration/2026-05-28-liquidity-capacity-filter-and-filter-tweak-sweep.md
+Verdict: REJECTED (commit 2f67746, 2026-05-27).
 
-For each (cell, venue) combination, shells out to the `volume-events` CLI with
-the cell's parameter overrides, parses the resulting
-volume_event_research_report.json for headline metrics, and writes a single
-aggregate sweep_summary.csv.
+This script is kept for reproducibility of the 2026-05-28 sweep cells; the
+parallel-execution machinery has been factored into ``scripts/_sweep_runtime.py``
+so future phase orchestrators (Phase 0 LOO audit, Phase 1 universe diagnostic,
+Phase 2 direction grid, Phase 4 hybrid events, Phase 6 combined-portfolio) can
+all share the same dispatch + summary-flush + atomic-print primitives.
 
 EXPLORATORY label: not promotion evidence. Decision rule (a priori): a cell
 qualifies only if Sharpe Δ ≥ +0.5 vs baseline on BOTH venues AND max-DD Δ ≤
 +5pp on both. See pre-reg doc for the full rule.
 
-Parallelism (added 2026-05-27 for the 5950X workstation rollout): cells
-dispatch via concurrent.futures.ThreadPoolExecutor with one cell per worker.
-Default 8 workers × POLARS_MAX_THREADS=4 = 32 threads (full 5950X SMT
-occupancy). Override via env:
-    SWEEP_MAX_WORKERS    cells run in parallel (default 8)
-    POLARS_MAX_THREADS   threads per cell's polars/rayon runtime (default 4)
-The summary CSV is rewritten under a lock after every cell completion, so
-the file always reflects all completed cells (sans in-flight ones) — safe
-to inspect mid-run and resume-friendly on interruption.
+Dispatch:
+
+    SWEEP_MAX_WORKERS=8 POLARS_MAX_THREADS=4 \\
+      .venv/Scripts/python.exe scripts/sweep_cells.py
 """
 from __future__ import annotations
 
-import concurrent.futures
-import csv
-import json
-import os
-import subprocess
 import sys
-import threading
-import time
-from dataclasses import dataclass, field
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent.parent
-SHARED = Path.home() / "SHARED_DATA"
-SWEEP_TAG = "sweep_2026-05-28"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _sweep_runtime import SHARED, Cell, run_sweep  # noqa: E402
 
-MAX_WORKERS = max(1, int(os.environ.get("SWEEP_MAX_WORKERS", "8")))
-PER_CELL_POLARS_THREADS = max(1, int(os.environ.get("POLARS_MAX_THREADS", "4")))
+SWEEP_TAG = "sweep_2026-05-28"
 
 # Window: 2025-01-01 → 2026-05-28 (~17 months). Trimmed from the 2023-26
 # in-sample window because the sweep is exploratory + computationally
@@ -54,13 +41,6 @@ VENUES = {
     "bybit":   SHARED / "bybit_full_pit",
     "binance": SHARED / "binance_full_pit",
 }
-
-
-@dataclass
-class Cell:
-    cell_id: str
-    description: str
-    overrides: dict[str, str] = field(default_factory=dict)
 
 
 # Baseline = current production promoted profile (matches deploy/systemd
@@ -121,161 +101,17 @@ CELLS: list[Cell] = [
 ]
 
 
-_PRINT_LOCK = threading.Lock()
-
-
-def _atomic_print(*lines: str) -> None:
-    """Print one or more lines atomically so concurrent worker output does
-    not interleave mid-line. Each call holds the lock for one block of
-    lines; ordering across calls is not preserved, but each block stays
-    intact, which is what's needed for readable scroll-back."""
-    with _PRINT_LOCK:
-        for line in lines:
-            print(line)
-        sys.stdout.flush()
-
-
-def _subprocess_env() -> dict[str, str]:
-    """Per-cell subprocess env: pins polars/rayon thread count so total
-    in-flight thread budget stays at MAX_WORKERS * PER_CELL_POLARS_THREADS."""
-    env = dict(os.environ)
-    env["POLARS_MAX_THREADS"] = str(PER_CELL_POLARS_THREADS)
-    env["RAYON_NUM_THREADS"] = str(PER_CELL_POLARS_THREADS)
-    return env
-
-
-def run_cell(cell: Cell, venue: str, data_root: Path) -> dict[str, str]:
-    """Run one cell on one venue, return per-cell metrics dict.
-
-    Designed to be invoked from a ThreadPoolExecutor; the subprocess call
-    blocks the worker thread (which is fine — Python releases the GIL
-    during subprocess.run) and stdout output is serialised via _atomic_print.
-    """
-    report_dir = data_root / "reports" / SWEEP_TAG / cell.cell_id
-    report_dir.mkdir(parents=True, exist_ok=True)
-    params = dict(BASELINE_PARAMS)
-    params.update(cell.overrides)
-    cmd = [
-        sys.executable, "-m", "liquidity_migration",
-        "--data-root", str(data_root),
-        "--config", "configs/volume_alpha.default.yaml",
-        "volume-events",
-        "--start", START_DATE,
-        "--end", END_DATE,
-        "--allow-partial-pit",  # pre-existing 2021 manifest gap
-        "--report-dir", str(report_dir),
-    ]
-    for k, v in params.items():
-        cmd.extend([k, v])
-
-    start = time.monotonic()
-    _atomic_print(f"  [{venue}/{cell.cell_id}] START  {cell.description}  →  {report_dir}")
-    proc = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, env=_subprocess_env())
-    elapsed = time.monotonic() - start
-    if proc.returncode != 0:
-        _atomic_print(
-            f"  [{venue}/{cell.cell_id}] FAILED (exit={proc.returncode}, {elapsed:.1f}s)",
-            f"    stderr (last 500): {proc.stderr[-500:]}",
-        )
-        return {
-            "venue": venue,
-            "cell_id": cell.cell_id,
-            "description": cell.description,
-            "status": "failed",
-            "elapsed_seconds": f"{elapsed:.1f}",
-            "error": proc.stderr[-500:].replace("\n", " | "),
-        }
-
-    # Parse the report JSON for headline metrics. Use best-scenario fields.
-    report_json = report_dir / "volume_event_research_report.json"
-    if not report_json.exists():
-        _atomic_print(f"  [{venue}/{cell.cell_id}] NO_REPORT ({elapsed:.1f}s) — expected {report_json}")
-        return {
-            "venue": venue, "cell_id": cell.cell_id, "description": cell.description,
-            "status": "no_report", "elapsed_seconds": f"{elapsed:.1f}",
-        }
-    payload = json.loads(report_json.read_text())
-    best = payload.get("best_scenario", {})
-    row = {
-        "venue": venue,
-        "cell_id": cell.cell_id,
-        "description": cell.description,
-        "status": "ok",
-        "elapsed_seconds": f"{elapsed:.1f}",
-        "trades": str(best.get("trades", 0)),
-        "total_return": f"{best.get('total_return', 0.0):.4f}",
-        "max_drawdown": f"{best.get('max_drawdown', 0.0):.4f}",
-        "avg_split_sharpe": f"{best.get('avg_split_sharpe', 0.0):.4f}",
-        "sharpe_like": f"{best.get('sharpe_like', best.get('sharpe', 0.0)):.4f}",
-        "promotable": str(best.get("promote", False)),
-        "worst_90d": f"{best.get('worst_90d_return', 0.0):.4f}",
-        "report_dir": str(report_dir),
-    }
-    _atomic_print(
-        f"  [{venue}/{cell.cell_id}] OK ({elapsed:.1f}s)  "
-        f"trades={row['trades']}  ret={row['total_return']}  dd={row['max_drawdown']}  sharpe={row['sharpe_like']}"
-    )
-    return row
-
-
-def _write_summary(summary_path: Path, rows: list[dict[str, str]]) -> None:
-    """Rewrite the aggregate summary CSV. Caller must hold the rows lock."""
-    if not rows:
-        return
-    fieldnames = sorted({k for r in rows for k in r.keys()})
-    with open(summary_path, "w", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=fieldnames)
-        writer.writeheader()
-        for r in rows:
-            writer.writerow(r)
-
-
 def main() -> int:
     summary_path = SHARED / f"{SWEEP_TAG}_summary.csv"
-    work: list[tuple[Cell, str, Path]] = []
-    for venue, data_root in VENUES.items():
-        if not data_root.exists():
-            print(f"SKIP venue={venue}: data root not found at {data_root}")
-            continue
-        for cell in CELLS:
-            work.append((cell, venue, data_root))
-
-    print(f"sweep summary → {summary_path}")
-    print(f"window: {START_DATE} → {END_DATE}")
-    print(
-        f"cells: {len(CELLS)}  venues: {len(VENUES)}  total runs: {len(work)}  "
-        f"parallel: SWEEP_MAX_WORKERS={MAX_WORKERS}  POLARS_MAX_THREADS={PER_CELL_POLARS_THREADS}  "
-        f"(thread budget = {MAX_WORKERS * PER_CELL_POLARS_THREADS})"
+    return run_sweep(
+        CELLS,
+        VENUES,
+        baseline_params=BASELINE_PARAMS,
+        start_date=START_DATE,
+        end_date=END_DATE,
+        sweep_tag=SWEEP_TAG,
+        summary_path=summary_path,
     )
-    print()
-
-    rows: list[dict[str, str]] = []
-    rows_lock = threading.Lock()
-
-    sweep_start = time.monotonic()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = {ex.submit(run_cell, cell, venue, data_root): (cell, venue) for cell, venue, data_root in work}
-        for fut in concurrent.futures.as_completed(futures):
-            cell, venue = futures[fut]
-            try:
-                row = fut.result()
-            except Exception as exc:  # noqa: BLE001 — orchestrator wants every failure recorded, not raised
-                row = {
-                    "venue": venue,
-                    "cell_id": cell.cell_id,
-                    "description": cell.description,
-                    "status": "exception",
-                    "elapsed_seconds": "0.0",
-                    "error": f"{type(exc).__name__}: {exc}",
-                }
-                _atomic_print(f"  [{venue}/{cell.cell_id}] EXCEPTION: {type(exc).__name__}: {exc}")
-            with rows_lock:
-                rows.append(row)
-                _write_summary(summary_path, rows)
-
-    elapsed_total = time.monotonic() - sweep_start
-    print(f"\nDONE. wrote {len(rows)} rows to {summary_path} in {elapsed_total/60:.1f} min")
-    return 0
 
 
 if __name__ == "__main__":

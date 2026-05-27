@@ -1,0 +1,234 @@
+"""Shared parallel-sweep runtime for the multi-phase research program.
+
+Used by ``scripts/sweep_cells.py`` (legacy 2026-05-28 EXPLORATORY sweep) and
+``scripts/phase0_loo_sweep.py`` (Phase 0 filter LOO audit). Future phase
+orchestrators (Phase 1 universe diagnostic, Phase 2 direction grid, etc.)
+import the same primitives:
+
+  Cell                — (cell_id, description, overrides)
+  run_cell()          — invoke `python -m liquidity_migration volume-events`
+                        for one (cell, venue), parse the report JSON,
+                        return a metrics dict
+  run_sweep()         — ThreadPoolExecutor dispatch + locked summary.csv
+                        write + atomic-print stdout serialisation
+
+The runtime honours two env vars set by the operator (matching the
+research-phase-runner skill):
+  SWEEP_MAX_WORKERS    cells run in parallel (default 8)
+  POLARS_MAX_THREADS   threads per cell's polars/rayon runtime (default 4)
+
+8 × 4 = 32 = full 5950X SMT occupancy.
+"""
+from __future__ import annotations
+
+import concurrent.futures
+import csv
+import json
+import os
+import subprocess
+import sys
+import threading
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Mapping
+
+REPO = Path(__file__).resolve().parent.parent
+SHARED = Path.home() / "SHARED_DATA"
+
+MAX_WORKERS = max(1, int(os.environ.get("SWEEP_MAX_WORKERS", "8")))
+PER_CELL_POLARS_THREADS = max(1, int(os.environ.get("POLARS_MAX_THREADS", "4")))
+
+
+@dataclass
+class Cell:
+    cell_id: str
+    description: str
+    overrides: dict[str, str] = field(default_factory=dict)
+
+
+_PRINT_LOCK = threading.Lock()
+
+
+def _atomic_print(*lines: str) -> None:
+    with _PRINT_LOCK:
+        for line in lines:
+            print(line)
+        sys.stdout.flush()
+
+
+def _subprocess_env() -> dict[str, str]:
+    env = dict(os.environ)
+    env["POLARS_MAX_THREADS"] = str(PER_CELL_POLARS_THREADS)
+    env["RAYON_NUM_THREADS"] = str(PER_CELL_POLARS_THREADS)
+    return env
+
+
+def run_cell(
+    cell: Cell,
+    venue: str,
+    data_root: Path,
+    *,
+    baseline_params: Mapping[str, str],
+    start_date: str,
+    end_date: str,
+    sweep_tag: str,
+    config_path: str = "configs/volume_alpha.default.yaml",
+) -> dict[str, str]:
+    """Run one cell on one venue, return per-cell metrics dict.
+
+    Shells out to ``python -m liquidity_migration volume-events`` with the
+    baseline params + cell overrides + the standard window / report-dir
+    flags. Parses the resulting ``volume_event_research_report.json`` for
+    headline metrics; on failure, returns a row with status='failed' so
+    the orchestrator can record what went wrong.
+    """
+    report_dir = data_root / "reports" / sweep_tag / cell.cell_id
+    report_dir.mkdir(parents=True, exist_ok=True)
+    params = dict(baseline_params)
+    params.update(cell.overrides)
+    cmd = [
+        sys.executable, "-m", "liquidity_migration",
+        "--data-root", str(data_root),
+        "--config", config_path,
+        "volume-events",
+        "--start", start_date,
+        "--end", end_date,
+        "--allow-partial-pit",
+        "--report-dir", str(report_dir),
+    ]
+    for k, v in params.items():
+        cmd.extend([k, v])
+
+    start = time.monotonic()
+    _atomic_print(f"  [{venue}/{cell.cell_id}] START  {cell.description}  →  {report_dir}")
+    proc = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, env=_subprocess_env())
+    elapsed = time.monotonic() - start
+    if proc.returncode != 0:
+        _atomic_print(
+            f"  [{venue}/{cell.cell_id}] FAILED (exit={proc.returncode}, {elapsed:.1f}s)",
+            f"    stderr (last 500): {proc.stderr[-500:]}",
+        )
+        return {
+            "venue": venue,
+            "cell_id": cell.cell_id,
+            "description": cell.description,
+            "status": "failed",
+            "elapsed_seconds": f"{elapsed:.1f}",
+            "error": proc.stderr[-500:].replace("\n", " | "),
+        }
+
+    report_json = report_dir / "volume_event_research_report.json"
+    if not report_json.exists():
+        _atomic_print(f"  [{venue}/{cell.cell_id}] NO_REPORT ({elapsed:.1f}s) — expected {report_json}")
+        return {
+            "venue": venue, "cell_id": cell.cell_id, "description": cell.description,
+            "status": "no_report", "elapsed_seconds": f"{elapsed:.1f}",
+        }
+    payload = json.loads(report_json.read_text())
+    best = payload.get("best_scenario", {})
+    row = {
+        "venue": venue,
+        "cell_id": cell.cell_id,
+        "description": cell.description,
+        "status": "ok",
+        "elapsed_seconds": f"{elapsed:.1f}",
+        "trades": str(best.get("trades", 0)),
+        "total_return": f"{best.get('total_return', 0.0):.4f}",
+        "max_drawdown": f"{best.get('max_drawdown', 0.0):.4f}",
+        "avg_split_sharpe": f"{best.get('avg_split_sharpe', 0.0):.4f}",
+        "sharpe_like": f"{best.get('sharpe_like', best.get('sharpe', 0.0)):.4f}",
+        "promotable": str(best.get("promote", False)),
+        "worst_90d": f"{best.get('worst_90d_return', 0.0):.4f}",
+        "report_dir": str(report_dir),
+    }
+    _atomic_print(
+        f"  [{venue}/{cell.cell_id}] OK ({elapsed:.1f}s)  "
+        f"trades={row['trades']}  ret={row['total_return']}  dd={row['max_drawdown']}  sharpe={row['sharpe_like']}"
+    )
+    return row
+
+
+def _write_summary(summary_path: Path, rows: list[dict[str, str]]) -> None:
+    if not rows:
+        return
+    fieldnames = sorted({k for r in rows for k in r.keys()})
+    with open(summary_path, "w", newline="") as fh:
+        writer = csv.DictWriter(fh, fieldnames=fieldnames)
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(r)
+
+
+def run_sweep(
+    cells: list[Cell],
+    venues: Mapping[str, Path],
+    *,
+    baseline_params: Mapping[str, str],
+    start_date: str,
+    end_date: str,
+    sweep_tag: str,
+    summary_path: Path,
+    config_path: str = "configs/volume_alpha.default.yaml",
+) -> int:
+    """Dispatch (cell × venue) work to ThreadPoolExecutor; flush summary.csv
+    after every completion under a lock. Returns 0 on completion."""
+    work: list[tuple[Cell, str, Path]] = []
+    for venue, data_root in venues.items():
+        if not data_root.exists():
+            print(f"SKIP venue={venue}: data root not found at {data_root}")
+            continue
+        for cell in cells:
+            work.append((cell, venue, data_root))
+
+    print(f"sweep summary → {summary_path}")
+    print(f"window: {start_date} → {end_date}")
+    print(f"sweep tag: {sweep_tag}")
+    print(
+        f"cells: {len(cells)}  venues: {len(venues)}  total runs: {len(work)}  "
+        f"parallel: SWEEP_MAX_WORKERS={MAX_WORKERS}  POLARS_MAX_THREADS={PER_CELL_POLARS_THREADS}  "
+        f"(thread budget = {MAX_WORKERS * PER_CELL_POLARS_THREADS})"
+    )
+    print()
+
+    rows: list[dict[str, str]] = []
+    rows_lock = threading.Lock()
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+
+    sweep_start = time.monotonic()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
+        futures = {
+            ex.submit(
+                run_cell,
+                cell,
+                venue,
+                data_root,
+                baseline_params=baseline_params,
+                start_date=start_date,
+                end_date=end_date,
+                sweep_tag=sweep_tag,
+                config_path=config_path,
+            ): (cell, venue)
+            for cell, venue, data_root in work
+        }
+        for fut in concurrent.futures.as_completed(futures):
+            cell, venue = futures[fut]
+            try:
+                row = fut.result()
+            except Exception as exc:  # noqa: BLE001
+                row = {
+                    "venue": venue,
+                    "cell_id": cell.cell_id,
+                    "description": cell.description,
+                    "status": "exception",
+                    "elapsed_seconds": "0.0",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                _atomic_print(f"  [{venue}/{cell.cell_id}] EXCEPTION: {type(exc).__name__}: {exc}")
+            with rows_lock:
+                rows.append(row)
+                _write_summary(summary_path, rows)
+
+    elapsed_total = time.monotonic() - sweep_start
+    print(f"\nDONE. wrote {len(rows)} rows to {summary_path} in {elapsed_total/60:.1f} min")
+    return 0
