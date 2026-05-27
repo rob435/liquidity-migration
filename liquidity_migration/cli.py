@@ -1241,6 +1241,108 @@ def _add_feature_factory_parser(subparsers) -> None:
     feature_factory.add_argument("--random-seed", type=int, default=17)
 
 
+def _add_signal_harness_parser(subparsers) -> None:
+    """Phase 5 + 6 signal-research harness: build feature panel, compute IC,
+    construct combined-signal portfolios. See liquidity_migration/signal_harness.py
+    for the feature catalogue and the Phase 5 decision rule."""
+    harness = subparsers.add_parser(
+        "signal-harness",
+        help="Signal-research harness: build PIT feature panel, univariate IC, combined-signal portfolio.",
+    )
+    actions = harness.add_subparsers(dest="signal_harness_action", required=True)
+
+    build_panel = actions.add_parser("build-panel", help="Build the (symbol, date, features, fwd_ret_*) panel.")
+    build_panel.add_argument("--start", required=True, help="Inclusive start date YYYY-MM-DD.")
+    build_panel.add_argument("--end", required=True, help="Exclusive end date YYYY-MM-DD.")
+    build_panel.add_argument(
+        "--features",
+        default="all",
+        help='Either "all" (default) or comma-separated feature names. See FEATURE_REGISTRY.',
+    )
+    build_panel.add_argument(
+        "--forward-horizons",
+        default="1,3,7",
+        help="Comma-separated forward-return horizons in days (default 1,3,7).",
+    )
+    build_panel.add_argument(
+        "--universe-min-daily-turnover",
+        type=float,
+        default=0.0,
+        help="Filter (symbol, date) rows below this turnover_quote (USD). 0 keeps all (default).",
+    )
+    build_panel.add_argument(
+        "--output",
+        required=True,
+        help="Output parquet path for the panel (e.g. ~/SHARED_DATA/bybit_full_pit/feature_panel.parquet).",
+    )
+
+    compute_ic = actions.add_parser("compute-ic", help="Compute univariate IC for every feature in a saved panel.")
+    compute_ic.add_argument("--panel", required=True, help="Path to a panel parquet produced by build-panel.")
+    compute_ic.add_argument(
+        "--target",
+        default="fwd_ret_3d",
+        help="Forward-return column to score against (default fwd_ret_3d).",
+    )
+    compute_ic.add_argument(
+        "--sub-periods",
+        type=int,
+        default=3,
+        help="Split the IC time-series into N sub-periods for sign-consistency check (default 3 → matches Phase 5).",
+    )
+    compute_ic.add_argument(
+        "--features",
+        default="all",
+        help='Either "all" (default — scores every feature in the panel) or comma-separated subset.',
+    )
+    compute_ic.add_argument(
+        "--output",
+        required=True,
+        help="Output JSON path for the IC report (one ICReport per feature).",
+    )
+
+    portfolio = actions.add_parser("combined-portfolio", help="Build a combined-signal portfolio from a saved panel.")
+    portfolio.add_argument("--panel", required=True, help="Path to a panel parquet.")
+    portfolio.add_argument(
+        "--features",
+        required=True,
+        help="Comma-separated surviving features to combine.",
+    )
+    portfolio.add_argument(
+        "--weighting",
+        choices=("equal", "ic_weighted"),
+        default="equal",
+        help='"equal" (Z-score sum) or "ic_weighted" (per-feature IC magnitude weight).',
+    )
+    portfolio.add_argument(
+        "--ic-weights",
+        default=None,
+        help='Only for weighting=ic_weighted: comma-separated "feature=ic" pairs.',
+    )
+    portfolio.add_argument(
+        "--top-decile",
+        type=float,
+        default=0.10,
+        help="Cross-sectional percentile cutoff for entering shorts (default 0.10).",
+    )
+    portfolio.add_argument(
+        "--vol-target-per-name",
+        type=float,
+        default=0.01,
+        help="Per-name vol target — sizes each position at vol-target / realized_vol_7d (default 0.01 = 1%).",
+    )
+    portfolio.add_argument(
+        "--forward-horizon",
+        type=int,
+        default=3,
+        help="Forward-return horizon column to attach to each position (default 3).",
+    )
+    portfolio.add_argument(
+        "--output",
+        required=True,
+        help="Output parquet path for the portfolio ledger.",
+    )
+
+
 def _add_event_demo_cycle_parser(subparsers) -> None:
     event_demo = subparsers.add_parser(
         "event-demo-cycle",
@@ -1697,6 +1799,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_strategy_tribunal_parser(subparsers)
     _add_portfolio_hedge_parser(subparsers)
     _add_feature_factory_parser(subparsers)
+    _add_signal_harness_parser(subparsers)
     _add_event_demo_cycle_parser(subparsers)
     _add_event_risk_cycle_parser(subparsers)
     _add_event_risk_ws_parser(subparsers)
@@ -1714,6 +1817,107 @@ _COMMANDS_WITHOUT_DATA_ROOT = frozenset({"download-data", "combined-book-telegra
 
 def _expanded_report_dir(report_dir: str | Path | None, *, default: Path) -> Path:
     return Path(report_dir).expanduser() if report_dir else default
+
+
+def _run_signal_harness(args, data_root: Path) -> int:
+    """Dispatcher for ``signal-harness {build-panel,compute-ic,combined-portfolio}``.
+
+    Kept as a module-level helper so the signal_harness module isn't imported
+    until the user actually invokes the subcommand (polars-heavy module).
+    """
+    import json
+    from dataclasses import asdict
+
+    import polars as pl
+
+    from liquidity_migration import signal_harness as sh
+
+    action = args.signal_harness_action
+
+    if action == "build-panel":
+        horizons = tuple(int(h.strip()) for h in args.forward_horizons.split(",") if h.strip())
+        panel = sh.build_feature_panel(
+            data_root,
+            start=args.start,
+            end=args.end,
+            feature_specs=args.features,
+            forward_horizons=horizons,
+            universe_min_daily_turnover=args.universe_min_daily_turnover,
+        )
+        out_path = Path(args.output).expanduser()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        panel.write_parquet(out_path)
+        feature_count = sum(1 for c in panel.columns if c not in {"symbol", "ts_ms", "date", "close", "turnover_quote"} and not c.startswith("fwd_ret_"))
+        print(
+            f"signal-harness build-panel: rows={panel.height}  symbols={panel['symbol'].n_unique() if panel.height else 0}  "
+            f"features={feature_count}  horizons={horizons}  -> {out_path}"
+        )
+        return 0
+
+    if action == "compute-ic":
+        panel = pl.read_parquet(Path(args.panel).expanduser())
+        if args.features == "all":
+            features = [c for c in panel.columns if c in sh.FEATURE_REGISTRY]
+        else:
+            features = [f.strip() for f in args.features.split(",") if f.strip()]
+        reports = []
+        for feature in features:
+            report = sh.compute_univariate_ic(
+                panel,
+                feature=feature,
+                target=args.target,
+                sub_periods=args.sub_periods,
+            )
+            reports.append(asdict(report))
+        out_path = Path(args.output).expanduser()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(reports, indent=2))
+        survived = sum(
+            1 for r in reports
+            if not (r["mean_ic"] != r["mean_ic"])  # not nan
+            and abs(r["mean_ic"]) >= 0.03
+            and r["sub_period_sign_consistent"]
+            and abs(r["t_stat"]) >= 3.0
+        )
+        print(
+            f"signal-harness compute-ic: target={args.target}  features={len(reports)}  "
+            f"survived (|IC|>=0.03 AND sign-consistent AND |t|>=3): {survived}  -> {out_path}"
+        )
+        return 0
+
+    if action == "combined-portfolio":
+        panel = pl.read_parquet(Path(args.panel).expanduser())
+        features = [f.strip() for f in args.features.split(",") if f.strip()]
+        ic_weights = None
+        if args.weighting == "ic_weighted":
+            if not args.ic_weights:
+                raise RuntimeError("--ic-weights required when --weighting=ic_weighted")
+            ic_weights = {}
+            for pair in args.ic_weights.split(","):
+                if "=" not in pair:
+                    raise RuntimeError(f"--ic-weights entry missing '=': {pair!r}")
+                k, v = pair.split("=", 1)
+                ic_weights[k.strip()] = float(v)
+        portfolio = sh.build_combined_signal_portfolio(
+            panel,
+            surviving_features=features,
+            weighting=args.weighting,
+            ic_weights=ic_weights,
+            top_decile=args.top_decile,
+            vol_target_per_name=args.vol_target_per_name,
+            forward_horizon=args.forward_horizon,
+        )
+        out_path = Path(args.output).expanduser()
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        portfolio.write_parquet(out_path)
+        active = portfolio.filter(pl.col("position_side") != "flat").height
+        print(
+            f"signal-harness combined-portfolio: weighting={args.weighting}  features={features}  "
+            f"rows={portfolio.height}  active={active}  -> {out_path}"
+        )
+        return 0
+
+    raise RuntimeError(f"unknown signal-harness action: {action!r}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2362,6 +2566,9 @@ def main(argv: list[str] | None = None) -> int:
             f"path={payload['output_files']['markdown']}"
         )
         return 0
+
+    if args.command == "signal-harness":
+        return _run_signal_harness(args, data_root)
 
     if args.command == "regime-durability":
         output_dir = args.output_dir
