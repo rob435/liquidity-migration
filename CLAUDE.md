@@ -8,11 +8,16 @@ regime-conditional, and the current focus is regime-aware refinement (see
 
 @AGENTS.md
 
-## Orientation
+## Orientation — read FIRST
 
+- **`STATE.md`** (repo root) — single-page research-program state. What's
+  done, what's running, what's next. **First read for every session.**
 - **`docs/backtesting_errors_we_never_repeat.md`** — mandatory research
   methodology standard. Read it before any backtest or strategy work.
-- `docs/research_findings.md` — current research verdict and refinement roadmap.
+- **`docs/preregistration/2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md`**
+  — current multi-phase research plan with the Strictness Manifesto and
+  the pre-committed FDR ceiling.
+- `docs/research_findings.md` — older research verdict + refinement roadmap.
 - `docs/data_roots.md` — which data root to use (research vs. live demo vs. OOS).
 - `docs/system_status.md` — strategy / deployment status.
 - `README.md` — repo overview and status.
@@ -40,6 +45,16 @@ failure — pushing broken code is operator pain. No exceptions.
 
 - Project skills in `.claude/skills/` load automatically when relevant:
   `backtest-integrity` (methodology gate), `run-strategy` (CLI invocations),
-  `research-report` (report interpretation), `repo-map` (codebase navigation).
-- The `liqmig-research` MCP server exposes data-root and report-parsing tools.
+  `research-phase-runner` (multi-phase workflow), `research-report` (report
+  interpretation), `repo-map` (codebase navigation).
+- The `liqmig-research` MCP server exposes:
+  - `current_state` — STATE.md, in 60 seconds
+  - `data_roots` — canonical data-root index
+  - `list_reports`, `parse_report`, `audit_run_artifacts` — report tooling
+  - `apply_decision_rule(summary_csv)` — programmatic Strictness Manifesto verdict
+- Research-phase helpers (no skills needed):
+  - `scripts/volume_events_cell.sh --venue X --cell-id Y --phase Z --overrides 'K=V,…'`
+    — runs `volume-events` with production-baseline flags filled in.
+  - `scripts/apply_decision_rule.py SUMMARY.csv` — CLI form of the
+    decision-rule analyzer; produces a per-cell verdict table.
 - For architecture questions, read `graphify-out/GRAPH_REPORT.md` first.

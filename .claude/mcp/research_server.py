@@ -586,6 +586,72 @@ def tool_audit_run_artifacts(args):
     return "\n".join(out)
 
 
+# --- tool: current_state ----------------------------------------------------
+
+def tool_current_state(args):
+    """Return STATE.md verbatim. The repo's single-page research-program state."""
+    path = os.path.join(REPO_ROOT, "STATE.md")
+    if not os.path.exists(path):
+        return (
+            "STATE.md not found at repo root. The research-program state file "
+            "should always exist; ask the operator to restore or create it. "
+            "Falling back to reading the master plan at "
+            "docs/preregistration/2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md."
+        )
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except Exception as exc:  # noqa: BLE001 - mcp must not crash on read error
+        return "STATE.md read failed: %s" % exc
+
+
+# --- tool: apply_decision_rule ----------------------------------------------
+
+def tool_apply_decision_rule(args):
+    """Apply the Strictness Manifesto per-cell to a sweep summary CSV.
+
+    Imports scripts.apply_decision_rule (pure stdlib) so the verdict logic
+    is single-sourced. Returns the same per-cell table + summary the CLI
+    prints, suitable for inclusion in a phase verdict pre-reg.
+    """
+    csv_arg = args.get("summary_csv") or args.get("path") or args.get("csv")
+    control = args.get("control") or args.get("control_cell") or "00_baseline"
+    rule = args.get("rule") or "manifesto"
+    if not isinstance(csv_arg, str) or not csv_arg.strip():
+        raise RpcError(-32602, "summary_csv (path) is required")
+
+    # Import the script as a module so we reuse the audited logic
+    script_path = os.path.join(REPO_ROOT, "scripts", "apply_decision_rule.py")
+    if not os.path.exists(script_path):
+        raise RpcError(-32603, "scripts/apply_decision_rule.py missing — repo state is broken")
+
+    # Resolve the CSV path against the repo root, data roots, or absolute path
+    csv_path = resolve_path(csv_arg) if not csv_arg.startswith("/") else csv_arg
+    if not os.path.exists(csv_path):
+        raise RpcError(-32602, "summary CSV not found at: %s" % csv_path)
+
+    # Capture stdout from main(); main() prints to stdout and exits with
+    # an int. Use subprocess to keep the analyzer's main() exit semantics
+    # intact (avoids muddling sys.exit with the long-lived MCP loop).
+    import subprocess  # local import: stdlib + only on tool invocation
+    proc = subprocess.run(
+        [
+            sys.executable, script_path, csv_path,
+            "--control", str(control),
+            "--rule", str(rule),
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if proc.returncode == 2:
+        raise RpcError(-32602, "decision-rule usage error: %s" % proc.stderr.strip())
+    if proc.returncode != 0:
+        raise RpcError(-32603, "decision-rule failed (exit %d): %s" % (proc.returncode, proc.stderr.strip()))
+    return proc.stdout
+
+
 # --- MCP plumbing -----------------------------------------------------------
 
 TOOLS = [
@@ -667,6 +733,55 @@ TOOLS = [
             "additionalProperties": False,
         },
         "handler": tool_audit_run_artifacts,
+    },
+    {
+        "name": "current_state",
+        "description": (
+            "Return the repo's STATE.md verbatim — the single-page summary of "
+            "what research phases have completed, what's running, what's "
+            "next, current decision rules, and pre-committed non-negotiables. "
+            "FIRST READ for any new session: a 60-second orient that points "
+            "at the right docs for whatever task is at hand. No arguments."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+        "handler": tool_current_state,
+    },
+    {
+        "name": "apply_decision_rule",
+        "description": (
+            "Apply the Strictness Manifesto decision rule (pre-registered in "
+            "docs/preregistration/2026-05-27-…research-plan.md) to a sweep "
+            "summary CSV. Returns the per-cell verdict table "
+            "(candidate / reject / inconclusive) plus a candidate ranking "
+            "by combined-venue Sharpe (honours the FDR ceiling). Single-"
+            "sourced from scripts/apply_decision_rule.py; equivalent to "
+            "running that script directly."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "summary_csv": {
+                    "type": "string",
+                    "description": "Path to the sweep summary CSV (data-root id, repo-relative, or absolute).",
+                },
+                "control": {
+                    "type": "string",
+                    "description": "Control cell_id. Default: 00_baseline.",
+                },
+                "rule": {
+                    "type": "string",
+                    "enum": ["manifesto", "legacy"],
+                    "description": "Decision-rule preset. Default: manifesto (stricter).",
+                },
+            },
+            "required": ["summary_csv"],
+            "additionalProperties": False,
+        },
+        "handler": tool_apply_decision_rule,
     },
 ]
 
