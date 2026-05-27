@@ -114,6 +114,19 @@ ledger could diverge from Bybit:
   ticker stream is unset and the cache has populated symbols, the loop
   retries `_open_ticker_stream()`. Without this, a single REST seed failure
   at startup would permanently disable the long sleeve's WS ticker feed.
+- **Sub-order split for venue-cap-bound entries (2026-05-27).** When the
+  strategy's target entry qty exceeds Bybit's per-order `maxMktOrderQty`,
+  the cycle now splits the entry into N = ceil(target/max) sequential
+  sub-orders (each ≤ max, sharing the base `orderLinkId` with `-s0`,
+  `-s1`, … suffixes). Previously the qty was capped-and-reduced, which
+  silently under-sized live trades vs the backtest assumption of full
+  target notional — observed live as REQUSDT entering at 53% of target
+  notional. Stops/TP attach to the first sub only (Bybit stops are
+  position-level, so one set covers the aggregated position). Aggregate
+  fills land in a single trade row with volume-weighted entry_price;
+  each sub gets its own order row for ledger audit. The split achieves
+  backtest fidelity on capacity-constrained alts without losing trades
+  to venue rejection.
 
 These are mechanical / engineering hardening — none touch the signal, the
 universe, or the parameters. Backtests and the `promoted` profile are
