@@ -52,15 +52,18 @@ echo "  workers:     manifest=$MANIFEST_WORKERS kline=$KLINE_WORKERS ancillary=$
 echo "=============================================================="
 
 echo
-echo "[1/4] Bybit — PIT manifest from public.bybit.com archive (USDT perps only)"
-# --include-v5-fallback supplements the archive scrape with currently-Trading
-# Bybit v5 perpetuals absent from public.bybit.com/trading. The archive root
-# has historically lagged new listings (observed 2026-05-25 with
-# BANUSDT/TRUSTUSDT, both demo-tradeable but never in the scrape). With
-# fallback on, those symbols enter the manifest and the universe.
+echo "[1/4] Bybit — PIT manifest from public.bybit.com archive + v5 instruments-info (USDT perps only)"
+# archive-manifest always merges two sources:
+#   * public.bybit.com/trading scrape (deep history; the archive root)
+#   * Bybit v5 instruments-info listing (currently-Trading perps)
+# The v5 listing closes two known archive gaps: symbols the scrape never
+# picked up at all (observed 2026-05-25 with BANUSDT/TRUSTUSDT — both
+# demo-tradeable yet absent from the scrape) and the ~24h current-day
+# publishing lag. No flag controls this; archive-only mode would silently
+# drop demo-tradeable symbols and is never the right behaviour for a
+# backtest. See ArchiveManifestConfig docstring for details.
 "$PYTHON_BIN" -m liquidity_migration --data-root "$ROOT" \
-  archive-manifest --start "$START" --end "$END" --workers "$MANIFEST_WORKERS" \
-  --include-v5-fallback
+  archive-manifest --start "$START" --end "$END" --workers "$MANIFEST_WORKERS"
 
 echo
 echo "[2/4] Bybit — 1h klines via v5 kline API (category=$CATEGORY, manifest-gated)"

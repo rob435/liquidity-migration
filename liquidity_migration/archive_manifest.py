@@ -39,11 +39,36 @@ _logger = logging.getLogger("liquidity_migration.archive_manifest")
 
 
 DEFAULT_BYBIT_V5_INSTRUMENTS_URL = "https://api.bybit.com/v5/market/instruments-info"
-V5_FALLBACK_URL_SENTINEL = "bybit_v5_listing"
+V5_LISTING_URL_SENTINEL = "bybit_v5_listing"
+V5_LISTING_SOURCE = "bybit_v5_listing"
+ARCHIVE_SCRAPE_SOURCE = "bybit_public_trading_archive"
 
 
 @dataclass(frozen=True, slots=True)
 class ArchiveManifestConfig:
+    """Config for ``build_archive_trade_manifest``.
+
+    The manifest is always built from **two sources merged**:
+
+    1. The historical public-archive scrape (``public.bybit.com/trading``).
+    2. The currently-Trading Bybit v5 ``instruments-info`` listing.
+
+    Both are necessary. The archive carries deep history but (a) misses
+    symbols that the scrape pattern never picked up (observed 2026-05-25
+    with BANUSDT/TRUSTUSDT, both demo-tradeable yet never in the scrape) and
+    (b) has a ~24h tail lag — the prior day's CSV is published ~24h after
+    close, so a same-day ``--end`` build would otherwise have a one-day
+    membership gap for every recently-traded symbol. The v5 listing closes
+    both gaps by synthesising rows for any ``(symbol, date)`` the scrape
+    missed, keyed off the symbol's ``launchTime``.
+
+    Synthesised rows carry ``url=bybit_v5_listing`` and
+    ``source="bybit_v5_listing"`` (not a real archive zip). The downstream
+    1m archive download path bails on those rows; the v5 1h kline path
+    treats ``(symbol, date)`` as the key and ignores ``url``, so the
+    full-PIT 1h pipeline picks them up transparently.
+    """
+
     base_url: str = DEFAULT_BYBIT_PUBLIC_TRADING_URL
     quote_suffix: str = "USDT"
     start: str | None = None
@@ -52,18 +77,6 @@ class ArchiveManifestConfig:
     max_symbols: int = 0
     workers: int = 8
     name: str = "bybit-public-trading"
-    # When enabled, fetch Bybit v5 instruments-info and synthesize manifest rows
-    # for any Trading-status symbol whose archive directory is empty or absent
-    # from public.bybit.com/trading. This closes the gap where a freshly-listed
-    # demo-tradeable symbol (observed 2026-05-25 with BANUSDT/TRUSTUSDT) shows
-    # up in the live ticker stream but never reaches the archive scrape — and
-    # therefore never enters the backtest universe.
-    #
-    # Synthesized rows carry `url=bybit_v5_listing` (not a real archive zip).
-    # The downstream 1m archive download path bails on those rows; the v5 1h
-    # kline path treats `(symbol, date)` as the key and ignores `url`, so the
-    # full-PIT 1h pipeline picks them up transparently.
-    include_v5_fallback: bool = False
     v5_instruments_url: str = DEFAULT_BYBIT_V5_INSTRUMENTS_URL
     v5_category: str = "linear"
 
@@ -143,7 +156,7 @@ def fetch_v5_trading_perp_listings(
 
     Returns a mapping `{symbol -> launch_time_ms}` restricted to symbols whose
     `status == "Trading"`, quote_suffix-quoted, and `contractType` is a perpetual
-    flavour. Used by ``supplement_manifest_with_v5_listings`` to discover
+    flavour. Used by ``build_archive_trade_manifest`` to discover
     demo-tradeable symbols (BANUSDT, TRUSTUSDT, etc.) that the
     ``public.bybit.com/trading`` archive hasn't yet exposed.
 
@@ -189,18 +202,18 @@ def fetch_v5_trading_perp_listings(
     return listings
 
 
-def synthesize_v5_fallback_manifest_rows(
+def synthesize_v5_listing_manifest_rows(
     listings: dict[str, int],
     *,
     existing_symbol_dates: set[tuple[str, str]],
     start: str | None,
     end: str | None,
 ) -> list[dict[str, Any]]:
-    """Build synthetic manifest rows for v5-Trading symbols missing from the
-    archive scrape. Two patterns are filled in one pass:
+    """Build manifest rows from v5-Trading listings for ``(symbol, date)``
+    pairs missing from the archive scrape. Two patterns are filled in one pass:
 
     1.  **Fully absent symbols** (BANUSDT, TRUSTUSDT on 2026-05-25): the public
-        archive doesn't list them at all. Rows are synthesized from
+        archive doesn't list them at all. Rows are emitted from
         ``launch_date`` through ``end-1`` for the entire history.
 
     2.  **Archive-lag tail** (every recently-traded symbol on the same day the
@@ -210,9 +223,9 @@ def synthesize_v5_fallback_manifest_rows(
         ``tradable_membership_flag`` is silently ``False`` for the current
         day, the strategy treats every symbol as non-tradable, and live demo
         signals (e.g. DRIFTUSDT 2026-05-26) never reconcile against the
-        backtest. The fallback now emits rows for any ``(symbol, day)`` that
-        is genuinely absent from ``existing_symbol_dates`` even when the
-        symbol itself is in the scrape.
+        backtest. The v5-listing supplement therefore emits rows for any
+        ``(symbol, day)`` genuinely absent from ``existing_symbol_dates``
+        even when the symbol itself is in the scrape.
 
     ``existing_symbol_dates`` is the set of ``(symbol, date)`` tuples already
     present in the HTML scrape — checked per-day instead of per-symbol so the
@@ -238,7 +251,14 @@ def synthesize_v5_fallback_manifest_rows(
         while day <= coverage_end:
             key = (symbol, day.isoformat())
             if key not in existing_symbol_dates:
-                rows.append({"symbol": symbol, "date": day.isoformat(), "url": V5_FALLBACK_URL_SENTINEL})
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "date": day.isoformat(),
+                        "url": V5_LISTING_URL_SENTINEL,
+                        "source": V5_LISTING_SOURCE,
+                    }
+                )
             day += timedelta(days=1)
     return rows
 
@@ -298,7 +318,7 @@ def parse_trade_archive_entries(
                 "symbol": symbol.upper(),
                 "date": file_date.isoformat(),
                 "url": urljoin(symbol_url, href),
-                "source": "bybit_public_trading_archive",
+                "source": ARCHIVE_SCRAPE_SOURCE,
             }
         )
     return sorted(rows, key=lambda row: (row["date"], row["symbol"], row["url"]))
@@ -313,10 +333,19 @@ def build_archive_trade_manifest(
     end: str | None = None,
     max_symbols: int = 0,
     workers: int = 8,
-    include_v5_fallback: bool = False,
     v5_instruments_url: str = DEFAULT_BYBIT_V5_INSTRUMENTS_URL,
     v5_category: str = "linear",
 ) -> pl.DataFrame:
+    """Build the Bybit PIT trade manifest by merging two sources:
+
+    1. ``public.bybit.com/trading`` HTML scrape — historical archive directory.
+    2. Bybit v5 ``instruments-info`` — currently-Trading perpetuals.
+
+    Both are always queried. The v5 listing closes two known archive gaps:
+    symbols the scrape never picked up at all (BANUSDT, TRUSTUSDT) and the
+    ~24h archive publishing lag at the current-day tail. A v5 endpoint blip
+    degrades gracefully — the archive scrape is still returned on its own.
+    """
     base_html = fetch_directory_html(base_url)
     available_symbols = parse_symbol_directories(base_html, quote_suffix=quote_suffix)
     requested = tuple(dict.fromkeys(symbol.upper() for symbol in symbols if symbol.strip()))
@@ -346,26 +375,26 @@ def build_archive_trade_manifest(
             with ThreadPoolExecutor(max_workers=worker_count) as executor:
                 scrape_rows = [row for symbol_rows in executor.map(fetch_symbol, selected) for row in symbol_rows]
 
-    fallback_rows: list[dict[str, Any]] = []
-    if include_v5_fallback:
-        # Best-effort enrichment — a v5 endpoint blip must not fail a manifest
-        # build whose primary source (the archive scrape) already succeeded.
-        try:
-            listings = fetch_v5_trading_perp_listings(
-                base_url=v5_instruments_url, category=v5_category, quote_suffix=quote_suffix
-            )
-        except (HTTPError, URLError, TimeoutError, ssl.SSLError) as exc:
-            _logger.warning("v5 instruments-info enrichment skipped: %s", exc)
-            listings = {}
-        if listings:
-            existing_symbol_dates = {
-                (str(row["symbol"]).upper(), str(row["date"])) for row in scrape_rows
-            }
-            fallback_rows = synthesize_v5_fallback_manifest_rows(
-                listings, existing_symbol_dates=existing_symbol_dates, start=start, end=end
-            )
+    # Always supplement with v5 instruments-info. A v5 endpoint blip degrades
+    # gracefully — we still return the archive-scrape rows on their own
+    # rather than failing the build.
+    v5_rows: list[dict[str, Any]] = []
+    try:
+        listings = fetch_v5_trading_perp_listings(
+            base_url=v5_instruments_url, category=v5_category, quote_suffix=quote_suffix
+        )
+    except (HTTPError, URLError, TimeoutError, ssl.SSLError) as exc:
+        _logger.warning("v5 instruments-info supplement skipped: %s", exc)
+        listings = {}
+    if listings:
+        existing_symbol_dates = {
+            (str(row["symbol"]).upper(), str(row["date"])) for row in scrape_rows
+        }
+        v5_rows = synthesize_v5_listing_manifest_rows(
+            listings, existing_symbol_dates=existing_symbol_dates, start=start, end=end
+        )
 
-    combined = scrape_rows + fallback_rows
+    combined = scrape_rows + v5_rows
     if not combined:
         return _empty_manifest()
     return pl.DataFrame(combined).sort(["date", "symbol", "url"])
@@ -385,7 +414,6 @@ def run_archive_manifest(
         end=config.end,
         max_symbols=config.max_symbols,
         workers=config.workers,
-        include_v5_fallback=config.include_v5_fallback,
         v5_instruments_url=config.v5_instruments_url,
         v5_category=config.v5_category,
     )

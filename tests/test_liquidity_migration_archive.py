@@ -152,6 +152,9 @@ def test_run_archive_manifest_writes_symbol_date_dataset(tmp_path, monkeypatch) 
         return pages[url]
 
     monkeypatch.setattr(manifest_module, "fetch_directory_html", fake_fetch)
+    # archive-manifest always merges in v5 instruments-info; stub it out in
+    # this unit test so the assertion stays scoped to the scraped rows.
+    monkeypatch.setattr(manifest_module, "fetch_v5_trading_perp_listings", lambda **_kw: {})
 
     payload = run_archive_manifest(
         tmp_path,
@@ -174,6 +177,7 @@ def test_archive_manifest_fetches_requested_symbol_missing_from_root_listing(tmp
     }
 
     monkeypatch.setattr(manifest_module, "fetch_directory_html", lambda url, *, timeout_seconds=60: pages[url])
+    monkeypatch.setattr(manifest_module, "fetch_v5_trading_perp_listings", lambda **_kw: {})
 
     payload = run_archive_manifest(
         tmp_path,
@@ -651,6 +655,7 @@ def test_archive_manifest_downloader_resumes_and_writes_klines(tmp_path, monkeyp
     }
 
     monkeypatch.setattr(manifest_module, "fetch_directory_html", lambda url, *, timeout_seconds=60: pages[url])
+    monkeypatch.setattr(manifest_module, "fetch_v5_trading_perp_listings", lambda **_kw: {})
     run_archive_manifest(
         tmp_path,
         # `--end` is end-exclusive; end is the day after the archive date.
