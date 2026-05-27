@@ -331,7 +331,15 @@ def run_event_demo_cycle(
             scenario=scenario,
         )
         exits, pending_exit_skips = _filter_pending_exit_orders(exits, all_orders, now_ms=cycle_now_ms)
-        exits, live_open_exit_skips = _filter_live_open_exit_orders(exits, live_exit_order_symbols)
+        # See entry-side rationale below: dry-run (paper) shares the demo's
+        # Bybit account so live_exit_order_symbols would include DEMO's open
+        # exit orders -- if paper skipped its own exits when demo had a live
+        # exit order on the same symbol, paper's exit decisions would silently
+        # cascade off demo's actions instead of running independently.
+        if demo.submit_orders:
+            exits, live_open_exit_skips = _filter_live_open_exit_orders(exits, live_exit_order_symbols)
+        else:
+            live_open_exit_skips = 0
         # Shared preflight callback used by BOTH exits and entries: a row is
         # flushed to the orders parquet BEFORE place_order so a crash between
         # submission and the cycle's end-of-cycle ledger flush still leaves the
@@ -401,7 +409,16 @@ def run_event_demo_cycle(
         elif wallet_error and demo.submit_orders:
             wallet_error_entry_skips = len(entry_candidates)
             entry_candidates = []
-        else:
+        elif demo.submit_orders:
+            # Bybit-live-state filters apply only when actually submitting.
+            # Dry-run (paper) shadows demo with idealized fills and shares the
+            # SAME Bybit demo account, so its get_positions / get_open_orders
+            # snapshot would return DEMO's positions and orders -- not paper's.
+            # Filtering paper's candidates against demo's live state would
+            # cascade divergence (each demo entry suppresses the matching
+            # paper candidate, making paper miss trades it should record).
+            # Paper relies on its own ledger via _filter_pending_entry_orders
+            # above for the "already in flight" check.
             entry_candidates, live_position_entry_skips = _filter_live_position_entry_orders(
                 entry_candidates,
                 live_position_symbols,

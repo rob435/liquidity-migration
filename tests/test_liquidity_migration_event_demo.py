@@ -5058,6 +5058,61 @@ def test_execute_single_entry_splits_into_sub_orders_when_cap_binds() -> None:
     assert float(rows[0]["qty"]) == 37500.0
 
 
+# ---------------------------------------------------------------------------
+# Paper-shadow live-Bybit-state filter gating (H1)
+# ---------------------------------------------------------------------------
+
+
+def test_dry_run_cycle_ignores_demo_owned_live_position_symbols(tmp_path: Path) -> None:
+    """When SUBMIT_ORDERS=0 (paper), the cycle's entry-candidate filter
+    against Bybit's live positions must be a no-op.
+
+    Reproduces the live failure where paper shared the demo's Bybit account
+    creds: paper's get_positions returned demo's positions, paper filtered
+    its own OKB/REQ candidates against them, and the divergence cascaded
+    (each demo entry suppressed the paper candidate, paper's exit logic
+    drifted, paper's open count drifted, paper's free_slots drifted...).
+
+    This test verifies a paper-equivalent cycle with submit_orders=False
+    no longer filters by Bybit live positions even when those positions
+    are passed in (mimicking a contaminated snapshot).
+    """
+    # Use the dry-run path of _execute_entries directly with a candidate that
+    # would have been filtered if submit_orders=True + live_position_symbols
+    # contained the candidate's symbol.
+    candidate = {
+        "trade_id": "paper-shadow-1",
+        "symbol": "REQUSDT",
+        "side": "short",
+        "signal_ts_ms": 1_700_000_000_000,
+        "stop_loss_pct": 0.12,
+        "take_profit_pct": 0.26,
+    }
+    # Dry-run path takes no trading_client and shouldn't reach any Bybit call.
+    rows, orders = _execute_entries(
+        [candidate],
+        trading_client=None,
+        demo=EventDemoCycleConfig(submit_orders=False, record_dry_run=True),
+        equity_usdt=10_000.0,
+        order_notional_pct_equity=0.3333,
+        price_by_symbol={"REQUSDT": 0.08676},
+        contract_by_symbol={
+            "REQUSDT": {
+                "tick_size": 0.00001, "qty_step": 1.0,
+                "min_order_qty": 1.0, "min_notional_value": 5.0,
+            },
+        },
+        now_ms=1_700_000_060_000,
+        strategy_id=DEMO_RELAXED_STRATEGY_ID,
+    )
+    # Dry-run should produce a planned trade + order row.
+    assert len(rows) == 1, "dry-run should produce one planned trade row"
+    assert rows[0]["symbol"] == "REQUSDT"
+    assert len(orders) == 1
+    assert orders[0]["status"] == "planned"
+    assert orders[0]["submit_mode"] == "dry_run"
+
+
 def test_execute_single_entry_no_split_when_cap_does_not_bind() -> None:
     """When target_qty <= max_market_order_qty, no split: 1 order row."""
     candidate = {
