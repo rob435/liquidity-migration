@@ -463,6 +463,16 @@ def _add_volume_events_parser(subparsers) -> None:
         help="Minimum 7d liquidity-rank improvement for whole-universe liquidity-migration events.",
     )
     volume_events.add_argument(
+        "--liquidity-migration-rank-direction",
+        choices=("improvement", "deterioration", "both"),
+        default=event_defaults.liquidity_migration_rank_direction,
+        help=(
+            "Direction of rank movement that constitutes a liquidity-migration event: "
+            "'improvement' (default, rank goes UP by >= threshold), 'deterioration' "
+            "(rank goes DOWN by >= threshold), or 'both' (|rank delta| >= threshold)."
+        ),
+    )
+    volume_events.add_argument(
         "--liquidity-migration-turnover-ratio-min",
         type=float,
         default=event_defaults.liquidity_migration_turnover_ratio_min,
@@ -2144,6 +2154,7 @@ def main(argv: list[str] | None = None) -> int:
             tail_rank_max=args.tail_rank_max,
             tail_rank_improvement_min=args.tail_rank_improvement_min,
             liquidity_migration_rank_improvement_min=args.liquidity_migration_rank_improvement_min,
+            liquidity_migration_rank_direction=args.liquidity_migration_rank_direction,
             liquidity_migration_turnover_ratio_min=args.liquidity_migration_turnover_ratio_min,
             liquidity_migration_prior_rank_min=args.liquidity_migration_prior_rank_min,
             liquidity_migration_current_rank_max=args.liquidity_migration_current_rank_max,

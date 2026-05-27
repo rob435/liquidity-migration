@@ -2,12 +2,34 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
 import polars as pl
+
+
+# Per-process thread-lock per dataset path. The file-based lock that follows
+# only serializes ACROSS processes; within a single process, multiple worker
+# threads contending on the file lock can wedge because they all write the
+# same pid into the lock file and then read it back as "my own pid -> still
+# alive somewhere -> keep waiting" even when the actual holder has silently
+# dropped the file via an unlink race. This per-process lock ensures only
+# one thread of this process ever enters the file-lock acquire/release dance.
+_DATASET_THREAD_LOCKS: dict[str, threading.Lock] = {}
+_DATASET_THREAD_LOCKS_GUARD = threading.Lock()
+
+
+def _thread_lock_for(lock_path: Path) -> threading.Lock:
+    key = str(lock_path.resolve())
+    with _DATASET_THREAD_LOCKS_GUARD:
+        lock = _DATASET_THREAD_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _DATASET_THREAD_LOCKS[key] = lock
+        return lock
 
 
 DATASETS = {
@@ -114,55 +136,86 @@ def exclusive_file_lock(
 ) -> Iterator[None]:
     lock_path = Path(path).expanduser()
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    fd: int | None = None
-    while fd is None:
-        try:
-            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            if _lock_owner_is_dead(lock_path):
-                try:
-                    lock_path.unlink()
-                except FileNotFoundError:
-                    pass
-                continue
+    # Acquire the per-process thread-lock FIRST so only one thread of this
+    # process can be in the file-lock body at a time. The file-lock below
+    # then only serializes across processes, which is its real job and what
+    # it actually handles correctly.
+    with _thread_lock_for(lock_path):
+        fd: int | None = None
+        while fd is None:
             try:
-                age = time.time() - lock_path.stat().st_mtime
-            except OSError:
-                age = 0.0
-            invalid_lock_stale = (
-                _lock_payload_is_invalid(lock_path)
-                and invalid_lock_stale_seconds >= 0
-                and age > invalid_lock_stale_seconds
-            )
-            if invalid_lock_stale:
+                fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                if _lock_owner_is_dead(lock_path):
+                    try:
+                        lock_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    continue
                 try:
-                    lock_path.unlink()
-                except FileNotFoundError:
-                    pass
-                continue
-            if stale_seconds > 0 and age > stale_seconds:
-                try:
-                    lock_path.unlink()
-                except FileNotFoundError:
-                    pass
-                continue
-            time.sleep(max(poll_seconds, 0.0))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps({"pid": os.getpid(), "created": time.time()}))
-        yield
-    finally:
+                    age = time.time() - lock_path.stat().st_mtime
+                except OSError:
+                    age = 0.0
+                invalid_lock_stale = (
+                    _lock_payload_is_invalid(lock_path)
+                    and invalid_lock_stale_seconds >= 0
+                    and age > invalid_lock_stale_seconds
+                )
+                if invalid_lock_stale:
+                    try:
+                        lock_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    continue
+                if stale_seconds > 0 and age > stale_seconds:
+                    try:
+                        lock_path.unlink()
+                    except FileNotFoundError:
+                        pass
+                    continue
+                time.sleep(max(poll_seconds, 0.0))
         try:
-            lock_path.unlink()
-        except FileNotFoundError:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(json.dumps({"pid": os.getpid(), "created": time.time()}))
+            yield
+        finally:
+            try:
+                lock_path.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _read_lock_text_safe(lock_path: Path, timeout: float = 1.0) -> str | None:
+    """Read the lock file text with a hard timeout. Returns None if the read
+    blocks (e.g. Windows 'delete-pending' state where another thread of this
+    same process unlinked the file but a handle keeps it half-alive — the
+    naive Path.read_text() hangs in Path.open() forever). The outer lock
+    loop treats None as 'unreadable, assume stale' and self-heals."""
+    import threading
+    box: list[str | None] = [None]
+    def _read() -> None:
+        try:
+            box[0] = lock_path.read_text(encoding="utf-8")
+        except Exception:
             pass
+    t = threading.Thread(target=_read, daemon=True)
+    t.start()
+    t.join(timeout)
+    return box[0]
 
 
 def _lock_owner_is_dead(lock_path: Path) -> bool:
+    text = _read_lock_text_safe(lock_path)
+    if text is None:
+        # File missing OR read hung (Windows delete-pending). Either way it
+        # is safe to treat the owner as dead — the next iteration's unlink
+        # is a no-op when the file is gone, and breaks delete-pending stalls
+        # when it isn't.
+        return True
     try:
-        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        payload = json.loads(text)
         pid = int(payload.get("pid") or 0)
-    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+    except (json.JSONDecodeError, TypeError, ValueError):
         return False
     if pid <= 0 or pid == os.getpid():
         return False
@@ -189,12 +242,15 @@ def _lock_owner_is_dead(lock_path: Path) -> bool:
 
 
 def _lock_payload_is_invalid(lock_path: Path) -> bool:
+    text = _read_lock_text_safe(lock_path)
+    if text is None:
+        # File missing or read hung — treat as invalid so the outer loop
+        # can unlink and retry (self-heals Windows delete-pending stalls).
+        return True
     try:
-        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        payload = json.loads(text)
         pid = int(payload.get("pid") or 0)
-    except FileNotFoundError:
-        return False
-    except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError):
+    except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
         return True
     return pid <= 0
 

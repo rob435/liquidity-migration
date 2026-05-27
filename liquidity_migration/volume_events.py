@@ -117,6 +117,7 @@ class VolumeEventResearchConfig:
     tail_rank_max: int = 160
     tail_rank_improvement_min: int = 20
     liquidity_migration_rank_improvement_min: int = 150
+    liquidity_migration_rank_direction: str = "improvement"
     liquidity_migration_turnover_ratio_min: float = 6.0
     liquidity_migration_prior_rank_min: int = 0
     liquidity_migration_current_rank_max: int = 0
@@ -854,7 +855,11 @@ def _entry_decision_for_event(
         return _fixed_delay_entry_decision(symbol_bars, ready_ts_ms=base_ready_ts_ms, signal_ts_ms=signal_ts_ms, now_ms=now_ms)
     if config.entry_policy != ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE:
         raise ValueError(f"Unknown entry_policy: {config.entry_policy}")
-    if not _promoted_quality_entry_event(event, score_col=score_col):
+    if not _promoted_quality_entry_event(
+        event,
+        score_col=score_col,
+        direction=config.liquidity_migration_rank_direction,
+    ):
         return _fixed_delay_entry_decision(
             symbol_bars,
             ready_ts_ms=base_ready_ts_ms,
@@ -1073,7 +1078,12 @@ def _bar_close_location_at(symbol_bars: dict[str, Any], idx: int) -> float:
     )
 
 
-def _promoted_quality_entry_event(event: dict[str, Any], *, score_col: str) -> bool:
+def _promoted_quality_entry_event(
+    event: dict[str, Any],
+    *,
+    score_col: str,
+    direction: str = "improvement",
+) -> bool:
     reference = VolumeEventResearchConfig(entry_policy=ENTRY_POLICY_FIXED_DELAY)
     rank_fraction = _float_or_nan(event.get(f"{score_col}_rank_frac"))
     liquidity_rank = _float_or_nan(event.get("liquidity_rank"))
@@ -1099,12 +1109,24 @@ def _promoted_quality_entry_event(event: dict[str, Any], *, score_col: str) -> b
         )
     ):
         return False
+    rank_delta = prior_rank - liquidity_rank
+    threshold = reference.liquidity_migration_rank_improvement_min
+    if direction == "improvement":
+        rank_ok = rank_delta >= threshold
+    elif direction == "deterioration":
+        rank_ok = rank_delta <= -threshold
+    elif direction == "both":
+        rank_ok = abs(rank_delta) >= threshold
+    else:
+        raise ValueError(
+            f"liquidity_migration_rank_direction must be improvement|deterioration|both, got {direction!r}"
+        )
     market_ok = market_pct_up <= reference.liquidity_migration_market_pct_up_max
     hot_coin_ok = day_return >= _liquidity_migration_hot_return_threshold_value(market_pct_up, reference)
     return (
         liquidity_rank >= reference.universe_rank_min
         and liquidity_rank <= reference.universe_rank_max
-        and prior_rank - liquidity_rank >= reference.liquidity_migration_rank_improvement_min
+        and rank_ok
         and turnover_ratio >= reference.liquidity_migration_turnover_ratio_min
         and rank_fraction <= reference.liquidity_migration_event_rank_fraction_max
         and day_return >= reference.liquidity_migration_day_return_min
@@ -1899,10 +1921,22 @@ def _filter_liquidity_migration(
     # signed delta gives a real comparison. See `_add_liquidity_migration_
     # speed_features` for the matching fix on the feature columns.
     rank_delta = pl.col("prior7_liquidity_rank").cast(pl.Int64) - pl.col("liquidity_rank").cast(pl.Int64)
+    threshold = config.liquidity_migration_rank_improvement_min
+    direction = config.liquidity_migration_rank_direction
+    if direction == "improvement":
+        rank_predicate = rank_delta >= threshold
+    elif direction == "deterioration":
+        rank_predicate = rank_delta <= -threshold
+    elif direction == "both":
+        rank_predicate = rank_delta.abs() >= threshold
+    else:
+        raise ValueError(
+            f"liquidity_migration_rank_direction must be improvement|deterioration|both, got {direction!r}"
+        )
     predicate = (
         (pl.col(rank_col) >= top_cut)
         & (pl.col(f"prior7_{rank_col}") < top_cut)
-        & (rank_delta >= config.liquidity_migration_rank_improvement_min)
+        & rank_predicate
     )
     if config.liquidity_migration_turnover_ratio_min > 0.0:
         predicate = (
@@ -2211,12 +2245,30 @@ def _explain_liquidity_migration_rejections(
         pl.col(f"prior7_{rank_col}"),
         top_cut,
     ))
-    gates.append((
-        "rank_improvement_min",
-        rank_delta >= config.liquidity_migration_rank_improvement_min,
-        rank_delta.cast(pl.Float64),
-        float(config.liquidity_migration_rank_improvement_min),
-    ))
+    # Gate name + value direction switch: the trace must reflect what
+    # constraint is actually active. For direction=deterioration the binding
+    # is `rank_delta <= -T`, which is equivalent to `-rank_delta >= T`, so
+    # the reported value is -rank_delta with the same magnitude threshold.
+    # For direction=both, the constraint is `|rank_delta| >= T`.
+    direction = config.liquidity_migration_rank_direction
+    rank_threshold = float(config.liquidity_migration_rank_improvement_min)
+    if direction == "improvement":
+        gate_name = "rank_improvement_min"
+        rank_gate_pred = rank_delta >= config.liquidity_migration_rank_improvement_min
+        rank_gate_value = rank_delta.cast(pl.Float64)
+    elif direction == "deterioration":
+        gate_name = "rank_deterioration_min"
+        rank_gate_pred = rank_delta <= -config.liquidity_migration_rank_improvement_min
+        rank_gate_value = (-rank_delta).cast(pl.Float64)
+    elif direction == "both":
+        gate_name = "rank_abs_delta_min"
+        rank_gate_pred = rank_delta.abs() >= config.liquidity_migration_rank_improvement_min
+        rank_gate_value = rank_delta.abs().cast(pl.Float64)
+    else:
+        raise ValueError(
+            f"liquidity_migration_rank_direction must be improvement|deterioration|both, got {direction!r}"
+        )
+    gates.append((gate_name, rank_gate_pred, rank_gate_value, rank_threshold))
 
     # Conditional gates (only added when the config moves them off the default)
     if config.liquidity_migration_turnover_ratio_min > 0.0:
@@ -4180,6 +4232,11 @@ def _validate_universe_config(config: VolumeEventResearchConfig) -> None:
 def _validate_liquidity_migration_config(config: VolumeEventResearchConfig) -> None:
     if config.liquidity_migration_rank_improvement_min < 0:
         raise ValueError("liquidity_migration_rank_improvement_min must be non-negative")
+    if config.liquidity_migration_rank_direction not in ("improvement", "deterioration", "both"):
+        raise ValueError(
+            "liquidity_migration_rank_direction must be improvement|deterioration|both, "
+            f"got {config.liquidity_migration_rank_direction!r}"
+        )
     if config.liquidity_migration_turnover_ratio_min < 0.0:
         raise ValueError("liquidity_migration_turnover_ratio_min must be non-negative")
     if config.liquidity_migration_prior_rank_min < 0:

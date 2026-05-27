@@ -223,6 +223,7 @@ def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Pa
     assert args.universe_rank_min == 31
     assert args.universe_rank_max == 150
     assert args.liquidity_migration_rank_improvement_min == 150
+    assert args.liquidity_migration_rank_direction == "improvement"
     assert args.liquidity_migration_turnover_ratio_min == 6.0
     assert args.liquidity_migration_event_rank_fraction_max == 0.90
     assert args.liquidity_migration_event_rank_fraction_exclude_min == 0.0
@@ -375,6 +376,8 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
             "40",
             "--liquidity-migration-rank-improvement-min",
             "65",
+            "--liquidity-migration-rank-direction",
+            "deterioration",
             "--liquidity-migration-turnover-ratio-min",
             "2.5",
             "--liquidity-migration-prior-rank-min",
@@ -467,6 +470,7 @@ def test_cli_parses_volume_events_research_overrides(tmp_path: Path) -> None:
     assert args.tail_rank_max == 260
     assert args.tail_rank_improvement_min == 40
     assert args.liquidity_migration_rank_improvement_min == 65
+    assert args.liquidity_migration_rank_direction == "deterioration"
     assert args.liquidity_migration_turnover_ratio_min == 2.5
     assert args.liquidity_migration_prior_rank_min == 120
     assert args.liquidity_migration_current_rank_max == 80

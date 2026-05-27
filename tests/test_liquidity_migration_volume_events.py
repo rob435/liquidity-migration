@@ -498,6 +498,202 @@ def test_filter_liquidity_migration_rejects_negative_rank_delta_after_u32_fix() 
     assert survivors == ["GOOD"], f"u32-underflow regression: {survivors}"
 
 
+def _isolated_liquidity_migration_config(
+    *,
+    rank_improvement_min: int = 150,
+    rank_direction: str = "improvement",
+) -> VolumeEventResearchConfig:
+    """Build a config that isolates the rank-delta predicate by disabling every
+    additional liquidity_migration_* band. Used by the direction-flag tests so
+    only the direction/threshold combination affects survival."""
+    from dataclasses import replace as dc_replace
+    return dc_replace(
+        VolumeEventResearchConfig(),
+        liquidity_migration_rank_improvement_min=rank_improvement_min,
+        liquidity_migration_rank_direction=rank_direction,
+        liquidity_migration_turnover_ratio_min=0.0,
+        liquidity_migration_current_rank_max=0,
+        liquidity_migration_event_rank_fraction_max=0.0,
+        liquidity_migration_event_rank_fraction_exclude_min=0.0,
+        liquidity_migration_event_rank_fraction_exclude_max=0.0,
+        liquidity_migration_score_max=0.0,
+        liquidity_migration_day_return_min=-10.0,
+        liquidity_migration_day_return_max=10.0,
+        liquidity_migration_return_7d_min=-10.0,
+        liquidity_migration_return_7d_max=10.0,
+        liquidity_migration_residual_return_min=-10.0,
+        liquidity_migration_residual_return_max=10.0,
+        liquidity_migration_close_to_high_7d_min=-10.0,
+        liquidity_migration_close_to_high_30d_min=-10.0,
+        liquidity_migration_prior30_max_return_min=-10.0,
+        liquidity_migration_prior30_max_return_max=10.0,
+        liquidity_migration_prior7_return_volatility_min=0.0,
+        liquidity_migration_prior7_return_volatility_max=10.0,
+        liquidity_migration_intraday_range_max=10.0,
+        liquidity_migration_funding_rate_last_min=-10.0,
+        liquidity_migration_funding_rate_last_max=10.0,
+        liquidity_migration_funding_3d_sum_min=-10.0,
+        liquidity_migration_funding_3d_sum_max=10.0,
+        liquidity_migration_funding_7d_sum_min=-10.0,
+        liquidity_migration_funding_7d_sum_max=10.0,
+        liquidity_migration_open_interest_return_3d_min=-10.0,
+        liquidity_migration_open_interest_return_3d_max=10.0,
+        liquidity_migration_open_interest_return_7d_min=-10.0,
+        liquidity_migration_open_interest_return_7d_max=10.0,
+        liquidity_migration_volume_to_oi_quote_min=0.0,
+        liquidity_migration_volume_to_oi_quote_max=0.0,
+        liquidity_migration_mark_index_basis_3d_mean_min=-10.0,
+        liquidity_migration_mark_index_basis_3d_mean_max=10.0,
+        liquidity_migration_premium_index_3d_mean_min=-10.0,
+        liquidity_migration_premium_index_3d_mean_max=10.0,
+        liquidity_migration_taker_imbalance_1d_min=-1.0,
+        liquidity_migration_taker_imbalance_1d_max=1.0,
+        liquidity_migration_taker_imbalance_3d_min=-1.0,
+        liquidity_migration_taker_imbalance_3d_max=1.0,
+        liquidity_migration_market_pct_up_max=1.0,
+        liquidity_migration_market_median_return_30d_max=10.0,
+        liquidity_migration_market_median_return_7d_max=10.0,
+        liquidity_migration_market_pct_up_30d_max=1.0,
+        liquidity_migration_market_pct_up_7d_max=1.0,
+        liquidity_migration_close_location_min=0.0,
+        liquidity_migration_close_location_max=1.0,
+        liquidity_migration_signal_last6h_turnover_share_max=1.0,
+        liquidity_migration_up_volume_concentration_min=0.0,
+        liquidity_migration_pit_age_days_min=0,
+        liquidity_migration_pit_age_days_max=0,
+        liquidity_migration_prior_rank_min=0,
+        require_pit_membership=False,
+        universe_rank_min=1,
+        universe_rank_max=400,
+        universe_min_daily_turnover=0.0,
+    )
+
+
+def _direction_fixture_base() -> pl.DataFrame:
+    """4-symbol fixture exercising the four delta corners around threshold 150:
+        CLIMB_BIG  : prior=250 -> 30   delta=+220  (large improvement)
+        CLIMB_SMALL: prior=110 -> 60   delta= +50  (small improvement)
+        DRAIN_SMALL: prior=60  -> 110  delta= -50  (small deterioration)
+        DRAIN_BIG  : prior=30  -> 250  delta=-220  (large deterioration)
+    All other gate columns are set to values that pass the rank gates
+    independently (high score rank, low prior-event-rank, high turnover, etc.)
+    so only the rank_delta predicate determines survival."""
+    return pl.DataFrame({
+        "symbol": ["CLIMB_BIG", "CLIMB_SMALL", "DRAIN_SMALL", "DRAIN_BIG"],
+        "date": ["2026-05-26"] * 4,
+        "ts_ms": [1779753600000] * 4,
+        "liquidity_rank": pl.Series([30, 60, 110, 250], dtype=pl.UInt32),
+        "prior7_liquidity_rank": pl.Series([250, 110, 60, 30], dtype=pl.UInt32),
+        "dollar_volume_rank_z": [2.0] * 4,
+        "dollar_volume_rank_z_rank_frac": [0.9] * 4,
+        "prior7_dollar_volume_rank_z_rank_frac": [0.1] * 4,
+        "tradable_membership_flag": [True] * 4,
+        "turnover_quote": [1.0e9] * 4,
+        "market_pct_up_1d": [0.50] * 4,
+        "market_median_return_30d_sum": [0.0] * 4,
+        "market_median_return_7d_sum": [0.0] * 4,
+        "market_pct_up_30d_mean": [0.5] * 4,
+        "market_pct_up_7d_mean": [0.5] * 4,
+    })
+
+
+def test_filter_liquidity_migration_direction_improvement_admits_climbers_only() -> None:
+    """Default direction=improvement: only deltas >= +150 pass."""
+    result = _event_filter(
+        _direction_fixture_base(),
+        "liquidity_migration",
+        score_col="dollar_volume_rank_z",
+        rank_col="dollar_volume_rank_z_rank_frac",
+        top_cut=0.60,
+        config=_isolated_liquidity_migration_config(rank_direction="improvement"),
+    )
+    assert sorted(result["symbol"].to_list()) == ["CLIMB_BIG"]
+
+
+def test_filter_liquidity_migration_direction_deterioration_admits_drainers_only() -> None:
+    """direction=deterioration: only deltas <= -150 pass. This is the
+    Phase 2 H2 cell — rapid rank deterioration as a tradable short signal."""
+    result = _event_filter(
+        _direction_fixture_base(),
+        "liquidity_migration",
+        score_col="dollar_volume_rank_z",
+        rank_col="dollar_volume_rank_z_rank_frac",
+        top_cut=0.60,
+        config=_isolated_liquidity_migration_config(rank_direction="deterioration"),
+    )
+    assert sorted(result["symbol"].to_list()) == ["DRAIN_BIG"]
+
+
+def test_filter_liquidity_migration_direction_both_admits_either_extreme() -> None:
+    """direction=both: |delta| >= 150 — the Phase 2 H3 two-sided event."""
+    result = _event_filter(
+        _direction_fixture_base(),
+        "liquidity_migration",
+        score_col="dollar_volume_rank_z",
+        rank_col="dollar_volume_rank_z_rank_frac",
+        top_cut=0.60,
+        config=_isolated_liquidity_migration_config(rank_direction="both"),
+    )
+    assert sorted(result["symbol"].to_list()) == ["CLIMB_BIG", "DRAIN_BIG"]
+
+
+def test_explain_liquidity_migration_rejections_gate_name_reflects_direction() -> None:
+    """When the strategy switches direction, the rejection trace must report
+    the gate name and value of the active constraint — otherwise a Phase 2
+    deterioration cell trace would falsely cite 'rank_improvement_min'."""
+    base = _direction_fixture_base().head(2)  # CLIMB_BIG (+220), CLIMB_SMALL (+50)
+
+    out_impr = _explain_liquidity_migration_rejections(
+        base,
+        score_col="dollar_volume_rank_z",
+        rank_col="dollar_volume_rank_z_rank_frac",
+        top_cut=0.60,
+        config=_isolated_liquidity_migration_config(rank_direction="improvement"),
+    )
+    by_impr = {row["symbol"]: row for row in out_impr.to_dicts()}
+    assert by_impr["CLIMB_BIG"]["first_failing_gate"] == ""
+    assert by_impr["CLIMB_SMALL"]["first_failing_gate"] == "rank_improvement_min"
+    assert by_impr["CLIMB_SMALL"]["first_failing_value"] == 50.0
+    assert by_impr["CLIMB_SMALL"]["first_failing_threshold"] == 150.0
+
+    out_det = _explain_liquidity_migration_rejections(
+        base,
+        score_col="dollar_volume_rank_z",
+        rank_col="dollar_volume_rank_z_rank_frac",
+        top_cut=0.60,
+        config=_isolated_liquidity_migration_config(rank_direction="deterioration"),
+    )
+    by_det = {row["symbol"]: row for row in out_det.to_dicts()}
+    # Both CLIMB_BIG and CLIMB_SMALL FAIL deterioration; the gate label must
+    # be 'rank_deterioration_min' and the reported value is -delta so the
+    # threshold comparison reads consistently (value < threshold => fail).
+    assert by_det["CLIMB_BIG"]["first_failing_gate"] == "rank_deterioration_min"
+    assert by_det["CLIMB_BIG"]["first_failing_value"] == -220.0
+    assert by_det["CLIMB_BIG"]["first_failing_threshold"] == 150.0
+
+    out_both = _explain_liquidity_migration_rejections(
+        base,
+        score_col="dollar_volume_rank_z",
+        rank_col="dollar_volume_rank_z_rank_frac",
+        top_cut=0.60,
+        config=_isolated_liquidity_migration_config(rank_direction="both"),
+    )
+    by_both = {row["symbol"]: row for row in out_both.to_dicts()}
+    assert by_both["CLIMB_BIG"]["first_failing_gate"] == ""
+    assert by_both["CLIMB_SMALL"]["first_failing_gate"] == "rank_abs_delta_min"
+    assert by_both["CLIMB_SMALL"]["first_failing_value"] == 50.0  # |delta|
+    assert by_both["CLIMB_SMALL"]["first_failing_threshold"] == 150.0
+
+
+def test_validate_event_config_rejects_unknown_rank_direction() -> None:
+    """Pre-registered values are improvement|deterioration|both. Anything else
+    is a typo / silent misconfiguration and must error at config-build time."""
+    from dataclasses import replace as dc_replace
+    bad = dc_replace(VolumeEventResearchConfig(), liquidity_migration_rank_direction="upward")
+    with pytest.raises(ValueError, match="liquidity_migration_rank_direction"):
+        _validate_event_config(bad)
+
+
 def test_bar_extreme_stop_fill_uses_adverse_hourly_extreme_for_short() -> None:
     hour = 60 * 60 * 1000
     symbol_bars = _make_symbol_bars(

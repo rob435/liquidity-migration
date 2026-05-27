@@ -149,6 +149,49 @@ def test_exclusive_file_lock_recovers_windows_winerror_87_dead_pid(tmp_path: Pat
     assert not lock_path.exists()
 
 
+def test_exclusive_file_lock_self_heals_when_lock_read_hangs(tmp_path: Path, monkeypatch) -> None:
+    """Windows-delete-pending scenario: another thread within this process has
+    just unlinked the lock file, but the OS hasn't released the handle yet, so
+    ``Path.read_text`` blocks indefinitely. The safe-read wrapper times out and
+    returns None; ``_lock_owner_is_dead`` / ``_lock_payload_is_invalid`` MUST
+    treat None as "treat as stale, unlink, retry" so the outer loop self-heals
+    instead of wedging. Regression for an actual wedge observed under
+    ThreadPoolExecutor sweep parallelism."""
+    from liquidity_migration import storage
+
+    lock_path = dataset_lock_path(tmp_path, "klines_1h")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # Plant a lock whose owner is THIS process (so _lock_owner_is_dead would
+    # short-circuit to "alive" via pid==self check) and which has valid JSON
+    # (so the payload-invalid path wouldn't fire either). The ONLY way the
+    # outer loop can recover is via the safe-read returning None.
+    lock_path.write_text(json.dumps({"pid": os.getpid(), "created": 1}), encoding="utf-8")
+
+    # Force the safe-read to return None — simulating a hung Path.read_text.
+    monkeypatch.setattr(storage, "_read_lock_text_safe", lambda *_args, **_kwargs: None)
+
+    # stale_seconds=0 + poll_seconds=0 → the ONLY recovery available is
+    # owner-dead returning True (which happens when text is None).
+    with exclusive_file_lock(lock_path, stale_seconds=0, poll_seconds=0.0):
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        assert payload["pid"] == os.getpid()
+
+    assert not lock_path.exists()
+
+
+def test_thread_lock_for_returns_same_lock_per_path() -> None:
+    """The per-process thread-lock layer must return a STABLE Lock object
+    per lock-path; otherwise two threads coming in for the same dataset
+    grab different Locks and don't actually serialise. Companion to the
+    8-writer concurrent test."""
+    from liquidity_migration.storage import _thread_lock_for
+
+    path_a = Path("/tmp/sweep_test_thread_lock_a.lock")
+    path_b = Path("/tmp/sweep_test_thread_lock_b.lock")
+    assert _thread_lock_for(path_a) is _thread_lock_for(path_a)
+    assert _thread_lock_for(path_a) is not _thread_lock_for(path_b)
+
+
 def test_exclusive_file_lock_recovers_malformed_lock_after_grace_without_stale_timeout(tmp_path: Path) -> None:
     lock_path = dataset_lock_path(tmp_path, "klines_1h")
     lock_path.parent.mkdir(parents=True, exist_ok=True)
