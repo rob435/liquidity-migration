@@ -36,6 +36,19 @@ from typing import Mapping
 REPO = Path(__file__).resolve().parent.parent
 SHARED = Path.home() / "SHARED_DATA"
 
+
+# Force line-buffered + UTF-8 stdout so atomic_print events surface in
+# real-time when the orchestrator's stdout is captured to a file (default
+# Windows cp1252 + block-buffered pipe both bite us; observed wedging the
+# Phase 0 dispatch even though cells were actually completing). Belt and
+# suspenders — invoking with `python -u` is the other half of this.
+try:
+    sys.stdout.reconfigure(line_buffering=True, encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(line_buffering=True, encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    # Pre-3.7 Python or already-detached streams; falls back to default.
+    pass
+
 MAX_WORKERS = max(1, int(os.environ.get("SWEEP_MAX_WORKERS", "8")))
 PER_CELL_POLARS_THREADS = max(1, int(os.environ.get("POLARS_MAX_THREADS", "4")))
 
@@ -45,6 +58,13 @@ class Cell:
     cell_id: str
     description: str
     overrides: dict[str, str] = field(default_factory=dict)
+    # Optional per-cell data-root override. When set, this cell runs against
+    # the given data root regardless of the orchestrator's per-venue default.
+    # Used by Phase 1 to route 474-archive-only cells to the side-copy at
+    # ~/SHARED_DATA/bybit_full_pit_archive_only while 764 cells stay on the
+    # full root. Stays None for Phase 0 / sweep_cells / future single-root
+    # phases.
+    data_root_override: Path | None = None
 
 
 _PRINT_LOCK = threading.Lock()
@@ -101,7 +121,7 @@ def run_cell(
         cmd.extend([k, v])
 
     start = time.monotonic()
-    _atomic_print(f"  [{venue}/{cell.cell_id}] START  {cell.description}  →  {report_dir}")
+    _atomic_print(f"  [{venue}/{cell.cell_id}] START  {cell.description}  ->  {report_dir}")
     proc = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, env=_subprocess_env())
     elapsed = time.monotonic() - start
     if proc.returncode != 0:
@@ -179,10 +199,17 @@ def run_sweep(
             print(f"SKIP venue={venue}: data root not found at {data_root}")
             continue
         for cell in cells:
-            work.append((cell, venue, data_root))
+            # Honour per-cell data_root_override so Phase 1 can route a
+            # mix of 474-archive-only and 764-full cells through the same
+            # orchestrator pass.
+            effective_root = cell.data_root_override if cell.data_root_override is not None else data_root
+            if not effective_root.exists():
+                print(f"SKIP cell={cell.cell_id} venue={venue}: data root not found at {effective_root}")
+                continue
+            work.append((cell, venue, effective_root))
 
-    print(f"sweep summary → {summary_path}")
-    print(f"window: {start_date} → {end_date}")
+    print(f"sweep summary -> {summary_path}")
+    print(f"window: {start_date} -> {end_date}")
     print(f"sweep tag: {sweep_tag}")
     print(
         f"cells: {len(cells)}  venues: {len(venues)}  total runs: {len(work)}  "

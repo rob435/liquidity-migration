@@ -10,18 +10,18 @@
 
 - Strategy: Bybit (+Binance) liquidity-migration short, **research-stage**.
   Live demo + paper run a frozen "promoted" profile; not deployed for real money.
-- Last sweep (2026-05-28 EXPLORATORY filter-tweak): **REJECTED**, no candidate.
-  Verdict in `docs/preregistration/2026-05-28-liquidity-capacity-filter-and-filter-tweak-sweep.md`.
+- Last sweep (Phase 0 filter LOO audit, 2026-05-28): **REJECTED**, 0 candidates.
+  Falsifier hits confirm `crowding`, `event_rank_frac`, `turnover_ratio` earn
+  their keep. Verdict in `docs/preregistration/2026-05-27-phase0-verdict.md`.
 - Current research program: 7-phase rank-direction edge + universe isolation +
   filter audit + signal-research harness. Pre-reg at
   `docs/preregistration/2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md`.
-- All 4 code changes are merged (`ef9d3aa`, `ed7c5d8`). Phase 0 (filter LOO
-  audit) pre-registered at
-  `docs/preregistration/2026-05-27-phase0-filter-loo-audit.md`, ready to
-  dispatch via `scripts/phase0_loo_sweep.py`.
-- Next action: dispatch Phase 0, then in parallel Phase 1 (universe-isolation
-  diagnostic; needs `scripts/build_legacy_archive_manifest.py` run first)
-  and Phase 5a (build feature panels).
+- All 4 code changes merged (`ef9d3aa`, `ed7c5d8`, `54f7163`). Phase 0
+  COMPLETE — REJECTED (0 candidates). The current production filter stack
+  stays as-is. `crowding`, `event_rank_frac`, `turnover_ratio` confirmed
+  load-bearing (falsifier hits on removal).
+- Phase 1, 2, 5, 7 are all pre-registered and ready to dispatch.
+- Next action: dispatch Phase 1 (universe-isolation diagnostic).
 
 ## What's done
 
@@ -33,7 +33,8 @@
 | 2026-05-27 | 7-phase research plan pre-registered (rank-direction + signal harness) | commit `e7dd104` |
 | 2026-05-27 | Code changes 1-3: rank-direction flag, sweep parallelism, legacy-archive manifest builder | commit `ef9d3aa` |
 | 2026-05-27 | Code change 4: signal_harness module (20 features + IC + portfolio + CLI) | commit `ed7c5d8` |
-| 2026-05-27 | Phase 0 pre-registered (filter LOO audit, 15 cells × 2 venues) | this commit |
+| 2026-05-27 | Phase 0 pre-registered (filter LOO audit, 15 cells × 2 venues) | commit `54f7163` |
+| 2026-05-28 | Phase 0 verdict: REJECTED (0 candidates, 3 falsifiers, 11 inconclusive) | this commit |
 
 ## What's NOT done (the work)
 
@@ -54,14 +55,14 @@ Open work:
 
 | Phase | Purpose | Pre-requisites | Status |
 |---|---|---|---|
-| 0 | Filter LOO audit | none | **pre-registered, ready to dispatch** |
-| 1 | Universe-isolation diagnostic | Change 3 + run `build_legacy_archive_manifest.py` | not started |
-| 2 | Rank-direction full grid | Change 1 | not started |
+| 0 | Filter LOO audit | none | **COMPLETE — REJECTED** (0 candidates, 3 falsifiers, 11 inconclusive). See [verdict](docs/preregistration/2026-05-27-phase0-verdict.md). |
+| 1 | Universe-isolation diagnostic | Change 3 + `build_legacy_archive_manifest.py` (run 2026-05-27) | **pre-registered, ready to dispatch** |
+| 2 | Rank-direction full grid | Change 1 | **pre-registered, ready to dispatch** |
 | 3 | Exit selection (conditional on P2 candidate) | P2 candidate | not started |
 | 4 | Hybrid event types (conditional on P2+P3) | P2+P3 | not started |
-| 5 | Signal-research harness + univariate IC | Change 4 | not started |
+| 5 | Signal-research harness + univariate IC | Change 4 | **pre-registered, ready to dispatch** |
 | 6 | Combined-signal portfolio (conditional on P5 ≥3 survivors) | P5 survivors | not started |
-| 7 | Pre-2023 OOS gate (MANDATORY for every finalist) | any finalist | not started |
+| 7 | Pre-2023 OOS gate (MANDATORY for every finalist) | any finalist | **pre-registered**, waiting on finalists |
 
 Hard end-date on Phase 7: **2026-06-15**.
 

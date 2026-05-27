@@ -32,6 +32,35 @@ def _thread_lock_for(lock_path: Path) -> threading.Lock:
         return lock
 
 
+def _unlink_with_retry(lock_path: Path, *, retries: int = 40, delay: float = 0.05) -> None:
+    """Unlink a lock file with retries on Windows PermissionError (WinError 32).
+
+    Windows raises ``PermissionError: [WinError 32] The process cannot
+    access the file because it is being used by another process`` whenever
+    ANY process holds the file open — including the brief windows when
+    another process is mid-``_read_lock_text_safe`` reading our payload to
+    check liveness. With many parallel sweep workers all contending on the
+    same dataset lock, those windows overlap with the lock holder's release
+    and naively-`.unlink()`-only-catching-FileNotFoundError crashes the
+    whole subprocess (and propagates failure to the orchestrator).
+
+    The retry loop tolerates this transient contention. If retries exhaust,
+    the file is left in place — the next acquire's stale-detection (dead
+    pid via _lock_owner_is_dead) will clean it up, so no permanent leak.
+    Defaults: 40 retries × 50ms ≈ 2s, double the 1s ``_read_lock_text_safe``
+    timeout the contending readers wait."""
+    for _ in range(retries):
+        try:
+            lock_path.unlink()
+            return
+        except FileNotFoundError:
+            return
+        except PermissionError:
+            time.sleep(delay)
+    # Last resort: leave the file. The next acquire's stale-detection
+    # path is the safety net.
+
+
 DATASETS = {
     "instruments",
     "klines_1m",
@@ -146,43 +175,47 @@ def exclusive_file_lock(
             try:
                 fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             except FileExistsError:
-                if _lock_owner_is_dead(lock_path):
-                    try:
-                        lock_path.unlink()
-                    except FileNotFoundError:
-                        pass
-                    continue
-                try:
-                    age = time.time() - lock_path.stat().st_mtime
-                except OSError:
-                    age = 0.0
-                invalid_lock_stale = (
-                    _lock_payload_is_invalid(lock_path)
-                    and invalid_lock_stale_seconds >= 0
-                    and age > invalid_lock_stale_seconds
-                )
-                if invalid_lock_stale:
-                    try:
-                        lock_path.unlink()
-                    except FileNotFoundError:
-                        pass
-                    continue
-                if stale_seconds > 0 and age > stale_seconds:
-                    try:
-                        lock_path.unlink()
-                    except FileNotFoundError:
-                        pass
-                    continue
-                time.sleep(max(poll_seconds, 0.0))
+                # POSIX-style "file already exists" — fall through to the
+                # liveness / staleness / wait logic below.
+                pass
+            except PermissionError:
+                # Windows-specific: when another process is mid-unlink the
+                # file enters "delete-pending" state. A concurrent O_CREAT|O_EXCL
+                # then raises PermissionError [Errno 13] / EACCES instead of
+                # FileExistsError, even though the semantically-correct answer
+                # is "the file exists, try again". Treat exactly like
+                # FileExistsError so the same recovery / wait path runs.
+                # Observed in Phase 0 dispatch: control cell crashed on lock
+                # acquire of funding.lock while another worker was releasing it.
+                pass
+            else:
+                # Got the lock fresh — break out of the wait loop.
+                break
+            if _lock_owner_is_dead(lock_path):
+                _unlink_with_retry(lock_path)
+                continue
+            try:
+                age = time.time() - lock_path.stat().st_mtime
+            except OSError:
+                age = 0.0
+            invalid_lock_stale = (
+                _lock_payload_is_invalid(lock_path)
+                and invalid_lock_stale_seconds >= 0
+                and age > invalid_lock_stale_seconds
+            )
+            if invalid_lock_stale:
+                _unlink_with_retry(lock_path)
+                continue
+            if stale_seconds > 0 and age > stale_seconds:
+                _unlink_with_retry(lock_path)
+                continue
+            time.sleep(max(poll_seconds, 0.0))
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(json.dumps({"pid": os.getpid(), "created": time.time()}))
             yield
         finally:
-            try:
-                lock_path.unlink()
-            except FileNotFoundError:
-                pass
+            _unlink_with_retry(lock_path)
 
 
 def _read_lock_text_safe(lock_path: Path, timeout: float = 1.0) -> str | None:

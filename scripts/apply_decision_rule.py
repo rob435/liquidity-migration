@@ -30,6 +30,15 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+# Force UTF-8 stdout so the verdict-table prints (which contain Δ chars) don't
+# crash on Windows cp1252-encoded captured pipes — observed during Phase 0
+# verdict generation.
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, ValueError):
+    pass
+
 EXIT_OK = 0
 EXIT_USAGE = 2
 

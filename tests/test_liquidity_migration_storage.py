@@ -179,6 +179,109 @@ def test_exclusive_file_lock_self_heals_when_lock_read_hangs(tmp_path: Path, mon
     assert not lock_path.exists()
 
 
+def test_unlink_with_retry_succeeds_after_transient_permission_error(tmp_path: Path, monkeypatch) -> None:
+    """Windows WinError 32 regression: the lock-release ``unlink`` raises
+    PermissionError when another process briefly has the file open (a parallel
+    sweep worker reading our lock payload via ``_read_lock_text_safe``).
+    ``_unlink_with_retry`` must spin past those transient failures and
+    eventually succeed, NOT propagate the PermissionError out and crash
+    the subprocess. Phase 0 dispatched 8 cells in parallel and every single
+    one wedged on this; the fix is the retry."""
+    from liquidity_migration import storage
+
+    lock_path = tmp_path / "dataset.lock"
+    lock_path.write_text("{}", encoding="utf-8")
+
+    real_unlink = Path.unlink
+    call_count = [0]
+
+    def flaky_unlink(self: Path, **kwargs):
+        call_count[0] += 1
+        if call_count[0] <= 3:
+            # First 3 attempts fail with WinError 32 (whether or not we're on
+            # Windows — what matters is that the helper does the retry).
+            err = PermissionError("simulated WinError 32")
+            err.winerror = 32  # type: ignore[attr-defined]
+            raise err
+        return real_unlink(self, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", flaky_unlink)
+
+    storage._unlink_with_retry(lock_path, retries=10, delay=0.001)
+    # Eventually succeeded; file is gone.
+    assert not lock_path.exists()
+    assert call_count[0] == 4  # 3 failures + 1 success
+
+
+def test_unlink_with_retry_gives_up_silently_when_retries_exhaust(tmp_path: Path, monkeypatch) -> None:
+    """If a file is permanently locked (shouldn't happen in practice but
+    let's be paranoid), ``_unlink_with_retry`` must return normally
+    instead of propagating PermissionError. The next acquire's stale-
+    detection path is the safety net that eventually cleans up."""
+    from liquidity_migration import storage
+
+    lock_path = tmp_path / "dataset.lock"
+    lock_path.write_text("{}", encoding="utf-8")
+
+    def always_locked(self: Path, **kwargs):
+        err = PermissionError("simulated permanent lock")
+        err.winerror = 32  # type: ignore[attr-defined]
+        raise err
+
+    monkeypatch.setattr(Path, "unlink", always_locked)
+
+    # MUST NOT raise.
+    storage._unlink_with_retry(lock_path, retries=3, delay=0.001)
+
+
+def test_exclusive_file_lock_retries_on_windows_permission_error_at_open(tmp_path: Path, monkeypatch) -> None:
+    """Windows EACCES regression: ``os.open(..., O_CREAT|O_EXCL)`` can raise
+    PermissionError [Errno 13] instead of FileExistsError when the lock file
+    is in delete-pending state (another worker is mid-unlink). The retry loop
+    MUST treat that exactly like FileExistsError — fall through to the wait
+    path — so the worker can re-attempt once the delete completes. Phase 0
+    control cell crashed on this; we now treat both exceptions identically."""
+    from liquidity_migration import storage
+
+    lock_path = dataset_lock_path(tmp_path, "klines_1h")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # Plant a lock owned by a DEAD pid so stale-recovery kicks in after the
+    # first PermissionError, letting the test's lock acquire succeed.
+    lock_path.write_text(json.dumps({"pid": 2_147_483_647, "created": 1}), encoding="utf-8")
+
+    real_open = storage.os.open
+    permission_error_count = [0]
+
+    def flaky_open(path: str, flags: int, *args, **kwargs):
+        # First two os.open calls raise PermissionError; subsequent calls
+        # work normally. Simulates a brief delete-pending window.
+        if (flags & os.O_CREAT) and (flags & os.O_EXCL) and permission_error_count[0] < 2:
+            permission_error_count[0] += 1
+            raise PermissionError("simulated Windows delete-pending EACCES")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(storage.os, "open", flaky_open)
+
+    with exclusive_file_lock(lock_path, stale_seconds=0, poll_seconds=0.0):
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        assert payload["pid"] == os.getpid()
+
+    assert permission_error_count[0] == 2  # both flaky attempts hit
+    assert not lock_path.exists()
+
+
+def test_unlink_with_retry_no_op_on_missing_file(tmp_path: Path) -> None:
+    """Already-gone files (FileNotFoundError) return immediately without
+    retrying — this is the most common case in practice (lock recovery
+    after a dead-pid restart)."""
+    from liquidity_migration import storage
+
+    lock_path = tmp_path / "never_existed.lock"
+    storage._unlink_with_retry(lock_path, retries=3, delay=0.001)
+    # No exception. File still doesn't exist.
+    assert not lock_path.exists()
+
+
 def test_thread_lock_for_returns_same_lock_per_path() -> None:
     """The per-process thread-lock layer must return a STABLE Lock object
     per lock-path; otherwise two threads coming in for the same dataset

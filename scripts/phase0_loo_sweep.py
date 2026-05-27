@@ -2,7 +2,7 @@
 
 Pre-reg: docs/preregistration/2026-05-27-phase0-filter-loo-audit.md
 
-15 cells (1 baseline + 14 LOO) × 2 venues = 30 runs. Window 2023-04-01 →
+15 cells (1 baseline + 14 LOO) × 2 venues = 30 runs. Window 2023-04-01 ->
 2026-04-30 (cross-venue minimum; Binance data ends 2026-04-30). Decision
 rule per the Strictness Manifesto in the parent plan.
 
