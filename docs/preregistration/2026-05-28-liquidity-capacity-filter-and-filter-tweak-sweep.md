@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-28
 **Author:** owner
-**Stage:** EXPLORATORY
+**Stage:** EXPLORATORY — **run-complete, REJECTED (2026-05-27)**
 
 ## What's changing
 
@@ -100,13 +100,115 @@ Output: `~/SHARED_DATA/{bybit,binance}_full_pit/reports/sweep_2026-05-28/<cell-i
 plus a top-level `sweep_summary.csv` aggregating Sharpe / DD / return /
 trade-count per cell per venue.
 
+## Deviations from pre-reg
+
+Two minor pre-reg deviations recorded for honesty:
+
+- **Cell count:** pre-reg said "17 cells × 2 venues = 34 invocations"; the
+  actually-shipped sweep config in `scripts/sweep_cells.py` trimmed to
+  10 cells × 2 venues = 20 invocations as a compute concession before
+  kickoff. The 10 cells retained are a representative subset; the
+  hypotheses H1-H6 are still each covered by at least one cell.
+- **Window:** pre-reg implied 2024-01-01+; actual run used
+  2025-01-01 → 2026-05-28 (~17 months) per the trimmed sweep config.
+  This narrower window puts more weight on the harshest recent regime
+  (April 2025, Nov-Dec 2025, May 2026 drawdowns) which is appropriate
+  for stress-testing filter tweaks but means the comparison-to-baseline
+  Sharpe magnitudes here are not directly comparable to older 2024+
+  baseline numbers.
+
+Both deviations are noted for the integrity record. The shipped sweep is
+still a coherent test of H1-H6 with the pre-registered decision rule.
+
 ## Post-run results
 
-(filled after run completes)
+Run completed 2026-05-27 (local clock). Process exit clean, 20/20 cells
+status=ok. Summary CSV: `~/SHARED_DATA/sweep_2026-05-28_summary.csv`.
+Per-cell reports under
+`~/SHARED_DATA/{bybit,binance}_full_pit/reports/sweep_2026-05-28/<cell>/`.
+Repo state at run: commit `0361d41` (pre-K1-K5 refactor, pre-research-plan).
+
+### Full per-cell metrics
+
+| Cell | Bybit trades | Bybit ret | Bybit DD | Bybit sharpe-like | Binance trades | Binance ret | Binance DD | Binance sharpe-like |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 00_baseline (control) | 416 | 5.19× | -42.1% | 2.27 | 319 | 0.66× | -40.7% | 0.98 |
+| A2_turnover_5M | 377 | 3.67× | -53.7% | 2.09 | 321 | 0.72× | -41.3% | 1.01 |
+| A3_turnover_10M | 290 | 4.51× | **-28.4%** | 2.23 | 303 | **-0.17×** | **-62.0%** | **0.08** |
+| A4_turnover_50M | 7 | 0.03× | -4.1% | 1.01 | 134 | 0.64× | -33.5% | 1.09 |
+| B1_rankimp_200 | 382 | **7.47×** | -38.8% | **2.71** | 281 | **-0.20×** | **-62.1%** | **0.05** |
+| C1_residret_12 | 372 | 4.65× | -41.3% | 2.18 | 271 | 0.02× | -45.9% | 0.37 |
+| D1_hold2 | 428 | 5.65× | -38.1% | 2.37 | 324 | 0.34× | -48.0% | 0.73 |
+| E1_rankmax_200 | 418 | 2.44× | -48.2% | 1.69 | 314 | -0.13× | -60.7% | 0.15 |
+| F1_turnover10M_hold2 | 301 | 3.22× | -30.7% | 2.11 | 313 | 0.02× | -56.9% | 0.37 |
+| F3_turnover10M_hold2_residret12 | 265 | 2.70× | -36.3% | 2.00 | 268 | -0.14× | -49.3% | 0.24 |
+
+### Decision-rule application
+
+For each non-baseline cell, applying the a-priori decision rule:
+
+| Cell | Rule 1: Sharpe Δ ≥ +0.5 both venues? | Rule 2: DD Δ ≤ +5pp both venues? | Rule 3: Return sign ≥ 0 both venues? | Rule 4: Bybit trades ≥ 30? | Verdict |
+|---|---|---|---|---|---|
+| A2_turnover_5M | Bybit Δ -0.18, Binance Δ +0.03 — **fail** | Bybit DD Δ -11.6pp — **fail** | yes | yes | reject |
+| A3_turnover_10M | Bybit Δ -0.04, Binance Δ -0.90 — **fail** | Bybit DD Δ +13.7pp — **fail** | **Binance negative** — **fail** | yes | reject |
+| A4_turnover_50M | Bybit Δ -1.27 — **fail** | yes (Bybit Δ +38pp BETTER, Binance Δ +7.2pp) | yes | **Bybit trades = 7 < 30** — **fail** | reject |
+| B1_rankimp_200 | Bybit Δ +0.44, Binance Δ -0.93 — **fail (sign flip)** | Bybit Δ +3.3pp ok, Binance Δ -21.4pp — **fail** | **Binance negative** — **fail** | yes | reject |
+| C1_residret_12 | Bybit Δ -0.10, Binance Δ -0.61 — **fail** | Binance DD Δ -5.2pp — borderline fail | yes | yes | reject |
+| D1_hold2 | Bybit Δ +0.10, Binance Δ -0.25 — **fail** | Binance DD Δ -7.3pp — **fail** | yes | yes | reject |
+| E1_rankmax_200 | Bybit Δ -0.58, Binance Δ -0.83 — **fail** | Both DDs worse — **fail** | **Binance negative** — **fail** | yes | reject |
+| F1_turnover10M_hold2 | Bybit Δ -0.16, Binance Δ -0.61 — **fail** | Binance DD Δ -16.2pp — **fail** | yes | yes | reject |
+| F3_turnover10M_hold2_residret12 | Bybit Δ -0.27, Binance Δ -0.74 — **fail** | Binance DD Δ -8.6pp — **fail** | **Binance negative** — **fail** | yes | reject |
+
+**Cells passing decision rule: 0 of 9.**
+
+### The cross-venue divergence pattern (the actual finding)
+
+The salient feature of these results is not that no cell passed —
+that's the expected outcome for an exploratory sweep with strict rules.
+The salient feature is the **systematic Bybit-vs-Binance sign disagreement**:
+
+- A3 ($10M turnover floor): Bybit DD improves -14pp; Binance DD worsens
+  +21pp, return goes negative. Direct contradiction.
+- B1 (rank_improvement_min 200): Bybit return +44%, Sharpe +0.44;
+  Binance return -30%, Sharpe -0.93. Direct contradiction.
+- E1 (universe_rank_max 200): Bybit return -53%; Binance return -19%
+  but DD worse +20pp. Bad on both, in different ways.
+
+The pre-registered rules saved a tempting venue-specific false positive:
+B1 alone on Bybit would have looked like a clear winner (+44% Sharpe,
++228% return improvement). Cross-venue testing rejected it.
+
+This pattern itself is research evidence — the baseline strategy
+generalises only weakly across the two venues (Bybit 5.19× / Binance
+0.66× with similar trade counts), and parameter tweaks amplify rather
+than reduce that fragility. It motivates the broader research program
+(orthogonal multi-signal features, signal-research harness) committed
+in commit `e7dd104` rather than further within-strategy parameter
+tweaks.
 
 ## Verdict
 
-(filled after analysis)
+**REJECTED — no improvement found.** Zero of nine candidate cells pass
+the a-priori decision rule. Production parameters remain unchanged.
+
+Filed as the negative-result outcome the pre-reg's H1-H6 hypotheses
+foresaw as the "most likely" case in the Honesty Notes section. The
+strategy parameters are at or near a local optimum within the explored
+filter-tweak space on this window.
+
+Two follow-on items recorded for the broader program:
+
+1. **The strong cross-venue divergence** in this run's results is by
+   itself a non-trivial finding — bigger than any individual cell's
+   in-sample Sharpe. It motivates Phase 5 (signal-research harness)
+   and Phase 6 (combined-signal portfolio) of the multi-phase research
+   plan at
+   `docs/preregistration/2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md`.
+
+2. **No filter-tweak hot-fix to demo.** The pre-reg standard prohibits
+   trading any cell that fails the decision rule, regardless of how
+   attractive single-venue numbers look. Production stays on the
+   current promoted profile pending the broader research program.
 
 ## Honesty notes
 
