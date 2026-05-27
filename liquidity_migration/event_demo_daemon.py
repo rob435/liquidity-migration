@@ -227,6 +227,22 @@ class EventDemoDaemon:
         self._reconcile_stop = threading.Event()
         self._reconciles_total = 0
         self._reconcile_errors = 0
+        # Private/ticker WS health watchdog. pybit reconnects transparently,
+        # so the daemon never observes an explicit disconnect — a long
+        # silence followed by a resumed event is the only symptom of a
+        # failed reconnect. The REST reconcile keeps the cache fresh so
+        # the cycle survives a dead WS, but a silently-dead WS means every
+        # snapshot falls back to REST and the WS-vs-REST telemetry hides
+        # the regression. The watchdog logs a ONE-SHOT warning when each
+        # stream goes silent past _ws_stale_warning_seconds (and another
+        # info line when it resumes), so operators can investigate even
+        # though the cycle keeps running. Counters live in stats for
+        # post-mortem audit.
+        self._ws_stale_warning_seconds = float(state_cache_stale_seconds)
+        self._ws_private_stale_warned = False
+        self._ws_ticker_stale_warned = False
+        self._ws_private_stale_ticks = 0
+        self._ws_ticker_stale_ticks = 0
         self._startup_telegram = bool(startup_telegram)
         self._shutdown_telegram = bool(shutdown_telegram)
         if order_submit_mode not in {"ws", "ws_then_rest", "rest"}:
@@ -565,6 +581,8 @@ class EventDemoDaemon:
                 "ticker_cache": self._ticker_cache.stats(),
                 "reconciles_total": self._reconciles_total,
                 "reconcile_errors": self._reconcile_errors,
+                "ws_private_stale_ticks": self._ws_private_stale_ticks,
+                "ws_ticker_stale_ticks": self._ws_ticker_stale_ticks,
             })
         if payload is not None and self._trade_router is not None:
             try:
@@ -781,6 +799,49 @@ class EventDemoDaemon:
                     self._open_ticker_stream()
                 except Exception as exc:  # noqa: BLE001
                     _logger.warning("short ticker stream recovery-open failed: %s", exc)
+            # Piggy-back the WS health watchdog on the reconcile cadence: no
+            # extra thread, fires every ticker_reconcile_interval_seconds.
+            self._check_ws_health()
+
+    def _check_ws_health(self) -> None:
+        """Watchdog: log one-shot warnings when the private or ticker WS
+        streams go silent past the stale threshold. The cycle's cache-stale
+        check + REST reconcile keeps the system alive; this method only
+        SURFACES the staleness so operators notice a silently-dead WS
+        (pybit auto-reconnects transparently, so a failed reconnect leaves
+        no other signal)."""
+        threshold = self._ws_stale_warning_seconds
+        if threshold <= 0.0:
+            return
+        if self._private_state_cache.is_seeded():
+            priv_silence = self._private_state_cache.seconds_since_last_event()
+            if priv_silence > threshold:
+                self._ws_private_stale_ticks += 1
+                if not self._ws_private_stale_warned:
+                    _logger.warning(
+                        "private WS silent for %.0fs (threshold %.0fs); REST "
+                        "reconcile keeps state fresh but pybit auto-reconnect "
+                        "may have failed — investigate",
+                        priv_silence, threshold,
+                    )
+                    self._ws_private_stale_warned = True
+            elif self._ws_private_stale_warned:
+                _logger.info("private WS resumed (silence=%.1fs)", priv_silence)
+                self._ws_private_stale_warned = False
+        if self._ticker_cache.is_seeded():
+            ticker_silence = self._ticker_cache.seconds_since_last_event()
+            if ticker_silence > threshold:
+                self._ws_ticker_stale_ticks += 1
+                if not self._ws_ticker_stale_warned:
+                    _logger.warning(
+                        "ticker WS silent for %.0fs (threshold %.0fs); cycle "
+                        "falls back to REST tickers",
+                        ticker_silence, threshold,
+                    )
+                    self._ws_ticker_stale_warned = True
+            elif self._ws_ticker_stale_warned:
+                _logger.info("ticker WS resumed (silence=%.1fs)", ticker_silence)
+                self._ws_ticker_stale_warned = False
 
     def _invoke_state_cache_seeder(self) -> None:
         """Single seeder entry point that lazily constructs and reuses the

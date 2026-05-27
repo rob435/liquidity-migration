@@ -16,6 +16,8 @@ import polars as pl
 from ._common import MS_PER_DAY
 from .bybit import BybitPrivateWebSocketStream, BybitPublicTickerStream, BybitWebSocketTradeClient, resolve_private_credentials
 from .config import ResearchConfig
+from decimal import Decimal
+
 from .event_demo import (
     EventDemoCycleConfig,
     EventRiskCycleConfig,
@@ -25,12 +27,15 @@ from .event_demo import (
     _bool,
     _build_private_client,
     _column_values,
+    _decimal_text,
     _demo_event_config,
     _empty_trades,
     _execution_summary,
     _execute_risk_exits,
     _execute_stop_repairs,
     _float,
+    _orphan_close_pnl_backfill,
+    _pending_order_refs,
     _normalized_position_side,
     _open_trades,
     _order_params,
@@ -40,6 +45,7 @@ from .event_demo import (
     _risk_reconcile_missing_positions,
     _reconcile_pending_order_fills,
     _selected_scenario,
+    _split_qty_for_max_order_size,
     _live_open_order_symbols,
     _safe_open_orders,
     _safe_raw_positions,
@@ -811,6 +817,32 @@ class EventWebSocketRiskEngine:
 
     def submit_exit(self, exit_plan: dict[str, Any]) -> None:
         symbol = str(exit_plan["symbol"])
+        # Cross-process double-submit guard (P1-2, 2026-05-27). The demo
+        # cycle (event_demo_cycle) and this ws_risk daemon both submit
+        # reduce-only exits and only share state via the orders parquet
+        # ledger. ``submitted_symbols`` is refreshed on each rest_reconcile;
+        # between reconciles a parallel demo cycle's submit is invisible.
+        # A fresh parquet read here closes the window: if the demo cycle
+        # just landed a pending reduce-only on this symbol we skip and let
+        # the next cycle pick up the residual instead of double-submitting
+        # (wasted REST + venue rejection on the loser).
+        if self.risk.submit_orders and not self.state.all_trades.is_empty():
+            try:
+                fresh_orders = self._read_orders_combined()
+            except Exception:  # noqa: BLE001 - parquet read must fail-open
+                fresh_orders = pl.DataFrame()
+            if not fresh_orders.is_empty():
+                _, fresh_pending_symbols = _pending_order_refs(
+                    fresh_orders, reduce_only=True, now_ms=_now_ms()
+                )
+                if symbol in fresh_pending_symbols and symbol not in self.state.submitted_symbols:
+                    _logger.info(
+                        "submit_exit skipped: pending reduce-only order on %s "
+                        "already in ledger (cross-process double-submit guard)",
+                        symbol,
+                    )
+                    self.mark_submitted_symbol(symbol)
+                    return
         if not self.risk.submit_orders:
             rows, orders = self.rest_exit([exit_plan], submit_orders=False)
         elif self.trade_client is not None and self.risk.order_submit_mode in {"ws", "ws_then_rest"}:
@@ -937,44 +969,76 @@ class EventWebSocketRiskEngine:
         # WS exits land in the short ledger and the long sleeve's reconciliation
         # never sees them.
         sleeve = str(trade.get("sleeve") or ("long" if side == "long" else "short"))
-        link = _risk_order_link_id("wx", symbol=symbol, ts_ms=_now_ms(), attempt=0)
-        order_params = _order_params(
-            symbol=symbol,
-            side=bybit_side,
-            qty=qty,
-            order_type="Market",
-            order_link_id=link,
-            reduce_only=True,
-        )
-        def enqueue_ack(message: dict[str, Any]) -> None:
-            payload = dict(message) if isinstance(message, dict) else {"message": message}
-            payload["_lm_order_link_id"] = link
-            self.events.put(("ws_order_ack", payload))
+        base_link = _risk_order_link_id("wx", symbol=symbol, ts_ms=_now_ms(), attempt=0)
 
-        self.trade_client.place_order(enqueue_ack, **order_params)
-        self.state.submitted_link_to_trade_id[link] = str(trade["trade_id"])
-        self.state.submitted_link_submit_mode[link] = "ws_submitted"
-        order_row = {
-            "order_link_id": link,
-            "ts_ms": _now_ms(),
-            "trade_id": str(trade["trade_id"]),
-            "sleeve": sleeve,
-            "symbol": symbol,
-            "side": bybit_side,
-            "order_type": "Market",
-            "qty": qty,
-            "reduce_only": True,
-            "order_id": "",
-            "submit_mode": "ws_submitted",
-            "avg_price": 0.0,
-            "notional_usdt": 0.0,
-            "status": "submitted_unconfirmed",
-            "exit_reason": str(exit_plan["exit_reason"]),
-            "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
-            "target_qty": qty,
-            "filled_qty": "",
-        }
-        return [], [order_row]
+        # Same split rationale as the main cycle's _execute_exits: a single
+        # reduce-only market order > maxMktOrderQty is rejected outright.
+        # Trade rows persist max_market_order_qty since 2026-05-27; legacy
+        # rows lack it and fall through to no split.
+        target_qty_decimal = Decimal(qty) if qty else Decimal("0")
+        max_qty_per_order = _float(trade.get("max_market_order_qty"))
+        qty_step = _float(trade.get("qty_step"))
+        sub_qty_decimals = _split_qty_for_max_order_size(
+            target_qty=target_qty_decimal,
+            max_qty_per_order=max_qty_per_order,
+            qty_step=qty_step,
+        )
+        sub_qty_strs = [_decimal_text(q) for q in sub_qty_decimals] if target_qty_decimal > 0 else [qty]
+        if len(sub_qty_strs) > 1:
+            _logger.info(
+                "ws_exit split into %d sub-orders symbol=%s target_qty=%s "
+                "max_mkt_qty=%s sub_qtys=%s",
+                len(sub_qty_strs),
+                symbol,
+                qty,
+                max_qty_per_order,
+                sub_qty_strs,
+            )
+
+        order_rows: list[dict[str, Any]] = []
+        now_ms = _now_ms()
+        for idx, sub_qty_str in enumerate(sub_qty_strs):
+            sub_link = base_link if len(sub_qty_strs) == 1 else f"{base_link}-s{idx}"
+            sub_order_params = _order_params(
+                symbol=symbol,
+                side=bybit_side,
+                qty=sub_qty_str,
+                order_type="Market",
+                order_link_id=sub_link,
+                reduce_only=True,
+            )
+
+            def _enqueue_ack(message: dict[str, Any], _link: str = sub_link) -> None:
+                payload = dict(message) if isinstance(message, dict) else {"message": message}
+                payload["_lm_order_link_id"] = _link
+                self.events.put(("ws_order_ack", payload))
+
+            self.trade_client.place_order(_enqueue_ack, **sub_order_params)
+            self.state.submitted_link_to_trade_id[sub_link] = str(trade["trade_id"])
+            self.state.submitted_link_submit_mode[sub_link] = "ws_submitted"
+            order_rows.append(
+                {
+                    "order_link_id": sub_link,
+                    "ts_ms": now_ms,
+                    "trade_id": str(trade["trade_id"]),
+                    "sleeve": sleeve,
+                    "symbol": symbol,
+                    "side": bybit_side,
+                    "order_type": "Market",
+                    "qty": sub_qty_str,
+                    "reduce_only": True,
+                    "order_id": "",
+                    "submit_mode": "ws_submitted",
+                    "avg_price": 0.0,
+                    "notional_usdt": 0.0,
+                    "status": "submitted_unconfirmed",
+                    "exit_reason": str(exit_plan["exit_reason"]),
+                    "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
+                    "target_qty": sub_qty_str,
+                    "filled_qty": "",
+                }
+            )
+        return [], order_rows
 
     def rest_exit(self, exits: list[dict[str, Any]], *, submit_orders: bool) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         rest_risk = EventRiskCycleConfig(
@@ -1530,17 +1594,41 @@ class EventWebSocketRiskEngine:
             trade = dict(trade_lookup.get(trade_id, {}))
             if not trade:
                 continue
+            close_exit_price = avg_price
+            close_exit_ts_ms = now_ms
+            close_exit_trigger_ts_ms = _int(order.get("exit_trigger_ts_ms")) or now_ms
+            close_submit_mode = str(order.get("submit_mode") or "position_flat_reconciled")
+            close_exit_order_id = order.get("order_id", "")
+            # If the recovered order has no avg_price (failed lm-rx fill
+            # confirmation while the venue later went flat under its own
+            # stop), fall back to closed-PnL backfill so the trade row
+            # closes with a real venue price instead of exit_price=0. Same
+            # backfill helper the orphan reconciler uses. Observed live as
+            # a DRIFT-style close: failed lm-rx, closed trade, null
+            # exit_price — broken audit / reconciliation downstream.
+            if close_exit_price <= 0.0 and self.private_client is not None:
+                backfill = _orphan_close_pnl_backfill(
+                    trade, now_ms=now_ms, trading_client=self.private_client
+                )
+                if backfill:
+                    close_exit_price = _float(backfill.get("exit_price")) or close_exit_price
+                    close_exit_ts_ms = int(backfill.get("exit_ts_ms") or close_exit_ts_ms)
+                    close_exit_trigger_ts_ms = int(
+                        backfill.get("exit_trigger_ts_ms") or close_exit_trigger_ts_ms
+                    )
+                    close_submit_mode = str(backfill.get("submit_mode") or close_submit_mode)
+                    close_exit_order_id = backfill.get("exit_order_id") or close_exit_order_id
             trade.update(
                 {
                     "status": "closed",
-                    "exit_ts_ms": now_ms,
-                    "exit_trigger_ts_ms": _int(order.get("exit_trigger_ts_ms")) or now_ms,
-                    "exit_price": avg_price,
+                    "exit_ts_ms": close_exit_ts_ms,
+                    "exit_trigger_ts_ms": close_exit_trigger_ts_ms,
+                    "exit_price": close_exit_price,
                     "exit_reason": str(order.get("exit_reason") or "pending_exit_position_flat"),
                     "exit_order_link_id": link,
-                    "exit_order_id": order.get("order_id", ""),
-                    "submit_mode": str(order.get("submit_mode") or "position_flat_reconciled"),
-                    "closed_at_ms": now_ms,
+                    "exit_order_id": close_exit_order_id,
+                    "submit_mode": close_submit_mode,
+                    "closed_at_ms": close_exit_ts_ms,
                     "updated_at_ms": now_ms,
                 }
             )
@@ -1722,7 +1810,13 @@ class EventWebSocketRiskEngine:
         now_ms = _now_ms()
         position_snapshot = build_position_pnl_snapshot(list(self.state.positions_by_symbol.values()))
         bybit_summary = summarize_position_pnl(position_snapshot)
-        ledger_positions = build_ledger_position_pnl_snapshot(self.state.open_trades, self.state.price_by_symbol)
+        # P1-3 alignment: prefer position-level markPrice over ticker mark for
+        # ledger uPnL so it matches Bybit's own position uPnL by construction.
+        ledger_positions = build_ledger_position_pnl_snapshot(
+            self.state.open_trades,
+            self.state.price_by_symbol,
+            position_by_symbol=self.state.positions_by_symbol,
+        )
         ledger_summary = summarize_position_pnl(ledger_positions)
         open_symbols = set(_column_values(self.state.open_trades, "symbol"))
         pending_entry_fills = sum(

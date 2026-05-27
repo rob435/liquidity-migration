@@ -823,6 +823,13 @@ class BybitTradeRouter:
         self._ws_exceptions = 0
         self._rest_fallbacks = 0
         self._rest_only = 0
+        # Incremented when a WS timeout's REST-fallback was suppressed
+        # because the probe found the order already at Bybit (the WS submit
+        # had reached the venue but the ack network-delayed past the
+        # timeout). Tracks how often the probe is saving us from a
+        # double-submit race.
+        self._ws_timeout_probe_recovered = 0
+        self._ws_timeout_probe_attempts = 0
 
     # -- order placement / cancellation -------------------------------
 
@@ -841,6 +848,26 @@ class BybitTradeRouter:
                 )
                 with self._lock:
                     self._rest_fallbacks += 1
+                # On a WS timeout the submit may have reached Bybit before
+                # the ack network-delayed past _ws_timeout_seconds. A REST
+                # resubmit then races: Bybit's per-orderLinkId dedup
+                # USUALLY catches it (retCode=110089), but the race window
+                # between Bybit ingesting the WS submit and processing the
+                # REST submit is not formally guaranteed to dedup. Probe
+                # order history by orderLinkId first; if Bybit already has
+                # the order, return that instead of resubmitting.
+                if failure.kind == "timeout":
+                    probed = self._probe_existing_order(
+                        symbol=params.get("symbol"),
+                        order_link_id=params["orderLinkId"],
+                    )
+                    if probed is not None:
+                        _logger_trade_router.info(
+                            "place_order WS timeout but order present on probe; "
+                            "skipping REST resubmit symbol=%s link=%s",
+                            params.get("symbol"), params["orderLinkId"],
+                        )
+                        return probed
         else:
             with self._lock:
                 self._rest_only += 1
@@ -892,6 +919,8 @@ class BybitTradeRouter:
                 "ws_exceptions": self._ws_exceptions,
                 "rest_fallbacks": self._rest_fallbacks,
                 "rest_only": self._rest_only,
+                "ws_timeout_probe_attempts": self._ws_timeout_probe_attempts,
+                "ws_timeout_probe_recovered": self._ws_timeout_probe_recovered,
             }
 
     # -- internals ----------------------------------------------------
@@ -946,6 +975,51 @@ class BybitTradeRouter:
             self._ws_successes += 1
         data = message.get("data")
         return dict(data) if isinstance(data, Mapping) else {}
+
+    def _probe_existing_order(
+        self, *, symbol: str | None, order_link_id: str,
+    ) -> dict[str, Any] | None:
+        """Look up an order by orderLinkId after a WS timeout. Returns a
+        place_order-shaped dict (``{"orderId", "orderLinkId"}``) when Bybit
+        already has the order, else None. Probe failures (transport error,
+        endpoint missing) return None — the caller then REST-falls-back as
+        before, so the probe never makes things worse than the old path."""
+        if not order_link_id:
+            return None
+        with self._lock:
+            self._ws_timeout_probe_attempts += 1
+        rows: list[dict[str, Any]] = []
+        # Check open orders first (lighter call than history scan, and an
+        # order ack-delayed past timeout is still open at the matching
+        # engine in the common case).
+        try:
+            open_rows = self._rest.get_open_orders(symbol=symbol) if symbol else self._rest.get_open_orders()
+        except Exception:  # noqa: BLE001 - any transport / endpoint failure → fall through
+            open_rows = []
+        rows.extend(
+            row for row in (open_rows or [])
+            if str(row.get("orderLinkId") or "") == order_link_id
+        )
+        if not rows:
+            try:
+                history = self._rest.get_order_history(
+                    symbol=symbol, order_link_id=order_link_id, limit=10,
+                )
+            except Exception:  # noqa: BLE001
+                history = []
+            rows.extend(history or [])
+        if not rows:
+            return None
+        # Pick the most-recently-created row (history is usually newest-first
+        # already, but be defensive — only one orderLinkId per UID per window,
+        # so this is conservative).
+        chosen = max(
+            rows,
+            key=lambda r: int(r.get("createdTime") or r.get("updatedTime") or 0),
+        )
+        with self._lock:
+            self._ws_timeout_probe_recovered += 1
+        return dict(chosen)
 
 
 class _RouterWsFailed(RuntimeError):

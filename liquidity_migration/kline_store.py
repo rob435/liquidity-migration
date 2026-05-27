@@ -243,6 +243,17 @@ class KlineStore:
         """Bulk-load historical bars for ``symbol``. Caller is responsible for
         confirming every bar is fully closed (REST-returned bars always are).
 
+        Bootstrap never overwrites a ts_ms already present in the store —
+        the live WS path is the authoritative source for any bar it has
+        already delivered. At cold start the bootstrap REST backfill and
+        the live WS stream race: a freshly closed bar can land on the WS
+        side first, then the bootstrap fetches the same hour from REST.
+        Without this guard the older REST snapshot would silently
+        overwrite the fresh WS row. For fully-closed bars the values are
+        normally identical, but the WS feed always reflects the most
+        recent venue state (final settlement / matching engine flushes),
+        so prefer it on ties.
+
         Single lock acquire + single deferred eviction sweep at the end —
         per-bar eviction here was the bootstrap hot-spot before this
         rewrite (each insert ran a full-store scan; 1083 bars × 567
@@ -264,8 +275,10 @@ class KlineStore:
             for parsed in parsed_bars:
                 if reference_ts - parsed.ts_ms > self._retain_ms:
                     continue
-                symbol_bars[parsed.ts_ms] = parsed
-                accepted += 1
+                # setdefault — gap-fill only. WS-delivered bars at the same
+                # ts_ms are preserved (see docstring).
+                if symbol_bars.setdefault(parsed.ts_ms, parsed) is parsed:
+                    accepted += 1
             self._adds_total += accepted
             if reference_ts > self._global_max_ts_ms:
                 self._global_max_ts_ms = reference_ts

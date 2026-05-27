@@ -509,7 +509,14 @@ def run_event_demo_cycle(
         bybit_positions = build_position_pnl_snapshot(raw_positions)
         report_error = _combine_errors(position_snapshot_error, bybit_open_order_error, wallet_error)
         bybit_position_summary = summarize_position_pnl(bybit_positions)
-        ledger_positions = build_ledger_position_pnl_snapshot(_open_trades(all_trades), price_by_symbol)
+        # Prefer per-position markPrice over the ticker mark when an open
+        # position exists for the symbol so the ledger uPnL matches Bybit's
+        # own position uPnL by construction (P1-3, 2026-05-27).
+        ledger_positions = build_ledger_position_pnl_snapshot(
+            _open_trades(all_trades),
+            price_by_symbol,
+            position_by_symbol=_active_position_by_symbol(raw_positions),
+        )
         ledger_position_summary = summarize_position_pnl(ledger_positions)
         mark_stage("summaries")
         cycle_row = {
@@ -861,7 +868,13 @@ def run_event_risk_cycle(
             and str(row.get("symbol", "")) not in pending_exit_symbols
         ]
         bybit_position_summary = summarize_position_pnl(position_snapshot)
-        ledger_positions = build_ledger_position_pnl_snapshot(_open_trades(all_trades), price_by_symbol)
+        # P1-3 alignment: prefer position-level markPrice over ticker mark for
+        # ledger uPnL so it matches Bybit's own position uPnL.
+        ledger_positions = build_ledger_position_pnl_snapshot(
+            _open_trades(all_trades),
+            price_by_symbol,
+            position_by_symbol=position_by_symbol,
+        )
         ledger_position_summary = summarize_position_pnl(ledger_positions)
         cycle_row = {
             "cycle_id": cycle_id,
@@ -963,6 +976,13 @@ def select_demo_entry_candidates(
     stop_exit_ts = _realized_stop_exit_ts(all_trades)
     realized_loss_exit_ts = _realized_loss_exit_ts(all_trades, config=config)
     candidates: list[dict[str, Any]] = []
+    # Track symbols chosen in THIS cycle so two events for the same symbol
+    # (different ts_ms, both passing every other filter) can't both produce
+    # candidates. _execute_entries fans out via ThreadPoolExecutor; without
+    # this guard, two workers would submit two place_order calls for the
+    # same symbol concurrently — neither sees the other in the cycle-start
+    # live_position_symbols snapshot.
+    chosen_symbols: set[str] = set()
     skips = _empty_skip_counts()
     min_ready_ts = now_ms - max_entry_lag_minutes * MS_PER_MINUTE if max_entry_lag_minutes >= 0 else 0
 
@@ -1018,6 +1038,9 @@ def select_demo_entry_candidates(
             continue
         if symbol in open_symbols:
             skips["active_symbol"] += 1
+            continue
+        if symbol in chosen_symbols:
+            skips["duplicate_symbol"] += 1
             continue
         if cooldown_until.get(symbol, 0) > signal_ts_ms:
             skips["cooldown"] += 1
@@ -1078,6 +1101,7 @@ def select_demo_entry_candidates(
                 "crowding_hour_last6h_turnover_share_max": _float(event.get("crowding_hour_last6h_turnover_share_max")),
             }
         )
+        chosen_symbols.add(symbol)
         if len(candidates) >= max_new_entries:
             break
     return candidates, skips
@@ -1394,7 +1418,23 @@ def build_position_pnl_snapshot(positions: list[dict[str, Any]]) -> list[dict[st
     return sorted(rows, key=lambda row: abs(float(row["unrealized_pnl_usdt"])), reverse=True)
 
 
-def build_ledger_position_pnl_snapshot(open_trades: pl.DataFrame, price_by_symbol: dict[str, float]) -> list[dict[str, Any]]:
+def build_ledger_position_pnl_snapshot(
+    open_trades: pl.DataFrame,
+    price_by_symbol: dict[str, float],
+    *,
+    position_by_symbol: dict[str, dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Compute uPnL per open ledger row.
+
+    When ``position_by_symbol`` is provided, the per-symbol ``markPrice`` from
+    the venue's position payload is preferred over ``price_by_symbol`` for
+    that symbol. Without this, the ledger uPnL is computed from the ticker's
+    ``mark_price`` (or ``last_price`` fallback) which can diverge from the
+    venue's own position mark — observed live as a ~4% drift on illiquid
+    alts like TRUSTUSDT where the WS-cache ticker mark trails the position
+    payload mark across a thin orderbook. Aligning to position markPrice
+    makes ledger uPnL match Bybit's own position uPnL by construction.
+    """
     if open_trades.is_empty():
         return []
     rows: list[dict[str, Any]] = []
@@ -1403,7 +1443,11 @@ def build_ledger_position_pnl_snapshot(open_trades: pl.DataFrame, price_by_symbo
         side = str(trade.get("side", ""))
         qty = _float(trade.get("qty"))
         entry_price = _float(trade.get("entry_price"))
-        mark_price = price_by_symbol.get(symbol, 0.0)
+        position_mark = 0.0
+        if position_by_symbol is not None:
+            position = position_by_symbol.get(symbol) or {}
+            position_mark = _first_float(position, ("markPrice", "mark_price"))
+        mark_price = position_mark if position_mark > 0.0 else price_by_symbol.get(symbol, 0.0)
         if not symbol or qty <= 0.0 or entry_price <= 0.0 or mark_price <= 0.0:
             continue
         if side == "short":
@@ -3057,6 +3101,12 @@ def _execute_single_entry(
             else 0.0,
             "tick_size": tick_size,
             "qty_step": qty_step,
+            # Persist the venue's per-order market cap on the trade so the
+            # exit path can split a close-position market order into N
+            # sub-orders mirroring the entry split (without this, exits on
+            # positions built up by entry-split would be rejected by Bybit
+            # for exceeding ``maxMktOrderQty`` on a single reduce-only order).
+            "max_market_order_qty": max_qty_per_order,
             "stop_price": stop_price,
             "take_profit_price": take_profit_price,
             "entry_stop_update_status": protection_update_status,
@@ -3315,65 +3365,163 @@ def _execute_exits(
             continue
         side = str(exit_plan.get("side") or trade.get("side") or "short")
         bybit_side = "Buy" if side == "short" else "Sell"
-        exit_link = _risk_order_link_id("ex", symbol=symbol, ts_ms=now_ms, attempt=0)
-        order_result: dict[str, Any] = {}
-        exec_summary: dict[str, Any] = {}
-        submit_mode = "dry_run"
-        error = ""
-        order_status = "planned"
-        if demo.submit_orders:
-            assert trading_client is not None
-            if record_preflight is not None:
-                record_preflight(
-                    _preflight_exit_order_row(
-                        exit_link=exit_link,
-                        now_ms=now_ms,
-                        trade_id=trade_id,
-                        symbol=symbol,
-                        bybit_side=bybit_side,
-                        order_type=demo.exit_order_type,
-                        qty=qty,
-                        exit_plan=exit_plan,
+        base_exit_link = _risk_order_link_id("ex", symbol=symbol, ts_ms=now_ms, attempt=0)
+        # Symmetric to _execute_single_entry's split: if the position qty
+        # exceeds Bybit's per-order ``maxMktOrderQty``, close it via N
+        # sequential reduce-only sub-orders. Each sub is bounded by the cap;
+        # the position is reduce_only so concurrent or staged fills can only
+        # shrink it. Trade rows persisted before this fix lack
+        # ``max_market_order_qty`` (legacy), which falls through to no split.
+        target_qty_decimal = Decimal(qty)
+        qty_step = _float(trade.get("qty_step")) or 0.0
+        max_qty_per_order = _float(trade.get("max_market_order_qty"))
+        sub_qty_decimals = _split_qty_for_max_order_size(
+            target_qty=target_qty_decimal,
+            max_qty_per_order=max_qty_per_order,
+            qty_step=qty_step,
+        )
+        sub_qty_strs = [_decimal_text(q) for q in sub_qty_decimals]
+        if len(sub_qty_strs) > 1:
+            _logger.info(
+                "exit split into %d sub-orders symbol=%s target_qty=%s "
+                "max_mkt_qty=%s sub_qtys=%s",
+                len(sub_qty_strs),
+                symbol,
+                qty,
+                max_qty_per_order,
+                sub_qty_strs,
+            )
+
+        def _sub_link(idx: int, _base: str = base_exit_link, _n: int = len(sub_qty_strs)) -> str:
+            return _base if _n == 1 else f"{_base}-s{idx}"
+
+        sub_order_rows: list[dict[str, Any]] = []
+        total_filled_qty = 0.0
+        total_fill_value = 0.0
+        first_order_id = ""
+        overall_submit_mode = "dry_run"
+        overall_error = ""
+        any_submitted_unconfirmed = False
+        any_failed = False
+
+        for idx, sub_qty_str in enumerate(sub_qty_strs):
+            sub_link = _sub_link(idx)
+            sub_target = _float(sub_qty_str)
+            sub_order_result: dict[str, Any] = {}
+            sub_exec_summary: dict[str, Any] = {}
+            sub_submit_mode = "dry_run"
+            sub_status = "planned"
+            sub_error = ""
+            if demo.submit_orders:
+                assert trading_client is not None
+                if record_preflight is not None:
+                    record_preflight(
+                        _preflight_exit_order_row(
+                            exit_link=sub_link,
+                            now_ms=now_ms,
+                            trade_id=trade_id,
+                            symbol=symbol,
+                            bybit_side=bybit_side,
+                            order_type=demo.exit_order_type,
+                            qty=sub_qty_str,
+                            exit_plan=exit_plan,
+                        )
                     )
-                )
-            try:
-                order_result = trading_client.place_order(
-                    **_order_params(
-                        symbol=symbol,
-                        side=bybit_side,
-                        qty=qty,
-                        order_type=demo.exit_order_type,
-                        order_link_id=exit_link,
-                        reduce_only=True,
-                    )
-                )
-                submit_mode = "submitted"
-            except Exception as exc:  # noqa: BLE001 - failed exits must be ledgered without aborting the cycle
-                submit_mode = "error"
-                order_status = "failed"
-                error = f"place_order failed: {exc}"[:500]
-            if submit_mode == "submitted":
                 try:
-                    exec_summary = _wait_for_execution_summary(
-                        trading_client,
-                        symbol=symbol,
-                        order_link_id=exit_link,
-                        poll_seconds=demo.order_fill_confirm_seconds,
-                        poll_interval_seconds=demo.order_fill_poll_interval_seconds,
-                        fast_poll_interval_seconds=demo.order_fill_fast_poll_interval_seconds,
-                        fast_poll_seconds=demo.order_fill_fast_poll_seconds,
-                        execution_event_router=execution_event_router,
+                    sub_order_result = trading_client.place_order(
+                        **_order_params(
+                            symbol=symbol,
+                            side=bybit_side,
+                            qty=sub_qty_str,
+                            order_type=demo.exit_order_type,
+                            order_link_id=sub_link,
+                            reduce_only=True,
+                        )
                     )
-                except Exception as exc:  # noqa: BLE001 - order may still fill; pending reconciliation will retry
-                    order_status = "submitted_unconfirmed"
-                    error = f"fill confirmation failed: {exc}"[:500]
-        exit_price = _float(exec_summary.get("avg_price")) or _float(exit_plan.get("planned_exit_price"))
+                    sub_submit_mode = "submitted"
+                    if not first_order_id:
+                        first_order_id = sub_order_result.get("orderId", "")
+                    if overall_submit_mode != "error":
+                        overall_submit_mode = "submitted"
+                except Exception as exc:  # noqa: BLE001 - failed exit subs are ledgered, cycle continues
+                    sub_submit_mode = "error"
+                    sub_status = "failed"
+                    sub_error = f"place_order failed: {exc}"[:500]
+                    any_failed = True
+                    if idx == 0:
+                        overall_submit_mode = "error"
+                        overall_error = sub_error
+                if sub_submit_mode == "submitted":
+                    try:
+                        sub_exec_summary = _wait_for_execution_summary(
+                            trading_client,
+                            symbol=symbol,
+                            order_link_id=sub_link,
+                            poll_seconds=demo.order_fill_confirm_seconds,
+                            poll_interval_seconds=demo.order_fill_poll_interval_seconds,
+                            fast_poll_interval_seconds=demo.order_fill_fast_poll_interval_seconds,
+                            fast_poll_seconds=demo.order_fill_fast_poll_seconds,
+                            execution_event_router=execution_event_router,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - order may still fill; reconciliation will retry
+                        sub_status = "submitted_unconfirmed"
+                        sub_error = f"fill confirmation failed: {exc}"[:500]
+                        any_submitted_unconfirmed = True
+                        if idx == 0 and not overall_error:
+                            overall_error = sub_error
+            sub_filled_qty = _float(sub_exec_summary.get("qty")) if demo.submit_orders else sub_target
+            sub_avg_price = (
+                _float(sub_exec_summary.get("avg_price"))
+                or _float(exit_plan.get("planned_exit_price"))
+            )
+            sub_tolerance = max(sub_target * 1e-8, 1e-12)
+            if demo.submit_orders and sub_status not in {"failed", "submitted_unconfirmed"}:
+                if sub_target > 0.0 and sub_filled_qty + sub_tolerance >= sub_target:
+                    sub_status = "filled"
+                elif sub_filled_qty > 0.0:
+                    sub_status = "partial"
+                    any_submitted_unconfirmed = True
+                else:
+                    sub_status = "submitted_unconfirmed"
+                    any_submitted_unconfirmed = True
+            total_filled_qty += sub_filled_qty
+            if sub_filled_qty > 0.0 and sub_avg_price > 0.0:
+                total_fill_value += sub_avg_price * sub_filled_qty
+            sub_filled_str = _decimal_text(Decimal(str(sub_filled_qty))) if sub_filled_qty > 0.0 else ""
+            sub_notional = abs(sub_avg_price * sub_filled_qty) if sub_filled_qty > 0.0 else 0.0
+            sub_order_rows.append(
+                {
+                    "order_link_id": sub_link,
+                    "ts_ms": now_ms,
+                    "trade_id": trade_id,
+                    "symbol": symbol,
+                    "side": bybit_side,
+                    "order_type": demo.exit_order_type,
+                    "qty": sub_qty_str,
+                    "reduce_only": True,
+                    "order_id": sub_order_result.get("orderId", ""),
+                    "submit_mode": sub_submit_mode,
+                    "avg_price": sub_avg_price,
+                    "notional_usdt": sub_notional,
+                    "status": sub_status if demo.submit_orders else "planned",
+                    "exit_reason": str(exit_plan["exit_reason"]),
+                    "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
+                    "target_qty": sub_qty_str,
+                    "filled_qty": sub_filled_str,
+                    "error": sub_error,
+                }
+            )
+
         target_qty = _float(qty)
-        filled_qty = _float(exec_summary.get("qty")) if demo.submit_orders else target_qty
+        exit_price = (
+            (total_fill_value / total_filled_qty)
+            if total_filled_qty > 0.0 and total_fill_value > 0.0
+            else _float(exit_plan.get("planned_exit_price"))
+        )
         qty_tolerance = max(target_qty * 1e-8, 1e-12)
-        fully_filled = not demo.submit_orders or (target_qty > 0.0 and filled_qty + qty_tolerance >= target_qty)
-        if order_status != "failed":
-            order_status = "filled" if fully_filled else "partial" if filled_qty > 0.0 else "submitted_unconfirmed"
+        fully_filled = not demo.submit_orders or (
+            target_qty > 0.0 and total_filled_qty + qty_tolerance >= target_qty
+        )
         entry_price = _float(trade.get("entry_price"))
         gross_trade_return = _trade_return(entry_price, exit_price, side=side)
         notional_weight = _safe_ratio(trade.get("notional_usdt"), trade.get("equity_usdt"))
@@ -3387,48 +3535,32 @@ def _execute_exits(
                     "gross_trade_return": gross_trade_return,
                     "net_return": gross_trade_return * notional_weight,
                     "exit_reason": str(exit_plan["exit_reason"]),
-                    "exit_order_link_id": exit_link,
-                    "exit_order_id": order_result.get("orderId", ""),
-                    "submit_mode": submit_mode,
+                    "exit_order_link_id": base_exit_link,
+                    "exit_order_id": first_order_id,
+                    "submit_mode": overall_submit_mode,
                     "closed_at_ms": now_ms,
                     "updated_at_ms": now_ms,
                 }
             )
             rows.append(trade)
-        elif demo.submit_orders and filled_qty > 0.0:
+        elif demo.submit_orders and total_filled_qty > 0.0:
             rows.append(
                 _partial_exit_trade_update(
                     trade,
                     exit_plan,
-                    filled_qty=filled_qty,
+                    filled_qty=total_filled_qty,
                     exit_price=exit_price,
-                    order_link_id=exit_link,
-                    order_id=order_result.get("orderId", ""),
+                    order_link_id=base_exit_link,
+                    order_id=first_order_id,
                     now_ms=now_ms,
                 )
             )
-        orders.append(
-            {
-                "order_link_id": exit_link,
-                "ts_ms": now_ms,
-                "trade_id": trade_id,
-                "symbol": symbol,
-                "side": bybit_side,
-                "order_type": demo.exit_order_type,
-                "qty": qty,
-                "reduce_only": True,
-                "order_id": order_result.get("orderId", ""),
-                "submit_mode": submit_mode,
-                "avg_price": exit_price,
-                "notional_usdt": abs(exit_price * filled_qty) if exit_price > 0.0 else 0.0,
-                "status": order_status if demo.submit_orders else "planned",
-                "exit_reason": str(exit_plan["exit_reason"]),
-                "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
-                "target_qty": qty,
-                "filled_qty": _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0.0 else "",
-                "error": error,
-            }
-        )
+        # any_failed / any_submitted_unconfirmed / overall_error feed the
+        # ledger flags on individual sub-order rows above. The aggregated
+        # trade-row status uses ``fully_filled`` instead, so they are not
+        # re-read here.
+        _ = (any_failed, any_submitted_unconfirmed, overall_error)
+        orders.extend(sub_order_rows)
     return rows, orders
 
 
@@ -3729,6 +3861,12 @@ def _execute_risk_exits(
                 now_ms=now_ms,
                 reference_price=planned_price,
                 tick_size=tick_size_by_symbol.get(symbol) or _float(trade.get("tick_size")) or 0.0,
+                # Trade rows persisted before the 2026-05-27 split work lack
+                # ``max_market_order_qty`` (legacy ledger) — the missing
+                # value falls through to no split in
+                # _split_qty_for_max_order_size, preserving prior behaviour.
+                max_qty_per_order=_float(trade.get("max_market_order_qty")),
+                qty_step=_float(trade.get("qty_step")),
                 record_preflight=_record_with_context if record_preflight is not None else None,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced in order telemetry so the loop can continue
@@ -3919,6 +4057,8 @@ def _submit_reduce_only_exit(
     now_ms: int,
     reference_price: float,
     tick_size: float,
+    max_qty_per_order: float = 0.0,
+    qty_step: float = 0.0,
     record_preflight: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     if not risk.submit_orders:
@@ -3943,73 +4083,155 @@ def _submit_reduce_only_exit(
         }
     assert trading_client is not None
     if risk.exit_order_mode == "market":
-        link = _risk_order_link_id("rx", symbol=symbol, ts_ms=now_ms, attempt=0)
-        if record_preflight is not None:
-            record_preflight(
-                _risk_preflight_order_row(
-                    link=link,
+        base_link = _risk_order_link_id("rx", symbol=symbol, ts_ms=now_ms, attempt=0)
+        # Symmetric to the entry-side split: a reduce-only close that
+        # exceeds Bybit's per-order ``maxMktOrderQty`` is rejected outright,
+        # so split the close into N sub-orders each ≤ cap. Without max_qty
+        # info (legacy callers / lazy fixture) the split helper returns the
+        # original qty unchanged, preserving prior behaviour.
+        target_qty_decimal = Decimal(qty)
+        sub_qty_decimals = _split_qty_for_max_order_size(
+            target_qty=target_qty_decimal,
+            max_qty_per_order=max_qty_per_order,
+            qty_step=qty_step,
+        )
+        sub_qty_strs = [_decimal_text(q) for q in sub_qty_decimals]
+        if len(sub_qty_strs) > 1:
+            _logger.info(
+                "ws-risk exit split into %d sub-orders symbol=%s target_qty=%s "
+                "max_mkt_qty=%s sub_qtys=%s",
+                len(sub_qty_strs),
+                symbol,
+                qty,
+                max_qty_per_order,
+                sub_qty_strs,
+            )
+
+        def _sub_link(idx: int, _base: str = base_link, _n: int = len(sub_qty_strs)) -> str:
+            return _base if _n == 1 else f"{_base}-s{idx}"
+
+        order_rows: list[dict[str, Any]] = []
+        total_filled_qty = 0.0
+        total_fill_value = 0.0
+        first_order_id = ""
+        any_submitted_unconfirmed = False
+        last_error = ""
+        for idx, sub_qty_str in enumerate(sub_qty_strs):
+            sub_link = _sub_link(idx)
+            sub_target = _float(sub_qty_str)
+            if record_preflight is not None:
+                record_preflight(
+                    _risk_preflight_order_row(
+                        link=sub_link,
+                        ts_ms=now_ms,
+                        symbol=symbol,
+                        side=bybit_side,
+                        qty=sub_qty_str,
+                        order_type="Market",
+                    )
+                )
+            try:
+                sub_order_result = trading_client.place_order(
+                    **_order_params(
+                        symbol=symbol,
+                        side=bybit_side,
+                        qty=sub_qty_str,
+                        order_type="Market",
+                        order_link_id=sub_link,
+                        reduce_only=True,
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001 - failed reduce-only sub-order is surfaced to caller for retry
+                # First-sub place_order failure: surface as a hard error to
+                # the caller (matches pre-split single-order behaviour where
+                # a place_order exception propagated out of this helper).
+                if idx == 0:
+                    raise
+                sub_err = f"place_order failed: {exc}"[:500]
+                last_error = sub_err
+                sub_row = _risk_order_row(
+                    link=sub_link,
                     ts_ms=now_ms,
                     symbol=symbol,
                     side=bybit_side,
-                    qty=qty,
+                    qty=sub_qty_str,
                     order_type="Market",
+                    submit_mode="error",
+                    status="failed",
+                    error=sub_err,
                 )
-            )
-        order_result = trading_client.place_order(
-            **_order_params(
+                sub_row.update({"target_qty": sub_qty_str, "filled_qty": ""})
+                order_rows.append(sub_row)
+                continue
+            sub_error = ""
+            sub_status = "submitted"
+            try:
+                sub_exec_summary = _execution_summary(
+                    trading_client.get_trade_history(symbol=symbol, order_link_id=sub_link, limit=50)
+                )
+            except Exception as exc:  # noqa: BLE001 - accepted reduce-only order remains pending for reconciliation
+                sub_exec_summary = {"qty": "", "avg_price": 0.0, "fee": 0.0, "executions": 0}
+                sub_status = "submitted_unconfirmed"
+                sub_error = f"fill confirmation failed: {exc}"[:500]
+                last_error = sub_error
+                any_submitted_unconfirmed = True
+            sub_filled_qty = _float(sub_exec_summary.get("qty"))
+            if sub_status != "submitted_unconfirmed":
+                if sub_target > 0.0 and sub_filled_qty + max(sub_target * 1e-8, 1e-12) >= sub_target:
+                    sub_status = "filled"
+                elif sub_filled_qty > 0.0:
+                    sub_status = "partial"
+                    any_submitted_unconfirmed = True
+                else:
+                    sub_status = "submitted_unconfirmed"
+                    any_submitted_unconfirmed = True
+            sub_avg_price = _float(sub_exec_summary.get("avg_price"))
+            total_filled_qty += sub_filled_qty
+            if sub_filled_qty > 0.0 and sub_avg_price > 0.0:
+                total_fill_value += sub_avg_price * sub_filled_qty
+            if not first_order_id:
+                first_order_id = sub_order_result.get("orderId", "")
+            sub_row = _risk_order_row(
+                link=sub_link,
+                ts_ms=now_ms,
                 symbol=symbol,
                 side=bybit_side,
-                qty=qty,
+                qty=sub_qty_str,
                 order_type="Market",
-                order_link_id=link,
-                reduce_only=True,
+                submit_mode="submitted",
+                status=sub_status,
+                order_id=sub_order_result.get("orderId", ""),
+                error=sub_error,
             )
-        )
-        error = ""
-        status = "submitted"
-        try:
-            exec_summary = _execution_summary(trading_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50))
-        except Exception as exc:  # noqa: BLE001 - accepted reduce-only order remains pending for reconciliation
-            exec_summary = {"qty": "", "avg_price": 0.0, "fee": 0.0, "executions": 0}
-            status = "submitted_unconfirmed"
-            error = f"fill confirmation failed: {exc}"[:500]
-        filled_qty = _float(exec_summary.get("qty"))
+            sub_row.update(
+                {
+                    "target_qty": sub_qty_str,
+                    "filled_qty": _decimal_text(Decimal(str(sub_filled_qty))) if sub_filled_qty > 0.0 else "",
+                    "avg_price": sub_avg_price,
+                    "notional_usdt": abs(sub_avg_price * sub_filled_qty) if sub_avg_price > 0.0 else 0.0,
+                }
+            )
+            order_rows.append(sub_row)
+
         target_qty = _float(qty)
-        if status != "submitted_unconfirmed":
-            status = (
-                "filled"
-                if target_qty > 0.0 and filled_qty + max(target_qty * 1e-8, 1e-12) >= target_qty
-                else "partial"
-                if filled_qty > 0.0
-                else "submitted_unconfirmed"
-            )
-        avg_price = _float(exec_summary.get("avg_price"))
-        order_row = _risk_order_row(
-            link=link,
-            ts_ms=now_ms,
-            symbol=symbol,
-            side=bybit_side,
-            qty=qty,
-            order_type="Market",
-            submit_mode="submitted",
-            status=status,
-            order_id=order_result.get("orderId", ""),
-            error=error,
+        avg_price = (
+            (total_fill_value / total_filled_qty)
+            if total_filled_qty > 0.0 and total_fill_value > 0.0
+            else 0.0
         )
-        order_row.update(
-            {
-                "target_qty": qty,
-                "filled_qty": _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0.0 else "",
-                "avg_price": avg_price,
-                "notional_usdt": abs(avg_price * filled_qty) if avg_price > 0.0 else 0.0,
-            }
-        )
+        agg_summary: dict[str, Any] = {
+            "qty": _decimal_text(Decimal(str(total_filled_qty))) if total_filled_qty > 0.0 else "",
+            "avg_price": avg_price,
+            "fee": 0.0,
+            "executions": sum(1 for r in order_rows if _float(r.get("filled_qty")) > 0.0),
+        }
+        _ = (any_submitted_unconfirmed, last_error, target_qty)
         return {
-            "order_link_id": link,
-            "order_id": order_result.get("orderId", ""),
+            "order_link_id": base_link,
+            "order_id": first_order_id,
             "submit_mode": "submitted",
-            "exec_summary": exec_summary,
-            "order_rows": [order_row],
+            "exec_summary": agg_summary,
+            "order_rows": order_rows,
         }
     return _submit_limit_chase_exit(
         symbol=symbol,
@@ -4234,12 +4456,16 @@ def _reconcile_open_trades(
     error = position_error
     if error:
         return open_trades, [], error
-    size_by_symbol = _position_size_by_symbol(positions)
+    size_by_symbol_side = _position_size_by_symbol_side(positions)
     updates: list[dict[str, Any]] = []
     kept = []
     for trade in open_trades.to_dicts():
         symbol = str(trade["symbol"])
-        if size_by_symbol.get(symbol, 0.0) > 0.0:
+        # Normalize through the same helper so "short" / "Sell" both land
+        # on "short" — trade rows carry "short"/"long" and Bybit positions
+        # carry "Sell"/"Buy", but the lookup must agree.
+        trade_side = _normalized_position_side(trade.get("side"))
+        if trade_side and size_by_symbol_side.get((symbol, trade_side), 0.0) > 0.0:
             kept.append(trade)
             continue
         updates.append(_orphan_close_trade_row(trade, now_ms=now_ms, trading_client=trading_client))
@@ -4756,13 +4982,34 @@ def _wait_for_execution_summary(
             time.sleep(min(interval, max(deadline - now, 0.0)))
 
 
-def _position_size_by_symbol(positions: list[dict[str, Any]]) -> dict[str, float]:
-    output: dict[str, float] = {}
+def _position_size_by_symbol_side(positions: list[dict[str, Any]]) -> dict[tuple[str, str], float]:
+    """Position size keyed by (symbol, normalized_side).
+
+    Side-awareness matters for orphan reconciliation: if a short closes and
+    a long is opened on the same symbol (manual flip on Bybit, or two
+    daemons sharing an account), Bybit's positions endpoint reports the
+    new long with size > 0. Keying only by symbol would let the orphan
+    reconciler keep the stale short trade as "still open" because some
+    position exists for that symbol. (symbol, side) keying surfaces the
+    flip as an orphan close on the short and leaves the new long
+    unrelated.
+
+    Sizes are aggregated by max() within each (symbol, side) bucket so a
+    fragmented position (rare; would require hedge mode) still reports
+    its real size."""
+    output: dict[tuple[str, str], float] = {}
     for position in positions:
         symbol = str(position.get("symbol", ""))
+        if not symbol:
+            continue
         size = _float(position.get("size"))
-        if symbol:
-            output[symbol] = max(output.get(symbol, 0.0), size)
+        if size <= 0.0:
+            continue
+        side = _normalized_position_side(position.get("side"))
+        if not side:
+            continue
+        key = (symbol, side)
+        output[key] = max(output.get(key, 0.0), size)
     return output
 
 
@@ -5233,6 +5480,7 @@ def _empty_skip_counts() -> dict[str, int]:
         "active_symbol": 0,
         "cooldown": 0,
         "no_entry_bar": 0,
+        "duplicate_symbol": 0,
     }
 
 

@@ -211,6 +211,47 @@ def test_bootstrap_symbol_idempotent_with_overlapping_ts() -> None:
     assert store.row_count() == 1
 
 
+def test_bootstrap_does_not_overwrite_live_ws_bar() -> None:
+    """At cold-start the bootstrap REST backfill and the live WS stream race.
+    A freshly-closed bar can arrive on WS first; the bootstrap then refetches
+    that hour from REST. The WS bar must win — it reflects the latest venue
+    state. Without this guard the older REST snapshot silently overwrites the
+    fresh WS row."""
+    store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
+    # 1. Live WS bar arrives first with close=200.0 (the "fresh" value).
+    store.add_bar("BTCUSDT", _ws_bar(MS_PER_HOUR, close=200.0), confirmed=True)
+    # 2. Bootstrap REST backfill includes the same hour but with close=100.0
+    # (the "stale" REST snapshot). Bootstrap must NOT overwrite.
+    accepted = store.bootstrap_symbol("BTCUSDT", [_ws_bar(MS_PER_HOUR, close=100.0)])
+    assert accepted == 0  # bootstrap reports 0 inserts because the slot was taken
+    frame = store.get_klines(["BTCUSDT"], start_ms=0, end_ms=10 * MS_PER_HOUR)
+    assert frame.height == 1
+    assert frame.row(0, named=True)["close"] == pytest.approx(200.0)
+
+
+def test_bootstrap_fills_gaps_around_live_ws_bar() -> None:
+    """Bootstrap should still fill OTHER hours — only the hours the live WS
+    stream already has are protected. This guarantees we don't lose 89 days
+    of historical bars just because the live WS landed a single bar first."""
+    store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
+    store.add_bar("BTCUSDT", _ws_bar(2 * MS_PER_HOUR, close=222.0), confirmed=True)
+    accepted = store.bootstrap_symbol(
+        "BTCUSDT",
+        [
+            _ws_bar(1 * MS_PER_HOUR, close=111.0),  # new gap-fill
+            _ws_bar(2 * MS_PER_HOUR, close=999.0),  # would overwrite WS
+            _ws_bar(3 * MS_PER_HOUR, close=333.0),  # new gap-fill
+        ],
+    )
+    assert accepted == 2  # only the two gaps
+    frame = store.get_klines(["BTCUSDT"], start_ms=0, end_ms=10 * MS_PER_HOUR)
+    assert frame.height == 3
+    closes = {row["ts_ms"]: row["close"] for row in frame.to_dicts()}
+    assert closes[1 * MS_PER_HOUR] == pytest.approx(111.0)
+    assert closes[2 * MS_PER_HOUR] == pytest.approx(222.0)  # WS preserved
+    assert closes[3 * MS_PER_HOUR] == pytest.approx(333.0)
+
+
 def test_concurrent_add_and_get_thread_safety() -> None:
     """Hammer the store from two threads: one inserts bars, one reads
     rectangular windows. The lock should keep the read stable and never

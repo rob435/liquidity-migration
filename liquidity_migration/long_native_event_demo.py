@@ -595,7 +595,13 @@ def run_long_native_demo_cycle(
         bybit_positions = build_position_pnl_snapshot(raw_positions)
         bybit_position_summary = summarize_position_pnl(bybit_positions)
         ledger_open_trades = _open_long_trades(all_trades)
-        ledger_positions = build_ledger_position_pnl_snapshot(ledger_open_trades, price_by_symbol)
+        # P1-3 alignment: prefer position-level markPrice over ticker mark for
+        # ledger uPnL so it matches Bybit's own position uPnL by construction.
+        ledger_positions = build_ledger_position_pnl_snapshot(
+            ledger_open_trades,
+            price_by_symbol,
+            position_by_symbol=_active_position_by_symbol(raw_positions),
+        )
         ledger_position_summary = summarize_position_pnl(ledger_positions)
         position_report_error = _combine_errors(bybit_position_error, bybit_open_order_error, wallet_error)
         mark_stage("summaries")

@@ -30,6 +30,7 @@ from liquidity_migration.event_demo import (
     _execute_risk_exits,
     _orphan_close_pnl_backfill,
     _preflight_exit_order_row,
+    _reconcile_open_trades,
     _risk_reconcile_missing_positions,
     _split_qty_for_max_order_size,
     _filter_live_open_exit_orders,
@@ -2216,6 +2217,66 @@ def test_select_demo_entry_candidates_builds_entry_bars_from_klines() -> None:
     assert len(candidates) == 1
     assert candidates[0]["entry_ready_ts_ms"] == signal_ts + 3 * hour
     assert candidates[0]["entry_rule"] == "quality_squeeze_giveback"
+
+
+def test_select_demo_entry_candidates_dedupes_same_symbol_in_cycle() -> None:
+    """A symbol with two un-traded events in the lookback window must yield
+    only one candidate; otherwise _execute_entries' ThreadPoolExecutor would
+    fan out two concurrent place_order calls for the same symbol."""
+    earlier_ts = 1_700_000_000_000
+    later_ts = earlier_ts + 2 * MS_PER_HOUR
+    scenario = EventScenario(
+        event_type="liquidity_migration",
+        threshold=0.30,
+        side_hypothesis="reversal",
+        hold_days=3,
+        stop_loss_pct=0.12,
+        cost_multiplier=3.0,
+        take_profit_pct=0.20,
+    )
+    config = VolumeEventResearchConfig(
+        require_pit_membership=False,
+        require_full_pit_universe=False,
+        liquidity_migration_close_location_min=0.0,
+        liquidity_migration_pit_age_days_min=0,
+        liquidity_migration_crowding_filter="none",
+    )
+    base_row = {
+        "symbol": "AAAUSDT",
+        "dollar_volume_rank_z": 2.5,
+        "dollar_volume_rank_z_rank_frac": 0.90,
+        "prior7_dollar_volume_rank_z_rank_frac": 0.20,
+        "liquidity_rank": 55,
+        "prior7_liquidity_rank": 230,
+        "turnover_quote": 8_000_000.0,
+        "prior7_turnover_quote_mean": 1_000_000.0,
+        "daily_return_1d": 0.02,
+        "residual_return_1d": 0.09,
+        "market_pct_up_1d": 0.55,
+        "tradable_membership_flag": False,
+    }
+    features = pl.DataFrame(
+        [
+            {**base_row, "ts_ms": earlier_ts},
+            {**base_row, "ts_ms": later_ts},
+        ]
+    )
+
+    candidates, skips = select_demo_entry_candidates(
+        features,
+        pl.DataFrame(),
+        now_ms=later_ts + MS_PER_HOUR + 5 * 60_000,
+        config=config,
+        scenario=scenario,
+        max_entry_lag_minutes=360,
+        max_new_entries=6,
+    )
+
+    assert [row["symbol"] for row in candidates] == ["AAAUSDT"]
+    assert skips["duplicate_symbol"] == 1
+    # Sort order is (ts_ms ASC, event_rank ASC, symbol ASC); the earlier
+    # event wins the slot, the later one is dropped as a duplicate.
+    assert candidates[0]["signal_ts_ms"] == earlier_ts
 
 
 def test_plan_demo_exits_detects_rank_decay_before_max_hold() -> None:
@@ -4592,6 +4653,68 @@ class _ClosedPnlClient:
         return list(self.records)
 
 
+def test_reconcile_open_trades_keeps_matching_side_position() -> None:
+    """Position exists on the SAME side as the open trade → keep the trade."""
+    open_trades = pl.DataFrame([_open_trade_row(side="short")], infer_schema_length=None)
+    raw_positions = [{"symbol": "AAAUSDT", "size": "1.0", "side": "Sell"}]
+
+    kept, updates, error = _reconcile_open_trades(
+        open_trades,
+        trading_client=_ClosedPnlClient(),
+        demo=EventDemoCycleConfig(submit_orders=True),
+        now_ms=1_700_000_100_000,
+        raw_positions=raw_positions,
+    )
+
+    assert error == ""
+    assert updates == []
+    assert kept.height == 1
+    assert str(kept.row(0, named=True)["status"]) == "open"
+
+
+def test_reconcile_open_trades_closes_when_position_vanished() -> None:
+    """Position gone from Bybit entirely → orphan-close the trade."""
+    open_trades = pl.DataFrame([_open_trade_row(side="short")], infer_schema_length=None)
+
+    kept, updates, error = _reconcile_open_trades(
+        open_trades,
+        trading_client=_ClosedPnlClient(),
+        demo=EventDemoCycleConfig(submit_orders=True),
+        now_ms=1_700_000_100_000,
+        raw_positions=[],
+    )
+
+    assert error == ""
+    assert kept.is_empty()
+    assert len(updates) == 1
+    assert updates[0]["status"] == "closed"
+    assert updates[0]["exit_reason"] == "bybit_position_missing"
+
+
+def test_reconcile_open_trades_closes_when_position_flipped_to_opposite_side() -> None:
+    """The audit's CRITICAL bug: a SHORT trade is still open in the ledger, but
+    on Bybit the position was closed and a new LONG opened on the same symbol
+    (manual flip, second daemon, or stop-loss + re-entry). The old reconciler
+    keyed by symbol-only saw size > 0 and kept the stale short. The fix keys
+    by (symbol, side) so the short is correctly orphan-closed."""
+    open_trades = pl.DataFrame([_open_trade_row(side="short")], infer_schema_length=None)
+    raw_positions = [{"symbol": "AAAUSDT", "size": "2.5", "side": "Buy"}]
+
+    kept, updates, error = _reconcile_open_trades(
+        open_trades,
+        trading_client=_ClosedPnlClient(),
+        demo=EventDemoCycleConfig(submit_orders=True),
+        now_ms=1_700_000_100_000,
+        raw_positions=raw_positions,
+    )
+
+    assert error == ""
+    assert kept.is_empty()
+    assert len(updates) == 1
+    assert updates[0]["status"] == "closed"
+    assert updates[0]["exit_reason"] == "bybit_position_missing"
+
+
 def test_risk_reconciler_no_op_on_position_snapshot_error() -> None:
     """A failed get_positions must NOT false-positive orphan-close every trade.
 
@@ -5176,3 +5299,254 @@ def test_submit_reduce_only_exit_skips_preflight_on_dry_run() -> None:
     )
 
     assert preflight_rows == []
+
+
+# ---------------------------------------------------------------------------
+# Exit sub-order split for venue-cap-bound closes (P0-2, 2026-05-27)
+# ---------------------------------------------------------------------------
+
+
+def test_execute_exits_splits_close_when_position_exceeds_max_mkt_qty() -> None:
+    """SUPER-shape position close: target qty exceeds Bybit's maxMktOrderQty
+    so the exit must split into N reduce-only sub-orders sharing the base
+    exit link with -s0, -s1 suffixes — mirror of the entry-side split."""
+    # Open trade for a 37500-contract short with max_market_order_qty=20000.
+    # A single reduce-only place_order at 37500 would be rejected; the split
+    # must turn it into 2 ~18750-contract sub-orders.
+    trade_row = _open_trade_row(
+        symbol="SUPERUSDT",
+        qty="37500",
+        entry_price=2.0,
+        notional_usdt=75_000.0,
+        qty_step=1.0,
+        tick_size=0.0001,
+        max_market_order_qty=20000.0,
+    )
+    all_trades = pl.DataFrame([trade_row], infer_schema_length=None)
+    client = FakeRiskClient(
+        fill_market_orders=True,
+        fill_order_prefixes=("lm-ex-",),
+        fill_qty="18750",
+        fill_price="1.95",
+    )
+
+    rows, orders = _execute_exits(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "SUPERUSDT",
+                "side": "short",
+                "qty": "37500",
+                "exit_reason": "max_hold",
+                "exit_trigger_ts_ms": 1_700_000_000_000,
+                "planned_exit_price": 1.95,
+            }
+        ],
+        all_trades,
+        trading_client=client,
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        now_ms=1_700_000_060_000,
+    )
+
+    # 2 reduce-only sub-orders submitted, 1 trade row closed.
+    assert len(orders) == 2, f"expected 2 sub-order rows, got {len(orders)}"
+    assert len(rows) == 1, f"expected 1 closed trade row, got {len(rows)}"
+    # Sub-links share a base with -s0 / -s1 suffixes.
+    base_links = {o["order_link_id"].rsplit("-s", 1)[0] for o in orders}
+    assert len(base_links) == 1, base_links
+    suffixes = sorted(o["order_link_id"].rsplit("-s", 1)[1] for o in orders)
+    assert suffixes == ["0", "1"], suffixes
+    # All sub-orders are reduce-only and under the cap.
+    for o in orders:
+        assert o["reduce_only"] is True
+        assert float(o["qty"]) <= 20000.0
+    # Aggregated close: trade row reflects full fill at the (uniform) avg
+    # price the FakeRiskClient stubs out.
+    assert rows[0]["status"] == "closed"
+    assert float(rows[0]["exit_price"]) == pytest.approx(1.95)
+
+
+def test_execute_exits_no_split_when_cap_does_not_bind() -> None:
+    """Position qty within the venue cap: a single reduce-only order is
+    submitted with the original (un-suffixed) exit_link, preserving the
+    pre-2026-05-27 behaviour for trades not affected by the split."""
+    trade_row = _open_trade_row(
+        symbol="AAAUSDT",
+        qty="50",
+        qty_step=0.1,
+        max_market_order_qty=1000.0,  # well above target
+    )
+    all_trades = pl.DataFrame([trade_row], infer_schema_length=None)
+    client = FakeRiskClient(
+        fill_market_orders=True,
+        fill_order_prefixes=("lm-ex-",),
+        fill_qty="50",
+        fill_price="100",
+    )
+
+    rows, orders = _execute_exits(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "qty": "50",
+                "exit_reason": "max_hold",
+                "exit_trigger_ts_ms": 1_700_000_000_000,
+                "planned_exit_price": 99.0,
+            }
+        ],
+        all_trades,
+        trading_client=client,
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        now_ms=1_700_000_060_000,
+    )
+
+    assert len(orders) == 1
+    assert "-s" not in orders[0]["order_link_id"].rsplit("-", 1)[-1]
+    assert len(rows) == 1
+    assert rows[0]["status"] == "closed"
+
+
+def test_execute_exits_legacy_trade_row_without_max_qty_does_not_split() -> None:
+    """Legacy trade rows persisted before max_market_order_qty was tracked
+    must still close as a single reduce-only order (no crash, no split)."""
+    trade_row = _open_trade_row(symbol="AAAUSDT", qty="50")  # no qty_step or max_qty
+    all_trades = pl.DataFrame([trade_row], infer_schema_length=None)
+    client = FakeRiskClient(
+        fill_market_orders=True,
+        fill_order_prefixes=("lm-ex-",),
+        fill_qty="50",
+        fill_price="100",
+    )
+
+    rows, orders = _execute_exits(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "qty": "50",
+                "exit_reason": "max_hold",
+                "exit_trigger_ts_ms": 1_700_000_000_000,
+                "planned_exit_price": 99.0,
+            }
+        ],
+        all_trades,
+        trading_client=client,
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        now_ms=1_700_000_060_000,
+    )
+
+    assert len(orders) == 1
+    assert len(rows) == 1
+
+
+def test_build_ledger_position_pnl_snapshot_prefers_position_markprice() -> None:
+    """P1-3 (2026-05-27): when an open Bybit position is supplied alongside
+    the ticker price-by-symbol dict, the ledger uPnL must use the position's
+    own ``markPrice`` so the ledger uPnL matches the venue's position uPnL.
+
+    Without this, a ticker-cache mark of 110 vs a position-payload mark of
+    115 (the live divergence shape observed on TRUSTUSDT) silently drifted
+    the ledger uPnL ~4% off the Bybit-reported uPnL."""
+    from liquidity_migration.event_demo import build_ledger_position_pnl_snapshot
+
+    open_trades = pl.DataFrame(
+        [
+            {
+                "symbol": "TRUSTUSDT",
+                "side": "short",
+                "qty": 100.0,
+                "entry_price": 120.0,
+                "status": "open",
+            }
+        ]
+    )
+    # Ticker mark (e.g., 1m kline close on a thin alt) trails the venue's
+    # position markPrice by ~4%, producing the user-reported drift.
+    price_by_symbol = {"TRUSTUSDT": 110.0}
+    position_by_symbol = {"TRUSTUSDT": {"symbol": "TRUSTUSDT", "markPrice": "115.0"}}
+
+    # Without position_by_symbol: uPnL uses ticker mark 110 → (120-110)*100 = 1000.
+    rows_ticker = build_ledger_position_pnl_snapshot(open_trades, price_by_symbol)
+    assert rows_ticker[0]["unrealized_pnl_usdt"] == pytest.approx(1000.0)
+
+    # With position_by_symbol: uPnL uses position mark 115 → (120-115)*100 = 500.
+    rows_position = build_ledger_position_pnl_snapshot(
+        open_trades, price_by_symbol, position_by_symbol=position_by_symbol
+    )
+    assert rows_position[0]["unrealized_pnl_usdt"] == pytest.approx(500.0)
+    assert rows_position[0]["mark_price"] == pytest.approx(115.0)
+
+
+def test_build_ledger_position_pnl_snapshot_falls_back_to_ticker_when_no_position() -> None:
+    """Symbols without an open position dict (e.g., long-tail symbols the
+    risk engine isn't watching) still fall back to the ticker mark — the
+    position-mark preference is per-symbol, not all-or-nothing."""
+    from liquidity_migration.event_demo import build_ledger_position_pnl_snapshot
+
+    open_trades = pl.DataFrame(
+        [
+            {
+                "symbol": "TRUSTUSDT",
+                "side": "short",
+                "qty": 100.0,
+                "entry_price": 120.0,
+                "status": "open",
+            }
+        ]
+    )
+    price_by_symbol = {"TRUSTUSDT": 110.0}
+    # Position dict for a DIFFERENT symbol — TRUSTUSDT falls through.
+    position_by_symbol = {"OTHERUSDT": {"symbol": "OTHERUSDT", "markPrice": "200.0"}}
+
+    rows = build_ledger_position_pnl_snapshot(
+        open_trades, price_by_symbol, position_by_symbol=position_by_symbol
+    )
+    assert rows[0]["mark_price"] == pytest.approx(110.0)
+
+
+def test_submit_reduce_only_exit_market_splits_at_max_qty() -> None:
+    """The wsrisk-cycle reduce-only exit must split a SUPER-shape close into
+    N market sub-orders, aggregating fills into a single exec_summary."""
+    from liquidity_migration.event_demo import _submit_reduce_only_exit, EventRiskCycleConfig
+
+    client = FakeRiskClient(
+        fill_market_orders=True,
+        fill_order_prefixes=("lm-rx-",),
+        fill_qty="18750",
+        fill_price="1.95",
+    )
+    submit = _submit_reduce_only_exit(
+        symbol="SUPERUSDT",
+        bybit_side="Buy",
+        qty="37500",
+        trading_client=client,
+        risk=EventRiskCycleConfig(submit_orders=True, exit_order_mode="market"),
+        now_ms=1_700_000_060_000,
+        reference_price=1.95,
+        tick_size=0.0001,
+        max_qty_per_order=20000.0,
+        qty_step=1.0,
+    )
+
+    # 2 sub-orders submitted, exec_summary aggregates 18750 + 18750 = 37500.
+    assert len(submit["order_rows"]) == 2
+    for row in submit["order_rows"]:
+        assert row["reduce_only"] is True
+        assert float(row["qty"]) <= 20000.0
+    assert float(submit["exec_summary"]["qty"]) == pytest.approx(37500.0)
+    assert float(submit["exec_summary"]["avg_price"]) == pytest.approx(1.95)

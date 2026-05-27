@@ -178,6 +178,98 @@ def test_daemon_rejects_nonpositive_ws_gap_threshold(tmp_path: Path) -> None:
         )
 
 
+class _StubCache:
+    """Stand-in for PrivateStateCache / TickerCache exposing only the two
+    methods the WS-health watchdog reads."""
+
+    def __init__(self, *, seeded: bool, silence_seconds: float) -> None:
+        self._seeded = seeded
+        self._silence = silence_seconds
+
+    def is_seeded(self) -> bool:
+        return self._seeded
+
+    def seconds_since_last_event(self) -> float:
+        return self._silence
+
+    # The daemon doesn't call these in _check_ws_health, but does elsewhere.
+    def stats(self) -> dict:
+        return {}
+
+    def symbol_count(self) -> int:
+        return 0
+
+
+def test_check_ws_health_warns_once_when_private_ws_goes_silent(
+    tmp_path: Path, caplog
+) -> None:
+    """The watchdog should log ONCE per staleness episode, not every tick."""
+    private = _StubCache(seeded=True, silence_seconds=999.0)
+    ticker = _StubCache(seeded=True, silence_seconds=1.0)
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
+        private_state_cache=private,  # type: ignore[arg-type]
+        ticker_cache=ticker,  # type: ignore[arg-type]
+        state_cache_stale_seconds=120.0,
+    )
+
+    with caplog.at_level("WARNING", logger="liquidity_migration.event_demo_daemon"):
+        daemon._check_ws_health()
+        daemon._check_ws_health()
+        daemon._check_ws_health()
+
+    matching = [r for r in caplog.records if "private WS silent" in r.message]
+    assert len(matching) == 1, "watchdog must log once per staleness episode"
+    assert daemon._ws_private_stale_ticks == 3  # but counter ticks every call
+    assert daemon._ws_ticker_stale_ticks == 0
+
+
+def test_check_ws_health_resumes_when_private_ws_recovers(tmp_path: Path) -> None:
+    """When WS resumes after a stale episode, the warned-flag must reset so
+    the next staleness episode is reported."""
+    private = _StubCache(seeded=True, silence_seconds=999.0)
+    ticker = _StubCache(seeded=True, silence_seconds=1.0)
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
+        private_state_cache=private,  # type: ignore[arg-type]
+        ticker_cache=ticker,  # type: ignore[arg-type]
+        state_cache_stale_seconds=120.0,
+    )
+
+    daemon._check_ws_health()
+    assert daemon._ws_private_stale_warned is True
+
+    # WS resumes — silence drops below the threshold.
+    private._silence = 5.0
+    daemon._check_ws_health()
+    assert daemon._ws_private_stale_warned is False
+
+
+def test_check_ws_health_silent_for_unseeded_cache(tmp_path: Path) -> None:
+    """An un-seeded cache hasn't received any WS event yet; the warning
+    would just be 'WS never started' noise. The watchdog must skip it."""
+    private = _StubCache(seeded=False, silence_seconds=999.0)
+    ticker = _StubCache(seeded=False, silence_seconds=999.0)
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
+        private_state_cache=private,  # type: ignore[arg-type]
+        ticker_cache=ticker,  # type: ignore[arg-type]
+        state_cache_stale_seconds=120.0,
+    )
+
+    daemon._check_ws_health()
+    assert daemon._ws_private_stale_warned is False
+    assert daemon._ws_ticker_stale_warned is False
+    assert daemon._ws_private_stale_ticks == 0
+    assert daemon._ws_ticker_stale_ticks == 0
+
+
 def test_daemon_falls_back_to_rest_when_ws_factory_fails(tmp_path: Path) -> None:
     """If the WS stream cannot be opened (network down, auth fail), the daemon
     must still run cycles — they just lose the WS fast path and fall back to

@@ -31,7 +31,11 @@ class _RestStub:
         self.cancel_calls: list[dict] = []
         self.leverage_calls: list[dict] = []
         self.position_calls: list[dict] = []
+        self.open_order_calls: list[dict] = []
+        self.history_calls: list[dict] = []
         self.fail_place = False
+        self.open_orders_by_link: dict[str, dict] = {}
+        self.order_history_by_link: dict[str, dict] = {}
 
     def place_order(self, **params):
         if self.fail_place:
@@ -50,6 +54,16 @@ class _RestStub:
     def get_positions(self, *, settle_coin=None):
         self.position_calls.append({"settle_coin": settle_coin})
         return [{"symbol": "BTCUSDT", "size": "0"}]
+
+    def get_open_orders(self, *, symbol=None, settle_coin=None):
+        self.open_order_calls.append({"symbol": symbol, "settle_coin": settle_coin})
+        return list(self.open_orders_by_link.values())
+
+    def get_order_history(self, *, symbol=None, order_link_id=None, limit=50):
+        self.history_calls.append({"symbol": symbol, "order_link_id": order_link_id, "limit": limit})
+        if order_link_id and order_link_id in self.order_history_by_link:
+            return [self.order_history_by_link[order_link_id]]
+        return []
 
 
 class _WsStub:
@@ -146,6 +160,75 @@ def test_ws_timeout_falls_back_to_rest() -> None:
     stats = router.stats()
     assert stats["ws_timeouts"] == 1
     assert stats["rest_fallbacks"] == 1
+    # Probe ran but found nothing → REST fallback as before.
+    assert stats["ws_timeout_probe_attempts"] == 1
+    assert stats["ws_timeout_probe_recovered"] == 0
+
+
+def test_ws_timeout_probe_recovers_open_order_skipping_rest() -> None:
+    """The double-submit race: WS submit reached Bybit but the ack
+    network-delayed past the timeout. The probe sees the order already on
+    Bybit and returns it instead of resubmitting via REST."""
+    rest = _RestStub()
+    rest.open_orders_by_link["lm-A"] = {
+        "orderId": "ws-late-1",
+        "orderLinkId": "lm-A",
+        "symbol": "BTCUSDT",
+        "createdTime": "1700000000000",
+    }
+    ws = _WsStub(never_ack=True)
+    router = BybitTradeRouter(rest_client=rest, ws_client=ws, ws_timeout_seconds=0.05)
+    result = router.place_order(
+        symbol="BTCUSDT", side="Buy", orderType="Market",
+        qty="1", orderLinkId="lm-A",
+    )
+    assert result["orderId"] == "ws-late-1"
+    assert rest.place_calls == []  # CRUCIAL: no double-submit
+    stats = router.stats()
+    assert stats["ws_timeouts"] == 1
+    assert stats["ws_timeout_probe_attempts"] == 1
+    assert stats["ws_timeout_probe_recovered"] == 1
+
+
+def test_ws_timeout_probe_falls_through_to_history_then_rest() -> None:
+    """Probe checks open-orders first, then history. If neither has the
+    order, REST resubmit fires as before."""
+    rest = _RestStub()
+    rest.order_history_by_link["lm-A"] = {
+        "orderId": "ws-late-2",
+        "orderLinkId": "lm-A",
+        "symbol": "BTCUSDT",
+        "createdTime": "1700000000000",
+    }
+    ws = _WsStub(never_ack=True)
+    router = BybitTradeRouter(rest_client=rest, ws_client=ws, ws_timeout_seconds=0.05)
+    result = router.place_order(
+        symbol="BTCUSDT", side="Buy", orderType="Market",
+        qty="1", orderLinkId="lm-A",
+    )
+    assert result["orderId"] == "ws-late-2"
+    assert rest.place_calls == []
+    assert rest.history_calls and rest.history_calls[0]["order_link_id"] == "lm-A"
+    stats = router.stats()
+    assert stats["ws_timeout_probe_recovered"] == 1
+
+
+def test_ws_reject_skips_probe_and_rest_falls_back() -> None:
+    """The probe is gated on failure.kind == 'timeout'. A WS reject
+    (Bybit demo's typical response) goes straight to REST without the
+    extra probe roundtrip — demo cycles must not pay that latency."""
+    rest = _RestStub()
+    ws = _WsStub(ack={"retCode": 10001, "retMsg": "demo trade unsupported"})
+    router = BybitTradeRouter(rest_client=rest, ws_client=ws)
+    result = router.place_order(
+        symbol="BTCUSDT", side="Buy", orderType="Market",
+        qty="1", orderLinkId="lm-A",
+    )
+    assert result["orderId"] == "rest-1"
+    stats = router.stats()
+    assert stats["ws_rejects"] == 1
+    assert stats["ws_timeout_probe_attempts"] == 0  # probe NOT invoked
+    assert rest.open_order_calls == []
 
 
 def test_ws_exception_falls_back_to_rest() -> None:

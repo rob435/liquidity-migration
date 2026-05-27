@@ -127,6 +127,39 @@ ledger could diverge from Bybit:
   each sub gets its own order row for ledger audit. The split achieves
   backtest fidelity on capacity-constrained alts without losing trades
   to venue rejection.
+- **Sub-order split for venue-cap-bound exits (2026-05-27).** Symmetric
+  to the entry-side split: closing a SUPER-shape position whose qty
+  exceeds `maxMktOrderQty` would previously be rejected outright (or
+  fill partially at the cap) — observed live on SUPERUSDT. The
+  reduce-only close path now splits into N sub-orders sharing the base
+  exit `orderLinkId` with `-s0`/`-s1`/… suffixes, applied across the
+  three live exit engines: the main cycle's `_execute_exits`, the
+  ws-risk `_submit_reduce_only_exit` market path, and the ws-risk WS
+  exit (`ws_exit`). Trade rows persist `max_market_order_qty` at entry
+  time so the close path can read it from the trade.
+- **Closed-PnL backfill on flat-position trade close (2026-05-27).**
+  When a pending reduce-only exit order had `avg_price=0` (fill
+  confirmation never resolved) and the venue position later went flat
+  under its own stop, the trade was previously closed with
+  `exit_price=0` — breaking ledger audit. The
+  `reconcile_flat_pending_exit_orders` path now falls back to the same
+  `_orphan_close_pnl_backfill` the orphan reconciler uses, querying
+  Bybit's closed-PnL endpoint to backfill the real venue exit price.
+- **Cross-process exit-submission lease (2026-05-27).** The demo cycle
+  and the ws-risk daemon both submit reduce-only exits and only share
+  state via the orders parquet ledger; between ws-risk's `rest_reconcile`
+  cycles a parallel demo-cycle exit submit was invisible, producing rare
+  double-submits (wasted REST + venue rejection on the loser). `submit_exit`
+  in ws_risk now re-reads the orders parquet immediately before submitting
+  to close that window.
+- **Ledger uPnL now matches Bybit position uPnL (2026-05-27).** The
+  ledger uPnL was computed from the ticker `mark_price` (or `last_price`
+  fallback), which can diverge from the position payload's `markPrice`
+  on illiquid alts — observed live as a ~4% drift on TRUSTUSDT.
+  `build_ledger_position_pnl_snapshot` now accepts an optional
+  `position_by_symbol` argument and prefers the position's own
+  `markPrice` for symbols with an open position, so ledger uPnL matches
+  Bybit's own position uPnL by construction.
 
 These are mechanical / engineering hardening — none touch the signal, the
 universe, or the parameters. Backtests and the `promoted` profile are

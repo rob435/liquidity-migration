@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 
 import polars as pl
+import pytest
 
 from liquidity_migration import ws_risk
 from liquidity_migration.config import ResearchConfig
@@ -512,6 +513,86 @@ def test_ws_risk_ws_order_closes_from_execution_stream(tmp_path: Path) -> None:
     assert stored.filter(pl.col("trade_id") == "t1").select("exit_trigger_ts_ms").item() == trigger_ts_ms
 
 
+def test_ws_risk_ws_exit_splits_close_when_position_exceeds_max_mkt_qty(tmp_path: Path) -> None:
+    """ws_exit path on a SUPER-shape position: submits N reduce-only sub-orders
+    with -s0/-s1 suffixes when qty > maxMktOrderQty. Without the split,
+    Bybit rejects the single close outright and the position hangs open."""
+    # Open trade with qty 37500 and a cap of 20000 — must split into 2 subs.
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "trade_id": "t1",
+                    "symbol": "SUPERUSDT",
+                    "side": "short",
+                    "status": "open",
+                    "qty": "37500",
+                    "entry_price": 2.0,
+                    "stop_price": 2.24,
+                    "take_profit_price": 1.6,
+                    "planned_exit_ts_ms": 9_999_999_999_999,
+                    "qty_step": 1.0,
+                    "max_market_order_qty": 20000.0,
+                }
+            ]
+        ),
+        tmp_path,
+        "event_demo_trades",
+        partition_by=(),
+    )
+    trade_client = FakeTradeClient()
+    # Match the venue position so the orphan reconciler doesn't fire and so
+    # the WS engine recognises the ticker hit as belonging to a tracked trade.
+    private_client = FakePrivateClient(
+        positions=[
+            {
+                "symbol": "SUPERUSDT",
+                "side": "Sell",
+                "size": "37500",
+                "avgPrice": "2.0",
+                "markPrice": "2.0",
+                "positionValue": "75000",
+                "unrealisedPnl": "0",
+                "stopLoss": "2.24",
+                "takeProfit": "1.6",
+            }
+        ]
+    )
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="ws",
+            rest_fallback=False,
+            exit_untracked_positions=False,
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+        trade_client=trade_client,
+    )
+
+    engine.bootstrap()
+    engine.on_ticker_message({"data": {"symbol": "SUPERUSDT", "markPrice": "2.30"}})
+
+    # Two reduce-only sub-orders should have been submitted, each <= 20000.
+    assert len(trade_client.orders) == 2, [o.get("qty") for o in trade_client.orders]
+    for order in trade_client.orders:
+        assert order["reduceOnly"] is True
+        assert float(order["qty"]) <= 20000.0
+    link_ids = [str(o["orderLinkId"]) for o in trade_client.orders]
+    bases = {link.rsplit("-s", 1)[0] for link in link_ids}
+    assert len(bases) == 1, bases
+    suffixes = sorted(link.rsplit("-s", 1)[1] for link in link_ids)
+    assert suffixes == ["0", "1"], suffixes
+
+
 def test_ws_risk_execution_stream_partial_fill_reduces_trade_qty(tmp_path: Path) -> None:
     _write_open_trade(tmp_path)
     private_client = FakePrivateClient(confirm_fills=False)
@@ -893,6 +974,175 @@ def test_ws_risk_bootstrap_loads_pending_exit_order_after_restart(tmp_path: Path
     assert stored.filter(pl.col("trade_id") == "t1").select("exit_reason").item() == "stop_loss"
     assert stored.filter(pl.col("trade_id") == "t1").select("exit_trigger_ts_ms").item() == 1_234_567_890
     assert stored_orders.filter(pl.col("order_link_id") == "lm-ex-pending").select("status").item() == "filled"
+
+
+def test_ws_risk_reconcile_flat_pending_exit_backfills_exit_price_from_closed_pnl(tmp_path: Path) -> None:
+    """DRIFT-style close (P1-1, 2026-05-27): a failed lm-rx left an order
+    with avg_price=0; the venue position later went flat under its own
+    stop. ``reconcile_flat_pending_exit_orders`` previously closed the
+    trade with exit_price=0 — a broken audit row.
+
+    With the closed-PnL backfill the trade closes with the real venue
+    exit price even when the lm-rx never confirmed a fill."""
+    _write_open_trade(tmp_path)
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "order_link_id": "lm-rx-AAA-1",
+                    "ts_ms": 9_999_999_999_000,
+                    "trade_id": "t1",
+                    "symbol": "AAAUSDT",
+                    "side": "Buy",
+                    "order_type": "Market",
+                    "qty": "1",
+                    "reduce_only": True,
+                    "submit_mode": "submitted",
+                    # The failed-confirmation shape: status pending but no fill data.
+                    "status": "submitted_unconfirmed",
+                    "avg_price": 0.0,
+                    "exit_reason": "stop_loss",
+                    "exit_trigger_ts_ms": 1_700_000_000_000,
+                    "target_qty": "1",
+                    "filled_qty": "",
+                }
+            ]
+        ),
+        tmp_path,
+        "event_demo_orders",
+        partition_by=(),
+    )
+
+    class _FakePrivateClientWithClosedPnl(FakePrivateClient):
+        """FakePrivateClient + a get_closed_pnl record so the orphan PnL
+        backfill returns the real venue close instead of an empty dict."""
+
+        def get_closed_pnl(self, *, symbol: str | None = None, start_time_ms: int | None = None, limit: int = 50):
+            return [
+                {
+                    "symbol": "AAAUSDT",
+                    "side": "Buy",
+                    "avgExitPrice": "112.5",
+                    "createdTime": "1700000060000",
+                    "orderId": "closed-pnl-1",
+                }
+            ]
+
+    # Flat position at venue + no fill data on get_trade_history (mirrors
+    # the failed lm-rx live shape: order submitted, fill confirm never
+    # resolved, venue closed under its own stop).
+    private_client = _FakePrivateClientWithClosedPnl(positions=[], confirm_fills=False)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+            exit_untracked_positions=False,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    # Run the rest-reconcile cycle — fires reconcile_flat_pending_exit_orders
+    # which we previously short-circuited with exit_price=0.
+    engine.rest_reconcile()
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    closed = stored.filter(pl.col("trade_id") == "t1")
+    assert closed.select("status").item() == "closed"
+    # The fix: exit_price comes from the closed-PnL backfill, not 0.
+    assert float(closed.select("exit_price").item()) == pytest.approx(112.5)
+
+
+def test_ws_risk_submit_exit_skips_when_demo_cycle_pending_in_parquet(tmp_path: Path) -> None:
+    """Cross-process lease (P1-2, 2026-05-27): the demo cycle just landed
+    a pending reduce-only order for AAAUSDT in the parquet ledger.
+    ws_risk evaluates the same symbol BEFORE its next rest_reconcile
+    refreshes ``submitted_symbols``. Without the lease ws_risk would
+    submit a second reduce-only — wasted REST + venue rejection on the
+    loser. With the lease ws_risk reads the parquet fresh and skips."""
+    _write_open_trade(tmp_path)
+    trade_client = FakeTradeClient()
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="ws",
+            rest_fallback=False,
+            exit_untracked_positions=False,
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+            adopt_untracked_positions=False,
+        ),
+        private_client=FakePrivateClient(),
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+        trade_client=trade_client,
+    )
+    engine.bootstrap()
+    # Now simulate the cross-process race: the demo cycle just landed a
+    # pending reduce-only order in the parquet AFTER ws_risk bootstrapped.
+    # ws_risk's in-memory ``submitted_symbols`` has NOT been refreshed for
+    # this write yet — exactly the race window the lease must close.
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "order_link_id": "lm-ex-demo-fresh",
+                    "ts_ms": int(time.time() * 1000),
+                    "trade_id": "t1",
+                    "symbol": "AAAUSDT",
+                    "side": "Buy",
+                    "order_type": "Market",
+                    "qty": "1",
+                    "reduce_only": True,
+                    "submit_mode": "submitted",
+                    "status": "submitted_unconfirmed",
+                    "exit_reason": "max_hold",
+                    "exit_trigger_ts_ms": 1_700_000_000_000,
+                    "target_qty": "1",
+                    "filled_qty": "",
+                }
+            ]
+        ),
+        tmp_path,
+        "event_demo_orders",
+        partition_by=(),
+    )
+    engine.state.submitted_symbols.discard("AAAUSDT")
+    engine.state.live_exit_order_symbols.discard("AAAUSDT")
+
+    # Now the ws-risk side decides to exit AAAUSDT (stop-loss hit). The
+    # cross-process lease must read the fresh parquet and skip.
+    engine.submit_exit(
+        {
+            "trade_id": "t1",
+            "symbol": "AAAUSDT",
+            "side": "short",
+            "qty": "1",
+            "exit_reason": "stop_loss",
+            "exit_trigger_ts_ms": int(time.time() * 1000),
+            "planned_exit_price": 113.0,
+        }
+    )
+
+    # No new exit submitted via the trade client — the lease blocked it.
+    assert trade_client.orders == [], trade_client.orders
+    # The symbol is re-marked as submitted so subsequent in-cycle ticks
+    # also no-op.
+    assert "AAAUSDT" in engine.state.submitted_symbols
 
 
 def test_ws_risk_rejected_pending_exit_unblocks_retry_after_restart(tmp_path: Path) -> None:
