@@ -1157,6 +1157,11 @@ def _add_volume_events_parser(subparsers) -> None:
         help="Allow biased diagnostics when archive manifest coverage is incomplete. Do not use for real backtests.",
     )
     volume_events.add_argument(
+        "--explain-rejections",
+        action="store_true",
+        help="Emit volume_event_rejections.csv with per-(symbol, signal_day) first-failing-gate trace. Diagnostic only — single-scenario runs.",
+    )
+    volume_events.add_argument(
         "--scenario-workers",
         type=int,
         default=event_defaults.workers,
@@ -2281,6 +2286,7 @@ def main(argv: list[str] | None = None) -> int:
             capitulation_reclaim_close_vs_prior20_high_max=args.capitulation_reclaim_close_vs_prior20_high_max,
             exclude_symbols=_csv_str(args.exclude_symbols, VolumeEventResearchConfig().exclude_symbols),
             workers=args.scenario_workers,
+            explain_rejections=args.explain_rejections,
         )
         payload = run_volume_event_research(
             data_root,

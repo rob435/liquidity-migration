@@ -238,6 +238,12 @@ class VolumeEventResearchConfig:
     # When set, the promotion gate adds an all-positive check across the
     # configured windows. Pristine OOS is the forward demo/paper ledger.
     splits: tuple[tuple[str, str, str], ...] = ()
+    # Diagnostic: when True, write per-row gate-rejection trace to
+    # ``<report_dir>/volume_event_rejections.csv`` after the filter runs.
+    # Each row is (symbol, ts_ms, first_failing_gate, value, threshold).
+    # Lets you diagnose "why didn't symbol X enter on day Y?" without
+    # monkey-patching the strategy. Single-scenario runs only.
+    explain_rejections: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,6 +349,32 @@ def run_volume_event_research(
             _, _sc = _event_score(scenario.event_type)
             events_df = _select_events(features, scenario=scenario, config=config, score_col=_sc)
             event_cache[key] = (events_df, _execution_ordered_events(events_df).to_dicts())
+
+    # Per-gate rejection trace for liquidity_migration scenarios. Cheap to compute
+    # (each gate is a polars column expression); only the first scenario's trace is
+    # emitted -- multi-scenario sweeps want aggregate metrics, not per-symbol traces.
+    if config.explain_rejections:
+        lm_scenarios = [s for s in _iter_scenarios(config) if s.event_type == "liquidity_migration"]
+        if lm_scenarios:
+            first = lm_scenarios[0]
+            _, _sc = _event_score(first.event_type)
+            rank_col_name = f"{_sc}_rank_frac"
+            top_cut = 1.0 - first.threshold
+            base_for_explain = _event_filter_base(
+                features, first.event_type, score_col=_sc, rank_col=rank_col_name, top_cut=top_cut, config=config,
+            )
+            rejections_df = _explain_liquidity_migration_rejections(
+                base_for_explain,
+                score_col=_sc,
+                rank_col=rank_col_name,
+                top_cut=top_cut,
+                config=config,
+            )
+            rejections_path = output_dir / "volume_event_rejections.csv"
+            rejections_df.write_csv(rejections_path)
+            print(
+                f"explain-rejections wrote {rejections_df.height} rows to {rejections_path}",
+            )
 
     def _run_one(scenario: EventScenario) -> dict[str, Any]:
         return _run_event_scenario(
@@ -1537,7 +1569,7 @@ def _apply_liquidity_migration_crowding_filter(events: pl.DataFrame, *, config: 
     )
 
 
-def _event_filter(
+def _event_filter_base(
     features: pl.DataFrame,
     event_type: str,
     *,
@@ -1546,6 +1578,10 @@ def _event_filter(
     top_cut: float,
     config: VolumeEventResearchConfig,
 ) -> pl.DataFrame:
+    """Universe + PIT-membership + market-context filter, BEFORE any event-specific
+    gates run. Extracted so per-gate rejection-trace instrumentation can take this
+    pre-event-filter dataframe as its input -- the explain function then identifies
+    which event-specific gate dropped each row."""
     base = features.filter(pl.col(score_col).is_not_null() & pl.col(score_col).is_finite())
     base = _exclude_symbols(base, config.exclude_symbols)
     if config.require_pit_membership:
@@ -1559,7 +1595,19 @@ def _event_filter(
             base = base.filter(pl.col("liquidity_rank") >= config.universe_rank_min)
         if config.universe_rank_max > 0:
             base = base.filter(pl.col("liquidity_rank") <= config.universe_rank_max)
-    base = _apply_market_context_filters(base, config)
+    return _apply_market_context_filters(base, config)
+
+
+def _event_filter(
+    features: pl.DataFrame,
+    event_type: str,
+    *,
+    score_col: str,
+    rank_col: str,
+    top_cut: float,
+    config: VolumeEventResearchConfig,
+) -> pl.DataFrame:
+    base = _event_filter_base(features, event_type, score_col=score_col, rank_col=rank_col, top_cut=top_cut, config=config)
     if event_type == "fresh_volume_spike":
         return base.filter((pl.col(rank_col) >= top_cut) & (pl.col(f"prior_{rank_col}") < top_cut))
     if event_type == "persistent_volume_breakout":
@@ -2106,6 +2154,186 @@ def _filter_liquidity_migration(
         if config.liquidity_migration_pit_age_days_max > 0:
             predicate = predicate & (pl.col("pit_age_days") <= float(config.liquidity_migration_pit_age_days_max))
     return base.filter(predicate)
+
+
+def _explain_liquidity_migration_rejections(
+    base: pl.DataFrame,
+    *,
+    score_col: str,
+    rank_col: str,
+    top_cut: float,
+    config: VolumeEventResearchConfig,
+) -> pl.DataFrame:
+    """Per-(symbol, ts_ms) rejection trace for ``_filter_liquidity_migration``.
+
+    Independently evaluates each gate in the same order ``_filter_liquidity_migration``
+    applies them, and records the FIRST failing gate per row plus the row's actual
+    value and the threshold. Rows that survive every gate get ``first_failing_gate=""``.
+
+    Output columns:
+        symbol, ts_ms, first_failing_gate, first_failing_value, first_failing_threshold
+
+    Use case: diagnose "why didn't symbol X get entered on signal day Y?" without
+    monkey-patching the strategy. Identifies the binding constraint per candidate.
+    Only emits for the liquidity_migration event family (the strategy's primary
+    event type); other event families' gates remain inspectable via the same
+    pattern if extended later.
+    """
+    if base.is_empty():
+        return pl.DataFrame(
+            schema={
+                "symbol": pl.Utf8,
+                "ts_ms": pl.Int64,
+                "first_failing_gate": pl.Utf8,
+                "first_failing_value": pl.Float64,
+                "first_failing_threshold": pl.Float64,
+            }
+        )
+
+    rank_delta = pl.col("prior7_liquidity_rank").cast(pl.Int64) - pl.col("liquidity_rank").cast(pl.Int64)
+
+    # Gate registry: ordered list of (name, predicate_expr, value_expr, threshold_value).
+    # Order MUST match ``_filter_liquidity_migration``'s application order so the
+    # 'first failing' label reflects the same gate the production filter would have
+    # cited as the binding constraint.
+    gates: list[tuple[str, pl.Expr, pl.Expr, float]] = []
+
+    # Base gates (always evaluated)
+    gates.append((
+        "event_rank_above_threshold",
+        pl.col(rank_col) >= top_cut,
+        pl.col(rank_col),
+        top_cut,
+    ))
+    gates.append((
+        "prior7_event_rank_below_threshold",
+        pl.col(f"prior7_{rank_col}") < top_cut,
+        pl.col(f"prior7_{rank_col}"),
+        top_cut,
+    ))
+    gates.append((
+        "rank_improvement_min",
+        rank_delta >= config.liquidity_migration_rank_improvement_min,
+        rank_delta.cast(pl.Float64),
+        float(config.liquidity_migration_rank_improvement_min),
+    ))
+
+    # Conditional gates (only added when the config moves them off the default)
+    if config.liquidity_migration_turnover_ratio_min > 0.0:
+        turnover_ratio = pl.col("turnover_quote") / pl.col("prior7_turnover_quote_mean")
+        gates.append((
+            "turnover_ratio_min",
+            (pl.col("prior7_turnover_quote_mean") > 0.0) & (turnover_ratio >= config.liquidity_migration_turnover_ratio_min),
+            turnover_ratio,
+            config.liquidity_migration_turnover_ratio_min,
+        ))
+    if config.liquidity_migration_prior_rank_min > 0:
+        gates.append((
+            "prior7_liquidity_rank_min",
+            pl.col("prior7_liquidity_rank") >= config.liquidity_migration_prior_rank_min,
+            pl.col("prior7_liquidity_rank").cast(pl.Float64),
+            float(config.liquidity_migration_prior_rank_min),
+        ))
+    if config.liquidity_migration_current_rank_max > 0:
+        gates.append((
+            "liquidity_rank_max",
+            pl.col("liquidity_rank") <= config.liquidity_migration_current_rank_max,
+            pl.col("liquidity_rank").cast(pl.Float64),
+            float(config.liquidity_migration_current_rank_max),
+        ))
+    if config.liquidity_migration_event_rank_fraction_max > 0.0:
+        gates.append((
+            "event_rank_fraction_max",
+            pl.col(rank_col) <= config.liquidity_migration_event_rank_fraction_max,
+            pl.col(rank_col),
+            config.liquidity_migration_event_rank_fraction_max,
+        ))
+    if config.liquidity_migration_day_return_min > -1.0:
+        gates.append((
+            "day_return_min",
+            pl.col("daily_return_1d").is_not_null() & (pl.col("daily_return_1d") >= config.liquidity_migration_day_return_min),
+            pl.col("daily_return_1d"),
+            config.liquidity_migration_day_return_min,
+        ))
+    if config.liquidity_migration_day_return_max < 10.0:
+        gates.append((
+            "day_return_max",
+            pl.col("daily_return_1d").is_not_null() & (pl.col("daily_return_1d") <= config.liquidity_migration_day_return_max),
+            pl.col("daily_return_1d"),
+            config.liquidity_migration_day_return_max,
+        ))
+    if config.liquidity_migration_residual_return_min > -10.0:
+        gates.append((
+            "residual_return_min",
+            pl.col("residual_return_1d").is_not_null() & (pl.col("residual_return_1d") >= config.liquidity_migration_residual_return_min),
+            pl.col("residual_return_1d"),
+            config.liquidity_migration_residual_return_min,
+        ))
+    if config.liquidity_migration_close_location_min > 0.0:
+        gates.append((
+            "close_location_min",
+            pl.col("signal_day_close_location").is_not_null()
+            & (pl.col("signal_day_close_location") >= config.liquidity_migration_close_location_min),
+            pl.col("signal_day_close_location"),
+            config.liquidity_migration_close_location_min,
+        ))
+    if config.liquidity_migration_pit_age_days_min > 0:
+        gates.append((
+            "pit_age_days_min",
+            pl.col("pit_age_days").is_not_null() & (pl.col("pit_age_days") >= float(config.liquidity_migration_pit_age_days_min)),
+            pl.col("pit_age_days"),
+            float(config.liquidity_migration_pit_age_days_min),
+        ))
+    # Market-pct-up gate: short-circuits via the "OR hot coin" clause -- a row
+    # passes if the market breadth is moderate OR if the symbol itself is hot
+    # enough. We treat this as a single gate keyed by market_pct_up_1d.
+    if config.liquidity_migration_market_pct_up_max < 1.0:
+        market_ok = pl.col("market_pct_up_1d").is_not_null() & (
+            pl.col("market_pct_up_1d") <= config.liquidity_migration_market_pct_up_max
+        )
+        if config.liquidity_migration_hot_market_day_return_min < 10.0:
+            hot_ok = pl.col("daily_return_1d").is_not_null() & (
+                pl.col("daily_return_1d") >= _liquidity_migration_hot_return_threshold_expr(config)
+            )
+            gates.append((
+                "market_or_hot_coin",
+                market_ok | hot_ok,
+                pl.col("market_pct_up_1d"),
+                config.liquidity_migration_market_pct_up_max,
+            ))
+        else:
+            gates.append((
+                "market_pct_up_max",
+                market_ok,
+                pl.col("market_pct_up_1d"),
+                config.liquidity_migration_market_pct_up_max,
+            ))
+
+    # Build a column per gate carrying the pass-bool + value on the full base
+    # frame (gate predicates reference feature columns that only exist on `base`,
+    # not on a slimmer projection), then derive the first-failing label.
+    annotated = base.with_columns([
+        *[predicate.fill_null(False).alias(f"_pass_{idx}") for idx, (_, predicate, *_) in enumerate(gates)],
+        *[value.cast(pl.Float64, strict=False).alias(f"_val_{idx}") for idx, (_, _, value, _) in enumerate(gates)],
+    ])
+
+    # Construct the first-failing expression: reverse the chain so later gates
+    # only label when no earlier gate failed.
+    first_gate_expr: pl.Expr = pl.lit("")
+    first_value_expr: pl.Expr = pl.lit(None, dtype=pl.Float64)
+    first_threshold_expr: pl.Expr = pl.lit(None, dtype=pl.Float64)
+    for idx, (name, _, _, threshold) in reversed(list(enumerate(gates))):
+        first_gate_expr = pl.when(~pl.col(f"_pass_{idx}")).then(pl.lit(name)).otherwise(first_gate_expr)
+        first_value_expr = pl.when(~pl.col(f"_pass_{idx}")).then(pl.col(f"_val_{idx}")).otherwise(first_value_expr)
+        first_threshold_expr = pl.when(~pl.col(f"_pass_{idx}")).then(pl.lit(threshold)).otherwise(first_threshold_expr)
+
+    result = annotated.with_columns([
+        first_gate_expr.alias("first_failing_gate"),
+        first_value_expr.alias("first_failing_value"),
+        first_threshold_expr.alias("first_failing_threshold"),
+    ]).select(["symbol", "ts_ms", "first_failing_gate", "first_failing_value", "first_failing_threshold"])
+
+    return result
 
 
 def _has_columns(frame: pl.DataFrame, *columns: str) -> bool:

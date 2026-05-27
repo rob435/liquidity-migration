@@ -27,6 +27,7 @@ from liquidity_migration.volume_events import (
     _event_decay_exit_hit,
     _event_filter,
     _execution_ordered_events,
+    _explain_liquidity_migration_rejections,
     _float_or_nan,
     _full_pit_universe_error,
     _funding_feature_frame,
@@ -332,6 +333,69 @@ def test_liquidity_rank_improvement_handles_rank_deterioration_without_u32_under
     assert improvements_1d[2] == 0
     assert improvements_3d[2] == 110 - 100 == 10
     assert improvements_7d[2] == 120 - 100 == 20
+
+
+def test_explain_liquidity_migration_rejections_labels_first_failing_gate() -> None:
+    """Per-row gate-rejection trace: each row gets the FIRST gate it fails,
+    in the same order _filter_liquidity_migration evaluates them.
+
+    Three symbols, each engineered to fail one specific gate:
+    - PASS:  satisfies every gate (first_failing_gate = "")
+    - RANK:  liquidity_rank_improvement = 100 < 150 → fails rank_improvement_min
+    - RESID: residual_return_1d = 0.02 < 0.08 → fails residual_return_min
+    """
+    base = pl.DataFrame({
+        "symbol": ["PASS", "RANK", "RESID"],
+        "ts_ms": [1_700_000_000_000] * 3,
+        "liquidity_rank": pl.Series([50, 50, 50], dtype=pl.UInt32),
+        "prior7_liquidity_rank": pl.Series([220, 150, 220], dtype=pl.UInt32),
+        "dollar_volume_rank_z_rank_frac": [0.85, 0.85, 0.85],
+        "prior7_dollar_volume_rank_z_rank_frac": [0.10, 0.10, 0.10],
+        "turnover_quote": [1.0e9, 1.0e9, 1.0e9],
+        "prior7_turnover_quote_mean": [1.0e8, 1.0e8, 1.0e8],
+        "daily_return_1d": [0.10, 0.10, 0.10],
+        "residual_return_1d": [0.15, 0.15, 0.02],
+        "signal_day_close_location": [0.50, 0.50, 0.50],
+        "pit_age_days": [200.0, 200.0, 200.0],
+        "market_pct_up_1d": [0.40, 0.40, 0.40],
+    })
+    config = VolumeEventResearchConfig(
+        liquidity_migration_rank_improvement_min=150,
+        liquidity_migration_turnover_ratio_min=6.0,
+        liquidity_migration_event_rank_fraction_max=0.90,
+        liquidity_migration_day_return_min=0.0,
+        liquidity_migration_residual_return_min=0.08,
+        liquidity_migration_close_location_min=0.30,
+        liquidity_migration_pit_age_days_min=90,
+    )
+    out = _explain_liquidity_migration_rejections(
+        base,
+        score_col="dollar_volume_rank_z",
+        rank_col="dollar_volume_rank_z_rank_frac",
+        top_cut=0.60,  # threshold 0.4 → top_cut = 1 - 0.4
+        config=config,
+    )
+    by_symbol = {row["symbol"]: row for row in out.to_dicts()}
+    assert by_symbol["PASS"]["first_failing_gate"] == ""
+    assert by_symbol["RANK"]["first_failing_gate"] == "rank_improvement_min"
+    assert by_symbol["RANK"]["first_failing_value"] == 100.0  # 150 - 50
+    assert by_symbol["RANK"]["first_failing_threshold"] == 150.0
+    assert by_symbol["RESID"]["first_failing_gate"] == "residual_return_min"
+    assert by_symbol["RESID"]["first_failing_value"] == pytest.approx(0.02)
+    assert by_symbol["RESID"]["first_failing_threshold"] == pytest.approx(0.08)
+
+
+def test_explain_liquidity_migration_rejections_empty_input_returns_empty_frame() -> None:
+    """Edge case: empty input returns an empty result, not an error."""
+    base = pl.DataFrame({"symbol": [], "ts_ms": [], "liquidity_rank": [],
+                         "prior7_liquidity_rank": [], "dollar_volume_rank_z_rank_frac": [],
+                         "prior7_dollar_volume_rank_z_rank_frac": []})
+    out = _explain_liquidity_migration_rejections(
+        base, score_col="dollar_volume_rank_z", rank_col="dollar_volume_rank_z_rank_frac",
+        top_cut=0.6, config=VolumeEventResearchConfig(),
+    )
+    assert out.height == 0
+    assert "first_failing_gate" in out.columns
 
 
 def test_filter_liquidity_migration_rejects_negative_rank_delta_after_u32_fix() -> None:
