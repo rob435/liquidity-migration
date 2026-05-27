@@ -185,6 +185,11 @@ class WebSocketRiskState:
     reconciliations: list[dict[str, Any]] = field(default_factory=list)
     pending_fill_reconciliations: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # Last error string from the most recent ``_safe_raw_positions`` call (or
+    # empty when the snapshot was clean). Plumbed into the orphan reconciler
+    # so a transient REST failure -- which leaves ``positions_by_symbol``
+    # empty -- does not false-positive orphan-close every open trade.
+    last_position_error: str = ""
     ws_order_unavailable: str = ""
     telegram_keys_sent: set[str] = field(default_factory=set)
 
@@ -339,6 +344,9 @@ class EventWebSocketRiskEngine:
         raw_positions, error = _safe_raw_positions(self.private_client, settle_coin=self.risk.settle_coin)
         if error:
             self.state.errors.append(error)
+        # Plumb the error to state so reconcile_positions can bail-on-bad-snapshot
+        # instead of false-positive orphan-closing every trade.
+        self.state.last_position_error = error
         self.state.positions_by_symbol = _active_position_by_symbol(raw_positions)
         self.state.price_by_symbol.update(_price_lookup_from_positions(self.state.positions_by_symbol))
         open_orders_ok = self.refresh_live_exit_order_symbols()
@@ -1018,11 +1026,24 @@ class EventWebSocketRiskEngine:
             self.state.repairs.extend(rows)
 
     def reconcile_positions(self, *, write: bool) -> list[dict[str, Any]]:
+        # ``trading_client`` enables the B3 closed-PnL backfill: when an orphan
+        # is detected, the reconciler calls ``get_closed_pnl`` to fill in
+        # ``exit_price`` / ``gross_trade_return`` / ``net_return`` /
+        # ``exit_order_id`` from the actual Bybit close, rather than leaving a
+        # zero-PnL "bybit_position_missing" row in the ledger. Without this
+        # argument the backfill silently no-ops -- observed live as REQUSDT
+        # closing at exit_price=0 after a real venue stop fired.
+        # ``position_error`` plumbs the last-known-REST-snapshot health: when
+        # the REST positions probe failed the empty ``positions_by_symbol``
+        # would otherwise look like "every open trade has vanished" and
+        # false-positive orphan-close them all on a transient API hiccup.
         reconciled, rows = _risk_reconcile_missing_positions(
             self.state.open_trades,
             position_by_symbol=self.state.positions_by_symbol,
             now_ms=_now_ms(),
             enabled=self.risk.submit_orders and self.private_client is not None,
+            position_error=self.state.last_position_error,
+            trading_client=self.private_client,
         )
         self.state.open_trades = reconciled
         if rows:
@@ -1038,7 +1059,11 @@ class EventWebSocketRiskEngine:
         raw_positions, error = _safe_raw_positions(self.private_client, settle_coin=self.risk.settle_coin)
         if error:
             self.state.errors.append(error)
+            self.state.last_position_error = error
             return
+        # REST snapshot is clean: clear any stale error flag from a prior probe
+        # so the orphan reconciler is allowed to act on this fresh state.
+        self.state.last_position_error = ""
         self.state.positions_by_symbol = _active_position_by_symbol(raw_positions)
         self.state.price_by_symbol.update(_price_lookup_from_positions(self.state.positions_by_symbol))
         self.state.all_trades = self._read_trades_combined()
