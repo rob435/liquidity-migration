@@ -75,8 +75,10 @@ A separate, legitimate refactor is splitting `event_demo.py` into
 `event_demo_{data,entries,planning,exits,reports,daemon}.py` — currently under
 audit, left as local WIP, **not** in this handoff commit.
 
-- It does **not** affect your immediate task: the sweep runs via `cli.py →
-  volume_events.py`, which the refactor doesn't touch.
+- It does **not** affect your immediate task in practice: `volume_events.py`
+  was split internally (filters/features/charts/validation siblings), but the
+  `volume-events` CLI command + flags are unchanged (verified `--help`, exit 0).
+  Do a quick `volume-events --help` on the desktop before the full run to confirm.
 - It IS an upstream dependency for the later code-touch phases (R5 sizing, R6
   cost-model wiring, R12 sniper, C0 continuous engine) — build those on the
   post-refactor module layout once it merges. See the round2 doc "Codebase note

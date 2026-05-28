@@ -94,10 +94,12 @@ audit**) into a module family: `event_demo_{data,entries,planning,exits,
 reports,daemon}.py`. This shapes how Round 2's **code-touch** sub-phases land —
 they target the post-refactor layout, not the old monolith:
 
-- **Unaffected — proceed now:** the backtest / sweep path is `cli.py →
-  volume_events.py`, which the refactor does NOT touch. R1-R3 sweeps (including
-  the wide-funnel `max_active=12` R1 run) and the signal harness run against the
-  current code as-is.
+- **Sweep path verified working:** `volume_events.py` was itself split
+  internally (filters / features / charts / validation siblings) by the
+  refactor, but the `volume-events` CLI command and all its flags are unchanged
+  (`--help` confirmed, exit 0). So R1-R3 sweeps (including the wide-funnel
+  `max_active=12` R1 run) and the signal harness run as-is — do a quick
+  `volume-events --help` / small dry-run on first use on the desktop to confirm.
 - **Depends on the refactor landing:** R5 (position sizing), R6 (cost-model
   integration into the runner), R12 (sniper entry / daemon), C0 (continuous
   engine = the live-daemon path). Implement these on top of the audited module
