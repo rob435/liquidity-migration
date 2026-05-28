@@ -31,7 +31,16 @@ import csv
 import json
 import math
 import random
+import sys
 from pathlib import Path
+
+# Windows cp1252 stdout crashes on the box-drawing / Δ / ⚠️ chars this script
+# prints; force UTF-8 (matches scripts/_sweep_runtime.py).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        pass
 
 SHARED = Path.home() / "SHARED_DATA"
 VENUES = {"bybit": "bybit_full_pit", "binance": "binance_full_pit"}
@@ -51,6 +60,7 @@ def _load_json_metrics(cell_dir: Path) -> dict:
     d = json.loads((cell_dir / "volume_event_research_report.json").read_text())
     b = d.get("best_scenario", {})
     dr = d.get("date_range", {})
+    pit = d.get("pit_manifest", {})
     return {
         "total_return": float(b.get("total_return", 0.0)),
         "max_drawdown": float(b.get("max_drawdown", 0.0)),
@@ -58,6 +68,10 @@ def _load_json_metrics(cell_dir: Path) -> dict:
         "trades": int(b.get("trades", 0)),
         "start": dr.get("start"),
         "end": dr.get("end"),
+        # PIT integrity: a run is clean evidence only if it covered the full PIT
+        # universe. A partial-PIT run is current-universe (survivorship) biased.
+        "full_pit_pass": bool(pit.get("full_pit_universe_pass", False)),
+        "run_label": str(d.get("run_label", "")),
     }
 
 
@@ -203,8 +217,13 @@ def _engine_mar(total_return: float, max_drawdown: float, years: float) -> float
 
 def _tier2_verdict(by_d: float, bn_d: float, pooled_d: float, *,
                    by_ret: float, bn_ret: float, by_dd: float, bn_dd: float,
-                   by_tr: int, bn_tr: int) -> str:
+                   by_tr: int, bn_tr: int, full_pit: bool = True) -> str:
     """Tier 2 Demo-candidate bar (see Round 2 pre-reg 'Decision framework')."""
+    # PIT integrity gate, FIRST: a partial-PIT run is current-universe
+    # (survivorship) biased and is not valid evidence regardless of how good the
+    # numbers look. Requires BOTH the cell and the control to have run full-PIT.
+    if not full_pit:
+        return "INVALID (partial-PIT — current-universe/survivorship biased)"
     # Falsify
     if by_ret <= 0 or bn_ret <= 0:
         return "FALSIFY (return ≤0 a venue)"
@@ -227,9 +246,12 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
-    # collected[cell][venue] = dict(mar_d, ret, dd, trades) for the cross-venue
-    # Tier 2 verdict printed after the per-venue fragility sections.
+    # collected[cell][venue] = dict(mar_d, ret, dd, trades, full_pit) for the
+    # cross-venue Tier 2 verdict printed after the per-venue fragility sections.
     collected: dict[str, dict[str, dict]] = {}
+    # control_full_pit[venue] — a cell is valid Tier-2 evidence only if BOTH it
+    # and the control ran full-PIT on BOTH venues.
+    control_full_pit: dict[str, bool] = {}
 
     for venue, root_name in VENUES.items():
         sweep_root = SHARED / root_name / "reports" / args.sweep_tag
@@ -240,6 +262,11 @@ def main() -> int:
         base_monthly = _load_monthly(control_dir)
         base_months = [m for m, _ in base_monthly]
         base_json = _load_json_metrics(control_dir)
+        control_full_pit[venue] = base_json["full_pit_pass"]
+        if not base_json["full_pit_pass"]:
+            print(f"  ⚠️  {venue} control ({args.control}) is NOT full-PIT "
+                  f"(run_label={base_json['run_label']!r}) — every {venue} Tier-2 verdict is "
+                  f"INVALID until the sweep is re-run full-PIT.")
         base_mar = _engine_mar(base_json["total_return"], base_json["max_drawdown"], _window_years(base_json))
 
         print(f"\n{'=' * 78}\n{venue.upper()}  (control={args.control}, {len(base_months)} months, "
@@ -264,6 +291,7 @@ def main() -> int:
             collected.setdefault(cell, {})[venue] = {
                 "mar_d": cell_mar - base_mar, "ret": cj["total_return"],
                 "dd": cj["max_drawdown"], "trades": cj["trades"],
+                "full_pit": cj["full_pit_pass"],
             }
 
             thirds = _thirds(months, cr, br)
@@ -294,7 +322,9 @@ def main() -> int:
 
     # ── Cross-venue Tier 2 Demo-candidate verdict ──
     print(f"\n{'=' * 78}\nTIER 2 — DEMO-CANDIDATE VERDICT (pooled MAR Δ > +0.1, positive both venues,\n"
-          f"  neither venue worse than -0.5 MAR, ≥30 by / ≥20 bn trades)\n{'=' * 78}")
+          f"  neither venue worse than -0.5 MAR, ≥30 by / ≥20 bn trades).\n"
+          f"  INVALID unless cell AND control ran FULL-PIT on both venues "
+          f"(partial-PIT = survivorship-biased).\n{'=' * 78}")
     hdr = f"  {'cell':<26}{'by MARΔ':>9}{'bn MARΔ':>9}{'pooled':>9}{'by/bn ret':>14}{'by/bn tr':>11}  verdict"
     print(hdr)
     for cell in sorted(collected):
@@ -304,10 +334,16 @@ def main() -> int:
             continue
         by, bn = vens["bybit"], vens["binance"]
         pooled = (by["mar_d"] + bn["mar_d"]) / 2.0
+        full_pit = (
+            by["full_pit"] and bn["full_pit"]
+            and control_full_pit.get("bybit", False)
+            and control_full_pit.get("binance", False)
+        )
         verdict = _tier2_verdict(by["mar_d"], bn["mar_d"], pooled,
                                  by_ret=by["ret"], bn_ret=bn["ret"],
                                  by_dd=by["dd"], bn_dd=bn["dd"],
-                                 by_tr=by["trades"], bn_tr=bn["trades"])
+                                 by_tr=by["trades"], bn_tr=bn["trades"],
+                                 full_pit=full_pit)
         print(f"  {cell:<26}{by['mar_d']:>+9.2f}{bn['mar_d']:>+9.2f}{pooled:>+9.2f}"
               f"{by['ret']:>6.1f}x/{bn['ret']:<6.1f}x{by['trades']:>5}/{bn['trades']:<5}  {verdict}")
     print("\n  NOTE: fragility diagnostics above are REPORTED, non-blocking at Tier 2 —"

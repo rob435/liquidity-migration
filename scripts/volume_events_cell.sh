@@ -39,7 +39,7 @@ PHASE=""
 START="$DEFAULT_START"
 END="$DEFAULT_END"
 OVERRIDES=""
-ALLOW_PARTIAL_PIT="--allow-partial-pit"   # toggled off if --strict-pit passed
+ALLOW_PARTIAL_PIT=""   # full PIT by default (engine aborts on coverage gaps); --allow-partial-pit opts into a BIASED run
 EXTRA_FLAGS=()
 
 usage() {
@@ -56,7 +56,9 @@ Optional:
   --start DATE                 Inclusive start (default $DEFAULT_START).
   --end DATE                   Exclusive end (default $DEFAULT_END).
   --overrides 'K=V,K=V,...'    Comma-separated CLI overrides.
-  --strict-pit                 Drop --allow-partial-pit (require full PIT).
+  --allow-partial-pit          Opt into a BIASED current-universe (survivorship)
+                               run; EXPLORATORY only, never promotion evidence.
+                               Default is full PIT (engine aborts on coverage gaps).
   --extra 'flag arg'           Append a raw flag/arg to the volume-events call.
                                Repeatable.
   --help                       Show this help.
@@ -101,7 +103,7 @@ while [[ $# -gt 0 ]]; do
         --start) START="$2"; shift 2 ;;
         --end) END="$2"; shift 2 ;;
         --overrides) OVERRIDES="$2"; shift 2 ;;
-        --strict-pit) ALLOW_PARTIAL_PIT=""; shift ;;
+        --allow-partial-pit) ALLOW_PARTIAL_PIT="--allow-partial-pit"; shift ;;
         --extra) EXTRA_FLAGS+=("$2"); shift 2 ;;
         --help|-h) usage; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; usage >&2; exit 2 ;;

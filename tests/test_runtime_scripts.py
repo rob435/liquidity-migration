@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 import time
 from pathlib import Path
 
@@ -9,8 +10,14 @@ import pytest
 
 def _load_sweep_module(name: str):
     repo = Path(__file__).resolve().parents[1]
+    scripts_dir = str(repo / "scripts")
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)  # so `from _sweep_runtime import ...` resolves
     spec = importlib.util.spec_from_file_location(name, repo / "scripts" / f"{name}.py")
     module = importlib.util.module_from_spec(spec)
+    # Register before exec so a @dataclass in the module (Cell) can resolve
+    # cls.__module__ via sys.modules during decoration.
+    sys.modules[name] = module
     spec.loader.exec_module(module)
     return module
 
@@ -35,6 +42,37 @@ def test_sweep_script_flags_are_real_cli_options(script_name: str) -> None:
         flags |= set(cell.overrides.keys())
     unknown = sorted(f for f in flags if f not in known)
     assert not unknown, f"{script_name} uses unknown volume-events flags: {unknown}"
+
+
+def test_sweep_runtime_enforces_full_pit_by_default(tmp_path, monkeypatch) -> None:
+    """The sweep runtime must NOT pass --allow-partial-pit by default — that flag
+    disables the engine's full-PIT survivorship guard, producing a current-universe
+    (survivors-only) biased run. It may be passed ONLY when allow_partial_pit=True
+    is explicitly requested (an intentionally biased EXPLORATORY sweep)."""
+    sweep = _load_sweep_module("_sweep_runtime")
+
+    captured: dict[str, list[str]] = {}
+
+    class _Proc:
+        returncode = 1  # non-zero -> run_cell returns a 'failed' row without reading a report
+        stdout = ""
+        stderr = ""
+
+    def _fake_run(cmd, **_kw):
+        captured["cmd"] = list(cmd)
+        return _Proc()
+
+    monkeypatch.setattr(sweep.subprocess, "run", _fake_run)
+    cell = sweep.Cell("c0", "desc")
+    common = dict(baseline_params={}, start_date="2023-01-01", end_date="2023-02-01", sweep_tag="t")
+
+    # Default: full-PIT -> the flag must be ABSENT.
+    sweep.run_cell(cell, "bybit", tmp_path, **common)
+    assert "--allow-partial-pit" not in captured["cmd"], "full PIT must be the default"
+
+    # Explicit opt-in -> the flag must be PRESENT.
+    sweep.run_cell(cell, "bybit", tmp_path, allow_partial_pit=True, **common)
+    assert "--allow-partial-pit" in captured["cmd"], "explicit opt-in must pass the flag"
 
 
 def test_runtime_scripts_do_not_delete_live_cycle_locks() -> None:

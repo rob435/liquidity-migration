@@ -105,6 +105,7 @@ def run_cell(
     end_date: str,
     sweep_tag: str,
     config_path: str = "configs/volume_alpha.default.yaml",
+    allow_partial_pit: bool = False,
 ) -> dict[str, str]:
     """Run one cell on one venue, return per-cell metrics dict.
 
@@ -113,6 +114,13 @@ def run_cell(
     flags. Parses the resulting ``volume_event_research_report.json`` for
     headline metrics; on failure, returns a row with status='failed' so
     the orchestrator can record what went wrong.
+
+    PIT integrity: full PIT is REQUIRED by default — the engine aborts with a
+    coverage error if the klines don't cover every manifest (symbol, date), so a
+    survivors-only root can't silently produce a ``current_universe``-filtered
+    (survivorship-biased) run. ``--allow-partial-pit`` is appended ONLY when
+    ``allow_partial_pit=True`` is explicitly passed, and that is for intentionally
+    biased EXPLORATORY sweeps only (never promotion evidence).
     """
     report_dir = data_root / "reports" / sweep_tag / cell.cell_id
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -125,9 +133,10 @@ def run_cell(
         "volume-events",
         "--start", start_date,
         "--end", end_date,
-        "--allow-partial-pit",
         "--report-dir", str(report_dir),
     ]
+    if allow_partial_pit:
+        cmd.append("--allow-partial-pit")
     for k, v in params.items():
         cmd.extend([k, v])
 
@@ -210,9 +219,15 @@ def run_sweep(
     sweep_tag: str,
     summary_path: Path,
     config_path: str = "configs/volume_alpha.default.yaml",
+    allow_partial_pit: bool = False,
 ) -> int:
     """Dispatch (cell × venue) work to ThreadPoolExecutor; flush summary.csv
-    after every completion under a lock. Returns 0 on completion."""
+    after every completion under a lock. Returns 0 on completion.
+
+    Full PIT is REQUIRED by default; pass ``allow_partial_pit=True`` only for an
+    intentionally biased EXPLORATORY sweep (the run is then
+    ``pit_membership_filtered_current_universe`` = survivorship-biased, never
+    promotion evidence)."""
     work: list[tuple[Cell, str, Path]] = []
     for venue, data_root in venues.items():
         if not data_root.exists():
@@ -236,6 +251,12 @@ def run_sweep(
         f"parallel: SWEEP_MAX_WORKERS={MAX_WORKERS}  POLARS_MAX_THREADS={PER_CELL_POLARS_THREADS}  "
         f"(thread budget = {MAX_WORKERS * PER_CELL_POLARS_THREADS})"
     )
+    print(
+        "PIT mode: FULL-PIT (engine aborts on any manifest/kline coverage gap)"
+        if not allow_partial_pit
+        else "PIT mode: PARTIAL-PIT — BIASED current-universe (survivorship) run; "
+        "EXPLORATORY only, never promotion evidence"
+    )
     print()
 
     rows: list[dict[str, str]] = []
@@ -255,6 +276,7 @@ def run_sweep(
                 end_date=end_date,
                 sweep_tag=sweep_tag,
                 config_path=config_path,
+                allow_partial_pit=allow_partial_pit,
             ): (cell, venue)
             for cell, venue, data_root in work
         }
