@@ -1,6 +1,6 @@
 # Research-program state
 
-**Last updated:** 2026-05-28 (post R1 verdict; R2 dispatch pending)
+**Last updated:** 2026-05-28 (post stale-doc cleanup; R1 v2 not yet dispatched)
 
 > If you are a Claude session opening this repo for the first time, read this
 > file FIRST. It tells you in 60 seconds what's been done, what's running,
@@ -58,7 +58,7 @@
 | Sub-phase | Purpose | Status |
 |---|---|---|
 | R0 | Doc cleanup (delete unused Phase 7 pre-reg, update STATE.md) | complete (5dff927) |
-| R1 | Per-filter hypothesis audit (softer criterion) | **complete (this commit) — 5/5 investigation-positive, all forward to R10 queue, production stack unchanged** |
+| R1 | Per-filter hypothesis audit (softer criterion) | not started — 2026-05-28 stale draft (6 cells, missing `R1_drop_all_4`, wrong window) was deleted; v2 pending per Mac amendment (7 cells, `R1_drop_all_4` first, window 2023-04-01 → 2026-05-28) |
 | R2 | Per-feature standalone decile-sort + correlation matrix | not started |
 | R3 | Bearish stack honest test (H2 retried) | not started — needs ~3h code (R3 filter flag additions) |
 | R4 | Risk-factor model construction (JS-style, 8 factors) | not started — needs ~3 days code |
@@ -89,7 +89,7 @@ R12a/b sniper + C0 continuous engine).
   promoted profile. Ledgers in `data/bybit-demo-event/`.
 - **Paper shadow** (same VPS, same profile, no order submission):
   `data/bybit-paper-event/`.
-- **NO research runs currently in-flight.** R1 complete 2026-05-28; R2 dispatch next.
+- **NO research runs currently in-flight.** R1 v2 dispatch pending (per Mac amendment with `R1_drop_all_4` lead candidate).
 
 ## What's broken
 
