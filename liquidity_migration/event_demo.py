@@ -3722,12 +3722,22 @@ def _reconcile_pending_order_fills(
             delta_qty = max(filled_qty - previous_filled_qty, 0.0)
             remaining_qty = max(_float(trade.get("qty")) - delta_qty, 0.0)
             if fully_filled or remaining_qty <= max(_float(trade.get("qty")) * 1e-8, 1e-12):
+                # gross_trade_return / net_return must land on the close so the
+                # ledger carries realized PnL without depending on the orphan
+                # reconciler. Both fields use the same formula as the cycle-exit
+                # path (lines ~3525) and orphan backfill (lines ~4778).
+                trade_side = str(trade.get("side") or "short")
+                entry_price = _float(trade.get("entry_price"))
+                gross_trade_return = _trade_return(entry_price, avg_price, side=trade_side)
+                notional_weight = _safe_ratio(trade.get("notional_usdt"), trade.get("equity_usdt"))
                 trade.update(
                     {
                         "status": "closed",
                         "exit_ts_ms": now_ms,
                         "exit_trigger_ts_ms": int(order.get("exit_trigger_ts_ms") or now_ms),
                         "exit_price": avg_price,
+                        "gross_trade_return": gross_trade_return,
+                        "net_return": gross_trade_return * notional_weight,
                         "exit_reason": str(order.get("exit_reason") or "pending_exit_fill"),
                         "exit_order_link_id": link,
                         "exit_order_id": order.get("order_id", ""),
@@ -3929,12 +3939,21 @@ def _execute_risk_exits(
             )
             orders.append(order_row)
         if fully_filled:
+            # Mirror the cycle-exit and pending-exit-reconcile paths: a closed
+            # trade must carry both gross_trade_return and net_return so the
+            # orphan reconciler does not have to backfill them post-hoc.
+            trade_side = str(trade.get("side") or "short")
+            entry_price = _float(trade.get("entry_price"))
+            gross_trade_return = _trade_return(entry_price, exit_price, side=trade_side)
+            notional_weight = _safe_ratio(trade.get("notional_usdt"), trade.get("equity_usdt"))
             trade.update(
                 {
                     "status": "closed",
                     "exit_ts_ms": now_ms,
                     "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
                     "exit_price": exit_price,
+                    "gross_trade_return": gross_trade_return,
+                    "net_return": gross_trade_return * notional_weight,
                     "exit_reason": str(exit_plan["exit_reason"]),
                     "exit_order_link_id": submit["order_link_id"],
                     "exit_order_id": submit["order_id"],
