@@ -43,9 +43,18 @@ Round 2 also corrects two Round 1 design errors:
   (annualized return / |max DD|) is primary; Sharpe is secondary
   tie-breaker.**
 
-11 sub-phases (R0-R10), conditional dependencies, ~weeks of wall-time
-on the 5950X. No hard deadline. Default outcome remains "do nothing if
-all hypotheses falsify."
+12 sub-phases (R0-R11 + R12), conditional dependencies, ~weeks of
+wall-time on the 5950X. No hard deadline. Default outcome remains
+"do nothing if all hypotheses falsify."
+
+**R12 (sniper-entry execution layer)** runs in parallel with R4-R10.
+It is NOT optional — operator instruction is to extend the program
+with sub-1h *execution* refinement. The signal stays at end-of-day
+close (1d resolution); the FILL becomes intraday-optimized. R12
+adds 1m kline ingestion for entry windows, a sniper entry simulator
+(limit/pullback/volume-spike/TWAP/market-control variants), univariate
+sniper tests, and R9 sniper variants. Missed fills are first-class
+data (no silent drop). See "Sub-phase R12" for the full breakdown.
 
 ---
 
@@ -925,6 +934,241 @@ Strategy stays in current state. Forward demo + paper continue.
 
 ---
 
+## Sub-phase R12 — Sniper entry execution layer
+
+**Purpose:** The current strategy enters mechanically at `signal_close
++ 1h` at market price. That's an opportunity-cost choice: the 1h delay
+is a leakage guard, but the +1h market fill is naïve — it ignores
+intraday microstructure that might offer a materially better fill
+price within the entry window.
+
+R12 layers **execution alpha** on top of the existing signal: the
+signal stays at end-of-day close (1d resolution); only the FILL becomes
+intraday-optimized. Variants tested include limit orders with timeout-
+fallback, pullback-waiting, volume-spike-triggered entries, and TWAP
+slicing.
+
+This is **not** a sub-1h signal extension (which would be a separate
+research program). It is an execution-layer refinement that improves
+per-trade entry price without touching the entry-decision logic.
+
+### Pre-requisites
+
+- 1m kline data available for the entry window per (signal_date, symbol)
+  pair. We do NOT need 1m klines for the full 5-year universe — only
+  for the [signal_close, signal_close + Nh] window per actual signal.
+  This is targeted, not bulk.
+- R6 cost model with maker/taker rebate-aware components (sniper limit
+  fills earn maker rebates on Bybit; market fallbacks pay taker fees;
+  the cost model must distinguish).
+
+### Honesty discipline: missed fills are first-class data
+
+Sniper logic involves a fundamental trade-off:
+- **Wait for a better price** → some trades never fill (the price doesn't
+  retrace, the volume spike doesn't happen, etc.)
+- **Take the market** → mechanical and guaranteed, but no execution
+  alpha
+
+The discipline: **every signal that doesn't fill within the window is
+counted as a $0-P&L trade for sniper variants.** This is the operational
+truth — a missed entry isn't free, it's an opportunity cost. Phase 6
+of Round 1 failed partly because it ignored holding-period exposure
+accounting. R12 doesn't repeat that mistake — fill-rate becomes a
+first-class metric alongside P&L.
+
+A sniper variant where 40% of signals never fill is NOT comparable to
+the control as "Sharpe improvement" — the relevant comparison is
+**total P&L per signal** (filled trades' P&L summed AND divided by
+total signals attempted, not just filled). The cost-of-missed-fills
+calculation is binding.
+
+### Sub-phase R12a — Targeted 1m kline ingestion for entry windows
+
+**Method:** For every (signal_date, symbol) in the historical trade
+ledger across both venues, download/derive 1m klines for the window
+`[signal_close, signal_close + 24h]`. Use the existing
+`archive-download-klines` path (trade-archive aggregation → 1m klines)
+which is already implemented.
+
+Storage: a new dataset `klines_1m_entry_windows` partitioned by
+(symbol, signal_date). Targeted, not universe-wide.
+
+**Validation:** Sum of (96 × 15m volume) within a 1d window equals the
+1d volume from the existing 1h dataset; close-of-last-1m-bar aligns
+with close-of-1h-bar.
+
+**Compute:** Per-signal 1m kline download is ~30s wall on a sequential
+connection. Round 1 baseline produced ~600 signals on Bybit + ~420 on
+Binance = ~1020 signals. At 4-way parallelism, that's ~2h wall.
+Round 2's R1-R5 may produce more signals; budget ~6-12h wall total
+for the historical backfill.
+
+If 1m data isn't reachable via archive for some old (symbol, date)
+pairs (the data-quality gap we documented in Round 1's PIT audit),
+those signals get a fallback: sniper logic uses the 1h kline only
+and emits a `sniper_data_quality=degraded` flag in the trade row.
+
+### Sub-phase R12b — Sniper entry simulator (code)
+
+**New module:** `liquidity_migration/sniper_entry.py`
+
+```python
+def simulate_sniper_entry(
+    signal_close_ts: int,
+    signal_close_price: float,
+    kline_panel_1m: pl.DataFrame,  # [signal_close, signal_close + 24h] 1m bars
+    *,
+    flavor: str,                   # see flavors below
+    side: str,                     # "short" or "long"
+    window_hours: float,           # max wait before market fallback
+    limit_pct: float | None,       # for limit_pct_then_market flavor
+    volume_mult: float | None,     # for volume_spike_then_market flavor
+    twap_slices: int | None,       # for twap_split flavor
+    pullback_pct: float | None,    # for pullback_threshold flavor
+) -> SniperFill:
+    """Return a SniperFill with fill_ts, fill_price, fill_type
+    ('limit' | 'market_fallback' | 'pullback' | 'volume_spike' | 'twap' | 'missed'),
+    and `missed: bool` flag."""
+```
+
+**5 sniper flavors (cells):**
+
+| Flavor | Logic | When it shines |
+|---|---|---|
+| `market_at_1h` | Current behaviour: market fill at signal_close + 1h. Control. | Signal is reliable; price moves away quickly |
+| `limit_pct_then_market` | Place limit at `signal_close × (1 + limit_pct)` for shorts (i.e. wait for retracement up); market fallback at `signal_close + window_hours`. | Choppy signal-day reactions where price tends to retrace within a few hours |
+| `volume_spike_then_market` | Wait for a 1m volume > `volume_mult × prior_1h_mean_volume` within the window; enter at the next 1m close after the spike. Market fallback at `signal_close + window_hours`. | Signal-day continuation pattern where the move is volume-confirmed |
+| `twap_split` | Break the position into `twap_slices` equal-time pieces over `window_hours`; fill each at the corresponding 1m bar close. Always fully fills. | Large positions where market impact matters; lower-confidence signals |
+| `pullback_threshold` | Wait for 1m close to move `pullback_pct` adverse from signal_close (for shorts: price moves UP by pullback_pct). Enter on the next bar. Market fallback at `signal_close + window_hours`. | Mean-reversion-favorable signals where the entry edge requires waiting for the initial momentum to spend |
+
+All flavors are PIT-clean: the simulator only consumes 1m kline data
+in chronological order; no future-peek.
+
+**Tests pin:**
+- PIT causality per flavor
+- Missed-fill flag correctness
+- Fill price matches the bar's close (not the bar's low/high — that
+  would be future-peek)
+- `market_at_1h` flavor matches existing strategy's fill price to
+  within 1 bps (regression test for the control)
+
+Effort: ~2 days code + tests.
+
+### Sub-phase R12c — Sniper univariate test
+
+**Method:** For each of the 5 sniper flavors, re-run the production
+strategy from R1 baseline_v2 against both venues with the sniper
+entry layer inserted. Measure:
+
+| Metric | Why |
+|---|---|
+| Avg fill improvement vs market@1h | The execution alpha number |
+| % of signals filled | The fill-rate cost |
+| Per-signal P&L (filled trades P&L / total signals) | The honest comparison metric |
+| MAR ratio | Round 2's primary objective |
+| Sharpe | Secondary tie-breaker |
+| Avg slippage by hour-of-day | Sanity: are some hours systematically better fills |
+
+**Investigation bar applies.** A sniper flavor investigation-positives
+if per-signal P&L beats market@1h on majority of venues (even after
+counting missed fills as $0). The improvement must come from EITHER
+better filled-trade entry price OR better selection of which signals
+to take (a "smart abstain" signal).
+
+**Cell list:** 5 flavors × 2 venues × ~7 parameterizations
+(limit_pct ∈ {0.5%, 1%, 1.5%}; volume_mult ∈ {2, 3, 5}; twap_slices ∈
+{4, 8}; pullback_pct ∈ {0.5%, 1%, 1.5%}; window_hours ∈ {2, 4, 8})
+= ~70 sniper-config cells. Compute: ~10 min/cell on cached 1m
+windows = ~150 min wall sequential, ~20 min at 8-way parallel.
+
+### Sub-phase R12d — R9 × sniper integration
+
+**Triggered if:** R9 produces ≥1 investigation-positive cell AND R12c
+produces ≥1 sniper flavor that beats market@1h.
+
+**Method:** For each R9 winner, build a "R9 + sniper" variant using
+the best R12c sniper flavor. Test on both venues, full window + 3
+sub-period thirds. Promotion bar applies.
+
+**Cell list:** Up to 5 R9 winners × 1 best sniper = 5 cells × 2 venues
+= 10 runs. Compute: ~30 min/cell = ~5h wall.
+
+### Sub-phase R12e — Entry-delay reduction sweep
+
+**Purpose:** With the sniper layer in place, the +1h leakage-guard
+delay might be over-conservative. Test reducing it.
+
+**Cells:** Best R9-sniper variant with `window_hours ∈ {0.5, 1, 2, 4, 8}`.
+Each recosted with R6 cost model (shorter delays = potentially
+different cost profile).
+
+**Investigation bar.** Compute: 5 cells × 2 venues = 10 runs × ~15 min
+= ~30 min wall.
+
+**Falsifier specific to R12e:** if reducing delay below 1h produces a
+material PIT violation (e.g. the signal-close kline isn't actually
+finalized until ~30s after close due to v5 API delivery latency), the
+sub-1h delay variants are rejected as non-executable in live.
+
+### Sub-phase R12f — Sniper stress test
+
+**Triggered if:** any R12d cell promotion-eligible.
+
+**Purpose:** R7 events replayed with sniper logic. Sniper variants
+may behave very differently in stressed regimes (limit orders don't
+fill when the market is one-way; volume spikes are everywhere;
+pullbacks don't materialize). Need explicit evidence the sniper layer
+doesn't make tail-event behavior worse.
+
+**Method:** Run the R12d promotion-eligible cells against each R7
+event. Same pass criteria (DD < 50% in any event).
+
+**Compute:** Per cell, ~40 min wall. ~3-5 finalists × ~40 min = ~3h.
+
+### Sub-phase R12 sequencing summary
+
+```
+R12a (1m data ingestion) ─┐
+                          ├─> R12b (simulator code) ─> R12c (univariate test)
+                          │                              │
+                          │                              ▼
+                          │                          R12d (R9 × sniper) ──> R12e (delay sweep)
+                          │                              │                  │
+                          │                              ▼                  ▼
+                          └─────────────────────────> R12f (sniper stress)
+                                                         │
+                                                         ▼
+                                                   forward to R10/R11 promotion gates
+                                                   (same gates as non-sniper cells)
+```
+
+R12 runs in parallel with R4-R9; sniper-variant cells go through the
+same R10 (Promotion) and R11 (OOS) gates as the non-sniper R9 cells.
+
+### Code changes for R12
+
+- `liquidity_migration/sniper_entry.py` (new module, ~2 days)
+- `liquidity_migration/cli.py` extension: `--entry-flavor` flag on
+  `volume-events` accepting `{market, limit_pct, volume_spike, twap,
+  pullback}` and the associated parameterization flags
+- `volume_events_cell.sh` helper: `--sniper-flavor X --sniper-params 'K=V,…'`
+  passes through cleanly
+- `scripts/build_entry_window_1m_klines.py` (new, ~half day): the targeted
+  1m kline ingester from R12a
+- Test fixtures: synthetic 1m kline panels + expected fill results per
+  flavor (~half day)
+
+Total R12 code work: **~3-4 days**.
+
+### Output
+
+`docs/preregistration/<DATE>-r12-sniper-entry-verdict.md` per
+sub-sub-phase as they complete. R12d/e/f get incorporated into the
+R10/R11 verdicts since they're forwarded through the same gates.
+
+---
+
 ## Compute plan
 
 ### Per-cell environment
@@ -952,15 +1196,26 @@ export SWEEP_MAX_WORKERS=8
 | R9 — Integrated assembly | 14 | 210 min | 5d 6h + |
 | R10 — Promotion gate | up to 5 finalists | 5 h | 5d 11h |
 | R11 — OOS gate | up to 5 finalists | 55 min/finalist | + 55 min/finalist |
+| R12a — 1m kline ingestion | targeted per signal | ~6-12 h | + 12 h |
+| R12b — Sniper simulator | (code work) | ~2 days | + 2 days |
+| R12c — Sniper univariate | ~70 | ~20 min | + 20 min |
+| R12d — R9 × sniper | up to 10 | ~5 h | + 5 h |
+| R12e — Delay reduction | 10 | 30 min | + 30 min |
+| R12f — Sniper stress | per finalist | ~40 min/finalist | + 40 min/finalist |
 
-**Total: ~1 week wall time** with 2-3 days of that being code work
-(R4 + R6) that the operator drives via Claude pair-coding sessions.
+**Total: ~1.5-2 weeks wall time** with 4-5 days of that being code
+work (R4 risk model + R6 cost model + R12b sniper simulator + R12a
+ingestion script) that the operator drives via Claude pair-coding
+sessions. R12 adds ~3-4 days of code work + ~24 hours of compute on
+top of the base Round 2.
 
 The operator should expect:
 - **Day 1-2:** R0 + R1 + R2 (mostly mechanical sweeps)
 - **Day 3-5:** R4 (risk model build) + R6 (cost model build) — code work
-- **Day 6-8:** R3 + R5 + R7 (depends on R4) + R8 (depends on R6) + R9
-- **Day 9-10:** R10 + R11 if any finalist emerges
+- **Day 4-6 (parallel):** R12a (1m ingestion) + R12b (sniper simulator) — independent of R4/R6
+- **Day 6-8:** R3 + R5 + R7 (depends on R4) + R8 (depends on R6) + R9 + R12c (univariate)
+- **Day 9-10:** R10 + R12d (R9 × sniper integration)
+- **Day 11-12:** R11 + R12e (delay sweep) + R12f (sniper stress) if any finalist emerges
 
 Conditional shortcuts:
 - If R1 finds no DROPs/RE-TESTS productive, R1 takes 30 min not 2h
@@ -971,8 +1226,14 @@ Conditional shortcuts:
 - If R6 cost model is materially different from cost_multiplier=3,
   R10 needs cells re-run under the new cost; otherwise legacy
   cost-multiplier=3 is fine
-- If NO R9 cell investigation-positives, R10 + R11 are skipped;
-  program closes with documented null
+- If R12c finds no sniper flavor that beats market@1h, R12d/e/f are
+  skipped — sniper layer concluded "no execution alpha here"
+- If R12a's 1m kline ingestion fails for material % of signals (e.g.
+  >20% no-data-available), R12 reports degraded coverage and we
+  decide whether to proceed at reduced rigour or pause
+- If NO R9 cell investigation-positives AND NO R12d cell
+  investigation-positives, R10 + R11 are skipped; program closes
+  with documented null
 
 ---
 
@@ -989,7 +1250,10 @@ Cross-referenced to `docs/backtesting_errors_we_never_repeat.md`.
 | #16 | Same-code illusion | All R2-R10 features and filters live in production-shipped code (signal_harness, risk_model, cost_model modules). Demo daemon honours the same flags as backtest — no backtest-only branches. |
 | #17 | Parameter mining | Two-tier threshold structure: Investigation tier doesn't promote, Promotion tier preserves Round 1's bar. FDR ceiling raised to 5 (was 3) but justified by Investigation-tier pre-filtering. Decision rules pre-registered before any data is seen. |
 | #18 | OOS reuse | Pre-2023 roots have been touched twice (original "fail everything" call + Round 1 plan would have used them but didn't because no Phase 7 finalist emerged). R11 OOS dilution is real. Mitigation: ≥30 days of fresh forward-demo data must accumulate before any R11 finalist goes to mainnet conversation. |
-| #19 | Multiple testing | Across R1+R2+R3+R5+R9+R10 cells, ~80 cells total. FDR ceiling of 5 at the R10→R11 gate keeps the bar high. Investigation-tier failures are NOT re-tested under different cell configurations. |
+| #19 | Multiple testing | Across R1+R2+R3+R5+R9+R10+R12 cells, ~150 cells total (R12c alone adds ~70 sniper config cells). FDR ceiling of 5 at the R10→R11 gate keeps the bar high. R12c uses Investigation-bar, so its 70 cells inflate exploration but NOT promotion. Investigation-tier failures are NOT re-tested under different cell configurations. |
+| #2  | Future info in signals — sniper-specific | R12 sniper simulator consumes 1m kline panel in chronological order; flow=open→fill is enforced by the simulator (no future-peek). Tests pin per-flavor PIT causality. Fill price uses bar close, not bar low/high (which would peek). |
+| #22 | Venue mechanics fantasy — sniper-specific | R12c maker/taker rebate accounting: limit fills earn the venue's maker rebate; market fallbacks pay taker fees. R6 cost model must distinguish these two paths or R12 promotion-eligibility under it is invalid. |
+| #23 | Pretty-report bias — sniper-specific | Sniper variants MUST report fill-rate alongside Sharpe/MAR. A "great Sharpe, 30% fill rate" cell is not promotion-eligible because the 70% filled trades P&L is meaningless without counting the 30% missed opportunities. |
 | #20 | Bad accounting | R6 cost model fixes the single-multiplier-3 problem from Round 1. All R10+ cells must clear under the model cost, not just legacy flat cost. |
 | #21 | Hidden common risk | R4 factor model explicitly decomposes basket risk into 8 named factors. R9 cells optionally cap per-factor exposure. Cells with residual Sharpe < +0.3 are promotion-rejected (catches "you're just selling vol" disguised as alpha). |
 | #22 | Venue mechanics fantasy | R6 cost model calibrated against paper-shadow vs demo slippage — uses real venue mechanics, not theoretical. Hold-period funding included. |
@@ -1055,11 +1319,11 @@ By committing this plan, the operator + assistant commit in advance to:
 
 | Week | Activity |
 |---|---|
-| Week 1 | R0 (doc cleanup) + R1 (filter audit) + R2 (per-feature) + R3 (bearish stack). Code: 3 small filter-related additions for R3. |
-| Week 2 | R4 (risk model — 3 days code) + R5 (sizing — 1 day code + sweep) |
-| Week 3 | R6 (cost model — 2 days code + calibration) + R7 (stress tests pending R4/R6) + R8 (capacity pending R6) |
-| Week 4 | R9 (integrated strategy assembly) + R10 (promotion gate). Conditional on R9 candidates. |
-| Week 5 | R11 (OOS gate) if any R10 finalist. Conditional on data-root state. |
+| Week 1 | R0 (doc cleanup) + R1 (filter audit) + R2 (per-feature) + R3 (bearish stack). Code: 3 small filter-related additions for R3. R12a starts in parallel (1m kline ingestion runs as background download). |
+| Week 2 | R4 (risk model — 3 days code) + R5 (sizing — 1 day code + sweep) + R12b (sniper simulator — 2 days code, parallel with R4) |
+| Week 3 | R6 (cost model — 2 days code + calibration) + R7 (stress tests pending R4/R6) + R8 (capacity pending R6) + R12c (sniper univariate test, depends on R12a+R12b ready) |
+| Week 4 | R9 (integrated strategy assembly) + R10 (promotion gate) + R12d (R9 × sniper). Conditional on R9 + R12c candidates. |
+| Week 5 | R11 (OOS gate) + R12e (delay sweep) + R12f (sniper stress test) if any R10 finalist. Conditional on data-root state. |
 | Week 6+ | Forward demo deployment proposal IF R11 passing. 30-day demo + paper-shadow reconciliation. Then operator decision on mainnet. |
 
 If R1/R2/R3 produce nothing meaningful, R4-R10 can still run as
@@ -1166,8 +1430,14 @@ Explicitly out:
   cross-venue is a different strategy class.
 - **Long-only strategy.** Bearish + market-neutral are in scope per R3;
   pure long is not.
-- **Higher-frequency execution.** All entries respect the +1h delay.
-  Microstructure / order book / sub-1h timing is out.
+- **Sub-1h SIGNAL generation.** Round 2's signal stays at end-of-day
+  close (1d resolution). R12 adds intraday EXECUTION refinement
+  (sniper entries) on top of the daily signal, but does NOT compute
+  new sub-1h signals. Sub-1h signal-generation (e.g. a 15m or hourly
+  rebalance frequency) is a separate research program.
+- **HFT / order book microstructure.** No order book ingestion; R12
+  works off 1m kline aggregates only. Sub-second execution, queue
+  position, lit/dark order routing — all out.
 - **Alternative asset classes.** Bybit + Binance USD-M perps only.
 
 These exclusions are deliberate scope discipline. Each could be a
@@ -1189,10 +1459,11 @@ future research program on its own pre-reg.
 | Cost model | Single multiplier ×3 | **Per-name, per-bar regression model (R6)** |
 | Tail risk | Implicit via DD reporting | **Named-event stress test suite (R7)** |
 | Capacity | Not measured | **Per-cell capacity curve (R8)** |
-| Strategy architecture | Event-driven only | **Event-driven + IC-augmented + factor-capped + risk-sized + cost-aware** |
+| Entry execution | Market @ signal_close + 1h (mechanical) | **Sniper layer (R12): limit / pullback / volume-spike / TWAP variants with PIT-clean 1m simulation; missed fills as first-class data** |
+| Strategy architecture | Event-driven only | **Event-driven + IC-augmented + factor-capped + risk-sized + cost-aware + sniper-executed** |
 | Hard deadline | 2026-06-15 (19-day buffer) | None (weeks acceptable) |
 | FDR ceiling | 3 candidates | 5 candidates (justified by Investigation-tier pre-filter) |
-| Mandatory artifacts per cell | Ledger + equity + monthly | + factor-decomposed P&L + stress scorecard + capacity curve + residual Sharpe |
+| Mandatory artifacts per cell | Ledger + equity + monthly | + factor-decomposed P&L + stress scorecard + capacity curve + residual Sharpe + sniper fill-rate (R12 variants) |
 
 Round 2 is **bigger, slower, more rigorous, and more honest about
 what counts as evidence.** It also produces durable infrastructure

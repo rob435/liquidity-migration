@@ -59,8 +59,12 @@
 | R9 | Integrated strategy assembly | not started |
 | R10 | Promotion-bar validation sweep | not started |
 | R11 | Pre-2023 OOS gate (mandatory final) | not started |
+| R12 | **Sniper entry execution layer** — sub-1h fill optimization on top of daily signal: 1m kline ingestion (R12a), simulator (R12b), univariate test of 5 sniper flavors (R12c), R9 integration (R12d), entry-delay reduction sweep (R12e), sniper stress test (R12f). Missed fills counted as $0-P&L. | not started — ~3-4 days code (R12a + R12b) |
 
 **No hard end-date on Round 2.** "Weeks if needed" per operator instruction.
+With R12 the total program estimate is ~1.5-2 weeks wall time, with
+4-5 of those days being code work (R4 risk model + R6 cost model +
+R12a/b sniper infrastructure).
 
 ## What's running
 
