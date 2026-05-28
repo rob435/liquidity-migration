@@ -226,13 +226,28 @@ as R-phases. No special pleading.
 
 **Primary metric: MAR ratio = annualized_return / |max_drawdown|.**
 
+Annualization formula (geometric, standard):
+`annualized_return = (1 + total_return) ** (365.25 / window_days) - 1`.
+
 Equivalent names: Calmar ratio, return-over-DD. Worked example for the
-Round 1 baseline:
+Round 1 baseline (window 2023-04-01 → 2026-04-30 = 1125 days = 37 months
+= 3.08 years):
 
 | Venue | Total return | Period | Annualized | Max DD | MAR |
 |---|--:|---|--:|--:|--:|
-| Bybit | +518.76% | 17m | +231.5%/yr | -42.1% | **+5.50** |
-| Binance | +66.12% | 17m | +45.4%/yr | -40.7% | **+1.11** |
+| Bybit | +518.76% | 1125 d (37 m) | +80.7%/yr | -42.1% | **+1.92** |
+| Binance | +66.12% | 1125 d (37 m) | +17.9%/yr | -40.7% | **+0.44** |
+
+> *Correction note (2026-05-28):* an earlier draft of this table cited
+> the period as "17 m" with MAR +5.50 (Bybit) / +1.11 (Binance). That
+> implied a ~1.5-year window; the actual Round 1 baseline window is
+> 1125 days / 37 months. The numbers above are recomputed with the
+> standard geometric annualization at the real window; the underlying
+> decision thresholds below (Investigation: MAR Δ > 0 majority venues;
+> Promotion: MAR Δ ≥ +0.5 both venues) are deltas-vs-control and are
+> NOT changed by this correction. Pinned in
+> `apply_decision_rule.py::compute_mar` + tests
+> `test_compute_mar_round1_baseline_actual_window` etc.
 
 Why MAR over Sharpe as primary:
 
