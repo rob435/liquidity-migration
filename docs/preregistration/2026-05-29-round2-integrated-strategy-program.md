@@ -229,25 +229,40 @@ as R-phases. No special pleading.
 Annualization formula (geometric, standard):
 `annualized_return = (1 + total_return) ** (365.25 / window_days) - 1`.
 
-Equivalent names: Calmar ratio, return-over-DD. Worked example for the
-Round 1 baseline (window 2023-04-01 → 2026-04-30 = 1125 days = 37 months
-= 3.08 years):
+Equivalent names: Calmar ratio, return-over-DD. Worked example using the
+actual Phase 0 / R1 baseline that R-phases inherit (window 2023-04-01 →
+2026-04-30 = 1125 days = 37 months = 3.08 years; promoted profile run on
+`bybit_full_pit` and `binance_full_pit`):
 
 | Venue | Total return | Period | Annualized | Max DD | MAR |
 |---|--:|---|--:|--:|--:|
-| Bybit | +518.76% | 1125 d (37 m) | +80.7%/yr | -42.1% | **+1.92** |
-| Binance | +66.12% | 1125 d (37 m) | +17.9%/yr | -40.7% | **+0.44** |
+| Bybit | +3856% (+38.56×) | 1125 d (37 m / 3.08 y) | +230.0%/yr | -42.11% | **+5.46** |
+| Binance | +421% (+4.21×) | 1125 d (37 m / 3.08 y) | +70.9%/yr | -42.20% | **+1.68** |
 
-> *Correction note (2026-05-28):* an earlier draft of this table cited
-> the period as "17 m" with MAR +5.50 (Bybit) / +1.11 (Binance). That
-> implied a ~1.5-year window; the actual Round 1 baseline window is
-> 1125 days / 37 months. The numbers above are recomputed with the
-> standard geometric annualization at the real window; the underlying
-> decision thresholds below (Investigation: MAR Δ > 0 majority venues;
-> Promotion: MAR Δ ≥ +0.5 both venues) are deltas-vs-control and are
-> NOT changed by this correction. Pinned in
-> `apply_decision_rule.py::compute_mar` + tests
-> `test_compute_mar_round1_baseline_actual_window` etc.
+> *Correction note (2026-05-28, second iteration):* The original draft of
+> this table cited Bybit total = +518.76% / 17 m / +231.5%/yr / MAR +5.50
+> and Binance total = +66.12% / 17 m / +45.4%/yr / MAR +1.11. That mixed
+> two different sweeps: the **total_return values** were transcribed from
+> the 2026-05-28 cost-tweak sweep (different baseline config, baseline
+> Bybit return +518.76% / +5.1876× over an ~18-month window), while the
+> **annualized / MAR values for Bybit** happen to match the Phase 0 / R1
+> baseline at 1125 days within rounding (+231.5%/yr vs the real +230.0%/yr).
+> Binance was wrong on both axes.
+>
+> An intermediate fix (commit `3e86b69`) recomputed the table as if the
+> Phase 0 baseline were `+518.76%` at 1125 days, producing MAR +1.92 /
+> +0.44 — internally consistent but wrong about the underlying baseline.
+> The numbers above (commit landing this sentence) reproduce R1's
+> `R1_baseline_v2` cell exactly (which in turn reproduces Phase 0's
+> `00_baseline` bit-identically). Verified by `compute_mar` /
+> `compute_annualized_return` in `scripts/apply_decision_rule.py` and
+> tests `test_compute_mar_round1_baseline_actual_window` /
+> `test_compute_annualized_return_round1_baseline_actual_window`.
+>
+> The decision thresholds below (Investigation: MAR Δ > 0 majority
+> venues; Promotion: MAR Δ ≥ +0.5 both venues) are deltas-vs-control
+> and are NOT changed by this correction. Only operator intuition about
+> the baseline anchor moves.
 
 Why MAR over Sharpe as primary:
 

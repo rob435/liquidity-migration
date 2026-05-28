@@ -231,24 +231,48 @@ def test_compute_annualized_return_half_year_window_squares():
     assert MOD.compute_annualized_return(r, 182.625) == pytest.approx(expected, rel=1e-6)
 
 
-def test_compute_annualized_return_round1_baseline_actual_window():
-    """Round 1 baseline (Bybit, 1125-day window) yields ~+81%/yr, NOT the
-    plan's worked-example +231.5%/yr. The plan's worked example has a
-    window-length typo (it cites '17m' but the actual window is 37 months
-    / 1125 days). Pin our formula at the actual window so MAR thresholds
-    are calibrated against real numbers."""
-    ann = MOD.compute_annualized_return(5.1876, 1125)
-    assert 0.80 < ann < 0.82, f"expected ~+81%/yr at 1125d, got {ann*100:.1f}%/yr"
+def test_compute_annualized_return_round1_actual_baseline():
+    """The actual Round 1 / Phase 0 / R1 baseline at 1125 days (Bybit):
+    total_return = +38.5606x → annualized ≈ +230.0%/yr.
+
+    Reproduced bit-identically by R1_baseline_v2 in the 2026-05-28 R1
+    sweep (matches Phase 0's 00_baseline). The Round 2 plan's worked
+    example for Bybit (annualized +231.5%/yr) matches this within
+    rounding — earlier-draft confusion in the plan's total_return cell
+    (+518.76% from a different sweep) is corrected in the plan as of
+    the same commit landing this test."""
+    ann = MOD.compute_annualized_return(38.5606, 1125)
+    assert 2.28 < ann < 2.32, f"expected ~+230.0%/yr at 1125d, got {ann*100:.1f}%/yr"
 
 
-def test_compute_mar_round1_baseline_actual_window():
-    """Bybit Round 1 baseline MAR at the actual 1125-day window ≈ +1.92.
-    NOT +5.50 (which is the plan's typo'd worked-example value). Promotion
-    thresholds (Δ ≥ +0.5) reference deltas relative to ACTUAL MAR, so a
-    candidate cell needs MAR ≥ +2.42 on Bybit at this window — well within
-    reach without the typo'd baseline."""
+def test_compute_mar_round1_actual_baseline():
+    """Bybit actual R1 baseline MAR at the 1125-day window ≈ +5.46.
+
+    Pinned from R1_baseline_v2's per-cell metrics:
+      total_return = +38.5606x, max_drawdown = -42.11%.
+
+    Promotion threshold ΔMAR ≥ +0.5 against this baseline means a
+    candidate cell needs MAR ≥ +5.96 on Bybit — challenging but
+    achievable (e.g. R1_retest_rank_max hit +6.90)."""
+    mar = MOD.compute_mar(38.5606, -0.4211, 1125)
+    assert 5.40 < mar < 5.50, f"expected ~+5.46, got {mar:+.2f}"
+
+
+def test_compute_mar_2026_05_28_sweep_baseline_at_1125_days():
+    """Cross-sweep sanity: the 2026-05-28 cost-tweak sweep's Bybit
+    baseline was total +518.76% / -42.11% DD over an ~18-month window
+    (different cost config from the R-phase baseline). Annualizing
+    that total at the R1 window of 1125 days would give MAR ≈ +1.92;
+    that's NOT the R-phase baseline, just a sanity-check that the
+    formula handles the "different sweep / different window" case
+    cleanly without false-promoting the cell.
+
+    This number is what the now-superseded plan-fix commit 3e86b69
+    cited (incorrectly attributing the 2026-05-28 sweep's total_return
+    to the R1 baseline). Keep the test as documentation of why the
+    earlier "fix" was wrong."""
     mar = MOD.compute_mar(5.1876, -0.4211, 1125)
-    assert 1.9 < mar < 1.95, f"expected ~+1.92, got {mar:+.2f}"
+    assert 1.90 < mar < 1.95, f"expected ~+1.92, got {mar:+.2f}"
 
 
 def test_compute_mar_handles_negative_return_cell():
