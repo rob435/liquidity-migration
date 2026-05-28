@@ -151,12 +151,12 @@ p5, LOO, thirds) from the per-cell ledgers. `scripts/apply_decision_rule.py
   - `apply_decision_rule(summary_csv, control_cell)` — programmatic verdict
   - `data_roots`, `list_reports`, `parse_report`, `audit_run_artifacts`
 - **Signal harness (Round 1 deliverable):** `python -m liquidity_migration signal-harness {build-panel, compute-ic, combined-portfolio}`
-- **Sweep orchestrators:**
-  - `scripts/phase0_loo_sweep.py` (R1 will adapt this pattern)
-  - `scripts/phase1_universe_diag_sweep.py` (Round 1 only; Round 2 doesn't need universe diagnostics)
-  - `scripts/phase2_direction_grid_sweep.py` (R3 will adapt)
-  - `scripts/phase6_combined_portfolio_sweep.py` (R9 will redo with proper holding-period accounting)
-  - `scripts/_sweep_runtime.py` (shared parallel orchestrator, reused throughout)
+- **Sweep orchestrators (current — Round-1 phase scripts removed in the
+  2026-05-28 cleanup; r1/r13 are the canonical patterns to adapt for R2/R3/R9):**
+  - `scripts/r1_filter_audit_sweep.py` — R1 filter audit (the active sweep).
+  - `scripts/r13_exit_rule_sweep.py` — R13 exit-rule re-opt (ready; dispatch after R1).
+  - `scripts/_sweep_runtime.py` — shared parallel orchestrator (`Cell` + `run_sweep`), reused by every sweep.
+  - `scripts/r1_robustness.py` — Tier-2 demo-candidate verdict + fragility diagnostics from per-cell ledgers.
 
 ## Non-negotiables (every session)
 

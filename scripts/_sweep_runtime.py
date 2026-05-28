@@ -1,9 +1,8 @@
 """Shared parallel-sweep runtime for the multi-phase research program.
 
-Used by ``scripts/sweep_cells.py`` (legacy 2026-05-28 EXPLORATORY sweep) and
-``scripts/phase0_loo_sweep.py`` (Phase 0 filter LOO audit). Future phase
-orchestrators (Phase 1 universe diagnostic, Phase 2 direction grid, etc.)
-import the same primitives:
+Used by the Round-2 sweep dispatchers ``scripts/r1_filter_audit_sweep.py`` and
+``scripts/r13_exit_rule_sweep.py``; future phase orchestrators (R3 bearish
+stack, R9 assembly, etc.) import the same primitives:
 
   Cell                — (cell_id, description, overrides)
   run_cell()          — invoke `python -m liquidity_migration volume-events`

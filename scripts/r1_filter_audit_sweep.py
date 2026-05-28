@@ -15,9 +15,9 @@ itself now runs at 12 slots, results are NOT directly comparable to the
 earlier max_active=3 exploratory drop_all_4 numbers — all cells compare to the
 12-slot 00_baseline control.
 
-The 4 dropped filters and their override values are the canonical Phase 0 LOO
-definitions (scripts/phase0_loo_sweep.py): dropping a filter = setting its
-threshold to a non-binding sentinel. R1_drop_all_4 drops all four at once;
+The 4 dropped filters and their override values are the canonical leave-one-out
+definitions: dropping a filter = setting its threshold to a non-binding
+sentinel. R1_drop_all_4 drops all four at once;
 the single-drop / both-noops cells decompose which filter carries the effect.
 
 Dispatch — desktop 5950X (16C/32T). Linux/macOS:
@@ -56,8 +56,8 @@ VENUES = {
     "binance": SHARED / "binance_full_pit",
 }
 
-# Production baseline = current promoted profile (matches phase0_loo_sweep.py
-# BASELINE_PARAMS and the volume_events_cell.sh wrapper's BASELINE table).
+# Production baseline = current promoted profile (matches the
+# volume_events_cell.sh wrapper's BASELINE table).
 BASELINE_PARAMS: dict[str, str] = {
     "--event-types": "liquidity_migration",
     "--thresholds": "0.4",
@@ -94,7 +94,7 @@ BASELINE_PARAMS: dict[str, str] = {
     "--realized-loss-pressure-loss-count": "6",
 }
 
-# Non-binding sentinels = "drop this filter" (canonical Phase 0 LOO values).
+# Non-binding sentinels = "drop this filter" (canonical leave-one-out values).
 DROP_DAY_RETURN = {"--liquidity-migration-day-return-min": "-1.0"}
 DROP_STOP_PRESSURE = {"--stop-pressure-stop-count": "999"}
 DROP_REALIZED_LOSS = {"--realized-loss-pressure-loss-count": "999"}
