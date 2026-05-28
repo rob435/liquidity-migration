@@ -28,7 +28,11 @@ from .event_demo import (
 from .feature_factory import run_feature_factory_report
 from .ingestion import generate_fixture_data
 from .portfolio_hedge import run_portfolio_hedge_report
-from .reconciliation import run_long_paper_demo_reconciliation, run_paper_demo_reconciliation
+from .reconciliation import (
+    run_demo_bybit_reconciliation,
+    run_long_paper_demo_reconciliation,
+    run_paper_demo_reconciliation,
+)
 from .regime_durability import RegimeDurabilityConfig, run_regime_durability_from_paths
 from .strategy_tribunal import StrategyTribunalConfig, run_strategy_tribunal
 from .universe import run_discover_universe
@@ -1751,6 +1755,33 @@ def _add_reconcile_paper_demo_parser(subparsers) -> None:
     reconcile.add_argument("--output-dir", default=None, help="Where to write the reconciliation report.")
 
 
+def _add_reconcile_demo_bybit_parser(subparsers) -> None:
+    reconcile = subparsers.add_parser(
+        "reconcile-demo-bybit",
+        help=(
+            "Reconcile the demo ledger against the live Bybit account "
+            "(closed_pnl + open positions). Surfaces orphans, exit-price gaps, "
+            "PnL residuals, and timestamp skew vs the venue truth."
+        ),
+    )
+    reconcile.add_argument(
+        "--demo-data-root",
+        default="data/bybit-demo-event",
+        help="Demo data root holding the event_demo_trades ledger.",
+    )
+    reconcile.add_argument(
+        "--lookback-hours",
+        type=int,
+        default=168,
+        help="Pull Bybit closed_pnl records covering this many hours back (default: 7d).",
+    )
+    reconcile.add_argument(
+        "--output-dir",
+        default=None,
+        help="Where to write demo_bybit_reconciliation.md. Defaults to <demo-root>/reports/demo_bybit_reconciliation/.",
+    )
+
+
 def _add_reconcile_long_paper_demo_parser(subparsers) -> None:
     reconcile = subparsers.add_parser(
         "reconcile-long-paper-demo",
@@ -1808,6 +1839,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_regime_durability_parser(subparsers)
     _add_reconcile_paper_demo_parser(subparsers)
     _add_reconcile_long_paper_demo_parser(subparsers)
+    _add_reconcile_demo_bybit_parser(subparsers)
 
     return parser
 
@@ -2631,6 +2663,40 @@ def main(argv: list[str] | None = None) -> int:
             f"demo_only={summary['demo_only']} "
             f"entry_slip_bps_mean={summary['entry_slippage_bps_mean']:.2f} "
             f"path={payload['report_path']}{warning}"
+        )
+        return 0
+
+    if args.command == "reconcile-demo-bybit":
+        # Build the trading client lazily here so a credential-less environment
+        # (e.g. CI) doesn't fail import of cli.py.
+        from .bybit import BybitPrivateClient, resolve_private_credentials
+
+        api_key, api_secret, demo_flag = resolve_private_credentials()
+        if not api_key or not api_secret:
+            raise SystemExit(
+                "reconcile-demo-bybit needs Bybit API credentials in env "
+                "(BYBIT_DEMO_API_KEY / BYBIT_DEMO_API_SECRET, etc.) — "
+                "see bybit.resolve_private_credentials."
+            )
+        trading_client = BybitPrivateClient(
+            category="linear", demo=demo_flag, api_key=api_key, api_secret=api_secret
+        )
+        payload = run_demo_bybit_reconciliation(
+            args.demo_data_root,
+            trading_client=trading_client,
+            lookback_hours=args.lookback_hours,
+            output_dir=args.output_dir,
+        )
+        summary = payload["result"]["summary"]
+        print(
+            "demo-bybit reconciliation "
+            f"paired_closed={summary['paired_closed']} "
+            f"orphan_in_bybit={summary['orphan_in_bybit']} "
+            f"orphan_in_ledger={summary['orphan_in_ledger']} "
+            f"open_only_in_ledger={summary['open_only_in_ledger']} "
+            f"open_only_in_bybit={summary['open_only_in_bybit']} "
+            f"pnl_gap_usdt_total={summary['pnl_gap_usdt_total']:.3f} "
+            f"path={payload['report_path']}"
         )
         return 0
 
