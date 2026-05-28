@@ -10,18 +10,23 @@
 
 - Strategy: Bybit (+Binance) liquidity-migration short, **research-stage**.
   Live demo + paper run a frozen "promoted" profile; not deployed for real money.
-- Last sweep (Phase 0 filter LOO audit, 2026-05-28): **REJECTED**, 0 candidates.
-  Falsifier hits confirm `crowding`, `event_rank_frac`, `turnover_ratio` earn
-  their keep. Verdict in `docs/preregistration/2026-05-27-phase0-verdict.md`.
+- Phase 0 filter LOO audit (2026-05-28): **REJECTED**, 0 candidates.
+  Falsifier hits confirm `crowding`, `event_rank_frac`, `turnover_ratio`
+  earn their keep. `docs/preregistration/2026-05-27-phase0-verdict.md`.
+- Phase 1 universe diagnostic (2026-05-28): **H1 falsified** — universe
+  widening hurts Sharpe but doesn't explain the DD shift. Other candidates
+  (bug-fix, regime, code drift) remain open. `docs/preregistration/2026-05-27-phase1-verdict.md`.
 - Current research program: 7-phase rank-direction edge + universe isolation +
   filter audit + signal-research harness. Pre-reg at
   `docs/preregistration/2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md`.
-- All 4 code changes merged (`ef9d3aa`, `ed7c5d8`, `54f7163`). Phase 0
-  COMPLETE — REJECTED (0 candidates). The current production filter stack
-  stays as-is. `crowding`, `event_rank_frac`, `turnover_ratio` confirmed
-  load-bearing (falsifier hits on removal).
-- Phase 1, 2, 5, 7 are all pre-registered and ready to dispatch.
-- Next action: dispatch Phase 1 (universe-isolation diagnostic).
+- All 4 code changes merged. Phase 0 REJECTED (filter stack stays as-is;
+  crowding/event_rank_frac/turnover_ratio confirmed load-bearing).
+  Phase 1 H1-FALSIFIED (universe widening hurts Sharpe but doesn't drive
+  the DD shift; Phase 2 in-sample numbers can be interpreted at face value).
+- Phase 2, 5, 7 pre-registered. Phase 6 / 3 / 4 conditional on Phase 2 / 5
+  results.
+- Next action: dispatch Phase 5a (build feature panels per venue), then
+  Phase 5b IC, then Phase 2 rank-direction grid.
 
 ## What's done
 
@@ -34,7 +39,8 @@
 | 2026-05-27 | Code changes 1-3: rank-direction flag, sweep parallelism, legacy-archive manifest builder | commit `ef9d3aa` |
 | 2026-05-27 | Code change 4: signal_harness module (20 features + IC + portfolio + CLI) | commit `ed7c5d8` |
 | 2026-05-27 | Phase 0 pre-registered (filter LOO audit, 15 cells × 2 venues) | commit `54f7163` |
-| 2026-05-28 | Phase 0 verdict: REJECTED (0 candidates, 3 falsifiers, 11 inconclusive) | this commit |
+| 2026-05-28 | Phase 0 verdict: REJECTED (0 candidates, 3 falsifiers, 11 inconclusive) | commit `8d7e1de` |
+| 2026-05-28 | Phase 1 verdict: H1 FALSIFIED on baseline (DD Δ +1.7pp < +5pp); avg sh_Δ=+1.09, avg dd_Δ=-5.78pp | this commit |
 
 ## What's NOT done (the work)
 
@@ -56,7 +62,7 @@ Open work:
 | Phase | Purpose | Pre-requisites | Status |
 |---|---|---|---|
 | 0 | Filter LOO audit | none | **COMPLETE — REJECTED** (0 candidates, 3 falsifiers, 11 inconclusive). See [verdict](docs/preregistration/2026-05-27-phase0-verdict.md). |
-| 1 | Universe-isolation diagnostic | Change 3 + `build_legacy_archive_manifest.py` (run 2026-05-27) | **pre-registered, ready to dispatch** |
+| 1 | Universe-isolation diagnostic | Change 3 + `build_legacy_archive_manifest.py` (run 2026-05-27) | **COMPLETE — H1 falsified** (universe widening ≠ DD-driver). See [verdict](docs/preregistration/2026-05-27-phase1-verdict.md). |
 | 2 | Rank-direction full grid | Change 1 | **pre-registered, ready to dispatch** |
 | 3 | Exit selection (conditional on P2 candidate) | P2 candidate | not started |
 | 4 | Hybrid event types (conditional on P2+P3) | P2+P3 | not started |
