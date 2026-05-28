@@ -6,12 +6,6 @@
 > file FIRST. It tells you in 60 seconds what's been done, what's running,
 > and what's next.
 
-> **▶ Desktop session (2026-05-28 handoff):** your next task is the R1
-> wide-funnel sweep (`max_active=12`). See
-> [docs/handoff-desktop-2026-05-28.md](docs/handoff-desktop-2026-05-28.md) for
-> the exact command, this session's decisions (three-tier demo-arbiter
-> framework; max_active 3→12), and collaboration prefs not in your local memory.
-
 ## TL;DR
 
 - Strategy: Bybit (+Binance) liquidity-migration short, **research-stage**.
