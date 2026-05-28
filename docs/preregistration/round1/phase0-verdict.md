@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-28 (sweep ran 2026-05-27, verdict generated 2026-05-28)
 **Stage:** run-complete, **REJECTED** (zero candidates per the Strictness Manifesto)
-**Pre-reg:** [docs/preregistration/2026-05-27-phase0-filter-loo-audit.md](2026-05-27-phase0-filter-loo-audit.md)
+**Pre-reg:** [docs/preregistration/round1/phase0-filter-loo-audit.md](phase0-filter-loo-audit.md)
 **Phase label per parent plan Appendix B:** `exploratory` (negative finding —
 "every filter currently in production earned its weight per the Manifesto threshold")
 
@@ -148,7 +148,7 @@ parent plan's pre-commitment ("the strategy stays in its current state").
 
 ## Artifacts
 
-- Pre-reg: `docs/preregistration/2026-05-27-phase0-filter-loo-audit.md`
+- Pre-reg: `docs/preregistration/round1/phase0-filter-loo-audit.md`
 - Summary CSV: `~/SHARED_DATA/phase0_loo_2026-05-27_summary.csv`
 - Per-cell reports:
   - `~/SHARED_DATA/bybit_full_pit/reports/phase0_loo_2026-05-27/<cell>/`
@@ -165,6 +165,6 @@ but not actionable on their own.
 ## Forward pointer
 
 **Next: Phase 1 (universe-isolation diagnostic).** Pre-reg ready at
-`docs/preregistration/2026-05-27-phase1-universe-isolation-diagnostic.md`,
+`docs/preregistration/round1/phase1-universe-isolation-diagnostic.md`,
 orchestrator at `scripts/phase1_universe_diag_sweep.py`. Dispatch
 immediately after this verdict commits.

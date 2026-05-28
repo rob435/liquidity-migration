@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-28 (sweep ran 2026-05-28 02:20 → 06:40, 259.9 min wall)
 **Stage:** run-complete, **REJECTED (0 candidates)** — H2 + H3 FALSIFIED.
-**Pre-reg:** [docs/preregistration/2026-05-27-phase2-rank-direction-grid.md](2026-05-27-phase2-rank-direction-grid.md)
+**Pre-reg:** [docs/preregistration/round1/phase2-rank-direction-grid.md](phase2-rank-direction-grid.md)
 **Phase label per parent plan Appendix B:** `exploratory` for all cells —
 no candidate means no `candidate`-label promotion.
 
@@ -149,7 +149,7 @@ venue. Per the pre-commitment, they are filed and not pursued.
   pre-reg. **No finalist from any phase → Phase 7 does NOT run.**
 
 **This concludes the 7-phase research program.** See
-`docs/preregistration/2026-05-27-program-verdict.md` for the
+`docs/preregistration/round1/program-verdict.md` for the
 end-of-program summary across all hypotheses.
 
 ## Pre-commitment compliance
@@ -166,7 +166,7 @@ end-of-program summary across all hypotheses.
 
 ## Artifacts
 
-- Pre-reg: `docs/preregistration/2026-05-27-phase2-rank-direction-grid.md`
+- Pre-reg: `docs/preregistration/round1/phase2-rank-direction-grid.md`
 - Summary CSV: `~/SHARED_DATA/phase2_direction_grid_2026-05-27_summary.csv`
 - Per-cell reports:
   - `~/SHARED_DATA/{bybit,binance}_full_pit/reports/phase2_direction_grid_2026-05-27/<cell>/`

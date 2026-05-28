@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-28
 **Stage:** proposed (pending operator confirmation; not yet run).
-**Parent plan:** [2026-05-29 Round 2 integrated-strategy program](2026-05-29-round2-integrated-strategy-program.md), section "Sub-phase R1".
+**Parent plan:** [2026-05-29 Round 2 integrated-strategy program](integrated-strategy-program.md), section "Sub-phase R1".
 **Phase label per integrity standard:** `exploratory` — no R1 cell is eligible for production filter change without a separate dated removal pre-reg.
 
 ## Purpose

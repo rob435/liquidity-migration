@@ -1,7 +1,7 @@
 """R1 — Per-filter audit dispatcher (Round 2, Investigation tier).
 
-Pre-reg: docs/preregistration/2026-05-28-r1-per-filter-audit.md
-Parent plan: docs/preregistration/2026-05-29-round2-integrated-strategy-program.md
+Pre-reg: docs/preregistration/round2/r1-per-filter-audit.md
+Parent plan: docs/preregistration/round2/integrated-strategy-program.md
 
 6 cells (1 baseline + 4 LOO + 1 joint-drop) × 2 venues = 12 runs. Window
 2023-04-01 -> 2026-04-30 (cross-venue minimum; Binance data ends 2026-04-30).

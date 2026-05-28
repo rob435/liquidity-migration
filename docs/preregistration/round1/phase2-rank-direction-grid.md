@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-27
 **Stage:** pre-registered, not yet run.
-**Parent plan:** [2026-05-27 multi-phase research plan](2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md)
+**Parent plan:** [2026-05-27 multi-phase research plan](rank-direction-edge-and-universe-isolation-research-plan.md)
 **Phase label per plan Appendix B:** `candidate` (cells qualifying under
 the Strictness Manifesto become candidates for Phase 7 OOS, subject to
 the FDR ceiling).

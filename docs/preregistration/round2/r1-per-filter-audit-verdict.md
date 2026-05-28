@@ -2,8 +2,8 @@
 
 **Date:** 2026-05-28 (sweep ran 2026-05-28, verdict generated 2026-05-28)
 **Stage:** run-complete · **5 investigation-positive · 0 falsifiers · 0 descriptive · 1 skip-control**
-**Pre-reg:** [docs/preregistration/2026-05-28-r1-per-filter-audit.md](2026-05-28-r1-per-filter-audit.md)
-**Parent plan:** [Round 2 integrated-strategy program](2026-05-29-round2-integrated-strategy-program.md)
+**Pre-reg:** [docs/preregistration/round2/r1-per-filter-audit.md](r1-per-filter-audit.md)
+**Parent plan:** [Round 2 integrated-strategy program](integrated-strategy-program.md)
 **Run-label per integrity standard:** `exploratory` (Investigation tier; no production change at R1 — by pre-commitment, investigation-positive cells join the R10 candidate queue but do NOT triggered filter-stack edits).
 
 ## Headline
@@ -147,7 +147,7 @@ Bybit slightly worse (DD +0.9 pp), Binance better (DD -4.1 pp). This is the venu
 
 ## Artifacts
 
-- Pre-reg: `docs/preregistration/2026-05-28-r1-per-filter-audit.md`
+- Pre-reg: `docs/preregistration/round2/r1-per-filter-audit.md`
 - Summary CSV: `~/SHARED_DATA/r1_filter_audit_2026-05-28_summary.csv`
 - Per-cell reports:
   - `~/SHARED_DATA/bybit_full_pit/reports/r1_filter_audit_2026-05-28/<cell>/`

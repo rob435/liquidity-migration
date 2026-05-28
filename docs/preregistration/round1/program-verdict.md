@@ -3,7 +3,7 @@
 **Date:** 2026-05-28 (program ran 2026-05-27 evening → 2026-05-28 06:40,
 ended ~38h after kickoff, 19 days inside the 2026-06-15 Phase-7 deadline)
 **Stage:** **PROGRAM COMPLETE — DOCUMENTED NULL RESULT.**
-**Parent plan:** [2026-05-27 multi-phase research plan](2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md)
+**Parent plan:** [2026-05-27 multi-phase research plan](rank-direction-edge-and-universe-isolation-research-plan.md)
 
 ## Headline
 

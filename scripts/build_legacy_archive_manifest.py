@@ -1,7 +1,7 @@
 """Build a side-copy data root whose archive_trade_manifest excludes the
 v5-listing supplement, isolating the 474-only legacy-archive universe.
 
-Pre-reg: docs/preregistration/2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md
+Pre-reg: docs/preregistration/round1/rank-direction-edge-and-universe-isolation-research-plan.md
 (Change 3 + Phase 1).
 
 The side-copy structure:

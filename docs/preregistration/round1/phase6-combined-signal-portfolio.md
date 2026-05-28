@@ -3,7 +3,7 @@
 **Date:** 2026-05-27
 **Stage:** pre-registered; **CONDITIONAL** on ≥3 features surviving Phase 5b
 (Phase 5 IC test).
-**Parent plan:** [2026-05-27 multi-phase research plan](2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md)
+**Parent plan:** [2026-05-27 multi-phase research plan](rank-direction-edge-and-universe-isolation-research-plan.md)
 **Phase label per parent plan Appendix B:** `candidate` (cells satisfying
 Manifesto criteria become candidates for Phase 7 OOS, subject to FDR ceiling).
 

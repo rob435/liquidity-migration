@@ -1,6 +1,6 @@
 """15-cell × 2-venue parameter sweep dispatcher (LEGACY 2026-05-28 EXPLORATORY sweep).
 
-Pre-reg: docs/preregistration/2026-05-28-liquidity-capacity-filter-and-filter-tweak-sweep.md
+Pre-reg: docs/preregistration/exploratory/liquidity-capacity-filter-and-filter-tweak-sweep.md
 Verdict: REJECTED (commit 2f67746, 2026-05-27).
 
 This script is kept for reproducibility of the 2026-05-28 sweep cells; the

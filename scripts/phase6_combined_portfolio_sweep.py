@@ -1,7 +1,7 @@
 """Phase 6 — combined-signal portfolio dispatcher.
 
-Pre-reg: docs/preregistration/2026-05-27-phase6-combined-signal-portfolio.md
-Verdict trigger: docs/preregistration/2026-05-27-phase5-verdict.md
+Pre-reg: docs/preregistration/round1/phase6-combined-signal-portfolio.md
+Verdict trigger: docs/preregistration/round1/phase5-verdict.md
   5 survivors pinned: vol_of_vol_30d, realized_vol_7d, dist_from_30d_low,
   xs_rank_ret_7d, xs_rank_ret_3d (all negative IC; short-side signal).
 

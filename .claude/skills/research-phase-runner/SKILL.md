@@ -1,13 +1,13 @@
 ---
 name: research-phase-runner
-description: "Execution workflow for the multi-phase research program pre-registered at docs/preregistration/2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md. Use any time you are about to run, conditionally-run, or write up a phase from that plan — covers pre-checks, dispatch, decision-rule application via scripts/apply_decision_rule.py, STATE.md update, and per-phase verdict commit. Keeps the Strictness Manifesto thresholds intact and the FDR ceiling honoured."
+description: "Execution workflow for the multi-phase research program pre-registered at docs/preregistration/round1/rank-direction-edge-and-universe-isolation-research-plan.md. Use any time you are about to run, conditionally-run, or write up a phase from that plan — covers pre-checks, dispatch, decision-rule application via scripts/apply_decision_rule.py, STATE.md update, and per-phase verdict commit. Keeps the Strictness Manifesto thresholds intact and the FDR ceiling honoured."
 ---
 
 # Running a research phase
 
 Use this every time you are about to run, conditionally-run, or write up a
 phase from the pre-registered research program. The plan lives at
-`docs/preregistration/2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md`.
+`docs/preregistration/round1/rank-direction-edge-and-universe-isolation-research-plan.md`.
 
 Always read STATE.md before starting — it tells you what's done, what's
 pending, and what the current decision rules are.

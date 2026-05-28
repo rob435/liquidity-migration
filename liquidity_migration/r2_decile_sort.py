@@ -1,7 +1,7 @@
 """R2 per-feature standalone decile-sort analytics.
 
 Implements the descriptive backtest spec in
-``docs/preregistration/2026-05-28-r2-per-feature-standalone.md``:
+``docs/preregistration/round2/r2-per-feature-standalone.md``:
 
 - :func:`decile_spread_pnl` — daily P&L from shorting the top-decile-by-feature
   basket (risk-equal weighted), held for ``horizon`` days, realized on

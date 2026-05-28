@@ -14,7 +14,7 @@ regime-conditional, and the current focus is regime-aware refinement (see
   done, what's running, what's next. **First read for every session.**
 - **`docs/backtesting_errors_we_never_repeat.md`** — mandatory research
   methodology standard. Read it before any backtest or strategy work.
-- **`docs/preregistration/2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md`**
+- **`docs/preregistration/round1/rank-direction-edge-and-universe-isolation-research-plan.md`**
   — current multi-phase research plan with the Strictness Manifesto and
   the pre-committed FDR ceiling.
 - `docs/research_findings.md` — older research verdict + refinement roadmap.

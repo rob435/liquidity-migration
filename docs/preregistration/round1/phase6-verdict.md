@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-28 (sweep ran 2026-05-28 02:20, 0.1 min wall)
 **Stage:** run-complete, **REJECTED (0 candidates)** — H7 FALSIFIED.
-**Pre-reg:** [docs/preregistration/2026-05-27-phase6-combined-signal-portfolio.md](2026-05-27-phase6-combined-signal-portfolio.md)
+**Pre-reg:** [docs/preregistration/round1/phase6-combined-signal-portfolio.md](phase6-combined-signal-portfolio.md)
 **Phase label per parent plan Appendix B:** `exploratory` — informational
 verdict; no cells forward to Phase 7.
 
@@ -125,8 +125,8 @@ a backtest-promoted profile, NOT cite-able as alpha.
 
 ## Artifacts
 
-- Pre-reg: `docs/preregistration/2026-05-27-phase6-combined-signal-portfolio.md`
-- Phase 5 verdict (survivor pinning): `docs/preregistration/2026-05-27-phase5-verdict.md`
+- Pre-reg: `docs/preregistration/round1/phase6-combined-signal-portfolio.md`
+- Phase 5 verdict (survivor pinning): `docs/preregistration/round1/phase5-verdict.md`
 - Summary CSV: `~/SHARED_DATA/phase6_combined_portfolio_2026-05-27_summary.csv`
 - Per-cell portfolios + metrics:
   - `~/SHARED_DATA/{bybit,binance}_full_pit/reports/phase6_combined_portfolio_2026-05-27/<cell>/portfolio.parquet`

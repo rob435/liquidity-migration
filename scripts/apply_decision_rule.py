@@ -5,7 +5,7 @@ Two rules are supported:
 - ``--rule manifesto`` (default; the Round 1 / R10-R11 Promotion bar):
   Sharpe Δ ≥ +0.5 BOTH venues + DD Δ ≤ -5pp BOTH + return ≥ 0 BOTH +
   ≥ 50 by / ≥ 30 bn trades. Pre-registered in
-  ``docs/preregistration/2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md``.
+  ``docs/preregistration/round1/rank-direction-edge-and-universe-isolation-research-plan.md``.
 
 - ``--rule investigation`` (Round 2's R1-R8 sub-phase tier, MAR-based):
   A cell is **investigation-positive** if MAR Δ > 0 on majority of
@@ -15,7 +15,7 @@ Two rules are supported:
   a venue that was positive in control OR DD > 70% on either OR
   trades < 30 on either (≈ 10 / sub-period at 3-thirds windows).
   Pre-registered in
-  ``docs/preregistration/2026-05-29-round2-integrated-strategy-program.md``.
+  ``docs/preregistration/round2/integrated-strategy-program.md``.
 
 MAR is computed as ``annualized_return / |max_drawdown|`` where
 ``annualized_return = (1 + total_return) ** (365.25 / window_days) - 1``.

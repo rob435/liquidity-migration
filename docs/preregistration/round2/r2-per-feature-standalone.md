@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-28
 **Stage:** proposed (committed with code, not yet run).
-**Parent plan:** [2026-05-29 Round 2 integrated-strategy program](2026-05-29-round2-integrated-strategy-program.md), section "Sub-phase R2".
+**Parent plan:** [2026-05-29 Round 2 integrated-strategy program](integrated-strategy-program.md), section "Sub-phase R2".
 **Phase label per integrity standard:** `exploratory` — R2 outputs are descriptive; no individual-feature cell graduates to R10 alone. R2 feeds R9's integrated-strategy assembly via the correlation matrix and PCA decomposition.
 
 ## Purpose

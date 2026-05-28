@@ -1,7 +1,7 @@
 """R2 — per-feature standalone decile-sort sweep.
 
-Pre-reg: docs/preregistration/2026-05-28-r2-per-feature-standalone.md
-Parent plan: docs/preregistration/2026-05-29-round2-integrated-strategy-program.md
+Pre-reg: docs/preregistration/round2/r2-per-feature-standalone.md
+Parent plan: docs/preregistration/round2/integrated-strategy-program.md
 
 For each venue (bybit, binance):
   1. Build the feature panel ONCE (all 5 R2 features + realized_vol_7d

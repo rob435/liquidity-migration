@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-28 (sweep ran 2026-05-28 00:11 → 01:32, ~81 min wall)
 **Stage:** run-complete, **H1 FALSIFIED on baseline pair; H1 NOT CONFIRMED on averaged metric**
-**Pre-reg:** [docs/preregistration/2026-05-27-phase1-universe-isolation-diagnostic.md](2026-05-27-phase1-universe-isolation-diagnostic.md)
+**Pre-reg:** [docs/preregistration/round1/phase1-universe-isolation-diagnostic.md](phase1-universe-isolation-diagnostic.md)
 **Phase label per parent plan Appendix B:** `biased_benchmark` for all 474
 cells (NEVER tradable); `exploratory` descriptive only for the 764 cells.
 
@@ -148,7 +148,7 @@ as large DD widening.
 
 ## Artifacts
 
-- Pre-reg: `docs/preregistration/2026-05-27-phase1-universe-isolation-diagnostic.md`
+- Pre-reg: `docs/preregistration/round1/phase1-universe-isolation-diagnostic.md`
 - Summary CSV: `~/SHARED_DATA/phase1_universe_diag_2026-05-27_summary.csv`
 - Per-cell reports:
   - 474: `~/SHARED_DATA/bybit_full_pit_archive_only/reports/phase1_universe_diag_2026-05-27/<cell>/`

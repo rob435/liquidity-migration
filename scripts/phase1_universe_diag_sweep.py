@@ -1,6 +1,6 @@
 """Phase 1 — universe-isolation diagnostic dispatcher.
 
-Pre-reg: docs/preregistration/2026-05-27-phase1-universe-isolation-diagnostic.md
+Pre-reg: docs/preregistration/round1/phase1-universe-isolation-diagnostic.md
 
 12 cells × 1 venue (Bybit) = 12 runs. 6 configs × 2 universes (474 archive-
 only side-copy vs 764 full root). The 474 side-copy was built by

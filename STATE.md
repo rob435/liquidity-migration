@@ -13,13 +13,13 @@
 - **Round 1 (7 phases, 2026-05-27): COMPLETE — documented null result.**
   H1, H2, H3, H5, H7 falsified; H4 not testable; H6 partially confirmed
   (5 features with stable cross-venue IC). Strategy unchanged.
-  See [Round 1 verdict](docs/preregistration/2026-05-27-program-verdict.md).
+  See [Round 1 verdict](docs/preregistration/round1/program-verdict.md).
 - **Round 2 (11 sub-phases + R12 sniper + C-phases continuous, planned 2026-05-29):
   pre-registered, code work next.** Integrated strategy program: per-filter
   hypothesis audit + per-feature standalone tests + bearish-stack honest test +
   JS-style risk model + 1/realized-vol sizing + per-name cost model + stress
   test suite + capacity analysis + integrated strategy assembly + R10 promotion
-  + R11 OOS. See [Round 2 plan](docs/preregistration/2026-05-29-round2-integrated-strategy-program.md).
+  + R11 OOS. See [Round 2 plan](docs/preregistration/round2/integrated-strategy-program.md).
 - **LEAD R1 CANDIDATE (2026-05-29 Mac-side exploratory peek):** `R1_drop_all_4`
   cell (drops `day_return`, `stop_pressure`, `realized_loss`, `rank_max`) shows
   Pareto improvement on BOTH venues over the full 2023-04-01 → 2026-05-28 window
@@ -44,14 +44,14 @@
 
 | Phase | Verdict | Receipt |
 |---|---|---|
-| 0 (filter LOO) | REJECTED — 3 falsifiers (`crowding`, `event_rank_frac`, `turnover_ratio`) confirmed load-bearing | [verdict](docs/preregistration/2026-05-27-phase0-verdict.md) |
-| 1 (universe diagnostic) | H1 FALSIFIED — universe widening hurts Sharpe but doesn't drive DD | [verdict](docs/preregistration/2026-05-27-phase1-verdict.md) |
-| 2 (rank direction grid) | REJECTED — H2/H3 falsified-by-construction (filter stack excludes bearish names); Bybit-favorite cells sign-flip on Binance | [verdict](docs/preregistration/2026-05-27-phase2-verdict.md) |
+| 0 (filter LOO) | REJECTED — 3 falsifiers (`crowding`, `event_rank_frac`, `turnover_ratio`) confirmed load-bearing | [verdict](docs/preregistration/round1/phase0-verdict.md) |
+| 1 (universe diagnostic) | H1 FALSIFIED — universe widening hurts Sharpe but doesn't drive DD | [verdict](docs/preregistration/round1/phase1-verdict.md) |
+| 2 (rank direction grid) | REJECTED — H2/H3 falsified-by-construction (filter stack excludes bearish names); Bybit-favorite cells sign-flip on Binance | [verdict](docs/preregistration/round1/phase2-verdict.md) |
 | 3, 4 | NOT TRIGGERED — no Phase 2 candidate | — |
-| 5 (signal harness IC) | 5 features survive at fwd_ret_3d — `vol_of_vol_30d`, `realized_vol_7d`, `dist_from_30d_low`, `xs_rank_ret_7d`, `xs_rank_ret_3d` (all negative IC = short-side) | [verdict](docs/preregistration/2026-05-27-phase5-verdict.md) |
-| 6 (combined portfolio) | REJECTED — H7 FALSIFIED, every combined cell worse than event-driven | [verdict](docs/preregistration/2026-05-27-phase6-verdict.md) |
+| 5 (signal harness IC) | 5 features survive at fwd_ret_3d — `vol_of_vol_30d`, `realized_vol_7d`, `dist_from_30d_low`, `xs_rank_ret_7d`, `xs_rank_ret_3d` (all negative IC = short-side) | [verdict](docs/preregistration/round1/phase5-verdict.md) |
+| 6 (combined portfolio) | REJECTED — H7 FALSIFIED, every combined cell worse than event-driven | [verdict](docs/preregistration/round1/phase6-verdict.md) |
 | 7 (OOS gate) | NOT TRIGGERED — no finalist from any phase | — |
-| Program | DOCUMENTED NULL — strategy unchanged | [program verdict](docs/preregistration/2026-05-27-program-verdict.md) |
+| Program | DOCUMENTED NULL — strategy unchanged | [program verdict](docs/preregistration/round1/program-verdict.md) |
 
 ### Round 2 (2026-05-29, in setup)
 

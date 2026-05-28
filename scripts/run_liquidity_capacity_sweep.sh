@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Pre-reg: docs/preregistration/2026-05-28-liquidity-capacity-filter-and-filter-tweak-sweep.md
+# Pre-reg: docs/preregistration/exploratory/liquidity-capacity-filter-and-filter-tweak-sweep.md
 #
 # Runs a 15-cell EXPLORATORY parameter sweep against the current promoted
 # baseline on both per-venue full-PIT roots. Each cell varies one or more

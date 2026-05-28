@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-28 (panels built 2026-05-28 01:34, IC re-run 02:00 with NaN + Binance-autodetect fixes)
 **Stage:** run-complete, **6 features survive at fwd_ret_3d** → **Phase 6 TRIGGERED**
-**Pre-reg:** [docs/preregistration/2026-05-27-phase5-signal-harness-ic.md](2026-05-27-phase5-signal-harness-ic.md)
+**Pre-reg:** [docs/preregistration/round1/phase5-signal-harness-ic.md](phase5-signal-harness-ic.md)
 **Phase label per parent plan Appendix B:** `exploratory` — IC report is
 informational regardless of outcome; survivors are candidates for Phase 6 only.
 
@@ -97,7 +97,7 @@ Phase 5's scope.
 
 ≥3 survivors required → 5 survivors after FDR ceiling. **Phase 6
 (combined-signal portfolio) is TRIGGERED.** Pre-reg at
-`docs/preregistration/2026-05-27-phase6-combined-signal-portfolio.md`.
+`docs/preregistration/round1/phase6-combined-signal-portfolio.md`.
 
 Surviving feature list pinned for Phase 6: **vol_of_vol_30d,
 realized_vol_7d, dist_from_30d_low, xs_rank_ret_7d, xs_rank_ret_3d**.
@@ -137,8 +137,8 @@ verdict commitments.
 
 ## Artifacts
 
-- Pre-reg: `docs/preregistration/2026-05-27-phase5-signal-harness-ic.md`
-- Phase 6 pre-reg: `docs/preregistration/2026-05-27-phase6-combined-signal-portfolio.md`
+- Pre-reg: `docs/preregistration/round1/phase5-signal-harness-ic.md`
+- Phase 6 pre-reg: `docs/preregistration/round1/phase6-combined-signal-portfolio.md`
 - Feature panels:
   - `~/SHARED_DATA/bybit_full_pit/feature_panel_2026-05-27.parquet` (371,560 rows × 28 cols)
   - `~/SHARED_DATA/binance_full_pit/feature_panel_2026-05-27.parquet` (478,017 rows × 28 cols)

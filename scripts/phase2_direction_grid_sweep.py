@@ -1,6 +1,6 @@
 """Phase 2 — rank-direction full grid dispatcher.
 
-Pre-reg: docs/preregistration/2026-05-27-phase2-rank-direction-grid.md
+Pre-reg: docs/preregistration/round1/phase2-rank-direction-grid.md
 
 3 directions {improvement, deterioration, both} x 11 thresholds
 {25, 50, 75, 100, 125, 150, 175, 200, 250, 300, 400}
