@@ -56,6 +56,132 @@ adds 1m kline ingestion for entry windows, a sniper entry simulator
 sniper tests, and R9 sniper variants. Missed fills are first-class
 data (no silent drop). See "Sub-phase R12" for the full breakdown.
 
+**C-phases (continuous-signal architecture)** run in parallel with
+R-phases. The current strategy generates signals once per calendar
+day (when daily aggregations finalize at UTC close). Round 2 also
+tests an alternative where the signal is **continuously re-evaluated**
+using WS-fed rolling-window features. The two architectures (daily /
+continuous) share R1-R8 infrastructure (filter audit, IC test, risk
+model, sizing, cost model, stress test, capacity) but differ in
+feature definitions and backtest framework. R9 integrates each
+architecture's best cells; R10/R11 promotion gates evaluate the best
+of both. See "Two signal architectures in scope" below and
+"Sub-phases C0-C3" for the continuous-signal implementation details.
+
+---
+
+## Two signal architectures in scope
+
+Round 1 ran exclusively on the **daily-frequency signal architecture**:
+features are defined as calendar-day aggregations (e.g. `liquidity_rank`
+= rank of a symbol's total UTC-day quote turnover among universe peers);
+the predicate fires at most once per (symbol, day); entries are
+mechanically delayed +1h after daily close to avoid same-bar leakage.
+
+Round 2 puts this architecture on **equal footing with a continuous-
+signal alternative**:
+
+### Architecture A — Daily (current production, Round 1 inheritance)
+
+- **Feature definition:** calendar-day aggregations. `liquidity_rank` =
+  rank of UTC-day total quote turnover. `prior7_liquidity_rank` = mean
+  of `liquidity_rank` over the prior 7 calendar days. Etc.
+- **Predicate evaluation:** once per UTC daily close, after all bars
+  for the day have finalized.
+- **Signal frequency:** at most one signal per (symbol, day).
+- **Entry delay:** +1h leakage guard (signal_close → entry).
+- **Cooldown:** 5 calendar days.
+- **WS role:** observation only — knows the daily-close bar the moment
+  it finalizes; monitors open positions for SL/TP exits; provides
+  low-latency state. Does NOT drive signal generation.
+
+### Architecture B — Continuous (new in Round 2)
+
+- **Feature definition:** rolling-window aggregations.
+  `rolling_24h_liquidity_rank` = rank of trailing-24h quote turnover,
+  recomputed every K minutes (default K=60 minutes — natural cadence
+  match to 1h kline closes).
+  `prior_24h_rank_avg_7d` = mean of `rolling_24h_liquidity_rank`
+  sampled hourly over the trailing 168 hours. Etc.
+- **Predicate evaluation:** every K minutes (default K=60).
+- **Signal frequency:** can fire at any K-minute step, not gated by
+  daily close. In practice gated by cooldown (see below) — most names
+  fire ≤ 1 signal per few days.
+- **Entry delay:** can be **smaller or zero**. The continuous feature
+  is already a rolling window — there's no "same-bar leakage" risk
+  the way there is for daily features. Default proposal: 0h entry
+  delay (immediate), with R12 sniper layer still applicable for fill
+  improvement.
+- **Cooldown:** 120 hours (= 5 days, same total duration, expressed in
+  hours).
+- **WS role:** signal-driving. KlineStreamManager publishes the 1h
+  kline close; continuous-signal engine recomputes rolling features
+  for all universe symbols; if the predicate now goes true on a
+  cooled-down name, the signal fires immediately.
+
+### Why both, why now
+
+Round 1's WS infrastructure was built (M1-M14) but is currently
+under-exploited — only observation, not signal generation. The user
+correctly identified that a constantly-observing system shouldn't be
+gated by an artificial daily-close clock if the data permits otherwise.
+
+Architecture B is a non-trivial redesign (different features,
+different backtest engine, different cooldown semantics) but the
+research infrastructure built in R1-R8 applies equally to both. The
+marginal cost of testing B alongside A is reasonable; the upside is
+a meaningfully different strategy that might Pareto-dominate the
+daily version.
+
+### What both architectures share (R1-R8 + R10 + R11)
+
+- **R1 filter audit** — most filters port directly; a few need rolling
+  equivalents (e.g. `day_return ≥ 0` → `rolling_24h_return ≥ 0`)
+- **R2 per-feature standalone test** — the same 5 IC features apply
+  to both architectures (their definition is already rolling-friendly);
+  decile sorts can be performed at both daily and continuous frequencies
+- **R3 bearish stack** — mirror logic works in both architectures
+- **R4 risk-factor model** — factor exposures are computed at entry
+  time regardless of when entry happens
+- **R5 1/realized-vol sizing** — sizing logic identical
+- **R6 cost model** — cost model identical (in fact, sniper-style fill
+  flavors are available for both architectures via R12)
+- **R7 stress tests** — same named events; each architecture replayed
+- **R8 capacity** — same per-name capacity ceiling logic
+- **R10 promotion gate** — same MAR-primary + Pareto requirement;
+  separate cells per architecture
+- **R11 OOS gate** — same pre-2023 root test; separate cells per
+  architecture
+
+### What's architecture-specific (C-phases)
+
+- **C0** — Continuous-signal architecture spec + rolling-feature
+  registry + continuous-evaluation engine
+- **C1** — Continuous-signal feature engineering + cross-venue univariate
+  IC test (does the rolling-feature predicate fire enough? in the right
+  places? consistently across venues?)
+- **C2** — Continuous-signal R9 variant (integrated continuous strategy)
+- **C3** — Continuous-signal stress test (R7 events replayed against
+  the continuous architecture; both architectures may stress
+  differently)
+
+See "Sub-phases C0-C3" later in this doc for full details.
+
+### Operator expectation: A vs B is an EMPIRICAL question
+
+We do not pre-commit to which architecture wins. R10/R11 evaluates each
+separately under the same promotion bar. Possible outcomes:
+
+| Outcome | Interpretation | Next step |
+|---|---|---|
+| A passes, B fails | Daily signal is a Pareto-best for this data | Promote A's best cell; B-architecture is closed for this dataset |
+| B passes, A fails | Continuous signal exploits WS infrastructure correctly; daily signal was leaving edge on the table | Promote B's best cell; replace existing strategy class |
+| Both pass | Two viable strategy lines; operator decides whether to run both in parallel or pick one based on capacity + ops complexity | Operator decision at promotion time |
+| Both fail | Documented null across both architectures | Strategy stays in current state |
+
+The C-phase decision rule is the SAME Investigation/Promotion structure
+as R-phases. No special pleading.
+
 ---
 
 ## Lessons from Round 1 (what changed our priors)
@@ -1169,6 +1295,228 @@ R10/R11 verdicts since they're forwarded through the same gates.
 
 ---
 
+## Sub-phases C0-C3 — Continuous-signal architecture
+
+These four sub-phases build and test the **Architecture B** alternative
+to the daily-signal Architecture A. C-phases share R1-R8 + R10 + R11
+infrastructure (see "Two signal architectures in scope" above) and run
+in parallel with the R-phase work.
+
+### Sub-phase C0 — Architecture spec + rolling-feature registry + continuous-evaluation engine
+
+**Purpose:** Build the foundational infrastructure for Architecture B.
+Without this, C1-C3 can't run.
+
+**Components:**
+
+**C0a — Rolling-feature registry** (new module
+`liquidity_migration/continuous_features.py`)
+
+Defines the rolling-window counterparts of every daily feature the
+strategy uses. Each entry pins:
+- Feature name (e.g. `rolling_24h_liquidity_rank`)
+- Rolling window length (e.g. 24h, 168h)
+- Update cadence (e.g. every 60min step)
+- Computation: cross-sectional vs per-name
+- Causality bound: which timestamp the feature value is "as of"
+
+Initial registry table (mapping daily → continuous):
+
+| Daily feature | Continuous equivalent | Window | Update | XS/PerName |
+|---|---|---|---|---|
+| `liquidity_rank` | `rolling_24h_liquidity_rank` | trailing 24h | 60min | XS |
+| `prior7_liquidity_rank` | `rolling_24h_liquidity_rank_avg_7d` | trailing 7×24h rolling-24h-rank samples averaged | 60min | XS |
+| `rank_improvement` | `rolling_24h_rank_improvement` | (current - prior_avg) of the rolling 24h ranks | 60min | XS |
+| `turnover_ratio` | `rolling_turnover_ratio_24h_vs_7d` | trailing 24h turnover / trailing 7×24h mean | 60min | per-name |
+| `event_rank_fraction` | `rolling_24h_event_rank_fraction` | rank of event-score / universe size, at any tick | 60min | XS |
+| `day_return` | `rolling_24h_return` | (current_close - close_24h_ago) / close_24h_ago | 60min | per-name |
+| `residual_return` | `rolling_24h_residual_return` | rolling_24h_return - universe-mean rolling_24h_return | 60min | XS-derived |
+| `close_location` | `rolling_24h_price_location` | (current_price - rolling_24h_low) / (rolling_24h_high - rolling_24h_low) | 60min | per-name |
+| `pit_age_days` | same (calendar age, doesn't need rolling) | symbol launch_ts vs now | once | per-name |
+| `crowding_filter` | `rolling_24h_crowding_score` | union-pathology with rolling-24h inputs | 60min | XS-derived |
+| `stop_pressure_*` | `rolling_window_stop_count` | stops fired by basket in trailing K hours | 60min | global |
+| `realized_loss_pressure_*` | `rolling_window_realized_loss_count` | losing exits in trailing K hours | 60min | global |
+
+The rolling-feature registry is the heart of Architecture B. Every
+strategy decision in continuous mode uses these features instead of
+their daily equivalents. All are PIT-clean by construction (rolling
+windows look backward only).
+
+**C0b — Continuous-evaluation engine** (new module
+`liquidity_migration/continuous_events.py`)
+
+Implements the K-minute step loop:
+
+```python
+def run_continuous_events_backtest(
+    data_root: Path,
+    *,
+    start: str, end: str,
+    config: ContinuousEventsConfig,  # rolling-feature thresholds
+    step_minutes: int = 60,
+) -> BacktestResult:
+    """
+    For each K-minute step in [start, end]:
+      1. Refresh rolling features for all universe symbols
+         (cached: only the names whose 1h kline just closed need
+         re-aggregation)
+      2. For each universe name with feature values now satisfying
+         the predicate AND not in cooldown:
+           emit signal
+      3. For each signal:
+           if free slot in basket: schedule entry at signal_ts + entry_delay
+           else: drop (cooldown still applies to dropped signals to
+                 avoid signal-spamming)
+      4. For each active position: check SL/TP/hold-timeout
+      5. Settle PnL, update equity, advance to next step
+    """
+```
+
+The engine maintains:
+- Cached rolling-feature state per (name, step)
+- Active position state
+- Per-name cooldown countdown (in hours)
+- Equity curve at K-minute resolution
+- Trade ledger with `decision_ts` precise to the minute (not just to
+  the calendar day)
+
+**C0c — Backtest validation** (regression test against daily mode)
+
+If we run Architecture B with `step_minutes=1440` (one step per
+calendar day) and all rolling-window lengths set to 24h, the results
+should be **bit-identical** to the daily-mode (Architecture A) backtest.
+This validates the continuous engine correctness — it's a
+generalization of the daily engine, not a re-implementation.
+
+Failure of this validation = the continuous engine has a feature
+definition mismatch that must be fixed before C1+ runs.
+
+**Code work:** ~5-7 days total (rolling features + engine + validation
++ tests). Largest single code addition in Round 2.
+
+**Output:** `docs/preregistration/<DATE>-c0-continuous-engine-verdict.md`
+confirming the validation, with the engine ready for C1.
+
+### Sub-phase C1 — Continuous-signal feature engineering + univariate IC
+
+**Purpose:** Run the Phase-5-equivalent univariate IC test using the
+rolling-feature versions of the 5 IC survivors. Confirms the
+continuous-feature definitions preserve (or strengthen) the cross-
+venue signal.
+
+**Method:** Same as R2 standalone tests but with continuous features
+and K-minute forward returns:
+
+- Rolling versions of `vol_of_vol_30d`, `realized_vol_7d`,
+  `dist_from_30d_low`, `xs_rank_ret_7d`, `xs_rank_ret_3d`
+- Forward returns at K-minute horizons: {1h, 3h, 24h, 72h, 168h}
+- Cross-venue IC + sub-period stability + sign-consistency thresholds
+  same as R2 / Phase 5
+
+**Expected output:**
+- IC values for each (feature × horizon × venue) combination
+- Comparison of continuous vs daily IC magnitudes (does continuous
+  preserve signal?)
+- Optimal forward horizon for continuous architecture
+- Per-feature decile-spread P&L at K-minute resolution
+
+**Investigation bar:** Same as Phase 5 (|IC| ≥ 0.03, |t| ≥ 3, sign-
+consistent cross-venue).
+
+**Cell list:** 5 features × 5 horizons × 2 venues = 50 IC measurements.
+Compute: ~30-60 min wall (signal_harness is fast).
+
+**Output:** `docs/preregistration/<DATE>-c1-continuous-ic-verdict.md`
+with the feature set pinned for C2.
+
+### Sub-phase C2 — Continuous-signal R9 variant
+
+**Purpose:** Build the integrated continuous-signal strategy (the
+Architecture B equivalent of R9), test it, and feed promotion-eligible
+cells to R10/R11.
+
+**Architecture:** Same as R9 but with continuous-signal substrate:
+
+1. **Continuous-feature gate** (from R1 + C0 + C1): symbol's rolling
+   features must pass the (continuous version of the) production filter
+   stack
+2. **IC-augmented signal score** (from C1): orthogonalized rolling-
+   feature signal
+3. **Signal threshold:** as R9
+4. **Risk-exposure caps** (from R4): factor loadings computed at
+   continuous decision_ts
+5. **Position sizing** (from R5): risk-equal, computed at
+   continuous decision_ts (uses rolling realized vol)
+6. **Cost-adjusted P&L** (from R6): per-name per-bar cost model
+   applied to actual (potentially intra-day) fills
+
+**Variants tested (C2 cell list):**
+
+7 integrated-continuous-strategy cells × 2 venues = 14 runs:
+
+| Cell | Description |
+|---|---|
+| `C2_event_only` | Continuous-event-driven only, risk-equal sized, model-costed. The Architecture B equivalent of `R9_event_only`. |
+| `C2_event_plus_ic` | Continuous event + IC additive |
+| `C2_event_AND_ic` | Continuous event AND IC threshold |
+| `C2_ic_only_top_decile` | Pure continuous IC, no event filter |
+| `C2_market_neutral` | Bullish continuous + bearish continuous in parallel slots |
+| `C2_event_OR_ic_factor_capped` | event OR ic with R4 factor caps |
+| `C2_market_neutral_factor_capped` | Market neutral + factor caps |
+
+Investigation bar; the winning cell forwards to R10 promotion bar.
+
+Compute: ~14 cells × ~30 min (continuous engine is slower than daily
+because of per-K-minute recomputation; partial caching helps) = ~7h
+wall at 4-way parallel.
+
+**Output:** `docs/preregistration/<DATE>-c2-continuous-r9-verdict.md`.
+Architecture B's best cell identified; forwards to R10.
+
+### Sub-phase C3 — Continuous-signal stress test
+
+**Triggered if:** any C2 cell promotion-eligible at R10.
+
+**Purpose:** R7's named-event replay applied to the continuous
+strategy. Architecture B may stress very differently from A:
+
+- Continuous signal might enter trades *mid-event* (no daily-close
+  gating), increasing tail-event entry frequency
+- Cooldown is in hours, so continuous can re-enter the same name
+  within 5 days of an event-induced stop
+- WS feed quality during tail events is a venue-specific risk (Bybit
+  feed has paused during prior cascade events)
+
+**Method:** Same as R7 (named events from March 2020 → May 2026
+replay) with the C2-promotion-eligible cells. Pass criteria identical
+to R7: DD < 50% in any event, basket-correlation < 0.6, no day with
+>3 simultaneous stop-outs.
+
+**Additional continuous-specific check:** During each event, log the
+fraction of WS-feed disruption minutes (if any cached WS feed had >5
+minute gap). If >5% of event minutes had feed disruption AND a stop
+fired during that disruption window, the cell is flagged as
+"WS-feed-fragile" — promotion-eligible only with explicit operator
+acknowledgment.
+
+**Output:** `docs/preregistration/<DATE>-c3-continuous-stress-verdict.md`.
+
+### C-phase total compute estimate
+
+| Phase | Cells/work | Wall |
+|---|---|---|
+| C0 — engine + features (code) | ~5-7 days code | (overlaps with R4/R6 weeks) |
+| C0c — validation regression | 2 venues | ~10 min |
+| C1 — univariate IC | 50 measurements | ~30-60 min |
+| C2 — integrated continuous | 14 cells | ~7h at 4-way par. |
+| C3 — stress test | per finalist | ~40 min/finalist |
+
+C-phases add **~1 week of code work + ~8h of compute** on top of the
+base R-phase + R12 program. Net Round 2 estimate: ~2.5-3 weeks wall
+time, with ~10 days being code.
+
+---
+
 ## Compute plan
 
 ### Per-cell environment
@@ -1202,12 +1550,18 @@ export SWEEP_MAX_WORKERS=8
 | R12d — R9 × sniper | up to 10 | ~5 h | + 5 h |
 | R12e — Delay reduction | 10 | 30 min | + 30 min |
 | R12f — Sniper stress | per finalist | ~40 min/finalist | + 40 min/finalist |
+| C0 — Continuous engine (code) | (code work) | ~5-7 days | + 5-7 days |
+| C0c — Engine validation | 2 venues | ~10 min | + 10 min |
+| C1 — Continuous univariate IC | 50 measurements | ~30-60 min | + 1 h |
+| C2 — Continuous R9 variant | 14 | ~7 h at 4-way par. | + 7 h |
+| C3 — Continuous stress | per finalist | ~40 min/finalist | + 40 min/finalist |
 
-**Total: ~1.5-2 weeks wall time** with 4-5 days of that being code
-work (R4 risk model + R6 cost model + R12b sniper simulator + R12a
-ingestion script) that the operator drives via Claude pair-coding
-sessions. R12 adds ~3-4 days of code work + ~24 hours of compute on
-top of the base Round 2.
+**Total: ~2.5-3 weeks wall time** with ~10 days being code work
+(R4 risk model + R6 cost model + R12a/b sniper infrastructure +
+C0 continuous engine + features). R12 adds ~3-4 days of code +
+~24h compute; C-phases add ~5-7 days code + ~8h compute on top of
+the base R-phase Round 2. The 5950X handles the parallel sweeps; the
+code work is the bottleneck.
 
 The operator should expect:
 - **Day 1-2:** R0 + R1 + R2 (mostly mechanical sweeps)
@@ -1254,6 +1608,11 @@ Cross-referenced to `docs/backtesting_errors_we_never_repeat.md`.
 | #2  | Future info in signals — sniper-specific | R12 sniper simulator consumes 1m kline panel in chronological order; flow=open→fill is enforced by the simulator (no future-peek). Tests pin per-flavor PIT causality. Fill price uses bar close, not bar low/high (which would peek). |
 | #22 | Venue mechanics fantasy — sniper-specific | R12c maker/taker rebate accounting: limit fills earn the venue's maker rebate; market fallbacks pay taker fees. R6 cost model must distinguish these two paths or R12 promotion-eligibility under it is invalid. |
 | #23 | Pretty-report bias — sniper-specific | Sniper variants MUST report fill-rate alongside Sharpe/MAR. A "great Sharpe, 30% fill rate" cell is not promotion-eligible because the 70% filled trades P&L is meaningless without counting the 30% missed opportunities. |
+| #2  | Future info in signals — continuous-specific | Rolling-window features are PIT-clean by construction (only look backward). C0c regression validation (continuous engine with 1d step + 24h window = bit-identical to daily backtest) is the binding correctness check; if it fails, continuous results are invalid. |
+| #13 | Timestamp & resampling leakage — continuous-specific | Continuous engine's "as-of-N-min-step" timestamps must align exactly with the K-minute step boundaries; off-by-one is a future-peek. Tests pin step alignment per feature. |
+| #15 | Warm-started state — continuous-specific | C0c regression validates cold-start; C2 cells use cold-start in backtest. Live deployment of a continuous strategy requires the same 90d-warmup pattern as the daily strategy. |
+| #16 | Same-code illusion — continuous-specific | Continuous backtest engine MUST be the same code path the live continuous daemon would use. If we ship a continuous strategy, the daemon code is the C0 engine called with `live=True`, not a separate re-implementation. Otherwise demo↔backtest divergence is guaranteed. |
+| #22 | Venue mechanics fantasy — continuous-specific | WS feed gaps during high-stress events (March 2020, FTX) are a real risk for continuous strategies that rely on minute-resolution feature updates. C3 stress test flags any cell whose stops fire during WS-feed-gap minutes; those cells are "WS-feed-fragile" and require operator acknowledgment. |
 | #20 | Bad accounting | R6 cost model fixes the single-multiplier-3 problem from Round 1. All R10+ cells must clear under the model cost, not just legacy flat cost. |
 | #21 | Hidden common risk | R4 factor model explicitly decomposes basket risk into 8 named factors. R9 cells optionally cap per-factor exposure. Cells with residual Sharpe < +0.3 are promotion-rejected (catches "you're just selling vol" disguised as alpha). |
 | #22 | Venue mechanics fantasy | R6 cost model calibrated against paper-shadow vs demo slippage — uses real venue mechanics, not theoretical. Hold-period funding included. |
@@ -1319,12 +1678,12 @@ By committing this plan, the operator + assistant commit in advance to:
 
 | Week | Activity |
 |---|---|
-| Week 1 | R0 (doc cleanup) + R1 (filter audit) + R2 (per-feature) + R3 (bearish stack). Code: 3 small filter-related additions for R3. R12a starts in parallel (1m kline ingestion runs as background download). |
-| Week 2 | R4 (risk model — 3 days code) + R5 (sizing — 1 day code + sweep) + R12b (sniper simulator — 2 days code, parallel with R4) |
-| Week 3 | R6 (cost model — 2 days code + calibration) + R7 (stress tests pending R4/R6) + R8 (capacity pending R6) + R12c (sniper univariate test, depends on R12a+R12b ready) |
-| Week 4 | R9 (integrated strategy assembly) + R10 (promotion gate) + R12d (R9 × sniper). Conditional on R9 + R12c candidates. |
-| Week 5 | R11 (OOS gate) + R12e (delay sweep) + R12f (sniper stress test) if any R10 finalist. Conditional on data-root state. |
-| Week 6+ | Forward demo deployment proposal IF R11 passing. 30-day demo + paper-shadow reconciliation. Then operator decision on mainnet. |
+| Week 1 | R0 (doc cleanup) + R1 (filter audit) + R2 (per-feature) + R3 (bearish stack). Code: 3 small filter-related additions for R3. R12a starts in parallel (1m kline ingestion runs as background download). C0 code work begins (rolling-feature registry + engine skeleton). |
+| Week 2 | R4 (risk model — 3 days code) + R5 (sizing — 1 day code + sweep) + R12b (sniper simulator — 2 days code, parallel with R4) + C0 continues (engine implementation + tests) |
+| Week 3 | R6 (cost model — 2 days code + calibration) + R7 (stress tests pending R4/R6) + R8 (capacity pending R6) + R12c (sniper univariate test, depends on R12a+R12b ready) + C0c validation (regression vs daily mode) + C1 (continuous univariate IC) |
+| Week 4 | R9 (integrated strategy assembly) + R10 (promotion gate) + R12d (R9 × sniper) + C2 (continuous R9 variant). Conditional on R9 + R12c + C2 candidates. |
+| Week 5 | R11 (OOS gate) + R12e (delay sweep) + R12f (sniper stress test) + C3 (continuous stress test) if any R10 finalist from EITHER architecture. Conditional on data-root state. |
+| Week 6+ | Forward demo deployment proposal IF R11 passing. 30-day demo + paper-shadow reconciliation. Then operator decision on mainnet. If BOTH architectures pass R11, operator decides whether to deploy one or run them in parallel (ops-complexity tradeoff). |
 
 If R1/R2/R3 produce nothing meaningful, R4-R10 can still run as
 infrastructure investment (the risk model + cost model are useful
@@ -1430,14 +1789,17 @@ Explicitly out:
   cross-venue is a different strategy class.
 - **Long-only strategy.** Bearish + market-neutral are in scope per R3;
   pure long is not.
-- **Sub-1h SIGNAL generation.** Round 2's signal stays at end-of-day
-  close (1d resolution). R12 adds intraday EXECUTION refinement
-  (sniper entries) on top of the daily signal, but does NOT compute
-  new sub-1h signals. Sub-1h signal-generation (e.g. a 15m or hourly
-  rebalance frequency) is a separate research program.
+- **Sub-1h SIGNAL generation at < 60-minute K-step.** Round 2's
+  continuous architecture (C-phases) re-evaluates the predicate every
+  K minutes; default and tested K is 60 (matching 1h kline cadence).
+  Sub-60-minute K-steps (e.g. K=15, K=5, K=1) are NOT in scope: they
+  require kline data faster than 1h (which we don't have universe-wide),
+  drive backtest compute proportionally higher, and approach HFT
+  territory where retail can't compete. K=60 captures the WS-driven
+  continuous-evaluation value; sub-60 is a future research program.
 - **HFT / order book microstructure.** No order book ingestion; R12
-  works off 1m kline aggregates only. Sub-second execution, queue
-  position, lit/dark order routing — all out.
+  and C-phases work off 1m / 1h kline aggregates only. Sub-second
+  execution, queue position, lit/dark order routing — all out.
 - **Alternative asset classes.** Bybit + Binance USD-M perps only.
 
 These exclusions are deliberate scope discipline. Each could be a
@@ -1460,7 +1822,9 @@ future research program on its own pre-reg.
 | Tail risk | Implicit via DD reporting | **Named-event stress test suite (R7)** |
 | Capacity | Not measured | **Per-cell capacity curve (R8)** |
 | Entry execution | Market @ signal_close + 1h (mechanical) | **Sniper layer (R12): limit / pullback / volume-spike / TWAP variants with PIT-clean 1m simulation; missed fills as first-class data** |
-| Strategy architecture | Event-driven only | **Event-driven + IC-augmented + factor-capped + risk-sized + cost-aware + sniper-executed** |
+| Signal frequency | Daily (calendar-day predicate eval) | **Two architectures in parallel: Architecture A (daily, R-phases) + Architecture B (continuous K=60min, C-phases). Both share R1-R8 infrastructure.** |
+| WS infrastructure role | Observation + execution only | **Signal-driving for Architecture B (continuous rolling-feature engine)** |
+| Strategy architecture | Event-driven only | **Event-driven + IC-augmented + factor-capped + risk-sized + cost-aware + sniper-executed; continuous-signal variant also tested** |
 | Hard deadline | 2026-06-15 (19-day buffer) | None (weeks acceptable) |
 | FDR ceiling | 3 candidates | 5 candidates (justified by Investigation-tier pre-filter) |
 | Mandatory artifacts per cell | Ledger + equity + monthly | + factor-decomposed P&L + stress scorecard + capacity curve + residual Sharpe + sniper fill-rate (R12 variants) |

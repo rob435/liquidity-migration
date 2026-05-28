@@ -60,11 +60,17 @@
 | R10 | Promotion-bar validation sweep | not started |
 | R11 | Pre-2023 OOS gate (mandatory final) | not started |
 | R12 | **Sniper entry execution layer** — sub-1h fill optimization on top of daily signal: 1m kline ingestion (R12a), simulator (R12b), univariate test of 5 sniper flavors (R12c), R9 integration (R12d), entry-delay reduction sweep (R12e), sniper stress test (R12f). Missed fills counted as $0-P&L. | not started — ~3-4 days code (R12a + R12b) |
+| C0 | **Continuous-signal engine** — rolling-feature registry + K-minute step backtest engine + regression validation (continuous at 1d step + 24h window = bit-identical to daily backtest). The foundation for Architecture B. | not started — ~5-7 days code |
+| C1 | **Continuous-signal univariate IC test** — Phase-5-equivalent on rolling-feature versions of the 5 IC survivors, at forward horizons {1h, 3h, 24h, 72h, 168h}. | not started — depends on C0 |
+| C2 | **Continuous-signal R9 variant** — Architecture B's integrated-strategy assembly. 7 cells × 2 venues. | not started — depends on C0 + C1 |
+| C3 | **Continuous-signal stress test** — R7 named-event replay applied to C2 promotion-eligible cells; flags WS-feed-fragile cells. | not started — conditional on C2 |
+
+**Two signal architectures in scope.** Round 2 runs **Architecture A (daily, R-phases)** and **Architecture B (continuous, C-phases)** in parallel. They share R1-R8 + R10 + R11 infrastructure but differ in feature definitions and backtest framework. R10/R11 evaluate the best cell from each architecture independently; both, one, or neither may pass.
 
 **No hard end-date on Round 2.** "Weeks if needed" per operator instruction.
-With R12 the total program estimate is ~1.5-2 weeks wall time, with
-4-5 of those days being code work (R4 risk model + R6 cost model +
-R12a/b sniper infrastructure).
+With R12 + C-phases the total program estimate is **~2.5-3 weeks wall time**,
+with ~10 days being code work (R4 risk model + R6 cost model +
+R12a/b sniper + C0 continuous engine).
 
 ## What's running
 
