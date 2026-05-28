@@ -14,12 +14,22 @@
   H1, H2, H3, H5, H7 falsified; H4 not testable; H6 partially confirmed
   (5 features with stable cross-venue IC). Strategy unchanged.
   See [Round 1 verdict](docs/preregistration/2026-05-27-program-verdict.md).
-- **Round 2 (11 sub-phases, planned 2026-05-29): pre-registered, code work next.**
-  Integrated strategy program: per-filter hypothesis audit + per-feature
-  standalone tests + bearish-stack honest test + JS-style risk model +
-  1/realized-vol sizing + per-name cost model + stress test suite +
-  capacity analysis + integrated strategy assembly + R10 promotion + R11 OOS.
-  See [Round 2 plan](docs/preregistration/2026-05-29-round2-integrated-strategy-program.md).
+- **Round 2 (11 sub-phases + R12 sniper + C-phases continuous, planned 2026-05-29):
+  pre-registered, code work next.** Integrated strategy program: per-filter
+  hypothesis audit + per-feature standalone tests + bearish-stack honest test +
+  JS-style risk model + 1/realized-vol sizing + per-name cost model + stress
+  test suite + capacity analysis + integrated strategy assembly + R10 promotion
+  + R11 OOS. See [Round 2 plan](docs/preregistration/2026-05-29-round2-integrated-strategy-program.md).
+- **LEAD R1 CANDIDATE (2026-05-29 Mac-side exploratory peek):** `R1_drop_all_4`
+  cell (drops `day_return`, `stop_pressure`, `realized_loss`, `rank_max`) shows
+  Pareto improvement on BOTH venues over the full 2023-04-01 → 2026-05-28 window
+  including May 2026 stress: Bybit MAR Δ **+1.29** (5.39 → 6.21 with extended-window
+  numbers Bybit MAR 4.92→6.21, Binance 1.45→2.48), Binance MAR Δ **+1.03**.
+  Return +65% Bybit / +29% Binance, DD shallower -3.6pp / -9.7pp. **Single
+  exploratory run, no sub-period stability check, no R4 residual-Sharpe, no
+  R7 stress, no R11 OOS — NOT yet promoted.** Goes FIRST into R1 dispatch
+  with full Manifesto pipeline. Re-baseline cascade pre-committed (see Round 2
+  doc) if it clears every gate.
 - **NEW optimization objective:** **(Return / Drawdown) tied as primary
   (i.e. MAR ratio), Sharpe as secondary tie-breaker.** This is a deliberate
   change from Round 1's implicit Sharpe-primary.
