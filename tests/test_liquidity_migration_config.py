@@ -56,6 +56,22 @@ def test_merge_dataclass_rejects_unknown_keys() -> None:
         _merge_dataclass(CostConfig, {"maker_fee_bps": 1.0, "not_a_real_field": 99})
 
 
+def test_cost_config_default_base_cost_unchanged_and_e3_e4_knobs() -> None:
+    # Default (60% maker blend, symmetric legs) must equal the legacy 2*blended
+    # so existing/running cells are byte-identical.
+    blended = 0.60 * (2.0 + 1.0) + 0.40 * (5.5 + 2.0)  # 4.8
+    assert CostConfig().base_entry_exit_cost_bps == pytest.approx(2.0 * blended)  # 9.6
+    assert CostConfig(exit_cost_multiplier=1.0).base_entry_exit_cost_bps == pytest.approx(9.6)
+    # E3: model the live 100%-taker market execution exactly (no maker blend).
+    assert CostConfig(maker_fill_probability=0.0).base_entry_exit_cost_bps == pytest.approx(
+        2.0 * (5.5 + 2.0)  # 15.0 bps round-trip
+    )
+    # E4: a costlier cover (exit) leg — only the exit leg scales.
+    assert CostConfig(exit_cost_multiplier=2.0).base_entry_exit_cost_bps == pytest.approx(
+        blended * 3.0  # entry(1) + exit(2) legs
+    )
+
+
 def test_ensure_data_root_exists(tmp_path: Path) -> None:
     assert ensure_data_root_exists(tmp_path) == tmp_path
     with pytest.raises(FileNotFoundError, match="does not exist"):

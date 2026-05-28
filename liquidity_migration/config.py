@@ -112,7 +112,20 @@ class CostConfig:
     taker_fee_bps: float = 5.5
     maker_adverse_selection_bps: float = 1.0
     taker_slippage_bps_liquid: float = 2.0
+    # Share of fills assumed passive (maker). The LIVE runner sends Market orders
+    # on both legs = 100% taker, so set this to 0.0 to model the deployed
+    # execution exactly (base becomes 2*(taker_fee+taker_slippage)=15 bps) rather
+    # than relying on the scenario cost_multiplier to paper over a maker blend
+    # the live engine never gets. Raise it only once passive execution (R12
+    # sniper / limit-chase exit) is actually deployed. (E3)
     maker_fill_probability: float = 0.60
+    # E4: per-leg cost asymmetry. The exit leg of a short is a buy-to-close,
+    # which is more expensive than the sell-to-open entry — especially covering
+    # into a stress spike. exit_cost_multiplier scales ONLY the exit leg's cost.
+    # Default 1.0 = symmetric (legacy behavior, base = 2*blended); a value >1
+    # charges the cover leg more. A global down-payment toward R6's per-name
+    # per-bar cost model.
+    exit_cost_multiplier: float = 1.0
 
     @property
     def base_entry_exit_cost_bps(self) -> float:
@@ -122,7 +135,8 @@ class CostConfig:
             self.maker_fill_probability * maker_cost
             + (1.0 - self.maker_fill_probability) * taker_cost
         )
-        return 2.0 * blended
+        # entry leg + exit leg; exit leg optionally costlier (E4 asymmetry).
+        return blended * (1.0 + self.exit_cost_multiplier)
 
 
 @dataclass(frozen=True, slots=True)
