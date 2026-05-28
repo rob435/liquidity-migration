@@ -1,0 +1,1200 @@
+# Research plan: Round 2 — integrated-strategy program (MAR-primary)
+
+**Date:** 2026-05-29
+**Author:** owner (drafted with assistant)
+**Stage:** proposed — master plan for Round 2. Each sub-phase below gets its
+own dated pre-registration file before its sweep runs.
+**Compute target:** Ryzen 5950X (16C / 32T). No compute rationing. Whole
+program expected to take weeks; that's acceptable.
+**Optimization objective:** **(Return / Drawdown) tied as primary, Sharpe as
+secondary tie-breaker.** See section "Optimization objective" for the
+exact decision metric.
+**Integrity standard:** `docs/backtesting_errors_we_never_repeat.md` is binding.
+
+---
+
+## TL;DR
+
+Round 1's 7-phase program documented a clean null result across H1-H7.
+Three findings carry forward:
+
+1. **The current filter stack contains real load-bearing structure** —
+   Round 1 Phase 0 confirmed `crowding`, `event_rank_frac`,
+   `turnover_ratio` as decisive falsifiers when removed.
+2. **The PIT data contains real univariate cross-venue IC signal** —
+   Round 1 Phase 5 identified 5 features with stable cross-sectional
+   short-side IC.
+3. **The naive combined-signal portfolio architecture does not translate
+   that IC into edge** — Round 1 Phase 6 falsified H7.
+
+Round 2 takes the validated parts of BOTH systems (event-driven entries
+with the load-bearing filter stack + the surviving IC features as
+augmenting signal) and combines them with **Jane-Street-style
+infrastructure** (risk-factor decomposition, 1/realized-vol position
+sizing, per-name cost model, stress-test suite, capacity analysis).
+
+Round 2 also corrects two Round 1 design errors:
+- **Threshold rigidity:** Round 1 used the same strict Manifesto bar at
+  every phase. Round 2 uses a **two-tier** system — Investigation bar
+  for sub-phases, Promotion bar (unchanged from Round 1) only at the
+  Phase 7 OOS forwarding gate.
+- **Sharpe-primary optimization:** Round 1 implicitly optimized for
+  Sharpe Δ. Round 2 makes the objective explicit: **MAR ratio
+  (annualized return / |max DD|) is primary; Sharpe is secondary
+  tie-breaker.**
+
+11 sub-phases (R0-R10), conditional dependencies, ~weeks of wall-time
+on the 5950X. No hard deadline. Default outcome remains "do nothing if
+all hypotheses falsify."
+
+---
+
+## Lessons from Round 1 (what changed our priors)
+
+### Confirmed
+- **3 filters are load-bearing** (LOO removal destroyed both venues):
+  `crowding`, `event_rank_frac`, `turnover_ratio`. Do not casually drop.
+- **5 features have stable cross-venue IC at fwd_ret_3d**:
+  `vol_of_vol_30d` (|IC|=0.087), `realized_vol_7d` (0.081),
+  `dist_from_30d_low` (0.071), `xs_rank_ret_7d` (0.043),
+  `xs_rank_ret_3d` (0.039). All negative IC = predict short.
+- **Bybit and Binance have venue-specific optima.** Phase 2 showed
+  Bybit's best rank-improvement threshold is ~200-300 while Binance's
+  is ~100-150. Production default (150) is the joint compromise.
+- **Universe widening hurts Sharpe but not DD.** Phase 1 showed 474-only
+  has +1.09 Sharpe vs 764-full but DD shift to -42% is unexplained.
+
+### Surprised
+- **Combined-signal portfolio did NOT beat event-driven.** Even with 5
+  surviving features, every Phase 6 cell underperformed baseline on
+  Sharpe (best: -1.90 Sharpe Δ on Bybit). The discrete-event-driven
+  architecture beats a naive continuous-rank portfolio on this data.
+- **Deterioration direction was structurally untestable.** Quality-
+  positive filters (day_return ≥ 0, residual ≥ 0.08, close_location
+  ≥ 0.30) exclude bearish names by construction. H2/H3
+  falsified-by-construction, not falsified by evidence.
+
+### What we still don't know
+- **Where the -22% → -42% DD shift came from.** H1 falsified, so not
+  universe. Remaining candidates: u32 bug-fix removed real signal, April
+  2025+ regime change, code drift in some other component. **R7 stress
+  test phase will partially answer this.**
+- **Whether a properly-implemented combined portfolio beats event-driven.**
+  Phase 6's implementation had a known exposure-inflation caveat. R9
+  integrated strategy will test the corrected version.
+- **Whether the inverse-direction edge actually exists.** H2 needs a
+  bearish-tuned filter stack to test honestly. **R3 will do this.**
+
+---
+
+## Optimization objective
+
+**Primary metric: MAR ratio = annualized_return / |max_drawdown|.**
+
+Equivalent names: Calmar ratio, return-over-DD. Worked example for the
+Round 1 baseline:
+
+| Venue | Total return | Period | Annualized | Max DD | MAR |
+|---|--:|---|--:|--:|--:|
+| Bybit | +518.76% | 17m | +231.5%/yr | -42.1% | **+5.50** |
+| Binance | +66.12% | 17m | +45.4%/yr | -40.7% | **+1.11** |
+
+Why MAR over Sharpe as primary:
+
+1. **Sharpe is risk-adjusted return where "risk" = volatility.** That
+   penalizes upside volatility too. Operators care about DD, not σ.
+2. **MAR directly answers "how much do I make vs how much can I lose."**
+   That's the operator's actual question.
+3. **MAR is robust to fat tails.** Sharpe assumes Gaussian. Crypto isn't.
+4. **MAR is leverage-invariant the same way Sharpe is** (both numerator
+   and denominator scale with leverage), so it's a fair comparison metric.
+
+Sharpe remains a **secondary tie-breaker** for two Pareto-equivalent
+cells with the same MAR. Sharpe also remains the falsifier bound (a cell
+with negative Sharpe is rejected regardless of MAR — because negative
+Sharpe means the return doesn't cover the volatility cost of taking it).
+
+### Pareto requirement on (return, drawdown)
+
+A cell is at least as good as the control if **NEITHER** of these is
+worse:
+- annualized return < control's annualized return
+- |max DD| > control's |max DD|
+
+I.e., to improve on control we need EITHER higher return at same-or-
+lower DD, OR lower DD at same-or-higher return. **MAR captures both
+sides of this constraint.** A cell that boosts return by 50% while
+doubling DD has lower MAR than the control — correctly rejected as a
+"more leverage in disguise" trade.
+
+---
+
+## Strictness Manifesto v2 (two-tier)
+
+Round 1 used a single threshold for all phases. Round 2 separates
+**Investigation** (gather evidence, don't act) from **Promotion**
+(forward to OOS, eligible to ship after demo). The Promotion bar is
+unchanged from Round 1 (modulo MAR-primary); the Investigation bar is
+looser so we don't lose useful information.
+
+### Investigation bar (sub-phases R1, R2, R3, R4, R7, R8)
+
+A cell is **investigation-positive** if **ALL** of:
+- MAR Δ > 0 on majority of venues (2/2 OR 1/2 with the other not worse
+  than -0.5 MAR)
+- No return sign-flip vs control (both venues remain same-signed)
+- ≥30 trades on Bybit (≥20 on Binance) if a trade-based cell
+
+A cell **falsifies** at this tier if **ANY** of:
+- MAR Δ ≤ -1.0 on either venue (decisively worse)
+- Return goes negative on a venue that was positive in control
+- DD > 70% on either venue (raised from R1's 60% — operator has
+  documented higher DD tolerance)
+- Trade count drops below 10 / sub-period on either venue
+  (signal-population vanished)
+
+Cells failing investigation-positive but not falsifying are
+**descriptive** — recorded for context, not acted on.
+
+### Promotion bar (Phase R10 forwarding to R11 OOS)
+
+A cell is **promotion-eligible** only if **ALL** of:
+- MAR Δ ≥ +0.5 on **both** venues vs control (improved by ≥0.5)
+- Return Δ ≥ 0 on **both** venues (Pareto requirement on return)
+- DD Δ ≤ 0 on **both** venues (Pareto requirement on drawdown)
+- Sign-consistent (positive return) across all 3 sub-period thirds on
+  both venues
+- ≥50 trades / sub-period on Bybit (≥30 on Binance)
+- No factor model finding the cell's residual alpha is < +0.3 Sharpe
+  (so we're not just selling vol or buying beta)
+
+A cell **promotion-falsifies** if **ANY** of:
+- MAR Δ ≤ -0.5 on either venue
+- Return goes negative on either venue
+- DD > 60% on either venue
+- Sign-flip across sub-periods on either venue
+
+### Falsifier (decisive close, both tiers)
+
+If a cell hits a falsifier at any tier, it is **closed-rejected**. It
+cannot be resurrected without a new dated pre-reg with explicit new
+motivation. Falsifier hits are first-class evidence — they tell us the
+hypothesis is wrong.
+
+### FDR ceiling
+
+Across R1+R2+R3+R7+R10 combined, **max 5 candidates** may forward to
+R11 OOS. If more cells satisfy promotion-eligibility, top-5 by
+combined-venue MAR Δ (pre-committed tie-break: then by combined-venue
+Sharpe Δ; then alphabetical). Rest **closed-rejected**, not "menu for
+later".
+
+The 5-candidate ceiling is higher than Round 1's 3 because Round 2's
+sub-phase menu is bigger AND because the Investigation-tier gate
+already filtered out most weak cells, so the candidates that reach
+Promotion are higher-quality on average.
+
+---
+
+## Sub-phase R0 — Round 1 doc cleanup (immediate)
+
+**Purpose:** Reduce navigation noise so future sessions don't have to
+wade through superseded scaffolding.
+
+**Actions:**
+1. **Delete** `docs/preregistration/2026-05-27-phase7-pre2023-oos-gate.md` —
+   never ran (no Round 1 finalists). The pre-reg has no executed
+   evidence to preserve; the parent plan's Phase 7 section captures the
+   design.
+2. **Keep** all Round 1 verdict docs (`phase0/1/2/5/6-verdict.md`) +
+   `program-verdict.md` + the parent plan — these are HISTORICAL
+   EVIDENCE per the integrity standard.
+3. **Keep** Round 1 sub-phase pre-regs (`phase0/1/2/5/6-*.md`) — these
+   document what was promised before the run, which is part of the
+   evidence chain.
+4. **Update** `STATE.md` to point at Round 2 as the active program.
+5. **Update** `docs/research_findings.md` headline to note Round 1
+   complete, Round 2 starting.
+
+**Compute:** zero. Pure docs work.
+
+**Output:** one doc-cleanup commit, separate from Round 2 substantive work.
+
+---
+
+## Sub-phase R1 — Per-filter hypothesis audit
+
+**Purpose:** For every filter in the production stack, state the
+*economic mechanism* it claims to capture and decide its fate using
+Round 1's Phase 0 LOO evidence under the looser "any filter that helps
+Sharpe even by a little bit doesn't have to cross the strict threshold"
+criterion.
+
+### Method
+
+For each filter, populate this row:
+
+| Filter | Hypothesis | LOO Sharpe Δ (by/bn) | LOO DD Δ (by/bn) | Decision | Reason |
+|---|---|---|---|---|---|
+
+Decisions:
+- **KEEP** — removal hurt either venue meaningfully (operator's softer
+  threshold: any negative Sharpe Δ on either venue OR DD widening ≥3pp
+  on either)
+- **DROP** — removal didn't hurt OR helped on both venues
+- **RE-TEST** — LOO degenerate or evidence mixed; needs a non-LOO test
+  before deciding
+
+### Round 1 Phase 0 evidence applied
+
+| Filter | Hypothesis (why we'd expect it to help) | by Sh Δ | bn Sh Δ | by DD Δ | bn DD Δ | Decision |
+|---|---|--:|--:|--:|--:|---|
+| `crowding` (union_pathology) | Detects late/stalled entries where cohort already crowded; pathology indicators sum to "this entry is statistically late" | -0.61 | -0.25 | -1.4pp | +6.6pp | **KEEP** (falsifier) |
+| `event_rank_frac` (≤0.90) | Caps event-of-day rank; top-10% scorers already arb'd by obvious traders; stay in unobvious window | -1.37 | -0.79 | +16.2pp | +26.5pp | **KEEP** (falsifier) |
+| `turnover_ratio` (≥6.0) | Today's turnover ≥6× prior 7d mean; ensures signal day is genuine outlier-volume, not quiet drift | -1.33 | -0.64 | +27.1pp | +11.3pp | **KEEP** (falsifier) |
+| `entry_delay` (1h) | 1h delay from signal close to entry; prevents same-bar leakage + matches realistic execution | -0.11 | -0.31 | +6.7pp | +16.1pp | **KEEP** |
+| `cooldown` (5d) | 5d between trades on same symbol; prevents over-concentration on multi-pumping name | -0.32 | +0.01 | +1.0pp | -2.8pp | **KEEP** (Bybit benefit) |
+| `rank_min` (31) | Skip top-30 by liquidity (BTC/ETH/SOL too obvious / too well-arb'd) | -0.42 | -0.13 | +0.5pp | -0.7pp | **KEEP** |
+| `residual_return` (≥0.08) | Signal-day return net of market ≥+8%; ensures move is idiosyncratic, not beta | -0.26 | +0.07 | -1.0pp | -6.1pp | **KEEP** (Bybit benefit) |
+| `close_location` (≥0.30) | Close in top 70% of intraday range; ensures signal day closes strong, not on the low | +0.04 | -0.32 | -5.0pp | +12.6pp | **KEEP** (Binance benefit) |
+| `pit_age` (≥90d) | Symbol listed ≥90d; protects against new-listing pump dynamics that don't generalize | +0.04 | -0.16 | -3.7pp | +5.1pp | **KEEP** (Binance benefit) |
+| `rank_max` (≤400) | Skip bottom-of-liquidity tail (low-cap names too friction-bound) | +0.11 | +0.08 | -4.9pp | -1.6pp | **RE-TEST** (LOO suggests filter hurts both venues mildly) |
+| `realized_loss` (≥6 stops/5d) | Stop firing on names with too many recent losses; basket risk-off when peers are stopping out | +0.10 | +0.00 | -1.2pp | +0.0pp | **RE-TEST** (Bybit benefit on removal; Binance no-op) |
+| `day_return` (≥0) | Signal day must be positive return; ensures we're not buying the dip | +0.02 | +0.03 | +0.0pp | +0.0pp | **DROP** (no-op both venues; Occam) |
+| `stop_pressure` (≥7 stops/10d) | Stop firing on basket-level stress | -0.03 | +0.05 | +0.9pp | -4.1pp | **DROP** (no-op both venues; Occam) |
+| `max_active` (3) | Position cap — at most 3 concurrent trades | (degenerate) | (degenerate) | (degenerate) | (degenerate) | **KEEP** (LOO degenerate; production value untested but mechanism essential) |
+
+### Decisions
+
+**KEEP without further testing (10 filters):** crowding,
+event_rank_frac, turnover_ratio, entry_delay, cooldown, rank_min,
+residual_return, close_location, pit_age, max_active.
+
+**RE-TEST individually before drop (2 filters):** rank_max,
+realized_loss. Each gets a single-cell test where the filter is removed
+WITH the rest of the stack intact, run on full window + 3 sub-periods,
+both venues. Investigation-bar threshold applies.
+
+**DROP without further test (2 filters):** day_return, stop_pressure.
+LOO Δ within ±0.05 Sharpe on both venues = genuinely no-op. Each gets
+a separate test only if anyone challenges the drop with a hypothesis.
+
+### Hypothesis testing for the DROP candidates
+
+For day_return and stop_pressure (the planned drops), R1 includes a
+single "remove these two" cell to verify the joint drop doesn't
+surface a missing interaction effect. Investigation bar.
+
+### Cell list (R1)
+
+| Cell | Description |
+|---|---|
+| `R1_baseline_v2` | Production filter stack as-is (control) |
+| `R1_drop_day_return` | Production minus `day_return` |
+| `R1_drop_stop_pressure` | Production minus `stop_pressure` |
+| `R1_drop_both_noops` | Production minus both `day_return` and `stop_pressure` |
+| `R1_retest_rank_max` | Production minus `rank_max` (re-confirms Phase 0 finding under longer window) |
+| `R1_retest_realized_loss` | Production minus `realized_loss` |
+
+6 cells × 2 venues = 12 runs. Window 2023-04-01 → 2026-04-30. Investigation
+bar. Compute: ~12 × 8 min = ~96 min sequential, ~30 min at 4-way parallel.
+
+### Output
+
+`docs/preregistration/<DATE>-r1-per-filter-audit-verdict.md` with the
+final filter-stack decision. If any DROP / RE-TEST cell investigation-
+positives, the production filter stack proposal is updated; otherwise
+the production stack stays as-is and R2 proceeds.
+
+---
+
+## Sub-phase R2 — Per-feature standalone test + correlation matrix
+
+**Purpose:** Round 1 Phase 5 surfaced 5 features with cross-venue IC.
+Phase 6 jumped to combination before measuring standalone P&L or
+feature correlations. R2 does the missing work.
+
+### Method
+
+For each of 5 surviving features, run a **daily decile-sort backtest**:
+
+1. Each day, rank the eligible universe by feature value
+2. Short the top decile, long the bottom decile (or short-only top
+   decile, since strategy is short-side)
+3. Hold for N days (test N ∈ {1, 3, 7})
+4. Size 1/realized_vol_7d per name (anticipating R5)
+5. Apply per-name per-bar cost model (anticipating R6); for R2 use
+   cost_multiplier 3 as legacy compatibility
+6. Compute MAR, Sharpe, DD, decile-spread P&L time series
+
+Investigation-bar threshold applies.
+
+### Features and their hypotheses
+
+| Feature | Mechanism hypothesis | Literature anchor | Expected MAR |
+|---|---|---|---|
+| `vol_of_vol_30d` | Vol-of-vol = regime instability; high vov names are mid-pump-cycle, vulnerable to comedown | Tail-risk premium (equities); GARCH state | Modest positive |
+| `realized_vol_7d` | "Low-vol anomaly" — high recent vol = overreaction state, mean-reversion premium for shorting | Frazzini-Pedersen 2014 (equities); replicated in crypto | Modest positive |
+| `dist_from_30d_low` | Extended from base = overbought; short-horizon mean reversion dominates | Inverse of 52-week-high effect (George-Hwang 2004 long version) at shorter window | Modest positive |
+| `xs_rank_ret_7d` | Short-horizon momentum reversal — names that pumped over last 7d revert | Jegadeesh 1990 (equities); same pattern in crypto | Modest positive |
+| `xs_rank_ret_3d` | Same as 7d but shorter window — even faster mean reversion | Same literature | Modest positive (likely correlated with 7d) |
+
+### Correlation matrix
+
+After R2 standalone tests complete, compute 5×5 Spearman correlation
+matrix on the daily decile-spread P&L. **Strong hypothesis:** the 5
+features collapse to ~2 orthogonal factors:
+
+- **Factor A: "vol/extension state"** (vol_of_vol_30d + realized_vol_7d
+  + dist_from_30d_low)
+- **Factor B: "short-horizon momentum reversal"** (xs_rank_ret_3d +
+  xs_rank_ret_7d)
+
+If the correlation matrix confirms this clustering (intra-cluster ρ ≥
+0.4, inter-cluster ρ ≤ 0.2), we use the factor structure in R9
+combination. If not, we use all 5 features but weight by IC × (1/avg
+intra-feature corr) — diversification-adjusted.
+
+### Cell list (R2)
+
+5 features × 3 horizons × 2 venues = 30 standalone-decile cells, plus 1
+correlation matrix computation × 2 venues.
+
+Window: 2021-01-01 → 2026-04-30 (full data root, longest available).
+Sub-periods: 3 thirds for stability check.
+
+Investigation bar applies per-cell. The **per-feature standalone P&L
+findings are descriptive only** — no individual feature graduates to
+Promotion alone. The output feeds R9 integration.
+
+Compute: ~30 cells × ~5 min (signal_harness is fast) = ~150 min wall.
+
+### Output
+
+`docs/preregistration/<DATE>-r2-per-feature-standalone-verdict.md` with:
+- Per-feature decile-spread P&L, MAR, Sharpe, DD per horizon per venue
+- 5×5 correlation matrix per venue
+- PCA decomposition reporting how much variance the top-2 components
+  explain (target: ≥80%)
+- Feature-group recommendation for R9 (likely 2-factor or 5-equal-weight)
+
+---
+
+## Sub-phase R3 — Bearish stack honest test (H2 retried)
+
+**Purpose:** Round 1 Phase 2 found H2 falsified-by-construction —
+deterioration direction produces 0 trades because the existing
+quality-positive filters exclude bearish names. R3 tests the bearish
+hypothesis honestly: with appropriate mirror-imaged filters.
+
+### Method
+
+Construct a "bearish filter stack" by mirror-imaging the quality gates:
+
+| Filter | Bullish (current) | Bearish (mirror) |
+|---|---|---|
+| `liquidity_migration_day_return_min` | ≥ 0.0 | ≤ 0.0 |
+| `liquidity_migration_residual_return_min` | ≥ 0.08 | (new: residual ≤ -0.08) |
+| `liquidity_migration_close_location_min` | ≥ 0.30 | (new: close_location ≤ 0.70) |
+| `liquidity_migration_rank_direction` | improvement | **deterioration** |
+| `liquidity_migration_rank_improvement_min` | 150 | 150 (absolute magnitude) |
+| `crowding_filter` | union_pathology | same (R1 confirmed load-bearing) |
+| `turnover_ratio_min` | 6.0 | same (R1 confirmed load-bearing) |
+| `event_rank_frac_max` | 0.90 | same (R1 confirmed load-bearing) |
+| `entry_delay_hours` | 1 | same |
+| `cooldown_days` | 5 | same |
+| `universe_rank` | 31..400 | same |
+| `pit_age_days_min` | 90 | same |
+| `max_active_symbols` | 3 | 3 |
+| `stop_loss_pct` | 0.12 (long-tail risk) | 0.12 (same; shorts have unbounded upside) |
+| `take_profit_pct` | 0.26 | (TBD: maybe none, since bearish continuation has no symmetric target) |
+
+### Code changes required
+
+- `liquidity_migration` CLI: add `--liquidity-migration-residual-return-max`
+  (matching the new bearish minimum direction). The existing `*-min`
+  flag stays for the bullish stack.
+- Similarly `--liquidity-migration-close-location-max`.
+- `volume_events_cell.sh`: add `--mirror-quality-filters` shorthand that
+  flips the three quality filters' direction.
+
+Estimated effort: ~3 hours including tests.
+
+### Cell list (R3)
+
+3 cells × 2 venues = 6 runs:
+
+| Cell | Description |
+|---|---|
+| `R3_baseline_v2` | Production filter stack (bullish), as control |
+| `R3_bearish_only` | Mirror-image filter stack, deterioration direction |
+| `R3_market_neutral` | Both stacks running in parallel with separate slot pools (3 long-side improvement entries + 3 short-side deterioration entries; balanced basket) |
+
+Investigation bar. Window: 2021-01-01 → 2026-04-30.
+
+**Note on R3_market_neutral:** if both legs investigation-positive,
+this is the most interesting cell — it's a market-neutral version of
+the strategy. If it Promotion-eligible at R10, that's a meaningful
+strategy-class improvement.
+
+Compute: ~6 cells × ~10 min = ~60 min wall.
+
+### Output
+
+`docs/preregistration/<DATE>-r3-bearish-stack-verdict.md`.
+
+If R3_bearish_only investigation-positive: a parallel "bearish" line
+opens that gets its own R9 integration + R10 promotion test.
+
+If R3_market_neutral investigation-positive: this is the lead candidate
+for R9.
+
+If both R3 cells investigation-negative: H2 is decisively closed even
+under appropriate filters. The deterioration direction does not carry
+short-side edge in this data. Bug-driven trades were genuinely
+capture-by-accident, not edge.
+
+---
+
+## Sub-phase R4 — Risk-factor model construction (Jane-Street-style)
+
+**Purpose:** Round 1 results are measured against $0 — no factor model
+strips known systematic risk premia. R4 builds a 5-8 factor model for
+crypto perp returns so every Round 2 strategy can be evaluated on
+**residual alpha** (the part not explained by exposure to known factors).
+
+### Proposed factors
+
+1. **BTC beta** — regression of name's daily returns on BTC's daily
+   returns over rolling 60d window. Captures market exposure.
+2. **Cross-sectional 3d momentum** — rank within universe of trailing
+   3-day returns. Captures short-horizon trend factor.
+3. **Cross-sectional 30d momentum** — same at longer horizon. Captures
+   longer-horizon trend.
+4. **Realized vol regime** — annualized 7d vol, ranked cross-sectionally.
+   Captures vol-tier exposure.
+5. **Funding rate exposure** — current funding rate Z-score
+   cross-sectionally. Captures carry-tilt.
+6. **Liquidity tier** — log(7d ADV), ranked cross-sectionally.
+   Captures small-cap risk premium.
+7. **Alt-season factor** — equal-weight return of top 20 alts vs BTC.
+   Captures alt-rotation regime.
+8. **Mark-index premium** — current mark-index spread Z-score. Captures
+   positioning intensity.
+
+### Method
+
+For each (date, symbol) in the PIT panel, compute the 8 factor
+exposures using only data available at decision_ts. Then per-day,
+cross-sectionally regress that day's realized returns on the 8 factor
+loadings (controlling for the residual). Output:
+
+- Factor return time series (8 × ~1,500 days for Bybit, ~1,800 for Binance)
+- Factor loadings per (date, symbol) — for residual-return computation
+- Residual return time series per (date, symbol) — the "after-factor" return
+
+### Validation
+
+The model is valid if:
+- Each factor's daily return Sharpe > 0 (factor is real)
+- |Per-factor avg correlation with realized vol| < 0.3 (factors are not
+  proxies for each other)
+- Residual return cross-section has mean ~0 and std smaller than raw
+  return std (factor model captures meaningful variance)
+
+If validation fails, drop the underperforming factors and iterate.
+Target: 5-6 stable factors per venue.
+
+### Strategy residualization
+
+Once the factor model exists, every Round 2 strategy cell's P&L can be
+**decomposed**:
+
+```
+Strategy P&L = sum over trades of:
+  (factor_exposure_at_entry · factor_returns_during_hold)  ← explained
+  + residual_return_during_hold                            ← unexplained = candidate alpha
+```
+
+A cell's **residual Sharpe** is the Sharpe of its residual returns.
+For Promotion-eligibility, residual Sharpe must be ≥ +0.3 — otherwise
+the cell is "selling vol" or "buying beta" rather than carrying real
+alpha.
+
+### Code changes
+
+New module `liquidity_migration/risk_model.py`:
+
+```python
+def build_factor_panel(data_root, *, start, end) -> pl.DataFrame
+def fit_factor_returns(factor_panel) -> pl.DataFrame
+def compute_residual_returns(factor_panel, factor_returns) -> pl.DataFrame
+def decompose_strategy_pnl(trade_ledger, factor_returns, factor_loadings) -> dict
+```
+
+CLI: `risk-model {build-panel, fit-returns, residualize-trades}`.
+
+Effort: ~3 days of code + tests. This is the largest single addition
+in Round 2 by code volume.
+
+### Output
+
+`docs/preregistration/<DATE>-r4-risk-model-verdict.md`. Factor
+selection finalized; integration spec for R9.
+
+---
+
+## Sub-phase R5 — 1/realized-vol position sizing
+
+**Purpose:** Replace dollar-equal sizing with risk-equal sizing per
+name. JS-style table stakes; typically shrinks DD by 20-30% without
+changing the strategy.
+
+### Method
+
+For each cell that fires entries, compute:
+
+```python
+position_size_usd = (gross_exposure × equity)
+                    × (target_vol_per_name / realized_vol_7d_for_name)
+                    / max(1, max_active_symbols)
+```
+
+Where:
+- `target_vol_per_name` is a config knob (e.g. 1.5% daily vol per name).
+- `realized_vol_7d_for_name` is the annualized 7d vol of the name at
+  signal close.
+- Sum-of-positions cap remains `gross_exposure × equity`.
+
+This makes a 100% vol name take half the position of a 50% vol name —
+both contributing equal risk dollars, not equal position dollars.
+
+### Validation
+
+Re-run the R1 baseline_v2 cell with 1/realized-vol sizing and compare:
+- MAR should improve (DD shrinks, return roughly stable)
+- Sharpe should improve (volatility of P&L drops)
+- Trade count, win rate unchanged (sizing change doesn't affect entry
+  decisions)
+- Max single-trade contribution to DD should drop
+
+If MAR doesn't improve OR Sharpe degrades materially, the sizing is
+wrong (calibration of target_vol_per_name needs tuning). Investigation
+bar applies.
+
+### Code changes
+
+Modify `liquidity_migration.event_demo` (and backtest equivalents) to
+support `--position-sizing {dollar_equal, risk_equal}` and a new
+`--target-vol-per-name` knob. Default stays `dollar_equal` for
+backward compatibility; cells opt in via flag.
+
+Effort: ~1 day code + tests.
+
+### Cell list (R5)
+
+| Cell | Description |
+|---|---|
+| `R5_baseline_dollar_equal` | Production sizing (control) |
+| `R5_risk_equal_1pct` | 1/realized-vol, target vol = 1% daily/name |
+| `R5_risk_equal_1.5pct` | 1/realized-vol, target vol = 1.5% daily/name |
+| `R5_risk_equal_2pct` | 1/realized-vol, target vol = 2% daily/name |
+
+4 cells × 2 venues = 8 runs. Investigation bar.
+
+### Output
+
+`docs/preregistration/<DATE>-r5-position-sizing-verdict.md`. The
+winning target_vol value pins R9's sizing knob.
+
+---
+
+## Sub-phase R6 — Per-name, per-bar cost model
+
+**Purpose:** Replace the single `cost_multiplier=3` with a model that
+varies cost by name (liquidity tier), size relative to ADV, time of
+day, and hold-period funding.
+
+### Method
+
+Calibrate the cost surface from forward demo + paper-shadow data.
+Specifically:
+
+1. For each demo trade, compute model-predicted cost (decompose into
+   spread + impact + funding + maker/taker share).
+2. Compute realized cost = (paper-shadow execution price - demo
+   execution price) + (paper funding - demo funding) for the matched
+   trade.
+3. Regress realized cost on (size/ADV, hour of day, vol regime, name
+   liquidity tier) using OLS.
+4. The fitted regression IS the cost model.
+
+### Functional form (initial)
+
+```
+predicted_cost_bps = α
+                   + β1 × (size_usd / ADV_30d)
+                   + β2 × vol_7d
+                   + β3 × spread_proxy_at_entry
+                   + β4 × hour_of_day_indicator
+                   + β5 × funding_rate × hold_hours / 8
+```
+
+α captures the base half-spread + slippage floor. β1-β5 are calibrated
+per-venue (Bybit and Binance differ structurally).
+
+### Validation
+
+The cost model is valid if:
+- Predicted vs realized cost correlation > 0.5 (R² > 0.25)
+- Model recovers the venue's published taker fee at α (sanity check)
+- Out-of-sample (last 30 days of forward demo) prediction RMSE within
+  20% of in-sample
+
+If validation fails, drop the worst-performing β term and refit.
+
+### Recosting Round 2 cells
+
+Every Round 2 cell that produces trades gets two cost-attributions:
+- **Legacy:** `cost_multiplier=3` flat (matches Round 1)
+- **Model:** predicted cost from R6 per trade
+
+The two are reported side-by-side in cell verdicts. Promotion-eligible
+cells must clear the promotion bar **under the model cost** — not
+just the legacy flat cost. This protects against "this only works if
+costs are ignored."
+
+### Code changes
+
+New module `liquidity_migration/cost_model.py`. Integrates with
+existing backtest cost-application logic via a new
+`--cost-model {flat, model}` flag.
+
+Effort: ~2 days code + tests + calibration.
+
+### Output
+
+`docs/preregistration/<DATE>-r6-cost-model-verdict.md`. Cost model
+spec + validation evidence + delta vs legacy on all R1 cells (so we
+know which cells were over- vs under-counting costs).
+
+---
+
+## Sub-phase R7 — Stress test suite (named historical events replay)
+
+**Purpose:** Quantify strategy behaviour during named tail events.
+Round 1 noted the strategy is "regime-conditional"; R7 makes that
+concrete by replaying specific historical regime breaks and measuring
+P&L, max DD during the event, and time to recovery.
+
+### Events to replay
+
+| Event | Date range | What happened |
+|---|---|---|
+| BTC March 2020 crash | 2020-03-09 → 2020-03-20 | -50% BTC in 5 days, deleveraging cascade |
+| LUNA collapse | 2022-05-08 → 2022-05-18 | $40B+ market cap evaporated in 10 days |
+| 3AC / June 2022 deleveraging | 2022-06-12 → 2022-06-22 | Hedge fund liquidations triggered cross-venue cascade |
+| FTX collapse | 2022-11-08 → 2022-11-15 | Largest exchange failure to date; cross-venue contagion |
+| Yen carry unwind | 2024-08-05 → 2024-08-12 | Cross-asset deleveraging; crypto crashed despite no idiosyncratic catalyst |
+| April 2025 regime shift | 2025-04-01 → 2025-04-30 | Inferred from Round 1 results — month where the strategy first showed major drawdown |
+| Nov-Dec 2025 stretch | 2025-11-01 → 2025-12-31 | The losing-months stretch in Round 1 baseline equity curve |
+| May 2026 drawdown | 2026-05-01 → 2026-05-28 | The current ongoing -42% DD |
+
+### Method
+
+For each event, run the R9 integrated strategy (after R9 completes) on
+the event window only, with:
+- Strategy state warm-started from data ending 90 days before event
+  (matches a realistic live restart scenario)
+- Same fill model, cost model, position sizing as R10 promotion bar
+- No look-ahead — only data known at each tick
+
+Report per event:
+- Trades opened during event
+- Trades closed during event
+- P&L during event
+- Max DD during event
+- Days from event end to recovery (high-water-mark)
+- Comparison to baseline strategy P&L during same event
+
+### Validation criteria
+
+Stress-test "pass" requires:
+- Strategy DD during ANY event ≤ -50% (i.e. doesn't go beyond historical
+  baseline DD in any single event)
+- Strategy P&L during 3 / 8 events ≥ baseline P&L during the same
+  events (i.e. doesn't underperform baseline in tail events)
+- Days to recovery ≤ 180 from any event (strategy doesn't get stuck)
+
+If a strategy cell fails any of these on any event, it's
+**promotion-falsified** regardless of its full-window metrics. This is
+the strongest tail-risk gate in Round 2.
+
+### Compute
+
+~8 events × ~5 min stress backtest per event per cell. For each R10
+candidate cell, ~40 min wall.
+
+### Output
+
+`docs/preregistration/<DATE>-r7-stress-test-verdict.md`. Per-cell
+stress event table + pass/fail per criterion.
+
+---
+
+## Sub-phase R8 — Capacity analysis
+
+**Purpose:** Compute the AUM ceiling at which strategy's own market
+impact erodes Sharpe meaningfully. JS-style: never deploy a strategy
+without knowing this number.
+
+### Method
+
+For each R10 candidate cell, simulate scaled-up versions:
+
+| Scale | Notional per name |
+|---|---|
+| 1× (current) | dollar_equal or risk_equal as configured |
+| 5× | 5× the per-name notional |
+| 10× | 10× |
+| 25× | 25× |
+| 50× | 50× |
+| 100× | 100× |
+
+For each scale, apply the R6 cost model (which has a size/ADV term),
+recompute trade P&L. Find the scale at which Sharpe drops 30% below
+1× Sharpe. That's the **capacity ceiling**.
+
+### Output
+
+For each R10 candidate, a capacity curve (scale vs Sharpe vs MAR) and
+a single capacity ceiling number reported in the verdict.
+
+### Validation
+
+A cell is "deployable" only if its capacity ceiling implies real-money
+AUM ≥ 10× the operator's intended deployment size. For typical retail
+target sizes ($10k-$100k notional), this means capacity ceiling ≥
+$100k notional per name (current effective ~$3k per name on demo
+suggests we're at <1% of capacity, so this should not bind for most
+cells).
+
+### Compute
+
+Per cell: 6 scales × ~10 min recost = ~60 min wall.
+
+### Output
+
+`docs/preregistration/<DATE>-r8-capacity-verdict.md`. Per-cell
+capacity curve.
+
+---
+
+## Sub-phase R9 — Integrated strategy assembly
+
+**Purpose:** Combine the validated outputs of R1-R8 into ONE integrated
+strategy specification, then run the candidate cells.
+
+### Architecture
+
+The integrated strategy = **event-driven entries augmented by IC signal,
+sized by risk, costed by model, capped by factor exposure.**
+
+Specifically, for each (date, candidate symbol):
+
+1. **Event-driven entry gate** (from R1 filter audit, kept filters):
+   the symbol must pass the event-detection filter stack (the production
+   stack minus any R1-validated drops). If gate fails: skip.
+
+2. **IC-augmented signal score** (from R2 standalone + R4 risk model):
+   compute the orthogonalized 2-factor signal from R2 (Factor A: vol/
+   extension state; Factor B: short-horizon mean reversion). Symbol's
+   signal_score = sum of factor loadings weighted by their IC
+   magnitudes (sign-corrected; all features have negative IC so
+   weighted negatively means short).
+
+3. **Signal threshold:** symbol's |signal_score| must exceed a
+   pre-registered threshold (TBD: tested in R9 sub-cells at multiple
+   thresholds; the "rank top decile by signal_score" is the default
+   pinning rule).
+
+4. **Risk-exposure caps** (from R4): the candidate's factor exposure
+   (BTC beta, momentum, vol regime, etc.) must not push the active
+   basket beyond pre-registered per-factor exposure caps (e.g.
+   |basket BTC beta| ≤ 0.5). If adding the candidate would breach a
+   cap, skip.
+
+5. **Position sizing** (from R5): risk-equal sizing with target vol
+   pinned from R5 winner.
+
+6. **Cost-adjusted P&L** (from R6): model cost predicted per trade,
+   subtracted from realized return.
+
+### Variants tested (R9 cell list)
+
+7 integrated-strategy cells × 2 venues = 14 runs:
+
+| Cell | Description |
+|---|---|
+| `R9_event_only` | Event-driven only (current production), risk-equal sized, model-costed. Control. |
+| `R9_event_plus_ic` | Event-driven + IC signal additive (signal must exceed threshold OR be event-driven) |
+| `R9_event_AND_ic` | Event-driven AND IC signal (both must fire — strictest) |
+| `R9_event_OR_ic_factor_capped` | event OR ic, with R4 factor exposure caps active |
+| `R9_ic_only_top_decile` | Pure IC signal, top-decile-by-signal, no event filter |
+| `R9_market_neutral` | Bullish event-driven + bearish event-driven (from R3) in parallel slots |
+| `R9_market_neutral_factor_capped` | Same as above + R4 factor caps |
+
+Investigation bar at this stage; the winning cell forwards to R10
+promotion bar.
+
+Compute: ~14 cells × ~15 min = ~210 min wall.
+
+### Output
+
+`docs/preregistration/<DATE>-r9-integrated-strategy-verdict.md`. The
+integrated-strategy spec finalized + best cell identified.
+
+---
+
+## Sub-phase R10 — Validation sweep + Promotion-bar gate
+
+**Purpose:** Apply the strict Promotion bar (MAR Δ ≥ +0.5, Pareto on
+return/DD, sub-period sign-consistent, ≥50 trades, residual Sharpe ≥
++0.3) to the R9 candidate(s). Max 5 forward to R11 OOS.
+
+### Method
+
+Each R9 investigation-positive cell gets the full Promotion-bar test:
+- Full window run + 3 sub-periods, both venues
+- R4 residual Sharpe computation
+- R6 model-cost recosting
+- R7 stress-test pass requirement
+- R8 capacity ceiling > $100k notional/name
+
+If any criterion fails → not promotion-eligible.
+
+If multiple cells eligible → FDR ceiling (top-5 by combined MAR Δ).
+
+### Cell list (R10)
+
+Conditional on R9 outputs. At most 5 cells × 2 venues × 3 sub-periods
+× ~10 min = ~5h wall.
+
+### Output
+
+`docs/preregistration/<DATE>-r10-promotion-gate-verdict.md`. The
+finalist(s) forwarded to R11 OOS.
+
+---
+
+## Sub-phase R11 — Pre-2023 OOS gate (mandatory final)
+
+**Purpose:** Same as Round 1 Phase 7. The only clean evidence surface
+remaining for this strategy is the pre-2023 dedicated OOS roots.
+
+### Pre-requisite
+
+Pre-2023 Bybit + Binance roots must exist on the 5950X. If not,
+rebuild before R11 (~6h data download per venue).
+
+### Method
+
+For each R10 finalist, run on:
+- Pre-2023 Bybit OOS root (full window + 3 sub-period thirds)
+- Pre-2023 Binance OOS root (same)
+
+Apply the Promotion bar (same as R10) on the OOS data:
+- MAR > 0 on both venues, all sub-periods
+- DD < 50% on both venues, all sub-periods
+- Sign-consistent direction
+- ≥20 trades/sub-period on Bybit (≥15 on Binance)
+
+### Output
+
+`docs/preregistration/<DATE>-r11-pre2023-oos-verdict.md`. Verdict per
+candidate.
+
+### Forward state
+
+A finalist passing R11 is **paper_ready** per the integrity standard,
+eligible for forward demo deployment. The demo deployment itself is a
+separate operator decision; the research program ends at R11 verdict.
+
+If ZERO finalists pass R11: **PROGRAM COMPLETE — DOCUMENTED NULL.**
+Strategy stays in current state. Forward demo + paper continue.
+
+---
+
+## Compute plan
+
+### Per-cell environment
+
+```bash
+export POLARS_MAX_THREADS=4
+export SWEEP_MAX_WORKERS=8
+```
+
+8 cells × 4 polars threads = 32 threads = full 5950X SMT.
+
+### Phase-by-phase wall-time estimate on 5950X
+
+| Phase | Cells | Wall (8-way par.) | Cumulative |
+|---|---:|---:|---:|
+| R0 — Doc cleanup | 0 | 0 min | 0 min |
+| R1 — Per-filter audit | 12 | 30 min | 30 min |
+| R2 — Per-feature standalone | 30 | 30 min | 1 h |
+| R3 — Bearish stack | 6 | 60 min | 2 h |
+| R4 — Risk model build | (code work) | ~3 days | 2 h + 3d |
+| R5 — Sizing calibration | 8 | 30 min | 3d 2.5h |
+| R6 — Cost model build | (code work) | ~2 days | 5d 2.5h |
+| R7 — Stress tests | per-finalist | 40 min each | + 40 min/finalist |
+| R8 — Capacity | per-finalist | 60 min each | + 60 min/finalist |
+| R9 — Integrated assembly | 14 | 210 min | 5d 6h + |
+| R10 — Promotion gate | up to 5 finalists | 5 h | 5d 11h |
+| R11 — OOS gate | up to 5 finalists | 55 min/finalist | + 55 min/finalist |
+
+**Total: ~1 week wall time** with 2-3 days of that being code work
+(R4 + R6) that the operator drives via Claude pair-coding sessions.
+
+The operator should expect:
+- **Day 1-2:** R0 + R1 + R2 (mostly mechanical sweeps)
+- **Day 3-5:** R4 (risk model build) + R6 (cost model build) — code work
+- **Day 6-8:** R3 + R5 + R7 (depends on R4) + R8 (depends on R6) + R9
+- **Day 9-10:** R10 + R11 if any finalist emerges
+
+Conditional shortcuts:
+- If R1 finds no DROPs/RE-TESTS productive, R1 takes 30 min not 2h
+- If R3 bearish stack investigation-negative, R3_market_neutral cell
+  in R9 is skipped, R9 shrinks
+- If R5 winner is ≈ dollar-equal in result, sizing change doesn't
+  propagate — R9 cells use legacy sizing
+- If R6 cost model is materially different from cost_multiplier=3,
+  R10 needs cells re-run under the new cost; otherwise legacy
+  cost-multiplier=3 is fine
+- If NO R9 cell investigation-positives, R10 + R11 are skipped;
+  program closes with documented null
+
+---
+
+## Threats to inference
+
+Cross-referenced to `docs/backtesting_errors_we_never_repeat.md`.
+
+| # | Threat | Mitigation |
+|---|---|---|
+| #1 | Future universe selection | Full 764-symbol manifest (v5-listing supplement always-on per K1-K5 refactor). No PIT contamination from today's coverage. |
+| #2 | Future info in signals | All R2 features computed at end-of-day close (decision_ts). All forward returns entry+1h → entry+1h+Nd. Signal harness tests pin causality per feature. R4 factor exposures computed at entry, not from data after. |
+| #4 | Revised / non-PIT data | All runs against full-PIT roots. No retroactive manifest filtering for promotion (Phase 1 biased_benchmark commitment is binding). |
+| #15 | Warm-started state | R7 stress tests explicitly use cold-start with 90 days of warm-up data, matching realistic live restart. R9 cells use standard volume-events cold-start. |
+| #16 | Same-code illusion | All R2-R10 features and filters live in production-shipped code (signal_harness, risk_model, cost_model modules). Demo daemon honours the same flags as backtest — no backtest-only branches. |
+| #17 | Parameter mining | Two-tier threshold structure: Investigation tier doesn't promote, Promotion tier preserves Round 1's bar. FDR ceiling raised to 5 (was 3) but justified by Investigation-tier pre-filtering. Decision rules pre-registered before any data is seen. |
+| #18 | OOS reuse | Pre-2023 roots have been touched twice (original "fail everything" call + Round 1 plan would have used them but didn't because no Phase 7 finalist emerged). R11 OOS dilution is real. Mitigation: ≥30 days of fresh forward-demo data must accumulate before any R11 finalist goes to mainnet conversation. |
+| #19 | Multiple testing | Across R1+R2+R3+R5+R9+R10 cells, ~80 cells total. FDR ceiling of 5 at the R10→R11 gate keeps the bar high. Investigation-tier failures are NOT re-tested under different cell configurations. |
+| #20 | Bad accounting | R6 cost model fixes the single-multiplier-3 problem from Round 1. All R10+ cells must clear under the model cost, not just legacy flat cost. |
+| #21 | Hidden common risk | R4 factor model explicitly decomposes basket risk into 8 named factors. R9 cells optionally cap per-factor exposure. Cells with residual Sharpe < +0.3 are promotion-rejected (catches "you're just selling vol" disguised as alpha). |
+| #22 | Venue mechanics fantasy | R6 cost model calibrated against paper-shadow vs demo slippage — uses real venue mechanics, not theoretical. Hold-period funding included. |
+| #23 | Pretty-report bias | Every cell produces trade ledger, equity curve, monthly P&L, factor-decomposed P&L, stress-test scorecard, capacity curve, residual-Sharpe report. Mandatory artifacts per cell. |
+| #24 | Unreconciled live drift | R11-passing finalists go to demo first with daily paper-shadow reconciliation. No mainnet path that skips ≥30 days demo. |
+| #25 | All-or-nothing compute | All sub-phase orchestrators inherit from `scripts/_sweep_runtime.py` shared parallel orchestrator (from R0 cleanup). Every cell's report flushed before next cell starts. |
+
+### Specific Round 1 lessons applied
+
+- **From Phase 0 falsifier-hits:** 3 named load-bearing filters
+  preserved without question. No casual "let's see if removing X helps"
+  experiments without a fresh pre-reg with new hypothesis.
+- **From Phase 1 null:** the universe-widening contribution to DD is
+  small. Phase 1-style biased_benchmark tests are SKIPPED in Round 2 —
+  the universe question is closed.
+- **From Phase 5 success:** the IC harness works. Re-use it in R2/R9
+  without re-validation work.
+- **From Phase 6 failure:** combined portfolios need orthogonalization,
+  proper holding-period accounting, real cost model. R9 does all
+  three. The Phase 6 implementation is NOT inherited as-is.
+- **From Phase 2 venue-divergence:** cross-venue Manifesto remains the
+  primary discrimination filter. Bybit-only winners are NOT promoted.
+
+---
+
+## Pre-registration commitments
+
+By committing this plan, the operator + assistant commit in advance to:
+
+1. **MAR is the primary metric.** Sharpe is secondary tie-breaker.
+   Switching back to Sharpe-primary mid-program is explicit
+   p-hacking and forbidden.
+2. **Two-tier thresholds are pre-committed.** Investigation bar applies
+   at R1-R8 sub-phases; Promotion bar (strict) applies at R10→R11
+   gate. Loosening either after seeing results is forbidden.
+3. **FDR ceiling is 5 candidates** at the R10 gate. If more cells
+   eligible, top-5 by combined-venue MAR Δ; rest closed-rejected.
+4. **R11 OOS is the final gate.** R11 failure = closed. No "Round 3"
+   to rescue near-misses.
+5. **No production filter change** is made on basis of R1-R8 results.
+   Production stack stays as-is until R11 produces a finalist (which
+   triggers a separate operator decision about demo deployment).
+6. **No mainnet** until ≥30 days of forward demo evidence post-R11
+   pass, with daily reconciliation against same-config paper-shadow.
+7. **All R0-R9 results are `exploratory` or `biased_benchmark` per
+   the integrity standard.** Only R11-passing cells reach `candidate`.
+   Only forward-demo-confirmed cells reach `paper_ready`.
+8. **No off-menu cells.** New cells require an amendment commit to
+   this doc before running. Silent menu expansion is forbidden.
+9. **Failure cases are first-class evidence.** If R10/R11 produces
+   ZERO finalists, the program ends with a documented null. The
+   strategy stays in its current state. There is no "ship something"
+   obligation.
+10. **No hard end-date.** This is deliberately different from Round 1.
+    The operator's instruction is "weeks if needed." If a sub-phase
+    legitimately takes longer than its estimate (e.g. R4 risk model
+    needs iteration), that is acceptable. The discipline is in NOT
+    shortcutting the workflow, not in racing to a deadline.
+
+---
+
+## Timeline (no hard deadline; weeks acceptable)
+
+| Week | Activity |
+|---|---|
+| Week 1 | R0 (doc cleanup) + R1 (filter audit) + R2 (per-feature) + R3 (bearish stack). Code: 3 small filter-related additions for R3. |
+| Week 2 | R4 (risk model — 3 days code) + R5 (sizing — 1 day code + sweep) |
+| Week 3 | R6 (cost model — 2 days code + calibration) + R7 (stress tests pending R4/R6) + R8 (capacity pending R6) |
+| Week 4 | R9 (integrated strategy assembly) + R10 (promotion gate). Conditional on R9 candidates. |
+| Week 5 | R11 (OOS gate) if any R10 finalist. Conditional on data-root state. |
+| Week 6+ | Forward demo deployment proposal IF R11 passing. 30-day demo + paper-shadow reconciliation. Then operator decision on mainnet. |
+
+If R1/R2/R3 produce nothing meaningful, R4-R10 can still run as
+infrastructure investment (the risk model + cost model are useful
+regardless of whether they produce a candidate strategy this round).
+The infrastructure becomes durable assets for any future research.
+
+---
+
+## Open questions / things to confirm before kicking off
+
+1. **Venue-specific config?** Phase 2 confirmed Bybit and Binance have
+   different optimal rank-improvement thresholds. R10 could allow
+   per-venue threshold tuning (e.g. Bybit uses 250, Binance uses 125).
+   This doubles the parameter space but matches reality. **Default in
+   R10: joint threshold (single value tested against both venues).**
+   Per-venue is a possible R10 amendment if joint-threshold cells
+   investigation-negative across the board.
+
+2. **Forward-demo runway length?** 30 days post-R11 pass is the
+   minimum. Operator may want 60-90 days for higher-conviction
+   mainnet sizing. Default: 30 days minimum, operator decides
+   longer at promotion time.
+
+3. **Bearish stack as separate strategy?** If R3 produces a
+   investigation-positive bearish cell AND R9_market_neutral is
+   promotion-eligible, do we deploy the long+short basket OR
+   maintain just the bearish line as a separate strategy on top of
+   existing short-only? **Default: market-neutral basket; if
+   operator wants the bearish line standalone that's a separate
+   pre-reg.**
+
+4. **Capacity vs deployment size?** R8 reports a number; operator
+   decides actual deployment size. Default constraint: never deploy
+   >10% of R8 capacity ceiling.
+
+5. **What if a candidate strategy is promotion-eligible but uses
+   features beyond current PIT data (e.g. needs OI from Binance
+   pre-2024 which we don't have)?** Per Round 1 program verdict
+   Option D: backfill the data before R11. Default: data backfill is
+   ALLOWED before R11; the strategy stays consistent with
+   currently-published-data discipline.
+
+---
+
+## Appendices
+
+### Appendix A — Filter hypothesis library (detailed)
+
+For each KEPT filter from R1, the longer-form hypothesis + literature
+anchor + observable signature:
+
+- **`crowding_filter` (union_pathology):** ...detection of late entries
+  via OR-aggregated stress indicators... [TBD: detailed]
+- **`event_rank_frac_max` (0.90):** Caps event score at 90th percentile.
+  Hypothesis: top decile of event scorers is over-traded population.
+  Literature: cross-sectional attention literature (Da et al 2011).
+  Signature: removal lets in highest-event-score names, which Round 1
+  Phase 0 confirmed crashes Sharpe by >1.0 on both venues.
+- [10 more filters, written out at the time R1 verdict is committed]
+
+### Appendix B — Feature hypothesis library (detailed)
+
+For each R2 feature, detailed mechanism + literature + decile-spread
+prediction:
+
+- **`vol_of_vol_30d`:** Daily standard deviation of daily returns over
+  30d. High vov = unstable vol regime, GARCH-like clustering.
+  Literature: tail risk premium (Bollerslev-Tauchen 2009); volatility
+  cascade dynamics (Calvet-Fisher 2008). Predicted: short-side
+  decile-spread Sharpe 0.5-1.0 standalone.
+- [4 more features, written out at the time R2 verdict is committed]
+
+### Appendix C — Risk-factor library (R4)
+
+For each proposed factor, motivation + measurement spec + expected
+behaviour:
+
+- **BTC beta:** OLS regression of name's daily returns on BTC's daily
+  returns over rolling 60d. Captures market direction risk.
+  Expected: most alts have β in [0.7, 1.3]; majors have β closer to
+  1.0; meme coins have β > 1.5 with high noise.
+- [7 more factors, written out at the time R4 verdict is committed]
+
+### Appendix D — CLI templates per sub-phase
+
+Reproducible CLI for each R-phase's typical cell, with all baseline
+flags filled in. (To be auto-generated from `scripts/volume_events_cell.sh`
+once R5/R6 sizing + cost flags are added.)
+
+---
+
+## What is NOT in scope for Round 2
+
+Explicitly out:
+
+- **ML signal combiners.** Round 2 uses linear combinations (equal-Z,
+  IC-weighted, PCA-orthogonalized). Tree models / neural nets are
+  deferred to a hypothetical Round 3 only if Round 2 produces a
+  candidate that we want to enhance.
+- **News / sentiment features.** No NLP data ingested.
+- **On-chain features.** No on-chain pipeline.
+- **Cross-venue arbitrage / pairs.** Each venue tested independently;
+  cross-venue is a different strategy class.
+- **Long-only strategy.** Bearish + market-neutral are in scope per R3;
+  pure long is not.
+- **Higher-frequency execution.** All entries respect the +1h delay.
+  Microstructure / order book / sub-1h timing is out.
+- **Alternative asset classes.** Bybit + Binance USD-M perps only.
+
+These exclusions are deliberate scope discipline. Each could be a
+future research program on its own pre-reg.
+
+---
+
+## Summary of what makes Round 2 different from Round 1
+
+| Aspect | Round 1 | Round 2 |
+|---|---|---|
+| Primary metric | Sharpe | **MAR (return/DD)** |
+| Threshold tiers | Single (Manifesto strict) | **Two (Investigation + Promotion)** |
+| Filter audit | LOO only (single-threshold strict) | LOO + softer-criterion + individual hypothesis test |
+| Feature work | IC test only, then naive combination | IC test + standalone decile + correlation matrix + PCA + orthogonalized combination |
+| Bearish hypothesis | Falsified-by-construction (no test) | **Honest test via R3 mirror-stack** |
+| Risk model | None (returns vs $0) | **8-factor crypto perp model (R4)** |
+| Position sizing | Dollar-equal | **1/realized-vol (R5)** |
+| Cost model | Single multiplier ×3 | **Per-name, per-bar regression model (R6)** |
+| Tail risk | Implicit via DD reporting | **Named-event stress test suite (R7)** |
+| Capacity | Not measured | **Per-cell capacity curve (R8)** |
+| Strategy architecture | Event-driven only | **Event-driven + IC-augmented + factor-capped + risk-sized + cost-aware** |
+| Hard deadline | 2026-06-15 (19-day buffer) | None (weeks acceptable) |
+| FDR ceiling | 3 candidates | 5 candidates (justified by Investigation-tier pre-filter) |
+| Mandatory artifacts per cell | Ledger + equity + monthly | + factor-decomposed P&L + stress scorecard + capacity curve + residual Sharpe |
+
+Round 2 is **bigger, slower, more rigorous, and more honest about
+what counts as evidence.** It also produces durable infrastructure
+(risk model, cost model, stress harness, capacity analyzer) that
+outlasts any single strategy decision.
