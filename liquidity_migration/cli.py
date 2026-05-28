@@ -1844,7 +1844,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-_COMMANDS_WITHOUT_DATA_ROOT = frozenset({"download-data", "combined-book-telegram-report"})
+_COMMANDS_WITHOUT_DATA_ROOT = frozenset(
+    {
+        "download-data",
+        "combined-book-telegram-report",
+        # The three reconciliation commands read from explicit --paper-data-root /
+        # --demo-data-root arguments; the global research data_root they would
+        # otherwise check doesn't exist on the VPS (where the demo runs) and
+        # doesn't need to.
+        "reconcile-paper-demo",
+        "reconcile-long-paper-demo",
+        "reconcile-demo-bybit",
+    }
+)
 
 
 def _expanded_report_dir(report_dir: str | Path | None, *, default: Path) -> Path:
