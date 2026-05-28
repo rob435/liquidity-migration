@@ -2743,6 +2743,11 @@ def _execute_single_entry(
         entry_price = price
         filled_notional = actual_notional
     sub_order_rows: list[dict[str, Any]] = []
+    # Defined here so BOTH the submit_orders branch and the dry-run branch
+    # (which never enters the per-sub fill loop) leave the trade-row builder
+    # able to read these without a NameError.
+    total_fee_acc = 0.0
+    max_exec_time_ms_acc = 0
 
     def _sub_link(idx: int) -> str:
         # Single-order path keeps the legacy entry_link verbatim for
@@ -2798,9 +2803,12 @@ def _execute_single_entry(
                 "error": error,
             })
 
+        # total_fee_acc / max_exec_time_ms_acc are pre-initialized at function
+        # scope above; total_filled_qty_acc / total_fill_value_acc are local to
+        # the submit branch only.
+        total_filled_qty_acc = 0.0
+        total_fill_value_acc = 0.0
         if not error:
-            total_filled_qty_acc = 0.0
-            total_fill_value_acc = 0.0
             for idx, sub_qty_str in enumerate(sub_qty_strs):
                 is_first = idx == 0
                 sub_link = _sub_link(idx)
@@ -2925,9 +2933,13 @@ def _execute_single_entry(
                     if is_first and not error:
                         error = sub_error
                         order_status = "submitted_unconfirmed"
+                    sub_fee = 0.0
+                    sub_exec_time_ms = 0
                 else:
                     sub_filled_qty = _float(sub_exec.get("qty"))
                     sub_avg_price = _float(sub_exec.get("avg_price")) or price
+                    sub_fee = _float(sub_exec.get("fee"))
+                    sub_exec_time_ms = int(_float(sub_exec.get("exec_time_ms") or 0))
                     sub_tolerance = max(sub_target * 1e-8, 1e-12)
                     if sub_target > 0.0 and sub_filled_qty + sub_tolerance >= sub_target:
                         sub_status = "filled"
@@ -2938,6 +2950,9 @@ def _execute_single_entry(
 
                 total_filled_qty_acc += sub_filled_qty
                 total_fill_value_acc += sub_avg_price * sub_filled_qty
+                total_fee_acc += sub_fee
+                if sub_exec_time_ms > max_exec_time_ms_acc:
+                    max_exec_time_ms_acc = sub_exec_time_ms
 
                 sub_filled_str = _decimal_text(Decimal(str(sub_filled_qty))) if sub_filled_qty > 0.0 else ""
                 sub_notional = abs(sub_avg_price * sub_filled_qty) if sub_filled_qty > 0.0 else 0.0
@@ -2955,6 +2970,8 @@ def _execute_single_entry(
                     "order_id": sub_order_result.get("orderId", ""),
                     "submit_mode": sub_submit_mode,
                     "avg_price": sub_avg_price,
+                    "fee_usdt": sub_fee,
+                    "exec_time_ms": sub_exec_time_ms,
                     "notional_usdt": sub_notional,
                     "target_notional_pct_equity": order_notional_pct_equity,
                     "entry_leverage": demo.entry_leverage,
@@ -3089,6 +3106,12 @@ def _execute_single_entry(
             "strategy_id": strategy_id,
             "status": "open",
             "entry_ts_ms": now_ms,
+            # Venue-reported fill time (latest execTime across sub-orders);
+            # 0 in the dry-run branch since no venue executions occurred.
+            # Paper↔demo reconciliation uses this to measure true fill-time
+            # skew, vs. entry_ts_ms which is the cycle wall-clock.
+            "entry_exec_time_ms": max_exec_time_ms_acc,
+            "entry_fee_usdt": total_fee_acc,
             "entry_price": entry_price,
             "qty": entry_qty or qty,
             "notional_usdt": filled_notional if demo.submit_orders else actual_notional,
@@ -3398,6 +3421,11 @@ def _execute_exits(
         sub_order_rows: list[dict[str, Any]] = []
         total_filled_qty = 0.0
         total_fill_value = 0.0
+        # See entry path: venue-reported fees and exec time are required for
+        # reconciliation to close the demo↔Bybit PnL triangle and to measure
+        # true fill-time skew.
+        total_fee = 0.0
+        max_exec_time_ms = 0
         first_order_id = ""
         overall_submit_mode = "dry_run"
         overall_error = ""
@@ -3474,6 +3502,8 @@ def _execute_exits(
                 _float(sub_exec_summary.get("avg_price"))
                 or _float(exit_plan.get("planned_exit_price"))
             )
+            sub_fee = _float(sub_exec_summary.get("fee")) if demo.submit_orders else 0.0
+            sub_exec_time_ms = int(_float(sub_exec_summary.get("exec_time_ms") or 0)) if demo.submit_orders else 0
             sub_tolerance = max(sub_target * 1e-8, 1e-12)
             if demo.submit_orders and sub_status not in {"failed", "submitted_unconfirmed"}:
                 if sub_target > 0.0 and sub_filled_qty + sub_tolerance >= sub_target:
@@ -3487,6 +3517,9 @@ def _execute_exits(
             total_filled_qty += sub_filled_qty
             if sub_filled_qty > 0.0 and sub_avg_price > 0.0:
                 total_fill_value += sub_avg_price * sub_filled_qty
+            total_fee += sub_fee
+            if sub_exec_time_ms > max_exec_time_ms:
+                max_exec_time_ms = sub_exec_time_ms
             sub_filled_str = _decimal_text(Decimal(str(sub_filled_qty))) if sub_filled_qty > 0.0 else ""
             sub_notional = abs(sub_avg_price * sub_filled_qty) if sub_filled_qty > 0.0 else 0.0
             sub_order_rows.append(
@@ -3497,6 +3530,8 @@ def _execute_exits(
                     "symbol": symbol,
                     "side": bybit_side,
                     "order_type": demo.exit_order_type,
+                    "fee_usdt": sub_fee,
+                    "exec_time_ms": sub_exec_time_ms,
                     "qty": sub_qty_str,
                     "reduce_only": True,
                     "order_id": sub_order_result.get("orderId", ""),
@@ -3532,6 +3567,8 @@ def _execute_exits(
                     "exit_ts_ms": now_ms,
                     "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
                     "exit_price": exit_price,
+                    "exit_fee_usdt": total_fee,
+                    "exit_exec_time_ms": max_exec_time_ms,
                     "gross_trade_return": gross_trade_return,
                     "net_return": gross_trade_return * notional_weight,
                     "exit_reason": str(exit_plan["exit_reason"]),
@@ -3646,6 +3683,8 @@ def _reconcile_pending_order_fills(
         qty_tolerance = max(target_qty * 1e-8, 1e-12)
         fully_filled = target_qty > 0.0 and filled_qty + qty_tolerance >= target_qty
         avg_price = _float(summary.get("avg_price")) or _float(order.get("avg_price"))
+        fee_usdt = _float(summary.get("fee"))
+        exec_time_ms = int(_float(summary.get("exec_time_ms") or 0))
         # `filled_qty` from summary is the cumulative venue qty as of NOW.
         # `previous_filled_qty` is the cumulative we recorded last reconcile.
         # delta_qty = filled_qty - previous_filled_qty is the new fill. Failed
@@ -3706,6 +3745,8 @@ def _reconcile_pending_order_fills(
                 "status": "filled" if fully_filled else "partial",
                 "filled_qty": _decimal_text(Decimal(str(filled_qty))),
                 "avg_price": avg_price,
+                "fee_usdt": fee_usdt,
+                "exec_time_ms": exec_time_ms,
                 "notional_usdt": abs(avg_price * filled_qty) if avg_price > 0.0 else 0.0,
                 "stop_price": entry_stop_price,
                 "take_profit_price": entry_take_profit_price,
@@ -3736,6 +3777,8 @@ def _reconcile_pending_order_fills(
                         "exit_ts_ms": now_ms,
                         "exit_trigger_ts_ms": int(order.get("exit_trigger_ts_ms") or now_ms),
                         "exit_price": avg_price,
+                        "exit_fee_usdt": fee_usdt,
+                        "exit_exec_time_ms": exec_time_ms,
                         "gross_trade_return": gross_trade_return,
                         "net_return": gross_trade_return * notional_weight,
                         "exit_reason": str(order.get("exit_reason") or "pending_exit_fill"),
@@ -3799,6 +3842,8 @@ def _reconcile_pending_order_fills(
                 "ts_ms": now_ms,
                 "status": "open",
                 "entry_ts_ms": opened_at_ms,
+                "entry_exec_time_ms": exec_time_ms,
+                "entry_fee_usdt": fee_usdt,
                 "entry_price": avg_price,
                 "qty": _decimal_text(Decimal(str(filled_qty))),
                 "notional_usdt": notional,
@@ -3908,6 +3953,8 @@ def _execute_risk_exits(
         exit_price = _float(submit["exec_summary"].get("avg_price")) or planned_price
         target_qty = _float(qty)
         filled_qty = _float(submit["exec_summary"].get("qty"))
+        exit_fee_usdt = _float(submit["exec_summary"].get("fee"))
+        exit_exec_time_ms = int(_float(submit["exec_summary"].get("exec_time_ms") or 0))
         qty_tolerance = max(target_qty * 1e-8, 1e-12)
         fully_filled = not risk.submit_orders or (target_qty > 0.0 and filled_qty + qty_tolerance >= target_qty)
         for order_row in submit["order_rows"]:
@@ -3925,6 +3972,8 @@ def _execute_risk_exits(
                     else "submitted_unconfirmed"
                 )
             row_avg_price = _float(order_row.get("avg_price")) or exit_price
+            row_fee = _float(order_row.get("fee_usdt"))
+            row_exec_time_ms = int(_float(order_row.get("exec_time_ms") or 0))
             notional_qty = row_filled_qty if risk.submit_orders else _float(row_target_qty)
             order_row.update(
                 {
@@ -3932,6 +3981,8 @@ def _execute_risk_exits(
                     "exit_reason": str(exit_plan["exit_reason"]),
                     "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
                     "avg_price": row_avg_price,
+                    "fee_usdt": row_fee,
+                    "exec_time_ms": row_exec_time_ms,
                     "filled_qty": _decimal_text(Decimal(str(row_filled_qty))) if row_filled_qty > 0.0 else "",
                     "target_qty": row_target_qty,
                     "notional_usdt": abs(row_avg_price * notional_qty) if row_avg_price > 0.0 else 0.0,
@@ -3952,6 +4003,8 @@ def _execute_risk_exits(
                     "exit_ts_ms": now_ms,
                     "exit_trigger_ts_ms": int(exit_plan["exit_trigger_ts_ms"]),
                     "exit_price": exit_price,
+                    "exit_fee_usdt": exit_fee_usdt,
+                    "exit_exec_time_ms": exit_exec_time_ms,
                     "gross_trade_return": gross_trade_return,
                     "net_return": gross_trade_return * notional_weight,
                     "exit_reason": str(exit_plan["exit_reason"]),
@@ -4797,8 +4850,12 @@ def _orphan_close_pnl_backfill(
     gross_trade_return = _trade_return(entry_price, exit_price, side=side)
     notional_weight = _safe_ratio(trade.get("notional_usdt"), trade.get("equity_usdt"))
     closed_at_ms = int(_float(best.get("createdTime") or best.get("updatedTime") or now_ms)) or now_ms
+    exit_fee_usdt = _float(best.get("execFee"))
     backfill: dict[str, Any] = {
         "exit_price": exit_price,
+        "exit_fee_usdt": exit_fee_usdt,
+        # Bybit's createdTime IS the venue execution time for the close.
+        "exit_exec_time_ms": closed_at_ms,
         "gross_trade_return": gross_trade_return,
         "net_return": gross_trade_return * notional_weight,
         "exit_ts_ms": closed_at_ms,
@@ -4932,6 +4989,13 @@ def _execution_summary(executions: list[dict[str, Any]]) -> dict[str, Any]:
     qty = 0.0
     value = 0.0
     fee = 0.0
+    # exec_time_ms = the latest venue-reported execTime across this order's
+    # fills. For a single-fill order it IS the fill time; for a multi-fill
+    # order it is the time the order fully completed. Capturing it lets the
+    # ledger record when the *venue* filled the order rather than when our
+    # daemon noticed (now_ms), which the reconciliation needs to measure
+    # true fill-time skew between paper and demo (and between demo and Bybit).
+    exec_time_ms = 0
     for execution in executions:
         exec_qty = _float(execution.get("execQty"))
         exec_price = _float(execution.get("execPrice"))
@@ -4939,10 +5003,14 @@ def _execution_summary(executions: list[dict[str, Any]]) -> dict[str, Any]:
         qty += exec_qty
         value += exec_value if exec_value > 0.0 else exec_qty * exec_price
         fee += _float(execution.get("execFee"))
+        ts_candidate = int(_float(execution.get("execTime") or 0))
+        if ts_candidate > exec_time_ms:
+            exec_time_ms = ts_candidate
     return {
         "qty": _decimal_text(Decimal(str(qty))) if qty > 0.0 else "",
         "avg_price": value / qty if qty > 0.0 else 0.0,
         "fee": fee,
+        "exec_time_ms": exec_time_ms,
         "executions": len(executions),
     }
 
