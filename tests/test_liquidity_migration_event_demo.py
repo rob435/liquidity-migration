@@ -3279,6 +3279,8 @@ def test_pending_exit_fill_reconciles_to_closed_trade() -> None:
                 "status": "open",
                 "qty": "1",
                 "entry_price": 99.0,
+                "notional_usdt": 99.0,
+                "equity_usdt": 990.0,
             }
         ]
     )
@@ -3296,6 +3298,10 @@ def test_pending_exit_fill_reconciles_to_closed_trade() -> None:
     assert trades[0]["exit_reason"] == "time_exit"
     assert trades[0]["exit_trigger_ts_ms"] == 1_700_000_061_000
     assert trades[0]["exit_price"] == 100.5
+    # Realized PnL fields must land on close, not depend on the orphan reconciler.
+    # short 99→100.5 → gross = (99-100.5)/99 ≈ -0.01515; net = gross * (99/990) = gross * 0.1
+    assert trades[0]["gross_trade_return"] == pytest.approx(-1.5 / 99.0)
+    assert trades[0]["net_return"] == pytest.approx((-1.5 / 99.0) * 0.1)
     assert order_updates[0]["status"] == "filled"
     assert order_updates[0]["notional_usdt"] == 100.5
 
@@ -3603,6 +3609,9 @@ def test_risk_exit_records_filled_order_after_confirmed_fill() -> None:
                 "side": "short",
                 "status": "open",
                 "qty": "1",
+                "entry_price": 100.0,
+                "notional_usdt": 100.0,
+                "equity_usdt": 1_000.0,
                 "stop_price": 112.0,
             }
         ]
@@ -3630,6 +3639,11 @@ def test_risk_exit_records_filled_order_after_confirmed_fill() -> None:
     )
 
     assert rows[0]["status"] == "closed"
+    # Realized PnL fields must land on close from the risk-exit path too.
+    # FakeRiskClient fills at 100.5 (its default), so short 100→100.5 →
+    # gross = (100-100.5)/100 = -0.005; net = gross * (100/1000) = -0.0005
+    assert rows[0]["gross_trade_return"] == pytest.approx(-0.005)
+    assert rows[0]["net_return"] == pytest.approx(-0.0005)
     assert orders[0]["status"] == "filled"
     assert orders[0]["filled_qty"] == "1"
 

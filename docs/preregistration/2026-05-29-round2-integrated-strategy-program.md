@@ -47,6 +47,21 @@ Round 2 also corrects two Round 1 design errors:
 wall-time on the 5950X. No hard deadline. Default outcome remains
 "do nothing if all hypotheses falsify."
 
+**Lead R1 candidate from 2026-05-29 Mac-side exploratory peek:**
+`R1_drop_all_4` (drops `day_return`, `stop_pressure`, `realized_loss`,
+`rank_max` — the 4 R1 DROP / RE-TEST filters identified from Round 1
+Phase 0 LOO data) showed Pareto improvement on BOTH venues over the
+full 2023-04-01 → 2026-05-28 window including May 2026 stress:
+**Bybit MAR Δ +1.29** (4.92 → 6.21, return +65%, max DD -3.6pp
+shallower), **Binance MAR Δ +1.03** (1.45 → 2.48, return +29%, max DD
+-9.7pp shallower). Single exploratory run, no sub-period stability,
+no R4 residual-Sharpe, no R7 stress, no R11 OOS — **NOT yet promoted**.
+R1 elevates this cell to lead-candidate priority and applies the full
+Manifesto pipeline. **Re-baseline cascade pre-committed below** (see
+"Lead-candidate re-baseline cascade" subsection) — IF the cell clears
+every gate, R2-R10 re-baseline against the drop_all_4 stack instead
+of production.
+
 **R12 (sniper-entry execution layer)** runs in parallel with R4-R10.
 It is NOT optional — operator instruction is to extend the program
 with sub-1h *execution* refinement. The signal stays at end-of-day
@@ -452,24 +467,94 @@ surface a missing interaction effect. Investigation bar.
 
 ### Cell list (R1)
 
-| Cell | Description |
-|---|---|
-| `R1_baseline_v2` | Production filter stack as-is (control) |
-| `R1_drop_day_return` | Production minus `day_return` |
-| `R1_drop_stop_pressure` | Production minus `stop_pressure` |
-| `R1_drop_both_noops` | Production minus both `day_return` and `stop_pressure` |
-| `R1_retest_rank_max` | Production minus `rank_max` (re-confirms Phase 0 finding under longer window) |
-| `R1_retest_realized_loss` | Production minus `realized_loss` |
+| Cell | Description | Priority |
+|---|---|---|
+| `R1_baseline_v2` | Production filter stack as-is (control) | required |
+| **`R1_drop_all_4`** | **Production minus `day_return` + `stop_pressure` + `realized_loss` + `rank_max` — the LEAD CANDIDATE per 2026-05-29 Mac exploratory** | **highest, dispatch first** |
+| `R1_drop_day_return` | Production minus `day_return` | normal |
+| `R1_drop_stop_pressure` | Production minus `stop_pressure` | normal |
+| `R1_drop_both_noops` | Production minus both `day_return` and `stop_pressure` | normal |
+| `R1_retest_rank_max` | Production minus `rank_max` (re-confirms Phase 0 finding under longer window) | normal |
+| `R1_retest_realized_loss` | Production minus `realized_loss` | normal |
 
-6 cells × 2 venues = 12 runs. Window 2023-04-01 → 2026-04-30. Investigation
-bar. Compute: ~12 × 8 min = ~96 min sequential, ~30 min at 4-way parallel.
+7 cells × 2 venues = 14 runs. Window 2023-04-01 → 2026-05-28 (extended to
+match the lead-candidate exploratory window). Investigation bar for the
+"normal" cells; **PROMOTION bar applied additionally to `R1_drop_all_4`**
+including sub-period sign-consistency check and (if R4 risk model is
+ready) residual-Sharpe check. Compute: ~14 × 8 min = ~112 min sequential,
+~35 min at 4-way parallel.
+
+### Lead-candidate priority (`R1_drop_all_4`)
+
+The 2026-05-29 Mac exploratory showed `R1_drop_all_4` Pareto-improving
+on BOTH venues over the extended window:
+
+| Venue | MAR (baseline → cell) | Δ Return | Δ Max DD | Δ Sharpe |
+|---|---|--:|--:|--:|
+| Bybit | 4.92 → 6.21 (Δ +1.29) | +65% | -3.6pp shallower | +0.25 |
+| Binance | 1.45 → 2.48 (Δ +1.03) | +29% | -9.7pp shallower | +0.13 |
+
+That run is **single-sample exploratory** — no sub-period check, no
+R4 residual-Sharpe, no R7 stress, no R11 OOS. Round 2 R1 elevates it
+to the full Manifesto pipeline. Specifically:
+
+- Dispatched FIRST in R1
+- Tested on full extended window + 3 sub-period thirds (2023-Q3+2024-Q1
+  / 2024-Q2+2025-Q1 / 2025-Q2+2026-Q2 split, or equivalent)
+- Sign-consistency required across all 3 thirds on both venues
+- Promotion-bar applied (MAR Δ ≥ +0.5, Pareto, ≥50 trades, etc.)
+- IF R4 is ready at the time R1 runs, residual-Sharpe ≥ +0.3 also
+  required; ELSE residual-Sharpe check deferred to R10 gate
+
+If `R1_drop_all_4` clears every R1 check, it becomes the active
+**re-baseline candidate** for R2-R10 (see "Lead-candidate re-baseline
+cascade" below).
 
 ### Output
 
 `docs/preregistration/<DATE>-r1-per-filter-audit-verdict.md` with the
-final filter-stack decision. If any DROP / RE-TEST cell investigation-
-positives, the production filter stack proposal is updated; otherwise
-the production stack stays as-is and R2 proceeds.
+final filter-stack decision and the `R1_drop_all_4` verdict per the
+Promotion bar. If `R1_drop_all_4` clears, the re-baseline cascade
+triggers automatically per pre-commitment.
+
+### Lead-candidate re-baseline cascade (PRE-COMMITTED)
+
+This cascade is committed in writing NOW so it cannot be litigated
+after seeing results.
+
+**Trigger:** `R1_drop_all_4` clears the **full Promotion bar** at R1:
+- MAR Δ ≥ +0.5 on **both** venues vs `R1_baseline_v2` (control)
+- Return Δ ≥ 0 on **both** venues (Pareto)
+- DD Δ ≤ 0 on **both** venues (Pareto)
+- Sign-consistent across all 3 sub-period thirds on both venues
+- ≥50 Bybit / ≥30 Binance trades / sub-period
+- Residual Sharpe ≥ +0.3 after R4 (IF R4 ready; deferred to R10 gate
+  otherwise)
+
+**If triggered:**
+- R2, R3, R5, R6, R7, R8, R9, R10, R11 cells RE-BASELINE against the
+  drop_all_4 stack (i.e. they compare to drop_all_4, not to production)
+- The Manifesto thresholds, FDR ceiling, Investigation/Promotion bars
+  STAY IDENTICAL (they are deltas; they hold against any baseline)
+- Cell tables in R2-R10 stay identical (the variations tested are
+  unchanged; only the comparison reference shifts)
+- R11 OOS gate still required before any production change OR demo
+  deployment
+
+**If NOT triggered** (drop_all_4 fails any R1 Promotion-bar check):
+- Production filter stack remains the baseline for all subsequent
+  R-phases
+- `R1_drop_all_4` is filed as "investigation-positive but did not clear
+  Promotion bar in proper R1 — Round 1 LOO directional signal stands
+  but does not justify production change"
+- Round 2 continues as originally designed
+
+**Critical constraint:** the re-baseline does NOT itself constitute
+promotion to production demo / mainnet. The drop_all_4 stack still
+must clear R7 stress + R11 OOS + 30-day forward demo with paper-shadow
+reconciliation before any live deployment. The re-baseline only means
+"R2-R10 compare future candidate cells against the drop_all_4 stack
+instead of production, because drop_all_4 has cleared the R1 bar."
 
 ---
 
@@ -1001,7 +1086,7 @@ Specifically, for each (date, candidate symbol):
 
 | Cell | Description |
 |---|---|
-| `R9_event_only` | Event-driven only (current production), risk-equal sized, model-costed. Control. |
+| `R9_event_only` | Event-driven only (whatever is the active baseline per the R1 re-baseline cascade — production OR drop_all_4 if R1 promoted it), risk-equal sized, model-costed. Control. |
 | `R9_event_plus_ic` | Event-driven + IC signal additive (signal must exceed threshold OR be event-driven) |
 | `R9_event_AND_ic` | Event-driven AND IC signal (both must fire — strictest) |
 | `R9_event_OR_ic_factor_capped` | event OR ic, with R4 factor exposure caps active |
