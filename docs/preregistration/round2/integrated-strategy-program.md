@@ -2070,3 +2070,32 @@ Round 2 is **bigger, slower, more rigorous, and more honest about
 what counts as evidence.** It also produces durable infrastructure
 (risk model, cost model, stress harness, capacity analyzer) that
 outlasts any single strategy decision.
+
+---
+
+## Sub-phase R13 — exit-rule re-optimization (added 2026-05-28; conditional on R1)
+
+**Gap this closes.** R1–R12 re-optimize the ENTRY (filters, features, sizing,
+cost) and the execution FILL (R12 sniper), but no phase re-optimizes the EXIT
+RULE. The 2026-05-23 exit-ladder sweep found exits (failed_fade params + holding
+period) among the highest-leverage knobs (+18% Sharpe), yet the promoted exit
+(take_profit 0.26, failed_fade off, rank_exit 0.55) was tuned for the OLD entry
+population. R1's `drop_all_4` changes that population, so the optimal exit very
+likely shifts. Leaving the exit fixed while re-optimizing the entry is an
+unforced inconsistency.
+
+**Strictly conditional on R1** confirming `drop_all_4` as the lead candidate.
+
+**Method.** Baseline = the R1 lead candidate (wide-funnel baseline + the four
+filter drops). Each cell overrides ONLY exit knobs, so trade ENTRIES are
+identical across cells and every metric delta is a pure exit-rule effect:
+take_profit in {0.21, 0.26, 0.30}, failed_fade in {off, 6h/3%/1%mfe,
+6h/4%/1%mfe}, rank_exit_threshold in {0.45, 0.55, 0.65}, fixed stop in {0.10,
+0.12}. 8 cells x 2 venues, window 2023-04-01 -> 2026-05-28. Dispatcher:
+`scripts/r13_exit_rule_sweep.py` (tag `r13_exit_rule_2026-05-28`).
+
+**Decision rule — Tier-1 Investigation** (in-sample; no OOS consumed). MAR Delta
+> 0 on the majority of venues vs `00_baseline_drop4`, no return sign-flip, >=30
+Bybit / >=20 Binance trades. Verdict via `scripts/r1_robustness.py`. A winning
+exit cell feeds R9 assembly and must still clear R11 OOS + the forward-demo gate
+before any real-money consideration — R13 does NOT shortcut Tier-3.

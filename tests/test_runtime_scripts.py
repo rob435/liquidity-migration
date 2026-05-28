@@ -1,7 +1,40 @@
 from __future__ import annotations
 
+import importlib.util
 import time
 from pathlib import Path
+
+import pytest
+
+
+def _load_sweep_module(name: str):
+    repo = Path(__file__).resolve().parents[1]
+    spec = importlib.util.spec_from_file_location(name, repo / "scripts" / f"{name}.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _volume_events_option_strings() -> set[str]:
+    from liquidity_migration.cli import build_parser
+
+    parser = build_parser()
+    sub = next(a for a in parser._actions if hasattr(a, "choices") and a.choices and "volume-events" in a.choices)
+    return set(sub.choices["volume-events"]._option_string_actions.keys())
+
+
+@pytest.mark.parametrize("script_name", ["r13_exit_rule_sweep", "r1_filter_audit_sweep"])
+def test_sweep_script_flags_are_real_cli_options(script_name: str) -> None:
+    """A sweep dispatcher that passes a stale/typo'd flag would fail every cell
+    on the desktop (wasting a long run). Guard: every flag in BASELINE_PARAMS and
+    in each cell's overrides must be a real `volume-events` CLI option."""
+    known = _volume_events_option_strings()
+    module = _load_sweep_module(script_name)
+    flags = set(module.BASELINE_PARAMS.keys())
+    for cell in module.CELLS:
+        flags |= set(cell.overrides.keys())
+    unknown = sorted(f for f in flags if f not in known)
+    assert not unknown, f"{script_name} uses unknown volume-events flags: {unknown}"
 
 
 def test_runtime_scripts_do_not_delete_live_cycle_locks() -> None:
