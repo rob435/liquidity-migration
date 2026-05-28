@@ -969,6 +969,18 @@ def target_order_notional_pct_equity(
     demo_config: EventDemoCycleConfig,
     event_config: VolumeEventResearchConfig,
 ) -> float:
+    """Per-position notional as a fraction of equity for the LIVE runner.
+
+    This is the dollar-EQUAL baseline (gross / max_active). The live runner does
+    NOT yet apply ``event_config.position_weighting`` — the backtest's per-name
+    weighting modes (inverse_vol, signal_rank, taker_imbalance_weighted, and the
+    R5 ``risk_equal`` target_vol/realized_vol sizing) are BACKTEST-ONLY until the
+    runner is wired to scale this per-candidate (R5 "modify the event_demo
+    runner" step). The frozen promoted profile uses ``equal``, so backtest and
+    live agree today; do not set a non-equal weighting in a live profile and
+    expect it to size positions until that wiring lands (else backtest≠live,
+    error #16).
+    """
     if demo_config.max_order_notional_pct_equity > 0.0:
         return demo_config.max_order_notional_pct_equity
     return event_config.gross_exposure / max(event_config.max_active_symbols, 1)

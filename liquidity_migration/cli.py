@@ -430,7 +430,8 @@ def _add_volume_events_parser(subparsers) -> None:
         choices=POSITION_WEIGHTINGS,
         default=event_defaults.position_weighting,
         help="Per-trade position sizing: equal (baseline), inverse_vol, signal_rank, "
-        "or taker_imbalance_weighted (size tilts down with signal-day taker buying).",
+        "taker_imbalance_weighted (size tilts down with signal-day taker buying), "
+        "or risk_equal (R5: absolute target_vol_per_name / realized_vol risk targeting).",
     )
     volume_events.add_argument(
         "--position-weight-vol-field",
@@ -442,6 +443,13 @@ def _add_volume_events_parser(subparsers) -> None:
         type=float,
         default=event_defaults.position_weight_clamp,
         help="Position weights are clamped to [1/clamp, clamp].",
+    )
+    volume_events.add_argument(
+        "--target-vol-per-name",
+        type=float,
+        default=event_defaults.target_vol_per_name,
+        help="R5 risk_equal sizing: per-name daily P&L-vol target (same units as "
+        "--position-weight-vol-field). Weight = target / realized_vol, clamped. Calibrated in R5.",
     )
     volume_events.add_argument(
         "--taker-imbalance-size-field",
@@ -2487,6 +2495,7 @@ def main(argv: list[str] | None = None) -> int:
             position_weighting=args.position_weighting,
             position_weight_vol_field=args.position_weight_vol_field,
             position_weight_clamp=args.position_weight_clamp,
+            target_vol_per_name=args.target_vol_per_name,
             taker_imbalance_size_field=args.taker_imbalance_size_field,
             taker_imbalance_size_scale=args.taker_imbalance_size_scale,
             cooldown_days=args.cooldown_days,

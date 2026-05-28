@@ -54,7 +54,7 @@ EVENT_TYPES = (
     "selloff_exhaustion",
 )
 SIDE_HYPOTHESES = ("continuation", "reversal")
-POSITION_WEIGHTINGS = ("equal", "inverse_vol", "signal_rank", "taker_imbalance_weighted")
+POSITION_WEIGHTINGS = ("equal", "inverse_vol", "signal_rank", "taker_imbalance_weighted", "risk_equal")
 LIQUIDITY_MIGRATION_CROWDING_FILTERS = ("none", "union_pathology", "model_v1")
 ENTRY_POLICY_FIXED_DELAY = "fixed_delay"
 ENTRY_POLICY_PROMOTED_QUALITY_SQUEEZE = "promoted_quality_squeeze"
@@ -103,6 +103,12 @@ class VolumeEventResearchConfig:
     position_weighting: str = "equal"
     position_weight_vol_field: str = "prior7_return_volatility"
     position_weight_clamp: float = 4.0
+    # R5 risk-equal sizing: per-name risk budget as a fraction of the
+    # vol-field's units. position_weight_vol_field is a daily-return stdev, so
+    # this is a daily P&L-vol target per name; the absolute weight is
+    # target_vol_per_name / realized_vol (clamped by position_weight_clamp).
+    # Only used when position_weighting == "risk_equal". Calibrated in R5.
+    target_vol_per_name: float = 0.015
     taker_imbalance_size_field: str = "taker_imbalance_1d"
     taker_imbalance_size_scale: float = 0.03
     cooldown_days: int = 5
@@ -573,6 +579,7 @@ def _run_event_scenario(
         score_col=score_col,
         size_field=config.taker_imbalance_size_field,
         size_scale=config.taker_imbalance_size_scale,
+        target_vol_per_name=config.target_vol_per_name,
     )
 
     for event in sorted_events:
@@ -1183,6 +1190,7 @@ class _PositionSizer:
     def __init__(
         self, *, mode: str, vol_field: str, clamp: float, score_col: str,
         size_field: str = "taker_imbalance_1d", size_scale: float = 0.03,
+        target_vol_per_name: float = 0.015,
     ) -> None:
         self._mode = mode
         self._vol_field = vol_field
@@ -1190,12 +1198,24 @@ class _PositionSizer:
         self._score_col = score_col
         self._size_field = size_field
         self._size_scale = size_scale
+        self._target_vol_per_name = target_vol_per_name
         self._prior_sum = 0.0
         self._prior_count = 0
 
     def weight(self, event: dict[str, Any]) -> float:
         if self._mode == "equal":
             return 1.0
+        if self._mode == "risk_equal":
+            # R5: ABSOLUTE risk-targeting — target_vol_per_name / realized_vol,
+            # clamped. Unlike inverse_vol this is NOT normalized by an expanding
+            # mean of prior events: every name targets the same risk-dollar
+            # budget, so high-vol names take smaller positions and gross floats
+            # below the equal-weight cap in high-vol regimes (the DD-shrinking
+            # mechanism). Missing/invalid vol falls back to the equal weight.
+            sigma = _float_or_nan(event.get(self._vol_field))
+            if not math.isfinite(sigma) or sigma <= 0.0:
+                return 1.0
+            return _clamp_position_weight(self._target_vol_per_name / sigma, clamp=self._clamp)
         quantity = _position_sizing_quantity(
             event, mode=self._mode, vol_field=self._vol_field, score_col=self._score_col,
             size_field=self._size_field, size_scale=self._size_scale,

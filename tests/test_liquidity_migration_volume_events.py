@@ -2288,6 +2288,34 @@ def test_position_sizer_equal_mode_is_always_neutral() -> None:
         assert sizer.weight({"sigma": sigma}) == 1.0
 
 
+def test_position_sizer_risk_equal_is_absolute_target_over_vol_clamped() -> None:
+    """R5: risk_equal returns an ABSOLUTE target_vol/realized_vol weight (clamped),
+    NOT normalized by an expanding mean of prior events (that's inverse_vol)."""
+    sizer = _PositionSizer(
+        mode="risk_equal", vol_field="sigma", clamp=4.0, score_col="s",
+        target_vol_per_name=0.02,
+    )
+    # weight = target / sigma, exact in-range value
+    assert sizer.weight({"sigma": 0.04}) == pytest.approx(0.5)   # 0.02 / 0.04
+    # absolute, not expanding-mean-relative: same sigma -> same weight every time
+    assert sizer.weight({"sigma": 0.04}) == pytest.approx(0.5)
+    assert sizer.weight({"sigma": 0.01}) == pytest.approx(2.0)   # 0.02 / 0.01
+    # clamp binds at both extremes ([1/4, 4])
+    assert sizer.weight({"sigma": 1.0}) == pytest.approx(0.25)   # 0.02/1.0=0.02 -> floor
+    assert sizer.weight({"sigma": 0.001}) == pytest.approx(4.0)  # 0.02/0.001=20 -> cap
+
+
+def test_position_sizer_risk_equal_neutral_on_missing_or_invalid_vol() -> None:
+    sizer = _PositionSizer(
+        mode="risk_equal", vol_field="sigma", clamp=4.0, score_col="s",
+        target_vol_per_name=0.02,
+    )
+    assert sizer.weight({}) == 1.0                 # missing
+    assert sizer.weight({"sigma": 0.0}) == 1.0     # zero
+    assert sizer.weight({"sigma": -0.1}) == 1.0    # negative
+    assert sizer.weight({"sigma": float("nan")}) == 1.0  # non-finite
+
+
 def test_position_sizing_quantity_taker_imbalance_weighted() -> None:
     def q(imbalance: float) -> float | None:
         return _position_sizing_quantity(

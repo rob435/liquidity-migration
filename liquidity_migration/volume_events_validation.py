@@ -90,6 +90,8 @@ def _validate_entry_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError(f"position_weighting must be one of: {', '.join(POSITION_WEIGHTINGS)}")
     if config.position_weight_clamp < 1.0:
         raise ValueError("position_weight_clamp must be >= 1.0")
+    if config.position_weighting == "risk_equal" and config.target_vol_per_name <= 0.0:
+        raise ValueError("target_vol_per_name must be positive for risk_equal position weighting")
     if config.cooldown_days < 0:
         raise ValueError("cooldown_days must be non-negative")
     if config.entry_delay_hours < 0:
