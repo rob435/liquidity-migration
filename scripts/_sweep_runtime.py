@@ -30,8 +30,20 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from pathlib import Path
 from typing import Mapping
+
+
+def _compute_window_days(start_date: str, end_date: str) -> int:
+    """Days between ``start_date`` (inclusive) and ``end_date`` (exclusive),
+    matching the volume-events backtest's end-exclusive window convention.
+
+    Both dates are ``YYYY-MM-DD``. Returns a non-negative int.
+    """
+    s = datetime.strptime(start_date, "%Y-%m-%d").date() if not isinstance(start_date, date) else start_date
+    e = datetime.strptime(end_date, "%Y-%m-%d").date() if not isinstance(end_date, date) else end_date
+    return max(0, (e - s).days)
 
 REPO = Path(__file__).resolve().parent.parent
 SHARED = Path.home() / "SHARED_DATA"
@@ -124,6 +136,7 @@ def run_cell(
     _atomic_print(f"  [{venue}/{cell.cell_id}] START  {cell.description}  ->  {report_dir}")
     proc = subprocess.run(cmd, cwd=REPO, capture_output=True, text=True, env=_subprocess_env())
     elapsed = time.monotonic() - start
+    window_days = _compute_window_days(start_date, end_date)
     if proc.returncode != 0:
         _atomic_print(
             f"  [{venue}/{cell.cell_id}] FAILED (exit={proc.returncode}, {elapsed:.1f}s)",
@@ -135,6 +148,9 @@ def run_cell(
             "description": cell.description,
             "status": "failed",
             "elapsed_seconds": f"{elapsed:.1f}",
+            "start_date": start_date,
+            "end_date": end_date,
+            "window_days": str(window_days),
             "error": proc.stderr[-500:].replace("\n", " | "),
         }
 
@@ -144,6 +160,8 @@ def run_cell(
         return {
             "venue": venue, "cell_id": cell.cell_id, "description": cell.description,
             "status": "no_report", "elapsed_seconds": f"{elapsed:.1f}",
+            "start_date": start_date, "end_date": end_date,
+            "window_days": str(window_days),
         }
     payload = json.loads(report_json.read_text())
     best = payload.get("best_scenario", {})
@@ -161,6 +179,9 @@ def run_cell(
         "promotable": str(best.get("promote", False)),
         "worst_90d": f"{best.get('worst_90d_return', 0.0):.4f}",
         "report_dir": str(report_dir),
+        "start_date": start_date,
+        "end_date": end_date,
+        "window_days": str(window_days),
     }
     _atomic_print(
         f"  [{venue}/{cell.cell_id}] OK ({elapsed:.1f}s)  "

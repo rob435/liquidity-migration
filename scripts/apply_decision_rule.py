@@ -1,26 +1,51 @@
-"""Apply the Strictness Manifesto decision rule to a sweep summary CSV.
+"""Apply a decision rule to a sweep summary CSV.
 
-The Manifesto is the pre-registered candidate / falsifier / inconclusive
-rule from
-`docs/preregistration/2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md`.
+Two rules are supported:
+
+- ``--rule manifesto`` (default; the Round 1 / R10-R11 Promotion bar):
+  Sharpe Δ ≥ +0.5 BOTH venues + DD Δ ≤ -5pp BOTH + return ≥ 0 BOTH +
+  ≥ 50 by / ≥ 30 bn trades. Pre-registered in
+  ``docs/preregistration/2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md``.
+
+- ``--rule investigation`` (Round 2's R1-R8 sub-phase tier, MAR-based):
+  A cell is **investigation-positive** if MAR Δ > 0 on majority of
+  venues (2/2 OR 1/2 with the other not worse than -0.5 MAR) AND no
+  return sign-flip vs control AND ≥ 30 by / ≥ 20 bn trades.
+  Falsifier: MAR Δ ≤ -1.0 on either venue OR return goes negative on
+  a venue that was positive in control OR DD > 70% on either OR
+  trades < 30 on either (≈ 10 / sub-period at 3-thirds windows).
+  Pre-registered in
+  ``docs/preregistration/2026-05-29-round2-integrated-strategy-program.md``.
+
+MAR is computed as ``annualized_return / |max_drawdown|`` where
+``annualized_return = (1 + total_return) ** (365.25 / window_days) - 1``.
+``window_days`` is read from the summary CSV's optional ``window_days``
+column when present (preferred — the sweep runtime emits it), else from
+the ``--window-days`` CLI flag. Cells with ambiguous or missing
+window_days fall through with a clear error.
 
 Usage:
     python scripts/apply_decision_rule.py SUMMARY.csv [--control 00_baseline] \\
-        [--rule manifesto|legacy] [--min-trades-bybit 50] [--min-trades-binance 30] \\
-        [--sharpe-delta 0.5] [--dd-delta-pp 5]
+        [--rule manifesto|investigation|legacy] \\
+        [--min-trades-bybit N] [--min-trades-binance N] \\
+        [--sharpe-delta 0.5] [--dd-delta-pp 5] \\
+        [--mar-delta-min 0.0] [--mar-falsify -1.0] [--window-days N]
 
-Output (stdout):
-    | cell_id | bybit_sharpe_d | binance_sharpe_d | bybit_dd_d | binance_dd_d | verdict | reason |
-    ...
+Output (stdout): per-cell verdict table + summary counts. The columns
+shown vary by rule (Sharpe Δ for manifesto/legacy, MAR Δ for
+investigation), with the metric set common to both (return, DD, trades)
+always present for cross-rule comparison.
 
 Exit codes:
     0  — analysis ran cleanly (verdicts printed)
     2  — control cell missing / CSV malformed / other usage error
 
 The script is venue-agnostic: it expects a CSV with at least the columns
-`cell_id`, `venue`, `sharpe_like`, `max_drawdown`, `trades`, `total_return`,
-and treats `bybit` + `binance` as the two venues to check. Missing venue
-rows for a non-control cell are treated as falsifiers.
+``cell_id``, ``venue``, ``sharpe_like``, ``max_drawdown``, ``trades``,
+``total_return``, and treats ``bybit`` + ``binance`` as the two venues
+to check. Missing venue rows for a non-control cell are treated as
+falsifiers. Investigation mode additionally requires either a
+``window_days`` column or a ``--window-days`` CLI flag.
 """
 from __future__ import annotations
 
@@ -51,6 +76,10 @@ class CellMetrics:
     max_drawdown: float
     trades: int
     total_return: float
+    # Optional — emitted by `_sweep_runtime.run_cell` for Round 2 sweeps so the
+    # investigation rule can compute MAR per cell without a CLI flag. Missing
+    # for legacy summary CSVs.
+    window_days: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,8 +93,42 @@ class CellVerdict:
     binance_trades: int
     bybit_ret: float
     binance_ret: float
-    verdict: str  # "candidate" | "reject" | "inconclusive" | "skip_control"
+    verdict: str  # "candidate" | "investigation_positive" | "reject" | "inconclusive" | "descriptive" | "skip_control"
     reasons: tuple[str, ...]
+    # Optional MAR-axis fields (populated by the investigation evaluator;
+    # default 0.0 for manifesto/legacy verdicts so the dataclass stays frozen
+    # but doesn't require touching every construction site).
+    bybit_mar: float = 0.0
+    binance_mar: float = 0.0
+    bybit_mar_d: float = 0.0
+    binance_mar_d: float = 0.0
+
+
+def compute_annualized_return(total_return: float, window_days: float) -> float:
+    """Geometric annualization. `total_return` is the cumulative multiplier-1
+    (e.g. 5.1876 = +518.76%). `window_days` is calendar days inclusive."""
+    if window_days <= 0:
+        raise ValueError(f"window_days must be > 0, got {window_days}")
+    growth = 1.0 + total_return
+    if growth <= 0:
+        # Cell lost more than 100% (cumulative). Annualization is undefined in
+        # the geometric sense; return -1.0 as the floor (lost everything).
+        return -1.0
+    return growth ** (365.25 / window_days) - 1.0
+
+
+def compute_mar(total_return: float, max_drawdown: float, window_days: float) -> float:
+    """MAR = annualized_return / |max_drawdown|.
+
+    Convention: max_drawdown is a negative number (-0.42 = -42%). MAR is
+    signed by annualized_return: positive when profitable, negative when
+    cumulative return is negative, zero when there is no drawdown
+    (degenerate; treat as 0 to avoid divide-by-zero — the cell is rejected
+    on trade-count or other gates anyway)."""
+    if max_drawdown == 0.0:
+        return 0.0
+    ann = compute_annualized_return(total_return, window_days)
+    return ann / abs(max_drawdown)
 
 
 def _read_csv(path: Path) -> list[CellMetrics]:
@@ -78,8 +141,14 @@ def _read_csv(path: Path) -> list[CellMetrics]:
         missing = required - set(reader.fieldnames or [])
         if missing:
             raise SystemExit(f"csv missing columns: {sorted(missing)}")
+        has_window_days = "window_days" in (reader.fieldnames or [])
         for row in reader:
             try:
+                window_days_val: float | None = None
+                if has_window_days:
+                    raw = row.get("window_days", "").strip()
+                    if raw:
+                        window_days_val = float(raw)
                 out.append(
                     CellMetrics(
                         cell_id=row["cell_id"].strip(),
@@ -88,6 +157,7 @@ def _read_csv(path: Path) -> list[CellMetrics]:
                         max_drawdown=float(row["max_drawdown"]),
                         trades=int(row["trades"]),
                         total_return=float(row["total_return"]),
+                        window_days=window_days_val,
                     )
                 )
             except (ValueError, KeyError) as exc:
@@ -243,16 +313,181 @@ def evaluate_cell(
     )
 
 
+def evaluate_cell_investigation(
+    cell_id: str,
+    cell_rows: dict[str, CellMetrics],
+    control_rows: dict[str, CellMetrics],
+    *,
+    window_days: float,
+    mar_delta_positive: float = 0.0,
+    mar_delta_tolerance: float = 0.5,
+    mar_falsify: float = -1.0,
+    dd_falsify_abs: float = 0.70,
+    min_trades_bybit: int = 30,
+    min_trades_binance: int = 20,
+) -> CellVerdict:
+    """Round 2 Investigation-tier rule (MAR-primary).
+
+    A cell is **investigation-positive** if ALL of:
+      - MAR Δ > ``mar_delta_positive`` on the majority of venues (2/2 OR
+        1/2 with the other not worse than -``mar_delta_tolerance``)
+      - No return sign-flip vs control (both venues remain same-signed)
+      - Trade counts ≥ min_trades_* on each venue
+
+    A cell **falsifies** if ANY of:
+      - MAR Δ ≤ ``mar_falsify`` on either venue (default: ≤ -1.0)
+      - Return goes negative on a venue that was positive in control
+      - |DD| > ``dd_falsify_abs`` on either venue (default: 70%)
+      - Trade count < 30 (Bybit) or < 20 (Binance) — signal-population
+        sanity floor; the plan's per-sub-period floor of 10 / third
+        approximates to 30 / 20 at 3-thirds windows.
+
+    Cells failing investigation-positive but not falsifying are
+    **descriptive** — recorded for context, not acted on.
+
+    ``window_days`` is required to compute MAR (annualized_return /
+    |max_drawdown|). The caller is responsible for sourcing it from the
+    CSV column or the CLI flag.
+    """
+    by = cell_rows.get("bybit")
+    bn = cell_rows.get("binance")
+    cby = control_rows.get("bybit")
+    cbn = control_rows.get("binance")
+
+    reasons: list[str] = []
+    if cby is None or cbn is None:
+        return CellVerdict(
+            cell_id=cell_id,
+            bybit_sharpe_d=0.0, binance_sharpe_d=0.0,
+            bybit_dd_d=0.0, binance_dd_d=0.0,
+            bybit_trades=0, binance_trades=0,
+            bybit_ret=0.0, binance_ret=0.0,
+            verdict="reject",
+            reasons=("control cell missing on bybit or binance",),
+        )
+
+    bybit_sharpe_d = (by.sharpe_like - cby.sharpe_like) if by else 0.0
+    binance_sharpe_d = (bn.sharpe_like - cbn.sharpe_like) if bn else 0.0
+    bybit_dd_d = ((abs(by.max_drawdown) - abs(cby.max_drawdown)) * 100.0) if by else 0.0
+    binance_dd_d = ((abs(bn.max_drawdown) - abs(cbn.max_drawdown)) * 100.0) if bn else 0.0
+    bybit_trades = by.trades if by else 0
+    binance_trades = bn.trades if bn else 0
+    bybit_ret = by.total_return if by else 0.0
+    binance_ret = bn.total_return if bn else 0.0
+
+    # MAR computations (per-row window_days takes precedence over the caller's
+    # default if present — keeps cells with venue-specific windows correct).
+    def _win(metrics: CellMetrics | None) -> float:
+        if metrics is None:
+            return window_days
+        return metrics.window_days if metrics.window_days is not None else window_days
+
+    bybit_mar_control = compute_mar(cby.total_return, cby.max_drawdown, _win(cby))
+    binance_mar_control = compute_mar(cbn.total_return, cbn.max_drawdown, _win(cbn))
+    bybit_mar = compute_mar(by.total_return, by.max_drawdown, _win(by)) if by else 0.0
+    binance_mar = compute_mar(bn.total_return, bn.max_drawdown, _win(bn)) if bn else 0.0
+    bybit_mar_d = bybit_mar - bybit_mar_control
+    binance_mar_d = binance_mar - binance_mar_control
+
+    # Falsifier checks
+    if by is None:
+        reasons.append("missing bybit row")
+    if bn is None:
+        reasons.append("missing binance row")
+    if by and abs(by.max_drawdown) > dd_falsify_abs:
+        reasons.append(f"falsifier: bybit DD {by.max_drawdown:.1%} worse than -{dd_falsify_abs:.0%}")
+    if bn and abs(bn.max_drawdown) > dd_falsify_abs:
+        reasons.append(f"falsifier: binance DD {bn.max_drawdown:.1%} worse than -{dd_falsify_abs:.0%}")
+    if by and cby and (cby.total_return > 0) and (by.total_return < 0):
+        reasons.append("falsifier: bybit return went negative vs positive control")
+    if bn and cbn and (cbn.total_return > 0) and (bn.total_return < 0):
+        reasons.append("falsifier: binance return went negative vs positive control")
+    if bybit_mar_d <= mar_falsify:
+        reasons.append(f"falsifier: bybit MAR Δ {bybit_mar_d:+.2f} ≤ {mar_falsify}")
+    if binance_mar_d <= mar_falsify:
+        reasons.append(f"falsifier: binance MAR Δ {binance_mar_d:+.2f} ≤ {mar_falsify}")
+    if bybit_trades < min_trades_bybit:
+        reasons.append(f"falsifier: bybit trades {bybit_trades} < {min_trades_bybit}")
+    if binance_trades < min_trades_binance:
+        reasons.append(f"falsifier: binance trades {binance_trades} < {min_trades_binance}")
+
+    is_falsifier = any(
+        r.startswith("falsifier:") or r.startswith("missing ") for r in reasons
+    )
+
+    # Investigation-positive: majority-venue MAR Δ > 0, with tolerance on the
+    # other venue. Specifically:
+    #   2/2 positive → investigation-positive
+    #   1/2 positive AND other venue's MAR Δ ≥ -tolerance → investigation-positive
+    #   else → descriptive (not positive, not falsifier)
+    pos_reasons: list[str] = []
+    by_positive = bybit_mar_d > mar_delta_positive
+    bn_positive = binance_mar_d > mar_delta_positive
+    venues_positive = int(by_positive) + int(bn_positive)
+    if venues_positive == 0:
+        pos_reasons.append(
+            f"no venue positive: bybit MAR Δ {bybit_mar_d:+.2f}, binance MAR Δ {binance_mar_d:+.2f}"
+        )
+    elif venues_positive == 1:
+        # Check the other venue's tolerance
+        other_d = bybit_mar_d if not by_positive else binance_mar_d
+        other_venue = "bybit" if not by_positive else "binance"
+        if other_d < -mar_delta_tolerance:
+            pos_reasons.append(
+                f"only 1 venue positive, {other_venue} MAR Δ {other_d:+.2f} < -{mar_delta_tolerance}"
+            )
+    # Sign-flip in returns (no positive direction loss between venues)
+    if by and bn and ((by.total_return > 0) != (bn.total_return > 0)):
+        pos_reasons.append("return sign-flip between venues")
+
+    is_positive = (not pos_reasons) and (not is_falsifier)
+
+    if is_falsifier:
+        verdict = "reject"
+    elif is_positive:
+        verdict = "investigation_positive"
+    else:
+        verdict = "descriptive"
+        reasons.extend(pos_reasons)
+
+    return CellVerdict(
+        cell_id=cell_id,
+        bybit_sharpe_d=bybit_sharpe_d,
+        binance_sharpe_d=binance_sharpe_d,
+        bybit_dd_d=bybit_dd_d,
+        binance_dd_d=binance_dd_d,
+        bybit_trades=bybit_trades,
+        binance_trades=binance_trades,
+        bybit_ret=bybit_ret,
+        binance_ret=binance_ret,
+        verdict=verdict,
+        reasons=tuple(reasons),
+        bybit_mar=bybit_mar,
+        binance_mar=binance_mar,
+        bybit_mar_d=bybit_mar_d,
+        binance_mar_d=binance_mar_d,
+    )
+
+
 _SKIP_CONTROL_SENTINEL = "__control__"
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("summary_csv", help="Sweep summary CSV (cell_id, venue, sharpe_like, max_drawdown, trades, total_return)")
+    parser.add_argument("summary_csv", help="Sweep summary CSV (cell_id, venue, sharpe_like, max_drawdown, trades, total_return, optional window_days)")
     parser.add_argument("--control", default="00_baseline", help="Control cell_id (default: 00_baseline)")
-    parser.add_argument("--rule", default="manifesto", choices=["manifesto", "legacy"], help="Decision-rule preset")
-    parser.add_argument("--sharpe-delta", type=float, default=None, help="Min sharpe Δ vs control (preset-dependent default)")
-    parser.add_argument("--dd-delta-pp", type=float, default=None, help="Min DD-improvement in pp vs control (preset-dependent default)")
+    parser.add_argument(
+        "--rule", default="manifesto",
+        choices=["manifesto", "legacy", "investigation"],
+        help="Decision-rule preset",
+    )
+    parser.add_argument("--sharpe-delta", type=float, default=None, help="Min sharpe Δ vs control (manifesto/legacy)")
+    parser.add_argument("--dd-delta-pp", type=float, default=None, help="Min DD-improvement in pp vs control (manifesto/legacy)")
+    parser.add_argument("--mar-delta-min", type=float, default=None, help="Min MAR Δ for investigation-positive (investigation; default 0.0)")
+    parser.add_argument("--mar-delta-tolerance", type=float, default=None, help="Max negative MAR Δ on the non-positive venue (investigation; default 0.5)")
+    parser.add_argument("--mar-falsify", type=float, default=None, help="MAR Δ ≤ this is a falsifier (investigation; default -1.0)")
+    parser.add_argument("--dd-falsify", type=float, default=None, help="|DD| > this is a falsifier (investigation; default 0.70 = 70%)")
+    parser.add_argument("--window-days", type=float, default=None, help="Window length in calendar days for MAR annualization (investigation; only used when summary CSV lacks a window_days column)")
     parser.add_argument("--min-trades-bybit", type=int, default=None)
     parser.add_argument("--min-trades-binance", type=int, default=None)
     args = parser.parse_args(argv)
@@ -263,11 +498,16 @@ def main(argv: list[str] | None = None) -> int:
         dd_delta_pp = args.dd_delta_pp if args.dd_delta_pp is not None else 5.0
         min_by = args.min_trades_bybit if args.min_trades_bybit is not None else 50
         min_bn = args.min_trades_binance if args.min_trades_binance is not None else 30
-    else:  # legacy = the 2026-05-28 sweep's softer rule
+    elif args.rule == "legacy":  # legacy = the 2026-05-28 sweep's softer rule
         sharpe_delta = args.sharpe_delta if args.sharpe_delta is not None else 0.5
         dd_delta_pp = args.dd_delta_pp if args.dd_delta_pp is not None else -5.0  # +5pp tolerance (legacy: DD may worsen by up to 5pp)
         min_by = args.min_trades_bybit if args.min_trades_bybit is not None else 30
         min_bn = args.min_trades_binance if args.min_trades_binance is not None else 0
+    else:  # investigation = Round 2 R1-R8 tier
+        sharpe_delta = 0.0  # unused
+        dd_delta_pp = 0.0   # unused
+        min_by = args.min_trades_bybit if args.min_trades_bybit is not None else 30
+        min_bn = args.min_trades_binance if args.min_trades_binance is not None else 20
 
     rows = _read_csv(Path(args.summary_csv))
     if not rows:
@@ -282,6 +522,38 @@ def main(argv: list[str] | None = None) -> int:
         )
         sys.exit(EXIT_USAGE)
     control_rows = indexed[args.control]
+
+    # Investigation mode needs window_days. Source priority: per-row CSV column,
+    # then CLI --window-days, else error.
+    inferred_window_days: float | None = None
+    if args.rule == "investigation":
+        csv_windows = {
+            m.window_days
+            for cell in indexed.values()
+            for m in cell.values()
+            if m.window_days is not None
+        }
+        if csv_windows:
+            if len(csv_windows) > 1:
+                print(
+                    f"WARNING: multiple window_days values in CSV ({sorted(csv_windows)}); "
+                    "per-row values are used per cell, --window-days only applies as fallback.",
+                    file=sys.stderr,
+                )
+            inferred_window_days = next(iter(csv_windows))
+        if inferred_window_days is None and args.window_days is None:
+            print(
+                "ERROR: investigation rule requires window_days. "
+                "Either emit a window_days column from the sweep runtime, "
+                "or pass --window-days N to this script.",
+                file=sys.stderr,
+            )
+            return EXIT_USAGE
+        window_days_fallback = args.window_days if args.window_days is not None else inferred_window_days
+        mar_delta_min = args.mar_delta_min if args.mar_delta_min is not None else 0.0
+        mar_delta_tolerance = args.mar_delta_tolerance if args.mar_delta_tolerance is not None else 0.5
+        mar_falsify = args.mar_falsify if args.mar_falsify is not None else -1.0
+        dd_falsify = args.dd_falsify if args.dd_falsify is not None else 0.70
 
     verdicts: list[CellVerdict] = []
     for cell_id in sorted(indexed):
@@ -302,30 +574,60 @@ def main(argv: list[str] | None = None) -> int:
                 )
             )
             continue
-        verdicts.append(
-            evaluate_cell(
-                cell_id=cell_id,
-                cell_rows=indexed[cell_id],
-                control_rows=control_rows,
-                sharpe_delta_min=sharpe_delta,
-                dd_delta_pp_max=dd_delta_pp,
-                min_trades_bybit=min_by,
-                min_trades_binance=min_bn,
+        if args.rule == "investigation":
+            assert window_days_fallback is not None  # narrowed above
+            verdicts.append(
+                evaluate_cell_investigation(
+                    cell_id=cell_id,
+                    cell_rows=indexed[cell_id],
+                    control_rows=control_rows,
+                    window_days=window_days_fallback,
+                    mar_delta_positive=mar_delta_min,
+                    mar_delta_tolerance=mar_delta_tolerance,
+                    mar_falsify=mar_falsify,
+                    dd_falsify_abs=dd_falsify,
+                    min_trades_bybit=min_by,
+                    min_trades_binance=min_bn,
+                )
             )
-        )
+        else:
+            verdicts.append(
+                evaluate_cell(
+                    cell_id=cell_id,
+                    cell_rows=indexed[cell_id],
+                    control_rows=control_rows,
+                    sharpe_delta_min=sharpe_delta,
+                    dd_delta_pp_max=dd_delta_pp,
+                    min_trades_bybit=min_by,
+                    min_trades_binance=min_bn,
+                )
+            )
 
-    # Pretty-print table
-    header = (
-        "cell_id", "by_sh_d", "bn_sh_d", "by_dd_d", "bn_dd_d",
-        "by_tr", "bn_tr", "by_ret", "bn_ret", "verdict",
-    )
+    # Pretty-print table (manifesto/legacy keep the original sharpe-Δ shape;
+    # investigation adds MAR Δ columns).
+    if args.rule == "investigation":
+        header = (
+            "cell_id", "by_mar_d", "bn_mar_d", "by_dd_d", "bn_dd_d",
+            "by_tr", "bn_tr", "by_ret", "bn_ret", "verdict",
+        )
+    else:
+        header = (
+            "cell_id", "by_sh_d", "bn_sh_d", "by_dd_d", "bn_dd_d",
+            "by_tr", "bn_tr", "by_ret", "bn_ret", "verdict",
+        )
     widths = [max(len(h), 18) for h in header]
     rows_fmt = [header]
     for v in verdicts:
+        if args.rule == "investigation":
+            primary_a = f"{v.bybit_mar_d:+.2f}"
+            primary_b = f"{v.binance_mar_d:+.2f}"
+        else:
+            primary_a = f"{v.bybit_sharpe_d:+.2f}"
+            primary_b = f"{v.binance_sharpe_d:+.2f}"
         rows_fmt.append((
             v.cell_id,
-            f"{v.bybit_sharpe_d:+.2f}",
-            f"{v.binance_sharpe_d:+.2f}",
+            primary_a,
+            primary_b,
             f"{v.bybit_dd_d:+.1f}pp",
             f"{v.binance_dd_d:+.1f}pp",
             str(v.bybit_trades),
@@ -338,18 +640,34 @@ def main(argv: list[str] | None = None) -> int:
         for i, cell in enumerate(r):
             widths[i] = max(widths[i], len(cell))
     fmt = "  ".join(f"{{:<{w}}}" for w in widths)
-    print(f"# rule: {args.rule}  control: {args.control}  sharpe_delta_min: +{sharpe_delta}  dd_delta_max: -{dd_delta_pp}pp  min_trades: bybit={min_by} binance={min_bn}")
+    if args.rule == "investigation":
+        print(
+            f"# rule: investigation  control: {args.control}  "
+            f"mar_delta_min: +{mar_delta_min}  mar_delta_tolerance: -{mar_delta_tolerance}  "
+            f"mar_falsify: {mar_falsify}  dd_falsify: -{dd_falsify*100:.0f}%  "
+            f"min_trades: bybit={min_by} binance={min_bn}  "
+            f"window_days_fallback: {window_days_fallback}"
+        )
+    else:
+        print(f"# rule: {args.rule}  control: {args.control}  sharpe_delta_min: +{sharpe_delta}  dd_delta_max: -{dd_delta_pp}pp  min_trades: bybit={min_by} binance={min_bn}")
     for r in rows_fmt:
         print(fmt.format(*r))
     print()
-    candidates = [v for v in verdicts if v.verdict == "candidate"]
+    positives_label = "investigation_positive" if args.rule == "investigation" else "candidate"
+    positives = [v for v in verdicts if v.verdict == positives_label]
     rejects = [v for v in verdicts if v.verdict == "reject"]
-    inconc = [v for v in verdicts if v.verdict == "inconclusive"]
-    print(f"# summary: candidates={len(candidates)} rejects={len(rejects)} inconclusive={len(inconc)} skip_control=1")
-    if candidates:
-        print("# CANDIDATES (per Manifesto FDR ceiling, pick top-3 by combined-venue sharpe):")
-        for v in sorted(candidates, key=lambda c: -(c.bybit_sharpe_d + c.binance_sharpe_d)):
-            print(f"#   {v.cell_id}  combined Δsharpe={v.bybit_sharpe_d + v.binance_sharpe_d:+.2f}")
+    other_label = "descriptive" if args.rule == "investigation" else "inconclusive"
+    other = [v for v in verdicts if v.verdict == other_label]
+    print(f"# summary: {positives_label}={len(positives)} rejects={len(rejects)} {other_label}={len(other)} skip_control=1")
+    if positives:
+        if args.rule == "investigation":
+            print("# INVESTIGATION-POSITIVE cells (ranked by combined-venue MAR Δ; forward to R10 candidate queue):")
+            for v in sorted(positives, key=lambda c: -(c.bybit_mar_d + c.binance_mar_d)):
+                print(f"#   {v.cell_id}  combined ΔMAR={v.bybit_mar_d + v.binance_mar_d:+.2f}")
+        else:
+            print("# CANDIDATES (per Manifesto FDR ceiling, pick top-3 by combined-venue sharpe):")
+            for v in sorted(positives, key=lambda c: -(c.bybit_sharpe_d + c.binance_sharpe_d)):
+                print(f"#   {v.cell_id}  combined Δsharpe={v.bybit_sharpe_d + v.binance_sharpe_d:+.2f}")
     if rejects:
         print()
         print("# REJECT reasons (first 5):")
