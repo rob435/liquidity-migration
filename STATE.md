@@ -21,6 +21,11 @@
   (-0.071), xs_rank_ret_7d (-0.043), xs_rank_ret_3d (-0.039). All negative
   IC → short-side signal. Phase 6 triggered.
   `docs/preregistration/2026-05-27-phase5-verdict.md`.
+- Phase 6 combined-signal portfolio (2026-05-28): **REJECTED, 0 candidates.**
+  Every cell shows sharpe BELOW event-driven baseline + DD WAY worse.
+  H7 falsified. The combined-signal portfolio does not beat the
+  event-driven discrete-trade strategy.
+  `docs/preregistration/2026-05-27-phase6-verdict.md`.
 - Current research program: 7-phase rank-direction edge + universe isolation +
   filter audit + signal-research harness. Pre-reg at
   `docs/preregistration/2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md`.
@@ -48,7 +53,8 @@
 | 2026-05-27 | Phase 0 pre-registered (filter LOO audit, 15 cells × 2 venues) | commit `54f7163` |
 | 2026-05-28 | Phase 0 verdict: REJECTED (0 candidates, 3 falsifiers, 11 inconclusive) | commit `8d7e1de` |
 | 2026-05-28 | Phase 1 verdict: H1 FALSIFIED on baseline (DD Δ +1.7pp < +5pp); avg sh_Δ=+1.09, avg dd_Δ=-5.78pp | commit `a5b7c05` |
-| 2026-05-28 | Phase 5 verdict: 5 features survive @ fwd_ret_3d (vol_of_vol_30d, realized_vol_7d, dist_from_30d_low, xs_rank_ret_7d, xs_rank_ret_3d) → **Phase 6 triggered** | this commit |
+| 2026-05-28 | Phase 5 verdict: 5 features survive @ fwd_ret_3d → Phase 6 triggered | commit `b90b07c` |
+| 2026-05-28 | Phase 6 verdict: REJECTED (0 candidates). No combined-portfolio scheme beats baseline. H7 FALSIFIED. | this commit |
 
 ## What's NOT done (the work)
 
@@ -75,7 +81,7 @@ Open work:
 | 3 | Exit selection (conditional on P2 candidate) | P2 candidate | not started |
 | 4 | Hybrid event types (conditional on P2+P3) | P2+P3 | not started |
 | 5 | Signal-research harness + univariate IC | Change 4 | **COMPLETE — 5 survivors @ fwd_ret_3d** (Phase 6 triggered). See [verdict](docs/preregistration/2026-05-27-phase5-verdict.md). |
-| 6 | Combined-signal portfolio (conditional on P5 ≥3 survivors) | P5 survivors | **pre-registered + orchestrator written, ready to dispatch** |
+| 6 | Combined-signal portfolio (conditional on P5 ≥3 survivors) | P5 survivors | **COMPLETE — REJECTED (0 candidates)**. H7 falsified. See [verdict](docs/preregistration/2026-05-27-phase6-verdict.md). |
 | 7 | Pre-2023 OOS gate (MANDATORY for every finalist) | any finalist | **pre-registered**, waiting on finalists |
 
 Hard end-date on Phase 7: **2026-06-15**.

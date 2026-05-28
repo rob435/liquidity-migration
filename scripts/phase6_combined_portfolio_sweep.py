@@ -34,7 +34,11 @@ from pathlib import Path
 import polars as pl
 
 SCRIPT_DIR = Path(__file__).resolve().parent
+REPO_ROOT = SCRIPT_DIR.parent
+# script-mode invocation puts SCRIPT_DIR on sys.path[0]; add REPO_ROOT so
+# `from liquidity_migration import ...` resolves to the package in the repo
 sys.path.insert(0, str(SCRIPT_DIR))
+sys.path.insert(0, str(REPO_ROOT))
 from _sweep_runtime import SHARED  # noqa: E402
 
 from liquidity_migration import signal_harness as sh  # noqa: E402
