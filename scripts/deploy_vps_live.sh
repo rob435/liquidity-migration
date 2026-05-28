@@ -49,7 +49,7 @@ fi
 "$PYTHON" -m pytest \
   tests/test_runtime_scripts.py \
   tests/test_liquidity_migration_cli.py::test_cli_volume_events_defaults_to_selected_liquidity_migration \
-  tests/test_liquidity_migration_event_demo.py::test_demo_relaxed_profile_lowers_gates_for_more_demo_trades
+  tests/test_liquidity_migration_event_demo_cycle.py::test_demo_relaxed_profile_lowers_gates_for_more_demo_trades
 
 "$PYTHON" - <<'PY'
 from liquidity_migration.event_demo import _demo_event_config, _demo_strategy_id

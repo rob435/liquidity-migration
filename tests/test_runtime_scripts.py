@@ -420,6 +420,33 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "deploy-confirm telegram send failed" in text
 
 
+def test_vps_deploy_script_pytest_nodeids_still_collect() -> None:
+    """The deploy script runs a pinned pytest subset as a pre-restart smoke test.
+    Because it `set -euo pipefail`s, a stale node-id (e.g. a test moved by a
+    test-file split) makes pytest exit non-zero and aborts the deploy. The
+    existing string-presence test can't catch a moved path, so verify every
+    `tests/...` node-id the script references actually collects."""
+    import re
+    import subprocess
+    import sys
+
+    repo = Path(__file__).resolve().parents[1]
+    text = (repo / "scripts" / "deploy_vps_live.sh").read_text(encoding="utf-8")
+    nodeids = re.findall(r"tests/[^\s\\]+\.py(?:::\w+)?", text)
+    assert nodeids, "expected deploy_vps_live.sh to pin a pytest smoke subset"
+    for nodeid in nodeids:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q", nodeid],
+            cwd=repo,
+            capture_output=True,
+            text=True,
+        )
+        assert proc.returncode == 0 and "no tests ran" not in proc.stdout.lower(), (
+            f"deploy smoke-test node-id no longer collects: {nodeid}\n"
+            f"{proc.stdout}\n{proc.stderr}"
+        )
+
+
 def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     repo = Path(__file__).resolve().parents[1]
     text = (repo / "scripts" / "verify_vps_live.sh").read_text(encoding="utf-8")
