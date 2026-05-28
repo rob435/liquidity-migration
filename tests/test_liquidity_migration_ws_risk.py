@@ -2358,8 +2358,19 @@ def test_ws_risk_recovers_strategy_trade_id_from_bot_order_link(tmp_path: Path) 
     trade_id on both ledgers."""
     from liquidity_migration.event_demo import _order_link_id, _demo_event_config, _selected_scenario
     from liquidity_migration.volume_events import VolumeEventResearchConfig
+    import time
 
-    signal_ts_ms = 1_779_667_200_000
+    # signal_ts derived from wall-clock so the planned_exit (signal_ts + 3h
+    # bybit-fill-delay + 3d production-hold) is always in the future relative
+    # to test execution. Hardcoded absolute timestamps in this fixture
+    # silently expired and caused the adopted-recovered trade to be closed
+    # by the max-hold exit before the test could assert on it.
+    # Align signal_ts to the nearest second: the order_link_id encoding
+    # uses a base-36 second-resolution timestamp, so signal_ts must be
+    # second-aligned for the round-trip (encode → decode → trade_id) to
+    # produce the same ms value the test asserts on.
+    now_ms = (int(time.time() * 1000) // 1000) * 1000
+    signal_ts_ms = now_ms - 24 * 60 * 60 * 1000  # 1 day ago — enough for fill but before max-hold
     entry_link = _order_link_id("en", symbol="AAAUSDT", signal_ts_ms=signal_ts_ms)
     promoted_strategy = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
     promoted_scenario = _selected_scenario(promoted_strategy)

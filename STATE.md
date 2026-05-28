@@ -22,10 +22,13 @@
   IC → short-side signal. Phase 6 triggered.
   `docs/preregistration/2026-05-27-phase5-verdict.md`.
 - Phase 6 combined-signal portfolio (2026-05-28): **REJECTED, 0 candidates.**
-  Every cell shows sharpe BELOW event-driven baseline + DD WAY worse.
-  H7 falsified. The combined-signal portfolio does not beat the
-  event-driven discrete-trade strategy.
-  `docs/preregistration/2026-05-27-phase6-verdict.md`.
+  H7 falsified. `docs/preregistration/2026-05-27-phase6-verdict.md`.
+- Phase 2 rank-direction grid (2026-05-28): **REJECTED, 0 candidates.**
+  H2 + H3 falsified-by-construction (deterioration → 0 trades on both
+  venues due to improvement-biased filter stack).
+  `docs/preregistration/2026-05-27-phase2-verdict.md`.
+- **PROGRAM-LEVEL VERDICT (2026-05-28):** documented null. No production
+  change. `docs/preregistration/2026-05-27-program-verdict.md`.
 - Current research program: 7-phase rank-direction edge + universe isolation +
   filter audit + signal-research harness. Pre-reg at
   `docs/preregistration/2026-05-27-rank-direction-edge-and-universe-isolation-research-plan.md`.
@@ -33,12 +36,16 @@
   crowding/event_rank_frac/turnover_ratio confirmed load-bearing).
   Phase 1 H1-FALSIFIED (universe widening hurts Sharpe but doesn't drive
   the DD shift; Phase 2 in-sample numbers can be interpreted at face value).
-- Phase 2 pre-registered + orchestrator ready. Phase 6 pre-registered +
-  orchestrator written. Phase 3 / 4 still conditional on Phase 2 candidates.
-- Next action: dispatch Phase 2 (the big ~3h rank-direction grid) and
-  Phase 6 in parallel — different code paths (Phase 6 reads pre-built
-  feature panels; Phase 2 reads klines/funding/OI/premium). Then Phase 7
-  OOS gate for any candidates.
+- **PROGRAM COMPLETE.** Documented null result across H1-H7:
+  - H1, H2, H3, H5, H7 FALSIFIED.
+  - H4 not testable (no Phase 2 candidate to feed Phase 7).
+  - H6 partially confirmed (5 IC survivors) but doesn't translate to
+    Phase 7-passing combined portfolio.
+- Phase 3, 4, 7 did NOT trigger (no candidates from any phase).
+- Strategy stays in current state. No production change. No mainnet
+  consideration. Forward demo + paper continue.
+- Next action: **OPERATOR DECISION** per the program verdict's
+  "What's NEXT" section. Default is "do nothing".
 
 ## What's done
 
@@ -54,7 +61,9 @@
 | 2026-05-28 | Phase 0 verdict: REJECTED (0 candidates, 3 falsifiers, 11 inconclusive) | commit `8d7e1de` |
 | 2026-05-28 | Phase 1 verdict: H1 FALSIFIED on baseline (DD Δ +1.7pp < +5pp); avg sh_Δ=+1.09, avg dd_Δ=-5.78pp | commit `a5b7c05` |
 | 2026-05-28 | Phase 5 verdict: 5 features survive @ fwd_ret_3d → Phase 6 triggered | commit `b90b07c` |
-| 2026-05-28 | Phase 6 verdict: REJECTED (0 candidates). No combined-portfolio scheme beats baseline. H7 FALSIFIED. | this commit |
+| 2026-05-28 | Phase 6 verdict: REJECTED (0 candidates). H7 FALSIFIED. | commit `9bd99e7` |
+| 2026-05-28 | Phase 2 verdict: REJECTED (0 candidates, 27 falsifiers, 5 inconclusive). H2 + H3 FALSIFIED-by-construction. | this commit |
+| 2026-05-28 | **PROGRAM COMPLETE — DOCUMENTED NULL RESULT.** Strategy unchanged. See [program verdict](docs/preregistration/2026-05-27-program-verdict.md). | this commit |
 
 ## What's NOT done (the work)
 
@@ -77,12 +86,12 @@ Open work:
 |---|---|---|---|
 | 0 | Filter LOO audit | none | **COMPLETE — REJECTED** (0 candidates, 3 falsifiers, 11 inconclusive). See [verdict](docs/preregistration/2026-05-27-phase0-verdict.md). |
 | 1 | Universe-isolation diagnostic | Change 3 + `build_legacy_archive_manifest.py` (run 2026-05-27) | **COMPLETE — H1 falsified** (universe widening ≠ DD-driver). See [verdict](docs/preregistration/2026-05-27-phase1-verdict.md). |
-| 2 | Rank-direction full grid | Change 1 | **pre-registered, ready to dispatch** |
-| 3 | Exit selection (conditional on P2 candidate) | P2 candidate | not started |
-| 4 | Hybrid event types (conditional on P2+P3) | P2+P3 | not started |
-| 5 | Signal-research harness + univariate IC | Change 4 | **COMPLETE — 5 survivors @ fwd_ret_3d** (Phase 6 triggered). See [verdict](docs/preregistration/2026-05-27-phase5-verdict.md). |
-| 6 | Combined-signal portfolio (conditional on P5 ≥3 survivors) | P5 survivors | **COMPLETE — REJECTED (0 candidates)**. H7 falsified. See [verdict](docs/preregistration/2026-05-27-phase6-verdict.md). |
-| 7 | Pre-2023 OOS gate (MANDATORY for every finalist) | any finalist | **pre-registered**, waiting on finalists |
+| 2 | Rank-direction full grid | Change 1 | **COMPLETE — REJECTED** (0 candidates, H2+H3 falsified-by-construction). See [verdict](docs/preregistration/2026-05-27-phase2-verdict.md). |
+| 3 | Exit selection (conditional on P2 candidate) | P2 candidate | **NOT TRIGGERED** — no P2 candidate |
+| 4 | Hybrid event types (conditional on P2+P3) | P2+P3 | **NOT TRIGGERED** — no P2 candidate |
+| 5 | Signal-research harness + univariate IC | Change 4 | **COMPLETE — 5 survivors @ fwd_ret_3d** (Phase 6 triggered). |
+| 6 | Combined-signal portfolio (conditional on P5 ≥3 survivors) | P5 survivors | **COMPLETE — REJECTED (0 candidates)**. H7 falsified. |
+| 7 | Pre-2023 OOS gate (MANDATORY for every finalist) | any finalist | **NOT TRIGGERED** — no finalist from any phase |
 
 Hard end-date on Phase 7: **2026-06-15**.
 
