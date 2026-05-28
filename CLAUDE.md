@@ -2,8 +2,8 @@
 
 A research codebase for a Bybit liquidity-migration short strategy. The
 strategy is under **active research** — its signal is statistically real but
-regime-conditional, and the current focus is regime-aware refinement (see
-`README.md` and `docs/research_findings.md`). Python 3.11+; package
+regime-conditional. Current focus: the **Round 2 integrated-strategy program**
+(see `STATE.md` and `docs/preregistration/round2/`). Python 3.11+; package
 `liquidity_migration/`.
 
 @AGENTS.md
@@ -14,9 +14,11 @@ regime-conditional, and the current focus is regime-aware refinement (see
   done, what's running, what's next. **First read for every session.**
 - **`docs/backtesting_errors_we_never_repeat.md`** — mandatory research
   methodology standard. Read it before any backtest or strategy work.
-- **`docs/preregistration/round1/rank-direction-edge-and-universe-isolation-research-plan.md`**
-  — current multi-phase research plan with the Strictness Manifesto and
-  the pre-committed FDR ceiling.
+- **`docs/preregistration/round2/integrated-strategy-program.md`** — the
+  CURRENT research plan (Round 2). Three-tier **demo-arbiter** decision
+  framework (Investigation → Demo-candidate → Real-money), MAR-primary.
+- `docs/preregistration/round1/` — Round 1 plan + verdicts (COMPLETE,
+  documented null). Historical evidence, not the active plan.
 - `docs/research_findings.md` — older research verdict + refinement roadmap.
 - `docs/data_roots.md` — which data root to use (research vs. live demo vs. OOS).
 - `docs/system_status.md` — strategy / deployment status.
@@ -51,7 +53,7 @@ failure — pushing broken code is operator pain. No exceptions.
   - `current_state` — STATE.md, in 60 seconds
   - `data_roots` — canonical data-root index
   - `list_reports`, `parse_report`, `audit_run_artifacts` — report tooling
-  - `apply_decision_rule(summary_csv)` — programmatic Strictness Manifesto verdict
+  - `apply_decision_rule(summary_csv)` — programmatic verdict (legacy strict bar; the Round-2 Tier-2 demo-candidate verdict comes from `scripts/r1_robustness.py`)
 - Research-phase helpers (no skills needed):
   - `scripts/volume_events_cell.sh --venue X --cell-id Y --phase Z --overrides 'K=V,…'`
     — runs `volume-events` with production-baseline flags filled in.

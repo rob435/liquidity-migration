@@ -1,139 +1,144 @@
 ---
 name: research-phase-runner
-description: "Execution workflow for the multi-phase research program pre-registered at docs/preregistration/round1/rank-direction-edge-and-universe-isolation-research-plan.md. Use any time you are about to run, conditionally-run, or write up a phase from that plan — covers pre-checks, dispatch, decision-rule application via scripts/apply_decision_rule.py, STATE.md update, and per-phase verdict commit. Keeps the Strictness Manifesto thresholds intact and the FDR ceiling honoured."
+description: "Execution workflow for the Round 2 research program pre-registered at docs/preregistration/round2/integrated-strategy-program.md. Use any time you are about to run, conditionally-run, or write up a sub-phase (R0-R12, C0-C3) from that plan — covers pre-checks, dispatch, the three-tier demo-arbiter decision rule (scripts/r1_robustness.py + scripts/apply_decision_rule.py), STATE.md update, and per-phase verdict commit. Keeps the three-tier thresholds intact; the Tier-3 real-money gate stays strict."
 ---
 
-# Running a research phase
+# Running a research sub-phase (Round 2)
 
-Use this every time you are about to run, conditionally-run, or write up a
-phase from the pre-registered research program. The plan lives at
-`docs/preregistration/round1/rank-direction-edge-and-universe-isolation-research-plan.md`.
+Use this every time you run, conditionally-run, or write up a sub-phase of the
+Round 2 program. The plan lives at
+`docs/preregistration/round2/integrated-strategy-program.md`.
 
-Always read STATE.md before starting — it tells you what's done, what's
-pending, and what the current decision rules are.
+Always read STATE.md first — it tells you what's done, what's pending, and the
+current binding decision rules.
 
-## Phase-runner workflow (apply per phase)
+## The decision framework — three-tier, demo-arbiter
 
-1. **Pre-check.** Read STATE.md. Confirm prior phases that this phase depends
-   on have completed and produced the input it needs. Confirm the code
-   changes the phase requires are merged. Confirm data roots present.
+Round 2 replaced Round 1's single strict "Strictness Manifesto" bar (+ FDR
+ceiling) with three gates, ordered by how expensive a false positive is:
 
-2. **Plan the cells.** Re-read the phase's "Cells" table in the plan doc.
-   Do NOT add cells not in the table without writing a new dated pre-reg
-   first.
+1. **Investigation** (R1-R8 sub-phases) — keep studying? Loose: MAR Δ > 0 on
+   the majority of venues, no return sign-flip, trade minimums.
+2. **Demo-candidate** (R10 gate → forward demo + queue for R11 OOS) — onto the
+   free forward-demo treadmill? LOOSE: **return positive on both venues +
+   pooled MAR Δ > +0.1 + neither venue worse than -0.5 MAR + ≥30 by / ≥20 bn
+   trades.** Fragility diagnostics (bootstrap p5, leave-one-month-out,
+   sub-period thirds, residual Sharpe) are **reported, NOT blocking** — they
+   set demo order.
+3. **Real-money** (demo → mainnet) — STRICT, NOT loosened: pre-2023 OOS pass +
+   ≥30d forward demo + bootstrap pooled MAR-Δ p5 ≥ 0 + residual Sharpe ≥ +0.3
+   + R7 stress pass + R8 capacity.
 
-3. **Dispatch.** Use `scripts/volume_events_cell.sh` per cell —
-   it fills in the production-baseline flags so you only pass overrides.
-   For multi-cell phases, use `scripts/sweep_cells.py` (after Change 2's
-   ThreadPoolExecutor parallelism lands) with `SWEEP_MAX_WORKERS=8 POLARS_MAX_THREADS=4`.
+Principle: permissive where being wrong is free (backtest→demo costs nothing —
+demo is paper), strict where it costs real money. The forward demo is the
+multiple-testing arbiter; the only finite surface capped is the pre-2023 OOS
+root (5 cells/quarter). MAR-primary (pooled), Sharpe secondary.
 
-4. **Apply the decision rule.** Once the per-cell summary CSV exists, run:
-   ```bash
-   python scripts/apply_decision_rule.py <SUMMARY_CSV> --control 00_baseline
-   ```
-   The output table gives you per-cell verdicts (candidate / reject /
-   inconclusive). The Strictness Manifesto thresholds are the defaults;
-   do not override them downward.
+## Phase-runner workflow (apply per sub-phase)
 
-5. **Enforce the FDR ceiling.** Max 3 candidates from Phases 2-4 group AND
-   max 3 from Phase 6 group may forward to Phase 7. If more cells qualify,
-   sort by combined-venue Sharpe (the script reports this) and close-reject
-   the rest in writing. **Closed-rejected cells are not a "menu for later."**
+1. **Pre-check.** Read STATE.md. Confirm upstream sub-phases completed and
+   produced the inputs this one needs. Confirm required code changes are
+   merged. Confirm data roots present (`~/SHARED_DATA/{bybit,binance}_full_pit`).
 
-6. **Write the verdict.** Update or create the dated pre-reg file under
-   `docs/preregistration/<YYYY-MM-DD>-phaseN-<short-name>.md` with:
-   - Stage updated to "run-complete, <ACCEPTED|REJECTED|INCONCLUSIVE>"
-   - Full per-cell metrics table
-   - Decision-rule application output
-   - Verdict paragraph including any falsification of the phase's hypothesis
-   - Forward pointer to whichever phase fires next, or "program complete"
-     if nothing forwards
+2. **Plan the cells.** Re-read the sub-phase's "Cell list" table in the plan.
+   Do NOT add off-menu cells without a dated amendment to the plan first.
 
-7. **Update STATE.md.** Move the phase from "not started" / "in progress"
-   to its terminal state in the Phases table. Add any new helpers,
-   reorganised state, or open questions.
+3. **Dispatch.** Single cells: `scripts/volume_events_cell.sh` (fills the
+   production-baseline flags; you pass overrides). Multi-cell sweeps: a
+   `scripts/_sweep_runtime.py`-based orchestrator (e.g.
+   `scripts/r1_filter_audit_sweep.py`) with `SWEEP_MAX_WORKERS=8
+   POLARS_MAX_THREADS=4` on the 5950X.
 
-8. **Commit + propose push to operator.** Two-file commit (verdict pre-reg
-   + STATE.md). Pre-push gate (`ruff` + `pytest`) MUST pass. NEVER push
-   without operator confirmation.
+4. **Apply the decision rule.**
+   - **Tier-2 demo-candidate verdict + fragility** (the Round-2 default):
+     ```bash
+     python scripts/r1_robustness.py --sweep-tag <SWEEP_TAG>
+     ```
+     emits the pooled-MAR-Δ Tier-2 verdict (engine-DD MAR) + bootstrap p5,
+     leave-one-month-out, and sub-period thirds from the per-cell ledgers.
+   - `scripts/apply_decision_rule.py <SUMMARY_CSV> --control 00_baseline` is the
+     **legacy strict (Sharpe) bar** — reference only; do not use it as the
+     Round-2 promotion gate.
+   Do not move thresholds downward to rescue a cell (see non-negotiables).
 
-## Conditional-phase triggers (from the plan)
+5. **Write the verdict.** Create the dated verdict file under
+   `docs/preregistration/round2/<YYYY-MM-DD>-<phase>-verdict.md` with: stage,
+   full per-cell metrics, the Tier-2 verdict + fragility diagnostics, the
+   verdict paragraph (incl. any falsification), and the forward pointer to the
+   next sub-phase (or "program complete — documented null").
 
-| Phase | Trigger |
-|---|---|
-| 3 (exit selection) | Phase 2 produced ≥1 candidate (`P2_det_*` or `P2_both_*` ideally) |
-| 4 (hybrid event types) | Phase 2 + Phase 3 both produced viable inputs |
-| 6 (combined-signal portfolio) | Phase 5b reported ≥3 surviving features |
-| 7 (pre-2023 OOS) | Any phase produced any finalist; mandatory before promotion |
+6. **Update STATE.md.** Move the sub-phase to its terminal state in the table;
+   add new helpers / open questions.
 
-If a trigger is not met, the phase does NOT run. File a 1-paragraph note
-in the program ledger explaining the negative trigger; do not look for
-excuses to run it anyway.
+7. **Commit + propose push to operator.** Two-file commit (verdict + STATE.md).
+   Pre-push gate (`ruff check liquidity_migration tests` + `pytest -q`) MUST
+   pass. NEVER push without operator confirmation.
+
+## Sub-phase scope + sequencing (Round 2)
+
+- **Data-only sweeps run now:** R1 (per-filter audit, **wide funnel
+  `max_active=12`**), R2 (per-feature decile-sort), R3 (bearish stack). These
+  use `cli.py → volume_events.py`, unaffected by the in-flight `event_demo` /
+  `volume_events` refactor (CLI verified intact).
+- **Code-touch phases build on the post-refactor module layout** (event_demo
+  split into `event_demo_{data,entries,planning,exits,reports,daemon}.py`):
+  R4 (risk model), R5 (sizing), R6 (cost model), R12 (sniper), C0 (continuous
+  engine / daemon). Verify the exact module per hook; coordinate if more
+  refactor work is in flight.
+- **Conditional triggers** are defined per sub-phase in the plan (e.g. R3's
+  market-neutral leg, R12d/f on a sniper flavor beating market@1h, C3 on a C2
+  demo-candidate). If a trigger isn't met, the phase does NOT run — file a
+  1-paragraph negative-trigger note; don't look for excuses to run it.
+- **Lead candidate `R1_drop_all_4`** is dispatched first in R1. If it clears
+  the Tier-2 bar, the pre-committed re-baseline cascade fires (R2-R11 compare
+  to drop_all_4; thresholds unchanged — they're deltas).
 
 ## Pre-committed behaviours (non-negotiable)
 
-- **No threshold loosening.** If a cell falls 0.01 short of the Manifesto's
-  +0.5 Sharpe-Δ on one venue, it is INCONCLUSIVE, not a candidate.
-  Filing as inconclusive is the discipline; arguing for "well it's very
-  close" is the failure mode.
-- **No off-menu cells.** If a phase's results suggest a new cell would
-  resolve an ambiguity, file the suggestion as an amendment to the plan
-  with a dated pre-reg entry, AND only run after operator review. Never
-  silently expand the menu mid-phase.
-- **No Phase 8.** Phase 7 is the final gate. A Phase 7 failure means
-  closed. There is no escape hatch.
-- **Hard end-date 2026-06-15.** After this date the inverse-direction
-  edge hypothesis is rejected by fiat and the program closes.
-- **biased_benchmark stays biased.** Phase 1 cells are NEVER traded in
-  production, regardless of their numbers.
+- **No FURTHER loosening.** The framework was loosened ONCE this round, on
+  principle (venue heterogeneity + redundant tests), pre-registered and
+  re-applied blind. Do not loosen again to rescue a near-miss, and the Tier-3
+  real-money gate stays strict. A cell short of the Tier-2 bar is descriptive,
+  not a demo-candidate.
+- **No off-menu cells.** New cells require a dated amendment to the plan before
+  running, with operator review.
+- **R11 OOS is the final gate** before any real-money conversation; a Tier-3
+  failure means closed. No escape-hatch phase.
+- **No hard end-date.** "Weeks if needed" per operator instruction; the
+  discipline is in not shortcutting the workflow, not racing a deadline.
+- **Failure is a first-class outcome.** Zero finalists = documented null;
+  strategy stays frozen. There is no "ship something" obligation.
 
 ## Phase-specific gotchas
 
-- **Phase 0 (filter LOO):** disabling a filter means setting it to its
-  permissive value (e.g. `turnover-ratio-min 0`, `pit-age-days-min 0`).
-  Some flags do not have a "disable" value; use the wrapper's
-  `--extra '--flag-name value'` pattern if a non-baseline flag is needed.
-- **Phase 1 (universe diagnostic):** requires the
-  `scripts/build_legacy_archive_manifest.py` side-copy of the manifest
-  to exist. Verify before running. If it doesn't, build it first; the
-  side-copy is symlinked, so re-building is cheap.
-- **Phase 2 (direction grid):** the `--liquidity-migration-rank-direction`
-  flag must be in the codebase (Change 1). Run a one-cell smoke
-  invocation first to verify the flag is accepted before dispatching
-  66 cells.
-- **Phase 3a (excursion measurement):** new code in the signal-harness
-  module is required; do not hand-roll this in a notebook. The harness
-  computes adverse/favourable excursion distributions cleanly with
-  PIT-honouring +1h fill alignment.
-- **Phase 3c (sensitivity grid):** ~13 hours wall on the 5950X. Kick
-  off as an overnight job. Do not interrupt; the orchestrator flushes
-  partial results after every cell.
-- **Phase 5 (signal harness):** the panel-build step (5a) is a one-off
-  per venue and should be cached. Re-running IC computation is cheap
-  once the panel exists. Do NOT rebuild the panel for each IC run.
-- **Phase 7 (OOS):** assess pre-2023 root state on first contact. If
-  rebuild needed, flag to operator before kicking off (~6h data
-  download).
+- **R1 (filter audit, wide funnel):** runs at `max_active=12` (not the
+  production 3) to gather a large dataset for feature-filtering. Dropping a
+  filter = its permissive sentinel (canonical Phase-0 LOO values). The control
+  also runs at 12, so numbers are NOT comparable to the max_active=3 peek.
+- **Sweep dispatch:** every orchestrator inherits `scripts/_sweep_runtime.py`
+  (parallel dispatch + per-cell summary flush). It emits a `window_days`
+  column so analytics stay window-aware.
+- **Signal-harness panels (R2 features):** the panel-build step is a one-off
+  per venue — cache it; re-running IC / decile-sort on the cached panel is
+  cheap. Do NOT rebuild the panel per run.
+- **R11 OOS:** assess pre-2023 root state on first contact. If a rebuild is
+  needed (~6h/venue download), flag to operator before kicking off.
 
 ## Useful MCP tools
 
-- `current_state()` — returns STATE.md as structured data.
-- `apply_decision_rule(summary_csv, control_cell)` — programmatic
-  verdict per cell (matches the script).
-- `parse_report(path)` — reads a `volume_event_research_report.md` into
-  headline metrics.
-- `audit_run_artifacts(path)` — checks the integrity-standard artifact
-  completeness for a run.
+- `current_state()` — STATE.md as structured data.
+- `apply_decision_rule(summary_csv, control_cell)` — programmatic legacy-bar
+  verdict (reference only; Round-2 Tier-2 verdict is `r1_robustness.py`).
+- `parse_report(path)` — `volume_event_research_report.md` → headline metrics.
+- `audit_run_artifacts(path)` — integrity-standard artifact completeness.
 - `data_roots()` — current data-root index.
 
 ## Communication style during a phase
 
-Report after each phase ends with:
-- 2-line headline: what ran, what verdict
-- The decision-rule analyzer output verbatim (~10 lines)
-- The verdict pre-reg file path
-- The next phase to trigger (or "program complete")
+Report after each sub-phase ends with: a 2-line headline (what ran, what
+verdict); the Tier-2 verdict + fragility output (~10 lines); the verdict file
+path; the next sub-phase to trigger (or "program complete"). Do NOT report
+mid-run progress unless something fails — let sweeps run to completion.
 
-Do NOT report mid-run progress unless something fails. The operator's
-attention is not the bottleneck; let phases run to completion before
-surfacing.
+Operator is learning quant fundamentals — explain in plain language, and
+surface inconsistencies BEFORE running.
