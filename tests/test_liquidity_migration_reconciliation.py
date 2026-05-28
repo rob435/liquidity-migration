@@ -4,8 +4,10 @@ import polars as pl
 import pytest
 
 from liquidity_migration.reconciliation import (
+    format_backtest_paper_report,
     format_demo_bybit_report,
     format_reconciliation_report,
+    reconcile_backtest_paper,
     reconcile_demo_bybit,
     reconcile_paper_demo,
 )
@@ -233,3 +235,161 @@ def test_reconcile_demo_bybit_pairs_and_flags_orphans() -> None:
     assert "ORPHANUSDT" in report
     assert "ghost position in ledger" in report
     assert "untracked position on exchange" in report
+
+
+def test_reconcile_backtest_paper_pairs_by_signal_ts_and_flags_drift() -> None:
+    """The backtest↔paper reconciler must:
+       1) pair trades on (symbol, side, signal_ts) within tolerance even when
+          the backtest's trade_id format differs from paper's
+       2) compute entry/exit price gap in bps
+       3) compute realized-return gap in percentage points
+       4) flag exit_reason divergence
+       5) flag backtest-only signals (paper missed a fire) and paper-only
+          signals (backtest missed a fire)
+    """
+    backtest = pl.DataFrame(
+        [
+            {
+                # Backtest format: basket-side-symbol, no signal_ts column,
+                # has entry_signal_ts_ms instead.
+                "trade_id": "20260522-s-WAVESUSDT",
+                "basket_id": "20260522",
+                "symbol": "WAVESUSDT", "side": "short",
+                "entry_signal_ts_ms": 1_700_000_000_000,
+                "entry_ts_ms": 1_700_000_060_000,
+                "exit_ts_ms": 1_700_100_000_000,
+                "entry_price": 0.4007, "exit_price": 0.3652,
+                "exit_reason": "take_profit",
+                "notional_weight": 0.05,
+                "gross_trade_return": 0.08858,
+                "gross_return": 0.00443,
+                "cost_return": -0.0002,
+                "funding_return": 0.0,
+                "net_return": 0.00423,
+            },
+            # Backtest fired for SUPER, paper missed it → live code drift
+            {
+                "trade_id": "20260522-s-SUPERUSDT",
+                "basket_id": "20260522",
+                "symbol": "SUPERUSDT", "side": "short",
+                "entry_signal_ts_ms": 1_700_000_000_000,
+                "entry_ts_ms": 1_700_000_060_000,
+                "exit_ts_ms": 1_700_050_000_000,
+                "entry_price": 0.123, "exit_price": 0.120,
+                "exit_reason": "take_profit",
+                "notional_weight": 0.05,
+                "gross_trade_return": 0.024,
+                "gross_return": 0.0012,
+                "cost_return": -0.0002,
+                "funding_return": 0.0,
+                "net_return": 0.001,
+            },
+        ]
+    )
+    paper = pl.DataFrame(
+        [
+            {
+                # Pairs with backtest's WAVES — same signal_ts, similar entry,
+                # but DIFFERENT exit reason (paper failed_fade-exited instead).
+                "trade_id": "liquidity_migration-q40-rev-WAVESUSDT-1700000000000",
+                "symbol": "WAVESUSDT", "side": "short",
+                "signal_ts_ms": 1_700_000_000_500,  # 0.5s gap, within 60s tolerance
+                "entry_ts_ms": 1_700_000_061_000,
+                "entry_exec_time_ms": 1_700_000_060_800,
+                "entry_price": 0.4006,  # 2.5 bps off
+                "entry_fee_usdt": 0.0,
+                "qty": 8318.7,
+                "status": "closed",
+                "exit_price": 0.3700,  # different exit price (paper held longer)
+                "exit_ts_ms": 1_700_120_000_000,
+                "exit_exec_time_ms": 1_700_120_000_500,
+                "exit_reason": "failed_fade",  # divergent reason
+                "exit_fee_usdt": 0.0,
+            },
+            # Paper-only signal: backtest didn't fire here
+            {
+                "trade_id": "liquidity_migration-q40-rev-EXTRAUSDT-1700000500000",
+                "symbol": "EXTRAUSDT", "side": "short",
+                "signal_ts_ms": 1_700_000_500_000,
+                "entry_ts_ms": 1_700_000_560_000,
+                "entry_exec_time_ms": 1_700_000_560_400,
+                "entry_price": 10.0, "entry_fee_usdt": 0.0,
+                "qty": 1.0, "status": "open",
+                "exit_price": 0.0, "exit_ts_ms": 0, "exit_exec_time_ms": 0,
+                "exit_reason": "", "exit_fee_usdt": 0.0,
+            },
+        ]
+    )
+    result = reconcile_backtest_paper(backtest, paper, signal_tolerance_ms=60_000)
+    summary = result["summary"]
+    assert summary["backtest_trades"] == 2
+    assert summary["paper_trades"] == 2
+    assert summary["paired"] == 1
+    assert summary["backtest_only"] == 1  # SUPERUSDT
+    assert summary["paper_only"] == 1  # EXTRAUSDT
+    # Entry gap on the WAVES pair: (0.4007 - 0.4006) / 0.4006 * 10_000 ≈ 2.5 bps
+    assert summary["entry_price_gap_bps_worst"] == pytest.approx(2.4963, rel=1e-3)
+    # Exit reason divergence: 1 paired, 1 divergent
+    assert summary["exit_reason_compared"] == 1
+    assert summary["exit_reason_divergent"] == 1
+    # Lists carry the right unpaired entries
+    bt_only = {t["symbol"] for t in result["backtest_only"]}
+    paper_only = {t["symbol"] for t in result["paper_only"]}
+    assert bt_only == {"SUPERUSDT"}
+    assert paper_only == {"EXTRAUSDT"}
+    # Per-pair carries both prices and the divergent reasons
+    pair = result["pairs"][0]
+    assert pair["symbol"] == "WAVESUSDT"
+    assert pair["backtest_exit_reason"] == "take_profit"
+    assert pair["paper_exit_reason"] == "failed_fade"
+    assert pair["exit_reason_match"] is False
+    assert pair["return_gap_pct"] is not None
+    # Report rendering: drift sections appear
+    report = format_backtest_paper_report(result)
+    assert "Backtest vs Paper Reconciliation" in report
+    assert "Backtest-only signals" in report
+    assert "Paper-only signals" in report
+    assert "SUPERUSDT" in report
+    assert "EXTRAUSDT" in report
+
+
+def test_reconcile_backtest_paper_window_filter() -> None:
+    """window_start_ms / window_end_ms must restrict the comparison set so the
+    backtest's longer history doesn't show up as endless backtest-only signals
+    when the forward paper run only covers the last few days."""
+    backtest = pl.DataFrame(
+        [
+            # Pre-window — should be filtered out
+            {"trade_id": "old-s-AAA", "symbol": "AAAUSDT", "side": "short",
+             "entry_signal_ts_ms": 1_000_000_000_000, "entry_ts_ms": 1_000_000_060_000,
+             "exit_ts_ms": 1_000_050_000_000, "entry_price": 1.0, "exit_price": 0.9,
+             "exit_reason": "tp", "notional_weight": 0.0, "gross_trade_return": 0.1,
+             "gross_return": 0.0, "cost_return": 0.0, "funding_return": 0.0, "net_return": 0.0},
+            # In-window — should pair
+            {"trade_id": "new-s-BBB", "symbol": "BBBUSDT", "side": "short",
+             "entry_signal_ts_ms": 1_700_000_000_000, "entry_ts_ms": 1_700_000_060_000,
+             "exit_ts_ms": 1_700_050_000_000, "entry_price": 10.0, "exit_price": 9.0,
+             "exit_reason": "tp", "notional_weight": 0.0, "gross_trade_return": 0.1,
+             "gross_return": 0.0, "cost_return": 0.0, "funding_return": 0.0, "net_return": 0.0},
+        ]
+    )
+    paper = pl.DataFrame(
+        [
+            {"trade_id": "lm-BBB", "symbol": "BBBUSDT", "side": "short",
+             "signal_ts_ms": 1_700_000_000_000, "entry_ts_ms": 1_700_000_061_000,
+             "entry_exec_time_ms": 1_700_000_060_500, "entry_price": 10.0,
+             "entry_fee_usdt": 0.0, "qty": 1.0, "status": "closed",
+             "exit_price": 9.0, "exit_ts_ms": 1_700_050_000_000,
+             "exit_exec_time_ms": 1_700_050_000_500, "exit_reason": "tp",
+             "exit_fee_usdt": 0.0},
+        ]
+    )
+    result = reconcile_backtest_paper(
+        backtest, paper, signal_tolerance_ms=60_000, window_start_ms=1_500_000_000_000
+    )
+    summary = result["summary"]
+    assert summary["backtest_trades"] == 1  # AAAUSDT excluded by window
+    assert summary["paper_trades"] == 1
+    assert summary["paired"] == 1
+    assert summary["backtest_only"] == 0
+    assert summary["paper_only"] == 0

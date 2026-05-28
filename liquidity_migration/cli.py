@@ -29,7 +29,9 @@ from .feature_factory import run_feature_factory_report
 from .ingestion import generate_fixture_data
 from .portfolio_hedge import run_portfolio_hedge_report
 from .reconciliation import (
+    run_backtest_paper_reconciliation,
     run_demo_bybit_reconciliation,
+    run_full_reconciliation,
     run_long_paper_demo_reconciliation,
     run_paper_demo_reconciliation,
 )
@@ -1755,6 +1757,97 @@ def _add_reconcile_paper_demo_parser(subparsers) -> None:
     reconcile.add_argument("--output-dir", default=None, help="Where to write the reconciliation report.")
 
 
+def _add_reconcile_backtest_paper_parser(subparsers) -> None:
+    reconcile = subparsers.add_parser(
+        "reconcile-backtest-paper",
+        help=(
+            "Reconcile the offline volume-events backtest (volume_event_best_trades.csv) "
+            "against the live paper ledger. Identical signal sets prove the live code "
+            "matches the offline backtest; mismatches surface code/data drift."
+        ),
+    )
+    reconcile.add_argument(
+        "--backtest-trades-csv",
+        required=True,
+        help="Path to a volume_event_best_trades.csv produced by `volume-events`.",
+    )
+    reconcile.add_argument(
+        "--paper-data-root",
+        default="data/bybit-paper-event",
+        help="Paper (dry-run) data root holding the event_demo_trades ledger.",
+    )
+    reconcile.add_argument(
+        "--signal-tolerance-ms",
+        type=int,
+        default=60_000,
+        help="Max signal-ts gap (ms) for pairing a backtest trade with a paper trade. Defaults to 60s.",
+    )
+    reconcile.add_argument(
+        "--window-start-ms",
+        type=int,
+        default=None,
+        help="Restrict backtest trades to signals at or after this ts. Defaults to the paper ledger's earliest signal.",
+    )
+    reconcile.add_argument(
+        "--window-end-ms",
+        type=int,
+        default=None,
+        help="Restrict backtest trades to signals at or before this ts.",
+    )
+    reconcile.add_argument(
+        "--output-dir",
+        default=None,
+        help="Where to write the backtest-paper reconciliation report.",
+    )
+
+
+def _add_reconcile_all_parser(subparsers) -> None:
+    reconcile = subparsers.add_parser(
+        "reconcile-all",
+        help=(
+            "Run the full reconciliation triangle in one shot: backtest↔paper↔demo↔Bybit. "
+            "Skips backtest↔paper if --backtest-trades-csv not provided; skips demo↔Bybit "
+            "if Bybit credentials are unavailable. Writes one combined headline report "
+            "plus the individual sub-reports."
+        ),
+    )
+    reconcile.add_argument(
+        "--paper-data-root",
+        default="data/bybit-paper-event",
+        help="Paper data root.",
+    )
+    reconcile.add_argument(
+        "--demo-data-root",
+        default="data/bybit-demo-event",
+        help="Demo data root.",
+    )
+    reconcile.add_argument(
+        "--backtest-trades-csv",
+        default=None,
+        help="Optional path to a volume_event_best_trades.csv to fold backtest↔paper into the run.",
+    )
+    reconcile.add_argument(
+        "--entry-tolerance-ms", type=int, default=600_000,
+        help="paper↔demo entry-time pairing tolerance.",
+    )
+    reconcile.add_argument(
+        "--signal-tolerance-ms", type=int, default=60_000,
+        help="backtest↔paper signal-ts pairing tolerance.",
+    )
+    reconcile.add_argument(
+        "--lookback-hours", type=int, default=168,
+        help="Bybit closed_pnl lookback window for demo↔Bybit.",
+    )
+    reconcile.add_argument(
+        "--skip-bybit", action="store_true",
+        help="Skip the demo↔Bybit leg even if credentials are present.",
+    )
+    reconcile.add_argument(
+        "--output-dir", default=None,
+        help="Where to write the combined + sub-reports. Defaults to <demo-root>/reports/full_reconciliation/.",
+    )
+
+
 def _add_reconcile_demo_bybit_parser(subparsers) -> None:
     reconcile = subparsers.add_parser(
         "reconcile-demo-bybit",
@@ -1840,6 +1933,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_reconcile_paper_demo_parser(subparsers)
     _add_reconcile_long_paper_demo_parser(subparsers)
     _add_reconcile_demo_bybit_parser(subparsers)
+    _add_reconcile_backtest_paper_parser(subparsers)
+    _add_reconcile_all_parser(subparsers)
 
     return parser
 
@@ -1848,13 +1943,15 @@ _COMMANDS_WITHOUT_DATA_ROOT = frozenset(
     {
         "download-data",
         "combined-book-telegram-report",
-        # The three reconciliation commands read from explicit --paper-data-root /
-        # --demo-data-root arguments; the global research data_root they would
-        # otherwise check doesn't exist on the VPS (where the demo runs) and
-        # doesn't need to.
+        # The reconciliation commands read from explicit --paper-data-root /
+        # --demo-data-root / --backtest-trades-csv arguments; the global
+        # research data_root they would otherwise check doesn't exist on the
+        # VPS (where the demo runs) and doesn't need to.
         "reconcile-paper-demo",
         "reconcile-long-paper-demo",
         "reconcile-demo-bybit",
+        "reconcile-backtest-paper",
+        "reconcile-all",
     }
 )
 
@@ -2709,6 +2806,59 @@ def main(argv: list[str] | None = None) -> int:
             f"open_only_in_bybit={summary['open_only_in_bybit']} "
             f"pnl_gap_usdt_total={summary['pnl_gap_usdt_total']:.3f} "
             f"path={payload['report_path']}"
+        )
+        return 0
+
+    if args.command == "reconcile-backtest-paper":
+        payload = run_backtest_paper_reconciliation(
+            args.backtest_trades_csv,
+            args.paper_data_root,
+            signal_tolerance_ms=args.signal_tolerance_ms,
+            window_start_ms=args.window_start_ms,
+            window_end_ms=args.window_end_ms,
+            output_dir=args.output_dir,
+        )
+        summary = payload["result"]["summary"]
+        print(
+            "backtest-paper reconciliation "
+            f"paired={summary['paired']} "
+            f"backtest_only={summary['backtest_only']} "
+            f"paper_only={summary['paper_only']} "
+            f"entry_gap_bps_worst={summary['entry_price_gap_bps_worst']:.2f} "
+            f"exit_gap_bps_worst={summary['exit_price_gap_bps_worst']:.2f} "
+            f"return_gap_pct_worst={summary['return_gap_pct_worst']:.4f} "
+            f"path={payload['report_path']}"
+        )
+        return 0
+
+    if args.command == "reconcile-all":
+        trading_client = None
+        if not args.skip_bybit:
+            from .bybit import BybitPrivateClient, resolve_private_credentials
+
+            api_key, api_secret, demo_flag = resolve_private_credentials()
+            if api_key and api_secret:
+                trading_client = BybitPrivateClient(
+                    category="linear", demo=demo_flag, api_key=api_key, api_secret=api_secret
+                )
+            else:
+                print(
+                    "reconcile-all: Bybit credentials unavailable; skipping demo↔Bybit leg. "
+                    "Pass --skip-bybit to silence this notice."
+                )
+        payload = run_full_reconciliation(
+            paper_root=args.paper_data_root,
+            demo_root=args.demo_data_root,
+            trading_client=trading_client,
+            backtest_trades_csv=args.backtest_trades_csv,
+            entry_tolerance_ms=args.entry_tolerance_ms,
+            signal_tolerance_ms=args.signal_tolerance_ms,
+            lookback_hours=args.lookback_hours,
+            output_dir=args.output_dir,
+        )
+        sub_keys = ",".join(sorted(payload["sub_reports"].keys()))
+        print(
+            f"full reconciliation legs={sub_keys} path={payload['combined_report_path']}"
         )
         return 0
 

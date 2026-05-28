@@ -59,6 +59,7 @@ def _clean_trades(trades: pl.DataFrame) -> list[dict[str, Any]]:
                 "trade_id": str(row.get("trade_id") or ""),
                 "symbol": symbol,
                 "side": side,
+                "signal_ts_ms": _int(row.get("signal_ts_ms")),
                 "entry_ts_ms": _int(row.get("entry_ts_ms")),
                 "entry_exec_time_ms": _int(row.get("entry_exec_time_ms")),
                 "entry_price": entry_price,
@@ -70,6 +71,53 @@ def _clean_trades(trades: pl.DataFrame) -> list[dict[str, Any]]:
                 "exit_exec_time_ms": _int(row.get("exit_exec_time_ms")),
                 "exit_reason": str(row.get("exit_reason") or ""),
                 "exit_fee_usdt": _float(row.get("exit_fee_usdt")),
+            }
+        )
+    return cleaned
+
+
+def _clean_backtest_trades(trades: pl.DataFrame) -> list[dict[str, Any]]:
+    """Adapt the volume-events backtest trade ledger (`volume_event_best_trades.csv`)
+    to the same dict shape that `_clean_trades` produces for paper/demo. The
+    backtest carries `entry_signal_ts_ms` (the signal-bar time) rather than the
+    paper ledger's `signal_ts_ms`; entry/exit times in the backtest are
+    deterministic from the strategy clock, not real wall-clock, so they are the
+    primary pairing keys."""
+    if trades.is_empty():
+        return []
+    cleaned: list[dict[str, Any]] = []
+    for row in trades.to_dicts():
+        symbol = str(row.get("symbol") or "")
+        side = _normalized_side(row.get("side"))
+        entry_price = _float(row.get("entry_price"))
+        if not symbol or side not in {"long", "short"} or entry_price <= 0.0:
+            continue
+        exit_price = _float(row.get("exit_price"))
+        exit_ts_ms = _int(row.get("exit_ts_ms"))
+        cleaned.append(
+            {
+                "trade_id": str(row.get("trade_id") or ""),
+                "symbol": symbol,
+                "side": side,
+                "signal_ts_ms": _int(row.get("entry_signal_ts_ms") or row.get("signal_ts_ms")),
+                "entry_ts_ms": _int(row.get("entry_ts_ms")),
+                # No exec_time / fee on the backtest path — it's a strategy-clock
+                # model with idealized fills + a per-side cost penalty baked into
+                # cost_return. Fee residual will be backtest gross vs paper gross,
+                # which by construction should match exactly.
+                "entry_exec_time_ms": 0,
+                "entry_price": entry_price,
+                "entry_fee_usdt": 0.0,
+                "qty": 0.0,  # backtest doesn't track qty; uses notional_weight
+                "notional_weight": _float(row.get("notional_weight")),
+                "status": "closed" if exit_price > 0.0 and exit_ts_ms > 0 else "open",
+                "exit_price": exit_price,
+                "exit_ts_ms": exit_ts_ms,
+                "exit_exec_time_ms": 0,
+                "exit_reason": str(row.get("exit_reason") or ""),
+                "exit_fee_usdt": 0.0,
+                "gross_trade_return": _float(row.get("gross_trade_return")),
+                "net_return": _float(row.get("net_return")),
             }
         )
     return cleaned
@@ -360,6 +408,286 @@ def format_reconciliation_report(result: dict[str, Any]) -> str:
     else:
         lines.append("No paired trades yet — both ledgers need overlapping trades to reconcile.")
     return "\n".join(lines) + "\n"
+
+
+def reconcile_backtest_paper(
+    backtest_trades: pl.DataFrame,
+    paper_trades: pl.DataFrame,
+    *,
+    signal_tolerance_ms: int = 60_000,
+    window_start_ms: int | None = None,
+    window_end_ms: int | None = None,
+) -> dict[str, Any]:
+    """Reconcile the offline volume-events backtest against the live paper
+    (dry-run) ledger.
+
+    Paper IS the live execution of the same strategy code that the backtest
+    runs offline; they MUST agree on which signals fire and at what price.
+    A mismatch surfaces one of:
+
+    - **Code drift**: the offline backtest and the live runner have diverged
+      (different filter, different threshold, different event detection).
+    - **Data drift**: the offline backtest used historical klines that
+      differ from what the live runner saw at the same timestamp (e.g.
+      revised funding, late OI bar).
+    - **Universe drift**: the offline backtest's PIT manifest disagrees
+      with the live universe at that ts.
+
+    Pairs by (symbol, side, signal_ts) within ``signal_tolerance_ms``. If
+    `window_start_ms`/`window_end_ms` are supplied, only trades whose
+    signal_ts falls in that window are considered — needed when the
+    backtest covers a longer period than the forward paper run.
+    """
+    backtest = _clean_backtest_trades(backtest_trades)
+    paper = _clean_trades(paper_trades)
+    if window_start_ms is not None:
+        backtest = [t for t in backtest if t["signal_ts_ms"] >= window_start_ms]
+        paper = [t for t in paper if t["signal_ts_ms"] >= window_start_ms]
+    if window_end_ms is not None:
+        backtest = [t for t in backtest if t["signal_ts_ms"] <= window_end_ms]
+        paper = [t for t in paper if t["signal_ts_ms"] <= window_end_ms]
+
+    tolerance = max(int(signal_tolerance_ms), 0)
+    paper_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for trade in paper:
+        paper_by_key.setdefault((trade["symbol"], trade["side"]), []).append(trade)
+    for bucket in paper_by_key.values():
+        bucket.sort(key=lambda t: t["signal_ts_ms"])
+
+    candidates: list[tuple[int, int, int]] = []
+    for bidx, bt in enumerate(backtest):
+        key = (bt["symbol"], bt["side"])
+        bucket = paper_by_key.get(key, [])
+        for pidx, paper_trade in enumerate(bucket):
+            gap = abs(bt["signal_ts_ms"] - paper_trade["signal_ts_ms"])
+            if gap <= tolerance:
+                candidates.append((gap, bidx, pidx))
+    candidates.sort()
+    used_backtest: set[int] = set()
+    used_paper: dict[tuple[str, str], set[int]] = {}
+    pairs: list[dict[str, Any]] = []
+    for _gap, bidx, pidx in candidates:
+        if bidx in used_backtest:
+            continue
+        bt = backtest[bidx]
+        key = (bt["symbol"], bt["side"])
+        paper_used = used_paper.setdefault(key, set())
+        if pidx in paper_used:
+            continue
+        used_backtest.add(bidx)
+        paper_used.add(pidx)
+        paper_trade = paper_by_key[key][pidx]
+        side = bt["side"]
+        # Both prices should match to 1 bp in a perfectly-synced setup; larger
+        # gaps mean the live runner picked a different bar (clock-skew) or
+        # the offline backtest used revised klines.
+        entry_price_gap_bps = (
+            abs(bt["entry_price"] - paper_trade["entry_price"]) / paper_trade["entry_price"] * 10_000.0
+            if paper_trade["entry_price"] > 0.0
+            else 0.0
+        )
+        both_closed = bt["status"] == "closed" and paper_trade["status"] == "closed"
+        exit_price_gap_bps: float | None = None
+        bt_return: float | None = None
+        paper_return: float | None = None
+        return_gap_pct: float | None = None
+        exit_reason_match: bool | None = None
+        if both_closed:
+            exit_price_gap_bps = (
+                abs(bt["exit_price"] - paper_trade["exit_price"]) / paper_trade["exit_price"] * 10_000.0
+                if paper_trade["exit_price"] > 0.0
+                else 0.0
+            )
+            bt_return = bt["gross_trade_return"] * 100.0
+            paper_return = _realized_return_pct(
+                side=side,
+                entry_price=paper_trade["entry_price"],
+                exit_price=paper_trade["exit_price"],
+            )
+            return_gap_pct = bt_return - paper_return
+            bt_reason = bt["exit_reason"]
+            paper_reason = paper_trade["exit_reason"]
+            if bt_reason or paper_reason:
+                exit_reason_match = bt_reason == paper_reason
+        pairs.append(
+            {
+                "symbol": bt["symbol"],
+                "side": side,
+                "backtest_trade_id": bt["trade_id"],
+                "paper_trade_id": paper_trade["trade_id"],
+                "signal_gap_ms": abs(bt["signal_ts_ms"] - paper_trade["signal_ts_ms"]),
+                "backtest_entry_price": bt["entry_price"],
+                "paper_entry_price": paper_trade["entry_price"],
+                "entry_price_gap_bps": entry_price_gap_bps,
+                "backtest_exit_price": bt["exit_price"],
+                "paper_exit_price": paper_trade["exit_price"],
+                "exit_price_gap_bps": exit_price_gap_bps,
+                "backtest_exit_reason": bt["exit_reason"],
+                "paper_exit_reason": paper_trade["exit_reason"],
+                "exit_reason_match": exit_reason_match,
+                "backtest_return_pct": bt_return,
+                "paper_return_pct": paper_return,
+                "return_gap_pct": return_gap_pct,
+            }
+        )
+
+    pairs.sort(key=lambda p: p["paper_trade_id"] or p["backtest_trade_id"])
+    entry_bps = [p["entry_price_gap_bps"] for p in pairs]
+    exit_bps = [p["exit_price_gap_bps"] for p in pairs if p["exit_price_gap_bps"] is not None]
+    return_gaps = [p["return_gap_pct"] for p in pairs if p["return_gap_pct"] is not None]
+    exit_reason_known = [p for p in pairs if p["exit_reason_match"] is not None]
+    exit_reason_divergent = [p for p in exit_reason_known if not p["exit_reason_match"]]
+    summary = {
+        "window_start_ms": window_start_ms,
+        "window_end_ms": window_end_ms,
+        "signal_tolerance_ms": tolerance,
+        "backtest_trades": len(backtest),
+        "paper_trades": len(paper),
+        "paired": len(pairs),
+        "backtest_only": len(backtest) - len(pairs),
+        "paper_only": len(paper) - len(pairs),
+        "entry_price_gap_bps_mean": mean(entry_bps) if entry_bps else 0.0,
+        "entry_price_gap_bps_worst": max(entry_bps) if entry_bps else 0.0,
+        "exit_price_gap_bps_mean": mean(exit_bps) if exit_bps else 0.0,
+        "exit_price_gap_bps_worst": max(exit_bps) if exit_bps else 0.0,
+        "return_gap_pct_mean": mean(return_gaps) if return_gaps else 0.0,
+        "return_gap_pct_worst": max((abs(r) for r in return_gaps), default=0.0),
+        "exit_reason_compared": len(exit_reason_known),
+        "exit_reason_divergent": len(exit_reason_divergent),
+    }
+    backtest_only_list = [
+        {"trade_id": bt["trade_id"], "symbol": bt["symbol"], "side": bt["side"], "signal_ts_ms": bt["signal_ts_ms"]}
+        for bidx, bt in enumerate(backtest) if bidx not in used_backtest
+    ]
+    paper_only_list: list[dict[str, Any]] = []
+    for key, bucket in paper_by_key.items():
+        used = used_paper.get(key, set())
+        for pidx, pt in enumerate(bucket):
+            if pidx in used:
+                continue
+            paper_only_list.append(
+                {"trade_id": pt["trade_id"], "symbol": pt["symbol"], "side": pt["side"], "signal_ts_ms": pt["signal_ts_ms"]}
+            )
+    return {
+        "summary": summary,
+        "pairs": pairs,
+        "backtest_only": backtest_only_list,
+        "paper_only": paper_only_list,
+    }
+
+
+def format_backtest_paper_report(result: dict[str, Any]) -> str:
+    """Render a backtest↔paper reconciliation as markdown."""
+    summary = result["summary"]
+    lines = [
+        "# Backtest vs Paper Reconciliation",
+        "",
+        "Pairs the offline volume-events backtest against the live paper",
+        "(dry-run) ledger. A clean match here proves the live strategy code",
+        "matches the offline backtest model on the same data.",
+        "",
+        f"- window: {summary['window_start_ms']} → {summary['window_end_ms']}",
+        f"- signal-pair tolerance: {summary['signal_tolerance_ms']} ms",
+        f"- backtest trades: {summary['backtest_trades']}",
+        f"- paper trades: {summary['paper_trades']}",
+        f"- paired: {summary['paired']}",
+        f"- backtest-only (paper missed signal — LIVE CODE DRIFT): {summary['backtest_only']}",
+        f"- paper-only (backtest missed signal — OFFLINE CODE/DATA DRIFT): {summary['paper_only']}",
+        "",
+        "## Entry-price agreement (bps; perfect sync = 0)",
+        "",
+        f"- mean: {summary['entry_price_gap_bps_mean']:.3f}",
+        f"- worst: {summary['entry_price_gap_bps_worst']:.3f}",
+        "",
+        "## Exit-price agreement (bps; perfect sync = 0)",
+        "",
+        f"- mean: {summary['exit_price_gap_bps_mean']:.3f}",
+        f"- worst: {summary['exit_price_gap_bps_worst']:.3f}",
+        "",
+        "## Realized-return agreement (percentage points)",
+        "",
+        f"- mean Δ: {summary['return_gap_pct_mean']:.4f}",
+        f"- worst |Δ|: {summary['return_gap_pct_worst']:.4f}",
+        "",
+        "## Exit-reason divergence",
+        "",
+        f"- pairs compared: {summary['exit_reason_compared']}",
+        f"- diverged: {summary['exit_reason_divergent']}",
+        "",
+    ]
+    if result["pairs"]:
+        lines.append("## Per-pair")
+        lines.append("")
+        lines.append(
+            "| symbol | side | signal Δ ms | entry Δ bps | exit Δ bps | bt reason | paper reason | bt ret % | paper ret % | ret Δ %% |"
+        )
+        lines.append("|---|---|---|---|---|---|---|---|---|---|")
+        for p in result["pairs"]:
+            exit_bps = p["exit_price_gap_bps"]
+            bt_ret = p["backtest_return_pct"]
+            paper_ret = p["paper_return_pct"]
+            ret_gap = p["return_gap_pct"]
+            lines.append(
+                f"| {p['symbol']} | {p['side']} | {p['signal_gap_ms']} | "
+                f"{p['entry_price_gap_bps']:.3f} | "
+                f"{'-' if exit_bps is None else format(exit_bps, '.3f')} | "
+                f"{p['backtest_exit_reason'] or '-'} | {p['paper_exit_reason'] or '-'} | "
+                f"{'-' if bt_ret is None else format(bt_ret, '.3f')} | "
+                f"{'-' if paper_ret is None else format(paper_ret, '.3f')} | "
+                f"{'-' if ret_gap is None else format(ret_gap, '.4f')} |"
+            )
+    if result["backtest_only"]:
+        lines.append("")
+        lines.append("## Backtest-only signals (paper missed — investigate live-code drift)")
+        lines.append("")
+        for t in result["backtest_only"]:
+            lines.append(f"- {t['symbol']} {t['side']} signal_ts_ms={t['signal_ts_ms']} trade_id={t['trade_id']}")
+    if result["paper_only"]:
+        lines.append("")
+        lines.append("## Paper-only signals (backtest missed — investigate offline code/data drift)")
+        lines.append("")
+        for t in result["paper_only"]:
+            lines.append(f"- {t['symbol']} {t['side']} signal_ts_ms={t['signal_ts_ms']} trade_id={t['trade_id']}")
+    return "\n".join(lines) + "\n"
+
+
+def run_backtest_paper_reconciliation(
+    backtest_trades_csv: str | Path,
+    paper_root: str | Path,
+    *,
+    signal_tolerance_ms: int = 60_000,
+    window_start_ms: int | None = None,
+    window_end_ms: int | None = None,
+    paper_dataset: str = "event_demo_trades",
+    output_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """Read the volume-events backtest trade CSV and the paper ledger, then
+    reconcile. If `window_start_ms` is None, defaults to the paper ledger's
+    earliest signal_ts (so the comparison is scoped to the forward window).
+    """
+    backtest_path = Path(backtest_trades_csv).expanduser()
+    paper_root_p = Path(paper_root).expanduser()
+    backtest_df = pl.read_csv(backtest_path) if backtest_path.exists() else pl.DataFrame()
+    paper_df = read_dataset(paper_root_p, paper_dataset)
+    if window_start_ms is None and not paper_df.is_empty() and "signal_ts_ms" in paper_df.columns:
+        non_null = [v for v in paper_df["signal_ts_ms"].to_list() if v is not None]
+        if non_null:
+            window_start_ms = int(min(non_null))
+    result = reconcile_backtest_paper(
+        backtest_df,
+        paper_df,
+        signal_tolerance_ms=signal_tolerance_ms,
+        window_start_ms=window_start_ms,
+        window_end_ms=window_end_ms,
+    )
+    report = format_backtest_paper_report(result)
+    report_dir = (
+        Path(output_dir).expanduser() if output_dir else paper_root_p / "reports" / "backtest_paper_reconciliation"
+    )
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / "backtest_paper_reconciliation.md"
+    report_path.write_text(report, encoding="utf-8")
+    return {"result": result, "report": report, "report_path": str(report_path)}
 
 
 def reconcile_demo_bybit(
@@ -784,3 +1112,104 @@ def _run_reconciliation(
     report_path = report_dir / report_filename
     report_path.write_text(report, encoding="utf-8")
     return {"result": result, "report": report, "report_path": str(report_path)}
+
+
+def run_full_reconciliation(
+    *,
+    paper_root: str | Path,
+    demo_root: str | Path,
+    trading_client: Any | None = None,
+    backtest_trades_csv: str | Path | None = None,
+    entry_tolerance_ms: int = DEFAULT_ENTRY_TOLERANCE_MS,
+    signal_tolerance_ms: int = 60_000,
+    lookback_hours: int = 168,
+    output_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """Run the full reconciliation triangle (or quadrilateral when a backtest
+    CSV is provided): backtest ↔ paper ↔ demo ↔ Bybit. Writes a combined
+    markdown report + individual sub-reports. Returns the structured payload
+    so callers can post the headline numbers to telegram or alert on regressions.
+
+    Sub-runs that lack inputs are skipped, not errored:
+    - `backtest_trades_csv=None` skips backtest↔paper
+    - `trading_client=None` skips demo↔Bybit (e.g. CI without credentials)
+
+    The remaining paper↔demo always runs since both ledgers are local.
+    """
+    paper_root_p = Path(paper_root).expanduser()
+    demo_root_p = Path(demo_root).expanduser()
+    out_root = Path(output_dir).expanduser() if output_dir else demo_root_p / "reports" / "full_reconciliation"
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    sub_reports: dict[str, dict[str, Any]] = {}
+    paper_demo_payload = run_paper_demo_reconciliation(
+        paper_root_p,
+        demo_root_p,
+        entry_tolerance_ms=entry_tolerance_ms,
+        output_dir=out_root / "paper_demo",
+    )
+    sub_reports["paper_demo"] = paper_demo_payload
+
+    if backtest_trades_csv is not None:
+        backtest_path = Path(backtest_trades_csv).expanduser()
+        if backtest_path.exists():
+            backtest_paper_payload = run_backtest_paper_reconciliation(
+                backtest_path,
+                paper_root_p,
+                signal_tolerance_ms=signal_tolerance_ms,
+                output_dir=out_root / "backtest_paper",
+            )
+            sub_reports["backtest_paper"] = backtest_paper_payload
+
+    if trading_client is not None:
+        demo_bybit_payload = run_demo_bybit_reconciliation(
+            demo_root_p,
+            trading_client=trading_client,
+            lookback_hours=lookback_hours,
+            output_dir=out_root / "demo_bybit",
+        )
+        sub_reports["demo_bybit"] = demo_bybit_payload
+
+    # Combined headline
+    headline = ["# Full Reconciliation — backtest ↔ paper ↔ demo ↔ Bybit", ""]
+    if "backtest_paper" in sub_reports:
+        s = sub_reports["backtest_paper"]["result"]["summary"]
+        headline.append(
+            f"- **backtest↔paper**: paired={s['paired']} "
+            f"backtest-only={s['backtest_only']} paper-only={s['paper_only']} "
+            f"entry_gap_bps_worst={s['entry_price_gap_bps_worst']:.2f} "
+            f"exit_gap_bps_worst={s['exit_price_gap_bps_worst']:.2f} "
+            f"return_gap_pct_worst={s['return_gap_pct_worst']:.3f}"
+        )
+    else:
+        headline.append("- **backtest↔paper**: skipped (no backtest CSV provided)")
+    s = sub_reports["paper_demo"]["result"]["summary"]
+    headline.append(
+        f"- **paper↔demo**: paired={s['paired']} paper-only={s['paper_only']} "
+        f"demo-only={s['demo_only']} entry_slip_bps_mean={s['entry_slippage_bps_mean']:.2f} "
+        f"exit_slip_bps_mean={s['exit_slippage_bps_mean']:.2f} "
+        f"exit_gap_ms_worst={s['exit_gap_ms_worst']} "
+        f"exit_reason_divergent={s['exit_reason_divergent']} "
+        f"fee_gap_usdt_total={s['fee_gap_usdt_total']:.3f}"
+    )
+    if "demo_bybit" in sub_reports:
+        s = sub_reports["demo_bybit"]["result"]["summary"]
+        headline.append(
+            f"- **demo↔Bybit**: paired={s['paired_closed']} "
+            f"orphan_in_bybit={s['orphan_in_bybit']} orphan_in_ledger={s['orphan_in_ledger']} "
+            f"open_only_in_ledger={s['open_only_in_ledger']} open_only_in_bybit={s['open_only_in_bybit']} "
+            f"pnl_gap_usdt_total={s['pnl_gap_usdt_total']:.3f}"
+        )
+    else:
+        headline.append("- **demo↔Bybit**: skipped (no Bybit credentials provided)")
+    headline.append("")
+    headline.append("## Sub-reports")
+    headline.append("")
+    for key, payload in sub_reports.items():
+        headline.append(f"- {key}: `{payload['report_path']}`")
+    combined_path = out_root / "full_reconciliation.md"
+    combined_path.write_text("\n".join(headline) + "\n", encoding="utf-8")
+    return {
+        "sub_reports": sub_reports,
+        "combined_report_path": str(combined_path),
+    }
