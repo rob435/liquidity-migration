@@ -704,6 +704,41 @@ def _attach_forward_returns(
 # ============================================================================
 
 
+def _autodetect_dataset_names(data_root: Path | str) -> dict[str, str]:
+    """Detect which dataset-naming convention applies to ``data_root``.
+
+    The repo holds two flavours of per-venue root:
+      * Bybit:   funding/, open_interest/, premium_index_1h/, mark_price_1h/
+      * Binance: binance_usdm_funding/, binance_usdm_open_interest/,
+                 binance_usdm_premium_index_1h/, binance_usdm_mark_price_1h/
+
+    ``klines_1h`` is the same on both venues. We sniff which subdirs exist
+    and return the right mapping so callers don't have to know the
+    convention up-front. Phase 5a hit this: dispatch used default Bybit
+    names against the Binance root, silently produced 100%-null
+    funding_rate_z / oi_delta_7d / premium_index_z, and the resulting
+    panel was unusable for Phase 5b IC.
+    """
+    root = Path(str(data_root)).expanduser()
+    binance_prefix = "binance_usdm_"
+    has_binance = (root / f"{binance_prefix}funding").is_dir() or (
+        root / f"{binance_prefix}open_interest"
+    ).is_dir()
+    if has_binance:
+        return {
+            "klines_dataset": "klines_1h",
+            "funding_dataset": f"{binance_prefix}funding",
+            "open_interest_dataset": f"{binance_prefix}open_interest",
+            "premium_dataset": f"{binance_prefix}premium_index_1h",
+        }
+    return {
+        "klines_dataset": "klines_1h",
+        "funding_dataset": "funding",
+        "open_interest_dataset": "open_interest",
+        "premium_dataset": "premium_index_1h",
+    }
+
+
 def build_feature_panel(
     data_root: Path | str,
     *,
@@ -712,10 +747,10 @@ def build_feature_panel(
     feature_specs: "Iterable[FeatureSpec] | str" = "all",
     forward_horizons: tuple[int, ...] = (1, 3, 7),
     universe_min_daily_turnover: float = 0.0,
-    klines_dataset: str = "klines_1h",
-    funding_dataset: str = "funding",
-    open_interest_dataset: str = "open_interest",
-    premium_dataset: str = "premium_index_1h",
+    klines_dataset: str | None = None,
+    funding_dataset: str | None = None,
+    open_interest_dataset: str | None = None,
+    premium_dataset: str | None = None,
 ) -> pl.DataFrame:
     """Build the (symbol, date, feature_1..k, fwd_ret_*) panel.
 
@@ -729,6 +764,12 @@ def build_feature_panel(
     below this threshold. 0 (default) keeps every (symbol, date). Use a
     moderate floor (e.g. 1e6 USD) to drop dead pairs from IC computations
     that would otherwise pollute the cross-sectional rank distribution.
+
+    Dataset-name args default to None, which triggers per-venue
+    autodetection — Bybit roots resolve to ``funding/open_interest/
+    premium_index_1h``, Binance roots resolve to the ``binance_usdm_``-
+    prefixed equivalents. Override an arg to force a specific dataset
+    name (e.g. when pointing at a side-copy with renamed dirs).
     """
     specs = resolve_feature_specs(feature_specs)
     start_ms = _date_str_to_ms(start)
@@ -740,16 +781,22 @@ def build_feature_panel(
     read_start_ms = start_ms - pad_back_ms
     read_end_ms = end_ms + pad_forward_ms
 
+    autodetected = _autodetect_dataset_names(data_root)
+    klines_name = klines_dataset if klines_dataset is not None else autodetected["klines_dataset"]
+    funding_name = funding_dataset if funding_dataset is not None else autodetected["funding_dataset"]
+    oi_name = open_interest_dataset if open_interest_dataset is not None else autodetected["open_interest_dataset"]
+    premium_name = premium_dataset if premium_dataset is not None else autodetected["premium_dataset"]
+
     klines_1h = _read_window(
         data_root,
-        klines_dataset,
+        klines_name,
         start_ms=read_start_ms,
         end_ms=read_end_ms,
         columns=["ts_ms", "symbol", "open", "high", "low", "close", "volume_base", "turnover_quote", "date"],
     )
-    funding = _read_window(data_root, funding_dataset, start_ms=read_start_ms, end_ms=read_end_ms)
-    open_interest = _read_window(data_root, open_interest_dataset, start_ms=read_start_ms, end_ms=read_end_ms)
-    premium = _read_window(data_root, premium_dataset, start_ms=read_start_ms, end_ms=read_end_ms)
+    funding = _read_window(data_root, funding_name, start_ms=read_start_ms, end_ms=read_end_ms)
+    open_interest = _read_window(data_root, oi_name, start_ms=read_start_ms, end_ms=read_end_ms)
+    premium = _read_window(data_root, premium_name, start_ms=read_start_ms, end_ms=read_end_ms)
 
     if klines_1h.is_empty():
         return pl.DataFrame()
@@ -840,7 +887,16 @@ def compute_univariate_ic(
         .sort("ts_ms")
     )
 
-    n_days = daily.height
+    # Filter NaN values too — polars' pl.corr returns NaN (not null) when
+    # one of the inputs has zero variance on a given day (e.g. constant
+    # ranks because all symbols share the same value, or only 1 symbol
+    # had a non-null observation that day). drop_nulls doesn't catch NaN.
+    # Without this filter, sum(ics) propagates NaN to mean_ic, t_stat, all
+    # sub-period ICs — a feature with even one zero-variance day silently
+    # returns NaN for every Phase 5 survival stat. Observed in production
+    # on Binance funding_rate_z (frequent zero-variance days).
+    ics = [v for v in daily["ic"].to_list() if v is not None and not math.isnan(v)]
+    n_days = len(ics)
     if n_days == 0:
         return ICReport(
             feature=feature,
@@ -853,7 +909,6 @@ def compute_univariate_ic(
             sub_period_sign_consistent=False,
         )
 
-    ics = daily["ic"].to_list()
     mean_ic = sum(ics) / n_days
     var = sum((v - mean_ic) ** 2 for v in ics) / max(n_days - 1, 1)
     ic_std = math.sqrt(var)

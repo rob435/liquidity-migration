@@ -432,6 +432,50 @@ def test_compute_univariate_ic_does_not_survive_phase_5_rule_on_noise() -> None:
     )
 
 
+def test_compute_univariate_ic_filters_nan_days_not_just_null_days() -> None:
+    """polars' pl.corr returns NaN (not null) when a per-day cross-section
+    has zero variance — e.g. all-identical funding rates or a 1-symbol day.
+    drop_nulls doesn't catch NaN, so the naive sum(ics)/n_days propagates
+    NaN to mean_ic, t_stat, and every sub-period IC. Observed in Phase 5b
+    on Binance funding_rate_z (frequent zero-variance days). The fix is to
+    explicitly filter NaN from the daily IC series before averaging."""
+    # Build a panel where most days have valid IC but one day has zero
+    # variance in the feature (all symbols share the same value) → pl.corr
+    # returns NaN. Mean over the remaining valid days must come back valid.
+    rows: list[dict] = []
+    import random
+    rng = random.Random(0)
+    n_symbols = 20
+    n_days = 50
+    bad_day = 25
+    for d in range(n_days):
+        ts = _date_ms("2025-01-01") + d * MS_PER_DAY
+        for s in range(n_symbols):
+            if d == bad_day:
+                # zero-variance day: every symbol shares the same feature value.
+                feature_val = 0.0
+            else:
+                feature_val = rng.gauss(0.0, 1.0)
+            rows.append({
+                "symbol": f"S{s:02d}",
+                "ts_ms": ts,
+                "feature_x": feature_val,
+                "fwd_ret_3d": rng.gauss(0.0, 0.05),
+            })
+    panel = pl.DataFrame(rows)
+    report = compute_univariate_ic(panel, feature="feature_x", target="fwd_ret_3d")
+    # mean_ic, t_stat, sub_period_ics MUST be valid finite numbers (the noisy
+    # feature has IC ~ 0 with small sample size, but the value itself is
+    # well-defined).
+    assert math.isfinite(report.mean_ic), f"mean_ic was {report.mean_ic} (expected finite)"
+    assert math.isfinite(report.t_stat) or report.ic_std == 0.0
+    for sub in report.sub_period_ics:
+        assert math.isfinite(sub) or report.n_days < 3
+    # n_days should equal valid (non-NaN) day count = n_days - 1 (we dropped
+    # the zero-variance day).
+    assert report.n_days == n_days - 1
+
+
 def test_compute_univariate_ic_raises_on_unknown_feature_or_target() -> None:
     panel = _planted_edge_panel()
     with pytest.raises(KeyError):
@@ -575,6 +619,37 @@ def test_build_feature_panel_end_to_end_produces_features_and_forward_returns(tm
     # Every (symbol, date) in the window has a row
     assert panel.height > 0
     assert set(panel["symbol"].unique().to_list()) == {"AAA", "BBB", "CCC"}
+
+
+def test_autodetect_dataset_names_picks_binance_when_prefixed_subdirs_exist(tmp_path: Path) -> None:
+    """Binance roots use binance_usdm_-prefixed dataset dirs; Bybit roots
+    use plain names. Phase 5a hit this — dispatch passed default Bybit
+    names against the Binance root, the panel silently produced 100%-null
+    funding/oi/premium-derived features, and Phase 5b IC returned all NaN
+    for those features. The autodetector picks the right convention by
+    sniffing which subdirs exist."""
+    from liquidity_migration.signal_harness import _autodetect_dataset_names
+
+    # Bybit-shaped root: plain dataset dirs
+    (tmp_path / "bybit_like" / "funding").mkdir(parents=True)
+    (tmp_path / "bybit_like" / "open_interest").mkdir(parents=True)
+    bybit_names = _autodetect_dataset_names(tmp_path / "bybit_like")
+    assert bybit_names["funding_dataset"] == "funding"
+    assert bybit_names["open_interest_dataset"] == "open_interest"
+    assert bybit_names["premium_dataset"] == "premium_index_1h"
+
+    # Binance-shaped root: binance_usdm_-prefixed dirs
+    (tmp_path / "binance_like" / "binance_usdm_funding").mkdir(parents=True)
+    (tmp_path / "binance_like" / "binance_usdm_open_interest").mkdir(parents=True)
+    binance_names = _autodetect_dataset_names(tmp_path / "binance_like")
+    assert binance_names["funding_dataset"] == "binance_usdm_funding"
+    assert binance_names["open_interest_dataset"] == "binance_usdm_open_interest"
+    assert binance_names["premium_dataset"] == "binance_usdm_premium_index_1h"
+
+    # Empty root (neither convention): defaults to Bybit names
+    (tmp_path / "empty").mkdir()
+    empty_names = _autodetect_dataset_names(tmp_path / "empty")
+    assert empty_names["funding_dataset"] == "funding"
 
 
 def test_build_feature_panel_universe_filter_drops_low_turnover_rows(tmp_path: Path) -> None:
