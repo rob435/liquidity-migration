@@ -87,6 +87,28 @@ of both. See "Two signal architectures in scope" below and
 
 ---
 
+## Codebase note — `event_demo` refactor in flight (2026-05-28)
+
+`liquidity_migration/event_demo.py` is being refactored (currently **under
+audit**) into a module family: `event_demo_{data,entries,planning,exits,
+reports,daemon}.py`. This shapes how Round 2's **code-touch** sub-phases land —
+they target the post-refactor layout, not the old monolith:
+
+- **Unaffected — proceed now:** the backtest / sweep path is `cli.py →
+  volume_events.py`, which the refactor does NOT touch. R1-R3 sweeps (including
+  the wide-funnel `max_active=12` R1 run) and the signal harness run against the
+  current code as-is.
+- **Depends on the refactor landing:** R5 (position sizing), R6 (cost-model
+  integration into the runner), R12 (sniper entry / daemon), C0 (continuous
+  engine = the live-daemon path). Implement these on top of the audited module
+  split — verify the exact module for each hook at implementation time — to
+  avoid colliding with the refactor.
+
+**Sequencing rule:** data-only sweeps run independently and now; runner/daemon
+code changes wait for the `event_demo` refactor + its audit to merge first.
+
+---
+
 ## Two signal architectures in scope
 
 Round 1 ran exclusively on the **daily-frequency signal architecture**:
@@ -916,10 +938,11 @@ bar applies.
 
 ### Code changes
 
-Modify `liquidity_migration.event_demo` (and backtest equivalents) to
-support `--position-sizing {dollar_equal, risk_equal}` and a new
-`--target-vol-per-name` knob. Default stays `dollar_equal` for
-backward compatibility; cells opt in via flag.
+Modify the `event_demo` runner (post-refactor: the relevant
+`event_demo_{entries,planning}.py` module — verify at implementation; see the
+"Codebase note") and the backtest equivalents to support `--position-sizing
+{dollar_equal, risk_equal}` and a new `--target-vol-per-name` knob. Default
+stays `dollar_equal` for backward compatibility; cells opt in via flag.
 
 Effort: ~1 day code + tests.
 

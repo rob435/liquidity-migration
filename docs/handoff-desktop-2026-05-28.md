@@ -69,8 +69,18 @@ artifacts live in the Mac's `~/SHARED_DATA`, uncommitted — you'll regenerate a
 - Loosen at the cheap gate, keep the real-money gate strict; don't re-stack
   redundant fragility tests.
 
-## NOT part of this handoff
+## The `event_demo` refactor (in flight, under audit)
 
-There is an in-progress `event_demo` refactor on the Mac (extracting
-`event_demo_data.py` out of `event_demo.py`) — unrelated to this research work,
-left as local Mac WIP, deliberately **not** committed here.
+A separate, legitimate refactor is splitting `event_demo.py` into
+`event_demo_{data,entries,planning,exits,reports,daemon}.py` — currently under
+audit, left as local WIP, **not** in this handoff commit.
+
+- It does **not** affect your immediate task: the sweep runs via `cli.py →
+  volume_events.py`, which the refactor doesn't touch.
+- It IS an upstream dependency for the later code-touch phases (R5 sizing, R6
+  cost-model wiring, R12 sniper, C0 continuous engine) — build those on the
+  post-refactor module layout once it merges. See the round2 doc "Codebase note
+  — event_demo refactor in flight".
+- Our research commit could not be pushed from the Mac: the repo's pre-push hook
+  lints the whole working tree, and the refactor is mid-edit (failing ruff). The
+  push lands once the refactor's audit settles the tree clean.
