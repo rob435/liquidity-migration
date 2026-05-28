@@ -528,6 +528,35 @@ class BybitPrivateClient:
         payload = self._call_optional(("get_closed_pnl",), **params)
         return payload.get("result", {}).get("list", []) if payload else []
 
+    def get_funding_settlements(
+        self,
+        *,
+        start_time_ms: int | None = None,
+        end_time_ms: int | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        """Funding-settlement rows from the account transaction log.
+
+        Used by the demo<->Bybit reconciliation (E6) to surface the short's
+        funding tailwind/drag — funding settles separately from closedPnl, so
+        without this it is invisible in the reconciliation. Each row carries a
+        signed account cash-flow (``funding``/``cashFlow``/``change``; positive =
+        the account received funding). Returns the result.list as-is (empty list
+        on a missing endpoint, mirroring get_closed_pnl).
+        """
+        params: dict[str, Any] = {
+            "accountType": "UNIFIED",
+            "category": self.category,
+            "type": "SETTLEMENT",
+            "limit": max(1, min(int(limit), 200)),
+        }
+        if start_time_ms is not None:
+            params["startTime"] = int(start_time_ms)
+        if end_time_ms is not None:
+            params["endTime"] = int(end_time_ms)
+        payload = self._call_optional(("get_transaction_log",), **params)
+        return payload.get("result", {}).get("list", []) if payload else []
+
     def set_leverage(self, *, symbol: str, buy_leverage: float = 1.0, sell_leverage: float | None = None) -> dict[str, Any]:
         if buy_leverage <= 0.0:
             raise ValueError("buy_leverage must be positive")

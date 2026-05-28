@@ -814,10 +814,36 @@ def _aggregate_bybit_closures(
     return merged
 
 
+def _summarize_funding(records: list[dict[str, Any]] | None) -> tuple[float, list[dict[str, Any]]]:
+    """Sum Bybit funding-settlement transaction-log rows into a signed total and
+    a per-symbol breakdown. Defensive: a settlement amount may arrive under
+    ``funding``, ``cashFlow``, or ``change`` depending on endpoint/version, and
+    the sign is account cash-flow (positive = credit to the account, i.e. a short
+    that RECEIVED funding). Rows missing all amount fields contribute 0."""
+    by_symbol: dict[str, float] = {}
+    for record in records or []:
+        symbol = str(record.get("symbol") or "")
+        if not symbol:
+            continue
+        amount = record.get("funding")
+        if amount is None:
+            amount = record.get("cashFlow")
+        if amount is None:
+            amount = record.get("change")
+        by_symbol[symbol] = by_symbol.get(symbol, 0.0) + _float(amount)
+    total = sum(by_symbol.values())
+    breakdown = [
+        {"symbol": sym, "funding_usdt": amt}
+        for sym, amt in sorted(by_symbol.items(), key=lambda kv: kv[0])
+    ]
+    return total, breakdown
+
+
 def reconcile_demo_bybit(
     demo_trades: pl.DataFrame,
     closed_pnl_records: list[dict[str, Any]],
     open_positions: list[dict[str, Any]],
+    funding_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Reconcile the demo ledger against Bybit's account-level truth.
 
@@ -1007,6 +1033,12 @@ def reconcile_demo_bybit(
             }
         )
 
+    # Funding is settled separately from Bybit's closedPnl (which is trading
+    # P&L net of trading fees only). For a short, positive funding is a CREDIT
+    # the closedPnl-based pnl_gap never sees — surfacing it shows the live
+    # short's true realized P&L (trading + funding). (E6)
+    funding_total_usdt, funding_by_symbol = _summarize_funding(funding_records)
+
     exit_price_bps_all = [p["exit_price_gap_bps"] for p in pairs]
     pnl_gaps_all = [p["pnl_gap_usdt"] for p in pairs]
     exit_ts_gaps_all = [p["exit_ts_gap_ms"] for p in pairs]
@@ -1027,6 +1059,7 @@ def reconcile_demo_bybit(
         "pnl_gap_usdt_total": sum(pnl_gaps_all) if pnl_gaps_all else 0.0,
         "exit_ts_gap_ms_mean": mean(exit_ts_gaps_all) if exit_ts_gaps_all else 0,
         "exit_ts_gap_ms_worst": max(exit_ts_gaps_all) if exit_ts_gaps_all else 0,
+        "funding_settlement_usdt_total": funding_total_usdt,
     }
     return {
         "summary": summary,
@@ -1037,6 +1070,7 @@ def reconcile_demo_bybit(
         "open_only_in_bybit": [{"symbol": s, "side": side} for s, side in open_only_in_bybit],
         "open_position_diffs": open_position_diffs,
         "duplicate_open_ledger": duplicate_open_ledger,
+        "funding_by_symbol": funding_by_symbol,
     }
 
 
@@ -1073,6 +1107,13 @@ def format_demo_bybit_report(result: dict[str, Any]) -> str:
         "is the fee cost plus any fill-price reconciliation error.",
         "",
         f"- total across paired: {summary['pnl_gap_usdt_total']:.3f}",
+        "",
+        "## Funding settlements (USDT; +ve = the account RECEIVED funding)",
+        "",
+        "Settled separately from closedPnl. For a short, positive funding is a",
+        "credit — realized P&L the pnl-gap above never captures.",
+        "",
+        f"- total over window: {summary.get('funding_settlement_usdt_total', 0.0):.3f}",
         "",
         "## Exit timestamp gap (|ledger - Bybit createdTime|, seconds)",
         "",
@@ -1172,7 +1213,18 @@ def run_demo_bybit_reconciliation(
             r["_symbol_query"] = sym
             closed_records.append(r)
 
-    result = reconcile_demo_bybit(trades, closed_records, open_positions)
+    # Funding settlements (optional): surfaces the short's funding tailwind/drag,
+    # which closedPnl excludes. hasattr-guarded so older clients still work, and
+    # a fetch failure degrades to "no funding data" rather than killing the run.
+    funding_records: list[dict[str, Any]] = []
+    fetch_funding = getattr(trading_client, "get_funding_settlements", None)
+    if callable(fetch_funding):
+        try:
+            funding_records = fetch_funding(start_time_ms=start_ms, end_time_ms=end_ms) or []
+        except Exception:  # noqa: BLE001 - funding visibility is best-effort, never fatal
+            funding_records = []
+
+    result = reconcile_demo_bybit(trades, closed_records, open_positions, funding_records)
     report = format_demo_bybit_report(result)
     report_dir = (
         Path(output_dir).expanduser() if output_dir else demo_root_p / "reports" / "demo_bybit_reconciliation"

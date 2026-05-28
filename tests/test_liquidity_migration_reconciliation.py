@@ -340,6 +340,32 @@ def test_reconcile_demo_bybit_flags_duplicate_open_ledger() -> None:
     assert dup["symbol"] == "AAAUSDT" and dup["side"] == "short" and dup["count"] == 2
 
 
+def test_reconcile_demo_bybit_surfaces_funding_settlements() -> None:
+    """E6: funding settles separately from closedPnl. The reconciler must sum the
+    signed funding cash-flows (tolerating the funding/cashFlow/change field
+    variants) into a total + per-symbol breakdown, defaulting to 0 when absent."""
+    empty = pl.DataFrame(schema={"symbol": pl.Utf8, "side": pl.Utf8, "status": pl.Utf8})
+    # Absent funding -> total 0.0, no behavior change.
+    base = reconcile_demo_bybit(empty, [], [])
+    assert base["summary"]["funding_settlement_usdt_total"] == pytest.approx(0.0)
+    assert base["funding_by_symbol"] == []
+
+    funding = [
+        {"symbol": "AAAUSDT", "funding": "1.50"},     # received (credit)
+        {"symbol": "AAAUSDT", "cashFlow": "0.50"},    # field variant
+        {"symbol": "BBBUSDT", "change": "-0.25"},     # paid (debit), field variant
+        {"symbol": "", "funding": "9.0"},             # no symbol -> ignored
+    ]
+    result = reconcile_demo_bybit(empty, [], [], funding)
+    assert result["summary"]["funding_settlement_usdt_total"] == pytest.approx(1.75)
+    by_symbol = {f["symbol"]: f["funding_usdt"] for f in result["funding_by_symbol"]}
+    assert by_symbol["AAAUSDT"] == pytest.approx(2.0)
+    assert by_symbol["BBBUSDT"] == pytest.approx(-0.25)
+    assert "" not in by_symbol
+    # Report renders the funding section.
+    assert "Funding settlements" in format_demo_bybit_report(result)
+
+
 def test_reconcile_backtest_paper_pairs_by_signal_ts_and_flags_drift() -> None:
     """The backtest↔paper reconciler must:
        1) pair trades on (symbol, side, signal_ts) within tolerance even when
