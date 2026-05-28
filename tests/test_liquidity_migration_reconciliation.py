@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import polars as pl
 import pytest
 
@@ -393,3 +395,94 @@ def test_reconcile_backtest_paper_window_filter() -> None:
     assert summary["paired"] == 1
     assert summary["backtest_only"] == 0
     assert summary["paper_only"] == 0
+
+
+def test_reconcile_paper_demo_pairs_via_signal_ts_when_entry_ts_diverges() -> None:
+    """Regression for the May-25 recovery-backfill case: demo's WAVES had
+    entry_ts_ms ~3h earlier than paper's (recovery backfilled to original
+    signal-bar time, while paper's entry_ts_ms was its later first-cycle
+    entry). They share the same signal_ts and trade_id should pair them.
+    BUT: legacy/empty trade_id rows have to fall through to signal_ts,
+    NOT to entry_ts (which would miss the pair because the gap is 3h ≫
+    entry_tolerance_ms default 10 min). Confirms the new Pass 1.5
+    signal-ts pairing closes that gap."""
+    paper = pl.DataFrame(
+        [
+            {
+                "trade_id": "",  # legacy: no trade_id, must pair via signal_ts
+                "symbol": "WAVESUSDT", "side": "short",
+                "signal_ts_ms": 1_700_000_000_000,
+                "entry_ts_ms": 1_700_010_795_773,  # 2:59 later than demo
+                "entry_exec_time_ms": 1_700_010_795_500,
+                "entry_price": 0.4007, "entry_fee_usdt": 0.0,
+                "qty": 8318.7, "status": "closed",
+                "exit_price": 0.3652, "exit_ts_ms": 1_700_100_000_000,
+                "exit_exec_time_ms": 1_700_100_000_500,
+                "exit_reason": "take_profit", "exit_fee_usdt": 0.0,
+            }
+        ]
+    )
+    demo = pl.DataFrame(
+        [
+            {
+                "trade_id": "",
+                "symbol": "WAVESUSDT", "side": "short",
+                "signal_ts_ms": 1_700_000_000_000,  # SAME signal_ts as paper
+                "entry_ts_ms": 1_700_000_000_000,  # recovery-backfilled to signal-bar
+                "entry_exec_time_ms": 1_700_000_001_000,
+                "entry_price": 0.4058, "entry_fee_usdt": 0.5,
+                "qty": 8053.6, "status": "closed",
+                "exit_price": 0.3982, "exit_ts_ms": 1_700_090_000_000,
+                "exit_exec_time_ms": 1_700_090_000_500,
+                "exit_reason": "take_profit", "exit_fee_usdt": 0.4,
+            }
+        ]
+    )
+    # entry_tolerance default 600_000 ms is FAR smaller than the 3h entry-ts
+    # gap; only signal-ts pairing (60s default tolerance) can close this.
+    result = reconcile_paper_demo(paper, demo)
+    assert result["summary"]["paired"] == 1, (
+        "signal_ts pairing must close the 3h entry_ts gap that the legacy "
+        "entry_ts pass alone would have missed"
+    )
+    pair = result["pairs"][0]
+    assert pair["symbol"] == "WAVESUSDT"
+    # Fee residual should pick up both demo legs' fees (0.5 + 0.4 = 0.9)
+    assert pair["fee_gap_usdt"] == pytest.approx(0.9)
+
+
+def test_combined_book_summary_uses_fees() -> None:
+    """combined-book-telegram-report's _ledger_pnl must subtract fees when
+    entry_fee_usdt / exit_fee_usdt are present so the headline matches
+    Bybit's net closedPnl. Without this, the report over-reports realized
+    PnL by ~fees (which compounds quickly across many trades)."""
+    import tempfile
+    from liquidity_migration.long_native_event_demo import _ledger_pnl
+    from liquidity_migration.storage import write_dataset
+
+    with tempfile.TemporaryDirectory() as root_str:
+        root = Path(root_str)
+        trades = pl.DataFrame(
+            [
+                {
+                    "trade_id": "t1", "symbol": "AAAUSDT", "side": "short",
+                    "status": "closed",
+                    "entry_price": 100.0, "exit_price": 90.0, "qty": 1.0,
+                    "entry_fee_usdt": 0.05, "exit_fee_usdt": 0.07,
+                },
+                {
+                    "trade_id": "t2", "symbol": "BBBUSDT", "side": "long",
+                    "status": "open",
+                    "entry_price": 50.0, "exit_price": 0.0, "qty": 2.0,
+                    "entry_fee_usdt": 0.03, "exit_fee_usdt": 0.0,
+                },
+            ]
+        )
+        write_dataset(trades, root, "event_demo_trades", partition_by=())
+        count, realized, open_notional = _ledger_pnl(root, "event_demo_trades")
+        assert count == 2
+        # Gross PnL on the closed short: (100-90)*1 = 10
+        # Net = 10 - 0.05 - 0.07 = 9.88
+        assert realized == pytest.approx(9.88)
+        # Open notional from t2 = 2 * 50 = 100
+        assert open_notional == pytest.approx(100.0)

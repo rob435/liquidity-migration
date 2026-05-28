@@ -157,15 +157,29 @@ def reconcile_paper_demo(
     demo_trades: pl.DataFrame,
     *,
     entry_tolerance_ms: int = DEFAULT_ENTRY_TOLERANCE_MS,
+    signal_tolerance_ms: int = 60_000,
 ) -> dict[str, Any]:
-    """Pair paper and demo trades by symbol/side/entry time and measure the
-    fill-price slippage between them. Returns a JSON-serializable summary plus a
-    per-pair breakdown. Pairing matches the globally smallest entry-time gaps
-    first within each (symbol, side) group, bounded by ``entry_tolerance_ms``,
-    so trades close in time cannot steal each other's better match."""
+    """Pair paper and demo trades by trade_id, then signal_ts, then entry_ts.
+    Measure fill-price + exit-time + exit-reason slippage between them.
+
+    Pairing precedence:
+
+    1. **Exact `trade_id`** — the strongest match. Trade-ids are deterministic
+       from (strategy, symbol, signal_ts), so identical IDs pair cleanly even
+       when fill times differ by hours.
+    2. **`signal_ts_ms` gap** (within `signal_tolerance_ms`, default 60s) —
+       the second strongest. Signal_ts is the strategy decision time and is
+       set from the same bar boundary on both sides; tight tolerance.
+    3. **`entry_ts_ms` gap** (within `entry_tolerance_ms`, default 10 min) —
+       the legacy fallback for rows missing both trade_id and signal_ts.
+
+    Within each pass, the globally smallest gap is paired first so trades
+    close in time cannot steal each other's better match.
+    """
     paper = _clean_trades(paper_trades)
     demo = _clean_trades(demo_trades)
     tolerance = max(int(entry_tolerance_ms), 0)
+    signal_tolerance = max(int(signal_tolerance_ms), 0)
 
     paper_by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for trade in paper:
@@ -208,17 +222,69 @@ def reconcile_paper_demo(
         tid_matched_demo.add(demo_idx)
         tid_matched_paper.setdefault(key, set()).add(paper_idx)
 
-    # Pass 2: gap-based pairing for trades without a matching trade_id (e.g.
-    # legacy ledger rows). Build every candidate within tolerance, then assign
-    # smallest-gap-first so the best global pairs win — a greedy per-demo
-    # nearest-time pass would let an earlier demo trade consume a paper trade
-    # that is a tighter match for a later one, biasing slippage.
+    # Pass 1.5: pair by signal_ts gap within `signal_tolerance_ms`. Recovery-
+    # backfilled trades can have entry_ts_ms that differs from paper's
+    # entry_ts_ms by HOURS (the recovered demo trade was backfilled with the
+    # original signal-bar time as its entry_ts, while paper recorded its own
+    # later first-cycle entry_ts) — so signal_ts is the only safe non-id key
+    # in that case. We do this BEFORE the legacy entry_ts pass so a true
+    # signal_ts match wins over a coincidental entry_ts proximity.
+    signal_matched_demo: set[int] = set(tid_matched_demo)
+    signal_matched_paper: dict[tuple[str, str], set[int]] = {
+        k: set(v) for k, v in tid_matched_paper.items()
+    }
+    signal_candidates: list[tuple[int, int, int]] = []
     for demo_idx, demo_trade in enumerate(demo):
         if demo_idx in tid_matched_demo:
+            continue
+        demo_signal = demo_trade.get("signal_ts_ms", 0)
+        if not demo_signal:
             continue
         key = (demo_trade["symbol"], demo_trade["side"])
         bucket = paper_by_key.get(key, [])
         already_paired = tid_matched_paper.get(key, set())
+        for paper_idx, paper_trade in enumerate(bucket):
+            if paper_idx in already_paired:
+                continue
+            paper_signal = paper_trade.get("signal_ts_ms", 0)
+            if not paper_signal:
+                continue
+            sig_gap = abs(demo_signal - paper_signal)
+            if sig_gap <= signal_tolerance:
+                # Sort key reuses the standard `gap` slot (smaller = better)
+                # so this list folds into the main `candidates` ordering.
+                signal_candidates.append((sig_gap, demo_idx, paper_idx))
+    # Assign signal-ts matches smallest-first so the best signal-aligned pair
+    # wins inside each (symbol, side) bucket.
+    signal_candidates.sort()
+    for sig_gap, demo_idx, paper_idx in signal_candidates:
+        if demo_idx in signal_matched_demo:
+            continue
+        key = (demo[demo_idx]["symbol"], demo[demo_idx]["side"])
+        paper_used = signal_matched_paper.setdefault(key, set())
+        if paper_idx in paper_used:
+            continue
+        # Use entry_ts gap as the secondary scoring (kept consistent with the
+        # rest of `candidates`) so the chronological re-sort below still works.
+        demo_trade = demo[demo_idx]
+        paper_trade = paper_by_key[key][paper_idx]
+        entry_gap = abs(demo_trade["entry_ts_ms"] - paper_trade["entry_ts_ms"])
+        candidates.append((entry_gap, demo_idx, paper_idx))
+        signal_matched_demo.add(demo_idx)
+        paper_used.add(paper_idx)
+
+    # Pass 2: gap-based pairing for trades without a matching trade_id or
+    # signal_ts (e.g. legacy ledger rows). Build every candidate within
+    # entry_tolerance_ms, then assign smallest-gap-first so the best global
+    # pairs win — a greedy per-demo nearest-time pass would let an earlier
+    # demo trade consume a paper trade that is a tighter match for a later
+    # one, biasing slippage.
+    for demo_idx, demo_trade in enumerate(demo):
+        if demo_idx in signal_matched_demo:
+            continue
+        key = (demo_trade["symbol"], demo_trade["side"])
+        bucket = paper_by_key.get(key, [])
+        already_paired = signal_matched_paper.get(key, set())
         for paper_idx, paper_trade in enumerate(bucket):
             if paper_idx in already_paired:
                 continue

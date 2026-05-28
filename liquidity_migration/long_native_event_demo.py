@@ -67,8 +67,10 @@ from .event_demo import (
     _refresh_positions_and_orders,
     _resolve_private_snapshot,
     _resolve_ticker_snapshot,
+    _safe_ratio,
     _stop_price_for_entry,
     _take_profit_price_for_entry,
+    _trade_return,
     _upsert_rows,
     _utc_now_ms,
     _wait_for_execution_summary,
@@ -1101,6 +1103,10 @@ def _execute_long_exits(
         status = "planned"
         error = ""
         exit_price = 0.0
+        # Pre-declare so the dry-run and place-order-failure branches both
+        # leave the trade-update / order-row writers able to read them.
+        exit_fee_usdt = 0.0
+        exit_exec_time_ms = 0
         filled_qty = _float(qty)
         if demo.submit_orders:
             assert trading_client is not None
@@ -1148,9 +1154,13 @@ def _execute_long_exits(
                     status = "submitted_unconfirmed"
                     error = f"fill confirmation failed: {exc}"[:500]
                     filled_qty = 0.0
+                    exit_fee_usdt = 0.0
+                    exit_exec_time_ms = 0
                 else:
                     filled_qty = _float(exec_summary.get("qty"))
                     exit_price = _float(exec_summary.get("avg_price"))
+                    exit_fee_usdt = _float(exec_summary.get("fee"))
+                    exit_exec_time_ms = int(_float(exec_summary.get("exec_time_ms") or 0))
                     target_qty = _float(qty)
                     tolerance = max(target_qty * 1e-8, 1e-12)
                     if target_qty > 0.0 and filled_qty + tolerance >= target_qty:
@@ -1163,10 +1173,26 @@ def _execute_long_exits(
         if not demo.submit_orders or filled_qty > 0.0 or status == "submitted_unconfirmed":
             trade_update = dict(trade)
             if status == "filled" or (not demo.submit_orders):
+                # Mirror the short-sleeve exit path: realized PnL + venue fee +
+                # venue execTime must land on the close so the ledger carries
+                # the full audit trail without needing the orphan reconciler.
+                final_exit_price = exit_price or _float(trade.get("entry_price"))
+                trade_side = str(trade.get("side") or "long")
+                entry_price_for_return = _float(trade.get("entry_price"))
+                gross_trade_return = _trade_return(
+                    entry_price_for_return, final_exit_price, side=trade_side
+                )
+                notional_weight = _safe_ratio(
+                    trade.get("notional_usdt"), trade.get("equity_usdt")
+                )
                 trade_update.update({
                     "status": "closed",
                     "exit_ts_ms": now_ms,
-                    "exit_price": exit_price or _float(trade.get("entry_price")),
+                    "exit_price": final_exit_price,
+                    "exit_fee_usdt": exit_fee_usdt,
+                    "exit_exec_time_ms": exit_exec_time_ms,
+                    "gross_trade_return": gross_trade_return,
+                    "net_return": gross_trade_return * notional_weight,
                     "exit_reason": str(plan.get("exit_reason", "time_stop")),
                     "exit_order_link_id": exit_link,
                     "exit_order_id": order_result.get("orderId", ""),
@@ -1193,6 +1219,8 @@ def _execute_long_exits(
             "order_id": order_result.get("orderId", ""),
             "submit_mode": submit_mode,
             "avg_price": exit_price,
+            "fee_usdt": exit_fee_usdt,
+            "exec_time_ms": exit_exec_time_ms,
             "notional_usdt": abs(exit_price * filled_qty) if exit_price > 0.0 else 0.0,
             "status": status,
             "trade_side": "long",
@@ -1329,6 +1357,11 @@ def _execute_single_long_entry(
     filled_qty = _float(qty)
     entry_price = price
     filled_notional = actual_notional
+    # Pre-declare so paths that bypass the venue (dry-run, set_leverage failure)
+    # still leave the trade-row / order-row writers able to read them as zero
+    # rather than NameError.
+    entry_fee_usdt = 0.0
+    entry_exec_time_ms = 0
 
     if demo.submit_orders:
         assert trading_client is not None
@@ -1406,6 +1439,8 @@ def _execute_single_long_entry(
             else:
                 filled_qty = _float(exec_summary.get("qty"))
                 entry_price = _float(exec_summary.get("avg_price")) or price
+                entry_fee_usdt = _float(exec_summary.get("fee"))
+                entry_exec_time_ms = int(_float(exec_summary.get("exec_time_ms") or 0))
                 filled_notional = abs(entry_price * filled_qty) if filled_qty > 0.0 else 0.0
                 target_qty = _float(qty)
                 tolerance = max(target_qty * 1e-8, 1e-12)
@@ -1467,6 +1502,8 @@ def _execute_single_long_entry(
             "sniper_deadline_ms": int(candidate.get("sniper_deadline_ms") or 0),
             "ts_ms": now_ms,
             "entry_ts_ms": now_ms,
+            "entry_exec_time_ms": entry_exec_time_ms,
+            "entry_fee_usdt": entry_fee_usdt,
             "entry_price": entry_price,
             "qty": entry_qty or qty,
             "notional_usdt": filled_notional if demo.submit_orders else actual_notional,
@@ -1507,6 +1544,8 @@ def _execute_single_long_entry(
         "order_id": order_result.get("orderId", ""),
         "submit_mode": submit_mode,
         "avg_price": entry_price,
+        "fee_usdt": entry_fee_usdt,
+        "exec_time_ms": entry_exec_time_ms,
         "notional_usdt": filled_notional if demo.submit_orders else actual_notional,
         "target_notional_pct_equity": order_notional_pct_equity,
         "entry_leverage": demo.entry_leverage,
@@ -1716,6 +1755,12 @@ def format_combined_book_summary(
 def _ledger_pnl(root: Path | None, dataset: str) -> tuple[int, float, float]:
     """Returns (trade_count, realized_pnl_usdt, open_notional_usdt) from a ledger.
 
+    Realized PnL is NET of fees when `entry_fee_usdt` / `exit_fee_usdt` are
+    populated on the closed trade rows (always true for trades written by the
+    post-2026-05-28 daemon). On older rows where those columns are missing or
+    NULL, the helper degrades gracefully to gross PnL — a known underestimate
+    that matches the legacy behaviour.
+
     Used by the combined-book summary; fails open (returns zeros) so a
     missing/empty ledger never breaks the message build.
     """
@@ -1732,6 +1777,8 @@ def _ledger_pnl(root: Path | None, dataset: str) -> tuple[int, float, float]:
     open_notional = 0.0
     if "status" not in trades.columns:
         return trade_count, realized, open_notional
+    has_entry_fee = "entry_fee_usdt" in trades.columns
+    has_exit_fee = "exit_fee_usdt" in trades.columns
     # Realized PnL needs entry+exit+qty; if any are missing we skip realized
     # but still try to compute open_notional, which needs only qty+entry.
     if {"entry_price", "exit_price", "qty"}.issubset(trades.columns):
@@ -1744,10 +1791,12 @@ def _ledger_pnl(root: Path | None, dataset: str) -> tuple[int, float, float]:
                 side = str(row.get("side", "")).lower()
                 if entry <= 0.0 or exit_price <= 0.0 or qty <= 0.0:
                     continue
-                if side == "short":
-                    realized += (entry - exit_price) * qty
-                else:
-                    realized += (exit_price - entry) * qty
+                gross = (entry - exit_price) * qty if side == "short" else (exit_price - entry) * qty
+                fee = (
+                    (_float(row.get("entry_fee_usdt")) if has_entry_fee else 0.0)
+                    + (_float(row.get("exit_fee_usdt")) if has_exit_fee else 0.0)
+                )
+                realized += gross - fee
     if {"entry_price", "qty"}.issubset(trades.columns):
         open_trades = trades.filter(pl.col("status").is_in(["open", "submitted"]))
         if not open_trades.is_empty():

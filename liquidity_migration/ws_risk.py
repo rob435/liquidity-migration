@@ -1279,6 +1279,13 @@ class EventWebSocketRiskEngine:
                 "status": "open",
                 "qty": qty,
                 "entry_price": entry_price,
+                # Adopted positions carry zero fee/venue-time on the ledger by
+                # default; the demo↔Bybit reconciliation will surface the real
+                # fee as a pnl_gap on this trade, which is the correct semantic
+                # ("we don't know what we paid; ask the venue"). A future
+                # enhancement could query get_trade_history to backfill.
+                "entry_fee_usdt": 0.0,
+                "entry_exec_time_ms": opened_ms,
                 "notional_usdt": abs(entry_price * _float(qty)),
                 "ts_ms": now_ms,
                 "entry_ts_ms": opened_ms,
@@ -1303,6 +1310,10 @@ class EventWebSocketRiskEngine:
             "status": "open",
             "qty": qty,
             "entry_price": entry_price,
+            # See above: zero fee/venue-time on adopted ledger; reconciliation
+            # surfaces the real fee as pnl_gap.
+            "entry_fee_usdt": 0.0,
+            "entry_exec_time_ms": opened_ms,
             "notional_usdt": abs(entry_price * _float(qty)),
             "ts_ms": now_ms,
             "entry_ts_ms": opened_ms,
@@ -1315,6 +1326,9 @@ class EventWebSocketRiskEngine:
             "planned_exit_ts_ms": planned_exit_ts_ms,
             "entry_order_link_id": "",
             "entry_order_id": "",
+            # Signal_ts unknown for hand-placed positions — leave 0 so the
+            # reconciliation doesn't accidentally pair a random other trade.
+            "signal_ts_ms": 0,
             "submit_mode": "adopted",
         }
 

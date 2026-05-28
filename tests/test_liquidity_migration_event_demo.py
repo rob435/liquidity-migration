@@ -2913,9 +2913,16 @@ def test_pending_entry_fill_recomputes_protection_from_confirmed_fill() -> None:
     assert trades[0]["stop_price"] == 112.6
     assert trades[0]["take_profit_price"] == 80.4
     assert trades[0]["entry_stop_update_status"] == "submitted"
+    # Schema completeness: even the entry-trade row written by the pending-fill
+    # reconciler carries the entry_fee + entry_exec_time keys so downstream
+    # reconciliation never trips on a missing column.
+    assert "entry_fee_usdt" in trades[0]
+    assert "entry_exec_time_ms" in trades[0]
     assert order_updates[0]["stop_price"] == 112.6
     assert order_updates[0]["take_profit_price"] == 80.4
     assert order_updates[0]["entry_stop_update_status"] == "submitted"
+    assert "fee_usdt" in order_updates[0]
+    assert "exec_time_ms" in order_updates[0]
     assert client.stop_updates == [{"symbol": "AAAUSDT", "stop_loss": "112.6", "take_profit": "80.4"}]
 
 
@@ -3302,8 +3309,18 @@ def test_pending_exit_fill_reconciles_to_closed_trade() -> None:
     # short 99→100.5 → gross = (99-100.5)/99 ≈ -0.01515; net = gross * (99/990) = gross * 0.1
     assert trades[0]["gross_trade_return"] == pytest.approx(-1.5 / 99.0)
     assert trades[0]["net_return"] == pytest.approx((-1.5 / 99.0) * 0.1)
+    # Schema completeness: venue exec_time + fee fields must always land on
+    # close so the demo↔Bybit reconciliation can close the PnL triangle. Even
+    # when the FakeRiskClient doesn't surface execTime/execFee, the trade row
+    # must carry the *keys* (zero values OK) so downstream consumers don't
+    # NameError on a missing column.
+    assert "exit_exec_time_ms" in trades[0]
+    assert "exit_fee_usdt" in trades[0]
     assert order_updates[0]["status"] == "filled"
     assert order_updates[0]["notional_usdt"] == 100.5
+    # Order ledger must mirror trade ledger: fee + exec_time per order row.
+    assert "fee_usdt" in order_updates[0]
+    assert "exec_time_ms" in order_updates[0]
 
 
 def test_pending_exit_partial_fill_reduces_open_trade_qty() -> None:
@@ -3644,8 +3661,15 @@ def test_risk_exit_records_filled_order_after_confirmed_fill() -> None:
     # gross = (100-100.5)/100 = -0.005; net = gross * (100/1000) = -0.0005
     assert rows[0]["gross_trade_return"] == pytest.approx(-0.005)
     assert rows[0]["net_return"] == pytest.approx(-0.0005)
+    # Schema completeness on the risk-engine exit path: same field set as the
+    # pending-fill reconciler and cycle-exit paths so all 3 close-paths write
+    # a uniform shape.
+    assert "exit_exec_time_ms" in rows[0]
+    assert "exit_fee_usdt" in rows[0]
     assert orders[0]["status"] == "filled"
     assert orders[0]["filled_qty"] == "1"
+    assert "fee_usdt" in orders[0]
+    assert "exec_time_ms" in orders[0]
 
 
 def test_run_event_risk_cycle_dry_run_closes_crossed_stop(tmp_path) -> None:
