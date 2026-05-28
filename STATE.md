@@ -6,6 +6,12 @@
 > file FIRST. It tells you in 60 seconds what's been done, what's running,
 > and what's next.
 
+> **▶ Desktop session (2026-05-28 handoff):** your next task is the R1
+> wide-funnel sweep (`max_active=12`). See
+> [docs/handoff-desktop-2026-05-28.md](docs/handoff-desktop-2026-05-28.md) for
+> the exact command, this session's decisions (three-tier demo-arbiter
+> framework; max_active 3→12), and collaboration prefs not in your local memory.
+
 ## TL;DR
 
 - Strategy: Bybit (+Binance) liquidity-migration short, **research-stage**.
@@ -33,8 +39,12 @@
 - **NEW optimization objective:** **(Return / Drawdown) tied as primary
   (i.e. MAR ratio), Sharpe as secondary tie-breaker.** This is a deliberate
   change from Round 1's implicit Sharpe-primary.
-- **NEW decision-rule structure:** two-tier (Investigation bar for
-  sub-phases, Promotion bar — strict — at R10 → R11 gate only).
+- **NEW decision-rule structure (AMENDED 2026-05-28):** three-tier,
+  demo-arbiter. Investigation (carry forward) → Demo-candidate (LOOSENED:
+  positive both venues + pooled MAR Δ > +0.1, fragility reported not
+  blocking) → Real-money (STRICT: OOS + ≥30d demo + bootstrap + residual
+  Sharpe + stress + capacity). Permissive where being wrong is free,
+  strict where it's expensive; forward demo is the arbiter.
 - Default action if Round 2 also produces a null: **do nothing.** Strategy
   stays in current state. Forward demo + paper continue.
 
@@ -58,7 +68,7 @@
 | Sub-phase | Purpose | Status |
 |---|---|---|
 | R0 | Doc cleanup (delete unused Phase 7 pre-reg, update STATE.md) | complete (5dff927) |
-| R1 | Per-filter hypothesis audit (softer criterion) | not started — 2026-05-28 stale draft (6 cells, missing `R1_drop_all_4`, wrong window) was deleted; v2 pending per Mac amendment (7 cells, `R1_drop_all_4` first, window 2023-04-01 → 2026-05-28) |
+| R1 | Per-filter hypothesis audit (softer criterion) | **pending desktop dispatch** — 7-cell sweep partially ran on the Mac then stopped per operator (2026-05-28); re-runs on the **5950X at `max_active=12`** (wide funnel — gather large dataset, then filter with features). Tag `r1_filter_audit_max12_2026-05-28`. Script `scripts/r1_filter_audit_sweep.py` (set to 12); verdict via `scripts/r1_robustness.py` |
 | R2 | Per-feature standalone decile-sort + correlation matrix | not started |
 | R3 | Bearish stack honest test (H2 retried) | not started — needs ~3h code (R3 filter flag additions) |
 | R4 | Risk-factor model construction (JS-style, 8 factors) | not started — needs ~3 days code |
@@ -89,7 +99,9 @@ R12a/b sniper + C0 continuous engine).
   promoted profile. Ledgers in `data/bybit-demo-event/`.
 - **Paper shadow** (same VPS, same profile, no order submission):
   `data/bybit-paper-event/`.
-- **NO research runs currently in-flight.** R1 v2 dispatch pending (per Mac amendment with `R1_drop_all_4` lead candidate).
+- **NO research runs currently in-flight.** R1 partially ran on the Mac then
+  was stopped (2026-05-28); it re-dispatches on the **5950X desktop at
+  `max_active=12`** (wide-funnel dataset → feature-filter). Script is ready.
 
 ## What's broken
 
@@ -97,40 +109,39 @@ Nothing known. Pre-push gate clean as of last check:
 - `.venv/bin/python -m ruff check liquidity_migration tests` → clean
 - `.venv/bin/python -m pytest -q` → all pass
 
-## Decision rules currently binding (Round 2)
+## Decision rules currently binding (Round 2) — AMENDED 2026-05-28 (three-tier, demo-arbiter)
 
-### Investigation bar (R1, R2, R3, R5, R7, R8 sub-phases)
+Principle: permissive where being wrong is free (backtest→demo), strict where
+it's expensive (demo→real money). Forward demo/paper is the arbiter. Full text
++ rationale in the Round 2 pre-reg, "Strictness Manifesto v2 — AMENDED 2026-05-28".
 
-A cell investigation-positives if **ALL**:
-- MAR Δ > 0 on majority venues (2/2 OR 1/2 with the other not worse than -0.5 MAR)
-- No return sign-flip vs control
-- ≥30 Bybit trades / ≥20 Binance trades (if trade-based)
+### Tier 1 — Investigation (R1-R8 sub-phases) — unchanged
+- MAR Δ > 0 on majority venues (2/2 OR 1/2 with other ≥ -0.5 MAR)
+- No return sign-flip vs control; ≥30 Bybit / ≥20 Binance trades
+- Falsifier: MAR Δ ≤ -1.0 either venue OR return negative OR DD > 70% OR <10 trades/sub-period
 
-Falsifier (decisive close): MAR Δ ≤ -1.0 either venue OR return goes negative OR DD > 70% OR trade count < 10/sub-period.
+### Tier 2 — Demo-candidate (→ R11 OOS + forward demo) — LOOSENED
+- Return positive on **both** venues (direction guard)
+- **Pooled** MAR Δ > +0.1 (mean of the two venue MAR deltas — NOT symmetric)
+- Neither venue worse than MAR Δ ≥ -0.5
+- ≥30 Bybit / ≥20 Binance trades total
+- Fragility diagnostics (bootstrap p5, LOO, sign-consistency, residual Sharpe) REPORTED, non-blocking — set demo order, not eligibility
 
-### Promotion bar (R10 → R11 OOS gate)
+### Tier 3 — Real-money (demo → mainnet) — STRICT, not loosened
+- R11 pre-2023 OOS pass: MAR > 0 both venues all 3 sub-periods; DD < 50%; sign-consistent; ≥20 Bybit / ≥15 Binance trades/sub-period
+- ≥30 days forward demo + daily paper-shadow reconciliation
+- Block-bootstrap pooled MAR-Δ p5 ≥ 0 (seed=0, block=3mo, n=5000)
+- Residual Sharpe ≥ +0.3 (after R4)
+- R7 stress pass + R8 capacity ≥ 10× deployment size
 
-A cell is promotion-eligible if **ALL**:
-- MAR Δ ≥ +0.5 on **both** venues
-- Return Δ ≥ 0 on **both** venues (Pareto)
-- DD Δ ≤ 0 on **both** venues (Pareto)
-- Sign-consistent across 3 sub-period thirds, both venues
-- ≥50 Bybit / ≥30 Binance trades / sub-period
-- Residual Sharpe (after R4 factor decomposition) ≥ +0.3
+Multiple-testing control: the demo treadmill itself (fresh forward data can't
+be overfit). Only finite surface capped: **max 5 cells consume the pre-2023
+OOS / quarter**; forward demo uncapped.
 
-FDR ceiling: **max 5 candidates** forward to R11. Excess → top-5 by combined MAR Δ; rest closed-rejected.
-
-### Phase R11 OOS gate (final)
-
-- MAR > 0 both venues, all 3 sub-periods
-- DD < 50% both venues, all sub-periods
-- Sign-consistent
-- ≥20 Bybit / ≥15 Binance trades / sub-period
-
-Pass + 30-day forward demo reconciliation = `paper_ready` per integrity standard.
-
-Apply Investigation tier via `python scripts/apply_decision_rule.py --rule investigation`
-(rule flag to be added in R1 implementation; currently `--rule manifesto` ≈ Promotion bar).
+`scripts/r1_robustness.py` emits the **Tier 2 demo-candidate verdict**
+(pooled MAR Δ > +0.1, engine-DD MAR) + the fragility diagnostics (bootstrap
+p5, LOO, thirds) from the per-cell ledgers. `scripts/apply_decision_rule.py
+--rule manifesto` remains the old strict Sharpe bar (legacy reference only).
 
 ## Helpers (when you need them)
 
@@ -161,8 +172,11 @@ Apply Investigation tier via `python scripts/apply_decision_rule.py --rule inves
 4. Never modify `docs/backtesting_errors_we_never_repeat.md`,
    `docs/parameter_pre_registration.md`, or `configs/volume_alpha.default.yaml`
    without operator instruction.
-5. Round 2's decision-rule structure (Investigation tier + Promotion tier
-   + FDR ceiling 5) is pre-committed — no post-hoc loosening.
+5. Round 2's decision-rule structure (three-tier, demo-arbiter; AMENDED
+   2026-05-28 by operator instruction, on principle) is pre-committed — no
+   FURTHER loosening to rescue a specific cell. The amendment moved heavy
+   stats to the demo→real-money gate and made the backtest→demo gate
+   permissive; the real-money (Tier 3) gate is NOT loosened.
 6. MAR-primary, Sharpe-secondary is pre-committed — no flipping back to
    Sharpe-primary mid-program.
 7. Strategy stays at current frozen promoted profile until R11 passes

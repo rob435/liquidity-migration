@@ -35,9 +35,11 @@ sizing, per-name cost model, stress-test suite, capacity analysis).
 
 Round 2 also corrects two Round 1 design errors:
 - **Threshold rigidity:** Round 1 used the same strict Manifesto bar at
-  every phase. Round 2 uses a **two-tier** system — Investigation bar
-  for sub-phases, Promotion bar (unchanged from Round 1) only at the
-  Phase 7 OOS forwarding gate.
+  every phase. Round 2 uses a **three-tier, demo-arbiter** system —
+  Investigation (carry forward) → Demo-candidate (loose backtest gate onto
+  the free forward-demo treadmill) → Real-money (strict; OOS + ≥30d demo +
+  heavy stats). Permissive where being wrong is free, strict where it costs
+  real money. See "Decision framework" below.
 - **Sharpe-primary optimization:** Round 1 implicitly optimized for
   Sharpe Δ. Round 2 makes the objective explicit: **MAR ratio
   (annualized return / |max DD|) is primary; Sharpe is secondary
@@ -79,7 +81,7 @@ using WS-fed rolling-window features. The two architectures (daily /
 continuous) share R1-R8 infrastructure (filter audit, IC test, risk
 model, sizing, cost model, stress test, capacity) but differ in
 feature definitions and backtest framework. R9 integrates each
-architecture's best cells; R10/R11 promotion gates evaluate the best
+architecture's best cells; R10 demo-candidate + R11 OOS gates evaluate the best
 of both. See "Two signal architectures in scope" below and
 "Sub-phases C0-C3" for the continuous-signal implementation details.
 
@@ -163,9 +165,9 @@ daily version.
   flavors are available for both architectures via R12)
 - **R7 stress tests** — same named events; each architecture replayed
 - **R8 capacity** — same per-name capacity ceiling logic
-- **R10 promotion gate** — same MAR-primary + Pareto requirement;
+- **R10 demo-candidate gate** — same Tier 2 bar (MAR-primary, pooled);
   separate cells per architecture
-- **R11 OOS gate** — same pre-2023 root test; separate cells per
+- **R11 OOS gate** — same pre-2023 root test (Tier 3); separate cells per
   architecture
 
 ### What's architecture-specific (C-phases)
@@ -185,7 +187,7 @@ See "Sub-phases C0-C3" later in this doc for full details.
 ### Operator expectation: A vs B is an EMPIRICAL question
 
 We do not pre-commit to which architecture wins. R10/R11 evaluates each
-separately under the same promotion bar. Possible outcomes:
+separately under the same three-tier bars. Possible outcomes:
 
 | Outcome | Interpretation | Next step |
 |---|---|---|
@@ -309,70 +311,115 @@ doubling DD has lower MAR than the control — correctly rejected as a
 
 ---
 
-## Strictness Manifesto v2 (two-tier)
+## Decision framework — three-tier (demo-arbiter)
 
-Round 1 used a single threshold for all phases. Round 2 separates
-**Investigation** (gather evidence, don't act) from **Promotion**
-(forward to OOS, eligible to ship after demo). The Promotion bar is
-unchanged from Round 1 (modulo MAR-primary); the Investigation bar is
-looser so we don't lose useful information.
+The program advances findings through three gates, ordered by how expensive a
+false positive is at each:
 
-### Investigation bar (sub-phases R1, R2, R3, R4, R7, R8)
+1. **Investigation** — should we keep studying this cell? (cheap: just attention)
+2. **Demo-candidate** — should this go on the forward-demo treadmill? (cheap:
+   demo is paper, costs nothing)
+3. **Real-money** — should real capital go behind it? (expensive: real money)
+
+Governing principle: **be permissive where being wrong is free, strict where
+it is expensive.** The heavy statistics live at the Real-money gate; the
+backtest→demo gate is deliberately loose so findings flow. **The forward demo
+is the real arbiter** — the one evidence surface a backtest cannot overfit,
+and it is inexhaustible.
+
+```text
+backtest sweeps
+  → [Tier 1: Investigation]  carry forward / descriptive / falsified
+  → [Tier 2: Demo-candidate] forward-demo + paper-shadow treadmill, queue for OOS
+  → [Tier 3: Real-money]     OOS pass + ≥30d demo + heavy stats → mainnet
+```
+
+> **Changelog.** Through 2026-05-28 this section was a two-tier "Strictness
+> Manifesto v2" (Investigation + a single strict Promotion bar forwarding
+> straight to OOS). Restructured to the three-tier model below on 2026-05-28
+> by operator instruction, **on principle, not to rescue a specific cell** (the
+> new bar is re-applied blind): the symmetric "+0.5 MAR on both venues"
+> rejected genuine venue-asymmetric edge — Round 1 established Bybit/Binance
+> have different optima — and four overlapping fragility tests (Pareto-both +
+> sign-consistent-3-thirds + residual-Sharpe + bootstrap/LOO) stacked into a
+> bar almost nothing could clear. The Real-money gate (Tier 3) is NOT loosened.
+
+### Tier 1 — Investigation (sub-phases R1-R8)
 
 A cell is **investigation-positive** if **ALL** of:
-- MAR Δ > 0 on majority of venues (2/2 OR 1/2 with the other not worse
-  than -0.5 MAR)
+- MAR Δ > 0 on majority of venues (2/2 OR 1/2 with the other not worse than
+  -0.5 MAR)
 - No return sign-flip vs control (both venues remain same-signed)
 - ≥30 trades on Bybit (≥20 on Binance) if a trade-based cell
 
-A cell **falsifies** at this tier if **ANY** of:
-- MAR Δ ≤ -1.0 on either venue (decisively worse)
-- Return goes negative on a venue that was positive in control
-- DD > 70% on either venue (raised from R1's 60% — operator has
-  documented higher DD tolerance)
-- Trade count drops below 10 / sub-period on either venue
-  (signal-population vanished)
+Falsifies (decisive close) if **ANY**: MAR Δ ≤ -1.0 either venue; return goes
+negative on a venue that was positive in control; DD > 70% either venue;
+trade count < 10 / sub-period either venue.
 
-Cells failing investigation-positive but not falsifying are
-**descriptive** — recorded for context, not acted on.
+Cells neither investigation-positive nor falsified are **descriptive** —
+recorded for context, not carried forward.
 
-### Promotion bar (Phase R10 forwarding to R11 OOS)
+### Tier 2 — Demo-candidate (→ forward demo + queue for R11 OOS)
 
-A cell is **promotion-eligible** only if **ALL** of:
-- MAR Δ ≥ +0.5 on **both** venues vs control (improved by ≥0.5)
-- Return Δ ≥ 0 on **both** venues (Pareto requirement on return)
-- DD Δ ≤ 0 on **both** venues (Pareto requirement on drawdown)
-- Sign-consistent (positive return) across all 3 sub-period thirds on
-  both venues
-- ≥50 trades / sub-period on Bybit (≥30 on Binance)
-- No factor model finding the cell's residual alpha is < +0.3 Sharpe
-  (so we're not just selling vol or buying beta)
+The loosened backtest gate. A cell is **demo-eligible** if **ALL** of:
+- **Return positive on BOTH venues** — direction consistency, the cheap and
+  genuine overfit guard. A one-venue fluke that is negative on the other does
+  NOT advance.
+- **Pooled MAR Δ > +0.1** — pooled = equal-weight mean of the two venue MAR
+  deltas. Replaces the old symmetric per-venue +0.5, so genuine
+  venue-asymmetric edge advances.
+- **Neither venue worse than MAR Δ ≥ -0.5** — don't demo something actively
+  harmful on a venue.
+- **≥30 Bybit / ≥20 Binance trades total** — sample-size sanity.
 
-A cell **promotion-falsifies** if **ANY** of:
-- MAR Δ ≤ -0.5 on either venue
-- Return goes negative on either venue
-- DD > 60% on either venue
-- Sign-flip across sub-periods on either venue
+That is the whole gate. Fragility diagnostics — block-bootstrap pooled MAR-Δ
+p5, leave-one-month-out concentration, sub-period sign-consistency, residual
+Sharpe — are **REPORTED for every demo-candidate but do NOT block.** They set
+the *order* candidates go on the treadmill (most robust first), not whether
+they go. Computed by `scripts/r1_robustness.py`.
 
-### Falsifier (decisive close, both tiers)
+Demo-falsifies if **ANY**: return negative on either venue; pooled MAR Δ ≤ 0;
+DD > 70% either venue. (A cell between 0 and +0.1 pooled MAR Δ is descriptive
+— neither demo-eligible nor falsified.)
 
-If a cell hits a falsifier at any tier, it is **closed-rejected**. It
-cannot be resurrected without a new dated pre-reg with explicit new
-motivation. Falsifier hits are first-class evidence — they tell us the
-hypothesis is wrong.
+### Tier 3 — Real-money (demo → mainnet) — STRICT
 
-### FDR ceiling
+Where being wrong is expensive, so the heavy checks live here. A cell is
+**real-money-eligible** only if **ALL** of:
+- **R11 pre-2023 OOS pass:** MAR > 0 both venues all 3 sub-periods; DD < 50%
+  both venues all sub-periods; sign-consistent; ≥20 Bybit / ≥15 Binance
+  trades / sub-period.
+- **≥30 days forward demo** with daily paper-shadow reconciliation (operator
+  may require 60-90d for higher-conviction sizing).
+- **Block-bootstrap pooled MAR-Δ p5 ≥ 0** (seed = 0, block = 3 months,
+  n = 5000) — the one fragility gate that matters, applied where it counts.
+- **Residual Sharpe ≥ +0.3** after the R4 factor model (not just selling vol
+  / buying beta).
+- **R7 stress pass** (DD < 50% in every named event) + **R8 capacity ceiling
+  ≥ 10× intended deployment size**.
 
-Across R1+R2+R3+R7+R10 combined, **max 5 candidates** may forward to
-R11 OOS. If more cells satisfy promotion-eligibility, top-5 by
-combined-venue MAR Δ (pre-committed tie-break: then by combined-venue
-Sharpe Δ; then alphabetical). Rest **closed-rejected**, not "menu for
-later".
+No mainnet without all of the above.
 
-The 5-candidate ceiling is higher than Round 1's 3 because Round 2's
-sub-phase menu is bigger AND because the Investigation-tier gate
-already filtered out most weak cells, so the candidates that reach
-Promotion are higher-quality on average.
+### Falsifier (decisive close, all tiers)
+
+A cell that hits a falsifier at any tier is **closed-rejected**. It cannot be
+resurrected without a new dated pre-reg with explicit new motivation.
+Falsifier hits are first-class evidence.
+
+### Multiple-testing control — the demo treadmill, not an FDR cap
+
+With the forward demo as arbiter, the **demo treadmill itself is the
+multiple-testing control:** every demo-candidate must independently re-prove
+itself on fresh, un-overfittable forward data, which no amount of backtest
+multiple-testing can fake. A false positive just produces a flat/negative
+forward curve and is dropped — cheaply. Parallel candidates run as
+paper-shadow forward configs (simulation on live data, no orders); promotion
+to the live demo account is a separate operator step.
+
+The one finite surface that CAN be burned is the pre-2023 OOS root (threat
+#18). So the only hard cap lives there: **max 5 cells may consume the pre-2023
+OOS per calendar quarter**; excess demo-candidates run forward first and wait
+their turn at OOS. Forward demo/paper is uncapped.
 
 ---
 
@@ -478,11 +525,38 @@ surface a missing interaction effect. Investigation bar.
 | `R1_retest_realized_loss` | Production minus `realized_loss` | normal |
 
 7 cells × 2 venues = 14 runs. Window 2023-04-01 → 2026-05-28 (extended to
-match the lead-candidate exploratory window). Investigation bar for the
-"normal" cells; **PROMOTION bar applied additionally to `R1_drop_all_4`**
-including sub-period sign-consistency check and (if R4 risk model is
-ready) residual-Sharpe check. Compute: ~14 × 8 min = ~112 min sequential,
-~35 min at 4-way parallel.
+match the lead-candidate exploratory window). Tier 2 Demo-candidate bar for
+all cells. Compute: ~14 × 8 min = ~112 min sequential, ~35 min at 4-way
+parallel (longer at max_active=12 — more trades per run).
+
+#### AMENDMENT 2026-05-28 — wide funnel: max_active 3 → 12
+
+R1 now runs at **`max_active_symbols = 12`** (not the production 3). Rationale
+(operator decision, pre-registered before the run):
+
+- **Gather a large trade dataset.** At 3 slots, ~25% of qualifying signals are
+  turned away for capacity and the result swings on which 3 names win slots in
+  a given month (the small-sample fragility behind `drop_all_4`'s 3-month-
+  dependent edge). 12 slots ≈ ~4× the trades → a far more reliable read on the
+  real edge.
+- **Then filter down with the features.** The per-trade ledger already records
+  all IC-feature values at entry (`vol_of_vol_30d`, `realized_vol_7d`,
+  `dist_from_30d_low`, `xs_rank_ret_7d/3d`, …). The wide-funnel ledger is the
+  raw material for a post-hoc study: which feature thresholds select the
+  winning subset? (The R2/R9 feature-selection work, now fed by a richer pool.)
+- **Risk is still bounded — by gross exposure, not by the count.**
+  `gross_exposure` stays 1.0, so each of 12 names is ~8% of equity (same total
+  bet, thinner slices). The systematic/beta exposure (12 correlated alt-shorts)
+  is governed by gross + the **R4 factor caps**, and the thinner per-name slices
+  make **R5 1/realized-vol sizing** more load-bearing.
+- **Comparability caveat:** the control (`R1_baseline_v2` / `00_baseline`) also
+  runs at 12 slots, so all cells compare at 12. These numbers are NOT directly
+  comparable to the max_active=3 exploratory `drop_all_4` numbers in the table
+  below.
+
+Dispatch: desktop **5950X** (not the Mac), tag `r1_filter_audit_max12_2026-05-28`,
+via `scripts/r1_filter_audit_sweep.py` (already set to 12). Verdict + fragility
+via `scripts/r1_robustness.py --sweep-tag r1_filter_audit_max12_2026-05-28`.
 
 ### Lead-candidate priority (`R1_drop_all_4`)
 
@@ -495,58 +569,65 @@ on BOTH venues over the extended window:
 | Binance | 1.45 → 2.48 (Δ +1.03) | +29% | -9.7pp shallower | +0.13 |
 
 That run is **single-sample exploratory** — no sub-period check, no
-R4 residual-Sharpe, no R7 stress, no R11 OOS. Round 2 R1 elevates it
-to the full Manifesto pipeline. Specifically:
+R4 residual-Sharpe, no R7 stress, no R11 OOS. Round 2 R1 runs it through
+the proper pipeline. Specifically:
 
 - Dispatched FIRST in R1
 - Tested on full extended window + 3 sub-period thirds (2023-Q3+2024-Q1
   / 2024-Q2+2025-Q1 / 2025-Q2+2026-Q2 split, or equivalent)
-- Sign-consistency required across all 3 thirds on both venues
-- Promotion-bar applied (MAR Δ ≥ +0.5, Pareto, ≥50 trades, etc.)
-- IF R4 is ready at the time R1 runs, residual-Sharpe ≥ +0.3 also
-  required; ELSE residual-Sharpe check deferred to R10 gate
+- **Tier 2 Demo-candidate bar** applied (return positive both venues +
+  pooled MAR Δ > +0.1 + neither venue worse than -0.5 + trade minimums)
+- Fragility diagnostics — bootstrap pooled MAR-Δ p5, leave-one-month-out,
+  sub-period sign-consistency, residual Sharpe (if R4 ready) — computed and
+  **recorded in the verdict for context**, but per the framework they do NOT
+  gate Tier 2; the heavy stats gate at Tier 3 (real money) only
 
-If `R1_drop_all_4` clears every R1 check, it becomes the active
+If `R1_drop_all_4` clears the Tier 2 bar, it becomes the active
 **re-baseline candidate** for R2-R10 (see "Lead-candidate re-baseline
 cascade" below).
 
 ### Output
 
 `docs/preregistration/<DATE>-r1-per-filter-audit-verdict.md` with the
-final filter-stack decision and the `R1_drop_all_4` verdict per the
-Promotion bar. If `R1_drop_all_4` clears, the re-baseline cascade
-triggers automatically per pre-commitment.
+final filter-stack decision and the `R1_drop_all_4` verdict against the
+Tier 2 Demo-candidate bar (with fragility diagnostics recorded). If it
+clears, the re-baseline cascade triggers automatically per pre-commitment.
 
 ### Lead-candidate re-baseline cascade (PRE-COMMITTED)
 
 This cascade is committed in writing NOW so it cannot be litigated
 after seeing results.
 
-**Trigger:** `R1_drop_all_4` clears the **full Promotion bar** at R1:
-- MAR Δ ≥ +0.5 on **both** venues vs `R1_baseline_v2` (control)
-- Return Δ ≥ 0 on **both** venues (Pareto)
-- DD Δ ≤ 0 on **both** venues (Pareto)
-- Sign-consistent across all 3 sub-period thirds on both venues
-- ≥50 Bybit / ≥30 Binance trades / sub-period
-- Residual Sharpe ≥ +0.3 after R4 (IF R4 ready; deferred to R10 gate
-  otherwise)
+**Trigger:** `R1_drop_all_4` clears the **Tier 2 Demo-candidate bar** at R1.
+Re-baselining is a research-comparison choice (what subsequent cells compare
+against), not a real-money action, so it triggers on the loose backtest→demo
+bar — NOT the strict Tier 3 gate:
+- Return positive on **both** venues vs `R1_baseline_v2` (control)
+- Pooled MAR Δ > +0.1 (mean of the two venue MAR deltas)
+- Neither venue worse than MAR Δ ≥ -0.5
+- ≥30 Bybit / ≥20 Binance trades total
+
+Fragility diagnostics (bootstrap pooled MAR-Δ p5, leave-one-month-out,
+sub-period sign-consistency, residual Sharpe) are computed and recorded in
+the R1 verdict for context, but do NOT gate the cascade.
 
 **If triggered:**
 - R2, R3, R5, R6, R7, R8, R9, R10, R11 cells RE-BASELINE against the
   drop_all_4 stack (i.e. they compare to drop_all_4, not to production)
-- The Manifesto thresholds, FDR ceiling, Investigation/Promotion bars
-  STAY IDENTICAL (they are deltas; they hold against any baseline)
+- The three-tier thresholds STAY IDENTICAL (they are deltas; they hold
+  against any baseline)
 - Cell tables in R2-R10 stay identical (the variations tested are
   unchanged; only the comparison reference shifts)
-- R11 OOS gate still required before any production change OR demo
-  deployment
+- The **Tier 3 real-money gate is still fully required** before any
+  production change OR mainnet (OOS + ≥30d demo + bootstrap + residual
+  Sharpe + stress + capacity)
 
-**If NOT triggered** (drop_all_4 fails any R1 Promotion-bar check):
+**If NOT triggered** (drop_all_4 fails the Tier 2 Demo-candidate bar):
 - Production filter stack remains the baseline for all subsequent
   R-phases
-- `R1_drop_all_4` is filed as "investigation-positive but did not clear
-  Promotion bar in proper R1 — Round 1 LOO directional signal stands
-  but does not justify production change"
+- `R1_drop_all_4` is filed as "did not clear the Demo-candidate bar in
+  proper R1 — Round 1 LOO directional signal stands but does not justify
+  a re-baseline"
 - Round 2 continues as originally designed
 
 **Critical constraint:** the re-baseline does NOT itself constitute
@@ -767,7 +848,8 @@ Strategy P&L = sum over trades of:
 ```
 
 A cell's **residual Sharpe** is the Sharpe of its residual returns.
-For Promotion-eligibility, residual Sharpe must be ≥ +0.3 — otherwise
+It is REPORTED at Tier 2 (demo-candidate) for context; at the **Tier 3
+real-money gate** it is a hard requirement (≥ +0.3) — otherwise
 the cell is "selling vol" or "buying beta" rather than carrying real
 alpha.
 
@@ -909,9 +991,9 @@ Every Round 2 cell that produces trades gets two cost-attributions:
 - **Legacy:** `cost_multiplier=3` flat (matches Round 1)
 - **Model:** predicted cost from R6 per trade
 
-The two are reported side-by-side in cell verdicts. Promotion-eligible
-cells must clear the promotion bar **under the model cost** — not
-just the legacy flat cost. This protects against "this only works if
+The two are reported side-by-side in cell verdicts. A cell must clear its
+gate (Tier 2 to reach demo; Tier 3 for real money) **under the model cost**
+— not just the legacy flat cost. This protects against "this only works if
 costs are ignored."
 
 ### Code changes
@@ -956,7 +1038,7 @@ For each event, run the R9 integrated strategy (after R9 completes) on
 the event window only, with:
 - Strategy state warm-started from data ending 90 days before event
   (matches a realistic live restart scenario)
-- Same fill model, cost model, position sizing as R10 promotion bar
+- Same fill model, cost model, position sizing as the R10 demo-candidate run
 - No look-ahead — only data known at each tick
 
 Report per event:
@@ -1094,8 +1176,8 @@ Specifically, for each (date, candidate symbol):
 | `R9_market_neutral` | Bullish event-driven + bearish event-driven (from R3) in parallel slots |
 | `R9_market_neutral_factor_capped` | Same as above + R4 factor caps |
 
-Investigation bar at this stage; the winning cell forwards to R10
-promotion bar.
+Investigation bar at this stage; the winning cell forwards to R10 for the
+Tier 2 Demo-candidate gate.
 
 Compute: ~14 cells × ~15 min = ~210 min wall.
 
@@ -1106,34 +1188,41 @@ integrated-strategy spec finalized + best cell identified.
 
 ---
 
-## Sub-phase R10 — Validation sweep + Promotion-bar gate
+## Sub-phase R10 — Demo-candidate gate (Tier 2) + Tier-3 prep
 
-**Purpose:** Apply the strict Promotion bar (MAR Δ ≥ +0.5, Pareto on
-return/DD, sub-period sign-consistent, ≥50 trades, residual Sharpe ≥
-+0.3) to the R9 candidate(s). Max 5 forward to R11 OOS.
+**Purpose:** Apply the **Tier 2 Demo-candidate bar** (return positive both
+venues + pooled MAR Δ > +0.1 + neither venue worse than -0.5 + trade
+minimums) to the R9 candidate(s) to decide what advances to forward demo +
+R11 OOS. At the same time, compute every **Tier 3 (real-money) input** so the
+later real-money decision has them ready.
 
 ### Method
 
-Each R9 investigation-positive cell gets the full Promotion-bar test:
-- Full window run + 3 sub-periods, both venues
-- R4 residual Sharpe computation
-- R6 model-cost recosting
-- R7 stress-test pass requirement
-- R8 capacity ceiling > $100k notional/name
+Each R9 investigation-positive cell gets:
+- Full window run + 3 sub-periods, both venues → **Tier 2 demo-eligibility**
+- The fragility diagnostics + Tier-3 inputs, computed and recorded (they do
+  NOT gate Tier 2, but a cell needs them to clear Tier 3 later):
+  - block-bootstrap pooled MAR-Δ p5 + leave-one-month-out (`r1_robustness.py`)
+  - R4 residual Sharpe
+  - R6 model-cost recosting (Tier 2 must hold under model cost too)
+  - R7 stress-test result
+  - R8 capacity ceiling
 
-If any criterion fails → not promotion-eligible.
-
-If multiple cells eligible → FDR ceiling (top-5 by combined MAR Δ).
+Demo-eligible cells advance to the forward treadmill and queue for R11 OOS.
+The only hard cap is the pre-2023 OOS quarterly limit (max 5 cells / quarter);
+ranking for that queue is by combined pooled MAR Δ, then by bootstrap p5
+(most robust first).
 
 ### Cell list (R10)
 
-Conditional on R9 outputs. At most 5 cells × 2 venues × 3 sub-periods
+Conditional on R9 outputs. At most ~5 cells × 2 venues × 3 sub-periods
 × ~10 min = ~5h wall.
 
 ### Output
 
-`docs/preregistration/<DATE>-r10-promotion-gate-verdict.md`. The
-finalist(s) forwarded to R11 OOS.
+`docs/preregistration/<DATE>-r10-demo-candidate-verdict.md`. The
+demo-candidate(s) forwarded to forward demo + R11 OOS, with all Tier-3
+inputs recorded.
 
 ---
 
@@ -1153,7 +1242,8 @@ For each R10 finalist, run on:
 - Pre-2023 Bybit OOS root (full window + 3 sub-period thirds)
 - Pre-2023 Binance OOS root (same)
 
-Apply the Promotion bar (same as R10) on the OOS data:
+R11 is the OOS component of the **Tier 3 real-money gate**. Apply the Tier 3
+OOS criteria on the pre-2023 data:
 - MAR > 0 on both venues, all sub-periods
 - DD < 50% on both venues, all sub-periods
 - Sign-consistent direction
@@ -1330,7 +1420,7 @@ produces ≥1 sniper flavor that beats market@1h.
 
 **Method:** For each R9 winner, build a "R9 + sniper" variant using
 the best R12c sniper flavor. Test on both venues, full window + 3
-sub-period thirds. Promotion bar applies.
+sub-period thirds. Tier 2 Demo-candidate bar applies (Tier-3 inputs recorded).
 
 **Cell list:** Up to 5 R9 winners × 1 best sniper = 5 cells × 2 venues
 = 10 runs. Compute: ~30 min/cell = ~5h wall.
@@ -1354,7 +1444,8 @@ sub-1h delay variants are rejected as non-executable in live.
 
 ### Sub-phase R12f — Sniper stress test
 
-**Triggered if:** any R12d cell promotion-eligible.
+**Triggered if:** any R12d cell is demo-eligible (stress is a Tier-3 input
+computed for every demo-candidate).
 
 **Purpose:** R7 events replayed with sniper logic. Sniper variants
 may behave very differently in stressed regimes (limit orders don't
@@ -1362,7 +1453,7 @@ fill when the market is one-way; volume spikes are everywhere;
 pullbacks don't materialize). Need explicit evidence the sniper layer
 doesn't make tail-event behavior worse.
 
-**Method:** Run the R12d promotion-eligible cells against each R7
+**Method:** Run the R12d demo-eligible cells against each R7
 event. Same pass criteria (DD < 50% in any event).
 
 **Compute:** Per cell, ~40 min wall. ~3-5 finalists × ~40 min = ~3h.
@@ -1380,8 +1471,8 @@ R12a (1m data ingestion) ─┐
                           └─────────────────────────> R12f (sniper stress)
                                                          │
                                                          ▼
-                                                   forward to R10/R11 promotion gates
-                                                   (same gates as non-sniper cells)
+                                                   forward to R10 demo-candidate
+                                                   + R11 OOS gates (same as non-sniper cells)
 ```
 
 R12 runs in parallel with R4-R9; sniper-variant cells go through the
@@ -1547,7 +1638,7 @@ with the feature set pinned for C2.
 ### Sub-phase C2 — Continuous-signal R9 variant
 
 **Purpose:** Build the integrated continuous-signal strategy (the
-Architecture B equivalent of R9), test it, and feed promotion-eligible
+Architecture B equivalent of R9), test it, and feed demo-eligible
 cells to R10/R11.
 
 **Architecture:** Same as R9 but with continuous-signal substrate:
@@ -1579,7 +1670,8 @@ cells to R10/R11.
 | `C2_event_OR_ic_factor_capped` | event OR ic with R4 factor caps |
 | `C2_market_neutral_factor_capped` | Market neutral + factor caps |
 
-Investigation bar; the winning cell forwards to R10 promotion bar.
+Investigation bar; the winning cell forwards to R10 for the Tier 2
+Demo-candidate gate.
 
 Compute: ~14 cells × ~30 min (continuous engine is slower than daily
 because of per-K-minute recomputation; partial caching helps) = ~7h
@@ -1590,7 +1682,8 @@ Architecture B's best cell identified; forwards to R10.
 
 ### Sub-phase C3 — Continuous-signal stress test
 
-**Triggered if:** any C2 cell promotion-eligible at R10.
+**Triggered if:** any C2 cell is demo-eligible at R10 (stress is a Tier-3
+input computed for every demo-candidate).
 
 **Purpose:** R7's named-event replay applied to the continuous
 strategy. Architecture B may stress very differently from A:
@@ -1603,7 +1696,7 @@ strategy. Architecture B may stress very differently from A:
   feed has paused during prior cascade events)
 
 **Method:** Same as R7 (named events from March 2020 → May 2026
-replay) with the C2-promotion-eligible cells. Pass criteria identical
+replay) with the C2 demo-eligible cells. Pass criteria identical
 to R7: DD < 50% in any event, basket-correlation < 0.6, no day with
 >3 simultaneous stop-outs.
 
@@ -1611,8 +1704,8 @@ to R7: DD < 50% in any event, basket-correlation < 0.6, no day with
 fraction of WS-feed disruption minutes (if any cached WS feed had >5
 minute gap). If >5% of event minutes had feed disruption AND a stop
 fired during that disruption window, the cell is flagged as
-"WS-feed-fragile" — promotion-eligible only with explicit operator
-acknowledgment.
+"WS-feed-fragile" — real-money-eligible (Tier 3) only with explicit
+operator acknowledgment.
 
 **Output:** `docs/preregistration/<DATE>-c3-continuous-stress-verdict.md`.
 
@@ -1717,19 +1810,19 @@ Cross-referenced to `docs/backtesting_errors_we_never_repeat.md`.
 | #4 | Revised / non-PIT data | All runs against full-PIT roots. No retroactive manifest filtering for promotion (Phase 1 biased_benchmark commitment is binding). |
 | #15 | Warm-started state | R7 stress tests explicitly use cold-start with 90 days of warm-up data, matching realistic live restart. R9 cells use standard volume-events cold-start. |
 | #16 | Same-code illusion | All R2-R10 features and filters live in production-shipped code (signal_harness, risk_model, cost_model modules). Demo daemon honours the same flags as backtest — no backtest-only branches. |
-| #17 | Parameter mining | Two-tier threshold structure: Investigation tier doesn't promote, Promotion tier preserves Round 1's bar. FDR ceiling raised to 5 (was 3) but justified by Investigation-tier pre-filtering. Decision rules pre-registered before any data is seen. |
+| #17 | Parameter mining | Three-tier demo-arbiter structure: Investigation and Demo-candidate gates are deliberately loose (no real-money consequence); the heavy stats gate only at Tier 3 (real money). The 2026-05-28 loosening was on principle (venue heterogeneity, redundant tests), pre-registered, and re-applied blind — not to rescue a seen cell. Multiple-testing control is the forward-demo treadmill; only the finite pre-2023 OOS is capped (5/quarter). |
 | #18 | OOS reuse | Pre-2023 roots have been touched twice (original "fail everything" call + Round 1 plan would have used them but didn't because no Phase 7 finalist emerged). R11 OOS dilution is real. Mitigation: ≥30 days of fresh forward-demo data must accumulate before any R11 finalist goes to mainnet conversation. |
-| #19 | Multiple testing | Across R1+R2+R3+R5+R9+R10+R12 cells, ~150 cells total (R12c alone adds ~70 sniper config cells). FDR ceiling of 5 at the R10→R11 gate keeps the bar high. R12c uses Investigation-bar, so its 70 cells inflate exploration but NOT promotion. Investigation-tier failures are NOT re-tested under different cell configurations. |
+| #19 | Multiple testing | Across R1+R2+R3+R5+R9+R10+R12 cells, ~150 cells total (R12c alone adds ~70 sniper config cells). The forward-demo treadmill is the multiple-testing control — every demo-candidate must independently re-prove itself on fresh, un-overfittable forward data, which backtest multiple-testing cannot fake. The one finite surface, the pre-2023 OOS root, is capped at 5 cells/quarter. R12c uses the Investigation bar, so its 70 cells inflate exploration but consume neither demo nor OOS budget. Investigation failures are NOT re-tested under different cell configs. |
 | #2  | Future info in signals — sniper-specific | R12 sniper simulator consumes 1m kline panel in chronological order; flow=open→fill is enforced by the simulator (no future-peek). Tests pin per-flavor PIT causality. Fill price uses bar close, not bar low/high (which would peek). |
 | #22 | Venue mechanics fantasy — sniper-specific | R12c maker/taker rebate accounting: limit fills earn the venue's maker rebate; market fallbacks pay taker fees. R6 cost model must distinguish these two paths or R12 promotion-eligibility under it is invalid. |
-| #23 | Pretty-report bias — sniper-specific | Sniper variants MUST report fill-rate alongside Sharpe/MAR. A "great Sharpe, 30% fill rate" cell is not promotion-eligible because the 70% filled trades P&L is meaningless without counting the 30% missed opportunities. |
+| #23 | Pretty-report bias — sniper-specific | Sniper variants MUST report fill-rate alongside Sharpe/MAR. A "great Sharpe, 30% fill rate" cell is not demo-eligible because the 70% filled trades P&L is meaningless without counting the 30% missed opportunities. |
 | #2  | Future info in signals — continuous-specific | Rolling-window features are PIT-clean by construction (only look backward). C0c regression validation (continuous engine with 1d step + 24h window = bit-identical to daily backtest) is the binding correctness check; if it fails, continuous results are invalid. |
 | #13 | Timestamp & resampling leakage — continuous-specific | Continuous engine's "as-of-N-min-step" timestamps must align exactly with the K-minute step boundaries; off-by-one is a future-peek. Tests pin step alignment per feature. |
 | #15 | Warm-started state — continuous-specific | C0c regression validates cold-start; C2 cells use cold-start in backtest. Live deployment of a continuous strategy requires the same 90d-warmup pattern as the daily strategy. |
 | #16 | Same-code illusion — continuous-specific | Continuous backtest engine MUST be the same code path the live continuous daemon would use. If we ship a continuous strategy, the daemon code is the C0 engine called with `live=True`, not a separate re-implementation. Otherwise demo↔backtest divergence is guaranteed. |
 | #22 | Venue mechanics fantasy — continuous-specific | WS feed gaps during high-stress events (March 2020, FTX) are a real risk for continuous strategies that rely on minute-resolution feature updates. C3 stress test flags any cell whose stops fire during WS-feed-gap minutes; those cells are "WS-feed-fragile" and require operator acknowledgment. |
 | #20 | Bad accounting | R6 cost model fixes the single-multiplier-3 problem from Round 1. All R10+ cells must clear under the model cost, not just legacy flat cost. |
-| #21 | Hidden common risk | R4 factor model explicitly decomposes basket risk into 8 named factors. R9 cells optionally cap per-factor exposure. Cells with residual Sharpe < +0.3 are promotion-rejected (catches "you're just selling vol" disguised as alpha). |
+| #21 | Hidden common risk | R4 factor model explicitly decomposes basket risk into 8 named factors. R9 cells optionally cap per-factor exposure. Cells with residual Sharpe < +0.3 are rejected at the Tier 3 real-money gate (catches "you're just selling vol" disguised as alpha). |
 | #22 | Venue mechanics fantasy | R6 cost model calibrated against paper-shadow vs demo slippage — uses real venue mechanics, not theoretical. Hold-period funding included. |
 | #23 | Pretty-report bias | Every cell produces trade ledger, equity curve, monthly P&L, factor-decomposed P&L, stress-test scorecard, capacity curve, residual-Sharpe report. Mandatory artifacts per cell. |
 | #24 | Unreconciled live drift | R11-passing finalists go to demo first with daily paper-shadow reconciliation. No mainnet path that skips ≥30 days demo. |
@@ -1760,11 +1853,15 @@ By committing this plan, the operator + assistant commit in advance to:
 1. **MAR is the primary metric.** Sharpe is secondary tie-breaker.
    Switching back to Sharpe-primary mid-program is explicit
    p-hacking and forbidden.
-2. **Two-tier thresholds are pre-committed.** Investigation bar applies
-   at R1-R8 sub-phases; Promotion bar (strict) applies at R10→R11
-   gate. Loosening either after seeing results is forbidden.
-3. **FDR ceiling is 5 candidates** at the R10 gate. If more cells
-   eligible, top-5 by combined-venue MAR Δ; rest closed-rejected.
+2. **Three-tier thresholds are pre-committed.** Investigation (R1-R8) and
+   Demo-candidate (R10) gates are deliberately loose; the strict Real-money
+   (Tier 3) gate is NOT loosened. The 2026-05-28 loosening was on principle,
+   pre-registered, and re-applied blind. No FURTHER loosening to rescue a
+   seen cell — and the Tier 3 gate stays strict.
+3. **The forward-demo treadmill is the multiple-testing control**, not an
+   FDR cap. The one finite surface, the pre-2023 OOS root, is capped at
+   **5 cells per calendar quarter** (ranked by combined pooled MAR Δ, then
+   bootstrap p5); forward demo/paper is uncapped.
 4. **R11 OOS is the final gate.** R11 failure = closed. No "Round 3"
    to rescue near-misses.
 5. **No production filter change** is made on basis of R1-R8 results.
@@ -1796,7 +1893,7 @@ By committing this plan, the operator + assistant commit in advance to:
 | Week 1 | R0 (doc cleanup) + R1 (filter audit) + R2 (per-feature) + R3 (bearish stack). Code: 3 small filter-related additions for R3. R12a starts in parallel (1m kline ingestion runs as background download). C0 code work begins (rolling-feature registry + engine skeleton). |
 | Week 2 | R4 (risk model — 3 days code) + R5 (sizing — 1 day code + sweep) + R12b (sniper simulator — 2 days code, parallel with R4) + C0 continues (engine implementation + tests) |
 | Week 3 | R6 (cost model — 2 days code + calibration) + R7 (stress tests pending R4/R6) + R8 (capacity pending R6) + R12c (sniper univariate test, depends on R12a+R12b ready) + C0c validation (regression vs daily mode) + C1 (continuous univariate IC) |
-| Week 4 | R9 (integrated strategy assembly) + R10 (promotion gate) + R12d (R9 × sniper) + C2 (continuous R9 variant). Conditional on R9 + R12c + C2 candidates. |
+| Week 4 | R9 (integrated strategy assembly) + R10 (demo-candidate gate) + R12d (R9 × sniper) + C2 (continuous R9 variant). Conditional on R9 + R12c + C2 candidates. |
 | Week 5 | R11 (OOS gate) + R12e (delay sweep) + R12f (sniper stress test) + C3 (continuous stress test) if any R10 finalist from EITHER architecture. Conditional on data-root state. |
 | Week 6+ | Forward demo deployment proposal IF R11 passing. 30-day demo + paper-shadow reconciliation. Then operator decision on mainnet. If BOTH architectures pass R11, operator decides whether to deploy one or run them in parallel (ops-complexity tradeoff). |
 
@@ -1824,7 +1921,7 @@ The infrastructure becomes durable assets for any future research.
 
 3. **Bearish stack as separate strategy?** If R3 produces a
    investigation-positive bearish cell AND R9_market_neutral is
-   promotion-eligible, do we deploy the long+short basket OR
+   demo-eligible, do we deploy the long+short basket OR
    maintain just the bearish line as a separate strategy on top of
    existing short-only? **Default: market-neutral basket; if
    operator wants the bearish line standalone that's a separate
@@ -1834,7 +1931,7 @@ The infrastructure becomes durable assets for any future research.
    decides actual deployment size. Default constraint: never deploy
    >10% of R8 capacity ceiling.
 
-5. **What if a candidate strategy is promotion-eligible but uses
+5. **What if a candidate strategy is demo-eligible but uses
    features beyond current PIT data (e.g. needs OI from Binance
    pre-2024 which we don't have)?** Per Round 1 program verdict
    Option D: backfill the data before R11. Default: data backfill is
@@ -1927,7 +2024,7 @@ future research program on its own pre-reg.
 | Aspect | Round 1 | Round 2 |
 |---|---|---|
 | Primary metric | Sharpe | **MAR (return/DD)** |
-| Threshold tiers | Single (Manifesto strict) | **Two (Investigation + Promotion)** |
+| Threshold tiers | Single (Manifesto strict) | **Three, demo-arbiter (Investigation → Demo-candidate → Real-money); loose where being wrong is free, strict where it costs real money** |
 | Filter audit | LOO only (single-threshold strict) | LOO + softer-criterion + individual hypothesis test |
 | Feature work | IC test only, then naive combination | IC test + standalone decile + correlation matrix + PCA + orthogonalized combination |
 | Bearish hypothesis | Falsified-by-construction (no test) | **Honest test via R3 mirror-stack** |
@@ -1941,7 +2038,7 @@ future research program on its own pre-reg.
 | WS infrastructure role | Observation + execution only | **Signal-driving for Architecture B (continuous rolling-feature engine)** |
 | Strategy architecture | Event-driven only | **Event-driven + IC-augmented + factor-capped + risk-sized + cost-aware + sniper-executed; continuous-signal variant also tested** |
 | Hard deadline | 2026-06-15 (19-day buffer) | None (weeks acceptable) |
-| FDR ceiling | 3 candidates | 5 candidates (justified by Investigation-tier pre-filter) |
+| Multiple-testing control | FDR ceiling: 3 candidates to OOS | **Forward-demo treadmill (fresh data can't be overfit); only the finite pre-2023 OOS is capped, at 5 cells/quarter** |
 | Mandatory artifacts per cell | Ledger + equity + monthly | + factor-decomposed P&L + stress scorecard + capacity curve + residual Sharpe + sniper fill-rate (R12 variants) |
 
 Round 2 is **bigger, slower, more rigorous, and more honest about
