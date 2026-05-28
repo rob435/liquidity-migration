@@ -2644,6 +2644,39 @@ def _write_pending_entry_order(root: Path, *, status: str, ts_ms: int) -> None:
     )
 
 
+def test_validate_ws_risk_config_warns_untracked_exit_without_long_root(caplog) -> None:
+    """exit_untracked_positions on a shared account with long_data_root unset
+    would force-close the long sleeve's positions. The validator must emit a
+    loud warning (it does not raise: a dedicated single-sleeve account is a
+    legitimate setup, and the launch script hard-fails the shared case)."""
+    import logging
+
+    from liquidity_migration.ws_risk import _validate_ws_risk_config
+
+    def _cfg(long_root: str) -> EventWebSocketRiskConfig:
+        return EventWebSocketRiskConfig(
+            submit_orders=False,  # keep validate_order_submit_allowed a no-op
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+            max_runtime_seconds=0.0,
+            stream_start_timeout_seconds=0.0,
+            exit_untracked_positions=True,
+            long_data_root=long_root,
+        )
+
+    with caplog.at_level(logging.WARNING, logger="liquidity_migration.ws_risk"):
+        _validate_ws_risk_config(_cfg(""))
+    assert any("exit_untracked_positions=ON" in r.message for r in caplog.records)
+
+    # With long_data_root set (dual-sleeve aware), no warning.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="liquidity_migration.ws_risk"):
+        _validate_ws_risk_config(_cfg("data/bybit-long-demo-event"))
+    assert not any("exit_untracked_positions=ON" in r.message for r in caplog.records)
+
+
 def test_validate_trade_row_invariants_catches_entry_before_signal() -> None:
     """The 2026-05-25 WAVESUSDT premature-exit bug: entry_ts_ms set to
     signal_ts_ms (i.e. before the actual fill). The validator must catch

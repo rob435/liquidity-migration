@@ -1156,6 +1156,12 @@ class _KlineConnectionState:
     message_count: int = 0
     dropped_messages: int = 0
     closed: bool = False
+    # monotonic timestamp of the last reconnect ATTEMPT — the watchdog uses this
+    # to space retries per-connection instead of sleeping while holding the pool
+    # lock (which previously blocked subscribe/stats for backoff×N seconds on a
+    # multi-connection reconnect). 0.0 = never attempted, so first reconnect is
+    # immediate.
+    last_reconnect_monotonic: float = 0.0
 
 
 class BybitKlineStreamPool:
@@ -1472,10 +1478,22 @@ class BybitKlineStreamPool:
             for state in list(self._connections):
                 if not state.assigned_symbols:
                     continue
+                # Per-connection backoff gate: a connection that attempted a
+                # reconnect within the last backoff window is left for a later
+                # watchdog tick. This replaces the old in-lock time.sleep so the
+                # pool lock is never held across the backoff (the sleep blocked
+                # subscribe/update_subscriptions/stats for backoff×N seconds on a
+                # multi-connection reconnect). backoff < watchdog interval, so the
+                # gate never blocks a connection indefinitely.
+                if (
+                    state.last_reconnect_monotonic > 0.0
+                    and now - state.last_reconnect_monotonic < self.reconnect_backoff_seconds
+                ):
+                    continue
                 if state.closed:
                     # Prior reconnect failed and left this slice without a
-                    # live client. Retry now; the backoff inside the
-                    # reconnect path still protects the venue from a storm.
+                    # live client. Retry now (the backoff gate above already
+                    # protects the venue from a tight retry storm).
                     to_reconnect.append(state.index)
                     continue
                 gap = now - state.last_message_monotonic
@@ -1505,6 +1523,11 @@ class BybitKlineStreamPool:
         # only clear on a SUCCESSFUL resubscribe (which rebuilds the set
         # in _subscribe_to_connection_locked).
         slice_symbols = sorted(state.assigned_symbols)
+        # Stamp the attempt BEFORE doing any work so the watchdog's backoff gate
+        # spaces the next retry even if the factory build below raises. This
+        # replaces the old in-lock time.sleep(backoff) that throttled storms at
+        # the cost of holding the pool lock for the whole sleep.
+        state.last_reconnect_monotonic = time.monotonic()
         _logger_ws_klines.warning(
             "kline connection reconnect conn=%d symbols=%d", index, len(slice_symbols),
         )
@@ -1512,9 +1535,6 @@ class BybitKlineStreamPool:
             self._close_state(state)
         except Exception as exc:  # noqa: BLE001
             _logger_ws_klines.warning("close on reconnect failed conn=%d: %s", index, exc)
-        # Brief sleep so a reconnect storm doesn't pound the venue.
-        if self.reconnect_backoff_seconds > 0.0:
-            time.sleep(self.reconnect_backoff_seconds)
         try:
             new_client = self._websocket_factory(
                 testnet=self.testnet, demo=self.demo, channel_type=self.category,

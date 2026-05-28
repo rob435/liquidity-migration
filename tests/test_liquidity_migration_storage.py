@@ -64,6 +64,31 @@ def test_event_demo_trades_dedupe_by_trade_id(tmp_path: Path) -> None:
     assert stored["return"][0] == 0.02
 
 
+def test_event_demo_trades_dedupe_keeps_freshest_updated_at_ms_not_last_written(tmp_path: Path) -> None:
+    """Two writers (demo cycle + ws_risk engine) both author trade rows, so the
+    LAST physical write is not a reliable proxy for the freshest version. When
+    rows carry updated_at_ms, dedup must keep the highest updated_at_ms even if
+    a STALE-snapshot row is written afterwards — otherwise a slow cycle could
+    resurrect a trade the risk engine already closed."""
+    fresh = pl.DataFrame(
+        [{"trade_id": "t-1", "symbol": "BTCUSDT", "ts_ms": 1_700_000_000_000,
+          "status": "closed", "updated_at_ms": 200}]
+    )
+    stale = pl.DataFrame(
+        [{"trade_id": "t-1", "symbol": "BTCUSDT", "ts_ms": 1_700_000_000_000,
+          "status": "open", "updated_at_ms": 100}]
+    )
+
+    write_dataset(fresh, tmp_path, "event_demo_trades", partition_by=())
+    # Stale write lands LAST but is an OLDER version.
+    write_dataset(stale, tmp_path, "event_demo_trades", partition_by=())
+
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    assert stored.height == 1
+    assert stored["status"][0] == "closed", "freshest updated_at_ms must win, not last-written"
+    assert stored["updated_at_ms"][0] == 200
+
+
 def test_read_dataset_handles_schema_evolution_across_partitions(tmp_path: Path) -> None:
     first = pl.DataFrame(
         [

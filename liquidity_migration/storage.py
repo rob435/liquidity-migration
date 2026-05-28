@@ -404,6 +404,16 @@ def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> 
         output = pl.concat([existing, output], how="diagonal_relaxed")
     keys = [col for col in DATASET_KEYS.get(dataset, ()) if col in output.columns]
     if keys:
+        # Dedup by the dataset's natural keys. When rows carry updated_at_ms
+        # (trades/orders), keep the freshest VERSION rather than whichever row
+        # happened to be written last: two processes (the demo cycle and the
+        # ws_risk engine) both author these rows, so write order is not a
+        # reliable proxy for recency. Sort ascending (nulls — legacy rows with
+        # no updated_at_ms — first) so the max updated_at_ms lands last and
+        # unique(keep="last") wins it; among ties / nulls the concat order
+        # (existing then new) still lets a same-version new row win.
+        if "updated_at_ms" in output.columns:
+            output = output.sort("updated_at_ms", nulls_last=False)
         output = output.unique(subset=keys, keep="last")
     sort_cols = [col for col in ("symbol", "ts_ms") if col in output.columns]
     if sort_cols:

@@ -756,6 +756,64 @@ def run_backtest_paper_reconciliation(
     return {"result": result, "report": report, "report_path": str(report_path)}
 
 
+def _qty_weighted_price(legs: list[tuple[float, float]]) -> float:
+    """Quantity-weighted average price over ``(size, price)`` legs, ignoring legs
+    with a non-positive price or size. Returns 0.0 when nothing is priced."""
+    priced = [(size, price) for size, price in legs if price > 0.0 and size > 0.0]
+    total = sum(size for size, _ in priced)
+    return sum(size * price for size, price in priced) / total if total > 0.0 else 0.0
+
+
+def _aggregate_bybit_closures(
+    records: list[dict[str, Any]], *, window_ms: int = 120_000
+) -> list[dict[str, Any]]:
+    """Fold a multi-order close into one logical closure.
+
+    Bybit's closed_pnl returns one row per closing ORDER, so a single ledger
+    trade closed via several reduce-only orders (a partial-exit sequence, or a
+    max-order-qty split) maps to multiple rows. Without folding, the extra legs
+    are mis-reported as orphan closures. Rows are merged when they share
+    (symbol, side) and their createdTime cluster within ``window_ms`` of the
+    previous leg: summed size/pnl/fee, qty-weighted avg entry/exit over priced
+    legs, earliest createdTime. The strategy holds one position per symbol with
+    a cooldown, so two genuinely distinct closes on the same symbol+side inside
+    the window are not expected."""
+    by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for record in records:
+        by_key.setdefault((record["symbol"], record["side"]), []).append(record)
+    merged: list[dict[str, Any]] = []
+    for group in by_key.values():
+        group.sort(key=lambda r: r["created_ts_ms"])
+        clusters: list[list[dict[str, Any]]] = []
+        for record in group:
+            if clusters and record["created_ts_ms"] - clusters[-1][-1]["created_ts_ms"] <= window_ms:
+                clusters[-1].append(record)
+            else:
+                clusters.append([record])
+        for cluster in clusters:
+            if len(cluster) == 1:
+                merged.append(cluster[0])
+                continue
+            merged.append(
+                {
+                    "symbol": cluster[0]["symbol"],
+                    "side": cluster[0]["side"],
+                    "avg_entry_price": _qty_weighted_price(
+                        [(r["closed_size"], r["avg_entry_price"]) for r in cluster]
+                    ),
+                    "avg_exit_price": _qty_weighted_price(
+                        [(r["closed_size"], r["avg_exit_price"]) for r in cluster]
+                    ),
+                    "closed_size": sum(r["closed_size"] for r in cluster),
+                    "closed_pnl_usdt": sum(r["closed_pnl_usdt"] for r in cluster),
+                    "exec_fee_usdt": sum(r["exec_fee_usdt"] for r in cluster),
+                    "created_ts_ms": min(r["created_ts_ms"] for r in cluster),
+                    "merged_legs": len(cluster),
+                }
+            )
+    return merged
+
+
 def reconcile_demo_bybit(
     demo_trades: pl.DataFrame,
     closed_pnl_records: list[dict[str, Any]],
@@ -785,7 +843,11 @@ def reconcile_demo_bybit(
         avg_exit = _float(record.get("avgExitPrice"))
         avg_entry = _float(record.get("avgEntryPrice"))
         closed_size = _float(record.get("closedSize"))
-        if not symbol or not original_side or avg_exit <= 0.0 or avg_entry <= 0.0 or closed_size <= 0.0:
+        # Only identity + a positive closedSize are essential. A closure missing
+        # avgEntry/avgExit (Bybit omits them on some close types) must still be
+        # surfaced — dropping it here would hide a real orphan from the
+        # cross-check. The exit-price-gap calc below already guards avg_exit<=0.
+        if not symbol or not original_side or closed_size <= 0.0:
             continue
         cleaned_bybit.append(
             {
@@ -799,6 +861,9 @@ def reconcile_demo_bybit(
                 "created_ts_ms": _int(record.get("createdTime") or record.get("updatedTime")),
             }
         )
+    # Fold multi-order closes (one ledger trade closed via N reduce-only orders)
+    # into one logical closure so the extra legs aren't mis-flagged as orphans.
+    cleaned_bybit = _aggregate_bybit_closures(cleaned_bybit)
 
     closed_demo_trades = [t for t in demo if t["status"] == "closed" and t["exit_price"] > 0.0]
     open_demo_trades = [t for t in demo if t["status"] == "open"]
@@ -891,6 +956,19 @@ def reconcile_demo_bybit(
     # Open-position cross-check: every ledger-open trade should have a non-zero
     # Bybit position; every non-zero Bybit position should map to a ledger trade.
     ledger_open_keys = {(t["symbol"], t["side"]) for t in open_demo_trades}
+    # Duplicate open trades on the same (symbol, side) collapse into a single key
+    # for the cross-check below, so surface them separately: the strategy holds
+    # one position per symbol, so >1 open ledger trade on a key is a stacking bug
+    # the open-position diff would otherwise hide.
+    open_key_counts: dict[tuple[str, str], int] = {}
+    for trade in open_demo_trades:
+        key = (trade["symbol"], trade["side"])
+        open_key_counts[key] = open_key_counts.get(key, 0) + 1
+    duplicate_open_ledger = [
+        {"symbol": sym, "side": side, "count": count}
+        for (sym, side), count in sorted(open_key_counts.items())
+        if count > 1
+    ]
     bybit_open_keys: set[tuple[str, str]] = set()
     bybit_open_detail: dict[tuple[str, str], dict[str, Any]] = {}
     for pos in open_positions or []:
@@ -943,6 +1021,7 @@ def reconcile_demo_bybit(
         "open_only_in_ledger": len(open_only_in_ledger),
         "open_only_in_bybit": len(open_only_in_bybit),
         "open_in_both": len(open_in_both),
+        "duplicate_open_ledger": len(duplicate_open_ledger),
         "exit_price_gap_bps_mean": mean(exit_price_bps_all) if exit_price_bps_all else 0.0,
         "exit_price_gap_bps_worst": max(exit_price_bps_all) if exit_price_bps_all else 0.0,
         "pnl_gap_usdt_total": sum(pnl_gaps_all) if pnl_gaps_all else 0.0,
@@ -957,6 +1036,7 @@ def reconcile_demo_bybit(
         "open_only_in_ledger": [{"symbol": s, "side": side} for s, side in open_only_in_ledger],
         "open_only_in_bybit": [{"symbol": s, "side": side} for s, side in open_only_in_bybit],
         "open_position_diffs": open_position_diffs,
+        "duplicate_open_ledger": duplicate_open_ledger,
     }
 
 
@@ -979,6 +1059,8 @@ def format_demo_bybit_report(result: dict[str, Any]) -> str:
         f"- open in ledger only (ghost position in ledger): **{summary['open_only_in_ledger']}**",
         f"- open on Bybit only (untracked position on exchange): **{summary['open_only_in_bybit']}**",
         f"- open on both sides: {summary['open_in_both']}",
+        f"- duplicate open ledger trades on one (symbol, side) — stacking bug: "
+        f"**{summary.get('duplicate_open_ledger', 0)}**",
         "",
         "## Exit-price gap (ledger vs Bybit avgExitPrice)",
         "",

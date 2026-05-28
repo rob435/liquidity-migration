@@ -2048,6 +2048,20 @@ def _validate_ws_risk_config(config: EventWebSocketRiskConfig) -> None:
         raise ValueError("pending_exit_guard_seconds must be non-negative")
     if config.exit_untracked_positions and config.order_submit_mode == "ws" and not config.rest_fallback:
         raise ValueError("exit_untracked_positions requires REST fallback in Bybit demo mode")
+    if config.exit_untracked_positions and not config.long_data_root:
+        # exit_untracked_positions flattens any Bybit position not found in this
+        # engine's ledger(s). With long_data_root set the engine reads BOTH the
+        # short and long ledgers, so the long sleeve's positions are recognised.
+        # Without it, on a SHARED account the long sleeve's open positions look
+        # untracked and would be force-closed. Warn rather than raise: a dedicated
+        # single-sleeve account is a legitimate (if rare) setup, and the launch
+        # script hard-fails this combination for the shared demo account.
+        _logger.warning(
+            "exit_untracked_positions=ON with long_data_root unset: this engine will "
+            "FLATTEN any Bybit position absent from the short ledger. If another sleeve "
+            "shares this account its positions WILL be closed. Set long_data_root or "
+            "disable exit_untracked_positions unless this account is single-sleeve."
+        )
     if config.untracked_position_grace_seconds < 0.0:
         raise ValueError("untracked_position_grace_seconds must be non-negative")
     if config.adopt_stop_loss_pct < 0.0 or config.adopt_take_profit_pct < 0.0:

@@ -239,6 +239,107 @@ def test_reconcile_demo_bybit_pairs_and_flags_orphans() -> None:
     assert "untracked position on exchange" in report
 
 
+def test_reconcile_demo_bybit_folds_multi_order_close_not_orphan() -> None:
+    """A ledger trade closed via several reduce-only orders maps to multiple
+    Bybit closed_pnl rows. They must fold into one logical close (paired), NOT
+    be mis-flagged as orphan closures."""
+    ledger = pl.DataFrame(
+        [
+            {
+                "trade_id": "t-1", "symbol": "AAAUSDT", "side": "short",
+                "entry_ts_ms": 1_000_000, "entry_exec_time_ms": 1_000_500,
+                "entry_price": 100.0, "entry_fee_usdt": 0.05,
+                "qty": 2.0, "status": "closed",
+                "exit_price": 90.0, "exit_ts_ms": 2_000_000,
+                "exit_exec_time_ms": 2_000_500,
+                "exit_reason": "take_profit", "exit_fee_usdt": 0.10,
+            },
+        ]
+    )
+    # Two closing executions for the SAME position, milliseconds apart.
+    bybit_closed = [
+        {
+            "symbol": "AAAUSDT", "side": "Buy",
+            "avgEntryPrice": "100.0", "avgExitPrice": "90.0",
+            "closedSize": "1", "closedPnl": "5.0", "execFee": "0.05",
+            "createdTime": "2000400",
+        },
+        {
+            "symbol": "AAAUSDT", "side": "Buy",
+            "avgEntryPrice": "100.0", "avgExitPrice": "90.0",
+            "closedSize": "1", "closedPnl": "5.0", "execFee": "0.05",
+            "createdTime": "2000450",
+        },
+    ]
+    result = reconcile_demo_bybit(ledger, bybit_closed, [])
+    summary = result["summary"]
+    assert summary["bybit_closed_records"] == 1, "two legs of one close must fold into one"
+    assert summary["paired_closed"] == 1
+    assert summary["orphan_in_bybit"] == 0, "folded legs must not be reported as orphans"
+    pair = result["pairs"][0]
+    assert pair["bybit_closed_size"] == pytest.approx(2.0)  # summed legs
+    assert pair["qty_gap"] == pytest.approx(0.0)
+
+
+def test_reconcile_demo_bybit_surfaces_closure_missing_avg_price() -> None:
+    """A Bybit closure with avgEntry/avgExit omitted (Bybit does this on some
+    close types) must still be surfaced as an orphan, not silently dropped
+    before the cross-check."""
+    ledger = pl.DataFrame(
+        [
+            {
+                "trade_id": "t-1", "symbol": "AAAUSDT", "side": "short",
+                "entry_ts_ms": 1_000_000, "entry_exec_time_ms": 1_000_500,
+                "entry_price": 100.0, "entry_fee_usdt": 0.05,
+                "qty": 1.0, "status": "open",
+                "exit_price": 0.0, "exit_ts_ms": 0, "exit_exec_time_ms": 0,
+                "exit_reason": "", "exit_fee_usdt": 0.0,
+            },
+        ]
+    )
+    bybit_closed = [
+        {
+            "symbol": "ZEROUSDT", "side": "Buy",
+            "avgEntryPrice": "0", "avgExitPrice": "0",  # omitted by venue
+            "closedSize": "5", "closedPnl": "-1.0", "execFee": "0.01",
+            "createdTime": "1800000",
+        },
+    ]
+    result = reconcile_demo_bybit(ledger, bybit_closed, [])
+    assert result["summary"]["orphan_in_bybit"] == 1
+    assert result["orphan_in_bybit"][0]["symbol"] == "ZEROUSDT"
+
+
+def test_reconcile_demo_bybit_flags_duplicate_open_ledger() -> None:
+    """Two open ledger trades on the same (symbol, side) collapse to one key in
+    the open-position cross-check; the reconciler must surface the duplication
+    separately as a stacking-bug signal."""
+    ledger = pl.DataFrame(
+        [
+            {
+                "trade_id": "t-1", "symbol": "AAAUSDT", "side": "short",
+                "entry_ts_ms": 1_000_000, "entry_exec_time_ms": 1_000_500,
+                "entry_price": 100.0, "entry_fee_usdt": 0.05,
+                "qty": 1.0, "status": "open",
+                "exit_price": 0.0, "exit_ts_ms": 0, "exit_exec_time_ms": 0,
+                "exit_reason": "", "exit_fee_usdt": 0.0,
+            },
+            {
+                "trade_id": "t-2", "symbol": "AAAUSDT", "side": "short",
+                "entry_ts_ms": 1_100_000, "entry_exec_time_ms": 1_100_500,
+                "entry_price": 101.0, "entry_fee_usdt": 0.05,
+                "qty": 1.0, "status": "open",
+                "exit_price": 0.0, "exit_ts_ms": 0, "exit_exec_time_ms": 0,
+                "exit_reason": "", "exit_fee_usdt": 0.0,
+            },
+        ]
+    )
+    result = reconcile_demo_bybit(ledger, [], [])
+    assert result["summary"]["duplicate_open_ledger"] == 1
+    dup = result["duplicate_open_ledger"][0]
+    assert dup["symbol"] == "AAAUSDT" and dup["side"] == "short" and dup["count"] == 2
+
+
 def test_reconcile_backtest_paper_pairs_by_signal_ts_and_flags_drift() -> None:
     """The backtest↔paper reconciler must:
        1) pair trades on (symbol, side, signal_ts) within tolerance even when

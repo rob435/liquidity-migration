@@ -257,6 +257,46 @@ def test_reconnect_resubscribes_slice_on_stale_connection() -> None:
         pool.close()
 
 
+def test_reconnect_backoff_does_not_sleep_under_lock() -> None:
+    """Regression guard for the watchdog lock-hold fix.
+
+    Before the fix: _reconnect_connection_locked did time.sleep(backoff) while
+    holding the pool lock, so a reconnect with backoff=5s blocked
+    subscribe/stats for 5s. After: the backoff is enforced by a per-connection
+    gate in check_stale_connections (no sleep), so a reconnect returns
+    immediately and a second check within the backoff window is skipped."""
+    factory = _FakeWebSocketFactory()
+    pool = BybitKlineStreamPool(
+        interval_minutes=60,
+        topics_per_connection=10,
+        stale_warning_seconds=0.01,
+        stale_reconnect_seconds=0.02,
+        watchdog_interval_seconds=0.05,
+        connection_spacing_seconds=0.0,
+        reconnect_backoff_seconds=5.0,  # would be a 5s in-lock sleep pre-fix
+        websocket_factory=factory,
+    )
+    pool.subscribe(["AAA_USDT", "BBB_USDT"], lambda s, b, c: None)
+    try:
+        state = pool._connections[0]  # type: ignore[attr-defined]
+        state.last_message_monotonic = time.monotonic() - 5.0
+        # First reconnect: must NOT block for the 5s backoff.
+        start = time.monotonic()
+        reconnects = pool.check_stale_connections()
+        elapsed = time.monotonic() - start
+        assert reconnects == 1
+        assert elapsed < 1.0, f"reconnect blocked {elapsed:.2f}s — backoff slept under lock"
+        # A second check within the backoff window is gated out (no thrash).
+        state.last_message_monotonic = time.monotonic() - 5.0
+        assert pool.check_stale_connections() == 0
+        # Once the backoff has elapsed, the connection is eligible again.
+        state.last_reconnect_monotonic = time.monotonic() - 6.0
+        state.last_message_monotonic = time.monotonic() - 5.0
+        assert pool.check_stale_connections() == 1
+    finally:
+        pool.close()
+
+
 class _FailingFactory:
     """Factory wrapper that fails the Nth build to simulate a transient
     WS outage during reconnect."""
