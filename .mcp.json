@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "liqmig-research": {
-      "command": "python3",
+      "command": "python",
       "args": [".claude/mcp/research_server.py"]
     }
   }
