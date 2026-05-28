@@ -45,9 +45,10 @@ Round 2 also corrects two Round 1 design errors:
   (annualized return / |max DD|) is primary; Sharpe is secondary
   tie-breaker.**
 
-12 sub-phases (R0-R11 + R12), conditional dependencies, ~weeks of
-wall-time on the 5950X. No hard deadline. Default outcome remains
-"do nothing if all hypotheses falsify."
+14 R-phases (R0-R13) + 4 continuous (C0-C3), conditional dependencies,
+~weeks of wall-time on the 5950X. No hard deadline. Default outcome remains
+"do nothing if all hypotheses falsify." (See "Status & 5950X dispatch" for
+what's shipped vs pending.)
 
 **Lead R1 candidate from 2026-05-29 Mac-side exploratory peek:**
 `R1_drop_all_4` (drops `day_return`, `stop_pressure`, `realized_loss`,
@@ -87,27 +88,58 @@ of both. See "Two signal architectures in scope" below and
 
 ---
 
-## Codebase note — `event_demo` refactor in flight (2026-05-28)
+## Status & 5950X dispatch (updated 2026-05-28)
 
-`liquidity_migration/event_demo.py` is being refactored (currently **under
-audit**) into a module family: `event_demo_{data,entries,planning,exits,
-reports,daemon}.py`. This shapes how Round 2's **code-touch** sub-phases land —
-they target the post-refactor layout, not the old monolith:
+**Shipped to the codebase** — all opt-in; defaults unchanged, so the running R1
+sweep and the frozen live profile are byte-identical:
+- **R5 sizing** — `--position-weighting risk_equal` (absolute
+  `target_vol_per_name / realized_vol`, clamped) + `--target-vol-per-name`.
+  Backtest done; live-runner per-name wiring is post-validation.
+- **R6 down-payment (E3/E4)** — `CostConfig.exit_cost_multiplier` (exit-leg
+  asymmetry) and `maker_fill_probability=0.0` to model the live 100%-taker fill.
+  Full per-name/per-bar R6 still pending.
+- **E6** — Bybit funding settlements surfaced in `reconcile-demo-bybit` (the
+  short's funding tailwind, which closedPnl never showed).
+- **R13** — new sub-phase, pre-registered at the end of this doc.
 
-- **Sweep path verified working:** `volume_events.py` was itself split
-  internally (filters / features / charts / validation siblings) by the
-  refactor, but the `volume-events` CLI command and all its flags are unchanged
-  (`--help` confirmed, exit 0). So R1-R3 sweeps (including the wide-funnel
-  `max_active=12` R1 run) and the signal harness run as-is — do a quick
-  `volume-events --help` / small dry-run on first use on the desktop to confirm.
-- **Depends on the refactor landing:** R5 (position sizing), R6 (cost-model
-  integration into the runner), R12 (sniper entry / daemon), C0 (continuous
-  engine = the live-daemon path). Implement these on top of the audited module
-  split — verify the exact module for each hook at implementation time — to
-  avoid colliding with the refactor.
+**Phase ledger:**
 
-**Sequencing rule:** data-only sweeps run independently and now; runner/daemon
-code changes wait for the `event_demo` refactor + its audit to merge first.
+| Phase | Status |
+|---|---|
+| R0 doc cleanup | done |
+| **R1** filter audit (`max_active=12`) | **RUNNING on the 5950X** |
+| R2 per-feature decile sort | code ready (`liquidity_migration/r2_decile_sort.py`); awaiting dispatch |
+| R3 bearish-stack honest test | pending (~3h filter-flag code) |
+| R4 risk-factor model | pending (~3d code) |
+| **R5** 1/realized-vol sizing | **backtest shipped** (`risk_equal`); cells opt in via flag |
+| R6 per-name/per-bar cost | **E3/E4 down-payment shipped**; full model pending |
+| R7 stress / R8 capacity | pending (depend on R4 / R6) |
+| R9 assembly / R10 promote / R11 OOS | pending |
+| R12 sniper-entry execution | pending (~3-4d code) |
+| **R13** exit-rule re-opt | **ready** — dispatch after R1 confirms drop_all_4 |
+| C0-C3 continuous signal | pending (~5-7d code) |
+
+**Dispatch (5950X, 8 cells × 4 polars threads = 32 SMT):**
+
+```
+SWEEP_MAX_WORKERS=8 POLARS_MAX_THREADS=4 .venv/bin/python -u scripts/r1_filter_audit_sweep.py
+# after R1 confirms drop_all_4 as lead:
+SWEEP_MAX_WORKERS=8 POLARS_MAX_THREADS=4 .venv/bin/python -u scripts/r13_exit_rule_sweep.py
+```
+Per-cell verdicts: `.venv/bin/python scripts/r1_robustness.py --sweep-tag <tag>`.
+
+---
+
+## Codebase note — `event_demo` refactor LANDED (2026-05-28)
+
+`event_demo.py` was split into a module family (`event_demo_{data,entries,
+planning,exits,reports}.py`) and `volume_events.py` into
+`volume_events_{filters,features,charts,validation}.py`. The `volume-events` CLI
+and all flags are unchanged, so every sweep + the signal harness run as-is. The
+package `__init__` preloads the hubs, so importing any sibling cold is safe.
+Round-1 phase sweep scripts were removed in the 2026-05-28 cleanup;
+`scripts/{r1_filter_audit_sweep,r13_exit_rule_sweep,_sweep_runtime,r1_robustness}.py`
+are the canonical sweep tooling.
 
 ---
 
@@ -902,6 +934,13 @@ selection finalized; integration spec for R9.
 
 ## Sub-phase R5 — 1/realized-vol position sizing
 
+**Status (2026-05-28): backtest SHIPPED.** Implemented as a new opt-in
+`position_weighting="risk_equal"` mode (reusing the existing
+`--position-weighting` enum rather than adding a separate `--position-sizing`
+flag) + `--target-vol-per-name`. `equal` stays default. Live-runner per-name
+wiring (see "Code changes") is post-validation — the live runner still sizes
+equal-weight (documented at `target_order_notional_pct_equity`).
+
 **Purpose:** Replace dollar-equal sizing with risk-equal sizing per
 name. JS-style table stakes; typically shrinks DD by 20-30% without
 changing the strategy.
@@ -967,6 +1006,14 @@ winning target_vol value pins R9's sizing knob.
 ---
 
 ## Sub-phase R6 — Per-name, per-bar cost model
+
+**Status (2026-05-28): E3/E4 down-payment SHIPPED** (not the full model). Two
+opt-in `CostConfig` knobs land ahead of the regression-calibrated surface:
+`exit_cost_multiplier` (per-leg asymmetry — the cover leg of a short costs more,
+default 1.0 = symmetric) and the existing `maker_fill_probability` (set to 0.0
+to model the deployed 100%-taker Market execution exactly = 15 bps round-trip,
+instead of leaning on `cost_multiplier=3` to paper over a maker blend the live
+engine never gets). The full per-name/per-bar model below is still pending.
 
 **Purpose:** Replace the single `cost_multiplier=3` with a model that
 varies cost by name (liquidity tier), size relative to ADV, time of
