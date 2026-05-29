@@ -1124,13 +1124,20 @@ def test_reconcile_open_trades_keeps_matching_side_position() -> None:
     assert str(kept.row(0, named=True)["status"]) == "open"
 
 
-def test_reconcile_open_trades_closes_when_position_vanished() -> None:
-    """Position gone from Bybit entirely → orphan-close the trade."""
+_SHORT_CLOSURE = {
+    "symbol": "AAAUSDT", "side": "Buy", "avgExitPrice": "95.0",
+    "closedSize": "1", "execFee": "0.1", "orderId": "x-1", "createdTime": "1700000050000",
+}
+
+
+def test_reconcile_open_trades_closes_when_position_vanished_with_evidence() -> None:
+    """Position gone from Bybit AND a closed-PnL record proves it closed →
+    orphan-close (the fail-closed invariant's positive-evidence path)."""
     open_trades = pl.DataFrame([_open_trade_row(side="short")], infer_schema_length=None)
 
     kept, updates, error = _reconcile_open_trades(
         open_trades,
-        trading_client=_ClosedPnlClient(),
+        trading_client=_ClosedPnlClient(records=[_SHORT_CLOSURE]),
         demo=EventDemoCycleConfig(submit_orders=True),
         now_ms=1_700_000_100_000,
         raw_positions=[],
@@ -1140,6 +1147,44 @@ def test_reconcile_open_trades_closes_when_position_vanished() -> None:
     assert kept.is_empty()
     assert len(updates) == 1
     assert updates[0]["status"] == "closed"
+    assert updates[0]["exit_reason"] == "bybit_position_missing"
+
+
+def test_reconcile_open_trades_keeps_open_when_no_closure_evidence() -> None:
+    """FAIL-CLOSED invariant: position absent but NO closure record → the trade
+    stays OPEN, not orphan-closed. A transient/empty positions read must never
+    wipe a possibly-live position from the ledger (the C1 class)."""
+    open_trades = pl.DataFrame([_open_trade_row(side="short")], infer_schema_length=None)
+
+    kept, updates, error = _reconcile_open_trades(
+        open_trades,
+        trading_client=_ClosedPnlClient(),  # no records -> no evidence
+        demo=EventDemoCycleConfig(submit_orders=True),
+        now_ms=1_700_000_100_000,
+        raw_positions=[],
+    )
+
+    assert error == ""
+    assert updates == []
+    assert kept.height == 1
+    assert str(kept.row(0, named=True)["status"]) == "open"
+
+
+def test_reconcile_open_trades_legacy_closes_on_absence_when_evidence_not_required() -> None:
+    """The fail-closed policy is a knob: orphan_close_require_evidence=False
+    restores the legacy close-on-absence (zero-PnL) behavior."""
+    open_trades = pl.DataFrame([_open_trade_row(side="short")], infer_schema_length=None)
+
+    kept, updates, error = _reconcile_open_trades(
+        open_trades,
+        trading_client=_ClosedPnlClient(),  # no evidence
+        demo=EventDemoCycleConfig(submit_orders=True, orphan_close_require_evidence=False),
+        now_ms=1_700_000_100_000,
+        raw_positions=[],
+    )
+
+    assert kept.is_empty()
+    assert len(updates) == 1
     assert updates[0]["exit_reason"] == "bybit_position_missing"
 
 
@@ -1154,7 +1199,7 @@ def test_reconcile_open_trades_closes_when_position_flipped_to_opposite_side() -
 
     kept, updates, error = _reconcile_open_trades(
         open_trades,
-        trading_client=_ClosedPnlClient(),
+        trading_client=_ClosedPnlClient(records=[_SHORT_CLOSURE]),
         demo=EventDemoCycleConfig(submit_orders=True),
         now_ms=1_700_000_100_000,
         raw_positions=raw_positions,
@@ -1239,6 +1284,36 @@ def test_orphan_close_pnl_backfill_pulls_exit_price_and_return() -> None:
     assert backfill["closed_at_ms"] == 1_700_000_050_000
     assert backfill["exit_order_id"] == "exit-order-1"
     assert backfill["submit_mode"] == "orphan_reconciled"
+
+
+def test_orphan_close_pnl_backfill_aggregates_multi_leg_close() -> None:
+    """M8: a position closed via several reduce-only legs must sum execFee and
+    qty-weight the exit price across legs, not price the close off one leg."""
+    trade = _open_trade_row(
+        side="short", entry_price=100.0, entry_ts_ms=1_700_000_000_000,
+        notional_usdt=1_000.0, equity_usdt=10_000.0,
+    )
+    client = _ClosedPnlClient(
+        records=[
+            {"symbol": "AAAUSDT", "side": "Buy", "avgExitPrice": "96.0", "closedSize": "3",
+             "execFee": "0.3", "orderId": "leg-1", "createdTime": "1700000040000"},
+            {"symbol": "AAAUSDT", "side": "Buy", "avgExitPrice": "94.0", "closedSize": "1",
+             "execFee": "0.1", "orderId": "leg-2", "createdTime": "1700000050000"},
+        ]
+    )
+
+    backfill = _orphan_close_pnl_backfill(trade, now_ms=1_700_000_100_000, trading_client=client)
+
+    # qty-weighted exit = (3*96 + 1*94) / 4 = 95.5
+    assert backfill["exit_price"] == pytest.approx(95.5)
+    # execFee summed across both legs (NOT just one leg's 0.1).
+    assert backfill["exit_fee_usdt"] == pytest.approx(0.4)
+    # Close completes at the last leg's venue time / order.
+    assert backfill["closed_at_ms"] == 1_700_000_050_000
+    assert backfill["exit_order_id"] == "leg-2"
+    assert backfill["orphan_close_legs"] == 2
+    # short return on the blended 95.5 = (100 - 95.5) / 100 = 0.045
+    assert backfill["gross_trade_return"] == pytest.approx(0.045)
 
 
 def test_orphan_close_pnl_backfill_returns_empty_when_endpoint_missing() -> None:

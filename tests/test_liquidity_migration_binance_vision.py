@@ -7,14 +7,44 @@ silently.
 from __future__ import annotations
 
 import io
+import json
 import zipfile
 
 import polars as pl
+import pytest
 
-from liquidity_migration.binance_vision import parse_month_csv, rewrite_manifest_to_coverage
+from liquidity_migration.binance_vision import (
+    _assert_download_completeness,
+    parse_month_csv,
+    rewrite_manifest_to_coverage,
+)
 from liquidity_migration.storage import read_dataset, write_dataset
 
 MS_PER_HOUR = 3_600_000
+
+
+def test_assert_download_completeness_raises_above_tolerance(tmp_path):
+    """M5: too many failed monthly downloads must abort the build (no silent
+    survivorship-biased universe) and persist the failed-jobs artifact."""
+    failed = [("AAAUSDT", "2023-01"), ("BBBUSDT", "2023-02")]
+    artifact = tmp_path / "failed.json"
+    with pytest.raises(RuntimeError, match="survivorship-biased"):
+        _assert_download_completeness(
+            failed, total_jobs=10, max_failure_ratio=0.005, artifact_path=artifact,
+        )
+    assert artifact.exists()
+    recorded = {row["symbol"] for row in json.loads(artifact.read_text())}
+    assert recorded == {"AAAUSDT", "BBBUSDT"}
+
+
+def test_assert_download_completeness_passes_within_tolerance(tmp_path):
+    """1 failure in 1000 (0.1%) is within the 0.5% tolerance — build proceeds."""
+    artifact = tmp_path / "failed.json"
+    _assert_download_completeness(
+        [("AAAUSDT", "2023-01")], total_jobs=1000, max_failure_ratio=0.005, artifact_path=artifact,
+    )
+    # Artifact still written (empty-ish) for audit even when within tolerance.
+    assert artifact.exists()
 
 
 def _zip_csv(text: str) -> bytes:

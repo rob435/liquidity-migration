@@ -58,10 +58,6 @@ class TradeLifecycleConfig:
     entry_delay_hours: int = 1
     stop_mode: str = "fixed"
     stop_loss_pct: float = 0.08
-    vol_stop_multiplier: float = 3.0
-    vol_stop_lookback_days: int = 20
-    min_stop_loss_pct: float = 0.0
-    max_stop_loss_pct: float = 0.0
     take_profit_pct: float = 0.0
     mfe_giveback_trigger_pct: float = 0.0
     mfe_giveback_retain_pct: float = 0.0

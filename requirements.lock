@@ -1,0 +1,30 @@
+# Exact-pinned lockfile — snapshot of the production VPS venv (deployed
+# commit b49e6e1, captured 2026-05-29). requirements.txt keeps range bounds
+# (which already block major-version bumps); this lock captures the exact
+# tested transitive set for fully-reproducible deploys / debugging.
+#
+# Recreate the exact environment with:
+#   python -m pip install -r requirements.lock
+#
+# Regenerate after an intentional dependency change:
+#   .venv/bin/python -m pip freeze | grep -v '^-e ' > requirements.lock
+certifi==2026.5.20
+charset-normalizer==3.4.7
+idna==3.16
+iniconfig==2.3.0
+numpy==2.4.6
+packaging==26.2
+pillow==11.3.0
+pluggy==1.6.0
+polars==1.41.0
+polars-runtime-32==1.41.0
+pyarrow==21.0.0
+pybit==5.16.0
+pycryptodome==3.23.0
+Pygments==2.20.0
+pytest==8.4.2
+PyYAML==6.0.3
+requests==2.34.2
+ruff==0.15.14
+urllib3==2.7.0
+websocket-client==1.9.0

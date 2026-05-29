@@ -1302,6 +1302,7 @@ def _reconcile_open_trades(
     if error:
         return open_trades, [], error
     size_by_symbol_side = _position_size_by_symbol_side(positions)
+    require_evidence = getattr(demo, "orphan_close_require_evidence", True)
     updates: list[dict[str, Any]] = []
     kept = []
     for trade in open_trades.to_dicts():
@@ -1313,7 +1314,20 @@ def _reconcile_open_trades(
         if trade_side and size_by_symbol_side.get((symbol, trade_side), 0.0) > 0.0:
             kept.append(trade)
             continue
-        updates.append(_orphan_close_trade_row(trade, now_ms=now_ms, trading_client=trading_client))
+        row = _orphan_close_trade_row(
+            trade, now_ms=now_ms, trading_client=trading_client, require_evidence=require_evidence,
+        )
+        if row is None:
+            # FAIL-CLOSED: position absent but no closure evidence — keep the
+            # trade OPEN rather than wipe a possibly-live position. Surfaced so
+            # a persistently-unconfirmed trade is visible to the operator.
+            kept.append(trade)
+            _logger.warning(
+                "orphan-close skipped (no closure evidence) symbol=%s side=%s trade_id=%s — keeping open",
+                symbol, trade_side, trade.get("trade_id"),
+            )
+            continue
+        updates.append(row)
     return pl.DataFrame(kept, infer_schema_length=None) if kept else _empty_trades(), updates, ""
 
 def _risk_reconcile_missing_positions(
@@ -1350,7 +1364,14 @@ def _risk_reconcile_missing_positions(
         if symbol and symbol in position_by_symbol:
             kept.append(trade)
             continue
-        updates.append(_orphan_close_trade_row(trade, now_ms=now_ms, trading_client=trading_client))
+        # The ws_risk path already gates orphan-close behind a grace window
+        # (untracked_position_grace_seconds) + the position_error guard above,
+        # so it keeps the legacy close-on-absence behavior here (require_evidence
+        # =False); the fail-closed evidence requirement is enforced on the
+        # grace-less cycle path (_reconcile_open_trades).
+        updates.append(
+            _orphan_close_trade_row(trade, now_ms=now_ms, trading_client=trading_client, require_evidence=False)
+        )
     return pl.DataFrame(kept, infer_schema_length=None) if kept else _empty_trades(), updates
 
 def _orphan_close_trade_row(
@@ -1358,13 +1379,21 @@ def _orphan_close_trade_row(
     *,
     now_ms: int,
     trading_client: Any | None,
-) -> dict[str, Any]:
+    require_evidence: bool = True,
+) -> dict[str, Any] | None:
     """Build an orphan-close trade row, backfilling PnL from Bybit when possible.
 
-    Falls back to the legacy zero-PnL row on any failure (missing endpoint,
-    transport error, no matching record). The reconciler must always be able to
-    close the ledger row -- a backfill failure cannot block the close.
+    FAIL-CLOSED invariant: when ``require_evidence`` (the default), the close is
+    produced ONLY if ``_orphan_close_pnl_backfill`` finds POSITIVE evidence of
+    closure (a closed-PnL record since entry). With no evidence this returns
+    ``None`` so the caller keeps the trade OPEN — a transient/empty positions
+    read must never wipe a live position from the ledger (the C1 class). Set
+    ``require_evidence=False`` to restore the legacy close-on-absence behavior
+    (zero-PnL close when no record is found).
     """
+    backfill = _orphan_close_pnl_backfill(trade, now_ms=now_ms, trading_client=trading_client)
+    if require_evidence and not backfill:
+        return None
     updated = dict(trade)
     updated.update(
         {
@@ -1376,7 +1405,6 @@ def _orphan_close_trade_row(
             "updated_at_ms": now_ms,
         }
     )
-    backfill = _orphan_close_pnl_backfill(trade, now_ms=now_ms, trading_client=trading_client)
     if backfill:
         updated.update(backfill)
     return updated
@@ -1428,19 +1456,37 @@ def _orphan_close_pnl_backfill(
         candidates.append((created_ts, record))
     if not candidates:
         return {}
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    _, best = candidates[0]
-    exit_price = _float(best.get("avgExitPrice"))
+    # Multi-leg close: one ledger position can be closed by several reduce-only
+    # orders (a partial-exit sequence, or a max-order-qty split), so closed_pnl
+    # returns multiple rows. Pricing the close off a single most-recent leg
+    # undercounts the exit fee and mis-prices a partial close. Aggregate ALL
+    # matching legs since entry — sum execFee, qty-weight avgExitPrice by
+    # closedSize, take the last leg's venue time/orderId. (M8) Single-leg
+    # closures and rows that omit closedSize degrade to the leg's own price. (M8)
+    candidates.sort(key=lambda item: item[0])  # ascending by createdTime
+    legs = [record for _, record in candidates]
+    priced = [
+        (_float(r.get("closedSize")), _float(r.get("avgExitPrice")))
+        for r in legs
+    ]
+    weighted = [(size, price) for size, price in priced if size > 0.0 and price > 0.0]
+    total_size = sum(size for size, _ in weighted)
+    if total_size > 0.0:
+        exit_price = sum(size * price for size, price in weighted) / total_size
+    else:
+        exit_price = _float(legs[-1].get("avgExitPrice"))
     if exit_price <= 0.0:
         return {}
+    exit_fee_usdt = sum(_float(r.get("execFee")) for r in legs)
+    last_leg = legs[-1]
+    # Bybit's createdTime IS the venue execution time; the close completes at
+    # the last leg.
+    closed_at_ms = int(_float(last_leg.get("createdTime") or last_leg.get("updatedTime") or now_ms)) or now_ms
     gross_trade_return = _trade_return(entry_price, exit_price, side=side)
     notional_weight = _safe_ratio(trade.get("notional_usdt"), trade.get("equity_usdt"))
-    closed_at_ms = int(_float(best.get("createdTime") or best.get("updatedTime") or now_ms)) or now_ms
-    exit_fee_usdt = _float(best.get("execFee"))
     backfill: dict[str, Any] = {
         "exit_price": exit_price,
         "exit_fee_usdt": exit_fee_usdt,
-        # Bybit's createdTime IS the venue execution time for the close.
         "exit_exec_time_ms": closed_at_ms,
         "gross_trade_return": gross_trade_return,
         "net_return": gross_trade_return * notional_weight,
@@ -1449,7 +1495,9 @@ def _orphan_close_pnl_backfill(
         "closed_at_ms": closed_at_ms,
         "submit_mode": "orphan_reconciled",
     }
-    exit_order_id = str(best.get("orderId") or "")
+    if len(legs) > 1:
+        backfill["orphan_close_legs"] = len(legs)
+    exit_order_id = str(last_leg.get("orderId") or "")
     if exit_order_id:
         backfill["exit_order_id"] = exit_order_id
     return backfill

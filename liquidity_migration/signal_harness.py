@@ -688,15 +688,43 @@ def _attach_forward_returns(
     """
     if daily_klines.is_empty():
         return pl.DataFrame()
-    df = daily_klines.sort(["symbol", "ts_ms"]).with_columns(
-        pl.col("first_bar_close").shift(-1).over("symbol").alias("_entry_close")
+    df = daily_klines.sort(["symbol", "ts_ms"]).select(["symbol", "ts_ms", "first_bar_close"])
+    # M4: resolve entry/exit closes by CALENDAR offset (exact ts_ms + k days),
+    # not a positional row shift. ``ts_ms`` is the uniform 00:00-UTC daily grid,
+    # so for a symbol with a missing day (delist→relist, data hole) a positional
+    # shift would silently skip the gap and turn fwd_ret_3d into, e.g., a
+    # 5-calendar-day return — distorting the horizon and the IC. A join on the
+    # explicit target timestamp keeps every horizon calendar-correct and leaves
+    # the gapped row's forward return null (no partner) rather than misaligned.
+    lookup = df.select(
+        pl.col("symbol"),
+        pl.col("ts_ms").alias("_lookup_ts"),
+        pl.col("first_bar_close").alias("_lookup_close"),
     )
+
+    def _close_at(offset_days: int, alias: str) -> pl.DataFrame:
+        return (
+            df.select(
+                pl.col("symbol"),
+                pl.col("ts_ms"),
+                (pl.col("ts_ms") + offset_days * MS_PER_DAY).alias("_lookup_ts"),
+            )
+            .join(lookup, on=["symbol", "_lookup_ts"], how="left")
+            .select(["symbol", "ts_ms", pl.col("_lookup_close").alias(alias)])
+        )
+
+    result = _close_at(1, "_entry_close")
+    for n in horizons:
+        result = result.join(_close_at(1 + n, f"_exit_{n}"), on=["symbol", "ts_ms"], how="left")
     exprs: list[pl.Expr] = [pl.col("symbol"), pl.col("ts_ms")]
     for n in horizons:
-        exit_col = pl.col("first_bar_close").shift(-(1 + n)).over("symbol")
-        fwd = pl.when(pl.col("_entry_close") > 0.0).then(exit_col / pl.col("_entry_close") - 1.0).otherwise(None)
+        fwd = (
+            pl.when(pl.col("_entry_close") > 0.0)
+            .then(pl.col(f"_exit_{n}") / pl.col("_entry_close") - 1.0)
+            .otherwise(None)
+        )
         exprs.append(fwd.alias(f"fwd_ret_{n}d"))
-    return df.select(exprs)
+    return result.select(exprs)
 
 
 # ============================================================================

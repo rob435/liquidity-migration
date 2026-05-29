@@ -125,6 +125,13 @@ class PrivateStateCache:
         self._positions_by_symbol: dict[str, dict[str, Any]] = {}
         self._equity_usdt: float = float(fallback_equity_usdt)
         self._wallet_error: str = ""
+        # Last error reported by the REST reconcile for positions / open
+        # orders. Surfaced via ``snapshot()`` so the cycle's orphan-close
+        # guard can distinguish "REST said zero positions" from "REST failed
+        # and we don't actually know". A live WS push for the same channel
+        # clears the error (the cache then IS the fresh source of truth).
+        self._position_error: str = ""
+        self._open_order_error: str = ""
         self._stats = _PrivateStateStats()
 
     # -- seed ----------------------------------------------------------
@@ -136,22 +143,36 @@ class PrivateStateCache:
         wallet_error: str = "",
         positions: Iterable[Mapping[str, Any]] | None = None,
         open_orders: Iterable[Mapping[str, Any]] | None = None,
+        position_error: str = "",
+        open_order_error: str = "",
     ) -> None:
         """Establish the baseline from a one-shot REST snapshot.
 
         Called once at daemon startup before WS subscriptions begin
         pushing. Subsequent WS events apply incremental updates on top of
         this baseline.
+
+        ``position_error`` / ``open_order_error`` carry the REST fetch error
+        (from ``_safe_raw_positions`` / ``_safe_open_orders``). When set, the
+        corresponding cache slice is NOT overwritten: a failed
+        ``get_positions`` returns ``([], error)`` and blindly replacing the
+        cache with that empty list would wipe live positions and — once
+        ``snapshot()`` reports the laundered empty error — drive the cycle to
+        false-orphan-close every open trade while the real positions stay
+        open (empty-fetch-as-deletion). Instead we keep the last-good slice
+        and propagate the error so the cycle's orphan guard engages.
         """
         with self._lock:
             if equity_usdt is not None:
                 self._equity_usdt = float(equity_usdt)
             self._wallet_error = str(wallet_error)
-            if positions is not None:
+            self._position_error = str(position_error)
+            if not position_error and positions is not None:
                 self._positions_by_symbol = {}
                 for row in positions:
                     self._upsert_position_locked(row)
-            if open_orders is not None:
+            self._open_order_error = str(open_order_error)
+            if not open_order_error and open_orders is not None:
                 self._orders_by_id = {}
                 self._link_to_id = {}
                 for row in open_orders:
@@ -166,6 +187,8 @@ class PrivateStateCache:
         wallet_error: str = "",
         positions: Iterable[Mapping[str, Any]] | None = None,
         open_orders: Iterable[Mapping[str, Any]] | None = None,
+        position_error: str = "",
+        open_order_error: str = "",
     ) -> None:
         """Like ``seed`` but called periodically — overwrites the cached
         positions + orders + equity with a fresh REST snapshot so any
@@ -176,6 +199,8 @@ class PrivateStateCache:
             wallet_error=wallet_error,
             positions=positions,
             open_orders=open_orders,
+            position_error=position_error,
+            open_order_error=open_order_error,
         )
 
     # -- WS event update paths ----------------------------------------
@@ -200,6 +225,9 @@ class PrivateStateCache:
                     _logger.warning("private_state_cache position event drop: %s", exc)
             self._stats.position_events += 1
             if applied > 0:
+                # A live position push makes the cache the authoritative,
+                # fresh source — clear any stale REST-reconcile error.
+                self._position_error = ""
                 self._stats.last_event_monotonic = time.monotonic()
 
     def on_order_event(self, message: Mapping[str, Any]) -> None:
@@ -232,6 +260,9 @@ class PrivateStateCache:
                     _logger.warning("private_state_cache order event drop: %s", exc)
             self._stats.order_events += 1
             if applied > 0:
+                # A live order push makes the cache the authoritative, fresh
+                # source — clear any stale REST-reconcile error.
+                self._open_order_error = ""
                 self._stats.last_event_monotonic = time.monotonic()
 
     def on_wallet_event(self, message: Mapping[str, Any]) -> None:
@@ -265,9 +296,9 @@ class PrivateStateCache:
                 "equity_usdt": self._equity_usdt,
                 "wallet_error": self._wallet_error,
                 "raw_open_orders": [dict(row) for row in self._orders_by_id.values()],
-                "open_order_error": "",
+                "open_order_error": self._open_order_error,
                 "raw_positions": [dict(row) for row in self._positions_by_symbol.values()],
-                "position_error": "",
+                "position_error": self._position_error,
             }
 
     def position_count(self) -> int:

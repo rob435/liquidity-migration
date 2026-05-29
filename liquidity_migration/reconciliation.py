@@ -814,16 +814,30 @@ def _aggregate_bybit_closures(
     return merged
 
 
-def _summarize_funding(records: list[dict[str, Any]] | None) -> tuple[float, list[dict[str, Any]]]:
+def _summarize_funding(
+    records: list[dict[str, Any]] | None,
+    *,
+    symbols: set[str] | None = None,
+) -> tuple[float, list[dict[str, Any]]]:
     """Sum Bybit funding-settlement transaction-log rows into a signed total and
     a per-symbol breakdown. Defensive: a settlement amount may arrive under
     ``funding``, ``cashFlow``, or ``change`` depending on endpoint/version, and
     the sign is account cash-flow (positive = credit to the account, i.e. a short
-    that RECEIVED funding). Rows missing all amount fields contribute 0."""
+    that RECEIVED funding). Rows missing all amount fields contribute 0.
+
+    ``symbols``, when provided, scopes the aggregation to that set — the demo
+    ledger's traded symbols. Bybit's transaction log is ACCOUNT-wide, so a box
+    that runs more than one sleeve on the same account (the short + long sleeves
+    share one demo account) would otherwise fold the other sleeves' funding into
+    this sleeve's reported carry. Symbols a sleeve never traded are dropped.
+    (A symbol traded by BOTH sleeves cannot be split by symbol alone — the
+    funding row carries no order-link/sleeve tag — and is attributed in full.)"""
     by_symbol: dict[str, float] = {}
     for record in records or []:
         symbol = str(record.get("symbol") or "")
         if not symbol:
+            continue
+        if symbols is not None and symbol not in symbols:
             continue
         amount = record.get("funding")
         if amount is None:
@@ -1037,7 +1051,14 @@ def reconcile_demo_bybit(
     # P&L net of trading fees only). For a short, positive funding is a CREDIT
     # the closedPnl-based pnl_gap never sees — surfacing it shows the live
     # short's true realized P&L (trading + funding). (E6)
-    funding_total_usdt, funding_by_symbol = _summarize_funding(funding_records)
+    # Scope funding to THIS ledger's traded symbols — the transaction log is
+    # account-wide and the short + long sleeves share one demo account, so an
+    # unscoped sum would contaminate the short's reported funding with the
+    # long sleeve's (M7).
+    ledger_symbols = {str(t.get("symbol") or "") for t in demo} - {""}
+    funding_total_usdt, funding_by_symbol = _summarize_funding(
+        funding_records, symbols=ledger_symbols
+    )
 
     exit_price_bps_all = [p["exit_price_gap_bps"] for p in pairs]
     pnl_gaps_all = [p["pnl_gap_usdt"] for p in pairs]
@@ -1104,7 +1125,11 @@ def format_demo_bybit_report(result: dict[str, Any]) -> str:
         "## PnL gap (ledger gross_pnl − Bybit closedPnl, USDT)",
         "",
         "Bybit's closedPnl is net of fees; the ledger PnL is gross. This residual",
-        "is the fee cost plus any fill-price reconciliation error.",
+        "is therefore dominated by the fee cost, PLUS any fill-price reconciliation",
+        "error AND any quantity mismatch (ledger qty vs Bybit closedSize — see the",
+        "`qty Δ` column): the ledger leg is priced on its qty and the Bybit leg on",
+        "closedSize, so a non-zero `qty Δ` adds a size-driven term that is NOT a fee.",
+        "Read it as a gross-minus-net residual, not a pure fee total.",
         "",
         f"- total across paired: {summary['pnl_gap_usdt_total']:.3f}",
         "",

@@ -96,7 +96,6 @@ LONG_DEMO_STRATEGY_PROFILE_CHOICES = LONG_DEMO_STRATEGY_PROFILES
 # Dataset names for the long-side ledger. Distinct from short's
 # event_demo_trades / event_demo_orders so the two sleeves don't collide.
 LONG_DEMO_TRADES_DATASET = "long_native_demo_trades"
-LONG_DEMO_ORDERS_DATASET = "long_native_demo_orders"
 
 # Order-link prefixes for the long sleeve. ws_risk routes fills to the long
 # ledger by these prefixes. The base helper `_long_order_link_id` builds

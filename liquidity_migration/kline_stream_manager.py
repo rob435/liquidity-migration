@@ -110,6 +110,13 @@ class KlineStreamManager:
     _last_universe_refresh_ms: int = field(init=False, repr=False, default=0)
     _start_time_monotonic: float = field(init=False, repr=False, default=0.0)
     _lock: threading.RLock = field(init=False, repr=False)
+    # Cycle-wake signal: an Event the daemon's run loop waits on, set when a
+    # NEW confirmed bar boundary lands (first symbol to deliver a new hour),
+    # so the daemon fires its cycle the instant fresh data arrives (WS-event-
+    # driven) instead of polling on a wall-clock timer. None = not wired
+    # (legacy timer path / tests).
+    _cycle_wake_event: threading.Event | None = field(init=False, repr=False, default=None)
+    _max_confirmed_ts_ms: int = field(init=False, repr=False, default=0)
 
     def __post_init__(self) -> None:
         self.cache_root = Path(self.cache_root).expanduser()
@@ -144,6 +151,12 @@ class KlineStreamManager:
 
     def store(self) -> KlineStore:
         return self._store
+
+    def set_cycle_wake_event(self, event: threading.Event | None) -> None:
+        """Register the Event the manager sets when a new confirmed bar boundary
+        lands. The daemon's run loop waits on this to fire WS-event-driven
+        cycles. Safe to call before or after start()."""
+        self._cycle_wake_event = event
 
     def is_started(self) -> bool:
         return self._started and not self._stopped
@@ -326,8 +339,24 @@ class KlineStreamManager:
             _logger.exception("pool.subscribe failed (continuing with REST fallback): %s", exc)
 
     def _on_bar(self, symbol: str, bar: dict[str, Any], confirmed: bool) -> None:
-        """Pool → store fan-in. One call per WS bar."""
-        self._store.add_bar(symbol, bar, confirmed=confirmed)
+        """Pool → store fan-in. One call per WS bar.
+
+        When a CONFIRMED bar lands that advances to a NEW bar boundary (i.e. the
+        first symbol to deliver a fresh hour), set the cycle-wake Event so the
+        daemon fires its cycle immediately. Gating on the boundary advance means
+        the ~566-symbol burst at each hour close coalesces into a SINGLE wake,
+        not one per symbol — no debounce storm. Runs on pybit's WS thread, so
+        the work is just an int compare + an O(1) Event.set()."""
+        inserted = self._store.add_bar(symbol, bar, confirmed=confirmed)
+        if not (confirmed and inserted) or self._cycle_wake_event is None:
+            return
+        try:
+            bar_ts = int(bar.get("start") or bar.get("ts_ms") or bar.get("startTime") or 0)
+        except (TypeError, ValueError):
+            return
+        if bar_ts > self._max_confirmed_ts_ms:
+            self._max_confirmed_ts_ms = bar_ts
+            self._cycle_wake_event.set()
 
     def _fetch_universe(self) -> list[str]:
         if self.universe_fetcher is not None:

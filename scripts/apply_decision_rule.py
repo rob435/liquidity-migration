@@ -80,6 +80,10 @@ class CellMetrics:
     # investigation rule can compute MAR per cell without a CLI flag. Missing
     # for legacy summary CSVs.
     window_days: float | None = None
+    # Optional PIT-integrity flag from the report payload. None = column absent
+    # (legacy CSV); False = the run was NOT full-PIT (survivorship-tainted —
+    # must not be cited as promotion evidence).
+    full_pit_universe_pass: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,10 +135,19 @@ def compute_mar(total_return: float, max_drawdown: float, window_days: float) ->
     return ann / abs(max_drawdown)
 
 
-def _read_csv(path: Path) -> list[CellMetrics]:
+def _read_csv(path: Path) -> tuple[list[CellMetrics], list[dict[str, str]]]:
+    """Return ``(metrics, excluded)``.
+
+    ``excluded`` holds cells that produced no usable metrics — a crashed/failed
+    sweep cell (``status`` != ``ok``) or a genuinely malformed row. Previously
+    these were silently skipped, so an operator scanning the verdict table saw
+    only the cells that happened to complete; a cell that failed for a
+    methodology-relevant reason (e.g. a partial-PIT abort) vanished without a
+    trace (M6). The caller surfaces ``excluded`` explicitly."""
     if not path.exists():
         raise SystemExit(f"summary csv not found: {path}")
     out: list[CellMetrics] = []
+    excluded: list[dict[str, str]] = []
     with path.open() as fh:
         reader = csv.DictReader(fh)
         required = {"cell_id", "venue", "sharpe_like", "max_drawdown", "trades", "total_return"}
@@ -142,13 +155,31 @@ def _read_csv(path: Path) -> list[CellMetrics]:
         if missing:
             raise SystemExit(f"csv missing columns: {sorted(missing)}")
         has_window_days = "window_days" in (reader.fieldnames or [])
+        has_status = "status" in (reader.fieldnames or [])
+        has_full_pit = "full_pit_universe_pass" in (reader.fieldnames or [])
         for row in reader:
+            status = (row.get("status") or "ok").strip().lower() if has_status else "ok"
+            if status not in {"", "ok"}:
+                # A failed / no-report cell carries no metrics — record it as an
+                # explicit exclusion (a falsifier), never a silent drop.
+                excluded.append({
+                    "cell_id": (row.get("cell_id") or "").strip(),
+                    "venue": (row.get("venue") or "").strip().lower(),
+                    "status": status,
+                    "error": (row.get("error") or "").strip()[:300],
+                })
+                continue
             try:
                 window_days_val: float | None = None
                 if has_window_days:
                     raw = row.get("window_days", "").strip()
                     if raw:
                         window_days_val = float(raw)
+                full_pit: bool | None = None
+                if has_full_pit:
+                    raw_pit = (row.get("full_pit_universe_pass") or "").strip().lower()
+                    if raw_pit in {"true", "false"}:
+                        full_pit = raw_pit == "true"
                 out.append(
                     CellMetrics(
                         cell_id=row["cell_id"].strip(),
@@ -158,12 +189,19 @@ def _read_csv(path: Path) -> list[CellMetrics]:
                         trades=int(row["trades"]),
                         total_return=float(row["total_return"]),
                         window_days=window_days_val,
+                        full_pit_universe_pass=full_pit,
                     )
                 )
             except (ValueError, KeyError) as exc:
-                # Skip malformed rows with a stderr note; do not crash the whole run
+                # Malformed row: surface as an exclusion too, not a silent skip.
                 print(f"WARNING: skipping malformed row {row}: {exc}", file=sys.stderr)
-    return out
+                excluded.append({
+                    "cell_id": (row.get("cell_id") or "").strip(),
+                    "venue": (row.get("venue") or "").strip().lower(),
+                    "status": "malformed",
+                    "error": str(exc)[:300],
+                })
+    return out, excluded
 
 
 def _index_by_cell(rows: list[CellMetrics]) -> dict[str, dict[str, CellMetrics]]:
@@ -509,7 +547,23 @@ def main(argv: list[str] | None = None) -> int:
         min_by = args.min_trades_bybit if args.min_trades_bybit is not None else 30
         min_bn = args.min_trades_binance if args.min_trades_binance is not None else 20
 
-    rows = _read_csv(Path(args.summary_csv))
+    rows, excluded = _read_csv(Path(args.summary_csv))
+    if excluded:
+        # M6: never let a crashed/failed cell vanish from the verdict — a
+        # partial-PIT abort or a methodology-relevant failure is a falsifier,
+        # not an absence. Surface them explicitly in the verdict output.
+        print(f"\n## EXCLUDED CELLS (no metrics — treated as FAILED, not omitted): {len(excluded)}")
+        for ex in excluded:
+            print(f"  - {ex['cell_id']}/{ex['venue']}: status={ex['status']} {ex['error']}".rstrip())
+    # LOW: flag cells whose run was NOT full-PIT (survivorship-tainted). The
+    # volume-events backtest fails such a run by default, so this only fires for
+    # an explicitly --allow-partial-pit EXPLORATORY cell that must not be cited.
+    non_full_pit = sorted({m.cell_id for m in rows if m.full_pit_universe_pass is False})
+    if non_full_pit:
+        print(
+            f"\n## WARNING — NON-FULL-PIT CELLS (survivorship-tainted, not promotion evidence): "
+            f"{', '.join(non_full_pit)}"
+        )
     if not rows:
         print(f"no rows read from {args.summary_csv}", file=sys.stderr)
         return EXIT_USAGE

@@ -1463,3 +1463,42 @@ def test_kline_stream_manager_factory_preserves_buffer_when_max_symbols_positive
     )
     manager.universe_fetcher()
     assert captured_top_n == [500], f"expected 400*1.25=500, got {captured_top_n}"
+
+
+def test_daemon_event_wait_fires_fast_on_bar_event(tmp_path: Path) -> None:
+    """WS-event-driven: with a bar event latched, the wait returns immediately
+    (sub-second) and counts as kline-triggered — the latency win over the timer."""
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
+        interval_seconds=0.0,
+        cycle_runner=_stub_cycle_runner([]),
+    )
+    daemon._min_cycle_interval_seconds = 0.0
+    daemon._max_idle_seconds = 5.0
+    daemon._bar_event.set()
+    t0 = time.monotonic()
+    daemon._wait_for_next_cycle_event()
+    assert time.monotonic() - t0 < 1.0
+    assert daemon._cycles_kline_triggered == 1
+    assert daemon._cycles_timer_triggered == 0
+
+
+def test_daemon_event_wait_falls_back_to_heartbeat_with_no_bar(tmp_path: Path) -> None:
+    """Safety heartbeat: with no bar event, the wait times out at max_idle so
+    exits/reconcile still run — counts as timer-triggered."""
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
+        interval_seconds=0.0,
+        cycle_runner=_stub_cycle_runner([]),
+    )
+    daemon._min_cycle_interval_seconds = 0.0
+    daemon._max_idle_seconds = 0.2
+    t0 = time.monotonic()
+    daemon._wait_for_next_cycle_event()
+    assert time.monotonic() - t0 >= 0.2
+    assert daemon._cycles_kline_triggered == 0
+    assert daemon._cycles_timer_triggered == 1

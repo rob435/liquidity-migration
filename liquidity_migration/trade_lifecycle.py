@@ -154,6 +154,11 @@ def summarize_trade_backtest(
             "position_weight_std": 0.0,
             "position_weight_min": 1.0,
             "position_weight_max": 1.0,
+            "worst_trade_mae": 0.0,
+            "mean_trade_mae": 0.0,
+            "worst_weighted_intrahold_loss": 0.0,
+            "realized_gross_mean": 0.0,
+            "realized_gross_max": 0.0,
         }
     basket_returns = np.asarray(baskets["basket_return"].to_list(), dtype=float)
     mean_return = float(np.mean(basket_returns)) if basket_returns.size else 0.0
@@ -186,7 +191,58 @@ def summarize_trade_backtest(
         "worst_90d_return": _worst_rolling_equity_return(equity, 90),
         "worst_120d_return": _worst_rolling_equity_return(equity, 120),
         **_position_weight_stats(trades),
+        **_intrahold_and_gross_stats(trades),
     }
+
+
+def _intrahold_and_gross_stats(trades: pl.DataFrame) -> dict[str, float]:
+    """Intra-hold adverse-excursion (H2) + realized-gross (M3) diagnostics.
+
+    H2: the realised-PnL-at-exit drawdown ignores how far a position ran against
+    us DURING the hold. ``mae`` is each trade's max adverse excursion (<=0); these
+    surface that hidden intra-hold risk. NOTE — these are PER-POSITION excursions:
+    a true portfolio mark-to-market drawdown (which compounds CONCURRENT open
+    positions and re-calibrates the pre-registered DD gate thresholds) is strictly
+    deeper and is its own pre-registered sub-phase
+    (docs/preregistration/round2/r-audit-methodology-hardening.md). Treat
+    ``worst_weighted_intrahold_loss`` as a LOWER BOUND on portfolio intra-hold DD.
+
+    M3: ``realized_gross_mean``/``_max`` is the per-basket sum of position gross
+    shares (``notional_weight``). risk_equal sizing lets gross float, so a
+    cell-vs-control MAR delta can partly reflect different gross rather than better
+    risk-adjustment — surfacing realised gross makes that confound auditable.
+    """
+    out = {
+        "worst_trade_mae": 0.0,
+        "mean_trade_mae": 0.0,
+        "worst_weighted_intrahold_loss": 0.0,
+        "realized_gross_mean": 0.0,
+        "realized_gross_max": 0.0,
+    }
+    if trades.is_empty():
+        return out
+    if "mae" in trades.columns:
+        mae = trades["mae"].drop_nulls()
+        if not mae.is_empty():
+            out["worst_trade_mae"] = float(mae.min())
+            out["mean_trade_mae"] = float(mae.mean())
+        if "notional_weight" in trades.columns:
+            weighted = (
+                trades.select((pl.col("mae") * pl.col("notional_weight").abs()).alias("w"))
+                .get_column("w")
+                .drop_nulls()
+            )
+            if not weighted.is_empty():
+                out["worst_weighted_intrahold_loss"] = float(weighted.min())
+    if {"basket_id", "notional_weight"}.issubset(trades.columns):
+        per_basket = trades.group_by("basket_id").agg(
+            pl.col("notional_weight").abs().sum().alias("gross")
+        )
+        gross = per_basket["gross"].drop_nulls()
+        if not gross.is_empty():
+            out["realized_gross_mean"] = float(gross.mean())
+            out["realized_gross_max"] = float(gross.max())
+    return out
 
 
 def _position_weight_stats(trades: pl.DataFrame) -> dict[str, float]:

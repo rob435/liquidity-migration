@@ -52,6 +52,29 @@ def _last_coverage_gap(df: pl.DataFrame) -> int | None:
         return None
 
 
+def ws_first_ratio(df: pl.DataFrame) -> dict[str, float]:
+    """Fraction of cycles served by the WS-fed caches vs the REST fallback.
+
+    The cycle persists ``ticker_source`` / ``private_snapshot_source`` as
+    ``'ws_cache'`` (sub-50ms WS snapshot) or ``'rest'`` (fallback because the
+    cache was stale/unseeded). A low WS-first % over many cycles means the WS
+    pipeline is effectively dead and production is on the slow REST path — the
+    exact silent regression the WS engineering exists to prevent. Returns
+    ``{}`` when the columns are absent (legacy ledgers)."""
+    out: dict[str, float] = {}
+    rows = df.height
+    if rows == 0:
+        return out
+    if "ticker_source" in df.columns:
+        ws_n = df.filter(pl.col("ticker_source") == "ws_cache").height
+        out["ticker_pct"] = 100.0 * ws_n / rows
+    if "private_snapshot_source" in df.columns:
+        ws_n = df.filter(pl.col("private_snapshot_source") == "ws_cache").height
+        out["private_pct"] = 100.0 * ws_n / rows
+    # Only return when BOTH are present so the caller's f-string is safe.
+    return out if {"ticker_pct", "private_pct"} <= out.keys() else {}
+
+
 def check_entries(
     *, data_root: Path, window_hours: int, min_cycles_per_hour: float = 0.8,
 ) -> tuple[int, str]:
@@ -118,10 +141,21 @@ def check_entries(
     effective_hours = min(window_hours, max(data_span_hours, 0.0))
     expected_cycles = int(effective_hours * 60 * min_cycles_per_hour)
     kline_age_text = f"{kline_age_hours:.1f}h" if kline_store_max_ts_ms > 0 else "unknown"
+    # WS-vs-REST reality (observability): the cycle persists ticker_source /
+    # private_snapshot_source ('ws_cache' when served by the WS-fed cache, 'rest'
+    # on fallback). Surfacing the WS-first % makes a silently-dead WS feed
+    # visible — without it, production could run REST-only (the slow path the WS
+    # pipeline exists to avoid) and nobody would know.
+    ws = ws_first_ratio(df) if cycles else {}
+    ws_text = ""
+    if ws:
+        ws_text = (
+            f", ws_first=ticker:{ws['ticker_pct']:.0f}%/private:{ws['private_pct']:.0f}%"
+        )
     suffix = (
         f"({candidates} candidates seen, {cycles} cycles, {stale_per_cycle} stale-skips/cycle, "
         f"coverage_gap={coverage_gap}, kline_age={kline_age_text}, "
-        f"latest_feature_age={feature_age_hours:.1f}h)"
+        f"latest_feature_age={feature_age_hours:.1f}h{ws_text})"
     )
 
     if cycles == 0:

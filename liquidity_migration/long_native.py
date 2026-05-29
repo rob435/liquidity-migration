@@ -112,7 +112,6 @@ class LongNativeConfig:
     fs_recent_funding_min: float = 0.00005  # last 8h funding flipped to ≥ 0.005%
     fs_min_day_return: float = 0.03
     fs_volume_multiple: float = 1.0  # at least at trailing average
-    fs_volume_lookback_days: int = 7
     fs_stop_pct: float = 0.08
     fs_take_profit_pct: float = 0.25
     fs_max_hold_days: int = 7
@@ -200,7 +199,6 @@ class LongNativeConfig:
     # --- pattern 6: buy-the-dip in confirmed uptrend ---
     enable_uptrend_dip: bool = False
     ud_sma_days: int = 50  # coin must be above this SMA
-    ud_above_sma_min_days: int = 30  # for at least this many days
     ud_today_min_drop: float = -0.15  # today's drop ≥ -7%
     ud_today_max_drop: float = -0.07  # but ≤ -15% (not catastrophic)
     ud_7d_return_min: float = -0.05  # 7d still net positive-ish
@@ -208,11 +206,78 @@ class LongNativeConfig:
     ud_take_profit_pct: float = 0.18
     ud_max_hold_days: int = 14
 
+    # --- pattern 7: cross-sectional momentum rotation (continuous, NOT event-sparse) ---
+    # Rank in-universe names by trailing return each day, hold the top-K. Unlike the
+    # FC event patterns this fires continuously, so it is the lever for trade COUNT.
+    enable_xsec_momentum: bool = False
+    xsec_lookback_days: int = 30        # trailing-return window for the momentum score
+    xsec_top_k: int = 5                 # hold the top-K in-universe momentum names
+    xsec_require_regime: bool = True    # only rotate while BTC regime_on
+    xsec_min_momentum: float = 0.0      # require trailing return strictly above this
+    xsec_stop_pct: float = 0.15
+    xsec_take_profit_pct: float = 0.50
+    xsec_max_hold_days: int = 10
+    xsec_require_btc_200: bool = False  # also require BTC above its 200d SMA (slow institutional trend)
+    xsec_min_btc_vol_pos: float = 0.0   # require BTC 30d-RV position in trailing-year range >= this (0=off)
+
+    # --- pattern 8: low-volatility selection (hold the CALMEST in-universe names) ---
+    # Attacks the Sharpe denominator: low-vol majors trend smoothly. Fires continuously.
+    enable_lowvol: bool = False
+    lowvol_top_k: int = 5
+    lowvol_require_regime: bool = True
+    lowvol_min_mom: float = -1.0        # require coin 30d return >= this (-1=off; 0.0 = calm AND rising)
+    lowvol_stop_pct: float = 0.10
+    lowvol_take_profit_pct: float = 0.30
+    lowvol_max_hold_days: int = 14
+
+    # --- pattern 9: short-term reversal (buy a 1-day dip inside an uptrend) ---
+    # High win-rate / low-variance profile. Fires often.
+    enable_reversal: bool = False
+    rev_drop_min: float = -0.12         # yesterday's simple return must be within [rev_drop_min, rev_drop_max]
+    rev_drop_max: float = -0.04
+    rev_require_uptrend: bool = True     # coin's own 30d return must be > 0 (dip in an uptrend, not a knife)
+    rev_require_regime: bool = True
+    rev_stop_pct: float = 0.08
+    rev_take_profit_pct: float = 0.10
+    rev_max_hold_days: int = 3
+
+    # --- pattern 10: funding-carry (long the most short-crowded names) ---
+    # Structurally different edge: negative funding pays the long to hold + squeeze upside.
+    enable_funding_carry: bool = False
+    funding_carry_top_k: int = 5
+    funding_carry_require_regime: bool = True
+    funding_carry_require_uptrend: bool = True   # coin_30d_return > 0 (skip negative-funding downtrends)
+    funding_carry_max_lookback_sum: float = 0.0  # only coins with trailing funding <= this (0 = negative only)
+    funding_carry_stop_pct: float = 0.10
+    funding_carry_take_profit_pct: float = 0.30
+    funding_carry_max_hold_days: int = 10
+
+    # --- pattern 11: OI-confirmed momentum (positioning conviction) ---
+    # Long the in-universe names with the fastest-growing open interest AND a rising
+    # price (new money building positions = real trend fuel, not a hollow rally).
+    enable_oi_momentum: bool = False
+    oi_top_k: int = 5
+    oi_require_regime: bool = True
+    oi_min_oi_chg_7d: float = 0.0       # require 7d OI growth >= this (positioning building)
+    oi_require_price_up: bool = True    # require coin_30d_return > 0 (price trending)
+    oi_stop_pct: float = 0.12
+    oi_take_profit_pct: float = 0.40
+    oi_max_hold_days: int = 10
+
     # --- portfolio ---
     max_concurrent_positions: int = 5
     cooldown_days: int = 7
     entry_delay_hours: int = 1
     gross_exposure: float = 1.0
+    # H1: per-position notional multiplier, mirroring the LIVE long daemon's
+    # --notional-multiplier. Default 1.0 = the gross the backtest has always
+    # modelled (NO change to existing results). The deployed long sleeve runs
+    # notional_multiplier=10 (an explicit owner choice, 2x the research-Sharpe
+    # peak of ~5x), so its live P&L volatility/drawdown is NOT comparable to a
+    # multiplier=1 backtest. Set this to the deployed value to validate the long
+    # sleeve at the gross it actually trades before any real-money decision.
+    # See docs/preregistration/round2/r-audit-methodology-hardening.md.
+    notional_multiplier: float = 1.0
     sizing: str = "vol_parity"  # or "equal"
     vol_estimate_window_days: int = 30
     vol_floor_annual: float = 0.30
@@ -269,16 +334,19 @@ def run_long_native_research(
         raise RuntimeError("klines_1h is empty; run download-data first")
     funding = read_dataset(root, "funding")
     archive_manifest = read_dataset(root, "archive_trade_manifest")
+    open_interest = read_dataset(root, "open_interest") if cfg.enable_oi_momentum else None
 
     klines = _exclude_symbols(raw_klines, cfg.exclude_symbols)
     funding = _exclude_symbols(funding, cfg.exclude_symbols)
     archive_manifest = _exclude_symbols(archive_manifest, cfg.exclude_symbols)
+    if open_interest is not None and not open_interest.is_empty():
+        open_interest = _exclude_symbols(open_interest, cfg.exclude_symbols)
 
     full_pit_universe_pass = _full_pit_universe_pass(klines, archive_manifest)
     if cfg.require_full_pit_universe and not full_pit_universe_pass:
         raise RuntimeError(_full_pit_universe_error(klines, archive_manifest))
 
-    features = build_long_features(klines, funding=funding, config=cfg)
+    features = build_long_features(klines, funding=funding, open_interest=open_interest, config=cfg)
     features = _filter_signal_window(features, start=cfg.start_date, end=cfg.end_date)
     if features.is_empty():
         raise RuntimeError("No features generated")
@@ -357,7 +425,7 @@ def run_long_native_research(
     return {**metadata, "report_dir": str(output_dir)}
 
 
-def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None, config: LongNativeConfig) -> pl.DataFrame:
+def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None, config: LongNativeConfig, open_interest: pl.DataFrame | None = None) -> pl.DataFrame:
     daily = daily_bars(klines_1h)
     if daily.is_empty():
         return daily
@@ -526,11 +594,36 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
         ).alias("in_universe")
     )
 
+    # cross-sectional momentum: trailing-return score + per-day rank among in-universe names.
+    # PIT-safe: shift() uses only past closes; the rank is cross-sectional at the signal close.
+    daily = daily.with_columns(
+        (pl.col("close") / pl.col("close").shift(config.xsec_lookback_days).over("symbol") - 1.0).alias("mom_score")
+    )
+    daily = daily.with_columns(
+        pl.when(pl.col("in_universe") & pl.col("mom_score").is_not_null())
+          .then(pl.col("mom_score")).otherwise(-1e9).alias("_mom_rankable")
+    ).with_columns(
+        pl.col("_mom_rankable").rank(method="ordinal", descending=True).over("ts_ms").alias("mom_rank")
+    )
+    # low-volatility rank among in-universe names (ascending: rank 1 = calmest)
+    daily = daily.with_columns(
+        pl.when(pl.col("in_universe") & pl.col("realized_vol").is_not_null())
+          .then(pl.col("realized_vol")).otherwise(1e9).alias("_lv_rankable")
+    ).with_columns(
+        pl.col("_lv_rankable").rank(method="ordinal", descending=False).over("ts_ms").alias("lowvol_rank")
+    )
+
     # BTC regime gate + BTC N-day high (for "not near top" filter)
     btc = daily.filter(pl.col("symbol") == config.regime_symbol).sort("ts_ms")
     if not btc.is_empty():
         btc = btc.with_columns([
             pl.col("close").rolling_mean(window_size=config.regime_sma_days, min_samples=config.regime_sma_days).alias("regime_sma"),
+            pl.col("close").rolling_mean(window_size=200, min_samples=100).alias("regime_sma_200"),
+            (pl.col("log_return").rolling_std(window_size=30, min_samples=20) * math.sqrt(365.0)).alias("btc_rv_30"),
+        ])
+        btc = btc.with_columns([
+            pl.col("btc_rv_30").rolling_min(window_size=365, min_samples=120).alias("_rvmin"),
+            pl.col("btc_rv_30").rolling_max(window_size=365, min_samples=120).alias("_rvmax"),
         ])
         # Pick the larger of the two high-window settings for computing the rolling max
         high_w = max(config.fc_btc_not_near_high_window_days, config.fc_btc_must_be_near_high_window_days)
@@ -545,17 +638,25 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
         btc = btc.with_columns([
             (pl.col("close") > pl.col("regime_sma")).alias("regime_on"),
             (pl.col("close") / pl.col("regime_sma") - 1.0).alias("btc_sma_dist"),
-        ]).select(["ts_ms", "regime_on", "btc_high_proximity", "btc_sma_dist"])
+            (pl.col("close") > pl.col("regime_sma_200")).alias("btc_trend_200"),
+            pl.when((pl.col("_rvmax") - pl.col("_rvmin")) > 1e-12)
+              .then((pl.col("btc_rv_30") - pl.col("_rvmin")) / (pl.col("_rvmax") - pl.col("_rvmin")))
+              .otherwise(0.5).alias("btc_vol_pos"),
+        ]).select(["ts_ms", "regime_on", "btc_high_proximity", "btc_sma_dist", "btc_trend_200", "btc_vol_pos"])
         daily = daily.join(btc, on="ts_ms", how="left").with_columns([
             pl.col("regime_on").fill_null(False),
             pl.col("btc_high_proximity").fill_null(0.0),
             pl.col("btc_sma_dist").fill_null(0.0),
+            pl.col("btc_trend_200").fill_null(False),
+            pl.col("btc_vol_pos").fill_null(0.5),
         ])
     else:
         daily = daily.with_columns([
             pl.lit(False).alias("regime_on"),
             pl.lit(0.0, dtype=pl.Float64).alias("btc_high_proximity"),
             pl.lit(0.0, dtype=pl.Float64).alias("btc_sma_dist"),
+            pl.lit(False).alias("btc_trend_200"),
+            pl.lit(0.5, dtype=pl.Float64).alias("btc_vol_pos"),
         ])
 
     # ETH regime gate (used by FOMO chase pattern)
@@ -605,6 +706,48 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
         daily = daily.with_columns([
             pl.lit(None, dtype=pl.Float64).alias("funding_lookback_sum"),
             pl.lit(None, dtype=pl.Float64).alias("funding_recent"),
+        ])
+
+    # funding-carry rank: most-negative trailing cumulative funding first
+    # (short-crowded -> long gets paid the carry + has squeeze upside).
+    daily = daily.with_columns(
+        pl.when(pl.col("in_universe") & pl.col("funding_lookback_sum").is_not_null())
+          .then(pl.col("funding_lookback_sum")).otherwise(1e9).alias("_fund_rankable")
+    ).with_columns(
+        pl.col("_fund_rankable").rank(method="ordinal", descending=False).over("ts_ms").alias("funding_rank")
+    )
+
+    # open-interest features (positioning / conviction). Hourly OI -> daily last,
+    # aligned to the same day-end ts_ms convention as funding. oi_rank = rank
+    # in-universe by 7d OI growth (descending: rank 1 = fastest-growing positioning).
+    if open_interest is not None and not open_interest.is_empty() and "open_interest" in open_interest.columns:
+        oi_daily = (
+            open_interest.select(["ts_ms", "symbol", "open_interest"])
+            .filter(pl.col("open_interest").is_finite())
+            .with_columns(((pl.col("ts_ms") - (pl.col("ts_ms") % MS_PER_DAY)) + MS_PER_DAY).alias("ts_ms_day_end"))
+            .sort(["symbol", "ts_ms"])
+            .group_by(["symbol", "ts_ms_day_end"], maintain_order=True)
+            .agg(pl.col("open_interest").last().alias("oi"))
+            .rename({"ts_ms_day_end": "ts_ms"})
+            .sort(["symbol", "ts_ms"])
+            .with_columns([
+                (pl.col("oi") / pl.col("oi").shift(3).over("symbol") - 1.0).alias("oi_chg_3d"),
+                (pl.col("oi") / pl.col("oi").shift(7).over("symbol") - 1.0).alias("oi_chg_7d"),
+            ])
+            .select(["ts_ms", "symbol", "oi", "oi_chg_3d", "oi_chg_7d"])
+        )
+        daily = daily.join(oi_daily, on=["ts_ms", "symbol"], how="left")
+        daily = daily.with_columns(
+            pl.when(pl.col("in_universe") & pl.col("oi_chg_7d").is_not_null())
+              .then(pl.col("oi_chg_7d")).otherwise(-1e9).alias("_oi_rankable")
+        ).with_columns(
+            pl.col("_oi_rankable").rank(method="ordinal", descending=True).over("ts_ms").alias("oi_rank")
+        )
+    else:
+        daily = daily.with_columns([
+            pl.lit(None, dtype=pl.Float64).alias("oi_chg_3d"),
+            pl.lit(None, dtype=pl.Float64).alias("oi_chg_7d"),
+            pl.lit(None, dtype=pl.Int64).alias("oi_rank"),
         ])
 
     return daily.sort(["ts_ms", "symbol"])
@@ -929,6 +1072,122 @@ def _fc_alpha_score(row: dict[str, Any]) -> float:
     return sum(components) / len(components)
 
 
+def detect_pattern_xsec_momentum(row: dict[str, Any], cfg: LongNativeConfig) -> bool:
+    """Pattern 7: cross-sectional momentum rotation — hold the top-K in-universe
+    names by trailing return. Fires continuously (every rebalance), so it lifts
+    trade count rather than waiting for a rare pump event."""
+    if not cfg.enable_xsec_momentum:
+        return False
+    if not row.get("in_universe"):
+        return False
+    if cfg.xsec_require_regime and not row.get("regime_on"):
+        return False
+    if cfg.xsec_require_btc_200 and not row.get("btc_trend_200"):
+        return False
+    if cfg.xsec_min_btc_vol_pos > 0.0:
+        vpos = _safe_float(row.get("btc_vol_pos"))
+        if vpos is None or vpos < cfg.xsec_min_btc_vol_pos:
+            return False
+    rank = _safe_float(row.get("mom_rank"))
+    score = _safe_float(row.get("mom_score"))
+    if rank is None or score is None:
+        return False
+    if score <= cfg.xsec_min_momentum:
+        return False
+    return rank <= cfg.xsec_top_k
+
+
+def detect_pattern_lowvol(row: dict[str, Any], cfg: LongNativeConfig) -> bool:
+    """Pattern 8: hold the lowest-realized-vol in-universe names (regime-gated).
+    Low-vol majors trend smoothly -> small Sharpe denominator. Fires continuously."""
+    if not cfg.enable_lowvol:
+        return False
+    if not row.get("in_universe"):
+        return False
+    if cfg.lowvol_require_regime and not row.get("regime_on"):
+        return False
+    lr = _safe_float(row.get("lowvol_rank"))
+    if lr is None or lr > cfg.lowvol_top_k:
+        return False
+    if cfg.lowvol_min_mom > -1.0:
+        m = _safe_float(row.get("coin_30d_return"))
+        if m is None or m < cfg.lowvol_min_mom:
+            return False
+    return True
+
+
+def detect_pattern_reversal(row: dict[str, Any], cfg: LongNativeConfig) -> bool:
+    """Pattern 9: buy a 1-day dip inside an uptrend (short-term mean reversion).
+    High win-rate / low-variance profile; the opposite bet to FOMO-chase."""
+    if not cfg.enable_reversal:
+        return False
+    if not row.get("in_universe"):
+        return False
+    if cfg.rev_require_regime and not row.get("regime_on"):
+        return False
+    lr = _safe_float(row.get("log_return"))
+    if lr is None:
+        return False
+    drop = math.expm1(lr)  # simple return of the (down) signal day
+    if drop > cfg.rev_drop_max or drop < cfg.rev_drop_min:
+        return False
+    if cfg.rev_require_uptrend:
+        m = _safe_float(row.get("coin_30d_return"))
+        if m is None or m <= 0.0:
+            return False
+    return True
+
+
+def detect_pattern_funding_carry(row: dict[str, Any], cfg: LongNativeConfig) -> bool:
+    """Pattern 10: long the most short-crowded in-universe names (most-negative
+    trailing funding). Carry edge (paid to hold) + short-squeeze upside; gated to
+    uptrends so it doesn't sit long in negative-funding downtrends."""
+    if not cfg.enable_funding_carry:
+        return False
+    if not row.get("in_universe"):
+        return False
+    if cfg.funding_carry_require_regime and not row.get("regime_on"):
+        return False
+    fr = _safe_float(row.get("funding_rank"))
+    fsum = _safe_float(row.get("funding_lookback_sum"))
+    if fr is None or fsum is None:
+        return False
+    if fsum > cfg.funding_carry_max_lookback_sum:
+        return False
+    if fr > cfg.funding_carry_top_k:
+        return False
+    if cfg.funding_carry_require_uptrend:
+        m = _safe_float(row.get("coin_30d_return"))
+        if m is None or m <= 0.0:
+            return False
+    return True
+
+
+def detect_pattern_oi_momentum(row: dict[str, Any], cfg: LongNativeConfig) -> bool:
+    """Pattern 11: long the in-universe names with the fastest-growing open
+    interest in a rising price (positioning conviction). New money building
+    positions = trend fuel, distinct from a hollow short-covering rally."""
+    if not cfg.enable_oi_momentum:
+        return False
+    if not row.get("in_universe"):
+        return False
+    if cfg.oi_require_regime and not row.get("regime_on"):
+        return False
+    orank = _safe_float(row.get("oi_rank"))
+    ochg = _safe_float(row.get("oi_chg_7d"))
+    if orank is None or ochg is None:
+        return False
+    if ochg < cfg.oi_min_oi_chg_7d:
+        return False
+    if orank > cfg.oi_top_k:
+        return False
+    if cfg.oi_require_price_up:
+        m = _safe_float(row.get("coin_30d_return"))
+        if m is None or m <= 0.0:
+            return False
+    return True
+
+
 def _classify_entry(row: dict[str, Any], cfg: LongNativeConfig) -> tuple[str | None, float, float, int]:
     """Returns (pattern_name, stop_pct, take_profit_pct, max_hold_days) or (None, ...)."""
     if detect_pattern_capitulation(row, cfg):
@@ -942,6 +1201,16 @@ def _classify_entry(row: dict[str, Any], cfg: LongNativeConfig) -> tuple[str | N
     if detect_pattern_fomo_chase(row, cfg):
         stop_pct, tp_pct = _fc_exit_params(row, cfg)
         return "fomo_chase", stop_pct, tp_pct, cfg.fc_max_hold_days
+    if detect_pattern_xsec_momentum(row, cfg):
+        return "xsec_momentum", cfg.xsec_stop_pct, cfg.xsec_take_profit_pct, cfg.xsec_max_hold_days
+    if detect_pattern_lowvol(row, cfg):
+        return "lowvol", cfg.lowvol_stop_pct, cfg.lowvol_take_profit_pct, cfg.lowvol_max_hold_days
+    if detect_pattern_reversal(row, cfg):
+        return "reversal", cfg.rev_stop_pct, cfg.rev_take_profit_pct, cfg.rev_max_hold_days
+    if detect_pattern_funding_carry(row, cfg):
+        return "funding_carry", cfg.funding_carry_stop_pct, cfg.funding_carry_take_profit_pct, cfg.funding_carry_max_hold_days
+    if detect_pattern_oi_momentum(row, cfg):
+        return "oi_momentum", cfg.oi_stop_pct, cfg.oi_take_profit_pct, cfg.oi_max_hold_days
     if detect_pattern_resurrection(row, cfg):
         return "volume_resurrection", cfg.res_stop_pct, cfg.res_take_profit_pct, cfg.res_max_hold_days
     return None, 0.0, 0.0, 0
@@ -1036,7 +1305,8 @@ def _run_long_pipeline(
         "exits_stop": 0, "exits_take_profit": 0, "exits_time": 0,
     }
     event_counts = {"capitulation_rebound": 0, "funding_squeeze": 0, "volume_resurrection": 0,
-                    "oversold_bounce": 0, "fomo_chase": 0, "uptrend_dip": 0}
+                    "oversold_bounce": 0, "fomo_chase": 0, "uptrend_dip": 0, "xsec_momentum": 0,
+                    "lowvol": 0, "reversal": 0, "funding_carry": 0, "oi_momentum": 0}
     round_trip_cost_bps = costs.base_entry_exit_cost_bps * config.cost_multiplier
     notional_weight = config.gross_exposure / max(config.max_concurrent_positions, 1)
 
@@ -1087,7 +1357,8 @@ def _run_long_pipeline(
                 if bar_low <= pos["stop_price"]:
                     trade = _finalize_trade(pos, exit_ts_ms=bar_end_ts, exit_price=pos["stop_price"],
                                             reason="stop_loss", notional_weight=notional_weight,
-                                            round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup)
+                                            round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
+                                            notional_multiplier=config.notional_multiplier)
                     trade_rows.append(trade)
                     cooldown_until[symbol] = bar_end_ts + config.cooldown_days * MS_PER_DAY
                     stats["exits_stop"] += 1
@@ -1097,7 +1368,8 @@ def _run_long_pipeline(
                 if bar_high >= pos["take_profit_price"]:
                     trade = _finalize_trade(pos, exit_ts_ms=bar_end_ts, exit_price=pos["take_profit_price"],
                                             reason="take_profit", notional_weight=notional_weight,
-                                            round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup)
+                                            round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
+                                            notional_multiplier=config.notional_multiplier)
                     trade_rows.append(trade)
                     cooldown_until[symbol] = bar_end_ts + config.cooldown_days * MS_PER_DAY
                     stats["exits_take_profit"] += 1
@@ -1107,7 +1379,8 @@ def _run_long_pipeline(
                 if bar_end_ts >= pos["planned_exit_ts_ms"]:
                     trade = _finalize_trade(pos, exit_ts_ms=bar_end_ts, exit_price=bar_close,
                                             reason="time_stop", notional_weight=notional_weight,
-                                            round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup)
+                                            round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
+                                            notional_multiplier=config.notional_multiplier)
                     trade_rows.append(trade)
                     cooldown_until[symbol] = bar_end_ts + config.cooldown_days * MS_PER_DAY
                     stats["exits_time"] += 1
@@ -1289,7 +1562,8 @@ def _run_long_pipeline(
             exit_ts = int(bars["bar_end_ts_ms"][-1])
             trade = _finalize_trade(pos, exit_ts_ms=exit_ts, exit_price=exit_price,
                                     reason="data_end", notional_weight=notional_weight,
-                                    round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup)
+                                    round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
+                                    notional_multiplier=config.notional_multiplier)
             trade_rows.append(trade)
             stats["exits_time"] += 1
 
@@ -1300,7 +1574,7 @@ def _run_long_pipeline(
     return trades, stats, event_counts
 
 
-def _finalize_trade(pos, *, exit_ts_ms, exit_price, reason, notional_weight, round_trip_cost_bps, funding_lookup):
+def _finalize_trade(pos, *, exit_ts_ms, exit_price, reason, notional_weight, round_trip_cost_bps, funding_lookup, notional_multiplier=1.0):
     side = "long"
     entry_price = float(pos["entry_price"])
     gross_trade_return = (exit_price / entry_price) - 1.0
@@ -1308,7 +1582,10 @@ def _finalize_trade(pos, *, exit_ts_ms, exit_price, reason, notional_weight, rou
         funding_lookup, symbol=pos["symbol"], side=side,
         entry_ts_ms=int(pos["entry_ts_ms"]), exit_ts_ms=int(exit_ts_ms),
     )
-    effective_weight = abs(notional_weight * float(pos["position_weight"]))
+    # H1: scale the per-position gross by the deployed notional multiplier
+    # (applied AFTER the B.3 per-symbol cap, matching the live semantics).
+    # Default 1.0 leaves the historical backtest gross unchanged.
+    effective_weight = abs(notional_weight * float(pos["position_weight"])) * notional_multiplier
     funding_return = effective_weight * raw_funding_return
     cost_return = -effective_weight * round_trip_cost_bps / 10_000.0
     gross_return = effective_weight * gross_trade_return

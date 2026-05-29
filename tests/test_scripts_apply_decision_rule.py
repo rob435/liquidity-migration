@@ -99,7 +99,7 @@ def test_real_2026_05_28_sweep_zero_candidates(tmp_path):
     rc = MOD.main([str(csv_path), "--control", "00_baseline"])
     assert rc == 0
     # Re-evaluate explicitly to inspect verdicts
-    raw = MOD._read_csv(csv_path)
+    raw, _excluded = MOD._read_csv(csv_path)
     indexed = MOD._index_by_cell(raw)
     control = indexed["00_baseline"]
     cells = [c for c in indexed if c != "00_baseline"]
@@ -129,7 +129,7 @@ def test_synthetic_passing_candidate_promotes_through(tmp_path):
         {"cell_id": "ideal_cell", "venue": "binance", "sharpe_like": 1.6, "max_drawdown": -0.32, "trades": 350, "total_return": 1.5},
     ]
     csv_path = _write_csv(tmp_path, rows)
-    raw = MOD._read_csv(csv_path)
+    raw, _excluded = MOD._read_csv(csv_path)
     indexed = MOD._index_by_cell(raw)
     v = MOD.evaluate_cell(
         cell_id="ideal_cell", cell_rows=indexed["ideal_cell"], control_rows=indexed["00_baseline"],
@@ -148,7 +148,7 @@ def test_inconclusive_when_one_side_fails(tmp_path):
         {"cell_id": "near_miss", "venue": "binance", "sharpe_like": 1.2, "max_drawdown": -0.34, "trades": 350, "total_return": 1.1},  # only +0.2 sharpe Δ
     ]
     csv_path = _write_csv(tmp_path, rows)
-    raw = MOD._read_csv(csv_path)
+    raw, _excluded = MOD._read_csv(csv_path)
     indexed = MOD._index_by_cell(raw)
     v = MOD.evaluate_cell(
         cell_id="near_miss", cell_rows=indexed["near_miss"], control_rows=indexed["00_baseline"],
@@ -167,7 +167,7 @@ def test_sign_flip_is_falsifier(tmp_path):
         {"cell_id": "signflip", "venue": "binance", "sharpe_like": 1.5, "max_drawdown": -0.32, "trades": 350, "total_return": -0.1},
     ]
     csv_path = _write_csv(tmp_path, rows)
-    raw = MOD._read_csv(csv_path)
+    raw, _excluded = MOD._read_csv(csv_path)
     indexed = MOD._index_by_cell(raw)
     v = MOD.evaluate_cell(
         cell_id="signflip", cell_rows=indexed["signflip"], control_rows=indexed["00_baseline"],
@@ -186,7 +186,7 @@ def test_dd_blowout_is_falsifier(tmp_path):
         {"cell_id": "blowout", "venue": "binance", "sharpe_like": 1.6, "max_drawdown": -0.32, "trades": 350, "total_return": 1.5},
     ]
     csv_path = _write_csv(tmp_path, rows)
-    raw = MOD._read_csv(csv_path)
+    raw, _excluded = MOD._read_csv(csv_path)
     indexed = MOD._index_by_cell(raw)
     v = MOD.evaluate_cell(
         cell_id="blowout", cell_rows=indexed["blowout"], control_rows=indexed["00_baseline"],
@@ -205,6 +205,38 @@ def test_missing_control_exits_usage(tmp_path):
     with pytest.raises(SystemExit) as exc:
         MOD.main([str(csv_path), "--control", "00_baseline"])
     assert exc.value.code == 2
+
+
+def test_read_csv_surfaces_failed_cells_as_excluded(tmp_path):
+    """M6: a status!=ok cell must be returned as an explicit exclusion (a
+    falsifier), never silently dropped."""
+    path = tmp_path / "s.csv"
+    path.write_text(
+        "cell_id,venue,status,sharpe_like,max_drawdown,trades,total_return,error\n"
+        "00_baseline,bybit,ok,1.0,-0.4,400,1.0,\n"
+        "crashed_cell,bybit,failed,,,,,partial-pit abort\n"
+    )
+    metrics, excluded = MOD._read_csv(path)
+    assert [m.cell_id for m in metrics] == ["00_baseline"]
+    assert len(excluded) == 1
+    assert excluded[0]["cell_id"] == "crashed_cell"
+    assert excluded[0]["status"] == "failed"
+    assert "partial-pit" in excluded[0]["error"]
+
+
+def test_read_csv_captures_full_pit_flag(tmp_path):
+    """The full_pit_universe_pass column is parsed into CellMetrics so the
+    analyzer can flag survivorship-tainted (non-full-PIT) cells."""
+    path = tmp_path / "s.csv"
+    path.write_text(
+        "cell_id,venue,status,sharpe_like,max_drawdown,trades,total_return,full_pit_universe_pass\n"
+        "00_baseline,bybit,ok,1.0,-0.4,400,1.0,True\n"
+        "biased_cell,bybit,ok,1.6,-0.3,350,1.5,False\n"
+    )
+    metrics, _excluded = MOD._read_csv(path)
+    by_cell = {m.cell_id: m for m in metrics}
+    assert by_cell["00_baseline"].full_pit_universe_pass is True
+    assert by_cell["biased_cell"].full_pit_universe_pass is False
 
 
 def test_missing_csv_columns_raises(tmp_path):
@@ -307,7 +339,7 @@ def test_investigation_both_venues_positive_mar_is_positive(tmp_path):
          "max_drawdown": -0.41, "trades": 290, "total_return": 0.80},
     ]
     csv_path = _write_csv_with_window(tmp_path, rows)
-    raw = MOD._read_csv(csv_path)
+    raw, _excluded = MOD._read_csv(csv_path)
     indexed = MOD._index_by_cell(raw)
     v = MOD.evaluate_cell_investigation(
         cell_id="R1_dropX",
@@ -340,7 +372,7 @@ def test_investigation_one_venue_positive_within_tolerance_is_positive(tmp_path)
          "max_drawdown": -0.55, "trades": 280, "total_return": 0.42, "window_days": 365.25},
     ]
     csv_path = _write_csv_with_window(tmp_path, rows)
-    raw = MOD._read_csv(csv_path)
+    raw, _excluded = MOD._read_csv(csv_path)
     indexed = MOD._index_by_cell(raw)
     v = MOD.evaluate_cell_investigation(
         cell_id="R1_dropY",
@@ -372,7 +404,7 @@ def test_investigation_one_venue_positive_other_beyond_tolerance_is_descriptive(
          "max_drawdown": -0.50, "trades": 290, "total_return": 0.20, "window_days": 365.25},
     ]
     csv_path = _write_csv_with_window(tmp_path, rows)
-    raw = MOD._read_csv(csv_path)
+    raw, _excluded = MOD._read_csv(csv_path)
     indexed = MOD._index_by_cell(raw)
     v = MOD.evaluate_cell_investigation(
         cell_id="R1_dropZ",
@@ -400,7 +432,7 @@ def test_investigation_mar_falsify_at_minus_one(tmp_path):
          "max_drawdown": -0.41, "trades": 290, "total_return": 0.70},
     ]
     csv_path = _write_csv_with_window(tmp_path, rows)
-    raw = MOD._read_csv(csv_path)
+    raw, _excluded = MOD._read_csv(csv_path)
     indexed = MOD._index_by_cell(raw)
     v = MOD.evaluate_cell_investigation(
         cell_id="R1_blowup",
@@ -425,7 +457,7 @@ def test_investigation_dd_70pct_is_falsifier(tmp_path):
          "max_drawdown": -0.40, "trades": 290, "total_return": 0.5},
     ]
     csv_path = _write_csv_with_window(tmp_path, rows)
-    raw = MOD._read_csv(csv_path)
+    raw, _excluded = MOD._read_csv(csv_path)
     indexed = MOD._index_by_cell(raw)
     v = MOD.evaluate_cell_investigation(
         cell_id="R1_dd_blowout",
@@ -450,7 +482,7 @@ def test_investigation_return_negative_on_positive_control_is_falsifier(tmp_path
          "max_drawdown": -0.40, "trades": 290, "total_return": 0.5},
     ]
     csv_path = _write_csv_with_window(tmp_path, rows)
-    raw = MOD._read_csv(csv_path)
+    raw, _excluded = MOD._read_csv(csv_path)
     indexed = MOD._index_by_cell(raw)
     v = MOD.evaluate_cell_investigation(
         cell_id="R1_signflip",
@@ -475,7 +507,7 @@ def test_investigation_trade_floor_is_falsifier(tmp_path):
          "max_drawdown": -0.38, "trades": 290, "total_return": 0.6},
     ]
     csv_path = _write_csv_with_window(tmp_path, rows)
-    raw = MOD._read_csv(csv_path)
+    raw, _excluded = MOD._read_csv(csv_path)
     indexed = MOD._index_by_cell(raw)
     v = MOD.evaluate_cell_investigation(
         cell_id="R1_dry",
@@ -559,7 +591,7 @@ def test_investigation_does_not_change_manifesto_verdicts(tmp_path):
          "max_drawdown": -0.6211, "trades": 281, "total_return": -0.1992, "window_days": 1126},
     ]
     csv_path = _write_csv_with_window(tmp_path, rows)
-    raw = MOD._read_csv(csv_path)
+    raw, _excluded = MOD._read_csv(csv_path)
     indexed = MOD._index_by_cell(raw)
     v = MOD.evaluate_cell(
         cell_id="B1_rankimp_200",

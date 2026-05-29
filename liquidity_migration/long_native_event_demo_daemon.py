@@ -31,7 +31,7 @@ from .bybit import (
     BybitPrivateWebSocketStream,
     BybitPublicTickerStream,
     BybitTradeRouter,
-    BybitWebSocketTradeClient,
+    build_ws_trade_client,
     resolve_private_credentials,
 )
 from .config import ResearchConfig
@@ -93,6 +93,8 @@ class LongNativeDemoDaemon:
         ws_trade_timeout_seconds: float = 5.0,
         trade_router: Any | None = None,
         trade_router_factory: Callable[..., Any] | None = None,
+        event_driven_cycle: bool = True,
+        min_cycle_interval_seconds: float = 2.0,
     ) -> None:
         if interval_seconds < 0.0:
             raise ValueError("interval_seconds must be non-negative")
@@ -107,6 +109,14 @@ class LongNativeDemoDaemon:
         self._telegram_sender = telegram_sender
         self.router = ExecutionEventRouter()
         self._shutdown = threading.Event()
+        # WS-event-driven cycle (mirrors the short daemon): fire on a new
+        # confirmed bar boundary, with a safety heartbeat + debounce.
+        self._bar_event = threading.Event()
+        self._event_driven_cycle = bool(event_driven_cycle)
+        self._min_cycle_interval_seconds = max(0.0, float(min_cycle_interval_seconds))
+        self._max_idle_seconds = self.interval_seconds if self.interval_seconds > 0.0 else 60.0
+        self._cycles_kline_triggered = 0
+        self._cycles_timer_triggered = 0
         self._ws_stream: Any | None = None
         self._cycles_run = 0
         self._cycle_errors = 0
@@ -182,6 +192,8 @@ class LongNativeDemoDaemon:
         if not self._shutdown.is_set():
             _logger.info("shutdown requested; will drain current cycle and exit")
         self._shutdown.set()
+        # Wake the event-driven wait so SIGTERM drains promptly.
+        self._bar_event.set()
 
     def _send_telegram(self, text: str) -> None:
         if not self.demo_config.telegram:
@@ -324,6 +336,14 @@ class LongNativeDemoDaemon:
         kline_status = "on" if self._kline_stream_manager is not None else (
             "disabled" if not self.demo_config.ws_klines_enabled else "failed"
         )
+        # Wire the WS bar signal so the run loop fires on fresh data; if there's
+        # no kline manager, fall back to the timer grid (no bar events arrive).
+        if self._kline_stream_manager is not None:
+            if self._event_driven_cycle and hasattr(self._kline_stream_manager, "set_cycle_wake_event"):
+                self._kline_stream_manager.set_cycle_wake_event(self._bar_event)
+        elif self._event_driven_cycle:
+            self._event_driven_cycle = False
+            _logger.info("no kline stream manager; long event-driven cycle disabled, using %.0fs timer", self.interval_seconds)
         # Seed state caches in a background thread (non-blocking) — the
         # seed thread also opens the public ticker WS once the symbol set
         # is populated. The reconcile thread handles subsequent refreshes.
@@ -343,21 +363,14 @@ class LongNativeDemoDaemon:
         try:
             self._next_cycle_at = time.monotonic()
             while not self._shutdown.is_set():
+                self._bar_event.clear()
                 self._run_one_cycle()
                 if self._shutdown.is_set():
                     break
-                self._next_cycle_at += self.interval_seconds
-                sleep_for = self._next_cycle_at - time.monotonic()
-                if sleep_for < 0.0:
-                    if self.interval_seconds > 0.0:
-                        self._cycle_overruns += 1
-                        _logger.warning(
-                            "long cycle overran the %.0fs interval by %.1fs; next cycle starts immediately (overrun #%d)",
-                            self.interval_seconds, -sleep_for, self._cycle_overruns,
-                        )
-                    self._next_cycle_at = time.monotonic()
-                    sleep_for = 0.0
-                self._sleep_interruptible(sleep_for)
+                if self._event_driven_cycle:
+                    self._wait_for_next_cycle_event()
+                else:
+                    self._wait_for_next_cycle_timer()
         finally:
             self._stop_reconcile_thread()
             self._close_ticker_stream()
@@ -366,9 +379,11 @@ class LongNativeDemoDaemon:
         router_stats = self.router.stats()
         _logger.info(
             "long_native_event_demo_daemon stopped cycles_run=%d cycle_errors=%d "
-            "cycle_overruns=%d max_cycle_seconds=%.1f ws_gaps=%d ws_max_gap_seconds=%.1f router_stats=%s",
+            "cycle_overruns=%d max_cycle_seconds=%.1f cycles_kline_triggered=%d "
+            "cycles_timer_triggered=%d ws_gaps=%d ws_max_gap_seconds=%.1f router_stats=%s",
             self._cycles_run, self._cycle_errors, self._cycle_overruns,
-            self._max_cycle_seconds, self._ws_gap_count, self._ws_max_gap_seconds, router_stats,
+            self._max_cycle_seconds, self._cycles_kline_triggered, self._cycles_timer_triggered,
+            self._ws_gap_count, self._ws_max_gap_seconds, router_stats,
         )
         if self._shutdown_telegram:
             self._send_telegram(
@@ -382,6 +397,8 @@ class LongNativeDemoDaemon:
             "cycle_errors": self._cycle_errors,
             "cycle_overruns": self._cycle_overruns,
             "max_cycle_seconds": self._max_cycle_seconds,
+            "cycles_kline_triggered": self._cycles_kline_triggered,
+            "cycles_timer_triggered": self._cycles_timer_triggered,
             "ws_gap_count": self._ws_gap_count,
             "ws_max_gap_seconds": self._ws_max_gap_seconds,
             "router_stats": router_stats,
@@ -719,6 +736,40 @@ class LongNativeDemoDaemon:
             return
         self._shutdown.wait(timeout=seconds)
 
+    def _wait_for_next_cycle_timer(self) -> None:
+        """Legacy fixed-interval grid (mirrors the short daemon)."""
+        self._next_cycle_at += self.interval_seconds
+        sleep_for = self._next_cycle_at - time.monotonic()
+        if sleep_for < 0.0:
+            if self.interval_seconds > 0.0:
+                self._cycle_overruns += 1
+                _logger.warning(
+                    "long cycle overran the %.0fs interval by %.1fs; next cycle "
+                    "starts immediately (overrun #%d)",
+                    self.interval_seconds, -sleep_for, self._cycle_overruns,
+                )
+            self._next_cycle_at = time.monotonic()
+            sleep_for = 0.0
+        self._cycles_timer_triggered += 1
+        self._sleep_interruptible(sleep_for)
+
+    def _wait_for_next_cycle_event(self) -> None:
+        """WS-event-driven wait (mirrors the short daemon): wake on a new
+        confirmed-bar boundary, the safety heartbeat, or shutdown — whichever
+        first, with a min-interval debounce floor."""
+        if self._min_cycle_interval_seconds > 0.0:
+            self._sleep_interruptible(self._min_cycle_interval_seconds)
+            if self._shutdown.is_set():
+                return
+        remaining = max(0.0, self._max_idle_seconds - self._min_cycle_interval_seconds)
+        woke = self._bar_event.wait(timeout=remaining)
+        if self._shutdown.is_set():
+            return
+        if woke:
+            self._cycles_kline_triggered += 1
+        else:
+            self._cycles_timer_triggered += 1
+
 
 def _build_private_ws_stream(config: ResearchConfig) -> BybitPrivateWebSocketStream:
     api_key, api_secret, demo = resolve_private_credentials()
@@ -829,7 +880,9 @@ def _default_long_trade_router_factory(
     ws_client: Any | None = None
     if order_submit_mode in {"ws", "ws_then_rest"}:
         try:
-            ws_client = BybitWebSocketTradeClient(
+            # Jittered retry de-syncs the multi-daemon demo connect storm; see
+            # build_ws_trade_client. Falls through to REST on genuine failure.
+            ws_client = build_ws_trade_client(
                 category=config.exchange.category,
                 testnet=config.exchange.testnet,
                 demo=demo,
@@ -890,6 +943,8 @@ def _default_long_state_cache_seeder(
             wallet_error=snap.get("wallet_error", ""),
             positions=snap["raw_positions"],
             open_orders=snap["raw_open_orders"],
+            position_error=snap.get("position_error", ""),
+            open_order_error=snap.get("open_order_error", ""),
         )
         return
     api_key, api_secret, demo = resolve_private_credentials()
@@ -907,6 +962,8 @@ def _default_long_state_cache_seeder(
             wallet_error=snap.get("wallet_error", ""),
             positions=snap["raw_positions"],
             open_orders=snap["raw_open_orders"],
+            position_error=snap.get("position_error", ""),
+            open_order_error=snap.get("open_order_error", ""),
         )
     else:
         # No private credentials configured: nothing to seed from. Cache

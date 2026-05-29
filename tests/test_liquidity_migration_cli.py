@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from liquidity_migration.config import DEFAULT_EXCLUDED_SYMBOLS
 from liquidity_migration.cli import _print_event_risk_summary, build_parser, main
 
@@ -39,6 +41,57 @@ def test_cli_fixture_pipeline_runs_volume_events(tmp_path: Path) -> None:
     )
 
     assert (data_root / "reports" / "volume_event_research" / "volume_event_research_report.md").exists()
+
+
+def test_cli_volume_events_maker_fill_probability_defaults_none(tmp_path: Path) -> None:
+    """M2: --maker-fill-probability defaults to None (use config) so the flag is
+    a non-breaking override, and accepts 0.0 to model 100%%-taker live execution."""
+    args = build_parser().parse_args(["--data-root", str(tmp_path), "volume-events"])
+    assert args.maker_fill_probability is None
+    args0 = build_parser().parse_args(
+        ["--data-root", str(tmp_path), "volume-events", "--maker-fill-probability", "0"]
+    )
+    assert args0.maker_fill_probability == 0.0
+
+
+def test_cost_config_zero_maker_models_full_taker(tmp_path: Path) -> None:
+    """The deployed runner is 100%% taker; maker_fill_probability=0.0 must yield
+    the full taker round-trip cost (2 * (taker_fee + taker_slippage) = 15 bps),
+    removing the maker-blend under-costing (M2)."""
+    from dataclasses import replace
+
+    from liquidity_migration.config import CostConfig
+
+    taker = replace(CostConfig(), maker_fill_probability=0.0)
+    assert taker.base_entry_exit_cost_bps == pytest.approx(15.0)
+    # The default 0.60 maker blend is cheaper (the under-costing the flag fixes).
+    assert CostConfig().base_entry_exit_cost_bps < taker.base_entry_exit_cost_bps
+
+
+def test_cli_event_demo_cycle_is_event_driven_by_default(tmp_path: Path) -> None:
+    """The daemon is WS-event-driven by default; --no-event-driven-cycle is the
+    kill-switch back to the fixed-interval timer."""
+    args = build_parser().parse_args(["--data-root", str(tmp_path), "event-demo-cycle"])
+    assert args.no_event_driven_cycle is False
+    args2 = build_parser().parse_args(
+        ["--data-root", str(tmp_path), "event-demo-cycle", "--no-event-driven-cycle"]
+    )
+    assert args2.no_event_driven_cycle is True
+
+
+def test_cli_event_demo_daemon_timing_flags_default_none(tmp_path: Path) -> None:
+    """De-hard-code: daemon reconcile/stale timing is now CLI-overridable
+    (was locked to the constructor defaults). Default None = keep current."""
+    args = build_parser().parse_args(["--data-root", str(tmp_path), "event-demo-cycle"])
+    assert args.ticker_reconcile_interval_seconds is None
+    assert args.state_cache_stale_seconds is None
+    args2 = build_parser().parse_args([
+        "--data-root", str(tmp_path), "event-demo-cycle",
+        "--ticker-reconcile-interval-seconds", "30",
+        "--state-cache-stale-seconds", "90",
+    ])
+    assert args2.ticker_reconcile_interval_seconds == 30.0
+    assert args2.state_cache_stale_seconds == 90.0
 
 
 def test_cli_archive_kline_default_requires_dense_utc_day(tmp_path: Path) -> None:
@@ -197,7 +250,8 @@ def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Pa
     assert args.hold_days == "3"
     assert args.sides == "reversal"
     assert args.stop_loss_pcts == "0.12"
-    assert args.stop_fill_mode == "stop"
+    # H3: conservative bar-extreme stop fill is the default (gap-through honest).
+    assert args.stop_fill_mode == "bar_extreme"
     assert args.take_profit_pcts == "0.26"
     assert args.cost_multipliers == "3.0"
     assert args.failed_fade_exit_hours == 0

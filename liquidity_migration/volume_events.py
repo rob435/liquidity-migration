@@ -74,7 +74,13 @@ class VolumeEventResearchConfig:
     hold_days: tuple[int, ...] = (3,)
     side_hypotheses: tuple[str, ...] = ("reversal",)
     stop_loss_pcts: tuple[float, ...] = (0.12,)
-    stop_fill_mode: str = "stop"
+    # H3: default to the conservative bar-extreme stop fill. 'stop' fills at the
+    # exact trigger price with no gap-through slippage, which understates
+    # short-squeeze tail losses (and thus drawdown / the MAR-primary metric) —
+    # an impossible-intrabar-path optimism (error #14). 'bar_extreme' fills at
+    # the bar's adverse extreme, modelling a gap-through-to-worst cover. Pre-reg:
+    # docs/preregistration/round2/r-audit-methodology-hardening.md.
+    stop_fill_mode: str = "bar_extreme"
     take_profit_pcts: tuple[float, ...] = (0.26,)
     cost_multipliers: tuple[float, ...] = (3.0,)
     mfe_giveback_trigger_pct: float = 0.0
@@ -764,6 +770,8 @@ def _run_event_scenario(
             config=config,
             pit_membership_pass=pit_membership_pass,
             full_pit_universe_pass=full_pit_universe_pass,
+            whole_period_drawdown=float(summary.get("max_drawdown", 0.0)),
+            whole_period_sharpe=float(summary.get("sharpe_like", summary.get("sharpe", 0.0))),
         ),
         **_exit_reason_fields(trades),
         "avg_actual_entry_delay_hours": float(trades["actual_entry_delay_hours"].mean())
@@ -1543,13 +1551,22 @@ def _promotion_fields(
     config: VolumeEventResearchConfig,
     pit_membership_pass: bool = False,
     full_pit_universe_pass: bool = False,
+    whole_period_drawdown: float = 0.0,
+    whole_period_sharpe: float = 0.0,
 ) -> dict[str, Any]:
     """Promotion gate over a per-run set of diagnostic splits.
 
     The "complete" check is now ``len(split_rows) == len(config.splits)`` —
     the gate enforces that the caller produced one row per configured window.
-    When no splits are configured the per-split gates degenerate to no-ops and
-    only the whole-period gates (max DD, avg Sharpe via ``summary``) bind.
+    When no splits are configured the per-split gates degenerate to no-ops, so
+    the whole-period max-DD and Sharpe gates (``whole_period_drawdown`` /
+    ``whole_period_sharpe``, taken from the run summary) bind instead.
+
+    M1: previously the ``expected == 0`` branch returned ``True``
+    unconditionally — a comment claimed the summary checks "carried the load",
+    but they were never applied, so ``promotion_gate_pass`` degenerated to a
+    PIT-coverage flag mislabeled as a quality gate. The whole-period DD/Sharpe
+    are now actually enforced.
     """
     expected = len(config.splits)
     returns = [float(row["total_return"]) for row in split_rows]
@@ -1561,10 +1578,12 @@ def _promotion_fields(
     avg_sharpe = float(np.mean(sharpes)) if sharpes else 0.0
     worst_dd = min(drawdowns) if drawdowns else 0.0
     if expected == 0:
-        # Whole-period gate: no per-split requirements; the summary-level
-        # checks (handled outside this helper via the row's max_drawdown/
-        # sharpe_like fields) carry the load.
-        pre_pit_gate_pass = True
+        # Whole-period gate: no per-split requirements, so apply the max-DD and
+        # Sharpe thresholds against the whole-period summary metrics (M1).
+        pre_pit_gate_pass = (
+            whole_period_drawdown >= config.promotion_max_drawdown
+            and whole_period_sharpe >= config.promotion_min_avg_sharpe
+        )
     else:
         pre_pit_gate_pass = (
             complete
@@ -1875,7 +1894,14 @@ def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) 
         f"- Run label: `{metadata['run_label']}`",
         f"- Feature rows: {metadata['rows']['features']}",
         f"- Scenarios: {metadata['rows']['scenarios']}",
-        f"- Stop fill mode: `{metadata['config'].get('stop_fill_mode', 'stop')}`",
+        f"- Stop fill mode: `{metadata['config'].get('stop_fill_mode', 'stop')}`"
+        + (
+            "  ⚠️ SLIPPAGE-OPTIMISTIC: stops fill at the exact trigger price with no "
+            "gap-through slippage — short-squeeze tail losses (and thus drawdown/MAR) "
+            "are understated. Use `--stop-fill-mode bar_extreme` for a conservative fill. (H3)"
+            if metadata['config'].get('stop_fill_mode', 'stop') == 'stop'
+            else ""
+        ),
         f"- Entry policy: `{metadata['config'].get('entry_policy', ENTRY_POLICY_FIXED_DELAY)}`",
         f"- Position weighting: `{metadata['config'].get('position_weighting', 'equal')}`"
         + (f" (vol field: `{metadata['config'].get('position_weight_vol_field')}`, clamp: {metadata['config'].get('position_weight_clamp')})" if metadata['config'].get('position_weighting', 'equal') != 'equal' else ""),

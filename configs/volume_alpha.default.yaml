@@ -40,4 +40,10 @@ cost_model:
   taker_fee_bps: 5.5
   maker_adverse_selection_bps: 1.0
   taker_slippage_bps_liquid: 2.0
-  maker_fill_probability: 0.60
+  # M2 (audit 2026-05-29): the LIVE runner sends Market orders on both legs =
+  # 100% taker, so the backtest must cost 100% taker too. A 0.60 maker blend
+  # under-costed every fill vs the deployed execution (reconciliation-drift,
+  # errors #6/#24). Set to 0.0 to model the deployed reality exactly; base
+  # round-trip becomes 2*(taker_fee+taker_slippage)=15 bps. Re-baseline per
+  # docs/preregistration/round2/r-audit-methodology-hardening.md.
+  maker_fill_probability: 0.0

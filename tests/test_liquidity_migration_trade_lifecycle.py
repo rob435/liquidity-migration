@@ -17,6 +17,7 @@ from liquidity_migration.trade_lifecycle import (
     _bar_excursion,
     _bar_exit_hits,
     _funding_lookup,
+    _intrahold_and_gross_stats,
     _max_underwater_days,
     _perp_funding_return,
     _position_weight_stats,
@@ -593,3 +594,33 @@ def test_summarize_trade_backtest_empty_returns_default_position_weight_stats() 
     )
     assert summary["position_weight_mean"] == pytest.approx(1.0)
     assert summary["position_weight_std"] == pytest.approx(0.0)
+
+
+def test_intrahold_and_gross_stats_surface_hidden_risk_and_gross() -> None:
+    """H2: per-position max-adverse-excursion stats surface intra-hold risk that
+    realised-at-exit drawdown hides. M3: per-basket realised gross is reported so
+    a floating-gross (risk_equal) confound is auditable."""
+    trades = pl.DataFrame(
+        [
+            # basket A: two concurrent names, gross share 0.5 + 0.5 = 1.0
+            {"basket_id": "A", "mae": -0.05, "notional_weight": 0.5},
+            {"basket_id": "A", "mae": -0.20, "notional_weight": 0.5},
+            # basket B: floated-down gross 0.3 + 0.3 = 0.6 (risk_equal in high vol)
+            {"basket_id": "B", "mae": -0.10, "notional_weight": 0.3},
+            {"basket_id": "B", "mae": -0.02, "notional_weight": 0.3},
+        ]
+    )
+    stats = _intrahold_and_gross_stats(trades)
+    # Deepest single-position adverse excursion.
+    assert stats["worst_trade_mae"] == pytest.approx(-0.20)
+    # Weighted worst = -0.20 * 0.5 = -0.10 (a LOWER BOUND on portfolio intra-hold DD).
+    assert stats["worst_weighted_intrahold_loss"] == pytest.approx(-0.10)
+    # Realised gross: basket A = 1.0, basket B = 0.6 -> mean 0.8, max 1.0.
+    assert stats["realized_gross_mean"] == pytest.approx(0.8)
+    assert stats["realized_gross_max"] == pytest.approx(1.0)
+
+
+def test_intrahold_and_gross_stats_empty_is_safe() -> None:
+    stats = _intrahold_and_gross_stats(pl.DataFrame())
+    assert stats["worst_trade_mae"] == 0.0
+    assert stats["realized_gross_mean"] == 0.0

@@ -340,13 +340,36 @@ def test_reconcile_demo_bybit_flags_duplicate_open_ledger() -> None:
     assert dup["symbol"] == "AAAUSDT" and dup["side"] == "short" and dup["count"] == 2
 
 
+def _funding_ledger() -> pl.DataFrame:
+    """Open short trades on AAAUSDT + BBBUSDT so funding for those symbols is
+    attributable to this sleeve (M7 scoping)."""
+    return pl.DataFrame(
+        [
+            {
+                "trade_id": "t-a", "symbol": "AAAUSDT", "side": "short",
+                "entry_ts_ms": 1_000_000, "entry_exec_time_ms": 1_000_500,
+                "entry_price": 100.0, "entry_fee_usdt": 0.05, "qty": 1.0, "status": "open",
+                "exit_price": 0.0, "exit_ts_ms": 0, "exit_exec_time_ms": 0,
+                "exit_reason": "", "exit_fee_usdt": 0.0,
+            },
+            {
+                "trade_id": "t-b", "symbol": "BBBUSDT", "side": "short",
+                "entry_ts_ms": 1_100_000, "entry_exec_time_ms": 1_100_500,
+                "entry_price": 50.0, "entry_fee_usdt": 0.05, "qty": 2.0, "status": "open",
+                "exit_price": 0.0, "exit_ts_ms": 0, "exit_exec_time_ms": 0,
+                "exit_reason": "", "exit_fee_usdt": 0.0,
+            },
+        ]
+    )
+
+
 def test_reconcile_demo_bybit_surfaces_funding_settlements() -> None:
     """E6: funding settles separately from closedPnl. The reconciler must sum the
     signed funding cash-flows (tolerating the funding/cashFlow/change field
     variants) into a total + per-symbol breakdown, defaulting to 0 when absent."""
-    empty = pl.DataFrame(schema={"symbol": pl.Utf8, "side": pl.Utf8, "status": pl.Utf8})
+    ledger = _funding_ledger()
     # Absent funding -> total 0.0, no behavior change.
-    base = reconcile_demo_bybit(empty, [], [])
+    base = reconcile_demo_bybit(ledger, [], [])
     assert base["summary"]["funding_settlement_usdt_total"] == pytest.approx(0.0)
     assert base["funding_by_symbol"] == []
 
@@ -356,7 +379,7 @@ def test_reconcile_demo_bybit_surfaces_funding_settlements() -> None:
         {"symbol": "BBBUSDT", "change": "-0.25"},     # paid (debit), field variant
         {"symbol": "", "funding": "9.0"},             # no symbol -> ignored
     ]
-    result = reconcile_demo_bybit(empty, [], [], funding)
+    result = reconcile_demo_bybit(ledger, [], [], funding)
     assert result["summary"]["funding_settlement_usdt_total"] == pytest.approx(1.75)
     by_symbol = {f["symbol"]: f["funding_usdt"] for f in result["funding_by_symbol"]}
     assert by_symbol["AAAUSDT"] == pytest.approx(2.0)
@@ -364,6 +387,20 @@ def test_reconcile_demo_bybit_surfaces_funding_settlements() -> None:
     assert "" not in by_symbol
     # Report renders the funding section.
     assert "Funding settlements" in format_demo_bybit_report(result)
+
+
+def test_reconcile_demo_bybit_funding_excludes_other_sleeve_symbols() -> None:
+    """M7: funding for a symbol this ledger never traded (e.g. a long-sleeve-only
+    name sharing the account) must NOT contaminate this sleeve's funding total."""
+    ledger = _funding_ledger()  # trades AAAUSDT, BBBUSDT only
+    funding = [
+        {"symbol": "AAAUSDT", "funding": "1.0"},
+        {"symbol": "ZZZUSDT", "funding": "100.0"},  # long-sleeve-only -> must be dropped
+    ]
+    result = reconcile_demo_bybit(ledger, [], [], funding)
+    assert result["summary"]["funding_settlement_usdt_total"] == pytest.approx(1.0)
+    by_symbol = {f["symbol"]: f["funding_usdt"] for f in result["funding_by_symbol"]}
+    assert "ZZZUSDT" not in by_symbol
 
 
 def test_reconcile_backtest_paper_pairs_by_signal_ts_and_flags_drift() -> None:

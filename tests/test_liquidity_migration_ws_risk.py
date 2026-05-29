@@ -10,10 +10,38 @@ from liquidity_migration import ws_risk
 from liquidity_migration.config import ResearchConfig
 from liquidity_migration.storage import read_dataset, write_dataset
 from liquidity_migration.ws_risk import (
+    _LOG_RETENTION,
     EventWebSocketRiskConfig,
     EventWebSocketRiskEngine,
+    WebSocketRiskState,
     _read_telegram_dedupe_keys,
 )
+
+
+def test_prune_state_logs_caps_telemetry_and_preserves_cumulative_count() -> None:
+    """Resource leak: the append-only telemetry logs must be bounded so a
+    long-lived risk daemon can't OOM (orphaning a position), while the
+    cumulative report counters stay exact via the eviction counters."""
+    state = WebSocketRiskState()
+    state.exits = [{"i": i} for i in range(_LOG_RETENTION + 50)]
+    state.errors = [f"e{i}" for i in range(_LOG_RETENTION + 10)]
+
+    class _Stub:
+        pass
+
+    stub = _Stub()
+    stub.state = state
+    stub.risk = EventWebSocketRiskConfig(telemetry_log_retention=_LOG_RETENTION)
+    EventWebSocketRiskEngine._prune_state_logs(stub)
+
+    assert len(state.exits) == _LOG_RETENTION
+    assert state.exits_evicted == 50
+    # The most recent rows are retained (last-N display still works).
+    assert state.exits[-1] == {"i": _LOG_RETENTION + 49}
+    # Cumulative count == surviving + evicted == original length.
+    assert len(state.exits) + state.exits_evicted == _LOG_RETENTION + 50
+    assert len(state.errors) == _LOG_RETENTION
+    assert state.errors_evicted == 10
 
 
 class FakePrivateClient:

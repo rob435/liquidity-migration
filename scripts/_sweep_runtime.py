@@ -173,6 +173,13 @@ def run_cell(
         }
     payload = json.loads(report_json.read_text())
     best = payload.get("best_scenario", {})
+    # Carry the PIT-integrity provenance into the summary CSV so the
+    # decision-rule analyzer can enforce the full-PIT gate (and an operator can
+    # audit it) instead of trusting that every row is unbiased. ``run_label`` /
+    # ``full_pit_universe_pass`` come from the report payload (volume_events).
+    full_pit_pass = best.get("full_pit_universe_pass")
+    if full_pit_pass is None:
+        full_pit_pass = payload.get("full_pit_universe_pass")
     row = {
         "venue": venue,
         "cell_id": cell.cell_id,
@@ -186,6 +193,8 @@ def run_cell(
         "sharpe_like": f"{best.get('sharpe_like', best.get('sharpe', 0.0)):.4f}",
         "promotable": str(best.get("promote", False)),
         "worst_90d": f"{best.get('worst_90d_return', 0.0):.4f}",
+        "run_label": str(payload.get("run_label", "")),
+        "full_pit_universe_pass": str(full_pit_pass) if full_pit_pass is not None else "",
         "report_dir": str(report_dir),
         "start_date": start_date,
         "end_date": end_date,

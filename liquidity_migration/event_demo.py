@@ -80,6 +80,13 @@ class EventDemoCycleConfig:
     data_name: str = "event-demo"
     strategy_profile: str = "promoted"
     max_active_symbols: int = 0  # 0 = use the strategy profile's value; >0 overrides it
+    # FAIL-CLOSED orphan invariant (default True): a ledger trade whose Bybit
+    # position is absent is orphan-closed ONLY when there is POSITIVE evidence
+    # of closure (a get_closed_pnl record since entry). Absence alone never
+    # closes — a transient/empty positions read must not wipe a live position
+    # from the ledger (the C1 false-orphan-close class). Set False to restore
+    # the legacy close-on-absence behavior (zero-PnL close when no record).
+    orphan_close_require_evidence: bool = True
     # WS-driven kline delivery. The daemon constructs a KlineStreamManager
     # when ws_klines_enabled, bootstraps lookback_days of history, then keeps
     # a hot in-memory store fed by Bybit's kline WS — cycle's

@@ -391,6 +391,45 @@ def test_on_bar_dispatch_adds_to_store(tmp_path: Path) -> None:
         manager.stop()
 
 
+def test_on_bar_sets_cycle_wake_event_on_new_confirmed_boundary(tmp_path: Path) -> None:
+    """WS-event-driven trigger: a confirmed bar at a NEW boundary sets the
+    cycle-wake event so the daemon fires its cycle immediately. An unconfirmed
+    bar and a same-boundary bar (the per-symbol hour-close burst) do NOT re-fire
+    it — the boundary-advance gate coalesces the burst into one wake."""
+    manager, pool, market = _build_manager(tmp_path=tmp_path, initial_symbols=["BTCUSDT"])
+    wake = threading.Event()
+    manager.set_cycle_wake_event(wake)
+    manager.start()
+    try:
+        callback = pool.callbacks[-1]
+        now_ms = int(time.time() * 1000)
+        h = (now_ms // MS_PER_HOUR) * MS_PER_HOUR
+        bar = {"start": h, "open": "1", "high": "1", "low": "1", "close": "9", "volume": "1", "turnover": "9"}
+
+        # Confirmed new-boundary bar -> wake set.
+        wake.clear()
+        callback("BTCUSDT", bar, True)
+        assert wake.is_set()
+
+        # Unconfirmed bar -> no wake (not a confirmed boundary).
+        wake.clear()
+        callback("BTCUSDT", bar, False)
+        assert not wake.is_set()
+
+        # Same-boundary confirmed bar from another symbol (the hour-close burst)
+        # -> no re-wake; the boundary didn't advance.
+        wake.clear()
+        callback("ETHUSDT", bar, True)
+        assert not wake.is_set()
+
+        # Next hour -> boundary advances -> wake set again.
+        wake.clear()
+        callback("BTCUSDT", {**bar, "start": h + MS_PER_HOUR}, True)
+        assert wake.is_set()
+    finally:
+        manager.stop()
+
+
 def test_start_recovers_from_flush_file(tmp_path: Path) -> None:
     pre_store = KlineStore(cache_root=tmp_path, flush_interval_seconds=0.0)
     pre_store.add_bar(

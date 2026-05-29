@@ -344,6 +344,18 @@ def _add_volume_events_parser(subparsers) -> None:
     volume_events.add_argument("--take-profit-pcts", default=",".join(str(item) for item in event_defaults.take_profit_pcts), help="Comma-separated fixed take-profit pcts; 0 disables.")
     volume_events.add_argument("--cost-multipliers", default=",".join(str(item) for item in event_defaults.cost_multipliers), help="Comma-separated cost multipliers.")
     volume_events.add_argument(
+        "--maker-fill-probability",
+        type=float,
+        default=None,
+        help=(
+            "Override CostConfig.maker_fill_probability for this run. The LIVE runner "
+            "sends Market orders on both legs (100%% taker), so pass 0.0 to model the "
+            "deployed execution exactly and remove the maker-blend under-costing (M2). "
+            "Default: use the config value. NOTE: changing the costed baseline "
+            "re-baselines the program — pre-register before citing as promotion evidence."
+        ),
+    )
+    volume_events.add_argument(
         "--mfe-giveback-trigger-pct",
         type=float,
         default=event_defaults.mfe_giveback_trigger_pct,
@@ -1419,6 +1431,27 @@ def _add_event_demo_cycle_parser(subparsers) -> None:
         help="Seconds between cycles in --daemon mode. Ignored otherwise.",
     )
     event_demo.add_argument(
+        "--ticker-reconcile-interval-seconds",
+        type=float,
+        default=None,
+        help="Daemon: seconds between periodic REST reconciles of the WS state caches "
+             "(default 60). Lower = fresher cache vs more REST load.",
+    )
+    event_demo.add_argument(
+        "--state-cache-stale-seconds",
+        type=float,
+        default=None,
+        help="Daemon: max age before the cycle falls back from the WS cache to REST "
+             "(default 120). Should be >= the reconcile interval.",
+    )
+    event_demo.add_argument(
+        "--no-event-driven-cycle",
+        dest="no_event_driven_cycle",
+        action="store_true",
+        help="Daemon kill-switch: revert to the legacy fixed-interval timer instead "
+             "of firing the cycle on WS confirmed-bar events. Default: event-driven.",
+    )
+    event_demo.add_argument(
         "--ws-klines-enabled",
         dest="ws_klines_enabled",
         action="store_true",
@@ -1692,6 +1725,11 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
     )
     long_demo.add_argument("--interval-seconds", type=float, default=60.0,
                            help="Seconds between cycles in --daemon mode.")
+    long_demo.add_argument(
+        "--no-event-driven-cycle", dest="no_event_driven_cycle", action="store_true",
+        help="Kill-switch: revert to the fixed-interval timer instead of WS confirmed-bar "
+             "event triggering. Default: event-driven.",
+    )
     long_demo.add_argument(
         "--ws-klines-enabled", dest="ws_klines_enabled", action="store_true",
         help="Enable WS-driven kline manager (default).",
@@ -2278,11 +2316,18 @@ def main(argv: list[str] | None = None) -> int:
         )
         if getattr(args, "daemon", False):
             from liquidity_migration.event_demo_daemon import EventDemoDaemon
+            daemon_timing_kwargs: dict[str, float] = {}
+            if getattr(args, "ticker_reconcile_interval_seconds", None) is not None:
+                daemon_timing_kwargs["ticker_reconcile_interval_seconds"] = args.ticker_reconcile_interval_seconds
+            if getattr(args, "state_cache_stale_seconds", None) is not None:
+                daemon_timing_kwargs["state_cache_stale_seconds"] = args.state_cache_stale_seconds
             daemon = EventDemoDaemon(
                 data_root,
                 config=config,
                 demo_config=demo_config,
                 interval_seconds=args.interval_seconds,
+                event_driven_cycle=not getattr(args, "no_event_driven_cycle", False),
+                **daemon_timing_kwargs,
             )
             daemon.install_signal_handlers()
             stats = daemon.run()
@@ -2449,6 +2494,7 @@ def main(argv: list[str] | None = None) -> int:
                 config=config,
                 demo_config=long_demo_config,
                 interval_seconds=args.interval_seconds,
+                event_driven_cycle=not getattr(args, "no_event_driven_cycle", False),
             )
             daemon.install_signal_handlers()
             stats = daemon.run()
@@ -2644,10 +2690,15 @@ def main(argv: list[str] | None = None) -> int:
             workers=args.scenario_workers,
             explain_rejections=args.explain_rejections,
         )
+        cost_config = config.costs
+        if args.maker_fill_probability is not None:
+            from dataclasses import replace
+
+            cost_config = replace(cost_config, maker_fill_probability=args.maker_fill_probability)
         payload = run_volume_event_research(
             data_root,
             event_config=event_config,
-            cost_config=config.costs,
+            cost_config=cost_config,
             report_dir=_expanded_report_dir(
                 args.report_dir,
                 default=data_root / "reports" / "volume_event_research",

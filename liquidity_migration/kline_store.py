@@ -62,6 +62,22 @@ _logger = logging.getLogger("liquidity_migration.kline_store")
 # unrelated symbols × 567 symbols ≈ 567 bars ≈ 50KB of slack, acceptable.
 _EVICTION_INTERVAL_MS = MS_PER_HOUR
 
+# A bar timestamped implausibly far in the future is corrupt (bad upstream
+# parse, venue glitch, malformed WS frame). Accepting one advances
+# ``_global_max_ts_ms``, which makes ``_evict_old_locked``'s cutoff
+# (= reference - retain) future-dated too — evicting EVERY legitimate bar in
+# the store (total loss → silent reversion to the slow REST path the WS
+# pipeline exists to avoid). Reject such bars at the insert boundary and clamp
+# the eviction reference so a single bad frame can never run the evictor away.
+# 1h bars can legitimately carry a start time up to the current/next boundary
+# plus clock skew, so 2h of slack is comfortably permissive.
+_MAX_FUTURE_TS_SLACK_MS = 2 * MS_PER_HOUR
+
+
+def _utc_now_ms() -> int:
+    return int(time.time() * 1000)
+
+
 WS_STORE_SOURCE = "bybit_ws_kline"
 
 _KLINE_SCHEMA: dict[str, pl.DataType] = {
@@ -183,6 +199,7 @@ class KlineStore:
         cache_root: str | Path | None,
         retain_days: int = DEFAULT_RETAIN_DAYS,
         flush_interval_seconds: float = DEFAULT_FLUSH_INTERVAL_SECONDS,
+        max_future_ts_slack_ms: int = _MAX_FUTURE_TS_SLACK_MS,
     ) -> None:
         if retain_days <= 0:
             raise ValueError("retain_days must be positive")
@@ -190,6 +207,8 @@ class KlineStore:
             raise ValueError("flush_interval_seconds must be non-negative")
         self._retain_ms = int(retain_days) * MS_PER_DAY
         self._retain_days = int(retain_days)
+        # Configurable far-future bar reject window (default = module constant).
+        self._max_future_ts_slack_ms = int(max_future_ts_slack_ms)
         self._flush_interval_seconds = float(flush_interval_seconds)
         self._lock = threading.RLock()
         self._bars: dict[str, dict[int, _Bar]] = {}
@@ -261,16 +280,20 @@ class KlineStore:
         """
         if not symbol:
             return 0
+        max_acceptable_ts = _utc_now_ms() + self._max_future_ts_slack_ms
         parsed_bars: list[_Bar] = []
         for bar in bars:
             parsed = _parse_ws_kline_event(bar)
-            if parsed is not None:
+            if parsed is not None and parsed.ts_ms <= max_acceptable_ts:
                 parsed_bars.append(parsed)
         if not parsed_bars:
             return 0
         accepted = 0
         with self._lock:
             reference_ts = max(self._global_max_ts_ms, max(p.ts_ms for p in parsed_bars))
+            # Self-heal a previously-poisoned global max: never let the
+            # eviction reference exceed now + slack.
+            reference_ts = min(reference_ts, max_acceptable_ts)
             symbol_bars = self._bars.setdefault(symbol, {})
             for parsed in parsed_bars:
                 if reference_ts - parsed.ts_ms > self._retain_ms:
@@ -294,6 +317,11 @@ class KlineStore:
     def _insert_bar(self, symbol: str, bar: _Bar) -> bool:
         if not symbol:
             return False
+        max_acceptable_ts = _utc_now_ms() + self._max_future_ts_slack_ms
+        if bar.ts_ms > max_acceptable_ts:
+            # Corrupt far-future bar — see _MAX_FUTURE_TS_SLACK_MS. Dropping it
+            # protects every other symbol's bars from mass-eviction.
+            return False
         with self._lock:
             # Cached global newest_ts replaces the prior O(symbols * bars)
             # scan. Reads + writes to _global_max_ts_ms happen only under
@@ -301,6 +329,8 @@ class KlineStore:
             reference_ts = self._global_max_ts_ms
             if bar.ts_ms > reference_ts:
                 reference_ts = bar.ts_ms
+            # Self-heal a previously-poisoned global max.
+            reference_ts = min(reference_ts, max_acceptable_ts)
             if reference_ts - bar.ts_ms > self._retain_ms:
                 return False
             symbol_bars = self._bars.setdefault(symbol, {})

@@ -72,8 +72,12 @@ fi
 
 order_args=()
 if [[ "${SUBMIT_ORDERS:-0}" == "1" ]]; then
-    if [[ "$STRATEGY_PROFILE" != "MultiStratV1" ]]; then
-        echo "Only STRATEGY_PROFILE=MultiStratV1 is allowed to submit long-sleeve demo entry orders." >&2
+    # Configurable space-separated allowlist (was a hard-coded single profile).
+    # Default keeps the safe long-sleeve value; extend ALLOWED_SUBMIT_PROFILES
+    # to enable others without editing this script. Safe-by-default.
+    ALLOWED_SUBMIT_PROFILES="${ALLOWED_SUBMIT_PROFILES:-MultiStratV1}"
+    if [[ " $ALLOWED_SUBMIT_PROFILES " != *" $STRATEGY_PROFILE "* ]]; then
+        echo "STRATEGY_PROFILE=$STRATEGY_PROFILE not in ALLOWED_SUBMIT_PROFILES='$ALLOWED_SUBMIT_PROFILES'; refusing to submit." >&2
         exit 2
     fi
     if [[ "${CONFIRM_DEMO_ORDERS:-0}" != "1" ]]; then

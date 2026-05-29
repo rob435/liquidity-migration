@@ -115,6 +115,40 @@ def test_insert_drops_bar_older_than_retain_window_immediately() -> None:
     assert "ETHUSDT" not in store.symbols_with_coverage_through(0)
 
 
+def test_far_future_bar_is_rejected_and_does_not_mass_evict() -> None:
+    """H6: a corrupt far-future ts must not advance the eviction reference and
+    evict every legitimate bar (total store loss → silent REST fallback)."""
+    from liquidity_migration.kline_store import _utc_now_ms
+
+    store = KlineStore(cache_root=None, retain_days=2, flush_interval_seconds=0.0)
+    now = _utc_now_ms()
+    assert store.add_bar("BTCUSDT", _ws_bar(now - MS_PER_HOUR), confirmed=True) is True
+    assert store.add_bar("ETHUSDT", _ws_bar(now - 2 * MS_PER_HOUR), confirmed=True) is True
+    assert store.symbol_count() == 2
+    # A bar 30 days in the future (e.g. ns-vs-ms parse glitch) is corrupt.
+    inserted = store.add_bar("XRPUSDT", _ws_bar(now + 30 * MS_PER_DAY), confirmed=True)
+    assert inserted is False
+    # The two legitimate symbols survive — NOT mass-evicted.
+    assert store.symbol_count() == 2
+    frame = store.get_klines(["BTCUSDT"], start_ms=now - MS_PER_HOUR, end_ms=now)
+    assert frame.height == 1
+
+
+def test_bootstrap_skips_far_future_bars() -> None:
+    """H6: bulk bootstrap must drop corrupt far-future bars, not let them
+    poison the eviction reference for the good bars in the same batch."""
+    from liquidity_migration.kline_store import _utc_now_ms
+
+    store = KlineStore(cache_root=None, retain_days=2, flush_interval_seconds=0.0)
+    now = _utc_now_ms()
+    accepted = store.bootstrap_symbol(
+        "BTCUSDT",
+        [_ws_bar(now - MS_PER_HOUR), _ws_bar(now + 30 * MS_PER_DAY)],
+    )
+    assert accepted == 1
+    assert store.symbol_count() == 1
+
+
 def test_get_klines_returns_inclusive_window() -> None:
     store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
     for hour in range(10):

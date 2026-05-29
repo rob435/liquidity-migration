@@ -1287,20 +1287,37 @@ def test_volume_event_promotion_uses_documented_drawdown_gate() -> None:
     assert "drawdown_fail" in fields["promotion_reason"]
 
 
-def test_volume_event_promotion_whole_period_only_passes_without_splits() -> None:
-    """When splits=() (default), the per-split gates degenerate to no-ops and
-    the gate passes once PIT preconditions are satisfied. Whole-period checks
-    on max DD / Sharpe live on the summary row, not in _promotion_fields."""
-    fields = _promotion_fields(
-        [],
-        config=VolumeEventResearchConfig(),
-        pit_membership_pass=True,
-        full_pit_universe_pass=True,
+def test_volume_event_promotion_whole_period_gate_binds_on_dd_and_sharpe() -> None:
+    """M1: when splits=() the per-split gates degenerate to no-ops, so the
+    whole-period max-DD and Sharpe thresholds (from the summary) MUST bind.
+    Previously this branch passed unconditionally (PIT-coverage flag mislabeled
+    as a quality gate)."""
+    config = VolumeEventResearchConfig()  # promotion_max_drawdown=-0.25, min_avg_sharpe=0.50
+
+    # Good whole-period run: shallow DD, healthy Sharpe -> passes.
+    good = _promotion_fields(
+        [], config=config, pit_membership_pass=True, full_pit_universe_pass=True,
+        whole_period_drawdown=-0.20, whole_period_sharpe=0.80,
     )
-    assert fields["pre_pit_gate_pass"] is True
-    assert fields["promotion_gate_pass"] is True
-    assert fields["promotion_reason"] == "pass"
-    assert fields["expected_splits"] == 0
+    assert good["pre_pit_gate_pass"] is True
+    assert good["promotion_gate_pass"] is True
+    assert good["expected_splits"] == 0
+
+    # Sharpe below threshold -> the gate now (correctly) fails.
+    weak_sharpe = _promotion_fields(
+        [], config=config, pit_membership_pass=True, full_pit_universe_pass=True,
+        whole_period_drawdown=-0.20, whole_period_sharpe=0.30,
+    )
+    assert weak_sharpe["pre_pit_gate_pass"] is False
+    assert weak_sharpe["promotion_gate_pass"] is False
+
+    # Drawdown beyond the cap -> fails.
+    blown_dd = _promotion_fields(
+        [], config=config, pit_membership_pass=True, full_pit_universe_pass=True,
+        whole_period_drawdown=-0.40, whole_period_sharpe=0.80,
+    )
+    assert blown_dd["pre_pit_gate_pass"] is False
+    assert blown_dd["promotion_gate_pass"] is False
 
 
 def test_attach_event_archive_membership_flags_symbol_dates() -> None:

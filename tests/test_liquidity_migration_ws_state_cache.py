@@ -248,6 +248,56 @@ def test_replace_with_rest_snapshot_overwrites_state() -> None:
     assert symbols == {"ETHUSDT"}
 
 
+def test_failed_reconcile_keeps_last_good_positions_and_propagates_error() -> None:
+    """CRITICAL regression (C1): a transient get_positions failure returns
+    ([], error). The reconcile must NOT wipe the cached positions to empty —
+    that, combined with snapshot() laundering the error to "", drove the
+    cycle to false-orphan-close every open trade while the real positions
+    stayed open. Keep last-good and surface the error instead."""
+    cache = PrivateStateCache()
+    cache.seed(positions=[{"symbol": "BTCUSDT", "size": "1.0", "side": "Sell"}])
+    # Transient REST failure: empty list + non-empty error.
+    cache.replace_with_rest_snapshot(positions=[], position_error="get_positions timeout")
+    snap = cache.snapshot()
+    # Last-good position is retained, NOT wiped.
+    assert {row["symbol"] for row in snap["raw_positions"]} == {"BTCUSDT"}
+    # The error is propagated so the cycle's orphan guard engages.
+    assert snap["position_error"] == "get_positions timeout"
+
+
+def test_failed_open_orders_reconcile_keeps_last_good_orders_and_propagates_error() -> None:
+    cache = PrivateStateCache()
+    cache.seed(open_orders=[{"orderId": "1", "orderLinkId": "A", "symbol": "BTCUSDT", "orderStatus": "New"}])
+    cache.replace_with_rest_snapshot(open_orders=[], open_order_error="get_open_orders 5xx")
+    snap = cache.snapshot()
+    assert len(snap["raw_open_orders"]) == 1
+    assert snap["open_order_error"] == "get_open_orders 5xx"
+
+
+def test_successful_empty_reconcile_clears_positions_and_error() -> None:
+    """A genuine empty response (no error) is a real "all closed" signal:
+    the cache must replace to empty AND clear any prior error so a legit
+    orphan-close still fires."""
+    cache = PrivateStateCache()
+    cache.seed(positions=[{"symbol": "BTCUSDT", "size": "1.0", "side": "Sell"}])
+    cache.replace_with_rest_snapshot(positions=[], position_error="stale")
+    assert cache.snapshot()["position_error"] == "stale"
+    cache.replace_with_rest_snapshot(positions=[], position_error="")
+    snap = cache.snapshot()
+    assert snap["raw_positions"] == []
+    assert snap["position_error"] == ""
+
+
+def test_live_ws_position_push_clears_stale_reconcile_error() -> None:
+    cache = PrivateStateCache()
+    cache.seed(positions=[{"symbol": "BTCUSDT", "size": "1.0", "side": "Sell"}])
+    cache.replace_with_rest_snapshot(positions=[], position_error="timeout")
+    assert cache.snapshot()["position_error"] == "timeout"
+    # A live WS position push restores authoritative, fresh state.
+    cache.on_position_event(_ws_message({"symbol": "ETHUSDT", "size": "0.5", "side": "Buy"}))
+    assert cache.snapshot()["position_error"] == ""
+
+
 def test_is_stale_returns_true_when_no_events() -> None:
     cache = PrivateStateCache()
     # Never seeded / never updated — instantly stale.

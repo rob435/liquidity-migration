@@ -90,8 +90,13 @@ fi
 
 order_args=()
 if [[ "${SUBMIT_ORDERS:-0}" == "1" ]]; then
-    if [[ "$STRATEGY_PROFILE" != "promoted" ]]; then
-        echo "Only STRATEGY_PROFILE=promoted is allowed to submit demo entry orders." >&2
+    # Submit-eligible profiles are a configurable space-separated allowlist
+    # (was a hard-coded single profile). Default keeps the safe value; set
+    # ALLOWED_SUBMIT_PROFILES="promoted demo_relaxed ..." to enable others
+    # without editing this script. Safe-by-default: SUBMIT_ORDERS defaults 0.
+    ALLOWED_SUBMIT_PROFILES="${ALLOWED_SUBMIT_PROFILES:-promoted}"
+    if [[ " $ALLOWED_SUBMIT_PROFILES " != *" $STRATEGY_PROFILE "* ]]; then
+        echo "STRATEGY_PROFILE=$STRATEGY_PROFILE not in ALLOWED_SUBMIT_PROFILES='$ALLOWED_SUBMIT_PROFILES'; refusing to submit." >&2
         exit 2
     fi
     if [[ "${CONFIRM_DEMO_ORDERS:-0}" != "1" ]]; then

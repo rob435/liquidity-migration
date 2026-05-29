@@ -14,7 +14,7 @@ from typing import Any
 import polars as pl
 
 from ._common import MS_PER_DAY
-from .bybit import BybitPrivateWebSocketStream, BybitPublicTickerStream, BybitWebSocketTradeClient, resolve_private_credentials
+from .bybit import BybitPrivateWebSocketStream, BybitPublicTickerStream, build_ws_trade_client, resolve_private_credentials
 from .config import ResearchConfig
 from decimal import Decimal
 
@@ -89,6 +89,13 @@ def _ensure_default_log_handler() -> None:
     root_pkg_logger.setLevel(getattr(logging, level_name, logging.INFO))
 
 
+# Default per-list cap on the append-only telemetry logs in WebSocketRiskState.
+# Reports only ever display the last 20; 2000 is a generous audit tail that
+# bounds a long-lived daemon's memory to a few MB. Overridable via
+# EventWebSocketRiskConfig.telemetry_log_retention.
+_LOG_RETENTION = 2000
+
+
 @dataclass(frozen=True, slots=True)
 class EventWebSocketRiskConfig:
     submit_orders: bool = False
@@ -112,6 +119,10 @@ class EventWebSocketRiskConfig:
     # backbone reconnects in <10s) but tolerates ordinary brief silences.
     stale_ws_seconds: float = 60.0
     stream_start_timeout_seconds: float = 3.0
+    # Longer budget specifically for the WS trade-client connect, which now
+    # retries with jittered backoff (de-syncing the multi-daemon demo storm);
+    # the 3s stream-start timeout is too tight for the retry. Startup-only.
+    ws_trade_connect_timeout_seconds: float = 15.0
     fast_execution_stream: bool = False
     stop_tolerance_bps: float = 1.0
     pending_exit_guard_seconds: float = 120.0
@@ -143,6 +154,10 @@ class EventWebSocketRiskConfig:
     long_data_root: str = ""
     long_trades_dataset: str = "long_native_demo_trades"
     long_orders_dataset: str = "long_native_demo_orders"
+    # Per-list cap on the append-only telemetry logs (exits/repairs/
+    # reconciliations/pending_fill_reconciliations/errors) so a long-lived
+    # daemon can't OOM. Configurable; reports only ever display the last 20.
+    telemetry_log_retention: int = _LOG_RETENTION
 
 
 @dataclass(slots=True)
@@ -191,6 +206,18 @@ class WebSocketRiskState:
     reconciliations: list[dict[str, Any]] = field(default_factory=list)
     pending_fill_reconciliations: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    # Cumulative count of telemetry-log rows pruned to bound daemon memory.
+    # The history lists above (exits/repairs/reconciliations/
+    # pending_fill_reconciliations/errors) are append-only display logs; left
+    # unbounded they grow for the daemon's lifetime and eventually OOM-kill it
+    # (which would orphan an open position mid-flight). _prune_state_logs caps
+    # each to _LOG_RETENTION and accumulates the dropped count here so the
+    # cumulative report counters stay exact.
+    exits_evicted: int = 0
+    repairs_evicted: int = 0
+    reconciliations_evicted: int = 0
+    pending_fill_reconciliations_evicted: int = 0
+    errors_evicted: int = 0
     # Last error string from the most recent ``_safe_raw_positions`` call (or
     # empty when the snapshot was clean). Plumbed into the orphan reconciler
     # so a transient REST failure -- which leaves ``positions_by_symbol``
@@ -417,18 +444,24 @@ class EventWebSocketRiskEngine:
                 self.public_stream = stream
         self.subscribe_tickers(set(self.state.positions_by_symbol) | set(_column_values(self.state.open_trades, "symbol")))
         if self.risk.order_submit_mode in {"ws", "ws_then_rest"} and self.trade_client is None:
-            if self.risk.order_submit_mode == "ws_then_rest":
-                self.state.ws_order_unavailable = _DEMO_WS_TRADE_UNAVAILABLE
-                return
+            # WS-first exits: actually ATTEMPT the WS trade client (with jittered
+            # retry) rather than pre-emptively giving up in ws_then_rest mode —
+            # WS order submission saves ~150-200ms per exit (lowest-latency
+            # stops). Falls back to REST on genuine failure (the seatbelt).
             client, error = _call_with_timeout(
                 "websocket trade client construction",
                 lambda: _build_ws_trade_client(self.config),
-                timeout_seconds=self.risk.stream_start_timeout_seconds,
+                timeout_seconds=max(
+                    self.risk.stream_start_timeout_seconds,
+                    self.risk.ws_trade_connect_timeout_seconds,
+                ),
             )
             if error:
-                self.state.ws_order_unavailable = error[:500]
+                # ws-only mode with live submission must not silently REST;
+                # ws_then_rest degrades to REST with the operator-friendly note.
                 if self.risk.order_submit_mode == "ws" and self.risk.submit_orders:
                     raise RuntimeError(error)
+                self.state.ws_order_unavailable = _DEMO_WS_TRADE_UNAVAILABLE
             else:
                 self.trade_client = client
 
@@ -1820,7 +1853,23 @@ class EventWebSocketRiskEngine:
             if ts_ms > 0 and now_ms - ts_ms > max_age_ms:
                 self.clear_submitted_symbol(symbol)
 
+    def _prune_state_logs(self) -> None:
+        """Cap the append-only telemetry logs so a long-lived daemon can't OOM
+        (which would orphan an open position). Cumulative report counters add
+        the evicted total back, so the reported counts stay exact."""
+        retention = getattr(self.risk, "telemetry_log_retention", _LOG_RETENTION)
+        for name in (
+            "exits", "repairs", "reconciliations", "pending_fill_reconciliations", "errors",
+        ):
+            log = getattr(self.state, name)
+            overflow = len(log) - retention
+            if overflow > 0:
+                evicted_attr = f"{name}_evicted"
+                setattr(self.state, evicted_attr, getattr(self.state, evicted_attr) + overflow)
+                del log[:overflow]
+
     def write_report(self, *, reason: str) -> dict[str, Any]:
+        self._prune_state_logs()
         now_ms = _now_ms()
         position_snapshot = build_position_pnl_snapshot(list(self.state.positions_by_symbol.values()))
         bybit_summary = summarize_position_pnl(position_snapshot)
@@ -1865,11 +1914,11 @@ class EventWebSocketRiskEngine:
             "entry_candidates": 0,
             "entries_executed": 0,
             "exit_candidates": len(self.state.orders),
-            "exits_executed": len(self.state.exits),
-            "stop_repairs": len(self.state.repairs),
+            "exits_executed": len(self.state.exits) + self.state.exits_evicted,
+            "stop_repairs": len(self.state.repairs) + self.state.repairs_evicted,
             "pending_entry_positions": len(pending_entry_positions),
-            "pending_fills_reconciled": len(self.state.pending_fill_reconciliations),
-            "pending_order_fills_reconciled": len(self.state.pending_fill_reconciliations),
+            "pending_fills_reconciled": len(self.state.pending_fill_reconciliations) + self.state.pending_fill_reconciliations_evicted,
+            "pending_order_fills_reconciled": len(self.state.pending_fill_reconciliations) + self.state.pending_fill_reconciliations_evicted,
             "pending_entry_fills_reconciled": pending_entry_fills,
             "pending_exit_fills_reconciled": pending_exit_fills,
             "untracked_exits_submitted": sum(1 for row in self.state.orders if str(row.get("exit_reason", "")) == "untracked_position"),
@@ -1998,9 +2047,12 @@ def _build_private_stream(config: ResearchConfig) -> BybitPrivateWebSocketStream
     )
 
 
-def _build_ws_trade_client(config: ResearchConfig) -> BybitWebSocketTradeClient:
+def _build_ws_trade_client(config: ResearchConfig) -> Any:
     api_key, api_secret, demo = resolve_private_credentials()
-    return BybitWebSocketTradeClient(
+    # Jittered retry de-syncs the multi-daemon demo connect storm and rides
+    # through transient rejects so WS exits actually establish (lowest-latency
+    # stop submission); permanent errors (no pybit / no creds) raise fast.
+    return build_ws_trade_client(
         category=config.exchange.category,
         testnet=config.exchange.testnet,
         demo=demo,

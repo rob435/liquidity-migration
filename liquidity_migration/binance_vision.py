@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import json
 import re
 import shutil
 import sys
@@ -214,16 +215,57 @@ def rewrite_manifest_to_coverage(data_root: str | Path, *, min_hourly_bars: int 
 # End-to-end OOS root build
 # --------------------------------------------------------------------------
 
+FAILED_JOBS_ARTIFACT = "binance_vision_failed_jobs.json"
+
+
+def _assert_download_completeness(
+    failed_jobs: list[tuple[str, str]],
+    total_jobs: int,
+    *,
+    max_failure_ratio: float,
+    artifact_path: Path | None = None,
+) -> None:
+    """Refuse to build a survivorship-biased OOS root.
+
+    A monthly archive file that fails all download retries currently just
+    vanishes from the dataset — silently dropping that (symbol, month) from the
+    PIT universe, exactly the survivorship failure
+    docs/backtesting_errors_we_never_repeat.md rules 1 & 12 forbid. Persist the
+    failed-jobs list for audit, then raise when the failure rate exceeds the
+    tolerance so a holey root can never be cited as OOS evidence."""
+    if artifact_path is not None:
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text(
+            json.dumps([{"symbol": s, "month": m} for s, m in failed_jobs], indent=2)
+        )
+    if total_jobs <= 0:
+        return
+    ratio = len(failed_jobs) / total_jobs
+    if ratio > max_failure_ratio:
+        sample = ", ".join(f"{s}:{m}" for s, m in failed_jobs[:10])
+        raise RuntimeError(
+            f"binance OOS build incomplete: {len(failed_jobs)}/{total_jobs} monthly "
+            f"files failed to download ({ratio:.2%} > {max_failure_ratio:.2%} tolerance). "
+            f"Refusing to write a survivorship-biased PIT root. First failures: {sample}. "
+            f"Failed-jobs artifact: {artifact_path}."
+        )
+
+
 def build_binance_oos(
     data_root: str | Path,
     *,
     end_date: str = "2023-05-01",
     workers: int = 24,
+    max_failure_ratio: float = 0.005,
 ) -> dict:
     """Build a Bybit-shaped PIT data root from the Binance Vision archive.
 
     end_date is the exclusive upper bound on signal days (klines kept strictly
     before it). Writes klines_1h and a coverage-filtered archive_trade_manifest.
+
+    Fails (does NOT write) when more than ``max_failure_ratio`` of the monthly
+    archive files fail to download, so a holey, survivorship-biased universe is
+    never silently produced (M5).
     """
     root = Path(data_root).expanduser()
     end_ms = int(pl.Series([end_date]).str.to_datetime().dt.timestamp("ms")[0])
@@ -236,7 +278,8 @@ def build_binance_oos(
           file=sys.stderr)
 
     all_rows: list[dict] = []
-    done = failed = 0
+    failed_jobs: list[tuple[str, str]] = []
+    done = 0
     with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(fetch_month_klines, s, m): (s, m) for s, m in jobs}
         for fut in as_completed(futs):
@@ -244,11 +287,19 @@ def build_binance_oos(
             if rows:
                 all_rows.extend(rows)
             else:
-                failed += 1
+                failed_jobs.append(futs[fut])
             done += 1
             if done % 500 == 0:
                 print(f"[binance_vision]  {done}/{len(jobs)} files, {len(all_rows):,} rows, "
-                      f"{failed} failed", file=sys.stderr)
+                      f"{len(failed_jobs)} failed", file=sys.stderr)
+
+    failed = len(failed_jobs)
+    # Persist the failed-jobs list and refuse to write a holey root (M5).
+    _assert_download_completeness(
+        failed_jobs, len(jobs),
+        max_failure_ratio=max_failure_ratio,
+        artifact_path=root / FAILED_JOBS_ARTIFACT,
+    )
 
     if not all_rows:
         raise RuntimeError("no klines downloaded from data.binance.vision")

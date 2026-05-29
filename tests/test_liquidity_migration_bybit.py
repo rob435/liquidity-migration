@@ -55,6 +55,39 @@ def test_bybit_private_client_constructs_demo_session(monkeypatch) -> None:
     assert client._client.kwargs["api_secret"] == "secret"
 
 
+def test_get_funding_settlements_follows_pagination_cursor(monkeypatch) -> None:
+    """H4: the funding total must not be truncated to the first 200-row page —
+    follow nextPageCursor to the end."""
+    pages = {
+        None: {
+            "retCode": 0,
+            "result": {"list": [{"funding": "1"}, {"funding": "2"}], "nextPageCursor": "page2"},
+        },
+        "page2": {
+            "retCode": 0,
+            "result": {"list": [{"funding": "3"}], "nextPageCursor": ""},
+        },
+    }
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.calls: list[dict] = []
+
+        def get_transaction_log(self, **params):
+            self.calls.append(params)
+            return pages[params.get("cursor")]
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+
+    rows = client.get_funding_settlements(start_time_ms=1_000, end_time_ms=2_000)
+
+    assert [row["funding"] for row in rows] == ["1", "2", "3"]
+    # Two pages fetched: the cursor was followed exactly once.
+    assert len(client._client.calls) == 2
+    assert client._client.calls[1]["cursor"] == "page2"
+
+
 def test_bybit_public_trade_stream_subscribes_symbols(monkeypatch) -> None:
     class FakeWebSocket:
         def __init__(self, **kwargs):
@@ -674,3 +707,55 @@ def test_private_credentials_present_uses_active_account(monkeypatch) -> None:
     monkeypatch.setenv("BYBIT_REAL_API_KEY", "k")
     monkeypatch.setenv("BYBIT_REAL_API_SECRET", "s")
     assert _private_credentials_present() is True
+
+
+def test_build_ws_trade_client_retries_then_succeeds(monkeypatch) -> None:
+    """The multi-daemon demo connect-storm fix: a transient connect failure is
+    retried with backoff (fresh client each attempt) until it succeeds."""
+    monkeypatch.setattr(bybit, "WebSocketTrading", object)  # pybit "present"
+    calls = {"n": 0}
+
+    class _Fake:
+        def __init__(self, **kwargs):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise RuntimeError("connection failed. Too many connection attempts")
+
+    monkeypatch.setattr(bybit, "BybitWebSocketTradeClient", _Fake)
+    slept: list[float] = []
+    client = bybit.build_ws_trade_client(
+        category="linear", testnet=False, demo=True, api_key="k", api_secret="s",
+        sleep=lambda s: slept.append(s), rng=lambda a, b: 0.0,
+    )
+    assert isinstance(client, _Fake)
+    assert calls["n"] == 3  # failed twice, succeeded on the third fresh client
+    assert len(slept) >= 2  # backoff slept between retries
+
+
+def test_build_ws_trade_client_raises_after_max_attempts(monkeypatch) -> None:
+    """All attempts fail -> raise so the caller falls back to REST (seatbelt)."""
+    monkeypatch.setattr(bybit, "WebSocketTrading", object)
+
+    class _AlwaysFail:
+        def __init__(self, **kwargs):
+            raise RuntimeError("too many connection attempts")
+
+    monkeypatch.setattr(bybit, "BybitWebSocketTradeClient", _AlwaysFail)
+    with pytest.raises(RuntimeError, match="too many"):
+        bybit.build_ws_trade_client(
+            category="linear", testnet=False, demo=True, api_key="k", api_secret="s",
+            attempts=3, sleep=lambda s: None, rng=lambda a, b: 0.0,
+        )
+
+
+def test_build_ws_trade_client_fails_fast_on_missing_creds(monkeypatch) -> None:
+    """Permanent errors (no creds) raise immediately with NO jitter/backoff —
+    keeps credential-less unit tests fast and network-free."""
+    monkeypatch.setattr(bybit, "WebSocketTrading", object)
+    slept: list[float] = []
+    with pytest.raises(RuntimeError, match="API key"):
+        bybit.build_ws_trade_client(
+            category="linear", testnet=False, demo=True, api_key=None, api_secret=None,
+            sleep=lambda s: slept.append(s), rng=lambda a, b: 0.0,
+        )
+    assert slept == []

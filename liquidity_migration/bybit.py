@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+import random
 import threading
 import time
 from collections import deque
@@ -534,6 +535,7 @@ class BybitPrivateClient:
         start_time_ms: int | None = None,
         end_time_ms: int | None = None,
         limit: int = 200,
+        max_pages: int = 50,
     ) -> list[dict[str, Any]]:
         """Funding-settlement rows from the account transaction log.
 
@@ -543,19 +545,39 @@ class BybitPrivateClient:
         signed account cash-flow (``funding``/``cashFlow``/``change``; positive =
         the account received funding). Returns the result.list as-is (empty list
         on a missing endpoint, mirroring get_closed_pnl).
+
+        Bybit caps the transaction log at 200 rows/page. Over a multi-day
+        reconciliation lookback a funding-active account easily exceeds one
+        page (funding settles every 8h per open position), so follow
+        ``nextPageCursor`` to the end. Without this the funding total — a
+        first-order driver of the short's edge — was silently truncated to
+        the first 200 rows. ``max_pages`` bounds the loop defensively.
         """
-        params: dict[str, Any] = {
+        base_params: dict[str, Any] = {
             "accountType": "UNIFIED",
             "category": self.category,
             "type": "SETTLEMENT",
             "limit": max(1, min(int(limit), 200)),
         }
         if start_time_ms is not None:
-            params["startTime"] = int(start_time_ms)
+            base_params["startTime"] = int(start_time_ms)
         if end_time_ms is not None:
-            params["endTime"] = int(end_time_ms)
-        payload = self._call_optional(("get_transaction_log",), **params)
-        return payload.get("result", {}).get("list", []) if payload else []
+            base_params["endTime"] = int(end_time_ms)
+        rows: list[dict[str, Any]] = []
+        cursor: str | None = None
+        for _ in range(max(1, int(max_pages))):
+            params = dict(base_params)
+            if cursor:
+                params["cursor"] = cursor
+            payload = self._call_optional(("get_transaction_log",), **params)
+            if not payload:
+                break
+            result = payload.get("result", {})
+            rows.extend(result.get("list", []))
+            cursor = result.get("nextPageCursor") or None
+            if not cursor:
+                break
+        return rows
 
     def set_leverage(self, *, symbol: str, buy_leverage: float = 1.0, sell_leverage: float | None = None) -> dict[str, Any]:
         if buy_leverage <= 0.0:
@@ -1097,6 +1119,74 @@ class BybitWebSocketTradeClient:
 
     def close(self) -> None:
         _close_ws_client(self._client)
+
+
+def build_ws_trade_client(
+    *,
+    category: str,
+    testnet: bool,
+    demo: bool,
+    api_key: str | None,
+    api_secret: str | None,
+    recv_window: int = 1000,
+    attempts: int = 4,
+    base_backoff_seconds: float = 0.5,
+    max_backoff_seconds: float = 8.0,
+    initial_jitter_seconds: float = 2.0,
+    sleep: Callable[[float], None] = time.sleep,
+    rng: Callable[[float, float], float] = random.uniform,
+) -> BybitWebSocketTradeClient:
+    """Build a WS trade client, retrying with jittered exponential backoff.
+
+    pybit's ``WebSocketTrading`` connects synchronously in its constructor and,
+    on repeated failure, raises AND permanently stops reconnecting on that
+    client ("Too many connection attempts. pybit will no longer try to
+    reconnect"). On the demo endpoint this is hit when several daemons open
+    auth-WS connections from one IP at once (per-IP connection-attempt rate
+    limit). The fix:
+
+      * each retry builds a FRESH client (the old one won't reconnect);
+      * an initial random jitter de-syncs the simultaneous boot of the short /
+        long / risk daemons so their first attempts don't collide;
+      * full-jitter exponential backoff spreads the retries.
+
+    On mainnet the first attempt typically succeeds instantly. If all attempts
+    fail the last error is raised so the caller falls back to REST (the
+    seatbelt). ``sleep``/``rng`` are injectable for deterministic tests.
+
+    PERMANENT errors (pybit not installed, or missing credentials) raise
+    IMMEDIATELY with no jitter/backoff — retrying can't fix them, and this keeps
+    credential-less unit tests fast and network-free."""
+    if WebSocketTrading is None:
+        raise RuntimeError("pybit is required for BybitWebSocketTradeClient")
+    if not api_key or not api_secret:
+        raise RuntimeError("Bybit private websocket trading requires API key and secret")
+    if initial_jitter_seconds > 0.0:
+        sleep(rng(0.0, initial_jitter_seconds))
+    last_exc: Exception | None = None
+    attempts = max(1, attempts)
+    for i in range(attempts):
+        try:
+            return BybitWebSocketTradeClient(
+                category=category,
+                testnet=testnet,
+                demo=demo,
+                api_key=api_key,
+                api_secret=api_secret,
+                recv_window=recv_window,
+            )
+        except Exception as exc:  # noqa: BLE001 - retry transient connect failures; caller REST-falls-back
+            last_exc = exc
+            if i + 1 >= attempts:
+                break
+            backoff = min(max_backoff_seconds, base_backoff_seconds * (2 ** i))
+            backoff += rng(0.0, backoff)  # full jitter
+            logging.getLogger("liquidity_migration.bybit").info(
+                "ws trade client connect attempt %d/%d failed (%s); retrying in %.1fs",
+                i + 1, attempts, str(exc)[:140], backoff,
+            )
+            sleep(backoff)
+    raise last_exc if last_exc is not None else RuntimeError("ws trade client build failed")
 
 
 def _close_ws_client(client: Any, *, timeout_seconds: float = 3.0) -> None:

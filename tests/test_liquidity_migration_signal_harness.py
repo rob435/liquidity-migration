@@ -174,6 +174,33 @@ def test_forward_returns_are_null_past_window_end() -> None:
     assert fwd["fwd_ret_7d"].null_count() == fwd.height
 
 
+def test_forward_returns_calendar_correct_across_missing_day() -> None:
+    """M4: a missing calendar day must not be skipped positionally. A row whose
+    entry (D+1) or exit (D+1+N) calendar day is absent gets a NULL forward
+    return, not a misaligned one. With a positional shift, day-2 below would
+    have wrongly produced close[D4]/close[D... ] — a 2-calendar-day return
+    mislabeled as fwd_ret_1d."""
+    base = _date_ms("2025-01-01")
+    present = [0, 1, 2, 4, 5, 6]  # 2025-01-04 (day 3) is MISSING
+    daily = pl.DataFrame(
+        {
+            "symbol": ["AAA"] * len(present),
+            "ts_ms": [base + d * MS_PER_DAY for d in present],
+            "first_bar_close": [float(d + 10) for d in present],  # close = day_index + 10
+        }
+    )
+    fwd = _attach_forward_returns(daily, horizons=(1,))
+    by_day = {(row["ts_ms"] - base) // MS_PER_DAY: row for row in fwd.to_dicts()}
+    # Day 0: entry=D1 (11), exit=D2 (12) — both present → valid.
+    assert by_day[0]["fwd_ret_1d"] == pytest.approx(12.0 / 11.0 - 1.0)
+    # Day 1: entry=D2 (12) present, exit=D3 MISSING → null (was 13/12-1 positionally).
+    assert by_day[1]["fwd_ret_1d"] is None
+    # Day 2: entry=D3 MISSING → null (positional shift wrongly gave 15/14-1).
+    assert by_day[2]["fwd_ret_1d"] is None
+    # Day 4: entry=D5 (15), exit=D6 (16) — both present → valid.
+    assert by_day[4]["fwd_ret_1d"] == pytest.approx(16.0 / 15.0 - 1.0)
+
+
 # ============================================================================
 # Causality (the bug we will not repeat)
 # ============================================================================

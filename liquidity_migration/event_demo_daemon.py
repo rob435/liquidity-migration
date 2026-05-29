@@ -49,7 +49,7 @@ from .bybit import (
     BybitPrivateWebSocketStream,
     BybitPublicTickerStream,
     BybitTradeRouter,
-    BybitWebSocketTradeClient,
+    build_ws_trade_client,
     resolve_private_credentials,
 )
 from .config import ResearchConfig
@@ -122,6 +122,8 @@ class EventDemoDaemon:
         ws_trade_timeout_seconds: float = 5.0,
         trade_router: Any | None = None,
         trade_router_factory: Callable[[ResearchConfig, EventDemoCycleConfig], Any] | None = None,
+        event_driven_cycle: bool = True,
+        min_cycle_interval_seconds: float = 2.0,
     ) -> None:
         if interval_seconds < 0.0:
             raise ValueError("interval_seconds must be non-negative")
@@ -140,6 +142,19 @@ class EventDemoDaemon:
         self._telegram_sender = telegram_sender
         self.router = ExecutionEventRouter()
         self._shutdown = threading.Event()
+        # WS-event-driven cycle: the kline manager sets _bar_event when a new
+        # confirmed bar boundary lands; the run loop waits on it so a cycle
+        # fires within ~min_cycle_interval of fresh data instead of up to
+        # interval_seconds later on a blind timer. A safety heartbeat
+        # (_max_idle_seconds) still fires the cycle even with zero bar events
+        # (exits/reconcile/staleness). event_driven_cycle=False reverts to the
+        # legacy fixed-interval grid.
+        self._bar_event = threading.Event()
+        self._event_driven_cycle = bool(event_driven_cycle)
+        self._min_cycle_interval_seconds = max(0.0, float(min_cycle_interval_seconds))
+        self._max_idle_seconds = self.interval_seconds if self.interval_seconds > 0.0 else 60.0
+        self._cycles_kline_triggered = 0
+        self._cycles_timer_triggered = 0
         self._ws_stream: Any | None = None
         self._cycles_run = 0
         self._cycle_errors = 0
@@ -262,6 +277,9 @@ class EventDemoDaemon:
         if not self._shutdown.is_set():
             _logger.info("shutdown requested; will drain current cycle and exit")
         self._shutdown.set()
+        # Wake the event-driven wait (which blocks on _bar_event, not _shutdown)
+        # so SIGTERM drains promptly instead of blocking up to the heartbeat.
+        self._bar_event.set()
 
     def _send_telegram(self, text: str) -> None:
         """Daemon-level operator notification. Cycle-level events already
@@ -432,6 +450,15 @@ class EventDemoDaemon:
         # safety net on the legacy path, but skip starting it under WS.
         if self._kline_stream_manager is not None:
             self._enable_kline_warmer = False
+            # Wire the WS bar signal so the run loop fires on fresh data.
+            if self._event_driven_cycle and hasattr(self._kline_stream_manager, "set_cycle_wake_event"):
+                self._kline_stream_manager.set_cycle_wake_event(self._bar_event)
+        elif self._event_driven_cycle:
+            # No WS kline manager (disabled/failed) → no bar events will arrive,
+            # so the event-driven wait would only ever fire on the heartbeat.
+            # Fall back to the timer grid so cadence matches interval_seconds.
+            self._event_driven_cycle = False
+            _logger.info("no kline stream manager; event-driven cycle disabled, using %.0fs timer", self.interval_seconds)
         self._start_kline_warmer()
         # Kick off seeding in a background thread (non-blocking). The seed
         # thread opens the public ticker WS once the seed populates the
@@ -462,24 +489,16 @@ class EventDemoDaemon:
         try:
             self._next_cycle_at = time.monotonic()
             while not self._shutdown.is_set():
+                # Arm the bar signal BEFORE the cycle so a bar landing DURING the
+                # cycle wakes the next wait (no missed-event window).
+                self._bar_event.clear()
                 self._run_one_cycle()
                 if self._shutdown.is_set():
                     break
-                self._next_cycle_at += self.interval_seconds
-                sleep_for = self._next_cycle_at - time.monotonic()
-                if sleep_for < 0.0:
-                    if self.interval_seconds > 0.0:
-                        self._cycle_overruns += 1
-                        _logger.warning(
-                            "cycle overran the %.0fs interval by %.1fs; next cycle "
-                            "starts immediately (overrun #%d)",
-                            self.interval_seconds,
-                            -sleep_for,
-                            self._cycle_overruns,
-                        )
-                    self._next_cycle_at = time.monotonic()
-                    sleep_for = 0.0
-                self._sleep_interruptible(sleep_for)
+                if self._event_driven_cycle:
+                    self._wait_for_next_cycle_event()
+                else:
+                    self._wait_for_next_cycle_timer()
         finally:
             self._stop_reconcile_thread()
             self._close_ticker_stream()
@@ -490,12 +509,15 @@ class EventDemoDaemon:
         _logger.info(
             "event_demo_daemon stopped cycles_run=%d cycle_errors=%d "
             "cycle_overruns=%d max_cycle_seconds=%.1f "
+            "cycles_kline_triggered=%d cycles_timer_triggered=%d "
             "kline_warms=%d kline_warms_skipped=%d kline_warm_errors=%d "
             "ws_gaps=%d ws_max_gap_seconds=%.1f router_stats=%s",
             self._cycles_run,
             self._cycle_errors,
             self._cycle_overruns,
             self._max_cycle_seconds,
+            self._cycles_kline_triggered,
+            self._cycles_timer_triggered,
             self._kline_warms,
             self._kline_warms_skipped,
             self._kline_warm_errors,
@@ -518,6 +540,8 @@ class EventDemoDaemon:
             "cycle_errors": self._cycle_errors,
             "cycle_overruns": self._cycle_overruns,
             "max_cycle_seconds": self._max_cycle_seconds,
+            "cycles_kline_triggered": self._cycles_kline_triggered,
+            "cycles_timer_triggered": self._cycles_timer_triggered,
             "kline_warms": self._kline_warms,
             "kline_warms_skipped": self._kline_warms_skipped,
             "kline_warm_errors": self._kline_warm_errors,
@@ -607,6 +631,52 @@ class EventDemoDaemon:
         if seconds <= 0.0:
             return
         self._shutdown.wait(timeout=seconds)
+
+    def _wait_for_next_cycle_timer(self) -> None:
+        """Legacy fixed-interval grid: cycle N+1 starts interval_seconds after
+        cycle N STARTED (not finished). We sleep only the remainder; an overrun
+        fires the next cycle immediately and re-anchors the grid so one slow
+        cycle never permanently shifts it."""
+        self._next_cycle_at += self.interval_seconds
+        sleep_for = self._next_cycle_at - time.monotonic()
+        if sleep_for < 0.0:
+            if self.interval_seconds > 0.0:
+                self._cycle_overruns += 1
+                _logger.warning(
+                    "cycle overran the %.0fs interval by %.1fs; next cycle "
+                    "starts immediately (overrun #%d)",
+                    self.interval_seconds,
+                    -sleep_for,
+                    self._cycle_overruns,
+                )
+            self._next_cycle_at = time.monotonic()
+            sleep_for = 0.0
+        self._cycles_timer_triggered += 1
+        self._sleep_interruptible(sleep_for)
+
+    def _wait_for_next_cycle_event(self) -> None:
+        """WS-event-driven wait: wake on a new confirmed-bar boundary, the safety
+        heartbeat, or shutdown — whichever first. The cycle then fires within
+        ~min_cycle_interval of fresh data instead of up to interval_seconds later.
+
+        A min-interval debounce floor (interruptible by shutdown) bounds how fast
+        consecutive cycles can start; a bar arriving during the floor stays
+        latched in _bar_event and satisfies the subsequent wait immediately. With
+        no bars, the wait times out at the heartbeat so exits/reconcile/staleness
+        still run. request_shutdown() sets _bar_event too, so SIGTERM returns
+        promptly rather than blocking up to the heartbeat."""
+        if self._min_cycle_interval_seconds > 0.0:
+            self._sleep_interruptible(self._min_cycle_interval_seconds)
+            if self._shutdown.is_set():
+                return
+        remaining = max(0.0, self._max_idle_seconds - self._min_cycle_interval_seconds)
+        woke = self._bar_event.wait(timeout=remaining)
+        if self._shutdown.is_set():
+            return
+        if woke:
+            self._cycles_kline_triggered += 1
+        else:
+            self._cycles_timer_triggered += 1
 
     def _start_kline_stream_manager(self) -> None:
         if not self.demo_config.ws_klines_enabled:
@@ -1098,7 +1168,11 @@ def _default_trade_router_factory(
     ws_client: Any | None = None
     if order_submit_mode in {"ws", "ws_then_rest"}:
         try:
-            ws_client = BybitWebSocketTradeClient(
+            # Retry with jittered backoff + initial jitter: on demo, several
+            # daemons open auth-WS from one IP at boot and collide on Bybit's
+            # connection-attempt rate limit; the jitter de-syncs them so WS
+            # execution actually establishes instead of dropping to REST.
+            ws_client = build_ws_trade_client(
                 category=config.exchange.category,
                 testnet=config.exchange.testnet,
                 demo=demo,
@@ -1165,6 +1239,8 @@ def _default_short_state_cache_seeder(
             wallet_error=snap.get("wallet_error", ""),
             positions=snap["raw_positions"],
             open_orders=snap["raw_open_orders"],
+            position_error=snap.get("position_error", ""),
+            open_order_error=snap.get("open_order_error", ""),
         )
         return
     api_key, api_secret, demo = resolve_private_credentials()
@@ -1182,6 +1258,8 @@ def _default_short_state_cache_seeder(
             wallet_error=snap.get("wallet_error", ""),
             positions=snap["raw_positions"],
             open_orders=snap["raw_open_orders"],
+            position_error=snap.get("position_error", ""),
+            open_order_error=snap.get("open_order_error", ""),
         )
     else:
         private_state_cache.replace_with_rest_snapshot()

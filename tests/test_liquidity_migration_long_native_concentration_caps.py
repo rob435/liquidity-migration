@@ -23,9 +23,36 @@ from liquidity_migration._common import MS_PER_HOUR
 from liquidity_migration.config import CostConfig
 from liquidity_migration.long_native import (
     LongNativeConfig,
+    _finalize_trade,
     _load_sector_map,
     _run_long_pipeline,
 )
+
+
+def test_finalize_trade_notional_multiplier_scales_gross() -> None:
+    """H1: notional_multiplier scales per-position gross (mirrors the live
+    daemon's --notional-multiplier). Default 1.0 is unchanged; 10x scales gross
+    10x so the long sleeve can be validated at the gross it actually deploys."""
+    pos = {
+        "entry_price": 100.0, "position_weight": 1.0, "symbol": "AAA",
+        "entry_ts_ms": 1_000_000, "entry_signal_ts_ms": 1_000_000 - MS_PER_HOUR,
+        "basket_id": "b1", "planned_exit_ts_ms": 2_000_000,
+        "stop_price": 90.0, "take_profit_price": 130.0, "pattern": "fomo_chase",
+    }
+    kw = dict(
+        exit_ts_ms=2_000_000, exit_price=110.0, reason="take_profit",
+        notional_weight=0.2, round_trip_cost_bps=0.0, funding_lookup={},
+    )
+    base = _finalize_trade(pos, **kw)  # default multiplier 1.0 — historical gross
+    scaled = _finalize_trade(pos, **kw, notional_multiplier=10.0)
+    # gross_trade_return = 110/100 - 1 = 0.10; effective_weight(1x)=0.2 -> 0.02
+    assert base["gross_return"] == pytest.approx(0.02)
+    assert base["notional_weight"] == pytest.approx(0.2)
+    # 10x -> effective_weight 2.0 -> gross 0.20
+    assert scaled["gross_return"] == pytest.approx(0.20)
+    assert scaled["gross_return"] == pytest.approx(base["gross_return"] * 10.0)
+    # The raw price move is unchanged — only the sizing scales.
+    assert scaled["gross_trade_return"] == base["gross_trade_return"]
 
 
 def _features_row(*, symbol: str, ts_ms: int, day_return: float = 0.20) -> dict:

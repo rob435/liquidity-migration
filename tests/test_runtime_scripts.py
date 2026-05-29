@@ -118,12 +118,19 @@ def test_systemd_entry_runner_uses_vps_cadence() -> None:
     assert "Environment=PYTHONDONTWRITEBYTECODE=1" in text
 
 
-def test_event_entry_runner_only_submits_promoted_profile() -> None:
+def test_event_entry_runner_submit_profile_allowlist_safe_by_default() -> None:
+    """The submit-profile gate is now a CONFIGURABLE allowlist, but still
+    safe-by-default: SUBMIT_ORDERS is opt-in and ALLOWED_SUBMIT_PROFILES
+    defaults to 'promoted' (so a non-promoted profile is refused unless the
+    operator explicitly widens the allowlist)."""
     repo = Path(__file__).resolve().parents[1]
     text = (repo / "scripts" / "run_bybit_demo_event_engine.sh").read_text(encoding="utf-8")
 
     assert 'SUBMIT_ORDERS:-0}" == "1"' in text
-    assert '$STRATEGY_PROFILE" != "promoted"' in text
+    # Safe default: allowlist falls back to 'promoted' when unset.
+    assert 'ALLOWED_SUBMIT_PROFILES:-promoted}' in text
+    # Membership check refuses a profile outside the allowlist.
+    assert 'ALLOWED_SUBMIT_PROFILES " != *" $STRATEGY_PROFILE "*' in text
 
 
 def test_event_entry_runner_wires_record_dry_run() -> None:
@@ -909,3 +916,23 @@ def test_health_watchdog_reports_per_cycle_stale_not_cumulative(tmp_path: Path) 
     assert "same 44 candidates" in msg, (
         "OK (sparse) text must reference the per-cycle figure for clarity"
     )
+
+
+def test_ws_first_ratio_surfaces_ws_vs_rest_mix() -> None:
+    """JS observability: the health watchdog surfaces the WS-first % so a
+    silently-dead WS feed (production stuck on the slow REST path) is visible."""
+    import sys
+
+    import polars as pl
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from check_demo_entry_health import ws_first_ratio
+
+    df = pl.DataFrame({
+        "ticker_source": ["ws_cache", "ws_cache", "ws_cache", "rest"],  # 75% WS
+        "private_snapshot_source": ["rest", "rest", "rest", "rest"],    # 0% WS
+    })
+    r = ws_first_ratio(df)
+    assert r["ticker_pct"] == pytest.approx(75.0)
+    assert r["private_pct"] == pytest.approx(0.0)
+    # Legacy ledger without the source columns -> empty (safe for the f-string).
+    assert ws_first_ratio(pl.DataFrame({"x": [1, 2]})) == {}
