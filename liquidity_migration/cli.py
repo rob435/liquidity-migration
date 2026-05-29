@@ -1452,6 +1452,34 @@ def _add_event_demo_cycle_parser(subparsers) -> None:
              "of firing the cycle on WS confirmed-bar events. Default: event-driven.",
     )
     event_demo.add_argument(
+        "--min-cycle-interval-seconds",
+        type=float,
+        default=None,
+        help="Daemon (event-driven): debounce floor between consecutive cycles "
+             "(default 2.0). Lower = faster bar->cycle reaction; a small floor still "
+             "coalesces a multi-frame burst.",
+    )
+    event_demo.add_argument(
+        "--order-submit-mode",
+        choices=["ws", "ws_then_rest", "rest"],
+        default=None,
+        help="Daemon: order submission path (default ws_then_rest). ws = WS-only, "
+             "rest = REST-only, ws_then_rest = WS with REST fallback.",
+    )
+    event_demo.add_argument(
+        "--ws-trade-timeout-seconds",
+        type=float,
+        default=None,
+        help="Daemon: WS trade-ack wait before REST fallback (default 5.0).",
+    )
+    event_demo.add_argument(
+        "--ws-gap-threshold-seconds",
+        type=float,
+        default=None,
+        help="Daemon: inter-WS-event gap beyond which a feed-staleness gap is counted "
+             "(default 120).",
+    )
+    event_demo.add_argument(
         "--ws-klines-enabled",
         dest="ws_klines_enabled",
         action="store_true",
@@ -2316,11 +2344,21 @@ def main(argv: list[str] | None = None) -> int:
         )
         if getattr(args, "daemon", False):
             from liquidity_migration.event_demo_daemon import EventDemoDaemon
-            daemon_timing_kwargs: dict[str, float] = {}
+            daemon_timing_kwargs: dict[str, object] = {}
             if getattr(args, "ticker_reconcile_interval_seconds", None) is not None:
                 daemon_timing_kwargs["ticker_reconcile_interval_seconds"] = args.ticker_reconcile_interval_seconds
             if getattr(args, "state_cache_stale_seconds", None) is not None:
                 daemon_timing_kwargs["state_cache_stale_seconds"] = args.state_cache_stale_seconds
+            # De-hard-coded daemon knobs: the daemon already accepts these; surface
+            # them so they are tunable (were pinned at construction defaults).
+            if getattr(args, "min_cycle_interval_seconds", None) is not None:
+                daemon_timing_kwargs["min_cycle_interval_seconds"] = args.min_cycle_interval_seconds
+            if getattr(args, "order_submit_mode", None) is not None:
+                daemon_timing_kwargs["order_submit_mode"] = args.order_submit_mode
+            if getattr(args, "ws_trade_timeout_seconds", None) is not None:
+                daemon_timing_kwargs["ws_trade_timeout_seconds"] = args.ws_trade_timeout_seconds
+            if getattr(args, "ws_gap_threshold_seconds", None) is not None:
+                daemon_timing_kwargs["ws_gap_threshold_seconds"] = args.ws_gap_threshold_seconds
             daemon = EventDemoDaemon(
                 data_root,
                 config=config,

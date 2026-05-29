@@ -85,13 +85,26 @@ def test_cli_event_demo_daemon_timing_flags_default_none(tmp_path: Path) -> None
     args = build_parser().parse_args(["--data-root", str(tmp_path), "event-demo-cycle"])
     assert args.ticker_reconcile_interval_seconds is None
     assert args.state_cache_stale_seconds is None
+    # De-hard-coded daemon knobs (were pinned at constructor defaults).
+    assert args.min_cycle_interval_seconds is None
+    assert args.order_submit_mode is None
+    assert args.ws_trade_timeout_seconds is None
+    assert args.ws_gap_threshold_seconds is None
     args2 = build_parser().parse_args([
         "--data-root", str(tmp_path), "event-demo-cycle",
         "--ticker-reconcile-interval-seconds", "30",
         "--state-cache-stale-seconds", "90",
+        "--min-cycle-interval-seconds", "0.5",
+        "--order-submit-mode", "ws",
+        "--ws-trade-timeout-seconds", "3",
+        "--ws-gap-threshold-seconds", "90",
     ])
     assert args2.ticker_reconcile_interval_seconds == 30.0
     assert args2.state_cache_stale_seconds == 90.0
+    assert args2.min_cycle_interval_seconds == 0.5
+    assert args2.order_submit_mode == "ws"
+    assert args2.ws_trade_timeout_seconds == 3.0
+    assert args2.ws_gap_threshold_seconds == 90.0
 
 
 def test_cli_archive_kline_default_requires_dense_utc_day(tmp_path: Path) -> None:
