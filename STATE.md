@@ -1,6 +1,6 @@
 # Research-program state
 
-**Last updated:** 2026-05-29 (R1+R13+R5+R2+R3 COMPLETE — H2 closed (bearish=0 trades); R9 = bullish stack only; R4 next)
+**Last updated:** 2026-05-29 (R1+R13+R5+R2+R3+R4 COMPLETE — H2 closed (bearish=0 trades); R9 = bullish stack only; R4 risk model = 6 validated factors, Tier-3 residual machinery confirmed; R6 next)
 
 > If you are a Claude session opening this repo for the first time, read this
 > file FIRST. It tells you in 60 seconds what's been done, what's running,
@@ -66,7 +66,7 @@
 | R1 | Per-filter hypothesis audit (softer criterion) | **COMPLETE (full-PIT, 2026-05-29).** 14/14 cells `full_pit_universe`. `drop_all_4` DEMO-ELIGIBLE (pooled MAR Δ +0.45) → re-baseline cascade TRIGGERED. Tag `r1_filter_audit_max12_2026-05-28`; ran `SWEEP_MAX_WORKERS=1` (23 GB/cell, 32 GB box — 8 OOMs). [verdict](docs/preregistration/round2/r1-per-filter-audit-verdict.md) |
 | R2 | Per-feature standalone decile-sort + correlation matrix | not started |
 | R3 | Bearish stack honest test (H2 retried) | not started — needs ~3h code (R3 filter flag additions) |
-| R4 | Risk-factor model construction (JS-style, 8 factors) | not started — needs ~3 days code |
+| R4 | Risk-factor model construction (JS-style, 8 factors) | **COMPLETE (full-PIT, 2026-05-29).** 6 validated factors (dropped XS-3d-momentum: sign-flip factor return; alt-season + CLI deferred, off critical path). All 3 criteria pass both venues; model explains ~47% of XS fwd-ret variance, residual mean ~0 → Tier-3 residual-Sharpe machinery confirmed. Tag `r4_risk_model_2026-05-29`. [verdict](docs/preregistration/round2/r4-risk-model-verdict.md) |
 | R5 | 1/realized-vol position sizing | not started — needs ~1 day code |
 | R6 | Per-name per-bar cost model | not started — needs ~2 days code |
 | R7 | Stress test suite (named historical events) | not started (depends on R4+R6) |
@@ -94,7 +94,7 @@ R12a/b sniper + C0 continuous engine).
   promoted profile. Ledgers in `data/bybit-demo-event/`.
 - **Paper shadow** (same VPS, same profile, no order submission):
   `data/bybit-paper-event/`.
-- **NO research runs currently in-flight.** R1 + R13 + R5 + R2 + R3 COMPLETE
+- **NO research runs currently in-flight.** R1 + R13 + R5 + R2 + R3 + R4 COMPLETE
   (2026-05-29, all full-PIT). **R9 carry-forward stack (bullish event-driven
   only):** `drop_all_4` entries + `ff6_4pct` failed-fade exit + dollar-equal
   sizing + 1 composite IC factor (R2: 5 IC features → PC1 ≈ 82–88%, ρ 0.72–0.92
@@ -106,15 +106,16 @@ R12a/b sniper + C0 continuous engine).
   [R5](docs/preregistration/round2/r5-position-sizing-verdict.md) ·
   [R2](docs/preregistration/round2/r2-per-feature-standalone-verdict.md) ·
   [R3](docs/preregistration/round2/r3-bearish-stack-verdict.md).
-  - **R4 risk-factor model IN PROGRESS** (foundational code — gates R7 / R9
+  - **R4 risk-factor model COMPLETE** (full-PIT, 2026-05-29; gates R7 / R9
     factor-caps / Tier-3 residual-Sharpe; map in memory `r4-risk-model-implementation-map`).
-    Chunks 1-4 committed: `liquidity_migration/risk_model.py` — `build_factor_panel`
-    (7 factors) + `fit_factor_returns` (per-day XS OLS → factor returns + residuals)
-    + `decompose_strategy_pnl` (per-trade factor-explained vs residual P&L →
-    residual_sharpe = the Tier-3 gate input). 8 unit tests. alt-season (8th) deferred.
-    **Next R4 chunks:** `risk-model` CLI subcommand (`build-panel` / `fit-returns` /
-    `residualize-trades`, wiring the 3 functions) → validation run on the full_pit
-    roots (factor Sharpe>0; |factor↔vol corr|<0.3; residual var<raw) → R4 verdict.
+    `liquidity_migration/risk_model.py` — `build_factor_panel` + `fit_factor_returns`
+    (per-day XS OLS → factor returns + residuals) + `decompose_strategy_pnl` (per-trade
+    explained vs residual P&L → residual_sharpe = the Tier-3 gate input). 8 unit tests.
+    **6 validated factors** (btc_beta, xs_rank_ret_30d, realized_vol_rank, funding_rate_z,
+    liquidity_rank, premium_index_z); dropped xs_rank_ret_3d (sign-flip factor return,
+    criterion-1 fail); alt-season + `risk-model` CLI deferred (off critical path). All 3
+    pre-reg criteria pass both venues; ~47% XS-variance explained, residual mean ~0. Tag
+    `r4_risk_model_2026-05-29`; [verdict](docs/preregistration/round2/r4-risk-model-verdict.md).
   - **Then** R6 cost model, R12 sniper, C0–C3, R9 assembly → R10 → R11 OOS.
     limit-chase EXIT enable is safe (market fallback) but live-path — test-gated,
     post-backtest-validation.

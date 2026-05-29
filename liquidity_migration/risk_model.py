@@ -34,11 +34,13 @@ from liquidity_migration.signal_harness import (
     build_feature_panel,
 )
 
-# The 6 R4 factors that already exist as signal_harness builders (reused as-is via
+# The 5 R4 factors that already exist as signal_harness builders (reused as-is via
 # build_feature_panel). realized_vol_7d is additionally cross-sectionally ranked
-# below ("realized vol regime"). BTC-beta + alt-season are computed separately.
+# below ("realized vol regime"). BTC-beta is computed separately. xs_rank_ret_3d
+# was DROPPED by the R4 validation (2026-05-29): sign-inconsistent factor-return
+# Sharpe across venues (-0.47 bybit / +0.50 binance) => criterion-1 failure, not a
+# stable priced factor. See docs/preregistration/round2/r4-risk-model-verdict.md.
 _REUSED_FACTOR_SPECS = [
-    "xs_rank_ret_3d",      # XS 3d momentum
     "xs_rank_ret_30d",     # XS 30d momentum
     "realized_vol_7d",     # -> realized_vol_rank (vol regime)
     "funding_rate_z",      # funding-rate exposure
@@ -47,7 +49,7 @@ _REUSED_FACTOR_SPECS = [
 ]
 
 _FACTOR_COLUMNS = [
-    "btc_beta", "xs_rank_ret_3d", "xs_rank_ret_30d", "realized_vol_rank",
+    "btc_beta", "xs_rank_ret_30d", "realized_vol_rank",
     "funding_rate_z", "liquidity_rank", "premium_index_z",
 ]
 
@@ -122,11 +124,12 @@ def build_factor_panel(
     daily bars, and attaches factor exposures. Pads 90d back so the rolling-60
     betas warm up; the returned panel covers [start, end).
 
-    Attaches 7 factor exposures: the 6 reused signal_harness factors (via
+    Attaches 6 factor exposures: the 5 reused signal_harness factors (via
     ``build_feature_panel``) + ``btc_beta``. ``realized_vol_7d`` is converted to
-    its cross-sectional rank (``realized_vol_rank``). The 8th planned factor
-    (alt-season) is deferred — 7 factors already meets the plan's 5-6 stable
-    target; add it later only if R4 validation calls for it.
+    its cross-sectional rank (``realized_vol_rank``). The R4 validation
+    (2026-05-29) pruned ``xs_rank_ret_3d`` (sign-inconsistent factor return across
+    venues) and deferred the alt-season factor — 6 stable, sign-consistent factors
+    meet the plan's 5-6 target. See r4-risk-model-verdict.md.
     """
     feat = build_feature_panel(
         data_root, start=start, end=end,
