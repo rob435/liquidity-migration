@@ -1090,15 +1090,7 @@ def test_ws_risk_reconcile_flat_pending_exit_backfills_exit_price_from_closed_pn
     assert float(closed.select("exit_price").item()) == pytest.approx(112.5)
 
 
-def test_ws_risk_submit_exit_skips_when_demo_cycle_pending_in_parquet(tmp_path: Path) -> None:
-    """Cross-process lease (P1-2, 2026-05-27): the demo cycle just landed
-    a pending reduce-only order for AAAUSDT in the parquet ledger.
-    ws_risk evaluates the same symbol BEFORE its next rest_reconcile
-    refreshes ``submitted_symbols``. Without the lease ws_risk would
-    submit a second reduce-only — wasted REST + venue rejection on the
-    loser. With the lease ws_risk reads the parquet fresh and skips."""
-    _write_open_trade(tmp_path)
-    trade_client = FakeTradeClient()
+def _submit_exit_engine(tmp_path: Path, trade_client: "FakeTradeClient") -> "EventWebSocketRiskEngine":
     engine = EventWebSocketRiskEngine(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
@@ -1120,57 +1112,52 @@ def test_ws_risk_submit_exit_skips_when_demo_cycle_pending_in_parquet(tmp_path: 
         trade_client=trade_client,
     )
     engine.bootstrap()
-    # Now simulate the cross-process race: the demo cycle just landed a
-    # pending reduce-only order in the parquet AFTER ws_risk bootstrapped.
-    # ws_risk's in-memory ``submitted_symbols`` has NOT been refreshed for
-    # this write yet — exactly the race window the lease must close.
-    write_dataset(
-        pl.DataFrame(
-            [
-                {
-                    "order_link_id": "lm-ex-demo-fresh",
-                    "ts_ms": int(time.time() * 1000),
-                    "trade_id": "t1",
-                    "symbol": "AAAUSDT",
-                    "side": "Buy",
-                    "order_type": "Market",
-                    "qty": "1",
-                    "reduce_only": True,
-                    "submit_mode": "submitted",
-                    "status": "submitted_unconfirmed",
-                    "exit_reason": "max_hold",
-                    "exit_trigger_ts_ms": 1_700_000_000_000,
-                    "target_qty": "1",
-                    "filled_qty": "",
-                }
-            ]
-        ),
-        tmp_path,
-        "event_demo_orders",
-        partition_by=(),
-    )
+    return engine
+
+
+_SUBMIT_EXIT_PLAN = {
+    "trade_id": "t1",
+    "symbol": "AAAUSDT",
+    "side": "short",
+    "qty": "1",
+    "exit_reason": "stop_loss",
+    "planned_exit_price": 113.0,
+}
+
+
+def test_ws_risk_submit_exit_skips_when_symbol_has_live_exit_order(tmp_path: Path) -> None:
+    """Cross-process double-submit guard (P1-2), now IN-MEMORY (no parquet read on
+    the stop hot path). ``live_exit_order_symbols`` is refreshed from the venue's
+    open orders every rest_reconcile and covers the demo cycle's live reduce-only
+    exits. When it already shows an exit for a symbol ws_risk did not submit, skip
+    — the demo cycle's exit is handling it."""
+    _write_open_trade(tmp_path)
+    trade_client = FakeTradeClient()
+    engine = _submit_exit_engine(tmp_path, trade_client)
+    # A reconcile has picked up the demo cycle's live reduce-only on AAAUSDT.
+    engine.state.live_exit_order_symbols.add("AAAUSDT")
     engine.state.submitted_symbols.discard("AAAUSDT")
+
+    engine.submit_exit({**_SUBMIT_EXIT_PLAN, "exit_trigger_ts_ms": int(time.time() * 1000)})
+
+    assert trade_client.orders == [], trade_client.orders  # skipped, no second submit
+    assert "AAAUSDT" in engine.state.submitted_symbols  # re-marked so in-cycle ticks no-op
+
+
+def test_ws_risk_submit_exit_proceeds_without_a_tracked_live_exit(tmp_path: Path) -> None:
+    """The guard is EFFICIENCY, not safety: when no live exit order is tracked for
+    the symbol (e.g. the <30s cross-process race before the next reconcile), the
+    stop submission MUST proceed. Worst case is a redundant reduce-only (venue
+    caps/rejects it) — never a missed stop."""
+    _write_open_trade(tmp_path)
+    trade_client = FakeTradeClient()
+    engine = _submit_exit_engine(tmp_path, trade_client)
     engine.state.live_exit_order_symbols.discard("AAAUSDT")
+    engine.state.submitted_symbols.discard("AAAUSDT")
 
-    # Now the ws-risk side decides to exit AAAUSDT (stop-loss hit). The
-    # cross-process lease must read the fresh parquet and skip.
-    engine.submit_exit(
-        {
-            "trade_id": "t1",
-            "symbol": "AAAUSDT",
-            "side": "short",
-            "qty": "1",
-            "exit_reason": "stop_loss",
-            "exit_trigger_ts_ms": int(time.time() * 1000),
-            "planned_exit_price": 113.0,
-        }
-    )
+    engine.submit_exit({**_SUBMIT_EXIT_PLAN, "exit_trigger_ts_ms": int(time.time() * 1000)})
 
-    # No new exit submitted via the trade client — the lease blocked it.
-    assert trade_client.orders == [], trade_client.orders
-    # The symbol is re-marked as submitted so subsequent in-cycle ticks
-    # also no-op.
-    assert "AAAUSDT" in engine.state.submitted_symbols
+    assert trade_client.orders, "stop submission must not be suppressed when no live exit is tracked"
 
 
 def test_ws_risk_rejected_pending_exit_unblocks_retry_after_restart(tmp_path: Path) -> None:

@@ -35,7 +35,6 @@ from .event_demo import (
     _execute_stop_repairs,
     _float,
     _orphan_close_pnl_backfill,
-    _pending_order_refs,
     _normalized_position_side,
     _open_trades,
     _order_params,
@@ -858,32 +857,31 @@ class EventWebSocketRiskEngine:
 
     def submit_exit(self, exit_plan: dict[str, Any]) -> None:
         symbol = str(exit_plan["symbol"])
-        # Cross-process double-submit guard (P1-2, 2026-05-27). The demo
-        # cycle (event_demo_cycle) and this ws_risk daemon both submit
-        # reduce-only exits and only share state via the orders parquet
-        # ledger. ``submitted_symbols`` is refreshed on each rest_reconcile;
-        # between reconciles a parallel demo cycle's submit is invisible.
-        # A fresh parquet read here closes the window: if the demo cycle
-        # just landed a pending reduce-only on this symbol we skip and let
-        # the next cycle pick up the residual instead of double-submitting
-        # (wasted REST + venue rejection on the loser).
-        if self.risk.submit_orders and not self.state.all_trades.is_empty():
-            try:
-                fresh_orders = self._read_orders_combined()
-            except Exception:  # noqa: BLE001 - parquet read must fail-open
-                fresh_orders = pl.DataFrame()
-            if not fresh_orders.is_empty():
-                _, fresh_pending_symbols = _pending_order_refs(
-                    fresh_orders, reduce_only=True, now_ms=_now_ms()
-                )
-                if symbol in fresh_pending_symbols and symbol not in self.state.submitted_symbols:
-                    _logger.info(
-                        "submit_exit skipped: pending reduce-only order on %s "
-                        "already in ledger (cross-process double-submit guard)",
-                        symbol,
-                    )
-                    self.mark_submitted_symbol(symbol)
-                    return
+        # Cross-process double-submit guard (P1-2, 2026-05-27), now from in-memory
+        # state — NO synchronous parquet read on the stop-submission hot path. The
+        # demo cycle and this ws_risk daemon both submit reduce-only exits;
+        # ``live_exit_order_symbols`` is refreshed every rest_reconcile (30s) from
+        # the authoritative order ledger and covers the demo cycle's reduce-only
+        # exits. A reduce-only the demo cycle landed in the last <30s may be missed
+        # here, but this is purely an EFFICIENCY guard, not a safety one: the only
+        # consequence of a miss is a redundant reduce-only order, which the venue
+        # caps/rejects (reduce-only can never flip a position or over-close) and the
+        # next cycle's residual pickup resolves — never a missed stop. Trading the
+        # rare wasted REST for removing a full cross-process glob-read from the
+        # latency-critical stop path is the right call on the risk daemon.
+        if (
+            self.risk.submit_orders
+            and not self.state.all_trades.is_empty()
+            and symbol in self.state.live_exit_order_symbols
+            and symbol not in self.state.submitted_symbols
+        ):
+            _logger.info(
+                "submit_exit skipped: live reduce-only order on %s already tracked "
+                "(in-memory cross-process double-submit guard)",
+                symbol,
+            )
+            self.mark_submitted_symbol(symbol)
+            return
         if not self.risk.submit_orders:
             rows, orders = self.rest_exit([exit_plan], submit_orders=False)
         elif self.trade_client is not None and self.risk.order_submit_mode in {"ws", "ws_then_rest"}:
