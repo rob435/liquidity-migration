@@ -66,7 +66,7 @@
 | R1 | Per-filter hypothesis audit (softer criterion) | **COMPLETE (full-PIT, 2026-05-29).** 14/14 cells `full_pit_universe`. `drop_all_4` DEMO-ELIGIBLE (pooled MAR Δ +0.45) → re-baseline cascade TRIGGERED. Tag `r1_filter_audit_max12_2026-05-28`; ran `SWEEP_MAX_WORKERS=1` (23 GB/cell, 32 GB box — 8 OOMs). [verdict](docs/preregistration/round2/r1-per-filter-audit-verdict.md) |
 | R2 | Per-feature standalone decile-sort + correlation matrix | not started |
 | R3 | Bearish stack honest test (H2 retried) | not started — needs ~3h code (R3 filter flag additions) |
-| R4 | Risk-factor model construction (JS-style, 8 factors) | **COMPLETE (full-PIT, 2026-05-29).** 6 validated factors (dropped XS-3d-momentum: sign-flip factor return; alt-season + CLI deferred, off critical path). All 3 criteria pass both venues; model explains ~47% of XS fwd-ret variance, residual mean ~0 → Tier-3 residual-Sharpe machinery confirmed. Tag `r4_risk_model_2026-05-29`. [verdict](docs/preregistration/round2/r4-risk-model-verdict.md) |
+| R4 | Risk-factor model construction (JS-style, 8 factors) | **COMPLETE (full-PIT, 2026-05-29).** 6 validated factors (dropped XS-3d-momentum: sign-flip factor return; alt-season + CLI deferred, off critical path). All 3 criteria pass both venues; variance-capture via the HONEST within-day permutation null (p=0.0 both venues — not the in-sample tautology; audit2 `b1a3368` A1), residual mean ~0 → Tier-3 residual-Sharpe machinery confirmed (incl. B1 `decompose` entry-ts fix). Tag `r4_risk_model_2026-05-29`. [verdict](docs/preregistration/round2/r4-risk-model-verdict.md) |
 | R5 | 1/realized-vol position sizing | not started — needs ~1 day code |
 | R6 | Per-name per-bar cost model | **CODE COMPLETE (2026-05-29).** `cost_model.py` — surface + OLS fit + per-trade predict + ledger recosting (model-vs-legacy) + summary; 12 tests. Default = honest 15bps taker (supersedes legacy ×3 = 45bps over-count). **β-calibration DATA-GATED** on ≥30d VPS demo/paper → queued (turnkey recipe: `reconcile_paper_demo` + `fit_cost_model`); per-cell delta folds into R9 run-up. [verdict](docs/preregistration/round2/r6-cost-model-verdict.md) |
 | R7 | Stress test suite (named historical events) | not started (R4✓ + R6✓ deps met) |
@@ -114,8 +114,10 @@ R12a/b sniper + C0 continuous engine).
     **6 validated factors** (btc_beta, xs_rank_ret_30d, realized_vol_rank, funding_rate_z,
     liquidity_rank, premium_index_z); dropped xs_rank_ret_3d (sign-flip factor return,
     criterion-1 fail); alt-season + `risk-model` CLI deferred (off critical path). All 3
-    pre-reg criteria pass both venues; ~47% XS-variance explained, residual mean ~0. Tag
-    `r4_risk_model_2026-05-29`; [verdict](docs/preregistration/round2/r4-risk-model-verdict.md).
+    pre-reg criteria pass both venues; variance-capture via honest permutation null
+    (p=0.0 both venues, audit2 `b1a3368`; the prior "~47% explained" was an in-sample
+    tautology — corrected), residual mean ~0. Tag `r4_risk_model_2026-05-29`;
+    [verdict](docs/preregistration/round2/r4-risk-model-verdict.md).
   - **⚠️ ENGINE RE-BASELINED by `9f52819`** (methodology hardening, concurrent
     session; pre-reg `docs/preregistration/round2/r-audit-methodology-hardening.md`).
     New conservative defaults: 100% taker (`maker_fill_probability` → 0.0 in

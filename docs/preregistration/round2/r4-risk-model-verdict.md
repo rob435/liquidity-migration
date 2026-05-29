@@ -6,20 +6,22 @@
 1153d; **research infrastructure, not a strategy-P&L claim** — the residual-Sharpe
 gate this enables is labelled per-cell at Tier-2/Tier-3).
 **Code:** `liquidity_migration/risk_model.py` (`build_factor_panel`, `fit_factor_returns`,
-`decompose_strategy_pnl`). Validation runner `scripts/r4_risk_model_validation.py` (4844bf1).
+`residual_variance_capture`, `decompose_strategy_pnl`). Canonical runner
+`scripts/r4_risk_model_validation.py`.
 **Artifacts:** `~/SHARED_DATA/r4_risk_model_2026-05-29_{bybit,binance}.json` (tag
-`r4_risk_model_2026-05-29`) + the M4-corrected re-validation
-`~/SHARED_DATA/r4_revalidate_m4_2026-05-29_{bybit,binance}.json` (runner
-`scripts/r4_revalidate_m4.py`). **Numbers below are the M4-corrected values.**
+`r4_risk_model_2026-05-29`). **Numbers below are from the canonical re-validation
+(2026-05-29 13:44) under the `9f52819` M4 + `b1a3368` audit2 hardening** — calendar-exact
+returns, permutation-null variance capture, B1 decompose fix.
 
 ## Headline
 
 **Factor model VALIDATED. 6 stable factors per venue — exactly the plan's 5-6
-target.** All three pre-registered validation criteria pass on **both** venues. The
-residual machinery (`fit_factor_returns` → `decompose_strategy_pnl` → residual Sharpe)
-is confirmed sound: it strips ~47% of cross-sectional forward-return variance with a
-mean-zero residual, so the **Tier-3 residual-Sharpe ≥ +0.3 gate now rests on a real
-factor model**, not a placeholder.
+target.** All three pre-registered validation criteria pass on **both** venues. Critically,
+the variance-capture criterion is the **honest permutation-null** test (not the in-sample
+`residual_std<raw_std` R²≥0 tautology): the model's residual std beats the within-day
+target-shuffle null on **both** venues at **p=0.0** (200 perms) — it reduces forward-return
+variance by MORE than chance, with a mean-zero residual. So the **Tier-3 residual-Sharpe ≥
++0.3 gate now rests on a real factor model**, not a placeholder.
 
 The construction ran 7 factors → validation **pruned `xs_rank_ret_3d`** (cross-sectional
 3-day momentum, factor #2) as the lone criterion-1 failure, leaving 6.
@@ -45,12 +47,12 @@ Code now carries the 6-factor `_FACTOR_COLUMNS` / `_REUSED_FACTOR_SPECS` (this P
 
 | factor | bybit Sharpe | binance Sharpe |
 |---|---|---|
-| liquidity_rank | **+1.86** | **+1.80** |
-| funding_rate_z | **+1.46** | +0.81 |
+| liquidity_rank | **+1.86** | **+1.77** |
+| funding_rate_z | **+1.46** | +0.79 |
 | btc_beta | +1.07 | +0.63 |
 | premium_index_z | +0.71 | **+1.26** |
-| realized_vol_rank | +0.75 | **+1.41** |
-| xs_rank_ret_30d | +0.02 | +0.22 |
+| realized_vol_rank | +0.75 | **+1.40** |
+| xs_rank_ret_30d | +0.02 | +0.19 |
 
 **PASS: 6/6 positive on both venues.** `liquidity_rank` is the dominant factor
 (~1.8 both venues, t≈2.6–3.3) — economically expected for a *liquidity*-migration
@@ -82,34 +84,53 @@ sign-consistent on both venues; (b) they are independent on binance (corr ≤0.0
 collinearity between two real factors does not bias the residual; and (d) they capture
 distinct facets of perp basis (realized funding paid vs forward-looking premium).
 
-### Criterion 3 — residual mean ~0 and residual std < raw std (model captures variance)
+### Criterion 3 — variance capture vs a permutation null (NOT the in-sample tautology)
 
-| venue | raw fwd-ret std | residual std | resid/raw | variance explained | residual mean |
-|---|---|---|---|---|---|
-| bybit | 0.07126 | 0.05193 | **0.729** | **46.9%** | −3.5e-17 |
-| binance | 0.06896 | 0.04996 | **0.724** | **47.5%** | −4.3e-17 |
+The pre-reg's literal "residual std < raw std" is an **in-sample tautology**: per-day OLS
+with an intercept guarantees R²≥0, so residual std is mechanically ≤ target std even for a
+pure-noise factor model. The honest test (`residual_variance_capture`, audit2 `b1a3368`)
+compares the real residual std against a **within-day target-shuffle permutation null**
+(200 perms; shuffling the target across symbols destroys any factor→return relation while
+preserving each day's return distribution). raw and residual std are over the **identical
+surviving rows** (fixing a prior whole-panel-vs-regression-subset denominator mismatch).
 
-**PASS both venues.** Residual cross-section mean is ~0 (machine-epsilon) by OLS
-construction, and the factor model explains ~47% of cross-sectional forward-return
-variance — substantial for a daily 6-factor crypto-perp model. (bybit 1150 / binance
-787 factor-return days — binance is shorter because the per-day regression requires all
-6 factor columns non-null and binance funding/premium history is shallower; 787d ≈ 2.15y
-is ample.)
+| venue | raw std (same-pop) | residual std | resid/raw | null p05 ratio | p-value | captures real variance |
+|---|---|---|---|---|---|---|
+| bybit | 0.06688 | 0.05193 | 0.776 | 0.806 | **0.0** | **YES** |
+| binance | 0.06591 | 0.04996 | 0.758 | 0.804 | **0.0** | **YES** |
 
-### M4 re-validation (concurrent commit `9f52819`)
+**PASS both venues.** The real residual ratio (0.776 / 0.758) is below the null's 5th
+percentile (0.806 / 0.804) and below **all 200** shuffles (p=0.0) — the model reduces
+forward-return variance by significantly MORE than fitting 6 parameters to noise does.
+Residual mean ≈ 0 (−3.5e-17 / −8.0e-17). (bybit 1150 / binance 787 factor-return days;
+binance shorter because the per-day regression needs all 6 factor columns non-null and its
+funding/premium history is shallower — 787d ≈ 2.15y is ample.)
 
-The R4 construction first ran against the pre-`9f52819` `signal_harness`. That commit's
-**M4 hardening** replaced the positional row-shift in `_attach_forward_returns` with a
-calendar-offset join, so `fwd_ret_1d` — this model's regression target — now nulls a
-symbol's gapped day (delist→relist / data hole) instead of returning a misaligned
-multi-day move. Because the target changed, the model was **re-validated on the
-corrected returns** (`scripts/r4_revalidate_m4.py`, tag `r4_revalidate_m4_2026-05-29`):
+**Forward-survivorship (B4):** only 1508 bybit / 1900 binance panel rows (0.33% / 0.45%)
+have a null forward return (delist/gap terminal days) and are necessarily dropped from the
+cross-section — a negligible exposure, surfaced for transparency.
 
-- **bybit: byte-identical** pre/post-M4 (no gapped days in its in-window daily grid).
-- **binance: shifts <2%** — raw fwd-ret std 0.0704→0.0690 (the fix correctly drops
-  inflated gap-straddling returns), resid/raw 0.7238→0.724, factor Sharpes move in the
-  2nd decimal. **No conclusion changes:** all 6 factors still Sharpe>0 both venues, the
-  `xs_rank_ret_3d` drop re-confirmed (−0.467 bybit / +0.499 binance), all criteria pass.
+### Methodology-hardening re-validation (`9f52819` M4 + `b1a3368` audit2)
+
+R4 was first built/validated against the pre-hardening engine; two concurrent methodology
+commits then changed its inputs, so it was **re-validated on the canonical runner** under
+the hardened code (the numbers above are that run):
+
+- **M4 / B3** — `_attach_forward_returns` and `_attach_daily_returns` both moved from a
+  positional row-shift to a calendar-exact ts-join (gapped returns nulled, not misaligned).
+  Affects `fwd_ret_1d` (the target) and `btc_beta` (built on daily returns). **bybit:
+  byte-identical** (no in-window gaps); **binance: factor Sharpes shift in the 2nd decimal**
+  (still 6/6 positive; `xs_rank_ret_3d` drop holds, sign-flip −0.47/+0.50).
+- **A1** — the variance-capture criterion is now the permutation null above. This verdict
+  originally cited the in-sample tautology (`residual_std<raw_std`, ~47% "explained") as
+  evidence; that was wrong and is **corrected** — the honest test (p=0.0) still PASSES.
+- **B1** — `decompose_strategy_pnl` snaps `entry_ts_ms` to the 00:00-UTC panel grid (the
+  engine ledger is +1h/bar-end; the prior join was all-null → residual inflated) and
+  returns null (not 0.0) when un-decomposable, with resolved-fraction counters. **This
+  fixes the Tier-3 residual-Sharpe input** — without it the gate would read inflated alpha.
+
+No conclusion changes: 6/6 factors Sharpe>0, the `xs_rank_ret_3d` drop holds, criteria 1–3
+pass. The hardening only made the evidence honest.
 
 ## R9 / Tier-3 integration spec (the deliverable)
 
@@ -121,8 +142,10 @@ corrected returns** (`scripts/r4_revalidate_m4.py`, tag `r4_revalidate_m4_2026-0
   `decompose_strategy_pnl(trades, build_factor_panel(...), fit_factor_returns(...))`.
   `explained = exposure_at_entry · Σ factor_returns_over_hold`; `residual = realized −
   explained`; `residual_sharpe = mean/std` (per-trade, un-annualized — the gate
-  annualizes with the cell's actual trade span). A cell that fails (≤ +0.3) is "selling
-  vol / buying beta", not carrying alpha.
+  annualizes with the cell's actual trade span). **`decompose` snaps `entry_ts_ms` to the
+  00:00-UTC panel grid (B1)** so the engine's +1h/bar-end entries match factor-loading
+  rows; un-decomposable trades are null (not 0.0), reported via resolved-fraction. A cell
+  that fails (≤ +0.3) is "selling vol / buying beta", not carrying alpha.
 - **R9 factor caps** use the same loadings (net per-factor exposure ceiling).
 - **R7 stress / R10:** residualize each cell on this model before comparison.
 - The `risk-model` CLI subcommand (`build-panel`/`fit-returns`/`residualize-trades`)
@@ -135,9 +158,8 @@ corrected returns** (`scripts/r4_revalidate_m4.py`, tag `r4_revalidate_m4_2026-0
 - **Full-PIT.** `build_factor_panel` reads the `*_full_pit` roots (delisted-inclusive
   PIT universe) → PIT-clean cross-sections. No `current_universe` shortcut.
 - **Causal.** All exposures (rolling-60d beta, XS ranks, Z-scores) look strictly
-  backward from `decision_ts`; the forward return `fwd_ret_1d` is the strictly-forward,
-  **calendar-correct** (post-M4) regression target. Unit-tested
-  (`tests/test_risk_model.py`, 8 tests).
+  backward from `decision_ts`; both `fwd_ret_1d` (target) and the daily returns feeding
+  `btc_beta` are **calendar-exact** (post-M4/B3). Unit-tested (`tests/test_risk_model.py`).
 - Not a strategy-P&L claim → no cost/funding model needed here; cost/funding enters at
   the per-cell residual-Sharpe and R6.
 
