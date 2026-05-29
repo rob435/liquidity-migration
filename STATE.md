@@ -15,10 +15,14 @@ but on **2026-05-29 that was shown to be substantially a methodology artifact** 
 `bar_extreme` stop fills + `max_active=3` over-concentration + a ×3 (45 bps) cost stacked
 together. Under the realistic capped stop fill at `max_active=12`, the daily strategy is
 **positive on both venues in-sample** (bybit +37.8% / −27.5% DD / Sharpe 0.70; binance
-−4.7% net but gross +16.1%, ~breakeven at honest 15 bps). The continuous variant
-(Architecture B) carries real cross-venue IC but is not tradeable as a short (it points to a
-**momentum/long** thesis). Full numbers + the useful findings: **`docs/research_summary.md`**.
-Nothing is promoted; the forward demo is the arbiter.
+−4.7% net but gross +16.1%, ~breakeven at honest 15 bps). **Framing (corrected):** the
+strategy is a SELECTION signal (the liquidity-migration event = candidate pool) + an
+EXECUTION signal (enter on the fade-confirmation — pop then giveback, "fade the fade", NOT
+short-at-the-top; this is `promoted_quality_squeeze`). The continuous variant carries real
+cross-venue selection IC but was only ever tested with *immediate* entry — its "null" is
+about timing the top, not the signal; applying the execution layer (+ sniper) to it is the
+open lead. Full detail: **`docs/research_summary.md`**. Nothing is promoted; forward demo is
+the arbiter.
 
 ## What's running
 
