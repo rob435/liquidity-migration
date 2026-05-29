@@ -174,6 +174,33 @@ def test_exclusive_file_lock_recovers_windows_winerror_87_dead_pid(tmp_path: Pat
     assert not lock_path.exists()
 
 
+def test_exclusive_file_lock_recovers_windows_winerror_11_dead_pid(tmp_path: Path, monkeypatch) -> None:
+    # Regression (Python 3.13 / Windows): os.kill(pid, 0) for an out-of-range pid
+    # (e.g. the 2_147_483_647 used by the test above) raises OSError winerror 11
+    # ERROR_BAD_FORMAT — not 87, not OverflowError. _lock_owner_is_dead must treat
+    # ANY non-permission OSError as dead, else exclusive_file_lock with
+    # poll_seconds=0.0 + stale_seconds=0 spins CPU-bound forever (observed: the
+    # full pytest gate wedged ~40 min on this single test on the 5950X box).
+    from liquidity_migration import storage
+
+    def fake_kill(pid: int, sig: int) -> None:  # simulate Windows out-of-range pid
+        err = OSError("simulated out-of-range pid")
+        err.winerror = 11  # type: ignore[attr-defined]
+        raise err
+
+    monkeypatch.setattr(storage.os, "kill", fake_kill)
+
+    lock_path = dataset_lock_path(tmp_path, "klines_1h")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(json.dumps({"pid": 4321, "created": 1}), encoding="utf-8")
+
+    with exclusive_file_lock(lock_path, stale_seconds=0, poll_seconds=0.0):
+        payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        assert payload["pid"] == os.getpid()
+
+    assert not lock_path.exists()
+
+
 def test_exclusive_file_lock_self_heals_when_lock_read_hangs(tmp_path: Path, monkeypatch) -> None:
     """Windows-delete-pending scenario: another thread within this process has
     just unlinked the lock file, but the OS hasn't released the handle yet, so
