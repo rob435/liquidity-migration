@@ -4,11 +4,14 @@
   block an improvement on reproducing prior output byte-for-byte. Performance /
   refactor changes are gated by **numerical equivalence within a tight tolerance**
   (`np.allclose`, NaN positions matching), NOT bit-identical output — last-bit
-  float-order differences carry no alpha. The deployed daily-frequency design
-  (Architecture A) is the *current* state, not a frozen baseline: the active direction
-  is the lowest-latency, fully-event-driven, continuous-signal Architecture B (Round 2
-  C-phases). What stays strict is the real-money promotion gate (OOS + forward demo is
-  the arbiter) and the methodology-correctness gates (PIT / no look-ahead / no
+  float-order differences carry no alpha. As of 2026-05-29 Round 2 is complete and BOTH
+  architectures are a documented null (see STATE.md): Architecture A (daily) runs on the
+  Bybit demo only (not real money) and has a real bybit edge that fails the cross-venue
+  bar; Architecture B (continuous) was evaluated and is not tradeable after honest cost.
+  Defer current direction to STATE.md — do not assert either architecture is "the active
+  direction." What stays strict is the real-money promotion gate (forward demo + the
+  cross-venue bar is the arbiter; there is no internal pre-2023 OOS root — see
+  `docs/data_roots.md`) and the methodology-correctness gates (PIT / no look-ahead / no
   survivorship — those are correctness bugs, not restrictions to loosen).
 - Be honest and call out wrong decisions directly.
 - Ask for exact intent, constraints, and success metrics when a request is vague.

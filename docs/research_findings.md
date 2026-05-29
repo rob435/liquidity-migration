@@ -1,12 +1,15 @@
 # Research Findings
 
-Updated 2026-05-29 — full-PIT roots rebuilt; Round 2 re-validation well underway.
+Updated 2026-05-29 — full-PIT roots rebuilt; **Round 2 COMPLETE = documented null.**
 
-> **Update (2026-05-29):** the full-PIT roots have been rebuilt and the Round 2
-> re-validation sequence is well underway (R1, R2, R3, R4, R5, R13 COMPLETE with
-> committed verdicts under the hardened engine) — see `STATE.md` and
-> `docs/preregistration/round2/`. The 2026-05-27 reset paragraph below is the
-> historical record; it no longer means "no evidence exists."
+> **Verdict (2026-05-29):** Round 2 ran to completion on rebuilt full-PIT roots under
+> the hardened engine — **both architectures are a documented null → do nothing.**
+> Architecture A (daily): real bybit edge (best stack MAR 1.39) but no binance edge
+> (−1.3%) → fails the cross-venue bar. Architecture B (continuous): not tradeable after
+> cost. The frozen `promoted` profile is unchanged on demo; nothing promoted; real money
+> off. Canonical verdicts: `STATE.md`, `docs/preregistration/round2/r9-integrated-strategy-verdict.md`,
+> `c0-c3-architecture-b-verdict.md`. The "2026-05-27 reset" / "deleted" text below is
+> historical record only — the roots are rebuilt and present (`docs/data_roots.md`).
 
 ## Status
 

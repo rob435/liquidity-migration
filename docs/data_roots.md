@@ -9,24 +9,8 @@ As of 2026-05-29 both per-venue full-PIT roots (`~/SHARED_DATA/bybit_full_pit`,
 has been generated against them (STATE.md records R1/R2/R3/R4/R5/R13 COMPLETE on
 full-PIT). The roots are data, not code — not committed. (Historical: they were
 deleted 2026-05-27 during a doc-cleanup session; the rebuild scripts below are the
-recovery path if a root is ever lost again.)
-
-```text
-~/SHARED_DATA/bybit_full_pit       DELETED (was Bybit USDT linear perpetuals,
-                                    ~12 GB, 2021-01..2026-05)
-
-~/SHARED_DATA/binance_full_pit     PARTIAL (klines_1h + binance_usdm_index_price_1h
-                                    survived; funding, mark price, open interest,
-                                    premium index, taker_flow_1h, manifest gone)
-
-~/SHARED_DATA/binance_full_pit_strategy
-                                   intact (~1.5 MB of derived strategy reports
-                                   from the Binance side; survived the deletion)
-```
-
-Until both roots are rebuilt no new backtest evidence can be generated. See
-`docs/research_findings.md` for the consequences for the verdict / current
-research labelling.
+recovery path if a root is ever lost again.) `binance_full_pit_strategy` (~1.5 MB of
+derived long-sleeve reports + the canonical funding dataset) is a separate, intact root.
 
 ## Per-venue full-PIT working datasets (intended state)
 

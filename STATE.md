@@ -202,15 +202,15 @@ it's expensive (demo→real money). Forward demo/paper is the arbiter. Full text
 - Fragility diagnostics (bootstrap p5, LOO, sign-consistency, residual Sharpe) REPORTED, non-blocking — set demo order, not eligibility
 
 ### Tier 3 — Real-money (demo → mainnet) — STRICT, not loosened
-- R11 pre-2023 OOS pass: MAR > 0 both venues all 3 sub-periods; DD < 50%; sign-consistent; ≥20 Bybit / ≥15 Binance trades/sub-period
+- R11 OOS pass — **forward-demo OOS** (reconciled 2026-05-29: no internal pre-2023 OOS root remains; pristine OOS = the forward demo/paper ledgers, per `docs/data_roots.md`): MAR > 0 both venues over the forward window; DD < 50%; sign-consistent
 - ≥30 days forward demo + daily paper-shadow reconciliation
 - Block-bootstrap pooled MAR-Δ p5 ≥ 0 (seed=0, block=3mo, n=5000)
 - Residual Sharpe ≥ +0.3 (after R4)
 - R7 stress pass + R8 capacity ≥ 10× deployment size
 
 Multiple-testing control: the demo treadmill itself (fresh forward data can't
-be overfit). Only finite surface capped: **max 5 cells consume the pre-2023
-OOS / quarter**; forward demo uncapped.
+be overfit) is the only OOS surface — uncapped. (Reconciled 2026-05-29: there is
+no internal pre-2023 OOS root; pristine OOS is forward-only, per `docs/data_roots.md`.)
 
 `scripts/r1_robustness.py` emits the **Tier 2 demo-candidate verdict**
 (pooled MAR Δ > +0.1, engine-DD MAR) + the fragility diagnostics (bootstrap

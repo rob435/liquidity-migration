@@ -1,5 +1,14 @@
 # Research plan: Round 2 — integrated-strategy program (MAR-primary)
 
+> **⚠ SUPERSEDED / COMPLETE (2026-05-29).** Round 2 ran to a **documented null →
+> do nothing** for both architectures (see STATE.md, `r9-integrated-strategy-verdict.md`,
+> `c0-c3-architecture-b-verdict.md`). This file is the FROZEN original plan, kept as a
+> research record — its forward-looking framing is historical. Two design points were
+> later superseded: (a) the **pre-2023 dedicated OOS root** referenced throughout (R11,
+> threats #17–19, "5 cells/quarter") was abandoned — pristine OOS is the **forward
+> demo/paper ledgers only**, per `docs/data_roots.md` (the per-venue roots span their
+> full histories, no internal OOS split); (b) R10/R11 did **not run** (no R9 finalist).
+
 **Date:** 2026-05-29
 **Author:** owner (drafted with assistant)
 **Stage:** proposed — master plan for Round 2. Each sub-phase below gets its

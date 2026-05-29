@@ -25,14 +25,17 @@ ceiling) with three gates, ordered by how expensive a false positive is:
    trades.** Fragility diagnostics (bootstrap p5, leave-one-month-out,
    sub-period thirds, residual Sharpe) are **reported, NOT blocking** — they
    set demo order.
-3. **Real-money** (demo → mainnet) — STRICT, NOT loosened: pre-2023 OOS pass +
-   ≥30d forward demo + bootstrap pooled MAR-Δ p5 ≥ 0 + residual Sharpe ≥ +0.3
-   + R7 stress pass + R8 capacity.
+3. **Real-money** (demo → mainnet) — STRICT, NOT loosened: forward-demo OOS pass
+   (≥30d forward demo + daily paper reconciliation) + bootstrap pooled MAR-Δ p5 ≥ 0
+   + residual Sharpe ≥ +0.3 + R7 stress pass + R8 capacity. (Reconciled 2026-05-29:
+   there is no internal pre-2023 OOS root — pristine OOS is the forward demo/paper
+   ledgers, per `docs/data_roots.md`.)
 
 Principle: permissive where being wrong is free (backtest→demo costs nothing —
-demo is paper), strict where it costs real money. The forward demo is the
-multiple-testing arbiter; the only finite surface capped is the pre-2023 OOS
-root (5 cells/quarter). MAR-primary (pooled), Sharpe secondary.
+demo is paper), strict where it costs real money. The forward demo is both the
+multiple-testing arbiter and the OOS surface — uncapped (fresh forward data can't
+be overfit); the per-venue roots span their full histories, so there is no internal
+OOS window. MAR-primary (pooled), Sharpe secondary.
 
 ## Phase-runner workflow (apply per sub-phase)
 
@@ -128,8 +131,9 @@ root (5 cells/quarter). MAR-primary (pooled), Sharpe secondary.
 - **Signal-harness panels (R2 features):** the panel-build step is a one-off
   per venue — cache it; re-running IC / decile-sort on the cached panel is
   cheap. Do NOT rebuild the panel per run.
-- **R11 OOS:** assess pre-2023 root state on first contact. If a rebuild is
-  needed (~6h/venue download), flag to operator before kicking off.
+- **R11 OOS = forward demo.** There is no internal pre-2023 OOS root (the per-venue
+  roots span their full histories; pristine OOS = the forward demo/paper ledgers, per
+  `docs/data_roots.md`). R11 reads accumulated forward-demo PnL, not a backtest re-slice.
 
 ## Useful MCP tools
 

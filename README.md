@@ -6,15 +6,21 @@ volume / liquidity-migration signal and shorts the weakest-ranked names.
 A long-only sleeve (`MultiStratV1` / v11a, FOMO-chase) runs alongside on
 demo.
 
-## Status: research-evidence reset (2026-05-27) + live demo running
+## Status: Round 2 complete — documented null (2026-05-29) + live demo running
 
-The per-venue full-PIT research roots and all backtest reports under them
-were deleted on 2026-05-27. The signal idea, engine code, demo runners,
-and live VPS deployment are unchanged; the supporting numerical evidence
-needs to be re-generated against a rebuilt data root before it can be
-cited. See [docs/research_findings.md](docs/research_findings.md) for what
-is and is not currently substantiated, and
-[docs/system_status.md](docs/system_status.md) for the deployment record.
+The Round 2 integrated-strategy program is **complete**, run on rebuilt full-PIT
+roots under the hardened engine (capped/`bar_extreme` stops, 100% taker,
+calendar-exact returns). Verdict: **both signal architectures are a documented
+null → do nothing.** Architecture A (daily) shows a *real bybit edge* (best stack
+MAR 1.39) but *no binance edge* (−1.3%), so it fails the cross-venue robustness
+bar; Architecture B (continuous) is not tradeable after honest cost. The frozen
+`promoted` profile is unchanged on demo, nothing is promoted, real money stays
+off. See [STATE.md](STATE.md) and
+[docs/preregistration/round2/](docs/preregistration/round2/) for the verdicts and
+[docs/system_status.md](docs/system_status.md) for the deployment record. Any
+further work (a bybit-only daily strategy from the single-venue edge, or a
+momentum-continuation thesis) is a new operator pre-registration, not a
+continuation of Round 2.
 
 A demo (paper) forward test of the 3-position concentrated `promoted`
 short profile + the v11a long sleeve runs on a Bybit demo account on a
