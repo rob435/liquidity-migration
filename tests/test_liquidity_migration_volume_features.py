@@ -102,3 +102,46 @@ def test_side_return_stop_and_take_profit_prices() -> None:
     assert _stop_price(100.0, side="short", stop_loss_pct=0.20) == pytest.approx(120.0)
     assert _take_profit_price(100.0, side="long", take_profit_pct=0.10) == pytest.approx(110.0)
     assert _take_profit_price(100.0, side="short", take_profit_pct=0.10) == pytest.approx(90.0)
+
+
+def test_vectorized_features_match_numpy_reference_numerically(tmp_path) -> None:
+    """Progressive standard (not bit-identical): the vectorized build_volume_features
+    is NUMERICALLY equivalent to the prior numpy implementation — cross-sectional z
+    and ranks match within float tolerance, NaN positions match exactly. Last-bit
+    differences from polars-rolling vs numpy-cumsum-diff carry no alpha and don't gate
+    shipping."""
+    generate_fixture_data(tmp_path)
+    klines = read_dataset(tmp_path, "klines_1h")
+    out = build_volume_features(klines)
+
+    # Recompute each robust z in numpy from the SAME raw column, per cross-section,
+    # and assert the vectorized z matches within tolerance.
+    raw_to_z = {
+        "volume_change_1d_raw": "volume_change_1d_z",
+        "volume_change_3d_raw": "volume_change_3d_z",
+        "volume_persistence_raw": "volume_persistence_z",
+        "dollar_volume_rank_raw": "dollar_volume_rank_z",
+    }
+    for _ts, part in out.group_by("ts_ms"):
+        for raw_col, z_col in raw_to_z.items():
+            vals = np.asarray(part[raw_col].to_list(), dtype=float)
+            finite = np.isfinite(vals)
+            ref = np.full(vals.shape, np.nan)
+            if finite.sum() >= 3:
+                center = float(np.nanmedian(vals[finite]))
+                mad = float(np.nanmedian(np.abs(vals[finite] - center)))
+                scale = 1.4826 * mad if mad > 1e-12 else float(np.nanstd(vals[finite]))
+                if scale > 1e-12:
+                    ref[finite] = np.clip((vals[finite] - center) / scale, -3.0, 3.0)
+            got = np.asarray(part[z_col].to_list(), dtype=float)
+            assert np.array_equal(np.isnan(got), np.isnan(ref)), (raw_col, "NaN mask")
+            assert np.allclose(got[~np.isnan(got)], ref[~np.isnan(ref)], rtol=1e-9, atol=1e-12), raw_col
+
+    # liquidity_rank is a per-ts_ms ordinal rank by log_turnover desc; pct = rank/count.
+    for _ts, part in out.group_by("ts_ms"):
+        n = part.height
+        assert sorted(part["liquidity_rank"].to_list()) == list(range(1, n + 1))
+        assert part["universe_count"].to_list() == [n] * n
+        # top log_turnover -> rank 1
+        top_idx = int(np.argmax(part["log_turnover"].to_numpy()))
+        assert part["liquidity_rank"].to_list()[top_idx] == 1

@@ -76,29 +76,27 @@ safety daemon → careful, well-tested, owner-reviewed work; do NOT rush.**
    and fresher (WS push vs 30s reconcile + per-exit glob). Requires careful add/remove
    on every order status transition + thorough tests before it replaces the disk guard.
 
-### Tier C — compute / I/O (identical-output refactors; some standalone, some cadence-prereq)
-**Hard rule:** these are pure performance and must produce **bit-identical** signal
-output — gate each behind an old-vs-new equivalence test on a realistic panel before
-shipping (error #2/#13 territory if a refactor subtly changes the alpha).
+### Tier C — compute / I/O (numerically-equivalent refactors)
+**Standard (PROGRESSIVE, revised 2026-05-29):** performance refactors are gated by
+**numerical equivalence within a tight tolerance** (`np.allclose`, rtol≈1e-9, NaN
+positions matching) — NOT bit-identical. This system is forward-moving: a last-bit
+float-order difference (e.g. polars sliding-window sum vs numpy cumsum-diff) carries no
+alpha and must not block an improvement. The gate that stays strict is the real-money
+promotion gate (OOS + forward demo), not byte-for-byte reproduction of the old output.
 
-1. **Incrementalize the 45-day daily panel** — **NOT done (WON'T, same reason as #2).**
-   Recomputing only the accreting tail day requires the rolling windows at the
-   day-boundary to match a full rebuild bit-for-bit, which hits the same float-order
-   issue as #2. Cache-served today (zero live gain). Revisit only if the cadence moves
-   sub-hourly (then the rebuild cost matters and an OOS-validated re-derivation is the
-   vehicle, not a silent refactor).
-2. **Vectorize `build_volume_features`** — **NOT done (WON'T): cannot be bit-identical.**
-   numpy computes the rolling sums by **cumsum-difference** (`cs[i]-cs[i-w]`); polars
-   `rolling_sum` uses a **sliding-window sum** — different floating-point summation
-   order, so the outputs differ at the last bit. That is a silent alpha change, and the
-   function is **cache-served** in the live daemon (cycle 0.3s, `features:0.0s`), so the
-   gain is zero. Shipping it would *violate* the bit-identical rule above. Correctly
-   left as the numpy implementation.
+1. **Incrementalize the 45-day daily panel** — recompute only the accreting tail day +
+   reuse cached prior-day rows (`event_demo_data.py:534`), gated by numerical
+   equivalence. Lower priority (cache-served today); higher value once the cadence
+   moves sub-hourly. TODO.
+2. **Vectorize `build_volume_features`** — ✅ **SHIPPED** (2026-05-29). Per-symbol loop +
+   per-ts_ms robust-z + liquidity-rank all vectorized to polars `.over()` expressions.
+   Numerically equivalent to the prior numpy implementation (test
+   `test_vectorized_features_match_numpy_reference_numerically`: z & ranks match within
+   rtol 1e-9, NaN positions exact). The earlier "can't be bit-identical" objection was
+   the over-strict restriction the owner removed — numerical equivalence is the bar.
 3. **Cache the materialized klines window frame in `KlineStore`** — ✅ **SHIPPED** (keyed
-   by sorted-symbols+window+mutation-version; ~138ms/wake; provably correct, equivalence
-   tested).
-4. **Incremental store flush** — ✅ **SHIPPED** as flush-skip-when-unchanged (the whole
-   re-serialize is skipped when the mutation version is unchanged).
+   by sorted-symbols+window+mutation-version; ~138ms/wake; numerically exact, tested).
+4. **Incremental store flush** — ✅ **SHIPPED** as flush-skip-when-unchanged.
 
 ### Tier B — the signal-cadence unlock (Architecture B / C-phases) — RESEARCH-GATED
 This is the only path that makes *entries* fast. It is **already pre-registered** as

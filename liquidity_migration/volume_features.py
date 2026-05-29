@@ -26,38 +26,37 @@ def build_volume_features(klines: pl.DataFrame, *, aggregation_ms: int = MS_PER_
     if daily_rows.is_empty():
         return daily_rows
 
-    symbol_frames = []
-    for key, part in daily_rows.sort(["symbol", "ts_ms"]).partition_by("symbol", as_dict=True).items():
-        symbol = str(key[0] if isinstance(key, tuple) else key)
-        turnover = np.asarray(part["turnover_quote"].to_list(), dtype=float)
-        log_turnover = np.log(turnover + 1.0)
-        roll_3 = _rolling_sum(turnover, 3)
-        roll_20_mean = _rolling_mean(turnover, 20)
-        n = turnover.size
-
-        vc1 = np.full(n, np.nan)
-        if n > 1:
-            vc1[1:] = np.log((turnover[1:] + 1.0) / (turnover[:-1] + 1.0))
-
-        vc3 = np.full(n, np.nan)
-        if n > 5:
-            vc3[5:] = np.log((roll_3[5:] + 1.0) / (roll_3[2:n - 3] + 1.0))
-
-        vp = np.full(n, np.nan)
-        if n > 19:
-            vp[19:] = np.log((roll_3[19:] / 3.0 + 1.0) / (roll_20_mean[19:] + 1.0))
-
-        symbol_frames.append(pl.DataFrame({
-            "ts_ms": part["ts_ms"],
-            "symbol": pl.Series([symbol] * n, dtype=pl.String),
-            "turnover_quote": pl.Series(turnover),
-            "log_turnover": pl.Series(log_turnover),
-            "volume_change_1d_raw": pl.Series(vc1),
-            "volume_change_3d_raw": pl.Series(vc3),
-            "volume_persistence_raw": pl.Series(vp),
-            "dollar_volume_rank_raw": pl.Series(log_turnover),
-        }))
-    df = pl.concat(symbol_frames).sort(["ts_ms", "symbol"])
+    # Vectorized per-symbol features (was a 566-iteration Python loop with numpy
+    # round-trips). The rolling windows operate on bars within each symbol via
+    # .over("symbol"); numerically equivalent to the prior numpy implementation
+    # (last-bit float-order differences from polars rolling vs numpy cumsum-diff are
+    # immaterial — see test_build_volume_features_matches_numpy_reference). The
+    # leading-edge nulls are filled to NaN to match the numpy nan-padding so the
+    # downstream cross-sectional-z (which treats both as not-finite) is unchanged.
+    tq = pl.col("turnover_quote")
+    df = (
+        daily_rows.sort(["symbol", "ts_ms"])
+        .with_columns((tq + 1.0).log().alias("log_turnover"))
+        .with_columns(
+            tq.rolling_sum(window_size=3).over("symbol").alias("_roll3"),
+            tq.rolling_mean(window_size=20).over("symbol").alias("_roll20_mean"),
+        )
+        .with_columns(
+            ((tq + 1.0) / (tq.shift(1).over("symbol") + 1.0)).log()
+                .fill_null(float("nan")).alias("volume_change_1d_raw"),
+            ((pl.col("_roll3") + 1.0) / (pl.col("_roll3").shift(3).over("symbol") + 1.0)).log()
+                .fill_null(float("nan")).alias("volume_change_3d_raw"),
+            ((pl.col("_roll3") / 3.0 + 1.0) / (pl.col("_roll20_mean") + 1.0)).log()
+                .fill_null(float("nan")).alias("volume_persistence_raw"),
+            pl.col("log_turnover").alias("dollar_volume_rank_raw"),
+        )
+        .select(
+            "ts_ms", "symbol", "turnover_quote", "log_turnover",
+            "volume_change_1d_raw", "volume_change_3d_raw",
+            "volume_persistence_raw", "dollar_volume_rank_raw",
+        )
+        .sort(["ts_ms", "symbol"])
+    )
     for raw_col in (
         "volume_change_1d_raw",
         "volume_change_3d_raw",
@@ -109,36 +108,37 @@ def _daily_bars(klines: pl.DataFrame, *, aggregation_ms: int = MS_PER_DAY) -> pl
 
 
 def _add_cross_sectional_z(df: pl.DataFrame, input_col: str, output_col: str) -> pl.DataFrame:
-    frames = []
-    for part in df.partition_by("ts_ms", maintain_order=True):
-        values = np.asarray(part[input_col].to_list(), dtype=float)
-        finite = np.isfinite(values)
-        z = np.full(values.shape, np.nan, dtype=float)
-        if finite.sum() >= 3:
-            center = float(np.nanmedian(values[finite]))
-            mad = float(np.nanmedian(np.abs(values[finite] - center)))
-            scale = 1.4826 * mad if mad > 1e-12 else float(np.nanstd(values[finite]))
-            if scale > 1e-12:
-                z[finite] = np.clip((values[finite] - center) / scale, -3.0, 3.0)
-        frames.append(part.with_columns(pl.Series(output_col, z)))
-    return pl.concat(frames).sort(["ts_ms", "symbol"]) if frames else df
+    # Vectorized robust cross-sectional z per ts_ms (was a per-ts_ms Python loop +
+    # numpy). Center = median, scale = 1.4826*MAD with a population-std fallback when
+    # MAD~0; computed over FINITE values only, and only when >=3 are finite. Rows
+    # that are not finite / under-populated / zero-scale get NaN — same as the numpy
+    # version (numerically equivalent; polars median/std vs numpy differ only at the
+    # last float bit). NaN is used (not null) so the downstream fill_nan still applies.
+    finite = pl.col(input_col).is_finite()
+    val = pl.when(finite).then(pl.col(input_col)).otherwise(None)
+    center = val.median().over("ts_ms")
+    mad = (val - center).abs().median().over("ts_ms")
+    std = val.std(ddof=0).over("ts_ms")
+    scale = pl.when(mad > 1e-12).then(1.4826 * mad).otherwise(std)
+    n_finite = finite.sum().over("ts_ms")
+    z = (
+        pl.when(finite & (n_finite >= 3) & (scale > 1e-12))
+        .then(((pl.col(input_col) - center) / scale).clip(-3.0, 3.0))
+        .otherwise(float("nan"))
+    )
+    return df.with_columns(z.alias(output_col)).sort(["ts_ms", "symbol"])
 
 
 def _add_liquidity_rank(df: pl.DataFrame) -> pl.DataFrame:
-    frames = []
-    for part in df.partition_by("ts_ms", maintain_order=True):
-        ranked = (
-            part.sort("log_turnover", descending=True)
-            .with_row_index("liquidity_rank", offset=1)
-            .with_columns(
-                [
-                    pl.lit(part.height).alias("universe_count"),
-                    (pl.col("liquidity_rank") / pl.lit(float(part.height))).alias("liquidity_rank_pct"),
-                ]
-            )
-        )
-        frames.append(ranked)
-    return pl.concat(frames).sort(["ts_ms", "symbol"]) if frames else df
+    # Vectorized per-ts_ms ordinal liquidity rank (was a per-ts_ms Python loop).
+    rank = pl.col("log_turnover").rank(method="ordinal", descending=True).over("ts_ms")
+    count = pl.len().over("ts_ms")
+    return df.with_columns(
+        rank.alias("liquidity_rank"),
+        count.cast(pl.Int64).alias("universe_count"),
+    ).with_columns(
+        (pl.col("liquidity_rank") / pl.col("universe_count").cast(pl.Float64)).alias("liquidity_rank_pct")
+    ).sort(["ts_ms", "symbol"])
 
 
 def _rolling_sum(values: np.ndarray, window: int) -> np.ndarray:

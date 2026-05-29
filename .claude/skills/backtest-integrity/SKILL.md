@@ -82,6 +82,14 @@ If any answer is weak, the backtest is not ready to influence real-money work.
 
 ## Repo specifics
 
+- **Progressive system, not a frozen baseline.** These gates are about *methodology and
+  evidence* (causality, PIT, costs, OOS, run labels) — NOT about reproducing a prior
+  run's output byte-for-byte. A performance/refactor change is held to **numerical
+  equivalence** (`np.allclose`, NaN positions matching), not bit-identical output;
+  last-bit float-order differences are not an integrity violation. The strict bars that
+  remain are the real-money promotion gate and the correctness gates below (look-ahead,
+  survivorship, accounting). Do not invoke "preserve the exact old numbers" to block an
+  improvement.
 - Signal features use only data known at the **decision timestamp**. For the
   deployed daily signal (Architecture A) that is the daily signal close, and entry
   is delayed **+1h** to prevent same-bar leakage — the signal close is not an
