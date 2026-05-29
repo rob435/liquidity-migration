@@ -216,6 +216,16 @@ class KlineStore:
         self._adds_skipped_unconfirmed = 0
         self._adds_evicted = 0
         self._reads_total = 0
+        # Single-entry materialized-window cache. get_klines rebuilds a large
+        # rectangular frame (~611k rows) on every call; on the steady-state hot
+        # path the same (symbols, window) is re-read every heartbeat with no new
+        # bar, so the result is identical. Key on (sorted symbols, start, end,
+        # mutation-version): _adds_total + _adds_evicted changes IFF _bars changes
+        # on every mutation path EXCEPT recover_from_disk (startup-only), which
+        # invalidates the cache explicitly. A hit therefore provably reflects the
+        # current store; a clone keeps the cached frame immutable to callers.
+        self._window_cache: tuple[tuple, pl.DataFrame] | None = None
+        self._window_builds = 0
         self._cache_root: Path | None = Path(cache_root).expanduser() if cache_root is not None else None
         if self._cache_root is not None:
             self._flush_dir = self._cache_root / ".cache" / "ws_klines"
@@ -398,6 +408,15 @@ class KlineStore:
         sorted_symbols = sorted(symbols)
         with self._lock:
             self._reads_total += 1
+            # Materialized-window cache: a hit means the mutation-version is
+            # unchanged since the cached frame was built, so the store data is
+            # identical and the cached frame is current. Return a clone so the
+            # caller can never mutate the cached object.
+            version = self._adds_total + self._adds_evicted
+            cache_key = (tuple(sorted_symbols), start_ms, end_ms, version)
+            cached = self._window_cache
+            if cached is not None and cached[0] == cache_key:
+                return cached[1].clone()
             for symbol in sorted_symbols:
                 symbol_bars = self._bars.get(symbol)
                 if not symbol_bars:
@@ -423,7 +442,7 @@ class KlineStore:
         # ts_ms, so the columns are already in (symbol, ts_ms) order. Skip
         # the explicit .sort() — it would otherwise re-pay an O(N log N)
         # cost on the same data we just emitted in order.
-        return pl.DataFrame(
+        frame = pl.DataFrame(
             {
                 "ts_ms": ts_col,
                 "symbol": symbol_col,
@@ -437,6 +456,13 @@ class KlineStore:
             },
             schema=_KLINE_SCHEMA,
         )
+        # Cache for the next same-version read; return a clone so the cached
+        # frame stays immutable. (cache_key holds the build-time version: if the
+        # store mutated during the build, the next read computes a newer version
+        # and misses, so a stale frame is never served.)
+        self._window_cache = (cache_key, frame)
+        self._window_builds += 1
+        return frame.clone()
 
     def symbols_with_coverage_through(self, ts_ms: int) -> set[str]:
         """Symbols that have a bar with ``bar.ts_ms >= ts_ms``.
@@ -701,6 +727,9 @@ class KlineStore:
             if self._bars and max_ts > 0:
                 self._evict_old_locked(reference_ts_ms=max_ts)
                 self._last_eviction_ref_ts_ms = max_ts
+            # recovery adds bars without bumping _adds_total (the window-cache
+            # version), so invalidate the cache explicitly. (Startup-only path.)
+            self._window_cache = None
         return recovered
 
     # -- introspection --------------------------------------------------
