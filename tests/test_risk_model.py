@@ -6,7 +6,12 @@ from pathlib import Path
 
 import polars as pl
 
-from liquidity_migration.risk_model import _FACTOR_COLUMNS, build_factor_panel, compute_btc_beta
+from liquidity_migration.risk_model import (
+    _FACTOR_COLUMNS,
+    build_factor_panel,
+    compute_btc_beta,
+    fit_factor_returns,
+)
 
 _DAY = 86_400_000
 
@@ -83,3 +88,30 @@ def test_build_factor_panel_attaches_all_factor_columns(tmp_path: Path) -> None:
     for col in ["symbol", "ts_ms", "date", *_FACTOR_COLUMNS]:
         assert col in panel.columns, f"missing {col}; got {panel.columns}"
     assert set(panel["symbol"].unique().to_list()) <= {"BTCUSDT", "AAA", "BBB"}
+
+
+def test_fit_factor_returns_recovers_known_loadings() -> None:
+    # y = 0.01 + 2.0*f1 + 0.5*f2 exactly (no noise) => OLS recovers slopes, residual ~ 0.
+    rng = random.Random(3)
+    rows = []
+    for ts in range(60):
+        for s in range(30):
+            f1 = rng.uniform(-1.0, 1.0)
+            f2 = rng.uniform(-1.0, 1.0)
+            rows.append({
+                "symbol": f"S{s}", "ts_ms": ts * _DAY, "f1": f1, "f2": f2,
+                "fwd_ret_1d": 0.01 + 2.0 * f1 + 0.5 * f2,
+            })
+    fr, resid = fit_factor_returns(pl.DataFrame(rows), factor_cols=["f1", "f2"])
+    day = fr.filter(pl.col("ts_ms") == 30 * _DAY)
+    assert abs(day.filter(pl.col("factor") == "f1")["factor_return"][0] - 2.0) < 1e-6
+    assert abs(day.filter(pl.col("factor") == "f2")["factor_return"][0] - 0.5) < 1e-6
+    assert resid["residual_return"].abs().max() < 1e-6
+
+
+def test_fit_factor_returns_skips_thin_days_and_handles_empty() -> None:
+    thin = pl.DataFrame([{"symbol": "A", "ts_ms": 0, "f1": 1.0, "fwd_ret_1d": 0.5}])
+    fr, resid = fit_factor_returns(thin, factor_cols=["f1"])  # need=3 obs > 1 -> skipped
+    assert fr.is_empty() and resid.is_empty()
+    fr2, resid2 = fit_factor_returns(pl.DataFrame(), factor_cols=["f1"])
+    assert fr2.is_empty() and resid2.is_empty()
