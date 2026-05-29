@@ -10,6 +10,7 @@ from liquidity_migration.risk_model import (
     _FACTOR_COLUMNS,
     build_factor_panel,
     compute_btc_beta,
+    decompose_strategy_pnl,
     fit_factor_returns,
 )
 
@@ -115,3 +116,28 @@ def test_fit_factor_returns_skips_thin_days_and_handles_empty() -> None:
     assert fr.is_empty() and resid.is_empty()
     fr2, resid2 = fit_factor_returns(pl.DataFrame(), factor_cols=["f1"])
     assert fr2.is_empty() and resid2.is_empty()
+
+
+def test_decompose_strategy_pnl_splits_explained_and_residual() -> None:
+    # 1 factor f1; trade A entered ts=0, hold 2d, exposure 2.0, realized 0.10.
+    # factor returns: day0=0.01, day1=0.02 -> cum 0.03 -> explained 2.0*0.03=0.06 -> residual 0.04.
+    loadings = pl.DataFrame([{"symbol": "A", "ts_ms": 0, "f1": 2.0}])
+    fr = pl.DataFrame([
+        {"ts_ms": 0, "factor": "f1", "factor_return": 0.01},
+        {"ts_ms": _DAY, "factor": "f1", "factor_return": 0.02},
+    ])
+    trades = pl.DataFrame([{"symbol": "A", "entry_ts_ms": 0, "hold_days": 2, "realized_return": 0.10}])
+    out = decompose_strategy_pnl(trades, loadings, fr, factor_cols=["f1"])
+    row = out["per_trade"].row(0, named=True)
+    assert abs(row["explained"] - 0.06) < 1e-9, row
+    assert abs(row["residual"] - 0.04) < 1e-9, row
+    assert out["n_trades"] == 1
+
+
+def test_decompose_strategy_pnl_missing_exposure_is_null() -> None:
+    loadings = pl.DataFrame(schema={"symbol": pl.String, "ts_ms": pl.Int64, "f1": pl.Float64})
+    fr = pl.DataFrame(schema={"ts_ms": pl.Int64, "factor": pl.String, "factor_return": pl.Float64})
+    trades = pl.DataFrame([{"symbol": "A", "entry_ts_ms": 0, "hold_days": 2, "realized_return": 0.1}])
+    out = decompose_strategy_pnl(trades, loadings, fr, factor_cols=["f1"])
+    assert out["per_trade"].row(0, named=True)["explained"] is None
+    assert out["residual_sharpe"] == 0.0

@@ -211,3 +211,80 @@ def fit_factor_returns(
     factor_returns = pl.DataFrame(factor_records, schema=f_schema) if factor_records else pl.DataFrame(schema=f_schema)
     residuals = pl.DataFrame(resid_records, schema=r_schema) if resid_records else pl.DataFrame(schema=r_schema)
     return factor_returns, residuals
+
+
+def decompose_strategy_pnl(
+    trades: pl.DataFrame,
+    factor_loadings: pl.DataFrame,
+    factor_returns: pl.DataFrame,
+    *,
+    factor_cols: list[str] | None = None,
+) -> dict:
+    """Decompose each trade's realized return into factor-explained + residual.
+
+    Inputs:
+      * ``trades``: ``symbol, entry_ts_ms, hold_days, realized_return`` (the
+        normalized per-trade ledger; the caller adapts the engine's trade ledger).
+      * ``factor_loadings``: ``symbol, ts_ms, <factor_cols>`` (``build_factor_panel``).
+      * ``factor_returns``: ``ts_ms, factor, factor_return`` (``fit_factor_returns``).
+
+    For each trade: exposure = the factor loadings at (symbol, entry_ts_ms); the
+    cumulative factor return over the hold = sum of each factor's daily return over
+    the ``hold_days`` daily steps from ``entry_ts_ms``; explained =
+    exposure · cum_factor_return; residual = realized_return - explained (the part
+    NOT explained by factor exposure = candidate alpha). Trades whose entry has no
+    loading row get null explained/residual.
+
+    Returns a dict: ``per_trade`` (symbol, entry_ts_ms, realized_return, explained,
+    residual), ``n_trades``, ``mean_residual``, and ``residual_sharpe`` =
+    mean(residual)/std(residual) over trades (PER-TRADE, un-annualized; the Tier-3
+    gate annualizes by sqrt(trades/yr) with the cell's actual trade span).
+    """
+    cols = list(factor_cols) if factor_cols is not None else list(_FACTOR_COLUMNS)
+    present = [c for c in cols if c in factor_loadings.columns]
+    pt_schema = {
+        "symbol": pl.String, "entry_ts_ms": pl.Int64, "realized_return": pl.Float64,
+        "explained": pl.Float64, "residual": pl.Float64,
+    }
+    if trades.is_empty() or not present:
+        return {"per_trade": pl.DataFrame(schema=pt_schema), "n_trades": 0, "mean_residual": 0.0, "residual_sharpe": 0.0}
+
+    load_map: dict[tuple, dict] = {
+        (row["symbol"], row["ts_ms"]): {f: row.get(f) for f in present}
+        for row in factor_loadings.iter_rows(named=True)
+    }
+    fr_map: dict[int, dict] = {}
+    for row in factor_returns.iter_rows(named=True):
+        fr_map.setdefault(row["ts_ms"], {})[row["factor"]] = row["factor_return"]
+
+    records: list[dict] = []
+    for t in trades.iter_rows(named=True):
+        sym, ets, hd = t["symbol"], int(t["entry_ts_ms"]), int(t["hold_days"])
+        realized = float(t["realized_return"])
+        exposure = load_map.get((sym, ets))
+        if exposure is None:
+            records.append({"symbol": sym, "entry_ts_ms": ets, "realized_return": realized, "explained": None, "residual": None})
+            continue
+        explained = 0.0
+        for f in present:
+            ef = exposure.get(f)
+            if ef is None:
+                continue
+            cum = 0.0
+            for k in range(hd):
+                cum += fr_map.get(ets + k * MS_PER_DAY, {}).get(f) or 0.0
+            explained += float(ef) * cum
+        records.append({"symbol": sym, "entry_ts_ms": ets, "realized_return": realized, "explained": explained, "residual": realized - explained})
+
+    per_trade = pl.DataFrame(records, schema=pt_schema)
+    resid = per_trade["residual"].drop_nulls().to_numpy()
+    if resid.size >= 2 and float(resid.std(ddof=1)) > 0.0:
+        residual_sharpe = float(resid.mean() / resid.std(ddof=1))
+    else:
+        residual_sharpe = 0.0
+    return {
+        "per_trade": per_trade,
+        "n_trades": int(per_trade.height),
+        "mean_residual": float(resid.mean()) if resid.size else 0.0,
+        "residual_sharpe": residual_sharpe,
+    }

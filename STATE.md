@@ -108,15 +108,13 @@ R12a/b sniper + C0 continuous engine).
   [R3](docs/preregistration/round2/r3-bearish-stack-verdict.md).
   - **R4 risk-factor model IN PROGRESS** (foundational code — gates R7 / R9
     factor-caps / Tier-3 residual-Sharpe; map in memory `r4-risk-model-implementation-map`).
-    Chunks 1-3 committed: `liquidity_migration/risk_model.py` — `build_factor_panel`
-    (7 factors: `btc_beta` new + 6 reused signal_harness builders) + `fit_factor_returns`
-    (per-day cross-sectional OLS of realized ret on the loadings → factor-return
-    series + per-name residual returns, the Tier-3 residual-Sharpe input). 6 unit
-    tests (btc_beta math, synthetic-root integration, OLS recovers known loadings).
-    alt-season (8th factor) deferred — 7 meets the plan's 5-6 stable target.
-    **Next R4 chunks:** `decompose_strategy_pnl(trade_ledger)` (per-trade
-    factor-explained vs residual P&L) → `risk-model` CLI → validation run on the
-    full_pit roots (factor Sharpe>0; |factor↔vol corr|<0.3; residual var<raw).
+    Chunks 1-4 committed: `liquidity_migration/risk_model.py` — `build_factor_panel`
+    (7 factors) + `fit_factor_returns` (per-day XS OLS → factor returns + residuals)
+    + `decompose_strategy_pnl` (per-trade factor-explained vs residual P&L →
+    residual_sharpe = the Tier-3 gate input). 8 unit tests. alt-season (8th) deferred.
+    **Next R4 chunks:** `risk-model` CLI subcommand (`build-panel` / `fit-returns` /
+    `residualize-trades`, wiring the 3 functions) → validation run on the full_pit
+    roots (factor Sharpe>0; |factor↔vol corr|<0.3; residual var<raw) → R4 verdict.
   - **Then** R6 cost model, R12 sniper, C0–C3, R9 assembly → R10 → R11 OOS.
     limit-chase EXIT enable is safe (market fallback) but live-path — test-gated,
     post-backtest-validation.
