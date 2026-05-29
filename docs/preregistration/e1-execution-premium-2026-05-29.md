@@ -147,8 +147,9 @@ adds nothing robust: +0.17 MAR on bybit (LOO-fragile, recent-concentrated) but �
 binance (sign-flip), pooled below the Tier-2 bar, and the high-power paired test is noise.
 This fires the plan's E1 falsifier → **pivot E2 toward SELECTION, not execution.**
 
-**Caveat being closed (E1b):** the default squeeze under-engages, so this null is being
-confirmed robust to engagement level by the knob-engagement probe
-([e1b-knob-engagement-2026-05-30.md](e1b-knob-engagement-2026-05-30.md), in flight) —
-forcing every candidate through the pop→giveback wait. If E1b also shows no robust
-premium, the selection-dominant verdict is final.
+**Caveat CLOSED (E1b, run-complete):** the knob-engagement probe
+([e1b-knob-engagement-2026-05-30.md](e1b-knob-engagement-2026-05-30.md)) forced every
+candidate through the pop→giveback wait (bybit giveback trades 69→267, binance 44→199).
+The premium was **unchanged** — bybit still +0.15 MAR (LOO-flips), binance still −0.015,
+Tier-2 still `descriptive`. The null is robust to engagement level; the selection-dominant
+verdict is **final**. E3 (sniper) is not justified — its gate (entry timing matters) fails.

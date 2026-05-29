@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-30
 **Author:** quant-researcher (autonomous research loop)
-**Stage:** run-pending
+**Stage:** run-complete
 **Plan:** [research_plan_selection_execution.md](../research_plan_selection_execution.md) §E1 (the knob-characterization follow-on)
 **Follows:** [e1-execution-premium-2026-05-29.md](e1-execution-premium-2026-05-29.md)
 
@@ -76,8 +76,37 @@ bash scripts/e1_knob_engage_dispatch.sh
 
 ## Post-run results
 
-(pending)
+Run 2026-05-30, sweep tag `e1_knob_engage_2026-05-30`, full-PIT both venues, same
+baseline as E1. Determinism check: the `00_baseline` (fixed_delay) control reproduced
+E1's bybit A **exactly** (+0.6732, −0.2441 DD, 763 trades) → engine is reproducible.
+
+Forcing the h1 gate to 0 routed far more candidates through the pop→giveback wait:
+**bybit giveback trades 69→267 (~6× the E1 default of 44→… actually 44 was binance;
+bybit E1 default was 69); binance 44→199.** Yet the premium over immediate entry is
+unchanged:
+
+| venue | engage_all ret | MAR Δ vs fixed_delay | bootstrap P(Δ>0) | LOO | paired-test (divergent) |
+|---|---:|---:|---:|---|---|
+| bybit | +71.0% | **+0.15** (monthly-DD +0.03) | 70% | **flips sign** (2026-04) | t=+0.32, 11/24 (noise) |
+| binance | +7.6% | **−0.015** (monthly-DD −0.00) | 32% | no flip | t=−0.55, 5/13 (noise) |
+
+`r1_robustness` Tier-2 verdict = **`descriptive`** (pooled MAR Δ +0.01 ≪ +0.1) —
+identical to E1's default-param result.
+
+**Mechanistic note:** even with all candidates in the giveback loop, only 13 (binance)
+/ 24 (bybit) trades changed entry *timing* — because at 1h granularity most "givebacks"
+complete *within the entry bar* (pop and giveback in the same hour → same entry as
+immediate). At 1h resolution the fade-confirmation timing is a near-no-op; the only
+lever left would be sub-hourly (E3/sniper), which is itself gated on timing mattering.
 
 ## Verdict
 
-(pending)
+**CONFIRMED — the execution-timing null is robust to engagement level.** Six-fold more
+fade-confirmation does not produce a robust cross-venue premium; the small bybit premium
+is the same fragile, recent-month, LOO-flipping artifact at any engagement, and binance
+stays slightly negative. The "default squeeze under-engaged" escape hatch is closed.
+
+**E1 final verdict = SELECTION-DOMINANT.** The alpha is the selection pool + a plain +1h
+short; the fade-confirmation execution is not load-bearing at 1h granularity. **E3 (sniper)
+is not justified** (its gate — entry timing matters — fails). E2 pivots to SELECTION
+refinement.

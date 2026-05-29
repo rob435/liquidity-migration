@@ -15,14 +15,16 @@ but on **2026-05-29 that was shown to be substantially a methodology artifact** 
 `bar_extreme` stop fills + `max_active=3` over-concentration + a ×3 (45 bps) cost stacked
 together. Under the realistic capped stop fill at `max_active=12`, the daily strategy is
 **positive on both venues in-sample** (bybit +37.8% / −27.5% DD / Sharpe 0.70; binance
-−4.7% net but gross +16.1%, ~breakeven at honest 15 bps). **Framing (corrected):** the
-strategy is a SELECTION signal (the liquidity-migration event = candidate pool) + an
-EXECUTION signal (enter on the fade-confirmation — pop then giveback, "fade the fade", NOT
-short-at-the-top; this is `promoted_quality_squeeze`). The continuous variant carries real
-cross-venue selection IC but was only ever tested with *immediate* entry — its "null" is
-about timing the top, not the signal; applying the execution layer (+ sniper) to it is the
-open lead. **Forward plan (narrow, for the 5950X): `docs/research_plan_selection_execution.md`**
-— E1 execution-premium → E2 continuous+execution → E3 sniper. Full detail:
+−4.7% net but gross +16.1%, ~breakeven at honest 15 bps). **Framing (E1-corrected 2026-05-30):**
+the alpha is the **SELECTION** signal (the liquidity-migration event = candidate pool) +
+a plain +1h short. **E1 + E1b falsified the EXECUTION half**: `fixed_delay` (immediate)
+vs `promoted_quality_squeeze` (fade-confirmation) on the same pool gives no robust
+cross-venue premium (pooled MAR Δ +0.01, Tier-2 `descriptive`; paired test noise; robust
+to 6× engagement). Immediate-entry shorting alone is bybit **+67.3% / MAR 2.76** at honest
+15 bps (binance +8.0%, funding-missing). At 1h granularity the fade-confirmation is a
+near-no-op, so **E3 (sniper) is dropped** and **E2 pivots to SELECTION refinement**
+(exhaustion-quality gate — older/liquid names, exhausting OI & taker-flow). Plan:
+**`docs/research_plan_selection_execution.md`**; full detail + E1 verdict:
 **`docs/research_summary.md`**. Nothing is promoted; forward demo is the arbiter.
 
 ## What's running
@@ -31,11 +33,16 @@ open lead. **Forward plan (narrow, for the 5950X): `docs/research_plan_selection
   `long_native_event_demo_daemon` under systemd. Frozen promoted profile. Ledgers in
   `data/bybit-demo-event/`.
 - **Paper shadow** (same VPS, same profile, no order submission): `data/bybit-paper-event/`.
-- **No research runs in-flight.**
-- **Next research run (the lead):** E1 from `docs/research_plan_selection_execution.md`
-  — `--entry-policy fixed_delay` vs `promoted_quality_squeeze` on the daily strategy
-  (realistic baseline, both venues) to quantify the execution signal's contribution.
-  Cheap, decisive, no new code; pre-register before running.
+- **No research runs in-flight.** (E1 + E1b complete 2026-05-30 — execution-premium is a
+  documented null; verdict = SELECTION-dominant. See `docs/research_summary.md` and
+  `docs/preregistration/e1-execution-premium-2026-05-29.md` + `e1b-knob-engagement-2026-05-30.md`.)
+- **Next research run (the lead):** E2 — **exhaustion-quality SELECTION refinement** (E1
+  pivoted E2 from execution to selection). Add an exhaustion-quality gate to the selection
+  filter (older `symbol_age`/`pit_age`, more-liquid `liquidity_rank`, falling/flat
+  `open_interest_return`, low `taker_imbalance`, no fresh `prior30_max_daily_return` spike —
+  the cross-venue predictors from E1's within-selection IC). Pre-register; backtest full-PIT
+  both venues; require MAR improvement **cross-venue AND in the recent (weak) third** (control
+  the "age proxies the strong 2023–24 regime" confound).
 - **Open action (from the 2026-05-29 re-baseline):** the deployed demo runs `max_active=3`
   (worst day −36%, DD −87% under honest fills); the research-validated value is
   `max_active=12` (worst day −4.8%, DD −27.5%). Consider moving the demo to 12 and/or

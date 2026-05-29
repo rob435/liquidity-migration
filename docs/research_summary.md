@@ -37,9 +37,40 @@ reasons:
 - **Selection/execution conflation:** the continuous test (C2) used *immediate* entry, never
   the fade-confirmation execution.
 
-Under the realistic fill + sane concentration, the **daily** strategy (which uses the
-fade-confirmation execution) is **positive on both venues in-sample.** It remains in-sample;
-the forward demo (since 2026-05-22) is the arbiter; nothing is promoted.
+Under the realistic fill + sane concentration, the **daily** strategy is **positive on
+both venues in-sample.** It remains in-sample; the forward demo (since 2026-05-22) is the
+arbiter; nothing is promoted.
+
+## E1 (2026-05-30): the EXECUTION signal is NOT load-bearing — the alpha is SELECTION
+
+The E1 experiment ([preregistration/e1-execution-premium-2026-05-29.md](preregistration/e1-execution-premium-2026-05-29.md)
++ the E1b knob-engagement robustness probe) tested the thesis directly: on the *same*
+selection pool, costs, and concentration (full-PIT, capped10, max_active=12, 15 bps,
+both venues, 2023-04→2026-05), vary only `--entry-policy`: A `fixed_delay` (immediate
++1h) vs B `promoted_quality_squeeze` (fade-confirmation).
+
+| venue | A immediate (fixed_delay) | B fade-confirm (quality_squeeze) | premium B−A |
+|---|---:|---:|---:|
+| bybit | **+67.3% / MAR 2.76 / Sh 1.07** | +71.2% / MAR 2.93 | +0.17 MAR (LOO-flips, recent-only) |
+| binance | **+8.0% / MAR 0.28** (funding-missing) | +7.3% / MAR 0.25 | −0.03 MAR (sign-flip) |
+
+**Verdict: SELECTION-DOMINANT.** The fade-confirmation execution adds nothing robust —
+pooled MAR Δ ≈ +0.01 (Tier-2 `descriptive`), it sign-flips across venues, the bybit
+premium is a fragile recent-month artifact (LOO flips the sign), and the high-power
+paired micro-test on the genuinely time-divergent trades is pure noise (bybit t=+0.35,
+binance t=−1.30). The E1b probe forced 6× more engagement (bybit giveback trades 69→267)
+and the premium was unchanged → robust to engagement level. **The alpha is the SELECTION
+pool + a plain +1h short.** Two reasons the execution layer is inert: (a) `promoted_quality_squeeze`
+never *filters* the pool (A and B trade the identical candidates), and (b) at 1h granularity
+most "givebacks" complete inside the entry bar, so the timing barely moves (only ~3–9% of
+entries differ from immediate). **`promoted_quality_squeeze` ≈ immediate entry in practice.**
+
+**What this corrects:** the 2026-05-29 retraction was right that the old null was a
+worst-case-fills + over-concentration artifact (E1 confirms the strategy is strongly
+positive — bybit +67% at honest 15 bps). But its framing that the strategy is a SELECTION
+*and* an EXECUTION (fade-confirmation) signal — and that execution is the open lead — is
+**not supported**. Execution timing is a non-lever at 1h; E3 (sniper) is therefore not
+justified (its gate fails). **The open lead is SELECTION refinement.**
 
 ## Daily strategy — realistic re-baseline (full-PIT, `bar_extreme_capped` 10%, in-sample 2023-04→2026-05)
 
@@ -52,36 +83,42 @@ the forward demo (since 2026-05-22) is the arbiter; nothing is promoted.
 All rows use the `promoted_quality_squeeze` (fade-confirmation) execution. At the honest
 15 bps cost the drag roughly thirds → bybit higher, **binance ~breakeven-to-positive**.
 **Both venues are gross-positive.** The top row is the old worst-case (what the "null" was
-built on). *(Binance funding not applied in this run; for a short, funding is typically a
-credit — likely understates binance.)*
+built on). *(Binance funding is **missing** in these runs — `binance_full_pit` has no funding
+dataset wired; label `funding-missing`. Correcting an earlier note: this does NOT understate
+binance — E1 shows bybit short funding is a net **−6.2% drag** (modeled), not a credit, so
+adding funding would if anything pull binance **down**. The cross-venue gap is real, not a
+funding artifact.)*
 
-## The open lead: refine the EXECUTION signal (sniper) + apply it to the continuous candidate
+## The open lead (post-E1): SELECTION refinement, not execution
 
-**Now sequenced as a narrow, falsifiable plan for the 5950X:
-[research_plan_selection_execution.md](research_plan_selection_execution.md)** — E1
-execution-premium (`fixed_delay` vs `promoted_quality_squeeze`, the cheap decisive
-proof) → E2 continuous candidate + execution layer → E3 sniper (sub-1h).
+E1 closed the execution question (above): timing is a non-lever, so E2/E3 pivot away
+from execution. The plan ([research_plan_selection_execution.md](research_plan_selection_execution.md))
+E1→E2→E3 sequence stands, but with E1's contingency triggered — E2 becomes a **selection
+refinement** study, and E3 (sniper) is dropped (its gate, "entry timing matters," failed).
 
-The selection/execution split makes the next research obvious and is the most promising
-direction:
+Two concrete selection leads:
 
-- **The continuous candidate signal carries real, robust cross-venue IC** (rolling features:
-  composite −0.084/−0.085/−0.087 bybit, −0.078/−0.081/−0.085 binance at 24/72/168h; `rv_168h`
-  −0.13 @168h, strengthening). This is a *selection* signal — genuinely informative about
-  *which* names will underperform. **It was only ever tested with immediate entry** (C2), so
-  its "not tradeable" label is about timing-the-top, not the signal.
-- **Untested and the lead:** apply the **fade-confirmation execution** (pop-then-giveback,
-  and finer **sniper** sub-1h timing) to the continuous candidate pool. The momentum-
-  continuation at the extremes is precisely what a confirmation entry is designed to wait
-  out.
-- **Sniper entry (was "R12"):** refine the execution signal to sub-1h / 1m timing — better
-  confirmation, less lag. This is *execution* refinement on a fixed *selection*, exactly the
-  separation above.
+- **Exhaustion-quality gate (E2 lead, exploratory IC):** among the *selected* events, the
+  cross-venue-consistent predictors of a profitable short say the best shorts are
+  **seasoned, liquid names whose flow is exhausting**, not fresh alts still ripping. On the
+  realized E1 shorts (both venues, Spearman vs net_return): older `symbol_age`/`pit_age`
+  (+0.11/+0.13), more-liquid `liquidity_rank` (−0.11/−0.14), falling/flat `open_interest_return`
+  (−0.08/−0.14), low `taker_imbalance` (−0.08/−0.14), no fresh `prior30_max_daily_return`
+  spike (−0.07/−0.13), higher `event_rank_fraction` within the sub-top-10% band (+0.09/+0.08).
+  Modest ICs but cross-venue-consistent and mechanistically sensible. **Pre-register a
+  refinement, backtest full-PIT both venues, and require it improves MAR cross-venue AND in
+  the recent (weak) third** — controlling the "age proxies the strong 2023–24 regime" confound.
+- **The continuous candidate signal carries real cross-venue *selection* IC** (rolling
+  features: composite −0.084/−0.085/−0.087 bybit, −0.078/−0.081/−0.085 binance at 24/72/168h;
+  `rv_168h` −0.13 @168h). It is a *selection* signal (which names underperform). Its c2
+  "not tradeable" label was an immediate-entry test — but E1 shows immediate entry is fine,
+  so the open question is whether the continuous selection beats the discrete event selection
+  under the *same plain +1h short*, not whether an execution layer rescues it.
 
-**To validate the separation directly:** compare the daily strategy under `fixed_delay`
-(near-immediate entry) vs `promoted_quality_squeeze` (fade-confirmation). If the squeeze
-materially outperforms, the execution signal *is* a large part of the alpha — the cleanest
-proof of this whole thesis. (Not yet run; cheap to run.)
+**Cross-venue asymmetry is the standing caveat:** bybit MAR 2.76 vs binance 0.28 (and
+binance is funding-missing, i.e. optimistic). The edge is also front-loaded (recent third
+much weaker). Any selection refinement must narrow this gap / hold up recently, not just
+reload the early bybit regime.
 
 ## Useful findings worth keeping
 
