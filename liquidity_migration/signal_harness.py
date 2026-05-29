@@ -246,11 +246,28 @@ def _aggregate_daily_premium(premium_index_1h: pl.DataFrame) -> pl.DataFrame:
 
 
 def _attach_daily_returns(daily_klines: pl.DataFrame) -> pl.DataFrame:
-    """Per-symbol daily simple return = close[D] / close[D-1] - 1."""
+    """Per-symbol daily simple return = close[D] / close[D-1] - 1.
+
+    Calendar-exact: the prior close is resolved by an explicit ``ts_ms - 1 day``
+    join, NOT a positional ``shift(1)``. ``ts_ms`` is the uniform 00:00-UTC daily
+    grid, so for a symbol with a missing day (delist->relist, data hole) a
+    positional shift would use the last PRESENT row and silently turn a
+    multi-calendar-day move into a "1d" return — the same gap-blindness the M4
+    forward-return join (``_attach_forward_returns``) was built to avoid. A gapped
+    row gets a null ``ret_1d`` (no D-1 partner) rather than a misaligned one.
+    """
     if daily_klines.is_empty():
         return pl.DataFrame()
-    return daily_klines.sort(["symbol", "ts_ms"]).with_columns(
-        (pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias("ret_1d")
+    df = daily_klines.sort(["symbol", "ts_ms"])
+    prev = df.select(
+        pl.col("symbol"),
+        (pl.col("ts_ms") + MS_PER_DAY).alias("ts_ms"),  # this row is D-1 for ts_ms+1d
+        pl.col("close").alias("_prev_close"),
+    )
+    return (
+        df.join(prev, on=["symbol", "ts_ms"], how="left")
+        .with_columns((pl.col("close") / pl.col("_prev_close") - 1.0).alias("ret_1d"))
+        .drop("_prev_close")
     )
 
 

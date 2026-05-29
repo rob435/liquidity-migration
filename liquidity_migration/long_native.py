@@ -1607,7 +1607,11 @@ def _finalize_trade(pos, *, exit_ts_ms, exit_price, reason, notional_weight, rou
         "gross_trade_return": gross_trade_return, "gross_return": gross_return,
         "cost_return": cost_return, "funding_return": funding_return,
         "funding_mode": funding_mode, "funding_event_count": int(funding_event_count),
-        "net_return": net_return, "mae": 0.0, "mfe": 0.0,
+        # The long sleeve does not track intra-hold price path, so MAE/MFE are
+        # NOT measured here. Emit NaN (not 0.0 — a fabricated zero reads as "no
+        # adverse excursion ever" and silently zeroes the H2 intra-hold MAE
+        # diagnostic; the consumer drops non-finite values as not-measured).
+        "net_return": net_return, "mae": float("nan"), "mfe": float("nan"),
         "bars_held": int(round((int(exit_ts_ms) - int(pos["entry_ts_ms"])) / MS_PER_HOUR)),
         "hold_hours": (int(exit_ts_ms) - int(pos["entry_ts_ms"])) / MS_PER_HOUR,
         "actual_entry_delay_hours": (int(pos["entry_ts_ms"]) - int(pos["entry_signal_ts_ms"])) / MS_PER_HOUR,

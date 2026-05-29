@@ -184,6 +184,14 @@ def fit_factor_returns(
     ``len(factor_cols) + 2``) are skipped; rows with any null factor/target are
     dropped per day. PIT-clean: factor loadings are as-of decision_ts; the target
     is the strictly-forward return.
+
+    FORWARD-SURVIVORSHIP NOTE: a symbol's terminal trading day before a
+    delist/data-gap has a null ``target_col`` (no strictly-forward return) and is
+    therefore dropped from that day's regression. This is unavoidable — you cannot
+    regress on a return that does not exist — but it means each daily factor-return
+    is estimated only over symbols that survived to the next day. The R4 validation
+    run surfaces the dropped-row count so this exposure is visible rather than
+    silent; treat factor returns near heavy-delisting windows with that caveat.
     """
     cols = list(factor_cols) if factor_cols is not None else list(_FACTOR_COLUMNS)
     f_schema = {"ts_ms": pl.Int64, "factor": pl.String, "factor_return": pl.Float64}
@@ -216,6 +224,87 @@ def fit_factor_returns(
     return factor_returns, residuals
 
 
+def residual_variance_capture(
+    panel: pl.DataFrame,
+    *,
+    factor_cols: list[str] | None = None,
+    target_col: str = "fwd_ret_1d",
+    min_obs_per_day: int | None = None,
+    n_permutations: int = 200,
+    seed: int = 0,
+) -> dict:
+    """Honest test of whether the factor model captures REAL forward-return variance.
+
+    The naive ``residual_std < raw_std`` check is an in-sample tautology: per-day
+    OLS *with an intercept* guarantees R^2 >= 0, so residual variance is
+    mechanically <= target variance regardless of whether any factor carries
+    forward-predictive information — the comparison passes even for a pure-noise
+    factor model. This builds a permutation NULL instead: for each cross-section
+    the target is shuffled across symbols (destroying any factor->return relation
+    while preserving that day's return distribution), the residual std is
+    recomputed, and the real residual std is compared against the null
+    distribution. The model captures real variance only if the actual residual std
+    is below what chance shuffling achieves (``p_value < 0.05``), i.e. it reduces
+    variance by MORE than fitting the same number of parameters to noise does.
+
+    Both ``raw_std`` and ``residual_std`` are over the IDENTICAL surviving
+    (symbol, ts_ms) rows used in the regression — fixing the prior whole-panel
+    (raw) vs regression-subset (residual) population mismatch. ``raw_std`` is
+    invariant to the within-day shuffle, so the null shares one denominator.
+    """
+    cols = list(factor_cols) if factor_cols is not None else list(_FACTOR_COLUMNS)
+    present = [c for c in cols if c in panel.columns]
+    empty = {
+        "raw_std": 0.0, "residual_std": 0.0, "residual_std_over_raw": None,
+        "null_ratio_p05": None, "p_value": None, "captures_real_variance": False,
+        "n_obs": 0, "n_days": 0, "n_permutations": int(max(0, n_permutations)),
+    }
+    if panel.is_empty() or target_col not in panel.columns or not present:
+        return empty
+    need = min_obs_per_day if min_obs_per_day is not None else len(present) + 2
+
+    # Precompute per day: the design matrix X (+ intercept) and its pseudo-inverse.
+    # X is FIXED across permutations (only y is shuffled), so caching pinv(X) turns
+    # each null fit into two cheap matmuls instead of a fresh lstsq.
+    day_ops: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+    for _key, day in panel.group_by("ts_ms"):
+        sub = day.drop_nulls(subset=[*present, target_col])
+        if sub.height < need:
+            continue
+        x = np.column_stack([np.ones(sub.height), sub.select(present).to_numpy()])
+        y = sub[target_col].to_numpy()
+        day_ops.append((x, np.linalg.pinv(x), y))
+    if not day_ops:
+        return empty
+
+    def _resid_std(shuffle: bool, rng: np.random.Generator) -> float:
+        chunks = [
+            (yy := (rng.permutation(y) if shuffle else y)) - x @ (pinv @ yy)
+            for x, pinv, y in day_ops
+        ]
+        return float(np.concatenate(chunks).std())
+
+    raw = np.concatenate([y for _x, _p, y in day_ops])
+    raw_std = float(raw.std())
+    rng = np.random.default_rng(seed)
+    real_res_std = _resid_std(False, rng)
+    n_perm = max(0, int(n_permutations))
+    null = np.array([_resid_std(True, rng) for _ in range(n_perm)]) if n_perm else np.array([])
+    p_value = float(np.mean(null <= real_res_std)) if null.size else None
+    null_p05 = float(np.percentile(null, 5)) if null.size else None
+    return {
+        "raw_std": raw_std,
+        "residual_std": real_res_std,
+        "residual_std_over_raw": (real_res_std / raw_std) if raw_std > 0 else None,
+        "null_ratio_p05": (null_p05 / raw_std) if (null_p05 is not None and raw_std > 0) else None,
+        "p_value": p_value,
+        "captures_real_variance": bool(p_value is not None and p_value < 0.05),
+        "n_obs": int(raw.size),
+        "n_days": len(day_ops),
+        "n_permutations": n_perm,
+    }
+
+
 def decompose_strategy_pnl(
     trades: pl.DataFrame,
     factor_loadings: pl.DataFrame,
@@ -231,17 +320,25 @@ def decompose_strategy_pnl(
       * ``factor_loadings``: ``symbol, ts_ms, <factor_cols>`` (``build_factor_panel``).
       * ``factor_returns``: ``ts_ms, factor, factor_return`` (``fit_factor_returns``).
 
-    For each trade: exposure = the factor loadings at (symbol, entry_ts_ms); the
-    cumulative factor return over the hold = sum of each factor's daily return over
-    the ``hold_days`` daily steps from ``entry_ts_ms``; explained =
-    exposure · cum_factor_return; residual = realized_return - explained (the part
-    NOT explained by factor exposure = candidate alpha). Trades whose entry has no
-    loading row get null explained/residual.
+    For each trade: ``entry_ts_ms`` is SNAPPED to the 00:00-UTC daily grid the
+    factor panel is keyed on (the engine ledger carries a +1h-delayed, bar-end
+    entry that would otherwise miss every exact-ts lookup); exposure = the factor
+    loadings at (symbol, snapped-entry); the cumulative factor return over the hold
+    = sum of each factor's daily return over the ``hold_days`` daily steps; explained
+    = exposure · cum_factor_return; residual = realized_return - explained (the part
+    NOT explained by factor exposure = candidate alpha). Trades whose snapped entry
+    has no loading row, OR whose hold spans no day with a factor-return row, get
+    null explained/residual (NOT explained=0.0 — that would mis-book the entire
+    realized return as residual alpha and silently inflate the residual Sharpe).
 
     Returns a dict: ``per_trade`` (symbol, entry_ts_ms, realized_return, explained,
-    residual), ``n_trades``, ``mean_residual``, and ``residual_sharpe`` =
+    residual), ``n_trades``, ``mean_residual``, ``residual_sharpe`` =
     mean(residual)/std(residual) over trades (PER-TRADE, un-annualized; the Tier-3
-    gate annualizes by sqrt(trades/yr) with the cell's actual trade span).
+    gate annualizes by sqrt(trades/yr) with the cell's actual trade span),
+    ``n_unresolved`` (trades that could not be decomposed -> null), and
+    ``resolved_fraction`` (decomposed trades / n_trades — a low value means the
+    loadings/returns grids do not line up with the trade ledger and the residual
+    Sharpe is not trustworthy).
     """
     cols = list(factor_cols) if factor_cols is not None else list(_FACTOR_COLUMNS)
     present = [c for c in cols if c in factor_loadings.columns]
@@ -261,11 +358,21 @@ def decompose_strategy_pnl(
         fr_map.setdefault(row["ts_ms"], {})[row["factor"]] = row["factor_return"]
 
     records: list[dict] = []
+    n_unresolved = 0
     for t in trades.iter_rows(named=True):
         sym, ets, hd = t["symbol"], int(t["entry_ts_ms"]), int(t["hold_days"])
         realized = float(t["realized_return"])
-        exposure = load_map.get((sym, ets))
+        # Snap to the 00:00-UTC daily grid (build_factor_panel keys ts_ms to the
+        # day's first hourly bar start; the engine ledger entry is +1h/bar-end).
+        grid = (ets // MS_PER_DAY) * MS_PER_DAY
+        exposure = load_map.get((sym, grid))
         if exposure is None:
+            n_unresolved += 1
+            records.append({"symbol": sym, "entry_ts_ms": ets, "realized_return": realized, "explained": None, "residual": None})
+            continue
+        present_days = [grid + k * MS_PER_DAY for k in range(max(hd, 1)) if (grid + k * MS_PER_DAY) in fr_map]
+        if not present_days:
+            n_unresolved += 1
             records.append({"symbol": sym, "entry_ts_ms": ets, "realized_return": realized, "explained": None, "residual": None})
             continue
         explained = 0.0
@@ -273,9 +380,7 @@ def decompose_strategy_pnl(
             ef = exposure.get(f)
             if ef is None:
                 continue
-            cum = 0.0
-            for k in range(hd):
-                cum += fr_map.get(ets + k * MS_PER_DAY, {}).get(f) or 0.0
+            cum = sum(fr_map[d].get(f) or 0.0 for d in present_days)
             explained += float(ef) * cum
         records.append({"symbol": sym, "entry_ts_ms": ets, "realized_return": realized, "explained": explained, "residual": realized - explained})
 
@@ -290,4 +395,6 @@ def decompose_strategy_pnl(
         "n_trades": int(per_trade.height),
         "mean_residual": float(resid.mean()) if resid.size else 0.0,
         "residual_sharpe": residual_sharpe,
+        "n_unresolved": int(n_unresolved),
+        "resolved_fraction": (resid.size / per_trade.height) if per_trade.height else 0.0,
     }

@@ -699,3 +699,21 @@ def test_build_feature_panel_universe_filter_drops_low_turnover_rows(tmp_path: P
     )
     assert panel_unfiltered.height > 0
     assert panel_filtered.height == 0
+
+
+def test_attach_daily_returns_is_calendar_exact_across_gaps() -> None:
+    """ret_1d must be calendar-exact: a symbol with a missing calendar day gets a
+    NULL return on the post-gap day, NOT a positional 2-day return mislabeled 1d
+    (the gap-blind shift(1) hazard the M4 forward-return join was built to avoid)."""
+    _DAY = 86_400_000
+    # Day 2 missing for X: present days 0, 1, 3.
+    df = pl.DataFrame({
+        "symbol": ["X", "X", "X"],
+        "ts_ms": [0, _DAY, 3 * _DAY],
+        "close": [100.0, 110.0, 121.0],
+    })
+    out = _attach_daily_returns(df).sort("ts_ms")
+    rets = out["ret_1d"].to_list()
+    assert rets[0] is None  # no D-1 partner for the first day
+    assert abs(rets[1] - 0.10) < 1e-12  # 110/100 - 1
+    assert rets[2] is None  # day 3 has no day-2 partner -> null, not 121/110-1

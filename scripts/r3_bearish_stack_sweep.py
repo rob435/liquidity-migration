@@ -34,9 +34,14 @@ Windows: ``$env:SWEEP_MAX_WORKERS=1; $env:POLARS_MAX_THREADS=8; .venv\\Scripts\\
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
+# Full-PIT klines reads peak ~23 GB/cell: declare it so _sweep_runtime's
+# memory-aware default drops to 1 worker on a 32 GB box even if the operator
+# forgets SWEEP_MAX_WORKERS=1 (an explicit env value still wins over this).
+os.environ.setdefault("SWEEP_CELL_GB", "23")
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _sweep_runtime import SHARED, Cell, run_sweep  # noqa: E402
 

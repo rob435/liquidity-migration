@@ -52,3 +52,35 @@ Treat the first sweep under the applied defaults as a **re-baseline** (`explorat
 re-run the control cell under identical settings before any cell-vs-control MAR
 delta is read as Tier-1/Tier-2 evidence. The applied changes only tighten realism,
 so a cell that survives the harder bar is stronger evidence, not weaker.
+
+---
+
+## Audit #2 (2026-05-29) — second deep audit, methodology fixes
+
+A second full-system deep audit (focused on the parallel R4 risk-model code, the
+decision/sweep tooling, and the WS-event-driven conversion) surfaced six further
+methodology issues. **Every change below again moves results in the conservative /
+more-honest direction — none can inflate an edge.** Same re-baseline rule applies.
+All test-gated (`tests/test_risk_model.py`, `tests/test_r1_robustness.py`,
+`tests/test_scripts_apply_decision_rule.py`, `tests/test_runtime_scripts.py`,
+`tests/test_liquidity_migration_signal_harness.py`) and ruff-clean.
+
+| Tag | Change | Effect on results | Error # |
+|---|---|---|---|
+| A1 | R4 validation criterion (3) "variance capture": in-sample `residual_std < raw_std` (always true — OLS R²≥0 tautology, passes a pure-noise model) → permutation-null test (`risk_model.residual_variance_capture`; `r4_risk_model_validation.py`). | The factor-model variance-capture gate now FAILS a zero-signal model and PASSES only when the real residual std beats a within-day target-shuffle null (p<0.05). A core R4 gate that produced a false PASS is now a real test. No committed R4 verdict existed yet, so nothing prior is contaminated. | #19 (multiple-testing/illusory-evidence class) |
+| B1 | `risk_model.decompose_strategy_pnl` matched factor loadings/returns on the **raw** `entry_ts_ms`; the engine ledger's +1h/bar-end entry missed the 00:00-UTC panel grid → all-null → realized return mis-booked as residual alpha. Now snaps entry to the daily grid; emits null (not 0.0) when un-decomposable; reports `n_unresolved`/`resolved_fraction`. | Latent today (function is tests-only, no live caller). Once wired, the Tier-3 residual Sharpe is computed from correctly-decomposed trades instead of a silently-inflated residual. | #13 (timestamp/grid misalignment) |
+| B3 | `signal_harness._attach_daily_returns` positional `shift(1)` → calendar-exact `ts_ms − 1 day` join (mirrors the M4 forward-return fix for the BACKWARD daily return). | A gapped symbol's post-gap `ret_1d` is now null, not a multi-calendar-day move mislabeled 1-day. Changes the BTC-beta factor and realized-vol/momentum features for symbols with calendar gaps (delist→relist, data holes). R4 factor returns under this fix supersede any pre-fix run. | #13 |
+| B4 | `risk_model.fit_factor_returns` forward-survivorship made visible: a symbol's terminal (null-forward-return) day is necessarily dropped from each cross-sectional regression; the R4 report now emits `fwd_survivorship_null_target_rows`/`_frac`. | No estimator change (you cannot regress on a non-existent forward return). Surfaces the survivorship exposure rather than leaving it silent. | #1/#12 |
+| B5 | `apply_decision_rule` now HARD-EXCLUDES non-full-PIT cells (verdict `non_full_pit`) instead of only warning — a survivorship-tainted `--allow-partial-pit` cell can no longer receive `investigation_positive`/`candidate`. | A partial-PIT cell is removed from the promotion-positive bucket regardless of how good its (biased) numbers look. Strictly fewer cells can be promoted. | #1/#19 |
+| B6 | `r1_robustness` MAR: zero-drawdown cells returned `+inf` (spuriously cleared the pooled-MAR demo-eligibility gate) → `nan`, and `_tier2_verdict` treats a non-finite MAR Δ as non-eligible. Also per-cell try/except on report load (an OOM-killed cell's truncated JSON no longer crashes the whole run). | A degenerate / too-few-trades zero-DD cell can no longer auto-pass the Tier-2 demo gate on a divide-by-≈0. Strictly fewer cells pass. | #20 (bad accounting) / #25 (all-or-nothing compute) |
+
+(Non-result-changing fixes from audit #2 — the kline cycle-wake future-bar clamp
+[`kline_stream_manager`], the long-sleeve `mae=mfe=NaN`-not-`0.0` diagnostic
+honesty [`long_native`/`trade_lifecycle`], the corrected ws_risk orphan-close
+grace-window comment [`event_demo_exits`], and the memory-aware sweep-worker
+default [`_sweep_runtime`] — are execution/diagnostic/ops fixes, not
+backtest-methodology, and are not gated here.)
+
+The author's WS-event-loop / trade-client-retry regressions surfaced by the same
+audit (bootstrap-blocking WS-trade build, orphaned retry thread) are deferred per
+owner instruction (low-severity, restart-only, demo-only).

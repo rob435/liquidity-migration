@@ -1364,11 +1364,14 @@ def _risk_reconcile_missing_positions(
         if symbol and symbol in position_by_symbol:
             kept.append(trade)
             continue
-        # The ws_risk path already gates orphan-close behind a grace window
-        # (untracked_position_grace_seconds) + the position_error guard above,
-        # so it keeps the legacy close-on-absence behavior here (require_evidence
-        # =False); the fail-closed evidence requirement is enforced on the
-        # grace-less cycle path (_reconcile_open_trades).
+        # The ws_risk path keeps the legacy close-on-absence behavior here
+        # (require_evidence=False). Its safety against a transient/empty read is
+        # the position_error guard at the caller (a failed/empty positions fetch
+        # does not reach here), NOT a grace window — untracked_position_grace_
+        # seconds gates the OPPOSITE direction (adopting an exchange position with
+        # no ledger row), not this ledger-row-with-no-position close. The
+        # fail-closed evidence requirement (require_evidence=True) is enforced on
+        # the cycle path (_reconcile_open_trades) instead.
         updates.append(
             _orphan_close_trade_row(trade, now_ms=now_ms, trading_client=trading_client, require_evidence=False)
         )

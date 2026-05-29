@@ -57,7 +57,19 @@ def _load_monthly(cell_dir: Path) -> list[tuple[str, float]]:
 
 
 def _load_json_metrics(cell_dir: Path) -> dict:
-    d = json.loads((cell_dir / "volume_event_research_report.json").read_text())
+    try:
+        d = json.loads((cell_dir / "volume_event_research_report.json").read_text())
+    except (OSError, ValueError) as exc:
+        # An OOM-killed / interrupted cell leaves a missing or truncated report
+        # (json.JSONDecodeError is a ValueError). Surface it as a per-cell
+        # load_error so the caller skips just that cell instead of crashing the
+        # whole multi-cell robustness run on one bad file.
+        return {
+            "total_return": 0.0, "max_drawdown": 0.0, "sharpe_like": 0.0,
+            "trades": 0, "start": None, "end": None,
+            "full_pit_pass": False, "run_label": "",
+            "load_error": f"{type(exc).__name__}: {exc}",
+        }
     b = d.get("best_scenario", {})
     dr = d.get("date_range", {})
     pit = d.get("pit_manifest", {})
@@ -72,6 +84,7 @@ def _load_json_metrics(cell_dir: Path) -> dict:
         # universe. A partial-PIT run is current-universe (survivorship) biased.
         "full_pit_pass": bool(pit.get("full_pit_universe_pass", False)),
         "run_label": str(d.get("run_label", "")),
+        "load_error": None,
     }
 
 
@@ -117,7 +130,11 @@ def _mar(returns: list[float]) -> float:
     n = len(returns)
     ann = _annualize(_compound(returns), n)
     dd = abs(_max_dd_monthly(returns))
-    return ann / dd if dd > 1e-9 else float("inf")
+    # A ~zero-drawdown series has UNMEASURABLE risk-adjusted return (MAR -> inf is a
+    # divide-by-~0 artifact, not "infinitely good"). Return nan, not inf, so it is
+    # excluded by the math.isfinite() guards rather than spuriously dominating /
+    # passing a MAR gate.
+    return ann / dd if dd > 1e-9 else float("nan")
 
 
 def _thirds(months: list[str], cell_r: list[float], base_r: list[float]) -> list[dict]:
@@ -212,7 +229,11 @@ def _engine_mar(total_return: float, max_drawdown: float, years: float) -> float
     the monthly-resolution DD / active-month count the bootstrap uses)."""
     dd = abs(max_drawdown)
     ann = (1.0 + total_return) ** (1.0 / years) - 1.0
-    return ann / dd if dd > 1e-9 else float("inf")
+    # nan (not inf) for a ~zero-DD cell: MAR is a divide-by-~0 artifact there, and
+    # inf would let a degenerate (e.g. too-few-trades, no down day) cell spuriously
+    # clear the pooled-MAR demo-eligibility gate. _tier2_verdict treats a non-finite
+    # MAR Δ as non-eligible.
+    return ann / dd if dd > 1e-9 else float("nan")
 
 
 def _tier2_verdict(by_d: float, bn_d: float, pooled_d: float, *,
@@ -224,6 +245,11 @@ def _tier2_verdict(by_d: float, bn_d: float, pooled_d: float, *,
     # numbers look. Requires BOTH the cell and the control to have run full-PIT.
     if not full_pit:
         return "INVALID (partial-PIT — current-universe/survivorship biased)"
+    # MAR observability gate: a non-finite MAR Δ means a venue's drawdown was
+    # ~zero (MAR undefined — degenerate/too-few-trades), so the cell carries no
+    # measurable risk-adjusted-return evidence and must not be demo-eligible.
+    if not (math.isfinite(by_d) and math.isfinite(bn_d) and math.isfinite(pooled_d)):
+        return "descriptive (MAR undefined — ~zero DD a venue, unmeasurable)"
     # Falsify
     if by_ret <= 0 or bn_ret <= 0:
         return "FALSIFY (return ≤0 a venue)"
@@ -259,9 +285,13 @@ def main() -> int:
             print(f"SKIP {venue}: {sweep_root} not found")
             continue
         control_dir = sweep_root / args.control
+        base_json = _load_json_metrics(control_dir)
+        if base_json.get("load_error"):
+            print(f"SKIP {venue}: control ({args.control}) report unreadable "
+                  f"({base_json['load_error']}) — cannot evaluate this venue.")
+            continue
         base_monthly = _load_monthly(control_dir)
         base_months = [m for m, _ in base_monthly]
-        base_json = _load_json_metrics(control_dir)
         control_full_pit[venue] = base_json["full_pit_pass"]
         if not base_json["full_pit_pass"]:
             print(f"  ⚠️  {venue} control ({args.control}) is NOT full-PIT "
@@ -279,13 +309,16 @@ def main() -> int:
             if not (cdir / "volume_event_best_monthly.csv").exists():
                 print(f"  {cell}: no ledger")
                 continue
+            cj = _load_json_metrics(cdir)
+            if cj.get("load_error"):
+                print(f"  {cell}: report unreadable ({cj['load_error']}) — skipped (OOM-killed cell?)")
+                continue
             cm = _load_monthly(cdir)
             # align months to the control's month set (intersection, sorted)
             cell_map = dict(cm)
             months = [m for m in base_months if m in cell_map]
             cr = [cell_map[m] for m in months]
             br = [dict(base_monthly)[m] for m in months]
-            cj = _load_json_metrics(cdir)
             cell_mar = _engine_mar(cj["total_return"], cj["max_drawdown"], _window_years(cj))
 
             collected.setdefault(cell, {})[venue] = {

@@ -4,6 +4,7 @@ import random
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 
 from liquidity_migration.risk_model import (
@@ -12,9 +13,84 @@ from liquidity_migration.risk_model import (
     compute_btc_beta,
     decompose_strategy_pnl,
     fit_factor_returns,
+    residual_variance_capture,
 )
 
 _DAY = 86_400_000
+
+
+def _factor_panel(n_days: int, n_syms: int, *, signal_factor: str | None = None, seed: int = 0) -> pl.DataFrame:
+    """Synthetic factor-exposure panel with all _FACTOR_COLUMNS + fwd_ret_1d.
+
+    ``signal_factor=None`` => target is pure noise (factors carry no information);
+    otherwise target = 0.3 * that factor + noise (a real, detectable relation)."""
+    rng = np.random.default_rng(seed)
+    rows = []
+    for d in range(n_days):
+        ts = d * _DAY
+        for s in range(n_syms):
+            vals = {c: float(rng.normal()) for c in _FACTOR_COLUMNS}
+            vals["liquidity_rank"] = float(s + 1)
+            tgt = (0.3 * vals[signal_factor] if signal_factor else 0.0) + float(rng.normal() * 0.02)
+            rows.append({"symbol": f"S{s}", "ts_ms": ts, **vals, "fwd_ret_1d": tgt})
+    return pl.DataFrame(rows)
+
+
+def test_residual_variance_capture_noise_model_does_not_capture() -> None:
+    # The OLD check (residual_std < raw_std) is an in-sample R^2>=0 tautology that
+    # passes EVERY noise panel. The permutation null instead has a ~5% false-positive
+    # rate BY CONSTRUCTION, so assert the rate across many seeds is low (a broken /
+    # tautological gate would flag capture on every noise panel).
+    flags = []
+    for s in range(20):
+        panel = _factor_panel(45, 25, signal_factor=None, seed=100 + s)
+        vc = residual_variance_capture(panel, n_permutations=50, seed=s)
+        assert vc["residual_std_over_raw"] < 1.0  # in-sample tautology still holds
+        flags.append(vc["captures_real_variance"])
+    # Expected ~1/20 false positives; <=5 is a safe bound that still catches a gate
+    # that calls every noise model "real" (the bug A1 fixes). P(false fail) ~ 3e-4.
+    assert sum(flags) <= 5, f"noise false-positive rate too high: {sum(flags)}/20"
+
+
+def test_residual_variance_capture_real_signal_is_detected() -> None:
+    # A genuine factor->return relation must be detected on every realization.
+    for s in range(5):
+        panel = _factor_panel(45, 25, signal_factor="btc_beta", seed=200 + s)
+        vc = residual_variance_capture(panel, n_permutations=50, seed=s)
+        assert vc["captures_real_variance"] is True
+        assert vc["p_value"] < 0.05
+        assert vc["residual_std_over_raw"] < vc["null_ratio_p05"]  # beats the null's best
+
+
+def test_decompose_strategy_pnl_snaps_offgrid_entry_to_daily_grid() -> None:
+    # Engine ledger entries are +1h off the 00:00-UTC panel grid; they must still
+    # resolve (pre-fix they missed every lookup -> all-null -> inflated residual).
+    panel = _factor_panel(40, 20, signal_factor="btc_beta", seed=3)
+    fr, _resid = fit_factor_returns(panel)
+    loadings = panel.select(["symbol", "ts_ms", *_FACTOR_COLUMNS])
+    trades = pl.DataFrame({
+        "symbol": ["S1", "S2"],
+        "entry_ts_ms": [10 * _DAY + 3_600_000, 11 * _DAY + 3_600_000],
+        "hold_days": [2, 2],
+        "realized_return": [0.05, -0.03],
+    })
+    dec = decompose_strategy_pnl(trades, loadings, fr)
+    assert dec["resolved_fraction"] == 1.0
+    assert dec["n_unresolved"] == 0
+    assert dec["per_trade"]["explained"].drop_nulls().len() == 2
+
+
+def test_decompose_strategy_pnl_no_factor_returns_is_null_not_zero() -> None:
+    # Exposure resolves but no factor-return rows over the hold -> null (NOT 0.0,
+    # which would mis-book the whole realized return as residual alpha).
+    panel = _factor_panel(40, 20, signal_factor="btc_beta", seed=4)
+    loadings = panel.select(["symbol", "ts_ms", *_FACTOR_COLUMNS])
+    empty_fr = pl.DataFrame(schema={"ts_ms": pl.Int64, "factor": pl.String, "factor_return": pl.Float64})
+    trades = pl.DataFrame({"symbol": ["S1"], "entry_ts_ms": [10 * _DAY], "hold_days": [2], "realized_return": [0.05]})
+    dec = decompose_strategy_pnl(trades, loadings, empty_fr)
+    assert dec["n_unresolved"] == 1
+    assert dec["per_trade"]["explained"][0] is None
+    assert dec["per_trade"]["residual"][0] is None
 
 
 def _daily_returns(symbol_to_rets: dict[str, list[float]]) -> pl.DataFrame:

@@ -354,7 +354,13 @@ class KlineStreamManager:
             bar_ts = int(bar.get("start") or bar.get("ts_ms") or bar.get("startTime") or 0)
         except (TypeError, ValueError):
             return
-        if bar_ts > self._max_confirmed_ts_ms:
+        # Only advance the wake high-water mark for a boundary at/behind the
+        # present hour. A bar timestamped > 1h ahead (clock skew / malformed frame
+        # — the store accepts up to 2h ahead for storage) would otherwise poison
+        # _max_confirmed_ts_ms and suppress every genuine boundary wake until
+        # wall-clock caught up (degrading to heartbeat cadence). Such a bar was
+        # still stored above; it just must not gate the cycle-wake.
+        if self._max_confirmed_ts_ms < bar_ts <= _utc_now_ms() + MS_PER_HOUR:
             self._max_confirmed_ts_ms = bar_ts
             self._cycle_wake_event.set()
 

@@ -624,3 +624,31 @@ def test_intrahold_and_gross_stats_empty_is_safe() -> None:
     stats = _intrahold_and_gross_stats(pl.DataFrame())
     assert stats["worst_trade_mae"] == 0.0
     assert stats["realized_gross_mean"] == 0.0
+
+
+def test_intrahold_stats_drops_nonfinite_mae() -> None:
+    # A sleeve that does not track intra-hold path emits NaN mae; it must read as
+    # not-measured and must NOT poison min()/mean() of the finite-mae trades.
+    trades = pl.DataFrame({
+        "mae": [float("nan"), -0.05, -0.02],
+        "notional_weight": [1.0, 1.0, 1.0],
+        "basket_id": ["b1", "b2", "b3"],
+    })
+    stats = _intrahold_and_gross_stats(trades)
+    assert stats["worst_trade_mae"] == -0.05
+    assert stats["mean_trade_mae"] == pytest.approx(-0.035)
+    assert stats["worst_weighted_intrahold_loss"] == pytest.approx(-0.05)
+
+
+def test_intrahold_stats_all_nonfinite_mae_reads_as_not_measured() -> None:
+    # All-NaN (e.g. the long sleeve) -> defaults stay 0.0 (not measured), NOT a
+    # fabricated min of zeros.
+    trades = pl.DataFrame({
+        "mae": [float("nan"), float("nan")],
+        "notional_weight": [1.0, 1.0],
+        "basket_id": ["b1", "b2"],
+    })
+    stats = _intrahold_and_gross_stats(trades)
+    assert stats["worst_trade_mae"] == 0.0
+    assert stats["mean_trade_mae"] == 0.0
+    assert stats["worst_weighted_intrahold_loss"] == 0.0

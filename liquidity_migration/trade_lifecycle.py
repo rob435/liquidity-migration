@@ -222,13 +222,17 @@ def _intrahold_and_gross_stats(trades: pl.DataFrame) -> dict[str, float]:
     if trades.is_empty():
         return out
     if "mae" in trades.columns:
-        mae = trades["mae"].drop_nulls()
+        # Drop non-finite mae: a sleeve that does not track intra-hold path (e.g.
+        # the long sleeve) emits NaN, which must read as "not measured" — not a
+        # spurious 0 — and must never poison min()/mean() of a sleeve that does.
+        finite_mae = trades.filter(pl.col("mae").is_finite())
+        mae = finite_mae["mae"]
         if not mae.is_empty():
             out["worst_trade_mae"] = float(mae.min())
             out["mean_trade_mae"] = float(mae.mean())
-        if "notional_weight" in trades.columns:
+        if "notional_weight" in finite_mae.columns:
             weighted = (
-                trades.select((pl.col("mae") * pl.col("notional_weight").abs()).alias("w"))
+                finite_mae.select((pl.col("mae") * pl.col("notional_weight").abs()).alias("w"))
                 .get_column("w")
                 .drop_nulls()
             )

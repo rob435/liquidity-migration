@@ -52,7 +52,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 # Force UTF-8 stdout so the verdict-table prints (which contain Δ chars) don't
@@ -97,7 +97,7 @@ class CellVerdict:
     binance_trades: int
     bybit_ret: float
     binance_ret: float
-    verdict: str  # "candidate" | "investigation_positive" | "reject" | "inconclusive" | "descriptive" | "skip_control"
+    verdict: str  # "candidate" | "investigation_positive" | "reject" | "inconclusive" | "descriptive" | "skip_control" | "non_full_pit"
     reasons: tuple[str, ...]
     # Optional MAR-axis fields (populated by the investigation evaluator;
     # default 0.0 for manifesto/legacy verdicts so the dataclass stays frozen
@@ -555,13 +555,16 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n## EXCLUDED CELLS (no metrics — treated as FAILED, not omitted): {len(excluded)}")
         for ex in excluded:
             print(f"  - {ex['cell_id']}/{ex['venue']}: status={ex['status']} {ex['error']}".rstrip())
-    # LOW: flag cells whose run was NOT full-PIT (survivorship-tainted). The
-    # volume-events backtest fails such a run by default, so this only fires for
-    # an explicitly --allow-partial-pit EXPLORATORY cell that must not be cited.
+    # A cell whose run was NOT full-PIT is current-universe (survivorship) biased
+    # and is not valid promotion evidence. The volume-events backtest fails such a
+    # run by default, so this only fires for an explicitly --allow-partial-pit
+    # EXPLORATORY cell. Warning alone is not enough — such a cell must be HARD-
+    # EXCLUDED from any positive verdict below (it previously could still receive
+    # investigation_positive/candidate on good-looking but tainted numbers).
     non_full_pit = sorted({m.cell_id for m in rows if m.full_pit_universe_pass is False})
     if non_full_pit:
         print(
-            f"\n## WARNING — NON-FULL-PIT CELLS (survivorship-tainted, not promotion evidence): "
+            f"\n## WARNING — NON-FULL-PIT CELLS (survivorship-tainted, HARD-EXCLUDED from promotion): "
             f"{', '.join(non_full_pit)}"
         )
     if not rows:
@@ -656,6 +659,23 @@ def main(argv: list[str] | None = None) -> int:
                     min_trades_binance=min_bn,
                 )
             )
+
+    # Hard-exclude survivorship-tainted (non-full-PIT) cells: override their
+    # verdict so a tainted cell can NEVER land in the promotion-positive bucket,
+    # regardless of how good its (biased) numbers look. The deltas stay in the
+    # table for transparency; the verdict becomes non-promotable.
+    if non_full_pit:
+        nfp = set(non_full_pit)
+        verdicts = [
+            replace(
+                v,
+                verdict="non_full_pit",
+                reasons=("survivorship-tainted: run was not full-PIT — excluded from promotion",) + v.reasons,
+            )
+            if (v.cell_id in nfp and v.verdict != "skip_control")
+            else v
+            for v in verdicts
+        ]
 
     # Pretty-print table (manifesto/legacy keep the original sharpe-Δ shape;
     # investigation adds MAR Δ columns).

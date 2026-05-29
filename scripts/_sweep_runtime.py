@@ -11,9 +11,12 @@ stack, R9 assembly, etc.) import the same primitives:
   run_sweep()         — ThreadPoolExecutor dispatch + locked summary.csv
                         write + atomic-print stdout serialisation
 
-The runtime honours two env vars set by the operator (matching the
+The runtime honours these env vars set by the operator (matching the
 research-phase-runner skill):
-  SWEEP_MAX_WORKERS    cells run in parallel (default 8)
+  SWEEP_MAX_WORKERS    cells run in parallel (explicit override; else a
+                       memory-aware default capped at 8 — see _resolve_max_workers)
+  SWEEP_CELL_GB        per-cell peak RSS estimate a heavy sweep declares before
+                       import so the default auto-drops on a small box (default 4)
   POLARS_MAX_THREADS   threads per cell's polars/rayon runtime (default 4)
 
 8 × 4 = 32 = full 5950X SMT occupancy.
@@ -60,7 +63,43 @@ except (AttributeError, ValueError):
     # Pre-3.7 Python or already-detached streams; falls back to default.
     pass
 
-MAX_WORKERS = max(1, int(os.environ.get("SWEEP_MAX_WORKERS", "8")))
+def _total_ram_gb() -> float | None:
+    """Best-effort total system RAM in GiB (POSIX sysconf, then /proc/meminfo)."""
+    try:
+        return (os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")) / (1024 ** 3)
+    except (ValueError, OSError, AttributeError):
+        pass
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) / (1024 ** 2)  # kB -> GiB
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def _resolve_max_workers() -> int:
+    """Memory-aware default for cell-level parallelism.
+
+    An explicit ``SWEEP_MAX_WORKERS`` always wins. Otherwise the default is capped
+    so ``workers * SWEEP_CELL_GB`` fits in ~85% of system RAM — a memory-heavy
+    full-PIT sweep (klines reads peak ~23 GB/cell) declares ``SWEEP_CELL_GB`` before
+    importing this module, so the default auto-drops to 1 on a 32 GB box instead of
+    OOM-killing 8 parallel cells when the operator forgets ``SWEEP_MAX_WORKERS=1``.
+    Light sweeps (default ``SWEEP_CELL_GB=4``) stay at the historical cap of 8.
+    """
+    explicit = os.environ.get("SWEEP_MAX_WORKERS")
+    if explicit is not None:
+        return max(1, int(explicit))
+    cell_gb = max(0.1, float(os.environ.get("SWEEP_CELL_GB", "4")))
+    total_gb = _total_ram_gb()
+    if not total_gb:
+        return 8  # unknown platform — preserve historical default
+    return max(1, min(8, int((0.85 * total_gb) / cell_gb)))
+
+
+MAX_WORKERS = _resolve_max_workers()
 PER_CELL_POLARS_THREADS = max(1, int(os.environ.get("POLARS_MAX_THREADS", "4")))
 
 

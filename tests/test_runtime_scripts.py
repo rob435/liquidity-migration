@@ -936,3 +936,34 @@ def test_ws_first_ratio_surfaces_ws_vs_rest_mix() -> None:
     assert r["private_pct"] == pytest.approx(0.0)
     # Legacy ledger without the source columns -> empty (safe for the f-string).
     assert ws_first_ratio(pl.DataFrame({"x": [1, 2]})) == {}
+
+
+def test_resolve_max_workers_explicit_override_always_wins(monkeypatch):
+    m = _load_sweep_module("_sweep_runtime")
+    monkeypatch.setenv("SWEEP_MAX_WORKERS", "1")
+    assert m._resolve_max_workers() == 1
+    monkeypatch.setenv("SWEEP_MAX_WORKERS", "12")
+    assert m._resolve_max_workers() == 12  # explicit beats the memory cap
+
+
+def test_resolve_max_workers_heavy_cell_drops_to_one_on_32gb(monkeypatch):
+    m = _load_sweep_module("_sweep_runtime")
+    monkeypatch.delenv("SWEEP_MAX_WORKERS", raising=False)
+    monkeypatch.setattr(m, "_total_ram_gb", lambda: 32.0)
+    monkeypatch.setenv("SWEEP_CELL_GB", "23")  # full-PIT klines read ~23 GB/cell
+    assert m._resolve_max_workers() == 1  # 0.85*32/23 = 1.18 -> 1 (was 8 -> OOM)
+
+
+def test_resolve_max_workers_light_cell_default_cap(monkeypatch):
+    m = _load_sweep_module("_sweep_runtime")
+    monkeypatch.delenv("SWEEP_MAX_WORKERS", raising=False)
+    monkeypatch.delenv("SWEEP_CELL_GB", raising=False)
+    monkeypatch.setattr(m, "_total_ram_gb", lambda: 64.0)
+    assert m._resolve_max_workers() == 8  # 0.85*64/4 = 13.6 -> capped at 8
+
+
+def test_resolve_max_workers_unknown_ram_falls_back_to_eight(monkeypatch):
+    m = _load_sweep_module("_sweep_runtime")
+    monkeypatch.delenv("SWEEP_MAX_WORKERS", raising=False)
+    monkeypatch.setattr(m, "_total_ram_gb", lambda: None)
+    assert m._resolve_max_workers() == 8

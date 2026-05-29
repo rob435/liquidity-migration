@@ -604,3 +604,38 @@ def test_investigation_does_not_change_manifesto_verdicts(tmp_path):
     )
     # Round 1 verdict was REJECT (sign-flip + DD blowout). Pin that.
     assert v.verdict == "reject"
+
+
+def test_non_full_pit_cell_is_hard_excluded_from_positive(tmp_path, capsys):
+    """A would-be investigation_positive cell that ran PARTIAL-PIT must be
+    hard-excluded (verdict 'non_full_pit') — not promoted on survivorship-biased
+    numbers. Previously such a cell was only warned about and could still receive
+    investigation_positive."""
+    header = (
+        "avg_split_sharpe,cell_id,description,elapsed_seconds,max_drawdown,"
+        "promotable,report_dir,sharpe_like,status,total_return,trades,"
+        "venue,window_days,full_pit_universe_pass,worst_90d\n"
+    )
+
+    def fmt(cell, venue, dd, sh, ret, tr, fp):
+        # column order must match `header`
+        return f"0.0,{cell},,0.0,{dd},False,,{sh},ok,{ret},{tr},{venue},1126,{fp},0.0"
+
+    rows = [
+        # full-PIT control
+        fmt("00_baseline", "bybit", -0.42, 2.27, 5.19, 416, "true"),
+        fmt("00_baseline", "binance", -0.41, 0.98, 0.66, 319, "true"),
+        # would-be investigation_positive (higher return, same DD, both venues),
+        # but the run was partial-PIT -> must NOT be promoted.
+        fmt("R1_taint", "bybit", -0.42, 2.40, 6.0, 380, "false"),
+        fmt("R1_taint", "binance", -0.41, 1.10, 0.80, 290, "false"),
+    ]
+    csv_path = tmp_path / "summary_pit.csv"
+    csv_path.write_text(header + "\n".join(rows) + "\n")
+
+    rc = MOD.main([str(csv_path), "--rule", "investigation", "--control", "00_baseline"])
+    out = capsys.readouterr().out
+    assert rc == MOD.EXIT_OK
+    assert "non_full_pit" in out
+    assert "investigation_positive=0" in out  # the tainted cell was excluded
+    assert "HARD-EXCLUDED" in out
