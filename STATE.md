@@ -1,6 +1,6 @@
 # Research-program state
 
-**Last updated:** 2026-05-29 (R1+R13+R5+R2+R3+R4 COMPLETE — H2 closed (bearish=0 trades); R9 = bullish stack only; R4 risk model = 6 validated factors, Tier-3 residual machinery confirmed. **Engine RE-BASELINED by `9f52819`** (100% taker / bar_extreme stops / calendar returns) → **R1 re-baseline DONE: `drop_all_4` FALSIFIES Tier-2** (demo-eligibility was a pre-hardening stop-fill artifact; binance negative under honest costs); R9 `event_only` baseline = production. R3+R4 unaffected; R6 code done (calibration queued). **R9 IC-selectivity PRE-CHECK FALSIFIED** the pre-registered lever — the composite IC ANTI-selects within events (high-IC = worst shorts; ρ −0.16 bybit / −0.31 binance). R5 `risk_equal` sizing tested — robustly cuts DD (binance −47%→−22%, MAR P(Δ>0)=98%) but **binance return STAYS NEGATIVE** (−0.03 to −0.05) → still FALSIFY. Testing the FINAL daily lever — loss-cutting EXIT (R13 failed-fade/tight-stop) × best sizing; **default do-nothing if it fails** — daily Architecture A then a documented null under honest methodology.)
+**Last updated:** 2026-05-29 (R1–R6 COMPLETE; engine RE-BASELINED honest by `9f52819`+`b1a3368` — 100% taker / bar_extreme stops / calendar returns / permutation-null. **R9 / DAILY ARCHITECTURE A = DOCUMENTED NULL** under honest methodology: every pre-registered daily lever tested — best stack (drop_all_4 entries + risk_equal 2% sizing + ff6_4pct exit) = **bybit MAR 1.39 (real edge) / binance −1.3% (no edge)** → fails the cross-venue Tier-2 bar. The earlier +0.45 demo-eligibility was a pre-hardening optimistic-stop-fill artifact (#14). **DECISION: DO NOTHING** — frozen promoted profile unchanged, nothing promoted. R12 sniper + C0–C3 continuous (Architecture B) = **operator decision** (~week build, low prior given the daily null). [R9 verdict](docs/preregistration/round2/r9-integrated-strategy-verdict.md).)
 
 > If you are a Claude session opening this repo for the first time, read this
 > file FIRST. It tells you in 60 seconds what's been done, what's running,
@@ -80,11 +80,11 @@
 | R6 | Per-name per-bar cost model | **CODE COMPLETE (2026-05-29).** `cost_model.py` — surface + OLS fit + per-trade predict + ledger recosting (model-vs-legacy) + summary; 12 tests. Default = honest 15bps taker (supersedes legacy ×3 = 45bps over-count). **β-calibration DATA-GATED** on ≥30d VPS demo/paper → queued (turnkey recipe: `reconcile_paper_demo` + `fit_cost_model`); per-cell delta folds into R9 run-up. [verdict](docs/preregistration/round2/r6-cost-model-verdict.md) |
 | R7 | Stress test suite (named historical events) | not started (R4✓ + R6✓ deps met) |
 | R8 | Capacity analysis (per-cell AUM ceiling) | not started (R6✓ dep met; needs the size/ADV term — present in cost_model) |
-| R9 | Integrated strategy assembly | not started |
-| R10 | Promotion-bar validation sweep | not started |
-| R11 | Pre-2023 OOS gate (mandatory final) | not started |
-| R12 | **Sniper entry execution layer** — sub-1h fill optimization on top of daily signal: 1m kline ingestion (R12a), simulator (R12b), univariate test of 5 sniper flavors (R12c), R9 integration (R12d), entry-delay reduction sweep (R12e), sniper stress test (R12f). Missed fills counted as $0-P&L. | not started — ~3-4 days code (R12a + R12b) |
-| C0 | **Continuous-signal engine** — rolling-feature registry + K-minute step backtest engine + regression validation (continuous at 1d step + 24h window = numerically equivalent to the daily backtest, `np.allclose` — per the progressive standard, not bit-identical). The foundation for Architecture B. | not started — ~5-7 days code |
+| R9 | Integrated strategy assembly | **DOCUMENTED NULL (full-PIT, honest engine, 2026-05-29).** All daily levers tested via hardened re-baselines + IC pre-check (no blind 7-cell build needed — diagnostics determine each cell). Best stack (drop_all_4 + risk_equal 2% + ff6_4pct) = bybit MAR 1.39 (real edge) / binance −1.3% (no edge) → fails cross-venue Tier-2. DO NOTHING. [verdict](docs/preregistration/round2/r9-integrated-strategy-verdict.md) |
+| R10 | Promotion-bar validation sweep | **not run** — downstream of a Tier-2 demo-candidate, which does not exist (R9 null) |
+| R11 | Pre-2023 OOS gate (mandatory final) | **not run** — no R10 finalist (R9 null) |
+| R12 | **Sniper entry execution layer** — sub-1h fill optimization on top of daily signal: 1m kline ingestion (R12a), simulator (R12b), univariate test of 5 sniper flavors (R12c), R9 integration (R12d), entry-delay reduction sweep (R12e), sniper stress test (R12f). Missed fills counted as $0-P&L. | **OPERATOR DECISION** — not auto-pursued: entry-fill optimization cannot create the absent binance edge (R9 null); building it on a no-edge daily strategy is unjustified. |
+| C0 | **Continuous-signal engine** — rolling-feature registry + K-minute step backtest engine + regression validation (continuous at 1d step + 24h window = numerically equivalent to the daily backtest, `np.allclose` — per the progressive standard, not bit-identical). The foundation for Architecture B. | **OPERATOR DECISION** — ~5-7 day build, low prior given the daily R9 null (same features, which anti-select within events; binance no edge). The only genuinely-untested track; not auto-pursued per the "default do-nothing" + don't-run-expensive-research-on-a-falsified-premise. |
 | C1 | **Continuous-signal univariate IC test** — Phase-5-equivalent on rolling-feature versions of the 5 IC survivors, at forward horizons {1h, 3h, 24h, 72h, 168h}. | not started — depends on C0 |
 | C2 | **Continuous-signal R9 variant** — Architecture B's integrated-strategy assembly. 7 cells × 2 venues. | not started — depends on C0 + C1 |
 | C3 | **Continuous-signal stress test** — R7 named-event replay applied to C2 promotion-eligible cells; flags WS-feed-fragile cells. | not started — conditional on C2 |
@@ -151,13 +151,18 @@ R12a/b sniper + C0 continuous engine).
     pre-registered `event_AND_ic` / `ic_only_top_decile` cells would ANTI-select. The
     inverse (low-IC = better short) is positive in-sample but a post-hoc sign flip (not
     promotable; error #17). So IC selectivity cannot rescue the negative event return.
-  - **NEXT: R5 `risk_equal` sizing-rescue = last daily lever** (`r9_event_sizing_hardened_sweep.py`,
-    tag `r9_event_sizing_hardened_2026-05-29`): risk_equal down-weights the high-vol
-    losers; does it flip drop_all_4 to Tier-2-positive under honest costs? If NO → **daily
-    Architecture A = documented null → DO NOTHING** (R1 filters, R2 IC, R3 bearish, R5
-    sizing all exhausted under honest methodology). R12 sniper + C0–C3 continuous are
-    separate larger tracks (low prior given the daily null) — surface to operator before
-    investing weeks. limit-chase EXIT enable test-gated/post-validation.
+  - **DAILY ARCHITECTURE A = DOCUMENTED NULL (2026-05-29) → DO NOTHING.** All daily levers
+    tested under the honest engine: R5 `risk_equal` 2% sizing (best; DD −47%→−22%) + R13
+    `ff6_4pct` exit (best) on drop_all_4 = the strongest stack → **bybit MAR 1.39 (real
+    edge) / binance −1.3% (no edge)** → fails cross-venue Tier-2. Tags
+    `r9_event_sizing_hardened_2026-05-29`, `r9_exit_sizing_hardened_2026-05-29`.
+    [R9 verdict](docs/preregistration/round2/r9-integrated-strategy-verdict.md). Frozen
+    promoted profile UNCHANGED, nothing promoted. bybit-only edge is real but fails the
+    pre-committed cross-venue bar (would need a NEW operator pre-reg).
+  - **OPERATOR DECISION — Architecture B (C0–C3) / R12 sniper:** the only remaining
+    pre-registered tracks; large builds, low prior given the daily null. NOT auto-pursued
+    (default do-nothing + don't run expensive research on a falsified premise). **Loop
+    PAUSED for operator steer.** limit-chase EXIT enable test-gated/post-validation.
 - **5950X full-PIT op note:** one `volume-events` cell peaks ~23 GB → run sweeps
   at `SWEEP_MAX_WORKERS=1` (NOT the plan's 8, which OOMs); clear
   `<root>/.locks/*.lock` after any OOM/kill or a clean cell hangs ~6 h on
