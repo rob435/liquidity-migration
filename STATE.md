@@ -1,6 +1,6 @@
 # Research-program state
 
-**Last updated:** 2026-05-29 (R1+R13+R5+R2 COMPLETE — R9 stack: `drop_all_4` + `ff6_4pct` exit + dollar-equal + 1 composite IC factor; R3/R4 next)
+**Last updated:** 2026-05-29 (R1+R13+R5+R2+R3 COMPLETE — H2 closed (bearish=0 trades); R9 = bullish stack only; R4 next)
 
 > If you are a Claude session opening this repo for the first time, read this
 > file FIRST. It tells you in 60 seconds what's been done, what's running,
@@ -94,21 +94,23 @@ R12a/b sniper + C0 continuous engine).
   promoted profile. Ledgers in `data/bybit-demo-event/`.
 - **Paper shadow** (same VPS, same profile, no order submission):
   `data/bybit-paper-event/`.
-- **NO research runs currently in-flight.** R1 + R13 + R5 + R2 COMPLETE
-  (2026-05-29, all full-PIT). **R9 carry-forward stack:** `drop_all_4` entries +
-  `ff6_4pct` failed-fade exit + dollar-equal sizing + **1 composite IC factor**
-  (R2: the 5 IC features collapse to PC1 ≈ 82–88%, all pairwise ρ 0.72–0.92 →
-  2-factor hypothesis rejected; R9 uses diversification-adjusted IC weighting,
-  ≈ single composite). Verdicts:
+- **NO research runs currently in-flight.** R1 + R13 + R5 + R2 + R3 COMPLETE
+  (2026-05-29, all full-PIT). **R9 carry-forward stack (bullish event-driven
+  only):** `drop_all_4` entries + `ff6_4pct` failed-fade exit + dollar-equal
+  sizing + 1 composite IC factor (R2: 5 IC features → PC1 ≈ 82–88%, ρ 0.72–0.92
+  → diversification-adjusted IC weighting). **R3 closed H2** — the
+  bearish/deterioration mirror gives 0 trades both venues (the `turnover≥6`
+  volume-spike trigger is structurally a pump detector); no bearish line, no
+  market-neutral. Verdicts:
   [R13](docs/preregistration/round2/r13-exit-rule-verdict.md) ·
   [R5](docs/preregistration/round2/r5-position-sizing-verdict.md) ·
-  [R2](docs/preregistration/round2/r2-per-feature-standalone-verdict.md).
-  - **Next: R3** bearish-stack honest test (needs ~3h mirror-filter CLI flags +
-    sweep). **R4 risk-factor model** built in parallel (foundational code — gates
-    R7 / R9 factor-caps / Tier-3 residual-Sharpe; memory
-    `r4-risk-model-implementation-map`). Then R6 cost model, R12 sniper, C0–C3,
-    R9 assembly → R10 → R11 OOS. limit-chase EXIT enable is safe (market
-    fallback) but live-path — do test-gated, post-backtest-validation.
+  [R2](docs/preregistration/round2/r2-per-feature-standalone-verdict.md) ·
+  [R3](docs/preregistration/round2/r3-bearish-stack-verdict.md).
+  - **Next: R4** risk-factor model (foundational code — gates R7 / R9
+    factor-caps / Tier-3 residual-Sharpe; memory `r4-risk-model-implementation-map`).
+    Then R6 cost model, R12 sniper, C0–C3, R9 assembly → R10 → R11 OOS.
+    limit-chase EXIT enable is safe (market fallback) but live-path — test-gated,
+    post-backtest-validation.
 - **5950X full-PIT op note:** one `volume-events` cell peaks ~23 GB → run sweeps
   at `SWEEP_MAX_WORKERS=1` (NOT the plan's 8, which OOMs); clear
   `<root>/.locks/*.lock` after any OOM/kill or a clean cell hangs ~6 h on
