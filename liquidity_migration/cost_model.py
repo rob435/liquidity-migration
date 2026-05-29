@@ -172,3 +172,76 @@ def fit_cost_model(
         "rmse_bps": float(np.sqrt((resid ** 2).mean())),
     })
     return params, diag
+
+
+_RECOST_COLUMNS = ["model_cost_bps", "model_cost_return", "model_net_return", "legacy_cost_bps"]
+
+
+def recost_trades(
+    trades: pl.DataFrame,
+    params: CostModelParams,
+    *,
+    weight_col: str = "notional_weight",
+    gross_col: str = "gross_return",
+    funding_col: str = "funding_return",
+    legacy_cost_col: str = "cost_return",
+) -> pl.DataFrame:
+    """Recost a backtest trade ledger under the R6 model, alongside the legacy flat cost.
+
+    The engine ledger (``volume_events`` trade rows) carries ``notional_weight``
+    (= |effective_weight|), ``gross_return``, ``funding_return``, ``cost_return`` (the
+    applied legacy flat cost leg), and ``net_return``. This keeps gross + funding fixed
+    and swaps ONLY the cost leg for the model's per-trade prediction:
+
+        model_cost_bps   = predict_cost_bps(trade_features, params)   (round-trip, floored)
+        model_cost_return = -notional_weight * model_cost_bps / 1e4
+        model_net_return  = gross_return + model_cost_return + funding_return
+
+    Cost features (``COST_FEATURE_COLUMNS``) absent from ``trades`` contribute 0, so with
+    ``DEFAULT_PARAMS`` this reduces to the flat 15 bps taker round-trip — a safe identity
+    until per-venue calibration lands. ``legacy_cost_bps`` is recovered from the existing
+    ``cost_return`` for a side-by-side bps comparison. The original columns are retained.
+    """
+    if trades.is_empty():
+        return pl.DataFrame(schema={**trades.schema, **{c: pl.Float64 for c in _RECOST_COLUMNS}})
+
+    out = trades.with_columns(predict_cost_bps(trades, params).alias("model_cost_bps"))
+    weight = pl.col(weight_col).abs()
+    out = out.with_columns(
+        (-weight * pl.col("model_cost_bps") / 10_000.0).alias("model_cost_return")
+    )
+    funding = pl.col(funding_col).fill_null(0.0) if funding_col in out.columns else pl.lit(0.0)
+    out = out.with_columns(
+        (pl.col(gross_col) + pl.col("model_cost_return") + funding).alias("model_net_return")
+    )
+    if legacy_cost_col in out.columns:
+        out = out.with_columns(
+            pl.when(weight > 0).then(-pl.col(legacy_cost_col) / weight * 10_000.0).otherwise(None).alias("legacy_cost_bps")
+        )
+    else:
+        out = out.with_columns(pl.lit(None, dtype=pl.Float64).alias("legacy_cost_bps"))
+    return out
+
+
+def summarize_recosting(recosted: pl.DataFrame, *, legacy_net_col: str = "net_return") -> dict:
+    """Aggregate the legacy-vs-model cost comparison for a ``recost_trades`` output.
+
+    Returns ``n_trades`` and per-cell means/totals: mean model & legacy cost (bps),
+    total model & legacy net return, and ``mean_net_return_delta`` (model − legacy,
+    negative = the model charges more than the legacy flat cost on this cell).
+    """
+    empty = {
+        "n_trades": 0, "mean_model_cost_bps": None, "mean_legacy_cost_bps": None,
+        "total_model_net_return": 0.0, "total_legacy_net_return": 0.0, "mean_net_return_delta": 0.0,
+    }
+    if recosted.is_empty() or "model_net_return" not in recosted.columns:
+        return empty
+    agg = recosted.select(
+        pl.len().alias("n_trades"),
+        pl.col("model_cost_bps").mean().alias("mean_model_cost_bps"),
+        pl.col("legacy_cost_bps").mean().alias("mean_legacy_cost_bps"),
+        pl.col("model_net_return").sum().alias("total_model_net_return"),
+        pl.col(legacy_net_col).sum().alias("total_legacy_net_return"),
+        (pl.col("model_net_return") - pl.col(legacy_net_col)).mean().alias("mean_net_return_delta"),
+    ).row(0, named=True)
+    return {k: (int(v) if k == "n_trades" else (float(v) if v is not None else None)) for k, v in agg.items()}

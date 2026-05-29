@@ -11,7 +11,22 @@ from liquidity_migration.cost_model import (
     CostModelParams,
     fit_cost_model,
     predict_cost_bps,
+    recost_trades,
+    summarize_recosting,
 )
+
+
+def _synth_ledger() -> pl.DataFrame:
+    """Minimal engine-style trade ledger; legacy cost = 45 bps (cost_multiplier 3 x 15)."""
+    nw = [0.01, 0.02]
+    gross = [0.005, -0.003]
+    funding = [0.0001, -0.0002]
+    cost_ret = [-w * 45.0 / 1e4 for w in nw]
+    net = [g + c + f for g, c, f in zip(gross, cost_ret, funding)]
+    return pl.DataFrame({
+        "symbol": ["A", "B"], "notional_weight": nw, "gross_return": gross,
+        "funding_return": funding, "cost_return": cost_ret, "net_return": net,
+    })
 
 
 def _synth_observations(coefs: dict, *, n: int = 300, seed: int = 1, noise: float = 0.0) -> pl.DataFrame:
@@ -111,3 +126,41 @@ def test_predict_empty_frame() -> None:
 def test_coef_vector_order() -> None:
     p = CostModelParams(alpha=1.0, b_size=2.0, b_vol=3.0, b_spread=4.0, b_hour=5.0, b_funding=6.0)
     assert list(p.coef_vector()) == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+
+
+def test_recost_default_is_flat_taker_floor() -> None:
+    out = recost_trades(_synth_ledger(), DEFAULT_PARAMS["bybit"])
+    assert out["model_cost_bps"].to_list() == [15.0, 15.0]
+    assert abs(out["model_cost_return"][0] - (-0.01 * 15 / 1e4)) < 1e-12
+    assert abs(out["model_net_return"][0] - (0.005 - 0.01 * 15 / 1e4 + 0.0001)) < 1e-12
+    # legacy applied cost recovered as ~45 bps round-trip
+    assert abs(out["legacy_cost_bps"][0] - 45.0) < 1e-6
+    assert abs(out["legacy_cost_bps"][1] - 45.0) < 1e-6
+    # non-destructive: original ledger columns retained
+    assert {"symbol", "gross_return", "net_return", "funding_return"} <= set(out.columns)
+
+
+def test_recost_calibrated_with_features_and_floor() -> None:
+    led = _synth_ledger().with_columns(pl.Series("size_adv_ratio", [0.5, 0.1]))
+    params = CostModelParams(alpha=10.0, b_size=20.0, cost_floor_bps=15.0, venue="bybit")
+    out = recost_trades(led, params)
+    assert abs(out["model_cost_bps"][0] - 20.0) < 1e-9   # 10 + 20*0.5
+    assert abs(out["model_cost_bps"][1] - 15.0) < 1e-9   # 10 + 20*0.1 = 12 -> floored to 15
+
+
+def test_recost_empty_keeps_schema() -> None:
+    out = recost_trades(pl.DataFrame(), DEFAULT_PARAMS["bybit"])
+    assert out.height == 0
+    for c in ["model_cost_bps", "model_cost_return", "model_net_return", "legacy_cost_bps"]:
+        assert c in out.columns
+
+
+def test_summarize_recosting() -> None:
+    out = recost_trades(_synth_ledger(), DEFAULT_PARAMS["bybit"])
+    summ = summarize_recosting(out)
+    assert summ["n_trades"] == 2
+    assert abs(summ["mean_model_cost_bps"] - 15.0) < 1e-9
+    assert abs(summ["mean_legacy_cost_bps"] - 45.0) < 1e-6
+    assert summ["mean_net_return_delta"] > 0   # model (15bps) cheaper than legacy (45bps)
+    assert abs(summ["total_model_net_return"] - out["model_net_return"].sum()) < 1e-12
+    assert summarize_recosting(pl.DataFrame())["n_trades"] == 0
