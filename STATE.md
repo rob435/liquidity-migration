@@ -1,6 +1,6 @@
 # Research-program state
 
-**Last updated:** 2026-05-28 (post stale-doc cleanup; R1 v2 not yet dispatched)
+**Last updated:** 2026-05-29 (R1 full-PIT COMPLETE — `drop_all_4` demo-eligible, re-baseline cascade TRIGGERED; R13 next)
 
 > If you are a Claude session opening this repo for the first time, read this
 > file FIRST. It tells you in 60 seconds what's been done, what's running,
@@ -20,16 +20,17 @@
   JS-style risk model + 1/realized-vol sizing + per-name cost model + stress
   test suite + capacity analysis + integrated strategy assembly + R10 promotion
   + R11 OOS. See [Round 2 plan](docs/preregistration/round2/integrated-strategy-program.md).
-- **LEAD R1 CANDIDATE (2026-05-29 Mac-side exploratory peek):** `R1_drop_all_4`
-  cell (drops `day_return`, `stop_pressure`, `realized_loss`, `rank_max`) shows
-  Pareto improvement on BOTH venues over the full 2023-04-01 → 2026-05-28 window
-  including May 2026 stress: Bybit MAR Δ **+1.29** (5.39 → 6.21 with extended-window
-  numbers Bybit MAR 4.92→6.21, Binance 1.45→2.48), Binance MAR Δ **+1.03**.
-  Return +65% Bybit / +29% Binance, DD shallower -3.6pp / -9.7pp. **Single
-  exploratory run, no sub-period stability check, no R4 residual-Sharpe, no
-  R7 stress, no R11 OOS — NOT yet promoted.** Goes FIRST into R1 dispatch
-  with full Manifesto pipeline. Re-baseline cascade pre-committed (see Round 2
-  doc) if it clears every gate.
+- **LEAD R1 CANDIDATE — CONFIRMED full-PIT (2026-05-29):** `R1_drop_all_4`
+  (drops `day_return`, `stop_pressure`, `realized_loss`, `rank_max`) is
+  **DEMO-ELIGIBLE** at R1 (Tier-2): pooled MAR Δ **+0.45** — Bybit **+1.30**
+  (engine-DD MAR 3.84→5.14, ret +2.26×→+2.95×, DD −11.9%→−10.6%), Binance
+  **−0.40** (MAR 1.16→0.75, DD −13.9%→−20.7%). Returns +ve both venues; trades
+  816/509. **Re-baseline cascade TRIGGERED** — R2–R11 now compare vs the
+  drop_all_4 stack. It is a **bybit-driven win with a real binance cost**
+  (bootstrap binance MAR Δ p5 −2.07, P(Δ>0)=28% — likely a true degradation):
+  demo candidate only. **Tier-3 real-money gate FAILS** (needs bootstrap pooled
+  MAR-Δ p5 ≥ 0) — far from real money; frozen promoted profile unchanged.
+  Verdict: [r1-per-filter-audit-verdict.md](docs/preregistration/round2/r1-per-filter-audit-verdict.md).
 - **NEW optimization objective:** **(Return / Drawdown) tied as primary
   (i.e. MAR ratio), Sharpe as secondary tie-breaker.** This is a deliberate
   change from Round 1's implicit Sharpe-primary.
@@ -62,7 +63,7 @@
 | Sub-phase | Purpose | Status |
 |---|---|---|
 | R0 | Doc cleanup (delete unused Phase 7 pre-reg, update STATE.md) | complete (5dff927) |
-| R1 | Per-filter hypothesis audit (softer criterion) | **pending desktop dispatch** — 7-cell sweep partially ran on the Mac then stopped per operator (2026-05-28); re-runs on the **5950X at `max_active=12`** (wide funnel — gather large dataset, then filter with features). Tag `r1_filter_audit_max12_2026-05-28`. Script `scripts/r1_filter_audit_sweep.py` (set to 12); verdict via `scripts/r1_robustness.py` |
+| R1 | Per-filter hypothesis audit (softer criterion) | **COMPLETE (full-PIT, 2026-05-29).** 14/14 cells `full_pit_universe`. `drop_all_4` DEMO-ELIGIBLE (pooled MAR Δ +0.45) → re-baseline cascade TRIGGERED. Tag `r1_filter_audit_max12_2026-05-28`; ran `SWEEP_MAX_WORKERS=1` (23 GB/cell, 32 GB box — 8 OOMs). [verdict](docs/preregistration/round2/r1-per-filter-audit-verdict.md) |
 | R2 | Per-feature standalone decile-sort + correlation matrix | not started |
 | R3 | Bearish stack honest test (H2 retried) | not started — needs ~3h code (R3 filter flag additions) |
 | R4 | Risk-factor model construction (JS-style, 8 factors) | not started — needs ~3 days code |
@@ -93,9 +94,13 @@ R12a/b sniper + C0 continuous engine).
   promoted profile. Ledgers in `data/bybit-demo-event/`.
 - **Paper shadow** (same VPS, same profile, no order submission):
   `data/bybit-paper-event/`.
-- **NO research runs currently in-flight.** R1 partially ran on the Mac then
-  was stopped (2026-05-28); it re-dispatches on the **5950X desktop at
-  `max_active=12`** (wide-funnel dataset → feature-filter). Script is ready.
+- **NO research runs currently in-flight.** R1 full-PIT COMPLETE (2026-05-29,
+  101.5 min serial). **Next: R13** exit-rule re-opt (now unblocked — conditional
+  on R1 confirming `drop_all_4`, satisfied), baseline = the `drop_all_4` stack,
+  full-PIT `SWEEP_MAX_WORKERS=1`. **5950X full-PIT op note:** one
+  `volume-events` cell peaks ~23 GB → run sweeps at `SWEEP_MAX_WORKERS=1`
+  (NOT the plan's 8, which OOMs); clear `<root>/.locks/*.lock` after any
+  OOM/kill or a clean cell hangs ~6 h on orphaned locks.
 
 ## What's broken
 
