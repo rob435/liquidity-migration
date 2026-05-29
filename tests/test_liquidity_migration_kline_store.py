@@ -586,3 +586,20 @@ def test_get_klines_cache_matches_uncached_output() -> None:
     cached = a.get_klines(["BTCUSDT", "ETHUSDT"], start_ms=0, end_ms=10 * MS_PER_HOUR)
     fresh = b.get_klines(["BTCUSDT", "ETHUSDT"], start_ms=0, end_ms=10 * MS_PER_HOUR)
     assert cached.equals(fresh)
+
+
+def test_flush_skips_when_store_unchanged(tmp_path: Path) -> None:
+    """Tier C: re-serializing the whole store every ~30s with no new bars is
+    wasted CPU + lock contention. flush_to_disk skips when the mutation version
+    is unchanged since the last flush, and resumes when a new bar lands."""
+    store = KlineStore(cache_root=tmp_path, flush_interval_seconds=0.0)
+    store.add_bar("BTCUSDT", _ws_bar(MS_PER_HOUR, close=100.0), confirmed=True)
+    assert store.flush_to_disk() == 1
+    flushes_after_first = store._flushes_total
+    # No mutation -> skipped (no re-serialize, not counted as a flush).
+    assert store.flush_to_disk() == 0
+    assert store._flushes_total == flushes_after_first
+    # A new bar -> flush resumes.
+    store.add_bar("BTCUSDT", _ws_bar(2 * MS_PER_HOUR, close=101.0), confirmed=True)
+    assert store.flush_to_disk() == 2
+    assert store._flushes_total == flushes_after_first + 1

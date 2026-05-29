@@ -226,6 +226,11 @@ class KlineStore:
         # current store; a clone keeps the cached frame immutable to callers.
         self._window_cache: tuple[tuple, pl.DataFrame] | None = None
         self._window_builds = 0
+        # Skip a periodic flush when nothing changed since the last one (quiet
+        # periods / between hourly bars): re-serializing the whole store every
+        # ~30s with no new bars is wasted CPU + lock contention. -1 forces the
+        # first flush. Uses the same mutation version as the window cache.
+        self._last_flush_version = -1
         self._cache_root: Path | None = Path(cache_root).expanduser() if cache_root is not None else None
         if self._cache_root is not None:
             self._flush_dir = self._cache_root / ".cache" / "ws_klines"
@@ -615,6 +620,10 @@ class KlineStore:
         turnover_col: list[float] = []
         source_col: list[str] = []
         with self._lock:
+            version = self._adds_total + self._adds_evicted
+            if version == self._last_flush_version:
+                # Nothing changed since the last flush — skip the full re-serialize.
+                return 0
             for symbol, symbol_bars in self._bars.items():
                 for ts_ms in sorted(symbol_bars):
                     bar = symbol_bars[ts_ms]
@@ -638,6 +647,7 @@ class KlineStore:
                 self._flushes_total += 1
                 self._last_flush_rows = 0
                 self._last_flush_monotonic = time.monotonic()
+                self._last_flush_version = version
             return 0
         try:
             self._flush_dir.mkdir(parents=True, exist_ok=True)
@@ -669,6 +679,7 @@ class KlineStore:
             self._flushes_total += 1
             self._last_flush_rows = len(ts_col)
             self._last_flush_monotonic = time.monotonic()
+            self._last_flush_version = version
         return len(ts_col)
 
     def recover_from_disk(self) -> int:
