@@ -109,6 +109,14 @@ class EventWebSocketRiskConfig:
     rest_reconcile_seconds: float = 30.0
     heartbeat_seconds: float = 10.0
     max_runtime_seconds: float = 0.0
+    # When True, a background thread (its OWN private client = separate HTTP
+    # session, so no shared-client concurrency) keeps the positions + open-orders
+    # REST snapshot fresh, and rest_reconcile reads it non-blocking instead of
+    # making the blocking REST calls on the consumer thread (which would stall
+    # stop-trigger processing for the fetch duration). Default OFF — enabling it
+    # on the live risk daemon is a reviewed deploy decision. See
+    # docs/preregistration/round2/r-latency-event-driven-optimization.md.
+    reconcile_prefetch_enabled: bool = False
     # 15s was too tight on a quiet demo account: Bybit's private WS only
     # pushes when state changes (orders, fills, balance moves). The ticker
     # WS keeps last_ws_event_monotonic fresh under normal load but during
@@ -272,6 +280,13 @@ class EventWebSocketRiskEngine:
         # state error (the dedupe + state mutation stay on the consumer thread).
         self._telegram_queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
         self._telegram_thread: threading.Thread | None = None
+        # Background reconcile-prefetcher (opt-in via reconcile_prefetch_enabled).
+        # Holds the latest positions + open-orders REST snapshot so rest_reconcile
+        # reads it non-blocking. Written by the prefetcher via atomic reference
+        # swap; read by the consumer. Default off -> these stay None/idle.
+        self._reconcile_prefetch: dict[str, Any] | None = None
+        self._reconcile_prefetch_thread: threading.Thread | None = None
+        self._reconcile_prefetch_stop = threading.Event()
 
     # ------------------------------------------------------------------
     # Dual-side ledger routing
@@ -360,10 +375,44 @@ class EventWebSocketRiskEngine:
                 self.long_root, self.risk.long_orders_dataset, partition_by=(),
             )
 
+    def _reconcile_prefetch_loop(self) -> None:
+        """Background: keep the positions + open-orders REST snapshot fresh on a
+        SEPARATE private client (own HTTP session — no concurrency with the
+        consumer's client / its place_order calls). The consumer's rest_reconcile
+        reads the snapshot non-blocking, so the slow REST never stalls stop-trigger
+        processing. A failed fetch is logged and retried next tick."""
+        client = _build_private_client(self.config)
+        interval = max(1.0, self.risk.rest_reconcile_seconds / 3.0)
+        while not self._reconcile_prefetch_stop.wait(timeout=interval):
+            try:
+                positions, pos_err = _safe_raw_positions(client, settle_coin=self.risk.settle_coin)
+                open_orders, oo_err = _safe_open_orders(client, settle_coin=self.risk.settle_coin)
+            except Exception as exc:  # noqa: BLE001 - the prefetcher must never die silently
+                _logger.warning("reconcile prefetch failed: %s", exc)
+                continue
+            # Atomic reference swap — the consumer reads the latest snapshot.
+            self._reconcile_prefetch = {
+                "positions": positions, "positions_error": pos_err,
+                "open_orders": open_orders, "open_orders_error": oo_err,
+                "monotonic": time.monotonic(),
+            }
+
+    def _start_reconcile_prefetcher(self) -> None:
+        if not self.risk.reconcile_prefetch_enabled:
+            return
+        if self._reconcile_prefetch_thread is not None and self._reconcile_prefetch_thread.is_alive():
+            return
+        self._reconcile_prefetch_stop.clear()
+        self._reconcile_prefetch_thread = threading.Thread(
+            target=self._reconcile_prefetch_loop, name="ws-risk-reconcile-prefetch", daemon=True
+        )
+        self._reconcile_prefetch_thread.start()
+
     def run(self) -> dict[str, Any]:
         self._consumer_thread_ident = threading.get_ident()
         started = time.monotonic()
         self.bootstrap()
+        self._start_reconcile_prefetcher()
         self.write_report(reason="startup")
         while True:
             if self.risk.max_runtime_seconds > 0 and time.monotonic() - started >= self.risk.max_runtime_seconds:
@@ -1159,7 +1208,18 @@ class EventWebSocketRiskEngine:
         return rows
 
     def rest_reconcile(self) -> None:
-        raw_positions, error = _safe_raw_positions(self.private_client, settle_coin=self.risk.settle_coin)
+        # When the prefetcher is enabled and has a fresh snapshot, read positions +
+        # open-orders from it (non-blocking) instead of making the blocking REST
+        # calls on this (consumer) thread. Stale/absent -> inline fetch (the exact
+        # legacy path). Default off -> prefetch is always None -> legacy path.
+        prefetch = self._reconcile_prefetch if self.risk.reconcile_prefetch_enabled else None
+        prefetch_fresh = prefetch is not None and (
+            time.monotonic() - float(prefetch["monotonic"]) <= max(self.risk.rest_reconcile_seconds, 1.0)
+        )
+        if prefetch_fresh:
+            raw_positions, error = prefetch["positions"], prefetch["positions_error"]
+        else:
+            raw_positions, error = _safe_raw_positions(self.private_client, settle_coin=self.risk.settle_coin)
         if error:
             self.state.errors.append(error)
             self.state.last_position_error = error
@@ -1167,12 +1227,23 @@ class EventWebSocketRiskEngine:
         # REST snapshot is clean: clear any stale error flag from a prior probe
         # so the orphan reconciler is allowed to act on this fresh state.
         self.state.last_position_error = ""
-        self.state.positions_by_symbol = _active_position_by_symbol(raw_positions)
+        snapshot_positions = _active_position_by_symbol(raw_positions)
+        if prefetch_fresh:
+            # UNION with the WS-maintained positions: a position the WS added since
+            # the (slightly older) prefetch snapshot is never dropped — so no stop
+            # goes unchecked. Orphan-close then only fires for a symbol absent from
+            # BOTH the snapshot and the live WS state (conservative; it may delay a
+            # close by a cycle in a rare WS-over-report drift, never miss a stop).
+            self.state.positions_by_symbol = {**self.state.positions_by_symbol, **snapshot_positions}
+        else:
+            self.state.positions_by_symbol = snapshot_positions
         self.state.price_by_symbol.update(_price_lookup_from_positions(self.state.positions_by_symbol))
         self.state.all_trades = self._read_trades_combined()
         self.state.open_trades = _open_trades(self.state.all_trades)
         orders = self._read_orders_combined()
-        open_orders_ok = self.refresh_live_exit_order_symbols()
+        open_orders_ok = self.refresh_live_exit_order_symbols(
+            prefetched=(prefetch["open_orders"], prefetch["open_orders_error"]) if prefetch_fresh else None
+        )
         self.reconcile_pending_order_fills(orders)
         orders = self._read_orders_combined()
         self.load_pending_entry_orders(orders)
@@ -1694,8 +1765,11 @@ class EventWebSocketRiskEngine:
             self.state.pending_fill_reconciliations.extend(trade_updates)
             self._write_trade_rows_routed(trade_updates)
 
-    def refresh_live_exit_order_symbols(self) -> bool:
-        open_orders, error = _safe_open_orders(self.private_client, settle_coin=self.risk.settle_coin)
+    def refresh_live_exit_order_symbols(self, prefetched: tuple[Any, str] | None = None) -> bool:
+        if prefetched is not None:
+            open_orders, error = prefetched
+        else:
+            open_orders, error = _safe_open_orders(self.private_client, settle_coin=self.risk.settle_coin)
         if error:
             self.state.errors.append(error)
             return False
@@ -2024,6 +2098,10 @@ class EventWebSocketRiskEngine:
         return True, "enqueued"
 
     def close(self) -> None:
+        # Stop the background reconcile-prefetcher.
+        self._reconcile_prefetch_stop.set()
+        if self._reconcile_prefetch_thread is not None and self._reconcile_prefetch_thread.is_alive():
+            self._reconcile_prefetch_thread.join(timeout=5.0)
         # Drain + stop the background telegram sender (sentinel after any pending
         # payloads so queued notifications still go out before exit).
         if self._telegram_thread is not None and self._telegram_thread.is_alive():

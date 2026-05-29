@@ -2923,3 +2923,102 @@ def test_maybe_notify_disabled_does_not_enqueue(tmp_path: Path) -> None:
     )
     assert engine.maybe_notify({"cycle": {}}) == (False, "disabled")
     assert engine._telegram_thread is None  # never started
+
+
+def _raw_pos(symbol: str) -> dict:
+    return {
+        "symbol": symbol, "side": "Sell", "size": "1", "avgPrice": "100",
+        "markPrice": "100", "positionValue": "100", "unrealisedPnl": "0",
+    }
+
+
+def test_rest_reconcile_prefetch_union_never_drops_a_ws_position(tmp_path: Path) -> None:
+    """Prefetch offload (opt-in): when rest_reconcile reads positions from the
+    background snapshot, a position the WS added AFTER the snapshot must NOT be
+    dropped — else its stop would go unchecked (missed stop). The union of the
+    snapshot with current WS positions guarantees neither source is lost."""
+    import time as _time
+
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=False, repair_stops=False, reconcile_prefetch_enabled=True,
+            rest_reconcile_seconds=30.0, heartbeat_seconds=0.0,
+            adopt_untracked_positions=False, exit_untracked_positions=False,
+        ),
+        private_client=FakePrivateClient(positions=[]),
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+        trade_client=FakeTradeClient(),
+    )
+    engine.bootstrap()
+    # A position the WS just added (in positions_by_symbol), absent from the snapshot.
+    engine.state.positions_by_symbol = {"WSFRESH": {"symbol": "WSFRESH", "side": "short", "size": 1.0}}
+    engine._reconcile_prefetch = {
+        "positions": [_raw_pos("SNAPONLY")], "positions_error": "",
+        "open_orders": [], "open_orders_error": "", "monotonic": _time.monotonic(),
+    }
+    engine.rest_reconcile()
+    assert "WSFRESH" in engine.state.positions_by_symbol, "WS-added position dropped -> missed-stop risk"
+    assert "SNAPONLY" in engine.state.positions_by_symbol  # snapshot applied too
+
+
+def test_rest_reconcile_prefetch_stale_falls_back_to_inline(tmp_path: Path) -> None:
+    """A stale prefetch snapshot is ignored — rest_reconcile fetches inline (the
+    legacy path), so correctness never depends on a lagging background thread."""
+    import time as _time
+
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=False, repair_stops=False, reconcile_prefetch_enabled=True,
+            rest_reconcile_seconds=30.0, heartbeat_seconds=0.0,
+            adopt_untracked_positions=False, exit_untracked_positions=False,
+        ),
+        private_client=FakePrivateClient(positions=[_raw_pos("INLINE")]),
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+        trade_client=FakeTradeClient(),
+    )
+    engine.bootstrap()
+    engine.state.positions_by_symbol = {}
+    # Stale snapshot (well beyond rest_reconcile_seconds) -> ignored.
+    engine._reconcile_prefetch = {
+        "positions": [_raw_pos("STALE")], "positions_error": "",
+        "open_orders": [], "open_orders_error": "", "monotonic": _time.monotonic() - 999.0,
+    }
+    engine.rest_reconcile()
+    assert "INLINE" in engine.state.positions_by_symbol  # used the inline fetch
+    assert "STALE" not in engine.state.positions_by_symbol
+
+
+def test_reconcile_prefetcher_lifecycle(tmp_path: Path, monkeypatch) -> None:
+    """The prefetcher starts only when enabled (own client), populates the snapshot,
+    and is stopped by close(). Disabled -> no thread."""
+    monkeypatch.setattr(ws_risk, "_build_private_client", lambda config: FakePrivateClient(positions=[_raw_pos("BG")]))
+
+    off = EventWebSocketRiskEngine(
+        tmp_path, config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(reconcile_prefetch_enabled=False),
+    )
+    off._start_reconcile_prefetcher()
+    assert off._reconcile_prefetch_thread is None  # disabled -> never starts
+
+    on = EventWebSocketRiskEngine(
+        tmp_path, config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(reconcile_prefetch_enabled=True, rest_reconcile_seconds=0.3),
+    )
+    on._start_reconcile_prefetcher()
+    assert on._reconcile_prefetch_thread is not None and on._reconcile_prefetch_thread.is_alive()
+    # The loop populates the snapshot within ~1 interval (0.1s).
+    import time as _t
+    deadline = _t.monotonic() + 3.0
+    while on._reconcile_prefetch is None and _t.monotonic() < deadline:
+        _t.sleep(0.05)
+    assert on._reconcile_prefetch is not None and "BG" in {
+        str(p.get("symbol")) for p in on._reconcile_prefetch["positions"]
+    }
+    on.close()
+    assert not on._reconcile_prefetch_thread.is_alive()  # stopped by close()
