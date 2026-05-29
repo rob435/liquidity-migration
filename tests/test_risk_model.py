@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import random
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import polars as pl
 
-from liquidity_migration.risk_model import compute_btc_beta
+from liquidity_migration.risk_model import _FACTOR_COLUMNS, build_factor_panel, compute_btc_beta
 
 _DAY = 86_400_000
 
@@ -45,3 +47,39 @@ def test_btc_beta_empty_input() -> None:
     out = compute_btc_beta(pl.DataFrame(schema={"symbol": pl.String, "ts_ms": pl.Int64, "ret_1d": pl.Float64}))
     assert out.is_empty()
     assert set(out.columns) == {"symbol", "ts_ms", "btc_beta"}
+
+
+def _write_klines_root(root: Path, *, symbols: list[str], days: int, seed: int = 11) -> None:
+    """Minimal synthetic klines_1h root (storage layout: date=YYYY-MM-DD/part.parquet)."""
+    rng = random.Random(seed)
+    rows = []
+    base = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    for sym in symbols:
+        price = 100.0
+        for d in range(days):
+            for h in range(24):
+                ts = base + timedelta(days=d, hours=h)
+                o = price
+                price *= 1 + rng.uniform(-0.02, 0.02)
+                c = price
+                rows.append({
+                    "ts_ms": int(ts.timestamp() * 1000), "symbol": sym,
+                    "open": o, "high": max(o, c) * 1.002, "low": min(o, c) * 0.998,
+                    "close": c, "volume_base": 1000.0, "turnover_quote": 1000.0 * c,
+                    "date": ts.strftime("%Y-%m-%d"),
+                })
+    df = pl.DataFrame(rows)
+    kdir = root / "klines_1h"
+    for key, group in df.group_by("date"):
+        part = kdir / f"date={key[0]}"
+        part.mkdir(parents=True, exist_ok=True)
+        group.write_parquet(part / "part.parquet")
+
+
+def test_build_factor_panel_attaches_all_factor_columns(tmp_path: Path) -> None:
+    _write_klines_root(tmp_path, symbols=["BTCUSDT", "AAA", "BBB"], days=40)
+    panel = build_factor_panel(tmp_path, start="2025-01-10", end="2025-02-08")
+    assert panel.height > 0
+    for col in ["symbol", "ts_ms", "date", *_FACTOR_COLUMNS]:
+        assert col in panel.columns, f"missing {col}; got {panel.columns}"
+    assert set(panel["symbol"].unique().to_list()) <= {"BTCUSDT", "AAA", "BBB"}

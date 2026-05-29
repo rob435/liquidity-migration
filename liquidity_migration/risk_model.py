@@ -29,7 +29,26 @@ from liquidity_migration.signal_harness import (
     _autodetect_dataset_names,
     _date_str_to_ms,
     _read_window,
+    _xs_rank,
+    build_feature_panel,
 )
+
+# The 6 R4 factors that already exist as signal_harness builders (reused as-is via
+# build_feature_panel). realized_vol_7d is additionally cross-sectionally ranked
+# below ("realized vol regime"). BTC-beta + alt-season are computed separately.
+_REUSED_FACTOR_SPECS = [
+    "xs_rank_ret_3d",      # XS 3d momentum
+    "xs_rank_ret_30d",     # XS 30d momentum
+    "realized_vol_7d",     # -> realized_vol_rank (vol regime)
+    "funding_rate_z",      # funding-rate exposure
+    "liquidity_rank",      # liquidity tier (log-ADV rank)
+    "premium_index_z",     # mark-index premium
+]
+
+_FACTOR_COLUMNS = [
+    "btc_beta", "xs_rank_ret_3d", "xs_rank_ret_30d", "realized_vol_rank",
+    "funding_rate_z", "liquidity_rank", "premium_index_z",
+]
 
 MS_PER_DAY = 86_400_000
 BTC_BETA_WINDOW = 60      # trailing trading-day window for the rolling OLS beta
@@ -102,27 +121,35 @@ def build_factor_panel(
     daily bars, and attaches factor exposures. Pads 90d back so the rolling-60
     betas warm up; the returned panel covers [start, end).
 
-    INCREMENTAL: currently attaches ``btc_beta``. The remaining 7 factors
-    (xs momentum 3d/30d, realized-vol rank, funding-rate Z, liquidity tier,
-    alt-season, mark-index premium) land in subsequent commits, reusing the
-    signal_harness builders per the R4 implementation map.
+    Attaches 7 factor exposures: the 6 reused signal_harness factors (via
+    ``build_feature_panel``) + ``btc_beta``. ``realized_vol_7d`` is converted to
+    its cross-sectional rank (``realized_vol_rank``). The 8th planned factor
+    (alt-season) is deferred — 7 factors already meets the plan's 5-6 stable
+    target; add it later only if R4 validation calls for it.
     """
+    feat = build_feature_panel(
+        data_root, start=start, end=end,
+        feature_specs=",".join(_REUSED_FACTOR_SPECS), forward_horizons=(1,),
+    )
+    if feat.is_empty():
+        return pl.DataFrame()
+    # "Realized vol regime" = cross-sectional rank of 7d realized vol (per the plan).
+    feat = _xs_rank(feat, "realized_vol_7d", out_col="realized_vol_rank")
+
+    # BTC-beta needs the backward daily-return series, which build_feature_panel
+    # does not expose -> a lightweight klines-only second read (padded for warm-up).
     start_ms = _date_str_to_ms(start)
     end_ms = _date_str_to_ms(end)
-    read_start_ms = start_ms - 90 * MS_PER_DAY
     klines_name = _autodetect_dataset_names(data_root)["klines_dataset"]
     klines_1h = _read_window(
-        data_root, klines_name, start_ms=read_start_ms, end_ms=end_ms,
+        data_root, klines_name, start_ms=start_ms - 90 * MS_PER_DAY, end_ms=end_ms,
         columns=["ts_ms", "symbol", "open", "high", "low", "close", "volume_base", "turnover_quote", "date"],
     )
     if klines_1h.is_empty():
-        return pl.DataFrame()
-    daily_klines = _aggregate_daily_klines(klines_1h)
-    daily_returns = _attach_daily_returns(daily_klines)
+        feat = feat.with_columns(pl.lit(None, dtype=pl.Float64).alias("btc_beta"))
+    else:
+        daily_returns = _attach_daily_returns(_aggregate_daily_klines(klines_1h))
+        feat = feat.join(compute_btc_beta(daily_returns, btc_symbol=btc_symbol), on=["symbol", "ts_ms"], how="left")
 
-    panel = daily_klines.select(["symbol", "ts_ms", "date"])
-    panel = panel.join(compute_btc_beta(daily_returns, btc_symbol=btc_symbol), on=["symbol", "ts_ms"], how="left")
-    return (
-        panel.filter((pl.col("ts_ms") >= start_ms) & (pl.col("ts_ms") < end_ms))
-        .sort(["ts_ms", "symbol"])
-    )
+    keep = ["symbol", "ts_ms", "date"] + [c for c in _FACTOR_COLUMNS if c in feat.columns]
+    return feat.select(keep).sort(["ts_ms", "symbol"])
