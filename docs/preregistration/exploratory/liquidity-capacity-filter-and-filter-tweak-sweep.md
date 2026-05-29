@@ -208,7 +208,7 @@ Two follow-on items recorded for the broader program:
    in-sample Sharpe. It motivates Phase 5 (signal-research harness)
    and Phase 6 (combined-signal portfolio) of the multi-phase research
    plan at
-   `docs/preregistration/round1/rank-direction-edge-and-universe-isolation-research-plan.md`.
+   `docs/research_summary.md`.
 
 2. **No filter-tweak hot-fix to demo.** The pre-reg standard prohibits
    trading any cell that fails the decision rule, regardless of how

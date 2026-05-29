@@ -115,7 +115,7 @@ class EventWebSocketRiskConfig:
     # making the blocking REST calls on the consumer thread (which would stall
     # stop-trigger processing for the fetch duration). Default OFF — enabling it
     # on the live risk daemon is a reviewed deploy decision. See
-    # docs/preregistration/round2/r-latency-event-driven-optimization.md.
+    # docs/research_summary.md.
     reconcile_prefetch_enabled: bool = False
     # 15s was too tight on a quiet demo account: Bybit's private WS only
     # pushes when state changes (orders, fills, balance moves). The ticker

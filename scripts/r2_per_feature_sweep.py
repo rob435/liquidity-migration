@@ -1,6 +1,6 @@
 """R2 — per-feature standalone decile-sort + correlation/PCA (Round 2).
 
-Pre-reg: docs/preregistration/round2/r2-per-feature-standalone.md (and the parent
+Pre-reg: docs/research_summary.md (and the parent
 integrated-strategy-program.md sub-phase R2).
 
 DESCRIPTIVE phase (no promotion): for each of the 5 Round-1 Phase-5 IC survivors,

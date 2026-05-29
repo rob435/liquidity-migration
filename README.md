@@ -15,8 +15,8 @@ null → do nothing.** Architecture A (daily) shows a *real bybit edge* (best st
 MAR 1.39) but *no binance edge* (−1.3%), so it fails the cross-venue robustness
 bar; Architecture B (continuous) is not tradeable after honest cost. The frozen
 `promoted` profile is unchanged on demo, nothing is promoted, real money stays
-off. See [STATE.md](STATE.md) and
-[docs/preregistration/round2/](docs/preregistration/round2/) for the verdicts and
+off. See [docs/research_summary.md](docs/research_summary.md) for the full results and
+verdicts, [STATE.md](STATE.md) for live state, and
 [docs/system_status.md](docs/system_status.md) for the deployment record. Any
 further work (a bybit-only daily strategy from the single-venue edge, or a
 momentum-continuation thesis) is a new operator pre-registration, not a

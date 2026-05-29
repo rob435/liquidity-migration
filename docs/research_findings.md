@@ -7,9 +7,9 @@ Updated 2026-05-29 — full-PIT roots rebuilt; **Round 2 COMPLETE = documented n
 > Architecture A (daily): real bybit edge (best stack MAR 1.39) but no binance edge
 > (−1.3%) → fails the cross-venue bar. Architecture B (continuous): not tradeable after
 > cost. The frozen `promoted` profile is unchanged on demo; nothing promoted; real money
-> off. Canonical verdicts: `STATE.md`, `docs/preregistration/round2/r9-integrated-strategy-verdict.md`,
-> `c0-c3-architecture-b-verdict.md`. The "2026-05-27 reset" / "deleted" text below is
-> historical record only — the roots are rebuilt and present (`docs/data_roots.md`).
+> off. Canonical record: `docs/research_summary.md` (and `STATE.md` for live state). The
+> "2026-05-27 reset" / "deleted" text below is historical record only — the roots are
+> rebuilt and present (`docs/data_roots.md`).
 
 ## Status
 

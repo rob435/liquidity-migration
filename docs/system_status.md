@@ -8,7 +8,7 @@ profile with `liquidity_migration_close_location_min = 0.30`.
 
 > **Research-evidence update (2026-05-29):** Round 2 is COMPLETE = **documented null**
 > (both architectures → do nothing) on rebuilt full-PIT roots under the hardened engine —
-> see `STATE.md` and `docs/preregistration/round2/`. The frozen `promoted` demo profile
+> see `STATE.md` and `docs/research_summary.md`. The frozen `promoted` demo profile
 > is unchanged. The "2026-05-27 reset" section below is historical record only (the roots
 > are rebuilt and present per `docs/data_roots.md`); it is not the live status.
 

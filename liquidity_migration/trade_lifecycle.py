@@ -204,7 +204,7 @@ def _intrahold_and_gross_stats(trades: pl.DataFrame) -> dict[str, float]:
     a true portfolio mark-to-market drawdown (which compounds CONCURRENT open
     positions and re-calibrates the pre-registered DD gate thresholds) is strictly
     deeper and is its own pre-registered sub-phase
-    (docs/preregistration/round2/r-audit-methodology-hardening.md). Treat
+    (docs/research_summary.md). Treat
     ``worst_weighted_intrahold_loss`` as a LOWER BOUND on portfolio intra-hold DD.
 
     M3: ``realized_gross_mean``/``_max`` is the per-basket sum of position gross

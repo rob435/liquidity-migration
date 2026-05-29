@@ -1,7 +1,7 @@
 """R1 re-baseline under the `9f52819` + `b1a3368` hardened engine defaults (Round 2).
 
 Executes the re-baseline rule pre-registered in
-``docs/preregistration/round2/r-audit-methodology-hardening.md`` ("treat the first sweep
+``docs/research_summary.md`` ("treat the first sweep
 under the applied defaults as a re-baseline: re-run the control under identical settings
 before any cell-vs-control MAR delta is read as Tier-1/Tier-2 evidence"). The original
 R1 audit (tag ``r1_filter_audit_max12_2026-05-28``) ran on the PRE-hardening engine.

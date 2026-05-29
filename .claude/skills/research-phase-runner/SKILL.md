@@ -1,13 +1,13 @@
 ---
 name: research-phase-runner
-description: "Execution workflow for the Round 2 research program pre-registered at docs/preregistration/round2/integrated-strategy-program.md. Use any time you are about to run, conditionally-run, or write up a sub-phase (R0-R12, C0-C3) from that plan — covers pre-checks, dispatch, the three-tier demo-arbiter decision rule (scripts/r1_robustness.py + scripts/apply_decision_rule.py), STATE.md update, and per-phase verdict commit. Keeps the three-tier thresholds intact; the Tier-3 real-money gate stays strict."
+description: "Execution workflow for the Round 2 research program pre-registered at docs/research_summary.md. Use any time you are about to run, conditionally-run, or write up a sub-phase (R0-R12, C0-C3) from that plan — covers pre-checks, dispatch, the three-tier demo-arbiter decision rule (scripts/r1_robustness.py + scripts/apply_decision_rule.py), STATE.md update, and per-phase verdict commit. Keeps the three-tier thresholds intact; the Tier-3 real-money gate stays strict."
 ---
 
 # Running a research sub-phase (Round 2)
 
 Use this every time you run, conditionally-run, or write up a sub-phase of the
 Round 2 program. The plan lives at
-`docs/preregistration/round2/integrated-strategy-program.md`.
+`docs/research_summary.md`.
 
 Always read STATE.md first — it tells you what's done, what's pending, and the
 current binding decision rules.
@@ -67,11 +67,12 @@ OOS window. MAR-primary (pooled), Sharpe secondary.
      Round-2 promotion gate.
    Do not move thresholds downward to rescue a cell (see non-negotiables).
 
-5. **Write the verdict.** Create the dated verdict file under
-   `docs/preregistration/round2/<YYYY-MM-DD>-<phase>-verdict.md` with: stage,
-   full per-cell metrics, the Tier-2 verdict + fragility diagnostics, the
-   verdict paragraph (incl. any falsification), and the forward pointer to the
-   next sub-phase (or "program complete — documented null").
+5. **Write the verdict.** Create a dated verdict file under
+   `docs/preregistration/<YYYY-MM-DD>-<phase>-verdict.md` (flat dir — the per-round
+   subdirs were consolidated into `docs/research_summary.md`) with: stage, full per-cell
+   metrics, the Tier-2 verdict + fragility diagnostics, the verdict paragraph (incl. any
+   falsification), the forward pointer, AND a one-paragraph roll-up into
+   `docs/research_summary.md` so the single record stays current.
 
 6. **Update STATE.md.** Move the sub-phase to its terminal state in the table;
    add new helpers / open questions.
@@ -101,7 +102,7 @@ OOS window. MAR-primary (pooled), Sharpe secondary.
   re-baseline cascade premise is therefore falsified: the R9 baseline is
   `R9_event_only` (production), NOT drop_all_4. Always confirm the current baseline
   from STATE.md before dispatching. See
-  [r1-rebaseline-hardened-verdict.md](../../../docs/preregistration/round2/r1-rebaseline-hardened-verdict.md).
+  [docs/research_summary.md](../../../docs/research_summary.md).
 
 ## Pre-committed behaviours (non-negotiable)
 

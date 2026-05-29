@@ -1,6 +1,6 @@
 """R4 — risk-factor model for crypto-perp returns (Round 2).
 
-Pre-reg: docs/preregistration/round2/integrated-strategy-program.md sub-phase R4.
+Pre-reg: docs/research_summary.md sub-phase R4.
 
 Builds a per-(date, symbol) factor-exposure panel so every Round-2 strategy can be
 evaluated on RESIDUAL alpha (the return NOT explained by exposure to known
@@ -39,7 +39,7 @@ from liquidity_migration.signal_harness import (
 # below ("realized vol regime"). BTC-beta is computed separately. xs_rank_ret_3d
 # was DROPPED by the R4 validation (2026-05-29): sign-inconsistent factor-return
 # Sharpe across venues (-0.47 bybit / +0.50 binance) => criterion-1 failure, not a
-# stable priced factor. See docs/preregistration/round2/r4-risk-model-verdict.md.
+# stable priced factor. See docs/research_summary.md.
 _REUSED_FACTOR_SPECS = [
     "xs_rank_ret_30d",     # XS 30d momentum
     "realized_vol_7d",     # -> realized_vol_rank (vol regime)

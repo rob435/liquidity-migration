@@ -2,9 +2,9 @@
 
 A research codebase for a Bybit liquidity-migration short strategy. The
 strategy is under **active research** — its signal is statistically real but
-regime-conditional. Current focus: the **Round 2 integrated-strategy program**
-(see `STATE.md` and `docs/preregistration/round2/`). Python 3.11+; package
-`liquidity_migration/`.
+regime-conditional. All research findings are consolidated in
+`docs/research_summary.md` (see `STATE.md` for live/operational state). Python
+3.11+; package `liquidity_migration/`.
 
 @AGENTS.md
 
@@ -14,12 +14,11 @@ regime-conditional. Current focus: the **Round 2 integrated-strategy program**
   done, what's running, what's next. **First read for every session.**
 - **`docs/backtesting_errors_we_never_repeat.md`** — mandatory research
   methodology standard. Read it before any backtest or strategy work.
-- **`docs/preregistration/round2/integrated-strategy-program.md`** — the
-  CURRENT research plan (Round 2). Three-tier **demo-arbiter** decision
-  framework (Investigation → Demo-candidate → Real-money), MAR-primary.
-- `docs/preregistration/round1/` — Round 1 plan + verdicts (COMPLETE,
-  documented null). Historical evidence, not the active plan.
-- `docs/research_findings.md` — older research verdict + refinement roadmap.
+- **`docs/research_summary.md`** — the single consolidated research record:
+  all results, verdicts, the useful findings, and the three-tier **demo-arbiter**
+  decision framework (Investigation → Demo-candidate → Real-money), MAR-primary.
+  (Round 1 + Round 2 per-phase docs were consolidated here; originals in git history.)
+- `docs/research_findings.md` — short verdict pointer (defers to the summary).
 - `docs/data_roots.md` — which data root to use (research vs. live demo vs. OOS).
 - `docs/system_status.md` — strategy / deployment status.
 - `README.md` — repo overview and status.

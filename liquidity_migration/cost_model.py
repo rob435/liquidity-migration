@@ -1,6 +1,6 @@
 """R6 — per-name, per-bar cost model (Round 2).
 
-Pre-reg: docs/preregistration/round2/integrated-strategy-program.md sub-phase R6.
+Pre-reg: docs/research_summary.md sub-phase R6.
 
 Replaces the single flat ``cost_multiplier`` with a regression-calibrated surface
 that varies predicted round-trip cost (bps) by name liquidity (size/ADV), volatility

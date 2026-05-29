@@ -1,6 +1,6 @@
 """R4 — risk-factor model validation run (Round 2).
 
-Pre-reg: docs/preregistration/round2/integrated-strategy-program.md sub-phase R4.
+Pre-reg: docs/research_summary.md sub-phase R4.
 
 Runs the R4 risk model (liquidity_migration/risk_model.py) on each full_pit venue
 root and checks the plan's three validation criteria:

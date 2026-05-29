@@ -1,6 +1,6 @@
 """R3 — Bearish-stack honest test (H2 retried), Round 2.
 
-Pre-reg: docs/preregistration/round2/integrated-strategy-program.md sub-phase R3.
+Pre-reg: docs/research_summary.md sub-phase R3.
 
 Round-1 Phase-2 found H2 "falsified-by-construction": the bullish quality gates
 (day_return >= 0, residual >= 0.08, close_location >= 0.30, rank improvement)

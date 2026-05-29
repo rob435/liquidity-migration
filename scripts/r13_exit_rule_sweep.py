@@ -1,6 +1,6 @@
 """R13 — exit-rule re-optimization dispatcher (Round 2, conditional on R1).
 
-Pre-reg: docs/preregistration/round2/integrated-strategy-program.md
+Pre-reg: docs/research_summary.md
          (sub-phase R13, added 2026-05-28)
 
 **Why this phase exists.** Round 2's R-phases re-optimize the ENTRY (filters,

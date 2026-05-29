@@ -1,6 +1,6 @@
 """R1 — per-filter hypothesis audit dispatcher (Round 2), WIDE-FUNNEL variant.
 
-Pre-reg: docs/preregistration/round2/integrated-strategy-program.md
+Pre-reg: docs/research_summary.md
          (sub-phase R1 + the 2026-05-28 max_active=12 amendment)
 
 7 cells (1 baseline + lead candidate + 5 decomposition/re-test) × 2 venues =

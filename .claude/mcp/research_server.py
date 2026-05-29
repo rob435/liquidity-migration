@@ -596,7 +596,7 @@ def tool_current_state(args):
             "STATE.md not found at repo root. The research-program state file "
             "should always exist; ask the operator to restore or create it. "
             "Falling back to reading the master plan at "
-            "docs/preregistration/round1/rank-direction-edge-and-universe-isolation-research-plan.md."
+            "docs/research_summary.md."
         )
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
@@ -754,7 +754,7 @@ TOOLS = [
         "name": "apply_decision_rule",
         "description": (
             "Apply the Strictness Manifesto decision rule (pre-registered in "
-            "docs/preregistration/round1/rank-direction-edge-and-universe-isolation-research-plan.md) to a sweep "
+            "docs/research_summary.md) to a sweep "
             "summary CSV. Returns the per-cell verdict table "
             "(candidate / reject / inconclusive) plus a candidate ranking "
             "by combined-venue Sharpe (honours the FDR ceiling). Single-"

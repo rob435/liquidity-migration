@@ -1,6 +1,6 @@
 """R5 — 1/realized-vol position-sizing sweep (Round 2).
 
-Pre-reg: docs/preregistration/round2/integrated-strategy-program.md (sub-phase R5).
+Pre-reg: docs/research_summary.md (sub-phase R5).
 
 Tests ``risk_equal`` sizing (absolute ``target_vol_per_name / realized_vol``,
 clamped) against the dollar-equal baseline, on the R1 ``drop_all_4`` re-baselined

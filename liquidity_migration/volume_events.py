@@ -88,7 +88,7 @@ class VolumeEventResearchConfig:
     #                        this is the operator's bad-but-bounded default (analogous to the
     #                        conservative cost multiplier) and is calibratable from live-demo
     #                        stop fills. Pre-reg:
-    #                        docs/preregistration/round2/r-audit-methodology-hardening.md.
+    #                        docs/research_summary.md.
     stop_fill_mode: str = "bar_extreme_capped"
     # Adverse stop slippage cap (fraction beyond the trigger) used by 'bar_extreme_capped'.
     stop_slippage_cap_pct: float = 0.10
