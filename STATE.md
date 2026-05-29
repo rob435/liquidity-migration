@@ -1,6 +1,6 @@
 # Research-program state
 
-**Last updated:** 2026-05-29 (R1 full-PIT COMPLETE — `drop_all_4` demo-eligible, re-baseline cascade TRIGGERED; R13 next)
+**Last updated:** 2026-05-29 (R1 + R13 full-PIT COMPLETE — `drop_all_4` stack + `ff6_4pct` failed-fade exit carry to R9; R2 next)
 
 > If you are a Claude session opening this repo for the first time, read this
 > file FIRST. It tells you in 60 seconds what's been done, what's running,
@@ -94,13 +94,18 @@ R12a/b sniper + C0 continuous engine).
   promoted profile. Ledgers in `data/bybit-demo-event/`.
 - **Paper shadow** (same VPS, same profile, no order submission):
   `data/bybit-paper-event/`.
-- **NO research runs currently in-flight.** R1 full-PIT COMPLETE (2026-05-29,
-  101.5 min serial). **Next: R13** exit-rule re-opt (now unblocked — conditional
-  on R1 confirming `drop_all_4`, satisfied), baseline = the `drop_all_4` stack,
-  full-PIT `SWEEP_MAX_WORKERS=1`. **5950X full-PIT op note:** one
-  `volume-events` cell peaks ~23 GB → run sweeps at `SWEEP_MAX_WORKERS=1`
-  (NOT the plan's 8, which OOMs); clear `<root>/.locks/*.lock` after any
-  OOM/kill or a clean cell hangs ~6 h on orphaned locks.
+- **NO research runs currently in-flight.** R1 + R13 full-PIT COMPLETE
+  (2026-05-29). **R13 verdict:** `ff6_4pct` (failed_fade 6h/4%/1%mfe) is the
+  winning exit (combined ΔMAR +0.52, MAR-up both venues) → carries to R9 on the
+  `drop_all_4` stack; tighter stop 0.10 falsified; TP/rank-exit moves descriptive.
+  [R13 verdict](docs/preregistration/round2/r13-exit-rule-verdict.md).
+  **Next: R2** per-feature standalone decile + correlation (code ready in
+  `liquidity_migration/r2_decile_sort.py`); then R5 sizing. R4 risk model built
+  in parallel (code; see memory `r4-risk-model-implementation-map`).
+- **5950X full-PIT op note:** one `volume-events` cell peaks ~23 GB → run sweeps
+  at `SWEEP_MAX_WORKERS=1` (NOT the plan's 8, which OOMs); clear
+  `<root>/.locks/*.lock` after any OOM/kill or a clean cell hangs ~6 h on
+  orphaned locks.
 
 ## What's broken
 
