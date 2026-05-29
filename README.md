@@ -6,21 +6,21 @@ volume / liquidity-migration signal and shorts the weakest-ranked names.
 A long-only sleeve (`MultiStratV1` / v11a, FOMO-chase) runs alongside on
 demo.
 
-## Status: Round 2 complete — documented null (2026-05-29) + live demo running
+## Status: research-stage (2026-05-29) — selection + execution, live demo running
 
-The Round 2 integrated-strategy program is **complete**, run on rebuilt full-PIT
-roots under the hardened engine (capped/`bar_extreme` stops, 100% taker,
-calendar-exact returns). Verdict: **both signal architectures are a documented
-null → do nothing.** Architecture A (daily) shows a *real bybit edge* (best stack
-MAR 1.39) but *no binance edge* (−1.3%), so it fails the cross-venue robustness
-bar; Architecture B (continuous) is not tradeable after honest cost. The frozen
-`promoted` profile is unchanged on demo, nothing is promoted, real money stays
-off. See [docs/research_summary.md](docs/research_summary.md) for the full results and
-verdicts, [STATE.md](STATE.md) for live state, and
-[docs/system_status.md](docs/system_status.md) for the deployment record. Any
-further work (a bybit-only daily strategy from the single-venue edge, or a
-momentum-continuation thesis) is a new operator pre-registration, not a
-continuation of Round 2.
+The strategy is a **selection signal** (a liquidity-migration event picks a
+candidate pool) + an **execution signal** (the in-migrated flow exhausts and
+fades — short the *confirmed* fade, not the top; this is a fade strategy, not a
+catch-the-top strategy). The earlier "Round 2 = documented null" verdict has been
+**retracted**: it was substantially a methodology artifact (worst-case stop fills
++ over-concentration + a ×3 cost) plus a selection/execution conflation. Under
+realistic capped stop fills at `max_active=12`, the daily strategy is
+**gross-positive on both venues in-sample** (bybit +37.8% net; binance gross
++16.1%). It stays in-sample; the Bybit demo forward test is the arbiter; nothing
+is promoted; real money stays off. Full record:
+[docs/research_summary.md](docs/research_summary.md); live state:
+[STATE.md](STATE.md); forward plan:
+[docs/research_plan_selection_execution.md](docs/research_plan_selection_execution.md).
 
 A demo (paper) forward test of the 3-position concentrated `promoted`
 short profile + the v11a long sleeve runs on a Bybit demo account on a
@@ -36,7 +36,8 @@ money.
   archive builders, the backtest / event engine, and the
   `python -m liquidity_migration` CLI (24 subcommands; run `--help`).
 - `tests/` — `.venv/bin/python -m pytest -q`.
-- `docs/research_findings.md` — current research-evidence status (post-reset).
+- `docs/research_findings.md` — short verdict pointer (defers to research_summary.md).
+- `docs/research_plan_selection_execution.md` — the forward research plan (5950X).
 - `docs/backtesting_errors_we_never_repeat.md` — research methodology standard.
 - `docs/data_roots.md` — data-root contract (research / live demo / OOS).
 - `docs/system_status.md` — strategy / deployment status.

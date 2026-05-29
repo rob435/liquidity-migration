@@ -190,6 +190,15 @@ class LongNativeConfig:
     fc_daily_best_n: int = 0                # 0=disabled. If >0, take only top-N FC candidates per day
     fc_btc_regime_required: bool = True   # If False, skip BTC SMA gate (loosen regime)
     fc_close_loc_multi_day: float = 0.6   # close-location requirement for multi-day triggers (looser)
+    # FC quality FILTER from positioning data (combine new L/S alpha into FC):
+    # skip FC pumps fired when retail is already euphorically long (buying the crowd's top).
+    fc_lsr_filter: bool = False
+    fc_max_lsr: float = 10.0              # skip FC entry if global (retail) long/short ratio > this
+    fc_min_lsr: float = 0.0               # skip FC entry if global L/S ratio < this (0=off)
+    # OI-confirmation: only take FC pumps where open interest is RISING (new money /
+    # conviction) vs falling (short-covering fakeout). Real per-trade quality filter.
+    fc_require_oi_rising: bool = False
+    fc_oi_chg_min: float = 0.0           # require 7d OI change > this at the pump
 
     # --- trailing-stop overlay (applies to all patterns when enabled) ---
     use_trailing_stop: bool = False
@@ -214,6 +223,8 @@ class LongNativeConfig:
     xsec_top_k: int = 5                 # hold the top-K in-universe momentum names
     xsec_require_regime: bool = True    # only rotate while BTC regime_on
     xsec_min_momentum: float = 0.0      # require trailing return strictly above this
+    xsec_use_residual: bool = False     # rank by BTC-beta-stripped RESIDUAL momentum (idiosyncratic)
+    xsec_beta_window: int = 60          # rolling window for the coin-vs-BTC beta
     xsec_stop_pct: float = 0.15
     xsec_take_profit_pct: float = 0.50
     xsec_max_hold_days: int = 10
@@ -264,6 +275,19 @@ class LongNativeConfig:
     oi_take_profit_pct: float = 0.40
     oi_max_hold_days: int = 10
 
+    # --- pattern 12: positioning metrics (binance.vision OI / LSR / taker) ---
+    # Cross-sectional select by a positioning factor. Genuinely-new participant-
+    # composition data (top-trader vs retail long/short ratio, taker flow).
+    enable_metrics_signal: bool = False
+    metrics_factor: str = "smart_minus_dumb"  # global_lsr_low | toptrader_lsr_high | smart_minus_dumb | taker_buy | oi_growth
+    metrics_top_k: int = 5
+    metrics_require_regime: bool = True
+    metrics_require_uptrend: bool = False
+    metrics_stop_pct: float = 0.12
+    metrics_take_profit_pct: float = 0.40
+    metrics_max_hold_days: int = 10
+    metrics_fill_only: bool = False     # FC-priority: metrics fills only leftover daily capacity
+
     # --- portfolio ---
     max_concurrent_positions: int = 5
     cooldown_days: int = 7
@@ -282,6 +306,19 @@ class LongNativeConfig:
     vol_estimate_window_days: int = 30
     vol_floor_annual: float = 0.30
     max_position_weight: float = 0.30
+    # Volatility-managed exposure (Moreira-Muir / Barroso-Santa-Clara): scale the
+    # whole book by vol_target / BTC-realized-vol. Sizes DOWN into high-vol regimes
+    # (where drawdowns cluster) and UP when calm. Lifts Sharpe + MAR if vol clusters.
+    enable_vol_target: bool = False
+    vol_target_annual: float = 0.60
+    vol_target_min_scale: float = 0.30
+    vol_target_max_scale: float = 2.0
+    # Drawdown throttle: when the book's realized equity is in drawdown beyond
+    # dd_throttle_trigger, scale new-position size by dd_throttle_scale (de-lever
+    # during losing streaks). Caps the worst peak-to-trough -> lifts MAR.
+    enable_dd_throttle: bool = False
+    dd_throttle_trigger: float = -0.03
+    dd_throttle_scale: float = 0.0
 
     # --- B.3 concentration limits ---
     # max_per_symbol_concurrent: explicit cap on the same-symbol-twice case
@@ -334,19 +371,31 @@ def run_long_native_research(
         raise RuntimeError("klines_1h is empty; run download-data first")
     funding = read_dataset(root, "funding")
     archive_manifest = read_dataset(root, "archive_trade_manifest")
-    open_interest = read_dataset(root, "open_interest") if cfg.enable_oi_momentum else None
+    open_interest = read_dataset(root, "open_interest") if (cfg.enable_oi_momentum or cfg.fc_require_oi_rising) else None
+    metrics_df = None
+    if cfg.enable_metrics_signal or cfg.fc_lsr_filter:
+        mfiles: list[Path] = []
+        for cand in ("binance_usdm_metrics", "positioning_lsr"):  # Binance metrics / Bybit L/S
+            mdir = root / cand
+            if mdir.exists():
+                mfiles = sorted(mdir.glob("*.parquet"))
+                break
+        if mfiles:
+            metrics_df = pl.concat([pl.read_parquet(f) for f in mfiles], how="vertical_relaxed")
 
     klines = _exclude_symbols(raw_klines, cfg.exclude_symbols)
     funding = _exclude_symbols(funding, cfg.exclude_symbols)
     archive_manifest = _exclude_symbols(archive_manifest, cfg.exclude_symbols)
     if open_interest is not None and not open_interest.is_empty():
         open_interest = _exclude_symbols(open_interest, cfg.exclude_symbols)
+    if metrics_df is not None and not metrics_df.is_empty():
+        metrics_df = _exclude_symbols(metrics_df, cfg.exclude_symbols)
 
     full_pit_universe_pass = _full_pit_universe_pass(klines, archive_manifest)
     if cfg.require_full_pit_universe and not full_pit_universe_pass:
         raise RuntimeError(_full_pit_universe_error(klines, archive_manifest))
 
-    features = build_long_features(klines, funding=funding, open_interest=open_interest, config=cfg)
+    features = build_long_features(klines, funding=funding, open_interest=open_interest, config=cfg, metrics=metrics_df)
     features = _filter_signal_window(features, start=cfg.start_date, end=cfg.end_date)
     if features.is_empty():
         raise RuntimeError("No features generated")
@@ -425,7 +474,7 @@ def run_long_native_research(
     return {**metadata, "report_dir": str(output_dir)}
 
 
-def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None, config: LongNativeConfig, open_interest: pl.DataFrame | None = None) -> pl.DataFrame:
+def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None, config: LongNativeConfig, open_interest: pl.DataFrame | None = None, metrics: pl.DataFrame | None = None) -> pl.DataFrame:
     daily = daily_bars(klines_1h)
     if daily.is_empty():
         return daily
@@ -594,11 +643,33 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
         ).alias("in_universe")
     )
 
-    # cross-sectional momentum: trailing-return score + per-day rank among in-universe names.
-    # PIT-safe: shift() uses only past closes; the rank is cross-sectional at the signal close.
-    daily = daily.with_columns(
-        (pl.col("close") / pl.col("close").shift(config.xsec_lookback_days).over("symbol") - 1.0).alias("mom_score")
-    )
+    # cross-sectional momentum score + per-day rank among in-universe names. PIT-safe.
+    # If xsec_use_residual: score = BTC-beta-stripped RESIDUAL momentum (idiosyncratic
+    # cumulative return), documented ~2x more robust than total-return momentum.
+    if config.xsec_use_residual:
+        _btc_lr = daily.filter(pl.col("symbol") == config.regime_symbol).select(
+            ["ts_ms", pl.col("log_return").alias("btc_lr")]
+        )
+        w = max(20, int(config.xsec_beta_window))
+        daily = daily.join(_btc_lr, on="ts_ms", how="left").with_columns(pl.col("btc_lr").fill_null(0.0))
+        daily = daily.sort(["symbol", "ts_ms"]).with_columns([
+            (pl.col("log_return") * pl.col("btc_lr")).rolling_mean(w, min_samples=w).over("symbol").alias("_xy"),
+            pl.col("log_return").rolling_mean(w, min_samples=w).over("symbol").alias("_mx"),
+            pl.col("btc_lr").rolling_mean(w, min_samples=w).over("symbol").alias("_my"),
+            (pl.col("btc_lr") ** 2).rolling_mean(w, min_samples=w).over("symbol").alias("_yy"),
+        ]).with_columns(
+            ((pl.col("_xy") - pl.col("_mx") * pl.col("_my")) /
+             (pl.col("_yy") - pl.col("_my") ** 2).clip(lower_bound=1e-9)).alias("_beta")
+        ).with_columns(
+            (pl.col("log_return") - pl.col("_beta") * pl.col("btc_lr")).alias("_resid_lr")
+        ).with_columns(
+            pl.col("_resid_lr").rolling_sum(config.xsec_lookback_days, min_samples=config.xsec_lookback_days)
+            .over("symbol").alias("mom_score")
+        )
+    else:
+        daily = daily.with_columns(
+            (pl.col("close") / pl.col("close").shift(config.xsec_lookback_days).over("symbol") - 1.0).alias("mom_score")
+        )
     daily = daily.with_columns(
         pl.when(pl.col("in_universe") & pl.col("mom_score").is_not_null())
           .then(pl.col("mom_score")).otherwise(-1e9).alias("_mom_rankable")
@@ -642,13 +713,14 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
             pl.when((pl.col("_rvmax") - pl.col("_rvmin")) > 1e-12)
               .then((pl.col("btc_rv_30") - pl.col("_rvmin")) / (pl.col("_rvmax") - pl.col("_rvmin")))
               .otherwise(0.5).alias("btc_vol_pos"),
-        ]).select(["ts_ms", "regime_on", "btc_high_proximity", "btc_sma_dist", "btc_trend_200", "btc_vol_pos"])
+        ]).select(["ts_ms", "regime_on", "btc_high_proximity", "btc_sma_dist", "btc_trend_200", "btc_vol_pos", "btc_rv_30"])
         daily = daily.join(btc, on="ts_ms", how="left").with_columns([
             pl.col("regime_on").fill_null(False),
             pl.col("btc_high_proximity").fill_null(0.0),
             pl.col("btc_sma_dist").fill_null(0.0),
             pl.col("btc_trend_200").fill_null(False),
             pl.col("btc_vol_pos").fill_null(0.5),
+            pl.col("btc_rv_30").fill_null(0.8),
         ])
     else:
         daily = daily.with_columns([
@@ -657,6 +729,7 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
             pl.lit(0.0, dtype=pl.Float64).alias("btc_sma_dist"),
             pl.lit(False).alias("btc_trend_200"),
             pl.lit(0.5, dtype=pl.Float64).alias("btc_vol_pos"),
+            pl.lit(0.8, dtype=pl.Float64).alias("btc_rv_30"),
         ])
 
     # ETH regime gate (used by FOMO chase pattern)
@@ -748,6 +821,37 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
             pl.lit(None, dtype=pl.Float64).alias("oi_chg_3d"),
             pl.lit(None, dtype=pl.Float64).alias("oi_chg_7d"),
             pl.lit(None, dtype=pl.Int64).alias("oi_rank"),
+        ])
+
+    # positioning metrics (binance.vision): top-trader vs retail L/S ratio, taker flow, OI.
+    # Build a cross-sectional factor score per config.metrics_factor, then rank in-universe.
+    if metrics is not None and not metrics.is_empty() and "global_lsr" in metrics.columns:
+        m = metrics.sort(["symbol", "ts_ms"]).with_columns(
+            (pl.col("oi") / pl.col("oi").shift(7).over("symbol") - 1.0).alias("oi_chg7_m")
+        ).select(["ts_ms", "symbol", "toptrader_lsr", "global_lsr", "taker_lsr", "oi_chg7_m"])
+        daily = daily.join(m, on=["ts_ms", "symbol"], how="left")
+        factor = config.metrics_factor
+        if factor == "global_lsr_low":
+            score = -pl.col("global_lsr")               # retail capitulated/short = contrarian long
+        elif factor == "toptrader_lsr_high":
+            score = pl.col("toptrader_lsr")             # smart money positioned long = follow
+        elif factor == "taker_buy":
+            score = pl.col("taker_lsr")                 # aggressive taker buying
+        elif factor == "oi_growth":
+            score = pl.col("oi_chg7_m")
+        else:  # smart_minus_dumb (default): smart longer than the crowd
+            score = pl.col("toptrader_lsr") - pl.col("global_lsr")
+        daily = daily.with_columns(score.alias("metrics_score"))
+        daily = daily.with_columns(
+            pl.when(pl.col("in_universe") & pl.col("metrics_score").is_not_null())
+              .then(pl.col("metrics_score")).otherwise(-1e9).alias("_m_rankable")
+        ).with_columns(
+            pl.col("_m_rankable").rank(method="ordinal", descending=True).over("ts_ms").alias("metrics_rank")
+        )
+    else:
+        daily = daily.with_columns([
+            pl.lit(None, dtype=pl.Float64).alias("metrics_score"),
+            pl.lit(None, dtype=pl.Int64).alias("metrics_rank"),
         ])
 
     return daily.sort(["ts_ms", "symbol"])
@@ -992,6 +1096,16 @@ def detect_pattern_fomo_chase(row: dict[str, Any], cfg: LongNativeConfig) -> boo
         bsd = _safe_float(row.get("btc_sma_dist"))
         if bsd is None or bsd > cfg.fc_max_btc_sma_dist:
             return False
+    # positioning quality filter: avoid FC pumps when retail is over-long (crowd top)
+    if cfg.fc_lsr_filter:
+        glsr = _safe_float(row.get("global_lsr"))
+        if glsr is not None and (glsr > cfg.fc_max_lsr or glsr < cfg.fc_min_lsr):
+            return False
+    # OI-confirmation: require open interest rising at the pump (new money, not short-cover)
+    if cfg.fc_require_oi_rising:
+        oichg = _safe_float(row.get("oi_chg_7d"))
+        if oichg is None or oichg <= cfg.fc_oi_chg_min:
+            return False
     return True
 
 
@@ -1188,6 +1302,29 @@ def detect_pattern_oi_momentum(row: dict[str, Any], cfg: LongNativeConfig) -> bo
     return True
 
 
+def detect_pattern_metrics(row: dict[str, Any], cfg: LongNativeConfig) -> bool:
+    """Pattern 12: cross-sectional positioning factor (binance.vision metrics).
+    Select top-K in-universe names by the configured factor (smart-vs-retail L/S
+    divergence, retail contrarian, top-trader follow, taker flow, or OI growth)."""
+    if not cfg.enable_metrics_signal:
+        return False
+    if not row.get("in_universe"):
+        return False
+    if cfg.metrics_require_regime and not row.get("regime_on"):
+        return False
+    rank = _safe_float(row.get("metrics_rank"))
+    score = _safe_float(row.get("metrics_score"))
+    if rank is None or score is None:
+        return False
+    if rank > cfg.metrics_top_k:
+        return False
+    if cfg.metrics_require_uptrend:
+        m = _safe_float(row.get("coin_30d_return"))
+        if m is None or m <= 0.0:
+            return False
+    return True
+
+
 def _classify_entry(row: dict[str, Any], cfg: LongNativeConfig) -> tuple[str | None, float, float, int]:
     """Returns (pattern_name, stop_pct, take_profit_pct, max_hold_days) or (None, ...)."""
     if detect_pattern_capitulation(row, cfg):
@@ -1211,6 +1348,8 @@ def _classify_entry(row: dict[str, Any], cfg: LongNativeConfig) -> tuple[str | N
         return "funding_carry", cfg.funding_carry_stop_pct, cfg.funding_carry_take_profit_pct, cfg.funding_carry_max_hold_days
     if detect_pattern_oi_momentum(row, cfg):
         return "oi_momentum", cfg.oi_stop_pct, cfg.oi_take_profit_pct, cfg.oi_max_hold_days
+    if detect_pattern_metrics(row, cfg):
+        return "metrics", cfg.metrics_stop_pct, cfg.metrics_take_profit_pct, cfg.metrics_max_hold_days
     if detect_pattern_resurrection(row, cfg):
         return "volume_resurrection", cfg.res_stop_pct, cfg.res_take_profit_pct, cfg.res_max_hold_days
     return None, 0.0, 0.0, 0
@@ -1306,9 +1445,14 @@ def _run_long_pipeline(
     }
     event_counts = {"capitulation_rebound": 0, "funding_squeeze": 0, "volume_resurrection": 0,
                     "oversold_bounce": 0, "fomo_chase": 0, "uptrend_dip": 0, "xsec_momentum": 0,
-                    "lowvol": 0, "reversal": 0, "funding_carry": 0, "oi_momentum": 0}
+                    "lowvol": 0, "reversal": 0, "funding_carry": 0, "oi_momentum": 0, "metrics": 0}
     round_trip_cost_bps = costs.base_entry_exit_cost_bps * config.cost_multiplier
     notional_weight = config.gross_exposure / max(config.max_concurrent_positions, 1)
+    # drawdown-throttle state (realized book equity from closed trades)
+    dd_realized_pnl = 0.0
+    dd_peak_eq = 1.0
+    dd_counted = 0
+    dd_cur = 0.0
 
     for ts in dates_all:
         rows_today = features_by_date.get(ts, [])
@@ -1389,6 +1533,14 @@ def _run_long_pipeline(
             if exited:
                 del open_positions[symbol]
 
+        # update realized-equity drawdown (from trades closed so far) for the throttle
+        if config.enable_dd_throttle:
+            for t in trade_rows[dd_counted:]:
+                dd_realized_pnl += float(t["net_return"])
+            dd_counted = len(trade_rows)
+            dd_peak_eq = max(dd_peak_eq, 1.0 + dd_realized_pnl)
+            dd_cur = (1.0 + dd_realized_pnl) / dd_peak_eq - 1.0
+
         # ---- check entries ----
         candidates = []
         for row in rows_today:
@@ -1412,6 +1564,10 @@ def _run_long_pipeline(
             candidates.sort(key=lambda c: -c[5])
         else:
             candidates.sort(key=lambda c: -(_safe_float(c[0].get("log_return")) or 0.0))
+        if config.metrics_fill_only:
+            # FC-priority: non-metrics patterns take slots first (stable sort keeps
+            # their relative order); metrics candidates only fill leftover capacity.
+            candidates.sort(key=lambda c: 1 if c[1] == "metrics" else 0)
         # FC v12: daily-best-N filter
         if config.fc_daily_best_n > 0:
             fc_kept = []
@@ -1531,6 +1687,19 @@ def _run_long_pipeline(
                 effective_gross = notional_weight * position_weight
                 if effective_gross > config.max_per_symbol_weight:
                     position_weight = config.max_per_symbol_weight / max(notional_weight, 1e-12)
+
+            # Volatility-managed book scalar (applied last so it's a clean book-level tilt):
+            # size inversely to BTC realized vol, clipped. PIT-safe (btc_rv_30 is trailing).
+            if config.enable_vol_target:
+                btc_rv = _safe_float(row.get("btc_rv_30")) or config.vol_target_annual
+                vt_scale = config.vol_target_annual / max(btc_rv, 1e-6)
+                vt_scale = max(config.vol_target_min_scale, min(config.vol_target_max_scale, vt_scale))
+                position_weight = position_weight * vt_scale
+
+            # Drawdown throttle: de-lever while the book is in its own realized drawdown
+            # (caps the worst peak-to-trough -> lifts MAR), restore on recovery.
+            if config.enable_dd_throttle and dd_cur <= config.dd_throttle_trigger:
+                position_weight = position_weight * config.dd_throttle_scale
 
             trailing_atr = _safe_float(row.get("atr_20d"))
             open_positions[symbol] = {

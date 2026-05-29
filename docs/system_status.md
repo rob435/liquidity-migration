@@ -6,9 +6,14 @@ The liquidity-migration short strategy is in **committed paper forward testing**
 on the Bybit demo account. The canonical live configuration is the `promoted`
 profile with `liquidity_migration_close_location_min = 0.30`.
 
-> **Research-evidence update (2026-05-29):** Round 2 is COMPLETE = **documented null**
-> (both architectures → do nothing) on rebuilt full-PIT roots under the hardened engine —
-> see `STATE.md` and `docs/research_summary.md`. The frozen `promoted` demo profile
+> **Research-evidence update (2026-05-29):** the earlier "Round 2 = documented null"
+> verdict has been **retracted** — it was substantially a methodology artifact
+> (worst-case stop fills + `max_active=3` over-concentration + a ×3 cost) plus a
+> selection/execution conflation. Under realistic capped fills at `max_active=12` the
+> daily strategy is gross-positive on both venues in-sample; the continuous candidate
+> signal carries real selection IC and the fade-confirmation execution layer is the open
+> lead. Canonical record: `docs/research_summary.md`; live state: `STATE.md`; forward
+> plan: `docs/research_plan_selection_execution.md`. The frozen `promoted` demo profile
 > is unchanged. The "2026-05-27 reset" section below is historical record only (the roots
 > are rebuilt and present per `docs/data_roots.md`); it is not the live status.
 
@@ -57,11 +62,12 @@ The deletion does NOT affect:
   turnover, smaller kline store, but demo ≠ backtest), set both env
   vars to 400 in the systemd unit and rebuild.
 - **NOTE (direction):** the daily aggregation described above is the **CURRENT /
-  deployed (Architecture A)** signal layer. The lowest-latency, fully-event-driven
-  **continuous variant (Architecture B, C-phases)** is under research and is NOT
-  deployed — see STATE.md "Two signal architectures in scope". The demo runtime is
-  already event-driven (WS bar-close cycle wakes + WS stop enforcement); what is
-  still daily is the *signal cadence*, not the runtime.
+  deployed** signal cadence. A lower-latency **continuous** candidate signal is under
+  research and is NOT deployed — it carries real cross-venue selection IC; applying the
+  fade-confirmation execution layer to it is the open lead (see
+  `docs/research_plan_selection_execution.md`). The demo runtime is already event-driven
+  (WS bar-close cycle wakes + WS stop enforcement); what is still daily is the *signal
+  cadence*, not the runtime.
 - The long sleeve (`liquidity-migration-bybit-long-demo.service`) runs the
   `MultiStratV1` / v11a profile at `NOTIONAL_MULTIPLIER=10`,
   `ENTRY_LEVERAGE=10`, `MAX_NEW_ENTRIES_PER_CYCLE=5`, `UNIVERSE_SIZE=10`.

@@ -21,8 +21,9 @@ EXECUTION signal (enter on the fade-confirmation — pop then giveback, "fade th
 short-at-the-top; this is `promoted_quality_squeeze`). The continuous variant carries real
 cross-venue selection IC but was only ever tested with *immediate* entry — its "null" is
 about timing the top, not the signal; applying the execution layer (+ sniper) to it is the
-open lead. Full detail: **`docs/research_summary.md`**. Nothing is promoted; forward demo is
-the arbiter.
+open lead. **Forward plan (narrow, for the 5950X): `docs/research_plan_selection_execution.md`**
+— E1 execution-premium → E2 continuous+execution → E3 sniper. Full detail:
+**`docs/research_summary.md`**. Nothing is promoted; forward demo is the arbiter.
 
 ## What's running
 
@@ -31,6 +32,10 @@ the arbiter.
   `data/bybit-demo-event/`.
 - **Paper shadow** (same VPS, same profile, no order submission): `data/bybit-paper-event/`.
 - **No research runs in-flight.**
+- **Next research run (the lead):** E1 from `docs/research_plan_selection_execution.md`
+  — `--entry-policy fixed_delay` vs `promoted_quality_squeeze` on the daily strategy
+  (realistic baseline, both venues) to quantify the execution signal's contribution.
+  Cheap, decisive, no new code; pre-register before running.
 - **Open action (from the 2026-05-29 re-baseline):** the deployed demo runs `max_active=3`
   (worst day −36%, DD −87% under honest fills); the research-validated value is
   `max_active=12` (worst day −4.8%, DD −27.5%). Consider moving the demo to 12 and/or

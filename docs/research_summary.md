@@ -57,6 +57,11 @@ credit — likely understates binance.)*
 
 ## The open lead: refine the EXECUTION signal (sniper) + apply it to the continuous candidate
 
+**Now sequenced as a narrow, falsifiable plan for the 5950X:
+[research_plan_selection_execution.md](research_plan_selection_execution.md)** — E1
+execution-premium (`fixed_delay` vs `promoted_quality_squeeze`, the cheap decisive
+proof) → E2 continuous candidate + execution layer → E3 sniper (sub-1h).
+
 The selection/execution split makes the next research obvious and is the most promising
 direction:
 

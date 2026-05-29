@@ -92,10 +92,10 @@ python -m liquidity_migration --data-root data/bybit-demo-event \
   which defaults to demo; keep it on demo without explicit owner instruction.
 - Event-driven entries are the strategy path; fixed-day rebalance grids are
   legacy benchmarks only. Do not revive the retired daily-close short-fade.
-- The deployed signal is Architecture A (daily-close features, +1h entry delay).
-  A **continuous / sub-hourly Architecture B** (rolling-window features, finer
-  bars, 0h delay) is under research (Round 2 C-phases C0–C3 + R12 sniper); its
-  faster-cadence path is NOT the deployed daily path and is research-gated (needs
+- The deployed signal is the daily-close signal (daily-close features, +1h entry
+  delay). A **continuous / sub-hourly** variant (rolling-window features, finer
+  bars, 0h delay) is under research (see `docs/research_plan_selection_execution.md`);
+  its faster-cadence path is NOT the deployed daily path and is research-gated (needs
   OOS re-validation before it can influence real-money work).
 - Every serious run must leave enough report output to audit the decision.
 - Before constructing a run, apply the **backtest-integrity** skill. After a

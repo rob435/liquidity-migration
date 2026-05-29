@@ -1,8 +1,10 @@
-"""Shared parallel-sweep runtime for the multi-phase research program.
+"""Shared parallel-sweep runtime for the research program's cell sweeps.
 
-Used by the Round-2 sweep dispatchers ``scripts/r1_filter_audit_sweep.py`` and
-``scripts/r13_exit_rule_sweep.py``; future phase orchestrators (R3 bearish
-stack, R9 assembly, etc.) import the same primitives:
+Reusable infrastructure for any multi-cell sweep dispatcher: a dispatcher
+declares baseline params + a list of Cells and imports these primitives. (The
+Round-2 R-phase dispatchers that originally used this were retired once their
+findings were consolidated into docs/research_summary.md; new-plan dispatchers
+import the same primitives.)
 
   Cell                — (cell_id, description, overrides)
   run_cell()          — invoke `python -m liquidity_migration volume-events`

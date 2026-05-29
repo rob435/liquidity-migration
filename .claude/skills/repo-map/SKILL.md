@@ -7,11 +7,11 @@ description: "Orient in the liquidity-migration codebase: module map, core abstr
 
 A Bybit (+Binance) research codebase for a liquidity-migration short strategy. The
 strategy is under active research — its signal is statistically real but
-regime-conditional. The current focus is the **Round 2 integrated-strategy program**
-(see `STATE.md` and `docs/research_summary.md`;
-`docs/research_findings.md` is the older research verdict). Direction: progressive —
-moving toward a lowest-latency, fully-event-driven, continuous-signal (Architecture B)
-system; the deployed daily-close signal is Architecture A.
+regime-conditional. The current focus is the **selection-vs-execution research plan**
+(see `STATE.md`, `docs/research_summary.md`, and
+`docs/research_plan_selection_execution.md`). Direction: progressive — the deployed
+daily-close signal is positive in-sample under realistic fills; the open lead is the
+fade-confirmation execution layer (plus a continuous candidate signal under research).
 
 ## graphify first (mandated by AGENTS.md)
 
