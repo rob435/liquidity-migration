@@ -1803,16 +1803,73 @@ def _pit_manifest_metadata(archive_manifest: pl.DataFrame, features: pl.DataFram
     }
 
 
+def _symbol_kline_date_bounds(klines: pl.DataFrame) -> dict[str, tuple[str, str]]:
+    """Per-symbol (first, last) kline `date` — the coin's traded lifespan in our archive."""
+    if klines.is_empty() or "symbol" not in klines.columns or "date" not in klines.columns:
+        return {}
+    agg = klines.group_by("symbol").agg(
+        pl.col("date").min().alias("first_date"),
+        pl.col("date").max().alias("last_date"),
+    )
+    return {
+        str(r["symbol"]): (str(r["first_date"]), str(r["last_date"]))
+        for r in agg.drop_nulls(["first_date", "last_date"]).to_dicts()
+    }
+
+
+def _symbol_first_kline_date(klines: pl.DataFrame) -> dict[str, str]:
+    """Per-symbol first (earliest) kline `date` — the day the coin started trading."""
+    return {s: lo for s, (lo, _hi) in _symbol_kline_date_bounds(klines).items()}
+
+
+def _required_pit_date_symbols(klines: pl.DataFrame, archive_manifest: pl.DataFrame) -> set[tuple[str, str]]:
+    """Archive-manifest (date, symbol) pairs that the klines are REQUIRED to cover for
+    a full-PIT universe — i.e. only within each symbol's traded lifespan
+    [first_kline_date, last_kline_date].
+
+    The archive trade manifest (derived from the public *trade* archive) can list a coin
+    OUTSIDE the span of its 1h *kline* archive at both ends:
+
+    - PRE-LISTING (date < first kline): listing/announcement precedes the first trade bar;
+      the trade-archive file is empty (0 trades), so no klines exist or can be built.
+    - POST-DELISTING (date > last kline): an isolated EMPTY trade-archive file (0 trades —
+      a settlement/marker artifact) can land weeks-to-months after the coin stopped
+      trading. Verified on the FTX/Terra collapse cohort — FTT/SRM/RAY/LUNA/UST/ANC/GST/
+      KEEP/BTT — all claimed on 2022-12-12, one date each, long after their real last bar;
+      re-downloading those nine partitions returns Empty (0 rows) every time.
+
+    Both are untradable — a coin with no trades on a date has no price/volume and cannot
+    pass the universe turnover / >=20-bar filters, so it could never be selected. Requiring
+    klines for them is a false tripwire, NOT survivorship protection.
+
+    Survivorship IS preserved: any date within [first, last] — including a genuine
+    mid-history gap where a real trading day's klines are simply missing (observed:
+    FHEUSDT 2025-08-29..10-21, a 54-day archive-download gap, correctly still flagged and
+    then backfilled) — is still required and will still trip the gate. This relies on the
+    pipeline invariant that the kline downloader is run over the FULL archive manifest, so
+    `last_kline_date` is the coin's true last real trading day (a real post-last trading
+    day would have been downloaded and would extend `last_kline_date`; only empty-file days
+    fall beyond it). `last_kline_date` is end-of-data for every still-active coin, so this
+    only ever drops empty-file phantom claims, never an active coin's recent dates."""
+    bounds = _symbol_kline_date_bounds(klines)
+    out: set[tuple[str, str]] = set()
+    for d, s in _date_symbol_set(archive_manifest):
+        span = bounds.get(s)
+        if span is not None and span[0] <= d <= span[1]:
+            out.add((d, s))
+    return out
+
+
 def _full_pit_universe_pass(klines: pl.DataFrame, archive_manifest: pl.DataFrame) -> bool:
     manifest_symbols = _symbol_set(archive_manifest)
     kline_symbols = _symbol_set(klines)
-    manifest_date_symbols = _date_symbol_set(archive_manifest)
+    required_date_symbols = _required_pit_date_symbols(klines, archive_manifest)
     kline_covered_date_symbols = _covered_kline_date_symbol_set(klines)
     return (
         bool(manifest_symbols)
         and manifest_symbols.issubset(kline_symbols)
-        and bool(manifest_date_symbols)
-        and manifest_date_symbols.issubset(kline_covered_date_symbols)
+        and bool(required_date_symbols)
+        and required_date_symbols.issubset(kline_covered_date_symbols)
     )
 
 
@@ -1820,9 +1877,9 @@ def _full_pit_universe_error(klines: pl.DataFrame, archive_manifest: pl.DataFram
     manifest_symbols = _symbol_set(archive_manifest)
     kline_symbols = _symbol_set(klines)
     missing_symbols = sorted(manifest_symbols - kline_symbols)
-    manifest_date_symbols = _date_symbol_set(archive_manifest)
+    required_date_symbols = _required_pit_date_symbols(klines, archive_manifest)
     kline_covered_date_symbols = _covered_kline_date_symbol_set(klines)
-    missing_date_symbols = sorted(manifest_date_symbols - kline_covered_date_symbols)
+    missing_date_symbols = sorted(required_date_symbols - kline_covered_date_symbols)
     if not manifest_symbols:
         return (
             "volume-events requires full PIT archive membership by default, but archive_trade_manifest is empty. "
@@ -1831,9 +1888,9 @@ def _full_pit_universe_error(klines: pl.DataFrame, archive_manifest: pl.DataFram
     return (
         "volume-events requires a full PIT universe by default, but klines_1h does not cover every archive manifest symbol/date. "
         f"manifest_symbols={len(manifest_symbols)} kline_symbols={len(kline_symbols)} missing_symbols={len(missing_symbols)} "
-        f"manifest_date_symbols={len(manifest_date_symbols)} kline_covered_date_symbols={len(kline_covered_date_symbols)} "
+        f"required_date_symbols={len(required_date_symbols)} kline_covered_date_symbols={len(kline_covered_date_symbols)} "
         f"missing_date_symbols={len(missing_date_symbols)} missing_symbol_sample={missing_symbols[:20]} "
-        f"missing_date_symbol_sample={missing_date_symbols[:20]}. Finish archive-download-klines-1h before running real event backtests."
+        f"missing_date_symbol_sample={missing_date_symbols[:20]} (note: pre-listing manifest entries before a symbol's first kline are NOT required — these are genuine gaps from a symbol's first traded day onward). Finish archive-download-klines-1h before running real event backtests."
     )
 
 

@@ -30,6 +30,8 @@ from liquidity_migration.volume_events import (
     _explain_liquidity_migration_rejections,
     _float_or_nan,
     _full_pit_universe_error,
+    _full_pit_universe_pass,
+    _required_pit_date_symbols,
     _funding_feature_frame,
     _open_interest_feature_frame,
     _signed_flow_feature_frame,
@@ -1031,11 +1033,17 @@ def test_full_pit_universe_error_reports_missing_symbols() -> None:
 
 
 def test_full_pit_universe_error_reports_missing_symbol_dates() -> None:
-    klines = pl.DataFrame([{"symbol": "AAAUSDT", "date": "2024-01-01"} for _ in range(24)])
+    # A genuine MID-HISTORY hole: the coin trades 01-01 and 01-03 (so its traded
+    # span is [01-01, 01-03]) but 01-02 is missing -> still required, still flagged.
+    klines = pl.DataFrame(
+        [{"symbol": "AAAUSDT", "date": "2024-01-01"} for _ in range(24)]
+        + [{"symbol": "AAAUSDT", "date": "2024-01-03"} for _ in range(24)]
+    )
     manifest = pl.DataFrame(
         [
             {"symbol": "AAAUSDT", "date": "2024-01-01"},
             {"symbol": "AAAUSDT", "date": "2024-01-02"},
+            {"symbol": "AAAUSDT", "date": "2024-01-03"},
         ]
     )
 
@@ -1044,6 +1052,34 @@ def test_full_pit_universe_error_reports_missing_symbol_dates() -> None:
     assert "missing_symbols=0" in message
     assert "missing_date_symbols=1" in message
     assert "2024-01-02" in message
+    assert _full_pit_universe_pass(klines, manifest) is False
+
+
+def test_full_pit_universe_excludes_prelisting_and_postdelisting_phantoms() -> None:
+    # The coin's real traded span (>=20-bar kline days) is [2024-01-02, 2024-01-03].
+    klines = pl.DataFrame(
+        [{"symbol": "AAAUSDT", "date": "2024-01-02"} for _ in range(24)]
+        + [{"symbol": "AAAUSDT", "date": "2024-01-03"} for _ in range(24)]
+    )
+    # The trade manifest over-claims an empty-file day on EACH side of that span:
+    #   2024-01-01 -> pre-listing (date < first kline)
+    #   2024-01-09 -> post-delisting settlement artifact (date > last kline)
+    # Neither is tradable, so neither is required and the gate must still PASS.
+    manifest = pl.DataFrame(
+        [
+            {"symbol": "AAAUSDT", "date": "2024-01-01"},
+            {"symbol": "AAAUSDT", "date": "2024-01-02"},
+            {"symbol": "AAAUSDT", "date": "2024-01-03"},
+            {"symbol": "AAAUSDT", "date": "2024-01-09"},
+        ]
+    )
+
+    required = _required_pit_date_symbols(klines, manifest)
+    assert ("2024-01-01", "AAAUSDT") not in required  # pre-listing excluded
+    assert ("2024-01-09", "AAAUSDT") not in required  # post-delisting excluded
+    assert ("2024-01-02", "AAAUSDT") in required
+    assert ("2024-01-03", "AAAUSDT") in required
+    assert _full_pit_universe_pass(klines, manifest) is True
 
 
 def test_event_filter_excludes_default_stable_and_peg_symbols() -> None:
