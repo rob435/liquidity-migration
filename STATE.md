@@ -1,6 +1,6 @@
 # Research-program state
 
-**Last updated:** 2026-05-29 (R1+R13+R5+R2+R3+R4 COMPLETE — H2 closed (bearish=0 trades); R9 = bullish stack only; R4 risk model = 6 validated factors, Tier-3 residual machinery confirmed. **Engine RE-BASELINED by `9f52819`** (100% taker / bar_extreme stops / calendar returns) → R1/R13/R5/R2 deltas re-run folds into the R9 run-up; R3+R4 unaffected. **R6 cost-model CODE COMPLETE** (calibration data-gated/queued); R12/R7/R8 next)
+**Last updated:** 2026-05-29 (R1+R13+R5+R2+R3+R4 COMPLETE — H2 closed (bearish=0 trades); R9 = bullish stack only; R4 risk model = 6 validated factors, Tier-3 residual machinery confirmed. **Engine RE-BASELINED by `9f52819`** (100% taker / bar_extreme stops / calendar returns) → **R1 re-baseline DONE: `drop_all_4` FALSIFIES Tier-2** (demo-eligibility was a pre-hardening stop-fill artifact; binance negative under honest costs); R9 `event_only` baseline = production. R3+R4 unaffected; R6 code done (calibration queued). **Next: build + test R9 integrated stack** (IC signal + R4 factor caps); default do-nothing if R9 falsifies.)
 
 > If you are a Claude session opening this repo for the first time, read this
 > file FIRST. It tells you in 60 seconds what's been done, what's running,
@@ -27,17 +27,19 @@
   JS-style risk model + 1/realized-vol sizing + per-name cost model + stress
   test suite + capacity analysis + integrated strategy assembly + R10 promotion
   + R11 OOS. See [Round 2 plan](docs/preregistration/round2/integrated-strategy-program.md).
-- **LEAD R1 CANDIDATE — CONFIRMED full-PIT (2026-05-29):** `R1_drop_all_4`
-  (drops `day_return`, `stop_pressure`, `realized_loss`, `rank_max`) is
-  **DEMO-ELIGIBLE** at R1 (Tier-2): pooled MAR Δ **+0.45** — Bybit **+1.30**
-  (engine-DD MAR 3.84→5.14, ret +2.26×→+2.95×, DD −11.9%→−10.6%), Binance
-  **−0.40** (MAR 1.16→0.75, DD −13.9%→−20.7%). Returns +ve both venues; trades
-  816/509. **Re-baseline cascade TRIGGERED** — R2–R11 now compare vs the
-  drop_all_4 stack. It is a **bybit-driven win with a real binance cost**
-  (bootstrap binance MAR Δ p5 −2.07, P(Δ>0)=28% — likely a true degradation):
-  demo candidate only. **Tier-3 real-money gate FAILS** (needs bootstrap pooled
-  MAR-Δ p5 ≥ 0) — far from real money; frozen promoted profile unchanged.
-  Verdict: [r1-per-filter-audit-verdict.md](docs/preregistration/round2/r1-per-filter-audit-verdict.md).
+- **LEAD R1 CANDIDATE `R1_drop_all_4` — FALSIFIED under the hardened engine
+  (2026-05-29 re-baseline).** Its original demo-eligibility (pooled MAR Δ **+0.45**) was
+  substantially a **pre-hardening optimistic-stop-fill artifact**. Under the honest
+  engine (`bar_extreme` stops + 100% taker + calendar returns) it **FALSIFIES Tier-2**:
+  pooled MAR Δ **+0.05** (< +0.1 bar), **binance return NEGATIVE** (−0.25× at 45bps,
+  −0.12 sum-net at honest 15bps), bybit edge real-but-weak (MAR Δ +0.15, bootstrap
+  P(Δ>0)=87%) vs binance no-edge (P=25%). DD blew out (bybit −10.6%→−30.5%, binance
+  −13.9%→−47.3%). **Re-baseline cascade premise FALSIFIED** — R2/R13/R5 carry-forwards
+  are not demo evidence on their own; R9 `R9_event_only` baseline = production, not
+  drop_all_4. Program continues to its pre-registered R9 integrated-stack test (R4 factor
+  caps target the DD blowout); **default do-nothing if R9 falsifies.** Verdicts:
+  [original](docs/preregistration/round2/r1-per-filter-audit-verdict.md) ·
+  [hardened re-baseline](docs/preregistration/round2/r1-rebaseline-hardened-verdict.md).
 - **NEW optimization objective:** **(Return / Drawdown) tied as primary
   (i.e. MAR ratio), Sharpe as secondary tie-breaker.** This is a deliberate
   change from Round 1's implicit Sharpe-primary.
@@ -70,7 +72,7 @@
 | Sub-phase | Purpose | Status |
 |---|---|---|
 | R0 | Doc cleanup (delete unused Phase 7 pre-reg, update STATE.md) | complete (5dff927) |
-| R1 | Per-filter hypothesis audit (softer criterion) | **COMPLETE (full-PIT, 2026-05-29).** 14/14 cells `full_pit_universe`. `drop_all_4` DEMO-ELIGIBLE (pooled MAR Δ +0.45) → re-baseline cascade TRIGGERED. Tag `r1_filter_audit_max12_2026-05-28`; ran `SWEEP_MAX_WORKERS=1` (23 GB/cell, 32 GB box — 8 OOMs). [verdict](docs/preregistration/round2/r1-per-filter-audit-verdict.md) |
+| R1 | Per-filter hypothesis audit (softer criterion) | **COMPLETE (full-PIT, 2026-05-29).** 14/14 cells `full_pit_universe`. `drop_all_4` DEMO-ELIGIBLE (pooled MAR Δ +0.45) → re-baseline cascade TRIGGERED. Tag `r1_filter_audit_max12_2026-05-28`. **HARDENED RE-BASELINE (2026-05-29): `drop_all_4` FALSIFIES Tier-2** — pooled MAR Δ +0.45→+0.05, binance ret +0.56×→−0.25× (bar_extreme stops tripled DD); demo-eligibility was a pre-hardening stop-fill artifact. [original verdict](docs/preregistration/round2/r1-per-filter-audit-verdict.md) · [re-baseline verdict](docs/preregistration/round2/r1-rebaseline-hardened-verdict.md) |
 | R2 | Per-feature standalone decile-sort + correlation matrix | not started |
 | R3 | Bearish stack honest test (H2 retried) | not started — needs ~3h code (R3 filter flag additions) |
 | R4 | Risk-factor model construction (JS-style, 8 factors) | **COMPLETE (full-PIT, 2026-05-29).** 6 validated factors (dropped XS-3d-momentum: sign-flip factor return; alt-season + CLI deferred, off critical path). All 3 criteria pass both venues; variance-capture via the HONEST within-day permutation null (p=0.0 both venues — not the in-sample tautology; audit2 `b1a3368` A1), residual mean ~0 → Tier-3 residual-Sharpe machinery confirmed (incl. B1 `decompose` entry-ts fix). Tag `r4_risk_model_2026-05-29`. [verdict](docs/preregistration/round2/r4-risk-model-verdict.md) |
@@ -131,16 +133,23 @@ R12a/b sniper + C0 continuous engine).
     `configs/volume_alpha.default.yaml`, 15 bps RT), `stop_fill_mode=bar_extreme`, M4
     calendar-shift fwd-returns, M1 promotion gate enforces DD+Sharpe. Per its decision
     rule, prior cell-vs-control deltas are `exploratory` until re-run under these
-    defaults. **R3** (0-trades, structural) ROBUST; **R4** (factor model, M4-revalidated)
-    UNAFFECTED; **R1/R13/R5/R2** need re-baseline → folded into the **R9 run-up under
-    the final R6 cost model** (re-running now under flat-taker then again post-R6 would
-    double the serial sweep queue on this RAM-bound box).
+    defaults. **R3** (0-trades, structural) ROBUST; **R4** (factor model) UNAFFECTED
+    (re-validated, permutation null). **R1 RE-BASELINE DONE (2026-05-29):** `drop_all_4`
+    **FALSIFIES Tier-2** under honest costs (pooled MAR Δ +0.45→+0.05, binance ret
+    +0.56×→−0.25×; `bar_extreme` stops tripled DD) — demo-eligibility was a stop-fill
+    artifact. [re-baseline verdict](docs/preregistration/round2/r1-rebaseline-hardened-verdict.md).
+    R13/R5/R2 carry-forwards likewise are not demo evidence on their own; R9
+    `event_only` baseline = production.
   - **R6 cost model CODE COMPLETE** (2026-05-29): `cost_model.py` surface + fit +
     predict + recost + summary, 12 tests; default 15 bps taker; β-calibration
     data-gated → queued; [verdict](docs/preregistration/round2/r6-cost-model-verdict.md).
-  - **Then** R12 sniper (R12a/b code), C0–C3 continuous, R7 stress, R8 capacity, R9
-    assembly → R10 → R11 OOS. limit-chase EXIT enable is safe (market fallback) but
-    live-path — test-gated, post-backtest-validation.
+  - **NEXT: build + run R9** (integrated stack: event entries + IC-augmented signal +
+    R4 basket factor caps + R5 sizing + R6 model cost) under the honest engine — the
+    factor caps target the −33%/−47% DD blowout. If the best R9 cell falsifies Tier-2 →
+    **default: do nothing.** Then R10 (residual Sharpe + stress + recost) → R11 OOS.
+    R7/R8 analyzers + R12 sniper + C0–C3 build alongside (R7/R8 run on R10 candidates;
+    R8 ceiling is `b_size`-calibration-gated). limit-chase EXIT enable is safe (market
+    fallback) but live-path — test-gated, post-backtest-validation.
 - **5950X full-PIT op note:** one `volume-events` cell peaks ~23 GB → run sweeps
   at `SWEEP_MAX_WORKERS=1` (NOT the plan's 8, which OOMs); clear
   `<root>/.locks/*.lock` after any OOM/kill or a clean cell hangs ~6 h on
