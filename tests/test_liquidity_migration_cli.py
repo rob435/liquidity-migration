@@ -263,8 +263,9 @@ def test_cli_volume_events_defaults_to_selected_liquidity_migration(tmp_path: Pa
     assert args.hold_days == "3"
     assert args.sides == "reversal"
     assert args.stop_loss_pcts == "0.12"
-    # H3: conservative bar-extreme stop fill is the default (gap-through honest).
-    assert args.stop_fill_mode == "bar_extreme"
+    # Realistic bad-case stop fill is the default: bar extreme capped at a bounded
+    # slippage beyond the trigger (not the unachievable worst-case wick top).
+    assert args.stop_fill_mode == "bar_extreme_capped"
     assert args.take_profit_pcts == "0.26"
     assert args.cost_multipliers == "3.0"
     assert args.failed_fade_exit_hours == 0

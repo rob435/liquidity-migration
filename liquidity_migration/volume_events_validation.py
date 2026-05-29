@@ -42,8 +42,10 @@ def _validate_scenario_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("hold days must be positive")
     if any(item < 0.0 or item >= 1.0 for item in config.stop_loss_pcts):
         raise ValueError("stop loss pcts must be in [0, 1)")
-    if config.stop_fill_mode not in {"stop", "bar_extreme"}:
-        raise ValueError("stop_fill_mode must be stop or bar_extreme")
+    if config.stop_fill_mode not in {"stop", "bar_extreme", "bar_extreme_capped"}:
+        raise ValueError("stop_fill_mode must be stop, bar_extreme, or bar_extreme_capped")
+    if not 0.0 <= config.stop_slippage_cap_pct < 1.0:
+        raise ValueError("stop_slippage_cap_pct must be in [0, 1)")
     if any(item < 0.0 or item >= 1.0 for item in config.take_profit_pcts):
         raise ValueError("take profit pcts must be in [0, 1)")
     if any(item < 0.0 for item in config.cost_multipliers):

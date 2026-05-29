@@ -339,7 +339,15 @@ def _add_volume_events_parser(subparsers) -> None:
     volume_events.add_argument(
         "--stop-fill-mode",
         default=event_defaults.stop_fill_mode,
-        help="Stop fill assumption: stop fills at stop price, bar_extreme fills at adverse hourly high/low.",
+        help="Stop fill assumption: 'stop' fills at trigger (optimistic), 'bar_extreme' at the adverse "
+        "hourly high/low (worst-case wick), 'bar_extreme_capped' (default) at the bar extreme capped at "
+        "--stop-slippage-cap-pct beyond the trigger (realistic bad-case).",
+    )
+    volume_events.add_argument(
+        "--stop-slippage-cap-pct",
+        type=float,
+        default=event_defaults.stop_slippage_cap_pct,
+        help="Adverse stop slippage cap (fraction beyond trigger) for stop-fill-mode=bar_extreme_capped.",
     )
     volume_events.add_argument("--take-profit-pcts", default=",".join(str(item) for item in event_defaults.take_profit_pcts), help="Comma-separated fixed take-profit pcts; 0 disables.")
     volume_events.add_argument("--cost-multipliers", default=",".join(str(item) for item in event_defaults.cost_multipliers), help="Comma-separated cost multipliers.")
@@ -2556,6 +2564,7 @@ def main(argv: list[str] | None = None) -> int:
             side_hypotheses=_csv_str(args.sides, VolumeEventResearchConfig().side_hypotheses),
             stop_loss_pcts=_csv_float(args.stop_loss_pcts, VolumeEventResearchConfig().stop_loss_pcts),
             stop_fill_mode=args.stop_fill_mode,
+            stop_slippage_cap_pct=args.stop_slippage_cap_pct,
             take_profit_pcts=_csv_float(args.take_profit_pcts, VolumeEventResearchConfig().take_profit_pcts),
             cost_multipliers=_csv_float(args.cost_multipliers, VolumeEventResearchConfig().cost_multipliers),
             mfe_giveback_trigger_pct=args.mfe_giveback_trigger_pct,

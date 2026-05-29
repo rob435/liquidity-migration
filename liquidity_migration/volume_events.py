@@ -74,13 +74,24 @@ class VolumeEventResearchConfig:
     hold_days: tuple[int, ...] = (3,)
     side_hypotheses: tuple[str, ...] = ("reversal",)
     stop_loss_pcts: tuple[float, ...] = (0.12,)
-    # H3: default to the conservative bar-extreme stop fill. 'stop' fills at the
-    # exact trigger price with no gap-through slippage, which understates
-    # short-squeeze tail losses (and thus drawdown / the MAR-primary metric) —
-    # an impossible-intrabar-path optimism (error #14). 'bar_extreme' fills at
-    # the bar's adverse extreme, modelling a gap-through-to-worst cover. Pre-reg:
-    # docs/preregistration/round2/r-audit-methodology-hardening.md.
-    stop_fill_mode: str = "bar_extreme"
+    # Stop-fill model — three points on the optimism<->pessimism axis:
+    #   'stop'               fills at the exact trigger: zero gap-through slippage, an
+    #                        impossible-intrabar-path OPTIMISM (error #14).
+    #   'bar_extreme'        fills at the bar's adverse extreme: the single WORST intrabar
+    #                        print (a 1h alt squeeze wick) — a pessimistic worst-case bound
+    #                        that, on illiquid 1h bars, assumes you cover at the top of a
+    #                        thin wick on every stop.
+    #   'bar_extreme_capped' (DEFAULT) fills at the bar extreme but CAPS adverse slippage at
+    #                        stop_slippage_cap_pct beyond the trigger — realistic wick
+    #                        slippage for the bulk of stops, without the unachievable
+    #                        wick-top tail. Reality sits between 'stop' and 'bar_extreme';
+    #                        this is the operator's bad-but-bounded default (analogous to the
+    #                        conservative cost multiplier) and is calibratable from live-demo
+    #                        stop fills. Pre-reg:
+    #                        docs/preregistration/round2/r-audit-methodology-hardening.md.
+    stop_fill_mode: str = "bar_extreme_capped"
+    # Adverse stop slippage cap (fraction beyond the trigger) used by 'bar_extreme_capped'.
+    stop_slippage_cap_pct: float = 0.10
     take_profit_pcts: tuple[float, ...] = (0.26,)
     cost_multipliers: tuple[float, ...] = (3.0,)
     mfe_giveback_trigger_pct: float = 0.0
@@ -662,6 +673,7 @@ def _run_event_scenario(
             event_decay_threshold=1.0 - scenario.threshold,
             funding_lookup=funding_lookup,
             stop_fill_mode=config.stop_fill_mode,
+            stop_slippage_cap_pct=config.stop_slippage_cap_pct,
         )
         if trade is None:
             skipped_no_entry += 1
@@ -1286,6 +1298,7 @@ def _simulate_indexed_trade(
     event_decay_threshold: float,
     funding_lookup: dict[str, dict[str, Any]] | None,
     stop_fill_mode: str = "stop",
+    stop_slippage_cap_pct: float = 0.10,
 ) -> dict[str, Any] | None:
     bar_end_ts_arr = symbol_bars["bar_end_ts_ms"]
     high_arr = symbol_bars["high"]
@@ -1338,7 +1351,10 @@ def _simulate_indexed_trade(
             take_profit_price=take_profit_price,
         )
         if stop_hit:
-            exit_price = _stop_fill_price(side=side, stop_price=effective_stop_price, high=bar_high, low=bar_low, mode=stop_fill_mode)
+            exit_price = _stop_fill_price(
+                side=side, stop_price=effective_stop_price, high=bar_high, low=bar_low,
+                mode=stop_fill_mode, cap_pct=stop_slippage_cap_pct,
+            )
             exit_ts_ms = bar_end_ts_ms_val
             exit_reason = "stop_loss"
             break
@@ -1494,13 +1510,21 @@ def _failed_fade_exit_hit(
     return close_location <= 1.0 - config.failed_fade_close_location_min
 
 
-def _stop_fill_price(*, side: str, stop_price: float | None, high: float, low: float, mode: str) -> float:
+def _stop_fill_price(
+    *, side: str, stop_price: float | None, high: float, low: float, mode: str, cap_pct: float = 0.10
+) -> float:
     if stop_price is None:
         return float("nan")
     if mode == "stop":
         return float(stop_price)
     if mode == "bar_extreme":
         return float(min(stop_price, low) if side == "long" else max(stop_price, high))
+    if mode == "bar_extreme_capped":
+        # Bar extreme, but cap adverse slippage at cap_pct beyond the trigger so a single
+        # thin 1h wick cannot dictate the fill (the realistic-bad-case default).
+        if side == "long":
+            return float(max(min(stop_price, low), stop_price * (1.0 - max(cap_pct, 0.0))))
+        return float(min(max(stop_price, high), stop_price * (1.0 + max(cap_pct, 0.0))))
     raise ValueError(f"Unknown stop_fill_mode: {mode}")
 
 
