@@ -107,13 +107,14 @@ sweep and the frozen live profile are byte-identical:
 | Phase | Status |
 |---|---|
 | R0 doc cleanup | done |
-| **R1** filter audit (`max_active=12`) | **RUNNING on the 5950X** |
-| R2 per-feature decile sort | code ready (`liquidity_migration/r2_decile_sort.py`); awaiting dispatch |
-| R3 bearish-stack honest test | pending (~3h filter-flag code) |
-| R4 risk-factor model | pending (~3d code) |
+| **R1** filter audit (`max_active=12`) | **COMPLETE (full-PIT)** — `drop_all_4` demo-eligible |
+| R2 per-feature decile sort | **COMPLETE** — 5 IC features → 1 composite factor |
+| R3 bearish-stack honest test | **COMPLETE** — H2 closed (0 trades both venues) |
+| R4 risk-factor model | **COMPLETE** — 6 validated factors |
 | **R5** 1/realized-vol sizing | **backtest shipped** (`risk_equal`); cells opt in via flag |
-| R6 per-name/per-bar cost | **E3/E4 down-payment shipped**; full model pending |
-| R7 stress / R8 capacity | pending (depend on R4 / R6) |
+| R6 per-name/per-bar cost | **CODE COMPLETE**; β-calibration data-gated → queued |
+| R7 stress / R8 capacity | pending (R4✓ + R6✓ deps met) |
+| **NB:** R1/R2/R5/R13 deltas | re-baseline under `9f52819` hardened defaults, folded into R9 run-up |
 | R9 assembly / R10 promote / R11 OOS | pending |
 | R12 sniper-entry execution | pending (~3-4d code) |
 | **R13** exit-rule re-opt | **ready** — dispatch after R1 confirms drop_all_4 |

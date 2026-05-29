@@ -1,6 +1,6 @@
 # Research-program state
 
-**Last updated:** 2026-05-29 (R1+R13+R5+R2+R3+R4 COMPLETE — H2 closed (bearish=0 trades); R9 = bullish stack only; R4 risk model = 6 validated factors, Tier-3 residual machinery confirmed. **Engine RE-BASELINED by `9f52819`** (100% taker / bar_extreme stops / calendar returns) → R1/R13/R5/R2 deltas re-run folds into the R9 run-up; R3+R4 unaffected. **R6 next**)
+**Last updated:** 2026-05-29 (R1+R13+R5+R2+R3+R4 COMPLETE — H2 closed (bearish=0 trades); R9 = bullish stack only; R4 risk model = 6 validated factors, Tier-3 residual machinery confirmed. **Engine RE-BASELINED by `9f52819`** (100% taker / bar_extreme stops / calendar returns) → R1/R13/R5/R2 deltas re-run folds into the R9 run-up; R3+R4 unaffected. **R6 cost-model CODE COMPLETE** (calibration data-gated/queued); R12/R7/R8 next)
 
 > If you are a Claude session opening this repo for the first time, read this
 > file FIRST. It tells you in 60 seconds what's been done, what's running,
@@ -68,9 +68,9 @@
 | R3 | Bearish stack honest test (H2 retried) | not started — needs ~3h code (R3 filter flag additions) |
 | R4 | Risk-factor model construction (JS-style, 8 factors) | **COMPLETE (full-PIT, 2026-05-29).** 6 validated factors (dropped XS-3d-momentum: sign-flip factor return; alt-season + CLI deferred, off critical path). All 3 criteria pass both venues; model explains ~47% of XS fwd-ret variance, residual mean ~0 → Tier-3 residual-Sharpe machinery confirmed. Tag `r4_risk_model_2026-05-29`. [verdict](docs/preregistration/round2/r4-risk-model-verdict.md) |
 | R5 | 1/realized-vol position sizing | not started — needs ~1 day code |
-| R6 | Per-name per-bar cost model | not started — needs ~2 days code |
-| R7 | Stress test suite (named historical events) | not started (depends on R4+R6) |
-| R8 | Capacity analysis (per-cell AUM ceiling) | not started (depends on R6) |
+| R6 | Per-name per-bar cost model | **CODE COMPLETE (2026-05-29).** `cost_model.py` — surface + OLS fit + per-trade predict + ledger recosting (model-vs-legacy) + summary; 12 tests. Default = honest 15bps taker (supersedes legacy ×3 = 45bps over-count). **β-calibration DATA-GATED** on ≥30d VPS demo/paper → queued (turnkey recipe: `reconcile_paper_demo` + `fit_cost_model`); per-cell delta folds into R9 run-up. [verdict](docs/preregistration/round2/r6-cost-model-verdict.md) |
+| R7 | Stress test suite (named historical events) | not started (R4✓ + R6✓ deps met) |
+| R8 | Capacity analysis (per-cell AUM ceiling) | not started (R6✓ dep met; needs the size/ADV term — present in cost_model) |
 | R9 | Integrated strategy assembly | not started |
 | R10 | Promotion-bar validation sweep | not started |
 | R11 | Pre-2023 OOS gate (mandatory final) | not started |
@@ -126,9 +126,12 @@ R12a/b sniper + C0 continuous engine).
     UNAFFECTED; **R1/R13/R5/R2** need re-baseline → folded into the **R9 run-up under
     the final R6 cost model** (re-running now under flat-taker then again post-R6 would
     double the serial sweep queue on this RAM-bound box).
-  - **Then** R6 cost model, R12 sniper, C0–C3, R9 assembly → R10 → R11 OOS.
-    limit-chase EXIT enable is safe (market fallback) but live-path — test-gated,
-    post-backtest-validation.
+  - **R6 cost model CODE COMPLETE** (2026-05-29): `cost_model.py` surface + fit +
+    predict + recost + summary, 12 tests; default 15 bps taker; β-calibration
+    data-gated → queued; [verdict](docs/preregistration/round2/r6-cost-model-verdict.md).
+  - **Then** R12 sniper (R12a/b code), C0–C3 continuous, R7 stress, R8 capacity, R9
+    assembly → R10 → R11 OOS. limit-chase EXIT enable is safe (market fallback) but
+    live-path — test-gated, post-backtest-validation.
 - **5950X full-PIT op note:** one `volume-events` cell peaks ~23 GB → run sweeps
   at `SWEEP_MAX_WORKERS=1` (NOT the plan's 8, which OOMs); clear
   `<root>/.locks/*.lock` after any OOM/kill or a clean cell hangs ~6 h on
