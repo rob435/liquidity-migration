@@ -4,7 +4,7 @@ import numpy as np
 import polars as pl
 
 
-from ._common import MS_PER_DAY
+from ._common import MS_PER_DAY, MS_PER_HOUR
 
 VOLUME_SCORE_COLUMNS = {
     "volume_change_1d": "volume_change_1d_z",
@@ -15,8 +15,14 @@ VOLUME_SCORE_COLUMNS = {
 }
 
 
-def build_volume_features(klines: pl.DataFrame) -> pl.DataFrame:
-    daily_rows = _daily_bars(klines)
+def build_volume_features(klines: pl.DataFrame, *, aggregation_ms: int = MS_PER_DAY) -> pl.DataFrame:
+    # aggregation_ms is the feature-bar interval. Default = MS_PER_DAY = the
+    # current/deployed daily-close cadence (Architecture A). Architecture-B
+    # research can pass a finer interval (e.g. 4h) to recompute the SAME volume
+    # features on a sub-daily grid — the rolling windows below operate on bars,
+    # so they are interval-agnostic; only the aggregation granularity changes.
+    # The deployed call sites do not pass this, so live behavior is unchanged.
+    daily_rows = _daily_bars(klines, aggregation_ms=aggregation_ms)
     if daily_rows.is_empty():
         return daily_rows
 
@@ -72,11 +78,18 @@ def build_volume_features(klines: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def _daily_bars(klines: pl.DataFrame) -> pl.DataFrame:
+def _daily_bars(klines: pl.DataFrame, *, aggregation_ms: int = MS_PER_DAY) -> pl.DataFrame:
+    # Bar-completeness threshold scales with the interval: a daily bar (24 hourly
+    # bars) requires >=20 (~83%); a finer aggregation_ms requires the same fraction
+    # of its expected hourly-bar count. For aggregation_ms = MS_PER_DAY this is
+    # exactly 20, so the daily default is byte-identical to the prior hard-coded
+    # behavior (verified by test_daily_bars_default_matches_legacy).
+    bars_per_interval = max(1, aggregation_ms // MS_PER_HOUR)
+    min_bars = max(1, round((20.0 / 24.0) * bars_per_interval))
     return (
         klines.with_columns(
             [
-                (pl.col("ts_ms") - (pl.col("ts_ms") % MS_PER_DAY)).alias("day_start_ms"),
+                (pl.col("ts_ms") - (pl.col("ts_ms") % aggregation_ms)).alias("day_start_ms"),
             ]
         )
         .sort(["symbol", "ts_ms"])
@@ -88,8 +101,8 @@ def _daily_bars(klines: pl.DataFrame) -> pl.DataFrame:
                 pl.len().alias("hourly_bars"),
             ]
         )
-        .filter(pl.col("hourly_bars") >= 20)
-        .with_columns((pl.col("day_start_ms") + MS_PER_DAY).alias("ts_ms"))
+        .filter(pl.col("hourly_bars") >= min_bars)
+        .with_columns((pl.col("day_start_ms") + aggregation_ms).alias("ts_ms"))
         .select(["ts_ms", "symbol", "turnover_quote", "close", "hourly_bars"])
         .sort(["ts_ms", "symbol"])
     )

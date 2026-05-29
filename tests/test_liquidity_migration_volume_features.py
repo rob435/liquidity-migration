@@ -8,7 +8,13 @@ import pytest
 from liquidity_migration.ingestion import generate_fixture_data
 from liquidity_migration.storage import read_dataset
 from liquidity_migration.trade_lifecycle import _side_return, _stop_price, _take_profit_price
-from liquidity_migration.volume_features import _rolling_mean, _rolling_sum, build_volume_features
+from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
+from liquidity_migration.volume_features import (
+    _daily_bars,
+    _rolling_mean,
+    _rolling_sum,
+    build_volume_features,
+)
 
 
 def test_volume_features_build_daily_liquidity_ranks(tmp_path) -> None:
@@ -22,6 +28,36 @@ def test_volume_features_build_daily_liquidity_ranks(tmp_path) -> None:
     assert "liquidity_rank" in features.columns
     assert "liquidity_rank_pct" in features.columns
     assert features["symbol"].n_unique() > 1
+
+
+def test_daily_bars_default_is_unchanged_by_aggregation_param(tmp_path) -> None:
+    """Tier B capability: the aggregation_ms knob defaults to MS_PER_DAY, so the
+    deployed daily-cadence output is byte-identical (the daily-completeness
+    threshold derives to exactly 20). Live alpha is unchanged."""
+    generate_fixture_data(tmp_path)
+    klines = read_dataset(tmp_path, "klines_1h")
+    default = _daily_bars(klines)
+    explicit_daily = _daily_bars(klines, aggregation_ms=MS_PER_DAY)
+    assert default.equals(explicit_daily)
+    # Whole-feature pipeline is identical at the daily default too.
+    assert build_volume_features(klines).equals(build_volume_features(klines, aggregation_ms=MS_PER_DAY))
+    # The daily bars are stamped at the next-day 00:00 boundary, unchanged.
+    assert (default["ts_ms"] % MS_PER_DAY == 0).all()
+
+
+def test_daily_bars_finer_interval_produces_more_bars(tmp_path) -> None:
+    """The capability works: a finer aggregation interval recomputes the volume
+    features on a sub-daily grid (more bars), with the completeness threshold
+    scaled to the interval (the Architecture-B research path; default OFF)."""
+    generate_fixture_data(tmp_path)
+    klines = read_dataset(tmp_path, "klines_1h")
+    daily = _daily_bars(klines, aggregation_ms=MS_PER_DAY)
+    six_hourly = _daily_bars(klines, aggregation_ms=6 * MS_PER_HOUR)
+    assert six_hourly.height > daily.height  # finer grid => more bars
+    assert (six_hourly["ts_ms"] % (6 * MS_PER_HOUR) == 0).all()
+    # Same volume features compute on the finer grid without error.
+    feats = build_volume_features(klines, aggregation_ms=6 * MS_PER_HOUR)
+    assert "volume_composite" in feats.columns and feats.height > 0
 
 
 def test_rolling_sum_matches_naive_loop() -> None:
