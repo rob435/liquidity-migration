@@ -106,9 +106,15 @@ R12a/b sniper + C0 continuous engine).
   [R5](docs/preregistration/round2/r5-position-sizing-verdict.md) ·
   [R2](docs/preregistration/round2/r2-per-feature-standalone-verdict.md) ·
   [R3](docs/preregistration/round2/r3-bearish-stack-verdict.md).
-  - **Next: R4** risk-factor model (foundational code — gates R7 / R9
-    factor-caps / Tier-3 residual-Sharpe; memory `r4-risk-model-implementation-map`).
-    Then R6 cost model, R12 sniper, C0–C3, R9 assembly → R10 → R11 OOS.
+  - **R4 risk-factor model IN PROGRESS** (foundational code — gates R7 / R9
+    factor-caps / Tier-3 residual-Sharpe; map in memory `r4-risk-model-implementation-map`).
+    Chunk 1 committed: `liquidity_migration/risk_model.py` with `build_factor_panel`
+    (reuses signal_harness daily-agg) + `compute_btc_beta` + 3 unit tests. **Next
+    R4 chunks:** remaining 6 factors (xs-mom 3d/30d, realized-vol rank, funding-Z,
+    liquidity tier, alt-season, mark-index premium) → `fit_factor_returns`
+    (per-day cross-sectional OLS) → `compute_residual_returns` /
+    `decompose_strategy_pnl` → `risk-model` CLI → validation run on full_pit roots.
+  - **Then** R6 cost model, R12 sniper, C0–C3, R9 assembly → R10 → R11 OOS.
     limit-chase EXIT enable is safe (market fallback) but live-path — test-gated,
     post-backtest-validation.
 - **5950X full-PIT op note:** one `volume-events` cell peaks ~23 GB → run sweeps
