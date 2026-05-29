@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-29
 **Author:** quant-researcher (autonomous research loop)
-**Stage:** run-pending
+**Stage:** run-complete
 **Plan:** [research_plan_selection_execution.md](../research_plan_selection_execution.md) §E1
 
 ## What's changing
@@ -100,8 +100,55 @@ PHASE=e1_exec_premium_2026-05-29 COST=1 bash scripts/e1_exec_premium_dispatch.sh
 
 ## Post-run results
 
-(filled in after the run; report paths + commit SHA)
+Run 2026-05-29/30, sweep tag `e1_exec_premium_2026-05-29`, full-PIT both venues,
+2023-04-01→2026-05-28, capped10 stops, max_active=12, 15 bps (cost×1).
+Reports: `~/SHARED_DATA/{bybit,binance}_full_pit/reports/e1_exec_premium_2026-05-29/{00_baseline,01_quality_squeeze}/`.
+
+| venue | arm | total ret | max DD | MAR (daily-DD) | Sharpe | trades |
+|---|---|---:|---:|---:|---:|---:|
+| bybit | A `fixed_delay` | **+67.3%** | −24.4% | **+2.76** | +1.07 | 763 |
+| bybit | B `quality_squeeze` | **+71.2%** | −24.3% | **+2.93** | +1.10 | 761 |
+| binance | A `fixed_delay` | **+8.0%** | −28.9% | +0.28 | +0.26 | 477 |
+| binance | B `quality_squeeze` | **+7.3%** | −29.1% | +0.25 | +0.25 | 477 |
+
+**Execution premium (B−A):** bybit +3.8% ret / +0.168 MAR; binance −0.7% ret /
+−0.026 MAR. **Sign-flips across venues.** Pooled MAR Δ ≈ +0.01 (r1_robustness,
+monthly-DD) to +0.07 (daily-DD) — **below the +0.1 Tier-2 bar.**
+`r1_robustness` Tier-2 verdict = **`descriptive`** (not a demo-candidate). bybit
+premium is fragile: LOO flips sign (carried by 2026-04), top-3 months = 90% of the
+positive Δ, bootstrap P(Δ>0)=72%. binance premium negative, bootstrap P(Δ>0)=12%.
+
+**Paired micro-test (the clean, high-power test — same names, immediate A vs
+giveback B, only the genuinely time-divergent trades):** bybit 22 divergent,
+Δnet +0.062%/trade, B-better 11/22 (50%), **t=+0.35**; binance 9 divergent,
+Δnet −0.069%/trade, B-better 3/9, **t=−1.30**. Both noise; opposite signs. The
+giveback-timing signal does **not** carry alpha.
+
+**Why B barely differs from A:** `promoted_quality_squeeze` never filters the pool
+(A and B trade the identical 477/≈763 candidates) and only re-times entry on
+~9–17% of trades (the ones still strongly popping at h+1); 83% short immediately
+just like A. The "fade-confirmation execution" is mostly inactive as deployed.
+
+**Cost/funding integrity:** bybit funding **modeled** (net −6.2% drag for the
+short, included in the +67.3%); binance funding **missing** (label: `funding-missing`)
+— so binance is if anything optimistic, *widening* the asymmetry. This corrects the
+STATE.md note that funding is "a short credit [that] likely understates binance."
+
+**Regime note:** the edge is front-loaded — bybit sub-period thirds +29% / +26% /
++4% (recent third much weaker), echoing the momentum-continuation's recency
+([[round3-momentum-null-verdict]]); forward demo (2026-05+) lands in the weak regime.
 
 ## Verdict
 
-(pending)
+**SELECTION-DOMINANT — no robust cross-venue execution premium.** Immediate-entry
+shorting of the liquidity-migration selection pool is the alpha (bybit +67% / MAR 2.76;
+binance +8%, funding-missing). The fade-confirmation execution (`promoted_quality_squeeze`)
+adds nothing robust: +0.17 MAR on bybit (LOO-fragile, recent-concentrated) but −0.03 on
+binance (sign-flip), pooled below the Tier-2 bar, and the high-power paired test is noise.
+This fires the plan's E1 falsifier → **pivot E2 toward SELECTION, not execution.**
+
+**Caveat being closed (E1b):** the default squeeze under-engages, so this null is being
+confirmed robust to engagement level by the knob-engagement probe
+([e1b-knob-engagement-2026-05-30.md](e1b-knob-engagement-2026-05-30.md), in flight) —
+forcing every candidate through the pop→giveback wait. If E1b also shows no robust
+premium, the selection-dominant verdict is final.
