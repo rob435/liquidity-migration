@@ -118,6 +118,9 @@ class VolumeEventResearchConfig:
     taker_imbalance_size_field: str = "taker_imbalance_1d"
     taker_imbalance_size_scale: float = 0.03
     cooldown_days: int = 5
+    # Architecture-B capability: sub-daily re-entry cooldown. None (default) = the
+    # daily cooldown_days; when set, overrides to cooldown_hours hours.
+    cooldown_hours: int | None = None
     rank_exit_threshold: float = 0.55
     require_pit_membership: bool = True
     require_full_pit_universe: bool = True
@@ -267,6 +270,11 @@ class EventScenario:
     stop_loss_pct: float
     cost_multiplier: float
     take_profit_pct: float = 0.0
+    # Architecture-B capability: a sub-daily hold. None (default) = the deployed
+    # daily cadence (hold_days); when set, the hold overrides to hold_hours hours.
+    # Lets the continuous / R12-sniper path express intraday holds without changing
+    # the daily default. See _scenario_hold_ms.
+    hold_hours: int | None = None
 
     @property
     def scenario_id(self) -> str:
@@ -274,7 +282,18 @@ class EventScenario:
         take_profit = "" if self.take_profit_pct <= 0.0 else f"-tp{int(self.take_profit_pct * 10000):04d}"
         threshold = f"q{int(self.threshold * 100):02d}"
         cost = f"c{self.cost_multiplier:g}".replace(".", "p")
-        return f"{self.event_type}-{threshold}-{self.side_hypothesis}-h{self.hold_days}-{stop}{take_profit}-{cost}"
+        # Daily default keeps the legacy id (hNN); a sub-daily hold is tagged hNNh
+        # so it can never collide with a day-based scenario.
+        hold = f"h{self.hold_days}" if self.hold_hours is None else f"h{self.hold_hours}h"
+        return f"{self.event_type}-{threshold}-{self.side_hypothesis}-{hold}-{stop}{take_profit}-{cost}"
+
+
+def _scenario_hold_ms(scenario: EventScenario) -> int:
+    """Hold duration in ms: hold_hours when set (Architecture-B sub-daily), else
+    the daily hold_days. Default path is byte-identical to hold_days * MS_PER_DAY."""
+    if scenario.hold_hours is not None:
+        return scenario.hold_hours * MS_PER_HOUR
+    return scenario.hold_days * MS_PER_DAY
 
 
 def run_volume_event_research(
@@ -621,7 +640,7 @@ def _run_event_scenario(
             skipped_no_entry += 1
             continue
         entry_ts_ms = int(entry_decision["entry_ts_ms"])
-        planned_exit_ts_ms = entry_ts_ms + scenario.hold_days * MS_PER_DAY
+        planned_exit_ts_ms = entry_ts_ms + _scenario_hold_ms(scenario)
         basket_id = f"{scenario.scenario_id}-{_iso_date(signal_ts_ms)}-{symbol}"
         position_weight = position_sizer.weight(event)
         trade = _simulate_indexed_trade(
@@ -736,7 +755,12 @@ def _run_event_scenario(
         if float(trade["net_return"]) <= -config.realized_loss_pressure_min_loss_abs:
             realized_loss_exit_ts_ms.append(int(trade["exit_ts_ms"]))
         active_until[symbol] = int(trade["exit_ts_ms"])
-        cooldown_until[symbol] = int(trade["exit_ts_ms"]) + config.cooldown_days * MS_PER_DAY
+        cooldown_ms = (
+            config.cooldown_hours * MS_PER_HOUR
+            if config.cooldown_hours is not None
+            else config.cooldown_days * MS_PER_DAY
+        )
+        cooldown_until[symbol] = int(trade["exit_ts_ms"]) + cooldown_ms
 
     trades = pl.DataFrame(rows, infer_schema_length=None).sort(["entry_ts_ms", "symbol"]) if rows else _empty_trades()
     baskets = summarize_baskets(trades, config=bt_config)

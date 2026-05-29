@@ -35,8 +35,10 @@ from liquidity_migration.volume_events import (
     _signed_flow_feature_frame,
     _simulate_indexed_trade,
     _stop_pressure_active,
+    EventScenario,
     VolumeEventResearchConfig,
     _add_rank_fraction,
+    _scenario_hold_ms,
     _monthly_returns,
     _promotion_fields,
     _scenario_side,
@@ -2457,3 +2459,33 @@ def test_position_weighting_runs_through_full_pipeline(tmp_path: Path) -> None:
             ),
         )
         assert payload["rows"]["scenarios"] == 1
+
+
+def test_scenario_hold_ms_daily_default_unchanged() -> None:
+    """Architecture-B capability: hold_hours defaults to None = the daily hold,
+    byte-identical to hold_days * MS_PER_DAY. scenario_id keeps the legacy hNN tag."""
+    from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
+
+    daily = EventScenario(
+        event_type="rocket", threshold=0.9, side_hypothesis="short",
+        hold_days=3, stop_loss_pct=0.12, cost_multiplier=3.0,
+    )
+    assert daily.hold_hours is None
+    assert _scenario_hold_ms(daily) == 3 * MS_PER_DAY
+    assert "-h3-" in daily.scenario_id  # legacy daily tag, no collision risk
+
+    sub_daily = EventScenario(
+        event_type="rocket", threshold=0.9, side_hypothesis="short",
+        hold_days=3, stop_loss_pct=0.12, cost_multiplier=3.0, hold_hours=12,
+    )
+    assert _scenario_hold_ms(sub_daily) == 12 * MS_PER_HOUR
+    assert "-h12h-" in sub_daily.scenario_id  # sub-daily tag, distinct id
+    assert sub_daily.scenario_id != daily.scenario_id
+
+
+def test_cooldown_hours_defaults_to_daily() -> None:
+    """cooldown_hours defaults to None so the live cooldown is the daily
+    cooldown_days; setting it switches to a sub-daily re-entry cooldown."""
+    cfg = VolumeEventResearchConfig()
+    assert cfg.cooldown_hours is None  # default = daily behavior preserved
+    assert cfg.cooldown_days == 5
