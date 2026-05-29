@@ -10,6 +10,13 @@
 
 - Strategy: Bybit (+Binance) liquidity-migration short, **research-stage**.
   Live demo + paper run a frozen "promoted" profile; not deployed for real money.
+- **Cadence direction:** the deployed signal is **Architecture A** (daily-close
+  features, +1h entry delay — what Round 1 and all R-phases tested). The active
+  *direction* is a lowest-latency, **fully event-driven** system: the runtime is
+  already event-driven (WS bar-close wakes, WS stop enforcement), and **Architecture
+  B** (continuous rolling-window signal, C-phases C0–C3) is the pre-registered path
+  off daily-frequency. See "Two signal architectures in scope" below. Moving the live
+  signal off daily requires the C0 engine + OOS re-validation — it is not yet shipped.
 - **Round 1 (7 phases, 2026-05-27): COMPLETE — documented null result.**
   H1, H2, H3, H5, H7 falsified; H4 not testable; H6 partially confirmed
   (5 features with stable cross-venue IC). Strategy unchanged.

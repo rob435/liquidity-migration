@@ -82,8 +82,14 @@ If any answer is weak, the backtest is not ready to influence real-money work.
 
 ## Repo specifics
 
-- Signal features use only data known at the daily signal close; entry is
-  delayed 1h — the signal close is not an executable fill.
+- Signal features use only data known at the **decision timestamp**. For the
+  deployed daily signal (Architecture A) that is the daily signal close, and entry
+  is delayed **+1h** to prevent same-bar leakage — the signal close is not an
+  executable fill; this +1h guard for daily features is **non-negotiable**. For the
+  continuous rolling-window signal under research (Architecture B / C-phases), the
+  decision timestamp is the rolling bar-close and the entry delay may be 0 *only
+  because the feature is already a causal trailing window* (research-gated, R12e/C-
+  phase) — never relax the delay for the daily profile.
 - `volume-events` requires full PIT by default; `--allow-partial-pit` is for
   explicitly biased diagnostics only, and that run must then be labelled biased.
 - Funding is a known gap on roots without a funding dataset — mark such runs

@@ -50,6 +50,12 @@ The deletion does NOT affect:
   To revert to the legacy narrow-universe demo (top-400 by ticker
   turnover, smaller kline store, but demo ≠ backtest), set both env
   vars to 400 in the systemd unit and rebuild.
+- **NOTE (direction):** the daily aggregation described above is the **CURRENT /
+  deployed (Architecture A)** signal layer. The lowest-latency, fully-event-driven
+  **continuous variant (Architecture B, C-phases)** is under research and is NOT
+  deployed — see STATE.md "Two signal architectures in scope". The demo runtime is
+  already event-driven (WS bar-close cycle wakes + WS stop enforcement); what is
+  still daily is the *signal cadence*, not the runtime.
 - The long sleeve (`liquidity-migration-bybit-long-demo.service`) runs the
   `MultiStratV1` / v11a profile at `NOTIONAL_MULTIPLIER=10`,
   `ENTRY_LEVERAGE=10`, `MAX_NEW_ENTRIES_PER_CYCLE=5`, `UNIVERSE_SIZE=10`.

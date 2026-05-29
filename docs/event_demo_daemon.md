@@ -27,6 +27,29 @@ liquidity-migration-bybit-demo.service`.
 All other env vars (`STRATEGY_PROFILE`, `INTERVAL_SECONDS`, `WORKERS`,
 `SUBMIT_ORDERS`, etc.) work identically in both modes.
 
+## Event-driven cycle (current default)
+
+The daemon no longer runs on a fixed wall-clock timer. It is **WS-event-driven**:
+`KlineStreamManager._on_bar` sets a cycle-wake `Event` on each new *confirmed*
+kline-bar boundary (the ~566-symbol hour-close burst is coalesced into one wake
+by gating on the boundary-advance high-water mark). The run loop waits on that
+event with a small min-cycle debounce floor and an `interval_seconds` **heartbeat**
+as the no-data fallback, plus a shutdown-wake. Telemetry distinguishes
+`cycles_kline_triggered` (woke on a bar) from `cycles_timer_triggered` (heartbeat).
+Set `--no-event-driven-cycle` to fall back to the pure timer loop. `interval_seconds`
+is now the heartbeat ceiling, not the primary clock.
+
+> **Cadence note (direction).** Bars are currently HOURLY and the signal acts on
+> the daily-close roll, so a new actionable *entry* still appears at most once per
+> UTC day regardless of how fast the loop wakes. The reaction-latency ceiling is set
+> by the *signal cadence*, not the runtime. Moving to sub-hourly reaction is the
+> Architecture-B / C-phase + R12 sniper work (rolling-window features, finer bars) —
+> see STATE.md. The runtime layer is already event-driven and ready for it.
+
+**SIGTERM drains promptly.** `request_shutdown()` also sets the cycle-wake event, so
+a `systemctl stop` returns within the current cycle rather than blocking up to the
+heartbeat; the in-flight cycle is allowed to finish so no `place_order` is interrupted.
+
 ## Safety boundaries
 
 Read these carefully before flipping the systemd unit.
@@ -48,9 +71,11 @@ journal logs as `cycle failed: ...` lines and bump the `cycle_errors`
 counter in the shutdown summary.
 
 **SIGTERM drains gracefully.** A `systemctl stop` flips a threading.Event the
-loop consults between cycles. The current cycle is allowed to finish so
-no place_order is interrupted mid-flight. Worst case is one full
-`interval_seconds + max_cycle_seconds` to exit.
+loop consults between cycles, and `request_shutdown()` also sets the cycle-wake
+event so the event-driven wait returns immediately rather than blocking up to the
+heartbeat. The current cycle is allowed to finish so no place_order is interrupted
+mid-flight. Worst case is roughly one `max_cycle_seconds` (the in-flight cycle), not
+a full heartbeat interval.
 
 **The risk service still runs as a separate process** (`liquidity-migration-bybit-risk`).
 That side already had its own WS connection for executions and is unaffected
