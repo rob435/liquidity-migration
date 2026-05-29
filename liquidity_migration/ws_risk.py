@@ -265,6 +265,14 @@ class EventWebSocketRiskEngine:
         self.state.telegram_keys_sent = set(_read_telegram_dedupe_keys(self.report_dir))
         # Captured by run(): the one thread allowed to mutate self.state.
         self._consumer_thread_ident: int | None = None
+        # Telegram notifications are sent on a background daemon thread so the
+        # consumer thread never blocks on the HTTP round-trip — a slow Telegram
+        # RTT would otherwise stall stop-enforcement event processing during a
+        # cascade. Lazily started on first enqueue; drained + stopped in close().
+        # Downside is bounded: a dropped/late notification, never an order or
+        # state error (the dedupe + state mutation stay on the consumer thread).
+        self._telegram_queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        self._telegram_thread: threading.Thread | None = None
 
     # ------------------------------------------------------------------
     # Dual-side ledger routing
@@ -1977,6 +1985,26 @@ class EventWebSocketRiskEngine:
         self.state.last_report_monotonic = time.monotonic()
         return payload
 
+    def _telegram_sender_loop(self) -> None:
+        """Background daemon: drain queued payloads and do the blocking HTTP send.
+        A None payload is the shutdown sentinel."""
+        while True:
+            payload = self._telegram_queue.get()
+            if payload is None:
+                return
+            try:
+                _maybe_notify(payload, enabled=True)
+            except Exception as exc:  # noqa: BLE001 - a notification must never crash the daemon
+                _logger.warning("background telegram send failed: %s", exc)
+
+    def _enqueue_telegram(self, payload: dict[str, Any]) -> None:
+        if self._telegram_thread is None or not self._telegram_thread.is_alive():
+            self._telegram_thread = threading.Thread(
+                target=self._telegram_sender_loop, name="ws-risk-telegram", daemon=True
+            )
+            self._telegram_thread.start()
+        self._telegram_queue.put(payload)
+
     def maybe_notify(self, payload: dict[str, Any]) -> tuple[bool, str]:
         if not self.risk.telegram:
             return False, "disabled"
@@ -1986,13 +2014,23 @@ class EventWebSocketRiskEngine:
         key = _telegram_dedupe_key(reason, payload)
         if key in self.state.telegram_keys_sent:
             return False, "duplicate_material_event"
-        sent, error = _maybe_notify(payload, enabled=True)
-        if sent:
-            self.state.telegram_keys_sent.add(key)
-            _write_telegram_dedupe_keys(self.report_dir, self.state.telegram_keys_sent)
-        return sent, error
+        # Optimistic dedupe + offload the blocking HTTP send: record the dedupe key
+        # on the consumer thread (cheap state mutation) and hand the network
+        # round-trip to the background sender, returning immediately so a slow
+        # Telegram RTT cannot stall stop-enforcement event processing. A failed
+        # send is logged by the sender, not retried — this is a notification, not
+        # an order, so optimistic dedupe (assume it sends) is acceptable.
+        self.state.telegram_keys_sent.add(key)
+        _write_telegram_dedupe_keys(self.report_dir, self.state.telegram_keys_sent)
+        self._enqueue_telegram(payload)
+        return True, "enqueued"
 
     def close(self) -> None:
+        # Drain + stop the background telegram sender (sentinel after any pending
+        # payloads so queued notifications still go out before exit).
+        if self._telegram_thread is not None and self._telegram_thread.is_alive():
+            self._telegram_queue.put(None)
+            self._telegram_thread.join(timeout=5.0)
         for client in (self.private_stream, self.public_stream, self.trade_client):
             close = getattr(client, "close", None)
             if callable(close):

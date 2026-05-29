@@ -2893,3 +2893,46 @@ def test_rebuild_flow_end_to_end_preserves_trade_ids_for_reconciliation(tmp_path
     )
     assert summary["paper_only"] == 0
     assert summary["demo_only"] == 0
+
+
+def test_maybe_notify_offloads_send_off_consumer_thread(tmp_path: Path, monkeypatch) -> None:
+    """Tier A latency: the Telegram HTTP send must NOT block the consumer thread
+    (a slow RTT would stall stop-enforcement event processing). maybe_notify
+    records the dedupe key on-thread and hands the network send to a background
+    daemon thread, returning immediately."""
+    import threading as _threading
+
+    sent_event = _threading.Event()
+    calls: list[dict] = []
+
+    def _fake_send(payload, *, enabled):
+        calls.append(payload)
+        sent_event.set()
+        return True, "ok"
+
+    monkeypatch.setattr(ws_risk, "_telegram_notification_reason", lambda payload: "stop_filled")
+    monkeypatch.setattr(ws_risk, "_telegram_dedupe_key", lambda reason, payload: "k1")
+    monkeypatch.setattr(ws_risk, "_maybe_notify", _fake_send)
+
+    engine = EventWebSocketRiskEngine(
+        tmp_path, config=ResearchConfig(), risk_config=EventWebSocketRiskConfig(telegram=True)
+    )
+    # Returns immediately with "enqueued" — no HTTP on the caller (consumer) thread.
+    ok, status = engine.maybe_notify({"cycle": {}})
+    assert (ok, status) == (True, "enqueued")
+    assert "k1" in engine.state.telegram_keys_sent  # dedupe recorded on-thread
+    # The background sender actually performs the send.
+    assert sent_event.wait(2.0), "background telegram sender did not run"
+    assert len(calls) == 1
+    # Optimistic dedupe: a second material event with the same key is suppressed.
+    assert engine.maybe_notify({"cycle": {}}) == (False, "duplicate_material_event")
+    engine.close()  # drains + stops the sender thread
+    assert len(calls) == 1
+
+
+def test_maybe_notify_disabled_does_not_enqueue(tmp_path: Path) -> None:
+    engine = EventWebSocketRiskEngine(
+        tmp_path, config=ResearchConfig(), risk_config=EventWebSocketRiskConfig(telegram=False)
+    )
+    assert engine.maybe_notify({"cycle": {}}) == (False, "disabled")
+    assert engine._telegram_thread is None  # never started
