@@ -1,6 +1,6 @@
 # Research-program state
 
-**Last updated:** 2026-05-29 (R1+R13+R5+R2+R3+R4 COMPLETE — H2 closed (bearish=0 trades); R9 = bullish stack only; R4 risk model = 6 validated factors, Tier-3 residual machinery confirmed; R6 next)
+**Last updated:** 2026-05-29 (R1+R13+R5+R2+R3+R4 COMPLETE — H2 closed (bearish=0 trades); R9 = bullish stack only; R4 risk model = 6 validated factors, Tier-3 residual machinery confirmed. **Engine RE-BASELINED by `9f52819`** (100% taker / bar_extreme stops / calendar returns) → R1/R13/R5/R2 deltas re-run folds into the R9 run-up; R3+R4 unaffected. **R6 next**)
 
 > If you are a Claude session opening this repo for the first time, read this
 > file FIRST. It tells you in 60 seconds what's been done, what's running,
@@ -116,6 +116,16 @@ R12a/b sniper + C0 continuous engine).
     criterion-1 fail); alt-season + `risk-model` CLI deferred (off critical path). All 3
     pre-reg criteria pass both venues; ~47% XS-variance explained, residual mean ~0. Tag
     `r4_risk_model_2026-05-29`; [verdict](docs/preregistration/round2/r4-risk-model-verdict.md).
+  - **⚠️ ENGINE RE-BASELINED by `9f52819`** (methodology hardening, concurrent
+    session; pre-reg `docs/preregistration/round2/r-audit-methodology-hardening.md`).
+    New conservative defaults: 100% taker (`maker_fill_probability` → 0.0 in
+    `configs/volume_alpha.default.yaml`, 15 bps RT), `stop_fill_mode=bar_extreme`, M4
+    calendar-shift fwd-returns, M1 promotion gate enforces DD+Sharpe. Per its decision
+    rule, prior cell-vs-control deltas are `exploratory` until re-run under these
+    defaults. **R3** (0-trades, structural) ROBUST; **R4** (factor model, M4-revalidated)
+    UNAFFECTED; **R1/R13/R5/R2** need re-baseline → folded into the **R9 run-up under
+    the final R6 cost model** (re-running now under flat-taker then again post-R6 would
+    double the serial sweep queue on this RAM-bound box).
   - **Then** R6 cost model, R12 sniper, C0–C3, R9 assembly → R10 → R11 OOS.
     limit-chase EXIT enable is safe (market fallback) but live-path — test-gated,
     post-backtest-validation.
