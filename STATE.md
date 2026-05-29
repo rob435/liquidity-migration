@@ -1,6 +1,6 @@
 # Research-program state
 
-**Last updated:** 2026-05-29 (R1–R6 COMPLETE; engine RE-BASELINED honest by `9f52819`+`b1a3368` — 100% taker / bar_extreme stops / calendar returns / permutation-null. **R9 / DAILY ARCHITECTURE A = DOCUMENTED NULL** under honest methodology: every pre-registered daily lever tested — best stack (drop_all_4 entries + risk_equal 2% sizing + ff6_4pct exit) = **bybit MAR 1.39 (real edge) / binance −1.3% (no edge)** → fails the cross-venue Tier-2 bar. The earlier +0.45 demo-eligibility was a pre-hardening optimistic-stop-fill artifact (#14). **DECISION: DO NOTHING** — frozen promoted profile unchanged, nothing promoted. R12 sniper + C0–C3 continuous (Architecture B) = **operator decision** (~week build, low prior given the daily null). [R9 verdict](docs/preregistration/round2/r9-integrated-strategy-verdict.md).)
+**Last updated:** 2026-05-29 (**ROUND 2 COMPLETE — DOCUMENTED NULL (both architectures) → DO NOTHING.** Engine re-baselined honest by `9f52819`+`b1a3368`. **Architecture A (daily, R9):** every pre-registered lever tested; best stack (drop_all_4 + risk_equal 2% + ff6_4pct) = bybit MAR 1.39 (real edge) / binance −1.3% (no edge) → fails cross-venue Tier-2; the +0.45 demo-eligibility was a pre-hardening stop-fill artifact (#14). **Architecture B (continuous, C0–C3):** C1/C2 prechecks — rolling features have real but weak IC (~−0.09 composite, −0.13 rv) that is non-monotonic & **wrong-signed at the tradeable extremes** (high-vol/momentum names CONTINUE up, +27/+39 bps top decile) and cost-dominated at every horizon → not tradeable; C0 engine not built (precheck-decisive). **Root cause (unifies all nulls): the fade-the-pump short thesis fails — selected extreme names show momentum-continuation, not reversion.** Frozen promoted profile UNCHANGED, nothing promoted. R12 moot. [A verdict](docs/preregistration/round2/r9-integrated-strategy-verdict.md) · [B verdict](docs/preregistration/round2/c0-c3-architecture-b-verdict.md).)
 
 > If you are a Claude session opening this repo for the first time, read this
 > file FIRST. It tells you in 60 seconds what's been done, what's running,
@@ -84,10 +84,10 @@
 | R10 | Promotion-bar validation sweep | **not run** — downstream of a Tier-2 demo-candidate, which does not exist (R9 null) |
 | R11 | Pre-2023 OOS gate (mandatory final) | **not run** — no R10 finalist (R9 null) |
 | R12 | **Sniper entry execution layer** — sub-1h fill optimization on top of daily signal: 1m kline ingestion (R12a), simulator (R12b), univariate test of 5 sniper flavors (R12c), R9 integration (R12d), entry-delay reduction sweep (R12e), sniper stress test (R12f). Missed fills counted as $0-P&L. | **OPERATOR DECISION** — not auto-pursued: entry-fill optimization cannot create the absent binance edge (R9 null); building it on a no-edge daily strategy is unjustified. |
-| C0 | **Continuous-signal engine** — rolling-feature registry + K-minute step backtest engine + regression validation (continuous at 1d step + 24h window = numerically equivalent to the daily backtest, `np.allclose` — per the progressive standard, not bit-identical). The foundation for Architecture B. | **OPERATOR DECISION** — ~5-7 day build, low prior given the daily R9 null (same features, which anti-select within events; binance no edge). The only genuinely-untested track; not auto-pursued per the "default do-nothing" + don't-run-expensive-research-on-a-falsified-premise. |
-| C1 | **Continuous-signal univariate IC test** — Phase-5-equivalent on rolling-feature versions of the 5 IC survivors, at forward horizons {1h, 3h, 24h, 72h, 168h}. | not started — depends on C0 |
-| C2 | **Continuous-signal R9 variant** — Architecture B's integrated-strategy assembly. 7 cells × 2 venues. | not started — depends on C0 + C1 |
-| C3 | **Continuous-signal stress test** — R7 named-event replay applied to C2 promotion-eligible cells; flags WS-feed-fragile cells. | not started — conditional on C2 |
+| C0 | **Continuous-signal engine** | **NOT BUILT — moot.** C1/C2 prechecks show the continuous signal is not tradeable (below); building the ~5-7d engine to confirm a wrong-signed, cost-dominated signal would burn compute on a determined outcome. [verdict](docs/preregistration/round2/c0-c3-architecture-b-verdict.md) |
+| C1 | **Continuous-signal univariate IC** | **DONE (full-PIT, 2026-05-29).** Rolling features have REAL cross-venue IC (rv_168h −0.13 @168h, strengthening) — `scripts/c1_continuous_ic_precheck.py`. Real at the feature level. |
+| C2 | **Continuous-signal tradeability** | **DOCUMENTED NULL (full-PIT, 2026-05-29).** Within-ts decile L/S cost-dominated at every horizon; the extreme top decile (strongest short) RALLIES (+27/+39 bps @168h = momentum-continuation); composite IC −0.09 is a weak non-tradeable bulk tendency. `scripts/c2_continuous_tradeability_precheck.py`. → Architecture B NULL. |
+| C3 | **Continuous-signal stress test** | **not run** — conditional on a C2 promotion-eligible cell, which does not exist (C2 null). |
 
 **Two signal architectures in scope.** Round 2 runs **Architecture A (daily, R-phases)** and **Architecture B (continuous, C-phases)** in parallel. They share R1-R8 + R10 + R11 infrastructure but differ in feature definitions and backtest framework. R10/R11 evaluate the best cell from each architecture independently; both, one, or neither may pass.
 
@@ -159,10 +159,19 @@ R12a/b sniper + C0 continuous engine).
     [R9 verdict](docs/preregistration/round2/r9-integrated-strategy-verdict.md). Frozen
     promoted profile UNCHANGED, nothing promoted. bybit-only edge is real but fails the
     pre-committed cross-venue bar (would need a NEW operator pre-reg).
-  - **OPERATOR DECISION — Architecture B (C0–C3) / R12 sniper:** the only remaining
-    pre-registered tracks; large builds, low prior given the daily null. NOT auto-pursued
-    (default do-nothing + don't run expensive research on a falsified premise). **Loop
-    PAUSED for operator steer.** limit-chase EXIT enable test-gated/post-validation.
+  - **ARCHITECTURE B (C0–C3) = DOCUMENTED NULL (2026-05-29).** Pursued after the operator
+    re-invoked the loop. C1 precheck: rolling features have REAL cross-venue IC (rv_168h
+    −0.13 @168h). C2 precheck: NOT tradeable — within-ts decile L/S cost-dominated at every
+    horizon; the extreme top decile (strongest short) RALLIES (+27/+39 bps @168h), i.e.
+    momentum-continuation, not reversion; composite IC −0.09 is a weak non-tradeable bulk
+    tendency. C0 engine not built (precheck-decisive). [B verdict](docs/preregistration/round2/c0-c3-architecture-b-verdict.md).
+  - **ROUND 2 COMPLETE → DO NOTHING.** Both architectures documented null under honest
+    methodology. Root cause: the fade-the-pump short thesis fails — the selected extreme
+    high-vol/momentum names continue UP, not revert (unifies R1/R9/within-events/C2). R12
+    sniper moot (entry-fill can't create absent edge). Frozen promoted profile unchanged.
+    Any future work (momentum thesis from the D9 rally; bybit-only daily) = NEW operator
+    pre-reg. limit-chase EXIT enable remains test-gated/post-validation (no validated
+    strategy to deploy it for).
 - **5950X full-PIT op note:** one `volume-events` cell peaks ~23 GB → run sweeps
   at `SWEEP_MAX_WORKERS=1` (NOT the plan's 8, which OOMs); clear
   `<root>/.locks/*.lock` after any OOM/kill or a clean cell hangs ~6 h on
