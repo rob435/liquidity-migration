@@ -1,6 +1,6 @@
 # Research-program state
 
-**Last updated:** 2026-05-29 (R1+R13+R5+R2+R3+R4 COMPLETE — H2 closed (bearish=0 trades); R9 = bullish stack only; R4 risk model = 6 validated factors, Tier-3 residual machinery confirmed. **Engine RE-BASELINED by `9f52819`** (100% taker / bar_extreme stops / calendar returns) → **R1 re-baseline DONE: `drop_all_4` FALSIFIES Tier-2** (demo-eligibility was a pre-hardening stop-fill artifact; binance negative under honest costs); R9 `event_only` baseline = production. R3+R4 unaffected; R6 code done (calibration queued). **Next: build + test R9 integrated stack** (IC signal + R4 factor caps); default do-nothing if R9 falsifies.)
+**Last updated:** 2026-05-29 (R1+R13+R5+R2+R3+R4 COMPLETE — H2 closed (bearish=0 trades); R9 = bullish stack only; R4 risk model = 6 validated factors, Tier-3 residual machinery confirmed. **Engine RE-BASELINED by `9f52819`** (100% taker / bar_extreme stops / calendar returns) → **R1 re-baseline DONE: `drop_all_4` FALSIFIES Tier-2** (demo-eligibility was a pre-hardening stop-fill artifact; binance negative under honest costs); R9 `event_only` baseline = production. R3+R4 unaffected; R6 code done (calibration queued). **R9 IC-selectivity PRE-CHECK FALSIFIED** the pre-registered lever — the composite IC ANTI-selects within events (high-IC = worst shorts; ρ −0.16 bybit / −0.31 binance). Testing the last daily lever (R5 `risk_equal` sizing, which down-weights the high-vol losers); **default do-nothing if it fails** — daily Architecture A then a documented null under honest methodology.)
 
 > If you are a Claude session opening this repo for the first time, read this
 > file FIRST. It tells you in 60 seconds what's been done, what's running,
@@ -143,13 +143,21 @@ R12a/b sniper + C0 continuous engine).
   - **R6 cost model CODE COMPLETE** (2026-05-29): `cost_model.py` surface + fit +
     predict + recost + summary, 12 tests; default 15 bps taker; β-calibration
     data-gated → queued; [verdict](docs/preregistration/round2/r6-cost-model-verdict.md).
-  - **NEXT: build + run R9** (integrated stack: event entries + IC-augmented signal +
-    R4 basket factor caps + R5 sizing + R6 model cost) under the honest engine — the
-    factor caps target the −33%/−47% DD blowout. If the best R9 cell falsifies Tier-2 →
-    **default: do nothing.** Then R10 (residual Sharpe + stress + recost) → R11 OOS.
-    R7/R8 analyzers + R12 sniper + C0–C3 build alongside (R7/R8 run on R10 candidates;
-    R8 ceiling is `b_size`-calibration-gated). limit-chase EXIT enable is safe (market
-    fallback) but live-path — test-gated, post-backtest-validation.
+  - **R9 IC-selectivity PRE-CHECK (2026-05-29) — FALSIFIED.** `scripts/r9_ic_selectivity_precheck.py`:
+    composite IC (5 features, high=short) vs `gross_trade_return` within event trades is
+    NEGATIVE and monotonic both venues (Spearman −0.16 bybit / −0.31 binance; top-IC
+    quintile gross −0.036/−0.083, bottom +0.048/+0.060). The event trigger already selects
+    the high-vol/extended basket (R2), so the marginal IC sorts the WRONG way → the
+    pre-registered `event_AND_ic` / `ic_only_top_decile` cells would ANTI-select. The
+    inverse (low-IC = better short) is positive in-sample but a post-hoc sign flip (not
+    promotable; error #17). So IC selectivity cannot rescue the negative event return.
+  - **NEXT: R5 `risk_equal` sizing-rescue = last daily lever** (`r9_event_sizing_hardened_sweep.py`,
+    tag `r9_event_sizing_hardened_2026-05-29`): risk_equal down-weights the high-vol
+    losers; does it flip drop_all_4 to Tier-2-positive under honest costs? If NO → **daily
+    Architecture A = documented null → DO NOTHING** (R1 filters, R2 IC, R3 bearish, R5
+    sizing all exhausted under honest methodology). R12 sniper + C0–C3 continuous are
+    separate larger tracks (low prior given the daily null) — surface to operator before
+    investing weeks. limit-chase EXIT enable test-gated/post-validation.
 - **5950X full-PIT op note:** one `volume-events` cell peaks ~23 GB → run sweeps
   at `SWEEP_MAX_WORKERS=1` (NOT the plan's 8, which OOMs); clear
   `<root>/.locks/*.lock` after any OOM/kill or a clean cell hangs ~6 h on
