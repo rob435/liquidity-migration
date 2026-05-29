@@ -77,7 +77,9 @@ secondary.
   DD < 50%; sign-consistent
 - ≥30 days forward demo + daily paper-shadow reconciliation
 - Block-bootstrap pooled MAR-Δ p5 ≥ 0 (seed=0, block=3mo, n=5000)
-- Residual Sharpe ≥ +0.3 (factor-model residual)
+- Residual Sharpe ≥ +0.3 (factor-model residual; foundation built + validated —
+  `liquidity_migration/risk_model.py` `decompose_strategy_pnl`, see
+  `docs/preregistration/r4-risk-model-verdict.md`)
 - Stress pass + capacity ≥ 10× deployment size
 
 The forward demo (fresh data can't be overfit) is both the multiple-testing arbiter and the

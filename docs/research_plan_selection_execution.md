@@ -132,6 +132,23 @@ loosened). MAR-primary, Sharpe-secondary. `scripts/r1_robustness.py --sweep-tag 
 emits the Tier-2 verdict + fragility from per-cell ledgers. **No further loosening to
 rescue a near-miss.**
 
+## Foundation: the R4 risk model (Tier-3 residual-Sharpe)
+
+The Tier-3 real-money gate requires **residual Sharpe ≥ +0.3 (factor-model residual)** —
+i.e. a cell's alpha must survive after stripping exposure to known factors. That machinery
+is **already built, validated, and live on `main`**: `liquidity_migration/risk_model.py`
+holds a validated **6-factor** model (`btc_beta`, `xs_rank_ret_30d`, `realized_vol_rank`,
+`funding_rate_z`, `liquidity_rank`, `premium_index_z`) plus `decompose_strategy_pnl`, which
+takes a cell's trade ledger and returns its residual after factor decomposition. It passes
+an honest within-day permutation-null variance-capture test (p=0.0 both venues) — not the
+in-sample R²≥0 tautology. Validation record:
+[preregistration/r4-risk-model-verdict.md](preregistration/r4-risk-model-verdict.md).
+
+So R4 is **not an experiment in this plan** — it is the *foundation under* the Tier-3 gate
+that E1/E2/E3 must eventually pass. Do not rebuild it. At the Tier-3 gate, residualize each
+demo-candidate cell on this model (`decompose_strategy_pnl`) and require residual
+Sharpe ≥ +0.3; a cell that fails is "selling vol / buying beta," not carrying alpha.
+
 ## 5950X operating notes
 
 - One full-PIT `volume-events` cell peaks **~23 GB** → run sweeps at
