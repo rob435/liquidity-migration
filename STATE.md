@@ -73,10 +73,10 @@
 |---|---|---|
 | R0 | Doc cleanup (delete unused Phase 7 pre-reg, update STATE.md) | complete (5dff927) |
 | R1 | Per-filter hypothesis audit (softer criterion) | **COMPLETE (full-PIT, 2026-05-29).** 14/14 cells `full_pit_universe`. `drop_all_4` DEMO-ELIGIBLE (pooled MAR Δ +0.45) → re-baseline cascade TRIGGERED. Tag `r1_filter_audit_max12_2026-05-28`. **HARDENED RE-BASELINE (2026-05-29): `drop_all_4` FALSIFIES Tier-2** — pooled MAR Δ +0.45→+0.05, binance ret +0.56×→−0.25× (bar_extreme stops tripled DD); demo-eligibility was a pre-hardening stop-fill artifact. [original verdict](docs/preregistration/round2/r1-per-filter-audit-verdict.md) · [re-baseline verdict](docs/preregistration/round2/r1-rebaseline-hardened-verdict.md) |
-| R2 | Per-feature standalone decile-sort + correlation matrix | not started |
-| R3 | Bearish stack honest test (H2 retried) | not started — needs ~3h code (R3 filter flag additions) |
+| R2 | Per-feature standalone decile-sort + correlation matrix | **COMPLETE (full-PIT, 2026-05-29).** The 5 Phase-5 IC features collapse to ONE dominant factor (PC1 = 87.8% bybit / 81.4% binance of decile-P&L variance; pairwise Spearman 0.72–0.92) — the plan's 2-orthogonal-factor premise fails. Tag `r2_per_feature_2026-05-29`. [verdict](docs/preregistration/round2/r2-per-feature-standalone-verdict.md) |
+| R3 | Bearish stack honest test (H2 retried) | **COMPLETE (full-PIT, 2026-05-29).** H2 DECISIVELY CLOSED — the mirror-imaged bearish stack produces 0 trades on BOTH venues (load-bearing filters, not the quality gates). Tag `r3_bearish_stack_2026-05-29`. [verdict](docs/preregistration/round2/r3-bearish-stack-verdict.md) |
 | R4 | Risk-factor model construction (JS-style, 8 factors) | **COMPLETE (full-PIT, 2026-05-29).** 6 validated factors (dropped XS-3d-momentum: sign-flip factor return; alt-season + CLI deferred, off critical path). All 3 criteria pass both venues; variance-capture via the HONEST within-day permutation null (p=0.0 both venues — not the in-sample tautology; audit2 `b1a3368` A1), residual mean ~0 → Tier-3 residual-Sharpe machinery confirmed (incl. B1 `decompose` entry-ts fix). Tag `r4_risk_model_2026-05-29`. [verdict](docs/preregistration/round2/r4-risk-model-verdict.md) |
-| R5 | 1/realized-vol position sizing | not started — needs ~1 day code |
+| R5 | 1/realized-vol position sizing | **COMPLETE (full-PIT, 2026-05-29).** Every `risk_equal` cell REJECTED (Tier-1 falsifier, bybit MAR Δ ≤ −1.0) → dollar-equal sizing stays; R9 uses dollar-equal. Tag `r5_position_sizing_2026-05-29`. [verdict](docs/preregistration/round2/r5-position-sizing-verdict.md) |
 | R6 | Per-name per-bar cost model | **CODE COMPLETE (2026-05-29).** `cost_model.py` — surface + OLS fit + per-trade predict + ledger recosting (model-vs-legacy) + summary; 12 tests. Default = honest 15bps taker (supersedes legacy ×3 = 45bps over-count). **β-calibration DATA-GATED** on ≥30d VPS demo/paper → queued (turnkey recipe: `reconcile_paper_demo` + `fit_cost_model`); per-cell delta folds into R9 run-up. [verdict](docs/preregistration/round2/r6-cost-model-verdict.md) |
 | R7 | Stress test suite (named historical events) | not started (R4✓ + R6✓ deps met) |
 | R8 | Capacity analysis (per-cell AUM ceiling) | not started (R6✓ dep met; needs the size/ADV term — present in cost_model) |
@@ -84,7 +84,7 @@
 | R10 | Promotion-bar validation sweep | not started |
 | R11 | Pre-2023 OOS gate (mandatory final) | not started |
 | R12 | **Sniper entry execution layer** — sub-1h fill optimization on top of daily signal: 1m kline ingestion (R12a), simulator (R12b), univariate test of 5 sniper flavors (R12c), R9 integration (R12d), entry-delay reduction sweep (R12e), sniper stress test (R12f). Missed fills counted as $0-P&L. | not started — ~3-4 days code (R12a + R12b) |
-| C0 | **Continuous-signal engine** — rolling-feature registry + K-minute step backtest engine + regression validation (continuous at 1d step + 24h window = bit-identical to daily backtest). The foundation for Architecture B. | not started — ~5-7 days code |
+| C0 | **Continuous-signal engine** — rolling-feature registry + K-minute step backtest engine + regression validation (continuous at 1d step + 24h window = numerically equivalent to the daily backtest, `np.allclose` — per the progressive standard, not bit-identical). The foundation for Architecture B. | not started — ~5-7 days code |
 | C1 | **Continuous-signal univariate IC test** — Phase-5-equivalent on rolling-feature versions of the 5 IC survivors, at forward horizons {1h, 3h, 24h, 72h, 168h}. | not started — depends on C0 |
 | C2 | **Continuous-signal R9 variant** — Architecture B's integrated-strategy assembly. 7 cells × 2 venues. | not started — depends on C0 + C1 |
 | C3 | **Continuous-signal stress test** — R7 named-event replay applied to C2 promotion-eligible cells; flags WS-feed-fragile cells. | not started — conditional on C2 |
@@ -119,7 +119,7 @@ R12a/b sniper + C0 continuous engine).
     factor-caps / Tier-3 residual-Sharpe; map in memory `r4-risk-model-implementation-map`).
     `liquidity_migration/risk_model.py` — `build_factor_panel` + `fit_factor_returns`
     (per-day XS OLS → factor returns + residuals) + `decompose_strategy_pnl` (per-trade
-    explained vs residual P&L → residual_sharpe = the Tier-3 gate input). 8 unit tests.
+    explained vs residual P&L → residual_sharpe = the Tier-3 gate input). 12 unit tests.
     **6 validated factors** (btc_beta, xs_rank_ret_30d, realized_vol_rank, funding_rate_z,
     liquidity_rank, premium_index_z); dropped xs_rank_ret_3d (sign-flip factor return,
     criterion-1 fail); alt-season + `risk-model` CLI deferred (off critical path). All 3

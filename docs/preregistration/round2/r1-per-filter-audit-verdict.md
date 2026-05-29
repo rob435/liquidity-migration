@@ -5,6 +5,15 @@
 **Run label:** `exploratory` (full-PIT, costed, ledger-backed, split-stable — but in-sample/pre-OOS; per pre-reg commitment #7 no R0–R9 cell is `candidate` until R11 OOS passes).
 **Verdict tooling:** `scripts/r1_robustness.py --sweep-tag r1_filter_audit_max12_2026-05-28` (Tier-2, authoritative) + `scripts/apply_decision_rule.py --rule investigation` (Tier-1 cross-check).
 
+> **⚠ SUPERSEDED by [r1-rebaseline-hardened-verdict.md](r1-rebaseline-hardened-verdict.md) (2026-05-29).**
+> Under the hardened engine (`bar_extreme` stops + 100% taker + calendar-exact
+> returns, commit `9f52819`), `R1_drop_all_4` **FALSIFIES** the Tier-2 bar: pooled
+> MAR Δ +0.45→+0.05 and Binance return goes negative. The DEMO-ELIGIBLE verdict
+> below was substantially a pre-hardening optimistic-stop-fill artifact, and the
+> re-baseline cascade did **not** hold — R9's baseline is production (`R9_event_only`),
+> NOT drop_all_4. The numbers below are the ORIGINAL (optimistic-fill) record, kept
+> for history.
+
 ## Headline
 
 `R1_drop_all_4` (production stack minus `day_return` + `stop_pressure` +

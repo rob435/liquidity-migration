@@ -1,6 +1,12 @@
 # Research Findings
 
-Updated 2026-05-27 — research-evidence reset.
+Updated 2026-05-29 — full-PIT roots rebuilt; Round 2 re-validation well underway.
+
+> **Update (2026-05-29):** the full-PIT roots have been rebuilt and the Round 2
+> re-validation sequence is well underway (R1, R2, R3, R4, R5, R13 COMPLETE with
+> committed verdicts under the hardened engine) — see `STATE.md` and
+> `docs/preregistration/round2/`. The 2026-05-27 reset paragraph below is the
+> historical record; it no longer means "no evidence exists."
 
 ## Status
 

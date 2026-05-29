@@ -44,11 +44,13 @@ Active strategy backtest:
 python -m liquidity_migration --config configs/volume_alpha.default.yaml volume-events
 ```
 
-Full-PIT overnight runner (syncs main, installs env, smoke tests, builds
-manifest + klines, validates coverage, runs the strategy):
+Build/verify the per-venue full-PIT data roots (archives old roots, builds both
+roots — manifest + klines — and validates coverage; see `docs/data_roots.md`), then
+run the `volume-events` backtest above against the rebuilt root:
 
 ```bash
-bash scripts/run_fullpit_volume_overnight.sh
+bash scripts/build_full_pit_roots.sh        # full pipeline (bybit + binance)
+bash scripts/verify_full_pit_rebuild.sh     # standalone coverage / data-layer-audit gates
 ```
 
 Promotion court (run after a `volume-events` report exists; replace `DATA_ROOT`):
@@ -69,14 +71,16 @@ python -m liquidity_migration --data-root data/bybit-demo-event \
   --config configs/volume_alpha.default.yaml event-demo-cycle
 ```
 
-## Subcommands (16)
+## Subcommands (24 — run `--help` for the authoritative list)
 
 `download-data` · `download-binance-proxy` · `data-layer-audit` ·
 `discover-universe` · `archive-manifest` · `archive-download-klines` ·
 `archive-download-klines-1h` · `archive-download-klines-1h-api` ·
 `volume-events` · `strategy-tribunal` · `portfolio-hedge` · `feature-factory` ·
-`event-demo-cycle` · `event-risk-cycle` ·
-`event-risk-ws` · `reconcile-paper-demo`
+`signal-harness` · `event-demo-cycle` · `event-risk-cycle` · `event-risk-ws` ·
+`long-native-event-demo-cycle` · `combined-book-telegram-report` ·
+`regime-durability` · `reconcile-paper-demo` · `reconcile-long-paper-demo` ·
+`reconcile-demo-bybit` · `reconcile-backtest-paper` · `reconcile-all`
 
 ## Guardrails
 

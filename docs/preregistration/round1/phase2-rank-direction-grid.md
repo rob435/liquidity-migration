@@ -84,6 +84,9 @@ SWEEP_MAX_WORKERS=8 POLARS_MAX_THREADS=4 \
   .venv/Scripts/python.exe scripts/phase2_direction_grid_sweep.py
 ```
 
+> _Historical: `scripts/phase2_direction_grid_sweep.py` was removed in the 2026-05-28
+> cleanup. Phase 2 is COMPLETE (REJECTED, 0 candidates — see `phase2-verdict.md`); not for re-running._
+
 Reports under
 `~/SHARED_DATA/{bybit,binance}_full_pit/reports/phase2_direction_grid_2026-05-27/<cell>/`.
 Aggregate summary at

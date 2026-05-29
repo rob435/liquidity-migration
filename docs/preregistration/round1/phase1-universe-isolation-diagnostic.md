@@ -113,6 +113,9 @@ SWEEP_MAX_WORKERS=8 POLARS_MAX_THREADS=4 \
   .venv/Scripts/python.exe scripts/phase1_universe_diag_sweep.py
 ```
 
+> _Historical: `scripts/phase1_universe_diag_sweep.py` was removed in the 2026-05-28
+> cleanup. Phase 1 is COMPLETE (H1 falsified — see `phase1-verdict.md`); not for re-running._
+
 Per-cell reports land under
 `~/SHARED_DATA/bybit_full_pit{,_archive_only}/reports/phase1_universe_diag_2026-05-27/<cell>/`
 (per-cell root depends on the 474/764 marker). Aggregate summary CSV at

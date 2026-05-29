@@ -65,6 +65,17 @@ Manifesto pipeline. **Re-baseline cascade pre-committed below** (see
 every gate, R2-R10 re-baseline against the drop_all_4 stack instead
 of production.
 
+> **OUTCOME (2026-05-29) — FALSIFIED; cascade did NOT trigger.** Under the
+> hardened re-baseline (`bar_extreme` stops + 100% taker + calendar-exact
+> returns, commit `9f52819`) `R1_drop_all_4` **FALSIFIES the Tier-2 demo-candidate
+> bar**: pooled MAR Δ +0.45→+0.05 (< +0.1) and Binance return goes negative — the
+> exploratory edge above was substantially a pre-hardening optimistic-stop-fill
+> artifact. The pre-committed cascade did **not** fire; the production filter stack
+> stays the baseline and **R9's baseline is `R9_event_only` = production, NOT
+> drop_all_4.** See [r1-rebaseline-hardened-verdict.md](r1-rebaseline-hardened-verdict.md)
+> and STATE.md. The pre-registered text above/below is kept verbatim as the original
+> pre-commitment.
+
 **R12 (sniper-entry execution layer)** runs in parallel with R4-R10.
 It is NOT optional — operator instruction is to extend the program
 with sub-1h *execution* refinement. The signal stays at end-of-day
@@ -107,7 +118,7 @@ sweep and the frozen live profile are byte-identical:
 | Phase | Status |
 |---|---|
 | R0 doc cleanup | done |
-| **R1** filter audit (`max_active=12`) | **COMPLETE (full-PIT)** — `drop_all_4` demo-eligible |
+| **R1** filter audit (`max_active=12`) | **COMPLETE (full-PIT)** — `drop_all_4` demo-eligible in the ORIGINAL verdict, but **FALSIFIES Tier-2 under the `9f52819` hardened re-baseline** (bar_extreme stops + 100% taker + calendar returns; pooled MAR Δ +0.45→+0.05, binance ret negative). Re-baseline cascade premise falsified; R9 baseline = `R9_event_only` (production), NOT drop_all_4. See [r1-rebaseline-hardened-verdict.md](r1-rebaseline-hardened-verdict.md). |
 | R2 per-feature decile sort | **COMPLETE** — 5 IC features → 1 composite factor |
 | R3 bearish-stack honest test | **COMPLETE** — H2 closed (0 trades both venues) |
 | R4 risk-factor model | **COMPLETE** — 6 validated factors |
@@ -117,15 +128,15 @@ sweep and the frozen live profile are byte-identical:
 | **NB:** R1/R2/R5/R13 deltas | re-baseline under `9f52819` hardened defaults, folded into R9 run-up |
 | R9 assembly / R10 promote / R11 OOS | pending |
 | R12 sniper-entry execution | pending (~3-4d code) |
-| **R13** exit-rule re-opt | **ready** — dispatch after R1 confirms drop_all_4 |
+| **R13** exit-rule re-opt | **COMPLETE (full-PIT, 2026-05-29)** — ran as a Tier-1 carry-forward on the drop_all_4 stack BEFORE the re-baseline; since drop_all_4 falsified, it is not standalone demo evidence. See [r13-exit-rule-verdict.md](r13-exit-rule-verdict.md). |
 | C0-C3 continuous signal | pending (~5-7d code) |
 
-**Dispatch (5950X, 8 cells × 4 polars threads = 32 SMT):**
+**Dispatch (5950X — full-PIT: a single volume-events cell peaks ~23 GB, so `SWEEP_MAX_WORKERS=1`; 8 OOMs the box. `_sweep_runtime.py` also memory-aware-auto-caps to 1):**
 
 ```
-SWEEP_MAX_WORKERS=8 POLARS_MAX_THREADS=4 .venv/bin/python -u scripts/r1_filter_audit_sweep.py
-# after R1 confirms drop_all_4 as lead:
-SWEEP_MAX_WORKERS=8 POLARS_MAX_THREADS=4 .venv/bin/python -u scripts/r13_exit_rule_sweep.py
+# Both R1 and R13 are COMPLETE (see the table above) — this is the historical recipe.
+SWEEP_MAX_WORKERS=1 POLARS_MAX_THREADS=8 .venv/bin/python -u scripts/r1_filter_audit_sweep.py
+SWEEP_MAX_WORKERS=1 POLARS_MAX_THREADS=8 .venv/bin/python -u scripts/r13_exit_rule_sweep.py
 ```
 Per-cell verdicts: `.venv/bin/python scripts/r1_robustness.py --sweep-tag <tag>`.
 
@@ -574,7 +585,7 @@ surface a missing interaction effect. Investigation bar.
 | Cell | Description | Priority |
 |---|---|---|
 | `R1_baseline_v2` | Production filter stack as-is (control) | required |
-| **`R1_drop_all_4`** | **Production minus `day_return` + `stop_pressure` + `realized_loss` + `rank_max` — the LEAD CANDIDATE per 2026-05-29 Mac exploratory** | **highest, dispatch first** |
+| **`R1_drop_all_4`** | **Production minus `day_return` + `stop_pressure` + `realized_loss` + `rank_max` — was the LEAD CANDIDATE per 2026-05-29 Mac exploratory; SINCE FALSIFIED Tier-2 under the `9f52819` hardened re-baseline (see TL;DR outcome + [verdict](r1-rebaseline-hardened-verdict.md))** | (ran; lead retired) |
 | `R1_drop_day_return` | Production minus `day_return` | normal |
 | `R1_drop_stop_pressure` | Production minus `stop_pressure` | normal |
 | `R1_drop_both_noops` | Production minus both `day_return` and `stop_pressure` | normal |
@@ -616,6 +627,13 @@ via `scripts/r1_filter_audit_sweep.py` (already set to 12). Verdict + fragility
 via `scripts/r1_robustness.py --sweep-tag r1_filter_audit_max12_2026-05-28`.
 
 ### Lead-candidate priority (`R1_drop_all_4`)
+
+> **RESOLVED 2026-05-29 — FALSIFIED; this cascade did NOT trigger.** Under the
+> hardened re-baseline (`9f52819`) `R1_drop_all_4` falsifies the Tier-2 bar (pooled
+> MAR Δ +0.05, binance negative); the original edge was a pre-hardening stop-fill
+> artifact. R2-R10 stay on the production baseline (`R9_event_only`), NOT drop_all_4.
+> See [r1-rebaseline-hardened-verdict.md](r1-rebaseline-hardened-verdict.md). The
+> pre-registered design below is kept verbatim as the original pre-commitment.
 
 The 2026-05-29 Mac exploratory showed `R1_drop_all_4` Pareto-improving
 on BOTH venues over the extended window:
@@ -1241,7 +1259,7 @@ Specifically, for each (date, candidate symbol):
 
 | Cell | Description |
 |---|---|
-| `R9_event_only` | Event-driven only (whatever is the active baseline per the R1 re-baseline cascade — production OR drop_all_4 if R1 promoted it), risk-equal sized, model-costed. Control. |
+| `R9_event_only` | Event-driven only. Baseline = **production** (the R1 re-baseline cascade RESOLVED to production: drop_all_4 was NOT promoted — it falsified Tier-2 under the `9f52819` hardened re-baseline). Risk-equal sized, model-costed. Control. |
 | `R9_event_plus_ic` | Event-driven + IC signal additive (signal must exceed threshold OR be event-driven) |
 | `R9_event_AND_ic` | Event-driven AND IC signal (both must fire — strictest) |
 | `R9_event_OR_ic_factor_capped` | event OR ic, with R4 factor exposure caps active |
@@ -1663,9 +1681,13 @@ The engine maintains:
 
 If we run Architecture B with `step_minutes=1440` (one step per
 calendar day) and all rolling-window lengths set to 24h, the results
-should be **bit-identical** to the daily-mode (Architecture A) backtest.
-This validates the continuous engine correctness — it's a
-generalization of the daily engine, not a re-implementation.
+should be **numerically equivalent** to the daily-mode (Architecture A)
+backtest — equity/positions/trade-P&L matching within a tight tolerance
+(`np.allclose`, NaN positions matching), per the progressive
+cross-implementation standard (NOT bit-identical: the continuous engine's
+polars rolling aggregation vs the daily numpy path differ in the last float
+bit, which carries no alpha). This validates the continuous engine
+correctness — it's a generalization of the daily engine, not a re-implementation.
 
 Failure of this validation = the continuous engine has a feature
 definition mismatch that must be fixed before C1+ runs.
@@ -1807,7 +1829,10 @@ export POLARS_MAX_THREADS=4
 export SWEEP_MAX_WORKERS=8
 ```
 
-8 cells × 4 polars threads = 32 threads = full 5950X SMT.
+8 cells × 4 polars threads = 32 threads = full 5950X SMT — but ONLY for **light**
+(non-full-PIT, default `SWEEP_CELL_GB=4`) sweeps. **Full-PIT cells peak ~23 GB: set
+`SWEEP_MAX_WORKERS=1 POLARS_MAX_THREADS=8`** (8 workers OOMs the box; `_sweep_runtime.py`
+is memory-aware and auto-caps, but set it explicitly).
 
 ### Phase-by-phase wall-time estimate on 5950X
 
@@ -1889,7 +1914,7 @@ Cross-referenced to `docs/backtesting_errors_we_never_repeat.md`.
 | #2  | Future info in signals — sniper-specific | R12 sniper simulator consumes 1m kline panel in chronological order; flow=open→fill is enforced by the simulator (no future-peek). Tests pin per-flavor PIT causality. Fill price uses bar close, not bar low/high (which would peek). |
 | #22 | Venue mechanics fantasy — sniper-specific | R12c maker/taker rebate accounting: limit fills earn the venue's maker rebate; market fallbacks pay taker fees. R6 cost model must distinguish these two paths or R12 promotion-eligibility under it is invalid. |
 | #23 | Pretty-report bias — sniper-specific | Sniper variants MUST report fill-rate alongside Sharpe/MAR. A "great Sharpe, 30% fill rate" cell is not demo-eligible because the 70% filled trades P&L is meaningless without counting the 30% missed opportunities. |
-| #2  | Future info in signals — continuous-specific | Rolling-window features are PIT-clean by construction (only look backward). C0c regression validation (continuous engine with 1d step + 24h window = bit-identical to daily backtest) is the binding correctness check; if it fails, continuous results are invalid. |
+| #2  | Future info in signals — continuous-specific | Rolling-window features are PIT-clean by construction (only look backward). C0c regression validation (continuous engine with 1d step + 24h window = numerically equivalent to the daily backtest, `np.allclose` — per the progressive standard, not bit-identical) is the binding correctness check; if it fails, continuous results are invalid. |
 | #13 | Timestamp & resampling leakage — continuous-specific | Continuous engine's "as-of-N-min-step" timestamps must align exactly with the K-minute step boundaries; off-by-one is a future-peek. Tests pin step alignment per feature. |
 | #15 | Warm-started state — continuous-specific | C0c regression validates cold-start; C2 cells use cold-start in backtest. Live deployment of a continuous strategy requires the same 90d-warmup pattern as the daily strategy. |
 | #16 | Same-code illusion — continuous-specific | Continuous backtest engine MUST be the same code path the live continuous daemon would use. If we ship a continuous strategy, the daemon code is the C0 engine called with `live=True`, not a separate re-implementation. Otherwise demo↔backtest divergence is guaranteed. |

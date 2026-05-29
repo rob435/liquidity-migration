@@ -26,7 +26,7 @@ regime-conditional. Current focus: the **Round 2 integrated-strategy program**
 
 ## Running
 
-- CLI: `python -m liquidity_migration <subcommand>` (17 subcommands; see `--help`).
+- CLI: `python -m liquidity_migration <subcommand>` (24 subcommands; see `--help`).
 - Tests: `.venv/bin/python -m pytest -q`.
 
 ## Mandatory pre-push gate (CI parity)

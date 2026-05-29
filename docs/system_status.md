@@ -1,10 +1,15 @@
 # System Status
 
-Updated 2026-05-27.
+Updated 2026-05-29.
 
 The liquidity-migration short strategy is in **committed paper forward testing**
 on the Bybit demo account. The canonical live configuration is the `promoted`
 profile with `liquidity_migration_close_location_min = 0.30`.
+
+> **Research-evidence update (2026-05-29):** the full-PIT roots have been rebuilt and
+> Round 2 evidence has been generated (R1/R2/R3/R4/R5/R13 COMPLETE under the hardened
+> engine) — see `STATE.md`. The 2026-05-27 reset note below is now historical, not the
+> live status.
 
 ## Research-evidence status (2026-05-27 reset)
 

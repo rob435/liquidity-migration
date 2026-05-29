@@ -97,6 +97,10 @@ SWEEP_MAX_WORKERS=8 POLARS_MAX_THREADS=4 \
   .venv/Scripts/python.exe scripts/phase0_loo_sweep.py
 ```
 
+> _Historical: `scripts/phase0_loo_sweep.py` was removed in the 2026-05-28 dead-script
+> cleanup (the sweep pattern is now `scripts/_sweep_runtime.py` + the `r*` scripts).
+> Round 1 is COMPLETE (documented null) — this dispatch is a record, not for re-running._
+
 Reports land in
 `~/SHARED_DATA/{bybit,binance}_full_pit/reports/phase0_loo_2026-05-27/<cell>/`.
 The aggregate summary CSV writes to

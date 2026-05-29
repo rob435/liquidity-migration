@@ -4,6 +4,11 @@
 **Author:** owner
 **Stage:** EXPLORATORY — **run-complete, REJECTED (2026-05-27)**
 
+> _Historical record. The dispatch scripts referenced below (`run_liquidity_capacity_sweep.sh`,
+> `sweep_cells.py`) were removed in the 2026-05-28 dead-script cleanup; the current sweep
+> pattern is `scripts/_sweep_runtime.py` + the `r*` sweep scripts. This run is complete and
+> rejected — not for re-running._
+
 ## What's changing
 
 Sweep candidate parameter changes against the current promoted baseline

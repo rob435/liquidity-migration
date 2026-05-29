@@ -46,8 +46,11 @@ root (5 cells/quarter). MAR-primary (pooled), Sharpe secondary.
 3. **Dispatch.** Single cells: `scripts/volume_events_cell.sh` (fills the
    production-baseline flags; you pass overrides). Multi-cell sweeps: a
    `scripts/_sweep_runtime.py`-based orchestrator (e.g.
-   `scripts/r1_filter_audit_sweep.py`) with `SWEEP_MAX_WORKERS=8
-   POLARS_MAX_THREADS=4` on the 5950X.
+   `scripts/r1_filter_audit_sweep.py`). **Full-PIT sweeps run at
+   `SWEEP_MAX_WORKERS=1 POLARS_MAX_THREADS=8`** — one full-PIT cell peaks ~23 GB, so
+   8 workers OOMs the box (`_sweep_runtime.py` is memory-aware and auto-caps, but set
+   it explicitly). Only light (non-full-PIT) sweeps use `SWEEP_MAX_WORKERS=8
+   POLARS_MAX_THREADS=4`.
 
 4. **Apply the decision rule.**
    - **Tier-2 demo-candidate verdict + fragility** (the Round-2 default):
@@ -89,9 +92,13 @@ root (5 cells/quarter). MAR-primary (pooled), Sharpe secondary.
   market-neutral leg, R12d/f on a sniper flavor beating market@1h, C3 on a C2
   demo-candidate). If a trigger isn't met, the phase does NOT run — file a
   1-paragraph negative-trigger note; don't look for excuses to run it.
-- **Lead candidate `R1_drop_all_4`** is dispatched first in R1. If it clears
-  the Tier-2 bar, the pre-committed re-baseline cascade fires (R2-R11 compare
-  to drop_all_4; thresholds unchanged — they're deltas).
+- **Lead candidate `R1_drop_all_4`** cleared Tier-2 in the ORIGINAL R1 verdict but
+  **FALSIFIES Tier-2 under the `9f52819` hardened re-baseline** (bar_extreme stops +
+  100% taker + calendar returns; pooled MAR Δ +0.45→+0.05, binance negative). The
+  re-baseline cascade premise is therefore falsified: the R9 baseline is
+  `R9_event_only` (production), NOT drop_all_4. Always confirm the current baseline
+  from STATE.md before dispatching. See
+  [r1-rebaseline-hardened-verdict.md](../../../docs/preregistration/round2/r1-rebaseline-hardened-verdict.md).
 
 ## Pre-committed behaviours (non-negotiable)
 

@@ -5,10 +5,13 @@ description: "Orient in the liquidity-migration codebase: module map, core abstr
 
 # Repo map
 
-A Bybit research codebase for a liquidity-migration short strategy. The strategy
-is under active research — its signal is statistically real but
-regime-conditional, and the current focus is regime-aware refinement (see
-`docs/research_findings.md`).
+A Bybit (+Binance) research codebase for a liquidity-migration short strategy. The
+strategy is under active research — its signal is statistically real but
+regime-conditional. The current focus is the **Round 2 integrated-strategy program**
+(see `STATE.md` and `docs/preregistration/round2/integrated-strategy-program.md`;
+`docs/research_findings.md` is the older research verdict). Direction: progressive —
+moving toward a lowest-latency, fully-event-driven, continuous-signal (Architecture B)
+system; the deployed daily-close signal is Architecture A.
 
 ## graphify first (mandated by AGENTS.md)
 
@@ -28,7 +31,7 @@ regime-conditional, and the current focus is regime-aware refinement (see
 
 ## Module map (`liquidity_migration/`)
 
-- `cli.py` — argparse entry point, 16 subcommands.
+- `cli.py` — argparse entry point, 24 subcommands.
 - `volume_events.py` — active event-driven strategy: full-PIT gates, ledger,
   reports.
 - `strategy_tribunal.py` — adversarial promotion court for completed reports.
@@ -43,6 +46,13 @@ regime-conditional, and the current focus is regime-aware refinement (see
   proxy archives.
 - `crowding.py` / `portfolio_hedge.py` — research-only crowding classifier and
   hedge overlay.
+- `risk_model.py` — R4 JS-style factor model: factor panel + per-day cross-sectional
+  factor-return fit + per-trade residual-P&L decomposition (Tier-3 residual-Sharpe input).
+- `cost_model.py` — R6 per-name/per-bar cost model: surface + OLS fit + per-trade
+  predict + ledger recosting; default honest 15 bps taker.
+- `kline_store.py` / `kline_stream_manager.py` / `ws_state_cache.py` — WS-driven kline
+  store + stream manager + private/ticker state caches (the event-driven runtime).
+- `signal_harness.py` — daily-aggregation + cross-sectional feature/IC research harness.
 - `universe.py` / `downloaders.py` / `archive.py` — universe snapshots and
   archive download plumbing.
 - `config.py` / `telegram.py` / `execution_router.py` — config, notifications,

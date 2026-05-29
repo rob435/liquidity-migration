@@ -112,6 +112,11 @@ SWEEP_MAX_WORKERS=4 POLARS_MAX_THREADS=4 \
 The orchestrator wraps `signal-harness combined-portfolio` per cell and
 produces per-cell volume-event-style metrics for the decision rule.
 
+> _Historical: Phase 6 is COMPLETE (REJECTED — H7 falsified; see `phase6-verdict.md`).
+> `scripts/phase6_combined_portfolio_sweep.py` was built, run once, and removed in the
+> 2026-05-28 cleanup. The dispatch block above is the original pre-registration plan,
+> not a runnable command._
+
 ## Pre-commitments
 
 1. **No threshold loosening** — the Manifesto's +0.5/-5pp bars apply.

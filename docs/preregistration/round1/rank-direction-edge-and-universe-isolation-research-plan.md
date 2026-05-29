@@ -302,6 +302,10 @@ Default-improvement run must match pre-change baseline.
 
 ### Change 2 — Sweep orchestrator parallelism (~2h)
 
+> _Historical plan. This was implemented and now lives in `scripts/_sweep_runtime.py`
+> (`ThreadPoolExecutor`, `SWEEP_MAX_WORKERS` env, memory-aware cap); the original
+> `scripts/sweep_cells.py` was removed in the 2026-05-28 cleanup. Round 1 is COMPLETE._
+
 `scripts/sweep_cells.py` currently runs cells sequentially. Replace inner
 loop with `concurrent.futures.ThreadPoolExecutor(max_workers=N)` where
 `N` defaults to 8 (configurable via env). Each cell already sets

@@ -1,12 +1,15 @@
 # Data Roots
 
-Updated 2026-05-27 — research roots deleted, rebuild required.
+Updated 2026-05-29 — per-venue full-PIT roots **rebuilt and present**.
 
 ## Current local state
 
-As of 2026-05-27 the local research roots are **gone or partial**. The
-deletion happened during a doc-cleanup session; the rebuild scripts below
-are the recovery path.
+As of 2026-05-29 both per-venue full-PIT roots (`~/SHARED_DATA/bybit_full_pit`,
+`~/SHARED_DATA/binance_full_pit`) are **rebuilt and present**, and Round 2 evidence
+has been generated against them (STATE.md records R1/R2/R3/R4/R5/R13 COMPLETE on
+full-PIT). The roots are data, not code — not committed. (Historical: they were
+deleted 2026-05-27 during a doc-cleanup session; the rebuild scripts below are the
+recovery path if a root is ever lost again.)
 
 ```text
 ~/SHARED_DATA/bybit_full_pit       DELETED (was Bybit USDT linear perpetuals,
