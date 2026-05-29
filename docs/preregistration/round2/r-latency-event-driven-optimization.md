@@ -38,6 +38,20 @@ and is a research program, not a mechanical edit.
   `order_submit_mode`, `ws_trade_timeout_seconds`, `ws_gap_threshold_seconds` are now
   `event-demo-cycle` CLI flags (default None = unchanged) — the debounce floor and
   execution-path knobs are tunable without a code edit.
+- **Tier A execution-latency wins (ALL shipped):** (1) Telegram HTTP send moved to a
+  background sender thread (off the consumer thread); (2) `submit_exit` cross-process
+  double-submit guard moved to in-memory `live_exit_order_symbols` (no parquet read on
+  the stop path) — safe because it is an efficiency guard, not a safety one (a miss =
+  a redundant reduce-only the venue caps/rejects, never a missed stop); (3) the
+  `rest_reconcile` blocking positions+open-orders REST moved to an opt-in background
+  prefetcher (`reconcile_prefetch_enabled`, **default off**) on its own HTTP session,
+  with a UNION-with-WS apply (never drops a fresh WS position) + stale-fallback to the
+  inline path. Enabling (3) on the live risk daemon is a reviewed deploy decision.
+- **Tier C compute/IO:** KlineStore materialized-window cache + flush-skip-when-unchanged
+  (cycle 0.7–1.2s → 0.3s). vectorize/incrementalize NOT done — see Tier C note below.
+- **Tier B Architecture-B capability (default daily):** `aggregation_ms` (feature
+  cadence) + `hold_hours`/`cooldown_hours` (sub-daily holds), byte-identical at the
+  daily default.
 
 ## Sequenced plan (each tranche test-gated, committed, and — where it touches the live system — owner-reviewed)
 
@@ -67,16 +81,24 @@ safety daemon → careful, well-tested, owner-reviewed work; do NOT rush.**
 output — gate each behind an old-vs-new equivalence test on a realistic panel before
 shipping (error #2/#13 territory if a refactor subtly changes the alpha).
 
-1. **Incrementalize the 45-day daily panel** — recompute only the accreting tail day +
-   any newly-completed day; reuse cached prior-day rows (`event_demo_data.py:534`).
-   `0.4s → ~0.05-0.1s`. Prerequisite for sub-hourly cadence.
-2. **Vectorize `build_volume_features`** — per-symbol Python loop + numpy round-trips →
-   polars `rolling_*`/`.over()` expressions (`volume_features.py:23-128`). 1.6-2.8×/stage.
-3. **Cache the materialized klines window frame in `KlineStore`** keyed by
-   (universe-hash, start, end), invalidate on `_global_max_ts_ms` advance — removes
-   ~110-130ms/wake (`kline_store.py:366`).
-4. **Incremental store flush** — append only new bars instead of re-serializing the
-   whole 611k-row store every 30s (`kline_store.py:561`).
+1. **Incrementalize the 45-day daily panel** — **NOT done (WON'T, same reason as #2).**
+   Recomputing only the accreting tail day requires the rolling windows at the
+   day-boundary to match a full rebuild bit-for-bit, which hits the same float-order
+   issue as #2. Cache-served today (zero live gain). Revisit only if the cadence moves
+   sub-hourly (then the rebuild cost matters and an OOS-validated re-derivation is the
+   vehicle, not a silent refactor).
+2. **Vectorize `build_volume_features`** — **NOT done (WON'T): cannot be bit-identical.**
+   numpy computes the rolling sums by **cumsum-difference** (`cs[i]-cs[i-w]`); polars
+   `rolling_sum` uses a **sliding-window sum** — different floating-point summation
+   order, so the outputs differ at the last bit. That is a silent alpha change, and the
+   function is **cache-served** in the live daemon (cycle 0.3s, `features:0.0s`), so the
+   gain is zero. Shipping it would *violate* the bit-identical rule above. Correctly
+   left as the numpy implementation.
+3. **Cache the materialized klines window frame in `KlineStore`** — ✅ **SHIPPED** (keyed
+   by sorted-symbols+window+mutation-version; ~138ms/wake; provably correct, equivalence
+   tested).
+4. **Incremental store flush** — ✅ **SHIPPED** as flush-skip-when-unchanged (the whole
+   re-serialize is skipped when the mutation version is unchanged).
 
 ### Tier B — the signal-cadence unlock (Architecture B / C-phases) — RESEARCH-GATED
 This is the only path that makes *entries* fast. It is **already pre-registered** as
