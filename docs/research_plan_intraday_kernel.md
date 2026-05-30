@@ -76,6 +76,17 @@ without an explicit operator go AND K0+K1 passing. The forward demo is the Tier-
 
 ## Status
 
-- **K0:** pending — pre-register, then run on the 5950X. (Next step: write the K0 precheck
-  script + its pre-registration receipt.)
-- **K1 / K2:** gated on K0 (and K1, respectively).
+- **K0: DONE — PASS (2026-05-30).** The daily-close (+1h) entry is a median **~8–11% below
+  the event-day intraday peak**, positive on **both venues × both early/recent splits ×
+  both books** (fixed_delay age≥90 and age≥300 quality_squeeze) — clears the ~15 bps gate by
+  ~50–65×. Decomposition (K0b): **~95–98% of that gap is the within-day-D giveback**, the +1h
+  fill window only ~2–6% → the lever is **intraday detection**, not faster fills (consistent
+  with E1). It is an optimistic *ceiling* (exact-top short) → necessary, not sufficient.
+  Receipt: `docs/preregistration/k0-intraday-fade-timing-2026-05-30.md`.
+- **K1: NEXT (gated on K0 — now open).** Build the rolling intraday event-feature pipeline
+  (PIT-causal, no within-bar look-ahead) and backtest the intraday-detected, age+momentum-gated
+  strategy vs the daily-close baseline under the realistic engine, both venues, early/recent
+  split. Pre-register before running. The K0b decomposition sets the bar: the trigger must fire
+  **genuinely intraday, before the daily close** (a near-close trigger only captures the ~2–6%
+  overnight crumb), and the realistic capture will be a *fraction* of the K0 ceiling.
+- **K2:** gated on K1 + explicit operator go (live WS engine + forward demo).

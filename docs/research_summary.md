@@ -192,6 +192,34 @@ binance is funding-missing, i.e. optimistic). The edge is also front-loaded (rec
 much weaker). Any selection refinement must narrow this gap / hold up recently, not just
 reload the early bybit regime.
 
+## K0 (2026-05-30): the intraday-detection kernel — upside-ceiling PASS
+
+The forward plan ([research_plan_intraday_kernel.md](research_plan_intraday_kernel.md))
+asks whether detecting the discrete event **intraday** (off the WS stream) instead of on
+the daily-close roll captures more of the fade. **K0** is the read-only upside-ceiling
+precheck (`scripts/k0_intraday_fade_timing_precheck.py`, EXPLORATORY): for every short in
+the validated daily ledger, compare the realized +1h entry to the **event-day intraday
+high** — the best price a faster detector could have shorted at.
+
+**Result: PASS, decisively, both venues × both early/recent splits × two books**
+(primary `fixed_delay`/age≥90 to isolate detection latency; secondary age≥300
+`quality_squeeze`). Median `ceiling_uplift` **bybit ~993–1041 bps, binance ~862–881 bps**
+(~8–11%), positive in every split (bybit EARLY 957–1026 / RECENT 1000–1071; binance EARLY
+698–778 / RECENT 969–996) — clears the ~15 bps cost gate by ~50–65×. The missed edge is
+**0.84–1.41× the entire realized fade.** So the daily-close (+1h) entry is **systematically
+~8–11% late** vs the intraday peak, all-weather (not a recent-regime artifact — passes the
+c2b guard).
+
+**Decomposition (K0b, `scripts/k0b_fade_decomposition.py`):** ~**95–98% of the ceiling is
+the within-day-D giveback** (peak→daily-close); the +1h overnight fill window is only
+~19–64 bps (~2–6%). → the lever is **intraday DETECTION**, not faster fills (re-confirms E1
+at the daily→intraday scale). **Caveat:** it's an optimistic *ceiling* (assumes shorting the
+exact top, which is unknowable in real time and pre-event-confirmation) → **necessary, not
+sufficient.** The realistic capture is a fraction of it, to be measured under the engine in
+**K1** (rolling PIT-causal intraday detection vs the daily-close baseline — pre-register
+first; K2 live-WS stays operator-gated). Receipt:
+`docs/preregistration/k0-intraday-fade-timing-2026-05-30.md`.
+
 ## Useful findings worth keeping
 
 1. **Concentration is the deployed config's main risk.** `max_active` 3→12 cuts worst-day

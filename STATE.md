@@ -17,7 +17,11 @@ cross-venue premium over immediate entry, so **E3 (sniper) is dropped** and the 
 **SELECTION refinement** (the age gate + residual-momentum gate, under "What's running"). (The
 earlier "Round 2 = null" was a methodology artifact — worst-case fills + over-concentration.)
 Plan: **`docs/research_plan_intraday_kernel.md`** (the forward direction — faster intraday
-detection of the same event); numbers + full record (the dated source of truth):
+detection of the same event). **K0 (the read-only upside-ceiling precheck) PASSED
+2026-05-30** — the daily-close (+1h) entry sits a median **~8–11% below the event-day
+intraday peak**, both venues, all-weather; ~95–98% of that gap is the within-day-D giveback
+(so the lever is *detection*, not fills). **K1** (the rolling intraday-detection backtest)
+is the open build. Numbers + full record (the dated source of truth):
 **`docs/research_summary.md`**. Nothing is promoted; forward demo is the arbiter.
 
 ## What's running
@@ -47,6 +51,11 @@ detection of the same event); numbers + full record (the dated source of truth):
 - **No research runs in-flight.** Research state — full detail + numbers in
   `docs/research_summary.md` (the dated record; the per-phase E1/E2/P3/c2b receipts were
   consolidated there and removed 2026-05-30 — git history has the originals):
+  - **K0 (intraday-detection kernel, 2026-05-30) — upside-ceiling PASS → K1 is the open build.**
+    The daily-close (+1h) entry is a median ~8–11% below the event-day intraday peak, both venues
+    × both early/recent splits × two books (fixed_delay + age≥300); ~95–98% is within-day-D
+    giveback (lever = detection, not fills — re-confirms E1). It's an optimistic ceiling
+    (necessary, not sufficient); K1 measures the realistic capture. K2 (live WS) operator-gated.
   - **E1+E1b — execution is a non-lever:** fade-confirmation adds no robust cross-venue premium
     over immediate entry → selection-dominant; E3 (sniper) dropped.
   - **E2/E2b/c/d — the age gate (lead):** `--liquidity-migration-pit-age-days-min≈300` (drop

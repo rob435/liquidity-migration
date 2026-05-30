@@ -33,7 +33,7 @@ from pathlib import Path
 
 import polars as pl
 
-from liquidity_migration.storage import read_dataset
+from liquidity_migration.storage import dataset_path
 
 MS_PER_DAY = 86_400_000
 
@@ -58,15 +58,40 @@ def _load_ledger(report_dir: Path) -> pl.DataFrame:
 
 def _intraday_highs(root: Path, symbols: list[str], lo_ms: int, hi_ms: int) -> dict[tuple[str, str], float]:
     """Per (symbol, trading-day) intraday high from 1h klines, scoped to the ledger's
-    symbols + date span (so we never materialise the full ~23 GB kline set)."""
-    kl = read_dataset(root, "klines_1h")
+    symbols + date span.
+
+    Reads LAZILY: prune the hive ``date=YYYY-MM-DD/symbol=SYM`` file list to the
+    ledger's symbols + [lo-1d, hi+1d] day window, then ``scan_parquet`` with column
+    projection (ts_ms, symbol, high) and the exact ts/symbol predicate pushed down, so
+    we never materialise the full ~23 GB kline set. This is a perf-only change vs an
+    eager ``read_dataset().filter()``: the symbol + ts window + per-(symbol,day)
+    max(high) are identical, so the result is numerically unchanged (it just no longer
+    OOMs the box — read-only precheck must not be all-or-nothing compute)."""
+    lo, hi = lo_ms - MS_PER_DAY, hi_ms + MS_PER_DAY
+    lo_day = datetime.fromtimestamp(lo / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
+    hi_day = datetime.fromtimestamp(hi / 1000.0, tz=timezone.utc).strftime("%Y-%m-%d")
+    symset = set(symbols)
+    files: list[str] = []
+    for f in dataset_path(root, "klines_1h").glob("date=*/symbol=*/*.parquet"):
+        day = next((p[5:] for p in f.parts if p.startswith("date=")), None)
+        sym = next((p[7:] for p in f.parts if p.startswith("symbol=")), None)
+        if day is not None and sym in symset and lo_day <= day <= hi_day:
+            files.append(str(f))
+    if not files:
+        raise SystemExit(f"no klines_1h under {root} for the ledger symbols/date span")
+    kl = (
+        pl.scan_parquet(files)
+        .select(["ts_ms", "symbol", "high"])
+        .filter(
+            pl.col("symbol").is_in(symbols)
+            & (pl.col("ts_ms") >= lo)
+            & (pl.col("ts_ms") <= hi)
+        )
+        .collect()
+    )
     if kl.is_empty():
-        raise SystemExit(f"no klines_1h under {root}")
-    kl = kl.filter(
-        pl.col("symbol").is_in(symbols)
-        & (pl.col("ts_ms") >= lo_ms - MS_PER_DAY)
-        & (pl.col("ts_ms") <= hi_ms + MS_PER_DAY)
-    ).with_columns(
+        raise SystemExit(f"no klines_1h under {root} for the ledger symbols/date span")
+    kl = kl.with_columns(
         pl.col("ts_ms").map_elements(_trading_day, return_dtype=pl.String).alias("_day")
     )
     agg = kl.group_by(["symbol", "_day"]).agg(pl.col("high").max().alias("hi"))
@@ -131,7 +156,7 @@ def main() -> int:
 
     print(f"=== K0 intraday-fade-timing ceiling — venue={args.venue} (split {args.split_date}) ===")
     print("  ceiling_uplift = best-case extra short edge from detecting intraday (shorting the")
-    print("  intraday high) vs the daily-close entry. >0 all-weather both venues ⇒ K1 justified.")
+    print("  intraday high) vs the daily-close entry. >0 all-weather both venues => K1 justified.")
     print(_summary(out, "ALL"))
     print(_summary(early, "EARLY"))
     print(_summary(recent, "RECENT"))
