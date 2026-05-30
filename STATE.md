@@ -1,6 +1,6 @@
 # Research-program state
 
-**Last updated:** 2026-05-29. **All research findings, results, and verdicts now live in
+**Last updated:** 2026-05-30. **All research findings, results, and verdicts now live in
 one place: [docs/research_summary.md](docs/research_summary.md).** Round 1 + Round 2
 per-phase plans and verdicts were consolidated there and removed (git history has the
 originals). This file = live/operational state + the binding decision rules.
@@ -27,6 +27,15 @@ open lead. **Forward plan (narrow, for the 5950X): `docs/research_plan_selection
 
 ## What's running
 
+- **LONG sleeve `div` promotion (2026-05-30, code-complete, not yet deployed):** the
+  `MultiStratV1` long-FC profile (`_v11a_long_native_config`) gained the `div`
+  risk-engineering — universe 10→50, max_concurrent 5→10, de-risk-only vol-target
+  (0.60 annual, max_scale 1.0). Cross-venue confirmed (Bybit MAR 1.46→1.58, Binance
+  0.91→1.30, both DD lower, trades ~2×). It's portfolio construction, NOT a new signal
+  (FC remains the alpha ceiling). Receipt: `docs/preregistration/div-promotion.md`.
+  On deploy, the deploy date is the clean pre/post split for the `MultiStratV1` long
+  ledger (the strategy_id was kept; a 12h sleeve was tested and **rejected** — additive
+  on Binance but a drag on Bybit, fails the cross-venue bar).
 - **Live demo** (Singapore VPS 5.223.42.109): `event_demo_daemon` + `ws_risk_daemon` +
   `long_native_event_demo_daemon` under systemd. Frozen promoted profile. Ledgers in
   `data/bybit-demo-event/`.

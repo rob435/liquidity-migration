@@ -185,15 +185,20 @@ def _long_demo_dataset_names(config: "LongNativeDemoCycleConfig") -> tuple[str, 
 
 
 def _v11a_long_native_config() -> LongNativeConfig:
-    """The v11a uni10 sniper retrace 1%/6h fall-through config.
+    """The v11a FC profile + `div` risk-engineering (PROMOTED 2026-05-30).
 
-    Sourced from the long_native_FC_v11a_retrace1pct_6h_fallthru research
-    run. Original provenance notes were in docs/long_native_findings.md;
-    that doc was removed in the 2026-05-27 doc cleanup. See the
-    LongNativeConfig defaults below + git history for the parameter origins.
+    Base: v11a sniper-retrace 1%/6h fall-through FC config (from the
+    long_native_FC_v11a_retrace1pct_6h_fallthru research run). The `div`
+    risk-engineering overlay was promoted 2026-05-30 after cross-venue
+    confirmation (Bybit MAR 1.46->1.58, Binance 0.91->1.30, both DD lower,
+    trades ~2x): universe 10->50, max_concurrent 5->10, de-risk-only vol
+    targeting (vol_target_annual=0.60, max_scale=1.0 — sizes the book DOWN in
+    high-BTC-vol regimes, never levers above 1.0). It is risk-engineering, not
+    a new signal (FC remains the alpha ceiling). See
+    docs/preregistration/div-promotion.md and git history for pre-div values.
     """
     return LongNativeConfig(
-        universe_size=10,
+        universe_size=50,  # div (was 10): wider book diversifies idiosyncratic risk
         universe_volume_window_days=90,
         min_listing_history_days=30,
         regime_symbol="BTCUSDT",
@@ -230,7 +235,7 @@ def _v11a_long_native_config() -> LongNativeConfig:
         fc_sniper_deadline_hours=6,
         fc_sniper_skip_on_no_retrace=False,  # fall through after deadline
         # Portfolio
-        max_concurrent_positions=5,
+        max_concurrent_positions=10,  # div (was 5): more concurrent slots for the wider book
         cooldown_days=7,
         entry_delay_hours=1,
         gross_exposure=1.0,
@@ -238,6 +243,12 @@ def _v11a_long_native_config() -> LongNativeConfig:
         vol_estimate_window_days=30,
         vol_floor_annual=0.30,
         max_position_weight=0.30,
+        # div: de-risk-only volatility targeting (Moreira-Muir) — scale the book by
+        # vol_target/BTC-realized-vol, capped at 1.0 (never lever up), floored at 0.30.
+        enable_vol_target=True,
+        vol_target_annual=0.60,
+        vol_target_max_scale=1.0,
+        vol_target_min_scale=0.30,
         cost_multiplier=3.0,
         require_pit_membership=False,
         require_full_pit_universe=False,

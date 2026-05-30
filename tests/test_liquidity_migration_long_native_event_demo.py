@@ -56,8 +56,8 @@ def test_v11a_config_matches_research_run() -> None:
     assert not cfg.enable_funding_squeeze
     assert not cfg.enable_oversold_bounce
     assert not cfg.enable_uptrend_dip
-    # uni10
-    assert cfg.universe_size == 10
+    # div: uni50 (promoted 2026-05-30, was uni10)
+    assert cfg.universe_size == 50
     # sniper retrace
     assert cfg.fc_use_sniper_entry
     assert cfg.fc_sniper_retrace_pct == pytest.approx(0.01)
@@ -74,12 +74,17 @@ def test_v11a_config_matches_research_run() -> None:
     assert cfg.fc_sigma_mult == pytest.approx(2.5)
     assert cfg.fc_enable_3d_trigger
     assert cfg.fc_enable_7d_trigger
-    # Portfolio
-    assert cfg.max_concurrent_positions == 5
+    # Portfolio (div: max_concurrent 5->10)
+    assert cfg.max_concurrent_positions == 10
     assert cfg.cooldown_days == 7
     assert cfg.entry_delay_hours == 1
     assert cfg.max_position_weight == pytest.approx(0.30)
     assert cfg.sizing == "vol_parity"
+    # div risk-engineering (promoted 2026-05-30): de-risk-only volatility targeting
+    assert cfg.enable_vol_target
+    assert cfg.vol_target_annual == pytest.approx(0.60)
+    assert cfg.vol_target_max_scale == pytest.approx(1.0)
+    assert cfg.vol_target_min_scale == pytest.approx(0.30)
 
 
 def test_strategy_profile_resolution() -> None:
