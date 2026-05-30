@@ -132,6 +132,17 @@ Two concrete selection leads:
   makes the strategy survive even the brutal fill assumption. **In-sample validation is now exhaustive:
   threshold (E2b) + regime (E2) + cost (E2c) + stop-fill (E2d).** Forward demo (Tier-3, operator-gated)
   is the only remaining gate.
+- **P2-1 (the sobering one): the edge is mostly FACTOR EXPOSURE, not unique alpha**
+  ([preregistration/p2-1-residual-alpha-verdict-2026-05-30.md](preregistration/p2-1-residual-alpha-verdict-2026-05-30.md)).
+  Decomposing the ledgers through the validated 6-factor risk model: the **baseline is pure factor
+  exposure** (annualized residual Sharpe strongly *negative* under the robust common-4-factor model
+  both venues — its raw Sharpe ≈1.1 is entirely priced premia from shorting high-vol/low-liquidity
+  alts). The **age gate sharply reduces factor dependence** (residual jumps massively vs baseline),
+  but the age-gated **residual alpha is borderline and not a clean cross-venue Tier-3 pass**: binance
+  clears (+0.43–0.52) but bybit is marginal/model-sensitive (+0.27 full6 / −0.12 common4), and the
+  √(trades/yr) annualization is optimistic (overlapping trades). So the strategy — even age-gated —
+  is primarily a **factor-harvesting vehicle** (still a legitimate demo-candidate at MAR 3–6 / halved
+  DD), but the "we found unique alpha" framing is **not** supported by the residual-Sharpe gate.
 - **The continuous candidate signal (c2b, 2026-05-30, EXPLORATORY) — age gate flips it on the
   full window but the edge is RECENT-REGIME-ONLY.** The rolling features carry real cross-venue IC
   (`rv_168h` −0.13 @168h). c2's decile short was "not tradeable" because the top-composite decile
