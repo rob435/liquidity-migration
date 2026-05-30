@@ -1713,7 +1713,7 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
     )
     demo_defaults = LongNativeDemoCycleConfig()
     long_demo.add_argument("--universe-size", type=int, default=demo_defaults.universe_size,
-                           help="Top-N by trailing 90d turnover (matches v11a universe_size=10).")
+                           help="Top-N by trailing 90d turnover (matches v11a universe_size; div=50).")
     long_demo.add_argument("--lookback-days", type=int, default=demo_defaults.lookback_days,
                            help="1h kline lookback in days. ≥60 so 30d returns and 30d vol populate.")
     long_demo.add_argument("--workers", type=int, default=demo_defaults.workers)
