@@ -80,7 +80,7 @@ from .event_demo import (
     order_quantity_for_notional,
     summarize_position_pnl,
 )
-from .long_native import LongNativeConfig, _classify_entry, build_long_features
+from .long_native import LongNativeConfig, _classify_entry, _vol_target_scale, build_long_features
 from .storage import exclusive_file_lock, read_dataset, write_dataset
 from .telegram import send_telegram_message
 from .universe import build_current_universe_table
@@ -113,8 +113,10 @@ SIGNAL_FRESHNESS_MS = 24 * MS_PER_HOUR
 
 @dataclass(frozen=True, slots=True)
 class LongNativeDemoCycleConfig:
-    # Universe: top-10 by trailing 90d turnover (matches research universe_size=10).
-    universe_size: int = 10
+    # Universe: top-50 by trailing 90d turnover. MUST match the deployed strategy
+    # config (_v11a_long_native_config().universe_size) — div promotion 2026-05-30
+    # widened both 10->50. test_demo_universe_matches_strategy guards the sync.
+    universe_size: int = 50
     lookback_days: int = 90
     workers: int = 8
     # Per-position notional scaling. The base per-position notional is
@@ -450,6 +452,16 @@ def run_long_native_demo_cycle(
         all_trades = read_dataset(root, trades_dataset)
         all_orders = read_dataset(root, orders_dataset)
         order_notional_pct_equity = target_long_order_notional_pct_equity(demo, strategy)
+        # div: apply the SAME de-risk-only vol-target scalar the backtest uses, so the live
+        # book sizes DOWN in high-BTC-vol regimes (never up). btc_rv_30 is a trailing feature
+        # broadcast across symbols; take the latest non-null. Shared helper => no drift.
+        latest_btc_rv: float | None = None
+        if "btc_rv_30" in features.columns and not features.is_empty():
+            _rv = features.sort("ts_ms")["btc_rv_30"].drop_nulls()
+            if len(_rv) > 0:
+                latest_btc_rv = float(_rv[-1])
+        vol_target_scale = _vol_target_scale(strategy, latest_btc_rv)
+        order_notional_pct_equity *= vol_target_scale
 
         cycle_trade_rows: list[dict[str, Any]] = []
         cycle_order_rows: list[dict[str, Any]] = []
@@ -626,6 +638,7 @@ def run_long_native_demo_cycle(
             "strategy_id": strategy_id,
             "strategy_profile": demo.strategy_profile,
             "symbols": len(symbols),
+            "vol_target_scale": vol_target_scale,  # div: de-risk-only book scalar applied to live sizing
             "kline_rows": klines.height,
             "kline_cache_rows": kline_cache_stats["cache_rows"],
             "kline_fetched_rows": kline_cache_stats["fetched_rows"],
@@ -1825,6 +1838,7 @@ def format_long_demo_cycle_summary(payload: dict[str, Any]) -> str:
         "long-native event demo cycle "
         f"id={cycle.get('cycle_id', '')} mode={cycle.get('mode')} "
         f"profile={cycle.get('strategy_profile')} symbols={cycle.get('symbols')} "
+        f"vt={_float(cycle.get('vol_target_scale')):.2f} "
         f"features={cycle.get('feature_rows')} entries={cycle.get('entries_executed')}/{cycle.get('entry_candidates')} "
         f"exits={cycle.get('exits_executed')}/{cycle.get('exit_candidates')} "
         f"open_long={cycle.get('open_long_positions_after')} equity=${_float(cycle.get('equity_usdt')):,.2f} "

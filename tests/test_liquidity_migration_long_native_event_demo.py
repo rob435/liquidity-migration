@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -85,6 +86,26 @@ def test_v11a_config_matches_research_run() -> None:
     assert cfg.vol_target_annual == pytest.approx(0.60)
     assert cfg.vol_target_max_scale == pytest.approx(1.0)
     assert cfg.vol_target_min_scale == pytest.approx(0.30)
+
+
+def test_demo_universe_matches_strategy() -> None:
+    # div promotion (2026-05-30) widened BOTH the strategy and the live-demo universe to 50.
+    # They MUST stay in sync — otherwise the live demo silently trades a different universe
+    # than the validated backtest. This guard exists because exactly that drift shipped once.
+    assert LongNativeDemoCycleConfig().universe_size == _v11a_long_native_config().universe_size == 50
+
+
+def test_vol_target_scale_de_risk_only() -> None:
+    from liquidity_migration.long_native import _vol_target_scale
+
+    cfg = _v11a_long_native_config()  # enable_vol_target=True, annual=0.60, max=1.0, min=0.30
+    assert _vol_target_scale(cfg, 0.30) == pytest.approx(1.0)   # calm -> capped at 1.0 (never lever up)
+    assert _vol_target_scale(cfg, 0.60) == pytest.approx(1.0)   # at target -> 1.0
+    assert _vol_target_scale(cfg, 1.20) == pytest.approx(0.5)   # storm -> de-risk to 0.5
+    assert _vol_target_scale(cfg, 10.0) == pytest.approx(0.30)  # extreme -> floored at min_scale
+    assert _vol_target_scale(cfg, None) == pytest.approx(1.0)   # missing rv -> neutral
+    off = replace(cfg, enable_vol_target=False)
+    assert _vol_target_scale(off, 1.20) == pytest.approx(1.0)   # disabled -> always 1.0
 
 
 def test_strategy_profile_resolution() -> None:

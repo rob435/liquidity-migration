@@ -350,6 +350,22 @@ class LongNativeConfig:
     splits: tuple[tuple[str, str, str], ...] = ()
 
 
+def _vol_target_scale(config: "LongNativeConfig", btc_rv: float | None) -> float:
+    """De-risk-only volatility-target book scalar (Moreira-Muir / Barroso-Santa-Clara).
+
+    Sizes inversely to BTC realized vol, clipped to [vol_target_min_scale,
+    vol_target_max_scale] (max_scale=1.0 => de-risk only, never lever up). Returns 1.0
+    when disabled. SHARED by the backtest portfolio (_run_long_pipeline) and the live
+    demo cycle (long_native_event_demo) so deployed sizing can never drift from the
+    validated backtest — see docs/preregistration/div-promotion.md.
+    """
+    if not config.enable_vol_target:
+        return 1.0
+    rv = btc_rv or config.vol_target_annual  # None/0.0 -> target (scale 1.0); mirrors backtest
+    vt = config.vol_target_annual / max(rv, 1e-6)
+    return max(config.vol_target_min_scale, min(config.vol_target_max_scale, vt))
+
+
 def run_long_native_research(
     data_root: str | Path,
     *,
@@ -1690,11 +1706,8 @@ def _run_long_pipeline(
 
             # Volatility-managed book scalar (applied last so it's a clean book-level tilt):
             # size inversely to BTC realized vol, clipped. PIT-safe (btc_rv_30 is trailing).
-            if config.enable_vol_target:
-                btc_rv = _safe_float(row.get("btc_rv_30")) or config.vol_target_annual
-                vt_scale = config.vol_target_annual / max(btc_rv, 1e-6)
-                vt_scale = max(config.vol_target_min_scale, min(config.vol_target_max_scale, vt_scale))
-                position_weight = position_weight * vt_scale
+            # _vol_target_scale is SHARED with the live demo cycle so they can't drift.
+            position_weight = position_weight * _vol_target_scale(config, _safe_float(row.get("btc_rv_30")))
 
             # Drawdown throttle: de-lever while the book is in its own realized drawdown
             # (caps the worst peak-to-trough -> lifts MAR), restore on recovery.
