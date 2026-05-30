@@ -46,30 +46,37 @@ candidate now**. The highest-value next step is likely **forward-demo validation
 (operator's call to move the demo profile from pit-age≈90 to 300–400) — real OOS evidence that
 no in-sample sweep can give — rather than more in-sample architecture exploration.
 
-## RESULT — the cheap age-gated c2 retest PASSED (2026-05-30, EXPLORATORY)
+## RESULT — c2 retest: full-period "flip" is a RECENT-REGIME ARTIFACT (2026-05-30, EXPLORATORY)
 
 Ran `scripts/c2b_continuous_age_precheck.py` (read-only; look-ahead decile characterization;
-true PIT listing age; not a backtest). The age gate **flips the sign** of the continuous
-decile short:
+true PIT listing age). **First read (overstated):** on the full window the age gate flips the
+continuous decile short from losing to cost-positive cross-venue @168h (age≥300 short-only net
++29 by / +35 bn bps; even beta-neutral L/S +14/+22) — monotone in the age cut. That looked like
+the gate rescuing the continuous architecture.
 
-| venue / 168h | baseline D9 fwd → short-net | **age≥300** D9 fwd → short-net | beta-neutral L/S net (base → age) |
-|---|---|---|---|
-| bybit | +27 → **−42 bps** (loses) | **−44 → +29 bps** (wins) | −58 → **+14 bps** |
-| binance | +39 → **−54 bps** (loses) | **−50 → +35 bps** (wins) | −67 → **+22 bps** |
+**The recent-vs-early split refutes the strong claim.** Splitting age≥300 @168h at 2025-06:
 
-Without the gate the top-composite decile **rallies** (the young-name momentum-continuation
-that sank c2). With the gate it **fades**, and the short is **cost-positive cross-venue at
-168h** — even the **beta-neutral L/S** is positive. The young-name squeeze poisoned *both* the
-discrete (E2) and continuous (c2) signals; they are the same truth. (72h is ~breakeven — the
-continuous edge is a **weekly/168h** phenomenon, distinct from the discrete 3-day hold.)
+| | EARLY 2023-04→2025-06 (~26 mo) | RECENT 2025-06+ (~12 mo) |
+|---|---|---|
+| bybit short-only net / **L/S net** | −44 / **−14 bps** | +194 / +75 bps |
+| binance short-only net / **L/S net** | −18 / **−12 bps** | +161 / +103 bps |
 
-**Revised recommendation:** the gate that c2 failed now **passes**, so **C0 is justified** —
-but as a *weekly* continuous short on the age-gated, top-composite names. EXPLORATORY look-ahead
-evidence only (no execution/capacity/funding) — it warrants the build, it is not itself a P&L.
+**Even the beta-neutral L/S is negative in the early 26 months** and only positive in the recent
+~12. So the continuous age-gated edge is **entirely a recent-regime (2025–26 alt-bear) phenomenon
+— substantially short-beta — with no edge in the earlier 2+ years.** The full-period positive was
+the recent bear dominating the average. This is **not** a robust, all-weather edge.
+
+**Corrected verdict:** the cheap retest is a **regime-conditional positive at best — it does NOT
+justify the multi-day C0 build.** Building a continuous engine on a recent-bear-only signal would
+chase a regime, not an edge. (Contrast the *discrete* E2 strategy, which is all-thirds-positive
+**including the early period** — that remains the robust finding.) This corrects an earlier
+over-claim in this note + commit a56e918.
 
 ## Ask
 
-Operator: (a) **greenlight the C0 build** (~5–7 d) now that the age-gated precheck passes — a
-weekly continuous short on seasoned, top-composite names with realistic execution/costs/capacity;
-and/or (b) decide whether to move the demo profile to the age gate for forward validation of the
-*discrete* strategy. I will not build C0 or change the demo profile without an explicit go.
+Operator: **C0 is not recommended on current evidence** (regime-conditional, short-beta-heavy).
+The robust, all-weather result is the **discrete age gate** — the highest-value step is your call
+on whether to **move the demo profile to the age gate (pit-age ~90 → 300)** for forward OOS
+validation. I will not build C0 or change the demo profile without an explicit go. (If you still
+want the continuous angle explored, the honest next test is a *regime-neutral* continuous study,
+not the C0 build.)

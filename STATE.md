@@ -53,13 +53,15 @@ near-no-op, so **E3 (sniper) is dropped** and **E2 pivots to SELECTION refinemen
   `age400` joint-best (bybit 6.91 / binance 5.64, ample trades); `age300` conservative;
   `prior30+age` an optional DD-reducer (mild bybit fragility). `age-alone` is the primary
   robust refinement. See `docs/preregistration/e2b-age-combo-2026-05-30.md`.
-- **Next research direction — C0 now JUSTIFIED (operator-gated):** the cheap age-gated c2 retest
-  (`c2b`, EXPLORATORY) shows the age gate **flips the continuous decile short to cost-positive
-  cross-venue @168h** (short-only +29/+35 bps net; beta-neutral L/S +14/+22 bps) — c2's "not
-  tradeable" null was a young-name artifact. So the continuous architecture is worth the multi-day
-  **C0 engine build** (a *weekly* continuous short on age-gated top-composite names). **Operator-gated:
-  do not build C0 / change demo profile without explicit OK.** Scope + result:
-  `docs/preregistration/exploratory/c0-continuous-engine-scope-2026-05-30.md`.
+- **Continuous architecture (c2b, EXPLORATORY) — C0 NOT justified:** the age-gated continuous
+  decile short looked cost-positive cross-venue @168h on the **full window**, but the recent/early
+  split shows the edge is **entirely recent-regime (2025–26 alt-bear, substantially short-beta)** —
+  even the beta-neutral L/S is **negative in the early 26 months** (−14/−12 bps) and only positive
+  recent. So it's regime-conditional, not all-weather → **C0 build is NOT recommended on current
+  evidence.** (Corrects an earlier over-claim.) The robust, all-weather result is the **discrete
+  age gate**. Detail: `docs/preregistration/exploratory/c0-continuous-engine-scope-2026-05-30.md`.
+- **Highest-value next step (operator's call):** forward-OOS-validate the discrete age gate —
+  move the demo profile pit-age ~90 → 300. Profile change needs operator OK (hard line).
 - **Open action (from the 2026-05-29 re-baseline):** the deployed demo runs `max_active=3`
   (worst day −36%, DD −87% under honest fills); the research-validated value is
   `max_active=12` (worst day −4.8%, DD −27.5%). Consider moving the demo to 12 and/or

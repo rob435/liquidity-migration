@@ -58,8 +58,15 @@ def _first_listing_ms(root: Path) -> pl.DataFrame:
     return k.group_by("symbol").agg(pl.col("ts_ms").min().alias("first_ms"))
 
 
-def _decile_short(feat: pl.DataFrame) -> dict:
-    """Within-ts decile of the composite; per-horizon short-only + L/S net vs cost."""
+def _decile_short(feat: pl.DataFrame, ts_lo: int | None = None, ts_hi: int | None = None) -> dict:
+    """Within-ts decile of the composite; per-horizon short-only + L/S net vs cost.
+    Optional [ts_lo, ts_hi) window for sub-period (recent/early) splits."""
+    if ts_lo is not None:
+        feat = feat.filter(pl.col("ts_ms") >= ts_lo)
+    if ts_hi is not None:
+        feat = feat.filter(pl.col("ts_ms") < ts_hi)
+    if feat.is_empty():
+        return {}
     present = [f for f in FEATURES if f in feat.columns]
     feat = feat.with_columns([
         ((pl.col(f).rank().over("ts_ms") - 1) / (pl.len().over("ts_ms") - 1)).alias(f"_n_{f}")
@@ -108,16 +115,29 @@ def main() -> int:
         feat = feat.join(first, on="symbol", how="left").with_columns(
             ((pl.col("ts_ms") - pl.col("first_ms")) / MS_PER_DAY).alias("age_days")
         )
-        aged = feat.filter(pl.col("age_days") >= AGE_MIN_DAYS)
-        venue_res = {"baseline": _decile_short(feat), f"age_ge_{AGE_MIN_DAYS}": _decile_short(aged)}
-        out[venue] = venue_res
-        for tag in ("baseline", f"age_ge_{AGE_MIN_DAYS}"):
+        venue_res: dict = {}
+        # age-sensitivity: 0 (baseline) / 200 / 300 / 400
+        for age in (0, 200, 300, 400):
+            aged = feat if age == 0 else feat.filter(pl.col("age_days") >= age)
+            tag = "baseline" if age == 0 else f"age_ge_{age}"
+            venue_res[tag] = _decile_short(aged)
             for h in (72, 168):
                 r = venue_res[tag].get(f"{h}h")
                 if r:
                     print(f"[{venue}] {tag:11s} {h:3d}h  D9_fwd={r['top_decile_mean_fwd_bps']:+.0f}bps  "
                           f"short_net={r['short_only_net_bps']:+.0f}bps  LS_net={r['ls_net_bps']:+.0f}bps  "
                           f"names/ts={r['avg_names_per_ts']}", flush=True)
+        # recent (>=2025-06) vs early (<2025-06) split at age>=300/400, 168h — confound check
+        cut = _date_str_to_ms("2025-06-01")
+        for age in (300, 400):
+            aged = feat.filter(pl.col("age_days") >= age)
+            early = _decile_short(aged, ts_hi=cut).get("168h", {})
+            recent = _decile_short(aged, ts_lo=cut).get("168h", {})
+            venue_res[f"age_ge_{age}_split168"] = {"early": early, "recent": recent}
+            print(f"[{venue}] age>={age} 168h SPLIT  early short_net={early.get('short_only_net_bps','?')}bps  "
+                  f"recent short_net={recent.get('short_only_net_bps','?')}bps  "
+                  f"(recent LS_net={recent.get('ls_net_bps','?')}bps)", flush=True)
+        out[venue] = venue_res
         print(flush=True)
     (SHARED / "c2b_continuous_age_precheck_2026-05-30.json").write_text(json.dumps(out, indent=2))
     print("DONE -> c2b_continuous_age_precheck_2026-05-30.json")

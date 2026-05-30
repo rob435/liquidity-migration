@@ -118,17 +118,17 @@ Two concrete selection leads:
   saturates ~age200 (≈MAR 6, flat to 400); binance monotone to 400. `age400` is the joint-best
   (bybit 6.91 / binance 5.64, ample trades); `age300` conservative; `prior30+age` an optional
   DD-reducer (mild bybit fragility). `age-alone` is the primary robust refinement.
-- **The continuous candidate signal — the age gate rescues it too (c2b, 2026-05-30, EXPLORATORY).**
-  The rolling features carry real cross-venue IC (`rv_168h` −0.13 @168h). c2 had called the
-  continuous decile short "not tradeable" — but that was a **young-name artifact**: in the full
-  panel the top-composite decile *rallies* (+27/+39 bps @168h, the M1 continuation), so the short
-  loses. **Apply `age≥300` and the sign flips** — the top decile *fades* (−44/−50 bps), short-only
-  net is **+29/+35 bps cost-positive cross-venue @168h**, and even the **beta-neutral L/S is
-  positive** (+14/+22 bps). 72h is breakeven → the continuous edge is a **weekly (168h)**
-  phenomenon. The young-listing squeeze poisoned *both* the discrete and continuous signals; the
-  age-gated continuous short justifies building the C0 engine (multi-day, **operator-gated** —
-  [preregistration/exploratory/c0-continuous-engine-scope-2026-05-30.md](preregistration/exploratory/c0-continuous-engine-scope-2026-05-30.md)).
-  EXPLORATORY look-ahead evidence only (no execution/capacity/funding) — warrants the build, not a P&L.
+- **The continuous candidate signal (c2b, 2026-05-30, EXPLORATORY) — age gate flips it on the
+  full window but the edge is RECENT-REGIME-ONLY.** The rolling features carry real cross-venue IC
+  (`rv_168h` −0.13 @168h). c2's decile short was "not tradeable" because the top-composite decile
+  *rallies* in the full panel (young-name M1 continuation). Applying `age≥300` flips the full-window
+  average to cost-positive @168h (short-only +29/+35 bps; beta-neutral L/S +14/+22). **But the
+  recent/early split refutes the robust reading**: even the beta-neutral L/S is **negative in the
+  early 26 months** (−14/−12 bps) and positive only in the recent ~12 (2025–26 alt-bear, largely
+  short-beta). So the continuous age-gated short is **regime-conditional, not all-weather** → the
+  C0 build is **not justified** on this (contrast the discrete strategy, all-thirds-positive incl.
+  early). Honest null for the strong "rescues the continuous architecture" claim.
+  ([preregistration/exploratory/c0-continuous-engine-scope-2026-05-30.md](preregistration/exploratory/c0-continuous-engine-scope-2026-05-30.md))
 
 **Cross-venue asymmetry is the standing caveat:** bybit MAR 2.76 vs binance 0.28 (and
 binance is funding-missing, i.e. optimistic). The edge is also front-loaded (recent third
