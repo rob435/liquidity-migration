@@ -22,8 +22,12 @@ split that P3-1b/P3-3/P3-4 validated, as a deployable fixed threshold. The media
 from the precompute and recorded here BEFORE the backtest. (A single pre-specified rule — the
 median split — per venue; no threshold search.)
 
-- bybit M = `<filled post-precompute>`
-- binance M = `<filled post-precompute>`
+- bybit M = **+0.137677** (median over 576 age300 trades; frac≤med=0.50)
+- binance M = **+0.114803** (median over 306 age300 trades; frac≤med=0.50)
+
+(Note: the median is positive — age300 candidates are idiosyncratically strong, so a naive 0.0
+cut would over-filter; the median is the principled 50/50 split the precheck validated. Signal:
+bybit 445,985 / binance 406,002 rows in `<root>/residual_momentum.parquet`.)
 
 ## Hypothesis + predicted direction
 
