@@ -7,8 +7,8 @@ description: "Correct command invocations for the liquidity_migration CLI: the v
 
 Entry point: `python -m liquidity_migration [--config ...] [--data-root ...] <subcommand>`.
 
-Always check help before constructing a run — the `volume-events` parser alone
-has 100+ flags:
+Always check `--help` before constructing a run — the parsers are large and
+change often:
 
 ```bash
 python -m liquidity_migration --help
@@ -26,9 +26,9 @@ python -m liquidity_migration <subcommand> --help
   or microstructure artefact.
 - **Live demo ledgers** → `data/bybit-demo-event`. NEVER point a research run
   here, and never point demo ledgers at the research root.
-- **Paper-shadow ledgers** → `data/bybit-paper-event`. The
-  `reconcile-paper-demo` and `reconcile-long-paper-demo` commands compare
-  these against the demo ledgers to measure execution slippage.
+- **Paper-shadow ledgers** → `data/bybit-paper-event`. Reconciliation is fully
+  scripted — run `bash scripts/reconcile.sh` (skill: `pit-reconcile`) for the
+  demo↔paper↔backtest↔Bybit reconcile; do not hand-assemble `reconcile-*` calls.
 - **Pristine OOS** → forward demo / paper ledgers only. There is no internal
   OOS surface; both per-venue roots span their full available history. Cite
   the forward ledger as the OOS evidence.
@@ -38,10 +38,12 @@ python -m liquidity_migration <subcommand> --help
 
 ## Canonical commands
 
-Active strategy backtest:
+Research cell / sweep — the official path (fills the ~30 baseline flags; do not
+hand-assemble `volume-events` flags):
 
 ```bash
-python -m liquidity_migration --config configs/volume_alpha.default.yaml volume-events
+bash scripts/volume_events_cell.sh --venue <bybit|binance> --cell-id <id> \
+  --phase <tag> --overrides 'KEY=VAL,…'   # DRY_RUN=1 to preview
 ```
 
 Build/verify the per-venue full-PIT data roots (archives old roots, builds both
@@ -60,31 +62,25 @@ python -m liquidity_migration --data-root data/bybit-demo-event \
   --config configs/volume_alpha.default.yaml event-demo-cycle
 ```
 
-## Subcommands (20 — run `--help` for the authoritative list)
+## Subcommands
 
-`download-data` · `download-binance-proxy` · `data-layer-audit` ·
-`discover-universe` · `archive-manifest` · `archive-download-klines` ·
-`archive-download-klines-1h` · `archive-download-klines-1h-api` ·
-`volume-events` · `signal-harness` · `event-demo-cycle` · `event-risk-cycle` ·
-`event-risk-ws` · `long-native-event-demo-cycle` · `combined-book-telegram-report` ·
-`reconcile-paper-demo` · `reconcile-long-paper-demo` ·
-`reconcile-demo-bybit` · `reconcile-backtest-paper` · `reconcile-all`
+Run `python -m liquidity_migration --help` for the current, authoritative
+subcommand list — do not maintain a copy here.
 
 ## Guardrails
 
 - `volume-events` requires full PIT by default; `--allow-partial-pit` is only
   for explicitly biased diagnostics, and that run must be labelled biased.
-- Demo order submission is allowed only for `STRATEGY_PROFILE=promoted` —
-  the runner refuses `SUBMIT_ORDERS=1` otherwise. Demo vs mainnet is the
-  `DEMO` / `REAL_MONEY` `.env` toggle (`bybit.resolve_private_credentials`),
-  which defaults to demo; keep it on demo without explicit owner instruction.
-- Event-driven entries are the strategy path; fixed-day rebalance grids are
-  legacy benchmarks only. Do not revive the retired daily-close short-fade.
-- The deployed signal is the daily-close signal (daily-close features, +1h entry
-  delay). A **continuous / sub-hourly** variant (rolling-window features, finer
-  bars, 0h delay) is under research (see `docs/research_plan_selection_execution.md`);
-  its faster-cadence path is NOT the deployed daily path and is research-gated (needs
-  OOS re-validation before it can influence real-money work).
+- Demo order submission is allowed only for the deployed `STRATEGY_PROFILE`
+  (see STATE.md > What's running) — the runner refuses `SUBMIT_ORDERS=1`
+  otherwise. Demo vs mainnet is the `DEMO` / `REAL_MONEY` `.env` toggle
+  (`bybit.resolve_private_credentials`), which defaults to demo; keep it on demo
+  without explicit owner instruction.
+- Event-driven entries are the strategy path; legacy fixed-day rebalance-grid
+  benchmarks are retired — do not revive them or cite their results as evidence.
+- What is deployed vs. research-gated (the daily-close signal vs. the continuous
+  variant) is tracked in STATE.md and `docs/research_plan_selection_execution.md`
+  — defer to them.
 - Every serious run must leave enough report output to audit the decision.
 - Before constructing a run, apply the **backtest-integrity** skill. After a
   run, read the output with the **research-report** skill before calling it a

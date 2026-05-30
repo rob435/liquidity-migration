@@ -70,10 +70,10 @@ per venue. **Run this first.**
 with a selection-refinement study instead.)
 
 **Question.** The continuous candidate signal carries real, robust cross-venue
-**selection IC** (c1 precheck: composite ≈ −0.08 both venues at 24/72/168h; `rv_168h`
-strengthening) but was only ever tested with **immediate** entry (c2 → "not
-tradeable"). Does the **fade-confirmation execution** rescue it — i.e. is c2's null a
-timing-the-top artifact, exactly like the daily case?
+**selection IC** (c1 precheck; as-of-dated magnitudes in `research_summary.md`) but was
+only ever tested with **immediate** entry (c2 → "not tradeable"). Does the
+**fade-confirmation execution** rescue it — i.e. is c2's null a timing-the-top artifact,
+exactly like the daily case?
 
 **Method.** Extend the continuous candidate path (the c1/c2 rolling-feature pipeline)
 to emit candidate events, then run the **same pop-then-giveback execution** on those
@@ -124,24 +124,24 @@ one-paragraph negative-trigger note — do not look for excuses to run a gated p
 
 ## Decision rule (unchanged — do not re-derive)
 
-Three-tier demo-arbiter from [STATE.md](../STATE.md): Tier-1 investigation (keep
-studying), Tier-2 demo-candidate (→ forward demo; **return positive both venues +
-pooled MAR Δ > +0.1 + neither venue worse than −0.5 MAR + ≥30 by / ≥20 bn trades**;
-fragility diagnostics reported, non-blocking), Tier-3 real-money (STRICT, not
+Three-tier demo-arbiter — the **exact bars live in [STATE.md](../STATE.md)**
+("Decision rules currently binding"); do not copy the numbers here. Tier-1
+investigation (keep studying), Tier-2 demo-candidate (→ forward demo; loose,
+fragility diagnostics reported non-blocking), Tier-3 real-money (STRICT, not
 loosened). MAR-primary, Sharpe-secondary. `scripts/r1_robustness.py --sweep-tag <TAG>`
 emits the Tier-2 verdict + fragility from per-cell ledgers. **No further loosening to
 rescue a near-miss.**
 
 ## Foundation: the R4 risk model (Tier-3 residual-Sharpe)
 
-The Tier-3 real-money gate requires **residual Sharpe ≥ +0.3 (factor-model residual)** —
-i.e. a cell's alpha must survive after stripping exposure to known factors. That machinery
-is **already built, validated, and live on `main`**: `liquidity_migration/risk_model.py`
-holds a validated **6-factor** model (`btc_beta`, `xs_rank_ret_30d`, `realized_vol_rank`,
-`funding_rate_z`, `liquidity_rank`, `premium_index_z`) plus `decompose_strategy_pnl`, which
-takes a cell's trade ledger and returns its residual after factor decomposition. It passes
-an honest within-day permutation-null variance-capture test (p=0.0 both venues) — not the
-in-sample R²≥0 tautology. Validation record:
+The Tier-3 real-money gate requires a **positive factor-model residual Sharpe** (exact
+bar in [STATE.md](../STATE.md) / the r4 verdict receipt) — a cell's alpha must survive
+after stripping exposure to known factors. That machinery is **already built, validated,
+and live on `main`**: `liquidity_migration/risk_model.py` holds the validated factor model
+(see the module for the live factor set) plus `decompose_strategy_pnl`, which takes a
+cell's trade ledger and returns its residual after factor decomposition. It passes an
+honest within-day permutation-null variance-capture test on both venues — not the
+in-sample R²≥0 tautology. Validation record (with the as-of-dated statistics):
 [preregistration/r4-risk-model-verdict.md](preregistration/r4-risk-model-verdict.md).
 
 So R4 is **not an experiment in this plan** — it is the *foundation under* the Tier-3 gate

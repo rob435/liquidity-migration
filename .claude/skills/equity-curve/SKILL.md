@@ -5,24 +5,24 @@ description: "Produce the long-only (long_native v11a) sleeve's equity curve and
 
 # Long-only sleeve equity curve + official PNG
 
-The "long-only system" in this repo is the **long_native v11a sleeve**
-(`liquidity_migration/long_native.py`, backtest entry `run_long_native_research`).
-It is crypto-native and long-only — separate from the volume-events short sleeve.
-
-## Run it — NO CLI subcommand; use the sweep script
-
-`run_long_native_research` is **not** wired into `python -m liquidity_migration`.
-Only the forward demo (`long-native-event-demo-cycle`) is. Drive the backtest via:
+The one command for the long-only (long_native v11a) equity curve + the official
+strategy-vs-BTC PNG is `scripts/long_native_sweep_fc_min_day.py`. Use it instead of
+hand-assembling a `long_native` run — there is **no CLI subcommand** (only the
+forward demo `long-native-event-demo-cycle` is wired into `python -m liquidity_migration`).
 
 ```bash
 .venv/bin/python scripts/long_native_sweep_fc_min_day.py \
   --data-root <ROOT> \
-  --values 0.15 \
+  --values <FC_MIN_DAY_RETURN> \
   --report-subdir long_native_v11a_rerun
 ```
 
-- `--values 0.15` is the canonical v11a `fc_min_day_return` default. One value =
-  one run; the script overrides only that param on `_v11a_long_native_config()`.
+The v11a sleeve (`liquidity_migration/long_native.py`, `run_long_native_research`)
+is crypto-native and long-only — separate from the volume-events short sleeve.
+
+- `--values` takes the `fc_min_day_return` value(s) to sweep; pass the canonical
+  v11a default (defined in `_v11a_long_native_config()`) for the production curve.
+  One value = one run; the script overrides only that param.
 - `--config` (default `configs/volume_alpha.default.yaml`) supplies only the
   **cost model**; the strategy config is always v11a.
 - Runtime ≈ 100–200 s per venue. Re-run instead of trusting a stale cached
@@ -55,8 +55,10 @@ live there).
 
 ## Canonical v11a profile (for context when reporting)
 
-- Universe: top **10** by **90d** turnover, PIT-recomputed daily; **30d** BTC
-  regime gate. Distinct symbols actually traded > 10 because top-10 membership
+- Universe / regime parameters (universe size, turnover lookback, BTC regime
+  gate) come from `_v11a_long_native_config()` in `liquidity_migration/long_native.py`
+  — read them there rather than trusting a copy here. Membership is PIT-recomputed
+  daily, so the count of distinct symbols traded exceeds the universe size as it
   rotates over the years.
 - In practice fires `fomo_chase` events; the docstring's capitulation_rebound /
   funding_squeeze / volume_resurrection patterns fire 0 under v11a.
@@ -77,11 +79,11 @@ From `long_native._run_label`, best → worst:
   claims symbol-dates the 1h klines don't cover).
 - `pit_required_missing_manifest` — archive manifest empty.
 
-Diagnose a gap by calling `long_native._full_pit_universe_pass` /
-`_full_pit_universe_error` on the root's `klines_1h` + `archive_trade_manifest`
-(both `_exclude_symbols`-filtered with `DEFAULT_EXCLUDED_SYMBOLS`). The error
-message lists `missing_date_symbols` and a sample. Fix Bybit gaps with
-`archive-download-klines-1h`; fix Binance funding gaps by backfilling funding.
+A PIT failure means a kline/manifest coverage gap; the run_label and report name
+it. To refresh membership and re-check coverage, follow the **`pit-reconcile`**
+skill (it drives `scripts/reconcile.sh`, which refreshes the archive manifest and
+checks coverage). Fix Bybit kline gaps with `archive-download-klines-1h`; fix
+Binance funding gaps by backfilling funding.
 
 ## Cross-venue read
 
@@ -95,4 +97,6 @@ venue funding-partial, the other funding-modeled; different history start).
 - `backtest-integrity` — apply before trusting any run; the label rules above
   ARE that standard for this sleeve.
 - `research-report` — interpret the JSON/MD report and assign a run label.
+- `pit-reconcile` — refresh PIT membership / diagnose manifest-vs-kline coverage
+  gaps (the official fix for a PIT-failed run_label).
 - `run-strategy` — the short/volume-events sleeve and the rest of the CLI.

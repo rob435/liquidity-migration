@@ -48,12 +48,14 @@ never real money. Read `docs/pit_gate.md` for the full design.
 - `--force` — run the backtest even if coverage is stale.
 - `--bybit-root PATH` / `--config PATH` / `--paper-root` / `--demo-root` / `--vps`.
 
-## What it is actually doing (so you can run a step by hand)
+## What the script does (so you don't re-derive it)
 
-- Refresh membership: `python -m liquidity_migration --data-root ~/SHARED_DATA/bybit_full_pit archive-manifest --end <today+2>`
-- Coverage check: `python -c "from liquidity_migration.pit_coverage import coverage_status, format_coverage; print(format_coverage(coverage_status('~/SHARED_DATA/bybit_full_pit')))"`
-- Backtest: `python -m liquidity_migration --config configs/volume_alpha.default.yaml --data-root ~/SHARED_DATA/bybit_full_pit volume-events --start <fwd-150d> --end <today+1> --report-dir <dir> --allow-partial-pit`
-- Reconcile: `python -m liquidity_migration reconcile-all --paper-data-root data/bybit-paper-event --demo-data-root data/bybit-demo-event --backtest-trades-csv <csv> --skip-bybit --output-dir <out>`
+In order: refreshes the archive manifest (PIT membership) on the Bybit research
+root, prints the PIT coverage table and aborts a stale strict run, runs the
+promoted `volume-events` backtest over the forward window, then `reconcile-all`
+(backtest↔paper↔demo, `+--with-bybit` for the venue leg), and prints the headline.
+Each step maps to a flag above — you should not need to run any step by hand; run
+`scripts/reconcile.sh` (or `--dry-run` to see the exact commands).
 
 ## Guardrails
 

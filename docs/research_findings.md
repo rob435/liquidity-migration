@@ -4,19 +4,15 @@
 research record is **[docs/research_summary.md](research_summary.md)**; live /
 operational state is **[STATE.md](../STATE.md)**.
 
-## Verdict (corrected 2026-05-29)
+## Verdict
 
-**The strategy is not a null — and "Round 2 = documented null" has been
-retracted.** That conclusion was substantially a *methodology artifact*
-(worst-case `bar_extreme` stop fills + `max_active=3` over-concentration + a ×3 /
-45 bps cost stacked together) compounded by a *selection/execution conflation*.
-
-Under the realistic capped stop fill (`bar_extreme_capped`, 10%) at
-`max_active=12`, the **daily** strategy — which uses the fade-confirmation
-execution — is **positive on both venues in-sample** (bybit +37.8% / −27.5% DD /
-Sharpe 0.70; binance −4.7% net but **gross +16.1%**, ~breakeven at honest 15 bps).
-Both venues are gross-positive. It remains in-sample; the forward demo (since
-2026-05-22) is the arbiter; nothing is promoted; real money stays off.
+The signal is statistically real but regime-conditional; the earlier "Round 2 =
+documented null" verdict has been **retracted** (substantially a methodology
+artifact). Under realistic capped fills the daily strategy is gross-positive on
+both venues in-sample. See **[docs/research_summary.md](research_summary.md)** for
+the dated postmortem and the figures, and **[STATE.md](../STATE.md)** for live
+state. Results remain in-sample; the forward demo is the arbiter and real money
+stays off.
 
 ## The frame that matters
 

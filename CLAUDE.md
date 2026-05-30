@@ -25,7 +25,7 @@ regime-conditional. All research findings are consolidated in
 
 ## Running
 
-- CLI: `python -m liquidity_migration <subcommand>` (20 subcommands; see `--help`).
+- CLI: `python -m liquidity_migration <subcommand>` (run `--help` for the list).
 - Tests: `.venv/bin/python -m pytest -q`.
 
 ## Mandatory pre-push gate (CI parity)
@@ -44,18 +44,16 @@ failure — pushing broken code is operator pain. No exceptions.
 
 ## Working here
 
-- Project skills in `.claude/skills/` load automatically when relevant:
-  `backtest-integrity` (methodology gate), `run-strategy` (CLI invocations),
-  `research-phase-runner` (multi-phase workflow), `research-report` (report
-  interpretation), `repo-map` (codebase navigation).
+- Project skills in `.claude/skills/` auto-load by description when relevant
+  (methodology gate, CLI invocations, reconcile, equity curve, research workflow,
+  report interpretation, repo navigation). `ls .claude/skills/` for the current set.
 - The `liqmig-research` MCP server exposes:
   - `current_state` — STATE.md, in 60 seconds
   - `data_roots` — canonical data-root index
   - `list_reports`, `parse_report`, `audit_run_artifacts` — report tooling
-  - `apply_decision_rule(summary_csv)` — programmatic verdict (legacy strict bar; the Round-2 Tier-2 demo-candidate verdict comes from `scripts/r1_robustness.py`)
-- Research-phase helpers (no skills needed):
-  - `scripts/volume_events_cell.sh --venue X --cell-id Y --phase Z --overrides 'K=V,…'`
-    — runs `volume-events` with production-baseline flags filled in.
-  - `scripts/apply_decision_rule.py SUMMARY.csv` — CLI form of the
-    decision-rule analyzer; produces a per-cell verdict table.
+  - `apply_decision_rule(summary_csv)` — programmatic verdict (legacy strict Sharpe bar; the Tier-2 demo-candidate verdict comes from `scripts/r1_robustness.py`; tier definitions in STATE.md)
+- Research + reconcile helper scripts (`volume_events_cell.sh`, `r1_robustness.py`,
+  `apply_decision_rule.py`, `reconcile.sh`, …) are driven by the `research-phase-runner`
+  and `pit-reconcile` skills; STATE.md "Helpers" is the canonical roster. Use those
+  rather than hand-assembling the calls.
 - For architecture questions, read `graphify-out/GRAPH_REPORT.md` first.

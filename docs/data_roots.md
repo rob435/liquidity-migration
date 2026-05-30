@@ -1,16 +1,14 @@
 # Data Roots
 
-Updated 2026-05-29 — per-venue full-PIT roots **rebuilt and present**.
+Canonical index of which data root to use (research full-PIT vs. live demo/paper
+vs. forward OOS). Whether a root is currently built/present is live state — see STATE.md.
 
-## Current local state
+## The roots are data, not code
 
-As of 2026-05-29 both per-venue full-PIT roots (`~/SHARED_DATA/bybit_full_pit`,
-`~/SHARED_DATA/binance_full_pit`) are **rebuilt and present**, and Round 2 evidence
-has been generated against them (STATE.md records R1/R2/R3/R4/R5/R13 COMPLETE on
-full-PIT). The roots are data, not code — not committed. (Historical: they were
-deleted 2026-05-27 during a doc-cleanup session; the rebuild scripts below are the
-recovery path if a root is ever lost again.) `binance_full_pit_strategy` (~1.5 MB of
-derived long-sleeve reports + the canonical funding dataset) is a separate, intact root.
+The per-venue full-PIT roots (`~/SHARED_DATA/bybit_full_pit`,
+`~/SHARED_DATA/binance_full_pit`) are data, not code — not committed. If a root is
+ever lost, the rebuild scripts below are the recovery path. `binance_full_pit_strategy`
+(derived long-sleeve reports + the canonical funding dataset) is a separate root.
 
 ## Per-venue full-PIT working datasets (intended state)
 
@@ -33,7 +31,7 @@ signal, disagreement = regime/microstructure artefact.
 Both roots are perpetuals-only by construction. The build scripts assert
 USDT-quoted symbols and fail loudly if any non-USDT symbol slips through.
 
-Rebuild on any machine (idempotent, resumable, takes ~17-31 hours unattended):
+Rebuild on any machine (idempotent, resumable):
 
 ```bash
 bash scripts/build_full_pit_roots.sh        # full pipeline
@@ -75,9 +73,9 @@ The parallel paper (dry-run) runner uses its own separate root
 (`data/bybit-paper-event`). It shadows the demo runner — same strategy
 profile, universe, and cadence — but submits no orders and records
 idealized fills at the signal price. Comparing the paper and demo ledgers
-measures demo-vs-paper execution slippage; the `reconcile-paper-demo` CLI
-command does that comparison for the short sleeve; `reconcile-long-paper-demo`
-does the same for the long sleeve.
+measures demo-vs-paper execution slippage. Run `bash scripts/reconcile.sh`
+(skill: `pit-reconcile`) for the full demo↔paper↔backtest↔Bybit reconcile — it is
+the only reconcile entrypoint; do not hand-assemble the `reconcile-*` calls.
 
 Do not use ad hoc current-universe or temporary recent roots for promotion
 evidence. Current-universe research is biased by construction unless

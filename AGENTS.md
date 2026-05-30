@@ -4,24 +4,20 @@
   block an improvement on reproducing prior output byte-for-byte. Performance /
   refactor changes are gated by **numerical equivalence within a tight tolerance**
   (`np.allclose`, NaN positions matching), NOT bit-identical output — last-bit
-  float-order differences carry no alpha. As of 2026-05-29 the earlier "Round 2 =
-  documented null" verdict is **retracted** — it was substantially a methodology artifact
-  (worst-case stop fills + `max_active=3` over-concentration + a ×3 cost) plus a
-  selection/execution conflation (see STATE.md + `docs/research_summary.md`). The strategy
-  is a SELECTION signal (the liquidity-migration event = candidate pool) + an EXECUTION
-  signal (short the *confirmed fade* — pop then giveback — NOT the top; a fade strategy,
-  not catch-the-top). Under realistic capped fills at `max_active=12` the daily strategy is
-  gross-positive on both venues in-sample; the continuous candidate carries real selection
-  IC and the fade-confirmation execution layer is the open lead (forward plan:
-  `docs/research_plan_selection_execution.md`). Defer current direction to STATE.md. What
-  stays strict is the real-money promotion gate (forward demo + the cross-venue bar is the
-  arbiter; there is no internal pre-2023 OOS root — see `docs/data_roots.md`) and the
+  float-order differences carry no alpha. The strategy is a SELECTION signal (the
+  liquidity-migration event = candidate pool) + an EXECUTION signal (short the
+  *confirmed fade* — pop then giveback — NOT the top; a fade strategy, not
+  catch-the-top). Current direction, status, and the (retracted) Round-2-null
+  postmortem live in STATE.md + `docs/research_summary.md` — defer to them; don't
+  restate dated numbers or results here. What stays strict is the real-money
+  promotion gate (forward demo + the cross-venue bar is the arbiter; there is no
+  internal pre-2023 OOS root — see `docs/data_roots.md`) and the
   methodology-correctness gates (PIT / no look-ahead / no survivorship — those are
   correctness bugs, not restrictions to loosen).
 - Be honest and call out wrong decisions directly.
 - Ask for exact intent, constraints, and success metrics when a request is vague.
 - Do not optimize for a vague goal; define the objective before expensive research.
-- The liquidity-migration short signal is statistically real but regime-conditional; the strategy is under active research — see `docs/research_findings.md`. It is not deployed, and the standalone strategy is not deployable as-is. Do not make deployment or promotion claims unless the regime overlay is validated out-of-sample and funding is costed.
+- The liquidity-migration short signal is statistically real but regime-conditional; the strategy is research-stage — see `docs/research_findings.md`. A frozen `promoted` profile runs on demo + paper only (forward-demo arbiter); nothing is promoted to real money. Do not make real-money deployment or promotion claims — the bar is the three-tier demo-arbiter gate in STATE.md (Tier-3 pass + funding costed).
 - A real-money (mainnet) execution path exists; the account is a `.env` toggle (`DEMO` / `REAL_MONEY`, mutually exclusive) read by `bybit.resolve_private_credentials()`, defaulting to demo. Keep it on demo — do not set `REAL_MONEY=true` without explicit owner instruction. The strategy is not validated for real money.
 - Telegram may notify; it must not approve or submit orders.
 - Serious research runs should leave enough report output to audit the decision.

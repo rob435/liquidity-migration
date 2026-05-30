@@ -32,26 +32,25 @@ and execution model. Anything else is a bug report, not alpha.
       spread/slippage, and capacity limits.
 - [ ] Every adaptive exit, trailing stop, basket stop, cooldown, and kill
       state starts from the state a live executor would have at activation
-      (warm-start bug = error #15).
+      (warm-start bug — the warm-started-state error in the standard).
 - [ ] Output has a trade ledger, equity curve, split metrics, drawdown,
       worst-day loss, config/param hash, data-root identity, research-log entry.
 - [ ] Expensive grids checkpoint or stage — no multi-hour all-or-nothing runs.
 - [ ] Any strange synchronization (e.g. mass same-minute exits) is stop-work
       until explained by code and market data.
 
-## The 25 errors — fast scan
+## The error taxonomy — fast scan
 
-1 future universe selection · 2 future info in signals · 3 instantaneous
-trading · 4 revised / non-PIT data · 5 ignored capacity · 6 trading fees ·
-7 slippage · 8 market impact · 9 borrow availability · 10 borrow/funding fees ·
-11 trading bans & venue restrictions · 12 instrument lifecycle (delist /
-rename / prelist / tick & lot size) · 13 timestamp & resampling leakage ·
-14 impossible OHLC intrabar path · 15 warm-started state · 16 same-code
-illusion (backtest ≠ forward lifecycle) · 17 parameter mining · 18 OOS reuse ·
-19 multiple-testing denial · 20 bad accounting · 21 hidden common risk (one
-basket = one bet) · 22 venue mechanics fantasy · 23 pretty-report bias (no
-artifacts = a screenshot) · 24 unreconciled live drift · 25 all-or-nothing
-compute. Full detail: `docs/backtesting_errors_we_never_repeat.md`.
+The recurring failure modes by theme: **look-ahead** (future universe / future
+info / non-PIT or revised data / timestamp & resampling leakage / impossible
+intrabar path), **cost & capacity** (fees / slippage / market impact / borrow &
+funding / capacity), **venue reality** (trading bans / instrument lifecycle /
+venue mechanics), **state & lifecycle** (warm-started state / backtest ≠ forward
+lifecycle), and **inference** (parameter mining / OOS reuse / multiple-testing /
+bad accounting / hidden common risk / pretty-report bias / unreconciled live
+drift / all-or-nothing compute). The canonical, **numbered** list is the single
+source of truth — `docs/backtesting_errors_we_never_repeat.md`. Read it; do not
+reproduce the count or numbering here.
 
 ## Run labels — always attach exactly one
 
@@ -97,12 +96,16 @@ If any answer is weak, the backtest is not ready to influence real-money work.
   signal under research, the decision timestamp is the rolling bar-close and the entry
   delay may be 0 *only because the feature is already a causal trailing window*
   (research-gated) — never relax the delay for the daily profile.
-- `volume-events` requires full PIT by default; `--allow-partial-pit` is for
-  explicitly biased diagnostics only, and that run must then be labelled biased.
+- Run the `volume-events` backtest via `scripts/volume_events_cell.sh` (it fills
+  the ~30 baseline flags) — do not hand-assemble them. The Tier-2 verdict comes
+  from `scripts/r1_robustness.py`; the legacy strict Sharpe bar from
+  `scripts/apply_decision_rule.py`. `volume-events` requires full PIT by default;
+  `--allow-partial-pit` is for explicitly biased diagnostics only, labelled biased.
 - Funding is a known gap on roots without a funding dataset — mark such runs
   fee/slippage stressed but funding-missing.
-- The fixed daily-close short-fade path is retired; do not revive it or cite
-  its old profit-protection results as evidence for the event-driven system.
+- Legacy fixed-day rebalance-grid benchmarks are retired — do not cite their
+  results as evidence for the event-driven system. (The fade-confirmation
+  *execution* is the live strategy, a different thing — see STATE.md.)
 - Demo/forward execution is execution evidence only, never alpha proof.
 
 The `liqmig-research` MCP server's `audit_run_artifacts` tool checks artifact

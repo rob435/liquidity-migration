@@ -17,23 +17,24 @@ current binding decision rules.
 The strategy is two separable signals: **selection** (the liquidity-migration event
 picks a candidate pool) and **execution** (short the *confirmed fade* — pop then
 giveback — not the top). It is a **fade strategy, not a catch-the-top strategy**. The
-plan tests the two signals separately; the old "null" measured one worst-case
-execution and blamed the signal. Do not re-introduce that conflation.
+plan tests selection and execution as separate signals — never collapse them into a
+single hard-coded execution.
 
 ## The decision framework — three-tier, demo-arbiter
 
-Ordered by how expensive a false positive is:
+Ordered by how expensive a false positive is. **The exact thresholds are owned by
+STATE.md ("Decision rules currently binding") — read them there; do not copy the
+numbers here (that is how they drift).**
 
-1. **Investigation** — keep studying? Loose: MAR Δ > 0 on the majority of venues, no
-   return sign-flip, trade minimums.
-2. **Demo-candidate** (→ forward demo) — LOOSE: **return positive on both venues +
-   pooled MAR Δ > +0.1 + neither venue worse than −0.5 MAR + ≥30 by / ≥20 bn trades.**
-   Fragility diagnostics (bootstrap p5, leave-one-month-out, sub-period thirds,
-   residual Sharpe) are **reported, NOT blocking** — they set demo order.
+1. **Investigation** — keep studying? Loose (MAR-Δ direction + trade minimums).
+2. **Demo-candidate** (→ forward demo) — LOOSE: positive return both venues + a
+   small positive pooled-MAR-Δ bar + a per-venue floor + trade minimums. Fragility
+   diagnostics (bootstrap p5, leave-one-month-out, sub-period thirds, residual
+   Sharpe) are **reported, NOT blocking** — they set demo order.
 3. **Real-money** (demo → mainnet) — STRICT, NOT loosened: forward-demo OOS pass
-   (≥30d forward demo + daily paper reconciliation) + bootstrap pooled MAR-Δ p5 ≥ 0
-   + residual Sharpe ≥ +0.3 + stress pass + capacity. There is no internal pre-2023
-   OOS root — pristine OOS is the forward demo/paper ledgers (`docs/data_roots.md`).
+   + bootstrap pooled MAR-Δ left-tail ≥ 0 + positive factor-residual Sharpe +
+   stress + capacity. There is no internal pre-2023 OOS root — pristine OOS is the
+   forward demo/paper ledgers (`docs/data_roots.md`).
 
 Principle: permissive where being wrong is free (backtest→demo is paper), strict where
 it costs real money. The forward demo is both the multiple-testing arbiter and the OOS
@@ -53,9 +54,8 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
    `scripts/_sweep_runtime.py`-based dispatcher for the experiment (the old R-phase
    dispatchers were deleted — `_sweep_runtime.py` is the reusable primitive: a
    dispatcher declares `BASELINE_PARAMS` + a list of `Cell`s and imports it).
-   **Full-PIT sweeps run at `SWEEP_MAX_WORKERS=1 POLARS_MAX_THREADS=8`** — one
-   full-PIT cell peaks ~23 GB, so 8 workers OOMs the box. Only light (non-full-PIT)
-   sweeps use `SWEEP_MAX_WORKERS=8 POLARS_MAX_THREADS=4`. Always run **both venues**.
+   Full-PIT sweeps are memory-bound — use the worker/thread settings in STATE.md
+   ("full-PIT op note"); over-parallelizing OOMs the box. Always run **both venues**.
 
 4. **Apply the decision rule.**
    ```bash
@@ -63,8 +63,8 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
    ```
    emits the pooled-MAR-Δ Tier-2 verdict (engine-DD MAR) + bootstrap p5,
    leave-one-month-out, and sub-period thirds from the per-cell ledgers.
-   `scripts/apply_decision_rule.py <SUMMARY_CSV> --control <CONTROL_CELL>` is the
-   **legacy strict (Sharpe) bar** — reference only; not the promotion gate.
+   `scripts/apply_decision_rule.py` is the **legacy strict (Sharpe) bar** —
+   reference only, not the promotion gate (run with `--help` for args).
    Do not move thresholds downward to rescue a cell (see non-negotiables).
 
 5. **Write the verdict.** Dated receipt under `docs/preregistration/<YYYY-MM-DD>-<exp>-verdict.md`
@@ -94,12 +94,10 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
 
 ## Useful MCP tools
 
-- `current_state()` — STATE.md as structured data.
-- `apply_decision_rule(summary_csv, control_cell)` — programmatic legacy-bar verdict
-  (reference only; the Tier-2 verdict is `r1_robustness.py`).
-- `parse_report(path)` — `volume_event_research_report.md` → headline metrics.
-- `audit_run_artifacts(path)` — integrity-standard artifact completeness.
-- `data_roots()` — current data-root index.
+The `liqmig-research` MCP server exposes report/state tooling (`current_state`,
+`parse_report`, `audit_run_artifacts`, `data_roots`, …) — see STATE.md "Helpers"
+for the current list. `apply_decision_rule` is the legacy-bar verdict (reference
+only); the Tier-2 verdict is `scripts/r1_robustness.py`.
 
 ## Communication style during an experiment
 

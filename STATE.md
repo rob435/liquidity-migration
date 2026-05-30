@@ -10,28 +10,24 @@ originals). This file = live/operational state + the binding decision rules.
 ## Current status (one paragraph)
 
 Bybit (+Binance) liquidity-migration **short**, research-stage — the live demo + paper run
-a frozen "promoted" profile; NOT real money. Round 2 initially concluded a documented null,
-but on **2026-05-29 that was shown to be substantially a methodology artifact** — worst-case
-`bar_extreme` stop fills + `max_active=3` over-concentration + a ×3 (45 bps) cost stacked
-together. Under the realistic capped stop fill at `max_active=12`, the daily strategy is
-**positive on both venues in-sample** (bybit +37.8% / −27.5% DD / Sharpe 0.70; binance
-−4.7% net but gross +16.1%, ~breakeven at honest 15 bps). **Framing (corrected):** the
-strategy is a SELECTION signal (the liquidity-migration event = candidate pool) + an
-EXECUTION signal (enter on the fade-confirmation — pop then giveback, "fade the fade", NOT
-short-at-the-top; this is `promoted_quality_squeeze`). The continuous variant carries real
-cross-venue selection IC but was only ever tested with *immediate* entry — its "null" is
-about timing the top, not the signal; applying the execution layer (+ sniper) to it is the
-open lead. **Forward plan (narrow, for the 5950X): `docs/research_plan_selection_execution.md`**
-— E1 execution-premium → E2 continuous+execution → E3 sniper. Full detail:
-**`docs/research_summary.md`**. Nothing is promoted; forward demo is the arbiter.
+a frozen "promoted" profile; NOT real money. The strategy is a SELECTION signal (the
+liquidity-migration event = candidate pool) + an EXECUTION signal (enter on the
+fade-confirmation — pop then giveback, "fade the fade", NOT short-at-the-top; this is
+`promoted_quality_squeeze`). Under realistic capped stop fills at `max_active=12` the daily
+strategy is gross-positive on both venues in-sample; the continuous candidate carries real
+cross-venue selection IC and the fade-confirmation/sniper execution layer is the open lead.
+(The earlier "Round 2 = null" was a methodology artifact — postmortem in research_summary.md.)
+**Forward plan: `docs/research_plan_selection_execution.md`** (E1 → E2 → E3). Numbers + full
+detail live in **`docs/research_summary.md`** (the dated record), not here. Nothing is
+promoted; forward demo is the arbiter.
 
 ## What's running
 
 - **LONG sleeve `div` promotion (2026-05-30, code-complete, not yet deployed):** the
   `MultiStratV1` long-FC profile (`_v11a_long_native_config`) gained the `div`
   risk-engineering — universe 10→50, max_concurrent 5→10, de-risk-only vol-target
-  (0.60 annual, max_scale 1.0). Cross-venue confirmed (Bybit MAR 1.46→1.58, Binance
-  0.91→1.30, both DD lower, trades ~2×). It's portfolio construction, NOT a new signal
+  (0.60 annual, max_scale 1.0). Cross-venue confirmed (both venues MAR up, DD lower,
+  trades ~2×; figures in `docs/preregistration/div-promotion.md`). Portfolio construction, NOT a new signal
   (FC remains the alpha ceiling). Receipt: `docs/preregistration/div-promotion.md`.
   On deploy, the deploy date is the clean pre/post split for the `MultiStratV1` long
   ledger (the strategy_id was kept; a 12h sleeve was tested and **rejected** — additive
@@ -45,17 +41,15 @@ open lead. **Forward plan (narrow, for the 5950X): `docs/research_plan_selection
   — `--entry-policy fixed_delay` vs `promoted_quality_squeeze` on the daily strategy
   (realistic baseline, both venues) to quantify the execution signal's contribution.
   Cheap, decisive, no new code; pre-register before running.
-- **Open action (from the 2026-05-29 re-baseline):** the deployed demo runs `max_active=3`
-  (worst day −36%, DD −87% under honest fills); the research-validated value is
-  `max_active=12` (worst day −4.8%, DD −27.5%). Consider moving the demo to 12 and/or
-  `risk_equal` sizing. See `docs/research_summary.md`.
+- **Open action (from the re-baseline):** the deployed demo runs `max_active=3`; the
+  research-validated value is `max_active=12` (materially lower worst-day + drawdown).
+  Consider moving the demo to 12 and/or `risk_equal` sizing. Numbers: `docs/research_summary.md`.
 
 ## Engine defaults (current)
 
 - **Stop fill: `bar_extreme_capped` (10% cap)** — realistic bad-case (caps adverse slippage
-  at 10% beyond the trigger). Was `bar_extreme` (worst-case wick); that change corrected the
-  Round-2 daily null. `stop` (optimistic) and `bar_extreme` (worst-case) remain selectable
-  via `--stop-fill-mode`.
+  at 10% beyond the trigger). `stop` (optimistic) and `bar_extreme` (worst-case) remain
+  selectable via `--stop-fill-mode`.
 - **Cost:** 100% taker; 15 bps base round-trip; sweeps default to ×3 = 45 bps (conservative).
 - **Full-PIT universe required** (engine aborts on coverage gaps); the PIT gate is scoped to
   each symbol's traded span `[first_kline, last_kline]` (pre-listing/post-delisting empty
@@ -127,8 +121,9 @@ Op note: the 16 GB research box can't run a full `bybit_full_pit` cell (~23 GB).
 - **Skill `research-phase-runner`** (auto-loads) — per-phase run/verdict workflow.
 - **MCP tools** on `liqmig-research`: `current_state`, `data_roots`, `list_reports`,
   `parse_report`, `audit_run_artifacts`, `apply_decision_rule`.
-- **5950X full-PIT op note:** one `volume-events` cell peaks ~23 GB → run sweeps at
-  `SWEEP_MAX_WORKERS=1` (8 OOMs the box); clear `<root>/.locks/*.lock` after any OOM/kill.
+- **Full-PIT op note:** one `volume-events` cell peaks ~23 GB → run full-PIT sweeps at
+  `SWEEP_MAX_WORKERS=1 POLARS_MAX_THREADS=8` (over-parallelizing OOMs the box); clear
+  `<root>/.locks/*.lock` after any OOM/kill.
 
 ## Non-negotiables (every session)
 
