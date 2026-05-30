@@ -124,6 +124,14 @@ Two concrete selection leads:
   age300 +22% / MAR 1.74; age400 stronger). The gate removes losing trades → lower cost drag → the
   edge widens at higher cost. So the discrete age gate is robust to threshold (E2b), regime (E2),
   and cost (E2c) — a thoroughly-validated in-sample Tier-2 demo-candidate. Forward demo is the next gate.
+- **E2d — the age gate is FILL-ROBUST + closes the loop on the original null** ([preregistration/e2d-age-stopfill-2026-05-30.md](preregistration/e2d-age-stopfill-2026-05-30.md)):
+  under worst-case `bar_extreme` wick fills the baseline goes **negative on binance** (−6.8%/MAR −0.18)
+  but the age-gated book stays strongly positive (bybit age300 +67%/MAR 3.85; binance age300 +27%/MAR 2.00).
+  The original Round-2 "documented null" was worst-case fills + over-concentration on a universe that
+  **included young names** (wildest wicks); the age gate (drop them) is the **structural remedy** — it
+  makes the strategy survive even the brutal fill assumption. **In-sample validation is now exhaustive:
+  threshold (E2b) + regime (E2) + cost (E2c) + stop-fill (E2d).** Forward demo (Tier-3, operator-gated)
+  is the only remaining gate.
 - **The continuous candidate signal (c2b, 2026-05-30, EXPLORATORY) — age gate flips it on the
   full window but the edge is RECENT-REGIME-ONLY.** The rolling features carry real cross-venue IC
   (`rv_168h` −0.13 @168h). c2's decile short was "not tradeable" because the top-composite decile
