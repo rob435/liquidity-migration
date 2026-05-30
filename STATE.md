@@ -70,14 +70,17 @@ promoted; forward demo is the arbiter.
     BOTH venues × BOTH eras; wick = noise. Edge is a SELECTION on pump-extremity (extreme-quintile
     beta-neutral short +1.2–1.3% early / +4.4–4.7% recent, gross 48h); shorting all bursts is
     ~breakeven. A NEW extreme-pump-reversal selector (the daily entry is too late). `scripts/i1b_burst_separation.py`.
-  - **I2 (2026-05-30) — signal REAL but the naïve stopped strategy FAILS.** Backtested the frozen
-    extreme-burst short (12% stop, costs, +1h fill). **No-stop:** net-positive both venues × both eras
-    (bybit +1.79% / binance +1.74% per trade @15bps; beats all-bursts) → I1b confirmed real. **With a
-    12% stop:** ~breakeven @15bps, negative @45bps; **33–41% stop-out** (−14% each) eats it; portfolio
-    MAR ~0/neg, recent-skewed. No-stop is undeployable (unbounded short tail). **Rediscovers WHY the
-    strategy shorts the FADE not the top (E1).** **Next = I2b:** fade-confirm execution intraday —
-    short the giveback, not the burst. `scripts/i2_burst_backtest.py`. Net: fill-timing dead (E1),
-    same-selector detection dead (K1a), purpose-built top-short = real signal / not safely monetizable.
+  - **I2 (2026-05-30) — REAL, promising, cross-venue, all-weather lead (with a WIDE stop); NOT validated.**
+    Extreme-burst short under the realistic engine (`scripts/i2_burst_backtest.py`). The daily strategy's
+    **12% stop is too tight** for a catch-the-top short (38% stop-out → fails, recent-only). Fade-confirm
+    (I2b, `i2b_burst_fade_confirm.py`) did NOT rescue (confirm≈1.0, no selectivity). But the **stop-width
+    frontier** is monotonic 12%→50%: **30% stop → MAR 3.2/2.79, DD 14.5/10.7%, all-weather both venues**;
+    50% → MAR 4.9/8.0, DD 16/9%; no-stop best-return but tail blows out (DD 26/20%, −20% day). A wide
+    (30–50%) stop monetizes the real signal with bounded tail (worst-day ~−4%). **Caveats (NOT validated):**
+    Stage-B PROXY; wide-stop gap/fill realism (2% slip optimistic); funding UNMODELED (maybe a credit);
+    back-loaded; STR-factor uniqueness open. **Next = I3** (engine-grade backtest + funding + risk_model
+    residual + STR-factor test; operator-gated). Net: fill-timing dead (E1), same-selector detection dead
+    (K1a), **purpose-built extreme-burst short + wide stop = a genuine lead for an engine-grade I3.**
   - **CV1 (cross-venue, 2026-05-30):** the bybit≫binance gap is **BREADTH + universe
     composition, NOT a weaker per-trade edge** — matched (same coin/day) events corr 0.89,
     binance ≈ bybit; per-trade net near-identical (median +0.34%/+0.27%). binance fires ~½ the

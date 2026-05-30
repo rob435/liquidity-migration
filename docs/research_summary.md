@@ -293,6 +293,30 @@ enough that any risk-bounding stop is hit ~40% of the time. No-stop is positive 
 intraday **giveback**, not the burst — to dodge the continuation that causes the stop-outs. Receipt:
 `docs/preregistration/i2-intraday-burst-selector-2026-05-30.md`.
 
+**I2b + stop-width resolution (2026-05-30) — the WIDE STOP monetizes it → a real (unvalidated) lead.**
+I2b (short the intraday *giveback*, not the burst) did NOT rescue it — confirm-rate ≈1.0 (almost every
+pump gives back 3–8% within 48h, so it barely filters) and it stayed recent-only / early-negative both
+venues. Wrong fix. The RIGHT lever is **stop WIDTH**: the daily strategy's **12% stop is far too tight**
+for a catch-the-top short (38% stop-out). Stop-width frontier (EXTREME subset, both venues, per-trade
+net45 + Stage-B-proxy portfolio MAR/DD):
+- 12% → MAR −0.8 (fails, recent-only); 20% → ~1.45; **30% → MAR 3.2/2.79, DD 14.5/10.7%, ALL-WEATHER
+  (EARLY net45 +0.15/+0.25 both venues)**; 50% → MAR 4.88/8.01, DD 16/9% (better, EARLY +0.44/+0.64);
+  no-stop → best raw return but the **tail blows out** (DD 26/20%, a −20% squeeze-day).
+- **Monotonic 12%→50% (not a fragile sweet-spot):** the tight stop killed a real edge; a wide (30–50%)
+  stop captures it with **bounded** tail (worst-day ~−4%); only removing the stop entirely exposes the
+  −20% day. So the 12% mismatch was the problem — the signal IS monetizable.
+
+**Verdict: a REAL, promising, cross-venue, all-weather intraday lead** — the extreme-pump-burst short +
+a wide (30–50%) stop, MAR ~3–8 / DD 9–16% net of 15–45 bps, both venues, both eras. **NOT validated:**
+(a) **Stage-B PROXY** (entry-day P&L booking, approximate concurrency → needs an engine-grade backtest);
+(b) **wide-stop FILL realism is the key risk** — a 30–50% stop can gap far worse in a squeeze (the 2% slip
+is optimistic); (c) **funding UNMODELED** (plausibly a *credit* here — shorts receive funding during
+pump-long-crowding — or a drag); (d) back-loaded / thin early; (e) **STR-factor uniqueness open** (is this
+the known short-term-reversal factor?). **Next = I3 (pre-registered):** engine-grade backtest (true
+exit-timing/concurrency + capped fills + funding) + `risk_model` residual + STR-factor test;
+operator-gated. A lead worth building properly — **not** a deployable strategy yet. Receipt:
+`docs/preregistration/i3-intraday-burst-engine-2026-05-30.md`.
+
 ## CV1 (2026-05-30): the cross-venue asymmetry is BREADTH + composition, NOT edge-quality
 
 Read-only decomposition of the age-gated ledgers both venues

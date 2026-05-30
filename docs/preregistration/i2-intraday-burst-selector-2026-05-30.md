@@ -78,3 +78,20 @@ in-memory projected-panel approach from I1b). Pre-register any later change to t
 **This RECONCILES with the strategy's founding philosophy (E1): short the confirmed FADE, not the top.** The burst-short is "catch the top," and I2 rediscovers why that's unsafe. **Tier-3 residual (risk_model) not run — moot until a deployable execution exists.**
 
 **Verdict: the naïve intraday-burst top-short is NOT a deployable edge** (real signal, fails realistic risk control). **Next = I2b (pre-register):** apply the proven fade-confirm execution at the intraday scale — use the burst only to *flag the candidate*, then short the intraday **giveback** (pop-then-fade) rather than the burst itself, avoiding shorting into the continuation that causes the stop-outs. If the intraday fade-confirm captures the unstopped edge with a survivable stop, cross-venue/all-weather → real; if not, the honest conclusion is that intraday detection finds a real effect that the existing daily fade-confirm strategy already captures what's safely capturable of. Per-trade tables: `~/SHARED_DATA/i2_{bybit,binance}.trades.csv`. I3/live stays operator-gated.
+
+## UPDATE (2026-05-30) — the verdict above (12% stop) is too narrow: a WIDE stop monetizes it
+
+The "NOT deployable" conclusion was specific to the **12% stop** (the daily strategy's value — too tight
+for a catch-the-top short). Two follow-ups changed the picture:
+- **I2b (fade-confirm intraday, `scripts/i2b_burst_fade_confirm.py`):** did NOT rescue it — confirm-rate
+  ≈1.0 (no selectivity), still recent-only/early-negative both venues. Wrong fix.
+- **Stop-width frontier (`i2_burst_backtest.py --stop-pct`, EXTREME, both venues, net45):** MONOTONIC
+  improvement 12%→50% — 12% MAR −0.8 (fails) → **30% MAR 3.2/2.79, DD 14.5/10.7%, all-weather** → 50%
+  MAR 4.88/8.01, DD 16/9% → no-stop best return but tail blows out (DD 26/20%, −20% day). A wide (30–50%)
+  stop is the signal's natural risk level: all-weather positive both venues × both eras × both costs,
+  **bounded** tail (worst-day ~−4%).
+
+**Revised verdict: a REAL, promising, cross-venue, all-weather intraday lead** (extreme-burst short +
+wide stop) — NOT validated (Stage-B proxy; wide-stop gap/fill realism; funding unmodeled; back-loaded;
+STR-factor open). → **I3** (`docs/preregistration/i3-intraday-burst-engine-2026-05-30.md`): engine-grade
+backtest + funding + risk_model residual + STR-factor test. Operator-gated.

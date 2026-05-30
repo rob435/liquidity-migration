@@ -124,11 +124,17 @@ genuinely different signal needing custom engineering. Reopened.
   early/recent** — `idio` (pump size vs market) ic_neutral −0.28…−0.31, velocity/vol-spike/accel
   −0.11…−0.16, wick = noise. Edge is a SELECTION on pump-extremity (extreme quintile beta-neutral
   short +1.2–1.3% early / +4.4–4.7% recent gross 48h; all-bursts ~breakeven). `scripts/i1b_burst_separation.py`.
-- **I2 (NEXT — the real test):** pre-register + backtest the extreme-pump-burst short under the
-  realistic engine (15 & 45 bps, capped stops, max_active, full-PIT, both venues, early/recent,
-  MAR-primary via r1_robustness) AND residualize through `risk_model.decompose_strategy_pnl` — is it
-  **unique alpha or the known short-term-reversal factor**? The gross-forward edge must survive
-  costs+stops; the edge lives in the extreme subset (selection design matters). Overfitting guard:
-  cross-venue + early/recent + full-distribution reporting. Pre-reg:
-  `docs/preregistration/i2-intraday-burst-selector-2026-05-30.md`.
-- **I3 / live:** gated on I2 + explicit operator go (WS engine + forward demo).
+- **I2 (DONE) — REAL, promising, cross-venue, all-weather lead with a WIDE stop; NOT validated.**
+  Backtested the extreme-burst short (`scripts/i2_burst_backtest.py`). The daily 12% stop is too tight
+  (38% stop-out → fails, recent-only); fade-confirm (I2b) didn't rescue (no selectivity). The **stop-width
+  frontier** is monotonic 12%→50%: **30% → MAR 3.2/2.79 DD 14.5/10.7% all-weather both venues**; 50% →
+  MAR 4.9/8.0 DD 16/9%; no-stop best-return but tail blows out (DD 26/20%). A wide (30–50%) stop monetizes
+  the signal with bounded tail. Caveats (not validated): Stage-B proxy; wide-stop gap/fill realism;
+  funding unmodeled; back-loaded; STR-factor open. Receipt: `docs/preregistration/i2-intraday-burst-selector-2026-05-30.md`.
+- **I3 (NEXT — engine-grade validation; pre-registered):** rebuild the burst short under a true
+  event-driven engine (real exit-timing + concurrency + `bar_extreme_capped` fills + funding), not the
+  Stage-B proxy; r1_robustness Tier-2 + `risk_model.decompose_strategy_pnl` residual + an explicit
+  short-term-reversal-factor control; both venues, early/recent; sweep stop-width transparently. The
+  open risks (wide-stop fill realism, funding sign, proxy→engine drift) are what I3 settles. Pre-reg:
+  `docs/preregistration/i3-intraday-burst-engine-2026-05-30.md`. **Operator-gated** (expensive build).
+- **I4 / live:** gated on I3 + explicit operator go (WS engine + forward demo).
