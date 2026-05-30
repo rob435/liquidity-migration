@@ -61,6 +61,12 @@ promoted; forward demo is the arbiter.
     ~40–85 bps (coin flip: 45% negative, binance-early negative, corr(lead,uplift)≈0).
     **Timing axis closed** (E1=fills, K1a=detection) → alpha is purely SELECTION; **K1b/K2
     cancelled.** Receipts: `docs/preregistration/k{0,1}-intraday-*.md`.
+  - **CV1 (cross-venue, 2026-05-30):** the bybit≫binance gap is **BREADTH + universe
+    composition, NOT a weaker per-trade edge** — matched (same coin/day) events corr 0.89,
+    binance ≈ bybit; per-trade net near-identical (median +0.34%/+0.27%). binance fires ~½ the
+    events + its venue-unique coins are weak marginals (less liquid, weaker spike). Edge is
+    venue-general on shared names → reassuring for robustness. Genuine caveat = recent per-trade
+    mean decay on BOTH venues (tail-driven). `scripts/cv1_cross_venue_decomposition.py`.
   - **E1+E1b — execution is a non-lever:** fade-confirmation adds no robust cross-venue premium
     over immediate entry → selection-dominant; E3 (sniper) dropped.
   - **E2/E2b/c/d — the age gate (lead):** `--liquidity-migration-pit-age-days-min≈300` (drop

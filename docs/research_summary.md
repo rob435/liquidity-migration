@@ -187,10 +187,13 @@ Two concrete selection leads:
   C0 build is **not justified** on this (contrast the discrete strategy, all-thirds-positive incl.
   early). Honest null for the strong "rescues the continuous architecture" claim.
 
-**Cross-venue asymmetry is the standing caveat:** bybit MAR 2.76 vs binance 0.28 (and
-binance is funding-missing, i.e. optimistic). The edge is also front-loaded (recent third
-much weaker). Any selection refinement must narrow this gap / hold up recently, not just
-reload the early bybit regime.
+**Cross-venue asymmetry — REFRAMED by CV1 (2026-05-30):** the headline gap (bybit MAR 2.76
+vs binance 0.28) is **NOT an edge-quality asymmetry** — the per-trade edge is venue-general
+(matched-event corr 0.89, binance ≈ bybit on shared coins). It is **breadth + universe
+composition**: binance fires ~half the events and its venue-unique coins are weak marginals
+(see the CV1 section). binance is funding-missing (optimistic). The genuine remaining caveat
+is the **recent per-trade mean decay on BOTH venues** (tail-driven) — any refinement must
+hold up recently, not just reload the early regime.
 
 ## K0→K1a (2026-05-30): the intraday-detection kernel — ceiling PASS, but FALSIFIED at K1a
 
@@ -233,6 +236,34 @@ reverts to the validated selection refinements (age gate + residual-momentum gat
 -gated). A *new* intraday-native selector is a separate unchartered direction. Receipts:
 `docs/preregistration/k0-intraday-fade-timing-2026-05-30.md` (ceiling),
 `k1-intraday-detection-2026-05-30.md` (K1a falsifier).
+
+## CV1 (2026-05-30): the cross-venue asymmetry is BREADTH + composition, NOT edge-quality
+
+Read-only decomposition of the age-gated ledgers both venues
+(`scripts/cv1_cross_venue_decomposition.py`, EXPLORATORY). The standing "Bybit strong /
+Binance weak" caveat is substantially a **misframe**:
+- **The per-trade edge is venue-GENERAL.** On the 164 events that fire on the *same coin,
+  same day* on both venues, outcomes correlate **0.89** and Binance is marginally *better*
+  (matched median net +0.52% vs +0.40%, paired diff ≈ 0). Per-venue per-trade net is
+  near-identical (bybit median +0.34% / win 63%; binance +0.27% / win 61%). The edge is
+  **not** Bybit-specific.
+- **The aggregate gap (age-gated sum +72% vs +29%) is BREADTH + composition.** Bybit fires
+  ~1.9× more events (579 vs 307; 270 vs 182 symbols) — Binance USD-M has fewer mid-liquidity
+  alt perps in the rank-31–400 band. And Binance's **venue-unique** coins (on Binance, not
+  Bybit) are weak marginal shorts (mean **−0.05%**, sum −7.4%, win 57%) — less liquid (rank
+  ~92 vs 69), weaker spike (turnover ~9× vs 14×), worst recently — whereas Bybit's
+  venue-unique coins are fine (+0.30% median, +45% sum).
+- **No clean single-feature filter removes the weak coins.** Per-trade net vs turnover-ratio
+  is weak/non-monotone (corr +0.08 bybit / +0.04 binance; venue-best buckets differ), and
+  rank-tightening was already rejected (E2). The weak binance-only coins can't be filtered
+  without dropping good events.
+
+**Implication:** the edge is **robust and replicates cross-venue on shared (high-quality)
+events** — reassuring for the real-money robustness question; Binance is **breadth-limited**
+(fewer/lower-quality unique events), not edge-weak. The MAR 2.76-vs-0.28 gap is the
+aggregate-return + drawdown denominator driven by breadth, not a weaker signal. (The recent
+per-trade mean decay is real on **both** venues — tail-driven — and remains the genuine
+standing caveat.) JSON: `~/SHARED_DATA/cv1_cross_venue_2026-05-30.json`.
 
 ## Useful findings worth keeping
 
