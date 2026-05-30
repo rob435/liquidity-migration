@@ -167,6 +167,19 @@ Two concrete selection leads:
   (+1.9/+2.0). It's the program's **best alpha evidence**, sitting right at the Tier-3 threshold;
   certifying it needs an engine-integrated backtest (rmom as a PIT selection filter, overlap-aware
   annualization) — **operator-gated build** (the precheck justifies it).
+- **P3b (BUILT + VALIDATED, operator-greenlit): the residual-momentum gate is a robust Tier-2
+  DEMO-CANDIDATE** ([preregistration/p3b-rmom-gate-backtest-2026-05-30.md](preregistration/p3b-rmom-gate-backtest-2026-05-30.md)).
+  Integrated the signal as a PIT selection filter in the engine (commit 17df8ba; default-inactive,
+  tested, 1054 tests pass) and backtested it (gate at the per-venue median rmom, both venues, 15 bps):
+  **return 2–3×, Sharpe doubled, DD halved** (bybit +98%→+210% / Sh 1.59→3.81 / DD −16%→−3.3%; binance
+  +32%→+90% / Sh 0.96→2.93 / DD −11%→−4%), all-thirds-positive both, LOO-stable, bootstrap MAR-Δ p5≫0
+  → **r1_robustness DEMO-ELIGIBLE** (the program's strongest, most robust Tier-2 result). Tier-3 residual
+  (overlap-aware weekly): the gate factor-neutralizes both venues; **binance clears +0.3 (+1.10) = genuine
+  factor-neutral alpha, but bybit is residual-neutral full-window (+0.00, +2.18 recent)** → NOT a clean
+  cross-venue alpha certification. So the gate = **risk-reduction + factor-neutralization + venue-asymmetric/
+  recent residual alpha** — a validated demo-candidate, not a fully-certified all-weather alpha engine.
+  (MARs DD-inflated; robust diagnostics + residual Sharpe are the headline.) **Recommend forward-demoing it**
+  (operator-gated profile change; the forward demo is the real Tier-3 arbiter for OOS persistence).
 - **The continuous candidate signal (c2b, 2026-05-30, EXPLORATORY) — age gate flips it on the
   full window but the edge is RECENT-REGIME-ONLY.** The rolling features carry real cross-venue IC
   (`rv_168h` −0.13 @168h). c2's decile short was "not tradeable" because the top-composite decile

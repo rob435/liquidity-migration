@@ -68,8 +68,21 @@ near-no-op, so **E3 (sniper) is dropped** and **E2 pivots to SELECTION refinemen
   recent. So it's regime-conditional, not all-weather → **C0 build is NOT recommended on current
   evidence.** (Corrects an earlier over-claim.) The robust, all-weather result is the **discrete
   age gate**. Detail: `docs/preregistration/exploratory/c0-continuous-engine-scope-2026-05-30.md`.
-- **Highest-value next step (operator's call):** forward-OOS-validate the discrete age gate —
-  move the demo profile pit-age ~90 → 300. Profile change needs operator OK (hard line).
+- **P3b (BUILT + VALIDATED, operator-greenlit): residual-momentum SELECTION gate = robust Tier-2
+  DEMO-CANDIDATE.** Integrated into the engine (commit 17df8ba; config
+  `liquidity_migration_residual_momentum_max`, `<root>/residual_momentum.parquet` signal,
+  scripts/precompute_residual_momentum.py; default-inactive, unit-tested, 1054 tests pass). Gated
+  backtest (sweep tag `p3b_rmom_gate_2026-05-30`, gate=per-venue median rmom +0.1377/+0.1148):
+  return 2–3×, Sharpe doubled, DD halved both venues; all-thirds-positive, LOO-stable, bootstrap
+  p5≫0 → r1_robustness **DEMO-ELIGIBLE**. Tier-3 residual (overlap-aware): factor-neutralizes both;
+  **binance certified (+1.10), bybit residual-neutral full-window (+0.00, +2.18 recent)** → NOT a
+  clean cross-venue alpha cert. Value = risk-reduction + factor-neutralization + venue-asymmetric/
+  recent residual alpha. See `docs/preregistration/p3b-rmom-gate-backtest-2026-05-30.md`.
+- **Highest-value next step (operator's call):** forward-demo the **residual-momentum gate** (the
+  strongest validated demo-candidate) and/or the discrete age gate (pit-age 300). The gate is a config
+  change on the engine (`--liquidity-migration-residual-momentum-max <median>` + precomputed signal);
+  the promoted profile is unchanged until you move it. Profile change needs operator OK (hard line);
+  forward demo is the real Tier-3 arbiter for whether the residual alpha persists OOS.
 - **Open action (from the 2026-05-29 re-baseline):** the deployed demo runs `max_active=3`
   (worst day −36%, DD −87% under honest fills); the research-validated value is
   `max_active=12` (worst day −4.8%, DD −27.5%). Consider moving the demo to 12 and/or

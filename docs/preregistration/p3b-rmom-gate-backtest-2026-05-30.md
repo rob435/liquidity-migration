@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-30
 **Author:** quant-researcher (autonomous loop; operator-greenlit the engine build)
-**Stage:** run-pending
+**Stage:** run-complete
 **Plan:** [research_plan_part2.md](../research_plan_part2.md) §P3 (certification)
 **Follows:** [p3-residual-momentum-verdict-2026-05-30.md](p3-residual-momentum-verdict-2026-05-30.md)
 **Engine:** the residual-momentum gate is now integrated (commit 17df8ba): config
@@ -65,6 +65,46 @@ PHASE=p3b_rmom_gate_2026-05-30 bash scripts/p3b_rmom_gate_dispatch.sh   # 00_bas
 .venv/bin/python scripts/p2_1b_residual_alpha_v2.py  # (adapt) decompose the gated cell, overlap-aware
 ```
 
-## Post-run results / Verdict
+## Post-run results
 
-(pending)
+Run 2026-05-30, sweep tag `p3b_rmom_gate_2026-05-30`, full-PIT both venues, 15 bps, max_active=12.
+The `00_baseline` (age300) cells reproduce e2's `02_age_min` exactly (deterministic ✓); the gate
+demonstrably fired (PIT-clean signal join; trade counts dropped to the low-rmom half + max_active refill).
+
+| | ret | DD | Sharpe | trades | MAR (monthly-DD, r1) | weekly residual Sharpe (recent) |
+|---|---|---|---|---|---|---|
+| bybit age300 | +0.98 | −16% | 1.59 | 579 | 1.47 | −0.68 (+0.48) |
+| **bybit + gate** | **+2.10** | **−3.3%** | **3.81** | 310 | 13.0 | **+0.00 (+2.18)** |
+| binance age300 | +0.32 | −11% | 0.96 | 307 | 0.83 | +0.13 (+0.45) |
+| **binance + gate** | **+0.90** | **−4.0%** | **2.93** | 169 | 5.80 | **+1.10 (+1.98)** |
+
+**Tier-2 (r1_robustness): DEMO-ELIGIBLE.** Pooled MAR Δ +8.25; both venues all-thirds-positive,
+LOO no-flip, bootstrap MAR-Δ p5 = +11.8 (bybit, P=97%) / +10.7 (binance, P=100%); recent third hugely
+improved (bybit +25%→+104%, binance +4%→+53%); trades 310/169 above the minimums. The strongest,
+most robust Tier-2 result in the program. (MARs are DD-inflated — the *robust diagnostics*, not the
+MAR magnitude, are the headline.)
+
+**Tier-3 (overlap-aware weekly residual Sharpe): NOT a clean cross-venue certification.** The gate
+factor-neutralizes both venues (bybit −0.68→+0.00, binance +0.13→+1.10). **binance clears the +0.3
+gate (+1.10)** = genuine factor-neutral alpha; **bybit is residual-NEUTRAL full-window (+0.00)** with
+its residual alpha concentrated recently (+2.18). So it is binance-yes / bybit-marginal — borderline,
+recency-tilted (the c2b caveat applies).
+
+## Verdict
+
+**The residual-momentum SELECTION gate is a VALIDATED, robust, cross-venue Tier-2 DEMO-CANDIDATE —
+the program's payoff — but NOT a clean cross-venue Tier-3 alpha certification.** Honestly:
+- It dramatically improves risk-adjusted return on both venues (return 2–3×, Sharpe doubled, DD
+  halved), all-thirds-positive, LOO-stable, bootstrap-robust → **DEMO-ELIGIBLE**.
+- Its cross-venue mechanism is **risk-reduction + factor-neutralization + venue-asymmetric / recent-
+  concentrated residual alpha** (binance certified +1.10; bybit factor-neutral full-window, +2.18
+  recent). It is *not* a fully-certified all-weather idiosyncratic-alpha engine.
+- The DD-inflated MARs (13 / 5.8 monthly) are not the headline; the robust diagnostics + the residual
+  Sharpe are.
+
+**Recommendation (operator-gated):** **forward-demo the residual-momentum gate** (a robust, validated,
+demo-eligible risk-adjusted improvement). Frame it as a risk-adjusted-return + factor-neutralization
+improvement with binance-side / recent residual alpha — NOT a certified cross-venue alpha engine. The
+forward demo (the real Tier-3 arbiter) tests whether the binance residual alpha and the recent bybit
+residual persist OOS. Engine integration is committed (17df8ba); the gate defaults inactive, so the
+promoted profile is unchanged until you choose to move it.
