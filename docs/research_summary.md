@@ -143,6 +143,16 @@ Two concrete selection leads:
   √(trades/yr) annualization is optimistic (overlapping trades). So the strategy — even age-gated —
   is primarily a **factor-harvesting vehicle** (still a legitimate demo-candidate at MAR 3–6 / halved
   DD), but the "we found unique alpha" framing is **not** supported by the residual-Sharpe gate.
+- **P2-2/3 (residual leaderboard) — the age gate's real value is FACTOR-NEUTRALIZATION**
+  ([preregistration/p2-2-3-residual-leaderboard-verdict-2026-05-30.md](preregistration/p2-2-3-residual-leaderboard-verdict-2026-05-30.md)).
+  Decomposing every candidate selection config: **no config clears Tier-3 residual ≥+0.3 cross-venue**
+  (age residuals sign-flip bybit −/binance +). The biggest *return* lever `drop_all_4` (+295%) is
+  **NOT alpha** — negative residual both venues = pure factor harvesting. But under *every* model the
+  age gate moves the residual sharply up from the baseline's *inefficient factor bet* (−0.99/−0.42
+  common4) toward **factor-neutral** (age400 −0.04/+0.26); **stricter age = more neutral**. So the age
+  gate's robust contribution is **stripping factor exposure** (valuable for forward robustness — a
+  near-neutral book resists factor-premium decay/crowding), not adding idiosyncratic alpha. Forward-demo
+  the age gate as a **robust factor-neutralized short**, not a unique-alpha engine.
 - **The continuous candidate signal (c2b, 2026-05-30, EXPLORATORY) — age gate flips it on the
   full window but the edge is RECENT-REGIME-ONLY.** The rolling features carry real cross-venue IC
   (`rv_168h` −0.13 @168h). c2's decile short was "not tradeable" because the top-composite decile
