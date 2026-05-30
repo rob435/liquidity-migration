@@ -65,8 +65,13 @@ promoted; forward demo is the arbiter.
     composition, NOT a weaker per-trade edge** — matched (same coin/day) events corr 0.89,
     binance ≈ bybit; per-trade net near-identical (median +0.34%/+0.27%). binance fires ~½ the
     events + its venue-unique coins are weak marginals (less liquid, weaker spike). Edge is
-    venue-general on shared names → reassuring for robustness. Genuine caveat = recent per-trade
-    mean decay on BOTH venues (tail-driven). `scripts/cv1_cross_venue_decomposition.py`.
+    venue-general on shared names → reassuring for robustness. `scripts/cv1_cross_venue_decomposition.py`.
+  - **RD1 (recent decay, 2026-05-30):** the recent per-trade mean decay (both venues) is
+    **squeeze-driven** — recent losers are stop-outs on coins pumping *against* a weak market
+    (idiosyncratic strength). The **rmom gate fixes it**: cuts ~75% of recent stop-out losers
+    (bybit 81→19, binance 57→14), recent mean +0.08%→+0.39% / +0.02%→+0.35%. Explains WHY the
+    rmom gate works (squeeze filter) + strengthens the case to forward-demo it.
+    `scripts/rd1_recent_decay_rmom.py`.
   - **E1+E1b — execution is a non-lever:** fade-confirmation adds no robust cross-venue premium
     over immediate entry → selection-dominant; E3 (sniper) dropped.
   - **E2/E2b/c/d — the age gate (lead):** `--liquidity-migration-pit-age-days-min≈300` (drop

@@ -191,9 +191,9 @@ Two concrete selection leads:
 vs binance 0.28) is **NOT an edge-quality asymmetry** — the per-trade edge is venue-general
 (matched-event corr 0.89, binance ≈ bybit on shared coins). It is **breadth + universe
 composition**: binance fires ~half the events and its venue-unique coins are weak marginals
-(see the CV1 section). binance is funding-missing (optimistic). The genuine remaining caveat
-is the **recent per-trade mean decay on BOTH venues** (tail-driven) — any refinement must
-hold up recently, not just reload the early regime.
+(see the CV1 section). binance is funding-missing (optimistic). The recent per-trade mean
+decay on BOTH venues (tail-driven) is **squeeze-driven and is fixed by the rmom gate** — see
+the RD1 section (cuts ~75% of recent stop-outs; restores recent mean both venues).
 
 ## K0→K1a (2026-05-30): the intraday-detection kernel — ceiling PASS, but FALSIFIED at K1a
 
@@ -264,6 +264,32 @@ events** — reassuring for the real-money robustness question; Binance is **bre
 aggregate-return + drawdown denominator driven by breadth, not a weaker signal. (The recent
 per-trade mean decay is real on **both** venues — tail-driven — and remains the genuine
 standing caveat.) JSON: `~/SHARED_DATA/cv1_cross_venue_2026-05-30.json`.
+
+## RD1 (2026-05-30): the recent decay is SQUEEZE-driven — and the rmom gate fixes it
+
+Following CV1's one genuine caveat (recent per-trade MEAN decay, both venues, tail-driven),
+RD1 dissects the recent (≥2025-06-01) tail of the age-gated book
+(`scripts/rd1_recent_decay_rmom.py`, EXPLORATORY):
+- **Mechanism — idiosyncratic strength vs a weak market.** Recent losers are overwhelmingly
+  **stop-outs** (bybit 81, binance 57 of recent losers) and cluster on days the **broad market
+  is DOWN** (losers: `market_pct_up_1d` ~0.28–0.32, `market_median_return_1d`<0, BTC down;
+  winners: `market_pct_up` ~0.44–0.47). A coin pumping *against* a weak market has **genuine
+  idiosyncratic strength** and keeps running → squeezes the short. (Counterintuitively the short
+  works BEST when the event rides a broad up-market that mean-reverts — the *opposite* of "don't
+  short a rally"; a `market_pct_up` ceiling would remove the winners, not the losers.)
+- **Fix — the residual-momentum gate (P3b) removes exactly these names.** rmom shorts
+  idiosyncratically-WEAK candidates, filtering the strong-against-weak-market squeeze coins.
+  Recent tail, age-gated baseline → rmom-gated: **stop-out losers cut ~75%** (bybit 81→19,
+  binance 57→14), worst-decile drag halved, recent per-trade **mean ~5–17×** (bybit
+  +0.08%→+0.39%, binance +0.02%→+0.35%), recent **sum** bybit +22.6%→+71.0% / binance
+  +4.2%→+42.1%, **both venues.** Selective (median rises too; not just fewer trades).
+
+**So** the recent decay (the standing caveat) is **squeeze-driven**, and the already-validated,
+PIT-clean **rmom gate is the mechanistic fix** — it removes the idiosyncratic-strength squeezes
+the age-gated book still takes. This both **explains WHY the rmom gate works** (it is a squeeze
+filter, not just "return 2–3×") and **strengthens the case to forward-demo it** (it addresses the
+very thing — recent decay — that most threatens a forward demo). Profile change is operator-gated.
+JSON: `~/SHARED_DATA/rd1_{bybit,binance}_2026-05-30.json`.
 
 ## Useful findings worth keeping
 
