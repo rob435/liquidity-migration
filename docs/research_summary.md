@@ -153,6 +153,17 @@ Two concrete selection leads:
   gate's robust contribution is **stripping factor exposure** (valuable for forward robustness — a
   near-neutral book resists factor-premium decay/crowding), not adding idiosyncratic alpha. Forward-demo
   the age gate as a **robust factor-neutralized short**, not a unique-alpha engine.
+- **P3 — residual-momentum selection: a real refinement + a promising (uncertified) alpha lead**
+  ([preregistration/p3-residual-momentum-verdict-2026-05-30.md](preregistration/p3-residual-momentum-verdict-2026-05-30.md)).
+  Trailing factor-residual momentum (PIT, signal-close `lag1`) **strongly predicts which age300
+  candidates are the best shorts, cross-venue** (IC −0.19 bybit / −0.35 binance — short the
+  idiosyncratically-weak names), survives the strict-PIT lag, full coverage, holds recent. Selecting
+  the low-rmom half lifts the per-trade residual Sharpe above the Tier-3 gate on both venues
+  (+0.47/+1.25). **Caveat (honest):** `IC(rmom,residual)` is weak (−0.08/−0.03) while `IC(rmom,net)`
+  is strong, so rmom predicts net mostly *through factor exposure*; the residual-Sharpe lift is likely
+  inflated by the optimistic √(trades/yr) annualization → **suggestive, not certified**. It's the
+  program's **most promising residual-alpha lead** — but certifying it needs an engine-integrated
+  backtest (rmom as a PIT selection filter) with overlap-aware annualization (operator-gated build).
 - **The continuous candidate signal (c2b, 2026-05-30, EXPLORATORY) — age gate flips it on the
   full window but the edge is RECENT-REGIME-ONLY.** The rolling features carry real cross-venue IC
   (`rv_168h` −0.13 @168h). c2's decile short was "not tradeable" because the top-composite decile
