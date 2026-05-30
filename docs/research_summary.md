@@ -278,6 +278,21 @@ Tested which PIT-causal features separate faders from continuers, then **beta-ne
   **Honest bounds:** gross-forward edge must survive costs+stops; the edge is in the extreme subset;
   it is plausibly short-term-reversal concentrated by the liquidity-migration framing — I2 settles it.
 
+**I2 RESULT (2026-05-30, `scripts/i2_burst_backtest.py`) — signal REAL, naïve stopped strategy FAILS.**
+Backtested the frozen extreme-burst short (12% stop, 48h max-hold, costs, +1h fill), both venues,
+early/recent. **Without a stop** the extreme subset is net-positive at 15 bps — bybit +1.79% (E +0.74 /
+R +3.47), binance +1.74% (E +1.10 / R +2.90) per trade — positive **both venues × both eras**, beating
+all-bursts (~+0.4%): the I1b signal is **real, not an artifact**. **But with a realistic 12% stop it
+collapses:** ~breakeven at 15 bps (bybit −0.01% / binance +0.05% ALL) and **negative at 45 bps**;
+**33–41% of trades stop out** (−14% each), eating the edge; portfolio MAR ~0/negative, recent-skewed.
+**Mechanism:** the median trade is +2.3%/wins 55%, but pump-shorts wiggle up ≥12% before fading often
+enough that any risk-bounding stop is hit ~40% of the time. No-stop is positive but **undeployable**
+(unbounded short tail risk). **This rediscovers WHY the strategy shorts the confirmed FADE, not the top
+(E1)** — the burst-short is "catch the top." **Verdict: not a deployable edge as a naïve top-short.**
+**Next = I2b:** apply fade-confirm execution intraday — use the burst to flag the candidate, short the
+intraday **giveback**, not the burst — to dodge the continuation that causes the stop-outs. Receipt:
+`docs/preregistration/i2-intraday-burst-selector-2026-05-30.md`.
+
 ## CV1 (2026-05-30): the cross-venue asymmetry is BREADTH + composition, NOT edge-quality
 
 Read-only decomposition of the age-gated ledgers both venues

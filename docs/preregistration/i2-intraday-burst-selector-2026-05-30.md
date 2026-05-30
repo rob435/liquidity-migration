@@ -64,6 +64,17 @@ path): enter/exit/cost/concentration sim on the I1b burst signal → trade ledge
 r1_robustness metrics + risk_model residual. Both venues, early/recent. Memory-safe (reuse the
 in-memory projected-panel approach from I1b). Pre-register any later change to the selector.
 
-## Status
+## Verdict (run 2026-05-30, 5950X, `scripts/i2_burst_backtest.py`) — signal REAL, naïve stopped strategy does NOT pass
 
-PENDING — build + run on the 5950X. I3 (live WS engine + forward demo) stays explicit-operator-gated.
+| EXTREME subset, per-trade net | no-stop @15bps | **12% stop @15bps** | 12% stop @45bps | frac stopped |
+|---|--:|--:|--:|--:|
+| bybit ALL / EARLY / RECENT | +1.79 / +0.74 / +3.47% | **−0.01 / −0.22 / +0.33%** | −0.31 / −0.52 / +0.03% | 0.37–0.40 |
+| binance ALL / EARLY / RECENT | +1.74 / +1.10 / +2.90% | **+0.05 / +0.19 / −0.21%** | −0.25 / −0.11 / −0.51% | 0.33–0.41 |
+
+- **The extreme selection beats all-bursts decisively** (no-stop +1.7% vs +0.4%; all-burst portfolio −40 to −48%) — the I1b signal is real, not an artifact, **cross-venue + all-weather (no-stop positive both eras both venues).** ✓ criterion 1.
+- **But the frozen strategy FAILS the realistic stop+cost test (criterion 2):** with the 12% stop, per-trade net is ~breakeven at 15 bps and **negative at 45 bps**; **33–41% of trades stop out** (−14% each). Portfolio MAR (extreme, net15) bybit −0.11 / binance +0.18 (~0); net45 −0.83 / −0.73 (clearly negative); recent-skewed. **Not a Tier-2 pass.**
+- **Diagnosis (the no-stop column):** the edge is real but lives in the *unstopped* fade — the median trade is +2.3% and wins 55%, but the pump-shorts wiggle up ≥12% before fading often enough that any risk-bounding stop is hit ~40% of the time at −14%, eating the mean. No-stop is positive but **undeployable** (a short into a pump has unbounded tail risk — one 3–5× continuation ruins the book).
+
+**This RECONCILES with the strategy's founding philosophy (E1): short the confirmed FADE, not the top.** The burst-short is "catch the top," and I2 rediscovers why that's unsafe. **Tier-3 residual (risk_model) not run — moot until a deployable execution exists.**
+
+**Verdict: the naïve intraday-burst top-short is NOT a deployable edge** (real signal, fails realistic risk control). **Next = I2b (pre-register):** apply the proven fade-confirm execution at the intraday scale — use the burst only to *flag the candidate*, then short the intraday **giveback** (pop-then-fade) rather than the burst itself, avoiding shorting into the continuation that causes the stop-outs. If the intraday fade-confirm captures the unstopped edge with a survivable stop, cross-venue/all-weather → real; if not, the honest conclusion is that intraday detection finds a real effect that the existing daily fade-confirm strategy already captures what's safely capturable of. Per-trade tables: `~/SHARED_DATA/i2_{bybit,binance}.trades.csv`. I3/live stays operator-gated.

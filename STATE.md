@@ -69,10 +69,15 @@ promoted; forward demo is the arbiter.
     `idio` (pump size vs market) ic_neutral −0.28…−0.31, velocity/vol-spike/accel −0.11…−0.16,
     BOTH venues × BOTH eras; wick = noise. Edge is a SELECTION on pump-extremity (extreme-quintile
     beta-neutral short +1.2–1.3% early / +4.4–4.7% recent, gross 48h); shorting all bursts is
-    ~breakeven. A NEW extreme-pump-reversal selector (the daily entry is too late). **Next = I2**
-    (engine backtest w/ costs+stops + risk_model residual: unique alpha vs short-term-reversal
-    factor?). `scripts/i1b_burst_separation.py`. Status: fill-timing dead (E1), same-selector
-    detection dead (K1a), **purpose-built intraday selector = REAL signal, I2 backtest pending.**
+    ~breakeven. A NEW extreme-pump-reversal selector (the daily entry is too late). `scripts/i1b_burst_separation.py`.
+  - **I2 (2026-05-30) — signal REAL but the naïve stopped strategy FAILS.** Backtested the frozen
+    extreme-burst short (12% stop, costs, +1h fill). **No-stop:** net-positive both venues × both eras
+    (bybit +1.79% / binance +1.74% per trade @15bps; beats all-bursts) → I1b confirmed real. **With a
+    12% stop:** ~breakeven @15bps, negative @45bps; **33–41% stop-out** (−14% each) eats it; portfolio
+    MAR ~0/neg, recent-skewed. No-stop is undeployable (unbounded short tail). **Rediscovers WHY the
+    strategy shorts the FADE not the top (E1).** **Next = I2b:** fade-confirm execution intraday —
+    short the giveback, not the burst. `scripts/i2_burst_backtest.py`. Net: fill-timing dead (E1),
+    same-selector detection dead (K1a), purpose-built top-short = real signal / not safely monetizable.
   - **CV1 (cross-venue, 2026-05-30):** the bybit≫binance gap is **BREADTH + universe
     composition, NOT a weaker per-trade edge** — matched (same coin/day) events corr 0.89,
     binance ≈ bybit; per-trade net near-identical (median +0.34%/+0.27%). binance fires ~½ the
