@@ -817,6 +817,15 @@ def _add_volume_events_parser(subparsers) -> None:
         help="Minimum point-in-time manifest age in days for liquidity-migration events; 0 disables.",
     )
     volume_events.add_argument(
+        "--liquidity-migration-residual-momentum-max",
+        type=float,
+        default=event_defaults.liquidity_migration_residual_momentum_max,
+        help="P3 residual-momentum SELECTION gate: keep liquidity-migration candidates whose trailing "
+             "PIT factor-residual momentum <= this (short the idiosyncratically-weak names). Requires a "
+             "precomputed <root>/residual_momentum.parquet (scripts/precompute_residual_momentum.py); "
+             "default 10.0 = inactive.",
+    )
+    volume_events.add_argument(
         "--liquidity-migration-pit-age-days-max",
         type=int,
         default=event_defaults.liquidity_migration_pit_age_days_max,
@@ -2653,6 +2662,7 @@ def main(argv: list[str] | None = None) -> int:
             liquidity_migration_close_location_max=args.liquidity_migration_close_location_max,
             liquidity_migration_up_volume_concentration_min=args.liquidity_migration_up_volume_concentration_min,
             liquidity_migration_pit_age_days_min=args.liquidity_migration_pit_age_days_min,
+            liquidity_migration_residual_momentum_max=args.liquidity_migration_residual_momentum_max,
             liquidity_migration_pit_age_days_max=args.liquidity_migration_pit_age_days_max,
             liquidity_migration_crowding_filter=args.liquidity_migration_crowding_filter,
             liquidity_migration_crowding_min_signals=args.liquidity_migration_crowding_min_signals,

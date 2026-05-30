@@ -195,6 +195,11 @@ class VolumeEventResearchConfig:
     liquidity_migration_up_volume_concentration_min: float = 0.0
     liquidity_migration_pit_age_days_min: int = 90
     liquidity_migration_pit_age_days_max: int = 0
+    # P3 residual-momentum selection gate (factor-neutral): keep candidates whose trailing
+    # PIT factor-residual momentum is <= this (short the idiosyncratically-weak names). Requires
+    # a precomputed <root>/residual_momentum.parquet (scripts/precompute_residual_momentum.py);
+    # default 10.0 = inactive. The engine left-joins the signal onto features by daily-grid ts_ms.
+    liquidity_migration_residual_momentum_max: float = 10.0
     liquidity_migration_crowding_filter: str = "union_pathology"
     liquidity_migration_crowding_min_signals: int = 2
     liquidity_migration_crowding_stalled_last6h_return_max: float = 0.03
@@ -307,6 +312,37 @@ def _scenario_hold_ms(scenario: EventScenario) -> int:
     return scenario.hold_days * MS_PER_DAY
 
 
+def _attach_residual_momentum(features: pl.DataFrame, root: Path) -> pl.DataFrame:
+    """Left-join the precomputed PIT residual-momentum signal onto the daily feature panel.
+
+    Joins on (symbol, daily-grid ts_ms) so the join is robust to ts_ms convention. The signal
+    (scripts/precompute_residual_momentum.py) is PIT-clean (trailing factor-residual strictly
+    before the signal day). Candidates with no signal row get a null ``residual_momentum`` and are
+    dropped by the gate's is_not_null() guard. Raises if the signal file is absent (the gate needs it).
+    """
+    sig_path = Path(root) / "residual_momentum.parquet"
+    if not sig_path.exists():
+        raise RuntimeError(
+            f"liquidity_migration_residual_momentum_max is active but {sig_path} is missing; "
+            "run scripts/precompute_residual_momentum.py first."
+        )
+    ms_per_day = 86_400_000
+    sig = (
+        pl.read_parquet(sig_path)
+        .select(
+            pl.col("symbol"),
+            ((pl.col("ts_ms") // ms_per_day) * ms_per_day).alias("_rm_day"),
+            pl.col("residual_momentum"),
+        )
+        .unique(["symbol", "_rm_day"], keep="first")
+    )
+    return (
+        features.with_columns(((pl.col("ts_ms") // ms_per_day) * ms_per_day).alias("_rm_day"))
+        .join(sig, on=["symbol", "_rm_day"], how="left")
+        .drop("_rm_day")
+    )
+
+
 def run_volume_event_research(
     data_root: str | Path,
     *,
@@ -371,6 +407,8 @@ def run_volume_event_research(
         ),
         _window_config(config),
     )
+    if config.liquidity_migration_residual_momentum_max < 10.0:
+        features = _attach_residual_momentum(features, root)
     full_pit_universe_pass = _full_pit_universe_pass(klines, archive_manifest)
     if config.require_full_pit_universe and not full_pit_universe_pass:
         raise RuntimeError(_full_pit_universe_error(klines, archive_manifest))
