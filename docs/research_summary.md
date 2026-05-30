@@ -98,16 +98,20 @@ refinement** study, and E3 (sniper) is dropped (its gate, "entry timing matters,
 
 Two concrete selection leads:
 
-- **Exhaustion-quality gate (E2 lead, exploratory IC):** among the *selected* events, the
-  cross-venue-consistent predictors of a profitable short say the best shorts are
-  **seasoned, liquid names whose flow is exhausting**, not fresh alts still ripping. On the
-  realized E1 shorts (both venues, Spearman vs net_return): older `symbol_age`/`pit_age`
-  (+0.11/+0.13), more-liquid `liquidity_rank` (−0.11/−0.14), falling/flat `open_interest_return`
-  (−0.08/−0.14), low `taker_imbalance` (−0.08/−0.14), no fresh `prior30_max_daily_return`
-  spike (−0.07/−0.13), higher `event_rank_fraction` within the sub-top-10% band (+0.09/+0.08).
-  Modest ICs but cross-venue-consistent and mechanistically sensible. **Pre-register a
-  refinement, backtest full-PIT both venues, and require it improves MAR cross-venue AND in
-  the recent (weak) third** — controlling the "age proxies the strong 2023–24 regime" confound.
+- **E2 RESULT (2026-05-30): the age gate is a robust cross-venue refinement.** Testing an
+  exhaustion-quality gate ([preregistration/e2-exhaustion-selection-2026-05-30.md](preregistration/e2-exhaustion-selection-2026-05-30.md)),
+  the winner is **`pit-age-days-min=300` (drop symbols younger than 300 days)**: daily-DD MAR
+  **bybit +2.93→+5.96, binance +0.25→+2.81** (return up, DD down on both), all-thirds-positive
+  both venues, LOO-stable, bootstrap P(Δ>0) 83%/93%. It **improves the recent weak third on
+  both venues** (bybit −2%→+25%, binance −26%→+4%) — refuting the age→early-regime confound and
+  **explaining the recent edge-decay** (young-name shorts are systematic net losers — fresh
+  listings squeeze; the signal works on seasoned names; verified cross-venue on the ledgers).
+  `prior30-max-return-max=0.14` is a secondary cross-venue risk-reducer (halves DD).
+  `universe-rank-max=110` (liquidity-tighten) was **rejected** — it hurt both venues (the
+  `liquidity_rank` IC was a within-realized artifact the backtest caught). Note: OI / taker /
+  funding features were **excluded** — they are NaN on `binance_full_pit`, so the earlier
+  exploratory IC's binance derivative-feature cluster was an artifact. **Tier-2 demo-candidate,
+  in-sample** — forward demo is the arbiter; deployment/profile change is the operator's call.
 - **The continuous candidate signal carries real cross-venue *selection* IC** (rolling
   features: composite −0.084/−0.085/−0.087 bybit, −0.078/−0.081/−0.085 binance at 24/72/168h;
   `rv_168h` −0.13 @168h). It is a *selection* signal (which names underperform). Its c2

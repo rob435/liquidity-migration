@@ -33,16 +33,22 @@ near-no-op, so **E3 (sniper) is dropped** and **E2 pivots to SELECTION refinemen
   `long_native_event_demo_daemon` under systemd. Frozen promoted profile. Ledgers in
   `data/bybit-demo-event/`.
 - **Paper shadow** (same VPS, same profile, no order submission): `data/bybit-paper-event/`.
-- **No research runs in-flight.** (E1 + E1b complete 2026-05-30 — execution-premium is a
-  documented null; verdict = SELECTION-dominant. See `docs/research_summary.md` and
-  `docs/preregistration/e1-execution-premium-2026-05-29.md` + `e1b-knob-engagement-2026-05-30.md`.)
-- **Next research run (the lead):** E2 — **exhaustion-quality SELECTION refinement** (E1
-  pivoted E2 from execution to selection). Add an exhaustion-quality gate to the selection
-  filter (older `symbol_age`/`pit_age`, more-liquid `liquidity_rank`, falling/flat
-  `open_interest_return`, low `taker_imbalance`, no fresh `prior30_max_daily_return` spike —
-  the cross-venue predictors from E1's within-selection IC). Pre-register; backtest full-PIT
-  both venues; require MAR improvement **cross-venue AND in the recent (weak) third** (control
-  the "age proxies the strong 2023–24 regime" confound).
+- **No research runs in-flight.** (E1+E1b complete = SELECTION-dominant; E2 complete 2026-05-30.)
+- **E2 RESULT (strong, the headline):** an **exhaustion-quality SELECTION refinement** —
+  `--liquidity-migration-pit-age-days-min=300` (drop symbols younger than 300 days) —
+  **~doubles daily-DD MAR cross-venue** (bybit +2.93→+5.96, binance +0.25→+2.81), is
+  all-thirds-positive both venues, and **fixes the recent weak third on both** (bybit −2%→+25%,
+  binance −26%→+4%). Mechanism verified: young-name shorts are systematic net losers (fresh
+  listings squeeze); the signal works on seasoned names. This **explains the recent edge-decay**.
+  `prior30-max-return-max=0.14` is a secondary cross-venue risk-reducer (halves DD).
+  `universe-rank-max=110` (liq-tighten) REJECTED. Tier-2 demo-candidate, **in-sample — forward
+  demo is the arbiter**. See `docs/preregistration/e2-exhaustion-selection-2026-05-30.md`.
+- **Open action (operator's call — NOT done autonomously):** the live demo runs
+  `pit-age-days-min≈90`; `age_min=300` is a strong candidate to test forward (profile change
+  needs operator OK; hard-line).
+- **Next research run:** E2b — age-threshold sensitivity (200/400; guard a knife-edge) + a
+  refined `prior30+age` combined (drop the rejected liq-tighten): does stacking the two
+  winners beat `age_min` alone cross-venue? Pre-registered, full-PIT both venues.
 - **Open action (from the 2026-05-29 re-baseline):** the deployed demo runs `max_active=3`
   (worst day −36%, DD −87% under honest fills); the research-validated value is
   `max_active=12` (worst day −4.8%, DD −27.5%). Consider moving the demo to 12 and/or

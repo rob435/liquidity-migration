@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-30
 **Author:** quant-researcher (autonomous research loop)
-**Stage:** run-pending
+**Stage:** run-complete
 **Plan:** [research_plan_selection_execution.md](../research_plan_selection_execution.md) §E2 (pivoted to SELECTION per E1's contingency)
 **Follows:** [e1-execution-premium-2026-05-29.md](e1-execution-premium-2026-05-29.md) (E1 verdict = selection-dominant)
 
@@ -74,8 +74,42 @@ bash scripts/e2_exhaustion_dispatch.sh
 
 ## Post-run results
 
-(pending)
+Run 2026-05-30, sweep tag `e2_exhaustion_select_2026-05-30`, full-PIT both venues.
+Daily-DD MAR (report best_scenario) vs `00_baseline` control:
+
+| cell | bybit MAR (Δ) / trades | binance MAR (Δ) / trades | recent-third (base→cell) | bootstrap P(Δ>0) |
+|---|---|---|---|---|
+| 00_baseline | +2.93 / 761 | +0.25 / 477 | by +8% / bn −26% | — |
+| **02_age_min** | **+5.96 (+3.04) / 579** | **+2.81 (+2.56) / 307** | **by −2%→+25%, bn −26%→+4%** (all-thirds+ both) | by 83% / bn 93% |
+| 01_prior30_cap | +4.34 (+1.42) / 543 | +2.14 (+1.89) / 366 | by +8%→+4% (all+), bn −26%→−6% | by 63% / bn 95% |
+| 03_liq_tighten | +2.10 (−0.82) / 600 | −0.15 (−0.40) / 381 | by +8%→−10%, bn worse | by 47% / bn 19% |
+| 04_combined (pre-reg) | (diluted; incl. rejected liq) | +0.33 (+0.08) / 179 | bn worse | bn 49% |
+
+**Mechanism (verified, cross-venue, on baseline ledgers):** young-name (<300d) shorts are
+systematic net losers — bybit −0.06%/tr (55% win), binance −0.08%/tr (52% win) — and worst
+recently (bybit recent young −0.22%/tr 49% win; binance recent young −0.21%/tr 48% win, and
+they were ~half of recent binance trades). Old-name shorts stay solid (60–64% win). The
+2024–25 listing wave flooded the universe with fresh alts that squeeze shorts; the signal
+works on seasoned names.
 
 ## Verdict
 
-(pending)
+**`02_age_min` (pit-age-days-min=300) is a robust cross-venue SELECTION refinement — Tier-2
+demo-candidate.** It ~doubles daily-DD MAR on both venues (return up, DD down), is
+all-thirds-positive on both, LOO-stable, bootstrap P(Δ>0) 83%/93%, and — passing the
+pre-registered honesty gate — **improves the recent (weak) third on both venues** (the
+age→early-regime confound is refuted: it hurts the early third, rescues the recent). It also
+**explains the prior "edge decaying recently" caveat**: the decay was concentrated in
+fresh-listing shorts.
+
+`01_prior30_cap` is a solid secondary cross-venue risk-reducer (halves DD; MAR Δ +1.4 by /
++1.9 bn). `03_liq_tighten` is **rejected** (hurts both venues — the liquidity_rank IC was a
+within-realized artifact). `04_combined` (as pre-registered) is **diluted** by the rejected
+liq_tighten — so the pre-registered combined gate is NOT the answer; the *components*
+`age_min` and `prior30_cap` are.
+
+**Status:** in-sample Tier-2 demo-candidate — NOT promotion (feature-selection circularity;
+forward demo is the Tier-3 arbiter). **Deployment is the operator's call** (the live demo runs
+pit-age-days-min≈90; do not change the profile autonomously). **Follow-on (E2b):** age-threshold
+sensitivity (200/400, guard against a knife-edge) + a refined `prior30+age` combined (drop the
+rejected liq_tighten) — does stacking the two winners beat `age_min` alone cross-venue?
