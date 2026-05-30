@@ -343,6 +343,13 @@ program's robust all-weather edge remains the daily age-gated + residual-momentu
 `i1b_burst_separation.py`, `i2_burst_backtest.py`, `i2b_burst_fade_confirm.py`. (Lower-probability
 avenues if revisited: down-bars=3; a market-neutral L/S form — though c2b found the beta-neutral
 continuous version was also recent-only.)
+**STR-factor check (completeness, 2026-05-31):** multivariate OLS of the unstopped beta-neutral
+forward return on rank-standardised burst features (both venues, i1b bursts) — **idiosyncratic
+relative-return reversal (`idio`) dominates (β −0.35/−0.36)**, i.e. the signal is **substantially the
+known short-term-reversal factor**; `vol_spike` (the liquidity-migration volume structure) **survives
+but is small** (univariate IC −0.14 → partial β −0.05/−0.06, consistent cross-venue). So ~mostly STR +
+a modest real volume increment — consistent with P2-1 ("mostly factor exposure"); does not change the
+not-deployable verdict.
 
 ## CV1 (2026-05-30): the cross-venue asymmetry is BREADTH + composition, NOT edge-quality
 
