@@ -53,10 +53,13 @@ near-no-op, so **E3 (sniper) is dropped** and **E2 pivots to SELECTION refinemen
   `age400` joint-best (bybit 6.91 / binance 5.64, ample trades); `age300` conservative;
   `prior30+age` an optional DD-reducer (mild bybit fragility). `age-alone` is the primary
   robust refinement. See `docs/preregistration/e2b-age-combo-2026-05-30.md`.
-- **Next research direction (operator-gated):** continuous-vs-discrete selection — does the
-  continuous candidate signal (c1 IC real) beat discrete-event selection under a plain +1h
-  short + age gate? Requires building the C0 continuous engine (~multi-day, code-touch) —
-  **scope + operator OK before starting; do not start autonomously.**
+- **Next research direction — C0 now JUSTIFIED (operator-gated):** the cheap age-gated c2 retest
+  (`c2b`, EXPLORATORY) shows the age gate **flips the continuous decile short to cost-positive
+  cross-venue @168h** (short-only +29/+35 bps net; beta-neutral L/S +14/+22 bps) — c2's "not
+  tradeable" null was a young-name artifact. So the continuous architecture is worth the multi-day
+  **C0 engine build** (a *weekly* continuous short on age-gated top-composite names). **Operator-gated:
+  do not build C0 / change demo profile without explicit OK.** Scope + result:
+  `docs/preregistration/exploratory/c0-continuous-engine-scope-2026-05-30.md`.
 - **Open action (from the 2026-05-29 re-baseline):** the deployed demo runs `max_active=3`
   (worst day −36%, DD −87% under honest fills); the research-validated value is
   `max_active=12` (worst day −4.8%, DD −27.5%). Consider moving the demo to 12 and/or

@@ -118,12 +118,17 @@ Two concrete selection leads:
   saturates ~age200 (≈MAR 6, flat to 400); binance monotone to 400. `age400` is the joint-best
   (bybit 6.91 / binance 5.64, ample trades); `age300` conservative; `prior30+age` an optional
   DD-reducer (mild bybit fragility). `age-alone` is the primary robust refinement.
-- **The continuous candidate signal carries real cross-venue *selection* IC** (rolling
-  features: composite −0.084/−0.085/−0.087 bybit, −0.078/−0.081/−0.085 binance at 24/72/168h;
-  `rv_168h` −0.13 @168h). It is a *selection* signal (which names underperform). Its c2
-  "not tradeable" label was an immediate-entry test — but E1 shows immediate entry is fine,
-  so the open question is whether the continuous selection beats the discrete event selection
-  under the *same plain +1h short*, not whether an execution layer rescues it.
+- **The continuous candidate signal — the age gate rescues it too (c2b, 2026-05-30, EXPLORATORY).**
+  The rolling features carry real cross-venue IC (`rv_168h` −0.13 @168h). c2 had called the
+  continuous decile short "not tradeable" — but that was a **young-name artifact**: in the full
+  panel the top-composite decile *rallies* (+27/+39 bps @168h, the M1 continuation), so the short
+  loses. **Apply `age≥300` and the sign flips** — the top decile *fades* (−44/−50 bps), short-only
+  net is **+29/+35 bps cost-positive cross-venue @168h**, and even the **beta-neutral L/S is
+  positive** (+14/+22 bps). 72h is breakeven → the continuous edge is a **weekly (168h)**
+  phenomenon. The young-listing squeeze poisoned *both* the discrete and continuous signals; the
+  age-gated continuous short justifies building the C0 engine (multi-day, **operator-gated** —
+  [preregistration/exploratory/c0-continuous-engine-scope-2026-05-30.md](preregistration/exploratory/c0-continuous-engine-scope-2026-05-30.md)).
+  EXPLORATORY look-ahead evidence only (no execution/capacity/funding) — warrants the build, not a P&L.
 
 **Cross-venue asymmetry is the standing caveat:** bybit MAR 2.76 vs binance 0.28 (and
 binance is funding-missing, i.e. optimistic). The edge is also front-loaded (recent third
