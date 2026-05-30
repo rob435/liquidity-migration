@@ -2767,7 +2767,8 @@ def main(argv: list[str] | None = None) -> int:
             f"paper_only={summary['paper_only']} "
             f"demo_only={summary['demo_only']} "
             f"entry_slip_bps_mean={summary['entry_slippage_bps_mean']:.2f} "
-            f"path={payload['report_path']}"
+            f"path={payload['report_path']} "
+            f"per_trade_csv={payload.get('pairs_csv_path') or '-'}"
         )
         return 0
 
@@ -2787,7 +2788,8 @@ def main(argv: list[str] | None = None) -> int:
             f"paper_only={summary['paper_only']} "
             f"demo_only={summary['demo_only']} "
             f"entry_slip_bps_mean={summary['entry_slippage_bps_mean']:.2f} "
-            f"path={payload['report_path']}{warning}"
+            f"path={payload['report_path']} "
+            f"per_trade_csv={payload.get('pairs_csv_path') or '-'}{warning}"
         )
         return 0
 
@@ -2821,7 +2823,8 @@ def main(argv: list[str] | None = None) -> int:
             f"open_only_in_ledger={summary['open_only_in_ledger']} "
             f"open_only_in_bybit={summary['open_only_in_bybit']} "
             f"pnl_gap_usdt_total={summary['pnl_gap_usdt_total']:.3f} "
-            f"path={payload['report_path']}"
+            f"path={payload['report_path']} "
+            f"per_trade_csv={payload.get('pairs_csv_path') or '-'}"
         )
         return 0
 
@@ -2843,7 +2846,8 @@ def main(argv: list[str] | None = None) -> int:
             f"entry_gap_bps_worst={summary['entry_price_gap_bps_worst']:.2f} "
             f"exit_gap_bps_worst={summary['exit_price_gap_bps_worst']:.2f} "
             f"return_gap_pct_worst={summary['return_gap_pct_worst']:.4f} "
-            f"path={payload['report_path']}"
+            f"path={payload['report_path']} "
+            f"per_trade_csv={payload.get('pairs_csv_path') or '-'}"
         )
         return 0
 

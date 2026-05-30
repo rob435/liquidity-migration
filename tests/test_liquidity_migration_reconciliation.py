@@ -6,6 +6,7 @@ import polars as pl
 import pytest
 
 from liquidity_migration.reconciliation import (
+    _write_pairs_csv,
     format_backtest_paper_report,
     format_demo_bybit_report,
     format_reconciliation_report,
@@ -54,7 +55,17 @@ def test_reconcile_pairs_trades_and_measures_slippage() -> None:
     assert pairs["AAAUSDT"]["exit_slippage_bps"] == pytest.approx(111.1111, rel=1e-4)
     assert pairs["AAAUSDT"]["paper_return_pct"] == pytest.approx(10.0)
     assert pairs["BBBUSDT"]["exit_slippage_bps"] is None
-    assert "Paper vs Demo Reconciliation" in format_reconciliation_report(result)
+    # Richer report: the pair carries raw entry+exit prices, not just bps gaps.
+    assert pairs["AAAUSDT"]["paper_entry_price"] == pytest.approx(100.0)
+    assert pairs["AAAUSDT"]["demo_entry_price"] == pytest.approx(99.0)
+    assert pairs["AAAUSDT"]["paper_exit_price"] == pytest.approx(90.0)
+    assert pairs["AAAUSDT"]["demo_exit_price"] == pytest.approx(91.0)
+    report = format_reconciliation_report(result)
+    assert "Paper vs Demo Reconciliation" in report
+    assert "paper entry" in report and "demo entry" in report
+    assert "paper exit" in report and "demo exit" in report
+    assert "| 100 | 99 |" in report  # closed pair's raw entry prices render
+    assert "| 90 | 91 |" in report  # ...and its raw exit prices
 
 
 def test_reconcile_empty_ledgers() -> None:
@@ -517,6 +528,9 @@ def test_reconcile_backtest_paper_pairs_by_signal_ts_and_flags_drift() -> None:
     assert "Paper-only signals" in report
     assert "SUPERUSDT" in report
     assert "EXTRAUSDT" in report
+    # Richer report: raw backtest+paper entry/exit prices per pair, not just bps gaps.
+    assert "bt entry" in report and "paper entry" in report
+    assert "bt exit" in report and "paper exit" in report
 
 
 def test_reconcile_backtest_paper_window_filter() -> None:
@@ -650,3 +664,26 @@ def test_combined_book_summary_uses_fees() -> None:
         assert realized == pytest.approx(9.88)
         # Open notional from t2 = 2 * 50 = 100
         assert open_notional == pytest.approx(100.0)
+
+
+def test_write_pairs_csv_emits_machine_readable_companion(tmp_path: Path) -> None:
+    """The per-pair CSV is the machine-readable companion to the markdown report
+    (sortable/filterable per-trade reconciliation detail). It sits next to the .md
+    as <stem>_pairs.csv; no paired trades => no file."""
+    report_path = tmp_path / "paper_demo_reconciliation.md"
+    pairs = [
+        {
+            "symbol": "AAAUSDT", "side": "short",
+            "paper_entry_price": 100.0, "demo_entry_price": 99.0, "entry_slippage_bps": 100.0,
+            "paper_exit_price": 90.0, "demo_exit_price": 91.0, "exit_slippage_bps": 111.11,
+        }
+    ]
+    csv_path = _write_pairs_csv(report_path, pairs)
+    assert csv_path is not None and csv_path.endswith("paper_demo_reconciliation_pairs.csv")
+    df = pl.read_csv(csv_path)
+    assert df.height == 1
+    assert {"symbol", "paper_entry_price", "demo_entry_price", "paper_exit_price", "demo_exit_price"} <= set(df.columns)
+    assert df["paper_entry_price"][0] == pytest.approx(100.0)
+    assert df["demo_exit_price"][0] == pytest.approx(91.0)
+    # No paired trades -> no companion file.
+    assert _write_pairs_csv(report_path, []) is None

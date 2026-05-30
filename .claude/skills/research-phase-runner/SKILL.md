@@ -1,24 +1,25 @@
 ---
 name: research-phase-runner
-description: "Execution workflow for the SELECTION-vs-EXECUTION research plan at docs/research_plan_selection_execution.md. Use any time you are about to run, conditionally-run, or write up an experiment (E1 execution-premium, E2 continuous+execution, E3 sniper) from that plan — covers pre-checks, dispatch, the three-tier demo-arbiter decision rule (scripts/r1_robustness.py + scripts/apply_decision_rule.py), the verdict receipt, STATE.md update, and the commit. Keeps the three-tier thresholds intact; the Tier-3 real-money gate stays strict."
+description: "Execution workflow for running a research experiment from the current forward plan (docs/research_plan_intraday_kernel.md — the intraday-detection kernel, phases K0/K1/K2). Use any time you are about to run, conditionally-run, or write up an experiment — covers pre-checks, dispatch, the three-tier demo-arbiter decision rule (scripts/r1_robustness.py + scripts/apply_decision_rule.py), the verdict receipt, STATE.md update, and the commit. Keeps the three-tier thresholds intact; the Tier-3 real-money gate stays strict."
 ---
 
 # Running a research experiment
 
 Use this every time you run, conditionally-run, or write up an experiment from the
-plan at **`docs/research_plan_selection_execution.md`** (E1 execution-premium,
-E2 continuous + execution, E3 sniper).
+current forward plan at **`docs/research_plan_intraday_kernel.md`** — the intraday-detection
+kernel (K0 upside-ceiling → K1 backtest → K2 build).
 
 Always read **STATE.md** first — it tells you what's done, what's pending, and the
 current binding decision rules.
 
 ## The thesis you are testing
 
-The strategy is two separable signals: **selection** (the liquidity-migration event
-picks a candidate pool) and **execution** (short the *confirmed fade* — pop then
-giveback — not the top). It is a **fade strategy, not a catch-the-top strategy**. The
-plan tests selection and execution as separate signals — never collapse them into a
-single hard-coded execution.
+The alpha is the **SELECTION** signal — the discrete liquidity-migration event picks the
+candidate pool (a fade short on seasoned names, not catch-the-top). E1 settled the
+EXECUTION question: entry *timing* is a non-lever (fade-confirmation ≈ immediate), so the
+forward work is **faster detection of the same event** (the kernel — detect intraday off the
+WS stream), NOT a new selector. Keep the proven event + age/residual-momentum gates; don't
+swap in the rank-all continuous decile (regime-conditional, rejected).
 
 ## The decision framework — three-tier, demo-arbiter
 
@@ -42,8 +43,8 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
 
 ## Workflow (apply per experiment)
 
-1. **Pre-check.** Read STATE.md. Confirm the experiment's gate is met (E2 needs E1's
-   execution premium; E3 needs E1/E2's timing result). Confirm required code is
+1. **Pre-check.** Read STATE.md. Confirm the experiment's gate is met (each kernel phase
+   gates the next — K1 needs K0's upside-ceiling pass; K2 needs K1). Confirm required code is
    merged. Confirm data roots present (`~/SHARED_DATA/{bybit,binance}_full_pit`).
 
 2. **Plan the arms/cells.** Re-read the experiment's section in the plan. Do NOT add

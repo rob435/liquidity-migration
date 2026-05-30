@@ -18,7 +18,7 @@ in-sample**. It stays in-sample; the Bybit demo forward test is the arbiter;
 nothing is promoted; real money stays off. Dated numbers + full record:
 [docs/research_summary.md](docs/research_summary.md); live state:
 [STATE.md](STATE.md); forward plan:
-[docs/research_plan_selection_execution.md](docs/research_plan_selection_execution.md).
+[docs/research_plan_intraday_kernel.md](docs/research_plan_intraday_kernel.md).
 
 A demo (paper) forward test of the frozen `promoted` short profile + the v11a
 long sleeve runs on a Bybit demo account on a VPS — that demo is the actual
@@ -35,7 +35,7 @@ money.
   `python -m liquidity_migration` CLI (run `--help` for the subcommand list).
 - `tests/` — `.venv/bin/python -m pytest -q`.
 - `docs/research_findings.md` — short verdict pointer (defers to research_summary.md).
-- `docs/research_plan_selection_execution.md` — the forward research plan (5950X).
+- `docs/research_plan_intraday_kernel.md` — the forward research plan (5950X).
 - `docs/backtesting_errors_we_never_repeat.md` — research methodology standard.
 - `docs/data_roots.md` — data-root contract (research / live demo / OOS).
 - `docs/event_demo_daemon.md` — demo forward-cycle daemon runbook + infra-hardening changelog.

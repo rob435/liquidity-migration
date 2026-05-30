@@ -9,7 +9,7 @@ A Bybit (+Binance) research codebase for a liquidity-migration **short** strateg
 (plus a long-native v11a sleeve). Research-stage; a frozen `promoted` profile runs
 on demo + paper only, not real money. Live state, current direction, and the
 research plan live in **STATE.md**, **docs/research_summary.md**, and
-**docs/research_plan_selection_execution.md** — this file is just the map.
+**docs/research_plan_intraday_kernel.md** — this file is just the map.
 
 ## graphify first (mandated by AGENTS.md)
 

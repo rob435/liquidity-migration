@@ -79,7 +79,7 @@ subcommand list — do not maintain a copy here.
 - Event-driven entries are the strategy path; legacy fixed-day rebalance-grid
   benchmarks are retired — do not revive them or cite their results as evidence.
 - What is deployed vs. research-gated (the daily-close signal vs. the continuous
-  variant) is tracked in STATE.md and `docs/research_plan_selection_execution.md`
+  variant) is tracked in STATE.md and `docs/research_plan_intraday_kernel.md`
   — defer to them.
 - Every serious run must leave enough report output to audit the decision.
 - Before constructing a run, apply the **backtest-integrity** skill. After a

@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import os
 import shutil
 import subprocess
 import sys
@@ -133,8 +134,10 @@ def pull_ledgers(step: Step, host: str) -> None:
             remote = f"{host}:{VPS_BASE}/{sleeve}/{ds}/"
             dest = REPO / local / ds
             dest.mkdir(parents=True, exist_ok=True)
-            # -a archive, -z compress; no --delete (never clobber local-only history).
-            step.run(["rsync", "-az", "--info=stats0", remote, f"{dest}/"], check=False)
+            # -a archive, -z compress, -q quiet; no --delete (never clobber
+            # local-only history). -q (not --info=stats0) so this works on macOS's
+            # openrsync 2.6.9 as well as Linux rsync 3.x.
+            step.run(["rsync", "-azq", remote, f"{dest}/"], check=False)
 
 
 def refresh_manifest(step: Step, root: str, today: dt.date) -> None:

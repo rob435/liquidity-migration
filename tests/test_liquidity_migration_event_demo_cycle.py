@@ -703,22 +703,24 @@ def test_demo_relaxed_profile_requires_wide_forward_universe() -> None:
 
 
 def test_promoted_profile_requires_wide_forward_universe() -> None:
-    # Regression for the 2026-05-24 demo-VPS bug: rank_end=220 was passing the
-    # validator even though the promoted profile needs trade_rank_max(150) +
-    # rank_improvement_min(150) = 300 to observe prior-week ranks of
-    # rocket-symbols. With the old narrow universe the forward test could
-    # never fire a signal.
-    with pytest.raises(ValueError, match="rank 300"):
+    # Regression for the 2026-05-24 demo-VPS bug (rank_end too narrow → zero
+    # signals). Since the 2026-05-30 drop_all_4 promotion the promoted profile
+    # drops the universe-rank-max bound (rank_max=99999), so the required
+    # prior-week rank ceiling is rank_max(99999) + rank_improvement_min(150) =
+    # 100149 — i.e. ANY fixed narrow universe is now too narrow, and the
+    # deployed services therefore MUST run match-the-backtest mode
+    # (universe_rank_end=0 / universe_max_symbols=0, the full ~750-perp set).
+    required = _required_universe_rank_end("promoted")
+    assert required == 99999 + 150  # == 100149
+    # A fixed narrow universe is rejected (it can never reach 100149).
+    with pytest.raises(ValueError, match="too narrow for promoted"):
         _validate_demo_config(
-            EventDemoCycleConfig(strategy_profile="promoted", universe_rank_end=220, universe_max_symbols=400)
+            EventDemoCycleConfig(strategy_profile="promoted", universe_rank_end=400, universe_max_symbols=400)
         )
-    with pytest.raises(ValueError, match="300"):
-        _validate_demo_config(
-            EventDemoCycleConfig(strategy_profile="promoted", universe_rank_end=400, universe_max_symbols=220)
-        )
-    # exact minimum passes
+    # Match-the-backtest mode (the deployed config) passes: the full universe is
+    # used, so the universe-too-narrow check is skipped by construction.
     _validate_demo_config(
-        EventDemoCycleConfig(strategy_profile="promoted", universe_rank_end=300, universe_max_symbols=300)
+        EventDemoCycleConfig(strategy_profile="promoted", universe_rank_end=0, universe_max_symbols=0)
     )
 
 
@@ -805,9 +807,10 @@ def test_compute_pipeline_diagnostics_reports_gap_when_universe_too_narrow() -> 
 
 
 def test_event_demo_max_active_symbols_override() -> None:
-    # 0 keeps the strategy profile's value (promoted = 5); a positive value overrides it.
+    # 0 keeps the strategy profile's value (promoted = 12 since the 2026-05-30
+    # drop_all_4 promotion); a positive value overrides it.
     promoted = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
-    assert promoted.max_active_symbols == 5
+    assert promoted.max_active_symbols == 12
     assert EventDemoCycleConfig().max_active_symbols == 0
     assert EventDemoCycleConfig(max_active_symbols=3).max_active_symbols == 3
     _validate_demo_config(EventDemoCycleConfig(strategy_profile="promoted", max_active_symbols=3))

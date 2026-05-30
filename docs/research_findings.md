@@ -30,7 +30,7 @@ The **continuous** candidate signal carries real, robust cross-venue selection
 IC, but was only ever tested with *immediate* entry — so its "not tradeable"
 label is about timing the top, not the signal. Applying + refining the
 fade-confirmation execution on that candidate pool is the open lead. The forward
-plan is **[docs/research_plan_selection_execution.md](research_plan_selection_execution.md)**.
+plan is **[docs/research_plan_intraday_kernel.md](research_plan_intraday_kernel.md)**.
 
 ## Methodology
 

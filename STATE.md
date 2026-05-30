@@ -10,25 +10,27 @@ originals). This file = live/operational state + the binding decision rules.
 ## Current status (one paragraph)
 
 Bybit (+Binance) liquidity-migration **short**, research-stage — the live demo + paper run
-a frozen "promoted" profile; NOT real money. Round 2 initially concluded a documented null,
-but on **2026-05-29 that was shown to be substantially a methodology artifact** — worst-case
-`bar_extreme` stop fills + `max_active=3` over-concentration + a ×3 (45 bps) cost stacked
-together. Under the realistic capped stop fill at `max_active=12`, the daily strategy is
-**positive on both venues in-sample** (bybit +37.8% / −27.5% DD / Sharpe 0.70; binance
-−4.7% net but gross +16.1%, ~breakeven at honest 15 bps). **Framing (E1-corrected 2026-05-30):**
-the alpha is the **SELECTION** signal (the liquidity-migration event = candidate pool) +
-a plain +1h short. **E1 + E1b falsified the EXECUTION half**: `fixed_delay` (immediate)
-vs `promoted_quality_squeeze` (fade-confirmation) on the same pool gives no robust
-cross-venue premium (pooled MAR Δ +0.01, Tier-2 `descriptive`; paired test noise; robust
-to 6× engagement). Immediate-entry shorting alone is bybit **+67.3% / MAR 2.76** at honest
-15 bps (binance +8.0%, funding-missing). At 1h granularity the fade-confirmation is a
-near-no-op, so **E3 (sniper) is dropped** and **E2 pivots to SELECTION refinement**
-(exhaustion-quality gate — older/liquid names, exhausting OI & taker-flow). Plan:
-**`docs/research_plan_selection_execution.md`**; full detail + E1 verdict:
+a frozen "promoted" profile; NOT real money. **Framing (E1-corrected 2026-05-30):** the alpha
+is the **SELECTION** signal (the liquidity-migration event = candidate pool) + a plain +1h
+short. E1+E1b **falsified the EXECUTION half** — fade-confirmation entry adds no robust
+cross-venue premium over immediate entry, so **E3 (sniper) is dropped** and the open lead is
+**SELECTION refinement** (the age gate + residual-momentum gate, under "What's running"). (The
+earlier "Round 2 = null" was a methodology artifact — worst-case fills + over-concentration.)
+Plan: **`docs/research_plan_intraday_kernel.md`** (the forward direction — faster intraday
+detection of the same event); numbers + full record (the dated source of truth):
 **`docs/research_summary.md`**. Nothing is promoted; forward demo is the arbiter.
 
 ## What's running
 
+- **SHORT sleeve `drop_all_4` promotion (2026-05-30, OPERATOR OVERRIDE — code-complete,
+  deploy pending owner push):** the `promoted` profile drops the 4 non-earning vetoes/bounds
+  (`day_return` floor, `stop_pressure`, `realized_loss`, `universe_rank_max`) and runs
+  `max_active=12` (systemd `MAX_ACTIVE_SYMBOLS` 3→12 on demo+paper). ⚠️ **FAILS the Tier-2
+  cross-venue guard under the corrected engine** (binance net-negative; the deleted research's
+  "winner" was an optimistic `stop_fill='stop'` artifact). Deployed by explicit operator
+  override for forward-demo observation only — revert if binance stays negative. `strategy_id`
+  unchanged → deploy date = clean pre/post split. Receipt + numbers:
+  `docs/preregistration/drop-all-4-promotion.md`.
 - **LONG sleeve `div` promotion (2026-05-30, code-complete, not yet deployed):** the
   `MultiStratV1` long-FC profile (`_v11a_long_native_config`) gained the `div`
   risk-engineering — universe 10→50, max_concurrent 5→10, de-risk-only vol-target
@@ -42,64 +44,26 @@ near-no-op, so **E3 (sniper) is dropped** and **E2 pivots to SELECTION refinemen
   `long_native_event_demo_daemon` under systemd. Frozen promoted profile. Ledgers in
   `data/bybit-demo-event/`.
 - **Paper shadow** (same VPS, same profile, no order submission): `data/bybit-paper-event/`.
-- **No research runs in-flight.** (E1+E1b complete = SELECTION-dominant; E2 complete 2026-05-30.)
-- **E2 RESULT (strong, the headline):** an **exhaustion-quality SELECTION refinement** —
-  `--liquidity-migration-pit-age-days-min=300` (drop symbols younger than 300 days) —
-  **~doubles daily-DD MAR cross-venue** (bybit +2.93→+5.96, binance +0.25→+2.81), is
-  all-thirds-positive both venues, and **fixes the recent weak third on both** (bybit −2%→+25%,
-  binance −26%→+4%). Mechanism verified: young-name shorts are systematic net losers (fresh
-  listings squeeze); the signal works on seasoned names. This **explains the recent edge-decay**.
-  `prior30-max-return-max=0.14` is a secondary cross-venue risk-reducer (halves DD).
-  `universe-rank-max=110` (liq-tighten) REJECTED. Tier-2 demo-candidate, **in-sample — forward
-  demo is the arbiter**. See `docs/preregistration/e2-exhaustion-selection-2026-05-30.md`.
-- **Open action (operator's call — NOT done autonomously):** the live demo runs
-  `pit-age-days-min≈90`; `age_min=300` is a strong candidate to test forward (profile change
-  needs operator OK; hard-line).
-- **E2b RESULT (confirms E2):** age sensitivity is **not a knife-edge** — dropping young
-  names roughly doubles MAR across age 200/300/400 on **both** venues, all-thirds-positive
-  both, recent-third improved both (bybit −2%→+17–24%), LOO-stable, bootstrap P(Δ>0) 86–96%
-  (binance age400 p5>0). bybit saturates ~age200 (≈MAR 6); binance monotone to 400.
-  `age400` joint-best (bybit 6.91 / binance 5.64, ample trades); `age300` conservative;
-  `prior30+age` an optional DD-reducer (mild bybit fragility). `age-alone` is the primary
-  robust refinement. **E2c: cost-robust** — at 3× cost (45 bps) the baseline degrades (binance
-  baseline goes negative) but the age-gated book stays strongly positive both venues. **E2d:
-  fill-robust too** — under worst-case `bar_extreme` fills the baseline goes negative on binance
-  but the age-gated book stays strongly positive (bybit age300 +67%/MAR3.85; binance age300
-  +27%/MAR2.00) — which **closes the loop on the original Round-2 null** (caused by worst-case
-  fills on a universe incl. wild-wick young names; the age gate is the structural remedy). So the
-  age gate is robust to **threshold + regime + cost + stop-fill** — in-sample validation is
-  exhaustive; the only remaining gate is forward demo. See `docs/preregistration/e2b-age-combo-2026-05-30.md`,
-  `e2c-age-cost-robust-2026-05-30.md`, `e2d-age-stopfill-2026-05-30.md`.
-- **Continuous architecture (c2b, EXPLORATORY) — C0 NOT justified:** the age-gated continuous
-  decile short looked cost-positive cross-venue @168h on the **full window**, but the recent/early
-  split shows the edge is **entirely recent-regime (2025–26 alt-bear, substantially short-beta)** —
-  even the beta-neutral L/S is **negative in the early 26 months** (−14/−12 bps) and only positive
-  recent. So it's regime-conditional, not all-weather → **C0 build is NOT recommended on current
-  evidence.** (Corrects an earlier over-claim.) The robust, all-weather result is the **discrete
-  age gate**. Detail: `docs/preregistration/exploratory/c0-continuous-engine-scope-2026-05-30.md`.
-- **P3b (BUILT + VALIDATED, operator-greenlit): residual-momentum SELECTION gate = robust Tier-2
-  DEMO-CANDIDATE.** Integrated into the engine (commit 17df8ba; config
-  `liquidity_migration_residual_momentum_max`, `<root>/residual_momentum.parquet` signal,
-  scripts/precompute_residual_momentum.py; default-inactive, unit-tested, 1054 tests pass). Gated
-  backtest (sweep tag `p3b_rmom_gate_2026-05-30`, gate=per-venue median rmom +0.1377/+0.1148):
-  return 2–3×, Sharpe doubled, DD halved both venues; all-thirds-positive, LOO-stable, bootstrap
-  p5≫0 → r1_robustness **DEMO-ELIGIBLE**. Tier-3 residual (overlap-aware): factor-neutralizes both;
-  **binance certified (+1.10), bybit residual-neutral full-window (+0.00, +2.18 recent)** → NOT a
-  clean cross-venue alpha cert. Value = risk-reduction + factor-neutralization + venue-asymmetric/
-  recent residual alpha. See `docs/preregistration/p3b-rmom-gate-backtest-2026-05-30.md`.
-- **Highest-value next step (operator's call):** forward-demo the **residual-momentum gate** (the
-  strongest validated demo-candidate) and/or the discrete age gate (pit-age 300). The gate is a config
-  change on the engine (`--liquidity-migration-residual-momentum-max <median>` + precomputed signal);
-  the promoted profile is unchanged until you move it. Profile change needs operator OK (hard line);
-  forward demo is the real Tier-3 arbiter for whether the residual alpha persists OOS.
-  **Deploy paths + the rmom-gate live-pipeline prerequisite (same-code #16 gap): `docs/forward_demo_readiness.md`.**
-  TL;DR: the **age gate** is deploy-ready (simple PIT feature, lowest friction — start here); the
-  **residual-momentum gate** is the stronger result but its signal must be live-wired first (scheduled
-  daily precompute extending `residual_momentum.parquet`, PIT-safe) before a faithful forward demo.
-- **Open action (from the 2026-05-29 re-baseline):** the deployed demo runs `max_active=3`
-  (worst day −36%, DD −87% under honest fills); the research-validated value is
-  `max_active=12` (worst day −4.8%, DD −27.5%). Consider moving the demo to 12 and/or
-  `risk_equal` sizing. See `docs/research_summary.md`.
+- **No research runs in-flight.** Research state — full detail + numbers in
+  `docs/research_summary.md` (the dated record; the per-phase E1/E2/P3/c2b receipts were
+  consolidated there and removed 2026-05-30 — git history has the originals):
+  - **E1+E1b — execution is a non-lever:** fade-confirmation adds no robust cross-venue premium
+    over immediate entry → selection-dominant; E3 (sniper) dropped.
+  - **E2/E2b/c/d — the age gate (lead):** `--liquidity-migration-pit-age-days-min≈300` (drop
+    names younger than ~300d) roughly doubles cross-venue MAR and fixes the recent weak third;
+    robust to threshold/regime/cost/stop-fill — **Tier-2 demo-candidate, in-sample.** Deploy-ready
+    (simple PIT feature). Mechanism: young-name shorts are systematic losers (fresh listings squeeze).
+  - **P3b — residual-momentum gate:** built + integrated (engine config
+    `liquidity_migration_residual_momentum_max`, default-inactive), r1_robustness **DEMO-ELIGIBLE**;
+    Tier-3 residual binance-certified, bybit recent-only (not a clean cross-venue cert). Stronger
+    than the age gate but its signal must be live-wired before a faithful forward demo.
+  - **Continuous architecture (c2b) — C0 NOT justified:** the edge is regime-conditional (recent
+    alt-bear only), not all-weather; the robust result is the discrete age gate.
+- **Open actions (operator's call — NOT autonomous; profile change is a hard line):** (a)
+  forward-demo the **age gate** (deploy-ready) and/or the **residual-momentum gate** (live-wire the
+  signal first — `docs/forward_demo_readiness.md`); (b) the deployed demo runs `max_active=3` vs the
+  research-validated `max_active=12` (materially lower worst-day + DD) — consider moving it +
+  `risk_equal` sizing. Numbers: `docs/research_summary.md`.
 
 ## Engine defaults (current)
 
@@ -110,6 +74,17 @@ near-no-op, so **E3 (sniper) is dropped** and **E2 pivots to SELECTION refinemen
 - **Full-PIT universe required** (engine aborts on coverage gaps); the PIT gate is scoped to
   each symbol's traded span `[first_kline, last_kline]` (pre-listing/post-delisting empty
   phantoms excluded; mid-history gaps still caught).
+- **Universe sourcing (clarification — the `rank_end: 120` in `configs/volume_alpha.default.yaml`
+  is NOT the trading universe):** that 120-rank `universe:` block is a *current-turnover snapshot*
+  setting read ONLY by `discover-universe` (a live `get_tickers()` snapshot — survivorship-biased
+  by construction, benchmark/scouting only). The actual paths bypass it: the `volume-events`
+  backtest reads zero of it — it ranks within the full-PIT root on PIT daily liquidity ranks and
+  trades the strategy's `rank_min..rank_max` band; the live demo/paper run match-the-backtest mode
+  (`UNIVERSE_RANK_END=0 / UNIVERSE_MAX_SYMBOLS=0` → the full ~750-perp universe). The pre-2026-05-24
+  demo did run a narrow current-universe (~220–400 by ticker turnover) — that was a real
+  current-universe bias and caused the DRIFTUSDT demo≠backtest divergence; the match-the-backtest
+  switch fixed it. So "the old narrow-universe demo was biased" is correct *for that legacy path*;
+  the current backtest + live demo are not on the 120.
 
 ## Decision rules currently binding — three-tier, demo-arbiter
 
@@ -172,8 +147,6 @@ Op note: the 16 GB research box can't run a full `bybit_full_pit` cell (~23 GB).
   fills the 30+ baseline flags (now bash-3.2-safe on macOS; `DRY_RUN=1` to preview).
 - **Decision-rule analyzer:** `scripts/apply_decision_rule.py SUMMARY.csv --control 00_baseline`.
 - **Tier-2 verdict + fragility:** `scripts/r1_robustness.py --sweep-tag <TAG>`.
-- **Continuous-signal prechecks:** `scripts/c1_continuous_ic_precheck.py` (IC),
-  `scripts/c2_continuous_tradeability_precheck.py` (decile L/S tradeability).
 - **Skill `research-phase-runner`** (auto-loads) — per-phase run/verdict workflow.
 - **MCP tools** on `liqmig-research`: `current_state`, `data_roots`, `list_reports`,
   `parse_report`, `audit_run_artifacts`, `apply_decision_rule`.

@@ -152,6 +152,25 @@ def _realized_return_pct(*, side: str, entry_price: float, exit_price: float) ->
     return (exit_price - entry_price) / entry_price * 100.0
 
 
+def _fmt_price(price: Any) -> str:
+    """Render a fill price for a markdown table. Prices span BTC (~1e5) to micro-cap
+    alts (~1e-6), so use 6 significant figures; an absent/zero price (an open trade)
+    shows as '-'."""
+    value = _float(price)
+    return "-" if value <= 0.0 else format(value, ".6g")
+
+
+def _write_pairs_csv(report_path: Path, pairs: list[dict[str, Any]]) -> str | None:
+    """Write the per-paired-trade detail to a sibling CSV next to the markdown
+    report — a machine-readable companion (sort by slippage, filter by symbol, …)
+    for reconciliation analysis. Returns the path, or None when nothing paired."""
+    if not pairs:
+        return None
+    csv_path = report_path.with_name(report_path.stem + "_pairs.csv")
+    pl.DataFrame(pairs, infer_schema_length=None).write_csv(csv_path)
+    return str(csv_path)
+
+
 def reconcile_paper_demo(
     paper_trades: pl.DataFrame,
     demo_trades: pl.DataFrame,
@@ -370,6 +389,8 @@ def reconcile_paper_demo(
                         side=side, paper_entry=paper_trade["entry_price"], demo_entry=demo_trade["entry_price"]
                     ),
                     "exit_slippage_bps": exit_bps,
+                    "paper_exit_price": paper_trade["exit_price"],
+                    "demo_exit_price": demo_trade["exit_price"],
                     "paper_return_pct": paper_return,
                     "demo_return_pct": demo_return,
                     "paper_exit_reason": paper_trade["exit_reason"],
@@ -453,9 +474,10 @@ def format_reconciliation_report(result: dict[str, Any]) -> str:
         lines.append("## Per-pair")
         lines.append("")
         lines.append(
-            "| symbol | side | entry slip bps | exit slip bps | exit gap (s) | paper reason | demo reason | paper ret % | demo ret % | fee Δ USDT |"
+            "| symbol | side | paper entry | demo entry | entry slip bps | paper exit | demo exit | "
+            "exit slip bps | exit gap (s) | paper reason | demo reason | paper ret % | demo ret % | fee Δ USDT |"
         )
-        lines.append("|---|---|---|---|---|---|---|---|---|---|")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for pair in result["pairs"]:
             exit_bps = pair["exit_slippage_bps"]
             paper_ret = pair["paper_return_pct"]
@@ -463,7 +485,10 @@ def format_reconciliation_report(result: dict[str, Any]) -> str:
             exit_gap = pair["exit_gap_ms"]
             fee_gap = pair["fee_gap_usdt"]
             lines.append(
-                f"| {pair['symbol']} | {pair['side']} | {pair['entry_slippage_bps']:.2f} | "
+                f"| {pair['symbol']} | {pair['side']} | "
+                f"{_fmt_price(pair['paper_entry_price'])} | {_fmt_price(pair['demo_entry_price'])} | "
+                f"{pair['entry_slippage_bps']:.2f} | "
+                f"{_fmt_price(pair.get('paper_exit_price'))} | {_fmt_price(pair.get('demo_exit_price'))} | "
                 f"{'-' if exit_bps is None else format(exit_bps, '.2f')} | "
                 f"{'-' if exit_gap is None else format(exit_gap / 1000.0, '.1f')} | "
                 f"{pair['paper_exit_reason'] or '-'} | {pair['demo_exit_reason'] or '-'} | "
@@ -685,9 +710,10 @@ def format_backtest_paper_report(result: dict[str, Any]) -> str:
         lines.append("## Per-pair")
         lines.append("")
         lines.append(
-            "| symbol | side | signal Δ ms | entry Δ bps | exit Δ bps | bt reason | paper reason | bt ret % | paper ret % | ret Δ %% |"
+            "| symbol | side | signal Δ ms | bt entry | paper entry | entry Δ bps | bt exit | paper exit | "
+            "exit Δ bps | bt reason | paper reason | bt ret % | paper ret % | ret Δ %% |"
         )
-        lines.append("|---|---|---|---|---|---|---|---|---|---|")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
         for p in result["pairs"]:
             exit_bps = p["exit_price_gap_bps"]
             bt_ret = p["backtest_return_pct"]
@@ -695,7 +721,9 @@ def format_backtest_paper_report(result: dict[str, Any]) -> str:
             ret_gap = p["return_gap_pct"]
             lines.append(
                 f"| {p['symbol']} | {p['side']} | {p['signal_gap_ms']} | "
+                f"{_fmt_price(p['backtest_entry_price'])} | {_fmt_price(p['paper_entry_price'])} | "
                 f"{p['entry_price_gap_bps']:.3f} | "
+                f"{_fmt_price(p['backtest_exit_price'])} | {_fmt_price(p['paper_exit_price'])} | "
                 f"{'-' if exit_bps is None else format(exit_bps, '.3f')} | "
                 f"{p['backtest_exit_reason'] or '-'} | {p['paper_exit_reason'] or '-'} | "
                 f"{'-' if bt_ret is None else format(bt_ret, '.3f')} | "
@@ -753,7 +781,8 @@ def run_backtest_paper_reconciliation(
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / "backtest_paper_reconciliation.md"
     report_path.write_text(report, encoding="utf-8")
-    return {"result": result, "report": report, "report_path": str(report_path)}
+    pairs_csv_path = _write_pairs_csv(report_path, result["pairs"])
+    return {"result": result, "report": report, "report_path": str(report_path), "pairs_csv_path": pairs_csv_path}
 
 
 def _qty_weighted_price(legs: list[tuple[float, float]]) -> float:
@@ -1257,7 +1286,8 @@ def run_demo_bybit_reconciliation(
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / "demo_bybit_reconciliation.md"
     report_path.write_text(report, encoding="utf-8")
-    return {"result": result, "report": report, "report_path": str(report_path)}
+    pairs_csv_path = _write_pairs_csv(report_path, result.get("pairs") or [])
+    return {"result": result, "report": report, "report_path": str(report_path), "pairs_csv_path": pairs_csv_path}
 
 
 def run_paper_demo_reconciliation(
@@ -1336,7 +1366,8 @@ def _run_reconciliation(
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / report_filename
     report_path.write_text(report, encoding="utf-8")
-    return {"result": result, "report": report, "report_path": str(report_path)}
+    pairs_csv_path = _write_pairs_csv(report_path, result["pairs"])
+    return {"result": result, "report": report, "report_path": str(report_path), "pairs_csv_path": pairs_csv_path}
 
 
 def run_full_reconciliation(

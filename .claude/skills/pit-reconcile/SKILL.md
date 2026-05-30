@@ -34,6 +34,10 @@ never real money. Read `docs/pit_gate.md` for the full design.
 3. **Read the summary** (step 6): `paired` / `backtest-only` / `paper-only` /
    `slip`. `paper↔demo` clean = the live executor matches the model. A single
    very-recent `paper-only` is the inherent ~1-day archive lag, not a bug.
+4. **Per-trade detail** — each leg writes a `*_pairs.csv` next to its `.md`
+   report (e.g. `backtest_paper_reconciliation_pairs.csv`): one row per paired
+   trade with the backtest/paper/demo entry+exit prices + per-trade slippage bps.
+   Sort it by slippage to find the worst fills.
 
 ## Flags (all optional)
 

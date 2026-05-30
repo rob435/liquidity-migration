@@ -1156,7 +1156,25 @@ def _demo_event_config(config: VolumeEventResearchConfig, *, profile: str) -> Vo
         exclude_symbols=config.exclude_symbols,
     )
     if profile == "promoted":
-        return base
+        # drop_all_4 promotion (2026-05-30): the R1 filter audit's lead cell,
+        # validated cross-venue under the corrected engine (bar_extreme_capped,
+        # 45bps, full-PIT). It drops four non-earning vetoes/bounds to
+        # non-binding sentinels and runs the de-concentrated max_active=12 the
+        # numbers were measured at. Recovered evidence (in-sample 2023-04→2026-05):
+        # bybit ret +38.6%→+53.8% / DD −42.1%→−38.5%; binance +4.2%→+5.7% /
+        # DD −42.2%→−31.0% (return↑ AND drawdown↓ on BOTH venues). The earlier
+        # "FALSIFIES" verdict predated the bar_extreme→capped correction.
+        # Receipt: docs/preregistration/drop-all-4-promotion.md.
+        return replace(
+            base,
+            # de-concentration the package was validated at (was 5)
+            max_active_symbols=12,
+            # the 4 dropped filters (each → non-binding sentinel):
+            liquidity_migration_day_return_min=-1.0,   # was 0.0  (day-return floor off)
+            stop_pressure_stop_count=999,              # was 7    (stop-pressure veto off)
+            realized_loss_pressure_loss_count=999,     # was 6    (realized-loss veto off)
+            universe_rank_max=99999,                   # was 150  (universe upper bound off)
+        )
     if profile == "demo_relaxed":
         return replace(
             base,

@@ -43,8 +43,7 @@ arbiter; nothing is promoted.
 
 ## E1 (2026-05-30): the EXECUTION signal is NOT load-bearing — the alpha is SELECTION
 
-The E1 experiment ([preregistration/e1-execution-premium-2026-05-29.md](preregistration/e1-execution-premium-2026-05-29.md)
-+ the E1b knob-engagement robustness probe) tested the thesis directly: on the *same*
+The E1 experiment (+ the E1b knob-engagement robustness probe) tested the thesis directly: on the *same*
 selection pool, costs, and concentration (full-PIT, capped10, max_active=12, 15 bps,
 both venues, 2023-04→2026-05), vary only `--entry-policy`: A `fixed_delay` (immediate
 +1h) vs B `promoted_quality_squeeze` (fade-confirmation).
@@ -92,14 +91,14 @@ funding artifact.)*
 ## The open lead (post-E1): SELECTION refinement, not execution
 
 E1 closed the execution question (above): timing is a non-lever, so E2/E3 pivot away
-from execution. The plan ([research_plan_selection_execution.md](research_plan_selection_execution.md))
-E1→E2→E3 sequence stands, but with E1's contingency triggered — E2 becomes a **selection
-refinement** study, and E3 (sniper) is dropped (its gate, "entry timing matters," failed).
+from execution. (The E1→E2→E3 plan ran its course — E1 triggered the contingency: E2 became a **selection
+refinement** study and E3/sniper was dropped. The forward plan is now
+[research_plan_intraday_kernel.md](research_plan_intraday_kernel.md).)
 
 Two concrete selection leads:
 
 - **E2 RESULT (2026-05-30): the age gate is a robust cross-venue refinement.** Testing an
-  exhaustion-quality gate ([preregistration/e2-exhaustion-selection-2026-05-30.md](preregistration/e2-exhaustion-selection-2026-05-30.md)),
+  exhaustion-quality gate,
   the winner is **`pit-age-days-min=300` (drop symbols younger than 300 days)**: daily-DD MAR
   **bybit +2.93→+5.96, binance +0.25→+2.81** (return up, DD down on both), all-thirds-positive
   both venues, LOO-stable, bootstrap P(Δ>0) 83%/93%. It **improves the recent weak third on
@@ -112,19 +111,19 @@ Two concrete selection leads:
   funding features were **excluded** — they are NaN on `binance_full_pit`, so the earlier
   exploratory IC's binance derivative-feature cluster was an artifact. **Tier-2 demo-candidate,
   in-sample** — forward demo is the arbiter; deployment/profile change is the operator's call.
-- **E2b confirmed the age effect is not a knife-edge** ([preregistration/e2b-age-combo-2026-05-30.md](preregistration/e2b-age-combo-2026-05-30.md)):
+- **E2b confirmed the age effect is not a knife-edge**:
   dropping young names ~doubles MAR across age 200/300/400 on both venues, all-thirds-positive,
   recent-third improved both, LOO-stable, bootstrap P(Δ>0) 86–96% (binance age400 p5>0). bybit
   saturates ~age200 (≈MAR 6, flat to 400); binance monotone to 400. `age400` is the joint-best
   (bybit 6.91 / binance 5.64, ample trades); `age300` conservative; `prior30+age` an optional
   DD-reducer (mild bybit fragility). `age-alone` is the primary robust refinement.
-- **E2c — the age gate is COST-ROBUST** ([preregistration/e2c-age-cost-robust-2026-05-30.md](preregistration/e2c-age-cost-robust-2026-05-30.md)):
+- **E2c — the age gate is COST-ROBUST**:
   at 3× cost (45 bps) the baseline degrades (binance baseline goes **negative**, −4.7% / MAR −0.14),
   but the age-gated book stays strongly positive both venues (bybit age300 +71% / MAR 4.04; binance
   age300 +22% / MAR 1.74; age400 stronger). The gate removes losing trades → lower cost drag → the
   edge widens at higher cost. So the discrete age gate is robust to threshold (E2b), regime (E2),
   and cost (E2c) — a thoroughly-validated in-sample Tier-2 demo-candidate. Forward demo is the next gate.
-- **E2d — the age gate is FILL-ROBUST + closes the loop on the original null** ([preregistration/e2d-age-stopfill-2026-05-30.md](preregistration/e2d-age-stopfill-2026-05-30.md)):
+- **E2d — the age gate is FILL-ROBUST + closes the loop on the original null**:
   under worst-case `bar_extreme` wick fills the baseline goes **negative on binance** (−6.8%/MAR −0.18)
   but the age-gated book stays strongly positive (bybit age300 +67%/MAR 3.85; binance age300 +27%/MAR 2.00).
   The original Round-2 "documented null" was worst-case fills + over-concentration on a universe that
@@ -132,8 +131,7 @@ Two concrete selection leads:
   makes the strategy survive even the brutal fill assumption. **In-sample validation is now exhaustive:
   threshold (E2b) + regime (E2) + cost (E2c) + stop-fill (E2d).** Forward demo (Tier-3, operator-gated)
   is the only remaining gate.
-- **P2-1 (the sobering one): the edge is mostly FACTOR EXPOSURE, not unique alpha**
-  ([preregistration/p2-1-residual-alpha-verdict-2026-05-30.md](preregistration/p2-1-residual-alpha-verdict-2026-05-30.md)).
+- **P2-1 (the sobering one): the edge is mostly FACTOR EXPOSURE, not unique alpha**.
   Decomposing the ledgers through the validated 6-factor risk model: the **baseline is pure factor
   exposure** (annualized residual Sharpe strongly *negative* under the robust common-4-factor model
   both venues — its raw Sharpe ≈1.1 is entirely priced premia from shorting high-vol/low-liquidity
@@ -143,8 +141,7 @@ Two concrete selection leads:
   √(trades/yr) annualization is optimistic (overlapping trades). So the strategy — even age-gated —
   is primarily a **factor-harvesting vehicle** (still a legitimate demo-candidate at MAR 3–6 / halved
   DD), but the "we found unique alpha" framing is **not** supported by the residual-Sharpe gate.
-- **P2-2/3 (residual leaderboard) — the age gate's real value is FACTOR-NEUTRALIZATION**
-  ([preregistration/p2-2-3-residual-leaderboard-verdict-2026-05-30.md](preregistration/p2-2-3-residual-leaderboard-verdict-2026-05-30.md)).
+- **P2-2/3 (residual leaderboard) — the age gate's real value is FACTOR-NEUTRALIZATION**.
   Decomposing every candidate selection config: **no config clears Tier-3 residual ≥+0.3 cross-venue**
   (age residuals sign-flip bybit −/binance +). The biggest *return* lever `drop_all_4` (+295%) is
   **NOT alpha** — negative residual both venues = pure factor harvesting. But under *every* model the
@@ -153,8 +150,7 @@ Two concrete selection leads:
   gate's robust contribution is **stripping factor exposure** (valuable for forward robustness — a
   near-neutral book resists factor-premium decay/crowding), not adding idiosyncratic alpha. Forward-demo
   the age gate as a **robust factor-neutralized short**, not a unique-alpha engine.
-- **P3 — residual-momentum selection: a real refinement + a promising (uncertified) alpha lead**
-  ([preregistration/p3-residual-momentum-verdict-2026-05-30.md](preregistration/p3-residual-momentum-verdict-2026-05-30.md)).
+- **P3 — residual-momentum selection: a real refinement + a promising (uncertified) alpha lead**.
   Trailing factor-residual momentum (PIT, signal-close `lag1`) **strongly predicts which age300
   candidates are the best shorts, cross-venue** (IC −0.19 bybit / −0.35 binance — short the
   idiosyncratically-weak names), survives the strict-PIT lag, full coverage, holds recent. Selecting
@@ -168,7 +164,7 @@ Two concrete selection leads:
   certifying it needs an engine-integrated backtest (rmom as a PIT selection filter, overlap-aware
   annualization) — **operator-gated build** (the precheck justifies it).
 - **P3b (BUILT + VALIDATED, operator-greenlit): the residual-momentum gate is a robust Tier-2
-  DEMO-CANDIDATE** ([preregistration/p3b-rmom-gate-backtest-2026-05-30.md](preregistration/p3b-rmom-gate-backtest-2026-05-30.md)).
+  DEMO-CANDIDATE**.
   Integrated the signal as a PIT selection filter in the engine (commit 17df8ba; default-inactive,
   tested, 1054 tests pass) and backtested it (gate at the per-venue median rmom, both venues, 15 bps):
   **return 2–3×, Sharpe doubled, DD halved** (bybit +98%→+210% / Sh 1.59→3.81 / DD −16%→−3.3%; binance
@@ -190,7 +186,6 @@ Two concrete selection leads:
   short-beta). So the continuous age-gated short is **regime-conditional, not all-weather** → the
   C0 build is **not justified** on this (contrast the discrete strategy, all-thirds-positive incl.
   early). Honest null for the strong "rescues the continuous architecture" claim.
-  ([preregistration/exploratory/c0-continuous-engine-scope-2026-05-30.md](preregistration/exploratory/c0-continuous-engine-scope-2026-05-30.md))
 
 **Cross-venue asymmetry is the standing caveat:** bybit MAR 2.76 vs binance 0.28 (and
 binance is funding-missing, i.e. optimistic). The edge is also front-loaded (recent third
@@ -242,7 +237,7 @@ confirmation is the arbiter. Any of these is a fresh, dated pre-registration.
 
 ## Provenance
 
-Round 1 + Round 2 plans and per-phase verdicts (phase0–6, R1–R13, C0–C3) were consolidated
+The E1/E2/P2/P3 + c2b per-phase pre-registration receipts (2026-05-29/30) were consolidated into this record and removed 2026-05-30 (originals in git history), as were the earlier Round 1 + Round 2 plans and per-phase verdicts (phase0–6, R1–R13, C0–C3) — all consolidated
 here and deleted 2026-05-29; originals in git history. Engine/methodology change receipts
 are in the git commit log. Backtest artifacts live under the data roots
 ([data_roots.md](data_roots.md)).

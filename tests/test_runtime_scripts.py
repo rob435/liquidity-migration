@@ -92,7 +92,7 @@ def test_systemd_entry_runner_uses_vps_cadence() -> None:
     assert "Environment=UNIVERSE_RANK_END=0" in text
     assert "Environment=UNIVERSE_MAX_SYMBOLS=0" in text
     assert "Environment=UNIVERSE_MIN_TURNOVER_24H=0" in text
-    assert "Environment=MAX_ACTIVE_SYMBOLS=3" in text
+    assert "Environment=MAX_ACTIVE_SYMBOLS=12" in text  # drop_all_4 promotion 2026-05-30 (was 3)
     assert "Environment=PYTHONDONTWRITEBYTECODE=1" in text
 
 
@@ -459,7 +459,7 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "Environment=UNIVERSE_RANK_END=0" in text
     assert "Environment=UNIVERSE_MAX_SYMBOLS=0" in text
     assert "Environment=UNIVERSE_MIN_TURNOVER_24H=0" in text
-    assert "Environment=MAX_ACTIVE_SYMBOLS=3" in text
+    assert "Environment=MAX_ACTIVE_SYMBOLS=12" in text  # drop_all_4 promotion 2026-05-30 (was 3)
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
     assert "deploy-verify-ok commit=" in text
     assert "--property=Environment" not in text
@@ -523,7 +523,7 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "Environment=UNIVERSE_RANK_END=0" in text
     assert "Environment=UNIVERSE_MAX_SYMBOLS=0" in text
     assert "Environment=UNIVERSE_MIN_TURNOVER_24H=0" in text
-    assert "Environment=MAX_ACTIVE_SYMBOLS=3" in text
+    assert "Environment=MAX_ACTIVE_SYMBOLS=12" in text  # drop_all_4 promotion 2026-05-30 (was 3)
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
     # Long-sleeve parity — verify must catch a regression where the long
     # services were stopped or disabled, since deploy enables + restarts them.
@@ -759,7 +759,7 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "Environment=UNIVERSE_RANK_END=0" in text
     assert "Environment=UNIVERSE_MAX_SYMBOLS=0" in text
     assert "Environment=UNIVERSE_MIN_TURNOVER_24H=0" in text
-    assert "Environment=MAX_ACTIVE_SYMBOLS=3" in text
+    assert "Environment=MAX_ACTIVE_SYMBOLS=12" in text  # drop_all_4 promotion 2026-05-30 (was 3)
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
     assert "deploy-verify-ok commit=" in text
     assert "--property=Environment" not in text

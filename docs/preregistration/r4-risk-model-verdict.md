@@ -6,7 +6,7 @@
 > itself is current and live**, and it is the **foundation of the Tier-3 residual-Sharpe
 > gate** (STATE.md Tier-3: "Residual Sharpe ≥ +0.3 (factor-model residual)"). R4 is
 > orthogonal to the forward research plan
-> ([research_plan_selection_execution.md](../research_plan_selection_execution.md), E1→E2→E3)
+> (then E1→E2→E3; the round concluded — see [research_summary.md](../research_summary.md))
 > — it sits *under* the gate those experiments must eventually pass.
 >
 > **Old-label → current-plan map:** R9 integrated assembly / R10 demo-candidate / R11 OOS
@@ -184,10 +184,10 @@ pass. The hardening only made the evidence honest.
 
 ## Next (current plan)
 
-R4 is done and frozen as the Tier-3 residual-Sharpe foundation. Forward research is the
-narrow plan in [research_plan_selection_execution.md](../research_plan_selection_execution.md):
-**E1** (execution premium — `fixed_delay` vs `promoted_quality_squeeze`) → **E2** (apply the
-fade-confirmation execution to the continuous candidate pool) → **E3** (sniper, sub-1h). At
+R4 is done and frozen as the Tier-3 residual-Sharpe foundation. (Historical: the then-current
+forward plan was E1 → E2 → E3; that round concluded — verdicts in
+[research_summary.md](../research_summary.md), forward plan now
+[research_plan_intraday_kernel.md](../research_plan_intraday_kernel.md).) At
 the Tier-3 gate, residualize each demo-candidate cell on this model (`decompose_strategy_pnl`)
 and require residual Sharpe ≥ +0.3. The risk model needs no further work to support that —
 it is the foundation, not an open phase.

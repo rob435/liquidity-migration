@@ -144,10 +144,13 @@ for material alerts only: entries, exits, position reconciliation, or
 position-report errors. Quiet no-trade cycles still write local reports but must
 not notify. The services submit demo orders only.
 The entry service uses `STRATEGY_PROFILE=promoted` at `close_location_min = 0.30`
-with `MAX_ACTIVE_SYMBOLS=3` — a concentrated (3 concurrent positions) variant of
-the 5-position canonical config, on the conservative `promoted_quality_squeeze`
-entry router. It fetches the top 220 turnover-ranked symbols so the strategy
-trades its rank 31-150 band, and submits demo (paper) orders only. This is a
+with `MAX_ACTIVE_SYMBOLS=12` — the de-concentrated (12 concurrent positions)
+`drop_all_4` package promoted 2026-05-30 (see
+`docs/preregistration/drop-all-4-promotion.md`), on the conservative
+`promoted_quality_squeeze` entry router. It runs match-the-backtest universe mode
+(`UNIVERSE_RANK_END=0 / UNIVERSE_MAX_SYMBOLS=0`, the full perp universe) — the
+`drop_all_4` package drops the rank-max band so the strategy trades from rank 31
+upward, and submits demo (paper) orders only. This is a
 demo-only paper forward test — not real-money validated. See `STATE.md` for
 live status and `docs/event_demo_daemon.md` for the daemon runbook. The risk
 service does not open entries; it repairs exchange-native stop/TP state, listens to
