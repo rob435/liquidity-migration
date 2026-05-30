@@ -76,7 +76,11 @@ def ws_first_ratio(df: pl.DataFrame) -> dict[str, float]:
 
 
 def check_entries(
-    *, data_root: Path, window_hours: int, min_cycles_per_hour: float = 0.8,
+    *,
+    data_root: Path,
+    window_hours: int,
+    min_cycles_per_hour: float = 0.8,
+    zero_entry_candidate_floor: int = 5,
 ) -> tuple[int, str]:
     cycles_root = data_root / "event_demo_cycles"
     latest = _latest_cycle_parquet(cycles_root)
@@ -229,10 +233,27 @@ def check_entries(
             f"OK (silent): no signals fired in {window_hours}h. Kline feed "
             f"fresh; strategy is just quiet. {suffix}"
         )
+    # candidates > 0 but 0 entries. A SMALL number of non-converting candidates
+    # over the window is normal: free slots may be full (max_active reached), the
+    # candidate's symbol may already hold an open position (re-entry blocked), or
+    # a demo entry order is still pending its fill (reconciles a later cycle).
+    # Only a SUSTAINED, large candidate volume with zero entries and a fresh feed
+    # is genuinely anomalous (entry execution or gating broken) — alerting on a
+    # single non-converting candidate (the 2026-05-30 "1 candidate" page) is
+    # noise. `entry_candidates` is the post-filter SUBMITTED count, so a handful
+    # not landing trades is within normal demo fill latency.
+    if candidates < zero_entry_candidate_floor:
+        return 0, (
+            f"OK (sparse): no entries fired in {window_hours}h with only {candidates} "
+            f"non-converting candidate(s) (slots full / symbol already open / pending "
+            f"fill) + {stale_per_cycle} stale-skips/cycle. Kline feed fresh; strategy "
+            f"is just quiet. {suffix}"
+        )
     return 1, (
         f"ALERT: 0 entries in last {window_hours}h with {candidates} candidates "
-        f"+ {stale_per_cycle} stale-skips/cycle — falls outside the known sparse / "
-        f"stale-feed patterns. Check universe coverage, event filters, and entry gates. {suffix}"
+        f"(>= floor {zero_entry_candidate_floor}) + {stale_per_cycle} stale-skips/cycle — "
+        f"that many submitted candidates should have produced entries. Check entry "
+        f"execution, free slots (max_active), and the live-state entry gates. {suffix}"
     )
 
 
@@ -263,6 +284,13 @@ def main() -> int:
         "tolerates brief deploy gaps but catches a daemon stuck in bootstrap "
         "or in an OOM/restart loop.",
     )
+    p.add_argument(
+        "--zero-entry-candidate-floor", type=int, default=5,
+        help="With 0 entries and a fresh feed, only alert when the windowed "
+        "post-filter candidate count reaches this floor. Below it, a few "
+        "non-converting candidates (slots full / symbol already open / pending "
+        "fill) are treated as normal sparse operation, not an anomaly.",
+    )
     p.add_argument("--telegram", action="store_true", help="Post alert via Telegram if unhealthy")
     args = p.parse_args()
 
@@ -270,6 +298,7 @@ def main() -> int:
         data_root=args.data_root,
         window_hours=args.window_hours,
         min_cycles_per_hour=args.min_cycles_per_hour,
+        zero_entry_candidate_floor=args.zero_entry_candidate_floor,
     )
     print(msg)
     if code != 0 and args.telegram:

@@ -201,3 +201,47 @@ Before flipping the systemd `ExecStart`:
 4. Confirm `systemctl stop` exits within a few seconds (drains current
    cycle, doesn't hit the 90s default kill timeout).
 5. Only then update the systemd `ExecStart`.
+
+## Resetting the demo/paper ledgers (post-overhaul clean slate)
+
+After a strategy overhaul (e.g. the 2026-05-30 `drop_all_4` SHORT + `div` LONG
+promotions) the accumulated forward ledgers belong to the *old* config. To
+restart the forward demo/paper run — and the Tier-3 30-day clock — from a clean
+slate, archive + wipe the trading ledgers with
+`scripts/reset_demo_paper_ledgers.sh`. It only touches the
+`event_demo_*` / `long_native_demo_*` / `long_native_paper_*` trade/order/cycle
+datasets across the four roots (`data/bybit-demo-event`, `data/bybit-paper-event`,
+`data/bybit-long-demo-event`, `data/bybit-long-paper-event`); the WS kline
+stores and everything else are preserved so there is no slow re-bootstrap. Every
+wiped dataset is tar.gz'd to `data/_archive/ledger-reset-<ts>.tar.gz` first, so
+the reset is auditable and reversible.
+
+This is a DATA operation on the VPS (5.223.42.109); CI does not run it. Run it
+in a maintenance window, as root, from `/opt/liquidity-migration`:
+
+```bash
+# 0. (Recommended) FLATTEN any open positions on the Bybit DEMO account first
+#    (Bybit demo UI or API). A ledger wipe with positions still open on Bybit
+#    leaves them untracked (the fail-closed orphan logic won't manage a position
+#    that has no ledger trade). Paper places no real orders, so it has none.
+# 1. Stop the daemons + timers so nothing writes mid-reset:
+systemctl stop \
+  liquidity-migration-bybit-demo liquidity-migration-bybit-paper \
+  liquidity-migration-bybit-risk liquidity-migration-bybit-long-demo \
+  liquidity-migration-bybit-long-paper \
+  liquidity-migration-demo-health.timer liquidity-migration-combined-book-report.timer
+# 2. Preview, then run the reset:
+scripts/reset_demo_paper_ledgers.sh --dry-run
+scripts/reset_demo_paper_ledgers.sh
+# 3. Restart — the daemons recreate the emptied datasets on their next cycle:
+systemctl start \
+  liquidity-migration-bybit-demo liquidity-migration-bybit-paper \
+  liquidity-migration-bybit-risk liquidity-migration-bybit-long-demo \
+  liquidity-migration-bybit-long-paper \
+  liquidity-migration-demo-health.timer liquidity-migration-combined-book-report.timer
+```
+
+Deploy the code first (so the daemons restart on the fixed engine), then run the
+reset — the order doesn't matter for correctness since the reset wipes whatever
+has accumulated, but doing the reset last means the first post-reset cycles are
+already on the fixed code.

@@ -984,10 +984,15 @@ def reconcile_demo_bybit(
                 "bybit_avg_entry_price": bb["avg_entry_price"],
                 "demo_exit_price": dt["exit_price"],
                 "bybit_avg_exit_price": bb["avg_exit_price"],
+                # None (not 0.0) when Bybit reported no usable exit price for the
+                # closure (e.g. a multi-leg close where avgExitPrice is omitted):
+                # a 0.0 gap reads as a perfect match and falsely deflates the
+                # slippage mean/worst. None == "unknown" and is excluded from the
+                # aggregates (matches the backtest<->paper path).
                 "exit_price_gap_bps": (
                     abs(dt["exit_price"] - bb["avg_exit_price"]) / bb["avg_exit_price"] * 10_000.0
                     if bb["avg_exit_price"] > 0.0
-                    else 0.0
+                    else None
                 ),
                 "ledger_pnl_usdt": ledger_pnl,
                 "bybit_closed_pnl_usdt": bb["closed_pnl_usdt"],
@@ -1089,7 +1094,7 @@ def reconcile_demo_bybit(
         funding_records, symbols=ledger_symbols
     )
 
-    exit_price_bps_all = [p["exit_price_gap_bps"] for p in pairs]
+    exit_price_bps_all = [p["exit_price_gap_bps"] for p in pairs if p["exit_price_gap_bps"] is not None]
     pnl_gaps_all = [p["pnl_gap_usdt"] for p in pairs]
     exit_ts_gaps_all = [p["exit_ts_gap_ms"] for p in pairs]
     summary = {
@@ -1181,9 +1186,12 @@ def format_demo_bybit_report(result: dict[str, Any]) -> str:
         lines.append("| symbol | side | qty Δ | exit price Δ bps | exit ts Δ s | ledger pnl | bybit pnl | pnl Δ |")
         lines.append("|---|---|---|---|---|---|---|---|")
         for p in result["pairs"]:
+            exit_bps_txt = (
+                f"{p['exit_price_gap_bps']:.2f}" if p["exit_price_gap_bps"] is not None else "—"
+            )
             lines.append(
                 f"| {p['symbol']} | {p['side']} | {p['qty_gap']:.6g} | "
-                f"{p['exit_price_gap_bps']:.2f} | {p['exit_ts_gap_ms'] / 1000.0:.1f} | "
+                f"{exit_bps_txt} | {p['exit_ts_gap_ms'] / 1000.0:.1f} | "
                 f"{p['ledger_pnl_usdt']:.3f} | {p['bybit_closed_pnl_usdt']:.3f} | "
                 f"{p['pnl_gap_usdt']:.3f} |"
             )

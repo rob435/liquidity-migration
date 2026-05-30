@@ -896,6 +896,71 @@ def test_health_watchdog_reports_per_cycle_stale_not_cumulative(tmp_path: Path) 
     )
 
 
+def test_health_watchdog_no_alert_on_few_nonconverting_candidates(tmp_path: Path) -> None:
+    """Regression for the 2026-05-30 false page. The exact telemetry that paged
+    the operator — 1 fresh candidate + 52 stale-skips/cycle + 0 entries + a
+    fresh kline feed — flipped the old catch-all from OK-sparse to ALERT. A
+    single non-converting candidate (free slots full / symbol already holds an
+    open position / a demo entry order still pending its fill) is normal sparse
+    operation, not an anomaly. The watchdog must NOT page below the floor."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from check_demo_entry_health import check_entries
+
+    from datetime import datetime, timezone
+    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    now_ms = int(time.time() * 1000)
+    cycles = [
+        {
+            "mode": "submit",
+            "ts_ms": now_ms - i * 60_000,
+            "entries_executed": 0,
+            "entry_candidates": 1 if i == 0 else 0,  # sum over window = 1, below floor
+            "skipped_stale": 52,
+            "universe_coverage": {"coverage_gap": 0},
+            "latest_feature_ts_ms": now_ms - 18 * 3_600_000,
+            "kline_store_max_ts_ms": now_ms - 78 * 60_000,  # 1.3h old → fresh (<2h)
+        }
+        for i in range(60)
+    ]
+    _write_demo_cycle_parquet(tmp_path, cycles=cycles, date=today)
+    code, msg = check_entries(data_root=tmp_path, window_hours=1)
+    assert code == 0, f"a single non-converting candidate must not page: {msg!r}"
+    assert "OK (sparse)" in msg
+    assert "ALERT" not in msg
+
+
+def test_health_watchdog_alerts_on_many_nonconverting_candidates(tmp_path: Path) -> None:
+    """The genuine-anomaly half of the floor: many submitted candidates with
+    zero entries and a fresh feed means entry execution or the live-state gates
+    are broken (not mere sparsity). That must still ALERT (exit 1) so the
+    floor fix does not silence a real entries-not-landing regression."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from check_demo_entry_health import check_entries
+
+    from datetime import datetime, timezone
+    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    now_ms = int(time.time() * 1000)
+    cycles = [
+        {
+            "mode": "submit",
+            "ts_ms": now_ms - i * 60_000,
+            "entries_executed": 0,
+            "entry_candidates": 1,  # sum over window = 60, well above floor
+            "skipped_stale": 0,
+            "universe_coverage": {"coverage_gap": 0},
+            "latest_feature_ts_ms": now_ms - 1 * 3_600_000,
+            "kline_store_max_ts_ms": now_ms - 15 * 60_000,  # fresh feed
+        }
+        for i in range(60)
+    ]
+    _write_demo_cycle_parquet(tmp_path, cycles=cycles, date=today)
+    code, msg = check_entries(data_root=tmp_path, window_hours=1)
+    assert code == 1, f"many candidates + 0 entries on a fresh feed must ALERT: {msg!r}"
+    assert "should have produced entries" in msg
+
+
 def test_ws_first_ratio_surfaces_ws_vs_rest_mix() -> None:
     """JS observability: the health watchdog surfaces the WS-first % so a
     silently-dead WS feed (production stuck on the slow REST path) is visible."""
@@ -945,3 +1010,47 @@ def test_resolve_max_workers_unknown_ram_falls_back_to_eight(monkeypatch):
     monkeypatch.delenv("SWEEP_MAX_WORKERS", raising=False)
     monkeypatch.setattr(m, "_total_ram_gb", lambda: None)
     assert m._resolve_max_workers() == 8
+
+
+def test_reset_demo_paper_ledgers_archives_then_wipes_only_ledgers(tmp_path: Path) -> None:
+    """scripts/reset_demo_paper_ledgers.sh must (a) preview without touching
+    anything under --dry-run, and (b) archive-then-wipe ONLY the trade/order/
+    cycle ledgers while preserving the WS kline stores (wiping those would force
+    a slow multi-day re-bootstrap)."""
+    import shutil
+    import subprocess
+
+    if shutil.which("bash") is None:
+        pytest.skip("bash unavailable")
+
+    repo = Path(__file__).resolve().parents[1]
+    script = repo / "scripts" / "reset_demo_paper_ledgers.sh"
+
+    # Synthetic repo root: the safety check requires liquidity_migration/ + data/.
+    (tmp_path / "liquidity_migration").mkdir()
+    ledger = tmp_path / "data" / "bybit-demo-event" / "event_demo_trades"
+    cycles = tmp_path / "data" / "bybit-demo-event" / "event_demo_cycles"
+    klines = tmp_path / "data" / "bybit-demo-event" / "event_demo_klines_1h"  # must survive
+    for d in (ledger, cycles, klines):
+        d.mkdir(parents=True)
+        (d / "part.parquet").write_bytes(b"x")
+
+    # --dry-run touches nothing.
+    dry = subprocess.run(
+        ["bash", str(script), "--dry-run"], cwd=tmp_path, capture_output=True, text=True
+    )
+    assert dry.returncode == 0, dry.stderr
+    assert "event_demo_trades" in dry.stdout
+    assert ledger.exists() and cycles.exists() and klines.exists()
+    assert not (tmp_path / "data" / "_archive").exists()
+
+    # Real run: archive created, ledgers gone, kline store preserved.
+    real = subprocess.run(
+        ["bash", str(script)], cwd=tmp_path, capture_output=True, text=True
+    )
+    assert real.returncode == 0, real.stderr
+    assert not ledger.exists(), "trade ledger must be wiped"
+    assert not cycles.exists(), "cycle ledger must be wiped"
+    assert klines.exists(), "WS kline store must be preserved"
+    archives = list((tmp_path / "data" / "_archive").glob("ledger-reset-*.tar.gz"))
+    assert len(archives) == 1, f"expected one archive tarball, got {archives}"

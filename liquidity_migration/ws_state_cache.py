@@ -290,16 +290,32 @@ class PrivateStateCache:
     # -- read accessors ------------------------------------------------
 
     def snapshot(self) -> dict[str, Any]:
-        """Cycle-friendly snapshot mirroring ``_collect_private_snapshots``."""
+        """Cycle-friendly snapshot mirroring ``_collect_private_snapshots``.
+
+        Stored rows are immutable-once-published (``_apply_*_update_locked``
+        rebinds the map key to a fresh ``dict(row)`` rather than mutating in
+        place — see lines ~356/376), so we only need to collect the row
+        references under the lock and can build the defensive copies outside it.
+        That keeps the lock hold O(1) instead of O(orders+positions) of dict
+        copies, so a busy account's WS position/order/wallet events are not
+        stalled while a cycle snapshots. Same pattern as
+        ``KlineStore.flush_to_disk``.
+        """
         with self._lock:
-            return {
-                "equity_usdt": self._equity_usdt,
-                "wallet_error": self._wallet_error,
-                "raw_open_orders": [dict(row) for row in self._orders_by_id.values()],
-                "open_order_error": self._open_order_error,
-                "raw_positions": [dict(row) for row in self._positions_by_symbol.values()],
-                "position_error": self._position_error,
-            }
+            equity_usdt = self._equity_usdt
+            wallet_error = self._wallet_error
+            open_order_error = self._open_order_error
+            position_error = self._position_error
+            order_rows = list(self._orders_by_id.values())
+            position_rows = list(self._positions_by_symbol.values())
+        return {
+            "equity_usdt": equity_usdt,
+            "wallet_error": wallet_error,
+            "raw_open_orders": [dict(row) for row in order_rows],
+            "open_order_error": open_order_error,
+            "raw_positions": [dict(row) for row in position_rows],
+            "position_error": position_error,
+        }
 
     def position_count(self) -> int:
         with self._lock:

@@ -125,6 +125,28 @@ per-cell ledgers; `scripts/apply_decision_rule.py` is the legacy strict (Sharpe)
 Nothing known. Pre-push gate clean: `.venv/bin/python -m ruff check liquidity_migration tests`
 + `.venv/bin/python -m pytest -q` both pass.
 
+**Fixed 2026-05-30 — coverage_gap false health alert + overhaul audit.** The
+`drop_all_4` promotion set `universe_rank_max=99999` (disable sentinel); the demo
+health diagnostic computed `required_prior7_rank = universe_rank_max +
+rank_improvement_min = 100149` and reported `coverage_gap≈99589`, so the
+`demo-health` watchdog paged "universe coverage gap blocks signal generation"
+(with an impossible "raise UNIVERSE_RANK_END" action) on a healthy demo. Fix:
+`_universe_rank_max_is_binding` treats `rank_max<=0` or `>=10000` as unbounded
+(`event_demo.py`) → `coverage_gap=0`; the validator now rejects a truncated
+universe for an unbounded-band profile with a clear match-the-backtest message.
+Watchdog (`scripts/check_demo_entry_health.py`) no longer pages on a few
+non-converting candidates (floor `--zero-entry-candidate-floor`, default 5) — the
+"1 candidate" page was noise. Also from the audit: reconcile now reports
+`exit_price_gap_bps=None` (not a false 0.0 "perfect") when Bybit omits a closure
+price (`reconciliation.py`); `PrivateStateCache.snapshot()` builds row copies
+outside the lock (`ws_state_cache.py`). Verified-NOT-bugs (false positives):
+the "stale-pending-entry blocks reentry" claim (no trade row is written for an
+unfilled demo entry) and three "look-ahead" feature findings (trailing windows on
+already-closed bars; also disabled by default). **Post-overhaul ledger reset is an
+operator step** — `scripts/reset_demo_paper_ledgers.sh` (archive+wipe the four
+roots' trade/order/cycle ledgers; keeps klines) + runbook in
+`docs/event_demo_daemon.md`. Deploy = push to main → CI restarts the daemons.
+
 **Fixed 2026-05-30 — PIT gate / reconcile plumbing** (was: backtest↔paper showed
 spurious `pit_membership_fail`/`paper-only`). Root cause: PIT membership was keyed
 on the signal *stamp* date (D+1, daily-close signals fire at 00:00 of the next day)

@@ -22,6 +22,7 @@ from liquidity_migration.event_demo import (
     _prune_cycle_reports,
     decode_entry_order_link_id,
     _required_universe_rank_end,
+    _universe_rank_max_is_binding,
     _validate_demo_config,
     run_event_demo_cycle,
 )
@@ -702,18 +703,20 @@ def test_demo_relaxed_profile_requires_wide_forward_universe() -> None:
     )
 
 
-def test_promoted_profile_requires_wide_forward_universe() -> None:
+def test_promoted_profile_requires_match_the_backtest_universe() -> None:
     # Regression for the 2026-05-24 demo-VPS bug (rank_end too narrow → zero
-    # signals). Since the 2026-05-30 drop_all_4 promotion the promoted profile
-    # drops the universe-rank-max bound (rank_max=99999), so the required
-    # prior-week rank ceiling is rank_max(99999) + rank_improvement_min(150) =
-    # 100149 — i.e. ANY fixed narrow universe is now too narrow, and the
-    # deployed services therefore MUST run match-the-backtest mode
-    # (universe_rank_end=0 / universe_max_symbols=0, the full ~750-perp set).
-    required = _required_universe_rank_end("promoted")
-    assert required == 99999 + 150  # == 100149
-    # A fixed narrow universe is rejected (it can never reach 100149).
-    with pytest.raises(ValueError, match="too narrow for promoted"):
+    # signals) AND the 2026-05-30 drop_all_4 false-alert fix. The promoted
+    # profile drops the universe-rank-max bound (rank_max=99999 = unbounded
+    # band), so there is NO finite rank ceiling: a truncated universe can never
+    # observe every band-entrant's prior-week rank and reintroduces the
+    # demo!=backtest bias. The validator therefore requires match-the-backtest
+    # mode (universe_rank_end=0 / universe_max_symbols=0, the full ~750-perp set)
+    # with a clear message — NOT an impossible "need rank 100149" demand (which
+    # was the bug that fabricated the coverage_gap=99589 health alert).
+    promoted = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
+    assert not _universe_rank_max_is_binding(promoted.universe_rank_max)
+    # A fixed narrow universe is rejected with the match-the-backtest guidance.
+    with pytest.raises(ValueError, match="unbounded universe band"):
         _validate_demo_config(
             EventDemoCycleConfig(strategy_profile="promoted", universe_rank_end=400, universe_max_symbols=400)
         )
@@ -759,11 +762,14 @@ def test_required_universe_rank_end_matches_strategy_math() -> None:
 
 
 def test_compute_pipeline_diagnostics_reports_zero_gap_for_synthetic_full_coverage() -> None:
-    """Diagnostics report zero coverage gap when the universe spans the required range."""
+    """A *bounded* profile reports zero coverage gap when the universe spans the required range."""
     from liquidity_migration.event_demo import _compute_pipeline_diagnostics, _selected_scenario
     from liquidity_migration.volume_events import _event_score
 
-    strategy = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
+    # demo_relaxed has a real, binding ceiling (rank_max=260) so the coverage
+    # check applies; the promoted profile is unbounded and is covered separately.
+    strategy = _demo_event_config(VolumeEventResearchConfig(), profile="demo_relaxed")
+    assert _universe_rank_max_is_binding(strategy.universe_rank_max)
     scenario = _selected_scenario(strategy)
     _, score_col = _event_score(scenario.event_type)
     required = strategy.universe_rank_max + strategy.liquidity_migration_rank_improvement_min
@@ -782,15 +788,16 @@ def test_compute_pipeline_diagnostics_reports_zero_gap_for_synthetic_full_covera
 def test_compute_pipeline_diagnostics_reports_gap_when_universe_too_narrow() -> None:
     """Diagnostics flag a non-zero coverage gap exactly when prior7 max < required.
 
-    Regression for the 2026-05-24 silent failure: the live demo had 165 symbols
-    and prior7_max=165 while promoted requires 300. The cycle JSON reported
-    `entries=0` with no clue why. This test pins the telemetry that exposes
-    that exact gap so a future regression is loud, not silent.
+    Regression for the 2026-05-24 silent failure: a truncated live universe whose
+    prior7_max is below the profile's required ceiling makes rocket-symbols
+    invisible. The cycle JSON reported `entries=0` with no clue why. This test
+    pins the telemetry on a *bounded* profile (demo_relaxed, required=340) so a
+    future regression is loud, not silent.
     """
     from liquidity_migration.event_demo import _compute_pipeline_diagnostics, _selected_scenario
     from liquidity_migration.volume_events import _event_score
 
-    strategy = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
+    strategy = _demo_event_config(VolumeEventResearchConfig(), profile="demo_relaxed")
     scenario = _selected_scenario(strategy)
     _, score_col = _event_score(scenario.event_type)
     required = strategy.universe_rank_max + strategy.liquidity_migration_rank_improvement_min
@@ -804,6 +811,37 @@ def test_compute_pipeline_diagnostics_reports_gap_when_universe_too_narrow() -> 
     coverage = diagnostics["universe_coverage"]
     assert coverage["observed_prior7_rank_max"] == narrow_observed_max
     assert coverage["coverage_gap"] == 100
+
+
+def test_compute_pipeline_diagnostics_unbounded_band_never_reports_gap() -> None:
+    """The drop_all_4 false-alert regression guard.
+
+    The promoted profile drops the universe-rank-max bound (rank_max=99999).
+    That disable-sentinel must NOT be fed into `required = rank_max + improvement`
+    — doing so produced required≈100149 and a fabricated coverage_gap≈99589 on
+    the full ~560-symbol live universe, which paged the operator with a false
+    "signal generation blocked" alert. An unbounded band has no finite
+    requirement: coverage_gap must be 0 regardless of how small the observed
+    universe is.
+    """
+    from liquidity_migration.event_demo import _compute_pipeline_diagnostics, _selected_scenario
+    from liquidity_migration.volume_events import _event_score
+
+    strategy = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
+    assert not _universe_rank_max_is_binding(strategy.universe_rank_max)
+    scenario = _selected_scenario(strategy)
+    _, score_col = _event_score(scenario.event_type)
+    # A realistic live universe (~560 symbols) — far below rank_max=99999.
+    features = pl.DataFrame({
+        "symbol": ["S1", "S2", "S3"],
+        "ts_ms": [0, 0, 0],
+        "prior7_liquidity_rank": [1, 280, 560],
+    })
+    diagnostics = _compute_pipeline_diagnostics(features, strategy=strategy, scenario=scenario, score_col=score_col)
+    coverage = diagnostics["universe_coverage"]
+    assert coverage["observed_prior7_rank_max"] == 560
+    assert coverage["required_prior7_rank"] == 0
+    assert coverage["coverage_gap"] == 0
 
 
 def test_event_demo_max_active_symbols_override() -> None:
@@ -956,22 +994,35 @@ def test_validate_demo_config_accepts_unlimited_universe_mode() -> None:
 
 
 def test_validate_demo_config_still_rejects_partially_unlimited_universe() -> None:
-    """Only the BOTH-zero case is the new escape hatch. A misconfig
-    where rank_end=0 but max_symbols=100 (or vice versa) still trips
-    the existing too-narrow check rather than silently becoming
-    a 100-symbol universe.
+    """Only the BOTH-zero case is the escape hatch. A misconfig where rank_end=0
+    but max_symbols=100 (or vice versa) must still be rejected, not silently
+    become a 100-symbol universe.
+
+    The rejection reason now depends on the band: the unbounded promoted profile
+    (rank_max disabled) rejects ANY non-both-zero universe with the
+    match-the-backtest message; a bounded profile (demo_relaxed) still trips the
+    finite too-narrow check.
     """
     import pytest as _pytest
-    with _pytest.raises(ValueError, match="too narrow"):
+    # promoted (unbounded band) → match-the-backtest message
+    with _pytest.raises(ValueError, match="unbounded universe band"):
         _validate_demo_config(EventDemoCycleConfig(
             universe_rank_end=0,
             universe_max_symbols=100,
             universe_min_turnover_24h=0.0,
         ))
-    with _pytest.raises(ValueError, match="too narrow"):
+    with _pytest.raises(ValueError, match="unbounded universe band"):
         _validate_demo_config(EventDemoCycleConfig(
             universe_rank_end=100,
             universe_max_symbols=0,
+            universe_min_turnover_24h=0.0,
+        ))
+    # demo_relaxed (bounded band, required rank 340) → finite too-narrow check
+    with _pytest.raises(ValueError, match="too narrow"):
+        _validate_demo_config(EventDemoCycleConfig(
+            strategy_profile="demo_relaxed",
+            universe_rank_end=0,
+            universe_max_symbols=100,
             universe_min_turnover_24h=0.0,
         ))
 

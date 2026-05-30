@@ -1208,6 +1208,30 @@ def _selected_scenario(config: VolumeEventResearchConfig) -> EventScenario:
     )
 
 
+# A `universe_rank_max` at or above this is treated as "no upper bound" rather
+# than a real, binding rank ceiling. The live USDT-perp universe is ~750
+# symbols, so any ceiling in the thousands is non-binding — most notably the
+# drop_all_4 promotion's `universe_rank_max=99999` "off" sentinel. Together with
+# `<= 0` (the documented disable value the filters gate on via `rank_max > 0`)
+# this distinguishes a dropped bound from a real one.
+_UNIVERSE_RANK_MAX_UNBOUNDED = 10_000
+
+
+def _universe_rank_max_is_binding(rank_max: int) -> bool:
+    """True when ``universe_rank_max`` is a real, binding upper rank ceiling.
+
+    ``<= 0`` is the documented disable sentinel (the live/backtest filters apply
+    the ceiling only when ``rank_max > 0``); ``>= _UNIVERSE_RANK_MAX_UNBOUNDED``
+    is the same "no upper bound" intent expressed as a non-binding number (e.g.
+    the ``99999`` the drop_all_4 promoted profile uses to drop the bound). In
+    both cases the trading band spans the whole universe, so the prior7-rank
+    coverage check does not apply — computing ``required = rank_max +
+    improvement`` against such a sentinel is what produced the spurious ~100k
+    ``coverage_gap`` and the false "signal generation blocked" health alert.
+    """
+    return 0 < rank_max < _UNIVERSE_RANK_MAX_UNBOUNDED
+
+
 def _compute_pipeline_diagnostics(
     features: pl.DataFrame,
     *,
@@ -1239,10 +1263,21 @@ def _compute_pipeline_diagnostics(
         }
     else:
         _, stages = select_events_with_stage_counts(features, scenario=scenario, config=strategy, score_col=score_col)
+    rank_max = int(strategy.universe_rank_max)
+    rank_improvement_min = int(strategy.liquidity_migration_rank_improvement_min)
+    # `required_prior7_rank` is the prior-week rank depth the universe must reach
+    # for a band-entrant to be observable. It is only finite when the band has a
+    # real, binding ceiling; an unbounded band (rank_max disabled, or a
+    # 99999-style off-sentinel) spans the whole universe, so there is no finite
+    # requirement. Recording 0 keeps the struct schema stable AND makes
+    # `coverage_gap = max(0, 0 - observed) == 0`, so a dropped universe bound no
+    # longer fabricates a ~100k gap and a false "signal generation blocked" alert.
+    bounded = _universe_rank_max_is_binding(rank_max)
+    required = (rank_max + rank_improvement_min) if bounded else 0
     coverage: dict[str, Any] = {
-        "universe_rank_max": int(strategy.universe_rank_max),
-        "rank_improvement_min": int(strategy.liquidity_migration_rank_improvement_min),
-        "required_prior7_rank": int(strategy.universe_rank_max + strategy.liquidity_migration_rank_improvement_min),
+        "universe_rank_max": rank_max,
+        "rank_improvement_min": rank_improvement_min,
+        "required_prior7_rank": required,
         "observed_prior7_rank_max": None,
         "observed_prior7_rank_null_pct": None,
         "coverage_gap": None,
@@ -1253,7 +1288,7 @@ def _compute_pipeline_diagnostics(
         observed_max = int(observed) if observed is not None else 0
         coverage["observed_prior7_rank_max"] = observed_max
         coverage["observed_prior7_rank_null_pct"] = round(100.0 * col.null_count() / max(col.len(), 1), 2)
-        coverage["coverage_gap"] = max(0, coverage["required_prior7_rank"] - observed_max)
+        coverage["coverage_gap"] = max(0, required - observed_max)
     return {"events_pipeline": stages, "universe_coverage": coverage}
 
 
@@ -1298,6 +1333,12 @@ def _required_universe_rank_end(strategy_profile: str) -> int:
     promoted profile (`rank_max=150 + rank_improvement_min=150 = 300` required),
     so every backtest entry's prior7_rank (189..287) was outside the demo
     universe and the forward test stayed at zero signals for days.
+
+    Note: this raw `rank_max + improvement` math is only meaningful for a
+    *binding* `universe_rank_max`. For an unbounded band (rank_max disabled, e.g.
+    the drop_all_4 promoted profile's 99999) the number is non-binding;
+    `_validate_demo_config` routes unbounded profiles to the match-the-backtest
+    requirement instead of comparing against this value.
     """
     strategy = _demo_event_config(VolumeEventResearchConfig(), profile=strategy_profile)
     return strategy.universe_rank_max + strategy.liquidity_migration_rank_improvement_min
@@ -1309,6 +1350,8 @@ def _validate_demo_config(config: EventDemoCycleConfig) -> None:
         raise ValueError(f"strategy_profile must be one of: {', '.join(DEMO_STRATEGY_PROFILES)}")
     if config.lookback_days < 25:
         raise ValueError("lookback_days must be at least 25 so 20d persistence and 7d prior ranks are populated")
+    strategy = _demo_event_config(VolumeEventResearchConfig(), profile=strategy_profile)
+    unbounded_band = not _universe_rank_max_is_binding(strategy.universe_rank_max)
     required_rank_end = _required_universe_rank_end(strategy_profile)
     # universe_rank_end / universe_max_symbols == 0 is "match-the-backtest"
     # mode: no ticker-turnover pre-filter, every active USDT-perp feeds into
@@ -1319,6 +1362,21 @@ def _validate_demo_config(config: EventDemoCycleConfig) -> None:
         config.universe_rank_end == 0 and config.universe_max_symbols == 0
     )
     if not unlimited_universe:
+        if unbounded_band:
+            # The band has no upper rank ceiling (universe_rank_max disabled —
+            # e.g. the drop_all_4 promoted profile's 99999). A truncated universe
+            # can never observe every band-entrant's prior-week rank and
+            # reintroduces the demo!=backtest selection bias (the 2026-05-26
+            # DRIFTUSDT divergence). There is no finite ceiling that fixes it, so
+            # require match-the-backtest mode rather than an impossible rank.
+            raise ValueError(
+                f"{strategy_profile} runs an unbounded universe band "
+                f"(universe_rank_max disabled); a truncated universe "
+                f"(universe_rank_end={config.universe_rank_end}, "
+                f"universe_max_symbols={config.universe_max_symbols}) reintroduces "
+                f"demo!=backtest selection bias. Set both universe_rank_end and "
+                f"universe_max_symbols to 0 for match-the-backtest mode."
+            )
         if config.universe_rank_end < required_rank_end:
             raise ValueError(
                 f"universe_rank_end={config.universe_rank_end} too narrow for {strategy_profile}: "
