@@ -83,6 +83,10 @@ near-no-op, so **E3 (sniper) is dropped** and **E2 pivots to SELECTION refinemen
   change on the engine (`--liquidity-migration-residual-momentum-max <median>` + precomputed signal);
   the promoted profile is unchanged until you move it. Profile change needs operator OK (hard line);
   forward demo is the real Tier-3 arbiter for whether the residual alpha persists OOS.
+  **Deploy paths + the rmom-gate live-pipeline prerequisite (same-code #16 gap): `docs/forward_demo_readiness.md`.**
+  TL;DR: the **age gate** is deploy-ready (simple PIT feature, lowest friction — start here); the
+  **residual-momentum gate** is the stronger result but its signal must be live-wired first (scheduled
+  daily precompute extending `residual_momentum.parquet`, PIT-safe) before a faithful forward demo.
 - **Open action (from the 2026-05-29 re-baseline):** the deployed demo runs `max_active=3`
   (worst day −36%, DD −87% under honest fills); the research-validated value is
   `max_active=12` (worst day −4.8%, DD −27.5%). Consider moving the demo to 12 and/or
