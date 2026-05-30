@@ -117,11 +117,18 @@ genuinely different signal needing custom engineering. Reopened.
   ~16–17 UTC, turnover climax ~4.2–4.6× day-mean at the peak then rolloff, peak-bar upper-wick
   ~0.43 + mid-range close (rejection), price +20–22% then fades ~6–8%/6h; OI builds into + surges
   after the peak (bybit); premium quiet. Fingerprint EXISTS (necessary). `scripts/i1a_fader_intraday_signature.py`.
-- **I1b (NEXT — make-or-break):** define a PIT-causal intraday burst trigger over ALL coins
-  (incl. pumps that CONTINUE), label forward fade-vs-continue, and test which features (velocity,
-  intrabar rejection, market-context, OI, premium, migration velocity, rmom) **separate faders
-  from continuers** cross-venue + early/recent. Separation exists → build + backtest the selector
-  (I2, pre-register, realistic engine, vs daily baseline). No separation → honest null of the
-  *right* hypothesis. The overfitting risk is high here — cross-venue + early/recent agreement is
-  the discipline; report the full feature distribution, not the winner.
-- **I2 / live:** gated on I1b; live WS engine stays explicit-operator-gated.
+- **I1b (DONE — PASS).** Scanned ALL intraday rate-bursts (age≥300, rank 31–400, gain≥8% +
+  vol-spike≥5×, cooldown 3d, fwd 48h) over BOTH venues incl. non-events (bybit 8968 / binance 7912),
+  labeled forward fade-vs-continue, tested separation + **beta-neutralized**. Result: separation
+  SURVIVES beta-neutralization (idiosyncratic, not market-regime beta), robust **cross-venue +
+  early/recent** — `idio` (pump size vs market) ic_neutral −0.28…−0.31, velocity/vol-spike/accel
+  −0.11…−0.16, wick = noise. Edge is a SELECTION on pump-extremity (extreme quintile beta-neutral
+  short +1.2–1.3% early / +4.4–4.7% recent gross 48h; all-bursts ~breakeven). `scripts/i1b_burst_separation.py`.
+- **I2 (NEXT — the real test):** pre-register + backtest the extreme-pump-burst short under the
+  realistic engine (15 & 45 bps, capped stops, max_active, full-PIT, both venues, early/recent,
+  MAR-primary via r1_robustness) AND residualize through `risk_model.decompose_strategy_pnl` — is it
+  **unique alpha or the known short-term-reversal factor**? The gross-forward edge must survive
+  costs+stops; the edge lives in the extreme subset (selection design matters). Overfitting guard:
+  cross-venue + early/recent + full-distribution reporting. Pre-reg:
+  `docs/preregistration/i2-intraday-burst-selector-2026-05-30.md`.
+- **I3 / live:** gated on I2 + explicit operator go (WS engine + forward demo).

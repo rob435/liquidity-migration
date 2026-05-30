@@ -63,9 +63,16 @@ promoted; forward demo is the arbiter.
     the *daily selector run hourly*** (≥6×-daily-turnover can't confirm until ~15:00, after the
     fade) — NOT a purpose-built intraday signal. **I1a:** faders carry a clear cross-venue
     intraday exhaustion fingerprint (peak ~16–17 UTC, turnover climax ~4.2–4.6×, upper-wick
-    rejection, OI build on bybit). **I1b (make-or-break, pending):** can a PIT-causal feature
-    separate faders from continuers? Status: fill-timing dead (E1), same-selector detection dead
-    (K1a), purpose-built intraday selector UNDER INVESTIGATION. `scripts/i1a_fader_intraday_signature.py`.
+    rejection, OI build on bybit). **I1b (make-or-break) = PASS:** scanning ALL intraday
+    rate-bursts (incl. non-events, both venues), a PIT-causal signal SEPARATES faders from
+    continuers and **survives beta-neutralization** (idiosyncratic, not market-regime beta) —
+    `idio` (pump size vs market) ic_neutral −0.28…−0.31, velocity/vol-spike/accel −0.11…−0.16,
+    BOTH venues × BOTH eras; wick = noise. Edge is a SELECTION on pump-extremity (extreme-quintile
+    beta-neutral short +1.2–1.3% early / +4.4–4.7% recent, gross 48h); shorting all bursts is
+    ~breakeven. A NEW extreme-pump-reversal selector (the daily entry is too late). **Next = I2**
+    (engine backtest w/ costs+stops + risk_model residual: unique alpha vs short-term-reversal
+    factor?). `scripts/i1b_burst_separation.py`. Status: fill-timing dead (E1), same-selector
+    detection dead (K1a), **purpose-built intraday selector = REAL signal, I2 backtest pending.**
   - **CV1 (cross-venue, 2026-05-30):** the bybit≫binance gap is **BREADTH + universe
     composition, NOT a weaker per-trade edge** — matched (same coin/day) events corr 0.89,
     binance ≈ bybit; per-trade net near-identical (median +0.34%/+0.27%). binance fires ~½ the

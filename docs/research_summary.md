@@ -255,6 +255,29 @@ if not → honest null (this time of the *right* hypothesis). "Timing is dead" i
 **downgraded to: the same-selector intraday variant is dead; the purpose-built intraday selector
 is UNDER ACTIVE INVESTIGATION.**
 
+**I1b RESULT (2026-05-30) — separation CONFIRMED, beta-neutral, cross-venue, all-weather → build I2.**
+Scanned ALL intraday rate-bursts (age≥300, liq-rank 31–400, intraday gain ≥8% + hourly vol-spike
+≥5× the prior-7d avg hour, cooldown 3d, forward 48h) across BOTH venues — including pumps that
+never became daily events (bybit 8968, binance 7912 bursts; `scripts/i1b_burst_separation.py`).
+Tested which PIT-causal features separate faders from continuers, then **beta-neutralized**
+(coin forward return − market forward return):
+- **The separation SURVIVES beta-neutralization** (so it's idiosyncratic, NOT the rejected
+  market-regime beta bet): `idio` (pump magnitude relative to market) ic_neutral **−0.28…−0.31**;
+  velocity / vol-spike / acceleration **−0.11…−0.16**; on **BOTH venues × BOTH early/recent**. The
+  intrabar **wick is noise** (ic≈0) — the I1a fingerprint's wick does NOT discriminate fade vs continue.
+- **It's a SELECTION on pump-extremity, not "short every pump":** shorting ALL bursts is
+  ~breakeven-to-negative beta-neutral (mean −0.6…−0.9% early); the **extreme subset** (top
+  idio/velocity quintile) has beta-neutral short-PnL **+1.2–1.3% early / +4.4–4.7% recent** (gross 48h).
+- **Mechanism (reconciles RD1):** the intraday burst entry catches the idiosyncratic short-term
+  reversal of extreme pumps that the daily entry (next-day +1h) is too late for — by the daily close
+  the faders have faded and only continuers remain (RD1's squeezes). So intraday detection DOES add
+  value — but as a **NEW extreme-pump-reversal selector**, not the daily selector run sooner.
+- **Verdict: the make-or-break PASSES.** Next = **I2**: backtest the extreme-pump-burst short under
+  the realistic engine (15 & 45 bps, capped stops, max_active, both venues, early/recent, MAR-primary)
+  AND residualize through `risk_model` (is it unique alpha vs the known short-term-reversal factor?).
+  **Honest bounds:** gross-forward edge must survive costs+stops; the edge is in the extreme subset;
+  it is plausibly short-term-reversal concentrated by the liquidity-migration framing — I2 settles it.
+
 ## CV1 (2026-05-30): the cross-venue asymmetry is BREADTH + composition, NOT edge-quality
 
 Read-only decomposition of the age-gated ledgers both venues
