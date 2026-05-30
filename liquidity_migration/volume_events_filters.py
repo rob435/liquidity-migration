@@ -481,6 +481,8 @@ def _filter_liquidity_migration(
         required_cols.append("up_volume_concentration")
     if config.liquidity_migration_pit_age_days_min > 0 or config.liquidity_migration_pit_age_days_max > 0:
         required_cols.append("pit_age_days")
+    if config.liquidity_migration_residual_momentum_max < 10.0:
+        required_cols.append("residual_momentum")
     if not _has_columns(base, *required_cols):
         return base.head(0)
     # prior7_liquidity_rank and liquidity_rank are both u32. Subtracting them
@@ -757,6 +759,15 @@ def _filter_liquidity_migration(
             predicate = predicate & (pl.col("pit_age_days") >= float(config.liquidity_migration_pit_age_days_min))
         if config.liquidity_migration_pit_age_days_max > 0:
             predicate = predicate & (pl.col("pit_age_days") <= float(config.liquidity_migration_pit_age_days_max))
+    if config.liquidity_migration_residual_momentum_max < 10.0:
+        # P3 residual-momentum gate: keep LOW residual-momentum candidates (short the
+        # idiosyncratically-weak names). residual_momentum is left-joined onto features by the
+        # engine; a null (no signal that day) fails the is_not_null() guard and is dropped.
+        predicate = (
+            predicate
+            & pl.col("residual_momentum").is_not_null()
+            & (pl.col("residual_momentum") <= config.liquidity_migration_residual_momentum_max)
+        )
     return base.filter(predicate)
 
 def _explain_liquidity_migration_rejections(

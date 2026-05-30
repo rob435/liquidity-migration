@@ -502,6 +502,45 @@ def test_filter_liquidity_migration_rejects_negative_rank_delta_after_u32_fix() 
     assert survivors == ["GOOD"], f"u32-underflow regression: {survivors}"
 
 
+def test_filter_liquidity_migration_residual_momentum_gate_keeps_low_rmom() -> None:
+    """P3 residual-momentum SELECTION gate: with --liquidity-migration-residual-momentum-max active,
+    only candidates whose trailing factor-residual momentum is <= the threshold survive (short the
+    idiosyncratically-weak names). High-rmom candidates AND candidates with no signal (null) are
+    dropped. With the default (10.0 = inactive) the gate is a no-op and needs no signal column."""
+    from dataclasses import replace as dc_replace
+    base = pl.DataFrame({
+        "symbol": ["LOW", "HIGH", "NULLSIG"],
+        "date": ["2026-05-26"] * 3,
+        "ts_ms": [1779753600000] * 3,
+        # all three are large climbers (delta = 250-40 = 210 >= 150) so they pass the rank gate;
+        # only residual_momentum differs.
+        "liquidity_rank": pl.Series([40, 40, 40], dtype=pl.UInt32),
+        "prior7_liquidity_rank": pl.Series([250, 250, 250], dtype=pl.UInt32),
+        "dollar_volume_rank_z": [2.0] * 3,
+        "dollar_volume_rank_z_rank_frac": [0.9] * 3,
+        "prior7_dollar_volume_rank_z_rank_frac": [0.1] * 3,
+        "tradable_membership_flag": [True] * 3,
+        "turnover_quote": [1.0e9] * 3,
+        "residual_momentum": [-0.05, 0.05, None],
+    })
+    config_on = dc_replace(
+        _isolated_liquidity_migration_config(), liquidity_migration_residual_momentum_max=0.0,
+    )
+    result = _event_filter(
+        base, "liquidity_migration", score_col="dollar_volume_rank_z",
+        rank_col="dollar_volume_rank_z_rank_frac", top_cut=0.60, config=config_on,
+    )
+    assert result["symbol"].to_list() == ["LOW"], result["symbol"].to_list()
+
+    # Default (10.0) = inactive: no residual_momentum column required, all three survive.
+    config_off = _isolated_liquidity_migration_config()
+    result_off = _event_filter(
+        base.drop("residual_momentum"), "liquidity_migration", score_col="dollar_volume_rank_z",
+        rank_col="dollar_volume_rank_z_rank_frac", top_cut=0.60, config=config_off,
+    )
+    assert set(result_off["symbol"].to_list()) == {"LOW", "HIGH", "NULLSIG"}, result_off["symbol"].to_list()
+
+
 def _isolated_liquidity_migration_config(
     *,
     rank_improvement_min: int = 150,
