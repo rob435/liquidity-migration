@@ -118,6 +118,12 @@ Two concrete selection leads:
   saturates ~age200 (≈MAR 6, flat to 400); binance monotone to 400. `age400` is the joint-best
   (bybit 6.91 / binance 5.64, ample trades); `age300` conservative; `prior30+age` an optional
   DD-reducer (mild bybit fragility). `age-alone` is the primary robust refinement.
+- **E2c — the age gate is COST-ROBUST** ([preregistration/e2c-age-cost-robust-2026-05-30.md](preregistration/e2c-age-cost-robust-2026-05-30.md)):
+  at 3× cost (45 bps) the baseline degrades (binance baseline goes **negative**, −4.7% / MAR −0.14),
+  but the age-gated book stays strongly positive both venues (bybit age300 +71% / MAR 4.04; binance
+  age300 +22% / MAR 1.74; age400 stronger). The gate removes losing trades → lower cost drag → the
+  edge widens at higher cost. So the discrete age gate is robust to threshold (E2b), regime (E2),
+  and cost (E2c) — a thoroughly-validated in-sample Tier-2 demo-candidate. Forward demo is the next gate.
 - **The continuous candidate signal (c2b, 2026-05-30, EXPLORATORY) — age gate flips it on the
   full window but the edge is RECENT-REGIME-ONLY.** The rolling features carry real cross-venue IC
   (`rv_168h` −0.13 @168h). c2's decile short was "not tradeable" because the top-composite decile

@@ -52,7 +52,10 @@ near-no-op, so **E3 (sniper) is dropped** and **E2 pivots to SELECTION refinemen
   (binance age400 p5>0). bybit saturates ~age200 (≈MAR 6); binance monotone to 400.
   `age400` joint-best (bybit 6.91 / binance 5.64, ample trades); `age300` conservative;
   `prior30+age` an optional DD-reducer (mild bybit fragility). `age-alone` is the primary
-  robust refinement. See `docs/preregistration/e2b-age-combo-2026-05-30.md`.
+  robust refinement. **E2c: cost-robust** — at 3× cost (45 bps) the baseline degrades (binance
+  baseline goes negative) but the age-gated book stays strongly positive both venues. So the age
+  gate is robust to threshold + regime + cost. See `docs/preregistration/e2b-age-combo-2026-05-30.md`,
+  `e2c-age-cost-robust-2026-05-30.md`.
 - **Continuous architecture (c2b, EXPLORATORY) — C0 NOT justified:** the age-gated continuous
   decile short looked cost-positive cross-venue @168h on the **full window**, but the recent/early
   split shows the edge is **entirely recent-regime (2025–26 alt-bear, substantially short-beta)** —
