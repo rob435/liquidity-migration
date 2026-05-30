@@ -237,6 +237,24 @@ reverts to the validated selection refinements (age gate + residual-momentum gat
 `docs/preregistration/k0-intraday-fade-timing-2026-05-30.md` (ceiling),
 `k1-intraday-detection-2026-05-30.md` (K1a falsifier).
 
+**I-phase (2026-05-30, operator-directed REOPENING — K1a was too narrow).** K1a only
+falsified running the *daily selector* hourly (its ≥6×-**daily**-turnover rule can't confirm
+until ~15:00, after the fade). It did NOT test a **purpose-built intraday selector** firing on
+*rate/flow* features at the peak — a genuinely different signal. Reopened to engineer one.
+Data verified (correcting a wrong memory): cross-venue all-weather channels = klines
+(price/volume/intrabar/velocity) + **premium_index (hourly) + funding (8h)** both venues +
+market-context; **OI bybit-only**; taker-flow binance-recent-only (out). 1h grain.
+**I1a (`scripts/i1a_fader_intraday_signature.py`):** faders show a clear cross-venue intraday
+**exhaustion fingerprint** — peak ~16–17:00 UTC, peak-bar **upper-wick ~0.43** + mid-range
+close (intrabar rejection), **turnover climax ~4.2–4.6× the day-mean at the peak** then rolloff,
+price +20–22% then fades ~6–8% over 6h; **OI builds into + surges after the peak on bybit**
+(+28%→+54%); premium ~0 (froth channel quiet). So the fingerprint EXISTS (necessary). **The
+make-or-break is I1b:** do pumps that CONTINUE (don't fade) show the same fingerprint at their
+intraday burst? If a PIT-causal feature separates faders from continuers → build the selector;
+if not → honest null (this time of the *right* hypothesis). "Timing is dead" is therefore
+**downgraded to: the same-selector intraday variant is dead; the purpose-built intraday selector
+is UNDER ACTIVE INVESTIGATION.**
+
 ## CV1 (2026-05-30): the cross-venue asymmetry is BREADTH + composition, NOT edge-quality
 
 Read-only decomposition of the age-gated ledgers both venues

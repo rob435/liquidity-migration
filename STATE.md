@@ -16,14 +16,18 @@ short. E1+E1b **falsified the EXECUTION half** — fade-confirmation entry adds 
 cross-venue premium over immediate entry, so **E3 (sniper) is dropped** and the open lead is
 **SELECTION refinement** (the age gate + residual-momentum gate, under "What's running"). (The
 earlier "Round 2 = null" was a methodology artifact — worst-case fills + over-concentration.)
-Tried + **FALSIFIED 2026-05-30** the intraday-detection kernel
-(`docs/research_plan_intraday_kernel.md`): K0 confirmed the daily entry is ~8–11% below the
-event-day peak (an optimistic ceiling), but **K1a showed that ceiling is un-capturable** —
-the same selector can't *confirm* the event (turnover ≥6×) until ~9h after the peak, so the
-realistic intraday uplift is only ~40–85 bps (a coin flip, 45% negative, negative on binance
-early). **This closes the timing axis** (E1 killed fill timing; K1a kills detection timing) →
-**the alpha is purely SELECTION; K1b/K2 cancelled.** The forward direction reverts to the
-validated selection refinements (age gate + residual-momentum gate) under forward demo.
+**Investigating the intraday-detection kernel** (`docs/research_plan_intraday_kernel.md`). K0
+confirmed the daily entry is ~8–11% below the event-day peak (optimistic ceiling). K1a
+falsified running the *daily selector* hourly (its ≥6×-**daily**-turnover rule can't confirm
+until ~15:00, after the fade) — but that is NOT a purpose-built intraday signal. **REOPENED
+2026-05-30 (operator-directed)** to engineer a rate/flow intraday selector. **I1a:** faders
+carry a clear cross-venue intraday **exhaustion fingerprint** (peak ~16–17 UTC, turnover climax
+4.2–4.6×, upper-wick rejection, OI build on bybit; premium quiet). **Make-or-break = I1b** — can
+a PIT-causal feature separate faders from pumps that CONTINUE? So: fill-timing dead (E1),
+same-selector detection dead (K1a), **purpose-built intraday selector UNDER ACTIVE
+INVESTIGATION**. Validated selection refinements (age + rmom gates) stand under forward demo
+(operator-gated). Data note: derivative channels verified (premium/funding both venues full;
+OI bybit-only; taker binance-recent-only) — see the corrected memory.
 Numbers + full record (the dated source of truth): **`docs/research_summary.md`**. Nothing is
 promoted; forward demo is the arbiter.
 
@@ -54,13 +58,14 @@ promoted; forward demo is the arbiter.
 - **No research runs in-flight.** Research state — full detail + numbers in
   `docs/research_summary.md` (the dated record; the per-phase E1/E2/P3/c2b receipts were
   consolidated there and removed 2026-05-30 — git history has the originals):
-  - **Intraday-detection kernel (K0→K1a, 2026-05-30) — FALSIFIED; kernel closed.** K0: the
-    daily entry is ~8–11% below the event-day peak (optimistic ceiling, both venues/splits).
-    **K1a: that ceiling is un-capturable** — the same selector can't confirm the event (turnover
-    ≥6×) until median h*=15–16:00 UTC, ~9h after the peak, so the realistic uplift is only
-    ~40–85 bps (coin flip: 45% negative, binance-early negative, corr(lead,uplift)≈0).
-    **Timing axis closed** (E1=fills, K1a=detection) → alpha is purely SELECTION; **K1b/K2
-    cancelled.** Receipts: `docs/preregistration/k{0,1}-intraday-*.md`.
+  - **Intraday-detection kernel (K0→K1a→I-phase, 2026-05-30) — REOPENED (operator-directed).**
+    K0: daily entry ~8–11% below the event-day peak (optimistic ceiling). **K1a falsified only
+    the *daily selector run hourly*** (≥6×-daily-turnover can't confirm until ~15:00, after the
+    fade) — NOT a purpose-built intraday signal. **I1a:** faders carry a clear cross-venue
+    intraday exhaustion fingerprint (peak ~16–17 UTC, turnover climax ~4.2–4.6×, upper-wick
+    rejection, OI build on bybit). **I1b (make-or-break, pending):** can a PIT-causal feature
+    separate faders from continuers? Status: fill-timing dead (E1), same-selector detection dead
+    (K1a), purpose-built intraday selector UNDER INVESTIGATION. `scripts/i1a_fader_intraday_signature.py`.
   - **CV1 (cross-venue, 2026-05-30):** the bybit≫binance gap is **BREADTH + universe
     composition, NOT a weaker per-trade edge** — matched (same coin/day) events corr 0.89,
     binance ≈ bybit; per-trade net near-identical (median +0.34%/+0.27%). binance fires ~½ the

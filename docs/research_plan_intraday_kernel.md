@@ -102,6 +102,26 @@ selector). Neither faster fills nor faster detection of the same event is a leve
 daily-close cadence leaves no capturable money on the table because the event cannot be
 confirmed any earlier. **The program reverts to its validated SELECTION refinements** — the
 age gate (Tier-2, all-weather) + the residual-momentum gate (P3b, demo-eligible) — under
-forward demo (the operator-gated arbiter). A *new* intraday-native selector (fire on
-early-confirming high-intensity pumps, accepting false positives) is a separate, unchartered
-direction, not this kernel.
+forward demo (the operator-gated arbiter).
+
+## I-phase — purpose-built intraday selector (operator-directed reopening, 2026-05-30)
+
+The operator (correctly) flagged that K1a was too narrow: it tested the *daily selector run
+hourly*, not a **purpose-built intraday signal** firing on rate/flow features at the peak — a
+genuinely different signal needing custom engineering. Reopened.
+
+- **Channels (verified data):** cross-venue all-weather = klines (price/volume/intrabar/velocity)
+  + premium_index (hourly) + funding (8h) both venues + market-context; OI bybit-only;
+  taker-flow binance-recent-only (out). 1h grain.
+- **I1a (DONE):** faders carry a clear cross-venue intraday **exhaustion fingerprint** — peak
+  ~16–17 UTC, turnover climax ~4.2–4.6× day-mean at the peak then rolloff, peak-bar upper-wick
+  ~0.43 + mid-range close (rejection), price +20–22% then fades ~6–8%/6h; OI builds into + surges
+  after the peak (bybit); premium quiet. Fingerprint EXISTS (necessary). `scripts/i1a_fader_intraday_signature.py`.
+- **I1b (NEXT — make-or-break):** define a PIT-causal intraday burst trigger over ALL coins
+  (incl. pumps that CONTINUE), label forward fade-vs-continue, and test which features (velocity,
+  intrabar rejection, market-context, OI, premium, migration velocity, rmom) **separate faders
+  from continuers** cross-venue + early/recent. Separation exists → build + backtest the selector
+  (I2, pre-register, realistic engine, vs daily baseline). No separation → honest null of the
+  *right* hypothesis. The overfitting risk is high here — cross-venue + early/recent agreement is
+  the discipline; report the full feature distribution, not the winner.
+- **I2 / live:** gated on I1b; live WS engine stays explicit-operator-gated.
