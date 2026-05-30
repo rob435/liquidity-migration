@@ -50,6 +50,8 @@ def main() -> int:
     ap.add_argument("--vol-spike-min", type=float, default=5.0)
     ap.add_argument("--cooldown-days", type=int, default=3)
     ap.add_argument("--confirm-window", type=int, default=48)
+    ap.add_argument("--confirm-down-bars", type=int, default=1,
+                    help="require N consecutive lower closes ending at the giveback bar (1 = no momentum filter)")
     ap.add_argument("--givebacks", default="3,5,8")
     ap.add_argument("--hold-h", type=int, default=48)
     ap.add_argument("--stop-pct", type=float, default=0.12)
@@ -87,7 +89,7 @@ def main() -> int:
                 "net15_sum_pct": round(sum(net15) * 100, 1),
                 "net45_mean_pct": round(st.mean(net45) * 100, 3), "net45_sum_pct": round(sum(net45) * 100, 1)}
 
-    res = {"venue": a.venue, "n_extreme_bursts": ext.height, "params": {k: getattr(a, k) for k in ("gain_min", "vol_spike_min", "rank_min", "rank_max", "age_min", "confirm_window", "hold_h", "stop_pct", "stop_slip")}, "givebacks": {}}
+    res = {"venue": a.venue, "n_extreme_bursts": ext.height, "params": {k: getattr(a, k) for k in ("gain_min", "vol_spike_min", "rank_min", "rank_max", "age_min", "confirm_window", "confirm_down_bars", "hold_h", "stop_pct", "stop_slip")}, "givebacks": {}}
     CW, HOLD = a.confirm_window, a.hold_h
     for X in [float(x) for x in a.givebacks.split(",")]:
         trades = []
@@ -101,11 +103,14 @@ def main() -> int:
                 continue
             run_hi = hi[i]
             entry_idx = None
+            DB = a.confirm_down_bars
             for j in range(i + 1, min(i + 1 + CW, len(ts))):
                 run_hi = max(run_hi, hi[j])
                 if run_hi > 0 and cl[j] <= run_hi * (1 - X / 100.0):
-                    entry_idx = j + 1
-                    break
+                    # momentum filter: require DB consecutive lower closes ending at j (sustained fade)
+                    if DB <= 1 or (j >= DB and all(cl[j - k] < cl[j - k - 1] for k in range(DB - 1))):
+                        entry_idx = j + 1
+                        break
             if entry_idx is None or entry_idx >= len(ts):
                 continue
             entry_open = op[entry_idx]

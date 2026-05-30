@@ -70,17 +70,19 @@ promoted; forward demo is the arbiter.
     BOTH venues × BOTH eras; wick = noise. Edge is a SELECTION on pump-extremity (extreme-quintile
     beta-neutral short +1.2–1.3% early / +4.4–4.7% recent, gross 48h); shorting all bursts is
     ~breakeven. A NEW extreme-pump-reversal selector (the daily entry is too late). `scripts/i1b_burst_separation.py`.
-  - **I2 (2026-05-30) — REAL, promising, cross-venue, all-weather lead (with a WIDE stop); NOT validated.**
-    Extreme-burst short under the realistic engine (`scripts/i2_burst_backtest.py`). The daily strategy's
-    **12% stop is too tight** for a catch-the-top short (38% stop-out → fails, recent-only). Fade-confirm
-    (I2b, `i2b_burst_fade_confirm.py`) did NOT rescue (confirm≈1.0, no selectivity). But the **stop-width
-    frontier** is monotonic 12%→50%: **30% stop → MAR 3.2/2.79, DD 14.5/10.7%, all-weather both venues**;
-    50% → MAR 4.9/8.0, DD 16/9%; no-stop best-return but tail blows out (DD 26/20%, −20% day). A wide
-    (30–50%) stop monetizes the real signal with bounded tail (worst-day ~−4%). **Caveats (NOT validated):**
-    Stage-B PROXY; wide-stop gap/fill realism (2% slip optimistic); funding UNMODELED (maybe a credit);
-    back-loaded; STR-factor uniqueness open. **Next = I3** (engine-grade backtest + funding + risk_model
-    residual + STR-factor test; operator-gated). Net: fill-timing dead (E1), same-selector detection dead
-    (K1a), **purpose-built extreme-burst short + wide stop = a genuine lead for an engine-grade I3.**
+  - **I2/c/d (2026-05-30/31) — intraday I-phase CONCLUDED: real signal, NOT safely deployable at a tight stop.**
+    Extreme-burst short, realistic engine (`i2_burst_backtest.py`, `i2b_burst_fade_confirm.py`). Operator
+    capped the stop at ≤20–25% (the 30–50% all-weather result was fragile — optimistic fill modeling +
+    untenable). Under a **tight stop (≤20%)** EVERY entry — top-short, % giveback 3–20%, momentum-confirmed
+    sustained fade (down-bars=2) — is **early-negative / recent-only both venues** (best cell give-5%/stop-20%:
+    EARLY net45 −0.46 bybit / −0.03 binance; RECENT +1.3/+1.0). Structural/regime: bull-market pump
+    continuations squeeze any tight-stopped short → c2b pattern (recent-only = regime bet). **Deep
+    reconciliation:** the daily strategy's "late" next-day entry (K0's ~9% "lateness") is WHY it's safely
+    all-weather — it sidesteps the intraday squeeze; the K0 ceiling is real but un-capturable *safely*. The
+    daily fade-confirm IS the safe harvest. **Verdict: file the intraday-standalone-short (real, not safely
+    deployable under realistic risk); robust all-weather edge stays the daily age-gated + rmom strategy.**
+    I3 deprioritised. Net: fill-timing dead (E1), same-selector detection dead (K1a), tight-stop intraday
+    short = recent-regime bet not all-weather alpha.
   - **CV1 (cross-venue, 2026-05-30):** the bybit≫binance gap is **BREADTH + universe
     composition, NOT a weaker per-trade edge** — matched (same coin/day) events corr 0.89,
     binance ≈ bybit; per-trade net near-identical (median +0.34%/+0.27%). binance fires ~½ the

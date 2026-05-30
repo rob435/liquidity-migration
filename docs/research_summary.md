@@ -317,6 +317,33 @@ exit-timing/concurrency + capped fills + funding) + `risk_model` residual + STR-
 operator-gated. A lead worth building properly — **not** a deployable strategy yet. Receipt:
 `docs/preregistration/i3-intraday-burst-engine-2026-05-30.md`.
 
+**I-PHASE CONCLUSION (2026-05-31, operator-directed tight-stop constraint) — the standalone intraday
+short is NOT safely all-weather deployable.** The operator (correctly) flagged the 30–50% stop as
+fragile (optimistic fill modeling; operationally untenable) and capped it at ≤20–25%, directing
+"more fade, not short the top" + entry refinements. Under a **tight stop (≤20%)**, every entry tested
+is **early-negative / recent-only on both venues** — top-short (I2), % giveback 3–20% (I2c), and
+**momentum-confirmed sustained fade** (down-bars=2, I2d): best cell (give-5%, stop-20%) is EARLY net45
+**−0.46% bybit / −0.03% binance**, RECENT +1.3/+1.0. Entry timing does NOT fix it; the early-negative is
+**structural/regime** — 2023–24 bull-market pump *continuations* squeeze any tight-stopped short, and a
+tight stop crystallises them as −15–20% losses (the all-weather profit only appeared at the wide,
+fragile stop). So at deployable risk it is the **c2b pattern: recent-only = a bear-regime bet, not
+all-weather alpha.**
+
+**The deep reconciliation (the real payoff of this arc):** the daily strategy's "late" next-day +1h
+entry — which K0 measured as ~9% below the intraday peak — is **NOT a bug; it is WHY the strategy is
+safely all-weather.** Entering *after* the pump has settled sidesteps the intraday squeeze that makes
+the aggressive/early short unsafe. The K0 ~9% ceiling is real but **un-capturable safely**, because
+capturing it means shorting into the squeeze zone (fat right tail). The daily fade-confirm-next-day
+entry IS the safe harvest of this exact effect. This closes the whole arc: K0 (ceiling real) → K1a
+(same-selector can't fire in time) → I1b (the signal is real, beta-neutral, all-weather *unstopped*) →
+I2/c/d (but not safely monetizable at a tight stop — the squeeze tail). **Verdict: file the
+intraday-standalone-short as a real signal that is NOT safely deployable under realistic risk; the
+program's robust all-weather edge remains the daily age-gated + residual-momentum strategy.** I3
+(engine-grade) is **deprioritised** — it would only sharpen a recent-only result. Scripts:
+`i1b_burst_separation.py`, `i2_burst_backtest.py`, `i2b_burst_fade_confirm.py`. (Lower-probability
+avenues if revisited: down-bars=3; a market-neutral L/S form — though c2b found the beta-neutral
+continuous version was also recent-only.)
+
 ## CV1 (2026-05-30): the cross-venue asymmetry is BREADTH + composition, NOT edge-quality
 
 Read-only decomposition of the age-gated ledgers both venues

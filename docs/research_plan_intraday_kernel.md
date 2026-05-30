@@ -131,10 +131,18 @@ genuinely different signal needing custom engineering. Reopened.
   MAR 4.9/8.0 DD 16/9%; no-stop best-return but tail blows out (DD 26/20%). A wide (30–50%) stop monetizes
   the signal with bounded tail. Caveats (not validated): Stage-B proxy; wide-stop gap/fill realism;
   funding unmodeled; back-loaded; STR-factor open. Receipt: `docs/preregistration/i2-intraday-burst-selector-2026-05-30.md`.
-- **I3 (NEXT — engine-grade validation; pre-registered):** rebuild the burst short under a true
-  event-driven engine (real exit-timing + concurrency + `bar_extreme_capped` fills + funding), not the
-  Stage-B proxy; r1_robustness Tier-2 + `risk_model.decompose_strategy_pnl` residual + an explicit
-  short-term-reversal-factor control; both venues, early/recent; sweep stop-width transparently. The
-  open risks (wide-stop fill realism, funding sign, proxy→engine drift) are what I3 settles. Pre-reg:
-  `docs/preregistration/i3-intraday-burst-engine-2026-05-30.md`. **Operator-gated** (expensive build).
-- **I4 / live:** gated on I3 + explicit operator go (WS engine + forward demo).
+- **I2c/I2d (2026-05-31) — operator capped the stop at ≤20–25% ("more fade, not the top"; entry
+  refinements). Under a TIGHT stop, the standalone short does NOT hold up.** Every entry — top-short,
+  % giveback 3–20% (I2c), momentum-confirmed sustained fade (down-bars=2, I2d) — is **early-negative /
+  recent-only both venues** (best give-5%/stop-20%: EARLY net45 −0.46 bybit / −0.03 binance). The
+  early-negative is structural/regime (bull-market continuations squeeze a tight-stopped short); entry
+  timing doesn't fix it. The 30–50% all-weather result was a fragile-fill + untenable-stop artifact.
+  `scripts/i2b_burst_fade_confirm.py`.
+- **I-PHASE CONCLUDED — verdict:** the intraday extreme-burst signal is **real** (I1b: beta-neutral,
+  cross-venue, all-weather *unstopped*) but **NOT safely deployable as a standalone short under
+  realistic risk** (recent-only at a tight stop). **Deep reconciliation:** the daily strategy's "late"
+  next-day entry is WHY it is safely all-weather — it sidesteps the intraday squeeze; the K0 ~9% ceiling
+  is real but un-capturable *safely*. The daily fade-confirm IS the safe harvest of this effect. **Robust
+  all-weather edge stays the daily age-gated + residual-momentum strategy.** I3 (engine-grade) +
+  I4 (live) **deprioritised** — they would only sharpen a recent-only result. (Lower-probability revisits:
+  down-bars=3; a market-neutral L/S form — but c2b found the beta-neutral continuous version recent-only too.)
