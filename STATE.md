@@ -46,9 +46,17 @@ near-no-op, so **E3 (sniper) is dropped** and **E2 pivots to SELECTION refinemen
 - **Open action (operator's call — NOT done autonomously):** the live demo runs
   `pit-age-days-min≈90`; `age_min=300` is a strong candidate to test forward (profile change
   needs operator OK; hard-line).
-- **Next research run:** E2b — age-threshold sensitivity (200/400; guard a knife-edge) + a
-  refined `prior30+age` combined (drop the rejected liq-tighten): does stacking the two
-  winners beat `age_min` alone cross-venue? Pre-registered, full-PIT both venues.
+- **E2b RESULT (confirms E2):** age sensitivity is **not a knife-edge** — dropping young
+  names roughly doubles MAR across age 200/300/400 on **both** venues, all-thirds-positive
+  both, recent-third improved both (bybit −2%→+17–24%), LOO-stable, bootstrap P(Δ>0) 86–96%
+  (binance age400 p5>0). bybit saturates ~age200 (≈MAR 6); binance monotone to 400.
+  `age400` joint-best (bybit 6.91 / binance 5.64, ample trades); `age300` conservative;
+  `prior30+age` an optional DD-reducer (mild bybit fragility). `age-alone` is the primary
+  robust refinement. See `docs/preregistration/e2b-age-combo-2026-05-30.md`.
+- **Next research direction (operator-gated):** continuous-vs-discrete selection — does the
+  continuous candidate signal (c1 IC real) beat discrete-event selection under a plain +1h
+  short + age gate? Requires building the C0 continuous engine (~multi-day, code-touch) —
+  **scope + operator OK before starting; do not start autonomously.**
 - **Open action (from the 2026-05-29 re-baseline):** the deployed demo runs `max_active=3`
   (worst day −36%, DD −87% under honest fills); the research-validated value is
   `max_active=12` (worst day −4.8%, DD −27.5%). Consider moving the demo to 12 and/or

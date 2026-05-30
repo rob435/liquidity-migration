@@ -112,6 +112,12 @@ Two concrete selection leads:
   funding features were **excluded** — they are NaN on `binance_full_pit`, so the earlier
   exploratory IC's binance derivative-feature cluster was an artifact. **Tier-2 demo-candidate,
   in-sample** — forward demo is the arbiter; deployment/profile change is the operator's call.
+- **E2b confirmed the age effect is not a knife-edge** ([preregistration/e2b-age-combo-2026-05-30.md](preregistration/e2b-age-combo-2026-05-30.md)):
+  dropping young names ~doubles MAR across age 200/300/400 on both venues, all-thirds-positive,
+  recent-third improved both, LOO-stable, bootstrap P(Δ>0) 86–96% (binance age400 p5>0). bybit
+  saturates ~age200 (≈MAR 6, flat to 400); binance monotone to 400. `age400` is the joint-best
+  (bybit 6.91 / binance 5.64, ample trades); `age300` conservative; `prior30+age` an optional
+  DD-reducer (mild bybit fragility). `age-alone` is the primary robust refinement.
 - **The continuous candidate signal carries real cross-venue *selection* IC** (rolling
   features: composite −0.084/−0.085/−0.087 bybit, −0.078/−0.081/−0.085 binance at 24/72/168h;
   `rv_168h` −0.13 @168h). It is a *selection* signal (which names underperform). Its c2

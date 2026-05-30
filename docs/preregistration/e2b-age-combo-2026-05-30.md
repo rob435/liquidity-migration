@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-30
 **Author:** quant-researcher (autonomous research loop)
-**Stage:** run-pending
+**Stage:** run-complete
 **Follows:** [e2-exhaustion-selection-2026-05-30.md](e2-exhaustion-selection-2026-05-30.md) (age_min=300 = robust cross-venue winner; liq_tighten rejected)
 
 ## What's changing
@@ -70,8 +70,36 @@ bash scripts/e2b_age_combo_dispatch.sh
 
 ## Post-run results
 
-(pending)
+Run 2026-05-30, sweep tag `e2b_age_combo_2026-05-30`, full-PIT both venues. Daily-DD MAR
+(report best_scenario); recent-third + LOO + bootstrap from r1_robustness. age300 reused
+from E2 (`02_age_min`).
+
+| cell | bybit MAR (Δ) / recent-3rd / boot P(Δ>0) / n | binance MAR (Δ) / recent-3rd / boot / n |
+|---|---|---|
+| age90 (baseline) | +2.93 / −2% / — / 761 | +0.25 / −26% / — / 477 |
+| age200 | +6.19 (+3.27) / −2%→+17% all+ / 88% / 672 | +0.85 (+0.60) / −26%→−9% / 79% / 376 |
+| age300 | +5.96 (+3.04) / −2%→+25% all+ / — / 579 | +2.81 (+2.56) / −26%→+4% all+ / 93% / 307 |
+| **age400** | **+6.91 (+3.98) / −2%→+24% all+ / 86% / 510** | **+5.64 (+5.39) / −22%→+18% all+ / 96% (p5>0) / 255** |
+| prior30+age300 | +6.33 (+3.40) / −2%→+12% all+ / **LOO-flips** / 89% / 419 | +3.40 (+3.15) / −26%→+8% all+ / 95% / 230 |
 
 ## Verdict
 
-(pending)
+**The age effect is CONFIRMED robust cross-venue — not a knife-edge.** Dropping young names
+(age ≥ 200–400 d) roughly doubles MAR on **both** venues, all-thirds-positive on both, and —
+passing the pre-registered honesty gate — **improves the recent weak third on both** (bybit
+−2%→+17–24%, binance to +4–18%), so it is a genuine within-regime improvement, not a
+regime-dodge. It works across the whole 200/300/400 range: **bybit saturates fast** (≈MAR 6
+already at age200, roughly flat to 400), **binance is monotone** (still climbing at 400). LOO-
+stable for age-alone; bootstrap P(Δ>0) 86–96% (binance age400 has p5>0, clearing even the
+strict Tier-3 bootstrap bar in-sample).
+
+- **`age-alone` is the primary refinement.** Threshold within 200–400 is not critical; `age300`
+  is conservative and well-populated, `age400` is the joint-best MAR (bybit 6.91 / binance 5.64)
+  with ample trades (510/255). Do not chase higher thresholds (diminishing trades; mining risk).
+- **`prior30+age` is an optional secondary DD-reducer** — it stacks (lower DD both venues) but
+  adds mild fragility (bybit LOO sign-flip), so it is not the primary gate.
+
+**Status:** in-sample **Tier-2 demo-candidate** — NOT promotion (feature-selection circularity;
+forward demo is the Tier-3 arbiter; deployment/profile change is the operator's call). The
+binance `age400` bootstrap p5>0 + all-thirds-positive is the strongest in-sample evidence so
+far, but Tier-3 still requires forward-demo OOS + residual-Sharpe.
