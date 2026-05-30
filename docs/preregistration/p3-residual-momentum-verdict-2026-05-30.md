@@ -47,6 +47,26 @@ high-rmom half is negative on both.
    established unique alpha. (I am explicitly not repeating this session's earlier "alpha purifier"
    over-claim.)
 
+## P3-3 update — overlap-aware annualization (resolves the caveat)
+
+Recomputed the selected subset's residual Sharpe with an **overlap-aware (weekly-bucketed)**
+annualization instead of √(trades/yr) (`scripts/p3_3_overlap_aware_residual.py`,
+`~/SHARED_DATA/p3_3_overlap_aware_residual_2026-05-30.json`):
+
+| LOW_rmom (selected) | √(trades/yr) | **overlap-aware weekly** | weekly-recent |
+|---|---|---|---|
+| bybit | +0.47 | **+0.28** (marginal miss of +0.3) | +1.92 |
+| binance | +1.25 | **+1.14** (clear pass) | +2.04 |
+
+(HIGH_rmom overlap-aware: bybit −0.59, binance −0.41 — both strongly negative; full: −0.68 / +0.13.)
+
+**Resolution:** the optimistic √(trades/yr) lift *was* partly inflated — honest annualization brings
+it to **+0.28 bybit / +1.14 binance**, i.e. **binance clears Tier-3, bybit narrowly misses.** So it is
+**borderline, NOT a clean cross-venue Tier-3 pass.** BUT the *relative* separation (selected vs
+discarded) is large and robust on both venues (LOW −HIGH ≈ +0.87 / +1.55), and it is **very strong in
+the recent regime** (+1.9 / +2.0). This is the program's **best alpha evidence**, honestly bounded:
+a real, PIT-clean, cross-venue residual-momentum edge sitting *right at* the Tier-3 threshold.
+
 ## Recommended next step (operator-gated — a real engine build)
 
 To **certify** this, the residual-momentum signal must be built into the engine's candidate selection

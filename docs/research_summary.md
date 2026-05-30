@@ -160,10 +160,13 @@ Two concrete selection leads:
   idiosyncratically-weak names), survives the strict-PIT lag, full coverage, holds recent. Selecting
   the low-rmom half lifts the per-trade residual Sharpe above the Tier-3 gate on both venues
   (+0.47/+1.25). **Caveat (honest):** `IC(rmom,residual)` is weak (−0.08/−0.03) while `IC(rmom,net)`
-  is strong, so rmom predicts net mostly *through factor exposure*; the residual-Sharpe lift is likely
-  inflated by the optimistic √(trades/yr) annualization → **suggestive, not certified**. It's the
-  program's **most promising residual-alpha lead** — but certifying it needs an engine-integrated
-  backtest (rmom as a PIT selection filter) with overlap-aware annualization (operator-gated build).
+  is strong, so rmom predicts net mostly *through factor exposure*. Under **honest overlap-aware
+  (weekly) annualization** (P3-3) the selected-subset residual Sharpe is **+0.28 bybit (marginal miss)
+  / +1.14 binance (clear pass)** — i.e. **borderline Tier-3, not a clean cross-venue pass** — but the
+  relative separation (selected vs discarded) is large/robust both venues and **very strong recently**
+  (+1.9/+2.0). It's the program's **best alpha evidence**, sitting right at the Tier-3 threshold;
+  certifying it needs an engine-integrated backtest (rmom as a PIT selection filter, overlap-aware
+  annualization) — **operator-gated build** (the precheck justifies it).
 - **The continuous candidate signal (c2b, 2026-05-30, EXPLORATORY) — age gate flips it on the
   full window but the edge is RECENT-REGIME-ONLY.** The rolling features carry real cross-venue IC
   (`rv_168h` −0.13 @168h). c2's decile short was "not tradeable" because the top-composite decile
