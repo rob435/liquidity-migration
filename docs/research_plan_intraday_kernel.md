@@ -83,10 +83,25 @@ without an explicit operator go AND K0+K1 passing. The forward demo is the Tier-
   fill window only ~2–6% → the lever is **intraday detection**, not faster fills (consistent
   with E1). It is an optimistic *ceiling* (exact-top short) → necessary, not sufficient.
   Receipt: `docs/preregistration/k0-intraday-fade-timing-2026-05-30.md`.
-- **K1: NEXT (gated on K0 — now open).** Build the rolling intraday event-feature pipeline
-  (PIT-causal, no within-bar look-ahead) and backtest the intraday-detected, age+momentum-gated
-  strategy vs the daily-close baseline under the realistic engine, both venues, early/recent
-  split. Pre-register before running. The K0b decomposition sets the bar: the trigger must fire
-  **genuinely intraday, before the daily close** (a near-close trigger only captures the ~2–6%
-  overnight crumb), and the realistic capture will be a *fraction* of the K0 ceiling.
-- **K2:** gated on K1 + explicit operator go (live WS engine + forward demo).
+- **K1: DONE — FAILED (K1a, 2026-05-30). The kernel is FALSIFIED; K1b + K2 cancelled.**
+  K1a (cheap feasibility, `scripts/k1a_intraday_first_crossing.py`) found the first intraday
+  hour the *same selector* fires and the realistic uplift (fill at `h*`+1 vs the daily +1h
+  entry). Result: only **~40–85 bps median (~10–15% of the K0 ceiling)**, a **coin flip**
+  (45–46% negative, q25 ≈ −3% / q75 ≈ +5%), **negative on binance early**, `corr(lead,uplift)
+  ≈0`. **Mechanism:** the selector cannot *confirm* the event (cumulative turnover ≥6×) until
+  median `h*` = 15–16:00 UTC — ~9h after the morning peak — by which point price has faded back
+  to ≈ the daily entry; confirmation time is decoupled from the price path. The K0 ceiling is
+  real but **un-capturable by faster detection of the same event.** Receipt:
+  `docs/preregistration/k1-intraday-detection-2026-05-30.md`.
+- **K2:** CANCELLED (gated on K1, which failed).
+
+## Outcome — the timing axis is closed; the alpha is SELECTION
+
+E1 killed *fill* timing (within 1h); **K1a kills *detection* timing** (across ~9h, same
+selector). Neither faster fills nor faster detection of the same event is a lever — the
+daily-close cadence leaves no capturable money on the table because the event cannot be
+confirmed any earlier. **The program reverts to its validated SELECTION refinements** — the
+age gate (Tier-2, all-weather) + the residual-momentum gate (P3b, demo-eligible) — under
+forward demo (the operator-gated arbiter). A *new* intraday-native selector (fire on
+early-confirming high-intensity pumps, accepting false positives) is a separate, unchartered
+direction, not this kernel.

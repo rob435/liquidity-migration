@@ -16,13 +16,16 @@ short. E1+E1b **falsified the EXECUTION half** — fade-confirmation entry adds 
 cross-venue premium over immediate entry, so **E3 (sniper) is dropped** and the open lead is
 **SELECTION refinement** (the age gate + residual-momentum gate, under "What's running"). (The
 earlier "Round 2 = null" was a methodology artifact — worst-case fills + over-concentration.)
-Plan: **`docs/research_plan_intraday_kernel.md`** (the forward direction — faster intraday
-detection of the same event). **K0 (the read-only upside-ceiling precheck) PASSED
-2026-05-30** — the daily-close (+1h) entry sits a median **~8–11% below the event-day
-intraday peak**, both venues, all-weather; ~95–98% of that gap is the within-day-D giveback
-(so the lever is *detection*, not fills). **K1** (the rolling intraday-detection backtest)
-is the open build. Numbers + full record (the dated source of truth):
-**`docs/research_summary.md`**. Nothing is promoted; forward demo is the arbiter.
+Tried + **FALSIFIED 2026-05-30** the intraday-detection kernel
+(`docs/research_plan_intraday_kernel.md`): K0 confirmed the daily entry is ~8–11% below the
+event-day peak (an optimistic ceiling), but **K1a showed that ceiling is un-capturable** —
+the same selector can't *confirm* the event (turnover ≥6×) until ~9h after the peak, so the
+realistic intraday uplift is only ~40–85 bps (a coin flip, 45% negative, negative on binance
+early). **This closes the timing axis** (E1 killed fill timing; K1a kills detection timing) →
+**the alpha is purely SELECTION; K1b/K2 cancelled.** The forward direction reverts to the
+validated selection refinements (age gate + residual-momentum gate) under forward demo.
+Numbers + full record (the dated source of truth): **`docs/research_summary.md`**. Nothing is
+promoted; forward demo is the arbiter.
 
 ## What's running
 
@@ -51,11 +54,13 @@ is the open build. Numbers + full record (the dated source of truth):
 - **No research runs in-flight.** Research state — full detail + numbers in
   `docs/research_summary.md` (the dated record; the per-phase E1/E2/P3/c2b receipts were
   consolidated there and removed 2026-05-30 — git history has the originals):
-  - **K0 (intraday-detection kernel, 2026-05-30) — upside-ceiling PASS → K1 is the open build.**
-    The daily-close (+1h) entry is a median ~8–11% below the event-day intraday peak, both venues
-    × both early/recent splits × two books (fixed_delay + age≥300); ~95–98% is within-day-D
-    giveback (lever = detection, not fills — re-confirms E1). It's an optimistic ceiling
-    (necessary, not sufficient); K1 measures the realistic capture. K2 (live WS) operator-gated.
+  - **Intraday-detection kernel (K0→K1a, 2026-05-30) — FALSIFIED; kernel closed.** K0: the
+    daily entry is ~8–11% below the event-day peak (optimistic ceiling, both venues/splits).
+    **K1a: that ceiling is un-capturable** — the same selector can't confirm the event (turnover
+    ≥6×) until median h*=15–16:00 UTC, ~9h after the peak, so the realistic uplift is only
+    ~40–85 bps (coin flip: 45% negative, binance-early negative, corr(lead,uplift)≈0).
+    **Timing axis closed** (E1=fills, K1a=detection) → alpha is purely SELECTION; **K1b/K2
+    cancelled.** Receipts: `docs/preregistration/k{0,1}-intraday-*.md`.
   - **E1+E1b — execution is a non-lever:** fade-confirmation adds no robust cross-venue premium
     over immediate entry → selection-dominant; E3 (sniper) dropped.
   - **E2/E2b/c/d — the age gate (lead):** `--liquidity-migration-pit-age-days-min≈300` (drop

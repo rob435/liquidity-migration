@@ -192,7 +192,7 @@ binance is funding-missing, i.e. optimistic). The edge is also front-loaded (rec
 much weaker). Any selection refinement must narrow this gap / hold up recently, not just
 reload the early bybit regime.
 
-## K0 (2026-05-30): the intraday-detection kernel — upside-ceiling PASS
+## K0→K1a (2026-05-30): the intraday-detection kernel — ceiling PASS, but FALSIFIED at K1a
 
 The forward plan ([research_plan_intraday_kernel.md](research_plan_intraday_kernel.md))
 asks whether detecting the discrete event **intraday** (off the WS stream) instead of on
@@ -215,10 +215,24 @@ the within-day-D giveback** (peak→daily-close); the +1h overnight fill window 
 ~19–64 bps (~2–6%). → the lever is **intraday DETECTION**, not faster fills (re-confirms E1
 at the daily→intraday scale). **Caveat:** it's an optimistic *ceiling* (assumes shorting the
 exact top, which is unknowable in real time and pre-event-confirmation) → **necessary, not
-sufficient.** The realistic capture is a fraction of it, to be measured under the engine in
-**K1** (rolling PIT-causal intraday detection vs the daily-close baseline — pre-register
-first; K2 live-WS stays operator-gated). Receipt:
-`docs/preregistration/k0-intraday-fade-timing-2026-05-30.md`.
+sufficient.** The realistic capture is a fraction of it, measured next in K1a.
+
+**K1a (2026-05-30) — FALSIFIED: the ceiling is un-capturable; the kernel is dead.** The cheap
+feasibility check (`scripts/k1a_intraday_first_crossing.py`, conditioned on daily-firers, the
+*optimistic* test) found the first intraday hour the **same selector** fires and the realistic
+uplift (fill at `h*`+1 vs the daily +1h entry): only **~40–85 bps median (~10–15% of the
+ceiling)**, a **coin flip** (45–46% of trades negative, q25 ≈ −3% / q75 ≈ +5%), **negative on
+binance early**, `corr(lead,uplift)≈0`. **Mechanism:** the selector can't *confirm* the event
+(cumulative turnover ≥6×) until median `h*` = 15–16:00 UTC — ~9h after the morning peak — by
+which point price has faded back to ≈ the daily entry; confirmation time (turnover
+accumulation) is **decoupled from the price path**. So the ~9% ceiling is real but
+un-capturable by faster detection of the *same* event. **This closes the timing axis:** E1
+killed *fill* timing (within 1h); K1a kills *detection* timing (~9h, same selector). The alpha
+is **purely SELECTION**, the daily cadence is fine, and **K1b/K2 are cancelled** — the program
+reverts to the validated selection refinements (age gate + residual-momentum gate, forward-demo
+-gated). A *new* intraday-native selector is a separate unchartered direction. Receipts:
+`docs/preregistration/k0-intraday-fade-timing-2026-05-30.md` (ceiling),
+`k1-intraday-detection-2026-05-30.md` (K1a falsifier).
 
 ## Useful findings worth keeping
 

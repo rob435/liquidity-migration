@@ -90,7 +90,44 @@ the realistic engine, both venues. This is the real test (net of false positives
   EXPLORATORY feasibility only).
 - A detector code path that cannot map to the K2 WS order lifecycle (#16).
 
-## Status
+## Verdict — K1a FAILS the gate → STOP. The intraday-detection kernel is FALSIFIED.
 
-PENDING — build + run **K1a** first on the 5950X, record the verdict, gate K1b on it. K2
-(live WS engine + forward demo) stays **explicit-operator-gated**.
+Ran K1a 2026-05-30 (5950X, both `fixed_delay` ledgers; `scripts/k1a_intraday_first_crossing.py`).
+For every daily-firing event, found the first intraday hour `h*` the same selector
+(cumulative-since-day-start turnover ≥6×, residual ≥8%, close-loc ≥0.30) crosses, and the
+**realistic** entry uplift (fill at `h*`+1 vs the daily +1h entry):
+
+| venue | split | n | fired | realistic_uplift median | lead | ceiling | captured | frac<0 |
+|---|---|--:|--:|--:|--:|--:|--:|--:|
+| bybit | ALL | 763 | 100% | **+58 bps** | 9h | 971 | 0.13 | 0.45 |
+| bybit | EARLY | 363 | 100% | +39 | 8h | 928 | 0.10 | — |
+| bybit | RECENT | 400 | 100% | +85 | 9h | 985 | 0.15 | — |
+| binance | ALL | 477 | 100% | **+40 bps** | 8h | 851 | 0.10 | 0.46 |
+| binance | EARLY | 169 | 100% | **−7 bps** | 7h | 678 | 0.06 | — |
+| binance | RECENT | 308 | 100% | +64 | 8h | 960 | 0.11 | — |
+
+**FALSIFIER TRIPPED** (negative on binance EARLY; realistic uplift ≈ 0 everywhere): the
+same-selector intraday detector captures only **~10–15% of the K0 ceiling** (~40–85 bps
+median vs ~9%), and it is a **coin flip** — **45–46% of trades are negative** (q25 ≈ −3%,
+q75 ≈ +5%), median barely positive, negative on binance early. `corr(lead, uplift) ≈ +0.07`
+(no monotone "earlier is better"); the faint long-lead tercile (+100–200 bps) is still ~40%
+negative and would need a *different* selector to isolate.
+
+**Mechanism (coherent with K0b):** the giveback happens *early* (around the morning peak),
+but the selector cannot **confirm** the event until cumulative turnover hits 6× — median
+`h*` = **15–16:00 UTC**, ~9h after the peak — by which point price has faded back to ≈ the
+daily entry. **Confirmation time (turnover accumulation) is decoupled from the price path**,
+so you enter at an essentially random point ±3–5% around the daily entry. The ~9% K0 ceiling
+is real but **un-capturable by faster detection of the same event.**
+
+**This closes the entire timing axis:** E1 killed *fill* timing (within 1h); K1a kills
+*detection* timing (across ~9h, same selector). The alpha is **purely SELECTION**, and the
+daily-close cadence leaves no capturable money on the table — you cannot confirm the event
+any earlier. **Do NOT build K1b or K2.** The discrete daily strategy + the age gate +
+residual-momentum gate (forward-demo-gated) stand as the program. A *new* intraday-native
+selector (fire on early-confirming high-intensity pumps) is a separate, unchartered
+direction with unassessed false-positive risk — not this kernel; not pursued.
+
+Per-trade tables: `~/SHARED_DATA/k1a_{bybit,binance}_fixed_delay.csv`. Label: **EXPLORATORY**
+(conditioned on daily-firers + rank-approx; a feasibility null, not a performance backtest —
+but decisive: the *optimistic* test already fails). K1b/K2 cancelled.
