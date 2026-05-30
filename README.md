@@ -34,14 +34,13 @@ money.
 
 - `liquidity_migration/` — Python package: data ingestion, point-in-time
   archive builders, the backtest / event engine, and the
-  `python -m liquidity_migration` CLI (24 subcommands; run `--help`).
+  `python -m liquidity_migration` CLI (20 subcommands; run `--help`).
 - `tests/` — `.venv/bin/python -m pytest -q`.
 - `docs/research_findings.md` — short verdict pointer (defers to research_summary.md).
 - `docs/research_plan_selection_execution.md` — the forward research plan (5950X).
 - `docs/backtesting_errors_we_never_repeat.md` — research methodology standard.
 - `docs/data_roots.md` — data-root contract (research / live demo / OOS).
-- `docs/system_status.md` — strategy / deployment status.
-- `docs/event_demo_daemon.md` — demo forward-cycle daemon execution runbook.
+- `docs/event_demo_daemon.md` — demo forward-cycle daemon runbook + infra-hardening changelog.
 - `.claude/` — Claude Code skills and an MCP server for working in this repo.
 - `AGENTS.md` — repo rules.
 

@@ -100,10 +100,26 @@ per-cell ledgers; `scripts/apply_decision_rule.py` is the legacy strict (Sharpe)
 Nothing known. Pre-push gate clean: `.venv/bin/python -m ruff check liquidity_migration tests`
 + `.venv/bin/python -m pytest -q` both pass.
 
+**Fixed 2026-05-30 — PIT gate / reconcile plumbing** (was: backtest↔paper showed
+spurious `pit_membership_fail`/`paper-only`). Root cause: PIT membership was keyed
+on the signal *stamp* date (D+1, daily-close signals fire at 00:00 of the next day)
+instead of the *trading* day; the archive only publishes the trading day, so fresh
+signals never validated. Fix keys membership on `date(ts_ms-1ms)`
+(`volume_events_features._attach_event_archive_membership`), proven on the real
+Bybit manifest (HEMIUSDT et al. now pass). Plus: `pit_coverage.py` staleness check,
+`download-data` coverage warning + `--refresh-manifest`, `volume-events
+--pit-membership strict|current-universe`, richer reject diagnostics, and a
+bash-3.2-safe `volume_events_cell.sh`. **One-command reconcile:
+`bash scripts/reconcile.sh`** (skill `pit-reconcile`, design `docs/pit_gate.md`).
+Op note: the 16 GB research box can't run a full `bybit_full_pit` cell (~23 GB).
+
 ## Helpers (when you need them)
 
+- **Demo-forward reconcile (one command):** `bash scripts/reconcile.sh` — pull VPS
+  ledgers → refresh manifest → coverage check → backtest → `reconcile-all` →
+  summary. `--dry-run` to preview. Skill: `pit-reconcile`; design: `docs/pit_gate.md`.
 - **CLI baseline wrapper:** `scripts/volume_events_cell.sh --cell-id X --overrides 'KEY=VAL,…'`
-  fills the 30+ baseline flags (NOTE: needs bash ≥4; on macOS invoke `volume-events` directly).
+  fills the 30+ baseline flags (now bash-3.2-safe on macOS; `DRY_RUN=1` to preview).
 - **Decision-rule analyzer:** `scripts/apply_decision_rule.py SUMMARY.csv --control 00_baseline`.
 - **Tier-2 verdict + fragility:** `scripts/r1_robustness.py --sweep-tag <TAG>`.
 - **Continuous-signal prechecks:** `scripts/c1_continuous_ic_precheck.py` (IC),

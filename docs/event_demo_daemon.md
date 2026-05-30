@@ -144,6 +144,41 @@ private REST rate budget is shared — the demo daemon uses
   before cycles start REST-bursting on every bar close. Streak resets on
   the first success.
 
+### Crash-/drift-durability hardening (2026-05-26/27)
+
+Additional ledger-fidelity invariants (none change strategy or backtest output;
+each closes a specific way the live ledger could diverge from Bybit; covered by
+`tests/test_liquidity_migration_event_demo*.py` + `tests/test_liquidity_migration_ws_state_cache.py`):
+
+- **Orphan-reconciler API-failure guard.** `_risk_reconcile_missing_positions`
+  takes a `position_error` and bails out (no orphan-closes) when the upstream
+  `get_positions` failed — a single transient REST failure must not
+  false-positive orphan-close every open trade. The main cycle's
+  `_reconcile_open_trades` already had this guard; the wsrisk path now matches it.
+- **Ledger write ordering.** End-of-cycle parquet writes flush the orders
+  dataset BEFORE the trades dataset (both cycles, both sleeves), so a crash
+  between the two leaves the order ledger ahead of the trade ledger and the
+  next cycle's `_reconcile_pending_order_fills` can re-apply the trade-close.
+- **Sub-order split for venue-cap-bound entries/exits.** When the target qty
+  exceeds Bybit's per-order `maxMktOrderQty`, the entry/exit splits into
+  N = ceil(target/max) sequential sub-orders sharing the base `orderLinkId`
+  (`-s0`/`-s1`/… suffixes) across all three exit engines; trade rows persist
+  `max_market_order_qty` so the close path can read it. Preserves backtest
+  notional fidelity on capacity-constrained alts instead of silently under-sizing.
+- **Closed-PnL backfill on flat-position trade close.** A pending reduce-only
+  exit with `avg_price=0` that later goes flat under its own stop falls back to
+  the `_orphan_close_pnl_backfill` path (Bybit closed-PnL endpoint) instead of
+  closing with `exit_price=0`.
+- **Cross-process exit-submission lease.** `submit_exit` in ws_risk re-reads the
+  orders parquet immediately before submitting, closing the window where the demo
+  cycle and the ws-risk daemon could double-submit the same reduce-only exit.
+- **Ledger uPnL matches Bybit position uPnL.** `build_ledger_position_pnl_snapshot`
+  prefers the position payload's own `markPrice` for open symbols, so ledger uPnL
+  matches Bybit's by construction (was ticker `mark_price`, drifted on illiquid alts).
+- **Long-sleeve ticker-stream recovery.** The long-native daemon's `_reconcile_loop`
+  mirrors the short daemon's recovery-open, retrying `_open_ticker_stream()` so a
+  startup REST-seed failure doesn't permanently disable the long sleeve's WS feed.
+
 ## Shadow-testing checklist
 
 Before flipping the systemd `ExecStart`:

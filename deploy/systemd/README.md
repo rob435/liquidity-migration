@@ -148,8 +148,8 @@ with `MAX_ACTIVE_SYMBOLS=3` — a concentrated (3 concurrent positions) variant 
 the 5-position canonical config, on the conservative `promoted_quality_squeeze`
 entry router. It fetches the top 220 turnover-ranked symbols so the strategy
 trades its rank 31-150 band, and submits demo (paper) orders only. This is a
-demo-only paper forward test — not Model-Court validated and not a real-money
-promotion. See `docs/system_status.md`. The risk
+demo-only paper forward test — not real-money validated. See `STATE.md` for
+live status and `docs/event_demo_daemon.md` for the daemon runbook. The risk
 service does not open entries; it repairs exchange-native stop/TP state, listens to
 demo private WebSocket position/order/execution streams plus the mainnet public
 ticker stream, and submits reduce-only exits. On the demo account, WebSocket

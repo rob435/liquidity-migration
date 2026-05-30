@@ -31,25 +31,20 @@ fade-confirmation execution layer (plus a continuous candidate signal under rese
 
 ## Module map (`liquidity_migration/`)
 
-- `cli.py` — argparse entry point, 24 subcommands.
+- `cli.py` — argparse entry point, 20 subcommands.
 - `volume_events.py` — active event-driven strategy: full-PIT gates, ledger,
   reports.
-- `strategy_tribunal.py` — adversarial promotion court for completed reports.
 - `event_demo.py` / `event_demo_daemon.py` — Bybit demo forward-cycle runner.
 - `ws_risk.py` — websocket-first risk watchdog with REST fallback.
-- `volume_features.py` / `feature_factory.py` — daily volume & liquidity-rank
-  features; shadow research feature surface.
+- `volume_features.py` — daily volume & liquidity-rank features.
 - `trade_lifecycle.py` — trade lifecycle, exits, baskets, equity helpers.
 - `archive_manifest.py` — point-in-time manifest + 1h kline builders.
 - `data_layer.py` / `ingestion.py` / `storage.py` — dataset read/write/audit.
 - `bybit.py` / `binance.py` / `binance_vision.py` — venue clients and PIT
   proxy archives.
-- `crowding.py` / `portfolio_hedge.py` — research-only crowding classifier and
-  hedge overlay.
+- `crowding.py` — research-only crowding classifier.
 - `risk_model.py` — R4 JS-style factor model: factor panel + per-day cross-sectional
   factor-return fit + per-trade residual-P&L decomposition (Tier-3 residual-Sharpe input).
-- `cost_model.py` — R6 per-name/per-bar cost model: surface + OLS fit + per-trade
-  predict + ledger recosting; default honest 15 bps taker.
 - `kline_store.py` / `kline_stream_manager.py` / `ws_state_cache.py` — WS-driven kline
   store + stream manager + private/ticker state caches (the event-driven runtime).
 - `signal_harness.py` — daily-aggregation + cross-sectional feature/IC research harness.
@@ -65,8 +60,7 @@ fade-confirmation execution layer (plus a continuous candidate signal under rese
   standard (see the backtest-integrity skill).
 - `docs/research_findings.md` — current research verdict and refinement roadmap.
 - `docs/data_roots.md` — canonical research / live demo / OOS root contract.
-- `docs/system_status.md` — strategy / deployment status.
-- `docs/event_demo_daemon.md` — demo forward-cycle daemon execution runbook.
+- `docs/event_demo_daemon.md` — demo forward-cycle daemon runbook + infra-hardening changelog.
 - `README.md` — repo overview and status.
 
 ## Tests

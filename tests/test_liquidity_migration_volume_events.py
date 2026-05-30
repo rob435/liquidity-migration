@@ -232,7 +232,7 @@ def test_basis_feature_frame_maps_hourly_basis_to_signal_day() -> None:
     assert second_day["premium_index_last"] == pytest.approx(0.002)
 
 
-def test_enriched_event_features_adds_feature_factory_columns() -> None:
+def test_enriched_event_features_adds_causal_research_columns() -> None:
     day = 24 * 60 * 60 * 1000
     hour = 60 * 60 * 1000
     symbols = ("AUSDT", "BUSDT", "CUSDT")
@@ -1359,6 +1359,11 @@ def test_volume_event_promotion_whole_period_gate_binds_on_dd_and_sharpe() -> No
 
 
 def test_attach_event_archive_membership_flags_symbol_dates() -> None:
+    # Signals are stamped at 00:00 UTC of the day AFTER the bar they summarise, so
+    # ts_ms = 2024-01-01 00:00 is the 2023-12-31 daily close. Post-FIX-A, PIT
+    # membership is keyed on that TRADING DAY (date of ts_ms-1ms), so the manifest
+    # must list 2023-12-31 for AAAUSDT to be a member. The `date` column itself is
+    # the stamp date (2024-01-01), preserved for the age features.
     features = pl.DataFrame(
         [
             {"symbol": "AAAUSDT", "ts_ms": 1_704_067_200_000},
@@ -1369,8 +1374,8 @@ def test_attach_event_archive_membership_flags_symbol_dates() -> None:
         [
             {
                 "symbol": "AAAUSDT",
-                "date": "2024-01-01",
-                "url": "https://public.bybit.com/trading/AAAUSDT/AAAUSDT2024-01-01.csv.gz",
+                "date": "2023-12-31",
+                "url": "https://public.bybit.com/trading/AAAUSDT/AAAUSDT2023-12-31.csv.gz",
             }
         ]
     )

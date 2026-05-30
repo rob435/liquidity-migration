@@ -1,14 +1,13 @@
 ---
 name: research-report
-description: "Read, interpret, and label research and backtest reports in this quant repo. Use when reading a volume_event_research_report.md or strategy_tribunal_report.md, extracting run metrics like return, drawdown, OOS and split stability, comparing runs, or assigning a run label. Pairs with the liqmig-research MCP tools parse_report, list_reports, and audit_run_artifacts."
+description: "Read, interpret, and label research and backtest reports in this quant repo. Use when reading a volume_event_research_report.md, extracting run metrics like return, drawdown, OOS and split stability, comparing runs, or assigning a run label. Pairs with the liqmig-research MCP tools parse_report, list_reports, and audit_run_artifacts."
 ---
 
 # Research reports
 
-Reports live under `<DATA_ROOT>/reports/...`. The two main kinds:
+Reports live under `<DATA_ROOT>/reports/...`. The main kind:
 
 - `volume_event_research_report.md` — a `volume-events` strategy run.
-- `strategy_tribunal_report.md` — the adversarial promotion court output.
 
 ## Fast path — the `liqmig-research` MCP tools
 
@@ -36,19 +35,15 @@ raw lines and can mislabel unusual formatting.
 A report missing the trade ledger, config/data identity, split report, or run
 record is "a screenshot", not evidence (error #23).
 
-## Promotion gate vs. model court
+## Promotion gate vs. the decision rule
 
 - `promotion gate: pass` is a within-report check — necessary, not sufficient.
-- `strategy-tribunal` (the model court) is the adversarial audit: artifact
-  checks, comparison-family filtering, recomputed-vs-reported path consistency,
-  explicit pre-registered windows, block-bootstrap left tail, random-sign /
-  inverted-edge / shuffled-symbol / shuffled-time / shuffled-event negative
-  controls, cost/funding/slippage stress, monthly regime, symbol concentration,
-  and same-hour entry crowding.
-- A `WATCH` verdict (not `PASS`) means a real caveat remains — usually partial
-  funding coverage, an unattached live-vs-backtest drift check, or a stress
-  family that still breaches the drawdown gate. Treat `WATCH` as research
-  evidence, never real-money proof.
+- The binding verdict is the three-tier demo-arbiter rule (STATE.md), computed
+  from per-cell ledgers by `scripts/r1_robustness.py` (Tier-2 demo-candidate
+  verdict + fragility diagnostics) with `scripts/apply_decision_rule.py` as the
+  legacy strict (Sharpe) bar. A within-report `pass` is never real-money proof:
+  the Tier-3 gate is the forward demo (see STATE.md / the research-phase-runner
+  skill).
 
 ## Assigning a run label
 

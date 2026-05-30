@@ -95,6 +95,16 @@ proof of this whole thesis. (Not yet run; cheap to run.)
 4. **Pre-2023 is structurally untradeable** (bybit had 7–182 symbols; rank-31–400 + ≥150
    rank-climb needs the 400+ universe that only existed from ~mid-2024). There is **no
    internal OOS root** — pristine OOS is the forward demo (see [data_roots.md](data_roots.md)).
+5. **Long sleeve = a low-correlation OVERLAY on the short book, not standalone alpha.**
+   The v11a long (FC) sleeve's FC signal is the quality ceiling (exhaustive 7-wave search
+   couldn't beat it on both venues; [[long-sleeve-alpha-search-null]]). Its value is
+   diversification: short↔long correlation ≈ −0.02/−0.05 (Bybit/Binance), so an additive
+   overlay (`combined = short + w·long`, w ≈ 0.5–1.0) lifts the combined book's risk-adjusted
+   return — cross-venue **MAR +17% (Bybit) / +38% (Binance)** at w=1.0, drawdown flat-to-better,
+   paying off precisely on the short book's worst days. The robust part is the
+   variance-reduction (structural regime complementarity); the standalone-return *magnitudes*
+   are 2023–2026 in-sample-optimistic (FC fails pre-2023 OOS), so don't over-size (w≥2 just
+   bets the fragile long edge). Already deployed on demo; forward demo is the OOS arbiter.
 
 ## Methodology lessons
 

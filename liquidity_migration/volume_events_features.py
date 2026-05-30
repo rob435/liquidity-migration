@@ -501,10 +501,30 @@ def _attach_event_archive_membership(features: pl.DataFrame, archive_manifest: p
                 pl.lit(None, dtype=pl.Float64).alias("pit_age_days"),
             ]
         )
-    membership = archive_manifest.select(["symbol", "date"]).unique().with_columns(pl.lit(True).alias("tradable_membership_flag"))
+    # PIT membership is keyed on the signal's TRADING DAY (the day whose close
+    # produced the signal), NOT the signal *stamp* date. Daily-close signals are
+    # stamped at 00:00 UTC of the day AFTER the bar (volume_features builds
+    # ts_ms = day_start_ms + one aggregation period), so the trading day is the
+    # date of (ts_ms - 1 ms). Joining on the stamp date asked the archive about
+    # the day *after* the decision (a mild look-ahead) and inflated the archive
+    # publishing lag by a full day -- a fresh signal could not PIT-validate until
+    # the *next* day's archive published, which is exactly why a same-day
+    # backtest<->paper reconciliation showed spurious pit_membership_fail.
+    # See docs/pit_gate.md and tests/test_pit_membership_trading_day.py.
+    membership = (
+        archive_manifest.select(["symbol", "date"])
+        .unique()
+        .with_columns(pl.lit(True).alias("tradable_membership_flag"))
+        .rename({"date": "_membership_day"})
+    )
     first_seen = archive_manifest.group_by("symbol").agg(pl.col("date").min().alias("first_manifest_date"))
+    frame = frame.with_columns(
+        (pl.from_epoch(pl.col("ts_ms"), time_unit="ms") - pl.duration(milliseconds=1))
+        .dt.strftime("%Y-%m-%d")
+        .alias("_membership_day")
+    )
     return (
-        frame.join(membership, on=["symbol", "date"], how="left")
+        frame.join(membership, on=["symbol", "_membership_day"], how="left")
         .join(first_seen, on="symbol", how="left")
         .with_columns(
             [
@@ -525,6 +545,7 @@ def _attach_event_archive_membership(features: pl.DataFrame, archive_manifest: p
                 .alias("pit_age_days"),
             ]
         )
+        .drop("_membership_day")
     )
 
 def _daily_return_frame(klines: pl.DataFrame) -> pl.DataFrame:

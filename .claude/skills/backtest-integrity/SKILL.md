@@ -13,7 +13,7 @@ and execution model. Anything else is a bug report, not alpha.
 
 ## Use this skill when
 
-- About to run or design a `volume-events` / `strategy-tribunal` / any backtest.
+- About to run or design a `volume-events` / any backtest.
 - Interpreting a research report or judging whether a result is trustworthy.
 - Tempted to call a result "edge", "candidate", or "promotion evidence".
 - Changing strategy gates, features, data ingestion, or fill/cost logic.

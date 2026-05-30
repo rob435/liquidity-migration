@@ -178,7 +178,7 @@ experiment and roll a one-paragraph update into [research_summary.md](research_s
   more daily filter mining.
 - **Long-sleeve standalone alpha.** Exhaustively searched → FC is the ceiling
   ([long-sleeve-alpha-search-null]). The long sleeve's value is a low-correlation
-  *overlay* on the short book ([long_short_overlay_findings.md](long_short_overlay_findings.md)),
+  *overlay* on the short book (see `research_summary.md` "Useful findings worth keeping" #5),
   not a return engine. Do not mine it again.
 - **Further loosening the decision rule.** It was loosened once, on principle,
   pre-registered. The Tier-3 real-money gate is not negotiable.

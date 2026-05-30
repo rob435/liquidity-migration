@@ -18,14 +18,40 @@
 #
 # Baseline = the current promoted profile (matches the configs/volume_alpha
 # default + the in-flight sweep's 00_baseline cell). Any override silently
-# replaces the corresponding baseline value; everything else is preserved.
+# replaces the corresponding baseline value; an override KEY not present in the
+# baseline is appended as a new flag. Everything else is preserved.
 #
 # Reports land in:
 #   <DATA_ROOT>/reports/<phase>/<cell-id>/
 # unless overridden via --report-dir-suffix.
 #
+# Set DRY_RUN=1 to print the fully-resolved command to stdout and exit WITHOUT
+# executing it (safe inspection of what would run).
+#
 # Exits non-zero on CLI parse error or volume-events failure. The full
 # resolved flag list is printed to stderr before invocation for audit.
+#
+# Portability: this script is written for bash 3.2 (the macOS system bash) as
+# well as bash 4+ (the Linux VPS). It deliberately avoids bash-4-only features
+# (no `declare -A` associative arrays); the baseline flag table is held as a
+# newline-delimited "KEY=VALUE" list and manipulated with helper functions, so
+# behavior is identical on both. As a belt-and-suspenders convenience, if it is
+# launched under an old bash and a newer one is installed via Homebrew, it
+# re-execs under that — but the script does NOT require bash 4 to work.
+
+# --- bash version guard (convenience only; the script works on bash 3.2) -----
+# If running under bash < 4 and a newer bash exists, re-exec under it once. The
+# VEC_REEXECED sentinel prevents an infinite loop if the newer bash is somehow
+# also < 4.
+if [ -z "${VEC_REEXECED:-}" ] && [ "${BASH_VERSINFO[0]:-0}" -lt 4 ]; then
+    for _candidate in /opt/homebrew/bin/bash /usr/local/bin/bash; do
+        if [ -x "$_candidate" ]; then
+            export VEC_REEXECED=1
+            exec "$_candidate" "$0" "$@"
+        fi
+    done
+fi
+
 set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-.venv/bin/python}"
@@ -62,6 +88,9 @@ Optional:
   --extra 'flag arg'           Append a raw flag/arg to the volume-events call.
                                Repeatable.
   --help                       Show this help.
+
+Environment:
+  DRY_RUN=1                    Print the resolved command and exit; do not run.
 
 Baseline flag values applied unless overridden:
   --event-types liquidity_migration
@@ -128,59 +157,94 @@ if [[ ! -d "$DATA_ROOT" ]]; then
 fi
 
 REPORT_DIR="${REPORT_DIR_OVERRIDE:-$DATA_ROOT/reports/$PHASE/$CELL_ID}"
-mkdir -p "$REPORT_DIR"
+if [[ "${DRY_RUN:-}" != "1" ]]; then
+    mkdir -p "$REPORT_DIR"
+fi
 
-# Baseline flag table (assoc array). Keys are flag names without leading "--".
-declare -A BASELINE=(
-    [event-types]="liquidity_migration"
-    [thresholds]="0.4"
-    [hold-days]="3"
-    [sides]="reversal"
-    [stop-loss-pcts]="0.12"
-    [take-profit-pcts]="0.26"
-    [cost-multipliers]="3"
-    [gross-exposure]="1.0"
-    [entry-delay-hours]="1"
-    [entry-policy]="promoted_quality_squeeze"
-    [max-active-symbols]="3"
-    [cooldown-days]="5"
-    [rank-exit-threshold]="0.55"
-    [universe-rank-min]="31"
-    [universe-rank-max]="400"
-    [liquidity-migration-rank-improvement-min]="150"
-    [liquidity-migration-rank-direction]="improvement"
-    [liquidity-migration-turnover-ratio-min]="6.0"
-    [liquidity-migration-event-rank-fraction-max]="0.90"
-    [liquidity-migration-day-return-min]="0.0"
-    [liquidity-migration-residual-return-min]="0.08"
-    [liquidity-migration-close-location-min]="0.30"
-    [liquidity-migration-pit-age-days-min]="90"
-    [liquidity-migration-crowding-filter]="union_pathology"
-    [stop-pressure-window-days]="10"
-    [stop-pressure-stop-count]="7"
-    [realized-loss-pressure-window-days]="5"
-    [realized-loss-pressure-loss-count]="6"
-)
+# Baseline flag table. Keys are flag names without leading "--". Held as a
+# newline-delimited "KEY=VALUE" list (bash 3.2 has no associative arrays). The
+# value of any single entry may itself contain "=" — only the first "=" on a
+# line separates KEY from VALUE.
+BASELINE_TABLE="event-types=liquidity_migration
+thresholds=0.4
+hold-days=3
+sides=reversal
+stop-loss-pcts=0.12
+take-profit-pcts=0.26
+cost-multipliers=3
+gross-exposure=1.0
+entry-delay-hours=1
+entry-policy=promoted_quality_squeeze
+max-active-symbols=3
+cooldown-days=5
+rank-exit-threshold=0.55
+universe-rank-min=31
+universe-rank-max=400
+liquidity-migration-rank-improvement-min=150
+liquidity-migration-rank-direction=improvement
+liquidity-migration-turnover-ratio-min=6.0
+liquidity-migration-event-rank-fraction-max=0.90
+liquidity-migration-day-return-min=0.0
+liquidity-migration-residual-return-min=0.08
+liquidity-migration-close-location-min=0.30
+liquidity-migration-pit-age-days-min=90
+liquidity-migration-crowding-filter=union_pathology
+stop-pressure-window-days=10
+stop-pressure-stop-count=7
+realized-loss-pressure-window-days=5
+realized-loss-pressure-loss-count=6"
+
+# set_baseline KEY VALUE
+# Replace KEY's entry in BASELINE_TABLE, or append it if not present. Mirrors
+# the bash-4 `BASELINE[$key]="$val"` semantics (in-place replace OR insert).
+set_baseline() {
+    local k="$1"
+    local v="$2"
+    local line out=""
+    local found=0
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        if [[ "${line%%=*}" == "$k" ]]; then
+            out="${out}${k}=${v}"$'\n'
+            found=1
+        else
+            out="${out}${line}"$'\n'
+        fi
+    done <<< "$BASELINE_TABLE"
+    if [[ "$found" -eq 0 ]]; then
+        out="${out}${k}=${v}"$'\n'
+    fi
+    # Strip the single trailing newline we always append.
+    BASELINE_TABLE="${out%$'\n'}"
+}
 
 # Apply overrides
 if [[ -n "$OVERRIDES" ]]; then
     IFS=',' read -ra PAIRS <<< "$OVERRIDES"
     for pair in "${PAIRS[@]}"; do
-        if [[ ! "$pair" == *"="* ]]; then
+        if [[ "$pair" != *"="* ]]; then
             echo "override missing '=': $pair" >&2
             exit 2
         fi
         key="${pair%%=*}"
         val="${pair#*=}"
-        BASELINE[$key]="$val"
+        set_baseline "$key" "$val"
     done
 fi
 
-# Build the flag list. Sort keys for reproducibility.
+# Build the flag list. Sort by KEY for reproducibility (identical to the prior
+# `sort` over associative-array keys). Sorting on the KEY field only — not the
+# whole KEY=VALUE line — preserves the exact prior ordering even when values
+# differ between keys that share a prefix. LC_ALL=C pins a byte-wise collation
+# so the emitted flag order is identical on macOS (BSD sort) and the Linux VPS
+# (GNU sort) regardless of each host's locale.
 FLAGS=()
-for key in $(echo "${!BASELINE[@]}" | tr ' ' '\n' | sort); do
-    FLAGS+=("--$key" "${BASELINE[$key]}")
-done
+while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    key="${line%%=*}"
+    val="${line#*=}"
+    FLAGS+=("--$key" "$val")
+done < <(printf '%s\n' "$BASELINE_TABLE" | LC_ALL=C sort -t= -k1,1)
 
 # Print resolved invocation to stderr (audit log)
 echo "[volume_events_cell] venue=$VENUE cell=$CELL_ID phase=$PHASE" >&2
@@ -201,6 +265,18 @@ CMD=(
     --report-dir "$REPORT_DIR"
 )
 [[ -n "$ALLOW_PARTIAL_PIT" ]] && CMD+=("$ALLOW_PARTIAL_PIT")
-CMD+=("${FLAGS[@]}" "${EXTRA_FLAGS[@]}")
+# Use the `${arr[@]+...}` guard so an EMPTY array does not trip `set -u` on
+# bash 3.2 (where expanding an empty array under `set -u` is an "unbound
+# variable" error; bash 4.4+ is lenient). FLAGS is always populated, but
+# EXTRA_FLAGS is empty unless --extra was passed.
+CMD+=(${FLAGS[@]+"${FLAGS[@]}"} ${EXTRA_FLAGS[@]+"${EXTRA_FLAGS[@]}"})
+
+if [[ "${DRY_RUN:-}" == "1" ]]; then
+    # Print the exact command that would be executed, one safely-quoted token
+    # per the rules of the shell, to stdout. Does not execute.
+    printf '%q ' "${CMD[@]}"
+    printf '\n'
+    exit 0
+fi
 
 exec "${CMD[@]}"

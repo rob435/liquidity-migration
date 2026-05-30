@@ -481,6 +481,18 @@ def run_volume_event_research(
         if not monthly.is_empty():
             monthly.write_csv(output_dir / "volume_event_best_monthly.csv")
 
+    # Aggregate PIT-membership verdict: True only if every scenario passed the
+    # membership gate (so the diagnostic fires whenever ANY scenario hard-rejected).
+    pit_membership_pass = (
+        bool(summary.select(pl.col("pit_membership_pass").all()).item())
+        if (not summary.is_empty() and "pit_membership_pass" in summary.columns)
+        else False
+    )
+    pit_membership_diagnostic = (
+        _pit_membership_diagnostic(root, archive_manifest, features)
+        if not pit_membership_pass
+        else {}
+    )
     metadata = {
         "config": asdict(config),
         "rows": {
@@ -491,6 +503,8 @@ def run_volume_event_research(
         },
         "date_range": _date_range(features),
         "pit_manifest": _pit_manifest_metadata(archive_manifest, features, klines),
+        "pit_membership_pass": pit_membership_pass,
+        "pit_membership_diagnostic": pit_membership_diagnostic,
         "cost_model": {
             **asdict(costs),
             "base_round_trip_cost_bps": costs.base_entry_exit_cost_bps,
@@ -503,6 +517,9 @@ def run_volume_event_research(
             full_pit_universe_pass=full_pit_universe_pass,
         ),
     }
+    if pit_membership_diagnostic:
+        for _line in _pit_membership_diagnostic_lines(pit_membership_diagnostic):
+            print(_line)
     (output_dir / "volume_event_research_report.json").write_text(
         json.dumps(
             {
@@ -1965,6 +1982,53 @@ def _run_label(
     return "pit_membership_filtered_current_universe"
 
 
+def _pit_membership_diagnostic(
+    data_root: str | Path,
+    archive_manifest: pl.DataFrame,
+    features: pl.DataFrame,
+) -> dict[str, Any]:
+    """Actionable detail for a `pit_membership_fail`: how far the archive manifest
+    lags the signal universe, and the count of feature rows whose TRADING DAY (the
+    date of `ts_ms - 1ms`; see `_attach_event_archive_membership`) falls past the
+    manifest's coverage end — the "uncovered tail" that the strict gate rejects.
+
+    Cheap: manifest end is read from the data-root's `date=` partitions (no parquet
+    read); the uncovered-tail count is a single polars expression over `features`.
+    """
+    from .pit_coverage import coverage_status
+
+    manifest_end = coverage_status(data_root).manifest_end
+    uncovered_tail = 0
+    if manifest_end is not None and not features.is_empty() and "ts_ms" in features.columns:
+        # Trading day = date of (ts_ms - 1ms); count distinct (symbol, trading day)
+        # event rows whose trading day is strictly after the manifest coverage end.
+        trading_day = (
+            pl.from_epoch(pl.col("ts_ms"), time_unit="ms") - pl.duration(milliseconds=1)
+        ).dt.date()
+        uncovered_tail = int(
+            features.select(trading_day.alias("_td"))
+            .filter(pl.col("_td") > pl.lit(manifest_end))
+            .height
+        )
+    return {
+        "manifest_end": manifest_end.isoformat() if manifest_end is not None else None,
+        "uncovered_tail_event_rows": uncovered_tail,
+    }
+
+
+def _pit_membership_diagnostic_lines(diagnostic: dict[str, Any]) -> list[str]:
+    """Concise, actionable remediation block for a membership rejection."""
+    manifest_end = diagnostic.get("manifest_end")
+    uncovered = diagnostic.get("uncovered_tail_event_rows", 0)
+    return [
+        "⚠️  pit_membership_fail — the archive manifest does not cover every traded signal day.",
+        f"     archive manifest coverage end : {manifest_end if manifest_end is not None else 'MISSING'}",
+        f"     event rows past coverage end  : {uncovered} (trading day = date of ts_ms-1ms; the uncovered tail)",
+        "     FIX: run `archive-manifest` to refresh PIT membership, or pass "
+        "`--pit-membership current-universe` for a labeled biased same-day diagnostic (never promotion evidence).",
+    ]
+
+
 def _promotion_note(*, archive_manifest: pl.DataFrame, full_pit_universe_pass: bool) -> str:
     if archive_manifest.is_empty():
         return "No archive_trade_manifest is present; use this as event-shape research only."
@@ -2018,6 +2082,22 @@ def format_volume_event_report(summary: pl.DataFrame, metadata: dict[str, Any]) 
         f"- Feature symbols: {pit.get('feature_symbols', 0)}",
         f"- Full PIT universe pass: {pit.get('full_pit_universe_pass', False)}",
         f"- Promotion note: {metadata.get('promotion_note', '')}",
+    ]
+    membership_diag = metadata.get("pit_membership_diagnostic") or {}
+    if not metadata.get("pit_membership_pass", True) and membership_diag:
+        manifest_end = membership_diag.get("manifest_end")
+        uncovered = membership_diag.get("uncovered_tail_event_rows", 0)
+        lines.extend(
+            [
+                f"- ⚠️ PIT membership FAIL — archive manifest coverage end "
+                f"`{manifest_end if manifest_end is not None else 'MISSING'}`, "
+                f"{uncovered} event row(s) past coverage end (uncovered tail; "
+                "trading day = date of ts_ms-1ms). Run `archive-manifest` to refresh PIT "
+                "membership, or pass `--pit-membership current-universe` for a labeled biased "
+                "same-day diagnostic (never promotion evidence).",
+            ]
+        )
+    lines += [
         "",
         "## Top Scenarios",
         "",

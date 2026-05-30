@@ -20,12 +20,12 @@ regime-conditional. All research findings are consolidated in
   (Round 1 + Round 2 per-phase docs were consolidated here; originals in git history.)
 - `docs/research_findings.md` — short verdict pointer (defers to the summary).
 - `docs/data_roots.md` — which data root to use (research vs. live demo vs. OOS).
-- `docs/system_status.md` — strategy / deployment status.
+- `docs/event_demo_daemon.md` — demo daemon runbook + live-infra hardening changelog.
 - `README.md` — repo overview and status.
 
 ## Running
 
-- CLI: `python -m liquidity_migration <subcommand>` (24 subcommands; see `--help`).
+- CLI: `python -m liquidity_migration <subcommand>` (20 subcommands; see `--help`).
 - Tests: `.venv/bin/python -m pytest -q`.
 
 ## Mandatory pre-push gate (CI parity)

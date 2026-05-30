@@ -145,7 +145,7 @@ def tool_data_roots(args):
 
 # --- tool: list_reports -----------------------------------------------------
 
-REPORT_NAME_HINTS = ("_report.md", "research_report.md", "tribunal_report.md")
+REPORT_NAME_HINTS = ("_report.md", "research_report.md")
 
 
 def tool_list_reports(args):
@@ -236,7 +236,7 @@ def _find_report_file(path):
     if os.path.isfile(path):
         return path
     if os.path.isdir(path):
-        patterns = ("*research_report.md", "*tribunal_report.md", "*_report.md", "*.md")
+        patterns = ("*research_report.md", "*_report.md", "*.md")
         for pat in patterns:
             hits = sorted(glob.glob(os.path.join(path, pat)))
             if hits:
@@ -535,10 +535,6 @@ def tool_audit_run_artifacts(args):
     total = len(checks)
     core_ok = all(ok for name, ok, _ in checks if name in CORE_ARTIFACTS)
     label_ok = any(ok for name, ok, _ in checks if name == "run label")
-    is_tribunal = (
-        "model court" in low or "strategy tribunal" in low
-        or "strategy_tribunal" in low
-    )
 
     out = [
         "# Run artifact audit",
@@ -555,15 +551,7 @@ def tool_audit_run_artifacts(args):
             out.append("       expected: %s" % detail)
     out.append("")
 
-    if is_tribunal:
-        verdict = (
-            "This looks like a model-court / strategy-tribunal report (an "
-            "adversarial audit OF a strategy run, not a run itself). The "
-            "checks above assume a strategy run directory - point "
-            "audit_run_artifacts at the underlying volume-events report dir "
-            "for a meaningful artifact verdict."
-        )
-    elif not core_ok:
+    if not core_ok:
         verdict = (
             "INCOMPLETE - core artifacts missing. Per error #23, a run without "
             "saved config, data identity, trade ledger and a cost model is 'a "
@@ -693,7 +681,7 @@ TOOLS = [
     {
         "name": "parse_report",
         "description": (
-            "Parse a research report .md (volume_event or strategy_tribunal) "
+            "Parse a research report .md (e.g. volume_event_research_report) "
             "into JSON: a 'headline' of mapped metrics (trades, return, "
             "drawdown, worst 90d, splits, OOS, promotion gate, verdict), all "
             "Key: value 'fields', every markdown 'table', and the methodology "

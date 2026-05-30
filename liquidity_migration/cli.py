@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import sys
 import time
 from pathlib import Path
 
@@ -25,9 +26,8 @@ from .event_demo import (
     run_event_demo_cycle,
     run_event_risk_cycle,
 )
-from .feature_factory import run_feature_factory_report
 from .ingestion import generate_fixture_data
-from .portfolio_hedge import run_portfolio_hedge_report
+from .pit_coverage import coverage_status, format_coverage
 from .reconciliation import (
     run_backtest_paper_reconciliation,
     run_demo_bybit_reconciliation,
@@ -35,8 +35,6 @@ from .reconciliation import (
     run_long_paper_demo_reconciliation,
     run_paper_demo_reconciliation,
 )
-from .regime_durability import RegimeDurabilityConfig, run_regime_durability_from_paths
-from .strategy_tribunal import StrategyTribunalConfig, run_strategy_tribunal
 from .universe import run_discover_universe
 from .volume_events import ENTRY_POLICIES, POSITION_WEIGHTINGS, VolumeEventResearchConfig, run_volume_event_research
 from .ws_risk import EventWebSocketRiskConfig, run_event_ws_risk
@@ -160,6 +158,48 @@ def _add_download_data_parser(subparsers) -> None:
         default="1h",
         help="Bybit open-interest interval for download-data open_interest: 5min, 15min, 30min, 1h, 4h, or 1d.",
     )
+    download.add_argument(
+        "--refresh-manifest",
+        action="store_true",
+        help=(
+            "Also rebuild the archive_trade_manifest (PIT membership) after the download. "
+            "download-data does NOT touch the manifest by default, so a 'fresh' root can "
+            "silently carry stale PIT membership."
+        ),
+    )
+
+
+def _download_manifest_staleness_lines(data_root: str | Path) -> list[str]:
+    """Coverage table + (when stale) a prominent WARNING that download-data does not
+    refresh the archive manifest, with the exact remediation command.
+
+    Factored out of the download-data handler so the staleness messaging is unit-
+    testable without performing a real download. Reads only `date=` partition dir
+    names via `coverage_status` (no parquet, no network).
+    """
+    import datetime as _dt
+
+    status = coverage_status(data_root)
+    lines = [format_coverage(status)]
+    if status.is_stale:
+        recent = (status.latest_signal_trading_day - _dt.timedelta(days=7)).isoformat()
+        end = (_dt.datetime.now(_dt.timezone.utc).date() + _dt.timedelta(days=2)).isoformat()
+        lines.extend(
+            [
+                "",
+                "  " + "=" * 70,
+                "  ⚠️  WARNING: download-data does NOT refresh the archive_trade_manifest.",
+                "      The PIT membership (archive_trade_manifest) is STALE — recent signals",
+                "      will hard-reject with pit_membership_fail until you refresh it. Run:",
+                "",
+                f"        python -m liquidity_migration --data-root {data_root} archive-manifest "
+                f"--start {recent} --end {end}",
+                "",
+                "      (or re-run download-data with --refresh-manifest).",
+                "  " + "=" * 70,
+            ]
+        )
+    return lines
 
 
 def _add_download_binance_proxy_parser(subparsers) -> None:
@@ -1193,6 +1233,17 @@ def _add_volume_events_parser(subparsers) -> None:
         help="Allow biased diagnostics when archive manifest coverage is incomplete. Do not use for real backtests.",
     )
     volume_events.add_argument(
+        "--pit-membership",
+        choices=["strict", "current-universe"],
+        default="strict",
+        help=(
+            "PIT archive-membership mode. strict (default): only trade signals whose "
+            "trading day is covered by the archive manifest. current-universe: drop the "
+            "membership gate for a same-day diagnostic — current-universe-biased and NEVER "
+            "promotion evidence."
+        ),
+    )
+    volume_events.add_argument(
         "--explain-rejections",
         action="store_true",
         help="Emit volume_event_rejections.csv with per-(symbol, signal_day) first-failing-gate trace. Diagnostic only — single-scenario runs.",
@@ -1204,75 +1255,6 @@ def _add_volume_events_parser(subparsers) -> None:
         help="Parallel workers for scenario sweep. 1 = serial (default). -1 = os.cpu_count().",
     )
     volume_events.add_argument("--report-dir", default=None)
-
-
-def _add_strategy_tribunal_parser(subparsers) -> None:
-    tribunal_defaults = StrategyTribunalConfig()
-    tribunal = subparsers.add_parser(
-        "strategy-tribunal",
-        help="Run adversarial robustness checks against a completed volume-events report directory.",
-    )
-    tribunal.add_argument(
-        "--report-dir",
-        default=None,
-        help="Completed volume-events report directory. Defaults to DATA_ROOT/reports/volume_event_research.",
-    )
-    tribunal.add_argument("--output-dir", default=None, help="Where to write tribunal output. Defaults under --report-dir.")
-    tribunal.add_argument(
-        "--comparison-csv",
-        default="",
-        help="Optional comma-separated stress/sweep CSVs used for sensitivity checks.",
-    )
-    tribunal.add_argument(
-        "--comparison-family",
-        default="",
-        help="Optional comma-separated strategy family names from comparison CSVs, such as promoted_funding.",
-    )
-    tribunal.add_argument(
-        "--pre-registered-window",
-        default="",
-        help="Optional comma-separated model-court windows as name:start:end, such as train:2023-05-03:2024-05-03.",
-    )
-    tribunal.add_argument(
-        "--execution-data-root",
-        default="",
-        help="Optional demo execution data root containing event_demo_orders/trades/cycles for live-vs-backtest drift checks.",
-    )
-    tribunal.add_argument("--bootstrap-samples", type=int, default=tribunal_defaults.bootstrap_samples)
-    tribunal.add_argument("--bootstrap-block-size", type=int, default=tribunal_defaults.bootstrap_block_size)
-    tribunal.add_argument("--random-seed", type=int, default=tribunal_defaults.random_seed)
-
-
-def _add_portfolio_hedge_parser(subparsers) -> None:
-    hedge = subparsers.add_parser(
-        "portfolio-hedge",
-        help="Overlay candidate long ledgers on a promoted short report and score hedge behavior.",
-    )
-    hedge.add_argument("--short-report-dir", required=True, help="Completed short volume-events report directory.")
-    hedge.add_argument(
-        "--long-report-dir",
-        required=True,
-        help="Comma-separated completed long volume-events report directories.",
-    )
-    hedge.add_argument("--hedge-weights", default="0.25,0.5,1.0", help="Comma-separated long overlay weights.")
-    hedge.add_argument("--report-dir", required=True, help="Directory for portfolio hedge report output.")
-
-
-def _add_feature_factory_parser(subparsers) -> None:
-    feature_factory = subparsers.add_parser(
-        "feature-factory",
-        help="Audit causal research features in a completed volume-events trade ledger.",
-    )
-    feature_factory.add_argument(
-        "--report-dir",
-        default=None,
-        help="Completed volume-events report directory. Defaults to DATA_ROOT/reports/volume_event_research.",
-    )
-    feature_factory.add_argument("--output-dir", default=None, help="Where to write feature-factory output.")
-    feature_factory.add_argument("--target-col", default="net_return", help="Trade return column to score.")
-    feature_factory.add_argument("--min-rows", type=int, default=12, help="Minimum rows for a feature bucket edge test.")
-    feature_factory.add_argument("--shuffle-samples", type=int, default=64, help="Shuffled-feature controls per feature.")
-    feature_factory.add_argument("--random-seed", type=int, default=17)
 
 
 def _add_signal_harness_parser(subparsers) -> None:
@@ -1789,32 +1771,6 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
                            default=demo_defaults.ws_klines_stale_reconnect_seconds)
 
 
-def _add_regime_durability_parser(subparsers) -> None:
-    rd = subparsers.add_parser(
-        "regime-durability",
-        help="B.2 — measure regime gate empirically: cohort trades by BTC/ETH SMA flip proximity.",
-    )
-    rd.add_argument(
-        "--trades-csv",
-        required=True,
-        help="Path to a long-native trade ledger CSV (e.g. <root>/reports/long_native_research/long_native_trades.csv).",
-    )
-    rd.add_argument("--btc-symbol", default="BTCUSDT", help="Symbol for the primary regime gate.")
-    rd.add_argument("--eth-symbol", default="ETHUSDT", help="Symbol for the secondary regime gate.")
-    rd.add_argument("--sma-days", type=int, default=30, help="SMA window for the regime gate.")
-    rd.add_argument(
-        "--flip-window-days",
-        type=int,
-        default=7,
-        help="Entries within N days *after* a regime-on flip are labelled fresh_regime.",
-    )
-    rd.add_argument(
-        "--output-dir",
-        default=None,
-        help="Where to write regime_durability_report.{json,md}. Defaults to <data-root>/reports/regime_durability/.",
-    )
-
-
 def _add_reconcile_paper_demo_parser(subparsers) -> None:
     reconcile = subparsers.add_parser(
         "reconcile-paper-demo",
@@ -2002,16 +1958,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_archive_download_klines_1h_parser(subparsers)
     _add_archive_download_klines_1h_api_parser(subparsers)
     _add_volume_events_parser(subparsers)
-    _add_strategy_tribunal_parser(subparsers)
-    _add_portfolio_hedge_parser(subparsers)
-    _add_feature_factory_parser(subparsers)
     _add_signal_harness_parser(subparsers)
     _add_event_demo_cycle_parser(subparsers)
     _add_event_risk_cycle_parser(subparsers)
     _add_event_risk_ws_parser(subparsers)
     _add_long_native_event_demo_cycle_parser(subparsers)
     _add_combined_book_report_parser(subparsers)
-    _add_regime_durability_parser(subparsers)
     _add_reconcile_paper_demo_parser(subparsers)
     _add_reconcile_long_paper_demo_parser(subparsers)
     _add_reconcile_demo_bybit_parser(subparsers)
@@ -2172,6 +2124,27 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{action} under {data_root}")
         for dataset, path in sorted(outputs.items()):
             print(f"{dataset}: {path}")
+        if args.refresh_manifest:
+            import datetime as _dt
+
+            from .archive_manifest import run_archive_manifest as _run_archive_manifest
+
+            end = (_dt.datetime.now(_dt.timezone.utc).date() + _dt.timedelta(days=2)).isoformat()
+            try:
+                _run_archive_manifest(
+                    data_root,
+                    config=ArchiveManifestConfig(end=end),
+                )
+                print(f"archive_trade_manifest refreshed (end={end}).", file=sys.stderr)
+            except Exception as exc:  # noqa: BLE001 - never fail the download on a manifest refresh
+                print(
+                    f"⚠️  WARNING: archive-manifest refresh failed ({exc}); manifest NOT updated.",
+                    file=sys.stderr,
+                )
+        # Diagnostics go to stderr so the machine-readable "dataset: path" lines
+        # on stdout stay clean for any tool that parses them.
+        for line in _download_manifest_staleness_lines(data_root):
+            print(line, file=sys.stderr)
         return 0
 
     if args.command == "download-binance-proxy":
@@ -2594,6 +2567,7 @@ def main(argv: list[str] | None = None) -> int:
             cooldown_days=args.cooldown_days,
             rank_exit_threshold=args.rank_exit_threshold,
             require_full_pit_universe=not args.allow_partial_pit,
+            require_pit_membership=(args.pit_membership == "strict"),
             universe_rank_min=args.universe_rank_min,
             universe_rank_max=args.universe_rank_max,
             universe_min_daily_turnover=args.universe_min_daily_turnover,
@@ -2759,90 +2733,15 @@ def main(argv: list[str] | None = None) -> int:
             f"best_return={best.get('total_return', 0.0):.2%} "
             f"path={Path(payload['report_dir']) / 'volume_event_research_report.md'}"
         )
-        return 0
-
-    if args.command == "strategy-tribunal":
-        report_dir = Path(args.report_dir).expanduser() if args.report_dir else data_root / "reports" / "volume_event_research"
-        payload = run_strategy_tribunal(
-            report_dir,
-            output_dir=args.output_dir,
-            comparison_csvs=tuple(Path(item).expanduser() for item in _csv_str(args.comparison_csv, ())),
-            comparison_families=_csv_str(args.comparison_family, ()),
-            court_windows=_csv_str(args.pre_registered_window, ()),
-            execution_data_root=Path(args.execution_data_root).expanduser() if args.execution_data_root else None,
-            config=StrategyTribunalConfig(
-                bootstrap_samples=args.bootstrap_samples,
-                bootstrap_block_size=args.bootstrap_block_size,
-                random_seed=args.random_seed,
-            ),
-        )
-        print(
-            "strategy tribunal "
-            f"verdict={payload['verdict']} "
-            f"path={payload['output_files']['markdown']}"
-        )
-        return 0
-
-    if args.command == "portfolio-hedge":
-        payload = run_portfolio_hedge_report(
-            short_report_dir=Path(args.short_report_dir).expanduser(),
-            long_report_dirs=[Path(item).expanduser() for item in _csv_str(args.long_report_dir, ())],
-            hedge_weights=list(_csv_float(args.hedge_weights, (0.25, 0.5, 1.0))),
-            report_dir=Path(args.report_dir).expanduser(),
-        )
-        print(
-            "portfolio hedge "
-            f"rows={len(payload['rows'])} "
-            f"path={payload['report_path']}"
-        )
-        return 0
-
-    if args.command == "feature-factory":
-        report_dir = Path(args.report_dir).expanduser() if args.report_dir else data_root / "reports" / "volume_event_research"
-        payload = run_feature_factory_report(
-            report_dir,
-            output_dir=args.output_dir,
-            target_col=args.target_col,
-            min_rows=args.min_rows,
-            shuffle_samples=args.shuffle_samples,
-            random_seed=args.random_seed,
-        )
-        print(
-            "feature factory "
-            f"features={payload['features_with_coverage']}/{payload['features_expected']} "
-            f"rows={payload['rows']} "
-            f"path={payload['output_files']['markdown']}"
-        )
+        if not event_config.require_pit_membership:
+            print(
+                "⚠️  current_universe_biased diagnostic — NOT promotion evidence "
+                "(--pit-membership current-universe drops the PIT archive-membership gate)."
+            )
         return 0
 
     if args.command == "signal-harness":
         return _run_signal_harness(args, data_root)
-
-    if args.command == "regime-durability":
-        output_dir = args.output_dir
-        if output_dir is None:
-            output_dir = str(data_root / "reports" / "regime_durability")
-        payload = run_regime_durability_from_paths(
-            trades_csv=args.trades_csv,
-            data_root=data_root,
-            output_dir=output_dir,
-            config=RegimeDurabilityConfig(
-                btc_symbol=args.btc_symbol,
-                eth_symbol=args.eth_symbol,
-                sma_days=args.sma_days,
-                flip_window_days=args.flip_window_days,
-            ),
-        )
-        cohorts = {row["cohort"]: row for row in payload.get("cohorts", [])}
-        print(
-            "regime-durability "
-            f"trades={payload.get('trade_count', 0)} "
-            f"fresh={cohorts.get('fresh_regime', {}).get('trades', 0)} "
-            f"held={cohorts.get('held_through_flip', {}).get('trades', 0)} "
-            f"std={cohorts.get('standard', {}).get('trades', 0)} "
-            f"path={output_dir}"
-        )
-        return 0
 
     if args.command == "reconcile-paper-demo":
         payload = run_paper_demo_reconciliation(

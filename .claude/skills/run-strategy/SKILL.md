@@ -1,6 +1,6 @@
 ---
 name: run-strategy
-description: "Correct command invocations for the liquidity_migration CLI: the volume-events backtest, strategy-tribunal promotion court, event-demo-cycle forward runner, data builders, and audits. Use whenever running or constructing a 'python -m liquidity_migration' command, so the right data root, end-date boundary, and point-in-time flags are applied."
+description: "Correct command invocations for the liquidity_migration CLI: the volume-events backtest, event-demo-cycle forward runner, data builders, and audits. Use whenever running or constructing a 'python -m liquidity_migration' command, so the right data root, end-date boundary, and point-in-time flags are applied."
 ---
 
 # Running the liquidity_migration CLI
@@ -53,17 +53,6 @@ bash scripts/build_full_pit_roots.sh        # full pipeline (bybit + binance)
 bash scripts/verify_full_pit_rebuild.sh     # standalone coverage / data-layer-audit gates
 ```
 
-Promotion court (run after a `volume-events` report exists; replace `DATA_ROOT`):
-
-```bash
-python -m liquidity_migration --data-root DATA_ROOT strategy-tribunal \
-  --report-dir DATA_ROOT/reports/volume_event_research \
-  --comparison-csv DATA_ROOT/reports/stress_summary.csv \
-  --comparison-family promoted_funding \
-  --pre-registered-window train:2023-05-03:2024-05-03,validation:2024-05-03:2025-05-03,oos:2025-05-03:2026-05-03 \
-  --execution-data-root DATA_ROOT
-```
-
 Demo forward, one dry cycle:
 
 ```bash
@@ -71,15 +60,14 @@ python -m liquidity_migration --data-root data/bybit-demo-event \
   --config configs/volume_alpha.default.yaml event-demo-cycle
 ```
 
-## Subcommands (24 — run `--help` for the authoritative list)
+## Subcommands (20 — run `--help` for the authoritative list)
 
 `download-data` · `download-binance-proxy` · `data-layer-audit` ·
 `discover-universe` · `archive-manifest` · `archive-download-klines` ·
 `archive-download-klines-1h` · `archive-download-klines-1h-api` ·
-`volume-events` · `strategy-tribunal` · `portfolio-hedge` · `feature-factory` ·
-`signal-harness` · `event-demo-cycle` · `event-risk-cycle` · `event-risk-ws` ·
-`long-native-event-demo-cycle` · `combined-book-telegram-report` ·
-`regime-durability` · `reconcile-paper-demo` · `reconcile-long-paper-demo` ·
+`volume-events` · `signal-harness` · `event-demo-cycle` · `event-risk-cycle` ·
+`event-risk-ws` · `long-native-event-demo-cycle` · `combined-book-telegram-report` ·
+`reconcile-paper-demo` · `reconcile-long-paper-demo` ·
 `reconcile-demo-bybit` · `reconcile-backtest-paper` · `reconcile-all`
 
 ## Guardrails
