@@ -52,7 +52,13 @@ Run 2026-05-30, sweep tag `e2d_stopfill_2026-05-30`, full-PIT both venues,
 |---|---|---|
 | 00_baseline | +1.50 / +41% / 761  [capped 2.93] | **−0.18 / −6.8% / 477**  [capped 0.25] |
 | 01_age300 | **+3.85 (Δ+2.35) / +67% / 579**  [capped 5.96] | **+2.00 (Δ+2.18) / +27% / 307**  [capped 2.81] |
-| 02_age400 | (confirmatory, finishing; ~MAR 4.5 expected) [capped 6.91] | **+4.48 (Δ+4.67) / +45% / 255**  [capped 5.64] |
+| 02_age400 | **+2.80 (Δ+1.30) / +60% / 510**  [capped 6.91] | **+4.48 (Δ+4.67) / +45% / 255**  [capped 5.64] |
+
+**Threshold nuance under stress:** on bybit, `age300` (MAR 3.85) *beats* `age400` (2.80) under
+worst-case fills — the stricter cut yields a thinner, more concentrated book that takes bigger
+wick hits (age400 DD −21% vs age300 −17%). So **`age300` is the more stress-robust, well-populated
+choice** (best across the realistic case + cost stress + fill stress); `age400` is marginally
+better only in the benign case. → recommend **age300** as the demo-candidate threshold.
 
 ## Verdict
 
