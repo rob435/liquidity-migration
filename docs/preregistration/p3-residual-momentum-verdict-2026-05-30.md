@@ -67,6 +67,18 @@ discarded) is large and robust on both venues (LOW −HIGH ≈ +0.87 / +1.55), a
 the recent regime** (+1.9 / +2.0). This is the program's **best alpha evidence**, honestly bounded:
 a real, PIT-clean, cross-venue residual-momentum edge sitting *right at* the Tier-3 threshold.
 
+## P3-4 — gated-portfolio sim (ledger-level, conservative): direction strong, magnitudes are artifacts
+
+`scripts/p3_4_gated_portfolio_sim.py` reconstructs the gated book's portfolio P&L from the ledger
+(drop the high-rmom half; no engine change). **Direction (trustworthy, cross-venue):** gating to the
+low-rmom half raises return (bybit +0.94→+1.65, binance +0.32→+0.92), **slashes DD** (bybit −14%→−2%,
+binance −8%→−1%), and **~doubles Sharpe** (bybit +1.4→+3.0, binance +1.0→+3.0); the discarded high-rmom
+half is outright **negative** both venues (Sharpe −0.7 / −1.4). **Magnitudes (NOT trustworthy):** the
+reported MAR (+74 / +91) and recent-MAR (+342 / nan) are **artifacts** — the crude monthly
+reconstruction is too smooth (it overstates even the *full* age300 vs the engine's real MAR), and a
+near-zero DD explodes MAR. So P3-4 **confirms the gate's directional value but cannot certify
+deployable magnitudes** — only the engine-integrated backtest can.
+
 ## Recommended next step (operator-gated — a real engine build)
 
 To **certify** this, the residual-momentum signal must be built into the engine's candidate selection
