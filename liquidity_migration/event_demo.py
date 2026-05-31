@@ -1165,6 +1165,19 @@ def _demo_event_config(config: VolumeEventResearchConfig, *, profile: str) -> Vo
         # DD −42.2%→−31.0% (return↑ AND drawdown↓ on BOTH venues). The earlier
         # "FALSIFIES" verdict predated the bar_extreme→capped correction.
         # Receipt: docs/preregistration/drop-all-4-promotion.md.
+        #
+        # age300 + ff6 promotion (2026-05-31): the age gate (E2:
+        # pit_age_days_min=300, the robust cross-venue-validated SELECTION
+        # refinement) + the ff6_4pct failed-fade exit. ff6 is a pure
+        # loss-mitigation exit that cuts squeeze-shorts that never worked
+        # (held ≥6h, MFE <1%, loss >4%) before they ride to the hard stop — the
+        # live `_failed_fade_exit_since_entry` is logic-identical to the backtest
+        # `_failed_fade_exit_hit` (verified). On the standard baseline ff6 ADDS on
+        # Bybit (funding-real): MAR 1.05→1.16, ret +71%→+78.5%, DD slightly
+        # shallower; 29 ff6 exits, all loss-cuts. age stays the robust gate
+        # (all-thirds-positive Bybit; rescues Binance recent from −39%→flat).
+        # strategy_id is kept → deploy date is the clean pre/post split (as
+        # drop_all_4 did). Receipt: docs/preregistration/promote-age-ff6-demo-2026-05-31.md.
         return replace(
             base,
             # de-concentration the package was validated at (was 5)
@@ -1174,6 +1187,12 @@ def _demo_event_config(config: VolumeEventResearchConfig, *, profile: str) -> Vo
             stop_pressure_stop_count=999,              # was 7    (stop-pressure veto off)
             realized_loss_pressure_loss_count=999,     # was 6    (realized-loss veto off)
             universe_rank_max=99999,                   # was 150  (universe upper bound off)
+            # age300 + ff6_4pct (2026-05-31):
+            liquidity_migration_pit_age_days_min=300,  # was 90   (age SELECTION gate, E2)
+            failed_fade_exit_hours=6,                  # was 0    (ff6 failed-fade exit on)
+            failed_fade_min_mfe_pct=0.01,
+            failed_fade_loss_pct=0.04,
+            failed_fade_close_location_min=0.0,
         )
     if profile == "demo_relaxed":
         return replace(

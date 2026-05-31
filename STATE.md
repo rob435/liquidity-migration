@@ -39,10 +39,19 @@ promoted; forward demo is the arbiter.
 
 ## What's running
 
-- **SHORT sleeve `drop_all_4` promotion (2026-05-30, OPERATOR OVERRIDE — code-complete,
-  deploy pending owner push):** the `promoted` profile drops the 4 non-earning vetoes/bounds
-  (`day_return` floor, `stop_pressure`, `realized_loss`, `universe_rank_max`) and runs
-  `max_active=12` (systemd `MAX_ACTIVE_SYMBOLS` 3→12 on demo+paper). ⚠️ **FAILS the Tier-2
+- **SHORT sleeve `age300 + ff6` promotion (2026-05-31, operator-directed):** the `promoted`
+  profile (`event_demo._demo_event_config`) gains the **age SELECTION gate**
+  (`pit_age_days_min` 90→**300**, E2 — the robust cross-venue-validated refinement) and the
+  **ff6_4pct failed-fade EXIT** (`failed_fade` 6h/4%/1%mfe/cloc0 — a pure loss-mitigation
+  exit), stacked on the existing drop_all_4 package. Live ff6 is logic-identical to the
+  backtest ff6 (verified); deploy script + golden tests pin the new live values. `strategy_id`
+  kept → deploy date = clean pre/post split. Standalone evidence: ff6 ADDS on Bybit
+  (MAR 1.05→1.16, ret +71%→+78.5%); the actual deploy config (drop4+age300+ff6) validated in
+  the receipt. Receipt + numbers: `docs/preregistration/promote-age-ff6-demo-2026-05-31.md`.
+- **SHORT sleeve `drop_all_4` promotion (2026-05-30, OPERATOR OVERRIDE — superseded by the
+  age300+ff6 stack above, which builds on it):** the `promoted` profile drops the 4 non-earning
+  vetoes/bounds (`day_return` floor, `stop_pressure`, `realized_loss`, `universe_rank_max`) and
+  runs `max_active=12` (systemd `MAX_ACTIVE_SYMBOLS` 3→12 on demo+paper). ⚠️ **FAILS the Tier-2
   cross-venue guard under the corrected engine** (binance net-negative; the deleted research's
   "winner" was an optimistic `stop_fill='stop'` artifact). Deployed by explicit operator
   override for forward-demo observation only — revert if binance stays negative. `strategy_id`

@@ -417,6 +417,10 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text
     assert "demo.take_profit_pcts == (0.21,)" in text
     assert "demo.failed_fade_exit_hours == 6" in text
+    # promoted profile carries age300 + ff6 (2026-05-31 promotion) — pin the
+    # deploy-time guard so the live promoted gate/exit can't silently drift.
+    assert "promoted.liquidity_migration_pit_age_days_min == 300" in text
+    assert "promoted.failed_fade_exit_hours == 6" in text
     assert "TELEGRAM_CHAT_ID" in text
     assert "bybit-demo.env.backup" in text
     assert "sed -i \"s/^TELEGRAM_CHAT_ID=" in text

@@ -686,6 +686,30 @@ def test_demo_relaxed_profile_lowers_gates_for_more_demo_trades() -> None:
     assert strategy.liquidity_migration_crowding_filter == "union_pathology"
 
 
+def test_promoted_profile_carries_drop_all_4_age300_and_ff6() -> None:
+    # Golden config for the live demo `promoted` profile = drop_all_4 (2026-05-30)
+    # + age300 + ff6_4pct (2026-05-31). Guards against silently dropping the age
+    # SELECTION gate or the failed-fade EXIT, both of which the forward demo is
+    # measuring. Receipt: docs/preregistration/promote-age-ff6-demo-2026-05-31.md.
+    strategy = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
+
+    # drop_all_4 (unchanged by the 2026-05-31 promotion):
+    assert strategy.max_active_symbols == 12
+    assert strategy.universe_rank_max == 99999
+    assert strategy.liquidity_migration_day_return_min == -1.0
+    assert strategy.stop_pressure_stop_count == 999
+    assert strategy.realized_loss_pressure_loss_count == 999
+    # take-profit is unchanged from the base promoted profile (NOT the 0.21 of demo_relaxed):
+    assert strategy.take_profit_pcts == (0.26,)
+    # age300 SELECTION gate (E2):
+    assert strategy.liquidity_migration_pit_age_days_min == 300
+    # ff6_4pct failed-fade EXIT (same knobs as demo_relaxed; live==backtest logic):
+    assert strategy.failed_fade_exit_hours == 6
+    assert strategy.failed_fade_min_mfe_pct == 0.01
+    assert strategy.failed_fade_loss_pct == 0.04
+    assert strategy.failed_fade_close_location_min == 0.0
+
+
 def test_demo_relaxed_profile_requires_wide_forward_universe() -> None:
     # demo_relaxed needs trade_rank_max(260) + rank_improvement_min(80) = 340
     # so prior-week ranks of rocket-symbols are observable.

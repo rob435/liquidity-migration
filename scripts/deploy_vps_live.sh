@@ -61,6 +61,14 @@ demo = _demo_event_config(VolumeEventResearchConfig(), profile="demo_relaxed")
 assert _demo_strategy_id("promoted") == "liqmig_union_q40_h3_tp26_g100_qsqueeze"
 assert _demo_strategy_id("demo_relaxed") == "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6"
 assert promoted.take_profit_pcts == (0.26,)
+# promoted = drop_all_4 (2026-05-30) + age300 + ff6_4pct (2026-05-31).
+assert promoted.max_active_symbols == 12
+assert promoted.universe_rank_max == 99999
+assert promoted.liquidity_migration_pit_age_days_min == 300
+assert promoted.failed_fade_exit_hours == 6
+assert promoted.failed_fade_min_mfe_pct == 0.01
+assert promoted.failed_fade_loss_pct == 0.04
+assert promoted.failed_fade_close_location_min == 0.0
 assert demo.take_profit_pcts == (0.21,)
 assert demo.failed_fade_exit_hours == 6
 assert demo.failed_fade_min_mfe_pct == 0.01
