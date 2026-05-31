@@ -16,9 +16,25 @@ short. E1+E1b **falsified the EXECUTION half** — fade-confirmation entry adds 
 cross-venue premium over immediate entry, so **E3 (sniper) is dropped** and the open lead is
 **SELECTION refinement** (the age gate + residual-momentum gate, under "What's running"). (The
 earlier "Round 2 = null" was a methodology artifact — worst-case fills + over-concentration.)
-Plan: **`docs/research_plan_intraday_kernel.md`** (the forward direction — faster intraday
-detection of the same event); numbers + full record (the dated source of truth):
-**`docs/research_summary.md`**. Nothing is promoted; forward demo is the arbiter.
+**Investigating the intraday-detection kernel** (`docs/research_plan_intraday_kernel.md`). K0
+confirmed the daily entry is ~8–11% below the event-day peak (optimistic ceiling). K1a
+falsified running the *daily selector* hourly (its ≥6×-**daily**-turnover rule can't confirm
+until ~15:00, after the fade) — but that is NOT a purpose-built intraday signal. **REOPENED
+2026-05-30 (operator-directed)** to engineer a rate/flow intraday selector. **I1a:** faders
+carry a clear cross-venue intraday **exhaustion fingerprint** (peak ~16–17 UTC, turnover climax
+4.2–4.6×, upper-wick rejection, OI build on bybit; premium quiet). **Make-or-break = I1b** — can
+a PIT-causal feature separate faders from pumps that CONTINUE? **I1b = PASS** (real beta-neutral
+cross-venue signal), and a 25%-stop top-short is a candidate — **but funding (I2g–I2k, 2026-05-31) eats ~85%
+of the edge**: under FAIR (funding-to-exit) accounting it is **marginally positive both venues** (24h/25%, MAR
++0.30 bybit / +0.49 binance) but **recent-tilted** (bybit underwater ~3y) and **found after extensive search**
+(weak evidence; verdict swings −0.54→+0.30→+3.08 with funding accounting = at the proxy's resolution limit).
+So: fill-timing dead (E1), same-selector detection dead (K1a), **standalone intraday burst-short = MARGINAL +
+unvalidated → engine-grade I3 to settle (operator-gated coin-flip), NOT closed.** The robust validated edge is
+the DAILY age+rmom selection refinements under forward demo (operator-gated) — their late next-day entry
+sidesteps both the intraday squeeze and the funding crowding. Full write-up: `docs/intraday_burst_synthesis.md`. Data note: derivative channels verified (premium/funding both venues full;
+OI bybit-only; taker binance-recent-only) — see the corrected memory.
+Numbers + full record (the dated source of truth): **`docs/research_summary.md`**. Nothing is
+promoted; forward demo is the arbiter.
 
 ## What's running
 
@@ -47,6 +63,54 @@ detection of the same event); numbers + full record (the dated source of truth):
 - **No research runs in-flight.** Research state — full detail + numbers in
   `docs/research_summary.md` (the dated record; the per-phase E1/E2/P3/c2b receipts were
   consolidated there and removed 2026-05-30 — git history has the originals):
+  - **Intraday-detection kernel (K0→K1a→I-phase, 2026-05-30) — REOPENED (operator-directed).**
+    K0: daily entry ~8–11% below the event-day peak (optimistic ceiling). **K1a falsified only
+    the *daily selector run hourly*** (≥6×-daily-turnover can't confirm until ~15:00, after the
+    fade) — NOT a purpose-built intraday signal. **I1a:** faders carry a clear cross-venue
+    intraday exhaustion fingerprint (peak ~16–17 UTC, turnover climax ~4.2–4.6×, upper-wick
+    rejection, OI build on bybit). **I1b (make-or-break) = PASS:** scanning ALL intraday
+    rate-bursts (incl. non-events, both venues), a PIT-causal signal SEPARATES faders from
+    continuers and **survives beta-neutralization** (idiosyncratic, not market-regime beta) —
+    `idio` (pump size vs market) ic_neutral −0.28…−0.31, velocity/vol-spike/accel −0.11…−0.16,
+    BOTH venues × BOTH eras; wick = noise. Edge is a SELECTION on pump-extremity (extreme-quintile
+    beta-neutral short +1.2–1.3% early / +4.4–4.7% recent, gross 48h); shorting all bursts is
+    ~breakeven. A NEW extreme-pump-reversal selector (the daily entry is too late). `scripts/i1b_burst_separation.py`.
+  - **I2/c/d/f (2026-05-30/31) — DEPLOYABLE-CANDIDATE at a 25% stop (top-short); NOT validated.**
+    Extreme-burst short, realistic engine (`i2_burst_backtest.py`, `i2b_burst_fade_confirm.py`). FADE entries
+    (giveback 3–20%, momentum down-bars, volume-decline-vs-climax, failed-retest/no-new-high) ALL underperform
+    and are early-negative at ≤20% — entry refinements can't fix a POST-entry bull re-pump squeeze; "more fade"
+    empirically loses. The lever is **STOP WIDTH**: the TOP-short (burst entry) flips all-weather at **~25%
+    (the operator's cap)** — per-trade net45 EARLY +0.13 bybit / +0.39 binance, RECENT +1.34/+0.51; portfolio
+    MAR net45 **3.1/2.2** (net15 5.6/4.3), DD 11–13%. (20–22% marginal; 30% similar.) **Verdict: a deployable
+    CANDIDATE exists within ≤25% = the extreme-burst top-short at 25%.** Caveats (NOT validated): Stage-B PROXY;
+    **back-loaded** (first calendar-third −6%/−2%); 25% is the boundary + a rough adverse hold; mostly STR. **Next
+    = engine-grade I3** (true exit-timing/concurrency + bar_extreme_capped fills + FUNDING + risk_model residual,
+    stop≤25%; operator-gated).
+  - **I2g–I2k FUNDING DE-RISK (2026-05-31) — funding eats ~85% of the edge; MARGINAL candidate survives under
+    FAIR accounting → engine-grade I3 to settle (operator-gated; NOT closed).** Funding *mean* looked like a kill
+    but was **outlier-distorted** (hourly-funding coins, LRC −16%); **median** trade ≈0. Funding-to-48h portfolio
+    was MAR-negative every hold (12h −0.69/−0.23, 24h −0.54/−0.09, 48h −0.91/−0.73) → looked dead. **But that
+    over-charged stopped trades** (a stop exits early; ~13% stopped = the worst crowded-short coins). **FAIR
+    funding-to-exit (I2k) reopens it:** at **24h/25%**, ret +4.3%/+5.6%, **MAR +0.30 bybit / +0.49 binance**
+    (binance all-weather; bybit positive-but-recent-tilted — underwater ~3y then a recent pop). Crowded-short
+    FILTER (I2i) didn't help (funding accrues *during* the hold). **Balanced verdict: real signal (I1b), MARGINAL
+    + recent-tilted standalone short found after extensive search (weak evidence); verdict swings with funding
+    accounting (−0.54→+0.30→+3.08) = at the proxy's resolution limit.** I3 (true exit-timing/concurrency + capped
+    fills + funding-to-exit + residual, 24h, stop≤25%) is the tool to settle it — operator-gated coin-flip.
+    **The DAILY age+rmom strategy is the robust validated all-weather edge regardless.** Full write-up:
+    `docs/intraday_burst_synthesis.md`. Net: fill-timing dead (E1), detection-timing dead (K1a), standalone
+    intraday short = marginal/unvalidated (I2k).
+  - **CV1 (cross-venue, 2026-05-30):** the bybit≫binance gap is **BREADTH + universe
+    composition, NOT a weaker per-trade edge** — matched (same coin/day) events corr 0.89,
+    binance ≈ bybit; per-trade net near-identical (median +0.34%/+0.27%). binance fires ~½ the
+    events + its venue-unique coins are weak marginals (less liquid, weaker spike). Edge is
+    venue-general on shared names → reassuring for robustness. `scripts/cv1_cross_venue_decomposition.py`.
+  - **RD1 (recent decay, 2026-05-30):** the recent per-trade mean decay (both venues) is
+    **squeeze-driven** — recent losers are stop-outs on coins pumping *against* a weak market
+    (idiosyncratic strength). The **rmom gate fixes it**: cuts ~75% of recent stop-out losers
+    (bybit 81→19, binance 57→14), recent mean +0.08%→+0.39% / +0.02%→+0.35%. Explains WHY the
+    rmom gate works (squeeze filter) + strengthens the case to forward-demo it.
+    `scripts/rd1_recent_decay_rmom.py`.
   - **E1+E1b — execution is a non-lever:** fade-confirmation adds no robust cross-venue premium
     over immediate entry → selection-dominant; E3 (sniper) dropped.
   - **E2/E2b/c/d — the age gate (lead):** `--liquidity-migration-pit-age-days-min≈300` (drop

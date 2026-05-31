@@ -76,6 +76,117 @@ without an explicit operator go AND K0+K1 passing. The forward demo is the Tier-
 
 ## Status
 
-- **K0:** pending — pre-register, then run on the 5950X. (Next step: write the K0 precheck
-  script + its pre-registration receipt.)
-- **K1 / K2:** gated on K0 (and K1, respectively).
+- **K0: DONE — PASS (2026-05-30).** The daily-close (+1h) entry is a median **~8–11% below
+  the event-day intraday peak**, positive on **both venues × both early/recent splits ×
+  both books** (fixed_delay age≥90 and age≥300 quality_squeeze) — clears the ~15 bps gate by
+  ~50–65×. Decomposition (K0b): **~95–98% of that gap is the within-day-D giveback**, the +1h
+  fill window only ~2–6% → the lever is **intraday detection**, not faster fills (consistent
+  with E1). It is an optimistic *ceiling* (exact-top short) → necessary, not sufficient.
+  Receipt: `docs/preregistration/k0-intraday-fade-timing-2026-05-30.md`.
+- **K1: DONE — FAILED (K1a, 2026-05-30). The kernel is FALSIFIED; K1b + K2 cancelled.**
+  K1a (cheap feasibility, `scripts/k1a_intraday_first_crossing.py`) found the first intraday
+  hour the *same selector* fires and the realistic uplift (fill at `h*`+1 vs the daily +1h
+  entry). Result: only **~40–85 bps median (~10–15% of the K0 ceiling)**, a **coin flip**
+  (45–46% negative, q25 ≈ −3% / q75 ≈ +5%), **negative on binance early**, `corr(lead,uplift)
+  ≈0`. **Mechanism:** the selector cannot *confirm* the event (cumulative turnover ≥6×) until
+  median `h*` = 15–16:00 UTC — ~9h after the morning peak — by which point price has faded back
+  to ≈ the daily entry; confirmation time is decoupled from the price path. The K0 ceiling is
+  real but **un-capturable by faster detection of the same event.** Receipt:
+  `docs/preregistration/k1-intraday-detection-2026-05-30.md`.
+- **K2:** CANCELLED (gated on K1, which failed).
+
+## Outcome — the timing axis is closed; the alpha is SELECTION
+
+E1 killed *fill* timing (within 1h); **K1a kills *detection* timing** (across ~9h, same
+selector). Neither faster fills nor faster detection of the same event is a lever — the
+daily-close cadence leaves no capturable money on the table because the event cannot be
+confirmed any earlier. **The program reverts to its validated SELECTION refinements** — the
+age gate (Tier-2, all-weather) + the residual-momentum gate (P3b, demo-eligible) — under
+forward demo (the operator-gated arbiter).
+
+## I-phase — purpose-built intraday selector (operator-directed reopening, 2026-05-30)
+
+The operator (correctly) flagged that K1a was too narrow: it tested the *daily selector run
+hourly*, not a **purpose-built intraday signal** firing on rate/flow features at the peak — a
+genuinely different signal needing custom engineering. Reopened.
+
+- **Channels (verified data):** cross-venue all-weather = klines (price/volume/intrabar/velocity)
+  + premium_index (hourly) + funding (8h) both venues + market-context; OI bybit-only;
+  taker-flow binance-recent-only (out). 1h grain.
+- **I1a (DONE):** faders carry a clear cross-venue intraday **exhaustion fingerprint** — peak
+  ~16–17 UTC, turnover climax ~4.2–4.6× day-mean at the peak then rolloff, peak-bar upper-wick
+  ~0.43 + mid-range close (rejection), price +20–22% then fades ~6–8%/6h; OI builds into + surges
+  after the peak (bybit); premium quiet. Fingerprint EXISTS (necessary). `scripts/i1a_fader_intraday_signature.py`.
+- **I1b (DONE — PASS).** Scanned ALL intraday rate-bursts (age≥300, rank 31–400, gain≥8% +
+  vol-spike≥5×, cooldown 3d, fwd 48h) over BOTH venues incl. non-events (bybit 8968 / binance 7912),
+  labeled forward fade-vs-continue, tested separation + **beta-neutralized**. Result: separation
+  SURVIVES beta-neutralization (idiosyncratic, not market-regime beta), robust **cross-venue +
+  early/recent** — `idio` (pump size vs market) ic_neutral −0.28…−0.31, velocity/vol-spike/accel
+  −0.11…−0.16, wick = noise. Edge is a SELECTION on pump-extremity (extreme quintile beta-neutral
+  short +1.2–1.3% early / +4.4–4.7% recent gross 48h; all-bursts ~breakeven). `scripts/i1b_burst_separation.py`.
+- **I2 (DONE) — REAL, promising, cross-venue, all-weather lead with a WIDE stop; NOT validated.**
+  Backtested the extreme-burst short (`scripts/i2_burst_backtest.py`). The daily 12% stop is too tight
+  (38% stop-out → fails, recent-only); fade-confirm (I2b) didn't rescue (no selectivity). The **stop-width
+  frontier** is monotonic 12%→50%: **30% → MAR 3.2/2.79 DD 14.5/10.7% all-weather both venues**; 50% →
+  MAR 4.9/8.0 DD 16/9%; no-stop best-return but tail blows out (DD 26/20%). A wide (30–50%) stop monetizes
+  the signal with bounded tail. Caveats (not validated): Stage-B proxy; wide-stop gap/fill realism;
+  funding unmodeled; back-loaded; STR-factor open. Receipt: `docs/preregistration/i2-intraday-burst-selector-2026-05-30.md`.
+- **I2c/I2d (2026-05-31) — operator capped the stop at ≤20–25% ("more fade, not the top"; entry
+  refinements). Under a TIGHT stop, the standalone short does NOT hold up.** Every entry — top-short,
+  % giveback 3–20% (I2c), momentum-confirmed sustained fade (down-bars=2, I2d) — is **early-negative /
+  recent-only both venues** (best give-5%/stop-20%: EARLY net45 −0.46 bybit / −0.03 binance). The
+  early-negative is structural/regime (bull-market continuations squeeze a tight-stopped short); entry
+  timing doesn't fix it. The 30–50% all-weather result was a fragile-fill + untenable-stop artifact.
+  `scripts/i2b_burst_fade_confirm.py`.
+- **I-PHASE CONCLUDED — verdict:** the intraday extreme-burst signal is **real** (I1b: beta-neutral,
+  cross-venue, all-weather *unstopped*) but **NOT safely deployable as a standalone short under
+  realistic risk** (recent-only at a tight stop). **Deep reconciliation:** the daily strategy's "late"
+  next-day entry is WHY it is safely all-weather — it sidesteps the intraday squeeze; the K0 ~9% ceiling
+  is real but un-capturable *safely*. The daily fade-confirm IS the safe harvest of this effect. **Robust
+  all-weather edge stays the daily age-gated + residual-momentum strategy** regardless of the below.
+- **I-PHASE VERDICT REVISED (2026-05-31, the operator's full ≤25% cap — I'd only tested ≤20% above).**
+  Also tested volume-decline-vs-climax + failed-retest/no-new-high (I2e/I2f) — both confirm≈1.0, no help,
+  early-negative (entry can't fix the POST-entry re-pump squeeze). BUT the lever is **stop width**: the
+  **extreme-burst TOP-short flips all-weather at ~25%** (the operator's cap) — per-trade net45 EARLY +0.13
+  bybit / +0.39 binance, RECENT +1.34/+0.51; portfolio MAR net45 3.1/2.2 (net15 5.6/4.3), DD 11–13% (20–22%
+  marginal). Fade entries underperform the top-short at the same stop ("more fade" empirically loses).
+  **A DEPLOYABLE-CANDIDATE exists within ≤25% = the extreme-burst top-short at a 25% stop** — NOT validated
+  (Stage-B proxy; back-loaded first-third −6%/−2%; 25%=boundary + rough adverse hold; mostly STR). **I3
+  (engine-grade: true exit-timing/concurrency + bar_extreme_capped fills + FUNDING + risk_model residual,
+  stop ≤25%) is now JUSTIFIED — operator-gated go/no-go.** `scripts/i2_burst_backtest.py`.
+- **FUNDING DE-RISK (I2g→I2k, 2026-05-31) — funding eats ~85% of the edge; a MARGINAL candidate survives
+  under fair accounting (verdict revised twice — see I2k; operator caught a pessimistic proxy bug).**
+  Before the expensive engine build, costed realized funding on the PROXY (the 2nd-biggest caveat after
+  fills). Short receives + / pays − funding over the hold (`--funding-ds`, both venues full-history).
+  - **I2g/I2h — median survives, portfolio dies.** The funding *mean* looked like a kill (−0.6…−1.5%/trade)
+    but was **outlier-distorted** by hourly-funding coins (e.g. LRC −16% over 48 settlements); the **median**
+    trade's funding is ~0 (median net45+funding still +3.4/+4.7). BUT the funding-**included PORTFOLIO** dies
+    — MAR **−0.91 bybit / −0.73 binance** — because 11–32% of trades sit in **crowded-short** coins (perp
+    discount when everyone shorts a fresh pump) paying >1% funding; at 2% book weight that's a broad early drag.
+  - **I2i — crowded-short FILTER doesn't rescue it.** A PIT filter skipping coins with negative trailing
+    funding *at entry* (floor 0 / −0.0003) helped (MAR → −0.46 bybit / −0.15 binance) but stayed **negative,
+    early-negative both venues** — because the funding accrues **during** the hold (shorts crowd in *as* the
+    pump fades), which an entry-time filter cannot predict.
+  - **I2j — SHORTER HOLD, funding-to-48h accounting.** 12/24/48h all MAR-negative under the (later-corrected)
+    to-48h funding (12h −0.69/−0.23, 24h −0.54/−0.09, 48h −0.91/−0.73). **24h least-bad.** Briefly read as a kill.
+  - **I2k — FAIR funding (to ACTUAL exit) REOPENS it; the to-48h "kill" was a PROXY BUG (operator caught it).**
+    The to-48h funding over-charged **stopped** trades (a stop exits early and stops paying; the ~13% stopped
+    trades are exactly the worst crowded-short coins). `--funding-to-exit` fixes it. At **24h hold, 25% stop**:
+
+    | 24h | funding-BLIND | **FAIR (to-exit)** | pessimistic (to-48h) |
+    |---|---|---|---|
+    | bybit   | ret +38.7%, MAR 3.08 | **ret +4.3%, MAR 0.30** | −0.54 |
+    | binance | ret +28.7%, MAR 2.76 | **ret +5.6%, MAR 0.49** | −0.09 |
+
+    Under fair funding the **24h candidate is positive on both venues** (binance all-weather; bybit positive-but-
+    recent-tilted — equity curve underwater ~3y then a recent pop). But funding eats **~80–89%** of the edge.
+  - **BALANCED VERDICT — real signal, MARGINAL standalone short, NOT closed → engine-grade I3 to settle (operator-gated).**
+    Real beta-neutral cross-venue signal (I1b); fair-funding positive but thin and recent-tilted; found after
+    **extensive search** (weak evidence, not validation); the verdict **swings with funding accounting**
+    (−0.54 → +0.30 → +3.08) → at the **Stage-B proxy's resolution limit**, which can't settle a MAR≈0.3 candidate.
+    **I3** (true exit-timing/concurrency + `bar_extreme_capped` fills + funding-to-exit + risk_model residual,
+    **24h hold, stop ≤25%**) is the right tool — operator-gated; given ~85% funding-eaten + recent-tilted it is a
+    genuine coin-flip whether it's worth the ~5–7d build. **The DAILY age+rmom strategy is the robust validated
+    all-weather edge regardless** (its late entry sidesteps both squeeze and funding crowding); the intraday short
+    is at best a higher-risk, marginal, unvalidated add-on. Full write-up: `docs/intraday_burst_synthesis.md`.
+    `scripts/i2_burst_backtest.py` (`--funding-ds`, `--funding-filter-floor`, `--funding-to-exit`, `--hold-h`).
