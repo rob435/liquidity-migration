@@ -348,8 +348,24 @@ forward return on rank-standardised burst features (both venues, i1b bursts) —
 relative-return reversal (`idio`) dominates (β −0.35/−0.36)**, i.e. the signal is **substantially the
 known short-term-reversal factor**; `vol_spike` (the liquidity-migration volume structure) **survives
 but is small** (univariate IC −0.14 → partial β −0.05/−0.06, consistent cross-venue). So ~mostly STR +
-a modest real volume increment — consistent with P2-1 ("mostly factor exposure"); does not change the
-not-deployable verdict.
+a modest real volume increment — consistent with P2-1 ("mostly factor exposure").
+
+**I-PHASE UPDATE (2026-05-31, the operator's full ≤25% cap) — a deployable CANDIDATE exists after all
+(verdict revised).** The "not deployable at a tight stop" conclusion above tested stops ≤20%; the
+operator's stated cap is ≤25% and I had not run the 22–25% boundary (premature null — second time this
+arc I called it early). Running it: the **extreme-burst TOP-short (the burst entry, NOT a fade) flips
+all-weather at ~25%** — per-trade net45 positive in **BOTH venues × BOTH eras** (EARLY +0.13 bybit /
++0.39 binance; RECENT +1.34/+0.51), Stage-B portfolio MAR net45 **3.1/2.2** (net15 5.6/4.3), **DD 11–13%**.
+The early period is marginally negative at 20–22% and turns positive at ~25% (the boundary sits right at
+the operator's cap). Note the fade entries all UNDERPERFORMED the top-short at the same stop — "more fade"
+empirically loses; the lever is **stop width**, not entry. **Verdict revised: a deployable-CANDIDATE
+config exists within the ≤25% constraint = the extreme-burst top-short at a ~25% stop.** Caveats (NOT
+validated): Stage-B PROXY (entry-day P&L, approx concurrency, flat 2% stop-slip → engine-grade needed);
+**back-loaded** (portfolio first calendar-third mildly negative −6%/−2%, bulk recent); 25% is the boundary
+(fragile below) and a rough 25% adverse hold operationally; mostly short-term-reversal (idio-dominated).
+**Next = engine-grade I3** (`docs/preregistration/i3-intraday-burst-engine-2026-05-30.md`: true
+exit-timing/concurrency + `bar_extreme_capped` fills + FUNDING + risk_model residual, stop ≤25%) — now
+**JUSTIFIED**; operator-gated go/no-go.
 
 ## CV1 (2026-05-30): the cross-venue asymmetry is BREADTH + composition, NOT edge-quality
 

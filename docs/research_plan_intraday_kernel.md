@@ -143,6 +143,14 @@ genuinely different signal needing custom engineering. Reopened.
   realistic risk** (recent-only at a tight stop). **Deep reconciliation:** the daily strategy's "late"
   next-day entry is WHY it is safely all-weather — it sidesteps the intraday squeeze; the K0 ~9% ceiling
   is real but un-capturable *safely*. The daily fade-confirm IS the safe harvest of this effect. **Robust
-  all-weather edge stays the daily age-gated + residual-momentum strategy.** I3 (engine-grade) +
-  I4 (live) **deprioritised** — they would only sharpen a recent-only result. (Lower-probability revisits:
-  down-bars=3; a market-neutral L/S form — but c2b found the beta-neutral continuous version recent-only too.)
+  all-weather edge stays the daily age-gated + residual-momentum strategy** regardless of the below.
+- **I-PHASE VERDICT REVISED (2026-05-31, the operator's full ≤25% cap — I'd only tested ≤20% above).**
+  Also tested volume-decline-vs-climax + failed-retest/no-new-high (I2e/I2f) — both confirm≈1.0, no help,
+  early-negative (entry can't fix the POST-entry re-pump squeeze). BUT the lever is **stop width**: the
+  **extreme-burst TOP-short flips all-weather at ~25%** (the operator's cap) — per-trade net45 EARLY +0.13
+  bybit / +0.39 binance, RECENT +1.34/+0.51; portfolio MAR net45 3.1/2.2 (net15 5.6/4.3), DD 11–13% (20–22%
+  marginal). Fade entries underperform the top-short at the same stop ("more fade" empirically loses).
+  **A DEPLOYABLE-CANDIDATE exists within ≤25% = the extreme-burst top-short at a 25% stop** — NOT validated
+  (Stage-B proxy; back-loaded first-third −6%/−2%; 25%=boundary + rough adverse hold; mostly STR). **I3
+  (engine-grade: true exit-timing/concurrency + bar_extreme_capped fills + FUNDING + risk_model residual,
+  stop ≤25%) is now JUSTIFIED — operator-gated go/no-go.** `scripts/i2_burst_backtest.py`.

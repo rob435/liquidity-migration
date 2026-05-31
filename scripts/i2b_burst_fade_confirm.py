@@ -52,6 +52,10 @@ def main() -> int:
     ap.add_argument("--confirm-window", type=int, default=48)
     ap.add_argument("--confirm-down-bars", type=int, default=1,
                     help="require N consecutive lower closes ending at the giveback bar (1 = no momentum filter)")
+    ap.add_argument("--vol-decline-frac", type=float, default=0.0,
+                    help="volume-exhaustion filter: require turnover at entry <= FRAC x the post-burst climax turnover (0 = off)")
+    ap.add_argument("--confirm-no-new-high-bars", type=int, default=0,
+                    help="failed-retest filter: require M bars since the last new post-burst high (the top is confirmed / no re-pump) before entry (0 = off)")
     ap.add_argument("--givebacks", default="3,5,8")
     ap.add_argument("--hold-h", type=int, default=48)
     ap.add_argument("--stop-pct", type=float, default=0.12)
@@ -75,7 +79,7 @@ def main() -> int:
     sym = {}
     for k, df in parts.items():
         s = k[0] if isinstance(k, tuple) else k
-        sym[s] = (df["ts_ms"].to_list(), df["open"].to_list(), df["high"].to_list(), df["close"].to_list())
+        sym[s] = (df["ts_ms"].to_list(), df["open"].to_list(), df["high"].to_list(), df["close"].to_list(), df["turnover_quote"].to_list())
 
     def stat(rows):
         if len(rows) < 20:
@@ -89,7 +93,7 @@ def main() -> int:
                 "net15_sum_pct": round(sum(net15) * 100, 1),
                 "net45_mean_pct": round(st.mean(net45) * 100, 3), "net45_sum_pct": round(sum(net45) * 100, 1)}
 
-    res = {"venue": a.venue, "n_extreme_bursts": ext.height, "params": {k: getattr(a, k) for k in ("gain_min", "vol_spike_min", "rank_min", "rank_max", "age_min", "confirm_window", "confirm_down_bars", "hold_h", "stop_pct", "stop_slip")}, "givebacks": {}}
+    res = {"venue": a.venue, "n_extreme_bursts": ext.height, "params": {k: getattr(a, k) for k in ("gain_min", "vol_spike_min", "rank_min", "rank_max", "age_min", "confirm_window", "confirm_down_bars", "vol_decline_frac", "confirm_no_new_high_bars", "hold_h", "stop_pct", "stop_slip")}, "givebacks": {}}
     CW, HOLD = a.confirm_window, a.hold_h
     for X in [float(x) for x in a.givebacks.split(",")]:
         trades = []
@@ -97,18 +101,30 @@ def main() -> int:
             d = sym.get(r["symbol"])
             if d is None:
                 continue
-            ts, op, hi, cl = d
+            ts, op, hi, cl, tq = d
             i = bisect.bisect_left(ts, r["ts_ms"])
             if i >= len(ts) or ts[i] != r["ts_ms"]:
                 continue
             run_hi = hi[i]
+            last_peak = i
+            climax_turn = tq[i] or 0.0
             entry_idx = None
             DB = a.confirm_down_bars
+            VF = a.vol_decline_frac
+            NNH = a.confirm_no_new_high_bars
             for j in range(i + 1, min(i + 1 + CW, len(ts))):
-                run_hi = max(run_hi, hi[j])
+                if hi[j] > run_hi:
+                    run_hi = hi[j]
+                    last_peak = j
+                climax_turn = max(climax_turn, tq[j] or 0.0)
                 if run_hi > 0 and cl[j] <= run_hi * (1 - X / 100.0):
-                    # momentum filter: require DB consecutive lower closes ending at j (sustained fade)
-                    if DB <= 1 or (j >= DB and all(cl[j - k] < cl[j - k - 1] for k in range(DB - 1))):
+                    # momentum filter: DB consecutive lower closes ending at j (sustained fade)
+                    mom_ok = DB <= 1 or (j >= DB and all(cl[j - k] < cl[j - k - 1] for k in range(DB - 1)))
+                    # volume-exhaustion filter: turnover at j has dried to <= VF x the post-burst climax
+                    vol_ok = VF <= 0.0 or (climax_turn > 0 and (tq[j] or 0.0) <= VF * climax_turn)
+                    # failed-retest filter: >= NNH bars since the last new high (top confirmed, no re-pump)
+                    nnh_ok = NNH <= 0 or (j - last_peak) >= NNH
+                    if mom_ok and vol_ok and nnh_ok:
                         entry_idx = j + 1
                         break
             if entry_idx is None or entry_idx >= len(ts):
