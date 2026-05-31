@@ -394,6 +394,76 @@ def test_pending_entry_fill_reconciles_to_open_trade() -> None:
     assert order_updates[0]["filled_qty"] == "1"
 
 
+def test_pending_entry_split_recovery_sums_sub_order_fills() -> None:
+    """BUG-3: s0 already built the open trade (qty=1 @100). s1 — a non-first
+    sub-order sharing the trade_id, recovered here after a place_order-after-accept
+    transport error — fills another 1. Its per-link fill (1) is NOT greater than
+    the trade qty already carrying s0 (1), so the old `filled_qty > existing.qty`
+    gate dropped it and the ledger under-reported the split position. The recovered
+    leg must SUM: qty 1 + 1 = 2 with a value-weighted blended entry."""
+    existing = pl.DataFrame(
+        [
+            {
+                "trade_id": "t-split",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "1",
+                "entry_price": 100.0,
+                "notional_usdt": 100.0,
+                "entry_leverage": 2.0,
+                "equity_usdt": 10_000.0,
+                "entry_ts_ms": 1_700_000_000_000,
+            }
+        ]
+    )
+    orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "lm-en-split-s1",
+                "ts_ms": 1_700_000_060_000,
+                "trade_id": "t-split",
+                "symbol": "AAAUSDT",
+                "side": "Sell",
+                "order_type": "Market",
+                "qty": "1",
+                "reduce_only": False,
+                "order_id": "order-s1",
+                "submit_mode": "submitted",
+                "avg_price": 100.0,
+                "notional_usdt": 0.0,
+                "target_notional_pct_equity": 0.2,
+                "entry_leverage": 2.0,
+                "initial_margin_usdt": 0.0,
+                "status": "submitted_unconfirmed",
+                "trade_side": "short",
+                "signal_ts_ms": 1_700_000_000_000,
+                "equity_usdt": 10_000.0,
+                "tick_size": 0.1,
+                "qty_step": 0.1,
+                "stop_price": 112.0,
+                "take_profit_price": 80.0,
+                "filled_qty": "",  # previous_filled_qty == 0
+            }
+        ]
+    )
+    client = FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("lm-en-",))
+
+    trades, _order_updates = _reconcile_pending_order_fills(
+        orders,
+        existing,
+        trading_client=client,
+        demo=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        now_ms=1_700_000_120_000,
+    )
+
+    assert len(trades) == 1
+    assert trades[0]["trade_id"] == "t-split"
+    assert trades[0]["qty"] == "2"  # summed, NOT overwritten-when-greater
+    assert trades[0]["entry_price"] == 100.25  # value-weighted blend of 100 and 100.5
+    assert trades[0]["notional_usdt"] == pytest.approx(100.25 * 2)
+
+
 def test_pending_entry_fill_recomputes_protection_from_confirmed_fill() -> None:
     orders = pl.DataFrame(
         [
@@ -1491,6 +1561,56 @@ def test_execute_exits_skips_preflight_on_dry_run() -> None:
     )
 
     assert preflight_rows == []
+
+
+def test_execute_exits_keeps_trade_open_when_no_exit_price_resolvable() -> None:
+    """BUG-5: a paper/dry-run max_hold on a fully-delisted coin has no
+    planned_exit_price (gone from BOTH the universe and get_tickers). The exit must
+    NOT close the trade at a fabricated exit_price=0 / 0% return — it must stay open
+    for a later retry (or, on the submit path, the orphan reconciler's settlement)."""
+    all_trades = pl.DataFrame([_open_trade_row()], infer_schema_length=None)
+
+    rows, _orders = _execute_exits(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "qty": "1",
+                "exit_reason": "max_hold",
+                "exit_trigger_ts_ms": 1_700_000_000_000,
+                "planned_exit_price": None,  # delisted: no resolvable price
+            }
+        ],
+        all_trades,
+        trading_client=None,
+        demo=EventDemoCycleConfig(submit_orders=False),
+        now_ms=1_700_000_060_000,
+    )
+    # No closed row booked — the trade stays open (no fabricated 0% return).
+    assert rows == []
+
+    # Control: a resolvable price DOES close it normally.
+    rows_ok, _ = _execute_exits(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "qty": "1",
+                "exit_reason": "max_hold",
+                "exit_trigger_ts_ms": 1_700_000_000_000,
+                "planned_exit_price": 99.0,
+            }
+        ],
+        all_trades,
+        trading_client=None,
+        demo=EventDemoCycleConfig(submit_orders=False),
+        now_ms=1_700_000_060_000,
+    )
+    assert len(rows_ok) == 1
+    assert rows_ok[0]["status"] == "closed"
+    assert rows_ok[0]["exit_price"] == 99.0
 
 
 def test_preflight_exit_order_row_uses_pending_status() -> None:

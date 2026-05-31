@@ -195,6 +195,72 @@ def test_update_subscriptions_adds_and_removes() -> None:
         pool.close()
 
 
+class _AlreadySubscribedWebSocket(_FakeWebSocket):
+    """pybit quirk repro: a topic stays in the callback directory even after
+    ``unsubscribe()``, so re-subscribing it raises 'already subscribed' — exactly
+    the live long-sleeve failure on a symbol that churns out of, then back into,
+    the universe."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._directory: set[str] = set()
+
+    def kline_stream(self, *, interval, symbol, callback) -> None:
+        symbols = symbol if isinstance(symbol, list) else [symbol]
+        for sym in symbols:
+            if f"kline.{interval}.{sym}" in self._directory:
+                # pybit checks the whole frame before subscribing any.
+                raise Exception(f"You have already subscribed to this topic: kline.{interval}.{sym}")
+        for sym in symbols:
+            self._directory.add(f"kline.{interval}.{sym}")
+        super().kline_stream(interval=interval, symbol=symbol, callback=callback)
+
+    def unsubscribe(self, *, topic: str) -> None:
+        # The quirk: records the call but does NOT drop the directory entry.
+        self.unsubscribed_topics.append(topic)
+
+
+class _AlreadySubscribedFactory:
+    def __init__(self) -> None:
+        self.built: list[_AlreadySubscribedWebSocket] = []
+
+    def __call__(self, *, testnet: bool, demo: bool, channel_type: str) -> _AlreadySubscribedWebSocket:
+        ws = _AlreadySubscribedWebSocket()
+        self.built.append(ws)
+        return ws
+
+
+def test_update_subscriptions_adopts_already_subscribed_and_keeps_new_listing() -> None:
+    """Regression for the live long-sleeve bug: a churn symbol (BILLUSDT) leaves
+    then re-enters the universe; pybit still holds its topic (unsubscribe didn't
+    clear the directory), so the re-subscribe raises 'already subscribed'. The
+    pool must (a) NOT raise, (b) ADOPT the churn symbol, and (c) still subscribe a
+    genuinely-new listing sorted AFTER it in the same batch (previously the throw
+    aborted the whole add loop and dropped ZZZUSDT, every hourly refresh)."""
+    factory = _AlreadySubscribedFactory()
+    pool, _ = _build_pool(topics_per_connection=10, factory=factory)
+    pool.subscribe(["AAAUSDT", "BILLUSDT"], lambda s, b, c: None)
+    try:
+        ws = factory.built[0]
+        # BILLUSDT drops out -> unsubscribe (pybit directory NOT cleared).
+        pool.update_subscriptions({"AAAUSDT"})
+        assert "BILLUSDT" not in pool.subscribed_symbols()
+
+        # BILLUSDT re-enters WITH a genuinely-new listing in the same batch.
+        # adds sort to [BILLUSDT, ZZZUSDT]; the old code threw on BILLUSDT and
+        # never reached ZZZUSDT. Must NOT raise now.
+        result = pool.update_subscriptions({"AAAUSDT", "BILLUSDT", "ZZZUSDT"})
+
+        assert result["added"] == 2
+        # Both adds are tracked again.
+        assert pool.subscribed_symbols() == {"AAAUSDT", "BILLUSDT", "ZZZUSDT"}
+        # ZZZUSDT got a real subscribe frame; BILLUSDT was ADOPTED (no 2nd frame).
+        assert ws.subscribed_symbols.count("ZZZUSDT") == 1
+        assert ws.subscribed_symbols.count("BILLUSDT") == 1
+    finally:
+        pool.close()
+
+
 def test_update_subscriptions_opens_new_connection_when_capacity_exhausted() -> None:
     pool, factory = _build_pool(topics_per_connection=2)
     pool.subscribe(["A_USDT", "B_USDT"], lambda s, b, c: None)

@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
-
 import polars as pl
 
-from ._common import MS_PER_HOUR, pct
+from ._common import MS_PER_HOUR
 
 CROWDING_TRADEABLE_CLASSES = {
     "isolated_idiosyncratic_event",
@@ -128,98 +125,6 @@ def classify_liquidity_migration_crowding(
     )
 
 
-def audit_crowding_model(
-    events: pl.DataFrame,
-    *,
-    output_dir: str | Path,
-    entry_delay_hours: int = 1,
-    signal_ts_col: str = "entry_signal_ts_ms",
-    entry_ts_col: str = "entry_ts_ms",
-    return_col: str = "net_return",
-) -> dict[str, Any]:
-    target = Path(output_dir)
-    target.mkdir(parents=True, exist_ok=True)
-    if events.is_empty():
-        return {"status": "missing", "rows": 0, "summary": [], "output_files": {}}
-    has_existing_classes = (
-        {"crowding_class", "crowding_tradeable"}.issubset(set(events.columns))
-        and events.filter(pl.col("crowding_class").cast(pl.Utf8).str.len_chars() > 0).height > 0
-    )
-    if has_existing_classes:
-        classified = events
-    else:
-        classified = classify_liquidity_migration_crowding(
-            events,
-            entry_delay_hours=entry_delay_hours,
-            signal_ts_col=signal_ts_col,
-            entry_ts_col=entry_ts_col,
-        )
-    summary = summarize_crowding_classes(classified, return_col=return_col)
-    classified_path = target / "crowding_model_trades.csv"
-    summary_path = target / "crowding_model_summary.csv"
-    report_path = target / "crowding_model_report.md"
-    classified.write_csv(classified_path)
-    summary.write_csv(summary_path)
-    payload = {
-        "status": "present",
-        "rows": classified.height,
-        "tradeable_rows": int(classified.filter(pl.col("crowding_tradeable")).height),
-        "non_tradeable_rows": int(classified.filter(~pl.col("crowding_tradeable")).height),
-        "classes": sorted(str(item) for item in classified["crowding_class"].drop_nulls().unique().to_list()),
-        "summary": summary.to_dicts(),
-        "output_files": {
-            "classified": str(classified_path),
-            "summary": str(summary_path),
-            "markdown": str(report_path),
-        },
-    }
-    report_path.write_text(format_crowding_model_report(payload), encoding="utf-8")
-    return payload
-
-
-def summarize_crowding_classes(classified: pl.DataFrame, *, return_col: str = "net_return") -> pl.DataFrame:
-    if classified.is_empty() or "crowding_class" not in classified.columns:
-        return pl.DataFrame()
-    aggregations = [
-        pl.len().alias("rows"),
-        pl.col("crowding_tradeable").sum().alias("tradeable_rows")
-        if "crowding_tradeable" in classified.columns
-        else pl.lit(0).alias("tradeable_rows"),
-    ]
-    if return_col in classified.columns:
-        aggregations.extend(
-            [
-                pl.col(return_col).sum().alias("additive_return"),
-                ((pl.col(return_col) + 1.0).product() - 1.0).alias("compounded_return"),
-                pl.col(return_col).mean().alias("mean_return"),
-                (pl.col(return_col) < 0.0).sum().alias("losing_rows"),
-            ]
-        )
-    return classified.group_by("crowding_class").agg(aggregations).sort("rows", descending=True)
-
-
-def format_crowding_model_report(payload: dict[str, Any]) -> str:
-    lines = [
-        "# Crowding Model Audit",
-        "",
-        f"- Status: `{payload.get('status', 'missing')}`",
-        f"- Rows: {payload.get('rows', 0)}",
-        f"- Tradeable rows: {payload.get('tradeable_rows', 0)}",
-        f"- Non-tradeable rows: {payload.get('non_tradeable_rows', 0)}",
-        "",
-        "| Class | Rows | Tradeable Rows | Additive Return | Compounded Return | Mean Return | Losing Rows |",
-        "|---|---:|---:|---:|---:|---:|---:|",
-    ]
-    for row in payload.get("summary", []):
-        lines.append(
-            f"| `{row.get('crowding_class', '')}` | {row.get('rows', 0)} | {row.get('tradeable_rows', 0)} | "
-            f"{_pct(row.get('additive_return'))} | {_pct(row.get('compounded_return'))} | "
-            f"{_pct(row.get('mean_return'))} | {row.get('losing_rows', 0)} |"
-        )
-    lines.append("")
-    return "\n".join(lines)
-
-
 def _entry_hour_expr(frame: pl.DataFrame, *, signal_ts_col: str, entry_ts_col: str, entry_delay_hours: int) -> pl.Expr:
     if entry_ts_col in frame.columns:
         return (pl.col(entry_ts_col) // MS_PER_HOUR) * MS_PER_HOUR
@@ -252,7 +157,3 @@ def _crowding_reason_expr() -> pl.Expr:
         .then(pl.lit("residual liquidity-migration event without broad-market or artifact flags"))
         .otherwise(pl.lit("cluster did not clear idiosyncratic, market, sector, or artifact rules"))
     )
-
-
-def _pct(value: Any) -> str:
-    return pct(value, invalid="0.00%")

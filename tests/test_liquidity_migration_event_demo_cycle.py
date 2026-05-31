@@ -398,6 +398,106 @@ def test_event_demo_cycle_still_exits_when_wallet_snapshot_fails(
     assert orders.filter(pl.col("trade_id") == "t-existing").select("status").item() == "filled"
 
 
+def test_event_demo_cycle_fetches_klines_for_held_symbol_evicted_from_universe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BUG-4/6: a held position on a symbol that has rotated/delisted OUT of the
+    universe must still have its klines fetched, so the cycle-owned exits
+    (failed_fade/ff6, rank, event_decay) keep evaluating instead of silently
+    no-op'ing until max_hold. The held symbol must NOT pollute the universe-scoped
+    feature/rank cross-section — it is fetched only for the exit planner."""
+    now_ms = 1_700_000_060_000
+    # Held SHORT on ZZZUSDT — NOT in the (AAAUSDT-only) universe; exit in the
+    # future so max_hold does not fire and we isolate the cadence-exit path.
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "trade_id": "t-held-evicted",
+                    "symbol": "ZZZUSDT",
+                    "side": "short",
+                    "status": "open",
+                    "entry_ts_ms": now_ms - 4 * 24 * MS_PER_HOUR,
+                    "planned_exit_ts_ms": now_ms + 24 * MS_PER_HOUR,
+                    "qty": "1",
+                    "entry_price": 100.0,
+                    "stop_price": 130.0,
+                    "take_profit_price": 70.0,
+                }
+            ]
+        ),
+        tmp_path,
+        "event_demo_trades",
+        partition_by=(),
+    )
+    _patch_minimal_event_cycle(monkeypatch, {"symbol": "AAAUSDT"})
+    # No entries — isolate the held-exit path.
+    monkeypatch.setattr(
+        "liquidity_migration.event_demo.select_demo_entry_candidates",
+        lambda *args, **kwargs: ([], {}),
+    )
+
+    fetched: list[tuple[str, ...]] = []
+
+    def _spy_download(symbols, **kwargs):
+        fetched.append(tuple(symbols))
+        rows = [
+            {
+                "symbol": s,
+                "ts_ms": now_ms - (3 - h) * MS_PER_HOUR,
+                "open": 100.0,
+                "high": 101.0,
+                "low": 99.0,
+                "close": 100.0,
+            }
+            for s in symbols
+            for h in range(3)
+        ]
+        return pl.DataFrame(rows), {
+            "cache_rows": 0,
+            "cache_symbols": 0,
+            "fetch_symbols": len(symbols),
+            "fetched_rows": len(rows),
+            "output_rows": len(rows),
+        }
+
+    monkeypatch.setattr(
+        "liquidity_migration.event_demo._download_recent_1h_klines", _spy_download
+    )
+
+    client = FakeRiskClient(
+        positions=[
+            {
+                "symbol": "ZZZUSDT",
+                "side": "Sell",
+                "size": "1",
+                "avgPrice": "100",
+                "markPrice": "100",
+                "positionValue": "100",
+                "unrealisedPnl": "0",
+            }
+        ],
+    )
+
+    run_event_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(
+            submit_orders=True, confirm_demo_orders=True, order_fill_confirm_seconds=0.0
+        ),
+        market_client=MinimalEventMarket(),
+        private_client=client,
+        now_ms=now_ms,
+    )
+
+    # The held-but-evicted ZZZUSDT must have been fetched for the exit planner...
+    assert any("ZZZUSDT" in symbols for symbols in fetched), fetched
+    # ...as a SEPARATE fetch from the universe (AAAUSDT) one — never merged into it.
+    assert ("ZZZUSDT",) in fetched
+    assert not any("ZZZUSDT" in s and "AAAUSDT" in s for s in fetched)
+
+
 def test_event_demo_cycle_skips_entry_when_live_open_entry_order_exists(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -749,6 +849,27 @@ def test_promoted_profile_requires_match_the_backtest_universe() -> None:
     _validate_demo_config(
         EventDemoCycleConfig(strategy_profile="promoted", universe_rank_end=0, universe_max_symbols=0)
     )
+
+
+def test_universe_shrink_floor_fires_in_match_the_backtest_mode() -> None:
+    """Regression for the dead-code shrink guard: in the deployed 0/0 config the
+    requested-size guard never fired, so a partial get_tickers() (the 2026-05-24
+    ~168-symbol blackout) shrank the universe silently. The absolute floor must
+    trip on the incident size yet never on a healthy ~560-symbol snapshot."""
+    from liquidity_migration.event_demo import (
+        _MATCH_BACKTEST_UNIVERSE_FLOOR,
+        _universe_shrink_floor,
+    )
+
+    match_backtest = EventDemoCycleConfig(universe_rank_end=0, universe_max_symbols=0)
+    floor = _universe_shrink_floor(match_backtest)
+    assert floor == _MATCH_BACKTEST_UNIVERSE_FLOOR
+    assert 168 < floor, "the 2026-05-24 partial-ticker size must trip the guard"
+    assert 566 >= floor, "a healthy ~560-symbol universe must NOT trip the guard"
+
+    # Narrow configs keep the historical 0.75 * requested trigger.
+    assert _universe_shrink_floor(EventDemoCycleConfig(universe_rank_end=400, universe_max_symbols=0)) == 300
+    assert _universe_shrink_floor(EventDemoCycleConfig(universe_max_symbols=200, universe_rank_end=0)) == 150
 
 
 def test_event_demo_rejects_non_positive_entry_leverage() -> None:

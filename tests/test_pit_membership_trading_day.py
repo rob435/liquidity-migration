@@ -74,3 +74,23 @@ def test_mixed_batch_keys_each_event_on_its_own_trading_day() -> None:
     out = _attach_event_archive_membership(features, manifest).sort("symbol")
     got = dict(zip(out["symbol"].to_list(), out["tradable_membership_flag"].to_list()))
     assert got == {"FOO": True, "BAR": True, "QUX": False}
+
+
+def test_trading_day_helpers_key_on_ts_minus_1ms() -> None:
+    """The shared ``_common`` helpers (the single source of truth for both live PIT
+    sites) must key on ``date(ts_ms - 1ms)`` and the polars expr must agree with the
+    scalar form exactly -- guards the 2026-05-30 off-by-one against re-introduction."""
+    from liquidity_migration._common import trading_day_expr, trading_day_from_ts
+
+    midnight = _ms(2026, 5, 30)  # 00:00:00.000 UTC -> summarises the 05-29 trading day
+    midday = _ms(2026, 5, 30) + 12 * 3_600_000  # mid-day stamp keeps its own day
+
+    assert trading_day_from_ts(midnight) == "2026-05-29"
+    assert trading_day_from_ts(midday) == "2026-05-30"
+
+    expr_days = (
+        pl.DataFrame({"ts_ms": [midnight, midday]}, schema={"ts_ms": pl.Int64})
+        .select(trading_day_expr("ts_ms").dt.strftime("%Y-%m-%d").alias("d"))["d"]
+        .to_list()
+    )
+    assert expr_days == ["2026-05-29", "2026-05-30"]

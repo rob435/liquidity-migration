@@ -9,10 +9,11 @@ helpers (6 of the 8 factors already exist there as builders); BTC-beta and the
 alt-season factor are new here, plus the cross-sectional factor-return regression
 + residualization.
 
-Built incrementally + test-gated. THIS commit lands the panel scaffolding + the
-BTC-beta factor (the most load-bearing new factor) + its unit test. Subsequent
-commits add the remaining factors, `fit_factor_returns`, `compute_residual_returns`,
-`decompose_strategy_pnl`, and the `risk-model` CLI.
+Built incrementally + test-gated. The panel scaffolding, the BTC-beta factor, the
+remaining factors, `fit_factor_returns`, and `decompose_strategy_pnl` have all
+landed (verdict: `docs/preregistration/r4-risk-model-verdict.md`). A standalone
+`risk-model` CLI was scoped but deprioritised and is not implemented; the model is
+consumed programmatically (e.g. `scripts/precompute_residual_momentum.py`).
 
 All factor exposures are causal at each row's end-of-day-close decision_ts —
 rolling windows look strictly backward; validated by the R4 validation run.

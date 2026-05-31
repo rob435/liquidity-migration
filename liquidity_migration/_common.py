@@ -12,6 +12,8 @@ import re
 from datetime import date, datetime, timezone
 from typing import Any
 
+import polars as pl
+
 UTC = timezone.utc
 
 MS_PER_MINUTE = 60_000
@@ -73,3 +75,22 @@ def date_ms(value: str) -> int:
     if parsed is None:
         raise ValueError(f"Invalid date: {value}")
     return parsed
+
+
+def trading_day_expr(ts_col: str = "ts_ms") -> pl.Expr:
+    """The PIT *trading day* as a polars Date expression: ``date(ts_ms - 1ms)``.
+
+    A daily-close signal is stamped at 00:00 UTC of the day AFTER the bar it
+    summarises (``volume_features`` builds ``ts_ms = day_start_ms + one period``),
+    so the trading day -- the day whose bar produced the signal -- is the date of
+    ``ts_ms - 1 ms``. Keying PIT archive membership on the stamp date instead asks
+    the archive about the day *after* the decision (a look-ahead) and was the
+    2026-05-30 reconciliation bug. Single source of truth for both live PIT sites,
+    locked by ``tests/test_pit_membership_trading_day.py``; see ``docs/pit_gate.md``.
+    """
+    return (pl.from_epoch(pl.col(ts_col), time_unit="ms") - pl.duration(milliseconds=1)).dt.date()
+
+
+def trading_day_from_ts(ts_ms: int) -> str:
+    """Scalar ``%Y-%m-%d`` form of :func:`trading_day_expr`: ``date(ts_ms - 1ms)``."""
+    return datetime.fromtimestamp((int(ts_ms) - 1) / 1000.0, tz=UTC).strftime("%Y-%m-%d")

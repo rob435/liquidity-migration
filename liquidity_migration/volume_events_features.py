@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import polars as pl
 
-from ._common import MS_PER_DAY
+from ._common import MS_PER_DAY, trading_day_expr
 from .volume_features import VOLUME_SCORE_COLUMNS
 
 
@@ -519,9 +519,7 @@ def _attach_event_archive_membership(features: pl.DataFrame, archive_manifest: p
     )
     first_seen = archive_manifest.group_by("symbol").agg(pl.col("date").min().alias("first_manifest_date"))
     frame = frame.with_columns(
-        (pl.from_epoch(pl.col("ts_ms"), time_unit="ms") - pl.duration(milliseconds=1))
-        .dt.strftime("%Y-%m-%d")
-        .alias("_membership_day")
+        trading_day_expr("ts_ms").dt.strftime("%Y-%m-%d").alias("_membership_day")
     )
     return (
         frame.join(membership, on=["symbol", "_membership_day"], how="left")

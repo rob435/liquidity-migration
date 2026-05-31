@@ -332,7 +332,7 @@ def _execute_exits(
         entry_price = _float(trade.get("entry_price"))
         gross_trade_return = _trade_return(entry_price, exit_price, side=side)
         notional_weight = _safe_ratio(trade.get("notional_usdt"), trade.get("equity_usdt"))
-        if fully_filled:
+        if fully_filled and exit_price > 0.0:
             trade.update(
                 {
                     "status": "closed",
@@ -352,6 +352,21 @@ def _execute_exits(
                 }
             )
             rows.append(trade)
+        elif fully_filled:
+            # No resolvable exit price (exit_price <= 0) — e.g. a fully-delisted
+            # coin gone from BOTH the universe and get_tickers, so the paper/dry-run
+            # path has no `planned_exit_price`. Closing now would book a fabricated
+            # exit_price=0 / 0% return into the ledger (BUG-5). Keep the trade OPEN
+            # and retry next cycle when a price reappears; on the submit path the
+            # venue settles it and `_reconcile_open_trades` orphan-closes it with the
+            # real `get_closed_pnl` price. Never fall back to entry_price — that
+            # books a still-fictional flat return.
+            _logger.warning(
+                "exit for %s (%s) skipped: no resolvable exit price "
+                "(delisted / no ticker / no fill price); keeping trade open for retry",
+                symbol,
+                str(exit_plan.get("exit_reason") or ""),
+            )
         elif demo.submit_orders and total_filled_qty > 0.0:
             rows.append(
                 _partial_exit_trade_update(
@@ -584,15 +599,43 @@ def _reconcile_pending_order_fills(
             continue
         existing_trade = dict(trade_lookup.get(trade_id, {}))
         if existing_trade:
-            if str(existing_trade.get("status")) != "closed" and filled_qty > _float(existing_trade.get("qty")):
+            # ADD this order's NEW fill (delta since last reconcile) to the open
+            # trade, never overwrite-when-greater. A cap-binding entry splits into
+            # sub-orders that share a trade_id; if a non-first sub is recovered
+            # here, its per-link `filled_qty` (e.g. 18750) is NOT greater than the
+            # trade qty already carrying the first sub (18750), so the old
+            # `filled_qty > existing.qty` gate dropped the second leg and the
+            # ledger under-reported the position (BUG-3). Delta-add (mirroring the
+            # reduce_only path) sums the legs and stays idempotent across cycles
+            # because `filled_qty` is written back onto the order row each pass.
+            delta_qty = max(filled_qty - previous_filled_qty, 0.0)
+            if str(existing_trade.get("status")) != "closed" and delta_qty > 0.0:
+                prior_qty = _float(existing_trade.get("qty"))
+                prior_entry = _float(existing_trade.get("entry_price"))
+                # This ORDER contributed `previous_filled_qty` to the trade last
+                # reconcile; its cumulative venue fill is now `filled_qty` at the
+                # venue's cumulative `avg_price`. REPLACE this order's prior
+                # contribution with its full current one while preserving every
+                # OTHER order's contribution. This is correct for BOTH a single
+                # order whose fill grew (prior_qty == previous_filled_qty, so the
+                # other-value term is 0 and entry == the cumulative avg_price) AND
+                # a split where a non-first sub is recovered (previous_filled_qty
+                # == 0, so the first sub's value is kept and the legs SUM).
+                other_qty = max(prior_qty - previous_filled_qty, 0.0)
+                new_qty = other_qty + filled_qty
+                order_price = avg_price if avg_price > 0.0 else prior_entry
+                if new_qty > 0.0 and prior_entry > 0.0 and order_price > 0.0:
+                    new_entry = (prior_entry * other_qty + order_price * filled_qty) / new_qty
+                else:
+                    new_entry = order_price if order_price > 0.0 else prior_entry
                 leverage = _float(existing_trade.get("entry_leverage")) or _float(order.get("entry_leverage")) or demo.entry_leverage
-                notional = abs(avg_price * filled_qty) if avg_price > 0.0 else _float(existing_trade.get("notional_usdt"))
+                notional = abs(new_entry * new_qty) if new_entry > 0.0 else _float(existing_trade.get("notional_usdt"))
                 initial_margin = notional / leverage if leverage > 0.0 else 0.0
                 equity = _float(existing_trade.get("equity_usdt"))
                 existing_trade.update(
                     {
-                        "entry_price": avg_price,
-                        "qty": _decimal_text(Decimal(str(filled_qty))),
+                        "entry_price": new_entry,
+                        "qty": _decimal_text(Decimal(str(new_qty))),
                         "notional_usdt": notional,
                         "initial_margin_usdt": initial_margin,
                         "initial_margin_pct_equity": initial_margin / equity if equity > 0.0 else 0.0,

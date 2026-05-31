@@ -28,10 +28,10 @@ regime-conditional. All research findings are consolidated in
 - CLI: `python -m liquidity_migration <subcommand>` (run `--help` for the list).
 - Tests: `.venv/bin/python -m pytest -q`.
 
-## Mandatory pre-push gate (CI parity)
+## Mandatory pre-push gate
 
-**Before EVERY `git push` on this repo, run BOTH commands the CI workflow
-(`.github/workflows/ci.yml`) runs:**
+**Before EVERY `git push` on this repo, run BOTH commands the local pre-push
+hook (`.git/hooks/pre-push`) enforces:**
 
 ```bash
 .venv/bin/python -m ruff check liquidity_migration tests
@@ -39,8 +39,10 @@ regime-conditional. All research findings are consolidated in
 ```
 
 If `ruff` fails, fix with `ruff check --fix` and re-verify. If pytest fails,
-fix the tests before pushing. The user gets a GitHub email on every CI
-failure — pushing broken code is operator pain. No exceptions.
+fix the tests before pushing. The hook blocks the push on failure; and because a
+push to `main` auto-deploys to the live VPS (`.github/workflows/vps-deploy.yml`,
+which emails the operator on failure), pushing broken code is operator pain. No
+exceptions.
 
 ## Working here
 

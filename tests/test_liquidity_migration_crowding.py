@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import polars as pl
 
-from liquidity_migration.crowding import audit_crowding_model, classify_liquidity_migration_crowding
+from liquidity_migration.crowding import classify_liquidity_migration_crowding
 
 
-def test_crowding_classifier_separates_idio_market_theme_and_artifact(tmp_path) -> None:
+def test_crowding_classifier_separates_idio_market_theme_and_artifact() -> None:
     events = pl.DataFrame(
         [
             {
@@ -99,10 +99,3 @@ def test_crowding_classifier_separates_idio_market_theme_and_artifact(tmp_path) 
     assert classes["THEME2USDT"] == "sector_theme_wave"
     assert classes["ARTUSDT"] == "exchange_liquidity_artifact"
     assert classified.filter(pl.col("crowding_tradeable")).height == 1
-
-    payload = audit_crowding_model(events, output_dir=tmp_path)
-    assert payload["status"] == "present"
-    assert payload["non_tradeable_rows"] == 5
-    assert (tmp_path / "crowding_model_trades.csv").exists()
-    assert (tmp_path / "crowding_model_summary.csv").exists()
-    assert (tmp_path / "crowding_model_report.md").exists()

@@ -116,7 +116,13 @@ def test_demo_kline_cache_fetches_only_new_hour(tmp_path: Path) -> None:
     assert read_dataset(tmp_path, "event_demo_klines_1h").height == 3
 
 
-def test_demo_kline_fetch_ranges_uses_latest_bar_per_symbol() -> None:
+def test_demo_kline_fetch_ranges_tails_contiguous_and_backfills_holes() -> None:
+    # AAAUSDT has a MID-WINDOW HOLE (bars at 0 and 2h, missing 1h): the fetch
+    # range must cover the full window to backfill the hole, NOT just the tail
+    # after the latest bar (the old latest-bar-only behaviour left the hole
+    # forever and the day failed the >=20-bar filter — BUG-2).
+    # BBBUSDT is merely BEHIND (contiguous, latest at 0): a tail fetch suffices.
+    # DDDUSDT is absent: full window.
     cached = pl.DataFrame(
         [
             {"symbol": "AAAUSDT", "ts_ms": 0},
@@ -134,10 +140,15 @@ def test_demo_kline_fetch_ranges_uses_latest_bar_per_symbol() -> None:
     )
 
     assert ranges == {
-        "AAAUSDT": (3 * MS_PER_HOUR, 3 * MS_PER_HOUR),
-        "BBBUSDT": (MS_PER_HOUR, 3 * MS_PER_HOUR),
+        "AAAUSDT": (0, 3 * MS_PER_HOUR),  # hole at 1h -> full-window backfill
+        "BBBUSDT": (MS_PER_HOUR, 3 * MS_PER_HOUR),  # contiguous, just behind -> tail
         "DDDUSDT": (0, 3 * MS_PER_HOUR),
     }
+    # A fully-contiguous symbol that already reaches end_ms gets no fetch range.
+    contiguous = pl.DataFrame(
+        [{"symbol": "EEEUSDT", "ts_ms": h * MS_PER_HOUR} for h in range(4)]
+    )
+    assert _demo_kline_fetch_ranges(["EEEUSDT"], contiguous, start_ms=0, end_ms=3 * MS_PER_HOUR) == {}
 
 
 def test_demo_kline_compact_cache_serves_repeat_window(tmp_path: Path) -> None:
@@ -307,6 +318,40 @@ def test_download_recent_1h_klines_falls_back_to_rest_for_uncovered_symbols(tmp_
     assert stats["store_symbols"] == 1
     assert stats["fetch_symbols"] == 1
     assert stats["fetched_rows"] >= 3
+
+
+def test_download_recent_1h_klines_backfills_store_midwindow_hole(tmp_path: Path) -> None:
+    """A store symbol that reaches end_ms but has a MID-WINDOW hole must be forced
+    off the fast path and REST-backfilled, not trusted as covered (BUG-2)."""
+    from liquidity_migration.kline_store import KlineStore
+
+    store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
+    # AAAUSDT: bars at 0 and 2h (HOLE at 1h). max==2h==end_ms so the latest-bar
+    # coverage check would wrongly call it covered.
+    for hour in (0, 2):
+        store.add_bar(
+            "AAAUSDT",
+            {"start": hour * MS_PER_HOUR, "open": "1", "high": "1", "low": "1",
+             "close": "1", "volume": "1", "turnover": "1"},
+            confirmed=True,
+        )
+
+    market = FakeKlineMarket()
+    output, _stats = _download_recent_1h_klines(
+        ["AAAUSDT"],
+        start_ms=0,
+        end_ms=2 * MS_PER_HOUR,
+        config=ResearchConfig(data_root=tmp_path),
+        workers=1,
+        market_client=market,
+        cache_root=tmp_path,
+        kline_store=store,
+    )
+    # The hole forced a REST fetch (the fast path would have skipped REST).
+    assert "AAAUSDT" in {call[0] for call in market.calls}
+    # The previously-missing 1h bar is now present in the merged output.
+    aaa_ts = set(output.filter(pl.col("symbol") == "AAAUSDT")["ts_ms"].to_list())
+    assert {0, MS_PER_HOUR, 2 * MS_PER_HOUR} <= aaa_ts
 
 
 def test_download_recent_1h_klines_ignores_store_failure_gracefully(tmp_path: Path) -> None:

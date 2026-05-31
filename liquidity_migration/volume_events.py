@@ -34,7 +34,7 @@ from .trade_lifecycle import (
     summarize_baskets,
     summarize_trade_backtest,
 )
-from ._common import MS_PER_DAY, MS_PER_HOUR, date_ms, pct
+from ._common import MS_PER_DAY, MS_PER_HOUR, date_ms, pct, trading_day_expr
 from .volume_features import VOLUME_SCORE_COLUMNS, build_volume_features
 
 
@@ -1896,11 +1896,6 @@ def _symbol_kline_date_bounds(klines: pl.DataFrame) -> dict[str, tuple[str, str]
     }
 
 
-def _symbol_first_kline_date(klines: pl.DataFrame) -> dict[str, str]:
-    """Per-symbol first (earliest) kline `date` — the day the coin started trading."""
-    return {s: lo for s, (lo, _hi) in _symbol_kline_date_bounds(klines).items()}
-
-
 def _required_pit_date_symbols(klines: pl.DataFrame, archive_manifest: pl.DataFrame) -> set[tuple[str, str]]:
     """Archive-manifest (date, symbol) pairs that the klines are REQUIRED to cover for
     a full-PIT universe — i.e. only within each symbol's traded lifespan
@@ -2040,9 +2035,7 @@ def _pit_membership_diagnostic(
     if manifest_end is not None and not features.is_empty() and "ts_ms" in features.columns:
         # Trading day = date of (ts_ms - 1ms); count distinct (symbol, trading day)
         # event rows whose trading day is strictly after the manifest coverage end.
-        trading_day = (
-            pl.from_epoch(pl.col("ts_ms"), time_unit="ms") - pl.duration(milliseconds=1)
-        ).dt.date()
+        trading_day = trading_day_expr("ts_ms")
         uncovered_tail = int(
             features.select(trading_day.alias("_td"))
             .filter(pl.col("_td") > pl.lit(manifest_end))

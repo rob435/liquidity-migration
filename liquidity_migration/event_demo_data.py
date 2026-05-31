@@ -187,7 +187,6 @@ def _download_recent_1h_klines(
             _logger.warning("kline_store coverage query failed; ignoring store: %s", exc)
             covered_set = set()
         covered_symbols = [s for s in symbols if s in covered_set]
-        store_fully_covers = len(covered_symbols) == len(symbols)
         if covered_symbols:
             try:
                 store_frame = kline_store.get_klines(
@@ -196,7 +195,20 @@ def _download_recent_1h_klines(
             except Exception as exc:  # noqa: BLE001
                 _logger.warning("kline_store get_klines failed; ignoring store: %s", exc)
                 store_frame = _empty_klines()
-                store_fully_covers = False
+                covered_symbols = []
+            else:
+                # `symbols_with_coverage_through` only checks the LATEST bar, so a
+                # symbol can read as "covered" while carrying a mid-window hole a
+                # WS reconnect dropped (pybit never replays confirmed bars). Drop
+                # those from the store fast path so the REST fallback below
+                # backfills the hole — otherwise the gappy day silently falls
+                # below the >=20-hourly-bar filter and that coin's daily features
+                # vanish for the day.
+                incomplete = _window_incomplete_symbols(store_frame, start_ms=start_ms, end_ms=end_ms)
+                if incomplete:
+                    store_frame = store_frame.filter(~pl.col("symbol").is_in(list(incomplete)))
+                    covered_symbols = [s for s in covered_symbols if s not in incomplete]
+        store_fully_covers = bool(covered_symbols) and len(covered_symbols) == len(symbols)
         if not store_frame.is_empty():
             stats["store_rows"] = store_frame.height
             stats["store_symbols"] = store_frame.select("symbol").unique().height
@@ -349,6 +361,30 @@ def _write_demo_kline_compact_cache(
         temp_parquet.unlink(missing_ok=True)
         temp_metadata.unlink(missing_ok=True)
 
+def _window_incomplete_symbols(
+    klines: pl.DataFrame, *, start_ms: int, end_ms: int
+) -> set[str]:
+    """Symbols in ``klines`` carrying a MID-WINDOW 1h hole inside ``[start, end]``.
+
+    1h bars are keyed uniquely on the hour grid, so a symbol's in-window bars are
+    contiguous iff their count equals ``(max - min) / 1h + 1``. A WS reconnect
+    drops confirmed bars that pybit never replays, leaving a hole BELOW the latest
+    bar — invisible to a latest-bar coverage check. Returned symbols are forced
+    off the store fast path so REST backfills the hole."""
+    if klines.is_empty() or "symbol" not in klines.columns or "ts_ms" not in klines.columns:
+        return set()
+    windowed = klines.filter(pl.col("ts_ms").is_between(start_ms, end_ms))
+    if windowed.is_empty():
+        return set()
+    agg = windowed.group_by("symbol").agg(
+        pl.col("ts_ms").min().alias("lo"),
+        pl.col("ts_ms").max().alias("hi"),
+        pl.len().alias("n"),
+    )
+    incomplete = agg.filter(pl.col("n") < ((pl.col("hi") - pl.col("lo")) // MS_PER_HOUR + 1))
+    return {str(s) for s in incomplete["symbol"].to_list()}
+
+
 def _demo_kline_fetch_ranges(
     symbols: list[str],
     cached: pl.DataFrame,
@@ -359,17 +395,33 @@ def _demo_kline_fetch_ranges(
     if cached.is_empty() or "symbol" not in cached.columns or "ts_ms" not in cached.columns:
         return {symbol: (start_ms, end_ms) for symbol in symbols}
 
-    latest_by_symbol = {
-        str(row["symbol"]): int(row["latest_ts_ms"])
-        for row in cached.group_by("symbol").agg(pl.col("ts_ms").max().alias("latest_ts_ms")).iter_rows(named=True)
+    stats_by_symbol = {
+        str(row["symbol"]): (int(row["lo"]), int(row["hi"]), int(row["n"]))
+        for row in cached.filter(pl.col("ts_ms").is_between(start_ms, end_ms))
+        .group_by("symbol")
+        .agg(
+            pl.col("ts_ms").min().alias("lo"),
+            pl.col("ts_ms").max().alias("hi"),
+            pl.len().alias("n"),
+        )
+        .iter_rows(named=True)
     }
     ranges: dict[str, tuple[int, int]] = {}
     for symbol in symbols:
-        latest = latest_by_symbol.get(symbol)
-        if latest is None:
+        info = stats_by_symbol.get(symbol)
+        if info is None:
             ranges[symbol] = (start_ms, end_ms)
             continue
-        fetch_start = max(latest + MS_PER_HOUR, start_ms)
+        lo, hi, n = info
+        if n < (hi - lo) // MS_PER_HOUR + 1:
+            # Mid-window hole (a WS-reconnect dropout pybit never replays): refetch
+            # the FULL window so REST backfills the missing interior hours; the
+            # dedupe merge drops the overlap. A latest-bar-only tail fetch
+            # (max+1h..end) would leave the hole forever and the gappy day would
+            # silently fail the >=20-hourly-bar filter.
+            ranges[symbol] = (start_ms, end_ms)
+            continue
+        fetch_start = max(hi + MS_PER_HOUR, start_ms)
         if fetch_start <= end_ms:
             ranges[symbol] = (fetch_start, end_ms)
     return ranges

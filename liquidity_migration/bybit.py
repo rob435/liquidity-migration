@@ -1255,6 +1255,16 @@ def _patch_pybit_daemon_ping_timer() -> None:
 _logger_ws_klines = logging.getLogger("liquidity_migration.bybit.ws_klines")
 
 
+def _is_already_subscribed_error(exc: BaseException) -> bool:
+    """True for pybit's "You have already subscribed to this topic" error.
+
+    pybit's ``_check_callback_directory`` raises this when a topic is still in
+    the connection's callback directory. A kline topic whose unsubscribe didn't
+    clear that directory (a symbol that churned out of, then back into, the
+    universe) triggers it on re-subscribe — handled idempotently by the pool."""
+    return "already subscribed" in str(exc).lower()
+
+
 def _default_kline_websocket_factory(*, testnet: bool, demo: bool, channel_type: str) -> Any:
     """Create a fresh pybit WebSocket client tuned for kline streams."""
     if WebSocket is None:
@@ -1399,7 +1409,13 @@ class BybitKlineStreamPool:
 
     def update_subscriptions(self, new_symbols: set[str]) -> dict[str, int]:
         """Diff the current assignment against ``new_symbols``: subscribe to
-        adds, unsubscribe from removals. Returns counts."""
+        adds, unsubscribe from removals. Returns counts.
+
+        Each add is ISOLATED: a subscribe failure on one symbol is logged and
+        skipped so it cannot abort the rest of the batch. Without this, a single
+        un-subscribable symbol (e.g. pybit's "already subscribed" on a churn
+        coin) would silently block every genuinely-new listing sorted after it,
+        on every hourly refresh."""
         with self._lock:
             if self._closed:
                 raise RuntimeError("pool is closed")
@@ -1410,9 +1426,17 @@ class BybitKlineStreamPool:
             removes = sorted(current - new_symbols)
             for symbol in removes:
                 self._unsubscribe_symbol_locked(symbol)
+            added = 0
             for symbol in adds:
-                self._subscribe_symbol_locked(symbol)
-            return {"added": len(adds), "removed": len(removes), "connections": len(self._connections)}
+                try:
+                    self._subscribe_symbol_locked(symbol)
+                    added += 1
+                except Exception as exc:  # noqa: BLE001 - one bad symbol must not drop the rest
+                    _logger_ws_klines.warning(
+                        "kline subscribe failed for %s; continuing with the rest: %s",
+                        symbol, exc,
+                    )
+            return {"added": added, "removed": len(removes), "connections": len(self._connections)}
 
     def _build_initial_connections_locked(self, symbols: list[str]) -> None:
         for i in range(0, len(symbols), self.topics_per_connection):
@@ -1479,7 +1503,29 @@ class BybitKlineStreamPool:
                     symbol=slice_,
                     callback=callback,
                 )
-            except Exception as exc:  # noqa: BLE001 - log and propagate
+            except Exception as exc:  # noqa: BLE001
+                if _is_already_subscribed_error(exc):
+                    # pybit still holds (one of) these topics in its callback
+                    # directory — a churn symbol that left then re-entered the
+                    # universe whose prior unsubscribe didn't clear it. pybit
+                    # rejects the WHOLE frame, so retry a multi-symbol slice one
+                    # at a time (the genuinely-new topics still subscribe); for a
+                    # single already-subscribed topic ADOPT the live subscription
+                    # — its callback already routes bars to the same sink, and a
+                    # genuinely-dead topic is rebuilt by the staleness watchdog.
+                    # Re-raising here instead aborts the whole add batch and recurs
+                    # every refresh, silently dropping later new listings.
+                    if len(slice_) > 1:
+                        for symbol in slice_:
+                            self._subscribe_to_connection_locked(state, [symbol])
+                        continue
+                    _logger_ws_klines.debug(
+                        "kline topic already subscribed conn=%d; adopting %s",
+                        state.index, slice_[0],
+                    )
+                    state.assigned_symbols.add(slice_[0])
+                    self._symbol_to_connection[slice_[0]] = state.index
+                    continue
                 _logger_ws_klines.warning(
                     "kline_stream subscribe failed conn=%d slice=%d/%d: %s",
                     state.index, len(slice_), len(symbols_list), exc,

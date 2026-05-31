@@ -178,11 +178,11 @@ def run_event_demo_cycle(
         # Found 2026-05-24: cycles between 00:00-04:00 UTC silently produced
         # ~168 symbols vs requested 400 for days, hiding every signal because
         # the strategy needs rank_end=300 at minimum to observe rocket signals.
-        requested_universe_size = demo.universe_max_symbols or demo.universe_rank_end
-        if requested_universe_size > 0 and universe.height < int(requested_universe_size * 0.75):
+        shrink_floor = _universe_shrink_floor(demo)
+        if universe.height < shrink_floor:
             _logger.warning(
-                "universe shrink detected: got %d symbols, requested %d; busting instruments cache and retrying",
-                universe.height, requested_universe_size,
+                "universe shrink detected: got %d symbols (floor %d); busting instruments cache and retrying",
+                universe.height, shrink_floor,
             )
             _bust_demo_instruments_cache(root)
             instruments = _demo_instruments(public, cache_root=root, now_ms=cycle_now_ms)
@@ -190,11 +190,11 @@ def run_event_demo_cycle(
             # in case the cache itself is stale and producing the shrunk view.
             tickers = _normalize_tickers(public.get_tickers())
             universe = _build_demo_universe(instruments, tickers, config=demo, snapshot_ts_ms=cycle_now_ms)
-            if universe.height < int(requested_universe_size * 0.75):
+            if universe.height < shrink_floor:
                 _logger.error(
-                    "universe shrink PERSISTS after cache bust: %d symbols (requested %d, instruments=%d, tickers=%d). "
-                    "Strategy cannot fire signals at this universe size — investigate Bybit API or filter logic.",
-                    universe.height, requested_universe_size, instruments.height, tickers.height,
+                    "universe shrink PERSISTS after cache bust: %d symbols (floor %d, instruments=%d, tickers=%d). "
+                    "Likely a partial Bybit ticker response — strategy cannot fire signals at this universe size.",
+                    universe.height, shrink_floor, instruments.height, tickers.height,
                 )
         symbols = universe["symbol"].to_list() if not universe.is_empty() else []
         if not symbols:
@@ -315,11 +315,45 @@ def run_event_demo_cycle(
             cycle_trade_rows.extend(reconcile_rows)
         mark_stage("open_trade_reconcile")
 
+        # Held positions that have rotated or delisted OUT of the universe are
+        # absent from `symbols`, so `klines` lacks their bars and the cycle-owned
+        # exits (failed_fade/ff6, rank, event_decay) would silently no-op until
+        # max_hold — the discretionary loss-cut unavailable on exactly the worst
+        # names (BUG-4/6). Fetch their klines separately and merge for the EXIT
+        # planner ONLY; never feed them into `features`/`klines` used for ranks &
+        # entries — the entry cross-section must stay scoped to the universe or
+        # every coin's liquidity rank would shift.
+        exit_klines = klines
+        exit_price_by_symbol = price_by_symbol
+        held_evicted = [
+            s
+            for s in (
+                _open_trades(reconciled_trades)["symbol"].unique().to_list()
+                if not reconciled_trades.is_empty()
+                else []
+            )
+            if s not in set(symbols)
+        ]
+        if held_evicted:
+            held_klines, _held_stats = _download_recent_1h_klines(
+                held_evicted,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                config=config,
+                workers=demo.workers,
+                market_client=public if market_client is not None else None,
+                cache_root=root,
+                kline_store=kline_store,
+            )
+            if not held_klines.is_empty():
+                exit_klines = _concat_recent_klines(klines, held_klines)
+                exit_price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, exit_klines)
+
         exits = plan_demo_exits(
             reconciled_trades,
             rank_lookup=rank_lookup,
-            klines=klines,
-            price_by_symbol=price_by_symbol,
+            klines=exit_klines,
+            price_by_symbol=exit_price_by_symbol,
             now_ms=cycle_now_ms,
             config=strategy,
             scenario=scenario,
@@ -1234,6 +1268,26 @@ def _selected_scenario(config: VolumeEventResearchConfig) -> EventScenario:
 # `<= 0` (the documented disable value the filters gate on via `rank_max > 0`)
 # this distinguishes a dropped bound from a real one.
 _UNIVERSE_RANK_MAX_UNBOUNDED = 10_000
+
+# Below this many symbols the cycle treats the universe as anomalously shrunk
+# and retries once with a forced-fresh fetch. In match-the-backtest mode
+# (universe_max_symbols == universe_rank_end == 0) there is NO requested size,
+# so the requested-size guard is inert; this absolute floor restores the
+# protection. The live USDT-perp universe is ~560-750; a partial get_tickers()
+# near UTC-midnight (the 2026-05-24 incident) collapsed it to ~168 and hid every
+# signal for days. 300 sits well below a healthy universe and well above the
+# incident size, so it never false-fires on a healthy snapshot.
+_MATCH_BACKTEST_UNIVERSE_FLOOR = 300
+
+
+def _universe_shrink_floor(demo: "EventDemoCycleConfig") -> int:
+    """Universe size below which a cycle retries with a forced-fresh fetch.
+
+    Narrow configs keep the historical ``0.75 * requested`` trigger; the
+    match-the-backtest (0/0) production config — where the requested-size guard
+    was dead code — falls back to the absolute :data:`_MATCH_BACKTEST_UNIVERSE_FLOOR`."""
+    requested = demo.universe_max_symbols or demo.universe_rank_end
+    return int(requested * 0.75) if requested > 0 else _MATCH_BACKTEST_UNIVERSE_FLOOR
 
 
 def _universe_rank_max_is_binding(rank_max: int) -> bool:
