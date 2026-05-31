@@ -23,10 +23,14 @@ until ~15:00, after the fade) — but that is NOT a purpose-built intraday signa
 2026-05-30 (operator-directed)** to engineer a rate/flow intraday selector. **I1a:** faders
 carry a clear cross-venue intraday **exhaustion fingerprint** (peak ~16–17 UTC, turnover climax
 4.2–4.6×, upper-wick rejection, OI build on bybit; premium quiet). **Make-or-break = I1b** — can
-a PIT-causal feature separate faders from pumps that CONTINUE? So: fill-timing dead (E1),
-same-selector detection dead (K1a), **purpose-built intraday selector UNDER ACTIVE
-INVESTIGATION**. Validated selection refinements (age + rmom gates) stand under forward demo
-(operator-gated). Data note: derivative channels verified (premium/funding both venues full;
+a PIT-causal feature separate faders from pumps that CONTINUE? **I1b = PASS** (real beta-neutral
+cross-venue signal), and a 25%-stop top-short looked like a deployable candidate — **but I2g–I2j
+(2026-05-31) closed the arc: FUNDING + the tight-stop squeeze kill the standalone short** (funding-included
+portfolio negative at every hold, both venues; see "I2g–I2j" below). So: fill-timing dead (E1), same-selector
+detection dead (K1a), **standalone intraday burst-short NOT deployable (killed by squeeze + crowded-short
+funding); intraday arc CLOSED.** The robust validated edge reverts to the DAILY age+rmom selection refinements,
+which stand under forward demo (operator-gated) — their late next-day entry is now understood to sidestep both
+the intraday squeeze and the funding crowding. Data note: derivative channels verified (premium/funding both venues full;
 OI bybit-only; taker binance-recent-only) — see the corrected memory.
 Numbers + full record (the dated source of truth): **`docs/research_summary.md`**. Nothing is
 promoted; forward demo is the arbiter.
@@ -80,8 +84,20 @@ promoted; forward demo is the arbiter.
     CANDIDATE exists within ≤25% = the extreme-burst top-short at 25%.** Caveats (NOT validated): Stage-B PROXY;
     **back-loaded** (first calendar-third −6%/−2%); 25% is the boundary + a rough adverse hold; mostly STR. **Next
     = engine-grade I3** (true exit-timing/concurrency + bar_extreme_capped fills + FUNDING + risk_model residual,
-    stop≤25%; operator-gated). Net: fill-timing dead (E1), detection-timing dead (K1a), but the extreme-burst
-    TOP-short + a 25% stop is a real cross-venue all-weather candidate worth engine-grade validation.
+    stop≤25%; operator-gated).
+  - **I2g–I2j FUNDING DE-RISK (2026-05-31) — FUNDING KILLS IT; I3 NOT recommended; intraday arc CLOSED.**
+    Costed realized funding on the proxy before the I3 build. The funding *mean* looked like a kill but was
+    **outlier-distorted** (hourly-funding coins, e.g. LRC −16%); the **median** trade's funding ≈0 (median
+    net45+funding +3.4/+4.7). BUT the funding-**included PORTFOLIO** is **negative on both venues at every hold**
+    (MAR 12h −0.69/−0.23, 24h −0.54/−0.09, 48h −0.91/−0.73) because 11–32% of trades are **crowded-short** coins
+    paying >1% funding (perp discount when everyone shorts a fresh pump). A PIT crowded-short FILTER (I2i) helped
+    (→ −0.46/−0.15) but didn't rescue (funding accrues *during* the hold, un-filterable at entry); a SHORTER HOLD
+    (I2j) didn't either (cuts funding *and* edge proportionally). **ROBUST FINAL: the standalone intraday
+    burst-short is NOT deployable** — two independent realistic costs each kill it: the tight-stop squeeze
+    (early-negative <~22%) AND the crowded-short funding drag. The signal (I1b) is real but the short *execution*
+    is too expensive (pay the crowd + get squeezed). **The robust validated all-weather edge stays the DAILY
+    age+rmom strategy** — its late next-day entry sidesteps both the squeeze and the funding crowding. Net:
+    fill-timing dead (E1), detection-timing dead (K1a), standalone intraday short killed by squeeze+funding (I2j).
   - **CV1 (cross-venue, 2026-05-30):** the bybit≫binance gap is **BREADTH + universe
     composition, NOT a weaker per-trade edge** — matched (same coin/day) events corr 0.89,
     binance ≈ bybit; per-trade net near-identical (median +0.34%/+0.27%). binance fires ~½ the

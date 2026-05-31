@@ -22,6 +22,7 @@ realized forward high over the hold (a pre-placed order, not look-ahead).
 from __future__ import annotations
 
 import argparse
+import bisect
 import glob
 import json
 from pathlib import Path
@@ -88,6 +89,8 @@ def main() -> int:
     ap.add_argument("--hold-h", type=int, default=48)
     ap.add_argument("--stop-pct", type=float, default=0.12)
     ap.add_argument("--stop-slip", type=float, default=0.02)
+    ap.add_argument("--funding-ds", default="", help="funding dataset (bybit: funding | binance: binance_usdm_funding) to overlay realized funding over the hold; short receives positive funding")
+    ap.add_argument("--funding-filter-floor", type=float, default=None, help="PIT crowded-short filter: skip trades whose trailing funding rate at entry < FLOOR (deeply-negative funding = crowded short = short pays)")
     ap.add_argument("--split-date", default="2025-06-01")
     ap.add_argument("--max-active", type=int, default=12)
     ap.add_argument("--weight", type=float, default=0.02)
@@ -128,6 +131,41 @@ def main() -> int:
         # diagnostic: NO-STOP variant (always exit at +hold_h close) - is the 12% stop the killer?
         (((pl.col("entry_open") - pl.col("exit_close")) / pl.col("entry_open")) - 0.0015).alias("net15_nostop")])
 
+    # funding overlay: short RECEIVES positive funding (longs pay shorts) over the hold [entry, exit].
+    # Also a PIT-causal trailing_funding (last settlement <= entry) for a crowded-short filter.
+    if a.funding_ds:
+        ffiles = glob.glob(str(Path(a.root).expanduser() / a.funding_ds / "**" / "*.parquet"), recursive=True)
+        fund = pl.scan_parquet(ffiles).select(["ts_ms", "symbol", "funding_rate"]).collect().sort(["symbol", "ts_ms"])
+        fund = fund.with_columns(pl.col("funding_rate").cum_sum().over("symbol").alias("cf"))
+        fmap = {}
+        for s, df_ in fund.partition_by("symbol", as_dict=True).items():
+            sk = s[0] if isinstance(s, tuple) else s
+            fmap[sk] = (df_["ts_ms"].to_list(), df_["cf"].to_list(), df_["funding_rate"].to_list())
+        ets = (b["ts_ms"] + MS_H).to_list()
+        xts = (b["ts_ms"] + (1 + a.hold_h) * MS_H).to_list()
+        syms = b["symbol"].to_list()
+        fpnl, tfund = [], []
+        for s, e, x in zip(syms, ets, xts):
+            d = fmap.get(s)
+            if d is None:
+                fpnl.append(0.0)
+                tfund.append(0.0)
+                continue
+            tsl, cfl, rl = d
+            ie = bisect.bisect_right(tsl, e) - 1
+            ix = bisect.bisect_right(tsl, x) - 1
+            ce = cfl[ie] if ie >= 0 else 0.0
+            cx = cfl[ix] if ix >= 0 else 0.0
+            fpnl.append(cx - ce)  # sum of funding settlements in (entry, exit]; short receives + funding
+            tfund.append(rl[ie] if ie >= 0 else 0.0)  # PIT: funding rate of the last settlement <= entry
+        b = b.with_columns([pl.Series("funding_pnl", fpnl), pl.Series("trailing_funding", tfund)])
+    else:
+        b = b.with_columns([pl.lit(0.0).alias("funding_pnl"), pl.lit(0.0).alias("trailing_funding")])
+    b = b.with_columns([(pl.col("net45") + pl.col("funding_pnl")).alias("net45f")])
+    # crowded-short funding FILTER (PIT): skip coins already paying deeply-negative funding at entry
+    if a.funding_filter_floor is not None:
+        b = b.filter(pl.col("trailing_funding") >= a.funding_filter_floor)
+
     def stat(df):
         if df.height < 20:
             return {"n": df.height}
@@ -135,7 +173,12 @@ def main() -> int:
                 "net15_mean_pct": round(df["net15"].mean() * 100, 3), "net15_median_pct": round(df["net15"].median() * 100, 3),
                 "net15_win_pct": round((df["net15"] > 0).mean() * 100, 1), "net15_sum_pct": round(df["net15"].sum() * 100, 1),
                 "net45_mean_pct": round(df["net45"].mean() * 100, 3), "net45_sum_pct": round(df["net45"].sum() * 100, 1),
-                "net15_NOSTOP_mean_pct": round(df["net15_nostop"].mean() * 100, 3), "net15_NOSTOP_sum_pct": round(df["net15_nostop"].sum() * 100, 1)}
+                "funding_pnl_mean_pct": round(df["funding_pnl"].mean() * 100, 3),
+                "funding_pnl_median_pct": round(df["funding_pnl"].median() * 100, 3),
+                "net45_with_funding_mean_pct": round(df["net45f"].mean() * 100, 3),
+                "net45_with_funding_median_pct": round(df["net45f"].median() * 100, 3),
+                "frac_funding_drag_gt1pct": round((df["funding_pnl"] < -0.01).mean(), 3),
+                "net15_NOSTOP_mean_pct": round(df["net15_nostop"].mean() * 100, 3)}
 
     def by_split(df, tag):
         return {"ALL": stat(df), "EARLY": stat(df.filter(pl.col("d") < a.split_date)),
@@ -160,20 +203,22 @@ def main() -> int:
         import statistics as st
         sharpe = (st.mean(pnl) / st.pstdev(pnl) * (365 ** 0.5)) if len(pnl) > 2 and st.pstdev(pnl) > 0 else None
         # thirds
-        n = len(pnl); t = n // 3
+        n = len(pnl)
+        t = n // 3
         thirds = [round(sum(pnl[i:j]) * 100, 1) for i, j in [(0, t), (t, 2 * t), (2 * t, n)]] if n >= 3 else []
         return {"n_days": n, "total_ret_pct": round(tot * 100, 1), "max_dd_pct": round(mdd * 100, 1),
                 "mar": round(tot / mdd, 2) if mdd > 0 else None, "worst_day_pct": round(min(pnl) * 100, 2) if pnl else None,
                 "sharpe": round(sharpe, 2) if sharpe else None, "thirds_pnl_pct": thirds}
     res["stageB_portfolio_extreme_net15"] = portfolio(ext, "net15")
     res["stageB_portfolio_extreme_net45"] = portfolio(ext, "net45")
+    res["stageB_portfolio_extreme_net45f"] = portfolio(ext, "net45f")  # WITH funding (portfolio caps outliers via weight)
     res["stageB_portfolio_allbursts_net15"] = portfolio(b, "net15")
 
     print(json.dumps(res, indent=2))
     if a.output_json:
         Path(a.output_json).expanduser().write_text(json.dumps(res, indent=2))
         b.select(["symbol", "d", "score", "extreme", "gain", "vel3", "vol_spike", "idio",
-                  "stopped", "gross", "net15", "net45"]).write_csv(Path(a.output_json).expanduser().with_suffix(".trades.csv"))
+                  "stopped", "gross", "net15", "net45", "funding_pnl", "net45f"]).write_csv(Path(a.output_json).expanduser().with_suffix(".trades.csv"))
     return 0
 
 
