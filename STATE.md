@@ -29,9 +29,14 @@ accounting it is only **marginally positive** (24h/25%, MAR +0.30 bybit / +0.49 
 the only remaining intraday step is the operator-gated engine-grade I3 (a coin-flip — deprioritised).**
 The robust, already-validated edge is the **DAILY age+rmom selection refinements** under forward demo
 (operator-gated) — their late next-day entry sidesteps both the intraday squeeze and the funding
-crowding. **Open daily lead (pre-registered, run-pending): the age+rmom+ff6 combined cell** — the
-three separately-validated refinements have never been measured as one stack (do they add or overlap?);
-receipt `docs/preregistration/age-rmom-ff6-combined-2026-05-31.md`. Data note: derivative channels
+crowding. **Daily age+rmom+ff6 combined cell — RUN 2026-05-31, lead RESOLVED: OVERLAP, ff6 inert.**
+The three refinements do NOT stack: `age_rmom` MAR sits below `rmom`-alone on BOTH venues (bybit
+1.38<3.09, binance 4.40<6.33 — they harvest the same squeeze factor, per RD1), and ff6 catches **0**
+trades on an age+rmom book (rmom already removed the squeeze-prone names pre-entry). `rmom`-alone has
+the highest MAR but it's fragile (near-zero-DD artifact on a thin ~60-trade/3y book, recent-tilted,
+bybit return-Δ p5≈0, and must be live-wired first); **`age` stays the robust deploy-ready single gate**
+(579/307 trades, bybit all-thirds-positive). Don't deploy the stack. Receipt+numbers:
+`docs/preregistration/age-rmom-ff6-combined-2026-05-31.md`. Data note: derivative channels
 verified (premium/funding both venues full; OI bybit-only; taker binance-recent-only) — see the
 corrected memory.
 Numbers + full record (the dated source of truth): **`docs/research_summary.md`**. Nothing is
