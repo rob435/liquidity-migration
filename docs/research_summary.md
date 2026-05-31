@@ -367,9 +367,12 @@ validated): Stage-B PROXY (entry-day P&L, approx concurrency, flat 2% stop-slip 
 exit-timing/concurrency + `bar_extreme_capped` fills + FUNDING + risk_model residual, stop ≤25%) — now
 **JUSTIFIED**; operator-gated go/no-go.
 
-**I-PHASE FINAL (2026-05-31) — FUNDING kills the standalone short; I3 NOT recommended; arc CLOSED.**
-Before the expensive I3 build, I costed the two biggest proxy caveats on the cheap proxy — first FUNDING
-(short receives + / pays − funding over the hold, both venues full-history, `--funding-ds`). Three sub-tests:
+**I-PHASE FUNDING DE-RISK (2026-05-31) — funding eats ~85% of the edge; a MARGINAL candidate survives under
+fair accounting → engine-grade I3 to settle (NOT closed). Full balanced write-up: `intraday_burst_synthesis.md`.**
+Before the expensive I3 build, costed FUNDING on the proxy (short receives + / pays − over the hold, both venues
+full-history, `--funding-ds`). **Note: this verdict revised twice in-session — first to "funding kills it/closed",
+then corrected when the operator asked whether any variant beat baseline under optimistic funding and exposed a
+pessimistic proxy bug (I2k: funding was over-charged on stopped trades).**
 - **I2g/I2h — median survives, portfolio dies.** The funding *mean* first looked like a kill (−0.6…−1.5%/trade)
   but was **outlier-distorted** by high-frequency-funding coins (LRC −16% over 48 hourly settlements). The
   **median** trade's funding is ≈0 (median net45+funding still +3.4/+4.7 early/recent). But the funding-**included
@@ -378,22 +381,30 @@ Before the expensive I3 build, I costed the two biggest proxy caveats on the che
 - **I2i — a PIT crowded-short FILTER (skip coins with negative trailing funding *at entry*) doesn't rescue it.**
   It helped (MAR → −0.46 bybit / −0.15 binance) but stayed negative & early-negative both venues, because the
   funding accrues **during** the hold (shorts crowd in *as* the pump fades) — un-predictable at entry.
-- **I2j — a SHORTER HOLD (12h/24h, since funding ∝ time-short and the fade is front-loaded) doesn't rescue it.**
-  Cutting the hold cuts the drag **and the edge proportionally** (median net45+funding 48h +3.4/+4.7 → 12h +2.3/+3.2);
-  **every** hold×venue cell is MAR-negative: 12h −0.69/−0.23, 24h −0.54/−0.09, 48h −0.91/−0.73. No free lunch.
+- **I2j — SHORTER HOLD (12/24/48h) with funding-to-48h accounting** looked like a kill (every cell MAR-negative:
+  12h −0.69/−0.23, 24h −0.54/−0.09, 48h −0.91/−0.73). **It was not — the accounting was wrong (see I2k).**
+- **I2k — FAIR funding (charged to ACTUAL exit) REOPENS it.** The to-48h funding was summed over the full hold
+  **even for stopped trades**, but a stopped trade exits early and stops paying — and the ~13% stopped trades are
+  exactly the **crowded-short squeezes** with the worst funding, so the charge was **over-counted on the killing
+  tail** (a pessimistic bug the operator's question surfaced). `--funding-to-exit` fixes it. At **24h hold, 25% stop**:
 
-**ROBUST FINAL VERDICT: the standalone intraday burst-short is NOT deployable.** TWO independent realistic costs
-each kill it — (1) the **tight-stop squeeze** (early-negative below ~22%, boundary even funding-blind at the 25% cap);
-(2) the **crowded-short funding drag** during the hold (funding-included portfolio negative at *every* hold, both
-venues, filter-resistant). The signal (I1b) is real but the *short execution* is too expensive: you pay the crowd
-(funding) **and** get squeezed by continuations (stop), and the thin idiosyncratic edge can't cover both. (Honesty
-both ways: the proxy slightly **over**counts funding for the ~15% stopped trades, so the precise engine number is
-marginally less harsh — but cannot flip an early-negative, MAR-negative portfolio all-weather.) **I3 is NOT
-recommended** — an expensive ~5–7d build with ~nil chance of flipping the sign. **The robust validated all-weather
-edge stays the DAILY age+rmom strategy**, whose late next-day entry is now understood to sidestep BOTH the intraday
-squeeze AND the worst of the crowded-short funding. The intraday arc is **closed**; the program reverts to
-forward-demoing the daily strategy (the operator-gated Tier-3 arbiter). `scripts/i2_burst_backtest.py`
-(`--funding-ds`, `--funding-filter-floor`, `--hold-h`).
+  | 24h hold | funding-BLIND | **FAIR (to-exit)** | pessimistic (to-48h) |
+  |---|---|---|---|
+  | bybit   | ret +38.7%, MAR 3.08 | **ret +4.3%, MAR 0.30** | −0.54 |
+  | binance | ret +28.7%, MAR 2.76 | **ret +5.6%, MAR 0.49** | −0.09 |
+
+**BALANCED VERDICT: real signal, MARGINAL standalone short, NOT closed.** Under fair funding the **24h-hold candidate
+is positive on both venues** (MAR +0.30 bybit / +0.49 binance; binance all-weather, bybit positive-but-recent-tilted —
+equity curve underwater ~3y then a recent pop; 48h hold ~breakeven). BUT funding eats **~80–89% of the funding-blind
+edge** (3.08/2.76 → 0.30/0.49), and this thin survivor was found after **extensive search** → **weak evidence, not
+validation.** The verdict **swings with funding-exit modeling** (−0.54 → +0.30 → +3.08) — it sits **at the Stage-B
+proxy's resolution limit**, which cannot settle a MAR≈0.3 candidate. So **engine-grade I3** (true exit-timing/concurrency
++ `bar_extreme_capped` fills + funding-to-exit + risk_model residual, **24h hold, stop ≤25%**) is the right tool —
+**operator-gated** (~85% funding-eaten + recent-tilted → a genuine coin-flip whether worth the ~5–7d build). **The DAILY
+age+rmom strategy remains the robust, already-validated all-weather edge** (late entry sidesteps both squeeze and funding
+crowding); the intraday short is at best a higher-risk, marginal, unvalidated add-on. Full write-up:
+`docs/intraday_burst_synthesis.md`. `scripts/i2_burst_backtest.py` (`--funding-ds`, `--funding-filter-floor`,
+`--funding-to-exit`, `--hold-h`).
 
 ## CV1 (2026-05-30): the cross-venue asymmetry is BREADTH + composition, NOT edge-quality
 

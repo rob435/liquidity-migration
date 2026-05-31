@@ -91,6 +91,7 @@ def main() -> int:
     ap.add_argument("--stop-slip", type=float, default=0.02)
     ap.add_argument("--funding-ds", default="", help="funding dataset (bybit: funding | binance: binance_usdm_funding) to overlay realized funding over the hold; short receives positive funding")
     ap.add_argument("--funding-filter-floor", type=float, default=None, help="PIT crowded-short filter: skip trades whose trailing funding rate at entry < FLOOR (deeply-negative funding = crowded short = short pays)")
+    ap.add_argument("--funding-to-exit", action="store_true", help="charge funding only to the ACTUAL exit (first stop-cross for stopped trades) instead of the full hold_h window — removes the pessimistic over-count of funding on stopped (squeeze) trades")
     ap.add_argument("--split-date", default="2025-06-01")
     ap.add_argument("--max-active", type=int, default=12)
     ap.add_argument("--weight", type=float, default=0.02)
@@ -141,17 +142,35 @@ def main() -> int:
         for s, df_ in fund.partition_by("symbol", as_dict=True).items():
             sk = s[0] if isinstance(s, tuple) else s
             fmap[sk] = (df_["ts_ms"].to_list(), df_["cf"].to_list(), df_["funding_rate"].to_list())
+        # per-symbol high path — only needed to find the first stop-cross when charging funding to exit
+        hmap = {}
+        if a.funding_to_exit:
+            for s, df_ in panel.select(["symbol", "ts_ms", "high"]).partition_by("symbol", as_dict=True).items():
+                sk = s[0] if isinstance(s, tuple) else s
+                hmap[sk] = (df_["ts_ms"].to_list(), df_["high"].to_list())
         ets = (b["ts_ms"] + MS_H).to_list()
         xts = (b["ts_ms"] + (1 + a.hold_h) * MS_H).to_list()
         syms = b["symbol"].to_list()
+        eopens = b["entry_open"].to_list()
+        stoppeds = b["stopped"].to_list()
         fpnl, tfund = [], []
-        for s, e, x in zip(syms, ets, xts):
+        for s, e, xf, eo, st in zip(syms, ets, xts, eopens, stoppeds):
             d = fmap.get(s)
             if d is None:
                 fpnl.append(0.0)
                 tfund.append(0.0)
                 continue
             tsl, cfl, rl = d
+            x = xf  # default: charge funding over the full hold window
+            if a.funding_to_exit and st:  # stopped trade: charge funding only up to the first stop-cross
+                h = hmap.get(s)
+                if h is not None:
+                    hts, hhi = h
+                    trig = eo * (1 + a.stop_pct)
+                    for k in range(bisect.bisect_left(hts, e), bisect.bisect_right(hts, xf)):
+                        if hhi[k] >= trig:
+                            x = hts[k]
+                            break
             ie = bisect.bisect_right(tsl, e) - 1
             ix = bisect.bisect_right(tsl, x) - 1
             ce = cfl[ie] if ie >= 0 else 0.0
