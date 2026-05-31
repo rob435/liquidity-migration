@@ -1,6 +1,6 @@
 # Research-program state
 
-**Last updated:** 2026-05-30. **All research findings, results, and verdicts now live in
+**Last updated:** 2026-05-31. **All research findings, results, and verdicts now live in
 one place: [docs/research_summary.md](docs/research_summary.md).** Round 1 + Round 2
 per-phase plans and verdicts were consolidated there and removed (git history has the
 originals). This file = live/operational state + the binding decision rules.
@@ -16,23 +16,24 @@ short. E1+E1b **falsified the EXECUTION half** — fade-confirmation entry adds 
 cross-venue premium over immediate entry, so **E3 (sniper) is dropped** and the open lead is
 **SELECTION refinement** (the age gate + residual-momentum gate, under "What's running"). (The
 earlier "Round 2 = null" was a methodology artifact — worst-case fills + over-concentration.)
-**Investigating the intraday-detection kernel** (`docs/research_plan_intraday_kernel.md`). K0
-confirmed the daily entry is ~8–11% below the event-day peak (optimistic ceiling). K1a
-falsified running the *daily selector* hourly (its ≥6×-**daily**-turnover rule can't confirm
-until ~15:00, after the fade) — but that is NOT a purpose-built intraday signal. **REOPENED
-2026-05-30 (operator-directed)** to engineer a rate/flow intraday selector. **I1a:** faders
-carry a clear cross-venue intraday **exhaustion fingerprint** (peak ~16–17 UTC, turnover climax
-4.2–4.6×, upper-wick rejection, OI build on bybit; premium quiet). **Make-or-break = I1b** — can
-a PIT-causal feature separate faders from pumps that CONTINUE? **I1b = PASS** (real beta-neutral
-cross-venue signal), and a 25%-stop top-short is a candidate — **but funding (I2g–I2k, 2026-05-31) eats ~85%
-of the edge**: under FAIR (funding-to-exit) accounting it is **marginally positive both venues** (24h/25%, MAR
-+0.30 bybit / +0.49 binance) but **recent-tilted** (bybit underwater ~3y) and **found after extensive search**
-(weak evidence; verdict swings −0.54→+0.30→+3.08 with funding accounting = at the proxy's resolution limit).
-So: fill-timing dead (E1), same-selector detection dead (K1a), **standalone intraday burst-short = MARGINAL +
-unvalidated → engine-grade I3 to settle (operator-gated coin-flip), NOT closed.** The robust validated edge is
-the DAILY age+rmom selection refinements under forward demo (operator-gated) — their late next-day entry
-sidesteps both the intraday squeeze and the funding crowding. Full write-up: `docs/intraday_burst_synthesis.md`. Data note: derivative channels verified (premium/funding both venues full;
-OI bybit-only; taker binance-recent-only) — see the corrected memory.
+**Intraday-detection kernel — arc CONCLUDED 2026-05-31** (`docs/research_plan_intraday_kernel.md`;
+full balanced write-up `docs/intraday_burst_synthesis.md`). K0 confirmed the daily entry is ~8–11%
+below the event-day peak (optimistic ceiling); K1a falsified running the *daily selector* hourly
+(its ≥6×-daily-turnover rule can't confirm until ~15:00, after the fade). The operator-directed
+reopening (I-phase) built a purpose-built intraday burst-short: **I1b = PASS** (real, beta-neutral,
+cross-venue signal) **but funding (I2g–I2k) eats ~85% of the edge** — under FAIR (funding-to-exit)
+accounting it is only **marginally positive** (24h/25%, MAR +0.30 bybit / +0.49 binance), recent-tilted
+(bybit underwater ~3y), found after extensive search (weak evidence; verdict swings
+−0.54→+0.30→+3.08 with funding accounting = at the proxy's resolution limit). **Net: fill-timing dead
+(E1), same-selector detection dead (K1a), standalone intraday burst-short = MARGINAL + unvalidated;
+the only remaining intraday step is the operator-gated engine-grade I3 (a coin-flip — deprioritised).**
+The robust, already-validated edge is the **DAILY age+rmom selection refinements** under forward demo
+(operator-gated) — their late next-day entry sidesteps both the intraday squeeze and the funding
+crowding. **Open daily lead (pre-registered, run-pending): the age+rmom+ff6 combined cell** — the
+three separately-validated refinements have never been measured as one stack (do they add or overlap?);
+receipt `docs/preregistration/age-rmom-ff6-combined-2026-05-31.md`. Data note: derivative channels
+verified (premium/funding both venues full; OI bybit-only; taker binance-recent-only) — see the
+corrected memory.
 Numbers + full record (the dated source of truth): **`docs/research_summary.md`**. Nothing is
 promoted; forward demo is the arbiter.
 

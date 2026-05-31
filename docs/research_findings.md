@@ -1,6 +1,6 @@
 # Research Findings — verdict pointer
 
-**Updated 2026-05-29.** This file is a short pointer. The single consolidated
+**Updated 2026-05-31.** This file is a short pointer. The single consolidated
 research record is **[docs/research_summary.md](research_summary.md)**; live /
 operational state is **[STATE.md](../STATE.md)**.
 
@@ -23,14 +23,19 @@ The strategy is two separable layers:
    **not** an entry.
 2. **Execution (entry signal)** — the in-migrated flow exhausts and **fades**.
    You do not short the top (the pump can continue — the extremes even continue
-   *up* first); you wait for the fade to **confirm**, then short — "**fade the
-   fade**." This is a fade strategy, not a catch-the-top strategy.
+   *up* first); the deployed entry waits ~a day for the fade to settle, then
+   shorts. This is a fade strategy, not a catch-the-top strategy.
 
-The **continuous** candidate signal carries real, robust cross-venue selection
-IC, but was only ever tested with *immediate* entry — so its "not tradeable"
-label is about timing the top, not the signal. Applying + refining the
-fade-confirmation execution on that candidate pool is the open lead. The forward
-plan is **[docs/research_plan_intraday_kernel.md](research_plan_intraday_kernel.md)**.
+**The alpha is SELECTION, not execution (E1, 2026-05-30).** A controlled test on
+the same pool — immediate +1h entry vs fade-confirmation — found fade-confirmation
+adds no robust cross-venue premium, so the entry/fill-timing axis is a non-lever
+(E3/sniper dropped). The **intraday-detection kernel** that followed is now closed:
+faster *detection* of the same event is un-capturable (K1a), and the purpose-built
+intraday burst-short is a real but **marginal, unvalidated** standalone (funding eats
+~85% of it — full write-up `intraday_burst_synthesis.md`). The robust, already-validated
+open lead is therefore **SELECTION refinement** — the **age gate** (`pit-age-days-min≈300`)
+and the **residual-momentum gate** — under forward demo (operator-gated). Forward plan:
+**[docs/research_plan_intraday_kernel.md](research_plan_intraday_kernel.md)**.
 
 ## Methodology
 

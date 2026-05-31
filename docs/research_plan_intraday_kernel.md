@@ -190,3 +190,15 @@ genuinely different signal needing custom engineering. Reopened.
     all-weather edge regardless** (its late entry sidesteps both squeeze and funding crowding); the intraday short
     is at best a higher-risk, marginal, unvalidated add-on. Full write-up: `docs/intraday_burst_synthesis.md`.
     `scripts/i2_burst_backtest.py` (`--funding-ds`, `--funding-filter-floor`, `--funding-to-exit`, `--hold-h`).
+
+## Forward lead (daily) — the age + rmom + ff6 combined stack (2026-05-31)
+
+The intraday timing axis is closed (above). The program reverts to its validated **SELECTION
+refinements**, and the one un-measured question there is whether they **compound**: the age gate
+(E2), the residual-momentum gate (P3b), and the failed-fade exit (R13, `ff6_4pct`) were each
+validated *separately, against different baselines* — never as one stack. RD1 showed age + rmom
+both target the same squeeze, so they may **stack or overlap**; ff6 cuts losers *after* entry that
+rmom may have already removed *before* entry. A pre-registered factorial settles all three margins
+(`00_baseline` / `age` / `rmom` / `age_rmom` / `age_rmom_ff6`, both venues, early/recent), reports
+trade-count cuts explicitly, and is gated by the Tier-2 demo-arbiter. **Run-pending on the 5950X.**
+Receipt: `docs/preregistration/age-rmom-ff6-combined-2026-05-31.md`.
