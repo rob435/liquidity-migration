@@ -85,16 +85,21 @@ def evaluate_cycle_liveness(
 
 
 def evaluate_unit_states(unit_states: dict[str, str]) -> list[Alert]:
-    """A monitored systemd unit not in {active} -> alert. ``activating`` (the
-    Restart=always recovery window) is tolerated; ``failed``/``inactive`` are not."""
+    """Alert only on the TERMINAL systemd ``failed`` state.
+
+    A deploy (or any ``Restart=always`` recovery) walks a unit through
+    activating -> active -> deactivating -> inactive -> activating, so alerting
+    on anything-not-active would fire on EVERY deploy. ``failed`` is the only
+    unambiguous "systemd gave up" state; a daemon that is merely down/hung/stopped
+    is caught (naturally debounced) by the per-data-root cycle-age check instead."""
     alerts: list[Alert] = []
     for unit, state in sorted(unit_states.items()):
-        if state not in {"active", "activating"}:
+        if state == "failed":
             alerts.append(
                 Alert(
                     key=f"unit:{unit}",
                     severity=CRITICAL,
-                    message=f"systemd unit {unit} is '{state}' (expected active).",
+                    message=f"systemd unit {unit} is FAILED (systemd gave up restarting it). Check positions.",
                 )
             )
     return alerts
@@ -265,8 +270,12 @@ def _unit_states(units: list[str]) -> dict[str, str]:
     return states
 
 
-def _venue_positions() -> tuple[dict[str, dict], str | None]:
-    """Return (positions_by_symbol, error). Degrades gracefully if creds/API down."""
+def _venue_positions(settle_coin: str = "USDT") -> tuple[dict[str, dict], str | None]:
+    """Return (positions_by_symbol, error). Degrades gracefully if creds/API down.
+
+    Bybit's linear get_positions requires ``settleCoin`` (or a symbol), so the
+    daemon calls ``get_positions(settle_coin="USDT")`` — the watchdog must too,
+    or every call fails 'params error'."""
     try:
         from liquidity_migration.bybit import BybitPrivateClient, resolve_private_credentials
 
@@ -274,7 +283,7 @@ def _venue_positions() -> tuple[dict[str, dict], str | None]:
         if not api_key or not api_secret:
             return {}, "no demo API creds in environment"
         client = BybitPrivateClient(api_key=api_key, api_secret=api_secret, demo=demo)
-        raw = client.get_positions()
+        raw = client.get_positions(settle_coin=settle_coin)
         rows = raw if isinstance(raw, list) else raw.get("list", [])
         return {str(p.get("symbol")): p for p in rows if str(p.get("symbol"))}, None
     except Exception as exc:  # noqa: BLE001
@@ -320,7 +329,7 @@ def gather_alerts(*, data_root: Path, units: list[str], now_ms: int, args: argpa
 
     open_trades = _open_trades(data_root)
     if open_trades:
-        positions, perr = _venue_positions()
+        positions, perr = _venue_positions(args.settle_coin)
         if perr is not None:
             alerts.append(
                 Alert(
@@ -353,6 +362,7 @@ def main() -> int:
     )
     p.add_argument("--max-cycle-age-min", type=float, default=10.0, help="alert if no cycle within this many minutes")
     p.add_argument("--max-ws-lag-hours", type=float, default=6.0, help="warn if the WS kline feed is this stale")
+    p.add_argument("--settle-coin", default="USDT", help="settle coin for the Bybit get_positions stop-protection check")
     p.add_argument("--cooldown-min", type=float, default=30.0, help="re-alert interval for a persisting condition")
     p.add_argument("--heartbeat-url", default=None, help="ping this URL on a healthy run (external dead-man's-switch)")
     p.add_argument("--telegram", action="store_true", help="send alerts via Telegram (else stdout only)")

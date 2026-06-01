@@ -32,12 +32,19 @@ def test_cycle_liveness_fresh_vs_stale_vs_missing() -> None:
     assert missing is not None and missing.severity == M.CRITICAL
 
 
-def test_unit_states_alert_only_on_not_active() -> None:
-    states = {"a.service": "active", "b.service": "activating", "c.service": "failed", "d.service": "inactive"}
+def test_unit_states_alert_only_on_terminal_failed() -> None:
+    # Transient restart states (activating/deactivating/inactive) must NOT alert —
+    # they happen on every deploy; only the terminal 'failed' is unambiguous.
+    states = {
+        "a.service": "active",
+        "b.service": "activating",
+        "c.service": "deactivating",
+        "d.service": "inactive",
+        "e.service": "failed",
+    }
     alerts = M.evaluate_unit_states(states)
-    keys = {a.key for a in alerts}
-    assert keys == {"unit:c.service", "unit:d.service"}  # active + activating tolerated
-    assert all(a.severity == M.CRITICAL for a in alerts)
+    assert {a.key for a in alerts} == {"unit:e.service"}
+    assert alerts[0].severity == M.CRITICAL
 
 
 def test_stop_protection_flags_missing_and_wrong_and_mismatch() -> None:
