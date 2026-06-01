@@ -5,6 +5,49 @@
 pre-registration candidate. The deployed daily strategy (age300 + ff6 on demo) is the baseline
 to BEAT, not to abandon.
 
+> **PROGRAM STATUS (2026-06-01) — VIABLE on the LIQUID universe; operator-gated engine + forward demo next.
+> (Two earlier closes — a "daily-cadence null" and a "weak book/capacity" — were both tested and RETRACTED.)**
+> Receipts: `p0-continuous-rmom-2026-05-31.md`, `p1b-continuous-intraday-fade-2026-06-01.md`,
+> `p1e-continuous-liquid-viable-2026-06-01.md` (final/reversed); `p1-continuous-daily-cycle-...` +
+> `p1c-continuous-final-verdict-...` = the two retracted closes (kept with banners).
+> - **Phase 0 = signal PASS:** rmom (NOT age) flips the continuous short **all-weather** both venues
+>   (+1h/+3h latency- & funding-robust; binance funding present+≈0, §1 corrected).
+> - **The fade is a real all-weather ALL-DAY intraday process** (p1f/p1g: per-hour fade rate positive at every
+>   hour both venues both eras). Avenue D's 24h-hold "daily-cadence null" was a **hold-span artifact** (retracted).
+> - **The edge is STRONGEST on LIQUID names** (p1i: 6h fade <$50k/h +52/+41 → >$1M/h **+118/+93** bybit/binance,
+>   all-weather; CV1 predicted it). The earlier "weak book/capacity" close averaged over the illiquid tail and
+>   was **wrong** (p1h proxy was also INVALID — compounding). Liquid subset is large (bybit ≥$500k/h 22%,
+>   binance 51%), **real capacity ~$1.4–1.8M @1%**, low cost (~25–30 bps).
+> - **SANE additive portfolio proxy (p1j, liquid universe, realistic cost): MAR 12–39, all-weather every cell
+>   both venues, DD 3–6%**, robust to 50 bps / ≥$1M threshold / 6–12h hold. **Right design: enter fresh rmom-D9
+>   on LIQUID names (≥$500k/h, ideally ≥$1M/h), short 6–12h hold** — captures off-close fades the daily misses.
+> - **CALIBRATED FINAL (p1k matched-sizing — same signal/universe/sizing, continuous any-hour vs a daily-only
+>   01:00 proxy): the DAILY cadence is MAR-OPTIMAL** (daily_24h MAR 42/36, Sharpe 10.3, DD 2.2/4.0% — the 01:00
+>   close is the best entry hour); **cont_24h earns ~1.7–1.8× more ABSOLUTE return** (ann 166/245% vs 92/146%)
+>   at higher DD → lower MAR (36/27). So continuous is **real, all-weather, tradeable on liquid names** (the
+>   "weak book" close was wrong) **but does NOT beat the daily on MAR-primary** — its value is
+>   absolute-return/breadth, not a risk-adjusted edge. The "daily favored" intuition is vindicated for the RIGHT
+>   reason (entry-quality), not the retracted daily-cycle artifact or the wrong cost argument. **DAILY-ALONE
+>   (close-only) is MAR-OPTIMAL** — the "combined book" = continuous (all entries) = MAR 36/27, *below*
+>   daily-alone (42/36); the off-close sleeve is the same signal/names → correlated → adds breadth, not
+>   diversification (an earlier "combined is best" claim was an over-reach, corrected).
+> - **CULMINATING (p1m) — continuous's REAL value-add is a MARKET-NEUTRAL L/S OVERLAY, not the directional
+>   short.** A beta-neutral continuous L/S (long D0 / short D9, liquid) is **low-correlation with the daily
+>   short** (corr 0.32/0.26, vs 0.65/0.72 for the continuous short which shares the D9 leg). Adding it to the
+>   daily short **improves the combined book** (bybit Sharpe 11.6→12.6 / MAR 47.9→69.9 @w=1.0, DD flat; binance
+>   Sharpe 11.1→12.3, MAR best @w=0.5) — a **diversifying sleeve like the long sleeve.** So the direct
+>   continuous SHORT doesn't beat the daily, but a continuous market-neutral L/S OVERLAY improves the live
+>   book's risk-adjusted return.
+> - **Net:** the operator-gated engine-grade work (liquid re-decile, realistic impact, the **continuous
+>   market-neutral L/S overlay** validated vs the DEPLOYED strategy's actual returns + correlation, forward
+>   demo) is **justified** — the upside is the uncorrelated market-neutral sleeve (a real risk-adjusted
+>   improvement), not the directional short (daily-alone is MAR-optimal). **Lessons: never finalize on a single
+>   hold horizon, a mid-fill proxy MAR, an aggregate mixing a strong core with a weak tail, or a short-only
+>   book that's secretly a beta bet (check market-neutral).**
+>
+> The avenues/roadmap below now aim at the **liquid-universe continuous book (and the combined daily+overlay)**.
+> EXPLORATORY decile char throughout — nothing here is promotion evidence.
+
 > Read first: `docs/research_summary.md` (the dated record, esp. §c2b / §i1b / §I2 / §CV1 / §RD1),
 > `docs/intraday_burst_synthesis.md`, and the `backtest-integrity` skill. This plan assumes them.
 

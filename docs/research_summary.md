@@ -406,6 +406,181 @@ crowding); the intraday short is at best a higher-risk, marginal, unvalidated ad
 `docs/intraday_burst_synthesis.md`. `scripts/i2_burst_backtest.py` (`--funding-ds`, `--funding-filter-floor`,
 `--funding-to-exit`, `--hold-h`).
 
+## Continuous-fade Phase 0 (2026-05-31): the rmom squeeze-filter makes the CONTINUOUS short ALL-WEATHER
+
+New forward program ([research_plan_continuous_fade.md](research_plan_continuous_fade.md)): build an
+always-on, any-hour version of the daily strategy, or kill it. Phase 0 (§6, the highest-information run)
+re-ran the c2b rolling-decile signal on full-PIT both venues with **age300 + residual-momentum** applied,
+split early/recent — EXPLORATORY look-ahead decile characterization (per-ts mean fwd returns, NOT a
+backtest). Receipt: `docs/preregistration/p0-continuous-rmom-2026-05-31.md`; artifacts
+`~/SHARED_DATA/p0{,b,c}_*_2026-05-31.{json,out}`; scripts `scripts/p0{,b,c}_continuous_*.py`. The port
+reproduces c2b's `baseline`/`age_ge_300` columns to ±0.5 bps (validates it).
+
+- **age300-alone is recent-only (c2b/BB2 confirmed); the PIT-clean rmom gate flips it ALL-WEATHER.**
+  EARLY/RECENT short_only & beta-neutral L/S @168h (bps): age300 bybit early **−44/−14**, binance early
+  **−18/−12** (recent-only); **rmom_lo** bybit early **+82/+92**, binance early **+65/+41** (positive both
+  venues both readouts). The **active gate is rmom, NOT age** — and rmom-alone beats the age+rmom stack
+  (stacking thins the cross-section; binance L/S goes −5). This *inverts* the daily-book finding (age robust,
+  rmom fragile/recent — [[age-rmom-ff6-overlap]]): rmom is a broad cross-sectional signal that the narrow
+  daily event-pool thins into a recent slice; continuous application recovers its all-weather breadth.
+- **BB1 (wrong-sign) also resolved by the same gate.** rmom-gated D9 mean-fwd is NEGATIVE at every horizon
+  incl. 1h (bybit −15/−41/−149/−146/−128 @1/3/24/72/168h) → the names *fade from hour one*; rmom IS the
+  causal "fade-has-started" confirmation. Baseline D9 instead RISES (+2/+16/+27) = shorting into continuation
+  (the c2b wrong sign).
+- **Two reframes of the plan.** (1) The robust object is a **~24h idiosyncratic reversal, NOT a "slow
+  multi-day fade"** — at the 24h hold the short is positive in EVERY bucket (2023/2024/2025H1/recent, both
+  venues, both readouts: bybit short +91/+111/+185/+170; binance +75/+90/+161/+163); at 168h the early period
+  is carried by a single 2025H1 outlier (+399/+427) and is weak/negative in 2023–24 (the c2b concentration
+  returns). 24h is the all-weather sweet spot. (2) rmom-not-age (above).
+- **Robust on every cheap axis.** Entry-latency (the mandatory gate): 24h early keeps **~88% at +1h**
+  (bybit +118→+104, binance +99→+86), positive both venues at +3h — a smooth gradient = real multi-hour
+  reversal, not a closing-print artifact. Threshold: **monotone** strengthening as the gate tightens (q
+  .50→.33→.25: bybit h24 early +118→+138→+150). **Funding: a non-issue both venues** (funding-to-exit leg
+  +0 to −5 bps every period, slightly positive early) — the rmom short enters post-fade names *after* the
+  funding crowd clears, inheriting the daily strat's funding-robustness. **Data correction:** binance
+  `binance_usdm_funding` has **99.8% panel coverage and is genuinely ≈0** — NOT funding-blind/missing (§1
+  saw ≈0 and mis-attributed it to sparsity); Avenue F4 is largely already done. [[binance-funding-missing]]
+- **Honest bounds (necessary, not sufficient):** EXPLORATORY per-ts characterization, not a tradeable book —
+  the gaps are concurrency/overlap, **true turnover/churn** (hourly reformation; the next cheap question =
+  Avenue D), sizing, capacity. ~24× overlap overstates `n_ts` precision (the all-weather-across-regimes
+  criterion carries the conclusion, not a t-stat). Substantially the **STR/residual-reversal factor** (rmom
+  = factor-residual momentum) → "mostly factor exposure" like the daily (P2-1); a deployable continuous
+  factor-harvest, NOT certified unique alpha. **Phase-0 sub-verdict: PASS at the signal level** — the edge is
+  real & all-weather; but tradeability + the discretization question were still open (Avenue D, below).
+
+**Continuous-fade Avenue D (2026-06-01): NULL for continuous-any-hour — the daily cadence is LOAD-BEARING.**
+Receipt `docs/preregistration/p1-continuous-daily-cycle-2026-06-01.md`; `scripts/p1d_continuous_turnover.py`;
+artifacts `~/SHARED_DATA/p1d_*_2026-05-31.{json,out}` + cached panels `<root>/_p1_continuous_panel.parquet`.
+The decisive discretization test (does continuous beat/extend daily?):
+- **Tradeable, not a churn artifact:** de-overlapped spell-entry (24h cooldown, 15bps) is all-weather both
+  venues all buckets and *stronger* than the per-ts char (bybit +193 vs +144 / binance +184 vs +133, FULL).
+  Persistence: D9 dwell ~6.7h, ~18 names concurrent, ~12.7k trades/yr (moderate, not pathological).
+- **But the fade is a DAILY-CYCLE object.** Short edge by hour-of-day decays **monotonically ~25× from the
+  daily close to 23:00**, identical both venues, equal n/hour (bybit hod0 +259 → hod23 +10; binance +245 →
+  +3). The **decisive cross-tab (fresh-entry edge × hour-of-day)** shows this is NOT staleness: *fresh* D9
+  entries also decay by hour (bybit hod0 +304 → hod23 −5) and **~4× of fresh entries occur at hod 0**
+  (n≈13.6k vs ~2.5k/hr). The daily-00:00-UTC close dominates even fresh signals.
+- **Verdict: the strong continuous thesis is FALSIFIED.** The 01:00 clock is not a proxy — it is the actual
+  information-arrival time; the **deployed daily entry is near-optimal**, and intraday entries are lower-edge
+  *noise*. A continuous any-hour book adds only low-edge breadth → **the engine-grade build (A3/H3) is NOT
+  justified.** This is the plan's welcomed honest null ("daily cadence is load-bearing — saves months"),
+  coherent with E1 (fill-timing not the lever), K1a (detection-timing not the lever), and the I-phase
+  reconciliation (the daily late entry is the safe, funding-light harvest). **Byproducts:** (1) the deployed
+  01:00 entry is **vindicated** as near-optimal; (2) rmom independently reconfirmed as the all-weather
+  cross-sectional fade gate; (3) **residual DAILY lead** — the rmom-composite-decile daily selection
+  (daily_0100, all-weather +250/+238) is a broader daily short than the event filter, worth a proper DAILY
+  backtest comparison (MAR/DD/funding vs the deployed strategy) — a daily-selection study, NOT a continuous
+  system. Net: **continuous-fade program CLOSED as an honest null; the program's robust edge remains the
+  daily age+rmom strategy, whose entry timing is now shown near-optimal.**
+
+**Continuous-fade Avenue D CORRECTED (2026-06-01, same day) — the NULL above is RETRACTED; CONTINUOUS IS
+VIABLE.** The "daily cadence load-bearing" verdict was **premature — a 24h-HOLD-SPAN artifact** (a 24h hold
+from a late entry-hour spans the next day's pump, manufacturing a close-peaked decay). Two decisive
+follow-ups (`scripts/p1f_entry_vs_hold.py`, `p1g_fresh_intraday.py`; receipt
+`docs/preregistration/p1b-continuous-intraday-fade-2026-06-01.md`) break the confound:
+- The **per-hour fade RATE** does NOT peak at the close — it is a broad **+12–15 bps/h plateau 00:00–15:00
+  UTC** (slightly midday-peaked), weakest-but-positive late-evening, **positive every hour both venues both
+  eras.** For FRESH D9 spell-entries (the clean test): 6h/h close +12.9/+12.1, midday +15.4/+15.0, late
+  +8.2/+6.5 bps/h (bybit/binance), all EARLY-positive. The SAME fresh entries fade comparably over 6h at all
+  hours (close +88 vs midday +91) but only the close entry's 24h fade is large (+319 vs +129) — purely the
+  longer post-close *runway*, not a daily lock.
+- **Corrected verdict: the fade is a real, all-weather, all-day intraday process → continuous is viable.**
+  ~82% of fresh fades occur OFF the daily close (entries the once-daily strategy misses) at comparable
+  per-hour quality, ~17–19-name book. **Both boss battles genuinely beaten** (BB1: a fresh D9 entry IS the
+  fade-started confirmation; BB2: all-weather). The mission thesis ("measure the state, short any hour") is
+  **vindicated.** Right design: enter fresh rmom-gated D9 at any hour, **short ~6–12h hold** (not 24h).
+- **Still EXPLORATORY (not a portfolio MAR).** The now-justified next step is a concurrency/capacity-aware
+  portfolio proxy backtest (enter-any-hour, 6–12h hold, cost+funding+max_active, both venues, early/recent);
+  capacity (concurrent illiquid-alt shorts) + turnover cost are the key open risks (funding ≈0 here, P0c).
+  **Lesson logged: never finalize a null on a single hold horizon — decompose entry-timing from hold-span.**
+  The earlier "deployed 01:00 entry vindicated / daily age+rmom is the robust edge" still holds for the
+  DAILY book; what changed is that continuous is NOT dominated — it captures real all-weather off-close fade.
+
+**Continuous-fade FINAL verdict (2026-06-01) — real all-weather SIGNAL, but a WEAK tradeable book; daily
+wins on COST/CAPACITY (not the retracted artifact).** Receipt
+`docs/preregistration/p1c-continuous-final-verdict-2026-06-01.md`. The portfolio proxy (`p1h`) is **INVALID**
+(compounds a high-frequency look-ahead edge with no capacity/fill realism → absurd MAR 24,000+; only its
+structure — DD 4-8%, both eras positive — is informative). Capacity is **small & shrinking** (D9 = mid-liq
+alts; bybit median hourly turnover $101k, RECENT only $52k, 35% of entries <$50k/h; est. deployable book
+~$0.1-0.5M bybit / $0.5-2.6M binance). **The sound economic reason the daily cadence wins** (NOT the retracted
+daily-cycle lock): the continuous **6h-hold** gross edge (~+85 bps) is the same order as a realistic
+round-trip cost on these names (spread + taker + impact ≈ 100+ bps) → **impact-fragile** (net @100bps ≈ −15);
+the daily **24h-3d hold** captures ~+319 bps (close) that clears the same cost (net @100bps ≈ +219). The
+15-bps mid-fill used in all the EXPLORATORY chars is the optimistic illusion; continuous also runs ~12× the
+daily's turnover on the same illiquid names → strictly worse capacity. **Net: continuous is a real,
+all-weather signal but NOT a worthwhile tradeable book** (small capacity + short-hold impact-fragility +
+long-hold only adds lower-edge off-close breadth); **recommend NOT building the continuous engine.** The
+robust, cost-survivable edge remains the **daily age+rmom strategy**, whose longer hold is now understood as
+*load-bearing for cost robustness* on the illiquid alt space. **Continuous-fade program CLOSED** (operator
+may revisit only with a realistic-impact engine backtest; low-priority given the capacity ceiling). Byproducts:
+rmom reconfirmed all-weather; binance funding present+≈0; the deployed daily design validated as cost-robust;
+lessons logged (single-hold-horizon null; never trust a proxy MAR that assumes mid-fills on illiquid names).
+
+**Continuous-fade REVERSAL (2026-06-01) — the "weak book / CLOSED" verdict above is RETRACTED; continuous is
+VIABLE on the LIQUID universe.** Receipt `docs/preregistration/p1e-continuous-liquid-viable-2026-06-01.md`. The
+"weak book" close averaged over the illiquid tail and was wrong. `p1i` (fade bucketed by entry liquidity) shows
+the edge is **monotonically STRONGER on MORE-liquid names** (6h fade <$50k/h +52/+41 → >$1M/h **+118/+93**
+bybit/binance, all-weather) — exactly as CV1 (venue-general edge) predicted; the liquid subset is large (bybit
+≥$500k/h 22%, binance 51%) with real capacity (~$1.4-1.8M @1%) and low cost (~25-30 bps RT). `p1j` (SANE
+ADDITIVE portfolio proxy — fixing p1h's compounding bug — on the liquid universe at realistic cost): **MAR
+12-39, all-weather every cell both venues** (early AND recent positive), DD 3-6%, robust to cost (survives
+50bps), liquidity threshold (≥$1M still MAR 17-37), and hold (6h & 12h; 12h best, bybit MAR 39 / binance 35).
+**Verdict: a continuous any-hour short of fresh rmom-D9 entries restricted to LIQUID names (≥$500k/h, ideally
+≥$1M/h), short 6-12h hold, is a real, all-weather, cross-venue, cost-robust, deployable-capacity (~$1-3M) edge**
+that captures off-close fades the daily misses — the mission's "continuous, any-hour" thesis is **supported**.
+**Calibration (I reversed twice):** EXPLORATORY (PIT-clean selection, simplified concurrency, not an engine MAR);
+the MAR magnitude is partly de-concentrated sizing (DD 3-6% from 2% weight × ~25 positions), so the true edge
+over the daily is the off-close breadth + lower DD, not a 5× return — a matched-sizing engine + forward demo is
+the real arbiter. **This JUSTIFIES the operator-gated engine-grade backtest on the liquid universe** (re-decile
+within liquid names; realistic impact; matched-sizing vs the daily; forward demo). Lesson added: never finalize
+a verdict on an aggregate that mixes a strong core with a weak tail — decompose by the binding constraint.
+
+**Continuous-fade CALIBRATED FINAL (2026-06-01, p1k matched-sizing) — continuous is REAL & tradeable on liquid
+names, but the DAILY cadence is MAR-optimal; continuous adds absolute-return breadth, not a risk-adjusted edge.**
+Matched-sizing (same liquid universe / 2% wt / max_active 25 / 30 bps; continuous any-hour vs a daily-only
+01:00 proxy of the SAME signal): **daily_24h has the HIGHEST MAR** (bybit 42 / binance 36), Sharpe (10.3), and
+lowest DD (2.2/4.0%) — the 01:00 close is the highest-quality entry hour; **cont_24h earns ~1.7-1.8× more
+absolute return** (ann 166/245% vs 92/146%) via off-close breadth but at higher DD (4.6/9.2%) → lower MAR
+(36/27). So the p1e "VIABLE" stands (continuous is a real strong strategy — "weak book" was wrong) **but
+tempered: by MAR-primary the daily wins.** The "daily favored" intuition is vindicated for the RIGHT reason
+(entry-quality: the close is the best hour), not the retracted daily-cycle artifact or the wrong cost argument.
+**Net (the honest landing after 6 pressure-tested flips): the continuous fade is real/all-weather/tradeable on
+liquid names; DAILY-ALONE (close-only) is MAR-OPTIMAL; continuous is a viable return-maximizing/capacity
+alternative (more absolute return, lower MAR).** Note (correcting an over-reach): the "combined book" = the
+continuous book (all entries) = MAR 36/27, **below** daily-alone (42/36); the off-close sleeve is the same
+signal on the same names → highly correlated → little diversification, so it adds breadth not risk-adjusted
+edge. **Daily-alone is the MAR-optimal harvest of this signal**; the operator-gated engine (liquid re-decile,
+realistic impact, forward demo) is justified but **NOT urgent** (the only upside is absolute-return/capacity at
+lower MAR). Receipt: `docs/preregistration/p1e-continuous-liquid-viable-2026-06-01.md` (matched-sizing addendum).
+**One genuine ADD (p1l, the mission's "market-neutral" pointer):** a beta-neutral continuous L/S (long D0 /
+short D9 within the liquid universe) **slashes drawdown vs short-only** (same method: bybit DD 23→19%, binance
+38→18%) by removing the short-beta tailwind, at lower return → **comparable MAR** (bybit 33→31, binance 14→20
+— binance higher, DD-reduction dominates). So the short-only's return is **substantially the short-beta
+tailwind** (recent alt-bear); the L/S is a **beta-neutral, low-DD, uncorrelated** alternative the *directional*
+daily short fundamentally **cannot be** — a potential diversifying sleeve (role like the long sleeve), NOT a
+MAR-beating replacement. (Absolute MARs here are concentrated-proxy-inflated — ~4-8 names/decile; only the
+short-vs-L/S comparison is valid.) `scripts/p1l_market_neutral.py`.
+**The CULMINATING finding (p1m, the actionable continuous deliverable): the continuous market-neutral L/S is a
+genuine DIVERSIFYING SLEEVE for the daily short.** corr(daily_short, cont_LS) = **0.32/0.26** (bybit/binance) —
+LOW, vs 0.65/0.72 for the continuous *short* (which shares the D9 leg); the beta-neutrality + D0 long leg
+decorrelates it. **Adding it to the daily short improves the combined book** — bybit Sharpe 11.6→12.6 / MAR
+47.9→69.9 (w=1.0, DD flat ~23.5%); binance Sharpe 11.1→12.3 / MAR best at w=0.5 (53.5→56.4). So while the
+direct continuous *short* doesn't beat the daily, **a continuous market-neutral L/S OVERLAY does improve the
+live book's risk-adjusted return** — the same role the long sleeve plays (short↔L/S corr ~0.3). **This is
+continuous's real value-add.** Caveats: proxy MARs concentrated-inflated; both are continuous-panel proxies
+(not the deployed event-filter strategy); proper validation (correlation to the DEPLOYED strategy, realistic
+impact, de-concentrated MAR, forward demo) is operator-gated. `scripts/p1m_combined_portfolio.py`.
+**HONEST TEMPERING (the redundancy question — the real deployment gate):** the EXISTING long sleeve already
+diversifies the short, and BETTER (short↔long corr ~−0.02/−0.05 per [[long-sleeve-alpha-search-null]], vs the
+continuous L/S's +0.32/+0.26). So the continuous L/S is NOT the only (or best) short-diversifier on hand — the
+decisive question is whether it is **additive to the long sleeve or redundant** with it (if the two
+short-diversifiers co-move, the continuous L/S adds little over what's deployed). That needs a clean 3-way
+engine backtest (deployed short + long sleeve + a real continuous L/S, aligned daily returns + corr) —
+**operator-gated** (the long sleeve is a separate ~23 GB volume-events run, not the continuous-panel proxy). So
+the continuous market-neutral L/S is a **genuine but possibly-redundant** diversifier; its marginal value over
+the long sleeve is the open, engine-gated deployment question. Net continuous-program deliverable: a real
+all-weather signal + a candidate market-neutral diversifying sleeve whose incremental value awaits the 3-way test.
+
 ## CV1 (2026-05-30): the cross-venue asymmetry is BREADTH + composition, NOT edge-quality
 
 Read-only decomposition of the age-gated ledgers both venues

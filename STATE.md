@@ -73,6 +73,46 @@ promoted; forward demo is the arbiter.
 - **No research runs in-flight.** Research state — full detail + numbers in
   `docs/research_summary.md` (the dated record; the per-phase E1/E2/P3/c2b receipts were
   consolidated there and removed 2026-05-30 — git history has the originals):
+  - **Continuous-fade program (2026-05-31→06-01) — VIABLE on the LIQUID universe (operator-gated engine
+    next). The earlier "weak book / CLOSED" verdict was RETRACTED.** Plan `docs/research_plan_continuous_fade.md`.
+    Arc (flipped several times — each premature verdict tested): Phase 0 = rmom (NOT age) flips the continuous
+    signal ALL-WEATHER; Avenue D's 24h-hold "daily-cadence NULL" = a hold-span artifact (retracted); p1f/p1g
+    = the fade is a real all-weather **all-day intraday process** (per-hour rate positive every hour both
+    venues), both BBs beaten; p1h proxy INVALID (compounding); p1c "weak book/capacity" verdict **also wrong**
+    — it averaged over the illiquid tail. **REVERSAL (p1i/p1j):** the edge is **monotonically STRONGER on
+    MORE-liquid names** (6h fade <$50k/h +52/+41 → >$1M/h **+118/+93** bybit/binance, all-weather; CV1
+    predicted it), the liquid subset is large (bybit ≥$500k/h 22%, binance 51%) with **real capacity
+    (~$1.4-1.8M @1%)** and low cost (~25-30 bps). SANE additive portfolio proxy on the liquid universe:
+    MAR 12-39 all-weather both venues. **CALIBRATED FINAL (p1k matched-sizing — same signal/universe/sizing,
+    continuous any-hour vs a daily-only 01:00 proxy): the DAILY cadence is MAR-OPTIMAL** (daily_24h MAR 42/36,
+    Sharpe 10.3, DD 2.2/4.0% — the 01:00 close is the best entry hour), while **cont_24h earns ~1.7-1.8× more
+    ABSOLUTE return** (ann 166/245% vs 92/146%) at higher DD → lower MAR (36/27). So: the continuous fade is
+    **real, all-weather, cross-venue, tradeable on liquid names** (≥$500k/h, ~$1-3M capacity — the "weak book"
+    close was wrong) **BUT does NOT beat the daily on MAR-primary**; its value is absolute-return/breadth, not a
+    risk-adjusted edge. The "daily favored" intuition is right for the RIGHT reason (entry-quality), not the
+    retracted daily-cycle artifact or the wrong cost argument. **DAILY-ALONE (close-only) is MAR-OPTIMAL** — the
+    "combined book" = continuous (all entries) = MAR 36/27 < daily-alone 42/36 (off-close is the same
+    signal/names → correlated → adds breadth not diversification). Operator-gated engine (liquid re-decile,
+    realistic impact, forward demo) justified but NOT urgent (only upside = absolute-return/capacity at lower MAR).
+    **One genuine ADD (p1l, market-neutral):** a beta-neutral continuous L/S (long D0/short D9, liquid) slashes
+    DD vs short-only (bybit 23→19%, binance 38→18%) at lower return → comparable MAR (33→31 / 14→20) — the
+    short-only return is substantially the short-beta tailwind. The L/S is a beta-neutral, low-DD, UNCORRELATED
+    alternative the directional daily can't be. **CULMINATING (p1m): it IS a genuine DIVERSIFYING SLEEVE** —
+    corr(daily_short, cont_LS)=0.32/0.26 (LOW; vs 0.65/0.72 for cont-short which shares the D9 leg); adding it
+    to the daily short improves the combined book (bybit Sharpe 11.6→12.6 / MAR 47.9→69.9 @w=1.0 DD flat;
+    binance Sharpe 11.1→12.3, MAR best @w=0.5). **So the direct continuous SHORT doesn't beat the daily, but a
+    continuous market-neutral L/S OVERLAY improves the live book's risk-adjusted return (like the long sleeve)
+    — continuous's candidate value-add.** Proxy MARs concentrated-inflated; validation vs the DEPLOYED strategy +
+    realistic impact + forward demo is operator-gated. **HONEST TEMPERING (redundancy = the real gate):** the
+    EXISTING long sleeve already diversifies the short BETTER (corr ~−0.03 vs the continuous L/S's +0.3), so the
+    decisive question is whether the continuous L/S is ADDITIVE to the long sleeve or REDUNDANT — needs a clean
+    3-way engine backtest (deployed short + long + real continuous L/S), operator-gated. So continuous's
+    deliverable: a real all-weather signal + a *candidate* (possibly-redundant) market-neutral diversifying sleeve. Byproducts: rmom reconfirmed all-weather; binance funding PRESENT
+    (99.8% cov) & ≈0. Lessons (6 pressure-tested flips): never finalize a null on one hold horizon, a proxy MAR
+    assuming mid-fills, or an aggregate mixing a strong core with a weak tail (decompose by the binding
+    constraint). Receipts: `p0-continuous-rmom-2026-05-31.md`, `p1b-continuous-intraday-fade-...`,
+    `p1e-continuous-liquid-viable-2026-06-01.md` (final, incl. matched-sizing); `p1-...daily-cycle` +
+    `p1c-...final-verdict` = the two retracted closes.
   - **Intraday-detection kernel (K0→K1a→I-phase, 2026-05-30) — REOPENED (operator-directed).**
     K0: daily entry ~8–11% below the event-day peak (optimistic ceiling). **K1a falsified only
     the *daily selector run hourly*** (≥6×-daily-turnover can't confirm until ~15:00, after the
