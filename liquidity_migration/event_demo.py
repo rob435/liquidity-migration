@@ -6,7 +6,7 @@ import math
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, InvalidOperation
 from pathlib import Path
@@ -122,6 +122,103 @@ class EventRiskCycleConfig:
     stop_tolerance_bps: float = 1.0
 
 
+@dataclass
+class _DemoCycleContext:
+    """Per-cycle state threaded through ``run_event_demo_cycle``'s stages.
+
+    Holds the STATIC inputs/clients (assembled once by :func:`_begin_demo_cycle`)
+    plus a few set-once derived values and the stage-timing recorder. The evolving
+    per-stage results (universe, klines, snapshots, exits, entries, ...) are
+    threaded EXPLICITLY through each stage function's return value rather than
+    mutated here, so the cycle's data flow stays auditable. The goal is a
+    readable orchestrator: build the context, then run a pipeline of named,
+    independently-testable stages."""
+
+    config: ResearchConfig
+    demo: EventDemoCycleConfig
+    strategy: VolumeEventResearchConfig
+    strategy_id: str
+    root: Path
+    report_dir: Path
+    cycle_now_ms: int
+    cycle_id: str
+    market_client: Any | None
+    private_client: Any | None
+    execution_event_router: Any | None
+    kline_store: Any | None
+    private_state_cache: Any | None
+    ticker_cache: Any | None
+    state_cache_stale_seconds: float
+    # Set-once derived values populated during cycle setup / the first stages.
+    public: Any | None = None
+    trading_client: Any | None = None
+    score_name: str = ""
+    score_col: str = ""
+    scenario: EventScenario | None = None
+    order_notional_pct_equity: float = 0.0
+    order_initial_margin_pct_equity: float = 0.0
+    # Stage timing.
+    cycle_perf_start: float = 0.0
+    stage_perf_start: float = 0.0
+    stage_timings_ms: dict[str, float] = field(default_factory=dict)
+
+    def mark_stage(self, name: str) -> None:
+        now = time.perf_counter()
+        self.stage_timings_ms[f"timing_{name}_ms"] = round((now - self.stage_perf_start) * 1000.0, 3)
+        self.stage_perf_start = now
+
+
+def _begin_demo_cycle(
+    data_root: str | Path,
+    *,
+    config: ResearchConfig,
+    event_config: VolumeEventResearchConfig | None,
+    demo_config: EventDemoCycleConfig | None,
+    market_client: Any | None,
+    private_client: Any | None,
+    now_ms: int | None,
+    execution_event_router: Any | None,
+    kline_store: Any | None,
+    private_state_cache: Any | None,
+    ticker_cache: Any | None,
+    state_cache_stale_seconds: float,
+) -> _DemoCycleContext:
+    """Validate inputs and assemble the static half of the per-cycle context."""
+    demo = demo_config or EventDemoCycleConfig()
+    strategy = _demo_event_config(event_config or VolumeEventResearchConfig(), profile=demo.strategy_profile)
+    if demo.max_active_symbols > 0:
+        strategy = replace(strategy, max_active_symbols=demo.max_active_symbols)
+    strategy_id = _demo_strategy_id(demo.strategy_profile)
+    _validate_event_config(strategy)
+    _validate_demo_config(demo)
+    root = Path(data_root).expanduser()
+    root.mkdir(parents=True, exist_ok=True)
+    report_dir = root / "reports" / demo.data_name
+    report_dir.mkdir(parents=True, exist_ok=True)
+    cycle_now_ms = now_ms if now_ms is not None else _utc_now_ms()
+    cycle_id = f"{_yyyymmddhhmmss(cycle_now_ms)}-{int(time.time_ns())}"
+    started = time.perf_counter()
+    return _DemoCycleContext(
+        config=config,
+        demo=demo,
+        strategy=strategy,
+        strategy_id=strategy_id,
+        root=root,
+        report_dir=report_dir,
+        cycle_now_ms=cycle_now_ms,
+        cycle_id=cycle_id,
+        market_client=market_client,
+        private_client=private_client,
+        execution_event_router=execution_event_router,
+        kline_store=kline_store,
+        private_state_cache=private_state_cache,
+        ticker_cache=ticker_cache,
+        state_cache_stale_seconds=state_cache_stale_seconds,
+        cycle_perf_start=started,
+        stage_perf_start=started,
+    )
+
+
 def _resolve_cycle_universe(
     *,
     public: Any,
@@ -170,6 +267,375 @@ def _resolve_cycle_universe(
     return universe, symbols, tickers, ticker_source
 
 
+def _cycle_plan_and_execute_exits(
+    ctx: _DemoCycleContext,
+    *,
+    reconciled_trades: pl.DataFrame,
+    all_trades: pl.DataFrame,
+    all_orders: pl.DataFrame,
+    klines: pl.DataFrame,
+    rank_lookup: dict[Any, Any],
+    price_by_symbol: dict[str, float],
+    symbols: list[str],
+    tickers: pl.DataFrame,
+    start_ms: int,
+    end_ms: int,
+    live_exit_order_symbols: set[str],
+    preflight_callback: Callable[[dict[str, Any]], None] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], int, int]:
+    """Plan + execute exits for the cycle.
+
+    Held positions that have rotated/delisted OUT of the universe get their klines
+    fetched SEPARATELY and merged for the exit planner only, so the cycle-owned
+    exits (failed_fade/ff6, rank, event_decay) keep evaluating without polluting
+    the universe-scoped feature/rank cross-section (BUG-4/6). Returns
+    ``(exits, executed_exits, exit_order_rows, pending_exit_skips,
+    live_open_exit_skips)``; the caller upserts the rows into the ledger."""
+    demo = ctx.demo
+    exit_klines = klines
+    exit_price_by_symbol = price_by_symbol
+    held_evicted = [
+        s
+        for s in (
+            _open_trades(reconciled_trades)["symbol"].unique().to_list()
+            if not reconciled_trades.is_empty()
+            else []
+        )
+        if s not in set(symbols)
+    ]
+    if held_evicted:
+        held_klines, _held_stats = _download_recent_1h_klines(
+            held_evicted,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            config=ctx.config,
+            workers=demo.workers,
+            market_client=ctx.public if ctx.market_client is not None else None,
+            cache_root=ctx.root,
+            kline_store=ctx.kline_store,
+        )
+        if not held_klines.is_empty():
+            exit_klines = _concat_recent_klines(klines, held_klines)
+            exit_price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, exit_klines)
+
+    exits = plan_demo_exits(
+        reconciled_trades,
+        rank_lookup=rank_lookup,
+        klines=exit_klines,
+        price_by_symbol=exit_price_by_symbol,
+        now_ms=ctx.cycle_now_ms,
+        config=ctx.strategy,
+        scenario=ctx.scenario,
+    )
+    exits, pending_exit_skips = _filter_pending_exit_orders(exits, all_orders, now_ms=ctx.cycle_now_ms)
+    # Dry-run (paper) shares the demo's Bybit account, so live_exit_order_symbols
+    # would include DEMO's open exit orders; filtering paper's exits against them
+    # would cascade paper off demo's actions instead of running independently.
+    if demo.submit_orders:
+        exits, live_open_exit_skips = _filter_live_open_exit_orders(exits, live_exit_order_symbols)
+    else:
+        live_open_exit_skips = 0
+    executed_exits, exit_order_rows = _execute_exits(
+        exits,
+        all_trades,
+        trading_client=ctx.trading_client,
+        demo=demo,
+        now_ms=ctx.cycle_now_ms,
+        execution_event_router=ctx.execution_event_router,
+        record_preflight=preflight_callback,
+    )
+    return exits, executed_exits, exit_order_rows, pending_exit_skips, live_open_exit_skips
+
+
+@dataclass
+class _EntryStageResult:
+    """Outputs of the entry stage. The caller upserts the row lists into the
+    ledger (the stage applies the stale-entry terminalization to its OWN
+    ``all_orders`` copy first, so candidate filtering sees it) and reads the
+    counts/snapshots into the cycle telemetry."""
+
+    refreshed_open: pl.DataFrame
+    position_snapshot_error: str
+    stale_entry_order_rows: list[dict[str, Any]]
+    entry_candidates: Any
+    skip_counts: dict[str, int]
+    pending_entry_skips: int
+    snapshot_error_entry_skips: int
+    open_order_error_entry_skips: int
+    wallet_error_entry_skips: int
+    live_position_entry_skips: int
+    live_open_entry_skips: int
+    entries_parallel_workers: int
+    executed_entries: list[dict[str, Any]]
+    entry_order_rows: list[dict[str, Any]]
+
+
+def _cycle_select_and_execute_entries(
+    ctx: _DemoCycleContext,
+    *,
+    features: pl.DataFrame,
+    all_trades: pl.DataFrame,
+    all_orders: pl.DataFrame,
+    klines: pl.DataFrame,
+    equity_usdt: float,
+    price_by_symbol: dict[str, float],
+    contract_by_symbol: dict[str, Any],
+    live_position_symbols: set[str],
+    live_entry_order_symbols: set[str],
+    wallet_error: str,
+    bybit_open_order_error: str,
+    reconcile_position_error: str,
+    bybit_position_error: str,
+    preflight_callback: Callable[[dict[str, Any]], None] | None,
+) -> _EntryStageResult:
+    """Terminalize stale pending entries, select candidates, apply the live-state
+    and capacity filters, then submit. Returns an :class:`_EntryStageResult`; the
+    caller applies the row lists to the ledger."""
+    demo = ctx.demo
+    strategy = ctx.strategy
+    refreshed_open = _open_trades(all_trades)
+    position_snapshot_error = _combine_errors(reconcile_position_error, bybit_position_error)
+    stale_entry_order_rows: list[dict[str, Any]] = []
+    if demo.submit_orders and not position_snapshot_error and not bybit_open_order_error:
+        stale_entry_order_rows = _terminalize_stale_pending_entry_orders(
+            all_orders,
+            live_position_symbols=live_position_symbols,
+            live_open_entry_order_symbols=live_entry_order_symbols,
+            now_ms=ctx.cycle_now_ms,
+        )
+        if stale_entry_order_rows:
+            all_orders = _upsert_rows(all_orders, stale_entry_order_rows, key="order_link_id")
+    entry_candidates, skip_counts = select_demo_entry_candidates(
+        features,
+        all_trades,
+        now_ms=ctx.cycle_now_ms,
+        config=strategy,
+        scenario=ctx.scenario,
+        max_entry_lag_minutes=demo.max_entry_lag_minutes,
+        max_new_entries=demo.max_new_entries_per_cycle,
+        klines=klines,
+    )
+    free_slots = max(int(strategy.max_active_symbols) - refreshed_open.height, 0)
+    entry_candidates = entry_candidates[:free_slots]
+    entry_candidates, pending_entry_skips = _filter_pending_entry_orders(entry_candidates, all_orders, now_ms=ctx.cycle_now_ms)
+    snapshot_error_entry_skips = 0
+    open_order_error_entry_skips = 0
+    wallet_error_entry_skips = 0
+    live_position_entry_skips = 0
+    live_open_entry_skips = 0
+    if position_snapshot_error and demo.submit_orders:
+        snapshot_error_entry_skips = len(entry_candidates)
+        entry_candidates = []
+    elif bybit_open_order_error and demo.submit_orders:
+        open_order_error_entry_skips = len(entry_candidates)
+        entry_candidates = []
+    elif wallet_error and demo.submit_orders:
+        wallet_error_entry_skips = len(entry_candidates)
+        entry_candidates = []
+    elif demo.submit_orders:
+        # Bybit-live-state filters apply only when actually submitting; dry-run
+        # (paper) shares the SAME demo account so its snapshot is demo's, not
+        # paper's — paper relies on its own ledger via _filter_pending_entry_orders.
+        entry_candidates, live_position_entry_skips = _filter_live_position_entry_orders(entry_candidates, live_position_symbols)
+        entry_candidates, live_open_entry_skips = _filter_live_open_entry_orders(entry_candidates, live_entry_order_symbols)
+    # Live submission fans candidates across a small worker pool (each worker owns
+    # its own private client routed through a shared rate limiter).
+    private_factory: Callable[[], Any] | None
+    if demo.submit_orders and demo.max_concurrent_entries > 1 and len(entry_candidates) > 1:
+        shared_private_limiter = BybitRestRateLimiter(
+            max_requests=_demo_private_rest_rate_limit_per_second(),
+            per_seconds=1.0,
+        )
+        def _build_worker_private_client() -> BybitPrivateClient:
+            client = _build_private_client(ctx.config)
+            client.rate_limiter = shared_private_limiter
+            return client
+        private_factory = _build_worker_private_client
+        entries_parallel_workers = min(demo.max_concurrent_entries, len(entry_candidates))
+    else:
+        private_factory = None
+        entries_parallel_workers = 1
+    executed_entries, entry_order_rows = _execute_entries(
+        entry_candidates,
+        trading_client=ctx.trading_client,
+        demo=demo,
+        equity_usdt=equity_usdt,
+        order_notional_pct_equity=ctx.order_notional_pct_equity,
+        price_by_symbol=price_by_symbol,
+        contract_by_symbol=contract_by_symbol,
+        now_ms=ctx.cycle_now_ms,
+        strategy_id=ctx.strategy_id,
+        record_preflight=preflight_callback,
+        private_client_factory=private_factory,
+        execution_event_router=ctx.execution_event_router,
+    )
+    return _EntryStageResult(
+        refreshed_open=refreshed_open,
+        position_snapshot_error=position_snapshot_error,
+        stale_entry_order_rows=stale_entry_order_rows,
+        entry_candidates=entry_candidates,
+        skip_counts=skip_counts,
+        pending_entry_skips=pending_entry_skips,
+        snapshot_error_entry_skips=snapshot_error_entry_skips,
+        open_order_error_entry_skips=open_order_error_entry_skips,
+        wallet_error_entry_skips=wallet_error_entry_skips,
+        live_position_entry_skips=live_position_entry_skips,
+        live_open_entry_skips=live_open_entry_skips,
+        entries_parallel_workers=entries_parallel_workers,
+        executed_entries=executed_entries,
+        entry_order_rows=entry_order_rows,
+    )
+
+
+@dataclass
+class _CycleData:
+    """Public-data half of the cycle: klines, features, signal lookups + the
+    freshly-read ledgers. Produced while the private-snapshot thread is in flight."""
+
+    start_ms: int
+    end_ms: int
+    klines: pl.DataFrame
+    kline_cache_stats: dict[str, Any]
+    features: pl.DataFrame
+    pipeline_diagnostics: dict[str, Any]
+    rank_lookup: dict[Any, Any]
+    price_by_symbol: dict[str, float]
+    contract_by_symbol: dict[str, Any]
+    all_trades: pl.DataFrame
+    all_orders: pl.DataFrame
+
+
+@dataclass
+class _PrivateSnapshot:
+    """Private REST/WS snapshot (wallet, orders, positions) joined from the
+    background thread, plus the derived live-symbol sets used by the filters."""
+
+    equity_usdt: float
+    wallet_error: str
+    raw_open_orders: list[dict[str, Any]]
+    bybit_open_order_error: str
+    raw_positions: list[dict[str, Any]]
+    bybit_position_error: str
+    live_exit_order_symbols: set[str]
+    live_entry_order_symbols: set[str]
+    live_position_symbols: set[str]
+
+
+def _cycle_start_private_snapshots(
+    ctx: _DemoCycleContext,
+) -> tuple[threading.Thread, dict[str, Any], dict[str, str]]:
+    """Build the private client (if needed) and start the background thread that
+    fetches wallet/positions/orders, overlapping the public klines+features path.
+
+    Returns ``(thread, snapshot_result, snapshot_source)`` for
+    :func:`_cycle_join_private_snapshots`; sets ``ctx.trading_client``. The worker
+    is the only thread that touches the client and the caller joins before first
+    use, so the client is never accessed concurrently."""
+    trading_client = ctx.private_client
+    if trading_client is None and (ctx.demo.submit_orders or (ctx.demo.telegram and _private_credentials_present())):
+        trading_client = _build_private_client(ctx.config)
+    ctx.trading_client = trading_client
+    snapshot_result: dict[str, Any] = {}
+    snapshot_source: dict[str, str] = {}
+
+    def _run_private_snapshots() -> None:
+        try:
+            snap, source = _resolve_private_snapshot(
+                trading_client,
+                ctx.demo,
+                private_state_cache=ctx.private_state_cache,
+                state_cache_stale_seconds=ctx.state_cache_stale_seconds,
+            )
+            snapshot_result.update(snap)
+            snapshot_source["source"] = source
+        except Exception as exc:  # noqa: BLE001 - a cycle must never crash on a dead snapshot thread
+            _logger.exception("private snapshot worker failed: %s", exc)
+            snapshot_result.update(_collect_private_snapshots(None, ctx.demo))
+            snapshot_source["source"] = "rest_after_error"
+
+    thread = threading.Thread(target=_run_private_snapshots, daemon=True)
+    thread.start()
+    return thread, snapshot_result, snapshot_source
+
+
+def _cycle_fetch_and_prepare(
+    ctx: _DemoCycleContext,
+    *,
+    symbols: list[str],
+    universe: pl.DataFrame,
+    tickers: pl.DataFrame,
+) -> _CycleData:
+    """Download the cycle's 1h klines, build features, compute pipeline diagnostics
+    + the rank/price/contract lookups, and read the ledgers. Sets the set-once
+    derived ctx fields (score, scenario, notional targets) and owns the klines /
+    features / signal_prep timing marks (this runs during the snapshot overlap)."""
+    demo = ctx.demo
+    strategy = ctx.strategy
+    start_ms, end_ms = _kline_window(ctx.cycle_now_ms, lookback_days=demo.lookback_days)
+    klines, kline_cache_stats = _download_recent_1h_klines(
+        symbols,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        config=ctx.config,
+        workers=demo.workers,
+        market_client=ctx.public if ctx.market_client is not None else None,
+        cache_root=ctx.root,
+        kline_store=ctx.kline_store,
+    )
+    ctx.mark_stage("klines")
+    features = _build_demo_features(klines, universe, cache_root=ctx.root)
+    ctx.mark_stage("features")
+    score_name, score_col = _event_score(strategy.event_types[0])
+    scenario = _selected_scenario(strategy)
+    ctx.score_name, ctx.score_col, ctx.scenario = score_name, score_col, scenario
+    pipeline_diagnostics = _compute_pipeline_diagnostics(
+        features, strategy=strategy, scenario=scenario, score_col=score_col,
+    )
+    _maybe_warn_universe_coverage_gap(pipeline_diagnostics, strategy=strategy)
+    ctx.order_notional_pct_equity = target_order_notional_pct_equity(demo, strategy)
+    ctx.order_initial_margin_pct_equity = target_initial_margin_pct_equity(demo, strategy)
+    rank_lookup = _rank_lookup_cache(features, config=strategy).get(score_col, {})
+    price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, klines)
+    contract_by_symbol = _contract_lookup(universe)
+    all_trades = read_dataset(ctx.root, "event_demo_trades")
+    all_orders = read_dataset(ctx.root, "event_demo_orders")
+    ctx.mark_stage("signal_prep")
+    return _CycleData(
+        start_ms=start_ms,
+        end_ms=end_ms,
+        klines=klines,
+        kline_cache_stats=kline_cache_stats,
+        features=features,
+        pipeline_diagnostics=pipeline_diagnostics,
+        rank_lookup=rank_lookup,
+        price_by_symbol=price_by_symbol,
+        contract_by_symbol=contract_by_symbol,
+        all_trades=all_trades,
+        all_orders=all_orders,
+    )
+
+
+def _cycle_join_private_snapshots(
+    thread: threading.Thread, snapshot_result: dict[str, Any]
+) -> _PrivateSnapshot:
+    """Join the background snapshot thread and unpack its result into the typed
+    snapshot + the derived live-symbol sets the entry/exit filters consume."""
+    thread.join()
+    raw_open_orders = snapshot_result["raw_open_orders"]
+    raw_positions = snapshot_result["raw_positions"]
+    return _PrivateSnapshot(
+        equity_usdt=snapshot_result["equity_usdt"],
+        wallet_error=snapshot_result["wallet_error"],
+        raw_open_orders=raw_open_orders,
+        bybit_open_order_error=snapshot_result["open_order_error"],
+        raw_positions=raw_positions,
+        bybit_position_error=snapshot_result["position_error"],
+        live_exit_order_symbols=_live_open_order_symbols(raw_open_orders, reduce_only=True),
+        live_entry_order_symbols=_live_open_order_symbols(raw_open_orders, reduce_only=False),
+        live_position_symbols=set(_active_position_by_symbol(raw_positions)),
+    )
+
+
 def run_event_demo_cycle(
     data_root: str | Path,
     *,
@@ -185,32 +651,38 @@ def run_event_demo_cycle(
     ticker_cache: Any | None = None,
     state_cache_stale_seconds: float = 120.0,
 ) -> dict[str, Any]:
-    demo = demo_config or EventDemoCycleConfig()
-    strategy = _demo_event_config(event_config or VolumeEventResearchConfig(), profile=demo.strategy_profile)
-    if demo.max_active_symbols > 0:
-        strategy = replace(strategy, max_active_symbols=demo.max_active_symbols)
-    strategy_id = _demo_strategy_id(demo.strategy_profile)
-    _validate_event_config(strategy)
-    _validate_demo_config(demo)
-    root = Path(data_root).expanduser()
-    root.mkdir(parents=True, exist_ok=True)
-    report_dir = root / "reports" / demo.data_name
-    report_dir.mkdir(parents=True, exist_ok=True)
-    cycle_now_ms = now_ms if now_ms is not None else _utc_now_ms()
-    cycle_id = f"{_yyyymmddhhmmss(cycle_now_ms)}-{int(time.time_ns())}"
-    cycle_perf_start = time.perf_counter()
-    stage_perf_start = cycle_perf_start
-    stage_timings_ms: dict[str, float] = {}
-
-    def mark_stage(name: str) -> None:
-        nonlocal stage_perf_start
-        now = time.perf_counter()
-        stage_timings_ms[f"timing_{name}_ms"] = round((now - stage_perf_start) * 1000.0, 3)
-        stage_perf_start = now
+    ctx = _begin_demo_cycle(
+        data_root,
+        config=config,
+        event_config=event_config,
+        demo_config=demo_config,
+        market_client=market_client,
+        private_client=private_client,
+        now_ms=now_ms,
+        execution_event_router=execution_event_router,
+        kline_store=kline_store,
+        private_state_cache=private_state_cache,
+        ticker_cache=ticker_cache,
+        state_cache_stale_seconds=state_cache_stale_seconds,
+    )
+    # Local aliases keep the (still-inline) cycle body working unchanged while
+    # stages are progressively extracted onto the context. Each alias IS the
+    # corresponding ctx field, so the body reads/writes them exactly as before.
+    demo = ctx.demo
+    strategy = ctx.strategy
+    strategy_id = ctx.strategy_id
+    root = ctx.root
+    report_dir = ctx.report_dir
+    cycle_now_ms = ctx.cycle_now_ms
+    cycle_id = ctx.cycle_id
+    cycle_perf_start = ctx.cycle_perf_start
+    stage_timings_ms = ctx.stage_timings_ms
+    mark_stage = ctx.mark_stage
 
     with exclusive_file_lock(root / ".locks" / "event_demo_ledger.lock", stale_seconds=900):
         mark_stage("cycle_lock_wait")
         public = market_client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
+        ctx.public = public
         universe, symbols, tickers, ticker_source = _resolve_cycle_universe(
             public=public,
             demo=demo,
@@ -222,84 +694,44 @@ def run_event_demo_cycle(
         )
         mark_stage("universe")
 
-        # The private REST snapshots (wallet equity, open orders, positions) are
-        # independent of the public klines/features path, so we fetch them on a
-        # background thread that overlaps it. _build_private_client does no
-        # network in __init__; the worker is the only thread that touches the
-        # client, and the main thread joins before its first use below, so the
-        # client is never accessed concurrently. timing_private_snapshots_ms
-        # then measures only the residual wait left after the overlap.
-        trading_client = private_client
-        if trading_client is None and (demo.submit_orders or (demo.telegram and _private_credentials_present())):
-            trading_client = _build_private_client(config)
-        snapshot_result: dict[str, Any] = {}
+        # Private REST snapshots (wallet/orders/positions) overlap the public
+        # klines+features path on a background thread; the join below waits only
+        # for the residual after the overlap.
+        snapshot_thread, snapshot_result, private_snapshot_source = _cycle_start_private_snapshots(ctx)
 
-        private_snapshot_source: dict[str, str] = {}
-
-        def _run_private_snapshots() -> None:
-            try:
-                snap, source = _resolve_private_snapshot(
-                    trading_client,
-                    demo,
-                    private_state_cache=private_state_cache,
-                    state_cache_stale_seconds=state_cache_stale_seconds,
-                )
-                snapshot_result.update(snap)
-                private_snapshot_source["source"] = source
-            except Exception as exc:  # noqa: BLE001 - a cycle must never crash on a dead snapshot thread
-                _logger.exception("private snapshot worker failed: %s", exc)
-                snapshot_result.update(_collect_private_snapshots(None, demo))
-                private_snapshot_source["source"] = "rest_after_error"
-
-        snapshot_thread = threading.Thread(target=_run_private_snapshots, daemon=True)
-        snapshot_thread.start()
-
-        start_ms, end_ms = _kline_window(cycle_now_ms, lookback_days=demo.lookback_days)
-        klines, kline_cache_stats = _download_recent_1h_klines(
-            symbols,
-            start_ms=start_ms,
-            end_ms=end_ms,
-            config=config,
-            workers=demo.workers,
-            market_client=public if market_client is not None else None,
-            cache_root=root,
-            kline_store=kline_store,
-        )
-        mark_stage("klines")
-        features = _build_demo_features(klines, universe, cache_root=root)
-        mark_stage("features")
-        score_name, score_col = _event_score(strategy.event_types[0])
-        scenario = _selected_scenario(strategy)
-        pipeline_diagnostics = _compute_pipeline_diagnostics(
-            features, strategy=strategy, scenario=scenario, score_col=score_col,
-        )
-        _maybe_warn_universe_coverage_gap(pipeline_diagnostics, strategy=strategy)
-        order_notional_pct_equity = target_order_notional_pct_equity(demo, strategy)
-        order_initial_margin_pct_equity = target_initial_margin_pct_equity(demo, strategy)
-        rank_lookup = _rank_lookup_cache(features, config=strategy).get(score_col, {})
-        price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, klines)
-        contract_by_symbol = _contract_lookup(universe)
-        all_trades = read_dataset(root, "event_demo_trades")
-        all_orders = read_dataset(root, "event_demo_orders")
-        # Ledger rows produced during the cycle are accumulated and flushed once
-        # at the end. The cycle reads the ledgers only here and then operates on
-        # the in-memory all_trades/all_orders, so each step's own disk write was
-        # a redundant full read-modify-write. The preflight entry-order write
-        # stays immediate -- it is the crash-durability anchor before place_order.
+        data = _cycle_fetch_and_prepare(ctx, symbols=symbols, universe=universe, tickers=tickers)
+        start_ms = data.start_ms
+        end_ms = data.end_ms
+        klines = data.klines
+        kline_cache_stats = data.kline_cache_stats
+        features = data.features
+        pipeline_diagnostics = data.pipeline_diagnostics
+        rank_lookup = data.rank_lookup
+        price_by_symbol = data.price_by_symbol
+        contract_by_symbol = data.contract_by_symbol
+        all_trades = data.all_trades
+        all_orders = data.all_orders
+        # Ledger rows produced during the cycle are accumulated and flushed once at
+        # the end (the cycle operates on the in-memory all_trades/all_orders). The
+        # preflight entry-order write stays immediate — the crash-durability anchor.
         cycle_trade_rows: list[dict[str, Any]] = []
         cycle_order_rows: list[dict[str, Any]] = []
-        mark_stage("signal_prep")
+        order_notional_pct_equity = ctx.order_notional_pct_equity
+        order_initial_margin_pct_equity = ctx.order_initial_margin_pct_equity
+        scenario = ctx.scenario
+        score_name = ctx.score_name
 
-        snapshot_thread.join()
-        equity_usdt = snapshot_result["equity_usdt"]
-        wallet_error = snapshot_result["wallet_error"]
-        raw_open_orders = snapshot_result["raw_open_orders"]
-        bybit_open_order_error = snapshot_result["open_order_error"]
-        raw_positions = snapshot_result["raw_positions"]
-        bybit_position_error = snapshot_result["position_error"]
-        live_exit_order_symbols = _live_open_order_symbols(raw_open_orders, reduce_only=True)
-        live_entry_order_symbols = _live_open_order_symbols(raw_open_orders, reduce_only=False)
-        live_position_symbols = set(_active_position_by_symbol(raw_positions))
+        snapshot = _cycle_join_private_snapshots(snapshot_thread, snapshot_result)
+        trading_client = ctx.trading_client
+        equity_usdt = snapshot.equity_usdt
+        wallet_error = snapshot.wallet_error
+        raw_open_orders = snapshot.raw_open_orders
+        bybit_open_order_error = snapshot.bybit_open_order_error
+        raw_positions = snapshot.raw_positions
+        bybit_position_error = snapshot.bybit_position_error
+        live_exit_order_symbols = snapshot.live_exit_order_symbols
+        live_entry_order_symbols = snapshot.live_entry_order_symbols
+        live_position_symbols = snapshot.live_position_symbols
         mark_stage("private_snapshots")
 
         pending_fill_trades, pending_fill_orders = _reconcile_pending_order_fills(
@@ -336,59 +768,6 @@ def run_event_demo_cycle(
             cycle_trade_rows.extend(reconcile_rows)
         mark_stage("open_trade_reconcile")
 
-        # Held positions that have rotated or delisted OUT of the universe are
-        # absent from `symbols`, so `klines` lacks their bars and the cycle-owned
-        # exits (failed_fade/ff6, rank, event_decay) would silently no-op until
-        # max_hold — the discretionary loss-cut unavailable on exactly the worst
-        # names (BUG-4/6). Fetch their klines separately and merge for the EXIT
-        # planner ONLY; never feed them into `features`/`klines` used for ranks &
-        # entries — the entry cross-section must stay scoped to the universe or
-        # every coin's liquidity rank would shift.
-        exit_klines = klines
-        exit_price_by_symbol = price_by_symbol
-        held_evicted = [
-            s
-            for s in (
-                _open_trades(reconciled_trades)["symbol"].unique().to_list()
-                if not reconciled_trades.is_empty()
-                else []
-            )
-            if s not in set(symbols)
-        ]
-        if held_evicted:
-            held_klines, _held_stats = _download_recent_1h_klines(
-                held_evicted,
-                start_ms=start_ms,
-                end_ms=end_ms,
-                config=config,
-                workers=demo.workers,
-                market_client=public if market_client is not None else None,
-                cache_root=root,
-                kline_store=kline_store,
-            )
-            if not held_klines.is_empty():
-                exit_klines = _concat_recent_klines(klines, held_klines)
-                exit_price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, exit_klines)
-
-        exits = plan_demo_exits(
-            reconciled_trades,
-            rank_lookup=rank_lookup,
-            klines=exit_klines,
-            price_by_symbol=exit_price_by_symbol,
-            now_ms=cycle_now_ms,
-            config=strategy,
-            scenario=scenario,
-        )
-        exits, pending_exit_skips = _filter_pending_exit_orders(exits, all_orders, now_ms=cycle_now_ms)
-        # See entry-side rationale below: dry-run (paper) shares the demo's
-        # Bybit account so live_exit_order_symbols would include DEMO's open
-        # exit orders -- if paper skipped its own exits when demo had a live
-        # exit order on the same symbol, paper's exit decisions would silently
-        # cascade off demo's actions instead of running independently.
-        if demo.submit_orders:
-            exits, live_open_exit_skips = _filter_live_open_exit_orders(exits, live_exit_order_symbols)
-        else:
-            live_open_exit_skips = 0
         # Shared preflight callback used by BOTH exits and entries: a row is
         # flushed to the orders parquet BEFORE place_order so a crash between
         # submission and the cycle's end-of-cycle ledger flush still leaves the
@@ -399,14 +778,20 @@ def run_event_demo_cycle(
             preflight_callback: Callable[[dict[str, Any]], None] | None = _record_preflight_order
         else:
             preflight_callback = None
-        executed_exits, exit_order_rows = _execute_exits(
-            exits,
-            all_trades,
-            trading_client=trading_client,
-            demo=demo,
-            now_ms=cycle_now_ms,
-            execution_event_router=execution_event_router,
-            record_preflight=preflight_callback,
+        exits, executed_exits, exit_order_rows, pending_exit_skips, live_open_exit_skips = _cycle_plan_and_execute_exits(
+            ctx,
+            reconciled_trades=reconciled_trades,
+            all_trades=all_trades,
+            all_orders=all_orders,
+            klines=klines,
+            rank_lookup=rank_lookup,
+            price_by_symbol=price_by_symbol,
+            symbols=symbols,
+            tickers=tickers,
+            start_ms=start_ms,
+            end_ms=end_ms,
+            live_exit_order_symbols=live_exit_order_symbols,
+            preflight_callback=preflight_callback,
         )
         if executed_exits:
             all_trades = _upsert_rows(all_trades, executed_exits, key="trade_id")
@@ -418,99 +803,43 @@ def run_event_demo_cycle(
                 cycle_order_rows.extend(exit_order_rows)
         mark_stage("exits")
 
-        refreshed_open = _open_trades(all_trades)
-        position_snapshot_error = _combine_errors(reconcile_position_error, bybit_position_error)
-        stale_entry_order_rows: list[dict[str, Any]] = []
-        if demo.submit_orders and not position_snapshot_error and not bybit_open_order_error:
-            stale_entry_order_rows = _terminalize_stale_pending_entry_orders(
-                all_orders,
-                live_position_symbols=live_position_symbols,
-                live_open_entry_order_symbols=live_entry_order_symbols,
-                now_ms=cycle_now_ms,
-            )
-            if stale_entry_order_rows:
-                all_orders = _upsert_rows(all_orders, stale_entry_order_rows, key="order_link_id")
-                cycle_order_rows.extend(stale_entry_order_rows)
-        entry_candidates, skip_counts = select_demo_entry_candidates(
-            features,
-            all_trades,
-            now_ms=cycle_now_ms,
-            config=strategy,
-            scenario=scenario,
-            max_entry_lag_minutes=demo.max_entry_lag_minutes,
-            max_new_entries=demo.max_new_entries_per_cycle,
+        entry_result = _cycle_select_and_execute_entries(
+            ctx,
+            features=features,
+            all_trades=all_trades,
+            all_orders=all_orders,
             klines=klines,
-        )
-        free_slots = max(int(strategy.max_active_symbols) - refreshed_open.height, 0)
-        entry_candidates = entry_candidates[:free_slots]
-        entry_candidates, pending_entry_skips = _filter_pending_entry_orders(entry_candidates, all_orders, now_ms=cycle_now_ms)
-        snapshot_error_entry_skips = 0
-        open_order_error_entry_skips = 0
-        wallet_error_entry_skips = 0
-        live_position_entry_skips = 0
-        live_open_entry_skips = 0
-        if position_snapshot_error and demo.submit_orders:
-            snapshot_error_entry_skips = len(entry_candidates)
-            entry_candidates = []
-        elif bybit_open_order_error and demo.submit_orders:
-            open_order_error_entry_skips = len(entry_candidates)
-            entry_candidates = []
-        elif wallet_error and demo.submit_orders:
-            wallet_error_entry_skips = len(entry_candidates)
-            entry_candidates = []
-        elif demo.submit_orders:
-            # Bybit-live-state filters apply only when actually submitting.
-            # Dry-run (paper) shadows demo with idealized fills and shares the
-            # SAME Bybit demo account, so its get_positions / get_open_orders
-            # snapshot would return DEMO's positions and orders -- not paper's.
-            # Filtering paper's candidates against demo's live state would
-            # cascade divergence (each demo entry suppresses the matching
-            # paper candidate, making paper miss trades it should record).
-            # Paper relies on its own ledger via _filter_pending_entry_orders
-            # above for the "already in flight" check.
-            entry_candidates, live_position_entry_skips = _filter_live_position_entry_orders(
-                entry_candidates,
-                live_position_symbols,
-            )
-            entry_candidates, live_open_entry_skips = _filter_live_open_entry_orders(
-                entry_candidates,
-                live_entry_order_symbols,
-            )
-        # When live-submitting orders, fan candidates out across a small worker
-        # pool: each worker owns its own private REST client so the place_order
-        # + fill-poll roundtrip pipelines across candidates instead of running
-        # strictly serially. Each worker shares the same shared private rate
-        # limiter so the process as a whole still stays under Bybit's
-        # per-account REST budget.
-        private_factory: Callable[[], Any] | None
-        if demo.submit_orders and demo.max_concurrent_entries > 1 and len(entry_candidates) > 1:
-            shared_private_limiter = BybitRestRateLimiter(
-                max_requests=_demo_private_rest_rate_limit_per_second(),
-                per_seconds=1.0,
-            )
-            def _build_worker_private_client() -> BybitPrivateClient:
-                client = _build_private_client(config)
-                client.rate_limiter = shared_private_limiter
-                return client
-            private_factory = _build_worker_private_client
-            entries_parallel_workers = min(demo.max_concurrent_entries, len(entry_candidates))
-        else:
-            private_factory = None
-            entries_parallel_workers = 1
-        executed_entries, entry_order_rows = _execute_entries(
-            entry_candidates,
-            trading_client=trading_client,
-            demo=demo,
             equity_usdt=equity_usdt,
-            order_notional_pct_equity=order_notional_pct_equity,
             price_by_symbol=price_by_symbol,
             contract_by_symbol=contract_by_symbol,
-            now_ms=cycle_now_ms,
-            strategy_id=strategy_id,
-            record_preflight=preflight_callback,
-            private_client_factory=private_factory,
-            execution_event_router=execution_event_router,
+            live_position_symbols=live_position_symbols,
+            live_entry_order_symbols=live_entry_order_symbols,
+            wallet_error=wallet_error,
+            bybit_open_order_error=bybit_open_order_error,
+            reconcile_position_error=reconcile_position_error,
+            bybit_position_error=bybit_position_error,
+            preflight_callback=preflight_callback,
         )
+        refreshed_open = entry_result.refreshed_open
+        position_snapshot_error = entry_result.position_snapshot_error
+        stale_entry_order_rows = entry_result.stale_entry_order_rows
+        entry_candidates = entry_result.entry_candidates
+        skip_counts = entry_result.skip_counts
+        pending_entry_skips = entry_result.pending_entry_skips
+        snapshot_error_entry_skips = entry_result.snapshot_error_entry_skips
+        open_order_error_entry_skips = entry_result.open_order_error_entry_skips
+        wallet_error_entry_skips = entry_result.wallet_error_entry_skips
+        live_position_entry_skips = entry_result.live_position_entry_skips
+        live_open_entry_skips = entry_result.live_open_entry_skips
+        entries_parallel_workers = entry_result.entries_parallel_workers
+        executed_entries = entry_result.executed_entries
+        entry_order_rows = entry_result.entry_order_rows
+        # Apply the stage's ledger effects: the stale-entry terminalization (always
+        # recorded) then the executed entries + their order rows (recorded only
+        # when submitting or recording dry-run). Order matches the pre-refactor flow.
+        if stale_entry_order_rows:
+            all_orders = _upsert_rows(all_orders, stale_entry_order_rows, key="order_link_id")
+            cycle_order_rows.extend(stale_entry_order_rows)
         if executed_entries:
             all_trades = _upsert_rows(all_trades, executed_entries, key="trade_id")
             if demo.submit_orders or demo.record_dry_run:

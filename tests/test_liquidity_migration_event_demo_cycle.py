@@ -145,6 +145,46 @@ def test_event_demo_cycle_skips_entry_when_live_position_exists(tmp_path: Path, 
     assert read_dataset(tmp_path, "event_demo_orders").is_empty()
 
 
+def test_event_demo_cycle_telemetry_row_has_stable_schema(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lock the cycle-telemetry contract: operator dashboards and the
+    check_demo_* watchdogs read these cycle_row fields by name, so the (still
+    inline) finalize assembly must keep emitting them. Guards the cycle-context
+    refactor — and any future edit to the payload assembly — against silently
+    dropping a field. Dynamic skip_counts keys and timing_* fields are excluded."""
+    now_ms = 1_700_000_060_000
+    _patch_minimal_event_cycle(monkeypatch, {"symbol": "AAAUSDT"})
+    monkeypatch.setattr(
+        "liquidity_migration.event_demo.select_demo_entry_candidates",
+        lambda *args, **kwargs: ([], {}),
+    )
+    payload = run_event_demo_cycle(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        market_client=MinimalEventMarket(),
+        private_client=FakeRiskClient(),
+        now_ms=now_ms,
+    )
+    row = payload["cycle"]
+    essential = {
+        "cycle_id", "ts_ms", "mode", "strategy_id", "strategy_profile", "symbols",
+        "kline_rows", "kline_store_max_ts_ms", "ticker_source", "private_snapshot_source",
+        "feature_rows", "latest_feature_ts_ms", "events_pipeline", "universe_coverage",
+        "entry_candidates", "entries_executed", "exit_candidates", "exits_executed",
+        "pending_order_fill_errors", "stale_pending_entry_orders_terminalized",
+        "open_trades_before", "open_trades_after", "equity_usdt",
+        "bybit_positions", "bybit_open_orders", "bybit_entry_open_orders", "bybit_exit_open_orders",
+        "ledger_positions", "position_report_error", "telegram_sent",
+        "skipped_pending_entry_order", "skipped_position_snapshot_error",
+        "cycle_elapsed_ms", "timing_persist_ms",
+    }
+    missing = essential - set(row)
+    assert not missing, f"cycle telemetry dropped fields: {sorted(missing)}"
+    assert {"cycle", "config", "strategy", "entries", "exits", "bybit_positions", "report_dir"} <= set(payload)
+
+
 def test_event_demo_cycle_skips_entry_when_live_position_in_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
