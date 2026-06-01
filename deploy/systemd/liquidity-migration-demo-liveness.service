@@ -1,0 +1,23 @@
+[Unit]
+Description=liquidity-migration fast liveness + position-safety watchdog
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/liquidity-migration
+EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+# Alerts on daemon-down/hung, an UNPROTECTED open position (no/wrong venue
+# stopLoss), ledger<->venue mismatch, WS feed stall, and exchange errors so the
+# operator can manually close. Exits 0 always (a watchdog must never crash-loop).
+ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/check_demo_liveness.py \
+    --data-root /opt/liquidity-migration/data/bybit-demo-event \
+    --max-cycle-age-min 10 \
+    --cooldown-min 30 \
+    --telegram
+SuccessExitStatus=0
+StandardOutput=journal
+StandardError=journal

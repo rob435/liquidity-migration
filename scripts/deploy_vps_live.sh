@@ -123,6 +123,7 @@ systemctl enable liquidity-migration-bybit-long-paper.service
 # book Telegram report would sit dormant until someone ran systemctl by hand.
 # --now schedules them immediately; subsequent deploys are idempotent.
 systemctl enable --now liquidity-migration-demo-health.timer
+systemctl enable --now liquidity-migration-demo-liveness.timer
 systemctl enable --now liquidity-migration-combined-book-report.timer
 systemctl restart liquidity-migration-bybit-demo.service
 systemctl restart liquidity-migration-bybit-risk.service
@@ -152,8 +153,10 @@ systemctl is-enabled --quiet liquidity-migration-bybit-long-paper.service
 # catches "we enabled it but something stopped it." Both are fail-loud here
 # so deploys can't silently leave the watchdog or daily report off.
 systemctl is-enabled --quiet liquidity-migration-demo-health.timer
+systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer
 systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer
 systemctl is-active --quiet liquidity-migration-demo-health.timer
+systemctl is-active --quiet liquidity-migration-demo-liveness.timer
 systemctl is-active --quiet liquidity-migration-combined-book-report.timer
 
 for legacy_unit in \

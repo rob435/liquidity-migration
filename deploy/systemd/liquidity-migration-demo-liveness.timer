@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the liquidity-migration liveness + position-safety watchdog every 3 minutes
+
+[Timer]
+# Fast cadence: a down daemon / unprotected position must surface in minutes,
+# not the hourly entry-health window. First run shortly after boot, then every
+# 3 minutes regardless of how long the previous run took.
+OnBootSec=2min
+OnUnitActiveSec=3min
+AccuracySec=15s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

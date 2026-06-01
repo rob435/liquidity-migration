@@ -122,6 +122,54 @@ class EventRiskCycleConfig:
     stop_tolerance_bps: float = 1.0
 
 
+def _resolve_cycle_universe(
+    *,
+    public: Any,
+    demo: EventDemoCycleConfig,
+    config: ResearchConfig,
+    root: Path,
+    cycle_now_ms: int,
+    ticker_cache: Any | None,
+    state_cache_stale_seconds: float,
+) -> tuple[pl.DataFrame, list[str], pl.DataFrame, str]:
+    """Resolve the per-cycle trading universe from fresh instruments x tickers.
+
+    Returns ``(universe, symbols, tickers, ticker_source)``. Rebuilt every cycle
+    so new listings enter and delistings leave within the instruments TTL. The
+    shrink guard retries ONCE with a forced-fresh fetch when the universe
+    collapses below ``_universe_shrink_floor`` — a partial Bybit ticker response
+    (the 2026-05-24 signal-blackout incident). Raises if no tradable symbol
+    survives the filters. Extracted from ``run_event_demo_cycle`` (the "universe"
+    stage) to shrink that function and make the shrink guard independently testable."""
+    instruments = _demo_instruments(public, cache_root=root, now_ms=cycle_now_ms)
+    raw_tickers, ticker_source = _resolve_ticker_snapshot(
+        public, ticker_cache=ticker_cache, state_cache_stale_seconds=state_cache_stale_seconds,
+    )
+    tickers = _normalize_tickers(raw_tickers)
+    universe = _build_demo_universe(instruments, tickers, config=demo, snapshot_ts_ms=cycle_now_ms)
+    shrink_floor = _universe_shrink_floor(demo)
+    if universe.height < shrink_floor:
+        _logger.warning(
+            "universe shrink detected: got %d symbols (floor %d); busting instruments cache and retrying",
+            universe.height, shrink_floor,
+        )
+        _bust_demo_instruments_cache(root)
+        instruments = _demo_instruments(public, cache_root=root, now_ms=cycle_now_ms)
+        # Forced-fresh REST in case the cache itself is producing the shrunk view.
+        tickers = _normalize_tickers(public.get_tickers())
+        universe = _build_demo_universe(instruments, tickers, config=demo, snapshot_ts_ms=cycle_now_ms)
+        if universe.height < shrink_floor:
+            _logger.error(
+                "universe shrink PERSISTS after cache bust: %d symbols (floor %d, instruments=%d, tickers=%d). "
+                "Likely a partial Bybit ticker response — strategy cannot fire signals at this universe size.",
+                universe.height, shrink_floor, instruments.height, tickers.height,
+            )
+    symbols = universe["symbol"].to_list() if not universe.is_empty() else []
+    if not symbols:
+        raise RuntimeError("Bybit demo event cycle found no current tradable symbols after universe filters")
+    return universe, symbols, tickers, ticker_source
+
+
 def run_event_demo_cycle(
     data_root: str | Path,
     *,
@@ -163,42 +211,15 @@ def run_event_demo_cycle(
     with exclusive_file_lock(root / ".locks" / "event_demo_ledger.lock", stale_seconds=900):
         mark_stage("cycle_lock_wait")
         public = market_client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
-        instruments = _demo_instruments(public, cache_root=root, now_ms=cycle_now_ms)
-        raw_tickers, ticker_source = _resolve_ticker_snapshot(
-            public,
+        universe, symbols, tickers, ticker_source = _resolve_cycle_universe(
+            public=public,
+            demo=demo,
+            config=config,
+            root=root,
+            cycle_now_ms=cycle_now_ms,
             ticker_cache=ticker_cache,
             state_cache_stale_seconds=state_cache_stale_seconds,
         )
-        tickers = _normalize_tickers(raw_tickers)
-        universe = _build_demo_universe(instruments, tickers, config=demo, snapshot_ts_ms=cycle_now_ms)
-        # Defensive: if universe came back materially smaller than requested
-        # (e.g. stale instruments cache served pre-listing-day data, or Bybit
-        # ticker API returned partial response near UTC midnight), bust the
-        # instruments cache and try once more with a forced fresh fetch.
-        # Found 2026-05-24: cycles between 00:00-04:00 UTC silently produced
-        # ~168 symbols vs requested 400 for days, hiding every signal because
-        # the strategy needs rank_end=300 at minimum to observe rocket signals.
-        shrink_floor = _universe_shrink_floor(demo)
-        if universe.height < shrink_floor:
-            _logger.warning(
-                "universe shrink detected: got %d symbols (floor %d); busting instruments cache and retrying",
-                universe.height, shrink_floor,
-            )
-            _bust_demo_instruments_cache(root)
-            instruments = _demo_instruments(public, cache_root=root, now_ms=cycle_now_ms)
-            # Universe shrink retry always uses fresh REST — bypass the cache
-            # in case the cache itself is stale and producing the shrunk view.
-            tickers = _normalize_tickers(public.get_tickers())
-            universe = _build_demo_universe(instruments, tickers, config=demo, snapshot_ts_ms=cycle_now_ms)
-            if universe.height < shrink_floor:
-                _logger.error(
-                    "universe shrink PERSISTS after cache bust: %d symbols (floor %d, instruments=%d, tickers=%d). "
-                    "Likely a partial Bybit ticker response — strategy cannot fire signals at this universe size.",
-                    universe.height, shrink_floor, instruments.height, tickers.height,
-                )
-        symbols = universe["symbol"].to_list() if not universe.is_empty() else []
-        if not symbols:
-            raise RuntimeError("Bybit demo event cycle found no current tradable symbols after universe filters")
         mark_stage("universe")
 
         # The private REST snapshots (wallet equity, open orders, positions) are

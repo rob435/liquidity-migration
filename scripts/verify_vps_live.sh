@@ -77,8 +77,10 @@ systemctl is-enabled --quiet liquidity-migration-bybit-long-paper.service
 # (or someone manually disabled) the demo-health watchdog or daily
 # combined-book report. Both fail loud if missing.
 systemctl is-enabled --quiet liquidity-migration-demo-health.timer
+systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer
 systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer
 systemctl is-active --quiet liquidity-migration-demo-health.timer
+systemctl is-active --quiet liquidity-migration-demo-liveness.timer
 systemctl is-active --quiet liquidity-migration-combined-book-report.timer
 
 for legacy_unit in \

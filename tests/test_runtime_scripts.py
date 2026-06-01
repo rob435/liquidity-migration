@@ -451,10 +451,13 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     # actually schedule them. Pin both timers so a deploy can't silently leave
     # the demo-health watchdog or daily combined-book report inactive.
     assert "systemctl enable --now liquidity-migration-demo-health.timer" in text
+    assert "systemctl enable --now liquidity-migration-demo-liveness.timer" in text
     assert "systemctl enable --now liquidity-migration-combined-book-report.timer" in text
     assert "systemctl is-enabled --quiet liquidity-migration-demo-health.timer" in text
+    assert "systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer" in text
     assert "systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-demo-health.timer" in text
+    assert "systemctl is-active --quiet liquidity-migration-demo-liveness.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-combined-book-report.timer" in text
     assert "Environment=STRATEGY_PROFILE=promoted" in text
     assert "Environment=INTERVAL_SECONDS=60" in text
@@ -538,8 +541,10 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     # Read-only verify must catch a missing-timer regression that the deploy
     # script would have caused — parity check, no-write semantics.
     assert "systemctl is-enabled --quiet liquidity-migration-demo-health.timer" in text
+    assert "systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer" in text
     assert "systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-demo-health.timer" in text
+    assert "systemctl is-active --quiet liquidity-migration-demo-liveness.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-combined-book-report.timer" in text
     assert "verify-ok commit=" in text
     assert "--property=Environment" not in text
