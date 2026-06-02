@@ -7,6 +7,7 @@ behave exactly like the legacy short-only engine.
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import polars as pl
@@ -299,3 +300,121 @@ def test_combined_read_handles_missing_long_dataset(tmp_path: Path) -> None:
     combined = engine._read_trades_combined()
     assert combined.height == 1
     assert combined["sleeve"].to_list() == ["short"]
+
+
+def test_corrupt_sibling_ledger_is_isolated_not_fatal(tmp_path: Path) -> None:
+    """A single SCHEMA-incompatible sibling ledger (a scalar column written as a
+    list) must NOT abort reconcile for all three sleeves. The combined read folds
+    pairwise, drops the bad frame, and still returns the healthy short rows -- and
+    sets ledger_read_error so exit/adopt fail closed (independence: a fault in one
+    sleeve cannot corrupt another)."""
+    short_root = tmp_path / "short"
+    cont_root = tmp_path / "cont"
+    short_root.mkdir()
+    cont_root.mkdir()
+    write_dataset(
+        pl.DataFrame([{"trade_id": "s1", "symbol": "AAAUSDT", "status": "open", "qty": 1.0}]),
+        short_root, "event_demo_trades", partition_by=(),
+    )
+    # `qty` written as a List (nested vs the short sleeve's scalar f64) -> a plain
+    # diagonal_relaxed concat raises SchemaError; a String would coerce and not
+    # reproduce the cross-sleeve crash.
+    write_dataset(
+        pl.DataFrame({"trade_id": ["c1"], "symbol": ["ZZZUSDT"], "status": ["open"], "qty": [[1, 2, 3]]}),
+        cont_root, "continuous_fade_demo_trades", partition_by=(),
+    )
+    cfg = EventWebSocketRiskConfig(continuous_data_root=str(cont_root))
+    engine = EventWebSocketRiskEngine(short_root, config=ResearchConfig(), risk_config=cfg)
+    combined = engine._read_trades_combined()  # must NOT raise
+    assert "s1" in combined["trade_id"].to_list(), "healthy short sleeve must survive a corrupt sibling"
+    assert engine.state.ledger_read_error, "a dropped corrupt sibling must flag fail-closed"
+
+
+def test_raised_sibling_read_records_ledger_read_error(tmp_path: Path, monkeypatch) -> None:
+    """A RAISED sibling-ledger read (torn parquet / I/O error) must not silently
+    drop that sleeve: the read fails open for THIS frame but records
+    ledger_read_error so exit_untracked / adopt fail closed for the pass."""
+    short_root = tmp_path / "short"
+    cont_root = tmp_path / "cont"
+    short_root.mkdir()
+    cont_root.mkdir()
+    write_dataset(
+        pl.DataFrame([{"trade_id": "s1", "symbol": "AAAUSDT", "status": "open", "qty": 1.0}]),
+        short_root, "event_demo_trades", partition_by=(),
+    )
+    import liquidity_migration.ws_risk as wsr
+
+    real_read = wsr.read_dataset
+
+    def fake_read(root, dataset, **kwargs):
+        if Path(root) == cont_root:
+            raise RuntimeError("torn parquet: end of file")
+        return real_read(root, dataset, **kwargs)
+
+    monkeypatch.setattr(wsr, "read_dataset", fake_read)
+    cfg = EventWebSocketRiskConfig(continuous_data_root=str(cont_root))
+    engine = EventWebSocketRiskEngine(short_root, config=ResearchConfig(), risk_config=cfg)
+    combined = engine._read_trades_combined()
+    assert "s1" in combined["trade_id"].to_list()
+    assert "continuous" in engine.state.ledger_read_error
+
+
+def test_missing_sibling_ledger_does_not_flag_read_error(tmp_path: Path) -> None:
+    """A MISSING (registered-but-absent) sibling ledger is normal and must stay
+    fail-open WITHOUT flagging ledger_read_error -- otherwise a fresh deployment
+    would permanently disable the untracked flatten/adopt janitors."""
+    short_root = tmp_path / "short"
+    long_root = tmp_path / "long"
+    short_root.mkdir()
+    long_root.mkdir()
+    write_dataset(
+        pl.DataFrame([{"trade_id": "s1", "symbol": "AAAUSDT", "status": "open", "qty": 1.0}]),
+        short_root, "event_demo_trades", partition_by=(),
+    )
+    cfg = EventWebSocketRiskConfig(long_data_root=str(long_root))
+    engine = EventWebSocketRiskEngine(short_root, config=ResearchConfig(), risk_config=cfg)
+    combined = engine._read_trades_combined()
+    assert combined["trade_id"].to_list() == ["s1"]
+    assert engine.state.ledger_read_error == ""
+
+
+def test_all_sleeve_route_datasets_are_registered(tmp_path: Path) -> None:
+    """Every dataset ws_risk routes a write to MUST be in storage.DATASETS, else
+    the first routed orphan-close write crashes the live reconcile authority
+    (the 'crash on first write' class for a renamed/new ledger)."""
+    from liquidity_migration import storage
+
+    short_root = tmp_path / "short"
+    long_root = tmp_path / "long"
+    cont_root = tmp_path / "cont"
+    for root in (short_root, long_root, cont_root):
+        root.mkdir()
+    cfg = EventWebSocketRiskConfig(long_data_root=str(long_root), continuous_data_root=str(cont_root))
+    engine = EventWebSocketRiskEngine(short_root, config=ResearchConfig(), risk_config=cfg)
+    for trades in (True, False):
+        for _root, dataset in engine._sleeve_routes(trades=trades).values():
+            assert dataset in storage.DATASETS, f"{dataset} not in storage.DATASETS"
+            assert dataset in storage.DATASET_KEYS, f"{dataset} has no dedup key"
+    for name in (cfg.long_trades_dataset, cfg.long_orders_dataset,
+                 cfg.continuous_trades_dataset, cfg.continuous_orders_dataset):
+        assert name in storage.DATASETS, f"config default {name} unregistered"
+
+
+def test_unowned_sleeve_tag_warns_and_counts_as_misroute(tmp_path: Path, caplog) -> None:
+    """A row tagged with a sleeve this engine does NOT own (e.g. 'continuous'
+    when continuous_data_root is unset) is routed to the short ledger as a
+    fallback, but must increment sleeve_misroutes and log a warning rather than
+    silently mis-filing -- a silent misroute would defeat sleeve independence."""
+    short_root = tmp_path / "short"
+    long_root = tmp_path / "long"
+    short_root.mkdir()
+    long_root.mkdir()
+    cfg = EventWebSocketRiskConfig(long_data_root=str(long_root))  # continuous NOT configured
+    engine = EventWebSocketRiskEngine(short_root, config=ResearchConfig(), risk_config=cfg)
+    rows = [{"trade_id": "c1", "sleeve": "continuous", "symbol": "ZZZUSDT", "status": "open", "qty": "1"}]
+    with caplog.at_level(logging.WARNING, logger="liquidity_migration.ws_risk"):
+        engine._write_trade_rows_routed(rows)
+    short_ledger = read_dataset(short_root, "event_demo_trades")
+    assert short_ledger["trade_id"].to_list() == ["c1"], "unowned tag falls back to short"
+    assert engine.state.sleeve_misroutes == 1
+    assert any("not owned" in record.getMessage() for record in caplog.records)

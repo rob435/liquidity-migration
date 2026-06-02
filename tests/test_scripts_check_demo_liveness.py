@@ -147,3 +147,70 @@ def test_gather_alerts_wires_stop_protection_and_unavailable(tmp_path, monkeypat
     keys_b = {a.key for a in M.gather_alerts(data_root=data_root, units=[], now_ms=now, args=args)}
     assert "stop_verify_unavailable" in keys_b
     assert not any(k.startswith("unprotected:") for k in keys_b)
+
+
+def test_gather_long_alerts_covers_cycle_age_and_stop_protection(tmp_path, monkeypatch) -> None:
+    """The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must catch a
+    hung/down cycle (the systemd-failed check can't, under Restart=always) and an unprotected or
+    unverified open position -- previously the long sleeve had NO liveness/stop coverage at all."""
+    import argparse
+
+    import polars as pl
+
+    from liquidity_migration.storage import write_dataset
+
+    now = 1_000 * HOUR
+    args = argparse.Namespace(max_cycle_age_min=10, settle_coin="USDT", max_ws_lag_hours=6)
+    long_root = tmp_path / "bybit-long-demo-event"
+    long_root.mkdir()
+    # Last cycle 60 min ago (threshold 10) -> hung-daemon liveness alert.
+    write_dataset(pl.DataFrame([{"cycle_id": "c1", "ts_ms": now - 60 * MIN}]),
+                  long_root, "long_native_demo_cycles", partition_by=())
+    write_dataset(pl.DataFrame([{"trade_id": "l1", "symbol": "BTCUSDT", "status": "open", "stop_price": 100.0}]),
+                  long_root, "long_native_demo_trades", partition_by=())
+
+    # (a) venue reachable, position has NO server-side stop -> unprotected + hung-cycle caught.
+    monkeypatch.setattr(M, "_venue_positions",
+                        lambda settle_coin="USDT": ({"BTCUSDT": {"size": "1", "stopLoss": ""}}, None))
+    keys_a = {a.key for a in M.gather_long_alerts(long_root=long_root, now_ms=now, args=args)}
+    assert "liveness:bybit-long-demo-event" in keys_a
+    assert "unprotected:BTCUSDT" in keys_a
+
+    # (b) venue probe failed -> long-specific unverified warning, NO false 'protected'.
+    monkeypatch.setattr(M, "_venue_positions", lambda settle_coin="USDT": ({}, "RuntimeError: api down"))
+    keys_b = {a.key for a in M.gather_long_alerts(long_root=long_root, now_ms=now, args=args)}
+    assert "stop_verify_unavailable_long" in keys_b
+    assert not any(k.startswith("unprotected:") for k in keys_b)
+
+
+def test_gather_long_alerts_skips_when_root_absent(tmp_path) -> None:
+    import argparse
+    args = argparse.Namespace(max_cycle_age_min=10, settle_coin="USDT", max_ws_lag_hours=6)
+    assert M.gather_long_alerts(long_root=tmp_path / "absent", now_ms=1_000 * HOUR, args=args) == []
+
+
+def test_gather_continuous_alerts_warns_on_empty_universe_and_unverified_stop(tmp_path, monkeypatch) -> None:
+    """Continuous-sleeve diagnosability: a zero universe / empty kline store is the same
+    silent-zero-signal failure as a stale rmom gate (different upstream cause), and a venue-probe
+    failure must not leave continuous open positions silently unverified."""
+    import argparse
+
+    import polars as pl
+
+    from liquidity_migration.storage import write_dataset
+
+    now = 1_000 * HOUR
+    args = argparse.Namespace(max_cycle_age_min=10, settle_coin="USDT", max_ws_lag_hours=6, max_rmom_stale_days=2.0)
+    root = tmp_path / "bybit-continuous-demo-event"
+    root.mkdir()
+    # Fresh cycle + fresh rmom, but EMPTY universe and EMPTY kline store -> silent-zero-signal.
+    write_dataset(pl.DataFrame([{"cycle_id": "c1", "ts_ms": now, "max_rmom_day_ts": now,
+                                 "universe_symbols": 0, "kline_store_rows": 0}]),
+                  root, "continuous_fade_demo_cycles", partition_by=())
+    write_dataset(pl.DataFrame([{"trade_id": "k1", "symbol": "WIFUSDT", "status": "open", "stop_price": 1.0}]),
+                  root, "continuous_fade_demo_trades", partition_by=())
+    monkeypatch.setattr(M, "_venue_positions", lambda settle_coin="USDT": ({}, "RuntimeError: api down"))
+    keys = {a.key for a in M.gather_continuous_alerts(continuous_root=root, now_ms=now, args=args)}
+    assert "continuous_universe_empty" in keys
+    assert "continuous_kline_store_empty" in keys
+    assert "stop_verify_unavailable_continuous" in keys

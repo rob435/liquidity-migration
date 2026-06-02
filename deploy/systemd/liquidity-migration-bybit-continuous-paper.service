@@ -1,0 +1,54 @@
+[Unit]
+Description=liquidity-migration Bybit continuous-fade paper (dry-run) sleeve
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/liquidity-migration
+EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+Environment=DATA_ROOT=data/bybit-continuous-paper-event
+Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
+# PAPER shadow of the continuous-demo sleeve: NO order submission, idealized fills
+# at the signal price. SUBMIT_ORDERS=0 + RECORD_DRY_RUN=1 + PAPER_MODE=1 routes
+# writes to continuous_fade_paper_* so reconcile-continuous-paper-demo can pair
+# this against the live demo ledger and measure execution slippage. Without
+# PAPER_MODE=1 it would silently write the demo dataset names → reconcile paired=0.
+Environment=SUBMIT_ORDERS=0
+Environment=CONFIRM_DEMO_ORDERS=0
+Environment=RECORD_DRY_RUN=1
+Environment=PAPER_MODE=1
+Environment=TELEGRAM_ENABLED=0
+Environment=INTERVAL_SECONDS=60
+Environment=USE_DAEMON=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=LOOKBACK_DAYS=45
+Environment=WORKERS=2
+# Every knob below MUST match the demo unit so the paper run is a true shadow.
+Environment=MAX_ACTIVE=25
+Environment=MAX_NEW_ENTRIES_PER_CYCLE=5
+Environment=MAX_HOLD_HOURS=48
+Environment=STOP_LOSS_PCT=0.25
+Environment=ENTRY_LEVERAGE=2
+Environment=PER_POSITION_NOTIONAL_PCT_EQUITY=2
+Environment=LIQ_TURNOVER_MIN=500000
+Environment=WS_KLINES_ENABLED=1
+ExecStart=/opt/liquidity-migration/scripts/run_bybit_continuous_demo_event_engine.sh
+Restart=always
+RestartSec=30
+KillMode=control-group
+TimeoutStopSec=180
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/opt/liquidity-migration
+MemoryMax=4G
+
+[Install]
+WantedBy=multi-user.target

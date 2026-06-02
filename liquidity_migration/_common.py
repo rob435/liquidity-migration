@@ -20,6 +20,11 @@ MS_PER_MINUTE = 60_000
 MS_PER_HOUR = 3_600_000
 MS_PER_DAY = 86_400_000
 
+# Order statuses that are still in-flight (not terminal): a pending entry/exit that
+# ws_risk and the sleeves must not double-submit or treat as flat. Single source of
+# truth so the short and long sleeves can't silently drift apart.
+PENDING_ORDER_STATUSES = {"submitted", "submitted_unconfirmed", "partial", "fallback_market"}
+
 
 def finite_float(value: Any, *, default: float | None = None) -> float | None:
     """Coerce `value` to a finite float, returning `default` if missing/invalid."""

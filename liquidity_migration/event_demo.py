@@ -20,7 +20,7 @@ from .downloaders import _normalize_instruments, _normalize_tickers
 from .storage import exclusive_file_lock, read_dataset, write_dataset
 from .telegram import send_telegram_message
 from .trade_lifecycle import _bar_excursion, _side_return
-from ._common import MS_PER_DAY, MS_PER_HOUR, MS_PER_MINUTE
+from ._common import MS_PER_DAY, MS_PER_HOUR, MS_PER_MINUTE, PENDING_ORDER_STATUSES
 from .volume_events import (
     EventScenario,
     VolumeEventResearchConfig,
@@ -38,7 +38,6 @@ PROMOTED_DEMO_STRATEGY_ID = "liqmig_union_q40_h3_tp26_g100_qsqueeze"
 DEMO_RELAXED_STRATEGY_ID = "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6"
 DEMO_STRATEGY_PROFILES = ("promoted", "demo_relaxed")
 DEMO_STRATEGY_PROFILE_CHOICES = DEMO_STRATEGY_PROFILES
-PENDING_ORDER_STATUSES = {"submitted", "submitted_unconfirmed", "partial", "fallback_market"}
 PENDING_ORDER_GUARD_MS = 15 * MS_PER_MINUTE
 
 
@@ -2891,7 +2890,11 @@ def _float(value: Any) -> float:
     return number if math.isfinite(number) else 0.0
 
 
-def _safe_ratio(numerator: Any, denominator: Any) -> float:
+def _ratio_or_zero(numerator: Any, denominator: Any) -> float:
+    """numerator/denominator, returning 0.0 when the denominator is 0 (e.g. a
+    notional/equity weight: zero equity => zero weight). Contrast
+    volume_events._ratio_or_nan, which returns NaN on a non-positive denominator
+    -- they were both once named _safe_ratio, a same-name/different-contract trap."""
     denom = _float(denominator)
     if denom == 0.0:
         return 0.0

@@ -194,6 +194,7 @@ def test_execute_entries_dry_run_builds_short_rows() -> None:
     assert r["stop_price"] > r["entry_price"]            # short stop is ABOVE entry
     assert abs(r["notional_usdt"] - 200.0) < 1e-6        # 2% of 10k
     assert r["status"] == "open" and o["reduce_only"] is False
+    assert r["sleeve"] == "continuous"                   # self-identifying for ws_risk routing
 
 
 def test_execute_exits_dry_run_closes_short() -> None:
@@ -201,6 +202,7 @@ def test_execute_exits_dry_run_closes_short() -> None:
 
     cfg = ContinuousDemoCycleConfig(submit_orders=False, record_dry_run=True)
     trade = {"trade_id": "continuous_fade_v1-WIFUSDT-1700000000", "symbol": "WIFUSDT", "side": "short",
+             "sleeve": "continuous",
              "status": "open", "entry_price": 100.0, "qty": "2", "equity_usdt": 10_000.0, "notional_usdt": 200.0}
     all_trades = pl.DataFrame([trade])
     plan = [{**trade, "exit_reason": "left_decile"}]
@@ -208,7 +210,20 @@ def test_execute_exits_dry_run_closes_short() -> None:
                                              now_ms=1_700_100_000_000, record_preflight=None)
     assert len(rows) == 1 and orders[0]["side"] == "Buy" and orders[0]["reduce_only"] is True
     assert rows[0]["status"] == "closed" and rows[0]["exit_reason"] == "left_decile"
+    assert rows[0]["sleeve"] == "continuous"             # exit row inherits the entry's sleeve tag (dict(trade))
     assert orders[0]["sleeve"] == "continuous" and orders[0]["order_link_id"].startswith("lm-ux-c-")
+
+
+def test_load_rmom_table_degrades_to_none_on_corrupt_file(tmp_path) -> None:
+    """A corrupt/torn residual_momentum.parquet must DEGRADE to None (rmom-absent,
+    which the watchdog pages on) rather than raise out of the cycle and write no
+    cycle row -- which would blind the rmom-staleness guard to a crashing cycle."""
+    from liquidity_migration.continuous_demo import _load_rmom_table
+
+    (tmp_path / "residual_momentum.parquet").write_bytes(b"not a parquet file")
+    assert _load_rmom_table(tmp_path) is None
+    (tmp_path / "residual_momentum.parquet").unlink()
+    assert _load_rmom_table(tmp_path) is None  # absent file unchanged
 
 
 def test_dataset_names_separate_from_other_sleeves() -> None:
@@ -255,6 +270,32 @@ def test_daemon_constructs_without_network(tmp_path) -> None:
     )
     assert daemon._cycle_runner is run_continuous_demo_cycle
     assert daemon.interval_seconds == 60.0
+
+
+def test_cycle_summary_formatter_routing_is_sleeve_safe(tmp_path) -> None:
+    """Regression pin for the 2026-06-02 KeyError:'cycle' prod bug: the continuous daemon subclasses
+    the long daemon, so the inherited long formatter would KeyError on the continuous FLAT payload and
+    the daemon's `except Exception: _logger.exception` swallowed it opaquely every cycle. The long
+    formatter must now fail LOUD + self-describing on a flat payload; the continuous formatter must
+    handle it; and the continuous daemon must route to its own formatter (override intact)."""
+    from liquidity_migration.config import ResearchConfig
+    from liquidity_migration.continuous_demo import format_continuous_demo_cycle_summary
+    from liquidity_migration.continuous_demo_daemon import ContinuousDemoDaemon
+    from liquidity_migration.long_native_event_demo import format_long_demo_cycle_summary
+
+    flat = {"cycle_id": "c1", "ts_ms": 1_700_000_000_000, "mode": "dry_run",
+            "universe_symbols": 5, "live_d9_symbols": 2, "rmom_present": True, "entries": [], "exits": []}
+
+    # (1) the inherited long formatter fails LOUD + self-describing (not a bare KeyError('cycle')).
+    with pytest.raises(KeyError, match="FLAT payload"):
+        format_long_demo_cycle_summary(flat)
+    # (2) the continuous formatter handles the flat shape.
+    assert isinstance(format_continuous_demo_cycle_summary(flat), str)
+    # (3) the continuous daemon routes to its OWN formatter (the override that fixed the prod bug).
+    daemon = ContinuousDemoDaemon(
+        tmp_path / "bybit-continuous-demo-event", config=ResearchConfig(),
+        demo_config=ContinuousDemoCycleConfig(submit_orders=False), interval_seconds=60.0)
+    assert isinstance(daemon._format_cycle_summary(flat), str)
 
 
 # ============================================================================

@@ -413,6 +413,21 @@ def gather_continuous_alerts(*, continuous_root: Path, now_ms: int, args: argpar
         )
         if rmom_alert:
             alerts.append(rmom_alert)
+        # Zero universe / empty kline store is the SAME silent-zero-signal failure as a stale rmom
+        # gate but via a different upstream cause (discover/ingestion or WS-kline failure) the rmom
+        # guard does not see -- both produce zero candidates that read like a quiet market.
+        universe_n = row.get("universe_symbols")
+        if universe_n is not None and int(universe_n) == 0:
+            alerts.append(Alert(
+                key="continuous_universe_empty", severity=WARNING,
+                message="continuous sleeve resolved an EMPTY universe (discover/ingestion failure?); zero candidates -- looks like a quiet market.",
+            ))
+        kline_rows = row.get("kline_store_rows")
+        if kline_rows is not None and int(kline_rows) == 0:
+            alerts.append(Alert(
+                key="continuous_kline_store_empty", severity=WARNING,
+                message="continuous sleeve WS kline store is EMPTY (kline_store_rows=0); zero candidates -- looks like a quiet market.",
+            ))
     # Stop protection on the continuous sleeve's own open trades. Account-wide same-symbol exclusion
     # (Rule A) means each netted venue position maps to one sleeve, so the same check is valid here.
     try:
@@ -427,6 +442,61 @@ def gather_continuous_alerts(*, continuous_root: Path, now_ms: int, args: argpar
         positions, perr = _venue_positions(args.settle_coin)
         if perr is None:
             alerts.extend(evaluate_stop_protection(open_trades=open_ct, venue_positions=positions))
+        else:
+            # Mirror the short sleeve (gather_alerts): a creds/API failure must not silently leave
+            # the continuous open positions unverified.
+            alerts.append(Alert(
+                key="stop_verify_unavailable_continuous", severity=WARNING,
+                message=f"could not verify continuous stop protection ({perr}); {len(open_ct)} open trade(s) unchecked.",
+            ))
+    return alerts
+
+
+def gather_long_alerts(*, long_root: Path, now_ms: int, args: argparse.Namespace) -> list[Alert]:
+    """Per-sleeve liveness for the long-native demo daemon: cycle-age (hung/down-but-active, which
+    the systemd-failed check never catches under Restart=always), WS-staleness, and server-side stop
+    protection on its own open trades. The long sleeve writes a SEPARATE ledger root +
+    ``long_native_demo_cycles``/``long_native_demo_trades``, so the short-root ``gather_alerts`` never
+    sees it. No rmom check (the long sleeve has no residual-momentum gate)."""
+    if not long_root.exists():
+        return []
+    label = long_root.name
+    alerts: list[Alert] = []
+    try:
+        cyc = read_dataset(long_root, "long_native_demo_cycles")
+    except Exception:  # noqa: BLE001 — watchdog never crashes
+        cyc = pl.DataFrame()
+    latest_ts = (
+        int(cyc.select(pl.col("ts_ms").max()).item())
+        if (cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns) else None
+    )
+    live = evaluate_cycle_liveness(
+        latest_cycle_ts_ms=latest_ts, now_ms=now_ms, max_age_minutes=args.max_cycle_age_min, label=label
+    )
+    if live:
+        alerts.append(live)
+    if cyc is not None and not cyc.is_empty() and "kline_store_max_ts_ms" in cyc.columns:
+        store_max = int(cyc.select(pl.col("kline_store_max_ts_ms").max()).item() or 0)
+        ws = evaluate_ws_staleness(store_max_ts_ms=store_max, now_ms=now_ms, max_lag_hours=args.max_ws_lag_hours, label=label)
+        if ws:
+            alerts.append(ws)
+    try:
+        tdf = read_dataset(long_root, "long_native_demo_trades")
+        open_ct = (
+            tdf.filter(pl.col("status") == "open").to_dicts()
+            if (not tdf.is_empty() and "status" in tdf.columns) else []
+        )
+    except Exception:  # noqa: BLE001
+        open_ct = []
+    if open_ct:
+        positions, perr = _venue_positions(args.settle_coin)
+        if perr is None:
+            alerts.extend(evaluate_stop_protection(open_trades=open_ct, venue_positions=positions))
+        else:
+            alerts.append(Alert(
+                key="stop_verify_unavailable_long", severity=WARNING,
+                message=f"could not verify long-sleeve stop protection ({perr}); {len(open_ct)} open trade(s) unchecked.",
+            ))
     return alerts
 
 
@@ -443,6 +513,8 @@ def main() -> int:
     p.add_argument("--max-ws-lag-hours", type=float, default=6.0, help="warn if the WS kline feed is this stale")
     p.add_argument("--continuous-root", type=Path, default=Path("data/bybit-continuous-demo-event"),
                    help="continuous-fade sleeve root for its per-sleeve cycle-age + rmom-freshness + stop checks ('' to skip)")
+    p.add_argument("--long-root", type=Path, default=Path("data/bybit-long-demo-event"),
+                   help="long-native sleeve root for its per-sleeve cycle-age + WS-staleness + stop checks ('' to skip)")
     p.add_argument("--max-rmom-stale-days", type=float, default=2.0,
                    help="alert if the continuous rmom signal gate's newest day is older than this (silent-blackout guard)")
     p.add_argument("--settle-coin", default="USDT", help="settle coin for the Bybit get_positions stop-protection check")
@@ -469,6 +541,8 @@ def main() -> int:
     alerts = gather_alerts(data_root=args.data_root, units=units, now_ms=now_ms, args=args)
     if str(args.continuous_root):
         alerts.extend(gather_continuous_alerts(continuous_root=args.continuous_root, now_ms=now_ms, args=args))
+    if str(args.long_root):
+        alerts.extend(gather_long_alerts(long_root=args.long_root, now_ms=now_ms, args=args))
     state = _load_state(state_file)
     to_send, resolved, new_state = select_alerts_to_send(
         active=alerts, state=state, now_ms=now_ms, cooldown_minutes=args.cooldown_min

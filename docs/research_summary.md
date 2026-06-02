@@ -92,8 +92,8 @@ funding artifact.)*
 
 E1 closed the execution question (above): timing is a non-lever, so E2/E3 pivot away
 from execution. (The E1→E2→E3 plan ran its course — E1 triggered the contingency: E2 became a **selection
-refinement** study and E3/sniper was dropped. The forward plan is now
-[research_plan_intraday_kernel.md](research_plan_intraday_kernel.md).)
+refinement** study and E3/sniper was dropped. (The intraday-detection forward plan that
+followed has since concluded — see the K0→K1a section below.))
 
 Two concrete selection leads:
 
@@ -197,8 +197,8 @@ the RD1 section (cuts ~75% of recent stop-outs; restores recent mean both venues
 
 ## K0→K1a (2026-05-30): the intraday-detection kernel — ceiling PASS, but FALSIFIED at K1a
 
-The forward plan ([research_plan_intraday_kernel.md](research_plan_intraday_kernel.md))
-asks whether detecting the discrete event **intraday** (off the WS stream) instead of on
+The intraday-detection question (concluded — verdict below)
+asked whether detecting the discrete event **intraday** (off the WS stream) instead of on
 the daily-close roll captures more of the fade. **K0** is the read-only upside-ceiling
 precheck (`scripts/k0_intraday_fade_timing_precheck.py`, EXPLORATORY): for every short in
 the validated daily ledger, compare the realized +1h entry to the **event-day intraday
@@ -368,7 +368,7 @@ exit-timing/concurrency + `bar_extreme_capped` fills + FUNDING + risk_model resi
 **JUSTIFIED**; operator-gated go/no-go.
 
 **I-PHASE FUNDING DE-RISK (2026-05-31) — funding eats ~85% of the edge; a MARGINAL candidate survives under
-fair accounting → engine-grade I3 to settle (NOT closed). Full balanced write-up: `intraday_burst_synthesis.md`.**
+fair accounting → engine-grade I3 to settle (NOT closed). Full balanced write-up consolidated below.**
 Before the expensive I3 build, costed FUNDING on the proxy (short receives + / pays − over the hold, both venues
 full-history, `--funding-ds`). **Note: this verdict revised twice in-session — first to "funding kills it/closed",
 then corrected when the operator asked whether any variant beat baseline under optimistic funding and exposed a
@@ -402,13 +402,13 @@ proxy's resolution limit**, which cannot settle a MAR≈0.3 candidate. So **engi
 + `bar_extreme_capped` fills + funding-to-exit + risk_model residual, **24h hold, stop ≤25%**) is the right tool —
 **operator-gated** (~85% funding-eaten + recent-tilted → a genuine coin-flip whether worth the ~5–7d build). **The DAILY
 age+rmom strategy remains the robust, already-validated all-weather edge** (late entry sidesteps both squeeze and funding
-crowding); the intraday short is at best a higher-risk, marginal, unvalidated add-on. Full write-up:
-`docs/intraday_burst_synthesis.md`. `scripts/i2_burst_backtest.py` (`--funding-ds`, `--funding-filter-floor`,
-`--funding-to-exit`, `--hold-h`).
+crowding); the intraday short is at best a higher-risk, marginal, unvalidated add-on. The arc's
+write-up + one-off scripts (`i2_burst_backtest.py` et al., flags `--funding-to-exit`/`--hold-h`)
+were consolidated here and removed 2026-06-02 — git history is the backstop.
 
 ## Continuous-fade Phase 0 (2026-05-31): the rmom squeeze-filter makes the CONTINUOUS short ALL-WEATHER
 
-New forward program ([research_plan_continuous_fade.md](research_plan_continuous_fade.md)): build an
+New forward program (continuous-fade; now concluded — see the Continuous-fade section): build an
 always-on, any-hour version of the daily strategy, or kill it. Phase 0 (§6, the highest-information run)
 re-ran the c2b rolling-decile signal on full-PIT both venues with **age300 + residual-momentum** applied,
 split early/recent — EXPLORATORY look-ahead decile characterization (per-ts mean fwd returns, NOT a
@@ -706,9 +706,62 @@ dead.** Open work: (a) move the demo to `max_active=12` + capped fills; (b) the
 (c) apply + refine the execution (sniper) on the continuous candidate pool; (d) forward-demo
 confirmation is the arbiter. Any of these is a fresh, dated pre-registration.
 
+## Open methodology debts (2026-06-02 full-system audit)
+
+Carried over from the 2026-06-02 audit (the audit's ~30 landed code fixes are in git
+history; these are the *unresolved, number-moving* findings — operator-gated, each needs a
+decision + re-run before the affected number is trusted):
+
+1. **Binance funding-interval undercount (HIGH).** `downloaders.py` hardcodes
+   `funding_interval_min=480` (8h) for every symbol, but Binance settles some alts every 4h;
+   `_funding_lookup` collapses 4h settlements into 8h buckets and drops one → **understates
+   Binance funding cost ~50% on 4h-funding alts**. Binance is the cross-venue OOS arbiter and
+   funding eats ~85% of the intraday edge, so this *inflates* the Binance MAR the promotion
+   gate trusts. The single most important debt.
+2. **age300 gate: live ≠ backtest definition (MEDIUM).** Live `pit_age_days` =
+   `snapshot_ts − exchange launch_time`; backtest = first PIT-archive appearance. The live
+   age300 gate admits boundary symbols on a different definition than the validated backtest.
+3. **`pit_age_days` overstated ~1 day** (computed from stamp date = trading_day+1) → live
+   age300 admits symbols a day too young.
+4. **Residual-momentum look-ahead UNCONFIRMED (HIGH).** The `fwd_ret_1d` residual `.shift(1)`
+   may not fully clear the day-grid offset; feeds the live continuous sleeve + backtest. STATE
+   treats rmom causality as fixed — this is a **caveat, not cleared**; needs a causality test.
+5. **`decompose_strategy_pnl` day-grid off-by-one** — reads factor loadings from the day after
+   the decision; biases the Tier-3 residual-Sharpe real-money gate metric.
+
+## Continuous program — decisive engine experiments (G1–G5, operator-gated)
+
+The continuous-fade forward plan reduces to five experiments (from the 2026-06-02 fault
+roadmap). **G1 is the gating decision** — until it runs, the continuous program's deployable
+thesis is unverified:
+
+- **G1 — 3-way redundancy backtest (THE decision):** deployed short + existing long sleeve +
+  continuous market-neutral L/S overlay, measured together. Continuous short is 0.65–0.72
+  correlated with the live daily short (redundant capacity); the L/S overlay (corr 0.26–0.32)
+  is the candidate diversifier — but the **existing long sleeve already diversifies better**
+  (corr ~−0.03). If the L/S is redundant vs the long sleeve → research result, not a sleeve.
+- **G2 — realistic engine at `entry_delay_hours=0`** (the live sleeve's actual operating point;
+  only +1h was ever validated).
+- **G3 — net MTM effect of the live reactivity machinery** (stop_approach / hysteresis /
+  re-entry cooldown are live with zero engine validation — ablate, default the losers off).
+- **G4 — borrow / short-availability cost** (likely behind the implausible residual Sharpe ~10).
+- **G5 — impact calibration + capacity from live fills.**
+
+Refuted (do not re-chase): "continuous short edge is mostly short-beta" (engine L/S beta
+−0.04/−0.07); the 30d age-floor "can't exclude young listings" (not a fault); throttling the
+exit burst (correctly rejected).
+
 ## Provenance
 
-The E1/E2/P2/P3 + c2b per-phase pre-registration receipts (2026-05-29/30) were consolidated into this record and removed 2026-05-30 (originals in git history), as were the earlier Round 1 + Round 2 plans and per-phase verdicts (phase0–6, R1–R13, C0–C3) — all consolidated
-here and deleted 2026-05-29; originals in git history. Engine/methodology change receipts
-are in the git commit log. Backtest artifacts live under the data roots
-([data_roots.md](data_roots.md)).
+This file is the single consolidated research record. The standalone per-arc write-ups —
+`intraday_burst_synthesis.md`, `continuous_alpha_program.md`, `continuous_sleeve_inheritance.md`,
+`continuous_sleeve_reactivity.md`, `continuous_faults_roadmap.md`, the `research_plan_*.md`
+forward plans, `forward_demo_readiness.md`, `research_findings.md`, and the
+`audit_2026-06-02_full_system.md` audit — were consolidated here (durable conclusions above) and
+**removed 2026-06-02; originals in git history**. Likewise the E1/E2/P2/P3 + c2b per-phase
+receipts (2026-05-29/30) and the earlier Round 1 + Round 2 plans/verdicts (phase0–6, R1–R13,
+C0–C3) were consolidated + deleted earlier (git history). The one-off research SCRIPTS that
+produced these arcs (`k0*`/`k1a*`/`i1*`/`i2*`/`cv1*`/`rd1*`/`p0*`–`p1m*`) were likewise deleted
+2026-06-02 — git history is their executable backstop. The `docs/preregistration/` receipts
+remain as the binding parameter-change compliance trail. Engine/methodology change receipts are
+in the git commit log; backtest artifacts live under the data roots ([data_roots.md](data_roots.md)).

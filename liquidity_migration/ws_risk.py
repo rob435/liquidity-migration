@@ -55,8 +55,6 @@ from .event_demo import (
     _maybe_notify,
     _telegram_notification_reason,
     _upsert_rows,
-    _write_order_rows,
-    _write_trade_rows,
     build_ledger_position_pnl_snapshot,
     build_position_pnl_snapshot,
     decode_entry_order_link_id,
@@ -248,6 +246,22 @@ class WebSocketRiskState:
     # empty -- does not false-positive orphan-close every open trade.
     last_position_error: str = ""
     ws_order_unavailable: str = ""
+    # Non-empty when a configured sibling-sleeve ledger READ raised this
+    # reconcile pass (a torn/corrupt parquet or I/O error -- NOT a merely
+    # empty/missing ledger, which stays fail-open). The position reconcilers
+    # (exit_untracked_positions / adopt_untracked_positions) fail CLOSED while
+    # set: a sleeve whose ledger we could not read drops out of open_trades, and
+    # flattening/adopting positions we can no longer see would corrupt that
+    # sibling sleeve on the netted account. Reset to "" at the top of
+    # bootstrap/rest_reconcile; set by _note_ledger_read_error. Mirrors
+    # last_position_error for the REST positions snapshot.
+    ledger_read_error: str = ""
+    # Cumulative count of cross-sleeve mis-attributions: rows whose `sleeve` tag
+    # was non-empty but unowned (routed to short as a fallback) plus
+    # un-recoverable short-side orphans adopted while a continuous sleeve is
+    # configured (short vs continuous is ambiguous by venue side alone).
+    # Surfaced in write_report so a recurring mis-attribution is visible.
+    sleeve_misroutes: int = 0
     telegram_keys_sent: set[str] = field(default_factory=set)
 
 
@@ -337,12 +351,54 @@ class EventWebSocketRiskEngine:
                                     self.risk.continuous_trades_dataset if trades else self.risk.continuous_orders_dataset)
         return routes
 
+    def _note_ledger_read_error(self, sleeve: str, dataset: str, exc: BaseException) -> None:
+        """Record a RAISED (not merely empty) owned-ledger read/combine for this
+        reconcile pass so the position reconcilers fail CLOSED -- see
+        exit_untracked_positions / adopt_untracked_positions. Mirrors
+        last_position_error for the REST positions snapshot."""
+        self.state.ledger_read_error = f"{sleeve}:{dataset}: {type(exc).__name__}: {exc}"
+        _logger.error("ws_risk: ledger read failed for sleeve=%s dataset=%s: %s", sleeve, dataset, exc)
+
+    def _combine_sleeve_frames(self, frames: list[pl.DataFrame], *, trades: bool) -> pl.DataFrame:
+        """diagonal_relaxed concat that ISOLATES a schema-incompatible sibling
+        ledger so one corrupt sleeve can't abort reconcile for all three. A
+        single corrupt ledger (e.g. a scalar column written as a list) would make
+        a plain pl.concat raise SchemaError, propagate out of rest_reconcile and
+        crash the shared reconcile loop for the short + long + continuous sleeves.
+        Fold pairwise so a bad frame is dropped (logged + flagged) while the
+        healthy sleeves still reconcile. frames[0] (short, the always-present
+        root) seeds the fold and is never dropped; a dropped sibling sets
+        ledger_read_error so exit/adopt fail closed (we can no longer see that
+        sleeve's positions)."""
+        try:
+            return pl.concat(frames, how="diagonal_relaxed")
+        except pl.exceptions.SchemaError as exc:
+            _logger.error("ws_risk: combined %s concat failed (%s); isolating incompatible sleeve(s)",
+                          "trades" if trades else "orders", exc)
+            combined = frames[0]
+            for frame in frames[1:]:
+                try:
+                    combined = pl.concat([combined, frame], how="diagonal_relaxed")
+                except pl.exceptions.SchemaError as inner:
+                    sleeve = str(frame["sleeve"][0]) if "sleeve" in frame.columns and frame.height else "?"
+                    self._note_ledger_read_error(sleeve, "combined", inner)
+            return combined
+
     def _read_combined(self, *, trades: bool) -> pl.DataFrame:
         frames: list[pl.DataFrame] = []
         for sleeve, (root, dataset) in self._sleeve_routes(trades=trades).items():
             try:
                 df = read_dataset(root, dataset)
-            except Exception:  # noqa: BLE001 - multi-ledger reads must fail open
+            except Exception as exc:  # noqa: BLE001 - one sleeve read must not abort the others
+                # A MISSING/empty ledger is normal (fresh deploy) and stays
+                # fail-open: read_dataset returns empty for a registered-but-absent
+                # dataset (storage.read_dataset path.exists() guard). A RAISED read
+                # (torn/corrupt parquet, I/O error, or an unregistered dataset
+                # name) is dangerous -- silently dropping a configured sibling's
+                # open trades here would let exit_untracked flatten / adopt
+                # mis-route that sleeve's live positions. Flag it so those
+                # reconcilers skip this pass; still return the healthy sleeves.
+                self._note_ledger_read_error(sleeve, dataset, exc)
                 df = pl.DataFrame()
             df = _ensure_sleeve_column(df, sleeve)
             if not df.is_empty():
@@ -351,7 +407,7 @@ class EventWebSocketRiskEngine:
             return _ensure_sleeve_column(pl.DataFrame(), "short")
         if len(frames) == 1:
             return frames[0]
-        return pl.concat(frames, how="diagonal_relaxed")
+        return self._combine_sleeve_frames(frames, trades=trades)
 
     def _read_trades_combined(self) -> pl.DataFrame:
         return self._read_combined(trades=True)
@@ -361,12 +417,22 @@ class EventWebSocketRiskEngine:
 
     def _sleeve_of(self, row: dict[str, Any]) -> str:
         """The row's sleeve, but only if this engine actually owns that ledger; otherwise 'short'
-        (the always-present root). A 'continuous' row when continuous_root is unset must NOT be written
-        — but that can't happen: such rows only arise when the engine reads the continuous ledger."""
+        (the always-present root). An empty/missing tag legitimately defaults to short; a NON-empty
+        tag we don't own is a possible mis-attribution (corrupt/misspelled tag, or a sleeve whose
+        root is unconfigured) -- surface it (counter + warning) rather than silently mis-filing it
+        into the short ledger, which would defeat sleeve independence on the netted account."""
         sleeve = str(row.get("sleeve") or "").lower()
         owned = {"short"} | ({"long"} if self.long_root is not None else set()) | (
             {"continuous"} if self.continuous_root is not None else set())
-        return sleeve if sleeve in owned else "short"
+        if sleeve in owned:
+            return sleeve
+        if sleeve:
+            self.state.sleeve_misroutes += 1
+            _logger.warning(
+                "ws_risk: row sleeve=%r not owned (owned=%s); routing to short -- possible misroute; "
+                "trade_id=%s symbol=%s", sleeve, sorted(owned), row.get("trade_id"), row.get("symbol"),
+            )
+        return "short"
 
     def _write_rows_routed(self, rows: list[dict[str, Any]], *, trades: bool) -> None:
         if not rows:
@@ -377,12 +443,10 @@ class EventWebSocketRiskEngine:
             by_sleeve.setdefault(self._sleeve_of(row), []).append(row)
         for sleeve, sleeve_rows in by_sleeve.items():
             root, dataset = routes[sleeve]
-            if sleeve == "short" and trades:
-                _write_trade_rows(root, pl.DataFrame(sleeve_rows, infer_schema_length=None))
-            elif sleeve == "short":
-                _write_order_rows(root, pl.DataFrame(sleeve_rows, infer_schema_length=None))
-            else:
-                write_dataset(pl.DataFrame(sleeve_rows, infer_schema_length=None), root, dataset, partition_by=())
+            # All sleeves write uniformly: _sleeve_routes already maps short ->
+            # event_demo_trades/_orders, so the short path needs no special-case
+            # (its event_demo wrappers were just write_dataset(..., partition_by=())).
+            write_dataset(pl.DataFrame(sleeve_rows, infer_schema_length=None), root, dataset, partition_by=())
 
     def _write_trade_rows_routed(self, rows: list[dict[str, Any]]) -> None:
         self._write_rows_routed(rows, trades=True)
@@ -442,6 +506,10 @@ class EventWebSocketRiskEngine:
 
     def bootstrap(self) -> None:
         self.private_client = self.private_client or _build_private_client(self.config)
+        # Clear last pass's ledger-read fault before re-reading every owned
+        # ledger; _read_combined re-sets it if a sibling read raises, gating the
+        # untracked flatten/adopt below (fail closed on a degraded read).
+        self.state.ledger_read_error = ""
         self.state.all_trades = self._read_trades_combined()
         self.state.open_trades = _open_trades(self.state.all_trades)
         orders = self._read_orders_combined()
@@ -1230,6 +1298,10 @@ class EventWebSocketRiskEngine:
         # open-orders from it (non-blocking) instead of making the blocking REST
         # calls on this (consumer) thread. Stale/absent -> inline fetch (the exact
         # legacy path). Default off -> prefetch is always None -> legacy path.
+        # Clear last pass's ledger-read fault; the combined reads below re-set it
+        # if a sibling ledger read raises, so the untracked flatten/adopt fail
+        # closed on a degraded read.
+        self.state.ledger_read_error = ""
         prefetch = self._reconcile_prefetch if self.risk.reconcile_prefetch_enabled else None
         prefetch_fresh = prefetch is not None and (
             time.monotonic() - float(prefetch["monotonic"]) <= max(self.risk.rest_reconcile_seconds, 1.0)
@@ -1289,6 +1361,15 @@ class EventWebSocketRiskEngine:
         Runs before exit_untracked_positions so an adopted position is no longer
         seen as untracked."""
         if not self.risk.adopt_untracked_positions:
+            return
+        if self.state.ledger_read_error:
+            # See exit_untracked_positions: a degraded sibling-ledger read means we
+            # cannot tell which positions are already tracked, so adopting now risks
+            # mis-routing a sibling's position into the wrong ledger. Skip this pass.
+            _logger.warning(
+                "ws_risk: skipping adopt_untracked_positions -- a ledger read failed this pass (%s)",
+                self.state.ledger_read_error,
+            )
             return
         self.expire_stale_submitted_symbols()
         open_symbols = set(_column_values(self.state.open_trades, "symbol"))
@@ -1429,6 +1510,19 @@ class EventWebSocketRiskEngine:
                 "signal_ts_ms": signal_ts_ms,
                 "submit_mode": "adopted_recovered",
             }
+        # Link recovery failed (order-history window exhausted, or a hand-placed
+        # position) -> fall back to the side-based sleeve tag. But short and
+        # continuous are BOTH short-direction, so the side heuristic cannot tell
+        # them apart: a continuous orphan here is tagged 'short' and lands in the
+        # short ledger. Surface the ambiguity so the operator can reconcile.
+        if side == "short" and self.continuous_root is not None:
+            self.state.sleeve_misroutes += 1
+            _logger.warning(
+                "ws_risk: adopting un-recoverable SHORT-side orphan %s as sleeve='short' "
+                "(entry-link recovery failed); short vs continuous is ambiguous on the netted "
+                "account -- verify the sleeve manually (qty=%s entry_price=%s)",
+                symbol, qty, entry_price,
+            )
         return {
             "trade_id": f"adopted-{symbol}-{opened_ms}",
             "sleeve": sleeve,
@@ -1524,6 +1618,17 @@ class EventWebSocketRiskEngine:
 
     def exit_untracked_positions(self) -> None:
         if not self.risk.exit_untracked_positions:
+            return
+        if self.state.ledger_read_error:
+            # A configured sleeve's ledger read raised this pass -> its open
+            # trades are missing from open_trades, so a live position of that
+            # sleeve would look "untracked" and get flattened. Fail closed: never
+            # flatten a position we merely failed to see. The server-side stops
+            # still protect every position; only this janitor pauses.
+            _logger.warning(
+                "ws_risk: skipping exit_untracked_positions -- a ledger read failed this pass (%s); "
+                "refusing to flatten positions we may have failed to see", self.state.ledger_read_error,
+            )
             return
         self.expire_stale_submitted_symbols()
         open_symbols = set(_column_values(self.state.open_trades, "symbol"))
@@ -2075,6 +2180,8 @@ class EventWebSocketRiskEngine:
             "position_report_error": "; ".join(self.state.errors[-3:]),
             "untracked_positions": len(untracked_positions),
             "ws_order_unavailable": self.state.ws_order_unavailable,
+            "ledger_read_error": self.state.ledger_read_error,
+            "sleeve_misroutes": self.state.sleeve_misroutes,
             "telegram_sent": False,
             "telegram_error": "",
         }

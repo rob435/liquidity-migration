@@ -38,13 +38,12 @@ from typing import Any, Callable
 
 import polars as pl
 
-from ._common import MS_PER_DAY, MS_PER_HOUR
+from ._common import MS_PER_DAY, MS_PER_HOUR, PENDING_ORDER_STATUSES
 from .bybit import BybitMarketData, BybitPrivateClient, BybitRestRateLimiter
 from .config import DEFAULT_EXCLUDED_SYMBOLS, ResearchConfig, UniverseConfig
 from .downloaders import _normalize_tickers
 from .event_demo import (
     _active_position_by_symbol,
-    _base36,
     _bool,
     _build_private_client,
     _column_values,
@@ -60,14 +59,16 @@ from .event_demo import (
     _live_open_order_symbols,
     _max_int,
     _order_params,
+    _order_link_id,
     _prices_close,
     _prune_cycle_reports,
     _price_lookup_from_tickers_and_klines,
     _private_credentials_present,
     _refresh_positions_and_orders,
     _resolve_private_snapshot,
+    _risk_order_link_id,
     _resolve_ticker_snapshot,
-    _safe_ratio,
+    _ratio_or_zero,
     _stop_price_for_entry,
     _take_profit_price_for_entry,
     _trade_return,
@@ -103,7 +104,6 @@ LONG_DEMO_TRADES_DATASET = "long_native_demo_trades"
 LONG_ENTRY_LINK_PREFIX = "en-l"
 LONG_EXIT_LINK_PREFIX = "ux-l"
 
-PENDING_ORDER_STATUSES = {"submitted", "submitted_unconfirmed", "partial", "fallback_market"}
 PENDING_ORDER_GUARD_MS = 15 * 60 * 1000
 
 # Signals older than this aren't acted on. Without this bound a missed-cycle
@@ -275,21 +275,15 @@ def _long_demo_strategy_id(profile: str) -> str:
 
 
 def _long_order_link_id(prefix: str, *, symbol: str, signal_ts_ms: int) -> str:
-    """Order link id with long-sleeve prefix. Produces `lm-{prefix}-{base}-{ts36}`.
-
-    For long entries use prefix='en-l' → `lm-en-l-<base>-<ts>`; for risk-side
-    exits the ws_risk service uses prefix='ux-l' → `lm-ux-l-<base>-<ts>`. The
-    36-char cap matches Bybit's order_link_id limit.
-    """
-    base = symbol.replace("USDT", "")[-10:]
-    encoded_ts = _base36(max(signal_ts_ms // 1000, 0))
-    return f"lm-{prefix}-{base}-{encoded_ts}"[:36]
+    """Long-sleeve entry/exit orderLinkId (prefix 'en-l' / 'ux-l'). Delegates to the single
+    canonical builder so the lm-{prefix}-{base}-{ts36} format has ONE source of truth (this was a
+    byte-for-byte copy of event_demo._order_link_id; the decoder is likewise single-sourced)."""
+    return _order_link_id(prefix, symbol=symbol, signal_ts_ms=signal_ts_ms)
 
 
 def _long_risk_order_link_id(prefix: str, *, symbol: str, ts_ms: int, attempt: int) -> str:
-    base = symbol.replace("USDT", "")[-8:]
-    encoded_ts = _base36(max(ts_ms // 1000, 0))
-    return f"lm-{prefix}-{base}-{encoded_ts}-{attempt}"[:36]
+    """Long-sleeve risk-exit orderLinkId. Delegates to the single canonical risk builder."""
+    return _risk_order_link_id(prefix, symbol=symbol, ts_ms=ts_ms, attempt=attempt)
 
 
 def _validate_long_demo_config(config: LongNativeDemoCycleConfig) -> None:
@@ -1205,7 +1199,7 @@ def _execute_long_exits(
                 gross_trade_return = _trade_return(
                     entry_price_for_return, final_exit_price, side=trade_side
                 )
-                notional_weight = _safe_ratio(
+                notional_weight = _ratio_or_zero(
                     trade.get("notional_usdt"), trade.get("equity_usdt")
                 )
                 trade_update.update({
@@ -1833,6 +1827,15 @@ def _ledger_pnl(root: Path | None, dataset: str) -> tuple[int, float, float]:
 
 def format_long_demo_cycle_summary(payload: dict[str, Any]) -> str:
     """Pretty-print a cycle payload — used by the CLI and daemon for stdout/journald."""
+    if "cycle" not in payload:
+        # Fail LOUD + self-describing instead of the bare KeyError('cycle') the daemon's
+        # `except Exception: _logger.exception(...)` swallowed opaquely every cycle (audit 2026-06-02).
+        # A flat payload here means another sleeve's payload (e.g. the continuous flat dict) was routed
+        # to the long formatter -- each sleeve must supply its own _format_cycle_summary (continuous does).
+        raise KeyError(
+            "format_long_demo_cycle_summary received a FLAT payload with no 'cycle' key "
+            f"(keys={sorted(payload)[:8]}); wrong-sleeve formatter? Use that sleeve's _format_cycle_summary."
+        )
     cycle = payload["cycle"]
     lines = [
         "long-native event demo cycle "

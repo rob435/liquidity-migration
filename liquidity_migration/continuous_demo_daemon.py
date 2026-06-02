@@ -172,6 +172,7 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
         self._ticker_update_count = 0
         self._ticker_batch_wakes = 0
         self._fill_nudges = 0
+        self._fill_nudge_errors = 0
 
     # -- Tier 2: inject the panel cache into the cycle runner ----------
 
@@ -194,6 +195,7 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
             "protective_last_check_age_ms": last_age_ms,
             "ticker_batch_wakes": self._ticker_batch_wakes,
             "fill_nudges": self._fill_nudges,
+            "fill_nudge_errors": self._fill_nudge_errors,
         }
 
     # -- main/fast serialisation: the main cycle holds the mutex for its whole duration so the
@@ -338,5 +340,9 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
                 # cycle so held-set/capacity refresh now rather than at the next scheduled tick.
                 self._tick_event.set()
                 self._bar_event.set()
-        except Exception:  # noqa: BLE001 — never let telemetry wiring break the WS callback
-            pass
+        except Exception as exc:  # noqa: BLE001 — never let telemetry wiring break the WS callback
+            # The wake events are also set by the main loop so a dropped nudge is
+            # bounded, but a RECURRING parse failure silently stops the fast
+            # protective-exit nudge -- count + log it so it is diagnosable.
+            self._fill_nudge_errors += 1
+            _logger.warning("continuous: fill-nudge wiring failed on execution message: %s", exc)

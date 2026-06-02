@@ -2569,3 +2569,21 @@ def test_cooldown_hours_defaults_to_daily() -> None:
     cfg = VolumeEventResearchConfig()
     assert cfg.cooldown_hours is None  # default = daily behavior preserved
     assert cfg.cooldown_days == 5
+
+
+def test_ratio_helpers_have_distinct_documented_contracts() -> None:
+    """The two ratio helpers (once both named _safe_ratio -- a same-name/different-contract
+    footgun) MUST keep their distinct zero-denominator behavior: event_demo._ratio_or_zero
+    returns 0.0, volume_events._ratio_or_nan returns NaN. Pin it so a future 'cleanup' can't
+    silently merge them and flip a metric from 0.0 to NaN (or vice-versa)."""
+    import math
+
+    from liquidity_migration.event_demo import _ratio_or_zero
+    from liquidity_migration.volume_events import _ratio_or_nan
+
+    assert _ratio_or_zero(5.0, 0.0) == 0.0
+    assert math.isnan(_ratio_or_nan(5.0, 0.0))
+    assert math.isnan(_ratio_or_nan(5.0, -1.0))  # non-positive denom -> NaN
+    # Both agree on a valid ratio.
+    assert _ratio_or_zero(6.0, 3.0) == 2.0
+    assert _ratio_or_nan(6.0, 3.0) == 2.0

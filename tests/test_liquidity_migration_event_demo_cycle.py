@@ -1164,6 +1164,30 @@ def test_decode_entry_order_link_id_returns_none_for_unknown_patterns() -> None:
     assert decode_entry_order_link_id("lm-en-l-SUPER-not_base36!") is None  # invalid base36
 
 
+def test_all_sleeve_link_builders_share_one_canonical_format() -> None:
+    """The three sleeve entry-link builders all DELEGATE to the single canonical
+    _order_link_id, so the lm-{prefix}-{base}-{ts36} format has ONE source of truth and every
+    prefix round-trips through the ONE decoder. Pins the consolidation against a future re-fork
+    (the encoders were byte-identical copies; the decoder was already single-sourced)."""
+    from liquidity_migration.continuous_demo import _continuous_order_link_id
+    from liquidity_migration.event_demo import _order_link_id
+    from liquidity_migration.long_native_event_demo import _long_order_link_id
+
+    ts = 1_779_667_200_000
+    short = _order_link_id("en", symbol="SUPERUSDT", signal_ts_ms=ts)
+    long = _long_order_link_id("en-l", symbol="SUPERUSDT", signal_ts_ms=ts)
+    cont = _continuous_order_link_id("en-c", symbol="SUPERUSDT", signal_ts_ms=ts)
+    # Identical base + ts36 encoding, differing ONLY by the sleeve prefix => one canonical format.
+    ts36 = short.rsplit("-", 1)[1]
+    assert short == f"lm-en-SUPER-{ts36}"
+    assert long == f"lm-en-l-SUPER-{ts36}"
+    assert cont == f"lm-en-c-SUPER-{ts36}"
+    # All three round-trip through the SINGLE decoder to the correct sleeve + ts.
+    assert decode_entry_order_link_id(short) == ("short", ts)
+    assert decode_entry_order_link_id(long) == ("long", ts)
+    assert decode_entry_order_link_id(cont) == ("continuous", ts)
+
+
 def test_validate_demo_config_accepts_unlimited_universe_mode() -> None:
     """universe_rank_end == universe_max_symbols == 0 must not trigger
     the universe-too-narrow check — that check exists to catch operator

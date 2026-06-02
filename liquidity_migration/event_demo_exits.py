@@ -43,7 +43,7 @@ from .event_demo import (
     _risk_order_link_id,
     _round_price,
     _safe_raw_positions,
-    _safe_ratio,
+    _ratio_or_zero,
     _split_order_link_id,
     _split_qty_for_max_order_size,
     _stop_price_for_entry,
@@ -331,7 +331,7 @@ def _execute_exits(
         )
         entry_price = _float(trade.get("entry_price"))
         gross_trade_return = _trade_return(entry_price, exit_price, side=side)
-        notional_weight = _safe_ratio(trade.get("notional_usdt"), trade.get("equity_usdt"))
+        notional_weight = _ratio_or_zero(trade.get("notional_usdt"), trade.get("equity_usdt"))
         if fully_filled and exit_price > 0.0:
             trade.update(
                 {
@@ -564,7 +564,7 @@ def _reconcile_pending_order_fills(
                 trade_side = str(trade.get("side") or "short")
                 entry_price = _float(trade.get("entry_price"))
                 gross_trade_return = _trade_return(entry_price, avg_price, side=trade_side)
-                notional_weight = _safe_ratio(trade.get("notional_usdt"), trade.get("equity_usdt"))
+                notional_weight = _ratio_or_zero(trade.get("notional_usdt"), trade.get("equity_usdt"))
                 trade.update(
                     {
                         "status": "closed",
@@ -817,7 +817,7 @@ def _execute_risk_exits(
             trade_side = str(trade.get("side") or "short")
             entry_price = _float(trade.get("entry_price"))
             gross_trade_return = _trade_return(entry_price, exit_price, side=trade_side)
-            notional_weight = _safe_ratio(trade.get("notional_usdt"), trade.get("equity_usdt"))
+            notional_weight = _ratio_or_zero(trade.get("notional_usdt"), trade.get("equity_usdt"))
             trade.update(
                 {
                     "status": "closed",
@@ -1529,7 +1529,7 @@ def _orphan_close_pnl_backfill(
     # the last leg.
     closed_at_ms = int(_float(last_leg.get("createdTime") or last_leg.get("updatedTime") or now_ms)) or now_ms
     gross_trade_return = _trade_return(entry_price, exit_price, side=side)
-    notional_weight = _safe_ratio(trade.get("notional_usdt"), trade.get("equity_usdt"))
+    notional_weight = _ratio_or_zero(trade.get("notional_usdt"), trade.get("equity_usdt"))
     backfill: dict[str, Any] = {
         "exit_price": exit_price,
         "exit_fee_usdt": exit_fee_usdt,

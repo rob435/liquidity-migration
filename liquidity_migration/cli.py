@@ -30,6 +30,7 @@ from .ingestion import generate_fixture_data
 from .pit_coverage import coverage_status, format_coverage
 from .reconciliation import (
     run_backtest_paper_reconciliation,
+    run_continuous_paper_demo_reconciliation,
     run_demo_bybit_reconciliation,
     run_full_reconciliation,
     run_long_paper_demo_reconciliation,
@@ -1966,6 +1967,36 @@ def _add_reconcile_long_paper_demo_parser(subparsers) -> None:
     reconcile.add_argument("--output-dir", default=None, help="Where to write the long reconciliation report.")
 
 
+def _add_reconcile_continuous_paper_demo_parser(subparsers) -> None:
+    reconcile = subparsers.add_parser(
+        "reconcile-continuous-paper-demo",
+        help="Continuous-fade sleeve (3rd) paper/demo execution slippage analyzer.",
+    )
+    reconcile.add_argument(
+        "--paper-data-root",
+        default="data/bybit-continuous-paper-event",
+        help="Paper data root holding the continuous_fade_paper_trades ledger.",
+    )
+    reconcile.add_argument(
+        "--demo-data-root",
+        default="data/bybit-continuous-demo-event",
+        help="Demo data root holding the continuous_fade_demo_trades ledger.",
+    )
+    reconcile.add_argument(
+        "--entry-tolerance-ms",
+        type=int,
+        default=600_000,
+        help="Max entry-time gap (ms) for pairing a paper trade with a demo trade.",
+    )
+    reconcile.add_argument(
+        "--min-pairs-warning",
+        type=int,
+        default=20,
+        help="Emit sample_warning when paired-trade count is below this threshold.",
+    )
+    reconcile.add_argument("--output-dir", default=None, help="Where to write the continuous reconciliation report.")
+
+
 def _add_continuous_events_parser(subparsers) -> None:
     d = ContinuousEventConfig()
     p = subparsers.add_parser(
@@ -2070,6 +2101,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_combined_book_report_parser(subparsers)
     _add_reconcile_paper_demo_parser(subparsers)
     _add_reconcile_long_paper_demo_parser(subparsers)
+    _add_reconcile_continuous_paper_demo_parser(subparsers)
     _add_reconcile_demo_bybit_parser(subparsers)
     _add_reconcile_backtest_paper_parser(subparsers)
     _add_reconcile_all_parser(subparsers)
@@ -2956,6 +2988,27 @@ def main(argv: list[str] | None = None) -> int:
         warning = " [SAMPLE WARNING]" if summary.get("sample_warning") else ""
         print(
             "long paper-demo reconciliation "
+            f"paired={summary['paired']} "
+            f"paper_only={summary['paper_only']} "
+            f"demo_only={summary['demo_only']} "
+            f"entry_slip_bps_mean={summary['entry_slippage_bps_mean']:.2f} "
+            f"path={payload['report_path']} "
+            f"per_trade_csv={payload.get('pairs_csv_path') or '-'}{warning}"
+        )
+        return 0
+
+    if args.command == "reconcile-continuous-paper-demo":
+        payload = run_continuous_paper_demo_reconciliation(
+            args.paper_data_root,
+            args.demo_data_root,
+            entry_tolerance_ms=args.entry_tolerance_ms,
+            output_dir=args.output_dir,
+            min_pairs_warning=args.min_pairs_warning,
+        )
+        summary = payload["result"]["summary"]
+        warning = " [SAMPLE WARNING]" if summary.get("sample_warning") else ""
+        print(
+            "continuous paper-demo reconciliation "
             f"paired={summary['paired']} "
             f"paper_only={summary['paper_only']} "
             f"demo_only={summary['demo_only']} "

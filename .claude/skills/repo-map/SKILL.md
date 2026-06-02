@@ -7,9 +7,9 @@ description: "Orient in the liquidity-migration codebase: module map, core abstr
 
 A Bybit (+Binance) research codebase for a liquidity-migration **short** strategy
 (plus a long-native v11a sleeve). Research-stage; a frozen `promoted` profile runs
-on demo + paper only, not real money. Live state, current direction, and the
-research plan live in **STATE.md**, **docs/research_summary.md**, and
-**docs/research_plan_intraday_kernel.md** — this file is just the map.
+on demo + paper only, not real money. Live state + what's next live in **STATE.md**;
+the single consolidated research record is **docs/research_summary.md** — this file is
+just the map.
 
 ## graphify first (mandated by AGENTS.md)
 
@@ -51,9 +51,9 @@ and `graphify-out/GRAPH_REPORT.md`.
 - `AGENTS.md` — repo rules.
 - `docs/backtesting_errors_we_never_repeat.md` — mandatory methodology
   standard (see the backtest-integrity skill).
-- `docs/research_summary.md` — the single consolidated, dated research record
-  (all results + verdicts).
-- `docs/research_findings.md` — short verdict pointer (defers to the summary).
+- `docs/research_summary.md` — THE single consolidated, dated research record
+  (all results, verdicts, open methodology debts). The one research file.
+- `docs/pit_gate.md` — PIT membership + the one-command all-sleeve reconcile design.
 - `docs/data_roots.md` — canonical research / live demo / OOS root contract.
 - `docs/event_demo_daemon.md` — demo forward-cycle daemon runbook + infra-hardening changelog.
 - `README.md` — repo overview and status.

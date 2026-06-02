@@ -1391,6 +1391,52 @@ def test_ws_risk_untracked_grace_cleared_when_symbol_becomes_tracked(tmp_path: P
     assert private_client.orders == []
 
 
+def test_exit_untracked_blocked_when_a_ledger_read_failed(tmp_path: Path, caplog) -> None:
+    """Fail-closed sleeve isolation: if a configured sibling ledger read raised
+    this pass, that sleeve's open trades are missing from open_trades, so a live
+    position of that sleeve looks 'untracked'. exit_untracked_positions must
+    refuse to flatten while state.ledger_read_error is set; once cleared, the same
+    untracked position IS flattened -- proving the guard, not the setup, blocks
+    it. Directly defends operator goal #1 (a fault in one sleeve must not flatten
+    another's positions on the netted account)."""
+    import logging as _logging
+
+    private_client = FakePrivateClient()
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+            exit_untracked_positions=True,
+            adopt_untracked_positions=False,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+    # A live, untracked position (absent from the empty open_trades ledger).
+    engine.state.positions_by_symbol = {"AAAUSDT": {"symbol": "AAAUSDT", "size": "1", "side": "Buy"}}
+    engine.state.ledger_read_error = "continuous:continuous_fade_demo_trades: ComputeError: torn parquet"
+
+    with caplog.at_level(_logging.WARNING, logger="liquidity_migration.ws_risk"):
+        engine.exit_untracked_positions()
+    assert private_client.orders == [], "must not flatten a position while a ledger read is failing"
+    assert any("skipping exit_untracked_positions" in r.getMessage() for r in caplog.records)
+
+    # Clear the fault: the very same untracked position is now flattened (grace=0).
+    engine.state.untracked_first_seen_ms.clear()
+    engine.state.ledger_read_error = ""
+    engine.exit_untracked_positions()
+    assert len(private_client.orders) == 1
+    assert private_client.orders[0]["reduceOnly"] is True
+
+
 def test_ws_risk_flattens_untracked_position_on_bootstrap(tmp_path: Path) -> None:
     private_client = FakePrivateClient()
     engine = EventWebSocketRiskEngine(

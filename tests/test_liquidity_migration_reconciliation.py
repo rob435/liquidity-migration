@@ -13,6 +13,7 @@ from liquidity_migration.reconciliation import (
     reconcile_backtest_paper,
     reconcile_demo_bybit,
     reconcile_paper_demo,
+    run_demo_bybit_reconciliation,
 )
 
 
@@ -248,6 +249,22 @@ def test_reconcile_demo_bybit_pairs_and_flags_orphans() -> None:
     assert "ORPHANUSDT" in report
     assert "ghost position in ledger" in report
     assert "untracked position on exchange" in report
+
+
+def test_run_demo_bybit_reconciliation_surfaces_closed_pnl_fetch_errors(tmp_path: Path) -> None:
+    """A transient get_closed_pnl failure for one symbol must be surfaced (logged
+    + in closed_pnl_fetch_errors), not silently swallowed -- otherwise its
+    mismatch in the report is indistinguishable from a real ledger<->venue gap."""
+    class _FlakyClient:
+        def get_positions(self, *, settle_coin=None):
+            return [{"symbol": "FLAKYUSDT", "side": "Sell", "size": "1", "avgPrice": "10.0"}]
+
+        def get_closed_pnl(self, *, symbol, start_time_ms, end_time_ms, limit):
+            raise RuntimeError("rate limited")
+
+    out = run_demo_bybit_reconciliation(tmp_path, trading_client=_FlakyClient(), output_dir=tmp_path)
+    assert out["closed_pnl_fetch_errors"] == ["FLAKYUSDT"]
+    assert "result" in out and "report_path" in out
 
 
 def test_reconcile_demo_bybit_folds_multi_order_close_not_orphan() -> None:

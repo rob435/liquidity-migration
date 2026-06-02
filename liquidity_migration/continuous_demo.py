@@ -654,12 +654,12 @@ def entry_circuit_breaker_tripped(
 
 
 def _continuous_order_link_id(prefix: str, *, symbol: str, signal_ts_ms: int) -> str:
-    """lm-{en-c|ux-c}-{base}-{ts36} — 5 parts, the distinct continuous sleeve (ws_risk routing)."""
-    from .event_demo import _base36
+    """lm-{en-c|ux-c}-{base}-{ts36} — 5 parts, the distinct continuous sleeve (ws_risk routing).
+    Delegates to the single canonical builder so the format has ONE source of truth; the int()
+    cast tolerates a non-int signal_ts (continuous-specific defensiveness)."""
+    from .event_demo import _order_link_id
 
-    base = symbol.replace("USDT", "")[-10:]
-    encoded_ts = _base36(max(int(signal_ts_ms) // 1000, 0))
-    return f"lm-{prefix}-{base}-{encoded_ts}"[:36]
+    return _order_link_id(prefix, symbol=symbol, signal_ts_ms=int(signal_ts_ms))
 
 
 def continuous_strategy_id(config: ContinuousDemoCycleConfig) -> str:
@@ -691,7 +691,7 @@ from .event_demo import (  # noqa: E402
     _private_credentials_present,
     _resolve_cycle_universe,
     _resolve_private_snapshot,
-    _safe_ratio,
+    _ratio_or_zero,
     _stop_price_for_entry,
     _trade_return,
     _upsert_rows,
@@ -778,7 +778,7 @@ def _execute_continuous_exits(
             if status == "filled" or not demo.submit_orders:
                 final_exit = exit_price or _float(trade.get("entry_price"))
                 gtr = _trade_return(_float(trade.get("entry_price")), final_exit, side="short")
-                nw = _safe_ratio(trade.get("notional_usdt"), trade.get("equity_usdt"))
+                nw = _ratio_or_zero(trade.get("notional_usdt"), trade.get("equity_usdt"))
                 upd.update({"status": "closed", "exit_ts_ms": now_ms, "exit_price": final_exit,
                             "exit_fee_usdt": exit_fee, "exit_exec_time_ms": exit_exec_time_ms,
                             "gross_trade_return": gtr, "net_return": gtr * nw,
@@ -883,7 +883,12 @@ def _execute_continuous_entries(
         if not demo.submit_orders or filled_qty > 0.0:
             trade_id = f"{strategy_id}-{symbol}-{signal_ts_ms}"
             rows.append({
+                # Tag the sleeve explicitly (the exit row below inherits it via
+                # dict(trade)). ws_risk backfills sleeve by root on read, but a
+                # self-identifying row is robust if it is ever routed via a path
+                # that doesn't backfill -- keeps the continuous ledger isolated.
                 "trade_id": trade_id, "strategy_id": strategy_id, "symbol": symbol, "side": "short",
+                "sleeve": "continuous",
                 "status": "open", "ts_ms": now_ms, "entry_ts_ms": now_ms, "opened_at_ms": now_ms, "updated_at_ms": now_ms,
                 "signal_ts_ms": signal_ts_ms, "entry_price": entry_price, "qty": entry_qty or qty,
                 "notional_usdt": filled_notional if demo.submit_orders else actual_notional, "equity_usdt": equity_usdt,
@@ -909,7 +914,18 @@ def _load_rmom_table(root: Path) -> pl.DataFrame | None:
     path = root / "residual_momentum.parquet"
     if not path.exists():
         return None
-    return pl.read_parquet(path).rename({"ts_ms": "day_ts"})
+    try:
+        return pl.read_parquet(path).rename({"ts_ms": "day_ts"})
+    except Exception as exc:  # noqa: BLE001 - a corrupt rmom file must DEGRADE, not crash the cycle
+        # A partially-written/corrupt parquet (mid-write crash, disk issue) or a
+        # schema drift (missing ts_ms) would otherwise raise out of the cycle,
+        # writing NO cycle row -- so the persisted max_rmom_day_ts telemetry never
+        # updates and the watchdog cannot tell "cycle crashing on a bad rmom file"
+        # from "merely quiet". Degrade to rmom-absent (the watchdog already pages
+        # on the silent-blackout that produces), keeping the staleness guard
+        # authoritative even on a corrupted file.
+        _logger.warning("continuous: failed to load rmom table %s: %s; degrading to rmom-absent", path, exc)
+        return None
 
 
 def format_continuous_demo_cycle_summary(payload: dict[str, Any]) -> str:

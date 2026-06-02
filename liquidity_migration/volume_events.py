@@ -788,7 +788,7 @@ def _run_event_scenario(
                 "signal_day_range_pct": _float_or_nan(event.get("signal_day_range_pct")),
                 "symbol_age_days": int(event.get("symbol_age_days", 0) or 0),
                 "pit_age_days": _float_or_nan(event.get("pit_age_days")),
-                "liquidity_migration_turnover_ratio": _safe_ratio(
+                "liquidity_migration_turnover_ratio": _ratio_or_nan(
                     event.get("turnover_quote"),
                     event.get("prior7_turnover_quote_mean"),
                 ),
@@ -1197,7 +1197,7 @@ def _promoted_quality_entry_event(
     residual_return = _float_or_nan(event.get("residual_return_1d"))
     close_location = _float_or_nan(event.get("signal_day_close_location"))
     pit_age_days = _float_or_nan(event.get("pit_age_days"))
-    turnover_ratio = _safe_ratio(event.get("turnover_quote"), event.get("prior7_turnover_quote_mean"))
+    turnover_ratio = _ratio_or_nan(event.get("turnover_quote"), event.get("prior7_turnover_quote_mean"))
     market_pct_up = _float_or_nan(event.get("market_pct_up_1d"))
     if not all(
         math.isfinite(value)
@@ -1844,7 +1844,11 @@ def _promotion_reason(
     return ",".join(reasons) if reasons else "fail"
 
 
-def _safe_ratio(numerator: Any, denominator: Any) -> float:
+def _ratio_or_nan(numerator: Any, denominator: Any) -> float:
+    """numerator/denominator, returning NaN on a non-finite/non-positive denominator
+    (so a missing ratio propagates as NaN through metric means, not a misleading 0.0).
+    Contrast event_demo._ratio_or_zero, which returns 0.0 -- they were both once named
+    _safe_ratio, a same-name/different-contract trap."""
     try:
         top = float(numerator)
         bottom = float(denominator)

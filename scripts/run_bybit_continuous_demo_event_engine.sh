@@ -48,6 +48,14 @@ if [[ "${SUBMIT_ORDERS:-0}" == "1" ]]; then
     fi
     order_args+=(--submit-orders --confirm-demo-orders)
 fi
+# PAPER_MODE=1 routes writes to continuous_fade_paper_* datasets so
+# reconcile-continuous-paper-demo can pair this shadow against the live demo
+# ledger. It REQUIRES record_dry_run and forbids submit_orders (validated in
+# _validate_continuous_demo_config) — same invariant as the long paper sleeve.
+if [[ "${PAPER_MODE:-0}" == "1" ]]; then
+    order_args+=(--paper-mode)
+fi
+[[ "${RECORD_DRY_RUN:-0}" == "1" ]] && order_args+=(--record-dry-run)
 [[ "${TELEGRAM_ENABLED:-0}" == "1" ]] && order_args+=(--telegram)
 
 echo "continuous-demo engine: data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS submit_orders=${SUBMIT_ORDERS:-0}"

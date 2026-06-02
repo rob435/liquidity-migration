@@ -15,10 +15,9 @@ catch-the-top strategy). The earlier "Round 2 = documented null" verdict has bee
 **retracted** (substantially a methodology artifact). Under realistic capped stop
 fills at `max_active=12`, the daily strategy is **gross-positive on both venues
 in-sample**. It stays in-sample; the Bybit demo forward test is the arbiter;
-nothing is promoted; real money stays off. Dated numbers + full record:
-[docs/research_summary.md](docs/research_summary.md); live state:
-[STATE.md](STATE.md); forward plan:
-[docs/research_plan_intraday_kernel.md](docs/research_plan_intraday_kernel.md).
+nothing is promoted; real money stays off. Dated numbers + full record (the one
+research file): [docs/research_summary.md](docs/research_summary.md); live state +
+what's next: [STATE.md](STATE.md).
 
 A demo (paper) forward test of the frozen `promoted` short profile + the v11a
 long sleeve runs on a Bybit demo account on a VPS — that demo is the actual
@@ -34,8 +33,8 @@ money.
   archive builders, the backtest / event engine, and the
   `python -m liquidity_migration` CLI (run `--help` for the subcommand list).
 - `tests/` — `.venv/bin/python -m pytest -q`.
-- `docs/research_findings.md` — short verdict pointer (defers to research_summary.md).
-- `docs/research_plan_intraday_kernel.md` — the forward research plan (5950X).
+- `docs/research_summary.md` — THE consolidated research record (results, verdicts,
+  open methodology debts, decision rules). All per-arc docs/scripts fold in here.
 - `docs/backtesting_errors_we_never_repeat.md` — research methodology standard.
 - `docs/data_roots.md` — data-root contract (research / live demo / OOS).
 - `docs/event_demo_daemon.md` — demo forward-cycle daemon runbook + infra-hardening changelog.

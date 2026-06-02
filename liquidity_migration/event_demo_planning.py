@@ -47,7 +47,7 @@ from .event_demo import (  # noqa: F401  (shared hub helpers)
     _rank_checks_for_symbol,
     _realized_loss_exit_ts,
     _realized_stop_exit_ts,
-    _safe_ratio,
+    _ratio_or_zero,
     _stop_hit_since_entry,
     _take_profit_hit_since_entry,
     _trade_id,
@@ -186,7 +186,7 @@ def select_demo_entry_candidates(
                 "liquidity_rank": int(event.get("liquidity_rank", 0) or 0),
                 "turnover_quote": _float(event.get("turnover_quote")),
                 "prior7_turnover_quote_mean": _float(event.get("prior7_turnover_quote_mean")),
-                "liquidity_migration_turnover_ratio": _safe_ratio(
+                "liquidity_migration_turnover_ratio": _ratio_or_zero(
                     event.get("turnover_quote"),
                     event.get("prior7_turnover_quote_mean"),
                 ),

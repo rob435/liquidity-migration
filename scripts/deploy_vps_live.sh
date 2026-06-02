@@ -132,6 +132,9 @@ systemctl enable liquidity-migration-bybit-long-paper.service
 # and the deploy verify hard-fails if it is not submitting. Pause via SUBMIT_ORDERS=0).
 # Separate ledger root.
 systemctl enable liquidity-migration-bybit-continuous-demo.service
+# Continuous-fade PAPER shadow (no orders, idealized fills, continuous_fade_paper_* ledger)
+# so reconcile-continuous-paper-demo can measure execution slippage like the short/long sleeves.
+systemctl enable liquidity-migration-bybit-continuous-paper.service
 # Timers must be enabled --now: enable alone writes the symlink but does not
 # start the timer, so on a fresh VPS the demo-health watchdog + daily combined-
 # book Telegram report would sit dormant until someone ran systemctl by hand.
@@ -175,6 +178,7 @@ systemctl restart liquidity-migration-bybit-paper.service
 systemctl restart liquidity-migration-bybit-long-demo.service
 systemctl restart liquidity-migration-bybit-long-paper.service
 systemctl restart liquidity-migration-bybit-continuous-demo.service
+systemctl restart liquidity-migration-bybit-continuous-paper.service
 
 if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then
   sleep "$SYSTEMD_SETTLE_SECONDS"
@@ -186,12 +190,14 @@ systemctl is-active --quiet liquidity-migration-bybit-paper.service
 systemctl is-active --quiet liquidity-migration-bybit-long-demo.service
 systemctl is-active --quiet liquidity-migration-bybit-long-paper.service
 systemctl is-active --quiet liquidity-migration-bybit-continuous-demo.service
+systemctl is-active --quiet liquidity-migration-bybit-continuous-paper.service
 systemctl is-enabled --quiet liquidity-migration-bybit-demo.service
 systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
 systemctl is-enabled --quiet liquidity-migration-bybit-paper.service
 systemctl is-enabled --quiet liquidity-migration-bybit-long-demo.service
 systemctl is-enabled --quiet liquidity-migration-bybit-long-paper.service
 systemctl is-enabled --quiet liquidity-migration-bybit-continuous-demo.service
+systemctl is-enabled --quiet liquidity-migration-bybit-continuous-paper.service
 systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer
 # Timer verification: is-enabled catches "we never enabled it"; is-active
 # catches "we enabled it but something stopped it." Both are fail-loud here
@@ -245,6 +251,11 @@ systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Envir
 # Continuous sleeve go-live assertions: live order submission + its disaster stop present.
 systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=1'
 systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=STOP_LOSS_PCT=0.25'
+# MONEY-SAFETY: the continuous PAPER shadow must NEVER submit orders. Fail loud if the
+# paper unit is mis-wired to submit (it must be a no-money dry-run on its own ledger root).
+systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=0'
+systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=PAPER_MODE=1'
+systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=DATA_ROOT=data/bybit-continuous-paper-event'
 
 python_commit="$(git rev-parse --short HEAD)"
 echo "deploy-verify-ok commit=$python_commit"

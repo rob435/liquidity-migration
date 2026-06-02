@@ -9,6 +9,7 @@ does not. Unpaired trades on either side are fill-rate divergence.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from statistics import mean, median
 from typing import Any
@@ -16,6 +17,8 @@ from typing import Any
 import polars as pl
 
 from .storage import read_dataset
+
+_logger = logging.getLogger(__name__)
 
 DEFAULT_ENTRY_TOLERANCE_MS = 600_000
 
@@ -1281,16 +1284,28 @@ def run_demo_bybit_reconciliation(
     open_positions = trading_client.get_positions(settle_coin="USDT")
     bybit_symbols = {str(p.get("symbol") or "") for p in open_positions if float(p.get("size") or 0) > 0}
     closed_records: list[dict[str, Any]] = []
+    closed_pnl_fetch_errors: list[str] = []
     for sym in sorted(ledger_symbols | bybit_symbols):
         if not sym:
             continue
         try:
             rows = trading_client.get_closed_pnl(symbol=sym, start_time_ms=start_ms, end_time_ms=end_ms, limit=200)
-        except Exception:  # noqa: BLE001 - one-symbol failure should not kill the whole reconciliation
+        except Exception as exc:  # noqa: BLE001 - one-symbol failure should not kill the whole reconciliation
+            # ...but it must not vanish: a swallowed fetch makes this symbol look
+            # like a genuine ledger<->venue mismatch in the report with no way to
+            # tell it from a transient API error. Log it + surface the symbol so
+            # the operator can distinguish a fetch error from a real mismatch.
+            _logger.warning("reconcile: get_closed_pnl failed for %s: %s", sym, exc)
+            closed_pnl_fetch_errors.append(sym)
             continue
         for r in rows or []:
             r["_symbol_query"] = sym
             closed_records.append(r)
+    if closed_pnl_fetch_errors:
+        _logger.warning(
+            "reconcile: %d symbol(s) had closed-pnl fetch errors (treat their mismatches as suspect): %s",
+            len(closed_pnl_fetch_errors), ", ".join(closed_pnl_fetch_errors),
+        )
 
     # Funding settlements (optional): surfaces the short's funding tailwind/drag,
     # which closedPnl excludes. hasattr-guarded so older clients still work, and
@@ -1312,7 +1327,8 @@ def run_demo_bybit_reconciliation(
     report_path = report_dir / "demo_bybit_reconciliation.md"
     report_path.write_text(report, encoding="utf-8")
     pairs_csv_path = _write_pairs_csv(report_path, result.get("pairs") or [])
-    return {"result": result, "report": report, "report_path": str(report_path), "pairs_csv_path": pairs_csv_path}
+    return {"result": result, "report": report, "report_path": str(report_path), "pairs_csv_path": pairs_csv_path,
+            "closed_pnl_fetch_errors": closed_pnl_fetch_errors}
 
 
 def run_paper_demo_reconciliation(
@@ -1357,6 +1373,39 @@ def run_long_paper_demo_reconciliation(
         demo_dataset="long_native_demo_trades",
         report_subdir="long_paper_demo_reconciliation",
         report_filename="long_paper_demo_reconciliation.md",
+        entry_tolerance_ms=entry_tolerance_ms,
+        output_dir=output_dir,
+    )
+    summary = payload["result"]["summary"]
+    summary["min_pairs_warning_threshold"] = int(min_pairs_warning)
+    summary["sample_warning"] = bool(summary["paired"] < int(min_pairs_warning))
+    return payload
+
+
+def run_continuous_paper_demo_reconciliation(
+    paper_root: str | Path,
+    demo_root: str | Path,
+    *,
+    entry_tolerance_ms: int = DEFAULT_ENTRY_TOLERANCE_MS,
+    output_dir: str | Path | None = None,
+    min_pairs_warning: int = 20,
+) -> dict[str, Any]:
+    """Continuous-fade sleeve (3rd sleeve) paper/demo execution-slippage
+    reconciler. Same pairing as the short/long reconcilers but reads the
+    continuous sleeve's own ledger datasets (``continuous_fade_paper_trades``
+    vs ``continuous_fade_demo_trades``). Like the long reconciler it emits a
+    ``sample_warning`` when fewer than ``min_pairs_warning`` pairs were matched
+    (continuous is sub-hourly so its pair count grows fast, but a fresh sleeve
+    still warrants the caveat). The continuous demo is intra-hour decile-cross
+    driven, so a small entry-time skew vs the paper fill is expected.
+    """
+    payload = _run_reconciliation(
+        paper_root=paper_root,
+        demo_root=demo_root,
+        paper_dataset="continuous_fade_paper_trades",
+        demo_dataset="continuous_fade_demo_trades",
+        report_subdir="continuous_paper_demo_reconciliation",
+        report_filename="continuous_paper_demo_reconciliation.md",
         entry_tolerance_ms=entry_tolerance_ms,
         output_dir=output_dir,
     )

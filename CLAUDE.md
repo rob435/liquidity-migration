@@ -14,11 +14,12 @@ regime-conditional. All research findings are consolidated in
   done, what's running, what's next. **First read for every session.**
 - **`docs/backtesting_errors_we_never_repeat.md`** — mandatory research
   methodology standard. Read it before any backtest or strategy work.
-- **`docs/research_summary.md`** — the single consolidated research record:
-  all results, verdicts, the useful findings, and the three-tier **demo-arbiter**
-  decision framework (Investigation → Demo-candidate → Real-money), MAR-primary.
-  (Round 1 + Round 2 per-phase docs were consolidated here; originals in git history.)
-- `docs/research_findings.md` — short verdict pointer (defers to the summary).
+- **`docs/research_summary.md`** — THE single consolidated research record:
+  every result, verdict, useful finding, open methodology debt, and the three-tier
+  **demo-arbiter** decision framework (Investigation → Demo-candidate → Real-money),
+  MAR-primary. All per-arc write-ups + research scripts were consolidated here and
+  removed 2026-06-02; git history is the backstop. **Read this for all research; it
+  is the one file.**
 - `docs/data_roots.md` — which data root to use (research vs. live demo vs. OOS).
 - `docs/event_demo_daemon.md` — demo daemon runbook + live-infra hardening changelog.
 - `README.md` — repo overview and status.
