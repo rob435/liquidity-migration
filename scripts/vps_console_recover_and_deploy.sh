@@ -220,16 +220,22 @@ systemctl enable liquidity-migration-bybit-risk.service
 systemctl enable liquidity-migration-bybit-paper.service
 systemctl enable liquidity-migration-bybit-long-demo.service
 systemctl enable liquidity-migration-bybit-long-paper.service
+# Continuous-fade sleeve (live on demo 2026-06-01) — recovery must bring it back too.
+systemctl enable liquidity-migration-bybit-continuous-demo.service
 # Timers must be enable --now: enable alone writes the symlink but doesn't
 # start the timer, so the demo-health watchdog + daily combined-book report
 # would sit dormant on a freshly-recovered VPS.
 systemctl enable --now liquidity-migration-demo-health.timer
 systemctl enable --now liquidity-migration-combined-book-report.timer
+systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer
 systemctl restart liquidity-migration-bybit-demo.service
 systemctl restart liquidity-migration-bybit-risk.service
 systemctl restart liquidity-migration-bybit-paper.service
 systemctl restart liquidity-migration-bybit-long-demo.service
 systemctl restart liquidity-migration-bybit-long-paper.service
+# Risk service restarts BEFORE the continuous daemon so the multi-sleeve tracker
+# (which reads CONTINUOUS_DATA_ROOT) is up before continuous starts trading.
+systemctl restart liquidity-migration-bybit-continuous-demo.service
 
 if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then
   sleep "$SYSTEMD_SETTLE_SECONDS"
@@ -240,11 +246,14 @@ systemctl is-active --quiet liquidity-migration-bybit-risk.service
 systemctl is-active --quiet liquidity-migration-bybit-paper.service
 systemctl is-active --quiet liquidity-migration-bybit-long-demo.service
 systemctl is-active --quiet liquidity-migration-bybit-long-paper.service
+systemctl is-active --quiet liquidity-migration-bybit-continuous-demo.service
 systemctl is-enabled --quiet liquidity-migration-bybit-demo.service
 systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
 systemctl is-enabled --quiet liquidity-migration-bybit-paper.service
 systemctl is-enabled --quiet liquidity-migration-bybit-long-demo.service
 systemctl is-enabled --quiet liquidity-migration-bybit-long-paper.service
+systemctl is-enabled --quiet liquidity-migration-bybit-continuous-demo.service
+systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer
 # Timer parity — recovery must catch a missed enable just like deploy does.
 systemctl is-enabled --quiet liquidity-migration-demo-health.timer
 systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer
@@ -284,5 +293,11 @@ systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Envir
 systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=UNIVERSE_MIN_TURNOVER_24H=0'
 systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=MAX_ACTIVE_SYMBOLS=12'
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=ORDER_SUBMIT_MODE=ws_then_rest'
+# SHARED-ACCOUNT SAFETY: a recovered VPS must keep the single risk service wired to
+# read EVERY sleeve's ledger root, else a sibling sleeve's live positions get flattened.
+systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=LONG_DATA_ROOT=data/bybit-long-demo-event'
+systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'
+systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=1'
+systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=STOP_LOSS_PCT=0.25'
 
 echo "deploy-verify-ok commit=$(git rev-parse --short HEAD)"

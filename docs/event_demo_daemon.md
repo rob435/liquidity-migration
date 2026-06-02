@@ -245,3 +245,61 @@ Deploy the code first (so the daemons restart on the fixed engine), then run the
 reset — the order doesn't matter for correctness since the reset wipes whatever
 has accumulated, but doing the reset last means the first post-reset cycles are
 already on the fixed code.
+
+## Continuous-fade sleeve (4th sleeve — sub-hourly, ticker-driven) — LIVE on demo (operator-directed 2026-06-01)
+
+A separate forward-demo sleeve for the continuous liquidity-migration fade (`continuous_demo.py`,
+`continuous_demo_daemon.py`, CLI `continuous-event-demo-cycle --daemon`, unit
+`liquidity-migration-bybit-continuous-demo.service`). It is fully isolated from short/long: data root
+`data/bybit-continuous-demo-event`, datasets `continuous_fade_demo_{trades,orders,cycles}`, orderLinkId
+prefix `lm-en-c-` / `lm-ux-c-` (the extended `ws_risk` `decode_entry_order_link_id` routes its fills).
+It reuses the same WS plumbing (kline pool + `TickerCache` + `PrivateStateCache` + `ExecutionEventRouter`)
+via a thin subclass of the long daemon.
+
+- **"No 1h":** the cross-sectional decile is recomputed off the live `TickerCache` price every
+  `INTERVAL_SECONDS` (default 60s) heartbeat, so a name entering/leaving the top fade decile is acted on
+  within ~60s — not gated on the hourly bar close. The trailing rolling features still come from the
+  confirmed-1h store (a 168h vol needs hourly history); only the reaction is sub-hourly.
+- **Signal == backtest:** the live decile uses the shared `compute_continuous_decile_panel`, proven
+  bit-identical to the verified backtest (equivalence test). State-exit: short fresh rmom-gated D9 (liquid
+  ≥$500k/h), cover when it leaves D9 or at max-hold; resting stop + the `ws_risk` intrabar path handle stops.
+- **rmom dependency:** the signal gates on `data/bybit-continuous-demo-event/residual_momentum.parquet`.
+  The `continuous-rmom-refresh.timer` rebuilds it daily (00:20 UTC) from the sleeve's own kline store.
+  No rmom file ⇒ the daemon runs but emits **no** signal (fail-safe), so the cold-start is signal-quiet
+  until the store has history and the first refresh runs.
+- **Memory:** the kline manager is scoped to the top-250 by 24h turnover (the liquid cross-section it
+  trades), not the full ~570 — the full store blew the long sleeve's 1G cap. `MemoryMax=4G`.
+
+### Shared-account safety (three short-direction sleeves, one netted demo account)
+
+Short, long, and continuous all trade ONE Bybit demo account (one-way / netted position mode). The
+isolation that makes this safe:
+
+- **One reconcile authority.** A single `ws_risk` service reads ALL THREE ledger roots (`DATA_ROOT` +
+  `LONG_DATA_ROOT` + `CONTINUOUS_DATA_ROOT`), tags every row with its `sleeve`, and routes each
+  write back to that sleeve's ledger (`_write_*_rows_routed`). So a continuous position is *tracked*
+  (never flattened as untracked), and a continuous orphan (server-side disaster stop fired) is closed —
+  with the real venue PnL backfilled from `get_closed_pnl` — into the **continuous** ledger, not short's.
+  The continuous cycle, like the long cycle, does NOT run its own orphan-close (that would race the risk
+  service); it only writes its own *planned* exits (left-decile / breakeven / failed-fade / max-hold).
+- **Account-wide same-symbol exclusion (Rule A).** Each sleeve's cycle skips entry on any symbol that
+  already has a live account position or pending entry order (account-wide, not sleeve-scoped), so two
+  sleeves never both hold the same symbol — the netted account stays effectively per-sleeve-disjoint.
+  Entries are also blocked entirely on a position-fetch error (no empty-fetch-as-flat false entry).
+- **Hard-fail wiring.** `run_bybit_demo_ws_risk_engine.sh` refuses to start with
+  `EXIT_UNTRACKED_POSITIONS=1` unless BOTH `LONG_DATA_ROOT` and `CONTINUOUS_DATA_ROOT` are set, and
+  `deploy_vps_live.sh` verify asserts the risk unit carries both roots — so a stale unit can't silently
+  leave a sleeve's positions exposed to flattening. The deploy also restarts the risk service BEFORE the
+  continuous daemon, so the tracker is up before trading starts.
+
+**Live (operator-directed go-live 2026-06-01):** the unit ships `SUBMIT_ORDERS=1` /
+`CONFIRM_DEMO_ORDERS=1` — it submits demo orders on deploy. To pause without removing the sleeve, set
+`SUBMIT_ORDERS=0` and `systemctl restart liquidity-migration-bybit-continuous-demo`. Cold start is
+signal-quiet until the first `residual_momentum.parquet` exists (the `continuous-rmom-refresh` timer,
+enabled `--now` on deploy, builds it). The refresh defaults `--end` to **tomorrow (UTC)** so it keeps
+`residual_momentum[today]` fresh on every daily run — a stale table (e.g. the old hardcoded
+`END=2026-05-28`) would silently empty the live decile (the `is_not_null` join drops every symbol). The
+liveness watchdog pages on an rmom table whose max day is stale, and the cycle telemetry surfaces
+`max_rmom_day_ts` (not just a `rmom_present` boolean). Add `data/bybit-continuous-demo-event` to
+`reset_demo_paper_ledgers.sh` to include it in the Tier-3-clock reset set. Demo account ONLY — never
+`REAL_MONEY`.

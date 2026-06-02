@@ -2821,13 +2821,17 @@ def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int] | None:
     if not order_link_id or not order_link_id.startswith("lm-en"):
         return None
     parts = order_link_id.split("-")
-    # Short: lm-en-{base}-{ts36}        → 4 parts, sleeve="short"
-    # Long:  lm-en-l-{base}-{ts36}      → 5 parts, sleeve="long"
+    # Short:      lm-en-{base}-{ts36}     → 4 parts, sleeve="short"
+    # Long:       lm-en-l-{base}-{ts36}   → 5 parts (parts[2]=="l"), sleeve="long"
+    # Continuous: lm-en-c-{base}-{ts36}   → 5 parts (parts[2]=="c"), sleeve="continuous"
     if len(parts) == 4 and parts[0] == "lm" and parts[1] == "en":
         sleeve = "short"
         ts36 = parts[3]
     elif len(parts) == 5 and parts[0] == "lm" and parts[1] == "en" and parts[2] == "l":
         sleeve = "long"
+        ts36 = parts[4]
+    elif len(parts) == 5 and parts[0] == "lm" and parts[1] == "en" and parts[2] == "c":
+        sleeve = "continuous"
         ts36 = parts[4]
     else:
         return None

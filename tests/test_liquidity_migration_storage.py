@@ -64,6 +64,34 @@ def test_event_demo_trades_dedupe_by_trade_id(tmp_path: Path) -> None:
     assert stored["return"][0] == 0.02
 
 
+def test_continuous_fade_datasets_registered_and_roundtrip(tmp_path: Path) -> None:
+    """Regression: run_continuous_demo_cycle ALWAYS writes its cycles ledger
+    (and trades/orders when recording), so every continuous dataset must be in
+    the DATASETS allowlist + DATASET_KEYS, else the live cycle crashes with
+    'Unknown dataset' on its first write. Roundtrip each with its dedupe key."""
+    from liquidity_migration.continuous_demo import (
+        ContinuousDemoCycleConfig,
+        continuous_dataset_names,
+    )
+    from liquidity_migration.storage import DATASET_KEYS, DATASETS
+
+    demo_names = continuous_dataset_names(ContinuousDemoCycleConfig())
+    paper_names = continuous_dataset_names(ContinuousDemoCycleConfig(paper_mode=True))
+    key_by_suffix = {"trades": "trade_id", "orders": "order_link_id", "cycles": "cycle_id"}
+    for trades, orders, cycles in (demo_names, paper_names):
+        for dataset in (trades, orders, cycles):
+            assert dataset in DATASETS, f"{dataset} missing from DATASETS allowlist"
+            assert dataset in DATASET_KEYS, f"{dataset} missing from DATASET_KEYS"
+        # Roundtrip + dedupe on each dataset's declared key.
+        for dataset, suffix in ((trades, "trades"), (orders, "orders"), (cycles, "cycles")):
+            key = key_by_suffix[suffix]
+            row = pl.DataFrame([{key: "k1", "symbol": "AAAUSDT", "v": 1}])
+            write_dataset(row, tmp_path, dataset, partition_by=())
+            write_dataset(row.with_columns(pl.lit(2).alias("v")), tmp_path, dataset, partition_by=())
+            stored = read_dataset(tmp_path, dataset)
+            assert stored.height == 1 and stored["v"][0] == 2
+
+
 def test_event_demo_trades_dedupe_keeps_freshest_updated_at_ms_not_last_written(tmp_path: Path) -> None:
     """Two writers (demo cycle + ws_risk engine) both author trade rows, so the
     LAST physical write is not a reliable proxy for the freshest version. When

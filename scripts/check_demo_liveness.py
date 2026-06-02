@@ -170,6 +170,38 @@ def evaluate_ws_staleness(
     return None
 
 
+def evaluate_rmom_staleness(
+    *, max_rmom_day_ts: int, now_ms: int, max_stale_days: float, label: str
+) -> Alert | None:
+    """The continuous decile join drops EVERY symbol when residual_momentum.parquet lacks today's row
+    (the ``is_not_null`` filter empties the cross-section) — a SILENT zero-signal blackout that reads as
+    'quiet market' (live_d9_symbols=0, rmom_present=True). Alert if the latest cycle's rmom day is
+    missing or older than ``max_stale_days``. This is the watchdog half of the rmom-freshness fix
+    (the precompute now defaults --end to tomorrow so the daily refresh keeps it current)."""
+    if not max_rmom_day_ts:
+        return Alert(
+            key=f"rmom:{label}",
+            severity=CRITICAL,
+            message=(
+                f"{label}: rmom signal gate EMPTY (max_rmom_day_ts=0) — the live decile drops every "
+                f"symbol (silent zero-signal blackout). Rebuild residual_momentum.parquet "
+                f"(precompute_residual_momentum.py) and check the continuous-rmom-refresh timer."
+            ),
+        )
+    stale_days = (now_ms - max_rmom_day_ts) / 86_400_000.0
+    if stale_days > max_stale_days:
+        return Alert(
+            key=f"rmom:{label}",
+            severity=CRITICAL,
+            message=(
+                f"{label}: rmom signal gate STALE — newest residual_momentum day {stale_days:.1f}d old "
+                f"(> {max_stale_days:.0f}d). The live decile silently empties; the continuous-rmom-refresh "
+                f"timer likely failed — rebuild residual_momentum.parquet."
+            ),
+        )
+    return None
+
+
 def evaluate_exchange_errors(*, recent: list[dict], label: str) -> list[Alert]:
     """Recent cycles reporting position/order snapshot errors or fill failures."""
     pos_errs = [str(r.get("position_report_error") or "") for r in recent]
@@ -351,6 +383,53 @@ def gather_alerts(*, data_root: Path, units: list[str], now_ms: int, args: argpa
     return alerts
 
 
+def gather_continuous_alerts(*, continuous_root: Path, now_ms: int, args: argparse.Namespace) -> list[Alert]:
+    """Per-sleeve liveness for the continuous-fade daemon: cycle-age (hung/down), rmom-gate freshness
+    (the silent-blackout class), and server-side stop protection on its own open trades. The
+    continuous sleeve writes a SEPARATE ledger root + an unpartitioned ``continuous_fade_demo_cycles``
+    dataset, so it needs its own gather (the short-root ``gather_alerts`` never sees it)."""
+    if not continuous_root.exists():
+        return []
+    label = continuous_root.name
+    alerts: list[Alert] = []
+    try:
+        cyc = read_dataset(continuous_root, "continuous_fade_demo_cycles")
+    except Exception:  # noqa: BLE001 — watchdog never crashes
+        cyc = pl.DataFrame()
+    latest_ts = (
+        int(cyc.select(pl.col("ts_ms").max()).item())
+        if (cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns) else None
+    )
+    live = evaluate_cycle_liveness(
+        latest_cycle_ts_ms=latest_ts, now_ms=now_ms, max_age_minutes=args.max_cycle_age_min, label=label
+    )
+    if live:
+        alerts.append(live)
+    if cyc is not None and not cyc.is_empty() and "ts_ms" in cyc.columns:
+        row = cyc.sort("ts_ms").tail(1).to_dicts()[0]
+        rmom_alert = evaluate_rmom_staleness(
+            max_rmom_day_ts=int(row.get("max_rmom_day_ts") or 0), now_ms=now_ms,
+            max_stale_days=args.max_rmom_stale_days, label=label,
+        )
+        if rmom_alert:
+            alerts.append(rmom_alert)
+    # Stop protection on the continuous sleeve's own open trades. Account-wide same-symbol exclusion
+    # (Rule A) means each netted venue position maps to one sleeve, so the same check is valid here.
+    try:
+        tdf = read_dataset(continuous_root, "continuous_fade_demo_trades")
+        open_ct = (
+            tdf.filter(pl.col("status") == "open").to_dicts()
+            if (not tdf.is_empty() and "status" in tdf.columns) else []
+        )
+    except Exception:  # noqa: BLE001
+        open_ct = []
+    if open_ct:
+        positions, perr = _venue_positions(args.settle_coin)
+        if perr is None:
+            alerts.extend(evaluate_stop_protection(open_trades=open_ct, venue_positions=positions))
+    return alerts
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--data-root", type=Path, default=Path("data/bybit-demo-event"))
@@ -362,6 +441,10 @@ def main() -> int:
     )
     p.add_argument("--max-cycle-age-min", type=float, default=10.0, help="alert if no cycle within this many minutes")
     p.add_argument("--max-ws-lag-hours", type=float, default=6.0, help="warn if the WS kline feed is this stale")
+    p.add_argument("--continuous-root", type=Path, default=Path("data/bybit-continuous-demo-event"),
+                   help="continuous-fade sleeve root for its per-sleeve cycle-age + rmom-freshness + stop checks ('' to skip)")
+    p.add_argument("--max-rmom-stale-days", type=float, default=2.0,
+                   help="alert if the continuous rmom signal gate's newest day is older than this (silent-blackout guard)")
     p.add_argument("--settle-coin", default="USDT", help="settle coin for the Bybit get_positions stop-protection check")
     p.add_argument("--cooldown-min", type=float, default=30.0, help="re-alert interval for a persisting condition")
     p.add_argument("--heartbeat-url", default=None, help="ping this URL on a healthy run (external dead-man's-switch)")
@@ -375,11 +458,17 @@ def main() -> int:
         "liquidity-migration-bybit-paper.service",
         "liquidity-migration-bybit-long-demo.service",
         "liquidity-migration-bybit-long-paper.service",
+        # Continuous-fade sleeve (went live on demo 2026-06-01) — systemd-failed check here, PLUS its
+        # own per-sleeve cycle-age + rmom-freshness + stop-protection via gather_continuous_alerts
+        # (it reads the SEPARATE continuous root, since this invocation's data_root is the SHORT root).
+        "liquidity-migration-bybit-continuous-demo.service",
     ]
     state_file = args.state_file or (args.data_root / ".cache" / "liveness_watchdog.json")
     now_ms = _now_ms()
 
     alerts = gather_alerts(data_root=args.data_root, units=units, now_ms=now_ms, args=args)
+    if str(args.continuous_root):
+        alerts.extend(gather_continuous_alerts(continuous_root=args.continuous_root, now_ms=now_ms, args=args))
     state = _load_state(state_file)
     to_send, resolved, new_state = select_alerts_to_send(
         active=alerts, state=state, now_ms=now_ms, cooldown_minutes=args.cooldown_min

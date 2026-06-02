@@ -73,6 +73,10 @@ systemctl is-enabled --quiet liquidity-migration-bybit-paper.service
 # reason it catches the short side.
 systemctl is-enabled --quiet liquidity-migration-bybit-long-demo.service
 systemctl is-enabled --quiet liquidity-migration-bybit-long-paper.service
+# Continuous-fade sleeve (live on demo 2026-06-01) + its daily rmom-refresh timer.
+systemctl is-enabled --quiet liquidity-migration-bybit-continuous-demo.service
+systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer
+systemctl is-active --quiet liquidity-migration-continuous-rmom-refresh.timer
 # Timer parity — read-only verify must catch a deploy that forgot to enable
 # (or someone manually disabled) the demo-health watchdog or daily
 # combined-book report. Both fail loud if missing.
@@ -106,6 +110,7 @@ systemctl is-active --quiet liquidity-migration-bybit-risk.service
 systemctl is-active --quiet liquidity-migration-bybit-paper.service
 systemctl is-active --quiet liquidity-migration-bybit-long-demo.service
 systemctl is-active --quiet liquidity-migration-bybit-long-paper.service
+systemctl is-active --quiet liquidity-migration-bybit-continuous-demo.service
 
 systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=STRATEGY_PROFILE=promoted'
 systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=INTERVAL_SECONDS=60'
@@ -114,6 +119,14 @@ systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Envir
 systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=UNIVERSE_MIN_TURNOVER_24H=0'
 systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=MAX_ACTIVE_SYMBOLS=12'
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=ORDER_SUBMIT_MODE=ws_then_rest'
+# SHARED-ACCOUNT SAFETY: the single risk service must read EVERY sleeve's ledger root,
+# else a sibling sleeve's live positions look untracked and get flattened. Fail loud
+# if the risk unit isn't wired to the long + continuous sleeves.
+systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=LONG_DATA_ROOT=data/bybit-long-demo-event'
+systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'
+# Continuous sleeve live + its disaster stop.
+systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=1'
+systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=STOP_LOSS_PCT=0.25'
 
 systemctl show liquidity-migration-bybit-demo.service \
   --property=ActiveState \

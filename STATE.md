@@ -113,6 +113,62 @@ promoted; forward demo is the arbiter.
     constraint). Receipts: `p0-continuous-rmom-2026-05-31.md`, `p1b-continuous-intraday-fade-...`,
     `p1e-continuous-liquid-viable-2026-06-01.md` (final, incl. matched-sizing); `p1-...daily-cycle` +
     `p1c-...final-verdict` = the two retracted closes.
+    - **ENGINE BUILT (2026-06-01, operator-directed):** the EXPLORATORY proxy is now an execution-grade
+      backtest — `liquidity_migration/continuous_events.py` + `continuous-events` CLI + 11 tests (suite 1044
+      pass). Reuses the daily engine's `_simulate_indexed_trade` (stop fills, funding-to-exit) + adds an honest
+      **+1h entry**, a **size/ADV market-impact** cost, and **fixed-capital additive** accounting. Port-validated
+      vs the proxy (bybit h12 delay-0: 12,981 trades / +390.9% vs proxy 13,006 / +388.2%). **VERIFIED by a full
+      audit** (operator-directed "check & verify everything"): accounting exact, NO look-ahead (latency sweep
+      decays smoothly 1→6h = real multi-hour reversal), MTM telescopes, survivorship clean, beta-neutral (beta
+      −0.1/−0.2; L/S keeps ~75–80% of return → NOT mostly short-beta). **The headline risk metrics were ~3× too
+      rosy and are corrected:** drawdown 2–3% (realized-at-exit) → 4–5% (daily MTM) → **6–7% (hourly/intraday
+      MTM)**; honest **MAR ~16 (bybit) / ~23 (binance), Sharpe ~10**, all-weather both venues — NOT the original
+      compounding-inflated 55–62. **EXPLORATORY** — residual Sharpe ~10 is still too high to deploy on faith
+      (not a bug: the un-closable gaps are OOS persistence, borrow/short-availability on pumped alts, and
+      sub-hourly squeezes); forward demo is the only arbiter. Receipt `continuous-engine-2026-06-01.md` (full
+      audit inside); artifacts `~/SHARED_DATA/cont_engine/`.
+    - **LIVE DEMO SLEEVE — SUBMIT_ORDERS=1, operator-directed go-live 2026-06-01 (pending operator push/deploy).**
+      A 4th forward-demo sleeve (`continuous_demo.py` + `continuous_demo_daemon.py` +
+      `continuous-event-demo-cycle` CLI; suite 1065 pass). SEPARATE everything: data root
+      `data/bybit-continuous-demo-event`, datasets `continuous_fade_demo_*` (now registered in `storage.DATASETS`
+      — a fixed crash-on-first-write), orderLinkId prefix `lm-en-c-` (ws_risk `decode_entry_order_link_id`
+      extended for the `c` sleeve). Reuses the live WS architecture (kline pool + TickerCache + PrivateStateCache
+      + ExecutionEventRouter) via a thin subclass of the long daemon. **No 1h:** the cross-sectional decile is
+      recomputed off the live ticker price every 60s heartbeat (not gated on the hourly close); the live signal
+      is **proven bit-identical to the backtest** (shared `compute_continuous_decile_panel`; equivalence test).
+      State-exit: short fresh rmom-D9, cover when it leaves D9 / max-hold.
+      **Shared-account safety (3 short sleeves, 1 netted demo acct):** the single `ws_risk` service reads ALL
+      THREE ledger roots (`DATA_ROOT`+`LONG_DATA_ROOT`+`CONTINUOUS_DATA_ROOT`), tags rows by `sleeve`, and
+      routes writes per-sleeve — so continuous positions are tracked (not flattened) and continuous orphans
+      (disaster-stop fired) are closed with `get_closed_pnl` backfill INTO the continuous ledger (verified by
+      test; the cycle defers orphan-close to ws_risk, like the long sleeve). Account-wide same-symbol exclusion
+      (Rule A) keeps the sleeves disjoint; the risk run-script hard-fails and `deploy_vps_live.sh` verify asserts
+      both sibling roots are wired. Deploy restarts risk BEFORE the continuous daemon. **Not pushed — operator
+      deploys (push auto-deploys to the VPS).** EXPLORATORY signal — the demo is the only OOS arbiter.
+      **Risk fix (2026-06-01):** the live sleeve now ships a WIDE server-side disaster stop
+      (`stop_loss_pct=0.25`, Bybit-managed, fires even if the daemon is down) + a guard test —
+      "leave-the-decile" is a PROFIT exit a squeezing short never triggers, so it is NOT a risk control.
+      **Daily→continuous inheritance TESTED + wired (2026-06-01, operator-directed; `docs/continuous_sleeve_inheritance.md`).**
+      Ablated every daily-system idea in `continuous_events.py`, both venues. **Verdict: the protective EXITS
+      transfer, the SELECTION gates backfire.** ADOPTED into the live sleeve: failed-fade exit (ff6; clean
+      cross-venue MAR↑/DD↓), breakeven@+10%MFE (big bybit, neutral binance), 30d age floor (neutral insurance),
+      25% disaster stop (safety). REJECTED by the data: fade-confirmation/deceleration (cut 63% of trades, the
+      edge is in still-rising names), market-context gate (kills it — the edge is in down markets),
+      extremity-cap/short-D8 (CATASTROPHIC — the edge IS the top decile), inverse-vol sizing (DD-up, not a
+      risk-adjusted win). **Honest confirmation:** the adopted combo cuts the intraday (hourly-MTM) squeeze
+      drawdown ~21–24% both venues (bybit 6.4→4.9%, binance 7.0→5.6%) while keeping ~84% of the return. The
+      sophistication that helped was risk machinery, not new signal — consistent with the STR-factor audit.
+      **Sub-cycle reactivity (2026-06-01, operator-directed; `docs/continuous_sleeve_reactivity.md`):** four
+      tiers added to the live sleeve — (1) a tick-driven protective-exit monitor (breakeven/failed-fade/
+      **stop-approach** on held names every ~2s, no panel recompute) + **anti-thrash** (hysteresis
+      `exit_decile_buffer=1`, 30-min re-entry cooldown); (2) `LivePanelCache` — heavy features once per bar
+      close, cheap re-rank per wake, **np.allclose-equivalent** (D9 + hold-band exact; full recompute is the
+      fallback); (3) opt-in debounced ticker-batch entry wake (**off by default**); (4) continuous-fill →
+      prompt state refresh. Tier 2 is a pure speedup; stop_approach/hysteresis/cooldown DO change live
+      exit/entry timing (risk/churn-reducing, configurable, NOT engine-validated — forward demo arbitrates).
+      Hardened after an adversarial multi-agent review (cache invalidates on a content signature, not just
+      the hour; fast-loop has a ledger-based in-flight-exit guard vs WS-snapshot lag). Suite 1084 pass.
+      **Not pushed — operator deploys.**
   - **Intraday-detection kernel (K0→K1a→I-phase, 2026-05-30) — REOPENED (operator-directed).**
     K0: daily entry ~8–11% below the event-day peak (optimistic ceiling). **K1a falsified only
     the *daily selector run hourly*** (≥6×-daily-turnover can't confirm until ~15:00, after the
@@ -237,7 +293,43 @@ per-cell ledgers; `scripts/apply_decision_rule.py` is the legacy strict (Sharpe)
 ## What's broken
 
 Nothing known. Pre-push gate clean: `.venv/bin/python -m ruff check liquidity_migration tests`
-+ `.venv/bin/python -m pytest -q` both pass.
++ `.venv/bin/python -m pytest -q` both pass (1086).
+
+**Fixed 2026-06-02 — continuous rmom silent-blackout (CRITICAL) + fault audit.** A 7-dimension
+adversarial audit of the continuous sleeve found `scripts/precompute_residual_momentum.py` hardcoded
+`END="2026-05-28"`, so the daily systemd refresh could never write a row for "today" → the live decile
+join (`...is_not_null()`) silently dropped the WHOLE cross-section → zero entries, masked as a quiet
+market (`rmom_present=True`, `live_d9_symbols=0`). Past 2026-05-28 the sleeve would emit no signal the
+moment it is armed. **Fixed:** `--end` defaults to tomorrow UTC (PIT-safe), atomic parquet write; cycle
+telemetry now persists `max_rmom_day_ts`/`rmom_stale_days`; `check_demo_liveness.py` now monitors the
+continuous sleeve (cycle-age + rmom-staleness page + stop-protection); fast-loop reactivity counters
+persisted as `rx_*`; and a **portfolio circuit breaker** (`entry_circuit_breaker_tripped`, default OFF)
+pauses entries during a correlated-squeeze cover-cluster. Full deduped/prioritized fault list + the
+decisive engine experiments (the 3-way redundancy backtest is the gating one) live in
+**`docs/continuous_faults_roadmap.md`**. Not pushed — operator deploys.
+
+**Circuit breaker — engine-validated 2026-06-02; ENABLED on live as tail insurance (operator-directed).**
+Swept window×threshold both venues (`scripts/cb1_circuit_breaker_validate.py`; receipt
+`docs/preregistration/cb1-circuit-breaker-2026-06-02.md`). Venue-divergent: robustly helps the squeezier
+binance book (DD 5.1%→~2%) but **hurts the already-clean bybit book (DD 2.6%) — off is MAR-optimal, 18/19
+cells lose; the one cross-venue winner (w24/n8) is a bybit noise spike**. So it is NOT a validated MAR win.
+**Operator-directed: the live sleeve ships it ENABLED at w24/n8** (`entry_pause_after_adverse_exits=8`,
+`entry_pause_window_minutes=1440`) as deliberate protective tail insurance (≈ −21% bybit return for −27% DD
+in-sample; only ever pauses entries, never adds risk; forward demo arbitrates). Engine default stays OFF.
+Disable via `entry_pause_after_adverse_exits=0`. Mechanism + regression tests retained. Suite 1088.
+
+**Strategy-alpha sweep 2026-06-02 (exit/entry/rebalance) — one robust win: tighten rmom 0.50→0.33.**
+Engine ablation both venues (`scripts/alpha_sweep.py`; receipt `docs/preregistration/alpha-sweep-2026-06-02.md`).
+**ENTRY:** `rmom_quantile` 0.50→**0.33** (keep the lowest-residual-momentum third) — cross-venue MAR↑
+(bybit 38.6→42.9 +11%, binance 30.4→**50.1** +65%), DD↓ both (2.6→1.8, 5.1→2.3), neighbours hold; same
+validated rmom squeeze-filter, used tighter; ~−23% return (MAR-primary win). **APPLIED 2026-06-02
+(operator-directed): the live sleeve ships `rmom_quantile=0.33`** (engine default stays 0.50; forward demo
+is the arbiter, revert to 0.50 if it diverges). **EXIT:** mfe_giveback t5/r30 is
+a smaller standalone win (bybit +9%/binance +1%) but does NOT stack with rmom33 (over-trims binance) →
+superseded. **DEAD/not-alpha:** liq-raise + turnover-surge entry gates (venue-divergent, hurt bybit — it
+wants breadth; refutes "re-inject the event"), max_hold (48≈peak), max_active (a leverage dial, not alpha),
+rotation (low). Meta: the one robust lever left is tightening the rmom squeeze-filter — risk machinery, not
+new signal.
 
 **Fixed 2026-05-30 — coverage_gap false health alert + overhaul audit.** The
 `drop_all_4` promotion set `universe_rank_max=99999` (disable sentinel); the demo

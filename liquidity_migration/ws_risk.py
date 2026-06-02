@@ -161,6 +161,14 @@ class EventWebSocketRiskConfig:
     long_data_root: str = ""
     long_trades_dataset: str = "long_native_demo_trades"
     long_orders_dataset: str = "long_native_demo_orders"
+    # Continuous-fade sleeve (3rd sleeve, also SHORT-direction). Same dual-side rationale: when
+    # continuous_data_root is set this engine ALSO reads + routes that ledger so continuous positions
+    # are recognised (not flattened as untracked, not mis-routed to the short ledger) on the shared
+    # demo account. Set to "" to ignore the continuous sleeve.
+    continuous_data_root: str = ""
+    continuous_trades_dataset: str = "continuous_fade_demo_trades"
+    continuous_orders_dataset: str = "continuous_fade_demo_orders"
+    adopt_continuous_strategy_id: str = ""
     # Per-list cap on the append-only telemetry logs (exits/repairs/
     # reconciliations/pending_fill_reconciliations/errors) so a long-lived
     # daemon can't OOM. Configurable; reports only ever display the last 20.
@@ -261,6 +269,11 @@ class EventWebSocketRiskEngine:
         )
         if self.long_root is not None:
             self.long_root.mkdir(parents=True, exist_ok=True)
+        self.continuous_root: Path | None = (
+            Path(self.risk.continuous_data_root).expanduser() if self.risk.continuous_data_root else None
+        )
+        if self.continuous_root is not None:
+            self.continuous_root.mkdir(parents=True, exist_ok=True)
         self.private_client = private_client
         self.private_stream = private_stream
         self.public_stream = public_stream
@@ -300,80 +313,73 @@ class EventWebSocketRiskEngine:
     # helpers; the legacy module-level helpers are kept for callers outside
     # this engine that already pass a per-root path.
     # ------------------------------------------------------------------
+    def _sleeve_routes(self, *, trades: bool) -> dict[str, tuple[Path, str]]:
+        """Map sleeve -> (root, dataset) for every ledger this engine owns. Short is always present;
+        long/continuous only when their data_root is configured. Drives both reads and routed writes
+        so a 4th sleeve is one entry, not N call-site edits."""
+        routes: dict[str, tuple[Path, str]] = {
+            "short": (self.root, "event_demo_trades" if trades else "event_demo_orders"),
+        }
+        if self.long_root is not None:
+            routes["long"] = (self.long_root,
+                              self.risk.long_trades_dataset if trades else self.risk.long_orders_dataset)
+        if self.continuous_root is not None:
+            routes["continuous"] = (self.continuous_root,
+                                    self.risk.continuous_trades_dataset if trades else self.risk.continuous_orders_dataset)
+        return routes
+
+    def _read_combined(self, *, trades: bool) -> pl.DataFrame:
+        frames: list[pl.DataFrame] = []
+        for sleeve, (root, dataset) in self._sleeve_routes(trades=trades).items():
+            try:
+                df = read_dataset(root, dataset)
+            except Exception:  # noqa: BLE001 - multi-ledger reads must fail open
+                df = pl.DataFrame()
+            df = _ensure_sleeve_column(df, sleeve)
+            if not df.is_empty():
+                frames.append(df)
+        if not frames:
+            return _ensure_sleeve_column(pl.DataFrame(), "short")
+        if len(frames) == 1:
+            return frames[0]
+        return pl.concat(frames, how="diagonal_relaxed")
+
     def _read_trades_combined(self) -> pl.DataFrame:
-        short = read_dataset(self.root, "event_demo_trades")
-        short = _ensure_sleeve_column(short, "short")
-        if self.long_root is None:
-            return short
-        try:
-            long_trades = read_dataset(self.long_root, self.risk.long_trades_dataset)
-        except Exception:  # noqa: BLE001 - dual-ledger reads must fail open
-            long_trades = pl.DataFrame()
-        long_trades = _ensure_sleeve_column(long_trades, "long")
-        if short.is_empty():
-            return long_trades
-        if long_trades.is_empty():
-            return short
-        return pl.concat([short, long_trades], how="diagonal_relaxed")
+        return self._read_combined(trades=True)
 
     def _read_orders_combined(self) -> pl.DataFrame:
-        short = read_dataset(self.root, "event_demo_orders")
-        short = _ensure_sleeve_column(short, "short")
-        if self.long_root is None:
-            return short
-        try:
-            long_orders = read_dataset(self.long_root, self.risk.long_orders_dataset)
-        except Exception:  # noqa: BLE001
-            long_orders = pl.DataFrame()
-        long_orders = _ensure_sleeve_column(long_orders, "long")
-        if short.is_empty():
-            return long_orders
-        if long_orders.is_empty():
-            return short
-        return pl.concat([short, long_orders], how="diagonal_relaxed")
+        return self._read_combined(trades=False)
 
-    @staticmethod
-    def _sleeve_of(row: dict[str, Any]) -> str:
+    def _sleeve_of(self, row: dict[str, Any]) -> str:
+        """The row's sleeve, but only if this engine actually owns that ledger; otherwise 'short'
+        (the always-present root). A 'continuous' row when continuous_root is unset must NOT be written
+        — but that can't happen: such rows only arise when the engine reads the continuous ledger."""
         sleeve = str(row.get("sleeve") or "").lower()
-        return sleeve if sleeve in {"long", "short"} else "short"
+        owned = {"short"} | ({"long"} if self.long_root is not None else set()) | (
+            {"continuous"} if self.continuous_root is not None else set())
+        return sleeve if sleeve in owned else "short"
+
+    def _write_rows_routed(self, rows: list[dict[str, Any]], *, trades: bool) -> None:
+        if not rows:
+            return
+        routes = self._sleeve_routes(trades=trades)
+        by_sleeve: dict[str, list[dict[str, Any]]] = {}
+        for row in rows:
+            by_sleeve.setdefault(self._sleeve_of(row), []).append(row)
+        for sleeve, sleeve_rows in by_sleeve.items():
+            root, dataset = routes[sleeve]
+            if sleeve == "short" and trades:
+                _write_trade_rows(root, pl.DataFrame(sleeve_rows, infer_schema_length=None))
+            elif sleeve == "short":
+                _write_order_rows(root, pl.DataFrame(sleeve_rows, infer_schema_length=None))
+            else:
+                write_dataset(pl.DataFrame(sleeve_rows, infer_schema_length=None), root, dataset, partition_by=())
 
     def _write_trade_rows_routed(self, rows: list[dict[str, Any]]) -> None:
-        if not rows:
-            return
-        short_rows: list[dict[str, Any]] = []
-        long_rows: list[dict[str, Any]] = []
-        for row in rows:
-            if self._sleeve_of(row) == "long" and self.long_root is not None:
-                long_rows.append(row)
-            else:
-                short_rows.append(row)
-        if short_rows:
-            _write_trade_rows(self.root, pl.DataFrame(short_rows, infer_schema_length=None))
-        if long_rows:
-            assert self.long_root is not None
-            write_dataset(
-                pl.DataFrame(long_rows, infer_schema_length=None),
-                self.long_root, self.risk.long_trades_dataset, partition_by=(),
-            )
+        self._write_rows_routed(rows, trades=True)
 
     def _write_order_rows_routed(self, rows: list[dict[str, Any]]) -> None:
-        if not rows:
-            return
-        short_rows: list[dict[str, Any]] = []
-        long_rows: list[dict[str, Any]] = []
-        for row in rows:
-            if self._sleeve_of(row) == "long" and self.long_root is not None:
-                long_rows.append(row)
-            else:
-                short_rows.append(row)
-        if short_rows:
-            _write_order_rows(self.root, pl.DataFrame(short_rows, infer_schema_length=None))
-        if long_rows:
-            assert self.long_root is not None
-            write_dataset(
-                pl.DataFrame(long_rows, infer_schema_length=None),
-                self.long_root, self.risk.long_orders_dataset, partition_by=(),
-            )
+        self._write_rows_routed(rows, trades=False)
 
     def _reconcile_prefetch_loop(self) -> None:
         """Background: keep the positions + open-orders REST snapshot fresh on a
@@ -1486,6 +1492,9 @@ class EventWebSocketRiskEngine:
         when adopt_*_strategy_id was left empty in EventWebSocketRiskConfig."""
         if sleeve == "long":
             return self.risk.adopt_long_strategy_id or MULTI_STRAT_V1_STRATEGY_ID
+        if sleeve == "continuous":
+            from .continuous_demo import CONTINUOUS_STRATEGY_ID  # lazy: avoid heavy import at module load
+            return self.risk.adopt_continuous_strategy_id or CONTINUOUS_STRATEGY_ID
         if sleeve == "short":
             if self.risk.adopt_short_strategy_id:
                 return self.risk.adopt_short_strategy_id
@@ -2214,19 +2223,19 @@ def _validate_ws_risk_config(config: EventWebSocketRiskConfig) -> None:
         raise ValueError("pending_exit_guard_seconds must be non-negative")
     if config.exit_untracked_positions and config.order_submit_mode == "ws" and not config.rest_fallback:
         raise ValueError("exit_untracked_positions requires REST fallback in Bybit demo mode")
-    if config.exit_untracked_positions and not config.long_data_root:
-        # exit_untracked_positions flattens any Bybit position not found in this
-        # engine's ledger(s). With long_data_root set the engine reads BOTH the
-        # short and long ledgers, so the long sleeve's positions are recognised.
-        # Without it, on a SHARED account the long sleeve's open positions look
-        # untracked and would be force-closed. Warn rather than raise: a dedicated
-        # single-sleeve account is a legitimate (if rare) setup, and the launch
-        # script hard-fails this combination for the shared demo account.
+    if config.exit_untracked_positions and (not config.long_data_root or not config.continuous_data_root):
+        # exit_untracked_positions flattens any Bybit position not found in this engine's ledger(s).
+        # On the SHARED demo account this engine must read EVERY sleeve's ledger (short + long +
+        # continuous) or a sibling sleeve's open positions look untracked and get force-closed. Warn
+        # per missing root; the launch script hard-fails the shared-account combination.
+        missing = [name for name, present in
+                   (("long_data_root", config.long_data_root), ("continuous_data_root", config.continuous_data_root))
+                   if not present]
         _logger.warning(
-            "exit_untracked_positions=ON with long_data_root unset: this engine will "
-            "FLATTEN any Bybit position absent from the short ledger. If another sleeve "
-            "shares this account its positions WILL be closed. Set long_data_root or "
-            "disable exit_untracked_positions unless this account is single-sleeve."
+            "exit_untracked_positions=ON with %s unset: this engine will FLATTEN any Bybit position "
+            "absent from the ledgers it reads. If another sleeve shares this account its positions WILL "
+            "be closed. Set the missing root(s) or disable exit_untracked_positions on a shared account.",
+            " + ".join(missing),
         )
     if config.untracked_position_grace_seconds < 0.0:
         raise ValueError("untracked_position_grace_seconds must be non-negative")

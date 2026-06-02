@@ -36,6 +36,7 @@ from .reconciliation import (
     run_paper_demo_reconciliation,
 )
 from .universe import run_discover_universe
+from .continuous_events import ContinuousEventConfig, run_continuous_event_research
 from .volume_events import ENTRY_POLICIES, POSITION_WEIGHTINGS, VolumeEventResearchConfig, run_volume_event_research
 from .ws_risk import EventWebSocketRiskConfig, run_event_ws_risk
 
@@ -1649,6 +1650,19 @@ def _add_event_risk_ws_parser(subparsers) -> None:
         default=ws_risk_defaults.long_orders_dataset,
         help="Dataset name for the long-side orders ledger (default: long_native_demo_orders).",
     )
+    event_ws_risk.add_argument(
+        "--continuous-data-root",
+        default=ws_risk_defaults.continuous_data_root,
+        help=(
+            "When set, ws_risk ALSO reads/writes the continuous-fade sleeve ledger at this data root "
+            "and routes WS fills per the `sleeve` column. REQUIRED on the shared account once the "
+            "continuous sleeve is live, else its short-direction positions are flattened as untracked."
+        ),
+    )
+    event_ws_risk.add_argument("--continuous-trades-dataset", default=ws_risk_defaults.continuous_trades_dataset,
+                               help="Dataset name for the continuous-sleeve trades ledger.")
+    event_ws_risk.add_argument("--continuous-orders-dataset", default=ws_risk_defaults.continuous_orders_dataset,
+                               help="Dataset name for the continuous-sleeve orders ledger.")
 
 
 def _add_combined_book_report_parser(subparsers) -> None:
@@ -1952,6 +1966,85 @@ def _add_reconcile_long_paper_demo_parser(subparsers) -> None:
     reconcile.add_argument("--output-dir", default=None, help="Where to write the long reconciliation report.")
 
 
+def _add_continuous_events_parser(subparsers) -> None:
+    d = ContinuousEventConfig()
+    p = subparsers.add_parser(
+        "continuous-events",
+        help="Execution-grade backtest of the continuous (any-hour) liquidity-migration fade.",
+    )
+    p.add_argument("--start", default=d.start_date, help="Signal window start (YYYY-MM-DD).")
+    p.add_argument("--end", default=d.end_date, help="Signal window end (exclusive, YYYY-MM-DD).")
+    p.add_argument("--side", default=d.side, choices=["short", "long"], help="Trade side.")
+    p.add_argument("--decile", type=int, default=d.decile, help="Composite decile to trade (9 = top/short).")
+    p.add_argument("--rmom-quantile", type=float, default=d.rmom_quantile,
+                   help="Keep within-ts residual-momentum rank <= this (rmom-low half).")
+    p.add_argument("--liq-turnover-min", type=float, default=d.liq_turnover_min,
+                   help="Liquid gate: signal-bar hourly turnover_quote (USD).")
+    p.add_argument("--entry-delay-hours", type=int, default=d.entry_delay_hours,
+                   help="Bars after the deciding bar's close (1 = honest +1h; 0 = proxy/look-ahead).")
+    p.add_argument("--exit-mode", default=d.exit_mode, choices=["fixed", "state"],
+                   help="fixed = hold_hours timer; state = hold only while the name stays in the fade decile.")
+    p.add_argument("--hold-hours", type=int, default=d.hold_hours, help="Fixed-mode hold horizon (hours).")
+    p.add_argument("--max-hold-hours", type=int, default=d.max_hold_hours,
+                   help="State-mode hold cap (force exit if the name never leaves the decile).")
+    p.add_argument("--cooldown-hours", type=int, default=d.cooldown_hours,
+                   help="Per-symbol re-entry cooldown; 0 = hold_hours.")
+    p.add_argument("--stop-loss-pct", type=float, default=d.stop_loss_pct, help="Stop loss fraction; 0 = no stop.")
+    p.add_argument("--stop-fill-mode", default=d.stop_fill_mode,
+                   choices=["stop", "bar_extreme", "bar_extreme_capped"], help="Stop fill model.")
+    p.add_argument("--stop-slippage-cap-pct", type=float, default=d.stop_slippage_cap_pct,
+                   help="Adverse-slippage cap for bar_extreme_capped fills.")
+    p.add_argument("--gross-exposure", type=float, default=d.gross_exposure,
+                   help="Gross exposure; per-name weight = gross/max_active.")
+    p.add_argument("--max-active", type=int, default=d.max_active, help="Max concurrent positions.")
+    p.add_argument("--taker-fee-bps", type=float, default=d.taker_fee_bps, help="Taker fee per leg (bps).")
+    p.add_argument("--spread-bps", type=float, default=d.spread_bps, help="Half-spread crossing per leg (bps).")
+    p.add_argument("--impact-coef-bps", type=float, default=d.impact_coef_bps,
+                   help="Market-impact coefficient (bps at 100%% participation).")
+    p.add_argument("--impact-exponent", type=float, default=d.impact_exponent,
+                   help="Impact exponent (0.5 = square-root).")
+    p.add_argument("--deploy-capital-usd", type=float, default=d.deploy_capital_usd,
+                   help="Deploy capital sizing the impact participation (notional/ADV).")
+    p.add_argument("--flat-round-trip-bps", type=float, default=None,
+                   help="Override the cost model with a flat round-trip bps (proxy-parity validation).")
+    p.add_argument("--no-funding", action="store_true", help="Disable funding-to-exit accounting.")
+    p.add_argument("--split-date", default=d.split_date, help="Early/recent split boundary (YYYY-MM-DD).")
+    p.add_argument("--report-dir", default=None, help="Output directory for artifacts.")
+
+
+def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
+    """CLI for the continuous-fade demo sleeve (sub-hourly, ticker-driven; separate ledger + lm-en-c-)."""
+    from .continuous_demo import ContinuousDemoCycleConfig
+    d = ContinuousDemoCycleConfig()
+    p = subparsers.add_parser(
+        "continuous-event-demo-cycle",
+        help="Run one continuous-fade demo cycle (separate sleeve; --daemon for the sub-hourly loop).",
+    )
+    p.add_argument("--decile", type=int, default=d.decile)
+    p.add_argument("--rmom-quantile", type=float, default=d.rmom_quantile)
+    p.add_argument("--liq-turnover-min", type=float, default=d.liq_turnover_min)
+    p.add_argument("--lookback-days", type=int, default=d.lookback_days)
+    p.add_argument("--workers", type=int, default=d.workers)
+    p.add_argument("--max-active", type=int, default=d.max_active)
+    p.add_argument("--max-new-entries-per-cycle", type=int, default=d.max_new_entries_per_cycle)
+    p.add_argument("--max-hold-hours", type=int, default=d.max_hold_hours)
+    p.add_argument("--stop-loss-pct", type=float, default=d.stop_loss_pct)
+    p.add_argument("--entry-leverage", type=float, default=d.entry_leverage)
+    p.add_argument("--per-position-notional-pct-equity", type=float, default=d.per_position_notional_pct_equity)
+    p.add_argument("--fallback-equity-usdt", type=float, default=d.fallback_equity_usdt)
+    p.add_argument("--entry-order-type", default=d.entry_order_type)
+    p.add_argument("--exit-order-type", default=d.exit_order_type)
+    p.add_argument("--submit-orders", action="store_true", help="Place real DEMO orders (default off = dry-run).")
+    p.add_argument("--confirm-demo-orders", action="store_true")
+    p.add_argument("--telegram", action="store_true")
+    p.add_argument("--record-dry-run", action="store_true")
+    p.add_argument("--paper-mode", action="store_true")
+    p.add_argument("--data-name", default=d.data_name)
+    p.add_argument("--daemon", action="store_true", help="Run the long-lived sub-hourly daemon loop.")
+    p.add_argument("--interval-seconds", type=float, default=60.0, help="Heartbeat cadence (sub-hourly reaction).")
+    p.add_argument("--no-event-driven-cycle", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Bybit liquidity-migration research CLI.")
     parser.add_argument("--config", default=None, help="YAML config path. Defaults to built-in research settings.")
@@ -1967,11 +2060,13 @@ def build_parser() -> argparse.ArgumentParser:
     _add_archive_download_klines_1h_parser(subparsers)
     _add_archive_download_klines_1h_api_parser(subparsers)
     _add_volume_events_parser(subparsers)
+    _add_continuous_events_parser(subparsers)
     _add_signal_harness_parser(subparsers)
     _add_event_demo_cycle_parser(subparsers)
     _add_event_risk_cycle_parser(subparsers)
     _add_event_risk_ws_parser(subparsers)
     _add_long_native_event_demo_cycle_parser(subparsers)
+    _add_continuous_event_demo_cycle_parser(subparsers)
     _add_combined_book_report_parser(subparsers)
     _add_reconcile_paper_demo_parser(subparsers)
     _add_reconcile_long_paper_demo_parser(subparsers)
@@ -2442,6 +2537,9 @@ def main(argv: list[str] | None = None) -> int:
             long_data_root=args.long_data_root,
             long_trades_dataset=args.long_trades_dataset,
             long_orders_dataset=args.long_orders_dataset,
+            continuous_data_root=args.continuous_data_root,
+            continuous_trades_dataset=args.continuous_trades_dataset,
+            continuous_orders_dataset=args.continuous_orders_dataset,
         )
         payload = run_event_ws_risk(data_root, config=config, risk_config=risk_config)
         _print_event_risk_summary(payload)
@@ -2536,6 +2634,43 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         payload = run_long_native_demo_cycle(data_root, config=config, demo_config=long_demo_config)
         print(format_long_demo_cycle_summary(payload))
+        return 0
+
+    if args.command == "continuous-event-demo-cycle":
+        from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig, run_continuous_demo_cycle
+        cont_demo_config = ContinuousDemoCycleConfig(
+            decile=args.decile, rmom_quantile=args.rmom_quantile, liq_turnover_min=args.liq_turnover_min,
+            lookback_days=args.lookback_days, workers=args.workers, max_active=args.max_active,
+            max_new_entries_per_cycle=args.max_new_entries_per_cycle, max_hold_hours=args.max_hold_hours,
+            stop_loss_pct=args.stop_loss_pct, entry_leverage=args.entry_leverage,
+            per_position_notional_pct_equity=args.per_position_notional_pct_equity,
+            fallback_equity_usdt=args.fallback_equity_usdt, entry_order_type=args.entry_order_type,
+            exit_order_type=args.exit_order_type, submit_orders=args.submit_orders,
+            confirm_demo_orders=args.confirm_demo_orders, telegram=args.telegram,
+            record_dry_run=args.record_dry_run, paper_mode=args.paper_mode, data_name=args.data_name,
+        )
+        if getattr(args, "daemon", False):
+            from liquidity_migration.continuous_demo_daemon import ContinuousDemoDaemon
+            daemon = ContinuousDemoDaemon(
+                data_root, config=config, demo_config=cont_demo_config,
+                interval_seconds=args.interval_seconds,
+                event_driven_cycle=not getattr(args, "no_event_driven_cycle", False),
+            )
+            daemon.install_signal_handlers()
+            stats = daemon.run()
+            print(
+                "continuous demo daemon stopped "
+                f"cycles_run={stats.get('cycles_run')} cycle_errors={stats.get('cycle_errors')}",
+                flush=True,
+            )
+            return 0
+        payload = run_continuous_demo_cycle(data_root, config=config, demo_config=cont_demo_config)
+        print(
+            f"continuous-demo cycle [{payload['mode']}] universe={payload.get('universe_symbols')} "
+            f"rmom={payload.get('rmom_present')} d9={payload.get('live_d9_symbols')} "
+            f"open={payload.get('open_positions')} entries={payload.get('entries')} exits={payload.get('exits')}",
+            flush=True,
+        )
         return 0
 
     if args.command == "volume-events":
@@ -2748,6 +2883,43 @@ def main(argv: list[str] | None = None) -> int:
                 "⚠️  current_universe_biased diagnostic — NOT promotion evidence "
                 "(--pit-membership current-universe drops the PIT archive-membership gate)."
             )
+        return 0
+
+    if args.command == "continuous-events":
+        cont_config = ContinuousEventConfig(
+            start_date=args.start, end_date=args.end, side=args.side, decile=args.decile,
+            rmom_quantile=args.rmom_quantile, liq_turnover_min=args.liq_turnover_min,
+            entry_delay_hours=args.entry_delay_hours, exit_mode=args.exit_mode,
+            hold_hours=args.hold_hours, max_hold_hours=args.max_hold_hours,
+            cooldown_hours=args.cooldown_hours, stop_loss_pct=args.stop_loss_pct,
+            stop_fill_mode=args.stop_fill_mode, stop_slippage_cap_pct=args.stop_slippage_cap_pct,
+            gross_exposure=args.gross_exposure, max_active=args.max_active,
+            taker_fee_bps=args.taker_fee_bps, spread_bps=args.spread_bps,
+            impact_coef_bps=args.impact_coef_bps, impact_exponent=args.impact_exponent,
+            deploy_capital_usd=args.deploy_capital_usd, flat_round_trip_bps=args.flat_round_trip_bps,
+            use_funding=not args.no_funding, split_date=args.split_date,
+        )
+        payload = run_continuous_event_research(
+            data_root, config=cont_config,
+            report_dir=_expanded_report_dir(
+                args.report_dir, default=data_root / "reports" / "continuous_events"
+            ),
+        )
+        full = payload["metrics"].get("full", {})
+        early = payload["metrics"].get("early", {})
+        recent = payload["metrics"].get("recent", {})
+        mtm = payload.get("metrics_mtm", {})
+        print(
+            f"continuous-events [{payload['run_label']}] hash={payload['config_hash']} "
+            f"trades={payload['n_trades']} funding={payload['funding_mode']}\n"
+            f"  realized-at-exit: MAR={full.get('mar')} total_ret={full.get('total_return')} "
+            f"maxDD={full.get('max_drawdown')} Sharpe={full.get('sharpe_like')} "
+            f"worst_day={full.get('worst_day_return')}\n"
+            f"  portfolio MTM:    MAR={mtm.get('mar')} maxDD={mtm.get('max_drawdown')} "
+            f"Sharpe={mtm.get('sharpe_like')} worst_day={mtm.get('worst_day_return')}\n"
+            f"  EARLY total_ret={early.get('total_return')} | RECENT total_ret={recent.get('total_return')}\n"
+            f"  report={payload.get('report_dir')}"
+        )
         return 0
 
     if args.command == "signal-harness":

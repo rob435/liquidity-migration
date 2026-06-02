@@ -468,6 +468,14 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "Environment=UNIVERSE_MIN_TURNOVER_24H=0" in text
     assert "Environment=MAX_ACTIVE_SYMBOLS=12" in text  # drop_all_4 promotion 2026-05-30 (was 3)
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
+    # Continuous-fade sleeve (live on demo 2026-06-01): brought up like the other
+    # live daemons, plus its rmom timer; risk service wired to read its ledger.
+    assert "liquidity-migration-bybit-continuous-demo.service" in text
+    assert "liquidity-migration-continuous-rmom-refresh.timer" in text
+    assert "Environment=LONG_DATA_ROOT=data/bybit-long-demo-event" in text
+    assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text
+    assert "Environment=SUBMIT_ORDERS=1" in text
+    assert "Environment=STOP_LOSS_PCT=0.25" in text
     assert "deploy-verify-ok commit=" in text
     assert "--property=Environment" not in text
     # Daemons no longer fire startup telegrams (default off as of the
@@ -546,6 +554,16 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "systemctl is-active --quiet liquidity-migration-demo-health.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-demo-liveness.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-combined-book-report.timer" in text
+    # Continuous-fade sleeve (live on demo 2026-06-01) — read-only verify must catch
+    # a stopped/disabled continuous daemon or a risk service no longer wired to read
+    # its ledger (which would silently flatten the continuous sleeve's positions).
+    assert "systemctl is-enabled --quiet liquidity-migration-bybit-continuous-demo.service" in text
+    assert "systemctl is-active --quiet liquidity-migration-bybit-continuous-demo.service" in text
+    assert "systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer" in text
+    assert "Environment=LONG_DATA_ROOT=data/bybit-long-demo-event" in text
+    assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text
+    assert "Environment=SUBMIT_ORDERS=1" in text
+    assert "Environment=STOP_LOSS_PCT=0.25" in text
     assert "verify-ok commit=" in text
     assert "--property=Environment" not in text
 
@@ -770,6 +788,14 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "Environment=UNIVERSE_MIN_TURNOVER_24H=0" in text
     assert "Environment=MAX_ACTIVE_SYMBOLS=12" in text  # drop_all_4 promotion 2026-05-30 (was 3)
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
+    # Continuous-fade sleeve (live on demo 2026-06-01): brought up like the other
+    # live daemons, plus its rmom timer; risk service wired to read its ledger.
+    assert "liquidity-migration-bybit-continuous-demo.service" in text
+    assert "liquidity-migration-continuous-rmom-refresh.timer" in text
+    assert "Environment=LONG_DATA_ROOT=data/bybit-long-demo-event" in text
+    assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text
+    assert "Environment=SUBMIT_ORDERS=1" in text
+    assert "Environment=STOP_LOSS_PCT=0.25" in text
     assert "deploy-verify-ok commit=" in text
     assert "--property=Environment" not in text
 

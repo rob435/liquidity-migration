@@ -118,6 +118,9 @@ systemctl enable liquidity-migration-bybit-risk.service
 systemctl enable liquidity-migration-bybit-paper.service
 systemctl enable liquidity-migration-bybit-long-demo.service
 systemctl enable liquidity-migration-bybit-long-paper.service
+# Continuous-fade demo sleeve (4th sleeve; ships SUBMIT_ORDERS=0 = dry-run until the
+# operator completes the shadow-test checklist and flips it). Separate ledger root.
+systemctl enable liquidity-migration-bybit-continuous-demo.service
 # Timers must be enabled --now: enable alone writes the symlink but does not
 # start the timer, so on a fresh VPS the demo-health watchdog + daily combined-
 # book Telegram report would sit dormant until someone ran systemctl by hand.
@@ -125,6 +128,8 @@ systemctl enable liquidity-migration-bybit-long-paper.service
 systemctl enable --now liquidity-migration-demo-health.timer
 systemctl enable --now liquidity-migration-demo-liveness.timer
 systemctl enable --now liquidity-migration-combined-book-report.timer
+# Daily refresh of the continuous-fade rmom gate (residual_momentum.parquet).
+systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer
 systemctl restart liquidity-migration-bybit-demo.service
 systemctl restart liquidity-migration-bybit-risk.service
 systemctl restart liquidity-migration-bybit-paper.service
@@ -134,6 +139,7 @@ systemctl restart liquidity-migration-bybit-paper.service
 # stay on the old code until the next manual restart.
 systemctl restart liquidity-migration-bybit-long-demo.service
 systemctl restart liquidity-migration-bybit-long-paper.service
+systemctl restart liquidity-migration-bybit-continuous-demo.service
 
 if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then
   sleep "$SYSTEMD_SETTLE_SECONDS"
@@ -144,11 +150,14 @@ systemctl is-active --quiet liquidity-migration-bybit-risk.service
 systemctl is-active --quiet liquidity-migration-bybit-paper.service
 systemctl is-active --quiet liquidity-migration-bybit-long-demo.service
 systemctl is-active --quiet liquidity-migration-bybit-long-paper.service
+systemctl is-active --quiet liquidity-migration-bybit-continuous-demo.service
 systemctl is-enabled --quiet liquidity-migration-bybit-demo.service
 systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
 systemctl is-enabled --quiet liquidity-migration-bybit-paper.service
 systemctl is-enabled --quiet liquidity-migration-bybit-long-demo.service
 systemctl is-enabled --quiet liquidity-migration-bybit-long-paper.service
+systemctl is-enabled --quiet liquidity-migration-bybit-continuous-demo.service
+systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer
 # Timer verification: is-enabled catches "we never enabled it"; is-active
 # catches "we enabled it but something stopped it." Both are fail-loud here
 # so deploys can't silently leave the watchdog or daily report off.
@@ -192,6 +201,15 @@ systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Envir
 systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=UNIVERSE_MIN_TURNOVER_24H=0'
 systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=MAX_ACTIVE_SYMBOLS=12'
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=ORDER_SUBMIT_MODE=ws_then_rest'
+# SHARED-ACCOUNT SAFETY: the single risk service must read EVERY sleeve's ledger
+# root, else a sibling sleeve's live positions look untracked and get flattened.
+# Fail the deploy loud if the risk unit isn't wired to track the long + continuous
+# sleeves (the continuous sleeve trades live as of 2026-06-01).
+systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=LONG_DATA_ROOT=data/bybit-long-demo-event'
+systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'
+# Continuous sleeve go-live assertions: live order submission + its disaster stop present.
+systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=1'
+systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=STOP_LOSS_PCT=0.25'
 
 python_commit="$(git rev-parse --short HEAD)"
 echo "deploy-verify-ok commit=$python_commit"

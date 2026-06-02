@@ -25,6 +25,9 @@ Environment=FAST_EXECUTION_STREAM=0
 # WS fills per the per-row sleeve column. Owner picked "extend ws_risk to
 # handle both sides" over running two processes. Leave empty for short-only.
 Environment=LONG_DATA_ROOT=data/bybit-long-demo-event
+# Continuous-fade sleeve (3rd, also short-direction): this single risk service must ALSO read its
+# ledger, else its positions look untracked and get flattened. REQUIRED with the continuous sleeve live.
+Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event
 ExecStart=/opt/liquidity-migration/scripts/run_bybit_demo_ws_risk_engine.sh
 Restart=always
 RestartSec=2

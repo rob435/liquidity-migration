@@ -404,6 +404,12 @@ class LongNativeDemoDaemon:
             "router_stats": router_stats,
         }
 
+    def _extra_cycle_kwargs(self) -> dict[str, Any]:
+        """Extra kwargs a subclass injects into the cycle runner. Empty for the long sleeve; the
+        continuous sleeve overrides this to pass its Tier-2 ``panel_cache``. Keeping it a hook means
+        a subclass need not duplicate the whole telemetry-laden ``_run_one_cycle`` to add one kwarg."""
+        return {}
+
     def _run_one_cycle(self) -> None:
         cycle_started = time.monotonic()
         payload: dict[str, Any] | None = None
@@ -424,6 +430,7 @@ class LongNativeDemoDaemon:
                 ticker_cache=self._ticker_cache,
                 state_cache_stale_seconds=self._state_cache_stale_seconds,
                 private_client=trade_router,
+                **self._extra_cycle_kwargs(),
             )
             self._cycles_run += 1
         except Exception as exc:  # noqa: BLE001

@@ -581,6 +581,34 @@ the continuous market-neutral L/S is a **genuine but possibly-redundant** divers
 the long sleeve is the open, engine-gated deployment question. Net continuous-program deliverable: a real
 all-weather signal + a candidate market-neutral diversifying sleeve whose incremental value awaits the 3-way test.
 
+**Continuous-fade ENGINE built (2026-06-01, operator-directed) — the EXPLORATORY proxy is now an execution-grade
+backtest; the short survives honest execution all-weather.** `liquidity_migration/continuous_events.py` +
+`continuous-events` CLI + 11 tests (full suite 1044 pass). It reproduces the proxy SELECTION (rmom-low composite-D9,
+liquid ≥$500k/h, fresh spell entry) but runs it through the daily engine's validated execution core
+(`_simulate_indexed_trade`: stop fills, MAE/MFE, funding-to-exit) plus the three things the proxy lacked: an
+**honest +1h entry** (proxy filled at the same close it ranked on = execution look-ahead), a **size/ADV market-impact
+cost** (`2·taker + 2·spread + 2·impact`, impact = k·(notional/ADV)^0.5 — the p1c capacity argument), and
+**fixed-capital additive** accounting (consistent with the fixed-capital impact charge; compounding + a fixed impact
+charge is internally inconsistent for a capacity-capped book and inflates returns absurdly). **Port-validated:** at
+delay=0 (proxy parity) bybit h12 = 12,981 trades / +390.9% vs the proxy's 13,006 / +388.2% (0.2%/0.7% — the diff is
+stablecoin exclusion + settlement-correct funding). **Honest run (delay=1 +1h entry + impact, both venues, additive):
+the continuous liquid short is all-weather both eras both venues** — bybit h12 MAR 27.7 / +326% (early +195 / recent
++131), binance h12 MAR 21.8 / +502% (early +268 / recent +235); h12>h6; a **25% stop HURTS** (engine-grade confirmation
+that the fade short doesn't want a tight stop). The honest +1h+impact haircut vs the look-ahead proxy is a clean ~17%.
+**Label EXPLORATORY** (impact coefficients are modeled-not-calibrated; MAR still inflated by 2% de-concentrated sizing
+→ DD 3–7%; the matched-sizing daily-cadence arm + forward demo remain the arbiters — daily-alone was MAR-optimal in
+the proxy, p1k). Receipt `docs/preregistration/continuous-engine-2026-06-01.md`; artifacts `~/SHARED_DATA/cont_engine/`.
+**FULL VERIFICATION AUDIT (2026-06-01, operator-directed "check & verify everything"):** the engine is correct —
+accounting exact (net=gross+cost+funding), NO look-ahead (latency sweep 1→6h decays smoothly both venues = real
+multi-hour reversal, not leakage), MTM telescopes, survivorship clean, Sharpe not an exit-day artifact. Two
+framings corrected: concurrency is ~4–8 names NOT 25; and the short is **NOT mostly short-beta** (beta −0.10/−0.20;
+the beta-neutral L/S long-D0/short-D9 keeps ~75–80% of return at Sharpe ~10 → a genuine cross-sectional fade).
+**Risk metrics were ~3× too rosy and are corrected:** DD 2–3% (realized-at-exit) → 4–5% (daily MTM) → **6–7%
+(hourly/intraday MTM)**; honest **MAR ~16 bybit / ~23 binance, Sharpe ~10**, all-weather both venues — not the
+compounding-inflated 55–62. Residual Sharpe ~10 is still too high to deploy and is NOT a bug: the un-closable gaps
+are OOS persistence (in-sample STR + heavy search), borrow/short-availability on pumped alts, and sub-hourly
+squeezes — only the forward demo settles them.
+
 ## CV1 (2026-05-30): the cross-venue asymmetry is BREADTH + composition, NOT edge-quality
 
 Read-only decomposition of the age-gated ledgers both venues

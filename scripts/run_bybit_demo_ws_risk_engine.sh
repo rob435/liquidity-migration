@@ -26,18 +26,18 @@ UNTRACKED_POSITION_GRACE_SECONDS="${UNTRACKED_POSITION_GRACE_SECONDS:-90}"
 # instance will read/write BOTH ledgers, routing by per-row `sleeve` column.
 # Leave empty to keep short-only behavior (legacy default).
 LONG_DATA_ROOT="${LONG_DATA_ROOT:-}"
+CONTINUOUS_DATA_ROOT="${CONTINUOUS_DATA_ROOT:-}"
 
-# SAFETY: exit_untracked_positions flattens any Bybit position not in the ledger
-# this engine reads. With LONG_DATA_ROOT unset the engine reads only the short
-# ledger, so on this SHARED demo account the long sleeve's open positions look
-# untracked and would be force-closed. Refuse to start that combination — set
-# LONG_DATA_ROOT, or explicitly disable EXIT_UNTRACKED_POSITIONS for a genuinely
-# single-sleeve account.
-if [[ "$EXIT_UNTRACKED_POSITIONS" == "1" && -z "$LONG_DATA_ROOT" ]]; then
-    echo "Refusing to start: EXIT_UNTRACKED_POSITIONS=1 with LONG_DATA_ROOT unset would" >&2
-    echo "flatten the long sleeve's positions on this shared demo account. Set" >&2
-    echo "LONG_DATA_ROOT=data/bybit-long-demo-event, or set EXIT_UNTRACKED_POSITIONS=0" >&2
-    echo "for a genuinely short-only dedicated account." >&2
+# SAFETY: exit_untracked_positions flattens any Bybit position not in the ledgers
+# this engine reads. On this SHARED demo account it must read EVERY sibling sleeve's
+# ledger (long + continuous) or that sleeve's open positions look untracked and get
+# force-closed. Refuse to start with EXIT_UNTRACKED_POSITIONS=1 unless BOTH sibling
+# roots are set (or disable EXIT_UNTRACKED_POSITIONS for a genuinely dedicated account).
+if [[ "$EXIT_UNTRACKED_POSITIONS" == "1" && ( -z "$LONG_DATA_ROOT" || -z "$CONTINUOUS_DATA_ROOT" ) ]]; then
+    echo "Refusing to start: EXIT_UNTRACKED_POSITIONS=1 requires BOTH LONG_DATA_ROOT and" >&2
+    echo "CONTINUOUS_DATA_ROOT on this shared demo account, else a sibling sleeve's positions" >&2
+    echo "would be flattened as untracked. Set both roots, or set EXIT_UNTRACKED_POSITIONS=0." >&2
+    echo "  LONG_DATA_ROOT=${LONG_DATA_ROOT:-(unset)} CONTINUOUS_DATA_ROOT=${CONTINUOUS_DATA_ROOT:-(unset)}" >&2
     exit 2
 fi
 
@@ -83,6 +83,10 @@ dual_sleeve_args=()
 if [[ -n "$LONG_DATA_ROOT" ]]; then
     dual_sleeve_args+=(--long-data-root "$LONG_DATA_ROOT")
     mkdir -p "$LONG_DATA_ROOT/.locks"
+fi
+if [[ -n "$CONTINUOUS_DATA_ROOT" ]]; then
+    dual_sleeve_args+=(--continuous-data-root "$CONTINUOUS_DATA_ROOT")
+    mkdir -p "$CONTINUOUS_DATA_ROOT/.locks"
 fi
 
 mkdir -p "$DATA_ROOT/.locks"

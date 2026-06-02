@@ -1,0 +1,27 @@
+[Unit]
+Description=Refresh the continuous-fade rmom gate (residual_momentum.parquet) on the demo data root
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/liquidity-migration
+Environment=POLARS_MAX_THREADS=8
+Environment=PYTHONDONTWRITEBYTECODE=1
+# The continuous signal gates on residual_momentum.parquet; rebuild it daily from the
+# continuous sleeve's own kline store so rmom[today] (trailing-7d residual, lag1) is fresh.
+# Without it the daemon runs but emits no signal (fail-safe: no rmom -> no entries).
+ExecStart=/opt/liquidity-migration/.venv/bin/python -u scripts/precompute_residual_momentum.py --root data/bybit-continuous-demo-event
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/opt/liquidity-migration
+
+[Install]
+WantedBy=multi-user.target

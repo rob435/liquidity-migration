@@ -32,6 +32,21 @@ def test_cycle_liveness_fresh_vs_stale_vs_missing() -> None:
     assert missing is not None and missing.severity == M.CRITICAL
 
 
+def test_rmom_staleness_empty_fresh_and_stale() -> None:
+    DAY = 24 * HOUR
+    now = 1_000 * DAY
+    # empty gate (no rmom row) -> CRITICAL silent-blackout
+    empty = M.evaluate_rmom_staleness(max_rmom_day_ts=0, now_ms=now, max_stale_days=2, label="cont")
+    assert empty is not None and empty.severity == M.CRITICAL and "EMPTY" in empty.message
+    # today's row (a few hours ago) -> fresh, no alert
+    assert M.evaluate_rmom_staleness(max_rmom_day_ts=now - 3 * HOUR, now_ms=now, max_stale_days=2, label="cont") is None
+    # yesterday's row -> within the 2-day window, no alert (refresh ran on time)
+    assert M.evaluate_rmom_staleness(max_rmom_day_ts=now - 1 * DAY, now_ms=now, max_stale_days=2, label="cont") is None
+    # 3 days stale -> CRITICAL (refresh failed; live decile silently empties)
+    stale = M.evaluate_rmom_staleness(max_rmom_day_ts=now - 3 * DAY, now_ms=now, max_stale_days=2, label="cont")
+    assert stale is not None and stale.severity == M.CRITICAL and "STALE" in stale.message
+
+
 def test_unit_states_alert_only_on_terminal_failed() -> None:
     # Transient restart states (activating/deactivating/inactive) must NOT alert —
     # they happen on every deploy; only the terminal 'failed' is unambiguous.

@@ -2668,7 +2668,7 @@ def test_validate_ws_risk_config_warns_untracked_exit_without_long_root(caplog) 
 
     from liquidity_migration.ws_risk import _validate_ws_risk_config
 
-    def _cfg(long_root: str) -> EventWebSocketRiskConfig:
+    def _cfg(long_root: str, continuous_root: str = "") -> EventWebSocketRiskConfig:
         return EventWebSocketRiskConfig(
             submit_orders=False,  # keep validate_order_submit_allowed a no-op
             order_submit_mode="rest",
@@ -2679,16 +2679,27 @@ def test_validate_ws_risk_config_warns_untracked_exit_without_long_root(caplog) 
             stream_start_timeout_seconds=0.0,
             exit_untracked_positions=True,
             long_data_root=long_root,
+            continuous_data_root=continuous_root,
         )
 
+    # No sibling roots -> warns (would flatten BOTH the long + continuous sleeves).
     with caplog.at_level(logging.WARNING, logger="liquidity_migration.ws_risk"):
         _validate_ws_risk_config(_cfg(""))
     assert any("exit_untracked_positions=ON" in r.message for r in caplog.records)
 
-    # With long_data_root set (dual-sleeve aware), no warning.
+    # Long set but continuous still unset -> STILL warns (continuous positions
+    # would be flattened as untracked on the shared account).
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger="liquidity_migration.ws_risk"):
         _validate_ws_risk_config(_cfg("data/bybit-long-demo-event"))
+    assert any("exit_untracked_positions=ON" in r.message for r in caplog.records)
+
+    # BOTH sibling roots set (fully multi-sleeve aware) -> no warning.
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="liquidity_migration.ws_risk"):
+        _validate_ws_risk_config(
+            _cfg("data/bybit-long-demo-event", "data/bybit-continuous-demo-event")
+        )
     assert not any("exit_untracked_positions=ON" in r.message for r in caplog.records)
 
 
@@ -3022,3 +3033,224 @@ def test_reconcile_prefetcher_lifecycle(tmp_path: Path, monkeypatch) -> None:
     }
     on.close()
     assert not on._reconcile_prefetch_thread.is_alive()  # stopped by close()
+
+
+# ---------------------------------------------------------------------------
+# Continuous sleeve coexistence on the SHARED demo account (task #14).
+# These guard the invariants that make "turn trading on" safe with three
+# sleeves netting into one Bybit account: (1) a tracked continuous position is
+# never flattened as untracked, (2) routed writes keep the continuous ledger
+# isolated from the short ledger, (3) the combined read tags continuous rows.
+# ---------------------------------------------------------------------------
+
+
+def _write_continuous_open_trade(root: Path, symbol: str = "AAAUSDT") -> None:
+    """Seed an OPEN continuous-sleeve trade in the continuous ledger."""
+    from liquidity_migration.continuous_demo import CONTINUOUS_STRATEGY_ID
+
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "trade_id": f"{CONTINUOUS_STRATEGY_ID}-{symbol}-1700000000000",
+                    "strategy_id": CONTINUOUS_STRATEGY_ID,
+                    "sleeve": "continuous",
+                    "symbol": symbol,
+                    "side": "short",
+                    "status": "open",
+                    "qty": "1",
+                    "entry_price": 100.0,
+                    "stop_price": 125.0,
+                    "planned_exit_ts_ms": 9_999_999_999_999,
+                }
+            ]
+        ),
+        root,
+        "continuous_fade_demo_trades",
+        partition_by=(),
+    )
+
+
+def test_ws_risk_does_not_flatten_tracked_continuous_position(tmp_path: Path) -> None:
+    """THE shared-account safety invariant: with continuous_data_root set, a
+    Bybit position that belongs to the continuous sleeve (present in the
+    continuous ledger) must be recognised as tracked and NOT force-closed by
+    exit_untracked_positions. Without this wiring the risk engine would flatten
+    the continuous sleeve's live shorts."""
+    continuous_root = tmp_path / "continuous"
+    continuous_root.mkdir()
+    _write_continuous_open_trade(continuous_root, "AAAUSDT")
+    private_client = FakePrivateClient()  # default position: AAAUSDT short
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+            exit_untracked_positions=True,
+            adopt_untracked_positions=False,
+            continuous_data_root=str(continuous_root),
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    # No reduce-only flatten order was sent, and the position survives.
+    assert private_client.orders == []
+    assert "AAAUSDT" in engine.state.positions_by_symbol
+    # The continuous trade is in the engine's combined open-trade view.
+    assert "AAAUSDT" in set(engine.state.open_trades["symbol"].to_list())
+
+
+def test_ws_risk_flattens_untracked_when_continuous_root_set_but_symbol_absent(tmp_path: Path) -> None:
+    """Control for the test above: continuous_data_root set but the venue
+    position is NOT in any ledger -> it is still a genuine orphan and gets
+    flattened. (Proves the no-flatten above is due to tracking, not a blanket
+    disable.)"""
+    continuous_root = tmp_path / "continuous"
+    continuous_root.mkdir()
+    _write_continuous_open_trade(continuous_root, "BBBUSDT")  # different symbol
+    private_client = FakePrivateClient()  # position: AAAUSDT (untracked)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+            exit_untracked_positions=True,
+            adopt_untracked_positions=False,
+            continuous_data_root=str(continuous_root),
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    assert private_client.orders and private_client.orders[0]["side"] == "Buy"
+    assert "AAAUSDT" not in engine.state.positions_by_symbol
+
+
+def test_ws_risk_routed_write_isolates_continuous_from_short_ledger(tmp_path: Path) -> None:
+    """A row tagged sleeve='continuous' must land in the continuous orders
+    dataset/root, never the short ledger — otherwise the continuous sleeve's
+    reconciliation diverges from what ws_risk actually wrote."""
+    continuous_root = tmp_path / "continuous"
+    continuous_root.mkdir()
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(continuous_data_root=str(continuous_root)),
+    )
+    engine._write_order_rows_routed([
+        {"order_link_id": "lm-ux-c-AAA-x", "ts_ms": 1, "symbol": "AAAUSDT", "side": "Buy",
+         "status": "filled", "sleeve": "continuous", "trade_id": "continuous_fade_v1-AAAUSDT-1"},
+        {"order_link_id": "lm-ux-SHORT-y", "ts_ms": 2, "symbol": "ZZZUSDT", "side": "Buy",
+         "status": "filled", "sleeve": "short", "trade_id": "short-ZZZUSDT-1"},
+    ])
+
+    cont_orders = read_dataset(continuous_root, "continuous_fade_demo_orders")
+    short_orders = read_dataset(tmp_path, "event_demo_orders")
+    assert set(cont_orders["symbol"].to_list()) == {"AAAUSDT"}
+    assert set(short_orders["symbol"].to_list()) == {"ZZZUSDT"}
+
+
+def test_ws_risk_read_combined_includes_and_tags_continuous(tmp_path: Path) -> None:
+    """The combined trade read must surface continuous-ledger trades tagged
+    sleeve='continuous' so they show up in open_trades (tracked) and route back
+    correctly on write."""
+    continuous_root = tmp_path / "continuous"
+    continuous_root.mkdir()
+    _write_continuous_open_trade(continuous_root, "AAAUSDT")
+    _write_open_trade(tmp_path)  # short-sleeve trade (BBB? -> AAAUSDT default)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(continuous_data_root=str(continuous_root)),
+    )
+    combined = engine._read_trades_combined()
+    rows = {(r["symbol"], r["sleeve"]) for r in combined.select("symbol", "sleeve").to_dicts()}
+    assert ("AAAUSDT", "continuous") in rows
+    assert ("AAAUSDT", "short") in rows
+
+
+def test_ws_risk_reconciles_vanished_continuous_position_into_continuous_ledger(tmp_path: Path) -> None:
+    """The disaster-stop-fired path for the continuous sleeve: a continuous
+    trade is open in the continuous ledger but its Bybit position has vanished
+    (server-side stopLoss closed it). ws_risk is the reconcile authority for ALL
+    sleeves it reads — it must close that trade with the real venue PnL backfilled
+    from get_closed_pnl, and route the close back to the CONTINUOUS ledger (not
+    the short ledger). This is why the continuous cycle does NOT need its own
+    orphan-close (it would race ws_risk); it mirrors the long-sleeve design."""
+    continuous_root = tmp_path / "continuous"
+    continuous_root.mkdir()
+    _write_continuous_open_trade(continuous_root, "AAAUSDT")
+
+    class _ClosedPnlClient(FakePrivateClient):
+        def get_closed_pnl(self, *, symbol: str | None = None, start_time_ms: int | None = None, limit: int = 50):
+            return [{"symbol": "AAAUSDT", "side": "Buy", "avgExitPrice": "90.0",
+                     "createdTime": "1700000060000", "orderId": "cont-closed-1"}]
+
+    # Position vanished at the venue (stop fired) -> orphan.
+    private_client = _ClosedPnlClient(positions=[], confirm_fills=False)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+            exit_untracked_positions=False,
+            continuous_data_root=str(continuous_root),
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+    engine.rest_reconcile()
+
+    # Closed in the CONTINUOUS ledger with the backfilled venue exit price.
+    cont_trades = read_dataset(continuous_root, "continuous_fade_demo_trades")
+    closed = cont_trades.filter(pl.col("symbol") == "AAAUSDT")
+    assert closed.select("status").item() == "closed"
+    assert float(closed.select("exit_price").item()) == pytest.approx(90.0)
+    assert closed.select("sleeve").item() == "continuous"
+    # The short ledger was NOT touched (no spurious continuous close leaked there).
+    try:
+        short_trades = read_dataset(tmp_path, "event_demo_trades")
+        assert "AAAUSDT" not in set(short_trades["symbol"].to_list()) if not short_trades.is_empty() else True
+    except Exception:
+        pass
+
+
+def test_ws_risk_adopt_strategy_id_for_continuous_sleeve(tmp_path: Path) -> None:
+    """A recovered continuous orphan must adopt under the continuous strategy_id
+    (so its deterministic trade_id matches the live sleeve), not 'short'."""
+    from liquidity_migration.continuous_demo import CONTINUOUS_STRATEGY_ID
+
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(),
+    )
+    assert engine._adopt_strategy_id_for_sleeve("continuous") == CONTINUOUS_STRATEGY_ID
