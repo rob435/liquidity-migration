@@ -22,17 +22,20 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
-# Every sibling module produced by the event_demo + volume_events splits.
+# Every sibling module produced by the event_demo + volume_events + cli splits.
 _SPLIT_SIBLINGS = [
     "event_demo_data",
     "event_demo_entries",
     "event_demo_planning",
     "event_demo_reports",
     "event_demo_exits",
+    "order_link_id",
     "volume_events_filters",
     "volume_events_features",
     "volume_events_charts",
     "volume_events_validation",
+    "volume_events_pit",
+    "cli_parsers",
 ]
 
 
