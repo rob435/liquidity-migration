@@ -30,15 +30,22 @@ class FixtureSpec:
     hours: int = 120
 
 
-def normalize_trade(raw: dict[str, Any], symbol: str | None = None) -> dict[str, Any]:
+def normalize_trade(raw: dict[str, Any], symbol: str | None = None, *, index: int | None = None) -> dict[str, Any]:
     side = raw.get("side") or raw.get("S")
     price = float(_first_present(raw, "price", "p"))
     size_base = float(_first_present(raw, "size", "v", "size_base", "homeNotional"))
     ts_ms = _parse_ts_ms(_first_present(raw, "time", "T", "ts", "ts_ms", "timestamp"))
-    trade_id = str(
-        _first_present(raw, "execId", "i", "tradeId", "trdMatchID", "trade_id", default=None)
-        or f"{ts_ms}-{side}-{price}-{size_base}"
-    )
+    venue_id = _first_present(raw, "execId", "i", "tradeId", "trdMatchID", "trade_id", default=None)
+    if venue_id is not None:
+        trade_id = str(venue_id)
+    else:
+        # No venue id: (ts,side,price,size) alone COLLIDES for split fills at the
+        # same instant+price, and the trades_to_frame dedup would then collapse
+        # distinct prints, undercounting volume (audit pass2 #18). Append the
+        # caller's row index so idless distinct trades survive. Default index=None
+        # keeps the legacy id for any direct caller.
+        suffix = f"-{index}" if index is not None else ""
+        trade_id = f"{ts_ms}-{side}-{price}-{size_base}{suffix}"
     seq = raw.get("seq") or raw.get("L")
     is_block = _parse_bool(raw.get("isBlockTrade") if "isBlockTrade" in raw else raw.get("BT"))
     is_rpi = _parse_bool(raw.get("isRPITrade") if "isRPITrade" in raw else raw.get("RPI"))
@@ -60,7 +67,7 @@ def normalize_trade(raw: dict[str, Any], symbol: str | None = None) -> dict[str,
 
 
 def trades_to_frame(trades: list[dict[str, Any]], symbol: str | None = None) -> pl.DataFrame:
-    rows = [normalize_trade(trade, symbol=symbol) for trade in trades]
+    rows = [normalize_trade(trade, symbol=symbol, index=i) for i, trade in enumerate(trades)]
     if not rows:
         return pl.DataFrame()
     return (

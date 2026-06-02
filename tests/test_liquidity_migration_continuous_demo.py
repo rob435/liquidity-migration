@@ -8,11 +8,14 @@ from __future__ import annotations
 
 import numpy as np
 import polars as pl
+import pytest
 
 from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
 from liquidity_migration.continuous_demo import (
     ContinuousDemoCycleConfig,
     LivePanelCache,
+    _validate_continuous_demo_config,
+    build_confirmed_entry_state,
     build_live_continuous_state,
     continuous_dataset_names,
     _continuous_order_link_id,
@@ -62,6 +65,24 @@ def test_live_state_reproduces_backtest_decile() -> None:
     live_d = {r["symbol"]: r["decile"] for r in live.to_dicts()}
     assert bt_T, "backtest produced no deciles at T (warmup too short)"
     assert live_d == bt_T  # live signal is identical to the verified backtest signal
+
+
+def test_confirmed_entry_state_is_the_deciding_bar_decile_no_live_price() -> None:
+    """Entry-timing fix: the entry decile comes from the CONFIRMED bar that closed +1h before entry
+    (deciding bar = cur_hour - 2h for delay=1), computed with NO live price — i.e. the backtest decile
+    at that bar. Distinct from the intra-hour live decile (which the engine showed ~halves MAR)."""
+    klines, rmom, start, n_bars = _synth()
+    cfg = ContinuousDemoCycleConfig(entry_confirm_delay_hours=1)
+    now = start + (n_bars - 1) * MS_PER_HOUR + 1_800_000  # mid current hour
+    cur_ts = start + (n_bars - 1) * MS_PER_HOUR
+    deciding_ts = cur_ts - 2 * MS_PER_HOUR                 # 1+delay = 2h back
+    es = build_confirmed_entry_state(klines, rmom, now_ts_ms=now, config=cfg)
+    # reference: backtest decile over confirmed bars (< cur_ts), at the deciding bar
+    bt = compute_continuous_decile_panel(klines.filter(pl.col("ts_ms") < cur_ts), rmom,
+                                         rmom_quantile=cfg.rmom_quantile, start_ms=0)
+    ref = {r["symbol"]: r["decile"] for r in bt.filter(pl.col("ts_ms") == deciding_ts).to_dicts()}
+    got = {r["symbol"]: r["decile"] for r in es.to_dicts()}
+    assert ref and got == ref                              # confirmed deciding-bar decile, no live bar
 
 
 def test_select_entries_respects_decile_liquidity_held_and_capacity() -> None:
@@ -655,3 +676,49 @@ def test_protective_exit_check_defers_to_running_main_cycle(tmp_path) -> None:
     finally:
         d._cycle_mutex.release()
     assert d._protective_exit_checks == 0             # never entered the body
+
+
+# --- order-submit safety guard (audit 2026-06-02 #1/#9) -------------------------
+
+def test_validate_continuous_demo_config_rejects_paper_with_submit() -> None:
+    """A paper-shadow unit must never submit real demo orders."""
+    with pytest.raises(ValueError, match="paper_mode"):
+        _validate_continuous_demo_config(
+            ContinuousDemoCycleConfig(paper_mode=True, submit_orders=True, confirm_demo_orders=True)
+        )
+
+
+def test_validate_continuous_demo_config_rejects_paper_without_record_dry_run() -> None:
+    with pytest.raises(ValueError, match="record_dry_run"):
+        _validate_continuous_demo_config(
+            ContinuousDemoCycleConfig(paper_mode=True, submit_orders=False, record_dry_run=False)
+        )
+
+
+def test_validate_continuous_demo_config_requires_confirm_flag_to_submit() -> None:
+    """submit_orders without --confirm-demo-orders is refused (the repo money-safety invariant
+    every other live sleeve enforces; this sleeve was the one missing it)."""
+    with pytest.raises(RuntimeError, match="confirm-demo-orders"):
+        _validate_continuous_demo_config(
+            ContinuousDemoCycleConfig(submit_orders=True, confirm_demo_orders=False)
+        )
+
+
+def test_validate_continuous_demo_config_allows_valid_demo_runs() -> None:
+    # non-submitting demo run: no guard trips
+    _validate_continuous_demo_config(ContinuousDemoCycleConfig(submit_orders=False))
+    # paper shadow done right
+    _validate_continuous_demo_config(
+        ContinuousDemoCycleConfig(paper_mode=True, submit_orders=False, record_dry_run=True)
+    )
+
+
+def test_continuous_live_config_golden_values() -> None:
+    """Pin the operator-directed live values so a silent revert toward the engine
+    defaults is caught (audit 2026-06-02 #11). rmom_quantile=0.33: alpha-sweep
+    2026-06-02; breaker w24/n8 + 0.25 stop: cb1 / I-phase receipts."""
+    c = ContinuousDemoCycleConfig()
+    assert c.rmom_quantile == 0.33
+    assert c.entry_pause_after_adverse_exits == 8
+    assert c.entry_pause_window_minutes == 1440
+    assert c.stop_loss_pct == 0.25

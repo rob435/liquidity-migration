@@ -83,7 +83,8 @@ def main() -> int:
             (-pl.col("d9") - COST).alias("short_ret"), (pl.col("d0") - pl.col("d9") - 2 * COST).alias("ls_ret"))
 
         def _series(frame: pl.DataFrame, col: str) -> dict[int, float]:
-            d = frame.with_columns(((pl.col("ts_ms") // MS_DAY) * MS_DAY).alias("day")).group_by("day").agg(pl.col(col).mean().alias("r"))
+            d = (frame.with_columns(((pl.col("ts_ms") // MS_DAY) * MS_DAY).alias("day"))
+                 .group_by("day").agg(pl.col(col).mean().alias("r")).drop_nulls("r"))
             return {int(r["day"]): float(r["r"]) for r in d.iter_rows(named=True)}
 
         daily_short = _series(j.filter(pl.col("hod").is_in([0, 1])), "short_ret")

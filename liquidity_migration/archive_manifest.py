@@ -233,7 +233,10 @@ def synthesize_v5_listing_manifest_rows(
     """
     if not listings:
         return []
-    today = date.today()
+    # UTC, not local: the VPS runs UTC+8, so date.today() would roll the
+    # no-end coverage boundary a day early vs the codebase's UTC day
+    # convention (every other date here is tz=UTC) (audit 2026-06-02 #40).
+    today = datetime.now(tz=UTC).date()
     start_date = date.fromisoformat(start) if start else None
     end_date = date.fromisoformat(end) if end else None
     rows: list[dict[str, Any]] = []

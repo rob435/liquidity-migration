@@ -445,8 +445,10 @@ def _funding_lookup(funding: pl.DataFrame | None) -> dict[str, dict[str, Any]] |
         # Store parallel sorted lists so _perp_funding_return can slice the
         # in-window events in O(log n) via bisect instead of an O(n) scan per
         # trade. ts_list is already sorted by the upstream `.sort(["symbol","ts_ms"])`.
-        ts_list = [int(row["ts_ms"]) for row in part.to_dicts()]
-        rate_list = [float(row[rate_col]) for row in part.to_dicts()]
+        # Column .to_list() avoids building per-row dicts twice (was two full
+        # part.to_dicts() passes); identical values/order (audit pass2 #19).
+        ts_list = [int(x) for x in part["ts_ms"].to_list()]
+        rate_list = [float(x) for x in part[rate_col].to_list()]
         if ts_list:
             start, end = raw_span.get(symbol, (ts_list[0], ts_list[-1]))
             output[symbol] = {

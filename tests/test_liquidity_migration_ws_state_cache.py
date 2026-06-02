@@ -533,3 +533,50 @@ def test_ticker_event_does_not_bump_last_event_when_every_row_drops() -> None:
     assert stats["dropped_events"] == 1
     # The drop must NOT have re-bumped freshness — gap stays >= the sleep.
     assert stats["seconds_since_last_event"] >= 0.005
+
+
+# -- WS-silence watchdog clock (audit 2026-06-02 #2) ----------------------------
+
+def test_private_ws_only_clock_survives_rest_reconcile(monkeypatch) -> None:
+    """The operator WS-silence watchdog must read a clock that the periodic REST
+    reconcile does NOT reset, else it can never report a dead private stream. seed/
+    replace_with_rest_snapshot must leave the WS-only clock untouched; only genuine
+    WS pushes bump it."""
+    import liquidity_migration.ws_state_cache as wsc
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(wsc.time, "monotonic", lambda: clock["t"])
+
+    cache = PrivateStateCache()
+    cache.seed(positions=[], equity_usdt=10_000.0)
+    assert cache.seconds_since_last_ws_event() == float("inf")  # seed is not a WS event
+
+    clock["t"] = 1010.0
+    cache.on_position_event({"data": [{"symbol": "AAAUSDT", "size": "1", "avgPrice": "100"}]})
+    assert cache.seconds_since_last_ws_event() == 0.0  # a real push sets it
+
+    # 130s of WS silence, but a REST reconcile interleaves right before the watchdog reads.
+    clock["t"] = 1140.0
+    cache.replace_with_rest_snapshot(positions=[{"symbol": "AAAUSDT", "size": "1", "avgPrice": "100"}])
+    assert cache.seconds_since_last_event() == 0.0          # seed-inclusive clock reset (masks silence)
+    assert cache.seconds_since_last_ws_event() == 130.0     # WS-only clock reports the true silence
+
+
+def test_ticker_ws_only_clock_survives_rest_reconcile(monkeypatch) -> None:
+    import liquidity_migration.ws_state_cache as wsc
+
+    clock = {"t": 500.0}
+    monkeypatch.setattr(wsc.time, "monotonic", lambda: clock["t"])
+
+    cache = TickerCache()
+    cache.seed([{"symbol": "BTCUSDT", "lastPrice": "100"}])
+    assert cache.seconds_since_last_ws_event() == float("inf")
+
+    clock["t"] = 510.0
+    cache.on_ticker_event({"data": [{"symbol": "BTCUSDT", "lastPrice": "101"}]})
+    assert cache.seconds_since_last_ws_event() == 0.0
+
+    clock["t"] = 640.0
+    cache.replace_with_rest_snapshot([{"symbol": "BTCUSDT", "lastPrice": "100"}])
+    assert cache.seconds_since_last_event() == 0.0
+    assert cache.seconds_since_last_ws_event() == 130.0

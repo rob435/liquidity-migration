@@ -100,6 +100,28 @@ def test_read_bybit_public_trade_archive_streams_1h_klines(tmp_path) -> None:
     ]
 
 
+def test_streamed_1h_klines_open_close_robust_to_descending_row_order(tmp_path) -> None:
+    """open=earliest-trade, close=latest-trade even when CSV rows are time-DESCENDING.
+    Real Bybit archives are ascending (verified), but the production streaming builder
+    must not silently swap open/close if that ever changes — both sibling builders sort
+    defensively (audit pass2 #1). Rows below are written newest-first."""
+    archive = tmp_path / "BTCUSDT2025-01-01.csv.gz"
+    csv_text = "\n".join(
+        [
+            "timestamp,symbol,side,size,price,tickDirection,trdMatchID,grossValue,homeNotional,foreignNotional",
+            "1735689660.0000,BTCUSDT,Buy,0.002,110.00,PlusTick,e3,0,0.002,0.22",   # latest -> close
+            "1735689630.0000,BTCUSDT,Buy,0.001,105.00,PlusTick,e2,0,0.001,0.105",  # middle
+            "1735689600.0000,BTCUSDT,Sell,0.003,100.00,MinusTick,e1,0,0.003,0.30",  # earliest -> open
+        ]
+    )
+    archive.write_bytes(gzip.compress(csv_text.encode("utf-8")))
+
+    row = read_public_trade_archive_klines_1h(archive).to_dicts()[0]
+    assert row["open"] == 100.0   # earliest trade by ts, NOT the first CSV row (110)
+    assert row["close"] == 110.0  # latest trade by ts, NOT the last CSV row (100)
+    assert row["high"] == 110.0 and row["low"] == 100.0
+
+
 def test_archive_filename_preserves_compression_suffix() -> None:
     url = "https://public.bybit.com/trading/BTCUSDT/BTCUSDT2025-01-01.csv.gz"
 

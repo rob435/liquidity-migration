@@ -219,3 +219,18 @@ def test_funding_interval_normalization() -> None:
     eth = funding.filter(pl.col("symbol") == "ETHUSDT")["funding_rate_8h_equiv"][0]
     assert btc == 0.002
     assert eth == -0.001
+
+
+def test_idless_split_fills_are_not_dedup_collapsed() -> None:
+    """Two distinct idless trades at the same instant/side/price/size must both
+    survive — the synthetic-id index keeps them apart so volume is not
+    undercounted by the trades_to_frame dedup (audit pass2 #18). A feed WITH
+    venue ids still dedups true duplicates normally."""
+    same = {"side": "Buy", "price": 100.0, "size": 1.0, "time": 1_700_000_000_000, "symbol": "FOOUSDT"}
+    frame = trades_to_frame([dict(same), dict(same)])
+    assert frame.height == 2  # both distinct prints survive
+    assert frame["size_base"].sum() == 2.0
+
+    # With venue ids, genuine duplicates (same execId) still collapse to one.
+    withid = {**same, "execId": "abc"}
+    assert trades_to_frame([dict(withid), dict(withid)]).height == 1

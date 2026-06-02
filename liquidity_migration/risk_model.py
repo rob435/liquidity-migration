@@ -348,7 +348,13 @@ def decompose_strategy_pnl(
         "explained": pl.Float64, "residual": pl.Float64,
     }
     if trades.is_empty() or not present:
-        return {"per_trade": pl.DataFrame(schema=pt_schema), "n_trades": 0, "mean_residual": 0.0, "residual_sharpe": 0.0}
+        # Keep the documented return shape on degenerate inputs so a Tier-3 gate
+        # reading the trustworthiness fields does not KeyError (audit 2026-06-02 #49).
+        return {
+            "per_trade": pl.DataFrame(schema=pt_schema), "n_trades": 0,
+            "mean_residual": 0.0, "residual_sharpe": 0.0,
+            "n_unresolved": 0, "resolved_fraction": 0.0,
+        }
 
     load_map: dict[tuple, dict] = {
         (row["symbol"], row["ts_ms"]): {f: row.get(f) for f in present}

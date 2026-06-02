@@ -360,8 +360,17 @@ class KlineStreamManager:
         # _max_confirmed_ts_ms and suppress every genuine boundary wake until
         # wall-clock caught up (degrading to heartbeat cadence). Such a bar was
         # still stored above; it just must not gate the cycle-wake.
-        if self._max_confirmed_ts_ms < bar_ts <= _utc_now_ms() + MS_PER_HOUR:
-            self._max_confirmed_ts_ms = bar_ts
+        # _on_bar runs on N pybit WS threads (one per pooled connection), so the
+        # high-water-mark compare-and-set must be atomic — an unlocked read-modify-
+        # write could lose a boundary advance under the hourly multi-connection
+        # burst (audit 2026-06-02 #22). Set the Event OUTSIDE the lock (it is
+        # thread-safe and we must not hold the lock across it).
+        wake = False
+        with self._lock:
+            if self._max_confirmed_ts_ms < bar_ts <= _utc_now_ms() + MS_PER_HOUR:
+                self._max_confirmed_ts_ms = bar_ts
+                wake = True
+        if wake:
             self._cycle_wake_event.set()
 
     def _fetch_universe(self) -> list[str]:

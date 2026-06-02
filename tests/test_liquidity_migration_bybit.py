@@ -88,6 +88,33 @@ def test_get_funding_settlements_follows_pagination_cursor(monkeypatch) -> None:
     assert client._client.calls[1]["cursor"] == "page2"
 
 
+def test_get_closed_pnl_follows_pagination_cursor(monkeypatch) -> None:
+    """A re-entered symbol's closures can exceed one 200-row page; the orphan-close
+    backfill must follow nextPageCursor or it could miss the real closing record
+    (audit pass2 #6). Single-page behaviour (no cursor) is unchanged."""
+    pages = {
+        None: {"retCode": 0, "result": {"list": [{"orderId": "c1"}, {"orderId": "c2"}], "nextPageCursor": "p2"}},
+        "p2": {"retCode": 0, "result": {"list": [{"orderId": "c3"}], "nextPageCursor": ""}},
+    }
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.calls: list[dict] = []
+
+        def get_closed_pnl(self, **params):
+            self.calls.append(params)
+            return pages[params.get("cursor")]
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+
+    rows = client.get_closed_pnl(symbol="FOOUSDT")
+
+    assert [row["orderId"] for row in rows] == ["c1", "c2", "c3"]
+    assert len(client._client.calls) == 2
+    assert client._client.calls[1]["cursor"] == "p2"
+
+
 def test_bybit_public_trade_stream_subscribes_symbols(monkeypatch) -> None:
     class FakeWebSocket:
         def __init__(self, **kwargs):

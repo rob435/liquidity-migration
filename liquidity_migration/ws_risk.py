@@ -44,6 +44,7 @@ from .event_demo import (
     _risk_reconcile_missing_positions,
     _reconcile_pending_order_fills,
     _selected_scenario,
+    _split_order_link_id,
     _split_qty_for_max_order_size,
     _live_open_order_symbols,
     _safe_open_orders,
@@ -233,6 +234,14 @@ class WebSocketRiskState:
     reconciliations_evicted: int = 0
     pending_fill_reconciliations_evicted: int = 0
     errors_evicted: int = 0
+    # Cumulative count of CLOSED-trade order links pruned from the per-link maps
+    # (orders / orders_by_link / executions_by_link / submitted_link_*). Those
+    # maps grow one entry per order for the daemon's lifetime; left unbounded
+    # they OOM-kill the long-lived risk daemon (orphaning a position) just like
+    # the telemetry logs. _prune_closed_order_state evicts only links whose trade
+    # is already closed (an OPEN trade's links are always retained for in-flight
+    # reconciliation), beyond a large retention grace.
+    orders_evicted: int = 0
     # Last error string from the most recent ``_safe_raw_positions`` call (or
     # empty when the snapshot was clean). Plumbed into the orphan reconciler
     # so a transient REST failure -- which leaves ``positions_by_symbol``
@@ -1092,7 +1101,10 @@ class EventWebSocketRiskEngine:
         order_rows: list[dict[str, Any]] = []
         now_ms = _now_ms()
         for idx, sub_qty_str in enumerate(sub_qty_strs):
-            sub_link = base_link if len(sub_qty_strs) == 1 else f"{base_link}-s{idx}"
+            # Use the shared 36-char-safe helper (truncates the base, never the
+            # unique -s{idx} suffix) like the entry/exit paths — a raw f-string
+            # would let two subs collide on a long base (audit 2026-06-02 #43).
+            sub_link = base_link if len(sub_qty_strs) == 1 else _split_order_link_id(base_link, idx)
             sub_order_params = _order_params(
                 symbol=symbol,
                 side=bybit_side,
@@ -1957,8 +1969,45 @@ class EventWebSocketRiskEngine:
                 setattr(self.state, evicted_attr, getattr(self.state, evicted_attr) + overflow)
                 del log[:overflow]
 
+    def _prune_closed_order_state(self) -> None:
+        """Bound the per-order-link maps (the documented orphan-on-OOM failure
+        mode, audit 2026-06-02 #14). Evicts ONLY links whose trade is already
+        closed — an OPEN trade's entry/exit links are always retained so a
+        late fill/cancel/reconcile never finds a missing order — and only the
+        oldest beyond a ``retention``-order grace window (so a just-closed
+        trade's late reconciliation still resolves). ``orders`` is
+        append-ordered, so the tail is the most recent."""
+        retention = getattr(self.risk, "telemetry_log_retention", _LOG_RETENTION)
+        orders = self.state.orders
+        if len(orders) <= retention:
+            return
+        live_trade_ids = {tid for tid in _column_values(self.state.open_trades, "trade_id") if tid}
+        grace_start = len(orders) - retention  # keep every order from here to the tail
+        kept: list[dict[str, Any]] = []
+        evicted_links: list[str] = []
+        for idx, order in enumerate(orders):
+            link = str(order.get("order_link_id") or "")
+            trade_id = str(order.get("trade_id") or "")
+            trade_open = trade_id != "" and trade_id in live_trade_ids
+            # Retain: open-trade orders (in-flight), the recent grace window, and
+            # any order without a link or trade_id (can't prove it is closed).
+            if trade_open or idx >= grace_start or not link or not trade_id:
+                kept.append(order)
+            else:
+                evicted_links.append(link)
+        if not evicted_links:
+            return
+        self.state.orders = kept
+        for link in evicted_links:
+            self.state.orders_by_link.pop(link, None)
+            self.state.executions_by_link.pop(link, None)
+            self.state.submitted_link_to_trade_id.pop(link, None)
+            self.state.submitted_link_submit_mode.pop(link, None)
+        self.state.orders_evicted += len(evicted_links)
+
     def write_report(self, *, reason: str) -> dict[str, Any]:
         self._prune_state_logs()
+        self._prune_closed_order_state()
         now_ms = _now_ms()
         position_snapshot = build_position_pnl_snapshot(list(self.state.positions_by_symbol.values()))
         bybit_summary = summarize_position_pnl(position_snapshot)

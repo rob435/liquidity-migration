@@ -44,6 +44,47 @@ def test_prune_state_logs_caps_telemetry_and_preserves_cumulative_count() -> Non
     assert state.errors_evicted == 10
 
 
+def test_prune_closed_order_state_evicts_closed_links_keeps_open_and_recent() -> None:
+    """The per-order-link maps (orders/orders_by_link/executions_by_link/
+    submitted_link_*) must be bounded like the telemetry logs, but an OPEN
+    trade's links must NEVER be evicted — a late fill/cancel/reconcile would
+    then find a missing order and mis-handle a live position (audit #14)."""
+    retention = 5
+    state = WebSocketRiskState()
+    open_order = {"order_link_id": "lm-open", "trade_id": "T_OPEN", "symbol": "AAA"}
+    closed_old = [{"order_link_id": f"lm-c{i}", "trade_id": f"T_C{i}", "symbol": "B"} for i in range(20)]
+    recent = [{"order_link_id": f"lm-r{i}", "trade_id": f"T_R{i}", "symbol": "C"} for i in range(retention)]
+    state.orders = [open_order, *closed_old, *recent]  # append-ordered: open is the OLDEST
+    state.orders_by_link = {o["order_link_id"]: o for o in state.orders}
+    state.executions_by_link = {o["order_link_id"]: {"filled_qty": 1.0, "value": 1.0} for o in state.orders}
+    state.submitted_link_to_trade_id = {o["order_link_id"]: o["trade_id"] for o in state.orders}
+    state.submitted_link_submit_mode = {o["order_link_id"]: "ws_submitted" for o in state.orders}
+    state.open_trades = pl.DataFrame([{"trade_id": "T_OPEN", "symbol": "AAA", "status": "open"}])
+
+    class _Stub:
+        pass
+
+    stub = _Stub()
+    stub.state = state
+    stub.risk = EventWebSocketRiskConfig(telemetry_log_retention=retention)
+    EventWebSocketRiskEngine._prune_closed_order_state(stub)
+
+    # The OPEN trade's link survives even though it is the single oldest entry.
+    for m in (state.orders_by_link, state.executions_by_link, state.submitted_link_to_trade_id, state.submitted_link_submit_mode):
+        assert "lm-open" in m
+    # The recent grace window survives.
+    assert all(f"lm-r{i}" in state.orders_by_link for i in range(retention))
+    # Old CLOSED-trade links are evicted from ALL four maps.
+    for link in ("lm-c0", "lm-c19"):
+        assert link not in state.orders_by_link
+        assert link not in state.executions_by_link
+        assert link not in state.submitted_link_to_trade_id
+        assert link not in state.submitted_link_submit_mode
+    # The list and its index stay consistent; counter is exact.
+    assert {o["order_link_id"] for o in state.orders} == set(state.orders_by_link)
+    assert state.orders_evicted == 20
+
+
 class FakePrivateClient:
     def __init__(
         self,
@@ -55,6 +96,7 @@ class FakePrivateClient:
         order_history: list[dict[str, object]] | None = None,
         fail_open_orders: bool = False,
         fail_order: bool = False,
+        fail_positions: bool = False,
     ) -> None:
         self.confirm_fills = confirm_fills
         self.fail_trade_history = fail_trade_history
@@ -62,6 +104,7 @@ class FakePrivateClient:
         self.order_history = order_history or []
         self.fail_open_orders = fail_open_orders
         self.fail_order = fail_order
+        self.fail_positions = fail_positions
         self.positions = positions if positions is not None else [
             {
                 "symbol": "AAAUSDT",
@@ -79,6 +122,8 @@ class FakePrivateClient:
         self.stop_updates: list[dict[str, object]] = []
 
     def get_positions(self, *, settle_coin: str | None = None):
+        if self.fail_positions:
+            raise RuntimeError("get_positions timeout")
         return self.positions
 
     def get_open_orders(self, *, symbol: str | None = None, settle_coin: str | None = None):
@@ -3254,3 +3299,39 @@ def test_ws_risk_adopt_strategy_id_for_continuous_sleeve(tmp_path: Path) -> None
         risk_config=EventWebSocketRiskConfig(),
     )
     assert engine._adopt_strategy_id_for_sleeve("continuous") == CONTINUOUS_STRATEGY_ID
+
+
+def test_transient_get_positions_failure_does_not_orphan_close_open_trades(tmp_path: Path) -> None:
+    """The C1 mass-false-orphan-close class (memory: audit-2026-05-29-critical-orphan-close):
+    a transient get_positions failure returns an empty position set that must NOT be read as
+    "every position vanished". Exercised through the engine (the cache-level guard is tested
+    separately) — open trades must survive, no reconciliation rows are written, and the error
+    is recorded so the orphan reconciler stays disarmed (audit 2026-06-02 #6)."""
+    _write_open_trade(tmp_path)
+    private_client = FakePrivateClient(fail_positions=True)
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+    engine.bootstrap()
+    assert engine.state.open_trades.height == 1  # loaded from the ledger
+
+    engine.rest_reconcile()                       # get_positions raises -> error short-circuit
+    rows = engine.reconcile_positions(write=True)  # orphan reconciler must stay disarmed
+
+    assert rows == [], "a transient positions-fetch failure must not orphan-close anything"
+    assert engine.state.open_trades.height == 1, "the open trade must survive the failed fetch"
+    assert engine.state.last_position_error, "the positions error must be recorded"
+    assert engine.state.reconciliations == [], "no false reconciliation rows"

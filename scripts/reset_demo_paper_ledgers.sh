@@ -8,6 +8,8 @@
 #   data/bybit-paper-event      : event_demo_trades  event_demo_orders  event_demo_cycles
 #   data/bybit-long-demo-event  : long_native_demo_trades  long_native_demo_orders  long_native_demo_cycles
 #   data/bybit-long-paper-event : long_native_paper_trades long_native_paper_orders long_native_paper_cycles
+#   data/bybit-continuous-demo-event  : continuous_fade_demo_trades  continuous_fade_demo_orders  continuous_fade_demo_cycles
+#   data/bybit-continuous-paper-event : continuous_fade_paper_trades continuous_fade_paper_orders continuous_fade_paper_cycles
 #
 # WHAT IT PRESERVES: the WS kline stores (event_demo_klines_1h, …), instruments,
 # manifests, configs, and every other dataset — wiping those would force a slow
@@ -64,6 +66,12 @@ data/bybit-long-demo-event:long_native_demo_cycles
 data/bybit-long-paper-event:long_native_paper_trades
 data/bybit-long-paper-event:long_native_paper_orders
 data/bybit-long-paper-event:long_native_paper_cycles
+data/bybit-continuous-demo-event:continuous_fade_demo_trades
+data/bybit-continuous-demo-event:continuous_fade_demo_orders
+data/bybit-continuous-demo-event:continuous_fade_demo_cycles
+data/bybit-continuous-paper-event:continuous_fade_paper_trades
+data/bybit-continuous-paper-event:continuous_fade_paper_orders
+data/bybit-continuous-paper-event:continuous_fade_paper_cycles
 "
 
 # Collect the targets that actually exist on disk.

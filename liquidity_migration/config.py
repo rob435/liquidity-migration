@@ -169,6 +169,14 @@ def _tuple_str(payload: dict[str, Any], key: str, default: tuple[str, ...]) -> t
 
 def _merge_universe_config(payload: dict[str, Any] | None) -> UniverseConfig:
     payload = dict(payload or {})
+    # Reject unknown YAML keys for the same fail-loud behaviour as _merge_dataclass —
+    # a typo'd universe key would otherwise be silently dropped (audit 2026-06-02 #42).
+    allowed = {item.name for item in fields(UniverseConfig)}
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise TypeError(
+            f"Unknown UniverseConfig keys in config: {unknown}. Allowed: {sorted(allowed)}"
+        )
     return UniverseConfig(
         min_turnover_24h=float(payload.get("min_turnover_24h", 2_000_000.0)),
         min_age_days=int(payload.get("min_age_days", 30)),

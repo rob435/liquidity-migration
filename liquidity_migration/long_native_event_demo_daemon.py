@@ -632,8 +632,10 @@ class LongNativeDemoDaemon:
         if threshold <= 0.0:
             return
         if self._private_state_cache.is_seeded():
-            priv_silence = self._private_state_cache.seconds_since_last_event()
-            if priv_silence > threshold:
+            # WS-only clock so the REST-reconcile re-seed can't mask a dead stream
+            # (audit 2026-06-02 #2); inf = no WS push yet = no-signal, not silence.
+            priv_silence = self._private_state_cache.seconds_since_last_ws_event()
+            if priv_silence != float("inf") and priv_silence > threshold:
                 self._ws_private_stale_ticks += 1
                 if not self._ws_private_stale_warned:
                     _logger.warning(
@@ -647,8 +649,8 @@ class LongNativeDemoDaemon:
                 _logger.info("long private WS resumed (silence=%.1fs)", priv_silence)
                 self._ws_private_stale_warned = False
         if self._ticker_cache.is_seeded():
-            ticker_silence = self._ticker_cache.seconds_since_last_event()
-            if ticker_silence > threshold:
+            ticker_silence = self._ticker_cache.seconds_since_last_ws_event()
+            if ticker_silence != float("inf") and ticker_silence > threshold:
                 self._ws_ticker_stale_ticks += 1
                 if not self._ws_ticker_stale_warned:
                     _logger.warning(

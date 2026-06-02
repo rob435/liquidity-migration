@@ -75,3 +75,30 @@ def test_download_binance_proxy_uses_separate_datasets(tmp_path: Path, monkeypat
     assert "binance_usdm_funding" in outputs
     assert read_dataset(tmp_path, "binance_usdm_klines_1h").height == 1
     assert read_dataset(tmp_path, "binance_usdm_funding").height == 1
+
+
+def test_download_binance_proxy_refuses_survivorship_biased_root(tmp_path: Path, monkeypatch) -> None:
+    """A high per-symbol failure ratio must RAISE (not silently build a holey,
+    survivorship-biased proxy root) and persist a failed-jobs artifact (audit pass2 #17)."""
+    import pytest
+
+    from liquidity_migration.binance import BinanceDataError
+
+    class FailingBinance:
+        def get_klines(self, symbol, interval, start, end):
+            raise BinanceDataError(f"{symbol} timeout")
+
+        def get_funding_history(self, symbol, start, end):
+            raise BinanceDataError(f"{symbol} timeout")
+
+    monkeypatch.setattr("liquidity_migration.downloaders.BinanceUSDMData", FailingBinance)
+
+    with pytest.raises(RuntimeError, match="survivorship"):
+        download_binance_usdm_proxy_data(
+            tmp_path,
+            symbols=("AAAUSDT", "BBBUSDT", "CCCUSDT", "DDDUSDT"),
+            start_ms=1767225600000,
+            end_ms=1767229200000,
+            datasets={"klines_1h"},
+        )
+    assert (tmp_path / "binance_proxy_failed_jobs.json").exists()  # auditable artifact

@@ -1003,6 +1003,34 @@ def test_split_qty_matches_the_req_usdt_live_case() -> None:
     assert abs(float(result[0]) - float(result[1])) <= 1.0
 
 
+def test_split_qty_never_exceeds_cap_on_coarse_step() -> None:
+    """Regression (audit 2026-06-02 #5): on a coarse qty_step the old even-split
+    dumped the rounding remainder on the last sub, which could exceed the cap and
+    re-trigger maxMktOrderQty. Every emitted sub must be <= cap for all grids."""
+    from decimal import Decimal as D
+
+    # The exact case that produced a 10100 final sub (> cap 10000) before the fix.
+    result = _split_qty_for_max_order_size(
+        target_qty=D("29999"), max_qty_per_order=10000.0, qty_step=100.0
+    )
+    assert all(q <= D("10000") for q in result), result
+    assert all((q % D("100")) == 0 for q in result), result  # step-aligned
+
+    # Exhaustive sweep over awkward target/cap/step combinations.
+    for target in ("29999", "30001", "50000", "99999", "12345", "100000"):
+        for cap in (7000.0, 10000.0, 19999.0, 20000.0):
+            for step in (1.0, 10.0, 100.0, 250.0):
+                subs = _split_qty_for_max_order_size(
+                    target_qty=D(target), max_qty_per_order=cap, qty_step=step
+                )
+                cap_d = D(str(cap))
+                assert all(q <= cap_d for q in subs), (target, cap, step, subs)
+                # total never exceeds target (sub-step remainder may be dropped, as before)
+                assert sum(subs) <= D(target), (target, cap, step, subs)
+                # within one step of target (no gross under-fill)
+                assert D(target) - sum(subs) < D(str(step)), (target, cap, step, subs)
+
+
 def test_execute_single_entry_splits_into_sub_orders_when_cap_binds() -> None:
     """End-to-end: REQUSDT-like scenario produces 2 order rows + 1 trade row
     with the FULL target qty filled (not capped-and-reduced)."""

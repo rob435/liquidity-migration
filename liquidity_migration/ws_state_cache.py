@@ -90,6 +90,13 @@ class _PrivateStateStats:
     wallet_events: int = 0
     seeded: bool = False
     last_event_monotonic: float = 0.0
+    # WS-ONLY freshness clock: bumped solely by genuine WS pushes, NEVER by
+    # seed()/replace_with_rest_snapshot. is_stale() (the cycle's REST-fallback
+    # decision) uses the seed-inclusive clock above; the operator WS-silence
+    # watchdog uses THIS one — otherwise the periodic REST reconcile re-seeds the
+    # seed-inclusive clock right before the watchdog reads it, so it can never
+    # fire (audit 2026-06-02 #2). 0.0 = no WS event ever seen.
+    last_ws_event_monotonic: float = 0.0
     dropped_events: int = 0
 
 
@@ -229,6 +236,7 @@ class PrivateStateCache:
                 # fresh source — clear any stale REST-reconcile error.
                 self._position_error = ""
                 self._stats.last_event_monotonic = time.monotonic()
+                self._stats.last_ws_event_monotonic = self._stats.last_event_monotonic
 
     def on_order_event(self, message: Mapping[str, Any]) -> None:
         """Apply an order WS push.
@@ -264,6 +272,7 @@ class PrivateStateCache:
                 # source — clear any stale REST-reconcile error.
                 self._open_order_error = ""
                 self._stats.last_event_monotonic = time.monotonic()
+                self._stats.last_ws_event_monotonic = self._stats.last_event_monotonic
 
     def on_wallet_event(self, message: Mapping[str, Any]) -> None:
         """Apply a wallet WS push.
@@ -286,6 +295,7 @@ class PrivateStateCache:
             self._stats.wallet_events += 1
             if applied > 0:
                 self._stats.last_event_monotonic = time.monotonic()
+                self._stats.last_ws_event_monotonic = self._stats.last_event_monotonic
 
     # -- read accessors ------------------------------------------------
 
@@ -338,6 +348,16 @@ class PrivateStateCache:
             if self._stats.last_event_monotonic == 0.0:
                 return float("inf")
             return time.monotonic() - self._stats.last_event_monotonic
+
+    def seconds_since_last_ws_event(self) -> float:
+        """Seconds since the last GENUINE WS push (seed/REST-reconcile excluded).
+        ``inf`` when no WS event has ever arrived — the WS-silence watchdog treats
+        that as "no signal yet" (not silence), so it only fires for a stream that
+        was pushing and went quiet, never for a healthy-but-calm one."""
+        with self._lock:
+            if self._stats.last_ws_event_monotonic == 0.0:
+                return float("inf")
+            return time.monotonic() - self._stats.last_ws_event_monotonic
 
     def is_stale(self, *, stale_seconds: float) -> bool:
         """True when the cache has not received a seed or WS event within
@@ -429,6 +449,8 @@ class _TickerStats:
     events: int = 0
     seeded: bool = False
     last_event_monotonic: float = 0.0
+    # WS-only freshness clock for the operator watchdog (see _PrivateStateStats).
+    last_ws_event_monotonic: float = 0.0
     dropped_events: int = 0
 
 
@@ -485,6 +507,7 @@ class TickerCache:
             self._stats.events += 1
             if applied > 0:
                 self._stats.last_event_monotonic = time.monotonic()
+                self._stats.last_ws_event_monotonic = self._stats.last_event_monotonic
 
     # -- read accessors ------------------------------------------------
 
@@ -512,6 +535,15 @@ class TickerCache:
             if self._stats.last_event_monotonic == 0.0:
                 return float("inf")
             return time.monotonic() - self._stats.last_event_monotonic
+
+    def seconds_since_last_ws_event(self) -> float:
+        """Seconds since the last genuine WS push (seed/REST-reconcile excluded);
+        ``inf`` when none yet. Drives the operator WS-silence watchdog so a REST
+        reconcile re-seed cannot mask a dead ticker stream (audit 2026-06-02 #2)."""
+        with self._lock:
+            if self._stats.last_ws_event_monotonic == 0.0:
+                return float("inf")
+            return time.monotonic() - self._stats.last_ws_event_monotonic
 
     def is_stale(self, *, stale_seconds: float) -> bool:
         return self.seconds_since_last_event() > stale_seconds

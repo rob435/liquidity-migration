@@ -59,6 +59,13 @@ class ContinuousDemoCycleConfig:
     max_new_entries_per_cycle: int = 5
     max_concurrent_entries: int = 4
     max_hold_hours: int = 48              # force-exit cap if a name never leaves the decile
+    # ENTRY TIMING (the alpha-sweep #1 finding, 2026-06-02): select ENTRIES from the CONFIRMED bar-close
+    # decile + this many hours' delay, NOT the live intra-hour decile cross. The engine validated the
+    # +1h point (d1) and it ~DOUBLES MAR vs intra-hour entry (d0) cross-venue — shorting intra-hour enters
+    # into the first-hour continuation/squeeze. 1 = the validated +1h entry (default). 0 = legacy intra-hour
+    # ("no-1h") entry off the live decile. EXITS stay tick-driven regardless (squeeze protection is good).
+    # docs/preregistration/alpha-sweep-2026-06-02.md. EXPLORATORY — forward demo is the arbiter.
+    entry_confirm_delay_hours: int = 1
     # --- anti-thrash (a name oscillating on the D9 boundary would otherwise churn fees) ---
     # Hysteresis: ENTER on the top decile (`decile`), but only cover on the state-exit ("left
     # decile") once the name is CLEARLY out — its decile has dropped below `decile - exit_decile_buffer`.
@@ -200,6 +207,36 @@ def build_live_continuous_state(
     combined = pl.concat([k, cur], how="vertical_relaxed")
     panel = compute_continuous_decile_panel(combined, rmom, rmom_quantile=config.rmom_quantile, start_ms=0)
     return panel.filter(pl.col("ts_ms") == cur_ts).select("symbol", "decile", "composite", "turnover_quote")
+
+
+def build_confirmed_entry_state(
+    klines_recent: pl.DataFrame,
+    rmom: pl.DataFrame,
+    *,
+    now_ts_ms: int,
+    config: ContinuousDemoCycleConfig,
+) -> pl.DataFrame:
+    """ENTRY decile from the CONFIRMED bar-close (no live in-progress bar) at the +Nh-validated deciding
+    bar — the alpha-sweep #1 fix. The engine validated entering 1h AFTER the deciding bar's close (d1),
+    which ~doubles MAR vs the live intra-hour cross (d0); shorting intra-hour walks into the first-hour
+    continuation/squeeze. So a name is an entry candidate iff it was in the top decile at the bar that
+    closed `entry_confirm_delay_hours` ago. NO synthetic live bar → fully PIT/confirmed. Returns the same
+    [symbol, decile, composite, turnover_quote] shape as build_live_continuous_state so the selector is a
+    drop-in. (Used for ENTRIES only; EXITS keep the live tick-driven state.)"""
+    delay = max(1, int(config.entry_confirm_delay_hours))
+    if klines_recent.is_empty():
+        return build_live_continuous_state(pl.DataFrame(), {}, rmom, now_ts_ms=now_ts_ms, config=config)
+    cur_ts = (int(now_ts_ms) // MS_PER_HOUR) * MS_PER_HOUR
+    # deciding bar starts at ts_d, closes at ts_d+1h; entry is +delay h after that close, so the most
+    # recent eligible deciding bar has ts_d = cur_ts - (1+delay)h (its +delay-after-close <= cur_ts <= now).
+    deciding_ts = cur_ts - (1 + delay) * MS_PER_HOUR
+    k = klines_recent.select("ts_ms", "symbol", "close", "turnover_quote").filter(pl.col("ts_ms") < cur_ts)
+    if config.exclude_symbols:
+        k = k.filter(~pl.col("symbol").is_in(list(config.exclude_symbols)))
+    if k.is_empty():
+        return build_live_continuous_state(pl.DataFrame(), {}, rmom, now_ts_ms=now_ts_ms, config=config)
+    panel = compute_continuous_decile_panel(k, rmom, rmom_quantile=config.rmom_quantile, start_ms=0)
+    return panel.filter(pl.col("ts_ms") == deciding_ts).select("symbol", "decile", "composite", "turnover_quote")
 
 
 def _empty_live_state() -> pl.DataFrame:
@@ -875,6 +912,23 @@ def _load_rmom_table(root: Path) -> pl.DataFrame | None:
     return pl.read_parquet(path).rename({"ts_ms": "day_ts"})
 
 
+def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
+    """Guard the only continuous order-submitting path: explicit confirm flag + demo
+    account, and refuse the paper_mode/submit_orders corruption combos. Mirrors
+    long_native_event_demo._validate_long_demo_config — this sleeve was the one live
+    order-submitter missing the repo's money-safety invariant (audit 2026-06-02 #1/#9)."""
+    if config.paper_mode and config.submit_orders:
+        raise ValueError("paper_mode=True is incompatible with submit_orders=True")
+    if config.paper_mode and not config.record_dry_run:
+        raise ValueError("paper_mode=True requires record_dry_run=True so the paper ledger is written")
+    from .bybit import validate_order_submit_allowed
+
+    validate_order_submit_allowed(
+        submit_orders=config.submit_orders,
+        confirm_demo_orders=config.confirm_demo_orders,
+    )
+
+
 def run_continuous_demo_cycle(
     data_root: str | Path,
     *,
@@ -898,6 +952,7 @@ def run_continuous_demo_cycle(
     from the Tier-2 within-hour cache (heavy features once per bar close, cheap re-rank per wake); a
     cache failure transparently falls back to the full recompute, so the cache is purely a speedup."""
     demo = demo_config or ContinuousDemoCycleConfig()
+    _validate_continuous_demo_config(demo)
     strategy_id = continuous_strategy_id(demo)
     trades_dataset, orders_dataset, cycles_dataset = continuous_dataset_names(demo)
     root = Path(data_root).expanduser()
@@ -945,6 +1000,13 @@ def run_continuous_demo_cycle(
             else:
                 live_state = build_live_continuous_state(
                     klines, price_by_symbol, rmom, now_ts_ms=cycle_now_ms, config=demo)
+
+        # ENTRY decile = the validated CONFIRMED-bar +1h state (alpha-sweep #1 fix). Entering on the live
+        # intra-hour decile (entry_confirm_delay_hours=0) ~halves MAR (shorts into the first-hour squeeze).
+        # EXITS keep `live_state` (tick-driven protection is good). 0 reverts to the legacy intra-hour entry.
+        entry_state = live_state
+        if demo.entry_confirm_delay_hours > 0 and rmom is not None and not klines.is_empty():
+            entry_state = build_confirmed_entry_state(klines, rmom, now_ts_ms=cycle_now_ms, config=demo)
 
         all_trades = read_dataset(root, trades_dataset)
         open_trades = _open_continuous_trades(all_trades, strategy_id)
@@ -1004,11 +1066,14 @@ def run_continuous_demo_cycle(
         candidates: list[dict[str, Any]] = []
         if not (errors and demo.submit_orders) and not entry_paused:
             picks = select_continuous_entries(
-                live_state, held_symbols=held_symbols, cooldown_symbols=cooldown, open_count=open_count,
+                entry_state, held_symbols=held_symbols, cooldown_symbols=cooldown, open_count=open_count,
                 config=demo, eligible_symbols=eligible)
             cur_hour_ts = (cycle_now_ms // MS_PER_HOUR) * MS_PER_HOUR
+            # signal ts = the deciding (confirmed) bar for the +1h entry, else the current hour (legacy).
+            signal_ts = (cur_hour_ts - (1 + demo.entry_confirm_delay_hours) * MS_PER_HOUR
+                         if demo.entry_confirm_delay_hours > 0 else cur_hour_ts)
             for c in picks:
-                candidates.append({**c, "signal_ts_ms": cur_hour_ts, "stop_loss_pct": demo.stop_loss_pct,
+                candidates.append({**c, "signal_ts_ms": signal_ts, "stop_loss_pct": demo.stop_loss_pct,
                                    "live_price": price_by_symbol.get(str(c["symbol"]), 0.0)})
         order_notional_frac = demo.per_position_notional_pct_equity / 100.0
         exec_entries, entry_orders = _execute_continuous_entries(

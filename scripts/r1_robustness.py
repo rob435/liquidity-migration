@@ -123,7 +123,14 @@ def _annualize(total_return: float, n_months: int) -> float:
     if n_months <= 0:
         return 0.0
     years = n_months / 12.0
-    return (1.0 + total_return) ** (1.0 / years) - 1.0
+    growth = 1.0 + total_return
+    # A >=100% cumulative loss makes the base non-positive; a fractional power of
+    # it returns a COMPLEX number in Python, which then crashes the math.isfinite()
+    # guard in _tier2_verdict (TypeError). Floor to -1.0 like the sibling
+    # apply_decision_rule.compute_annualized_return (audit pass2 #3).
+    if growth <= 0.0:
+        return -1.0
+    return growth ** (1.0 / years) - 1.0
 
 
 def _mar(returns: list[float]) -> float:
@@ -211,15 +218,22 @@ def _block_bootstrap(cell_r: list[float], base_r: list[float], *, n_boot: int, b
         hi = min(lo + 1, len(ys) - 1)
         return ys[lo] + (ys[hi] - ys[lo]) * (pos - lo)
 
+    def frac_gt0(xs: list[float]) -> float:
+        # P(delta > 0) over the FINITE samples only — a non-finite MAR delta
+        # (zero-DD cell) must not inflate the denominator and bias the reported
+        # probability, consistent with pct()'s finite filter (audit 2026-06-02 #35).
+        ys = [v for v in xs if math.isfinite(v)]
+        return (sum(1 for v in ys if v > 0) / len(ys)) if ys else float("nan")
+
     return {
         "ann_delta_p5": pct(ann_deltas, 0.05),
         "ann_delta_p50": pct(ann_deltas, 0.50),
         "ann_delta_p95": pct(ann_deltas, 0.95),
-        "ann_delta_p_gt0": sum(1 for d in ann_deltas if d > 0) / len(ann_deltas),
+        "ann_delta_p_gt0": frac_gt0(ann_deltas),
         "mar_delta_p5": pct(mar_deltas, 0.05),
         "mar_delta_p50": pct(mar_deltas, 0.50),
         "mar_delta_p95": pct(mar_deltas, 0.95),
-        "mar_delta_p_gt0": sum(1 for d in mar_deltas if math.isfinite(d) and d > 0) / len(mar_deltas),
+        "mar_delta_p_gt0": frac_gt0(mar_deltas),
     }
 
 
@@ -228,7 +242,10 @@ def _engine_mar(total_return: float, max_drawdown: float, years: float) -> float
     (uses the engine's reported daily max_drawdown + the true window span, not
     the monthly-resolution DD / active-month count the bootstrap uses)."""
     dd = abs(max_drawdown)
-    ann = (1.0 + total_return) ** (1.0 / years) - 1.0
+    growth = 1.0 + total_return
+    # growth<=0 (>=100% cumulative loss) -> a fractional power is COMPLEX and crashes
+    # the isfinite() guard; floor the annualized return to -1.0 (audit pass2 #3).
+    ann = (growth ** (1.0 / years) - 1.0) if growth > 0.0 else -1.0
     # nan (not inf) for a ~zero-DD cell: MAR is a divide-by-~0 artifact there, and
     # inf would let a degenerate (e.g. too-few-trades, no down day) cell spuriously
     # clear the pooled-MAR demo-eligibility gate. _tier2_verdict treats a non-finite

@@ -476,6 +476,18 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text
     assert "Environment=SUBMIT_ORDERS=1" in text
     assert "Environment=STOP_LOSS_PCT=0.25" in text
+    # Reboot-safety invariant (audit 2026-06-02 #51): the risk service (the single
+    # reconcile authority that tracks the continuous sleeve's positions) must come
+    # up BEFORE the continuous daemon, else the continuous sleeve's live positions
+    # look untracked and get flattened. Pin both the enable and restart order.
+    assert (
+        text.index("systemctl enable liquidity-migration-bybit-risk.service")
+        < text.index("systemctl enable liquidity-migration-bybit-continuous-demo.service")
+    )
+    assert (
+        text.index("systemctl restart liquidity-migration-bybit-risk.service")
+        < text.index("systemctl restart liquidity-migration-bybit-continuous-demo.service")
+    )
     assert "deploy-verify-ok commit=" in text
     assert "--property=Environment" not in text
     # Daemons no longer fire startup telegrams (default off as of the
@@ -1089,3 +1101,29 @@ def test_reset_demo_paper_ledgers_archives_then_wipes_only_ledgers(tmp_path: Pat
     assert klines.exists(), "WS kline store must be preserved"
     archives = list((tmp_path / "data" / "_archive").glob("ledger-reset-*.tar.gz"))
     assert len(archives) == 1, f"expected one archive tarball, got {archives}"
+
+
+def test_reset_demo_paper_ledgers_covers_continuous_sleeve(tmp_path: Path) -> None:
+    """The now-live continuous-fade sleeve must be reset too — omitting it would
+    leave stale continuous trades that contaminate the clean pre/post forward-demo
+    split on a strategy overhaul (audit 2026-06-02 #10)."""
+    import shutil
+    import subprocess
+
+    if shutil.which("bash") is None:
+        pytest.skip("bash unavailable")
+
+    repo = Path(__file__).resolve().parents[1]
+    script = repo / "scripts" / "reset_demo_paper_ledgers.sh"
+
+    (tmp_path / "liquidity_migration").mkdir()
+    cont = tmp_path / "data" / "bybit-continuous-demo-event" / "continuous_fade_demo_trades"
+    cont_klines = tmp_path / "data" / "bybit-continuous-demo-event" / "continuous_fade_demo_klines_1h"
+    for d in (cont, cont_klines):
+        d.mkdir(parents=True)
+        (d / "part.parquet").write_bytes(b"x")
+
+    real = subprocess.run(["bash", str(script)], cwd=tmp_path, capture_output=True, text=True)
+    assert real.returncode == 0, real.stderr
+    assert not cont.exists(), "continuous trade ledger must be wiped"
+    assert cont_klines.exists(), "continuous WS kline store must be preserved"

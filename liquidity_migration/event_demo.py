@@ -24,6 +24,7 @@ from ._common import MS_PER_DAY, MS_PER_HOUR, MS_PER_MINUTE
 from .volume_events import (
     EventScenario,
     VolumeEventResearchConfig,
+    _bar_close_location,
     _event_score,
     _rank_lookup_cache,
     _validate_event_config,
@@ -1930,21 +1931,21 @@ def _split_qty_for_max_order_size(
     if target_qty <= cap:
         return [target_qty]
     step = Decimal(str(qty_step if qty_step > 0.0 else 0.001))
-    n_subs = int(math.ceil(float(target_qty) / max_qty_per_order))
-    per_sub_raw = target_qty / n_subs
-    per_sub = (per_sub_raw // step) * step
-    if per_sub <= 0:
-        # Pathological: target_qty < step but > cap is impossible since cap > 0.
-        # Defensive: fall back to no split.
+    # Split as evenly as the step grid allows, but distribute the rounding
+    # remainder one step at a time across the FIRST few subs rather than dumping
+    # all of it on the last one. The old "floor each, last absorbs the slack"
+    # form let the last sub exceed the cap on a coarse step (audit 2026-06-02 #5:
+    # target=29999 cap=10000 step=100 -> a 10100 final sub re-triggers the very
+    # maxMktOrderQty rejection this function prevents). Working in whole step
+    # units, every sub differs by at most one step and is provably <= cap.
+    cap_units = int(cap // step)            # max whole steps that fit under the cap
+    total_units = int(target_qty // step)   # whole steps of target (sub-step remainder dropped, as before)
+    if cap_units <= 0 or total_units <= 0:
+        # cap smaller than one step increment (pathological): cannot split safely.
         return [target_qty]
-    consumed = per_sub * (n_subs - 1)
-    last = target_qty - consumed
-    # Floor last to step (might equal per_sub if no remainder)
-    last = (last // step) * step
-    subs = [per_sub] * (n_subs - 1)
-    if last > 0:
-        subs.append(last)
-    return subs
+    n_subs = -(-total_units // cap_units)    # ceil: minimum orders so an even split fits under the cap
+    base, rem = divmod(total_units, n_subs)  # `rem` subs get base+1 units, the rest base; base+1 <= cap_units
+    return [step * (base + 1)] * rem + [step * base] * (n_subs - rem)
 
 
 
@@ -2669,12 +2670,9 @@ def _failed_fade_exit_since_entry(
 
 
 def _completed_bar_close_location(row: dict[str, Any]) -> float:
-    high = _float(row.get("high"))
-    low = _float(row.get("low"))
-    close = _float(row.get("close"))
-    if abs(high - low) <= 1e-12:
-        return 0.5
-    return max(0.0, min(1.0, (close - low) / (high - low)))
+    # Delegate to the canonical backtest helper so the live close-location is
+    # byte-identical to the engine's (was a duplicated formula, audit #55).
+    return _bar_close_location(_float(row.get("high")), _float(row.get("low")), _float(row.get("close")))
 
 
 def _take_profit_hit_since_entry(

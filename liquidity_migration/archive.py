@@ -122,6 +122,15 @@ def read_public_trade_archive_klines_1h(path: str | Path, *, symbol: str | None 
             if not {"timestamp", "size", "price", "trdMatchID"}.issubset(set(reader.fieldnames or ())):
                 raise ValueError("unsupported public trade archive schema")
             bars: dict[tuple[int, str], dict[str, float | int | str]] = {}
+            # Per-bar (open_trade_ts, close_trade_ts) so open/close track the
+            # EARLIEST/LATEST trade by timestamp, not by CSV row order. Bybit
+            # public-trade archives are ascending today (verified on the real
+            # full-PIT root), so this is byte-identical to the prior last-wins
+            # logic — but both sibling builders (_read_..._vectorized, ingestion.
+            # aggregate_trade_klines_1h) sort defensively, and this matches them
+            # so a future archive-format change can't silently swap open/close
+            # on the production streaming path (audit pass2 #1).
+            bar_ts: dict[tuple[int, str], tuple[int, int]] = {}
             for raw in reader:
                 raw_symbol = str(symbol or raw.get("symbol") or "").upper()
                 if not raw_symbol:
@@ -145,10 +154,18 @@ def read_public_trade_archive_klines_1h(path: str | Path, *, symbol: str | None 
                         "turnover_quote": quote_value,
                         "source": "bybit_public_trades",
                     }
+                    bar_ts[key] = (ts_ms, ts_ms)
                     continue
                 bar["high"] = max(float(bar["high"]), price)
                 bar["low"] = min(float(bar["low"]), price)
-                bar["close"] = price
+                open_ts, close_ts = bar_ts[key]
+                if ts_ms < open_ts:           # earlier trade -> new open
+                    bar["open"] = price
+                    open_ts = ts_ms
+                if ts_ms >= close_ts:         # later (or tied-last) trade -> new close
+                    bar["close"] = price
+                    close_ts = ts_ms
+                bar_ts[key] = (open_ts, close_ts)
                 bar["volume_base"] = float(bar["volume_base"]) + size_base
                 bar["turnover_quote"] = float(bar["turnover_quote"]) + quote_value
             if not bars:

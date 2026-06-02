@@ -198,6 +198,7 @@ def test_ws_timeout_probe_falls_through_to_history_then_rest() -> None:
         "orderId": "ws-late-2",
         "orderLinkId": "lm-A",
         "symbol": "BTCUSDT",
+        "orderStatus": "Filled",  # an active/filled history row counts as present (audit #45)
         "createdTime": "1700000000000",
     }
     ws = _WsStub(never_ack=True)
@@ -210,6 +211,51 @@ def test_ws_timeout_probe_falls_through_to_history_then_rest() -> None:
     assert rest.place_calls == []
     assert rest.history_calls and rest.history_calls[0]["order_link_id"] == "lm-A"
     stats = router.stats()
+    assert stats["ws_timeout_probe_recovered"] == 1
+
+
+def test_ws_timeout_probe_ignores_rejected_history_and_resubmits() -> None:
+    """A Rejected/Cancelled history row means the WS submit did NOT take effect,
+    so the probe must NOT report it as present — REST resubmits (Bybit dedup
+    backstops a true race) instead of leaving the position unentered (audit #45)."""
+    rest = _RestStub()
+    rest.order_history_by_link["lm-A"] = {
+        "orderId": "ws-rej",
+        "orderLinkId": "lm-A",
+        "symbol": "BTCUSDT",
+        "orderStatus": "Rejected",
+        "createdTime": "1700000000000",
+    }
+    ws = _WsStub(never_ack=True)
+    router = BybitTradeRouter(rest_client=rest, ws_client=ws, ws_timeout_seconds=0.05)
+    result = router.place_order(
+        symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="lm-A",
+    )
+    assert result["orderId"] == "rest-1"  # resubmitted, not suppressed by the rejected row
+    assert rest.place_calls and rest.place_calls[0]["orderLinkId"] == "lm-A"
+    assert router.stats()["ws_timeout_probe_recovered"] == 0
+
+
+def test_ws_exception_probe_recovers_present_order_skipping_rest() -> None:
+    """A WS exception (lost ack), like a timeout, may have reached Bybit — the
+    dedup probe now runs for it too and suppresses the double-submit (audit #44)."""
+    rest = _RestStub()
+    rest.open_orders_by_link["lm-A"] = {
+        "orderId": "ws-late-exc",
+        "orderLinkId": "lm-A",
+        "symbol": "BTCUSDT",
+        "orderStatus": "New",
+        "createdTime": "1700000000000",
+    }
+    ws = _WsStub(raise_on_call=ConnectionError("ws transport dead"))
+    router = BybitTradeRouter(rest_client=rest, ws_client=ws)
+    result = router.place_order(
+        symbol="BTCUSDT", side="Buy", orderType="Market", qty="1", orderLinkId="lm-A",
+    )
+    assert result["orderId"] == "ws-late-exc"
+    assert rest.place_calls == []  # the probe prevented the double-submit
+    stats = router.stats()
+    assert stats["ws_exceptions"] == 1
     assert stats["ws_timeout_probe_recovered"] == 1
 
 

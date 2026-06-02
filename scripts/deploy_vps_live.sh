@@ -74,6 +74,16 @@ assert demo.failed_fade_exit_hours == 6
 assert demo.failed_fade_min_mfe_pct == 0.01
 assert demo.failed_fade_loss_pct == 0.04
 assert demo.failed_fade_close_location_min == 0.0
+
+# Continuous-fade live sleeve (operator-directed values): pin the alpha/risk levers so a
+# silent revert toward the engine defaults cannot ship on the next deploy (audit 2026-06-02
+# #11/#12). rmom 0.33 = alpha-sweep 2026-06-02; breaker w24/n8 = cb1; 25% disaster stop = I-phase.
+from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig
+cont = ContinuousDemoCycleConfig()
+assert cont.rmom_quantile == 0.33, cont.rmom_quantile
+assert cont.entry_pause_after_adverse_exits == 8, cont.entry_pause_after_adverse_exits
+assert cont.entry_pause_window_minutes == 1440, cont.entry_pause_window_minutes
+assert cont.stop_loss_pct == 0.25, cont.stop_loss_pct
 print("strategy-settings-ok")
 PY
 
@@ -118,8 +128,9 @@ systemctl enable liquidity-migration-bybit-risk.service
 systemctl enable liquidity-migration-bybit-paper.service
 systemctl enable liquidity-migration-bybit-long-demo.service
 systemctl enable liquidity-migration-bybit-long-paper.service
-# Continuous-fade demo sleeve (4th sleeve; ships SUBMIT_ORDERS=0 = dry-run until the
-# operator completes the shadow-test checklist and flips it). Separate ledger root.
+# Continuous-fade demo sleeve (4th sleeve; LIVE as of 2026-06-01 — ships SUBMIT_ORDERS=1
+# and the deploy verify hard-fails if it is not submitting. Pause via SUBMIT_ORDERS=0).
+# Separate ledger root.
 systemctl enable liquidity-migration-bybit-continuous-demo.service
 # Timers must be enabled --now: enable alone writes the symlink but does not
 # start the timer, so on a fresh VPS the demo-health watchdog + daily combined-

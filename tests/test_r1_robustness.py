@@ -84,3 +84,20 @@ def test_load_json_metrics_valid_report_has_no_load_error(tmp_path) -> None:
     assert m["load_error"] is None
     assert m["total_return"] == 1.5
     assert m["full_pit_pass"] is True
+
+
+def test_annualize_and_engine_mar_stay_real_below_minus_100pct() -> None:
+    """A >=100% cumulative loss makes (1+total_return) non-positive; a fractional
+    power of it is COMPLEX in Python and crashes the math.isfinite() Tier-2 guard.
+    Both helpers must floor to a real -1.0-based value (audit pass2 #3)."""
+    ann = MOD._annualize(-1.3, 36)
+    assert isinstance(ann, float) and math.isfinite(ann)
+    assert ann == -1.0
+
+    mar = MOD._engine_mar(-1.3, max_drawdown=-0.5, years=3.0)
+    assert isinstance(mar, float) and math.isfinite(mar)
+    # ann floored to -1.0, dd 0.5 -> mar -2.0; the point is it is REAL + finite, not complex.
+    assert mar == -2.0
+
+    # exactly -100% (growth == 0) must also stay real, not raise.
+    assert MOD._annualize(-1.0, 12) == -1.0

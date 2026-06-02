@@ -506,6 +506,7 @@ class BybitPrivateClient:
         start_time_ms: int | None = None,
         end_time_ms: int | None = None,
         limit: int = 50,
+        max_pages: int = 50,
     ) -> list[dict[str, Any]]:
         """Closed-PnL records for the account.
 
@@ -517,17 +518,35 @@ class BybitPrivateClient:
         no exit price and no PnL — accurate that the position is gone, but the
         ledger loses the trade outcome.
 
-        Returns the result.list payload as-is (empty list on missing endpoint).
+        Bybit caps closed-PnL at <=200 rows/page; a symbol re-entered several
+        times over the reconciliation lookback can exceed one page, so follow
+        ``nextPageCursor`` to the end (mirrors get_funding_settlements). Without
+        this the backfill could miss the actual closing record for a re-entered
+        symbol (audit pass2 #6). Returns the result.list rows (empty on a missing
+        endpoint); ``max_pages`` bounds the loop defensively.
         """
-        params: dict[str, Any] = {"category": self.category, "limit": max(1, min(int(limit), 200))}
+        base_params: dict[str, Any] = {"category": self.category, "limit": max(1, min(int(limit), 200))}
         if symbol:
-            params["symbol"] = symbol
+            base_params["symbol"] = symbol
         if start_time_ms is not None:
-            params["startTime"] = int(start_time_ms)
+            base_params["startTime"] = int(start_time_ms)
         if end_time_ms is not None:
-            params["endTime"] = int(end_time_ms)
-        payload = self._call_optional(("get_closed_pnl",), **params)
-        return payload.get("result", {}).get("list", []) if payload else []
+            base_params["endTime"] = int(end_time_ms)
+        rows: list[dict[str, Any]] = []
+        cursor: str | None = None
+        for _ in range(max(1, int(max_pages))):
+            params = dict(base_params)
+            if cursor:
+                params["cursor"] = cursor
+            payload = self._call_optional(("get_closed_pnl",), **params)
+            if not payload:
+                break
+            result = payload.get("result", {})
+            rows.extend(result.get("list", []))
+            cursor = result.get("nextPageCursor") or None
+            if not cursor:
+                break
+        return rows
 
     def get_funding_settlements(
         self,
@@ -813,6 +832,15 @@ class BybitPrivateWebSocketStream:
         _close_ws_client(self._client)
 
 
+# Order statuses that mean a probed orderLinkId is genuinely working at the venue
+# (so a WS-fallback resubmit should be suppressed). Terminal-bad statuses
+# (Rejected/Cancelled/Deactivated/Expired/PartiallyFilledCanceled) mean the submit
+# did NOT take effect and the order must be resubmitted (audit 2026-06-02 #45).
+_PROBE_PRESENT_STATUSES = frozenset(
+    {"new", "partiallyfilled", "filled", "untriggered", "triggered"}
+)
+
+
 class BybitTradeRouter:
     """Route order placement + cancellation through WS first, REST as fallback.
 
@@ -899,15 +927,17 @@ class BybitTradeRouter:
                 )
                 with self._lock:
                     self._rest_fallbacks += 1
-                # On a WS timeout the submit may have reached Bybit before
-                # the ack network-delayed past _ws_timeout_seconds. A REST
-                # resubmit then races: Bybit's per-orderLinkId dedup
-                # USUALLY catches it (retCode=110089), but the race window
-                # between Bybit ingesting the WS submit and processing the
-                # REST submit is not formally guaranteed to dedup. Probe
-                # order history by orderLinkId first; if Bybit already has
-                # the order, return that instead of resubmitting.
-                if failure.kind == "timeout":
+                # On a WS timeout / exception / malformed-ack the submit may have
+                # reached Bybit before the ack was lost or garbled. A REST resubmit
+                # then races: Bybit's per-orderLinkId dedup USUALLY catches it
+                # (retCode=110089), but the window between Bybit ingesting the WS
+                # submit and processing the REST submit is not formally guaranteed
+                # to dedup. Probe by orderLinkId first; if Bybit already has the
+                # (active/filled) order, return it instead of resubmitting. A
+                # "rejected" kind is a definitive venue reject (the order did NOT
+                # take), so it is excluded — REST resubmits and re-rejects cleanly
+                # (audit 2026-06-02 #44).
+                if failure.kind in ("timeout", "exception", "malformed_ack"):
                     probed = self._probe_existing_order(
                         symbol=params.get("symbol"),
                         order_link_id=params["orderLinkId"],
@@ -1058,7 +1088,16 @@ class BybitTradeRouter:
                 )
             except Exception:  # noqa: BLE001
                 history = []
-            rows.extend(history or [])
+            # Only an active/filled history row counts as "present" — a
+            # Rejected/Cancelled/Expired row means the submit did not take, so
+            # returning it would wrongly suppress the REST resubmit and leave the
+            # position unentered (audit 2026-06-02 #45). Open-orders matches above
+            # are active by definition and need no status filter.
+            rows.extend(
+                row for row in (history or [])
+                if str(row.get("orderStatus") or row.get("order_status") or "").lower()
+                in _PROBE_PRESENT_STATUSES
+            )
         if not rows:
             return None
         # Pick the most-recently-created row (history is usually newest-first

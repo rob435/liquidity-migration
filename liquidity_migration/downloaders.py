@@ -160,10 +160,20 @@ def download_binance_usdm_proxy_data(
     workers: int = 1,
     interval: str = "1h",
     period: str = "1h",
+    max_failure_ratio: float = 0.05,
 ) -> dict[str, Path]:
+    # Refuse to silently build a survivorship-biased proxy root: the per-symbol
+    # skip below is deliberate (a single timeout must not abort a 200-symbol build,
+    # and a re-run retries it), but a HIGH failure ratio means many symbols are
+    # missing — the exact survivorship gap docs/backtesting_errors_we_never_repeat.md
+    # forbids. Accumulate failures and assert completeness like binance_vision
+    # (audit pass2 #17). 5% tolerance: lenient for transient single-symbol drops.
+    from .binance_vision import _assert_download_completeness
     resolved = {_resolve_binance_dataset_name(item) for item in datasets}
     symbols = tuple(dict.fromkeys(symbol.upper() for symbol in symbols))
     outputs: dict[str, Path] = {}
+    failed: list[tuple[str, str]] = []
+    _failed_artifact = Path(data_root) / "binance_proxy_failed_jobs.json"
     if workers > 1:
         max_workers = max(1, min(workers, len(symbols)))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -195,7 +205,12 @@ def download_binance_usdm_proxy_data(
                     # consecutive runs: a single symbol's premiumIndexKlines
                     # / indexPriceKlines timeout brought down the entire
                     # script via set -euo pipefail.
+                    failed.append((symbol, ""))
                     print(f"WARN: binance symbol {symbol} failed; skipping. Re-run to retry: {exc}", flush=True)
+        _assert_download_completeness(
+            failed, len(symbols), max_failure_ratio=max_failure_ratio,
+            artifact_path=_failed_artifact if failed else None,
+        )
         return outputs
 
     client = BinanceUSDMData()
@@ -216,7 +231,12 @@ def download_binance_usdm_proxy_data(
                 )
             )
         except BinanceDataError as exc:
+            failed.append((symbol, ""))
             print(f"WARN: binance symbol {symbol} failed; skipping. Re-run to retry: {exc}", flush=True)
+    _assert_download_completeness(
+        failed, len(symbols), max_failure_ratio=max_failure_ratio,
+        artifact_path=_failed_artifact if failed else None,
+    )
     return outputs
 
 

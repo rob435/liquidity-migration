@@ -806,7 +806,15 @@ def _aggregate_bybit_closures(
     previous leg: summed size/pnl/fee, qty-weighted avg entry/exit over priced
     legs, earliest createdTime. The strategy holds one position per symbol with
     a cooldown, so two genuinely distinct closes on the same symbol+side inside
-    the window are not expected."""
+    the window are not expected.
+
+    Averaging/timestamp basis (audit pass2 #5/#15/#16 — deliberate, documented):
+    avg_exit/avg_entry are VWAPs over the PRICED legs only; a cluster with NO
+    priced leg yields 0.0, and the downstream exit_price_gap_bps already reports
+    None (not a spurious gap) in that case. avg_entry weights by ``closed_size``
+    (the exit quantity) — exact for the one-position-per-symbol close this folds.
+    ``created_ts_ms`` is the EARLIEST leg (chronological sort key); it is not a
+    close-completion timestamp."""
     by_key: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for record in records:
         by_key.setdefault((record["symbol"], record["side"]), []).append(record)
@@ -815,7 +823,16 @@ def _aggregate_bybit_closures(
         group.sort(key=lambda r: r["created_ts_ms"])
         clusters: list[list[dict[str, Any]]] = []
         for record in group:
-            if clusters and record["created_ts_ms"] - clusters[-1][-1]["created_ts_ms"] <= window_ms:
+            # A missing Bybit createdTime/updatedTime yields created_ts_ms=0; such
+            # rows must NOT cluster (0-0 <= window would merge unrelated closures on
+            # the same symbol+side into one phantom leg). Require both timestamps
+            # positive before merging on proximity (audit 2026-06-02 #29).
+            if (
+                clusters
+                and record["created_ts_ms"] > 0
+                and clusters[-1][-1]["created_ts_ms"] > 0
+                and record["created_ts_ms"] - clusters[-1][-1]["created_ts_ms"] <= window_ms
+            ):
                 clusters[-1].append(record)
             else:
                 clusters.append([record])

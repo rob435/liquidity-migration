@@ -192,6 +192,11 @@ class _StubCache:
     def seconds_since_last_event(self) -> float:
         return self._silence
 
+    def seconds_since_last_ws_event(self) -> float:
+        # The watchdog reads the WS-only clock (audit 2026-06-02 #2); the stub's
+        # configured silence stands in for genuine-WS-push staleness.
+        return self._silence
+
     # The daemon doesn't call these in _check_ws_health, but does elsewhere.
     def stats(self) -> dict:
         return {}
@@ -559,10 +564,14 @@ def test_daemon_holds_fixed_interval_cadence_without_drift(tmp_path: Path) -> No
     assert not runner.is_alive()
     assert len(cycle_starts) >= 3, f"expected several cycles, got {len(cycle_starts)}"
 
-    periods = [b - a for a, b in zip(cycle_starts, cycle_starts[1:])]
-    for period in periods:
-        # Fixed cadence -> ~0.25s. Old drift bug -> ~0.40s (interval+cycle).
-        assert 0.18 < period < 0.34, f"cycle period {period:.3f}s drifted from the 0.25s interval"
+    # Assert on the MEDIAN period, not every sample: a fixed cadence keeps the
+    # median ~0.25s, while the old post-cycle-sleep drift bug pushed EVERY period
+    # to ~0.40s (interval+cycle). The median catches that systematic drift but
+    # tolerates an occasional scheduler-starvation spike under CI load that made
+    # the per-sample upper bound flaky (audit pass2 #57).
+    periods = sorted(b - a for a, b in zip(cycle_starts, cycle_starts[1:]))
+    median = periods[len(periods) // 2]
+    assert 0.18 < median < 0.34, f"median cycle period {median:.3f}s drifted from the 0.25s interval"
     assert daemon._cycle_overruns == 0  # type: ignore[attr-defined]
 
 
@@ -595,10 +604,12 @@ def test_daemon_overrun_fires_next_cycle_immediately_and_counts(tmp_path: Path) 
     assert len(cycle_starts) >= 3
     assert daemon._cycle_overruns >= 2  # type: ignore[attr-defined]
 
-    # Back-to-back cycles: period ~= cycle duration (0.15s), with no idle added.
-    periods = [b - a for a, b in zip(cycle_starts, cycle_starts[1:])]
-    for period in periods:
-        assert period < 0.30, f"overrunning cycles should run back-to-back, period was {period:.3f}s"
+    # Back-to-back cycles: median period ~= cycle duration (0.15s), no extra idle.
+    # Median (not per-sample) tolerates a load spike while still catching a
+    # systematic "idle added between cycles" regression (audit pass2 #57).
+    periods = sorted(b - a for a, b in zip(cycle_starts, cycle_starts[1:]))
+    median = periods[len(periods) // 2]
+    assert median < 0.30, f"overrunning cycles should run back-to-back, median period {median:.3f}s"
 
 
 def test_daemon_kline_warmer_runs_between_cycles(tmp_path: Path) -> None:

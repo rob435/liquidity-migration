@@ -318,8 +318,37 @@ cells lose; the one cross-venue winner (w24/n8) is a bybit noise spike**. So it 
 in-sample; only ever pauses entries, never adds risk; forward demo arbitrates). Engine default stays OFF.
 Disable via `entry_pause_after_adverse_exits=0`. Mechanism + regression tests retained. Suite 1088.
 
-**Strategy-alpha sweep 2026-06-02 (exit/entry/rebalance) — one robust win: tighten rmom 0.50→0.33.**
-Engine ablation both venues (`scripts/alpha_sweep.py`; receipt `docs/preregistration/alpha-sweep-2026-06-02.md`).
+**Strategy-alpha program 2026-06-02 (~20 quant bases, 13 iterations, `scripts/alpha_sweep.py`,
+`docs/continuous_alpha_program.md`) — THREE robust cross-venue findings; nothing else robustly adds.**
+**#1 ENTRY TIMING (the dominant ~2× lever) — IMPLEMENTED, reversible, NOT pushed (operator deploys).**
+The live sleeve entered intra-hour on the live decile cross (≈ engine d0); the validated point is +1h after
+the confirmed bar close (d1): d1 ≈ 2× d0 MAR both venues (bybit 19.5→38.6, binance 15.1→30.4). Fix:
+`continuous_demo.build_confirmed_entry_state` + `entry_confirm_delay_hours=1` (default; =0 reverts to the
+"no-1h" legacy) selects ENTRIES from the confirmed-bar decile, EXITS stay tick-driven. Tested; suite 1101.
+ALSO cuts the intraday squeeze DD (iter 10) — dominates legacy on return AND risk.
+**#2 rmom_quantile 0.50→0.33 — APPLIED + pushed.** Recommended config (d1+rmom33) is robust cross-venue
+(point MAR bybit 42.8 / binance 50.1; block-boot MAR p5≈37 both; both eras +; receipt
+`docs/preregistration/alpha-sweep-2026-06-02.md`).
+**#3 DE-GROSS: gross_exposure 0.5 is OVER-LEVERED — ~0.3 is strictly better risk-adjusted (NEW, validated,
+NOT applied).** gross 0.5→0.3 dominates on BOTH venues across point MAR (+4/+6%), daily-DD, hourly-DD (−41%),
+bootstrap-p5 (UP), and BOTH eras (UP). Mechanism = standard sqrt impact law ($-cost ∝ notional^1.5). HONEST
+magnitude: MODEST (+1.5–2.9 MAR pts ≈ +3–6%) at current small size; it's a CAPACITY/impact lever that grows
+with AUM. A sizing decision for the operator (lower gross = lower absolute return, more capacity headroom).
+**REJECTED this round (failed the era/bootstrap gate or no-add):** funding-conditioned entry (no
+discrimination), concentration/per-hour-burst cap (full-sample mirage; cut point-MAR + bootstrap-p5 + era1).
+Robustness: edge survives 2× modeled cost both venues (iter 11); true intraday DD contained (3.4–4.1%, iter 10).
+**Next step: operator deploys #1 (entry timing) ± #3 (de-gross toward ~0.3); forward demo is the arbiter.**
+**ACCOUNT-LEVEL (iter 17, the deepest base): the continuous SHORT is 0.65-0.72 correlated with the live
+event/daily short** (both short D9) → at the account level it's REDUNDANT CAPACITY, not a diversifier; all the
+short-fade tuning improves a sleeve ~70% identical to a bet the book already has. The diversifier is the
+LONG/market-neutral L/S leg (corr 0.26-0.32, +46% bybit / +5% binance combined MAR) — which ALREADY exists as
+the live long sleeve. **Strategic reframe: account-level "perfection" = size the continuous short as capacity +
+lean on the long sleeve for diversification, NOT more short-fade tuning.** (Proxies — trust the correlations
++ direction, not absolute MAR.) Regime conditioning tested too: mild real effect, NOT robustly timeable
+(trend7 gate was a window-tuned spike; vol-regime era-overfit). Rejected dregs: ATR/vol-scaled stop (a fade
+wants a wide stop), concentration cap, funding gate, scale-in (dominated by +1h). Backtest research complete.
+
+Older single-win note (superseded by the above): rmom-0.33 detail —
 **ENTRY:** `rmom_quantile` 0.50→**0.33** (keep the lowest-residual-momentum third) — cross-venue MAR↑
 (bybit 38.6→42.9 +11%, binance 30.4→**50.1** +65%), DD↓ both (2.6→1.8, 5.1→2.3), neighbours hold; same
 validated rmom squeeze-filter, used tighter; ~−23% return (MAR-primary win). **APPLIED 2026-06-02

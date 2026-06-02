@@ -282,19 +282,16 @@ def _xs_rank(df: pl.DataFrame, value_col: str, *, out_col: str) -> pl.DataFrame:
     Larger value -> higher rank. Nulls stay null; their presence does not
     bias the ranks of the rest (rank is computed over non-null values).
     """
+    # _cs_count_partial (a windowed cum_sum) was computed then immediately dropped,
+    # never read — removed; the denominator is count().over('ts_ms') below (audit pass2 #20).
     return df.with_columns(
         pl.col(value_col)
         .rank(method="average", descending=False)
         .over("ts_ms")
         .alias(f"{out_col}_raw_rank"),
-        pl.col(value_col)
-        .is_not_null()
-        .cum_sum()
-        .over("ts_ms")
-        .alias("_cs_count_partial"),  # unused; placeholder if we need denominator
     ).with_columns(
         (pl.col(f"{out_col}_raw_rank") / pl.col(value_col).count().over("ts_ms")).alias(out_col)
-    ).drop([f"{out_col}_raw_rank", "_cs_count_partial"])
+    ).drop([f"{out_col}_raw_rank"])
 
 
 def _xs_zscore(df: pl.DataFrame, value_col: str, *, out_col: str) -> pl.DataFrame:

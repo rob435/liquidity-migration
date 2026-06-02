@@ -121,3 +121,29 @@ def test_cooldown_sends_new_suppresses_persisting_then_reresends_and_resolves() 
     # Condition cleared -> resolved + key dropped.
     to_send, resolved, state = M.select_alerts_to_send(active=[], state=state, now_ms=later + MIN, cooldown_minutes=30)
     assert to_send == [] and resolved == ["liveness:demo"] and state == {}
+
+
+def test_gather_alerts_wires_stop_protection_and_unavailable(tmp_path, monkeypatch) -> None:
+    """Orchestration coverage (audit 2026-06-02 #54): gather_alerts must feed the live
+    venue positions into the stop-protection check, and when the venue probe FAILS it must
+    warn that open trades are unchecked — never silently report them as protected."""
+    import argparse
+
+    now = 1_000 * HOUR
+    args = argparse.Namespace(max_cycle_age_min=10, settle_coin="USDT", max_ws_lag_hours=6)
+    data_root = tmp_path / "bybit-demo-event"
+    data_root.mkdir()
+    monkeypatch.setattr(M, "_unit_states", lambda units: {})
+    monkeypatch.setattr(M, "_open_trades", lambda root: [{"symbol": "AAAUSDT", "stop_price": 100.0}])
+
+    # (a) venue reachable but the position carries NO server-side stop -> CRITICAL unprotected.
+    monkeypatch.setattr(M, "_venue_positions", lambda settle_coin="USDT": ({"AAAUSDT": {"size": "1", "stopLoss": ""}}, None))
+    keys_a = {a.key for a in M.gather_alerts(data_root=data_root, units=[], now_ms=now, args=args)}
+    assert "unprotected:AAAUSDT" in keys_a
+    assert "stop_verify_unavailable" not in keys_a
+
+    # (b) venue probe failed -> WARNING that the open trade is unverified, and NO false 'protected'.
+    monkeypatch.setattr(M, "_venue_positions", lambda settle_coin="USDT": ({}, "RuntimeError: api down"))
+    keys_b = {a.key for a in M.gather_alerts(data_root=data_root, units=[], now_ms=now, args=args)}
+    assert "stop_verify_unavailable" in keys_b
+    assert not any(k.startswith("unprotected:") for k in keys_b)

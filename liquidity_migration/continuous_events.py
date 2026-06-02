@@ -72,6 +72,8 @@ class ContinuousEventConfig:
     max_hold_hours: int = 48              # state-mode cap (force exit if the name never leaves the decile)
     cooldown_hours: int = 0               # 0 -> fixed: hold_hours; state: 0 (spell-fresh already dedupes)
     stop_loss_pct: float = 0.0            # 0 -> no stop (proxy parity)
+    stop_vol_mult: float = 0.0            # >0 -> vol-scaled stop = k * trailing hourly vol (overrides fixed
+    #                                       stop_loss_pct per-trade), clamped to [5%,50%]. 0 -> fixed stop.
     stop_fill_mode: str = "bar_extreme_capped"
     stop_slippage_cap_pct: float = 0.10
     # --- sizing ---
@@ -179,6 +181,10 @@ def per_symbol_timeseries_features(k: pl.DataFrame) -> pl.DataFrame:
     k = k.with_columns((pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias("ret1"))
     k = k.with_columns(
         pl.col("ret1").rolling_std(window_size=168, min_samples=48).over("symbol").alias("rv_168h"),
+        # max single-hour return over the trailing week (the MAX / lottery-demand feature, Bali et al.) —
+        # always computed but only enters the composite when feature_set includes it, so the default
+        # signal (and the live↔backtest equivalence) is unchanged. Research lever for the MAX base.
+        pl.col("ret1").rolling_max(window_size=168, min_samples=48).over("symbol").alias("max_ret168"),
         (pl.col("close") / pl.col("close").shift(72).over("symbol") - 1.0).alias("ret72"),
         (pl.col("close") / pl.col("close").shift(168).over("symbol") - 1.0).alias("ret168"),
         pl.col("close").rolling_min(window_size=720, min_samples=168).over("symbol").alias("min720"),
@@ -194,7 +200,8 @@ def per_symbol_timeseries_features(k: pl.DataFrame) -> pl.DataFrame:
 
 
 def cross_sectional_decile(
-    k: pl.DataFrame, rmom: pl.DataFrame, *, rmom_quantile: float = 0.5
+    k: pl.DataFrame, rmom: pl.DataFrame, *, rmom_quantile: float = 0.5,
+    feature_set: tuple[str, ...] = FEATURES,
 ) -> pl.DataFrame:
     """Cross-sectional composite -> decile from per-symbol features. `k` must already carry
     [symbol, ts_ms, turnover_quote, rv_168h, vov, dist_low, ret72, ret168]; the backtest passes the
@@ -215,7 +222,7 @@ def cross_sectional_decile(
     k = k.with_columns(
         ((pl.col("residual_momentum").rank().over("ts_ms") - 1) / (pl.len().over("ts_ms") - 1)).alias("_rr")
     ).filter(pl.col("_rr") <= rmom_quantile)
-    present = [f for f in FEATURES if f in k.columns]
+    present = [f for f in feature_set if f in k.columns]
     k = k.with_columns(
         [((pl.col(f).rank().over("ts_ms") - 1) / (pl.len().over("ts_ms") - 1)).alias(f"_n_{f}") for f in present]
     )
@@ -227,7 +234,8 @@ def cross_sectional_decile(
 
 
 def compute_continuous_decile_panel(
-    k: pl.DataFrame, rmom: pl.DataFrame, *, rmom_quantile: float = 0.5, start_ms: int = 0
+    k: pl.DataFrame, rmom: pl.DataFrame, *, rmom_quantile: float = 0.5, start_ms: int = 0,
+    feature_set: tuple[str, ...] = FEATURES,
 ) -> pl.DataFrame:
     """Shared feature -> composite -> decile pipeline (used by BOTH the backtest panel and the
     live demo state, so the live signal is provably identical to the verified backtest).
@@ -240,7 +248,7 @@ def compute_continuous_decile_panel(
     k = per_symbol_timeseries_features(k)
     if start_ms:
         k = k.filter(pl.col("ts_ms") >= start_ms)
-    return cross_sectional_decile(k, rmom, rmom_quantile=rmom_quantile)
+    return cross_sectional_decile(k, rmom, rmom_quantile=rmom_quantile, feature_set=feature_set)
 
 
 def _fresh_entries(panel: pl.DataFrame, config: ContinuousEventConfig) -> pl.DataFrame:
@@ -400,6 +408,11 @@ def _run_trades(
             rv = _entry_vol(close_arr, int(entry_bar))
             mult = min(max(config.target_vol_per_name / rv, 1.0 / clamp), clamp) if rv > 0 else 1.0
             nw = base_nw * mult
+        # vol-scaled stop (default off): k * trailing hourly vol, clamped; else the fixed stop_pct.
+        trade_stop = stop_pct
+        if config.stop_vol_mult > 0.0:
+            sv = _entry_vol(close_arr, int(entry_bar))
+            trade_stop = min(max(config.stop_vol_mult * sv, 0.05), 0.50) if sv > 0 else stop_pct
         if state_mode:
             planned_exit = min(int(spell_end) + delay_ms, entry_bar_end + max_hold_ms)
             planned_exit = max(planned_exit, entry_bar_end + MS_PER_HOUR)
@@ -410,7 +423,7 @@ def _run_trades(
             rank=int(config.decile), basket_id=_iso_day(entry_bar_end), signal_ts_ms=int(sig_ts),
             entry_bar=int(entry_bar), symbol_bars=bars, planned_exit_ts_ms=planned_exit,
             notional_weight=nw, position_weight=1.0, config=lifecycle,
-            round_trip_cost_bps=_round_trip_bps(config, turn), stop_pct=stop_pct,
+            round_trip_cost_bps=_round_trip_bps(config, turn), stop_pct=trade_stop,
             rank_lookup={}, event_decay_threshold=0.0,
             funding_lookup=funding_lookup if config.use_funding else None,
             stop_fill_mode=config.stop_fill_mode, stop_slippage_cap_pct=config.stop_slippage_cap_pct,
