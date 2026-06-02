@@ -29,6 +29,7 @@ from .config import ResearchConfig
 from .continuous_demo import (
     ContinuousDemoCycleConfig,
     LivePanelCache,
+    format_continuous_demo_cycle_summary,
     run_continuous_demo_cycle,
     run_continuous_protective_exit_cycle,
 )
@@ -201,6 +202,11 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
     def _run_one_cycle(self) -> None:
         with self._cycle_mutex:
             super()._run_one_cycle()
+
+    def _format_cycle_summary(self, payload: dict[str, Any]) -> str:
+        # The continuous cycle payload is a flat dict (no `cycle` key), so the inherited long-shaped
+        # formatter KeyError'd every cycle (audit 2026-06-02). Format the continuous shape instead.
+        return format_continuous_demo_cycle_summary(payload)
 
     # -- lifecycle: start/stop the Tier-1 monitor around the base run loop --------------------
 

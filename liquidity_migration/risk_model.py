@@ -117,6 +117,7 @@ def build_factor_panel(
     start: str,
     end: str,
     btc_symbol: str = "BTCUSDT",
+    klines_dataset: str | None = None,
 ) -> pl.DataFrame:
     """Build the per-(symbol, ts_ms, date) factor-exposure panel, full-PIT.
 
@@ -131,10 +132,18 @@ def build_factor_panel(
     (2026-05-29) pruned ``xs_rank_ret_3d`` (sign-inconsistent factor return across
     venues) and deferred the alt-season factor — 6 stable, sign-consistent factors
     meet the plan's 5-6 target. See r4-risk-model-verdict.md.
+
+    ``klines_dataset`` overrides the autodetected kline store name. The autodetect
+    only distinguishes the Bybit/Binance funding-dir conventions and always returns
+    ``klines_1h``; the live demo/paper roots store their WS-driven klines under
+    ``event_demo_klines_1h`` instead, so the offline rmom refresh must pass the real
+    store name or both reads return zero rows (the 2026-06-02 continuous zero-signal
+    blackout). Defaults to None => autodetect (research roots).
     """
     feat = build_feature_panel(
         data_root, start=start, end=end,
         feature_specs=",".join(_REUSED_FACTOR_SPECS), forward_horizons=(1,),
+        klines_dataset=klines_dataset,
     )
     if feat.is_empty():
         return pl.DataFrame()
@@ -145,7 +154,7 @@ def build_factor_panel(
     # does not expose -> a lightweight klines-only second read (padded for warm-up).
     start_ms = _date_str_to_ms(start)
     end_ms = _date_str_to_ms(end)
-    klines_name = _autodetect_dataset_names(data_root)["klines_dataset"]
+    klines_name = klines_dataset or _autodetect_dataset_names(data_root)["klines_dataset"]
     klines_1h = _read_window(
         data_root, klines_name, start_ms=start_ms - 90 * MS_PER_DAY, end_ms=end_ms,
         columns=["ts_ms", "symbol", "open", "high", "low", "close", "volume_base", "turnover_quote", "date"],

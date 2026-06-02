@@ -912,6 +912,29 @@ def _load_rmom_table(root: Path) -> pl.DataFrame | None:
     return pl.read_parquet(path).rename({"ts_ms": "day_ts"})
 
 
+def format_continuous_demo_cycle_summary(payload: dict[str, Any]) -> str:
+    """Pretty-print a continuous-fade cycle payload (a FLAT dict) for stdout/journald. The continuous
+    daemon subclasses the long daemon, whose `format_long_demo_cycle_summary` expects `payload['cycle']`;
+    feeding it the flat continuous payload KeyError'd every cycle (audit 2026-06-02). This is the
+    continuous-shaped override so the cycle summary prints (incl. the rmom-gate freshness)."""
+    def _f(v: Any) -> float:
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    return (
+        "continuous-fade demo cycle "
+        f"id={payload.get('cycle_id', '')} mode={payload.get('mode')} "
+        f"symbols={payload.get('universe_symbols')} "
+        f"rmom={'present' if payload.get('rmom_present') else 'MISSING'} "
+        f"max_rmom_day_ts={payload.get('max_rmom_day_ts')} stale_days={payload.get('rmom_stale_days')} "
+        f"d9={payload.get('live_d9_symbols')} cand={payload.get('candidates')} "
+        f"entries={payload.get('entries')} exits={payload.get('exits')} open={payload.get('open_positions')} "
+        f"equity=${_f(payload.get('equity_usdt')):,.2f} paused={payload.get('entry_paused')}"
+    )
+
+
 def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
     """Guard the only continuous order-submitting path: explicit confirm flag + demo
     account, and refuse the paper_mode/submit_orders corruption combos. Mirrors
@@ -1106,7 +1129,9 @@ def run_continuous_demo_cycle(
             "cycle_id": cycle_id, "ts_ms": cycle_now_ms, "strategy_id": strategy_id, "mode": "submit" if demo.submit_orders else "dry_run",
             "universe_symbols": len(symbols), "ticker_source": ticker_source, "kline_store_rows": kline_stats.get("store_rows", 0),
             "rmom_present": rmom is not None, "max_rmom_day_ts": max_rmom_day_ts,
-            "rmom_stale_days": (cur_day_ts - max_rmom_day_ts) // MS_PER_DAY if max_rmom_day_ts else None,
+            # 0-floored: the refresh seeds a today/tomorrow row (the daily-rollover guard) so the gate
+            # day can lead cur_day -> a raw diff would read negative; "0 = fresh" is the meaningful floor.
+            "rmom_stale_days": max(0, (cur_day_ts - max_rmom_day_ts) // MS_PER_DAY) if max_rmom_day_ts else None,
             "live_d9_symbols": live_d9, "open_positions": open_count,
             "entries": len([r for r in exec_entries if r.get("status") in ("filled", "partial", "planned")]),
             "exits": len(exec_exits), "candidates": len(candidates), "equity_usdt": equity_usdt,

@@ -18,6 +18,7 @@ from liquidity_migration.continuous_demo import (
     build_confirmed_entry_state,
     build_live_continuous_state,
     continuous_dataset_names,
+    format_continuous_demo_cycle_summary,
     _continuous_order_link_id,
     _protective_exit_reason,
     _recent_exit_cooldown_symbols,
@@ -722,3 +723,20 @@ def test_continuous_live_config_golden_values() -> None:
     assert c.entry_pause_after_adverse_exits == 8
     assert c.entry_pause_window_minutes == 1440
     assert c.stop_loss_pct == 0.25
+
+
+def test_format_continuous_demo_cycle_summary_handles_flat_payload() -> None:
+    # The continuous daemon subclasses the long daemon, whose formatter expects payload['cycle'];
+    # feeding it the flat continuous payload KeyError'd every cycle (audit 2026-06-02). This formatter
+    # must accept the FLAT shape and surface the rmom gate freshness.
+    payload = {
+        "cycle_id": "20260602-1", "mode": "submit", "universe_symbols": 550,
+        "rmom_present": True, "max_rmom_day_ts": 1780444800000, "rmom_stale_days": 0,
+        "live_d9_symbols": 17, "candidates": 2, "entries": 1, "exits": 0,
+        "open_positions": 2, "equity_usdt": 12345.6,
+    }
+    s = format_continuous_demo_cycle_summary(payload)
+    assert "continuous-fade demo cycle" in s
+    assert "d9=17" in s and "open=2" in s and "rmom=present" in s
+    # robust to a missing/None equity and an empty payload (never raises)
+    assert "$0.00" in format_continuous_demo_cycle_summary({"rmom_present": False})

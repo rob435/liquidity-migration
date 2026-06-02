@@ -131,11 +131,14 @@ def test_btc_beta_empty_input() -> None:
     assert set(out.columns) == {"symbol", "ts_ms", "btc_beta"}
 
 
-def _write_klines_root(root: Path, *, symbols: list[str], days: int, seed: int = 11) -> None:
-    """Minimal synthetic klines_1h root (storage layout: date=YYYY-MM-DD/part.parquet)."""
+def _write_klines_root(
+    root: Path, *, symbols: list[str], days: int, seed: int = 11,
+    dataset: str = "klines_1h", base: datetime | None = None,
+) -> None:
+    """Minimal synthetic kline root (storage layout: <dataset>/date=YYYY-MM-DD/part.parquet)."""
     rng = random.Random(seed)
     rows = []
-    base = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    base = base or datetime(2025, 1, 1, tzinfo=timezone.utc)
     for sym in symbols:
         price = 100.0
         for d in range(days):
@@ -151,7 +154,7 @@ def _write_klines_root(root: Path, *, symbols: list[str], days: int, seed: int =
                     "date": ts.strftime("%Y-%m-%d"),
                 })
     df = pl.DataFrame(rows)
-    kdir = root / "klines_1h"
+    kdir = root / dataset
     for key, group in df.group_by("date"):
         part = kdir / f"date={key[0]}"
         part.mkdir(parents=True, exist_ok=True)
@@ -165,6 +168,19 @@ def test_build_factor_panel_attaches_all_factor_columns(tmp_path: Path) -> None:
     for col in ["symbol", "ts_ms", "date", *_FACTOR_COLUMNS]:
         assert col in panel.columns, f"missing {col}; got {panel.columns}"
     assert set(panel["symbol"].unique().to_list()) <= {"BTCUSDT", "AAA", "BBB"}
+
+
+def test_build_factor_panel_honours_klines_dataset_override(tmp_path: Path) -> None:
+    # Live demo/paper roots store WS klines under event_demo_klines_1h, NOT klines_1h. The
+    # autodetect always returns klines_1h, so without the override the read is empty (the
+    # 2026-06-02 continuous zero-signal blackout); the override must read the live store.
+    _write_klines_root(tmp_path, symbols=["BTCUSDT", "AAA", "BBB"], days=40, dataset="event_demo_klines_1h")
+    assert build_factor_panel(tmp_path, start="2025-01-10", end="2025-02-08").is_empty()  # autodetect -> klines_1h (absent)
+    panel = build_factor_panel(
+        tmp_path, start="2025-01-10", end="2025-02-08", klines_dataset="event_demo_klines_1h")
+    assert panel.height > 0
+    for col in ["symbol", "ts_ms", "date", *_FACTOR_COLUMNS]:
+        assert col in panel.columns, f"missing {col}; got {panel.columns}"
 
 
 def test_fit_factor_returns_recovers_known_loadings() -> None:
@@ -217,3 +233,41 @@ def test_decompose_strategy_pnl_missing_exposure_is_null() -> None:
     out = decompose_strategy_pnl(trades, loadings, fr, factor_cols=["f1"])
     assert out["per_trade"].row(0, named=True)["explained"] is None
     assert out["residual_sharpe"] == 0.0
+
+
+def _load_precompute_module():
+    import importlib.util
+    import sys
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "precompute_residual_momentum.py"
+    scripts = str(path.parent)
+    if scripts not in sys.path:
+        sys.path.insert(0, scripts)
+    spec = importlib.util.spec_from_file_location("precompute_residual_momentum", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_precompute_residual_momentum_reaches_today(tmp_path: Path) -> None:
+    # The live continuous decile exact-joins residual_momentum on TODAY's day_ts, but residual_return
+    # only completes ~2 days late -> without the trailing pad the table stops ~2 days back and the live
+    # gate is silently empty (the 2026-06-02 zero-signal blackout). Klines run through a known last day;
+    # `end` = that day + 1 ("tomorrow"), matching the live daily refresh.
+    mod = _load_precompute_module()
+    base = datetime(2025, 1, 1, tzinfo=timezone.utc)
+    days = 50
+    last_day = base + timedelta(days=days - 1)
+    end = (last_day + timedelta(days=1)).strftime("%Y-%m-%d")  # exclusive end = "tomorrow" UTC
+    # Enough cross-section that the per-day common4 regression is over-determined (4 factors + intercept).
+    symbols = ["BTCUSDT", *[f"S{i:02d}USDT" for i in range(20)]]
+    _write_klines_root(tmp_path, symbols=symbols, days=days, dataset="event_demo_klines_1h", base=base)
+    n = mod.precompute(tmp_path, start="2025-01-02", end=end, klines_dataset="event_demo_klines_1h")
+    assert n > 0
+    sig = pl.read_parquet(tmp_path / "residual_momentum.parquet")
+    assert {"symbol", "ts_ms", "residual_momentum"} <= set(sig.columns)
+    assert sig["residual_momentum"].is_finite().all()
+    today_floor = (int(last_day.timestamp() * 1000) // _DAY) * _DAY
+    # Blackout guard: the table must carry a row at "today" (the live join's day_ts), not stop ~2 days back.
+    assert sig.filter(pl.col("ts_ms") == today_floor).height > 0, (
+        f"no residual_momentum row for today {today_floor}; max={sig['ts_ms'].max()} -> live gate blackout")

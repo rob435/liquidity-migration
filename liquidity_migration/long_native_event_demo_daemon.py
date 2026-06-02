@@ -462,10 +462,16 @@ class LongNativeDemoDaemon:
                 _logger.debug("long trade_router stats fetch failed: %s", exc)
         if payload is not None:
             try:
-                print(format_long_demo_cycle_summary(payload), flush=True)
+                print(self._format_cycle_summary(payload), flush=True)
             except Exception:  # noqa: BLE001
-                _logger.exception("failed to format long cycle summary")
+                _logger.exception("failed to format cycle summary")
         _logger.debug("long cycle complete elapsed=%.2fs", elapsed)
+
+    def _format_cycle_summary(self, payload: dict[str, Any]) -> str:
+        """Pretty cycle line for stdout/journald. Overridable: a subclass whose cycle payload has a
+        different shape (e.g. the continuous sleeve's flat dict, which has no ``cycle`` key) supplies
+        its own formatter so the summary prints instead of KeyError'ing every cycle."""
+        return format_long_demo_cycle_summary(payload)
 
     # -- trade router (WS-first / REST-fallback order submission) ----
 

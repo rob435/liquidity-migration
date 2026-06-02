@@ -293,7 +293,29 @@ per-cell ledgers; `scripts/apply_decision_rule.py` is the legacy strict (Sharpe)
 ## What's broken
 
 Nothing known. Pre-push gate clean: `.venv/bin/python -m ruff check liquidity_migration tests`
-+ `.venv/bin/python -m pytest -q` both pass (1086).
++ `.venv/bin/python -m pytest -q` both pass (1111).
+
+**Fixed 2026-06-02 (PART 2) — continuous rmom STILL never built on the live root (CRITICAL,
+operator-paged) + full-system VPS audit.** Even after the END-date + seed-timing fixes below, the
+gate had built ZERO rows since go-live (`rmom_present=false`/`max_rmom_day_ts=0`/`live_d9=0` across
+all ~600 cycles). Two deeper causes: (1) the rmom refresh (`build_factor_panel`→`_autodetect_dataset_names`)
+read **`klines_1h`**, but the live demo root stores WS klines under **`event_demo_klines_1h`** → empty
+panel → no parquet; (2) `residual_return` completes ~2 days late so the table ended behind today, while
+the live decile **exact-joins** today's `day_ts` → empty. **Fixed:** `klines_dataset` override on
+`build_factor_panel` + a `_resolve_klines_dataset` sniff; the precompute appends causal/PIT-safe
+null-residual trailing rows through `end` so `residual_momentum[today]` (and a rollover-guard tomorrow
+row) is produced (append-only ⇒ historical rows byte-identical, validated max|Δ|=0.0; tests added).
+Verified LIVE: gate filled (515 syms@today), `live_d9`→17, opened RENDER/VIRTUAL, watchdog logged
+"resolved — rmom"; ws_risk correctly TRACKS the new continuous positions across the netted account
+(first live test of the shared-account integration — passed). Audit also fixed a recurring
+`KeyError:'cycle'` "failed to format cycle summary" (the continuous daemon subclasses the long daemon
+whose formatter expects `payload['cycle']`; the continuous payload is flat) via a
+`format_continuous_demo_cycle_summary` override. Rest of system healthy (5 daemons 0-restart, timers
+firing, disk 14%, all sleeves writing). **DEPLOY:** `risk_model.py`+`precompute_residual_momentum.py`
+were scp-patched onto the VPS to clear the blackout NOW (refresh oneshot reloads code without a daemon
+restart); the daemon-side fixes (`continuous_demo*.py`, `long_native_event_demo_daemon.py`) are
+local-only and land on the next push. **Operator must commit+push** to make it permanent + converge
+the VPS git drift (2 files modified vs origin/main).
 
 **Fixed 2026-06-02 — continuous rmom silent-blackout (CRITICAL) + fault audit.** A 7-dimension
 adversarial audit of the continuous sleeve found `scripts/precompute_residual_momentum.py` hardcoded
