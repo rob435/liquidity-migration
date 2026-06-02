@@ -476,6 +476,16 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text
     assert "Environment=SUBMIT_ORDERS=1" in text
     assert "Environment=STOP_LOSS_PCT=0.25" in text
+    # The deploy must SEED the rmom gate (start the oneshot service), not just enable the
+    # daily timer — else a fresh deploy starts the continuous daemon into an empty gate and
+    # blacks out until 00:20 UTC (the 2026-06-02 incident). Seed must run BEFORE the
+    # continuous daemon restart so the parquet exists when it starts; empty-gate WARN is fail-safe.
+    assert "systemctl start liquidity-migration-continuous-rmom-refresh.service" in text
+    assert (
+        text.index("systemctl start liquidity-migration-continuous-rmom-refresh.service")
+        < text.index("systemctl restart liquidity-migration-bybit-continuous-demo.service")
+    )
+    assert "rmom gate is EMPTY after seed" in text
     # Reboot-safety invariant (audit 2026-06-02 #51): the risk service (the single
     # reconcile authority that tracks the continuous sleeve's positions) must come
     # up BEFORE the continuous daemon, else the continuous sleeve's live positions

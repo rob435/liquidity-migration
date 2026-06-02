@@ -81,6 +81,22 @@ surfaced for the operator rather than risk a same-file race).
 - **#19** (wallet ≤0 equity): distinguishing "no equity field" from "legit ≤0" needs a contract change to shared `wallet_equity_usdt`; doesn't occur on a funded demo.
 - **#31** (adopted-trade net_return=0): the equity isn't available in the adoption path without a new wallet fetch; LOW/analytics-only/post-restart-only.
 
+## Live incident + durable fix — 2026-06-02 (post-deploy)
+
+After the `d981ada` push deployed, the `check_demo_liveness` watchdog (the #54 monitoring this
+audit added/tested) correctly paged: **continuous-sleeve rmom gate EMPTY (`max_rmom_day_ts=0`) →
+silent zero-signal blackout.** Fail-safe (the sleeve makes NO entries, never wrong entries;
+protective exits run off live price). Root cause: `deploy_vps_live.sh` did `systemctl enable --now`
+the rmom **timer** (next fire 00:20 UTC) but never ran the refresh **service**, so a fresh deploy
+started the daemon into an unseeded `residual_momentum.parquet`. NOT a code regression (the
+`--end`-defaults-to-tomorrow fix is intact); a deploy-ordering gap.
+
+- **Immediate remediation (operator, on the VPS):** `systemctl start liquidity-migration-continuous-rmom-refresh.service` then verify the parquet has a current row; the next 60s cycle clears the blackout.
+- **Durable fix (implemented, test-gated, ready for next push — NOT pushed):** `deploy_vps_live.sh`
+  now SEEDS the rmom gate (runs the oneshot refresh) on every deploy, before the continuous daemon
+  restart, with a fail-safe WARN when the gate is empty (the first-deploy edge where the kline store
+  is still bootstrapping). Regression test pins the seed + its ordering + the WARN.
+
 ## Second-pass deep audit (numerical / accounting / data-layer) — 2026-06-02
 
 A focused 5-agent second pass on the high-stakes areas the broad pass disclosed as gaps

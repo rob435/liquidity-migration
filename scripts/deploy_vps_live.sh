@@ -141,6 +141,30 @@ systemctl enable --now liquidity-migration-demo-liveness.timer
 systemctl enable --now liquidity-migration-combined-book-report.timer
 # Daily refresh of the continuous-fade rmom gate (residual_momentum.parquet).
 systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer
+# Seed the rmom gate NOW rather than waiting for the 00:20 UTC timer. Without this a
+# fresh deploy starts the continuous daemon into an EMPTY gate -> the live decile drops
+# every symbol (silent zero-signal blackout — the 2026-06-02 incident). The refresh is a
+# oneshot, so this blocks until the parquet is (re)built from the sleeve's kline store.
+# best-effort + fail-safe: a FIRST deploy (klines still bootstrapping) yields no rows ->
+# WARN, not fail (no rmom => no entries, never WRONG entries; the daily timer + the
+# rmom-staleness watchdog cover the gap; re-run the service once klines are up).
+echo "Seeding continuous rmom gate (residual_momentum.parquet) ..."
+systemctl start liquidity-migration-continuous-rmom-refresh.service \
+  || echo "WARN: rmom seed service failed; the 00:20 timer + rmom watchdog will cover it." >&2
+_rmom_rows="$("$PYTHON" - <<'PY' 2>/dev/null || echo 0
+import pathlib, polars as pl
+p = pathlib.Path("data/bybit-continuous-demo-event/residual_momentum.parquet")
+print(pl.read_parquet(p).height if p.exists() else 0)
+PY
+)"
+if [ "${_rmom_rows:-0}" -le 0 ]; then
+  echo "WARN: continuous rmom gate is EMPTY after seed (likely a first deploy with the kline" \
+       "store still bootstrapping). The continuous sleeve emits NO entries until rmom is built —" \
+       "re-run 'systemctl start liquidity-migration-continuous-rmom-refresh.service' once the" \
+       "daemon has bootstrapped klines. Fail-safe: no entries, never wrong entries." >&2
+else
+  echo "continuous rmom gate seeded: ${_rmom_rows} rows."
+fi
 systemctl restart liquidity-migration-bybit-demo.service
 systemctl restart liquidity-migration-bybit-risk.service
 systemctl restart liquidity-migration-bybit-paper.service
