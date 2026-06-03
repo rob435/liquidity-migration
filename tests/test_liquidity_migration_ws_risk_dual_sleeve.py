@@ -345,13 +345,22 @@ def test_raised_sibling_read_records_ledger_read_error(tmp_path: Path, monkeypat
     import liquidity_migration.ws_risk as wsr
 
     real_read = wsr.read_dataset
+    real_window = wsr.read_ledger_window
 
     def fake_read(root, dataset, **kwargs):
         if Path(root) == cont_root:
             raise RuntimeError("torn parquet: end of file")
         return real_read(root, dataset, **kwargs)
 
+    def fake_window(root, dataset, **kwargs):
+        # The per-cycle reconcile read is windowed (read_ledger_window); a torn read
+        # on either the full (bootstrap) or windowed path must record the error.
+        if Path(root) == cont_root:
+            raise RuntimeError("torn parquet: end of file")
+        return real_window(root, dataset, **kwargs)
+
     monkeypatch.setattr(wsr, "read_dataset", fake_read)
+    monkeypatch.setattr(wsr, "read_ledger_window", fake_window)
     cfg = EventWebSocketRiskConfig(continuous_data_root=str(cont_root))
     engine = EventWebSocketRiskEngine(short_root, config=ResearchConfig(), risk_config=cfg)
     combined = engine._read_trades_combined()

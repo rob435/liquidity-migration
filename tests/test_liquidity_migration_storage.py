@@ -462,3 +462,128 @@ def test_event_demo_orders_lock_serializes_concurrent_writers(tmp_path: Path) ->
             time.sleep(0.005)
         for future in futures:
             future.result()
+
+
+# --- reconcile-ledger-5 / quality-dup-5: month-bucketed ledgers -------------
+from liquidity_migration.storage import (  # noqa: E402
+    _LEDGER_MONTH_COL,
+    dataset_path,
+    read_ledger_window,
+)
+
+_MS_PER_DAY = 86_400_000
+
+
+def _trade(trade_id: str, entry_ts_ms: int, **over) -> dict:
+    row = {
+        "trade_id": trade_id, "symbol": "AAAUSDT", "side": "short", "status": "open",
+        "entry_ts_ms": entry_ts_ms, "ts_ms": entry_ts_ms, "qty": "1", "entry_price": 100.0,
+        "updated_at_ms": entry_ts_ms,
+    }
+    row.update(over)
+    return row
+
+
+def test_ledger_writes_month_buckets_and_read_strips_partition_col(tmp_path: Path) -> None:
+    """A bucketed ledger writes one part per calendar month (keyed on the immutable
+    entry_ts_ms), and read_dataset returns a frame schema-identical to the legacy
+    monolith — the internal _ledger_month column never leaks to callers."""
+    jan = 1_704_067_200_000  # 2024-01-01 UTC
+    mar = jan + 70 * _MS_PER_DAY  # ~2024-03
+    write_dataset(pl.DataFrame([_trade("t-jan", jan)]), tmp_path, "event_demo_trades", partition_by=())
+    write_dataset(pl.DataFrame([_trade("t-mar", mar)]), tmp_path, "event_demo_trades", partition_by=())
+    root = dataset_path(tmp_path, "event_demo_trades")
+    buckets = sorted(p.name for p in root.glob(f"{_LEDGER_MONTH_COL}=*"))
+    assert buckets == [f"{_LEDGER_MONTH_COL}=202401", f"{_LEDGER_MONTH_COL}=202403"]
+    out = read_dataset(tmp_path, "event_demo_trades")
+    assert _LEDGER_MONTH_COL not in out.columns
+    assert set(out["trade_id"].to_list()) == {"t-jan", "t-mar"}
+
+
+def test_ledger_immutable_entry_ts_key_no_phantom_open_after_update(tmp_path: Path) -> None:
+    """CRITICAL (the design's central risk): a trade UPDATE rewrites ts_ms=now but
+    PRESERVES entry_ts_ms. Bucketing on the immutable entry_ts_ms keeps the open and
+    closed versions in the SAME bucket, so _write_part dedup collapses them to ONE
+    closed row. Had the bucket keyed on the mutable ts_ms, the update would land in a
+    new bucket and the stale OPEN copy would survive -> a phantom open trade on the
+    netted account."""
+    entry = 1_704_067_200_000  # 2024-01
+    later = entry + 70 * _MS_PER_DAY  # ~2024-03 (would be a different bucket if ts_ms-keyed)
+    write_dataset(pl.DataFrame([_trade("t1", entry)]), tmp_path, "event_demo_trades", partition_by=())
+    # Update: same trade_id + entry_ts_ms, but ts_ms moved forward and status closed.
+    write_dataset(
+        pl.DataFrame([_trade("t1", entry, ts_ms=later, status="closed", updated_at_ms=later)]),
+        tmp_path, "event_demo_trades", partition_by=(),
+    )
+    out = read_dataset(tmp_path, "event_demo_trades")
+    assert out.height == 1                          # no phantom: exactly one row
+    assert out["status"].to_list() == ["closed"]    # the freshest version wins
+    # And it stayed in the entry-month bucket, not the ts_ms-month bucket.
+    root = dataset_path(tmp_path, "event_demo_trades")
+    assert [p.name for p in root.glob(f"{_LEDGER_MONTH_COL}=*")] == [f"{_LEDGER_MONTH_COL}=202401"]
+
+
+def test_ledger_read_dedups_legacy_monolith_and_bucket_coexistence(tmp_path: Path) -> None:
+    """Half-migrated state: a trade_id present in BOTH the legacy monolithic
+    part.parquet AND a (newer) month bucket must read as ONE row — the freshest
+    updated_at_ms — never doubled. Guards the migration window."""
+    entry = 1_704_067_200_000
+    root = dataset_path(tmp_path, "event_demo_trades")
+    root.mkdir(parents=True, exist_ok=True)
+    # Simulate a legacy monolith (pre-migration) with the OLD version of t1.
+    pl.DataFrame([_trade("t1", entry, status="open", updated_at_ms=entry)]).write_parquet(root / "part.parquet")
+    # A newer bucketed write of the SAME trade_id (closed).
+    write_dataset(
+        pl.DataFrame([_trade("t1", entry, status="closed", updated_at_ms=entry + 1000)]),
+        tmp_path, "event_demo_trades", partition_by=(),
+    )
+    out = read_dataset(tmp_path, "event_demo_trades")
+    assert out.height == 1                          # not double-counted across monolith+bucket
+    assert out["status"].to_list() == ["closed"]    # freshest updated_at_ms wins
+
+
+def test_ledger_schema_drift_across_buckets_unions(tmp_path: Path) -> None:
+    """Schema drift across month buckets (a later era adds a column) must union via the
+    diagonal_relaxed fallback rather than raise — the regression that surfaced as
+    ColumnNotFoundError under a plain multi-file scan_parquet."""
+    jan = 1_704_067_200_000
+    mar = jan + 70 * _MS_PER_DAY
+    write_dataset(pl.DataFrame([_trade("t-jan", jan)]), tmp_path, "event_demo_trades", partition_by=())
+    write_dataset(
+        pl.DataFrame([_trade("t-mar", mar, exit_reason="stop_loss", exit_price=95.0)]),  # extra cols
+        tmp_path, "event_demo_trades", partition_by=(),
+    )
+    out = read_dataset(tmp_path, "event_demo_trades")
+    assert set(out["trade_id"].to_list()) == {"t-jan", "t-mar"}
+    assert "exit_reason" in out.columns  # the wider schema is preserved
+
+
+def test_read_ledger_window_recent_plus_legacy_excludes_old(tmp_path: Path) -> None:
+    """The windowed reconcile read returns the most-recent months_back buckets PLUS the
+    legacy (_ledger_month=0) tail, and excludes older non-recent buckets — bounding the
+    per-pass read while never dropping the not-yet-migrated open-trade tail."""
+    base = 1_704_067_200_000  # 2024-01
+    m_jan = base
+    m_mar = base + 70 * _MS_PER_DAY   # 2024-03
+    m_may = base + 130 * _MS_PER_DAY  # ~2024-05
+    for tid, ts in [("t-jan", m_jan), ("t-mar", m_mar), ("t-may", m_may)]:
+        write_dataset(pl.DataFrame([_trade(tid, ts)]), tmp_path, "event_demo_trades", partition_by=())
+    # A legacy monolith row (bucket 0) must ALWAYS be included.
+    root = dataset_path(tmp_path, "event_demo_trades")
+    pl.DataFrame([_trade("t-legacy", m_jan)]).write_parquet(root / "part.parquet")
+    out = read_ledger_window(tmp_path, "event_demo_trades", months_back=1)
+    got = set(out["trade_id"].to_list())
+    assert "t-may" in got and "t-legacy" in got   # newest bucket + legacy tail
+    assert "t-jan" not in got and "t-mar" not in got  # older buckets excluded by the window
+
+
+def test_non_ledger_dataset_is_not_month_bucketed(tmp_path: Path) -> None:
+    """A dataset not in LEDGER_BUCKET_SOURCE keeps its normal layout — no _ledger_month
+    bucketing, no read-time key dedup behavior change."""
+    write_dataset(
+        pl.DataFrame([{"ts_ms": 1_704_067_200_000, "symbol": "BTCUSDT", "buy_quote": 1.0, "sell_quote": 2.0}]),
+        tmp_path, "funding",
+    )
+    root = dataset_path(tmp_path, "funding")
+    assert not list(root.glob(f"{_LEDGER_MONTH_COL}=*"))  # not bucketed
+    assert read_dataset(tmp_path, "funding").height == 1

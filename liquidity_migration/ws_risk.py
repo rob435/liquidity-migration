@@ -65,7 +65,7 @@ from .event_demo import (
 )
 from .long_native_event_demo import MULTI_STRAT_V1_STRATEGY_ID
 from .volume_events import VolumeEventResearchConfig
-from .storage import exclusive_file_lock, read_dataset, write_dataset
+from .storage import exclusive_file_lock, read_dataset, read_ledger_window, write_dataset
 
 
 _logger = logging.getLogger("liquidity_migration.ws_risk")
@@ -384,11 +384,26 @@ class EventWebSocketRiskEngine:
                     self._note_ledger_read_error(sleeve, "combined", inner)
             return combined
 
-    def _read_combined(self, *, trades: bool) -> pl.DataFrame:
+    # quality-dup-5: reconcile only needs OPEN trades + recently-touched orders.
+    # Re-reading the whole-history ledger every ~60s pass scales with the daemon's
+    # lifetime; the windowed read touches only the recent month buckets (+ the legacy
+    # tail until migration drains it). months_back=6 is ~9x the longest sleeve hold
+    # (~21d), so a live open trade is never outside the window; bootstrap() still does
+    # the FULL read (months_back=0) so a cold start re-loads every open trade
+    # regardless of age. A trade somehow stuck open past 6 months would fall out of the
+    # steady-state window (still protected by its server-side stop + recovered on the
+    # next restart's full bootstrap read) — implausible given the hold horizon.
+    _RECONCILE_MONTHS_BACK = 6
+
+    def _read_combined(self, *, trades: bool, months_back: int = _RECONCILE_MONTHS_BACK) -> pl.DataFrame:
         frames: list[pl.DataFrame] = []
         for sleeve, (root, dataset) in self._sleeve_routes(trades=trades).items():
             try:
-                df = read_dataset(root, dataset)
+                df = (
+                    read_dataset(root, dataset)
+                    if months_back <= 0
+                    else read_ledger_window(root, dataset, months_back=months_back)
+                )
             except Exception as exc:  # noqa: BLE001 - one sleeve read must not abort the others
                 # A MISSING/empty ledger is normal (fresh deploy) and stays
                 # fail-open: read_dataset returns empty for a registered-but-absent
@@ -409,11 +424,11 @@ class EventWebSocketRiskEngine:
             return frames[0]
         return self._combine_sleeve_frames(frames, trades=trades)
 
-    def _read_trades_combined(self) -> pl.DataFrame:
-        return self._read_combined(trades=True)
+    def _read_trades_combined(self, *, full: bool = False) -> pl.DataFrame:
+        return self._read_combined(trades=True, months_back=0 if full else self._RECONCILE_MONTHS_BACK)
 
-    def _read_orders_combined(self) -> pl.DataFrame:
-        return self._read_combined(trades=False)
+    def _read_orders_combined(self, *, full: bool = False) -> pl.DataFrame:
+        return self._read_combined(trades=False, months_back=0 if full else self._RECONCILE_MONTHS_BACK)
 
     def _sleeve_of(self, row: dict[str, Any]) -> str:
         """The row's sleeve, but only if this engine actually owns that ledger; otherwise 'short'
@@ -510,9 +525,12 @@ class EventWebSocketRiskEngine:
         # ledger; _read_combined re-sets it if a sibling read raises, gating the
         # untracked flatten/adopt below (fail closed on a degraded read).
         self.state.ledger_read_error = ""
-        self.state.all_trades = self._read_trades_combined()
+        # Cold start: FULL read (months_back=0) so EVERY open trade is re-loaded
+        # regardless of age — a windowed read could miss a long-held open position on
+        # restart. The steady-state rest_reconcile loop uses the bounded window.
+        self.state.all_trades = self._read_trades_combined(full=True)
         self.state.open_trades = _open_trades(self.state.all_trades)
-        orders = self._read_orders_combined()
+        orders = self._read_orders_combined(full=True)
         raw_positions, error = _safe_raw_positions(self.private_client, settle_coin=self.risk.settle_coin)
         if error:
             self.state.errors.append(error)

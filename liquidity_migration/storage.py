@@ -315,6 +315,71 @@ def with_date_column(df: pl.DataFrame, ts_col: str = "ts_ms") -> pl.DataFrame:
     )
 
 
+# reconcile-ledger-5 / quality-dup-5: the demo/paper trade+order ledgers were
+# written with partition_by=() -> a single monolithic part.parquet that the live
+# hot path read-modify-rewrites under the lock (write cost O(history)) and that
+# ws_risk re-reads in full every reconcile pass (read cost O(history)). Bucket
+# these ledgers by calendar month so each write/read touches only the current
+# month. The bucket column MUST be derived from a per-row IMMUTABLE timestamp:
+# dedup in _write_part is per-part-file, so a row that changes buckets across an
+# update leaves a stale copy in the old bucket (a phantom OPEN trade on the
+# netted account). For TRADE ledgers the stable source is entry_ts_ms (the exit
+# reconcile path rewrites ts_ms=now_ms but preserves entry_ts_ms); for ORDER
+# ledgers it is ts_ms (set once at creation, preserved on in-place update).
+_LEDGER_MONTH_COL = "_ledger_month"
+LEDGER_BUCKET_SOURCE: dict[str, str] = {
+    "event_demo_trades": "entry_ts_ms",
+    "event_demo_orders": "ts_ms",
+    "long_native_demo_trades": "entry_ts_ms",
+    "long_native_demo_orders": "ts_ms",
+    "long_native_paper_trades": "entry_ts_ms",
+    "long_native_paper_orders": "ts_ms",
+    "continuous_fade_demo_trades": "entry_ts_ms",
+    "continuous_fade_demo_orders": "ts_ms",
+    "continuous_fade_paper_trades": "entry_ts_ms",
+    "continuous_fade_paper_orders": "ts_ms",
+}
+
+
+def _with_ledger_month(df: pl.DataFrame, dataset: str) -> pl.DataFrame:
+    """Add the int yyyymm _ledger_month partition column for a bucketed ledger
+    dataset, derived from its registered IMMUTABLE timestamp source. Rows whose
+    source ts is missing/null/<=0 fall into bucket 0 (legacy/unknown) so a
+    malformed row never crashes the write. A no-op for datasets not in
+    LEDGER_BUCKET_SOURCE or when the source column is absent."""
+    src = LEDGER_BUCKET_SOURCE.get(dataset)
+    if src is None or src not in df.columns or df.is_empty():
+        return df
+    month = pl.col(src).cast(pl.Int64, strict=False)
+    return df.with_columns(
+        pl.when(month.is_null() | (month <= 0))
+        .then(pl.lit(0, dtype=pl.Int64))
+        .otherwise(
+            pl.from_epoch(month, time_unit="ms").dt.strftime("%Y%m").cast(pl.Int64, strict=False)
+        )
+        .fill_null(0)
+        .alias(_LEDGER_MONTH_COL)
+    )
+
+
+def _recent_ledger_month_dirs(path: Path, months_back: int) -> list[Path]:
+    """The most-recent ``months_back`` _ledger_month=* bucket dirs plus the
+    legacy bucket (_ledger_month=0) -- the open-trade tail not yet migrated.
+    Used by the windowed reconcile read."""
+    dirs = [p for p in path.glob(f"{_LEDGER_MONTH_COL}=*") if p.is_dir()]
+
+    def _month_of(p: Path) -> int:
+        try:
+            return int(p.name.split("=", 1)[1])
+        except (IndexError, ValueError):
+            return 0
+
+    nonzero = sorted((p for p in dirs if _month_of(p) > 0), key=_month_of)
+    recent = nonzero[-months_back:] if months_back > 0 else nonzero
+    legacy = [p for p in dirs if _month_of(p) == 0]
+    return recent + legacy
+
+
 def write_dataset(
     df: pl.DataFrame,
     data_root: str | Path,
@@ -344,6 +409,15 @@ def _write_dataset_unlocked(
     if "ts_ms" in df.columns:
         df = with_date_column(df)
     path.mkdir(parents=True, exist_ok=True)
+
+    # Month-bucket the demo/paper ledgers regardless of the partition_by the caller
+    # passed (every ledger writer passes partition_by=()): force the immutable-keyed
+    # _ledger_month partition so the hot-path write touches only the current month,
+    # not the whole-history monolith (reconcile-ledger-5). See LEDGER_BUCKET_SOURCE.
+    if dataset in LEDGER_BUCKET_SOURCE:
+        df = _with_ledger_month(df, dataset)
+        if _LEDGER_MONTH_COL in df.columns:
+            partition_by = (_LEDGER_MONTH_COL,)
 
     partition_cols = [col for col in partition_by if col in df.columns]
     if not partition_cols:
@@ -392,21 +466,83 @@ def read_dataset_columns(
     # the actual file reads complete before a writer can rename underneath us.
     with exclusive_file_lock(dataset_lock_path(data_root, dataset), stale_seconds=21_600, poll_seconds=0.01):
         files = sorted(path.glob("**/*.parquet"))
-        if not files:
-            return pl.DataFrame()
-        file_paths = [str(file) for file in files]
-        try:
-            lf = pl.scan_parquet(file_paths)
-            if columns is not None:
-                present = [col for col in columns if col in lf.collect_schema().names()]
-                lf = lf.select(present)
-            return lf.collect()
-        except pl.exceptions.SchemaError:
-            frames = [pl.read_parquet(file) for file in file_paths]
-            joined = pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
-            if columns is not None and not joined.is_empty():
-                joined = joined.select([col for col in columns if col in joined.columns])
-            return joined
+        return _collect_ledger_files(files, dataset=dataset, columns=columns)
+
+
+def _collect_ledger_files(
+    files: list[Path],
+    *,
+    dataset: str,
+    columns: list[str] | None,
+) -> pl.DataFrame:
+    """Union a set of parquet part files into one frame, transparently dropping the
+    internal _ledger_month partition column so the returned frame is schema-identical
+    to the legacy monolithic layout. For a bucketed ledger this unions the legacy
+    part.parquet (if any) with the new _ledger_month=* buckets; a cross-bucket
+    unique() (scoped to bucketed ledgers ONLY — non-ledger datasets keep the legacy
+    no-read-dedup behavior to avoid a full-frame unique on every big-dataset read)
+    guarantees a key present in BOTH the legacy file and a migrated bucket (the
+    migration window) is never double-counted on read."""
+    if not files:
+        return pl.DataFrame()
+    file_paths = [str(file) for file in files]
+    try:
+        lf = pl.scan_parquet(file_paths)
+        names = lf.collect_schema().names()
+        if _LEDGER_MONTH_COL in names:
+            lf = lf.drop(_LEDGER_MONTH_COL)
+            names = [n for n in names if n != _LEDGER_MONTH_COL]
+        if columns is not None:
+            lf = lf.select([col for col in columns if col in names])
+        out = lf.collect()
+    except (pl.exceptions.SchemaError, pl.exceptions.ColumnNotFoundError):
+        # Month-bucketing spreads schema-drifting ledger rows (different writers /
+        # eras add columns) across bucket files, so a unified scan_parquet can hit
+        # SchemaError OR ColumnNotFoundError. The legacy monolith never did (one
+        # diagonal_relaxed-merged file). Fall back to per-file read + diagonal concat,
+        # which tolerates the drift (ledgers are small, so the no-pushdown cost is nil).
+        frames = [pl.read_parquet(file) for file in file_paths]
+        out = pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
+        if _LEDGER_MONTH_COL in out.columns:
+            out = out.drop(_LEDGER_MONTH_COL)
+        if columns is not None and not out.is_empty():
+            out = out.select([col for col in columns if col in out.columns])
+    # Cross-bucket dedup, scoped to the month-bucketed ledgers: per-part-file dedup
+    # in _write_part does not span the legacy monolith + a migrated bucket during the
+    # migration window. Coalesce on the dataset key, preferring the freshest
+    # updated_at_ms (mirrors _write_part recency), so a key in both is never doubled.
+    if dataset in LEDGER_BUCKET_SOURCE and not out.is_empty():
+        keys = [c for c in DATASET_KEYS.get(dataset, ()) if c in out.columns]
+        if keys:
+            if "updated_at_ms" in out.columns:
+                out = out.sort("updated_at_ms", nulls_last=False)
+            out = out.unique(subset=keys, keep="last")
+    return out
+
+
+def read_ledger_window(
+    data_root: str | Path,
+    dataset: str,
+    *,
+    months_back: int = 3,
+) -> pl.DataFrame:
+    """Windowed read of a month-bucketed ledger: only the most-recent ``months_back``
+    month buckets plus the legacy monolith / _ledger_month=0 tail. quality-dup-5:
+    ws_risk's per-reconcile read no longer scales with the daemon's whole-history
+    ledger -- it only needs OPEN trades and recently-touched orders, and an open trade
+    older than the window is still served by the always-included legacy tail until the
+    migration drains it. Falls back to the full read for a non-bucketed dataset."""
+    path = dataset_path(data_root, dataset)
+    if not path.exists():
+        return pl.DataFrame()
+    with exclusive_file_lock(dataset_lock_path(data_root, dataset), stale_seconds=21_600, poll_seconds=0.01):
+        bucket_dirs = _recent_ledger_month_dirs(path, months_back)
+        if not bucket_dirs:
+            files = sorted(path.glob("**/*.parquet"))
+        else:
+            legacy = sorted(path.glob("part.parquet"))
+            files = legacy + sorted(f for d in bucket_dirs for f in d.glob("**/*.parquet"))
+        return _collect_ledger_files(files, dataset=dataset, columns=None)
 
 
 def _write_part(df: pl.DataFrame, path: Path, *, dataset: str, append: bool) -> None:
