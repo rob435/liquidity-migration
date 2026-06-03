@@ -110,6 +110,13 @@ DATASETS = {
     "binance_usdm_funding",
     "binance_usdm_open_interest",
     "binance_usdm_taker_flow_1h",
+    # Cross-sleeve margin-budget + same-symbol reservation control table
+    # (long-sleeve-5/6). ONE control row per netted account, OWNED + rewritten by
+    # ws_risk each reconcile pass; every sleeve reads it read-only before sizing.
+    # Structured fields are JSON-string columns (scalar Utf8 is schema-stable under
+    # the diagonal_relaxed concat/dedup the read+write paths use). See
+    # read_control_row / write_control_row below.
+    "cross_sleeve_account_state",
 }
 
 DATASET_KEYS = {
@@ -149,6 +156,9 @@ DATASET_KEYS = {
     "binance_usdm_funding": ("ts_ms", "symbol"),
     "binance_usdm_open_interest": ("ts_ms", "symbol"),
     "binance_usdm_taker_flow_1h": ("ts_ms", "symbol"),
+    # Single control row per netted account; key = account_key (write_control_row
+    # relies on this so _write_part dedups the upsert on it).
+    "cross_sleeve_account_state": ("account_key",),
 }
 
 
