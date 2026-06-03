@@ -196,15 +196,15 @@ def download_binance_usdm_proxy_data(
                 symbol = futures[future]
                 try:
                     outputs.update(future.result())
-                except BinanceDataError as exc:
-                    # Per-symbol failure (rate limit, transient 5xx after
-                    # retries, etc.) — log + skip rather than aborting the
-                    # whole multi-hundred-symbol build. Re-running the
-                    # script will retry this symbol (markers gate the
-                    # already-finished ones). Observed 2026-05-26 on three
-                    # consecutive runs: a single symbol's premiumIndexKlines
-                    # / indexPriceKlines timeout brought down the entire
-                    # script via set -euo pipefail.
+                except (BinanceDataError, IndexError, KeyError, ValueError) as exc:
+                    # Per-symbol failure — log + skip rather than aborting the whole
+                    # multi-hundred-symbol build. Covers transport errors (BinanceDataError)
+                    # AND a malformed/truncated payload row that raises IndexError/KeyError/
+                    # ValueError out of the client paging or the normalizers (those parse
+                    # paths run OUTSIDE the BinanceDataError conversion) — DAT-5. Routing
+                    # them through _assert_download_completeness preserves the survivorship
+                    # gate instead of letting one bad row kill the build under set -e.
+                    # Re-running the script retries this symbol (markers gate finished ones).
                     failed.append((symbol, ""))
                     print(f"WARN: binance symbol {symbol} failed; skipping. Re-run to retry: {exc}", flush=True)
         _assert_download_completeness(
@@ -230,7 +230,9 @@ def download_binance_usdm_proxy_data(
                     period=period,
                 )
             )
-        except BinanceDataError as exc:
+        except (BinanceDataError, IndexError, KeyError, ValueError) as exc:
+            # See the threaded branch above (DAT-5): a malformed payload row must be
+            # recorded + routed through the survivorship gate, not abort the build.
             failed.append((symbol, ""))
             print(f"WARN: binance symbol {symbol} failed; skipping. Re-run to retry: {exc}", flush=True)
     _assert_download_completeness(

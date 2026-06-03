@@ -3113,8 +3113,11 @@ def _maybe_notify(payload: dict[str, Any], *, enabled: bool) -> tuple[bool, str]
         return False, "disabled"
     if not _telegram_notification_reason(payload):
         return False, "quiet_no_material_event"
-    text = format_telegram_status_message(payload)
     try:
+        # Formatting reads payload fields by direct subscript; a schema gap would raise.
+        # Keep it INSIDE the guard so a telegram-formatting fault becomes cycle telemetry,
+        # never an exception that could kill the (unguarded) event-risk-cycle --loop (EVE-2).
+        text = format_telegram_status_message(payload)
         sent = send_telegram_message(text, enabled=True)
     except Exception as exc:  # noqa: BLE001 - notification failure is cycle telemetry
         return False, str(exc)[:500]

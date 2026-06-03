@@ -786,3 +786,46 @@ def test_build_ws_trade_client_fails_fast_on_missing_creds(monkeypatch) -> None:
             sleep=lambda s: slept.append(s), rng=lambda a, b: 0.0,
         )
     assert slept == []
+
+
+def test_bybit_market_data_does_not_retry_definite_reject(monkeypatch) -> None:
+    """EXC-3: a definite (non-rate-limit) venue reject must raise IMMEDIATELY, not burn
+    the full retry budget + exponential backoff re-issuing the identical failing call."""
+    import pytest as _pytest
+
+    class FakeHTTP:
+        def __init__(self, *, testnet: bool):
+            self.calls = 0
+
+        def get_tickers(self, **params):
+            del params
+            self.calls += 1
+            return {"retCode": 10001, "retMsg": "params error: invalid symbol"}
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitMarketData(retry_sleep_seconds=0.0, retries=3)
+    with _pytest.raises(bybit.BybitDataError):
+        client.get_tickers()
+    stats = client.stats()
+    assert stats["http_calls"] == 1, "a definite reject must NOT be retried"
+    assert stats["retry_events"] == 0
+
+
+def test_bybit_market_data_still_retries_rate_limit(monkeypatch) -> None:
+    """EXC-3 guard: a rate-limit reject must STILL retry (only definite rejects short-circuit)."""
+    class FakeHTTP:
+        def __init__(self, *, testnet: bool):
+            self.calls = 0
+
+        def get_tickers(self, **params):
+            del params
+            self.calls += 1
+            if self.calls == 1:
+                return {"retCode": 10006, "retMsg": "Too many visits. Exceeded the API Rate Limit."}
+            return {"retCode": 0, "result": {"list": [{"symbol": "BTCUSDT"}]}}
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitMarketData(retry_sleep_seconds=0.0, retries=3)
+    assert client.get_tickers() == [{"symbol": "BTCUSDT"}]
+    assert client.stats()["http_calls"] == 2
+    assert client.stats()["retry_events"] == 1

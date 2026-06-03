@@ -366,6 +366,12 @@ class BybitMarketData:
                     elapsed_ms = (time.perf_counter() - started) * 1000.0
                     self._record_call(elapsed_ms, error_text=str(exc), rate_limited=_is_rate_limit(exc))
                 last_error = exc
+                # A definite (non-rate-limit) venue reject — bad symbol, invalid param —
+                # won't change on retry, so raise immediately instead of wasting the full
+                # retry budget + exponential backoff on identical calls (mirrors
+                # BybitPrivateClient._call; EXC-3). Transport errors + rate limits still retry.
+                if isinstance(exc, BybitDataError) and not _is_rate_limit(exc):
+                    raise
                 if attempt + 1 >= self.retries:
                     break
                 self.retry_events += 1

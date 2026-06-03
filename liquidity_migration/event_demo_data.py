@@ -298,7 +298,10 @@ def _read_demo_kline_cache(
     if cached.is_empty() or "symbol" not in cached.columns or "ts_ms" not in cached.columns:
         return _empty_klines()
     output = cached.filter(pl.col("symbol").is_in(symbols) & pl.col("ts_ms").is_between(start_ms, end_ms))
-    _write_demo_kline_compact_cache(cache_root, symbols=symbols, start_ms=start_ms, end_ms=end_ms, klines=output)
+    # Don't write the compact cache here (EVE-7): the sole caller (_download_recent_1h_klines)
+    # always rewrites a same-key SUPERSET right after — at the no-fetch path or post-REST-merge —
+    # so this write would be immediately overwritten. Skipping it saves one full-window parquet
+    # serialization per slow-path cache-miss cycle.
     return output
 
 def _demo_kline_compact_cache_paths(cache_root: Path) -> tuple[Path, Path]:

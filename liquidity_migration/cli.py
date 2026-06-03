@@ -675,19 +675,22 @@ def main(argv: list[str] | None = None) -> int:
             cycles = 0
             while True:
                 started = time.perf_counter()
-                payload = run_event_risk_cycle(
-                    data_root,
-                    config=config,
-                    risk_config=risk_config,
-                    private_client=private_client,
-                )
-                elapsed_seconds = time.perf_counter() - started
-                if not args.quiet_loop or _event_risk_payload_material(payload):
-                    _print_event_risk_summary(payload, elapsed_ms=elapsed_seconds * 1000.0)
+                try:
+                    payload = run_event_risk_cycle(
+                        data_root,
+                        config=config,
+                        risk_config=risk_config,
+                        private_client=private_client,
+                    )
+                    elapsed_seconds = time.perf_counter() - started
+                    if not args.quiet_loop or _event_risk_payload_material(payload):
+                        _print_event_risk_summary(payload, elapsed_ms=elapsed_seconds * 1000.0)
+                except Exception as exc:  # noqa: BLE001 - one bad cycle must not kill the loop (CCR-3)
+                    print(f"ERROR: event-risk-cycle iteration failed; continuing: {exc}", file=sys.stderr, flush=True)
                 cycles += 1
                 if args.max_cycles and cycles >= args.max_cycles:
                     return 0
-                sleep_seconds = max(args.interval_seconds - elapsed_seconds, 0.0)
+                sleep_seconds = max(args.interval_seconds - (time.perf_counter() - started), 0.0)
                 if sleep_seconds > 0.0:
                     time.sleep(sleep_seconds)
         payload = run_event_risk_cycle(data_root, config=config, risk_config=risk_config)
