@@ -610,8 +610,15 @@ class TickerCache:
         # snapshot under the same key, so by the time the callback runs the
         # row is already complete — but if the upstream changes we still want
         # to handle pure deltas correctly. Merge any non-None field over the
-        # existing row.
+        # existing row. COPY-then-REBIND (don't mutate the published dict in
+        # place): PrivateStateCache documents + relies on rows being immutable
+        # once published (snapshot() copies refs under the lock, builds dicts
+        # outside it). Sharing that invariant here makes a future lock-free
+        # TickerCache read safe by construction and avoids a torn-read trap
+        # (a reader iterating a row while this merges into it) — SHAR-1.
+        merged = dict(existing)
         for key, value in row.items():
             if value is None:
                 continue
-            existing[key] = value
+            merged[key] = value
+        self._rows_by_symbol[symbol] = merged

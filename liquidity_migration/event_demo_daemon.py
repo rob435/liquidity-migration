@@ -229,6 +229,11 @@ class EventDemoDaemon:
         )
         self._ticker_cache: TickerCache = ticker_cache if ticker_cache is not None else TickerCache()
         self._ticker_stream: Any | None = None
+        # _ticker_stream is opened/closed from up to three threads (the startup seed
+        # thread, the reconcile-loop recovery-open, and the _check_ws_health watchdog
+        # reconnect); serialize every read-modify-write under this lock so a slow seed
+        # racing the reconcile tick can't leave two ticker WS connections open (DAEM-002).
+        self._ticker_stream_lock = threading.Lock()
         self._ticker_stream_factory = ticker_stream_factory or _default_short_ticker_stream_factory
         self._state_cache_seeder = state_cache_seeder or _default_short_state_cache_seeder
         # Cached REST clients for the seeder. Constructing a fresh
@@ -238,6 +243,11 @@ class EventDemoDaemon:
         # session-setup on every reconcile. Reuse a single pair per daemon.
         self._seed_market_client: Any | None = None
         self._seed_private_client: Any | None = None
+        # The seeder's lazy client construction runs from both the startup seed thread
+        # and the reconcile loop; serialize the check-then-construct so a slow cold-start
+        # seed racing the first reconcile tick can't build (and leak) a duplicate client
+        # whose HTTP session lands in CLOSE_WAIT (DAEM-001).
+        self._seed_client_lock = threading.Lock()
         self._ticker_reconcile_interval_seconds = float(ticker_reconcile_interval_seconds)
         self._state_cache_stale_seconds = float(state_cache_stale_seconds)
         self._reconcile_thread: threading.Thread | None = None
@@ -795,11 +805,12 @@ class EventDemoDaemon:
         thread.start()
 
     def _run_state_cache_seed(self) -> None:
+        # The reconcile loop is the SINGLE writer of _reconciles_total / _reconcile_errors
+        # (the seed is conceptually reconcile #0); the seed thread no longer increments
+        # them, eliminating the cross-thread lost-update on those counters (DAEM-004).
         try:
             self._invoke_state_cache_seeder()
-            self._reconciles_total += 1
         except Exception as exc:  # noqa: BLE001
-            self._reconcile_errors += 1
             _logger.warning("short state cache seed failed (cycle falls back to REST): %s", exc)
             return
         # Bail before opening the public ticker WS if shutdown has been
@@ -828,24 +839,42 @@ class EventDemoDaemon:
             # silently disable the ticker WS for the daemon's lifetime.
             _logger.info("short ticker stream skipped: cache has no seeded symbols")
             return
+        # Fast-out if a stream is already live (seed vs reconcile vs watchdog can all
+        # call this). Build the new connection OUTSIDE the lock (the WS connect blocks),
+        # then install it under the lock ONLY if none is live, else close the loser so a
+        # race never leaves two ticker WS connections open (DAEM-002).
+        with self._ticker_stream_lock:
+            if self._ticker_stream is not None:
+                return
         try:
-            self._ticker_stream = self._ticker_stream_factory(self.config)
+            stream = self._ticker_stream_factory(self.config)
         except Exception as exc:  # noqa: BLE001
             _logger.warning("short ticker WS stream failed to open; REST fallback: %s", exc)
-            self._ticker_stream = None
             return
         symbols = sorted({
             str(row.get("symbol", "")) for row in self._ticker_cache.snapshot_list()
         } - {""})
         try:
-            self._ticker_stream.subscribe_tickers(symbols, self._handle_ticker_message)
+            stream.subscribe_tickers(symbols, self._handle_ticker_message)
         except Exception as exc:  # noqa: BLE001
             _logger.warning("short ticker subscribe failed; REST fallback: %s", exc)
-            self._close_ticker_stream()
+            self._close_single_ticker_stream(stream)
+            return
+        installed = False
+        with self._ticker_stream_lock:
+            if self._ticker_stream is None:
+                self._ticker_stream = stream
+                installed = True
+        if not installed:
+            self._close_single_ticker_stream(stream)  # lost the race; close the loser
 
     def _close_ticker_stream(self) -> None:
-        stream = self._ticker_stream
-        self._ticker_stream = None
+        with self._ticker_stream_lock:
+            stream = self._ticker_stream
+            self._ticker_stream = None
+        self._close_single_ticker_stream(stream)
+
+    def _close_single_ticker_stream(self, stream: Any | None) -> None:
         if stream is None:
             return
         try:
@@ -1001,29 +1030,36 @@ class EventDemoDaemon:
         """Single seeder entry point that lazily constructs and reuses the
         REST clients. Skipping the per-call client construction keeps the
         seeder's TCP sessions alive across the daemon's lifetime instead
-        of leaking one CLOSE_WAIT socket per reconcile."""
-        if self._seed_market_client is None:
-            self._seed_market_client = BybitMarketData(
-                category=self.config.exchange.category,
-                testnet=self.config.exchange.testnet,
-            )
-        if self._seed_private_client is None:
-            api_key, api_secret, demo = resolve_private_credentials()
-            if api_key and api_secret:
-                self._seed_private_client = BybitPrivateClient(
+        of leaking one CLOSE_WAIT socket per reconcile. The check-then-construct
+        runs under _seed_client_lock so the startup seed thread and the reconcile
+        loop can't both build (and leak) a client during a slow cold-start
+        (DAEM-001); the lock is NOT held across the REST seed so the two threads'
+        seeds still overlap harmlessly."""
+        with self._seed_client_lock:
+            if self._seed_market_client is None:
+                self._seed_market_client = BybitMarketData(
                     category=self.config.exchange.category,
                     testnet=self.config.exchange.testnet,
-                    demo=demo,
-                    api_key=api_key,
-                    api_secret=api_secret,
                 )
+            if self._seed_private_client is None:
+                api_key, api_secret, demo = resolve_private_credentials()
+                if api_key and api_secret:
+                    self._seed_private_client = BybitPrivateClient(
+                        category=self.config.exchange.category,
+                        testnet=self.config.exchange.testnet,
+                        demo=demo,
+                        api_key=api_key,
+                        api_secret=api_secret,
+                    )
+            market_client = self._seed_market_client
+            private_client = self._seed_private_client
         self._state_cache_seeder(
             config=self.config,
             demo_config=self.demo_config,
             private_state_cache=self._private_state_cache,
             ticker_cache=self._ticker_cache,
-            market_client=self._seed_market_client,
-            private_client=self._seed_private_client,
+            market_client=market_client,
+            private_client=private_client,
         )
 
     def _start_kline_warmer(self) -> None:

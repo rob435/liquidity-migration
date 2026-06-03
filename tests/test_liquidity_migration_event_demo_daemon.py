@@ -1646,3 +1646,54 @@ def test_check_ws_health_does_not_reconnect_private_stream_on_quiet_but_connecte
     daemon._check_ws_health()
     assert daemon._ws_private_reconnects == 0
     assert daemon._ws_private_disconnected_since is None
+
+
+def test_open_ticker_stream_is_race_safe_loser_closed_not_leaked(tmp_path: Path) -> None:
+    """DAEM-002: _ticker_stream is opened from the seed, reconcile-recovery and watchdog
+    threads. Two concurrent _open_ticker_stream calls must end with EXACTLY ONE live
+    stream and the losing one CLOSED (not a leaked second ticker WS)."""
+    import threading as _threading
+
+    barrier = _threading.Barrier(2, timeout=3.0)
+    built: list[object] = []
+    closed: list[object] = []
+
+    class _FakeTicker:
+        def __init__(self) -> None:
+            built.append(self)
+
+        def subscribe_tickers(self, symbols, cb) -> None:  # noqa: ANN001
+            pass
+
+        def close(self) -> None:
+            closed.append(self)
+
+    def factory(_config):  # noqa: ANN001, ANN202
+        barrier.wait()  # force both threads to build concurrently (past the early is-None check)
+        return _FakeTicker()
+
+    ticker = _StubCache(seeded=True, silence_seconds=1.0)
+    ticker.symbol_count = lambda: 5  # type: ignore[method-assign]
+    ticker.snapshot_list = lambda *a, **k: [{"symbol": "BTCUSDT"}]  # type: ignore[method-assign]
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
+        private_state_cache=_StubCache(seeded=False, silence_seconds=0.0),  # type: ignore[arg-type]
+        ticker_cache=ticker,  # type: ignore[arg-type]
+        state_cache_stale_seconds=120.0,
+        ticker_stream_factory=factory,
+    )
+
+    t1 = _threading.Thread(target=daemon._open_ticker_stream)
+    t2 = _threading.Thread(target=daemon._open_ticker_stream)
+    t1.start()
+    t2.start()
+    t1.join(3.0)
+    t2.join(3.0)
+
+    assert len(built) == 2, "both threads built a candidate stream (both passed the early is-None check)"
+    assert daemon._ticker_stream is not None, "exactly one stream must be installed"
+    assert len(closed) == 1, "the losing stream must be CLOSED, not leaked"
+    assert daemon._ticker_stream not in closed, "the installed stream must not be the closed loser"
