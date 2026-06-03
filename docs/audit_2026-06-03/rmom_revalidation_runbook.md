@@ -47,3 +47,15 @@ entries, never WRONG entries — `deploy_vps_live.sh:156`), so the worst case wh
 pending is fewer/no continuous entries, never mis-selected ones. There is no urgency-to-deploy; the
 urgency is to confirm the 0.33 choice still holds before treating continuous-sleeve forward-demo
 results as evidence for promotion.
+
+## Step-1 result (measured 2026-06-04, `scripts/rmom_shift_diagnostic.py` on `bybit_full_pit`, 450d)
+Bottom-third (`quantile=0.33`) membership, shift1 (old) vs shift3 (fixed), 219,066 (symbol,ts)
+obs over 442 trading days:
+- **Symmetric churn of the selected set: 51.3%** (mean per-ts Jaccard 0.489).
+- **Only 65.5% of the old shift1 selection is retained** under shift3 (~⅓ flips out, ~⅓ flips in).
+
+**Conclusion: HIGH churn ⇒ re-validation is required, not a formality.** Removing the ~25h
+look-ahead materially changes which names the gate trades, so the `rmom_quantile=0.33` choice (tuned
+on the contaminated shift1 values) and the gated-backtest MAR verdict must be re-run on the shift3
+values (steps 2–4) before continuous-sleeve forward-demo results are treated as promotion evidence.
+Re-run `scripts/rmom_shift_diagnostic.py --quantile <X>` while sweeping to size each candidate.
