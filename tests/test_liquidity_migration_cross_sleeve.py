@@ -116,3 +116,35 @@ def test_expired_foreign_reservation_no_longer_blocks(tmp_path: Path) -> None:
     claim_symbol_reservation(tmp_path, symbol="WUSDT", sleeve="long", trade_id="t1", now_ms=1100, ttl_ms=50)
     # well past the 50ms ttl: the foreign reservation is inactive -> short may now claim.
     assert claim_symbol_reservation(tmp_path, symbol="WUSDT", sleeve="short", trade_id="t2", now_ms=9999) is True
+
+
+def test_claim_is_atomic_under_true_thread_contention(tmp_path: Path) -> None:
+    """long-sleeve-6 atomicity under REAL contention: two threads race to claim the same
+    symbol through the actual exclusive_file_lock. Exactly one must win and exactly one
+    reservation row may persist — never two. Repeated to shake out interleavings."""
+    import threading
+
+    for attempt in range(8):
+        root = tmp_path / f"attempt{attempt}"
+        root.mkdir()
+        seed_margin_budget(root, {"long": 0.45}, now_ms=1_700_000_000_000)  # create the dataset
+        out: dict[str, bool] = {}
+        barrier = threading.Barrier(2)
+
+        def _claim(sleeve: str, trade_id: str, root: Path = root, out: dict = out, barrier=barrier) -> None:
+            barrier.wait(timeout=5.0)  # maximize the contention window
+            out[sleeve] = claim_symbol_reservation(
+                root, symbol="RACEUSDT", sleeve=sleeve, trade_id=trade_id,
+                now_ms=1_700_000_100_000, ttl_ms=180_000,
+            )
+
+        t1 = threading.Thread(target=_claim, args=("long", "l1"))
+        t2 = threading.Thread(target=_claim, args=("continuous", "c1"))
+        t1.start()
+        t2.start()
+        t1.join(timeout=10.0)
+        t2.join(timeout=10.0)
+
+        assert sum(1 for v in out.values() if v) == 1, f"attempt {attempt}: exactly one claim wins"
+        active = [r for r in read_account_state(root).reservations if r["symbol"] == "RACEUSDT"]
+        assert len(active) == 1, f"attempt {attempt}: exactly one reservation row persisted"
