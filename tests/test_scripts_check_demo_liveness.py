@@ -217,12 +217,17 @@ def test_gather_continuous_alerts_warns_on_empty_universe_and_unverified_stop(tm
 
 
 def test_sleeve_kill_switch_toggle(monkeypatch) -> None:
-    """The watchdog skips an intentionally-off sleeve (default unset = on)."""
-    monkeypatch.delenv("CONTINUOUS_SLEEVE", raising=False)
-    assert M._sleeve_on("CONTINUOUS_SLEEVE") is True   # unset -> on (identical to pre-kill-switch)
+    """The watchdog skips an intentionally-off sleeve. Explicit env always wins; the
+    unset-default is per-sleeve and mirrors deploy/lib_sleeves.sh (continuous off, short/long on)."""
     for off in ("off", "OFF", "false", "0", "no"):
         monkeypatch.setenv("CONTINUOUS_SLEEVE", off)
-        assert M._sleeve_on("CONTINUOUS_SLEEVE") is False, off
+        assert M._sleeve_on("CONTINUOUS_SLEEVE", default="off") is False, off
     for on in ("on", "ON", "1", "true", "yes"):
         monkeypatch.setenv("CONTINUOUS_SLEEVE", on)
-        assert M._sleeve_on("CONTINUOUS_SLEEVE") is True, on
+        assert M._sleeve_on("CONTINUOUS_SLEEVE", default="off") is True, on
+    # Unset -> per-sleeve default: continuous OFF (cannot resurrect the disabled sleeve),
+    # short/long ON (identical to before the kill-switch).
+    monkeypatch.delenv("CONTINUOUS_SLEEVE", raising=False)
+    assert M._sleeve_on("CONTINUOUS_SLEEVE", default="off") is False
+    monkeypatch.delenv("SHORT_SLEEVE", raising=False)
+    assert M._sleeve_on("SHORT_SLEEVE") is True

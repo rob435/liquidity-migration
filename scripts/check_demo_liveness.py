@@ -52,11 +52,15 @@ CRITICAL = "CRITICAL"
 WARNING = "WARNING"
 
 
-def _sleeve_on(env_var: str) -> bool:
+def _sleeve_on(env_var: str, *, default: str = "on") -> bool:
     """A sleeve is active unless its kill-switch toggle (deploy/sleeves.env, loaded into this
-    watchdog's env via the liveness service EnvironmentFile) is off. Default (unset) = on, so the
-    watchdog is identical to before the kill-switch unless a sleeve is deliberately retired."""
-    return os.environ.get(env_var, "on").strip().lower() in {"on", "1", "true", "yes"}
+    watchdog's env via the liveness service EnvironmentFile) is off. ``default`` is the
+    last-resort value when the toggle is UNSET; it mirrors deploy/lib_sleeves.sh exactly
+    (SHORT/LONG default on, CONTINUOUS defaults off — look-ahead-disabled), so this watchdog
+    can never page for a retired sleeve nor expect the disabled continuous sleeve to be up
+    on a stripped/manual invocation. In production the EnvironmentFile always sets the
+    toggle, so the default only matters off-VPS."""
+    return os.environ.get(env_var, default).strip().lower() in {"on", "1", "true", "yes"}
 
 
 @dataclass(frozen=True)
@@ -547,9 +551,10 @@ def main() -> int:
     now_ms = _now_ms()
 
     # Per-sleeve kill-switch: skip an intentionally-off sleeve so a deliberately-retired daemon
-    # doesn't false-page as "down". Default (toggle unset) = on -> identical to before.
+    # doesn't false-page as "down". Unset-defaults mirror deploy/lib_sleeves.sh: SHORT/LONG on,
+    # CONTINUOUS off (look-ahead-disabled — never page for it nor expect it up if env is missing).
     alerts = gather_alerts(data_root=args.data_root, units=units, now_ms=now_ms, args=args) if _sleeve_on("SHORT_SLEEVE") else []
-    if str(args.continuous_root) and _sleeve_on("CONTINUOUS_SLEEVE"):
+    if str(args.continuous_root) and _sleeve_on("CONTINUOUS_SLEEVE", default="off"):
         alerts.extend(gather_continuous_alerts(continuous_root=args.continuous_root, now_ms=now_ms, args=args))
     if str(args.long_root) and _sleeve_on("LONG_SLEEVE"):
         alerts.extend(gather_long_alerts(long_root=args.long_root, now_ms=now_ms, args=args))
