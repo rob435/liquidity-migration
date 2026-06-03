@@ -882,7 +882,12 @@ def _long_demo_private_rest_rate_limit_per_second() -> int:
 def _open_long_trades(trades: pl.DataFrame) -> pl.DataFrame:
     if trades.is_empty() or "status" not in trades.columns:
         return trades
-    open_only = trades.filter(pl.col("status").is_in(["open", "submitted"]))
+    # Long-sleeve trade rows only ever carry status "open" (entry) or "closed" (exit) —
+    # never "submitted" (that's an ORDER-row status, not a trade-row status). The
+    # "submitted" branch was dead/misleading (LON-4 fix 1). An in-flight unconfirmed
+    # entry has no trade row at all; it's gated separately by _filter_pending_long_entries
+    # (PENDING_ORDER_GUARD_MS) + the live-position/open-order filters.
+    open_only = trades.filter(pl.col("status") == "open")
     if open_only.is_empty():
         return open_only
     if "side" in open_only.columns:
@@ -1952,7 +1957,7 @@ def _ledger_pnl(root: Path | None, dataset: str) -> tuple[int, float, float]:
                 )
                 realized += gross - fee
     if {"entry_price", "qty"}.issubset(trades.columns):
-        open_trades = trades.filter(pl.col("status").is_in(["open", "submitted"]))
+        open_trades = trades.filter(pl.col("status") == "open")  # "submitted" is dead for trade rows (LON-4)
         if not open_trades.is_empty():
             for row in open_trades.to_dicts():
                 qty = _float(row.get("qty"))

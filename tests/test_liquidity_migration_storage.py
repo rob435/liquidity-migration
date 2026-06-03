@@ -587,3 +587,51 @@ def test_non_ledger_dataset_is_not_month_bucketed(tmp_path: Path) -> None:
     root = dataset_path(tmp_path, "funding")
     assert not list(root.glob(f"{_LEDGER_MONTH_COL}=*"))  # not bucketed
     assert read_dataset(tmp_path, "funding").height == 1
+
+
+def test_exclusive_file_lock_release_does_not_delete_successor_lock(tmp_path: Path) -> None:
+    """CROS-1: if our lock is stale-evicted and a successor recreates the path with a NEW
+    inode while we're still in the critical section, release must NOT delete the successor's
+    lock (an unconditional unlink-by-path would admit a second concurrent writer)."""
+    lock = tmp_path / "x.lock"
+    with exclusive_file_lock(lock, stale_seconds=600):
+        os.unlink(lock)
+        with open(lock, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps({"pid": 999_999, "created": time.time()}))
+        successor_ino = os.stat(lock).st_ino
+    assert lock.exists(), "release deleted a successor's lock (CROS-1)"
+    assert os.stat(lock).st_ino == successor_ino
+
+
+def test_exclusive_file_lock_release_unlinks_its_own_lock(tmp_path: Path) -> None:
+    """CROS-1 happy path: a normal release (no eviction) still removes our own lock."""
+    lock = tmp_path / "z.lock"
+    with exclusive_file_lock(lock, stale_seconds=600):
+        assert lock.exists()
+    assert not lock.exists()
+
+
+def test_lock_owner_is_dead_evicts_reused_pid(tmp_path: Path, monkeypatch) -> None:
+    """CROS-2: a live-but-REUSED pid (started after the lock's created ts) is treated as
+    dead so the stale lock self-heals immediately instead of waiting out the stale timeout.
+    An unknown start time (non-Linux / no /proc) stays conservative (owner alive)."""
+    from liquidity_migration import storage
+
+    lock = tmp_path / "y.lock"
+    lock.write_text(json.dumps({"pid": 1, "created": time.time() - 100}), encoding="utf-8")
+    monkeypatch.setattr(storage, "_pid_started_after", lambda pid, created: True)
+    assert storage._lock_owner_is_dead(lock) is True
+    monkeypatch.setattr(storage, "_pid_started_after", lambda pid, created: None)
+    assert storage._lock_owner_is_dead(lock) is False
+
+
+def test_pid_started_after_guards_and_current_process() -> None:
+    import sys
+    from liquidity_migration import storage
+
+    assert storage._pid_started_after(os.getpid(), 0.0) is None  # created<=0 -> unknown
+    if sys.platform.startswith("linux"):
+        assert storage._pid_started_after(os.getpid(), 1.0) is True  # we started after epoch 1
+        assert storage._pid_started_after(os.getpid(), time.time() + 1e9) is False
+    else:
+        assert storage._pid_started_after(os.getpid(), 1.0) is None  # no /proc -> unknown

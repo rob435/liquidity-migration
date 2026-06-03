@@ -53,13 +53,13 @@ from .event_demo import (
     _stop_price_for_entry,
     _take_profit_price_for_entry,
     _terminalize_stale_pending_entry_orders,
-    _maybe_notify,
     _telegram_notification_reason,
     _upsert_rows,
     build_ledger_position_pnl_snapshot,
     build_position_pnl_snapshot,
     decode_entry_order_link_id,
     format_event_risk_cycle_report,
+    format_telegram_status_message,
     plan_risk_exits,
     plan_stop_repairs,
     summarize_position_pnl,
@@ -69,6 +69,7 @@ from .volume_events import VolumeEventResearchConfig
 from .storage import exclusive_file_lock, read_dataset, read_ledger_window, write_dataset
 from . import cross_sleeve as _cross_sleeve
 from .event_demo import wallet_equity_usdt
+from .telegram import send_telegram_message
 
 
 _logger = logging.getLogger("liquidity_migration.ws_risk")
@@ -325,7 +326,9 @@ class EventWebSocketRiskEngine:
         # cascade. Lazily started on first enqueue; drained + stopped in close().
         # Downside is bounded: a dropped/late notification, never an order or
         # state error (the dedupe + state mutation stay on the consumer thread).
-        self._telegram_queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        # Pre-rendered message STRINGS (not the live payload dict), so the background
+        # sender never reads structures the consumer concurrently mutates (WS-R-001).
+        self._telegram_queue: queue.Queue[str | None] = queue.Queue()
         self._telegram_thread: threading.Thread | None = None
         # Background reconcile-prefetcher (opt-in via reconcile_prefetch_enabled).
         # Holds the latest positions + open-orders REST snapshot so rest_reconcile
@@ -823,12 +826,21 @@ class EventWebSocketRiskEngine:
             return
         self.state.subscribed_symbols.update(missing)
 
-    def handle_event(self, event_type: str, message: dict[str, Any]) -> None:
+    def _assert_consumer_thread(self) -> None:
+        """Fail-fast if a state mutator runs off the consumer thread. The documented
+        invariant (WebSocketRiskState: every field mutated ONLY by the consumer thread)
+        was enforced only at handle_event; calling this at the top of each public
+        mutator too means a stray pybit callback wired directly to a mutator trips the
+        assertion instead of silently racing (WS-R-002). The `is not None` gate keeps
+        unit tests that call mutators directly (before run() sets the ident) green."""
         if self._consumer_thread_ident is not None and threading.get_ident() != self._consumer_thread_ident:
             raise RuntimeError(
                 "WebSocketRiskState mutated off the consumer thread -- WS callbacks "
                 "must enqueue onto self.events, never dispatch state changes directly."
             )
+
+    def handle_event(self, event_type: str, message: dict[str, Any]) -> None:
+        self._assert_consumer_thread()
         self.state.last_ws_event_monotonic = time.monotonic()
         if event_type == "position":
             self.on_position_message(message)
@@ -843,6 +855,7 @@ class EventWebSocketRiskEngine:
         self.on_idle()
 
     def on_position_message(self, message: dict[str, Any]) -> None:
+        self._assert_consumer_thread()
         changed_symbols: set[str] = set()
         for row in _message_rows(message):
             symbol = str(row.get("symbol", ""))
@@ -875,6 +888,7 @@ class EventWebSocketRiskEngine:
         self.evaluate_symbols(changed_symbols)
 
     def on_order_message(self, message: dict[str, Any]) -> None:
+        self._assert_consumer_thread()
         updates: list[dict[str, Any]] = []
         for row in _message_rows(message):
             link = str(row.get("orderLinkId") or row.get("order_link_id") or "")
@@ -929,6 +943,7 @@ class EventWebSocketRiskEngine:
             self._write_order_rows_routed(updates)
 
     def on_ws_order_ack(self, message: dict[str, Any]) -> None:
+        self._assert_consumer_thread()
         ret_code = _int(message.get("retCode"))
         if ret_code == 0:
             return
@@ -962,6 +977,7 @@ class EventWebSocketRiskEngine:
         self.write_report(reason="ws_order_ack_failed")
 
     def on_execution_message(self, message: dict[str, Any]) -> None:
+        self._assert_consumer_thread()
         for row in _message_rows(message):
             link = str(row.get("orderLinkId") or row.get("order_link_id") or "")
             if not link:
@@ -2482,24 +2498,25 @@ class EventWebSocketRiskEngine:
         return payload
 
     def _telegram_sender_loop(self) -> None:
-        """Background daemon: drain queued payloads and do the blocking HTTP send.
-        A None payload is the shutdown sentinel."""
+        """Background daemon: drain pre-rendered message strings and do the blocking
+        HTTP send. A None item is the shutdown sentinel. The string is frozen on the
+        consumer thread (WS-R-001), so this thread touches no shared mutable state."""
         while True:
-            payload = self._telegram_queue.get()
-            if payload is None:
+            text = self._telegram_queue.get()
+            if text is None:
                 return
             try:
-                _maybe_notify(payload, enabled=True)
+                send_telegram_message(text, enabled=True)
             except Exception as exc:  # noqa: BLE001 - a notification must never crash the daemon
                 _logger.warning("background telegram send failed: %s", exc)
 
-    def _enqueue_telegram(self, payload: dict[str, Any]) -> None:
+    def _enqueue_telegram(self, text: str) -> None:
         if self._telegram_thread is None or not self._telegram_thread.is_alive():
             self._telegram_thread = threading.Thread(
                 target=self._telegram_sender_loop, name="ws-risk-telegram", daemon=True
             )
             self._telegram_thread.start()
-        self._telegram_queue.put(payload)
+        self._telegram_queue.put(text)
 
     def maybe_notify(self, payload: dict[str, Any]) -> tuple[bool, str]:
         if not self.risk.telegram:
@@ -2510,15 +2527,27 @@ class EventWebSocketRiskEngine:
         key = _telegram_dedupe_key(reason, payload)
         if key in self.state.telegram_keys_sent:
             return False, "duplicate_material_event"
-        # Optimistic dedupe + offload the blocking HTTP send: record the dedupe key
-        # on the consumer thread (cheap state mutation) and hand the network
-        # round-trip to the background sender, returning immediately so a slow
-        # Telegram RTT cannot stall stop-enforcement event processing. A failed
-        # send is logged by the sender, not retried — this is a notification, not
-        # an order, so optimistic dedupe (assume it sends) is acceptable.
+        # Render the message NOW, on the consumer thread, where the payload and its
+        # shared order/position row-dicts are stable for this cycle — then enqueue only
+        # the frozen string. The background sender thus never reads dicts the consumer
+        # mutates in place on the next event (WS-R-001). Guard the render: now that it
+        # runs on the consumer/reconcile thread, a formatting fault must be telemetry,
+        # never an exception into the reconcile loop (same intent as EVE-2).
+        try:
+            text = format_telegram_status_message(payload)
+        except Exception as exc:  # noqa: BLE001 - a telegram-format fault must not break reconcile
+            return False, f"format_failed: {str(exc)[:200]}"
+        # Optimistic dedupe + offload the blocking HTTP send: record the dedupe key on
+        # the consumer thread and hand the network round-trip to the background sender,
+        # returning immediately so a slow Telegram RTT can't stall stop-enforcement. A
+        # failed send is logged, not retried — a notification, not an order.
         self.state.telegram_keys_sent.add(key)
         _write_telegram_dedupe_keys(self.report_dir, self.state.telegram_keys_sent)
-        self._enqueue_telegram(payload)
+        # Bound the in-memory dedupe set to the same 24h window the on-disk file keeps
+        # (the write above just pruned it), so a long-lived daemon's set can't grow
+        # without bound (WSR-5).
+        self.state.telegram_keys_sent = set(_read_telegram_dedupe_keys(self.report_dir))
+        self._enqueue_telegram(text)
         return True, "enqueued"
 
     def close(self) -> None:

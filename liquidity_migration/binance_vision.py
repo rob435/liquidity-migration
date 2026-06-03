@@ -62,12 +62,20 @@ def _s3_common_prefixes(prefix: str) -> list[str]:
             url += f"&marker={urllib.parse.quote(marker)}"
         xml = urllib.request.urlopen(url, timeout=30).read().decode()  # noqa: S310 - public archive
         found = re.findall(rf"<Prefix>{re.escape(prefix)}([^/]+)/</Prefix>", xml)
-        if not found:
-            break
         out.extend(found)
         if "<IsTruncated>true</IsTruncated>" not in xml:
             break
-        marker = f"{prefix}{found[-1]}/"
+        # Continue on IsTruncated, NOT on an empty page (DAT-7): a page that is empty
+        # of MATCHES but still truncated must advance, or the listing silently
+        # under-enumerates (a survivorship hole this module exists to prevent). Prefer
+        # S3's NextMarker; fall back to the last matched prefix; bail if neither.
+        next_marker = re.search(r"<NextMarker>([^<]+)</NextMarker>", xml)
+        if next_marker:
+            marker = next_marker.group(1)
+        elif found:
+            marker = f"{prefix}{found[-1]}/"
+        else:
+            break
     return out
 
 
@@ -81,12 +89,17 @@ def _s3_keys(prefix: str) -> list[str]:
             url += f"&marker={urllib.parse.quote(marker)}"
         xml = urllib.request.urlopen(url, timeout=30).read().decode()  # noqa: S310 - public archive
         found = re.findall(r"<Key>([^<]+)</Key>", xml)
-        if not found:
-            break
         out.extend(found)
         if "<IsTruncated>true</IsTruncated>" not in xml:
             break
-        marker = found[-1]
+        # Continue on IsTruncated, not empty-page (DAT-7) — see _s3_common_prefixes.
+        next_marker = re.search(r"<NextMarker>([^<]+)</NextMarker>", xml)
+        if next_marker:
+            marker = next_marker.group(1)
+        elif found:
+            marker = found[-1]
+        else:
+            break
     return out
 
 

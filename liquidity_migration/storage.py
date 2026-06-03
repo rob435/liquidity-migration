@@ -235,12 +235,33 @@ def exclusive_file_lock(
                 _unlink_with_retry(lock_path)
                 continue
             time.sleep(max(poll_seconds, 0.0))
+        # Capture the inode of the file WE created (fd is still open here, before
+        # os.fdopen consumes it) so release only unlinks OUR lock. If our lock is
+        # stale-evicted mid-critical-section and a successor recreates the path with a
+        # new inode, an unconditional unlink-by-path would delete the SUCCESSOR's lock
+        # and admit a second concurrent writer (CROS-1).
+        try:
+            _owned = os.fstat(fd)
+            owned_key: tuple[int, int] | None = (_owned.st_dev, _owned.st_ino)
+        except OSError:
+            owned_key = None  # can't fstat -> fall back to legacy unlink-by-path
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(json.dumps({"pid": os.getpid(), "created": time.time()}))
             yield
         finally:
-            _unlink_with_retry(lock_path)
+            if owned_key is None:
+                _unlink_with_retry(lock_path)  # legacy path (fstat failed)
+            else:
+                try:
+                    cur = os.stat(lock_path)
+                    release_ours = (cur.st_dev, cur.st_ino) == owned_key
+                except FileNotFoundError:
+                    release_ours = False  # already gone -> nothing to unlink
+                except OSError:
+                    release_ours = True  # can't inode-check (e.g. Windows delete-pending) -> preserve legacy self-heal
+                if release_ours:
+                    _unlink_with_retry(lock_path)
 
 
 def _read_lock_text_safe(lock_path: Path, timeout: float = 1.0) -> str | None:
@@ -262,6 +283,38 @@ def _read_lock_text_safe(lock_path: Path, timeout: float = 1.0) -> str | None:
     return box[0]
 
 
+def _pid_started_after(pid: int, created_ts: float) -> bool | None:
+    """True if the live process ``pid`` started strictly AFTER ``created_ts`` (epoch
+    seconds) — i.e. the lock's pid was REUSED by a newer process, so the original
+    lock owner is actually dead. None when the start time can't be determined
+    (non-Linux / no /proc), so the caller stays conservative and does NOT evict on a
+    pid that os.kill reports as live. Linux-only via /proc/<pid>/stat; never raises
+    (CROS-2: os.kill(pid,0) alone false-positives "alive" on a reused pid)."""
+    if created_ts <= 0.0:
+        return None
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii") as fh:
+            # comm (field 2) may contain spaces/parens; split on the LAST ") " so the
+            # remaining whitespace-split fields start at field 3 (state).
+            after_comm = fh.read().rsplit(") ", 1)[1].split()
+        starttime_ticks = float(after_comm[19])  # field 22 (starttime), 0-indexed from field 3
+        btime = 0.0
+        with open("/proc/stat", encoding="ascii") as fh:
+            for line in fh:
+                if line.startswith("btime "):
+                    btime = float(line.split()[1])
+                    break
+        if btime <= 0.0:
+            return None
+        clk = os.sysconf("SC_CLK_TCK")
+        if clk <= 0:
+            return None
+        proc_start_epoch = btime + starttime_ticks / clk
+        return proc_start_epoch > created_ts + 1.0  # 1s slack vs clock granularity
+    except Exception:  # noqa: BLE001 - any /proc parsing failure -> "unknown", stay conservative
+        return None
+
+
 def _lock_owner_is_dead(lock_path: Path) -> bool:
     text = _read_lock_text_safe(lock_path)
     if text is None:
@@ -273,6 +326,7 @@ def _lock_owner_is_dead(lock_path: Path) -> bool:
     try:
         payload = json.loads(text)
         pid = int(payload.get("pid") or 0)
+        created_ts = float(payload.get("created") or 0.0)
     except (json.JSONDecodeError, TypeError, ValueError):
         return False
     if pid <= 0 or pid == os.getpid():
@@ -282,7 +336,9 @@ def _lock_owner_is_dead(lock_path: Path) -> bool:
     except ProcessLookupError:
         return True
     except PermissionError:
-        return False
+        # Foreign live pid — but it could be a REUSED pid whose original (dead) owner
+        # held this lock. If the live pid started after the lock was created, evict.
+        return _pid_started_after(pid, created_ts) is True
     except OverflowError:
         return True
     except OSError:
@@ -298,7 +354,10 @@ def _lock_owner_is_dead(lock_path: Path) -> bool:
         # sweep-hang we keep hitting). Safe on POSIX too: a live *owned* pid makes
         # os.kill succeed (no exception), so it is never misclassified as dead.
         return True
-    return False
+    # os.kill succeeded -> a live, signalable process holds this pid. It may be a
+    # REUSED pid (the original owner was killed without cleanup); if the live process
+    # started after the lock was created, the real owner is dead -> evict (CROS-2).
+    return _pid_started_after(pid, created_ts) is True
 
 
 def _lock_payload_is_invalid(lock_path: Path) -> bool:

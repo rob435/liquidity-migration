@@ -185,16 +185,13 @@ def build_live_continuous_state(
     SHARED verified decile pipeline, and returns the latest-bar rows:
     [symbol, decile, composite, turnover_quote]. This is the live analog of one backtest timestamp."""
     if klines_recent.is_empty() or not current_prices:
-        return pl.DataFrame(
-            {"symbol": pl.Series([], dtype=pl.String), "decile": pl.Series([], dtype=pl.Int64),
-             "composite": pl.Series([], dtype=pl.Float64), "turnover_quote": pl.Series([], dtype=pl.Float64)}
-        )
+        return _empty_live_state()
     cur_ts = (int(now_ts_ms) // MS_PER_HOUR) * MS_PER_HOUR
     k = klines_recent.select("ts_ms", "symbol", "close", "turnover_quote").filter(pl.col("ts_ms") < cur_ts)
     if config.exclude_symbols:
         k = k.filter(~pl.col("symbol").is_in(list(config.exclude_symbols)))
     if k.is_empty():
-        return build_live_continuous_state(pl.DataFrame(), {}, rmom, now_ts_ms=now_ts_ms, config=config)
+        return _empty_live_state()
     last_turn = (
         k.sort("ts_ms").group_by("symbol").agg(pl.col("turnover_quote").last().alias("lt"))
     )
@@ -207,7 +204,7 @@ def build_live_continuous_state(
         .select("ts_ms", "symbol", "close", "turnover_quote")
     )
     if cur.is_empty():
-        return build_live_continuous_state(pl.DataFrame(), {}, rmom, now_ts_ms=now_ts_ms, config=config)
+        return _empty_live_state()
     combined = pl.concat([k, cur], how="vertical_relaxed")
     panel = compute_continuous_decile_panel(combined, rmom, rmom_quantile=config.rmom_quantile, start_ms=0)
     return panel.filter(pl.col("ts_ms") == cur_ts).select("symbol", "decile", "composite", "turnover_quote")
@@ -229,7 +226,7 @@ def build_confirmed_entry_state(
     drop-in. (Used for ENTRIES only; EXITS keep the live tick-driven state.)"""
     delay = max(1, int(config.entry_confirm_delay_hours))
     if klines_recent.is_empty():
-        return build_live_continuous_state(pl.DataFrame(), {}, rmom, now_ts_ms=now_ts_ms, config=config)
+        return _empty_live_state()
     cur_ts = (int(now_ts_ms) // MS_PER_HOUR) * MS_PER_HOUR
     # deciding bar starts at ts_d, closes at ts_d+1h; entry is +delay h after that close, so the most
     # recent eligible deciding bar has ts_d = cur_ts - (1+delay)h (its +delay-after-close <= cur_ts <= now).
@@ -238,7 +235,7 @@ def build_confirmed_entry_state(
     if config.exclude_symbols:
         k = k.filter(~pl.col("symbol").is_in(list(config.exclude_symbols)))
     if k.is_empty():
-        return build_live_continuous_state(pl.DataFrame(), {}, rmom, now_ts_ms=now_ts_ms, config=config)
+        return _empty_live_state()
     panel = compute_continuous_decile_panel(k, rmom, rmom_quantile=config.rmom_quantile, start_ms=0)
     return panel.filter(pl.col("ts_ms") == deciding_ts).select("symbol", "decile", "composite", "turnover_quote")
 

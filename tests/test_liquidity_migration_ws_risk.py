@@ -2153,7 +2153,7 @@ def test_ws_risk_telegram_material_events_are_deduped(tmp_path: Path, monkeypatc
         sent.append(text)
         return enabled
 
-    monkeypatch.setattr("liquidity_migration.event_demo.send_telegram_message", fake_send)
+    monkeypatch.setattr("liquidity_migration.ws_risk.send_telegram_message", fake_send)
     engine = EventWebSocketRiskEngine(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
@@ -2191,7 +2191,7 @@ def test_ws_risk_pending_fill_notification_is_deduped_across_heartbeats(tmp_path
         sent.append(text)
         return enabled
 
-    monkeypatch.setattr("liquidity_migration.event_demo.send_telegram_message", fake_send)
+    monkeypatch.setattr("liquidity_migration.ws_risk.send_telegram_message", fake_send)
     engine = EventWebSocketRiskEngine(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
@@ -2227,7 +2227,7 @@ def test_ws_risk_telegram_dedupe_survives_restart(tmp_path: Path, monkeypatch) -
         sent.append(text)
         return enabled
 
-    monkeypatch.setattr("liquidity_migration.event_demo.send_telegram_message", fake_send)
+    monkeypatch.setattr("liquidity_migration.ws_risk.send_telegram_message", fake_send)
     first_engine = EventWebSocketRiskEngine(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
@@ -2266,7 +2266,7 @@ def test_ws_risk_stop_repair_dedupe_ignores_synthetic_order_link(tmp_path: Path,
         sent.append(text)
         return enabled
 
-    monkeypatch.setattr("liquidity_migration.event_demo.send_telegram_message", fake_send)
+    monkeypatch.setattr("liquidity_migration.ws_risk.send_telegram_message", fake_send)
 
     def write_repair(order_link_id: str, *, stop_price: float = 112.0) -> dict[str, object]:
         engine = EventWebSocketRiskEngine(
@@ -3027,16 +3027,19 @@ def test_maybe_notify_offloads_send_off_consumer_thread(tmp_path: Path, monkeypa
     import threading as _threading
 
     sent_event = _threading.Event()
-    calls: list[dict] = []
+    calls: list[str] = []
 
-    def _fake_send(payload, *, enabled):
-        calls.append(payload)
+    def _fake_send(text, *, enabled):
+        calls.append(text)
         sent_event.set()
-        return True, "ok"
+        return True
 
     monkeypatch.setattr(ws_risk, "_telegram_notification_reason", lambda payload: "stop_filled")
     monkeypatch.setattr(ws_risk, "_telegram_dedupe_key", lambda reason, payload: "k1")
-    monkeypatch.setattr(ws_risk, "_maybe_notify", _fake_send)
+    # The message is rendered on the consumer thread (WS-R-001) and only the frozen
+    # string is enqueued; the background sender calls send_telegram_message directly.
+    monkeypatch.setattr(ws_risk, "format_telegram_status_message", lambda payload: "rendered-text")
+    monkeypatch.setattr(ws_risk, "send_telegram_message", _fake_send)
 
     engine = EventWebSocketRiskEngine(
         tmp_path, config=ResearchConfig(), risk_config=EventWebSocketRiskConfig(telegram=True)
@@ -3628,3 +3631,38 @@ def test_ws_risk_rebuilds_private_stream_when_socket_down(tmp_path: Path, monkey
     engine._maybe_reconnect_private_stream(time.monotonic())
     assert engine._private_disconnected_since is None
     assert engine._private_ws_reconnects == 1
+
+
+def test_state_mutators_assert_consumer_thread(tmp_path: Path) -> None:
+    """WS-R-002: the off-thread state-mutation guard now covers the public mutators too,
+    not just handle_event — a stray callback wired directly to a mutator fails fast
+    instead of silently racing. No-op on the consumer thread (ident matches)."""
+    import threading as _threading
+
+    engine = EventWebSocketRiskEngine(
+        tmp_path, config=ResearchConfig(), risk_config=EventWebSocketRiskConfig()
+    )
+    engine._consumer_thread_ident = _threading.get_ident()  # as run() sets it, to THIS thread
+
+    # On the consumer thread the guard is a no-op (empty message -> no state change).
+    engine.on_position_message({"data": []})
+
+    errors: list[str] = []
+
+    def _off_thread() -> None:
+        for mutator in (
+            engine.on_position_message,
+            engine.on_order_message,
+            engine.on_execution_message,
+            engine.on_ws_order_ack,
+        ):
+            try:
+                mutator({"data": []})
+            except RuntimeError as exc:
+                errors.append(str(exc))
+
+    t = _threading.Thread(target=_off_thread)
+    t.start()
+    t.join(2.0)
+    assert len(errors) == 4, "every mutator must fail-fast when called off the consumer thread"
+    assert all("off the consumer thread" in e for e in errors)
