@@ -1562,3 +1562,87 @@ def test_check_ws_health_force_reconnects_ticker_stream_when_silent_past_bound(
     # (not suppressed by the once-per-episode warn flag).
     daemon._check_ws_health()
     assert daemon._ws_ticker_reconnects == 2
+
+
+def test_check_ws_health_force_reconnects_private_stream_when_socket_down(tmp_path: Path) -> None:
+    """IND-1: the private WS only pushes on position/order CHANGES, so data-silence is
+    ambiguous (a quiet account looks silent). The watchdog instead reconnects off pybit's
+    is_connected() (socket-level liveness): a genuinely DOWN socket, continuously down past
+    the bound, force-rebuilds the stream (with a cooldown). The cycle keeps trading off REST."""
+    opened: list[str] = []
+
+    class _DeadPrivate:
+        def is_connected(self) -> bool:
+            return False
+
+        def subscribe_executions(self, cb, **k) -> None:  # noqa: ANN001
+            pass
+
+        def subscribe_positions(self, cb) -> None:  # noqa: ANN001
+            pass
+
+        def subscribe_orders(self, cb) -> None:  # noqa: ANN001
+            pass
+
+        def subscribe_wallet(self, cb) -> None:  # noqa: ANN001
+            pass
+
+        def close(self) -> None:
+            pass
+
+    class _LivePrivate(_DeadPrivate):
+        def is_connected(self) -> bool:
+            return True
+
+    def factory(_config):  # noqa: ANN001, ANN202
+        opened.append("o")
+        return _LivePrivate()
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
+        private_state_cache=_StubCache(seeded=False, silence_seconds=0.0),  # type: ignore[arg-type]
+        ticker_cache=_StubCache(seeded=False, silence_seconds=0.0),  # type: ignore[arg-type]
+        state_cache_stale_seconds=10.0,  # -> private reconnect bound 30s
+        ws_stream_factory=factory,
+    )
+    daemon._ws_stream = _DeadPrivate()  # type: ignore[assignment]
+
+    daemon._check_ws_health()  # marks disconnected_since; down_for ~0 < 30 -> no reconnect yet
+    assert daemon._ws_private_reconnects == 0
+
+    daemon._ws_private_disconnected_since = time.monotonic() - 999  # past the bound
+    daemon._check_ws_health()
+    assert daemon._ws_private_reconnects == 1, "down-past-bound socket must force a rebuild"
+    assert opened, "a fresh private stream must be opened after force-reconnect"
+    assert isinstance(daemon._ws_stream, _LivePrivate)
+
+    daemon._check_ws_health()  # now healthy -> tracker cleared, no further reconnect
+    assert daemon._ws_private_disconnected_since is None
+    assert daemon._ws_private_reconnects == 1
+
+
+def test_check_ws_health_does_not_reconnect_private_stream_on_quiet_but_connected(tmp_path: Path) -> None:
+    """A quiet-but-connected private stream (is_connected True) must NEVER force-reconnect,
+    even when data-silent — the whole point of the socket-level signal."""
+    class _LiveQuiet:
+        def is_connected(self) -> bool:
+            return True
+
+        def close(self) -> None:
+            raise AssertionError("must not close a healthy private stream")
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
+        private_state_cache=_StubCache(seeded=True, silence_seconds=9999.0),  # type: ignore[arg-type]
+        ticker_cache=_StubCache(seeded=False, silence_seconds=0.0),  # type: ignore[arg-type]
+        state_cache_stale_seconds=10.0,
+    )
+    daemon._ws_stream = _LiveQuiet()  # type: ignore[assignment]
+    daemon._ws_private_disconnected_since = time.monotonic() - 999  # even if a stale tracker lingered
+    daemon._check_ws_health()
+    assert daemon._ws_private_reconnects == 0
+    assert daemon._ws_private_disconnected_since is None

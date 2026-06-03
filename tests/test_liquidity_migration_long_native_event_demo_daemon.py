@@ -90,3 +90,50 @@ def test_long_daemon_routes_ws_execution_event_through_router(tmp_path: Path) ->
     runner.join(timeout=2.0)
     assert not runner.is_alive()
     assert daemon.router.stats()["events_received"] >= before + 1, "WS execution event must reach the router"
+
+
+def test_long_daemon_force_reconnects_private_stream_when_socket_down(tmp_path: Path) -> None:
+    """IND-1 (long sleeve mirror): a genuinely DOWN private socket, continuously down
+    past the bound, force-rebuilds the stream via pybit's is_connected() signal."""
+    opened: list[str] = []
+
+    class _DeadPrivate(_RecordingWsStream):
+        def is_connected(self) -> bool:
+            return False
+
+        def subscribe_positions(self, cb) -> None:  # noqa: ANN001
+            pass
+
+        def subscribe_orders(self, cb) -> None:  # noqa: ANN001
+            pass
+
+        def subscribe_wallet(self, cb) -> None:  # noqa: ANN001
+            pass
+
+    class _LivePrivate(_DeadPrivate):
+        def is_connected(self) -> bool:
+            return True
+
+    def factory(_config):  # noqa: ANN001, ANN202
+        opened.append("o")
+        return _LivePrivate()
+
+    daemon = LongNativeDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=LongNativeDemoCycleConfig(submit_orders=False, ws_klines_enabled=False),
+        interval_seconds=0.0,
+        ws_stream_factory=factory,
+        cycle_runner=_stub_long_cycle_runner([]),
+    )
+    daemon._ws_stale_warning_seconds = 10.0
+    daemon._private_stale_reconnect_seconds = 30.0
+    daemon._ws_stream = _DeadPrivate()  # type: ignore[assignment]
+
+    daemon._check_ws_health()
+    assert daemon._ws_private_reconnects == 0
+    daemon._ws_private_disconnected_since = time.monotonic() - 999
+    daemon._check_ws_health()
+    assert daemon._ws_private_reconnects == 1
+    assert opened, "fresh long private stream opened after force-reconnect"
+    assert isinstance(daemon._ws_stream, _LivePrivate)

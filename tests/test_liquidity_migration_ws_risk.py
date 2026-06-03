@@ -3571,3 +3571,60 @@ def test_ws_risk_consumer_loop_reraises_off_thread_assertion(tmp_path: Path) -> 
     engine.on_idle = off_thread  # type: ignore[method-assign]
     with pytest.raises(RuntimeError, match="off the consumer thread"):
         engine.run()
+
+
+def test_ws_risk_rebuilds_private_stream_when_socket_down(tmp_path: Path, monkeypatch) -> None:
+    """IND-1 (the risk authority): the private stream feeds the real-time position/order/
+    execution events that drive intrabar stops. When its socket is genuinely DOWN past the
+    bound, ws_risk rebuilds + re-subscribes it (REST reconcile covers the gap). A quiet but
+    connected socket must NOT trigger a rebuild."""
+    built: list[str] = []
+    closed: list[str] = []
+
+    class _DeadPrivate:
+        def is_connected(self) -> bool:
+            return False
+
+        def close(self) -> None:
+            closed.append("c")
+
+        def subscribe_positions(self, cb) -> None:  # noqa: ANN001
+            pass
+
+        def subscribe_orders(self, cb) -> None:  # noqa: ANN001
+            pass
+
+        def subscribe_executions(self, cb, **k) -> None:  # noqa: ANN001
+            pass
+
+    class _LivePrivate(_DeadPrivate):
+        def is_connected(self) -> bool:
+            return True
+
+    def _fake_build(_config):  # noqa: ANN001, ANN202
+        built.append("b")
+        return _LivePrivate()
+
+    monkeypatch.setattr("liquidity_migration.ws_risk._build_private_stream", _fake_build)
+
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(),
+        risk_config=EventWebSocketRiskConfig(private_ws_reconnect_seconds=30.0),
+    )
+    engine.private_stream = _DeadPrivate()  # type: ignore[assignment]
+
+    engine._maybe_reconnect_private_stream(time.monotonic())  # marks since; not past bound
+    assert not closed and engine._private_ws_reconnects == 0
+
+    engine._private_disconnected_since = time.monotonic() - 999  # past the bound
+    engine._maybe_reconnect_private_stream(time.monotonic())
+    assert closed, "down-past-bound private stream must be closed"
+    assert built, "a fresh private stream must be built + re-subscribed"
+    assert engine._private_ws_reconnects == 1
+    assert isinstance(engine.private_stream, _LivePrivate)
+
+    # A now-healthy socket must clear the tracker and never reconnect.
+    engine._maybe_reconnect_private_stream(time.monotonic())
+    assert engine._private_disconnected_since is None
+    assert engine._private_ws_reconnects == 1

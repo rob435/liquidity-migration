@@ -127,6 +127,14 @@ class EventWebSocketRiskConfig:
     # telegram. 60s is short enough to catch a real WS death (the WS
     # backbone reconnects in <10s) but tolerates ordinary brief silences.
     stale_ws_seconds: float = 60.0
+    # Socket-level private-WS force-reconnect bound. The private stream feeds the
+    # real-time position/order/execution events that drive intrabar stops; if its socket
+    # dies and pybit's own auto-reconnect fails, ws_risk silently degrades to REST-only
+    # reconcile. We rebuild off pybit's is_connected() (true liveness, NOT data-silence,
+    # which on a quiet account is ambiguous) only after the socket is continuously DOWN
+    # past this bound (giving pybit's own reconnect first dibs), with the same value as a
+    # cooldown so a persistent failure can't storm Bybit's auth connection limit. 0 = off.
+    private_ws_reconnect_seconds: float = 180.0
     stream_start_timeout_seconds: float = 3.0
     # Longer budget specifically for the WS trade-client connect, which now
     # retries with jittered backoff (de-syncing the multi-daemon demo storm);
@@ -326,6 +334,64 @@ class EventWebSocketRiskEngine:
         self._reconcile_prefetch: dict[str, Any] | None = None
         self._reconcile_prefetch_thread: threading.Thread | None = None
         self._reconcile_prefetch_stop = threading.Event()
+        # Socket-level private-WS reconnect tracking (see _maybe_reconnect_private_stream).
+        self._private_disconnected_since: float | None = None
+        self._last_private_reconnect_monotonic = 0.0
+        self._private_ws_reconnects = 0
+
+    def _maybe_reconnect_private_stream(self, now: float) -> None:
+        """Rebuild the private WS stream when its SOCKET is genuinely down (not merely
+        a quiet account). The private stream feeds the position/order/execution events
+        that drive ws_risk's intrabar stops; if its socket dies and pybit's own
+        auto-reconnect fails, ws_risk silently degrades to REST-only reconcile. pybit's
+        is_connected() reads ws.sock.connected (TRUE liveness), so we rebuild only after
+        a continuously-down socket past private_ws_reconnect_seconds (pybit's reconnect
+        goes first) + the same value as a cooldown (auth-limit safety). REST reconcile
+        covers the gap, so a failed rebuild never loses protection. Best-effort: any
+        failure is recorded and swallowed so the reconcile loop is never broken."""
+        stream = self.private_stream
+        bound = self.risk.private_ws_reconnect_seconds
+        if stream is None or bound <= 0.0:
+            return
+        probe = getattr(stream, "is_connected", None)
+        connected = probe() if callable(probe) else None
+        if connected is not False:
+            if connected is True:
+                self._private_disconnected_since = None
+            return  # True (healthy) or None (unknown / older pybit) -> stay conservative
+        if self._private_disconnected_since is None:
+            self._private_disconnected_since = now
+        down_for = now - self._private_disconnected_since
+        if down_for <= bound or now - self._last_private_reconnect_monotonic <= bound:
+            return
+        self._last_private_reconnect_monotonic = now
+        self._private_disconnected_since = None
+        self._private_ws_reconnects += 1
+        _logger.warning(
+            "private WS socket down %.0fs > bound %.0fs; rebuilding the risk private stream",
+            down_for, bound,
+        )
+        try:
+            stream.close()
+        except Exception:  # noqa: BLE001 - close errors must not break reconcile
+            pass
+        self.private_stream = None
+        new_stream, error = _call_with_timeout(
+            "private websocket stream reconnect",
+            lambda: _build_private_stream(self.config),
+            timeout_seconds=self.risk.stream_start_timeout_seconds,
+        )
+        if error:
+            self.state.errors.append(error)
+            return
+        self.private_stream = new_stream
+        _, sub_error = _call_with_timeout(
+            "private websocket re-subscribe",
+            self._subscribe_private_stream,
+            timeout_seconds=self.risk.stream_start_timeout_seconds,
+        )
+        if sub_error:
+            self.state.errors.append(sub_error)
 
     # ------------------------------------------------------------------
     # Dual-side ledger routing
@@ -2139,6 +2205,7 @@ class EventWebSocketRiskEngine:
 
     def on_idle(self) -> None:
         now = time.monotonic()
+        self._maybe_reconnect_private_stream(now)
         self.reconcile_stale_websocket(now)
         if self.risk.rest_reconcile_seconds > 0 and now - self.state.last_reconcile_monotonic >= self.risk.rest_reconcile_seconds:
             self.rest_reconcile()

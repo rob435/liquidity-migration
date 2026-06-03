@@ -171,6 +171,14 @@ class LongNativeDemoDaemon:
         # keeps the system alive but a silently-dead WS otherwise hides
         # from telemetry.
         self._ws_stale_warning_seconds = float(state_cache_stale_seconds)
+        # Private WS socket-level force-reconnect (see EventDemoDaemon for the rationale):
+        # reconnect off pybit's is_connected() (true liveness, not data-silence — the
+        # private stream only pushes on changes), only after CONTINUOUS disconnection past
+        # this bound (pybit's own auto-reconnect first) + a cooldown (auth-limit safety).
+        self._private_stale_reconnect_seconds = 3.0 * float(state_cache_stale_seconds)
+        self._ws_private_disconnected_since: float | None = None
+        self._last_private_reconnect_monotonic = 0.0
+        self._ws_private_reconnects = 0
         self._ws_private_stale_warned = False
         self._ws_ticker_stale_warned = False
         self._ws_private_stale_ticks = 0
@@ -464,6 +472,7 @@ class LongNativeDemoDaemon:
                 "reconcile_errors": self._reconcile_errors,
                 "ws_private_stale_ticks": self._ws_private_stale_ticks,
                 "ws_ticker_stale_ticks": self._ws_ticker_stale_ticks,
+                "ws_private_reconnects": self._ws_private_reconnects,
             })
         if payload is not None and self._trade_router is not None:
             try:
@@ -664,6 +673,39 @@ class LongNativeDemoDaemon:
             elif self._ws_private_stale_warned:
                 _logger.info("long private WS resumed (silence=%.1fs)", priv_silence)
                 self._ws_private_stale_warned = False
+        # Socket-level private-WS force-reconnect (TRUE liveness via pybit is_connected,
+        # not data-silence — a quiet account is silent but healthy). Rebuild only after a
+        # genuinely DOWN socket past the bound (pybit auto-reconnect first) + a cooldown
+        # (auth-limit safety). REST reconcile covers the gap; never blocks a cycle.
+        if self._ws_stream is not None and not self._shutdown.is_set():
+            connected = (
+                self._ws_stream.is_connected()
+                if hasattr(self._ws_stream, "is_connected")
+                else None
+            )
+            if connected is False:
+                mono = time.monotonic()
+                if self._ws_private_disconnected_since is None:
+                    self._ws_private_disconnected_since = mono
+                down_for = mono - self._ws_private_disconnected_since
+                cooldown_elapsed = (
+                    mono - self._last_private_reconnect_monotonic > self._private_stale_reconnect_seconds
+                )
+                if down_for > self._private_stale_reconnect_seconds and cooldown_elapsed:
+                    self._ws_private_reconnects += 1
+                    self._last_private_reconnect_monotonic = mono
+                    self._ws_private_disconnected_since = None
+                    _logger.warning(
+                        "long private WS socket down %.0fs > reconnect bound %.0fs; forcing stream rebuild",
+                        down_for, self._private_stale_reconnect_seconds,
+                    )
+                    self._close_ws()
+                    try:
+                        self._open_ws()
+                    except Exception as exc:  # noqa: BLE001 - rebuild best-effort; REST reconcile covers the gap
+                        _logger.warning("long private WS forced reconnect failed: %s", exc)
+            elif connected is True:
+                self._ws_private_disconnected_since = None
         if self._ticker_cache.is_seeded():
             ticker_silence = self._ticker_cache.seconds_since_last_ws_event()
             if ticker_silence != float("inf") and ticker_silence > threshold:

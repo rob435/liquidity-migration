@@ -834,6 +834,21 @@ class BybitPrivateWebSocketStream:
         reads to bypass the per-cycle REST get_wallet_balance call."""
         self._client.wallet_stream(callback=callback)
 
+    def is_connected(self) -> bool | None:
+        """Socket-level liveness of the private stream. pybit's WebSocket subclasses
+        _WebSocketManager, whose is_connected() reads ``ws.sock.connected`` — a TRUE
+        connection signal independent of data flow, so a watchdog can distinguish a
+        DEAD socket from a merely-quiet account (the private stream only pushes on
+        position/order changes). Returns None when the client doesn't expose it (older
+        pybit) so the caller can stay conservative and not force a reconnect."""
+        probe = getattr(self._client, "is_connected", None)
+        if not callable(probe):
+            return None
+        try:
+            return bool(probe())
+        except Exception:  # noqa: BLE001 - a liveness probe must never raise into the cycle
+            return None
+
     def close(self) -> None:
         _close_ws_client(self._client)
 
