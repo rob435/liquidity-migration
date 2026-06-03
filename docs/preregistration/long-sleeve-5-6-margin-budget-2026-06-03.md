@@ -16,9 +16,22 @@ new-entry count if it is at/over its pre-registered IM ceiling (long-sleeve-5), 
 claims each symbol through an under-lock reservation so two processes can't both enter the same
 symbol in the same minute (long-sleeve-6). All writes are under-lock read-modify-write (serialized).
 
-## The split (REVISED 2026-06-03 — DYNAMIC EQUAL SPLIT, operator-directed)
-Superseding the earlier static `seed_margin_budget` choice: ws_risk now computes the split
-**automatically every reconcile pass** as an EQUAL division across the ACTIVE sleeves —
+## STATUS 2026-06-03 (post adversarial round-6): BUDGET OFF — clamp NOT wired, deferred
+The dynamic equal-split below was BUILT + tested, then an adversarial verifier (round 6) showed an
+**equal 1/n split STARVES the over-subscribed sleeves**: long alone wants ~200% IM (10x leverage x
+10x notional ⇒ 20% of equity per position), short ~50%, continuous ~25% — the three combined want
+~275% of ONE netted account, so any ≤100% budget throttles someone, and an equal third clamps long to
+~2 of its 5–10 positions and short to ~8 of 12 (this is literally the falsifier below). **Operator
+decision: ship with the budget OFF** (ws_risk writes IM/equity + GCs reservations only; the clamp
+stays a no-op, budget None — the verified pre-this-turn behavior). The building blocks
+(`equal_split_budget`, `ws_risk._active_sleeves`, the `sleeves.env` EnvironmentFile, the
+`write_account_state` budget arg) remain in place + tested, ready to wire a **sleeve-WEIGHTED** split
+once chosen deliberately. The reservation registry stays active (separate, fail-open). DO NOT wire an
+equal split as-is.
+
+## The (DEFERRED) split equation — DYNAMIC EQUAL SPLIT
+If/when wired: ws_risk computes the split every reconcile pass as an EQUAL division across the ACTIVE
+sleeves —
 
 > **budget(sleeve) = 1 / n_active**  (3 active → 0.333… each, 2 → 0.5 each, 1 → 1.0)
 

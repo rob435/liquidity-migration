@@ -525,9 +525,14 @@ class EventWebSocketRiskEngine:
             account_pct, im_by_sleeve = _cross_sleeve.compute_im_used(
                 self.state.open_trades, equity_usdt=equity, sleeve_leverage=self._sleeve_entry_leverage()
             )
-            # Equal-split IM budget = 1/n across the active sleeves, recomputed + written each
-            # pass so it self-adjusts to the kill-switch (3 on → 1/3 each, 2 → 1/2, 1 → 1/1).
-            budget = _cross_sleeve.equal_split_budget(self._active_sleeves())
+            # Margin budget is OFF (operator decision 2026-06-03): an EQUAL 1/n split would
+            # STARVE the over-subscribed sleeves — long alone wants ~200% IM (10x lev x 10x
+            # notional, 20%/position), short ~50%, continuous ~25%; the three combined want
+            # ~275% of one netted account, so any <=100% budget throttles someone and an
+            # equal third clamps long to ~2 of its 5-10 positions. The building blocks are
+            # ready (`equal_split_budget(self._active_sleeves())`) but wiring a budget here
+            # is gated on a deliberate, sleeve-WEIGHTED allocation choice. Until then ws_risk
+            # writes ONLY IM/equity + GCs reservations; the clamp stays a no-op (budget None).
             _cross_sleeve.write_account_state(
                 self.root,
                 equity_usdt=equity,
@@ -535,7 +540,6 @@ class EventWebSocketRiskEngine:
                 im_used_pct_by_sleeve=im_by_sleeve,
                 now_ms=_now_ms(),
                 account_key=self.account_key,
-                margin_budget_pct_by_sleeve=budget,
             )
         except Exception as exc:  # noqa: BLE001 - owner write must never break reconcile
             _logger.error("ws_risk: cross-sleeve state refresh failed (non-fatal): %s", exc)
