@@ -21,6 +21,7 @@ dependencies = [
 dev = [
     "pytest>=8.3,<9.0",
     "ruff>=0.6,<1.0",
+    "mypy>=1.11,<2.0",
 ]
 
 [tool.ruff]
@@ -29,6 +30,41 @@ line-length = 120
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]
+
+# Static type checking. Adopted incrementally: lenient at the (un-stubbed) polars/
+# numpy/pybit boundary, real checks on our own logic. Run: `mypy` (config below).
+# Ratchet plan: the per-module `disable_error_code` relaxations below are the only
+# debt — each is a polars Series-aggregate -> float() coercion the call site
+# guarantees is numeric; the rung after green is replacing those with a None-safe
+# helper, then enabling disallow_untyped_defs. Green today catches the bugs that
+# matter (None-derefs, wrong Callable/return types, stale attrs).
+[tool.mypy]
+python_version = "3.11"
+files = ["liquidity_migration"]
+ignore_missing_imports = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+no_implicit_optional = true
+
+# RATCHET DEBT (the only relaxations): the pure-compute modules below do
+# `float(series.mean()/.sum()/.min())` on polars aggregates, which polars types as
+# a broad `... | None` union — mypy can't see that the call site guarantees a
+# finite number. arg-type stays ON everywhere else (it caught real wrong-type
+# bugs in cli/ws_risk/daemons). Next rung: route these through a None-safe helper,
+# then drop these overrides.
+[[tool.mypy.overrides]]
+module = [
+    "liquidity_migration.trade_lifecycle",
+    "liquidity_migration.kline_store",
+    "liquidity_migration.volume_events",
+    "liquidity_migration.volume_events_charts",
+    "liquidity_migration.volume_events_features",
+    "liquidity_migration.continuous_events",
+    "liquidity_migration.signal_harness",
+    "liquidity_migration.universe",
+    "liquidity_migration.volume_features",
+]
+disable_error_code = ["arg-type"]
 
 [tool.setuptools.packages.find]
 include = ["liquidity_migration*"]

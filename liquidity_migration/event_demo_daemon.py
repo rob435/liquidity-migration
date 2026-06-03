@@ -121,7 +121,9 @@ class EventDemoDaemon:
         order_submit_mode: str = "ws_then_rest",
         ws_trade_timeout_seconds: float = 5.0,
         trade_router: Any | None = None,
-        trade_router_factory: Callable[[ResearchConfig, EventDemoCycleConfig], Any] | None = None,
+        # (config, demo_config, *, order_submit_mode, ws_timeout_seconds) -> router; ... since the
+        # default factory takes keyword args the 2-arg signature omitted (mypy caught the mismatch).
+        trade_router_factory: Callable[..., Any] | None = None,
         event_driven_cycle: bool = True,
         min_cycle_interval_seconds: float = 2.0,
     ) -> None:

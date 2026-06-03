@@ -125,6 +125,12 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
         loop and a prompt cycle so held-set/capacity update immediately, not at the next 60s tick.
     """
 
+    # The continuous sleeve has its OWN config type (NOT a subclass of the long sleeve's) yet reuses
+    # the long daemon's scaffolding, so self.demo_config is genuinely a ContinuousDemoCycleConfig here.
+    # The base stores it via an untyped assignment as LongNativeDemoCycleConfig; narrow it for the
+    # checker. (mypy surfaced this real divergence — see the deferred BaseDemoDaemon note.)
+    demo_config: ContinuousDemoCycleConfig  # type: ignore[assignment]
+
     def __init__(
         self,
         data_root: str | Path,
@@ -217,7 +223,15 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
         try:
             return super().run()
         finally:
+            # Idempotent backstop; the primary stop is _pre_resource_teardown(),
+            # which the base run() invokes BEFORE closing WS/kline/trade resources.
             self._stop_protective_exit_monitor()
+
+    def _pre_resource_teardown(self) -> None:
+        # Stop + join the fast protective-exit thread BEFORE the base closes the
+        # WS/kline/trade clients it submits through, so a draining protective cycle
+        # never touches a closed client (ws-daemonloops-1).
+        self._stop_protective_exit_monitor()
 
     def request_shutdown(self) -> None:
         super().request_shutdown()
@@ -248,8 +262,14 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
         self._protective_exit_thread = None
         if thread is None:
             return
+        self._shutdown.set()
         self._tick_event.set()
-        thread.join(timeout=5.0)
+        # A protective cycle can be mid order-submit (acquires the file lock and
+        # places a reduce-only exit); a 5s join could return while that submit is
+        # still in flight and the daemon=True thread then gets hard-killed. Join with
+        # a budget that covers an order submit + fill-confirm (ws-daemonloops-2).
+        join_budget = max(15.0, float(getattr(self.demo_config, "order_fill_confirm_seconds", 0.0)) + 5.0)
+        thread.join(timeout=join_budget)
 
     def _protective_exit_loop(self) -> None:
         cfg = self.demo_config

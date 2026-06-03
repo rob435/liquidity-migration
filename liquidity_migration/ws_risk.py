@@ -530,7 +530,7 @@ class EventWebSocketRiskEngine:
             self.reconcile_flat_pending_exit_orders(orders)
             orders = self._read_orders_combined()
             self.terminalize_stale_pending_entry_orders(orders)
-        self.reconcile_positions(write=True)
+        self.reconcile_positions(write=True, require_evidence=True)
         self.evaluate_symbols(set(self.state.positions_by_symbol))
         self.repair_exchange_stops()
         self.adopt_untracked_positions()
@@ -1263,7 +1263,7 @@ class EventWebSocketRiskEngine:
             self._write_order_rows_routed(rows)
             self.state.repairs.extend(rows)
 
-    def reconcile_positions(self, *, write: bool) -> list[dict[str, Any]]:
+    def reconcile_positions(self, *, write: bool, require_evidence: bool = False) -> list[dict[str, Any]]:
         # ``trading_client`` enables the B3 closed-PnL backfill: when an orphan
         # is detected, the reconciler calls ``get_closed_pnl`` to fill in
         # ``exit_price`` / ``gross_trade_return`` / ``net_return`` /
@@ -1275,6 +1275,11 @@ class EventWebSocketRiskEngine:
         # the REST positions probe failed the empty ``positions_by_symbol``
         # would otherwise look like "every open trade has vanished" and
         # false-positive orphan-close them all on a transient API hiccup.
+        # ``require_evidence`` is set by the bulk REST snapshot callers
+        # (rest_reconcile / bootstrap): a successful-but-empty or partial snapshot
+        # must not zero-PnL-close a trade that ``get_closed_pnl`` can't confirm.
+        # The WS ``on_position_message`` path leaves it False (a WS size=0 is the
+        # close evidence for that symbol).
         reconciled, rows = _risk_reconcile_missing_positions(
             self.state.open_trades,
             position_by_symbol=self.state.positions_by_symbol,
@@ -1282,6 +1287,7 @@ class EventWebSocketRiskEngine:
             enabled=self.risk.submit_orders and self.private_client is not None,
             position_error=self.state.last_position_error,
             trading_client=self.private_client,
+            require_evidence=require_evidence,
         )
         self.state.open_trades = reconciled
         if rows:
@@ -1342,7 +1348,7 @@ class EventWebSocketRiskEngine:
             self.reconcile_flat_pending_exit_orders(orders)
             orders = self._read_orders_combined()
             self.terminalize_stale_pending_entry_orders(orders)
-        self.reconcile_positions(write=True)
+        self.reconcile_positions(write=True, require_evidence=True)
         self.evaluate_symbols(set(self.state.positions_by_symbol))
         self.repair_exchange_stops()
         self.reconcile_untracked_exit_orders()
@@ -1468,8 +1474,11 @@ class EventWebSocketRiskEngine:
         # rebuild positions instead of seeing 3 demo_only / 3 paper_only.
         recovered = self._recover_entry_link_metadata(symbol=symbol, side=side)
         if recovered is not None:
-            link, strategy_id, signal_ts_ms, decoded_sleeve = recovered
-            trade_id = f"{strategy_id}-{symbol}-{signal_ts_ms}"
+            link, strategy_id, signal_ts_ms, decoded_sleeve, reentry_seq = recovered
+            # Rebuild the deterministic trade_id, carrying the continuous re-entry seq so a rebuilt
+            # same-signal-window re-entry reconstructs its DISTINCT id (continuous-2). seq=0 (every
+            # short/long link + a first continuous entry) reproduces the legacy form verbatim.
+            trade_id = f"{strategy_id}-{symbol}-{signal_ts_ms}" + (f"-{reentry_seq}" if reentry_seq > 0 else "")
             # entry_ts_ms must reflect the actual fill time (Bybit's
             # createdTime) not signal_ts. The cycle's exit logic computes
             # planned_exit_ts_ms = entry_ts_ms + hold_days*MS_PER_DAY and
@@ -1556,7 +1565,7 @@ class EventWebSocketRiskEngine:
 
     def _recover_entry_link_metadata(
         self, *, symbol: str, side: str,
-    ) -> tuple[str, str, int, str] | None:
+    ) -> tuple[str, str, int, str, int] | None:  # (link, strategy_id, signal_ts_ms, sleeve, reentry_seq)
         """Find the original bot-placed entry order for ``symbol`` and decode
         its orderLinkId into (link, strategy_id, signal_ts_ms, sleeve).
         Returns None when the symbol has no bot-generated entry in the recent
@@ -1585,11 +1594,11 @@ class EventWebSocketRiskEngine:
             decoded = decode_entry_order_link_id(link)
             if decoded is None:
                 continue
-            decoded_sleeve, signal_ts_ms = decoded
+            decoded_sleeve, signal_ts_ms, reentry_seq = decoded
             strategy_id = self._adopt_strategy_id_for_sleeve(decoded_sleeve)
             if not strategy_id:
                 continue
-            return link, strategy_id, signal_ts_ms, decoded_sleeve
+            return link, strategy_id, signal_ts_ms, decoded_sleeve, reentry_seq
         return None
 
     def _adopt_strategy_id_for_sleeve(self, sleeve: str) -> str:
