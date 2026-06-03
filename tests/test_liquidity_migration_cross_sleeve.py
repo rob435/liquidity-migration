@@ -14,6 +14,7 @@ from liquidity_migration.cross_sleeve import (
     clamp_max_new_entries,
     equal_split_budget,
     read_account_state,
+    release_symbol_reservation,
     seed_margin_budget,
     write_account_state,
 )
@@ -281,3 +282,26 @@ def test_claim_is_atomic_under_true_process_contention(tmp_path: Path) -> None:
         assert sum(1 for _, ok in results if ok) == 1, f"attempt {attempt}: exactly one process wins"
         active = [r for r in read_account_state(root).reservations if r["symbol"] == "RACEUSDT"]
         assert len(active) == 1, f"attempt {attempt}: exactly one reservation row persisted"
+
+
+def test_release_symbol_reservation_frees_symbol_for_sibling(tmp_path: Path) -> None:
+    """LON-9: releasing a failed long entry's reservation frees the symbol for a sibling
+    sleeve immediately, instead of blocking it for the full TTL. Matches only on
+    (symbol, sleeve, trade_id) so it never drops another sleeve's claim."""
+    # Seed the control dataset so claims persist (an absent dataset fails open).
+    seed_margin_budget(tmp_path, {"long": 0.45}, now_ms=1_000)
+    now = 1_700_000_000_000
+
+    assert claim_symbol_reservation(tmp_path, symbol="AAAUSDT", sleeve="long", trade_id="t1", now_ms=now) is True
+    # short is blocked while long holds it
+    assert claim_symbol_reservation(tmp_path, symbol="AAAUSDT", sleeve="short", trade_id="t2", now_ms=now) is False
+
+    # long's entry failed -> release frees the symbol
+    assert release_symbol_reservation(tmp_path, symbol="AAAUSDT", sleeve="long", trade_id="t1", now_ms=now) is True
+    assert claim_symbol_reservation(tmp_path, symbol="AAAUSDT", sleeve="short", trade_id="t2", now_ms=now) is True
+
+    # releasing something never claimed is a harmless no-op
+    assert release_symbol_reservation(tmp_path, symbol="ZZZUSDT", sleeve="long", trade_id="x", now_ms=now) is False
+    # a wrong-trade_id release must NOT drop short's live claim
+    assert release_symbol_reservation(tmp_path, symbol="AAAUSDT", sleeve="short", trade_id="WRONG", now_ms=now) is False
+    assert claim_symbol_reservation(tmp_path, symbol="AAAUSDT", sleeve="long", trade_id="t3", now_ms=now) is False

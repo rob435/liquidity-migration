@@ -17,8 +17,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from liquidity_migration.config import load_config
-from liquidity_migration.long_native import run_long_native_research
+from liquidity_migration.long_native import build_long_research_inputs, run_long_native_research
 from liquidity_migration.long_native_event_demo import _v11a_long_native_config
+
+# Sweep params that only affect ENTRY classification (_classify_entry), NOT build_long_features.
+# When the sweep varies only these, the read + feature panel is identical across cells, so we
+# build it ONCE and reuse it (LON-6). Any other override forces a recompute (correctness first).
+_ENTRY_ONLY_OVERRIDES = {"fc_min_day_return", "fc_use_sigma_threshold"}
 
 
 def _fmt_pct_tag(value: float) -> str:
@@ -51,6 +56,7 @@ def main() -> int:
 
     base_cfg = _v11a_long_native_config()
     sweep_summary: list[dict] = []
+    shared_inputs: dict | None = None  # LON-6: built once, reused across entry-only cells
 
     for value in values:
         tag = _fmt_pct_tag(value)
@@ -66,6 +72,12 @@ def main() -> int:
             if args.disable_sigma:
                 overrides["fc_use_sigma_threshold"] = False
             cfg = replace(base_cfg, **overrides)
+            # LON-6: reuse the read+feature inputs ONLY when every varied field is entry-only
+            # (features are then provably identical to base_cfg); otherwise recompute. Built
+            # lazily so an all-skipped run never pays the read/build cost.
+            reuse_inputs = set(overrides).issubset(_ENTRY_ONLY_OVERRIDES)
+            if reuse_inputs and shared_inputs is None:
+                shared_inputs = build_long_research_inputs(data_root, config=base_cfg)
             t0 = time.perf_counter()
             print(f"[run ] fc_min_day_return={value} -> {run_dir}", flush=True)
             payload = run_long_native_research(
@@ -73,6 +85,7 @@ def main() -> int:
                 config=cfg,
                 cost_config=research.costs,
                 report_dir=run_dir,
+                precomputed_inputs=shared_inputs if reuse_inputs else None,
             )
             elapsed = time.perf_counter() - t0
             print(f"[done] fc_min_day_return={value} in {elapsed:.1f}s", flush=True)

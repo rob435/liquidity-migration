@@ -85,6 +85,7 @@ from .cross_sleeve import (
     claim_symbol_reservation,
     clamp_max_new_entries,
     read_account_state,
+    release_symbol_reservation,
     shared_account_root,
 )
 from .long_native import LongNativeConfig, _classify_entry, _vol_target_scale, build_long_features
@@ -1405,6 +1406,7 @@ def _execute_long_entries(
         # venue position exists, closing the same-minute cross-process race the lagging
         # venue snapshot misses. Dry-run/paper never reserves (no real order races);
         # fail-open if no writer/control row yet.
+        claimed_reservation = False
         if demo.submit_orders and cross_sleeve_account_root is not None:
             _symbol = str(cand.get("symbol", ""))
             if not claim_symbol_reservation(
@@ -1418,6 +1420,7 @@ def _execute_long_entries(
                 _logger.info("long entry skipped: symbol %s taken by another sleeve (reservation)", _symbol)
                 skipped_reservation += 1
                 continue
+            claimed_reservation = True
         row, order = _execute_single_long_entry(
             cand,
             trading_client=trading_client,
@@ -1433,6 +1436,19 @@ def _execute_long_entries(
         )
         if row is not None:
             rows.append(row)
+        elif claimed_reservation and cross_sleeve_account_root is not None:
+            # LON-9: the entry did NOT open a confirmed position (place failed / fill
+            # unconfirmed -> no trade row), so release the reservation now rather than
+            # blocking siblings from this symbol for the full TTL. Fail-open; the TTL +
+            # closed_trade_ids GC remain the backstop. A confirmed (row is not None) entry
+            # keeps its reservation until ws_risk GCs it on the trade's close.
+            release_symbol_reservation(
+                cross_sleeve_account_root,
+                symbol=str(cand.get("symbol", "")),
+                sleeve="long",
+                trade_id=str(cand.get("trade_id", "")),
+                now_ms=now_ms,
+            )
         if order is not None:
             order_rows.append(order)
     return rows, order_rows, skipped_reservation

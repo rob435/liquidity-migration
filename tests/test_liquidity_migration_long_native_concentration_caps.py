@@ -350,3 +350,27 @@ def test_max_per_symbol_weight_disabled_passes_through() -> None:
     if not trades.is_empty():
         pw = float(trades["position_weight"][0])
         assert math.isfinite(pw) and pw > 0
+
+
+def test_run_long_native_research_precomputed_inputs_are_equivalent(tmp_path) -> None:
+    """LON-6: the sweep hoist (precomputed_inputs) must yield a result identical to the
+    default build-internally path — the read + feature panel are entry-param-independent,
+    so reusing them across sweep cells is provably equivalent (the gate the verifier required)."""
+    import dataclasses
+
+    from liquidity_migration.ingestion import generate_fixture_data
+    from liquidity_migration.long_native import build_long_research_inputs, run_long_native_research
+    from liquidity_migration.long_native_event_demo import _v11a_long_native_config
+
+    generate_fixture_data(tmp_path)
+    cfg = dataclasses.replace(_v11a_long_native_config(), require_full_pit_universe=False)
+
+    default = run_long_native_research(tmp_path, config=cfg, report_dir=tmp_path / "default")
+    inputs = build_long_research_inputs(tmp_path, config=cfg)
+    precomp = run_long_native_research(
+        tmp_path, config=cfg, report_dir=tmp_path / "precomp", precomputed_inputs=inputs,
+    )
+    assert default["summary"] == precomp["summary"]
+    assert default["rows"] == precomp["rows"]
+    assert default["splits"] == precomp["splits"]
+    assert default["run_label"] == precomp["run_label"]

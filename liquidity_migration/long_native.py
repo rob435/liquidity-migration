@@ -367,19 +367,17 @@ def _vol_target_scale(config: "LongNativeConfig", btc_rv: float | None) -> float
     return max(config.vol_target_min_scale, min(config.vol_target_max_scale, vt))
 
 
-def run_long_native_research(
-    data_root: str | Path,
-    *,
-    config: LongNativeConfig | None = None,
-    cost_config: CostConfig | None = None,
-    report_dir: str | Path | None = None,
-) -> dict[str, Any]:
+def build_long_research_inputs(data_root: str | Path, *, config: LongNativeConfig | None = None) -> dict[str, Any]:
+    """Read + build everything run_long_native_research needs BEFORE the trade pipeline:
+    raw klines, the PIT gate, the feature panel, and the per-symbol bar/funding lookups.
+    Split out so a parameter sweep (scripts/long_native_sweep_fc_min_day.py) that varies only
+    ENTRY-classification thresholds (fc_min_day_return etc. — consumed in _classify_entry, NOT
+    in build_long_features) can compute this ONCE and pass it back via run_long_native_research(
+    precomputed_inputs=...), instead of re-reading multi-GB klines + rebuilding ~109 feature
+    columns per sweep cell (LON-6). The DEFAULT run_long_native_research path calls this with
+    no precomputed inputs, so its behaviour is byte-identical to before the split."""
     cfg = config or LongNativeConfig()
-    costs = cost_config or CostConfig()
     root = Path(data_root).expanduser()
-    output_dir = Path(report_dir) if report_dir else root / "reports" / "long_native_research"
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     raw_klines = read_dataset_columns(
         root, "klines_1h",
         columns=["ts_ms", "symbol", "date", "open", "high", "low", "close", "turnover_quote", "volume_base"],
@@ -426,8 +424,44 @@ def run_long_native_research(
     if features.is_empty():
         raise RuntimeError("No features generated")
 
-    bars_by_symbol = _bars_by_symbol(klines)
-    funding_lookup = _funding_lookup(funding) if funding is not None and not funding.is_empty() else None
+    return {
+        "raw_klines": raw_klines,
+        "klines": klines,
+        "archive_manifest": archive_manifest,
+        "features": features,
+        "bars_by_symbol": _bars_by_symbol(klines),
+        "funding_lookup": _funding_lookup(funding) if funding is not None and not funding.is_empty() else None,
+        "full_pit_universe_pass": full_pit_universe_pass,
+        "pit_covered_date_symbols": pit_covered_date_symbols,
+    }
+
+
+def run_long_native_research(
+    data_root: str | Path,
+    *,
+    config: LongNativeConfig | None = None,
+    cost_config: CostConfig | None = None,
+    report_dir: str | Path | None = None,
+    precomputed_inputs: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    cfg = config or LongNativeConfig()
+    costs = cost_config or CostConfig()
+    root = Path(data_root).expanduser()
+    output_dir = Path(report_dir) if report_dir else root / "reports" / "long_native_research"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Default path builds the inputs here (byte-identical to before the LON-6 split). A
+    # sweep over ENTRY-only params passes precomputed_inputs to skip the re-read + rebuild;
+    # the caller is responsible for only reusing them when feature-affecting cfg is unchanged.
+    inputs = precomputed_inputs if precomputed_inputs is not None else build_long_research_inputs(root, config=cfg)
+    raw_klines = inputs["raw_klines"]
+    klines = inputs["klines"]
+    archive_manifest = inputs["archive_manifest"]
+    features = inputs["features"]
+    bars_by_symbol = inputs["bars_by_symbol"]
+    funding_lookup = inputs["funding_lookup"]
+    full_pit_universe_pass = inputs["full_pit_universe_pass"]
+    pit_covered_date_symbols = inputs["pit_covered_date_symbols"]
 
     trades, lifecycle_stats, event_counts = _run_long_pipeline(
         features=features,

@@ -471,3 +471,50 @@ def claim_symbol_reservation(
     except Exception as exc:  # noqa: BLE001 - reservation must never halt the live book
         _logger.warning("cross_sleeve claim failed for %s/%s, failing open: %s", sleeve, symbol, exc)
         return True
+
+
+def release_symbol_reservation(
+    account_root: str | Path,
+    *,
+    symbol: str,
+    sleeve: str,
+    trade_id: str,
+    now_ms: int,
+) -> bool:
+    """LON-9: drop the active reservation `sleeve` claimed for `symbol`/`trade_id` once an
+    entry FAILED or went unconfirmed (no trade opened), so a sibling sleeve isn't blocked
+    from that symbol for the full RESERVATION_TTL_MS. Matches on (symbol, sleeve, trade_id)
+    so it only ever releases THIS sleeve's own claim, never another's. Returns True iff a
+    reservation was dropped. Safe-by-default: no control dataset yet -> no-op; ANY error ->
+    swallow + warn (a release bug must never halt the book — the TTL is still the backstop).
+    The TTL-expiry / closed_trade_ids GC in write_account_state remains the fallback."""
+    try:
+        root = ensure_data_root(account_root)
+        with exclusive_file_lock(dataset_lock_path(root, CROSS_SLEEVE_DATASET), stale_seconds=21_600, poll_seconds=0.01):
+            path = root / CROSS_SLEEVE_DATASET
+            if not (path.exists() and sorted(path.glob("**/*.parquet"))):
+                return False  # nothing persisted yet
+            state = _read_state_locked(root)
+            kept = [
+                r for r in state.reservations
+                if not (
+                    str(r.get("symbol")) == symbol
+                    and str(r.get("sleeve")) == sleeve
+                    and str(r.get("trade_id")) == trade_id
+                )
+            ]
+            if len(kept) == len(state.reservations):
+                return False  # nothing matched (already GC'd / never claimed)
+            _write_state_locked(root, CrossSleeveAccountState(
+                account_key=state.account_key,
+                equity_usdt=state.equity_usdt,
+                account_im_used_pct=state.account_im_used_pct,
+                im_used_pct_by_sleeve=state.im_used_pct_by_sleeve,
+                margin_budget_pct_by_sleeve=state.margin_budget_pct_by_sleeve,
+                reservations=kept,
+                updated_at_ms=max(state.updated_at_ms + 1, int(now_ms)),  # CS-1: monotonic last-writer-wins
+            ))
+            return True
+    except Exception as exc:  # noqa: BLE001 - a release bug must never halt the book; TTL is the backstop
+        _logger.warning("cross_sleeve release failed for %s/%s (TTL still frees it): %s", sleeve, symbol, exc)
+        return False
