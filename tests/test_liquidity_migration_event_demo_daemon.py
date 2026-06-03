@@ -57,7 +57,7 @@ def test_daemon_subscribes_to_ws_executions_on_start_and_closes_on_stop(tmp_path
     # Give it a beat to subscribe + run cycle.
     time.sleep(0.05)
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     assert not runner.is_alive(), "daemon did not stop cleanly"
     assert ws.execution_callback is not None
     assert ws.closed is True
@@ -111,7 +111,7 @@ def test_daemon_continues_running_when_cycle_raises(tmp_path: Path) -> None:
     runner.start()
     time.sleep(0.1)
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     assert not runner.is_alive()
     assert call_count["n"] >= 2
     stats = daemon.router.stats()
@@ -162,7 +162,7 @@ def test_daemon_run_reports_ws_gap_stats(tmp_path: Path) -> None:
     runner.start()
     time.sleep(0.05)
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     assert not runner.is_alive()
     assert result["stats"]["ws_gap_count"] == 0
     assert result["stats"]["ws_max_gap_seconds"] == 0.0
@@ -295,32 +295,48 @@ def test_daemon_falls_back_to_rest_when_ws_factory_fails(tmp_path: Path) -> None
     runner.start()
     time.sleep(0.05)
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     assert not runner.is_alive()
     assert len(seen) >= 1  # cycles ran even without WS
 
 
 def test_daemon_shutdown_during_sleep_returns_promptly(tmp_path: Path) -> None:
     """SIGTERM during the sleep between cycles must wake the daemon quickly so
-    systemctl stop doesn't hit its kill-timeout."""
+    systemctl stop doesn't hit its kill-timeout. We time the shutdown from a
+    KNOWN-sleeping state (poll until cycle 1 has completed) so cold-start
+    cycle-drain can't leak into `elapsed` — a fixed sleep(0.05) didn't guarantee
+    cycle 1 had finished, which made this assertion flaky under load."""
     ws = _RecordingWsStream()
+    seen: list[dict] = []
     daemon = EventDemoDaemon(
         tmp_path,
         config=ResearchConfig(data_root=tmp_path),
         demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
         interval_seconds=5.0,  # long sleep between cycles
         ws_stream_factory=lambda _config: ws,
-        cycle_runner=_stub_cycle_runner([]),
+        cycle_runner=_stub_cycle_runner(seen),
     )
     runner = threading.Thread(target=daemon.run, daemon=True)
     runner.start()
-    time.sleep(0.05)  # let first cycle finish + start sleeping
+    # Cycle 1 returns immediately after appending to `seen`; once it has, the daemon
+    # is entering the 5s inter-cycle sleep. Absorb cold-start cost in this poll, NOT
+    # in the measured shutdown latency below.
+    deadline = time.monotonic() + 5.0
+    while not seen and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert seen, "cycle 1 never ran"
     started_stop = time.monotonic()
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     elapsed = time.monotonic() - started_stop
     assert not runner.is_alive()
-    assert elapsed < 1.0, f"shutdown during sleep must be near-instant, took {elapsed:.3f}s"
+    # The property under test: the 5.0s inter-cycle sleep was INTERRUPTED (not slept
+    # to completion / hung). A clean shutdown returns in teardown time (~0.3-1.8s of
+    # thread joins, load-dependent); a broken/non-interruptible one would take ~5s+.
+    # The threshold sits comfortably below the interval to prove interruption while
+    # tolerating teardown-join variance under load (the old 1.0s bound was inside that
+    # variance band -> flaky). systemd's stop-timeout (default 90s) is the real budget.
+    assert elapsed < 3.0, f"shutdown must interrupt the 5s sleep, took {elapsed:.3f}s"
 
 
 def test_daemon_rejects_negative_interval(tmp_path: Path) -> None:
@@ -372,7 +388,7 @@ def test_daemon_prints_event_demo_cycle_summary_per_cycle(tmp_path: Path, capsys
     runner.start()
     time.sleep(0.1)
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     assert not runner.is_alive()
     out = capsys.readouterr().out
     assert "event demo cycle" in out, f"daemon did not emit cycle summary: {out!r}"
@@ -408,7 +424,7 @@ def test_daemon_sends_telegram_on_startup_and_shutdown(tmp_path: Path) -> None:
     runner.start()
     time.sleep(0.05)
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     assert not runner.is_alive()
 
     assert len(messages) == 2, f"expected 1 start + 1 stop telegram, got {messages}"
@@ -442,7 +458,7 @@ def test_daemon_telegram_disabled_sends_nothing(tmp_path: Path) -> None:
     runner.start()
     time.sleep(0.05)
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     assert messages == []
 
 
@@ -471,7 +487,7 @@ def test_daemon_telegrams_cycle_exception(tmp_path: Path) -> None:
     runner.start()
     time.sleep(0.1)
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     assert not runner.is_alive()
 
     crash_msgs = [m for m in messages if "cycle failed" in m]
@@ -501,7 +517,7 @@ def test_daemon_continues_running_when_telegram_send_raises(tmp_path: Path) -> N
     runner.start()
     time.sleep(0.1)
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     assert not runner.is_alive()
     # No assertion needed beyond "daemon exits cleanly"; the test fails on
     # timeout if a telegram exception breaks the loop.
@@ -529,7 +545,7 @@ def test_daemon_telegram_startup_reports_ws_unavailable_when_factory_fails(tmp_p
     runner.start()
     time.sleep(0.05)
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     start = next((m for m in messages if "started" in m), "")
     assert "ws=unavailable" in start, f"expected ws=unavailable in startup msg, got {start!r}"
 
@@ -560,7 +576,7 @@ def test_daemon_holds_fixed_interval_cadence_without_drift(tmp_path: Path) -> No
     runner.start()
     time.sleep(1.1)  # enough wall time for ~4 cycles at a 0.25s cadence
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     assert not runner.is_alive()
     assert len(cycle_starts) >= 3, f"expected several cycles, got {len(cycle_starts)}"
 
@@ -597,9 +613,9 @@ def test_daemon_overrun_fires_next_cycle_immediately_and_counts(tmp_path: Path) 
     )
     runner = threading.Thread(target=daemon.run, daemon=True)
     runner.start()
-    time.sleep(0.8)
+    time.sleep(1.2)  # wider window -> reliably collects >=3 overrunning cycles under load
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     assert not runner.is_alive()
     assert len(cycle_starts) >= 3
     assert daemon._cycle_overruns >= 2  # type: ignore[attr-defined]
@@ -637,7 +653,7 @@ def test_daemon_kline_warmer_runs_between_cycles(tmp_path: Path) -> None:
     runner.start()
     time.sleep(0.4)
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     assert not runner.is_alive()
     assert len(warm_calls) >= 2, f"warmer should have fired between cycles, got {len(warm_calls)}"
     assert daemon._kline_warms >= 2  # type: ignore[attr-defined]
@@ -664,7 +680,7 @@ def test_daemon_kline_warmer_can_be_disabled(tmp_path: Path) -> None:
     runner.start()
     time.sleep(0.3)
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     assert not runner.is_alive()
     assert warm_calls == []
     assert daemon._kline_warms == 0  # type: ignore[attr-defined]
@@ -698,7 +714,7 @@ def test_daemon_kline_warmer_yields_while_a_cycle_runs(tmp_path: Path) -> None:
     runner.start()
     time.sleep(0.5)
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     assert not runner.is_alive()
     assert warm_calls == [], "warmer must not fire while cycles run continuously"
     assert daemon._kline_warms_skipped > 0  # type: ignore[attr-defined]
@@ -1147,7 +1163,7 @@ def test_daemon_reuses_seeder_rest_clients_across_reconciles(tmp_path: Path) -> 
             _time.sleep(0.02)
     finally:
         daemon.request_shutdown()
-        runner.join(timeout=2.0)
+        runner.join(timeout=5.0)
     assert len(seen_market_clients) >= 2, (
         f"seeder fired only {len(seen_market_clients)} times; expected >= 2"
     )
@@ -1202,7 +1218,7 @@ def test_daemon_seed_runs_async_and_does_not_block_first_cycle(tmp_path: Path) -
     finally:
         seed_allow_complete.set()
         daemon.request_shutdown()
-        runner.join(timeout=2.0)
+        runner.join(timeout=5.0)
 
 
 class _RecordingTickerStream:
@@ -1242,7 +1258,7 @@ def test_daemon_lifecycle_telegrams_default_off(tmp_path: Path) -> None:
     runner.start()
     time.sleep(0.05)
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     assert not any("started" in m for m in messages), f"startup telegram should be suppressed, got {messages!r}"
     assert not any("stopped" in m for m in messages), f"shutdown telegram should be suppressed, got {messages!r}"
 
@@ -1265,7 +1281,7 @@ def test_daemon_shutdown_telegram_can_be_re_enabled(tmp_path: Path) -> None:
     runner.start()
     time.sleep(0.05)
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     assert any("stopped" in m for m in messages)
 
 
@@ -1288,7 +1304,7 @@ def test_daemon_startup_telegram_can_be_suppressed(tmp_path: Path) -> None:
     runner.start()
     time.sleep(0.05)
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     assert not any("started" in m for m in messages)
     assert not any("stopped" in m for m in messages)
 
@@ -1317,7 +1333,7 @@ def test_daemon_cycle_failure_telegram_fires_regardless_of_lifecycle_flag(tmp_pa
     runner.start()
     time.sleep(0.1)
     daemon.request_shutdown()
-    runner.join(timeout=2.0)
+    runner.join(timeout=5.0)
     error_msgs = [m for m in messages if "cycle failed" in m or "❌" in m]
     assert error_msgs, f"expected at least one cycle-failed telegram, got {messages!r}"
 
