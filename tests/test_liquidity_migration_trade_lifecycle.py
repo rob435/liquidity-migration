@@ -296,19 +296,18 @@ def test_perp_funding_return_modeled_with_zero_events_in_window():
 
 
 def test_funding_lookup_collapses_intra_interval_snapshot_rows():
-    # Some symbols carry hourly snapshot rows of an 8h funding rate
-    # (funding_interval_min=480). Each settlement must be charged once, not once
-    # per snapshot row, or a multi-day hold is over-charged up to ~8x.
+    # Hourly snapshot rows of an 8h funding rate must collapse to one charge per settlement.
+    # Snapshot collapse is only safe with the AUTHORITATIVE interval, so it is passed explicitly
+    # (the stored funding_interval_min is no longer trusted — see the 4h-undercount test below).
     hour = 3_600_000
     funding = pl.DataFrame(
         {
             "symbol": ["AAA"] * 24,
             "ts_ms": [h * hour for h in range(24)],
             "funding_rate": [0.001] * 24,
-            "funding_interval_min": [480] * 24,
         }
     )
-    lookup = _funding_lookup(funding)
+    lookup = _funding_lookup(funding, interval_by_symbol={"AAA": 480})
     # 24 hourly rows span three 8h settlements -> three events, not 24.
     assert lookup["AAA"]["events_ts"] == [0, 8 * hour, 16 * hour]
     # Coverage span stays the raw first/last stamp.
@@ -319,6 +318,33 @@ def test_funding_lookup_collapses_intra_interval_snapshot_rows():
         lookup, symbol="AAA", side="short", entry_ts_ms=1, exit_ts_ms=23 * hour
     )
     assert (mode, count) == ("modeled", 2)
+
+
+def test_funding_4h_settlements_not_undercounted():
+    """A real 4h-settling alt (one row per 4h settlement) must charge ALL six daily settlements.
+    The old code bucketed by the stored funding_interval_min (hardcoded/defaulted to 8h) and merged
+    each pair into one — charging HALF the funding and inflating short MAR (funding-undercount, fixed
+    2026-06-03). The default exact-stamp dedup now counts every distinct settlement."""
+    hour = 3_600_000
+    funding = pl.DataFrame(
+        {
+            "symbol": ["BBB"] * 6,
+            "ts_ms": [h * hour for h in range(0, 24, 4)],  # 0,4h,8h,12h,16h,20h
+            "funding_rate": [0.001] * 6,
+            "funding_interval_min": [480] * 6,  # WRONG stored value — now ignored for bucketing
+        }
+    )
+    # Default (no authoritative interval): exact-stamp dedup keeps all six distinct settlements.
+    lookup = _funding_lookup(funding)
+    assert lookup["BBB"]["events_ts"] == [h * hour for h in range(0, 24, 4)]
+    # And supplying the TRUE 4h interval gives the identical result (no merge).
+    lookup_true = _funding_lookup(funding, interval_by_symbol={"BBB": 240})
+    assert lookup_true["BBB"]["events_ts"] == [h * hour for h in range(0, 24, 4)]
+    # Overlapping-fetch duplicate stamps are still deduped.
+    dup = pl.DataFrame(
+        {"symbol": ["CCC"] * 3, "ts_ms": [0, 0, 4 * hour], "funding_rate": [0.001, 0.001, 0.002]}
+    )
+    assert _funding_lookup(dup)["CCC"]["events_ts"] == [0, 4 * hour]
 
 
 # --------------------------------------------------------------------------

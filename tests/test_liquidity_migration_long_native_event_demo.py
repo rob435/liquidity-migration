@@ -330,6 +330,57 @@ def test_plan_time_stop_exits_only_for_expired_long_positions() -> None:
     assert plans[0]["exit_reason"] == "time_stop"
 
 
+def test_long_dry_run_exit_marks_to_live_price_not_flat() -> None:
+    """Paper/dry-run long exits must mark to the live ticker price, not record a FLAT
+    0% close at the entry price (long-sleeve-2). Without a live price threaded in, the
+    long paper shadow booked 0% on every time-stop and was useless as a forward arbiter."""
+    from liquidity_migration.long_native_event_demo import _execute_long_exits
+
+    now = 2_000_000_000_000
+    all_trades = pl.DataFrame([
+        {
+            "trade_id": "t1", "sleeve": "long", "symbol": "BTCUSDT", "side": "long",
+            "status": "open", "qty": "0.001", "entry_price": 100.0,
+            "notional_usdt": 1_000.0, "equity_usdt": 10_000.0,
+            "planned_exit_ts_ms": now - MS_PER_HOUR,
+        },
+    ])
+    plan = {"trade_id": "t1", "symbol": "BTCUSDT", "qty": "0.001", "exit_reason": "time_stop"}
+    demo = LongNativeDemoCycleConfig(submit_orders=False)
+
+    rows, _orders = _execute_long_exits(
+        [plan], all_trades, trading_client=None, demo=demo, now_ms=now,
+        price_by_symbol={"BTCUSDT": 110.0},  # live price +10%
+    )
+    assert len(rows) == 1 and rows[0]["status"] == "closed"
+    assert float(rows[0]["exit_price"]) == pytest.approx(110.0)
+    assert float(rows[0]["gross_trade_return"]) == pytest.approx(0.10, abs=1e-6)
+    assert float(rows[0]["net_return"]) != 0.0, "paper exit must not record FLAT PnL"
+
+    # With NO live price available it falls back to the entry price (the old flat behavior).
+    rows_flat, _ = _execute_long_exits(
+        [plan], all_trades, trading_client=None, demo=demo, now_ms=now, price_by_symbol={},
+    )
+    assert float(rows_flat[0]["gross_trade_return"]) == pytest.approx(0.0)
+
+
+def test_long_entry_excludes_incomplete_today_bar() -> None:
+    """long-sleeve-1: the current, still-forming daily bar has a FUTURE day-END ts and must NOT be
+    eligible — firing FC on a not-yet-closed bar is look-ahead vs the backtest's closed-bar signal."""
+    from liquidity_migration.long_native import LongNativeConfig
+    from liquidity_migration.long_native_event_demo import _select_long_entry_candidates
+
+    now = 1_700_000_000_000
+    # ONLY a future-ts (today, still forming) bar -> its day-END ts is in the future -> not eligible.
+    future_bar = pl.DataFrame([{"symbol": "BTCUSDT", "ts_ms": now + MS_PER_HOUR, "close": 100.0}])
+    candidates, skips = _select_long_entry_candidates(
+        features=future_bar, klines=pl.DataFrame(), all_trades=pl.DataFrame(), now_ms=now,
+        strategy=LongNativeConfig(), price_by_symbol={"BTCUSDT": 90.0}, max_new_entries=5,
+    )
+    assert candidates == []
+    assert skips["no_signal"] == 1  # the only bar's day-END ts is in the future -> excluded
+
+
 def test_pending_entry_dedupe_skips_in_flight_orders() -> None:
     now = 1_700_000_000_000
     candidates = [
@@ -529,3 +580,29 @@ def test_long_kline_universe_fetcher_returns_empty_on_rest_failure() -> None:
             raise RuntimeError("simulated REST outage")
 
     assert _build_long_kline_universe(_FailingMarket()) == []
+
+
+def test_compute_long_order_sizing_matches_inline_vol_target_block() -> None:
+    """long-sleeve-9: the extracted ``_compute_long_order_sizing`` helper must reproduce the
+    prior inline block byte-for-byte — base per-position notional * the de-risk-only vol-target
+    scalar keyed on the LATEST non-null ``btc_rv_30`` (after sorting by ts_ms)."""
+    from liquidity_migration.long_native import _vol_target_scale
+    from liquidity_migration.long_native_event_demo import (
+        _compute_long_order_sizing,
+        target_long_order_notional_pct_equity,
+    )
+
+    demo = LongNativeDemoCycleConfig()
+    strategy = _long_demo_event_config(demo.strategy_profile)
+    # ts_ms out of order with an interleaved null — the helper must sort then take the last non-null.
+    features = pl.DataFrame({"ts_ms": [3, 1, 2], "btc_rv_30": [0.9, None, 0.4]})
+    notional, scale = _compute_long_order_sizing(demo=demo, strategy=strategy, features=features)
+    expected_scale = _vol_target_scale(strategy, 0.9)  # latest by ts_ms (ts=3)
+    assert scale == expected_scale
+    assert notional == pytest.approx(target_long_order_notional_pct_equity(demo, strategy) * expected_scale)
+
+    # No btc_rv_30 column -> latest_btc_rv is None -> the None vol-target path (no de-risk-up).
+    bare = pl.DataFrame({"ts_ms": [1, 2]})
+    n0, s0 = _compute_long_order_sizing(demo=demo, strategy=strategy, features=bare)
+    assert s0 == _vol_target_scale(strategy, None)
+    assert n0 == pytest.approx(target_long_order_notional_pct_equity(demo, strategy) * s0)

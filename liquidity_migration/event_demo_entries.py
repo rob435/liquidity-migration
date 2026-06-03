@@ -34,6 +34,12 @@ from .event_demo import (  # noqa: F401  (shared hub helpers)
 
 _logger = logging.getLogger(__name__)
 
+# Fallback contract granularity when the venue contract spec omits tick_size /
+# qty_step (legacy/lazy fixtures). Mirrors event_demo._round_price's 0.0001 tick
+# fallback and the 0.001 qty-step floor in order_quantity_for_notional (quality-dup-8).
+_DEFAULT_TICK_SIZE = 0.0001
+_DEFAULT_QTY_STEP = 0.001
+
 
 def _preflight_entry_order_row(
     *,
@@ -200,8 +206,8 @@ def _execute_single_entry(
     contract = contract_by_symbol.get(symbol, {})
     if price is None or price <= 0.0:
         return None, []
-    tick_size = _float(contract.get("tick_size")) or 0.0001
-    qty_step = _float(contract.get("qty_step")) or 0.001
+    tick_size = _float(contract.get("tick_size")) or _DEFAULT_TICK_SIZE
+    qty_step = _float(contract.get("qty_step")) or _DEFAULT_QTY_STEP
     capped_notional = equity_usdt * demo.wallet_balance_fraction * order_notional_pct_equity
     # Compute the UNCAPPED target qty. We deliberately do NOT pass
     # max_order_qty here -- when the venue's per-order cap binds, we split
@@ -475,6 +481,7 @@ def _execute_single_entry(
                         fast_poll_interval_seconds=demo.order_fill_fast_poll_interval_seconds,
                         fast_poll_seconds=demo.order_fill_fast_poll_seconds,
                         execution_event_router=execution_event_router,
+                        target_qty=sub_target,  # EXEC-6: aggregate all WS legs before deciding filled/partial
                     )
                 except Exception as exc:  # noqa: BLE001 - order may still fill; reconciliation will retry
                     sub_status = "submitted_unconfirmed"

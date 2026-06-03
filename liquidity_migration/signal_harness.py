@@ -32,14 +32,12 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, cast
 
 import polars as pl
 
+from liquidity_migration._common import MS_PER_DAY
 from liquidity_migration.storage import read_dataset_columns
-
-MS_PER_DAY = 86_400_000
-MS_PER_HOUR = 3_600_000
 TRADING_DAYS_PER_YEAR = 365  # crypto trades 7 days/week; annualisation is calendar-day-based
 
 
@@ -1040,8 +1038,11 @@ def build_combined_signal_portfolio(
         z_cols.append(z_col)
 
     # Combined signal
+    combined: pl.Expr
     if weighting == "equal":
-        combined = sum(pl.col(z) for z in z_cols)
+        # z_cols is non-empty (surviving_features validated above), so the
+        # builtin sum() always yields a polars Expr, never the int start value.
+        combined = cast(pl.Expr, sum(pl.col(z) for z in z_cols))
     else:
         # ic_weighted: positive IC means high feature value -> high return,
         # so the SIGN of IC tells us which direction predicts. For a SHORT
@@ -1054,7 +1055,7 @@ def build_combined_signal_portfolio(
         if any(f not in ic_weights for f in surviving_features):  # type: ignore[operator]
             missing = [f for f in surviving_features if f not in ic_weights]  # type: ignore[operator]
             raise KeyError(f"ic_weights missing entries for {missing}")
-        combined = sum(ic_weights[f] * pl.col(z) for f, z in zip(surviving_features, z_cols))  # type: ignore[index]
+        combined = cast(pl.Expr, sum(ic_weights[f] * pl.col(z) for f, z in zip(surviving_features, z_cols)))  # type: ignore[index, misc]  # ic_weights non-None+membership checked above
 
     df = df.with_columns(combined.alias("combined_signal"))
 

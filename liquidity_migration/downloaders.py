@@ -10,7 +10,7 @@ from urllib.parse import urlparse
 import polars as pl
 
 from .archive import ArchiveFileNotFoundError, download_public_trade_archive, read_public_trade_archive
-from .binance import BinanceDataError, BinanceUSDMData
+from .binance import BinanceDataError, BinanceUSDMData, _recent_history_start
 from .bybit import BybitMarketData
 from .config import ResearchConfig
 from .ingestion import aggregate_trade_klines_1m, normalize_funding_history
@@ -481,6 +481,7 @@ def _download_binance_symbol_datasets(
                 period=period,
             ),
             marker_suffix=f"_{period}",
+            clamp_window_days=30,
         )
     if "binance_usdm_taker_flow_1h" in datasets:
         outputs["binance_usdm_taker_flow_1h"] = _download_symbol_dataset(
@@ -497,6 +498,7 @@ def _download_binance_symbol_datasets(
                 period=period,
             ),
             marker_suffix=f"_{period}",
+            clamp_window_days=30,
         )
     return outputs
 
@@ -513,6 +515,7 @@ def _download_symbol_dataset(
     fetch: Callable[[int, int], list[dict]],
     postprocess: Callable[[pl.DataFrame], pl.DataFrame] | None = None,
     marker_suffix: str = "",
+    clamp_window_days: int | None = None,
 ) -> Path:
     """Download a per-symbol dataset slice, with incremental tail-only refresh.
 
@@ -578,7 +581,28 @@ def _download_symbol_dataset(
     # That way the next refresh sees "this range is fully covered" via a
     # direct lookup (no glob scan), and the tail-only path will only fire
     # when the requested end_ms moves forward again.
-    _mark_complete(_marker_path(data_root, dataset=dataset, symbol=symbol, start_ms=start_ms, end_ms=end_ms, suffix=marker_suffix))
+    #
+    # BUT never claim a never-before-covered range complete on an EMPTY fetch: a
+    # symbol that lists mid-window (pre-listing []), a transient empty REST
+    # response, or a provider hiccup that returns [] instead of raising would
+    # otherwise be marked complete and SKIPPED FOREVER (permanent silent coverage
+    # gap). A zero-row *tail* extension (tail_only) is legitimate (no new data past
+    # the existing coverage), so still mark that; only a fresh empty range is held
+    # back for retry next run.
+    # DEPLOY NOTE (data-download-1): the Binance OI-hist / taker-flow endpoints only
+    # serve a rolling ~30-day window — get_open_interest_hist / get_taker_buy_sell_volume
+    # clamp `start` to max(start, now-30d) internally. Previously the marker was written
+    # for the FULL requested [start_ms, end_ms], so the uncovered pre-30d span was claimed
+    # complete and SKIPPED FOREVER (permanent silent coverage gap). When clamp_window_days
+    # is set we key the marker start on that same clamp, so the uncovered prefix stays
+    # unmarked and is re-attempted (and re-clamped — cheap, bounded) next run.
+    marker_start_ms = start_ms
+    if clamp_window_days is not None:
+        marker_start_ms = max(start_ms, _recent_history_start(effective_start_ms, end_ms, days=clamp_window_days))
+    if frame.height > 0 or tail_only:
+        _mark_complete(_marker_path(data_root, dataset=dataset, symbol=symbol, start_ms=marker_start_ms, end_ms=end_ms, suffix=marker_suffix))
+    else:
+        print(f"{dataset}: {index}/{total} {symbol} EMPTY fresh fetch — marker withheld for retry", flush=True)
     print(f"{dataset}: {index}/{total} {symbol} rows={frame.height}", flush=True)
     del rows, frame
     gc.collect()
@@ -754,12 +778,15 @@ def _normalize_binance_funding(symbol: str, rows: list[dict]) -> list[dict]:
 
 
 def _normalize_binance_open_interest(symbol: str, rows: list[dict], *, period: str) -> list[dict]:
+    # _float_or_none: a row MISSING a field yields null (genuinely-missing data the OI feature frame
+    # drops via drop_nulls) rather than a fabricated 0.0 that would corrupt the OI-change series and
+    # show up as a spurious 0->next-value jump (data-download-7).
     return [
         {
             "ts_ms": int(row["timestamp"]),
             "symbol": symbol,
-            "open_interest": float(row.get("sumOpenInterest", 0.0)),
-            "open_interest_value": float(row.get("sumOpenInterestValue", 0.0)),
+            "open_interest": _float_or_none(row.get("sumOpenInterest")),
+            "open_interest_value": _float_or_none(row.get("sumOpenInterestValue")),
             "open_interest_interval": period,
             "source": "binance_usdm_open_interest",
         }
@@ -770,8 +797,26 @@ def _normalize_binance_open_interest(symbol: str, rows: list[dict], *, period: s
 def _normalize_binance_taker_flow(symbol: str, rows: list[dict], *, period: str) -> list[dict]:
     output = []
     for row in rows:
-        buy_volume = float(row.get("buyVol", 0.0))
-        sell_volume = float(row.get("sellVol", 0.0))
+        # An ABSENT buy/sell field is genuinely-missing data, not a real zero — a fabricated 0 would
+        # corrupt the signed-volume / imbalance series (data-download-7). A malformed row (either side
+        # missing) emits nulls for the derived fields rather than a spurious 0.
+        buy_volume = _float_or_none(row.get("buyVol"))
+        sell_volume = _float_or_none(row.get("sellVol"))
+        if buy_volume is None or sell_volume is None:
+            output.append(
+                {
+                    "ts_ms": int(row["timestamp"]),
+                    "symbol": symbol,
+                    "buy_volume_base": buy_volume,
+                    "sell_volume_base": sell_volume,
+                    "signed_volume_base": None,
+                    "taker_imbalance": None,
+                    "buy_sell_ratio": _float_or_none(row.get("buySellRatio")),
+                    "flow_interval": period,
+                    "source": "binance_usdm_taker_flow",
+                }
+            )
+            continue
         total = buy_volume + sell_volume
         output.append(
             {
@@ -781,7 +826,7 @@ def _normalize_binance_taker_flow(symbol: str, rows: list[dict], *, period: str)
                 "sell_volume_base": sell_volume,
                 "signed_volume_base": buy_volume - sell_volume,
                 "taker_imbalance": (buy_volume - sell_volume) / total if total > 0 else 0.0,
-                "buy_sell_ratio": float(row.get("buySellRatio", 0.0)),
+                "buy_sell_ratio": _float_or_none(row.get("buySellRatio")),
                 "flow_interval": period,
                 "source": "binance_usdm_taker_flow",
             }

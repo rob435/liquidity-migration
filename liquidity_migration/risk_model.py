@@ -25,6 +25,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
+from liquidity_migration._common import MS_PER_DAY
 from liquidity_migration.signal_harness import (
     _aggregate_daily_klines,
     _attach_daily_returns,
@@ -54,7 +55,7 @@ _FACTOR_COLUMNS = [
     "funding_rate_z", "liquidity_rank", "premium_index_z",
 ]
 
-MS_PER_DAY = 86_400_000
+# MS_PER_DAY imported from _common (quality-dup-2 — single source of truth).
 BTC_BETA_WINDOW = 60      # trailing trading-day window for the rolling OLS beta
 BTC_BETA_MIN_PERIODS = 30
 
@@ -378,9 +379,22 @@ def decompose_strategy_pnl(
     for t in trades.iter_rows(named=True):
         sym, ets, hd = t["symbol"], int(t["entry_ts_ms"]), int(t["hold_days"])
         realized = float(t["realized_return"])
-        # Snap to the 00:00-UTC daily grid (build_factor_panel keys ts_ms to the
-        # day's first hourly bar start; the engine ledger entry is +1h/bar-end).
-        grid = (ets // MS_PER_DAY) * MS_PER_DAY
+        # Snap to the DECISION day D — the factor panel keys loadings at 00:00 UTC of D (the day the
+        # trade decided at EOD) and factor_return[D] is the first day actually held — NOT the entry's
+        # calendar day D+1. The signal fires at D's EOD (signal_ts_ms = 00:00 of D+1, the end-of-day
+        # stamp) and the trade enters +Nh into D+1, so flooring entry_ts lands on D+1: one day too
+        # late, reading non-causal load_map[(sym, D+1)] loadings and a +1-day-shifted factor-return
+        # window — which corrupts the Tier-3 residual-Sharpe (audit risk-config-cli-1, fixed
+        # 2026-06-03). Prefer the exact decision day from signal_ts (trading day = floor(signal_ts -
+        # 1ms)); fall back to floor(entry) - 1 day for legacy rows lacking signal_ts_ms (entry is the
+        # morning after D, so its calendar day is D+1). NOTE: that fallback assumes a SINGLE-day
+        # entry delay — a multi-day-delayed entry would mis-snap — so the signal_ts path (the standard
+        # engine ledger column, taken whenever present) is authoritative; the fallback is legacy-only.
+        sig = t.get("signal_ts_ms")
+        if sig is not None:
+            grid = ((int(sig) - 1) // MS_PER_DAY) * MS_PER_DAY
+        else:
+            grid = ((ets // MS_PER_DAY) - 1) * MS_PER_DAY
         exposure = load_map.get((sym, grid))
         if exposure is None:
             n_unresolved += 1

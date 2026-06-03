@@ -22,7 +22,7 @@ import logging
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import TYPE_CHECKING, Any, Callable, Mapping, cast
 
 from .bybit import BybitMarketData
 from .config import ResearchConfig
@@ -35,6 +35,11 @@ from .continuous_demo import (
 )
 from .kline_stream_manager import KlineStreamManager
 from .long_native_event_demo_daemon import LongNativeDemoDaemon
+
+if TYPE_CHECKING:
+    # Only referenced in the cast annotations below (the base daemon's config type); the continuous
+    # sleeve has its own ContinuousDemoCycleConfig — see the __init__ note on the deliberate divergence.
+    from .long_native_event_demo import LongNativeDemoCycleConfig
 
 _logger = logging.getLogger(__name__)
 
@@ -96,6 +101,12 @@ def _default_continuous_kline_stream_manager_factory(
     cache_root: Path,
 ) -> KlineStreamManager:
     market = BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
+
+    # A nested def (vs the prior `lambda m=market:`) lets mypy type the zero-arg fetcher; behaviour is
+    # identical — `market` is captured here and never rebound, so the closure sees the same object.
+    def universe_fetcher() -> list[str]:
+        return _build_continuous_kline_universe(market)
+
     return KlineStreamManager(
         market_data=market,
         cache_root=cache_root,
@@ -105,7 +116,7 @@ def _default_continuous_kline_stream_manager_factory(
         topics_per_connection=demo_config.ws_klines_topics_per_connection,
         stale_warning_seconds=demo_config.ws_klines_stale_warning_seconds,
         stale_reconnect_seconds=demo_config.ws_klines_stale_reconnect_seconds,
-        universe_fetcher=lambda m=market: _build_continuous_kline_universe(m),
+        universe_fetcher=universe_fetcher,
     )
 
 
@@ -144,15 +155,20 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
         **kwargs: Any,
     ) -> None:
         demo_config = demo_config or ContinuousDemoCycleConfig()
+        # The continuous sleeve genuinely uses ContinuousDemoCycleConfig (not a subclass of the long
+        # sleeve's config) but reuses the long daemon's scaffolding, which only touches the common
+        # config fields. The class-level `demo_config` annotation re-narrows it for this subclass; the
+        # casts below satisfy the base __init__ signature without changing any runtime value.
         super().__init__(
             data_root,
             config=config,
-            demo_config=demo_config,
+            demo_config=cast("LongNativeDemoCycleConfig", demo_config),  # only common fields used
             interval_seconds=interval_seconds,
             cycle_runner=cycle_runner,
-            kline_stream_manager_factory=(
-                kline_stream_manager_factory or _default_continuous_kline_stream_manager_factory
-            ),
+            kline_stream_manager_factory=cast(
+                "Callable[[ResearchConfig, LongNativeDemoCycleConfig, Path], Any] | None",
+                kline_stream_manager_factory or _default_continuous_kline_stream_manager_factory,
+            ),  # only common config fields used
             event_driven_cycle=event_driven_cycle,
             **kwargs,
         )

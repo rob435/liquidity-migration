@@ -37,6 +37,17 @@ def finite_float(value: Any, *, default: float | None = None) -> float | None:
     return number if math.isfinite(number) else default
 
 
+def coerce_int(value: Any, *, default: int = 0) -> int:
+    """Coerce `value` to an int, returning `default` (0) on a missing/invalid value.
+
+    Shared single implementation for the trivial parse that reconciliation.py and
+    ws_risk.py each re-defined as a private ``_int`` (quality-dup-9)."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def pct(value: Any, *, invalid: str = "") -> str:
     """Format a fraction as a 2-decimal percentage, or `invalid` if not finite."""
     number = finite_float(value)

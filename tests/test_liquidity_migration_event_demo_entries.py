@@ -1133,3 +1133,92 @@ def test_execute_single_entry_no_split_when_cap_does_not_bind() -> None:
     # No -s suffix on the link (single-order path preserves legacy entry_link)
     assert "-s" not in orders[0]["order_link_id"].rsplit("-", 1)[-1]
 
+
+def test_wait_for_execution_summary_aggregates_multi_fill_ws_rows() -> None:
+    """A market order filling in TWO WS execution messages for the same
+    orderLinkId must aggregate to the full qty (not return `partial` from the
+    first leg). The router wakes on the first row; with target_qty known we wait
+    for the second leg before returning."""
+    import threading as _threading
+    import time as _time
+    from liquidity_migration.event_demo import _wait_for_execution_summary
+    from liquidity_migration.execution_router import ExecutionEventRouter
+
+    router = ExecutionEventRouter()
+    router.on_execution_event(
+        {"data": [{"orderLinkId": "lm-en-MULTI", "execQty": "4", "execPrice": "100", "execValue": "400", "execFee": "0.2"}]}
+    )
+
+    def _deliver_second_leg() -> None:
+        _time.sleep(0.03)
+        router.on_execution_event(
+            {"data": [{"orderLinkId": "lm-en-MULTI", "execQty": "6", "execPrice": "101", "execValue": "606", "execFee": "0.3"}]}
+        )
+
+    class NoRestClient:
+        def get_trade_history(self, *, symbol, order_link_id, limit=50):
+            return []
+
+    t = _threading.Thread(target=_deliver_second_leg)
+    t.start()
+    try:
+        summary = _wait_for_execution_summary(
+            NoRestClient(),
+            symbol="AAAUSDT",
+            order_link_id="lm-en-MULTI",
+            poll_seconds=2.0,
+            poll_interval_seconds=0.2,
+            fast_poll_interval_seconds=0.05,
+            fast_poll_seconds=0.5,
+            execution_event_router=router,
+            target_qty=10.0,
+        )
+    finally:
+        t.join()
+
+    # Without the fix the summary would be qty=4 (first leg only).
+    assert float(summary["qty"] or 0) == 10.0
+    # value-weighted avg of 4@100 + 6@101 = (400 + 606) / 10 = 100.6
+    assert abs(summary["avg_price"] - 100.6) < 1e-9
+
+
+def test_wait_for_execution_summary_rest_path_waits_for_cumulative_not_partial() -> None:
+    """EXEC-6 (REST-path gate): with NO ws router, a multi-fill order whose REST get_trade_history
+    first returns only leg1 (qty < target) must NOT short-circuit to 'partial' — the poll must wait
+    until the cumulative REST view reaches the target. Pins the production property the WS-only
+    aggregation test (which stubs get_trade_history=[]) did not exercise."""
+    from liquidity_migration.event_demo import _wait_for_execution_summary
+
+    class _PartialThenFullRest:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_trade_history(self, *, symbol, order_link_id, limit=50):
+            self.calls += 1
+            legs = [{"orderLinkId": order_link_id, "execQty": "4", "execPrice": "100",
+                     "execValue": "400", "execFee": "0.2"}]
+            if self.calls >= 2:  # second poll: the full book-walk has settled
+                legs.append({"orderLinkId": order_link_id, "execQty": "6", "execPrice": "101",
+                             "execValue": "606", "execFee": "0.3"})
+            return legs
+
+    rest = _PartialThenFullRest()
+    summary = _wait_for_execution_summary(
+        rest,
+        symbol="AAAUSDT",
+        order_link_id="lm-en-MULTI",
+        poll_seconds=2.0,
+        poll_interval_seconds=0.02,
+        fast_poll_interval_seconds=0.02,
+        fast_poll_seconds=0.0,
+        execution_event_router=None,
+        target_qty=10.0,
+    )
+    # Did not return the 4-qty partial; waited for the cumulative 10.
+    assert rest.calls >= 2
+    assert _float_qty(summary) == 10.0
+
+
+def _float_qty(summary) -> float:
+    from liquidity_migration.event_demo import _float as _f
+    return _f(summary.get("qty"))

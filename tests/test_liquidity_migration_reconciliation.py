@@ -221,7 +221,11 @@ def test_reconcile_demo_bybit_pairs_and_flags_orphans() -> None:
         # Untracked: Bybit has this open, the ledger does not
         {"symbol": "UNTRACKEDUSDT", "side": "Sell", "size": "1", "avgPrice": "10.0", "unrealisedPnl": "0.0"},
     ]
-    result = reconcile_demo_bybit(ledger, bybit_closed, bybit_open)
+    # Legacy account-wide detector (scoping OFF) — this test intentionally feeds
+    # ORPHANUSDT / UNTRACKEDUSDT (symbols the ledger never traded) to validate the
+    # raw within-namespace orphan/untracked flags. reconcile-ledger-7's default
+    # (symbol,side) scoping is exercised by test_reconcile_demo_bybit_scopes_out_sibling_sleeve_closures.
+    result = reconcile_demo_bybit(ledger, bybit_closed, bybit_open, scope_to_ledger_symbol_sides=False)
     summary = result["summary"]
     assert summary["ledger_closed_trades"] == 1
     assert summary["ledger_open_trades"] == 2
@@ -333,7 +337,10 @@ def test_reconcile_demo_bybit_surfaces_closure_missing_avg_price() -> None:
             "createdTime": "1800000",
         },
     ]
-    result = reconcile_demo_bybit(ledger, bybit_closed, [])
+    # Raw within-namespace detector (scoping OFF): ZEROUSDT is intentionally a
+    # symbol the ledger never traded, validating the missing-avgPrice orphan
+    # surfacing itself (reconcile-ledger-7 scoping is tested separately).
+    result = reconcile_demo_bybit(ledger, bybit_closed, [], scope_to_ledger_symbol_sides=False)
     assert result["summary"]["orphan_in_bybit"] == 1
     assert result["orphan_in_bybit"][0]["symbol"] == "ZEROUSDT"
 
@@ -704,3 +711,74 @@ def test_write_pairs_csv_emits_machine_readable_companion(tmp_path: Path) -> Non
     assert df["demo_exit_price"][0] == pytest.approx(91.0)
     # No paired trades -> no companion file.
     assert _write_pairs_csv(report_path, []) is None
+
+
+def test_reconcile_demo_bybit_surfaces_netted_same_symbol_over_close() -> None:
+    """reconcile-core-7 (a): on the shared/netted account Bybit's account-wide
+    closed_pnl can report a folded closedSize LARGER than this ledger's trade qty
+    when a sibling sleeve closed the same symbol+side in the same window. The
+    reconciler must surface that as a (negative) qty_gap on the paired close -- a
+    size-driven residual -- not silently price it as zero."""
+    ledger = pl.DataFrame(
+        [
+            {
+                "trade_id": "t-1", "symbol": "AAAUSDT", "side": "short",
+                "entry_ts_ms": 1_000_000, "entry_exec_time_ms": 1_000_500,
+                "entry_price": 100.0, "entry_fee_usdt": 0.05,
+                "qty": 1.0, "status": "closed",
+                "exit_price": 90.0, "exit_ts_ms": 2_000_000, "exit_exec_time_ms": 2_000_500,
+                "exit_reason": "take_profit", "exit_fee_usdt": 0.07,
+            },
+        ]
+    )
+    # Two same-symbol+side legs within the fold window: this ledger's 1.0 plus a
+    # sibling sleeve's 2.0 -> folded closedSize 3.0 vs ledger qty 1.0.
+    bybit_closed = [
+        {"symbol": "AAAUSDT", "side": "Buy", "avgEntryPrice": "100.0", "avgExitPrice": "90.0",
+         "closedSize": "1", "closedPnl": "5.0", "execFee": "0.05", "createdTime": "2000400"},
+        {"symbol": "AAAUSDT", "side": "Buy", "avgEntryPrice": "100.0", "avgExitPrice": "90.0",
+         "closedSize": "2", "closedPnl": "10.0", "execFee": "0.10", "createdTime": "2000450"},
+    ]
+    result = reconcile_demo_bybit(ledger, bybit_closed, [])
+    summary = result["summary"]
+    assert summary["bybit_closed_records"] == 1, "the two same-symbol+side legs fold into one logical close"
+    assert summary["paired_closed"] == 1
+    assert summary["orphan_in_bybit"] == 0
+    pair = result["pairs"][0]
+    assert pair["bybit_closed_size"] == pytest.approx(3.0)  # summed legs (netted over-close)
+    assert pair["qty_gap"] == pytest.approx(-2.0)  # ledger 1.0 - bybit 3.0
+
+
+def test_reconcile_demo_bybit_scopes_out_sibling_sleeve_closures() -> None:
+    """reconcile-ledger-7 (production default, scoping ON): a sibling sleeve's closure on a
+    (symbol, side) THIS ledger never traded is dropped before orphan detection (NOT flagged
+    orphan_in_bybit), while the ledger's own (symbol, side) close still pairs. The legacy
+    account-wide mode (scoping OFF) still surfaces the sibling as an orphan. Pins the default
+    the docstring references — previously asserted by NO test."""
+    ledger = pl.DataFrame(
+        [
+            {
+                "trade_id": "t-1", "symbol": "AAAUSDT", "side": "short",
+                "entry_ts_ms": 1_000_000, "entry_exec_time_ms": 1_000_500,
+                "entry_price": 100.0, "entry_fee_usdt": 0.05,
+                "qty": 1.0, "status": "closed",
+                "exit_price": 90.0, "exit_ts_ms": 2_000_000, "exit_exec_time_ms": 2_000_500,
+                "exit_reason": "take_profit", "exit_fee_usdt": 0.07,
+            },
+        ]
+    )
+    bybit_closed = [
+        # OUR close (pairs with t-1): AAAUSDT/short closed via a Bybit Buy.
+        {"symbol": "AAAUSDT", "side": "Buy", "avgEntryPrice": "100.0", "avgExitPrice": "90.0",
+         "closedSize": "1", "closedPnl": "9.88", "execFee": "0.05", "createdTime": "2000400"},
+        # SIBLING sleeve's close on a (symbol, side) this ledger never traded.
+        {"symbol": "ZZZUSDT", "side": "Buy", "avgEntryPrice": "10.0", "avgExitPrice": "9.0",
+         "closedSize": "5", "closedPnl": "5.0", "execFee": "0.02", "createdTime": "2000500"},
+    ]
+    scoped = reconcile_demo_bybit(ledger, bybit_closed, [])  # default scoping ON
+    assert scoped["summary"]["orphan_in_bybit"] == 0  # ZZZUSDT sibling dropped, not our orphan
+    assert scoped["summary"]["paired_closed"] == 1     # our AAAUSDT close still pairs
+
+    raw = reconcile_demo_bybit(ledger, bybit_closed, [], scope_to_ledger_symbol_sides=False)
+    assert raw["summary"]["orphan_in_bybit"] == 1      # legacy account-wide detector surfaces it
+    assert raw["orphan_in_bybit"][0]["symbol"] == "ZZZUSDT"

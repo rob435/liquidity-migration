@@ -27,6 +27,7 @@ from .volume_events import (
     _realized_loss_pressure_active,
     _scenario_side,
     _select_events,
+    _stop_fill_price,
     _stop_pressure_active,
 )
 
@@ -44,7 +45,7 @@ from .event_demo import (  # noqa: F401  (shared hub helpers)
     _price_crosses_stop,
     _price_crosses_take_profit,
     _prices_close,
-    _rank_checks_for_symbol,
+    _quantity_text,
     _realized_loss_exit_ts,
     _realized_stop_exit_ts,
     _ratio_or_zero,
@@ -54,6 +55,42 @@ from .event_demo import (  # noqa: F401  (shared hub helpers)
 )
 
 _logger = logging.getLogger(__name__)
+
+
+def _conservative_stop_fill_price(
+    klines: pl.DataFrame,
+    *,
+    symbol: str,
+    side: str,
+    bar_end_ts_ms: int,
+    stop_price: float,
+    config: VolumeEventResearchConfig,
+) -> float:
+    """Honest (backtest-matching) stop fill for the demo cycle (EXEC-2).
+
+    Fills at the worse-of trigger vs the realized adverse extreme of the bar that
+    tripped the stop, under the run's stop_fill_mode / stop_slippage_cap_pct —
+    identical to the engine's ``_stop_fill_price`` so demo<->backtest stop PnL agree.
+    Falls back to the bare trigger when the trigger bar is absent from klines.
+    """
+    if klines.is_empty():
+        return stop_price
+    bar = (
+        klines.filter(pl.col("symbol") == symbol)
+        .with_columns((pl.col("ts_ms") + MS_PER_HOUR).alias("bar_end_ts_ms"))
+        .filter(pl.col("bar_end_ts_ms") == bar_end_ts_ms)
+    )
+    if bar.is_empty():
+        return stop_price
+    row = bar.row(0, named=True)
+    return _stop_fill_price(
+        side=side,
+        stop_price=stop_price,
+        high=_float(row.get("high")),
+        low=_float(row.get("low")),
+        mode=config.stop_fill_mode,
+        cap_pct=config.stop_slippage_cap_pct,
+    )
 
 
 def select_demo_entry_candidates(
@@ -261,6 +298,16 @@ def plan_demo_exits(
         return []
     exits: list[dict[str, Any]] = []
     event_decay_threshold = 1.0 - float(scenario.threshold)
+    # Precompute symbol -> sorted [(ts_ms, rank_fraction)] ONCE per cycle. The
+    # per-trade _rank_checks_for_symbol used to full-scan the entire rank_lookup
+    # dict for every open trade (O(open_trades * N)); the index makes each trade's
+    # checks a single dict lookup + an entry/now window slice. Numerically
+    # identical to the prior per-trade scan (same items, same sort order).
+    rank_checks_by_symbol: dict[str, list[tuple[int, float]]] = {}
+    for (candidate_symbol, ts_ms), rank_fraction in rank_lookup.items():
+        rank_checks_by_symbol.setdefault(str(candidate_symbol), []).append((int(ts_ms), float(rank_fraction)))
+    for symbol_checks in rank_checks_by_symbol.values():
+        symbol_checks.sort()
     for trade in open_trades.to_dicts():
         symbol = str(trade["symbol"])
         side = str(trade.get("side") or _scenario_side(scenario.event_type, scenario.side_hypothesis))
@@ -280,9 +327,32 @@ def plan_demo_exits(
                 stop_price=stop_price,
             )
             if stop_hit is not None:
-                exit_checks.append((stop_hit, 0, "stop_loss", stop_price))
+                # DEPLOY NOTE (EXEC-2): book the paper/demo stop fill with the SAME honest
+                # bar_extreme(_capped) convention the deployed backtest uses (worse-of trigger
+                # vs the realized adverse bar extreme), NOT the optimistic trigger price, so
+                # demo<->backtest stop PnL agree (the forward-demo arbiter). See
+                # docs/research_summary.md honest engine.
+                stop_fill = _conservative_stop_fill_price(
+                    klines,
+                    symbol=symbol,
+                    side=side,
+                    bar_end_ts_ms=stop_hit,
+                    stop_price=stop_price,
+                    config=config,
+                )
+                exit_checks.append((stop_hit, 0, "stop_loss", stop_fill))
             elif current_price is not None and _price_crosses_stop(side=side, price=current_price, stop_price=stop_price):
-                exit_checks.append((now_ms, 0, "stop_loss", current_price))
+                # Live tick already printed adverse to the trigger; fill at the worse-of trigger
+                # vs the realized cross (capped), mirroring the bar-extreme convention.
+                stop_fill = _stop_fill_price(
+                    side=side,
+                    stop_price=stop_price,
+                    high=current_price,
+                    low=current_price,
+                    mode=config.stop_fill_mode,
+                    cap_pct=config.stop_slippage_cap_pct,
+                )
+                exit_checks.append((now_ms, 0, "stop_loss", stop_fill))
 
         take_profit_price = _float(trade.get("take_profit_price"))
         if take_profit_price > 0.0:
@@ -317,7 +387,11 @@ def plan_demo_exits(
             trigger_ts_ms, trigger_price = failed_fade_hit
             exit_checks.append((trigger_ts_ms, 2, "failed_fade", trigger_price))
 
-        for check_ts_ms, rank_fraction in _rank_checks_for_symbol(rank_lookup, symbol=symbol, entry_ts_ms=entry_ts_ms, now_ms=now_ms):
+        for check_ts_ms, rank_fraction in [
+            (ts, frac)
+            for ts, frac in rank_checks_by_symbol.get(symbol, ())
+            if entry_ts_ms < ts <= now_ms
+        ]:
             if _event_decay_exit_hit(
                 symbol=symbol,
                 bar_end_ts_ms=check_ts_ms,
@@ -365,6 +439,7 @@ def plan_risk_exits(
     position_by_symbol: dict[str, dict[str, Any]],
     price_by_symbol: dict[str, float],
     now_ms: int,
+    cap_qty_to_trade: bool = False,
 ) -> list[dict[str, Any]]:
     if open_trades.is_empty():
         return []
@@ -373,7 +448,26 @@ def plan_risk_exits(
         symbol = str(trade.get("symbol", ""))
         position = position_by_symbol.get(symbol, {})
         side = str(trade.get("side") or _normalized_position_side(position.get("side")) or "short")
-        qty = str(_first_non_empty(position.get("size"), trade.get("qty")))
+        # DEPLOY NOTE (reconcile-core-2): on the SHARED netted demo account (3 sleeves,
+        # one account) position.size is the SUM of every sleeve's leg on this symbol.
+        # Sizing a reduce-only risk exit to that netted size lets one sleeve's stop
+        # FLATTEN a sibling sleeve's leg (reduce_only caps at the netted position, not
+        # at this sleeve's leg). When cap_qty_to_trade (set by ws_risk whenever a
+        # sibling-sleeve ledger is configured) cap the exit at min(trade.qty,
+        # position.size) so a stop closes only this sleeve's exposure. Single-sleeve
+        # symbols are unaffected (trade.qty == position.size). If trade.qty is transiently
+        # smaller than the real position, the residual exposure beyond this sleeve's ledgered
+        # qty is recovered by the separate untracked-position flatten path — NOT by a re-emit
+        # here (plan_risk_exits only iterates OPEN ledger trades, so the just-closed trade is
+        # gone next pass). Under-closing is fail-safe; the cross-sleeve OVER-close it prevents
+        # is the non-self-healing failure. Off (default) preserves the legacy single-account
+        # 'prefer venue size'.
+        trade_qty = _float(trade.get("qty"))
+        position_size = _float(position.get("size"))
+        if cap_qty_to_trade and trade_qty > 0.0 and position_size > 0.0:
+            qty = _quantity_text(min(trade_qty, position_size))
+        else:
+            qty = str(_first_non_empty(position.get("size"), trade.get("qty")))
         if not symbol or not qty:
             continue
         current_price = price_by_symbol.get(symbol, 0.0)

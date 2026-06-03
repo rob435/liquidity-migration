@@ -148,6 +148,11 @@ Recent landed work (full detail in git history / `docs/research_summary.md`):
 - **CLI baseline wrapper:** `scripts/volume_events_cell.sh --cell-id X --overrides 'KEY=VAL,…'`.
 - **Decision-rule analyzer:** `scripts/apply_decision_rule.py SUMMARY.csv --control 00_baseline`.
 - **Tier-2 verdict + fragility:** `scripts/r1_robustness.py --sweep-tag <TAG>`.
+- **Equity curves (one command, ALL sleeves):** `bash scripts/equity_curves.sh [--sleeves …]
+  [--years 3]` — runs each sleeve's EXACT deployed profile over the window and emits the
+  equity-vs-BTC PNG + run_label. The promoted profiles live in ONE place:
+  **`liquidity_migration/promoted.py`** (`short_profile`/`long_profile`/`continuous_profile`,
+  pinned by `tests/test_promoted_profiles.py`) — never reverse-engineer flags again.
 - **Continuous signal-consistency:** `scripts/continuous_demo_signal_check.py --root <demo-root>`.
 - **Skill `research-phase-runner`** (auto-loads) — per-experiment run/verdict workflow.
 - **MCP tools** on `liqmig-research`: `current_state`, `data_roots`, `list_reports`, `parse_report`,

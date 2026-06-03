@@ -313,9 +313,15 @@ def test_compute_mar_handles_negative_return_cell():
     assert mar < 0, f"expected negative MAR for losing cell, got {mar:+.2f}"
 
 
-def test_compute_mar_zero_drawdown_returns_zero():
-    """Degenerate case: no drawdown → MAR returns 0 (caller treats as not-positive)."""
-    assert MOD.compute_mar(1.0, 0.0, 365.25) == 0.0
+def test_compute_mar_zero_drawdown_is_nan_not_zero():
+    """Degenerate case (no drawdown) → MAR is UNMEASURABLE -> nan, matching r1_robustness so the two
+    decision tools treat the same cell identically (scripts-tooling-6). nan fails every verdict
+    comparison, so the cell is excluded (not a misleading 0)."""
+    import math
+
+    assert math.isnan(MOD.compute_mar(1.0, 0.0, 365.25))
+    assert math.isnan(MOD.compute_mar(1.0, -1e-12, 365.25))  # near-zero DD is also unmeasurable
+    assert math.isfinite(MOD.compute_mar(1.0, -0.40, 365.25))  # a real drawdown stays finite
 
 
 def test_compute_annualized_return_total_loss_capped():

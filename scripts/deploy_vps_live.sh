@@ -123,18 +123,20 @@ systemctl disable --now \
   model050426-bybit-demo-signal.timer \
   model050426-bybit-demo-signal.service \
   2>/dev/null || true
-systemctl enable liquidity-migration-bybit-demo.service
+
+# --- per-sleeve kill-switch (deploy/sleeves.env) ----------------------------------------
+# Single source of truth for which strategy sleeves run. Default (all "on") is byte-identical
+# to the previous unconditional enables. Flip a sleeve to "off" in deploy/sleeves.env (or
+# /etc/liquidity-migration/sleeves.env) + redeploy to RETIRE it — it stays disabled across
+# deploys; "off" stops new entries but ws_risk + the server-side disaster stops keep open
+# positions protected until they exit (no flatten). The risk service always runs.
+. deploy/lib_sleeves.sh
+lm_load_sleeve_toggles
+echo "sleeves: SHORT=$SHORT_SLEEVE LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE"
 systemctl enable liquidity-migration-bybit-risk.service
-systemctl enable liquidity-migration-bybit-paper.service
-systemctl enable liquidity-migration-bybit-long-demo.service
-systemctl enable liquidity-migration-bybit-long-paper.service
-# Continuous-fade demo sleeve (4th sleeve; LIVE as of 2026-06-01 — ships SUBMIT_ORDERS=1
-# and the deploy verify hard-fails if it is not submitting. Pause via SUBMIT_ORDERS=0).
-# Separate ledger root.
-systemctl enable liquidity-migration-bybit-continuous-demo.service
-# Continuous-fade PAPER shadow (no orders, idealized fills, continuous_fade_paper_* ledger)
-# so reconcile-continuous-paper-demo can measure execution slippage like the short/long sleeves.
-systemctl enable liquidity-migration-bybit-continuous-paper.service
+apply_sleeve_enable "$SHORT_SLEEVE" $SHORT_SLEEVE_UNITS
+apply_sleeve_enable "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
+apply_sleeve_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 # Timers must be enabled --now: enable alone writes the symlink but does not
 # start the timer, so on a fresh VPS the demo-health watchdog + daily combined-
 # book Telegram report would sit dormant until someone ran systemctl by hand.
@@ -142,7 +144,9 @@ systemctl enable liquidity-migration-bybit-continuous-paper.service
 systemctl enable --now liquidity-migration-demo-health.timer
 systemctl enable --now liquidity-migration-demo-liveness.timer
 systemctl enable --now liquidity-migration-combined-book-report.timer
-# Daily refresh of the continuous-fade rmom gate (residual_momentum.parquet).
+# Daily refresh of the continuous-fade rmom gate + the gate seed run ONLY when the
+# continuous sleeve is on (else there is nothing to feed; disable the timer too).
+if sleeve_on "$CONTINUOUS_SLEEVE"; then
 systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer
 # Seed the rmom gate NOW rather than waiting for the 00:20 UTC timer. Without this a
 # fresh deploy starts the continuous daemon into an EMPTY gate -> the live decile drops
@@ -168,37 +172,32 @@ if [ "${_rmom_rows:-0}" -le 0 ]; then
 else
   echo "continuous rmom gate seeded: ${_rmom_rows} rows."
 fi
-systemctl restart liquidity-migration-bybit-demo.service
+else
+  echo "kill-switch: CONTINUOUS_SLEEVE=off -> skipping rmom timer + gate seed." >&2
+  systemctl disable --now liquidity-migration-continuous-rmom-refresh.timer 2>/dev/null || true
+fi
+
+# --- restart: only the ON sleeves (off sleeves were disable --now'd above); risk always. ---
+# Long/continuous share the liquidity_migration package with the short side, so any Python
+# change requires restarting every running sleeve to pick up the new code.
 systemctl restart liquidity-migration-bybit-risk.service
-systemctl restart liquidity-migration-bybit-paper.service
-# Long-sleeve services also need restart after a deploy — they share the
-# liquidity_migration package with the short side, so any Python change
-# requires restarting them too. Previously missed; the long daemon would
-# stay on the old code until the next manual restart.
-systemctl restart liquidity-migration-bybit-long-demo.service
-systemctl restart liquidity-migration-bybit-long-paper.service
-systemctl restart liquidity-migration-bybit-continuous-demo.service
-systemctl restart liquidity-migration-bybit-continuous-paper.service
+if sleeve_on "$SHORT_SLEEVE"; then systemctl restart liquidity-migration-bybit-demo.service liquidity-migration-bybit-paper.service; fi
+if sleeve_on "$LONG_SLEEVE"; then systemctl restart liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service; fi
+if sleeve_on "$CONTINUOUS_SLEEVE"; then systemctl restart liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service; fi
 
 if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then
   sleep "$SYSTEMD_SETTLE_SECONDS"
 fi
 
-systemctl is-active --quiet liquidity-migration-bybit-demo.service
+# Risk always runs; each sleeve is verified per its toggle (on => active+enabled, off => NOT active).
 systemctl is-active --quiet liquidity-migration-bybit-risk.service
-systemctl is-active --quiet liquidity-migration-bybit-paper.service
-systemctl is-active --quiet liquidity-migration-bybit-long-demo.service
-systemctl is-active --quiet liquidity-migration-bybit-long-paper.service
-systemctl is-active --quiet liquidity-migration-bybit-continuous-demo.service
-systemctl is-active --quiet liquidity-migration-bybit-continuous-paper.service
-systemctl is-enabled --quiet liquidity-migration-bybit-demo.service
 systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
-systemctl is-enabled --quiet liquidity-migration-bybit-paper.service
-systemctl is-enabled --quiet liquidity-migration-bybit-long-demo.service
-systemctl is-enabled --quiet liquidity-migration-bybit-long-paper.service
-systemctl is-enabled --quiet liquidity-migration-bybit-continuous-demo.service
-systemctl is-enabled --quiet liquidity-migration-bybit-continuous-paper.service
-systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer
+verify_sleeve "$SHORT_SLEEVE" $SHORT_SLEEVE_UNITS
+verify_sleeve "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
+verify_sleeve "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
+if sleeve_on "$CONTINUOUS_SLEEVE"; then
+  systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer
+fi
 # Timer verification: is-enabled catches "we never enabled it"; is-active
 # catches "we enabled it but something stopped it." Both are fail-loud here
 # so deploys can't silently leave the watchdog or daily report off.

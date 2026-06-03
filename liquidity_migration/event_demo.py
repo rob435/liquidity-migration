@@ -23,7 +23,7 @@ from .trade_lifecycle import _bar_excursion, _side_return
 from ._common import MS_PER_DAY, MS_PER_HOUR, MS_PER_MINUTE, PENDING_ORDER_STATUSES
 # orderLinkId encode/decode live in order_link_id.py (cohesive home); re-exported here so
 # existing `from .event_demo import _order_link_id` callers (3 sleeves, ws_risk, tests) are unaffected.
-from .order_link_id import _base36, _order_link_id, _risk_order_link_id, _split_order_link_id, decode_entry_order_link_id  # noqa: F401
+from .order_link_id import _base36, _order_link_id, _risk_order_link_id, _split_order_link_id, decode_entry_order_link_id, is_exit_link  # noqa: F401
 from .volume_events import (
     EventScenario,
     VolumeEventResearchConfig,
@@ -321,6 +321,8 @@ def _cycle_plan_and_execute_exits(
             exit_klines = _concat_recent_klines(klines, held_klines)
             exit_price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, exit_klines)
 
+    if ctx.scenario is None:  # set in _run_demo_cycle setup before any stage runs; explicit (-O-safe) guard
+        raise RuntimeError("ctx.scenario must be set before the exit-planning stage")
     exits = plan_demo_exits(
         reconciled_trades,
         rank_lookup=rank_lookup,
@@ -408,6 +410,8 @@ def _cycle_select_and_execute_entries(
         )
         if stale_entry_order_rows:
             all_orders = _upsert_rows(all_orders, stale_entry_order_rows, key="order_link_id")
+    if ctx.scenario is None:  # set in _run_demo_cycle setup before any stage runs; explicit (-O-safe) guard
+        raise RuntimeError("ctx.scenario must be set before the entry-selection stage")
     entry_candidates, skip_counts = select_demo_entry_candidates(
         features,
         all_trades,
@@ -418,7 +422,7 @@ def _cycle_select_and_execute_entries(
         max_new_entries=demo.max_new_entries_per_cycle,
         klines=klines,
     )
-    free_slots = max(int(strategy.max_active_symbols) - refreshed_open.height, 0)
+    free_slots = _free_entry_slots(strategy.max_active_symbols, refreshed_open, all_orders, now_ms=ctx.cycle_now_ms)
     entry_candidates = entry_candidates[:free_slots]
     entry_candidates, pending_entry_skips = _filter_pending_entry_orders(entry_candidates, all_orders, now_ms=ctx.cycle_now_ms)
     snapshot_error_entry_skips = 0
@@ -722,6 +726,8 @@ def run_event_demo_cycle(
         order_notional_pct_equity = ctx.order_notional_pct_equity
         order_initial_margin_pct_equity = ctx.order_initial_margin_pct_equity
         scenario = ctx.scenario
+        if scenario is None:  # set in cycle setup (ctx.scenario) before this point; explicit (-O-safe) guard
+            raise RuntimeError("ctx.scenario must be set before the entry-execution stage")
         score_name = ctx.score_name
 
         snapshot = _cycle_join_private_snapshots(snapshot_thread, snapshot_result)
@@ -1170,6 +1176,9 @@ def run_event_risk_cycle(
             enabled=risk.submit_orders and trading_client is not None,
             position_error=position_error,
             trading_client=trading_client,
+            # Bulk REST snapshot: a successful-but-empty/partial get_positions must
+            # not zero-PnL-orphan-close a trade get_closed_pnl can't confirm (C1).
+            require_evidence=True,
         )
         if reconcile_rows:
             all_trades = _upsert_rows(all_trades, reconcile_rows, key="trade_id")
@@ -1177,6 +1186,12 @@ def run_event_risk_cycle(
             open_trades = _open_trades(all_trades)
             reconciled_trades = _open_trades(all_trades)
 
+        # reconcile-core-2: this is the legacy single-account REST `event-risk` path — it owns
+        # only ``data_root`` and has NO sibling-sleeve root awareness, so it does NOT pass
+        # cap_qty_to_trade. The shared/netted demo account is managed exclusively by the WS risk
+        # engine (event-risk-ws / ws_risk), which DOES cap each sleeve's stop to its own leg. Do
+        # NOT run this REST path against the shared account; if shared-account support is ever
+        # added here, wire cap_qty_to_trade the same way ws_risk does.
         exits = plan_risk_exits(
             reconciled_trades,
             position_by_symbol=position_by_symbol,
@@ -1711,7 +1726,7 @@ def _compute_pipeline_diagnostics(
     if not features.is_empty() and "prior7_liquidity_rank" in features.columns:
         col = features["prior7_liquidity_rank"]
         observed = col.max()
-        observed_max = int(observed) if observed is not None else 0
+        observed_max = int(observed) if observed is not None else 0  # type: ignore[arg-type]  # polars Series value
         coverage["observed_prior7_rank_max"] = observed_max
         coverage["observed_prior7_rank_null_pct"] = round(100.0 * col.null_count() / max(col.len(), 1), 2)
         coverage["coverage_gap"] = max(0, required - observed_max)
@@ -2064,6 +2079,20 @@ def _pending_order_refs(orders: pl.DataFrame, *, reduce_only: bool, now_ms: int)
     return trade_ids, symbols
 
 
+def _free_entry_slots(max_active: int, open_trades: pl.DataFrame, orders: pl.DataFrame, *, now_ms: int) -> int:
+    """Entry slots still available under max_active = max_active - open trade rows - in-flight entry
+    orders that have not yet become trade rows.
+
+    Counting only ``open_trades.height`` would let an entry whose place_order succeeded with the fill
+    UNCONFIRMED (a pending entry ORDER with no trade row) leak a slot, so the live position count could
+    transiently exceed max_active (EXEC-4). A partial fill (which DOES have a trade row) must not be
+    double-counted, so only pending-ENTRY symbols ABSENT from open_trades are subtracted."""
+    open_symbols = set(open_trades["symbol"].to_list()) if not open_trades.is_empty() else set()
+    _ids, pending_entry_symbols = _pending_order_refs(orders, reduce_only=False, now_ms=now_ms)
+    inflight = len(pending_entry_symbols - open_symbols)
+    return max(int(max_active) - open_trades.height - inflight, 0)
+
+
 
 def _live_open_order_symbols(open_orders: list[dict[str, Any]], *, reduce_only: bool) -> set[str]:
     output: set[str] = set()
@@ -2090,7 +2119,7 @@ def _open_order_active(row: dict[str, Any]) -> bool:
 
 def _is_own_exit_order(row: dict[str, Any]) -> bool:
     link = str(row.get("orderLinkId") or row.get("order_link_id") or "")
-    return link.startswith(("lm-ex-", "lm-rx-", "lm-wx-", "lm-ux-"))
+    return is_exit_link(link)
 
 
 
@@ -2193,7 +2222,12 @@ def _resolve_ticker_snapshot(
             if ticker_cache.is_seeded() and not ticker_cache.is_stale(
                 stale_seconds=state_cache_stale_seconds,
             ):
-                snap = ticker_cache.snapshot_list()
+                # ws-dataplane-1: per-symbol staleness filter — drop any symbol whose
+                # OWN last update is older than the bound, so a stale per-symbol price
+                # can't reach stop/exit pricing while another symbol keeps the global
+                # cache 'fresh'. The 60s REST reconcile re-stamps all symbols (< 120s
+                # bound), so a healthy-but-quiet symbol is never dropped.
+                snap = ticker_cache.snapshot_list(max_age_seconds=state_cache_stale_seconds)
                 if snap:
                     return snap, "ws_cache"
         except Exception as exc:  # noqa: BLE001
@@ -2402,6 +2436,7 @@ def _wait_for_execution_summary(
     fast_poll_interval_seconds: float = 0.05,
     fast_poll_seconds: float = 0.5,
     execution_event_router: Any | None = None,
+    target_qty: float = 0.0,
 ) -> dict[str, Any]:
     # `while True` is bounded: the deadline check below returns once
     # `time.monotonic() >= deadline`, so the loop runs at most `poll_seconds`
@@ -2435,10 +2470,31 @@ def _wait_for_execution_summary(
                 ws_rows = execution_event_router.wait_for_fill_rows(order_link_id, ws_wait)
                 if ws_rows:
                     summary = _execution_summary(ws_rows)
-                    if _float(summary.get("qty")) > 0.0:
+                    summary_qty = _float(summary.get("qty"))
+                    # EXEC-6: multi-fill market orders deliver several WS execution
+                    # rows for the SAME orderLinkId (book-walk). wait_for_fill_rows
+                    # wakes on the FIRST row, so returning here would record a
+                    # fully-filled order as `partial` from only the first leg. When
+                    # target_qty is known, keep looping (rows accumulate in the
+                    # router) until the cumulative WS qty reaches the target or the
+                    # deadline passes; when unknown (0.0) preserve the legacy
+                    # first-fill return.
+                    if summary_qty > 0.0 and (
+                        target_qty <= 0.0
+                        or summary_qty + max(target_qty * 1e-8, 1e-12) >= target_qty
+                        or time.monotonic() >= deadline
+                    ):
                         return summary
         summary = _execution_summary(trading_client.get_trade_history(symbol=symbol, order_link_id=order_link_id, limit=50))
-        if _float(summary.get("qty")) > 0.0 or time.monotonic() >= deadline:
+        rest_qty = _float(summary.get("qty"))
+        # EXEC-6: gate the REST poll on target_qty too (mirrors the WS branch). A still-partial
+        # REST view (only the first book-walk leg settled) must NOT short-circuit a multi-fill
+        # order to 'partial'; wait for the cumulative qty to reach target. The deadline clause
+        # still bounds a genuine partial (only one leg ever arrives) to the poll budget.
+        if (
+            rest_qty > 0.0
+            and (target_qty <= 0.0 or rest_qty + max(target_qty * 1e-8, 1e-12) >= target_qty)
+        ) or time.monotonic() >= deadline:
             return summary
         if execution_event_router is None:
             now = time.monotonic()
@@ -2762,7 +2818,9 @@ def _round_price(price: float | Decimal, *, tick_size: float, rounding: str) -> 
         units = (value / tick).to_integral_value(rounding=rounding)
         return float(units * tick)
     except (InvalidOperation, ZeroDivisionError):
-        return price
+        # Fallback: coerce the input to float (identity for a float input; honours the
+        # -> float signature for a Decimal input instead of cast-lying about it).
+        return float(price)
 
 
 def _trade_id(scenario: EventScenario, *, symbol: str, signal_ts_ms: int) -> str:
@@ -2814,7 +2872,7 @@ def _max_int(frame: pl.DataFrame, column: str) -> int:
     if frame.is_empty() or column not in frame.columns:
         return 0
     value = frame[column].max()
-    return int(value) if value is not None else 0
+    return int(value) if value is not None else 0  # type: ignore[arg-type]  # polars Series value
 
 
 def _float(value: Any) -> float:
@@ -2944,8 +3002,10 @@ from .event_demo_exits import (  # noqa: E402, F401  (re-export surface)
     _execute_exits,
     _execute_risk_exits,
     _execute_stop_repairs,
+    _fetch_account_closed_pnl,
     _limit_chase_price,
     _orphan_close_pnl_backfill,
+    _orphan_close_pnl_from_records,
     _orphan_close_trade_row,
     _partial_exit_trade_update,
     _preflight_exit_order_row,

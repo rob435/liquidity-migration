@@ -80,7 +80,7 @@ def _utc_now_ms() -> int:
 
 WS_STORE_SOURCE = "bybit_ws_kline"
 
-_KLINE_SCHEMA: dict[str, pl.DataType] = {
+_KLINE_SCHEMA: dict[str, type[pl.DataType]] = {  # values are polars dtype classes, not instances
     "ts_ms": pl.Int64,
     "symbol": pl.String,
     "open": pl.Float64,
@@ -226,12 +226,19 @@ class KlineStore:
         # current store; a clone keeps the cached frame immutable to callers.
         self._window_cache: tuple[tuple, pl.DataFrame] | None = None
         self._window_builds = 0
+        # (version, oldest_ts_ms, row_count) cache for stats() — keyed on the
+        # same _adds_total+_adds_evicted mutation version as _window_cache so a
+        # hit provably reflects the current store (ws-dataplane-7). recovery
+        # adds bars without bumping _adds_total, so it must invalidate this too.
+        self._stats_scan_cache: tuple[int, int | None, int] | None = None
         # Skip a periodic flush when nothing changed since the last one (quiet
         # periods / between hourly bars): re-serializing the whole store every
         # ~30s with no new bars is wasted CPU + lock contention. -1 forces the
         # first flush. Uses the same mutation version as the window cache.
         self._last_flush_version = -1
         self._cache_root: Path | None = Path(cache_root).expanduser() if cache_root is not None else None
+        self._flush_dir: Path | None
+        self._flush_path: Path | None
         if self._cache_root is not None:
             self._flush_dir = self._cache_root / ".cache" / "ws_klines"
             self._flush_path = self._flush_dir / "store.parquet"
@@ -533,21 +540,39 @@ class KlineStore:
 
     def oldest_ts_ms(self) -> int | None:
         with self._lock:
-            best: int | None = None
-            for symbol_bars in self._bars.values():
-                if not symbol_bars:
-                    continue
-                local_min = min(symbol_bars)
-                if best is None or local_min < best:
-                    best = local_min
-            return best
+            return self._oldest_ts_ms_locked()
+
+    def _oldest_ts_ms_locked(self) -> int | None:
+        best: int | None = None
+        for symbol_bars in self._bars.values():
+            if not symbol_bars:
+                continue
+            local_min = min(symbol_bars)
+            if best is None or local_min < best:
+                best = local_min
+        return best
 
     def stats(self) -> dict[str, Any]:
         with self._lock:
             symbol_count = len(self._bars)
-            row_count = sum(len(symbol_bars) for symbol_bars in self._bars.values())
             newest = self.newest_ts_ms()
-            oldest = self.oldest_ts_ms()
+            # oldest_ts_ms + row_count are an O(symbols x bars) scan (a min() per
+            # symbol). stats() is polled on every daemon heartbeat, so the scan ran
+            # every poll against a ~600-symbol store. Cache the (oldest, row_count)
+            # pair keyed on the same mutation-version as the window cache
+            # (_adds_total + _adds_evicted bump on every insert/eviction/trim, the
+            # only paths that change oldest or the row total). A version hit provably
+            # reflects the current store, so the scan now runs only when the store
+            # actually changed (ws-dataplane-7).
+            version = self._adds_total + self._adds_evicted
+            cached = self._stats_scan_cache
+            if cached is not None and cached[0] == version:
+                oldest = cached[1]
+                row_count = cached[2]
+            else:
+                oldest = self._oldest_ts_ms_locked()
+                row_count = sum(len(symbol_bars) for symbol_bars in self._bars.values())
+                self._stats_scan_cache = (version, oldest, row_count)
             # 56-byte estimate matches the dataclass overhead in CPython 3.11+
             # with slots (8 ints + 6 floats + 1 str pointer, ~56-72 bytes).
             estimated_bytes = row_count * 72 + symbol_count * 224
@@ -708,6 +733,13 @@ class KlineStore:
         with self._lock:
             recovered = 0
             max_ts = self._global_max_ts_ms
+            # Clamp recovery to the same future-ts bound as _insert_bar: a corrupt
+            # far-future bar in the flush file would otherwise advance
+            # _global_max_ts_ms, push _evict_old_locked's (reference - retain)
+            # cutoff into the future, and mass-evict every legitimate bar on
+            # startup (the documented total-loss scenario). The insert path drops
+            # such bars; recovery must too.
+            max_acceptable_ts = _utc_now_ms() + self._max_future_ts_slack_ms
             for row in frame.iter_rows(named=True):
                 symbol = str(row.get("symbol", "") or "")
                 if not symbol:
@@ -715,6 +747,8 @@ class KlineStore:
                 try:
                     ts_ms = int(row["ts_ms"])
                 except (TypeError, ValueError, KeyError):
+                    continue
+                if ts_ms > max_acceptable_ts:
                     continue
                 try:
                     bar = _Bar(
@@ -739,8 +773,9 @@ class KlineStore:
                 self._evict_old_locked(reference_ts_ms=max_ts)
                 self._last_eviction_ref_ts_ms = max_ts
             # recovery adds bars without bumping _adds_total (the window-cache
-            # version), so invalidate the cache explicitly. (Startup-only path.)
+            # version), so invalidate both caches explicitly. (Startup-only path.)
             self._window_cache = None
+            self._stats_scan_cache = None
         return recovered
 
     # -- introspection --------------------------------------------------

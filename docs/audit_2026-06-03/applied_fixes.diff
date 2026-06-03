@@ -1,0 +1,420 @@
+diff --git a/liquidity_migration/continuous_demo.py b/liquidity_migration/continuous_demo.py
+index 77a7e1f..c47f836 100644
+--- a/liquidity_migration/continuous_demo.py
++++ b/liquidity_migration/continuous_demo.py
+@@ -57,7 +57,6 @@ class ContinuousDemoCycleConfig:
+     # --- execution / book ---
+     max_active: int = 25
+     max_new_entries_per_cycle: int = 5
+-    max_concurrent_entries: int = 4
+     max_hold_hours: int = 48              # force-exit cap if a name never leaves the decile
+     # ENTRY TIMING (the alpha-sweep #1 finding, 2026-06-02): select ENTRIES from the CONFIRMED bar-close
+     # decile + this many hours' delay, NOT the live intra-hour decile cross. The engine validated the
+@@ -881,6 +880,20 @@ def _execute_continuous_entries(
+                     order_status = "filled" if (tgt > 0 and filled_qty + max(tgt * 1e-8, 1e-12) >= tgt) else ("partial" if filled_qty > 0 else "submitted_unconfirmed")
+         entry_qty = _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0 else ""
+         if not demo.submit_orders or filled_qty > 0.0:
++            # KNOWN COLLISION (operator-gated, audit 2026-06-03, continuous-2): signal_ts_ms is the
++            # deciding-bar hour, CONSTANT for the whole wall-clock hour, so a same-symbol cover-then-
++            # re-enter within that hour (cover at H:05, cooldown lifts H:35, re-enter H:40 still in D9)
++            # produces an IDENTICAL trade_id (and identical entry orderLinkId). storage dedups
++            # continuous_fade_demo_trades on trade_id -> the closed row is silently overwritten by the
++            # re-open (LEDGER DATA LOSS), and Bybit rejects the duplicate orderLinkId so the re-entry
++            # never places. Correct fix is a backward-compatible re-entry SEQUENCE (seq = count of prior
++            # (symbol, signal_ts) trades in the ledger; seq=0 keeps today's exact id/link so existing
++            # rows are untouched): trade_id = f"{...}-{signal_ts}" for seq 0 else f"...-{signal_ts}-{seq}",
++            # and an entry orderLinkId suffix "-{seq}" — this PRESERVES retry idempotency (a crash-retry
++            # of the same open recomputes the same seq -> same link) while making a genuine re-entry
++            # distinct. It must also extend decode_entry_order_link_id + the ws_risk:1478 reconstruction
++            # to round-trip the seq, so it is an operator-coordinated change to the live reconcile/rebuild
++            # identity scheme + a write->read collision test (continuous-8). NOT changed blind here.
+             trade_id = f"{strategy_id}-{symbol}-{signal_ts_ms}"
+             rows.append({
+                 # Tag the sleeve explicitly (the exit row below inherits it via
+diff --git a/liquidity_migration/downloaders.py b/liquidity_migration/downloaders.py
+index eec4395..e094a42 100644
+--- a/liquidity_migration/downloaders.py
++++ b/liquidity_migration/downloaders.py
+@@ -578,7 +578,18 @@ def _download_symbol_dataset(
+     # That way the next refresh sees "this range is fully covered" via a
+     # direct lookup (no glob scan), and the tail-only path will only fire
+     # when the requested end_ms moves forward again.
+-    _mark_complete(_marker_path(data_root, dataset=dataset, symbol=symbol, start_ms=start_ms, end_ms=end_ms, suffix=marker_suffix))
++    #
++    # BUT never claim a never-before-covered range complete on an EMPTY fetch: a
++    # symbol that lists mid-window (pre-listing []), a transient empty REST
++    # response, or a provider hiccup that returns [] instead of raising would
++    # otherwise be marked complete and SKIPPED FOREVER (permanent silent coverage
++    # gap). A zero-row *tail* extension (tail_only) is legitimate (no new data past
++    # the existing coverage), so still mark that; only a fresh empty range is held
++    # back for retry next run.
++    if frame.height > 0 or tail_only:
++        _mark_complete(_marker_path(data_root, dataset=dataset, symbol=symbol, start_ms=start_ms, end_ms=end_ms, suffix=marker_suffix))
++    else:
++        print(f"{dataset}: {index}/{total} {symbol} EMPTY fresh fetch — marker withheld for retry", flush=True)
+     print(f"{dataset}: {index}/{total} {symbol} rows={frame.height}", flush=True)
+     del rows, frame
+     gc.collect()
+diff --git a/liquidity_migration/event_demo.py b/liquidity_migration/event_demo.py
+index 0f558a1..8b28818 100644
+--- a/liquidity_migration/event_demo.py
++++ b/liquidity_migration/event_demo.py
+@@ -1170,6 +1170,9 @@ def run_event_risk_cycle(
+             enabled=risk.submit_orders and trading_client is not None,
+             position_error=position_error,
+             trading_client=trading_client,
++            # Bulk REST snapshot: a successful-but-empty/partial get_positions must
++            # not zero-PnL-orphan-close a trade get_closed_pnl can't confirm (C1).
++            require_evidence=True,
+         )
+         if reconcile_rows:
+             all_trades = _upsert_rows(all_trades, reconcile_rows, key="trade_id")
+diff --git a/liquidity_migration/event_demo_exits.py b/liquidity_migration/event_demo_exits.py
+index ef483ed..3f1c74d 100644
+--- a/liquidity_migration/event_demo_exits.py
++++ b/liquidity_migration/event_demo_exits.py
+@@ -1381,6 +1381,7 @@ def _risk_reconcile_missing_positions(
+     enabled: bool,
+     position_error: str = "",
+     trading_client: Any | None = None,
++    require_evidence: bool = False,
+ ) -> tuple[pl.DataFrame, list[dict[str, Any]]]:
+     """Close ledger rows whose Bybit position has vanished.
+ 
+@@ -1390,34 +1391,56 @@ def _risk_reconcile_missing_positions(
+     on a single transient API failure. The caller plumbs the error string from
+     :func:`_safe_raw_positions`.
+ 
++    ``require_evidence`` extends that protection to the *successful-but-empty*
++    snapshot (retCode 0 with an empty ``result.list`` during a venue degradation),
++    which carries no ``position_error`` yet is the same C1 mass-false-close class.
++    With it set, a trade is closed ONLY when ``get_closed_pnl`` confirms a real
++    close since entry; absent that record the trade is kept OPEN (a possibly-live
++    position is never wiped to a zero-PnL ``bybit_position_missing`` row). The bulk
++    REST-snapshot callers (``rest_reconcile`` / ``bootstrap`` / the cycle runner)
++    pass ``True``; the WS ``on_position_message`` path keeps ``False`` because a WS
++    ``size=0`` IS the positive close evidence for that symbol, so its (possibly
++    last-position-emptying) close stays prompt.
++
+     When a ``trading_client`` is provided, queries ``get_closed_pnl`` per orphan
+     symbol to backfill ``exit_price`` / ``gross_trade_return`` / ``net_return``
+-    / ``exit_order_id`` / ``exit_ts_ms`` from the actual close. Missing PnL data
+-    is non-fatal -- the trade still closes with ``exit_reason='bybit_position_missing'``
+-    and the previous zero-PnL defaults.
++    / ``exit_order_id`` / ``exit_ts_ms`` from the actual close.
+     """
+     if open_trades.is_empty() or not enabled:
+         return open_trades, []
+     if position_error:
+         return open_trades, []
++    # Side-aware keep-open check, mirroring the cycle path (_reconcile_open_trades):
++    # key on (symbol, normalized_side) so a same-symbol flip (ledger short while the
++    # venue now holds a long on that symbol) is surfaced as a short-side orphan
++    # close instead of being masked by the opposite-side position. position_by_symbol
++    # values carry `side` in both the WS (on_position_message) and REST
++    # (_active_position_by_symbol) population paths.
++    size_by_symbol_side = _position_size_by_symbol_side(list(position_by_symbol.values()))
+     updates: list[dict[str, Any]] = []
+     kept = []
+     for trade in open_trades.to_dicts():
+         symbol = str(trade.get("symbol", ""))
+-        if symbol and symbol in position_by_symbol:
++        trade_side = _normalized_position_side(trade.get("side"))
++        if trade_side and size_by_symbol_side.get((symbol, trade_side), 0.0) > 0.0:
+             kept.append(trade)
+             continue
+-        # The ws_risk path keeps the legacy close-on-absence behavior here
+-        # (require_evidence=False). Its safety against a transient/empty read is
+-        # the position_error guard at the caller (a failed/empty positions fetch
+-        # does not reach here), NOT a grace window — untracked_position_grace_
+-        # seconds gates the OPPOSITE direction (adopting an exchange position with
+-        # no ledger row), not this ledger-row-with-no-position close. The
+-        # fail-closed evidence requirement (require_evidence=True) is enforced on
+-        # the cycle path (_reconcile_open_trades) instead.
+-        updates.append(
+-            _orphan_close_trade_row(trade, now_ms=now_ms, trading_client=trading_client, require_evidence=False)
++        row = _orphan_close_trade_row(
++            trade, now_ms=now_ms, trading_client=trading_client, require_evidence=require_evidence,
+         )
++        if row is None:
++            # FAIL-CLOSED: position absent but no closure evidence — keep the
++            # trade OPEN rather than wipe a possibly-live position on a degraded/
++            # empty REST snapshot. untracked_position_grace_seconds gates the
++            # OPPOSITE direction (adopting an exchange position with no ledger
++            # row), not this ledger-row-with-no-position close.
++            kept.append(trade)
++            _logger.warning(
++                "risk orphan-close skipped (no closure evidence) symbol=%s trade_id=%s — keeping open",
++                symbol, trade.get("trade_id"),
++            )
++            continue
++        updates.append(row)
+     return pl.DataFrame(kept, infer_schema_length=None) if kept else _empty_trades(), updates
+ 
+ def _orphan_close_trade_row(
+diff --git a/liquidity_migration/kline_store.py b/liquidity_migration/kline_store.py
+index 7b0398d..ab6ab58 100644
+--- a/liquidity_migration/kline_store.py
++++ b/liquidity_migration/kline_store.py
+@@ -708,6 +708,13 @@ class KlineStore:
+         with self._lock:
+             recovered = 0
+             max_ts = self._global_max_ts_ms
++            # Clamp recovery to the same future-ts bound as _insert_bar: a corrupt
++            # far-future bar in the flush file would otherwise advance
++            # _global_max_ts_ms, push _evict_old_locked's (reference - retain)
++            # cutoff into the future, and mass-evict every legitimate bar on
++            # startup (the documented total-loss scenario). The insert path drops
++            # such bars; recovery must too.
++            max_acceptable_ts = _utc_now_ms() + self._max_future_ts_slack_ms
+             for row in frame.iter_rows(named=True):
+                 symbol = str(row.get("symbol", "") or "")
+                 if not symbol:
+@@ -716,6 +723,8 @@ class KlineStore:
+                     ts_ms = int(row["ts_ms"])
+                 except (TypeError, ValueError, KeyError):
+                     continue
++                if ts_ms > max_acceptable_ts:
++                    continue
+                 try:
+                     bar = _Bar(
+                         ts_ms=ts_ms,
+diff --git a/liquidity_migration/long_native_event_demo.py b/liquidity_migration/long_native_event_demo.py
+index dbf8963..b228b76 100644
+--- a/liquidity_migration/long_native_event_demo.py
++++ b/liquidity_migration/long_native_event_demo.py
+@@ -460,6 +460,12 @@ def run_long_native_demo_cycle(
+         cycle_trade_rows: list[dict[str, Any]] = []
+         cycle_order_rows: list[dict[str, Any]] = []
+ 
++        # Live mark price for this cycle, used to price BOTH dry-run/paper exits
++        # (so a paper close marks to market instead of FLAT at entry — otherwise the
++        # long paper shadow records 0% on every time-stop and is useless as a
++        # forward arbiter) and the entry checks below.
++        price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, klines)
++
+         # Time-stop exits first: any open position past planned_exit_ts_ms
+         # is closed reduce-only this cycle. Stop/TP are venue-managed and
+         # fire instantly; the cycle only handles time-stops.
+@@ -489,6 +495,7 @@ def run_long_native_demo_cycle(
+             now_ms=cycle_now_ms,
+             execution_event_router=execution_event_router,
+             record_preflight=preflight_callback,
++            price_by_symbol=price_by_symbol,
+         )
+         if executed_exits:
+             all_trades = _upsert_rows(all_trades, executed_exits, key="trade_id")
+@@ -504,7 +511,7 @@ def run_long_native_demo_cycle(
+         # bar per symbol, then check sniper retrace condition against live 1h
+         # bars. Each candidate carries enough state to enter at-market this
+         # cycle if conditions are met or the deadline has expired.
+-        price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, klines)
++        # (price_by_symbol was built above so the exit path could mark to market.)
+         contract_by_symbol = _contract_lookup(universe)
+         candidates, skip_counts = _select_long_entry_candidates(
+             features=features,
+@@ -1099,9 +1106,11 @@ def _execute_long_exits(
+     now_ms: int,
+     execution_event_router: Any | None = None,
+     record_preflight: Callable[[dict[str, Any]], None] | None = None,
++    price_by_symbol: dict[str, float] | None = None,
+ ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+     if not exits:
+         return [], []
++    price_by_symbol = price_by_symbol or {}
+     trade_lookup = {str(row["trade_id"]): row for row in all_trades.to_dicts()} if not all_trades.is_empty() else {}
+     rows: list[dict[str, Any]] = []
+     order_rows: list[dict[str, Any]] = []
+@@ -1193,7 +1202,15 @@ def _execute_long_exits(
+                 # Mirror the short-sleeve exit path: realized PnL + venue fee +
+                 # venue execTime must land on the close so the ledger carries
+                 # the full audit trail without needing the orphan reconciler.
+-                final_exit_price = exit_price or _float(trade.get("entry_price"))
++                # For the dry-run / paper path there is no venue fill, so mark the
++                # close to the live ticker/kline price; only fall back to the entry
++                # price (a FLAT 0% close) when no live price is available — without
++                # this the paper shadow recorded 0% on every time-stop.
++                final_exit_price = (
++                    exit_price
++                    or _float(price_by_symbol.get(symbol, 0.0))
++                    or _float(trade.get("entry_price"))
++                )
+                 trade_side = str(trade.get("side") or "long")
+                 entry_price_for_return = _float(trade.get("entry_price"))
+                 gross_trade_return = _trade_return(
+diff --git a/liquidity_migration/trade_lifecycle.py b/liquidity_migration/trade_lifecycle.py
+index 297e942..c5400a5 100644
+--- a/liquidity_migration/trade_lifecycle.py
++++ b/liquidity_migration/trade_lifecycle.py
+@@ -430,6 +430,17 @@ def _funding_lookup(funding: pl.DataFrame | None) -> dict[str, dict[str, Any]] |
+         # intra-interval snapshot rows (e.g. hourly rows of an 8h rate). Charging
+         # every row would bill the settlement rate up to 8x, so collapse each
+         # settlement window to its boundary-aligned row.
++        #
++        # KNOWN DEBT (operator-gated, audit 2026-06-03): this collapse is only
++        # correct when funding_interval_min is the TRUE per-symbol settlement
++        # interval. It is NOT today — _normalize_binance_funding hardcodes 8h for
++        # every symbol and the Bybit funding-history endpoint omits the interval
++        # (also defaulting to 8h). For a real 4h-settling alt the 8h window merges
++        # two settlements and charges HALF the funding, inflating short-strategy
++        # MAR. Correct fix: source the true fundingInterval from the instruments
++        # dataset (downloaders.py:867 has it) and join it onto funding before this
++        # point, then re-ingest funding + re-run the affected backtests. See the
++        # strict-xfail test_funding_4h_settlements_not_undercounted_*.
+         interval_ms = (
+             pl.col("funding_interval_min").cast(pl.Int64, strict=False).fill_null(480).clip(1) * 60_000
+         )
+diff --git a/liquidity_migration/volume_events.py b/liquidity_migration/volume_events.py
+index 93c2833..33de8fb 100644
+--- a/liquidity_migration/volume_events.py
++++ b/liquidity_migration/volume_events.py
+@@ -313,12 +313,27 @@ def _scenario_hold_ms(scenario: EventScenario) -> int:
+ 
+ 
+ def _attach_residual_momentum(features: pl.DataFrame, root: Path) -> pl.DataFrame:
+-    """Left-join the precomputed PIT residual-momentum signal onto the daily feature panel.
+-
+-    Joins on (symbol, daily-grid ts_ms) so the join is robust to ts_ms convention. The signal
+-    (scripts/precompute_residual_momentum.py) is PIT-clean (trailing factor-residual strictly
+-    before the signal day). Candidates with no signal row get a null ``residual_momentum`` and are
+-    dropped by the gate's is_not_null() guard. Raises if the signal file is absent (the gate needs it).
++    """Left-join the precomputed residual-momentum signal onto the daily feature panel.
++
++    Candidates with no signal row get a null ``residual_momentum`` and are dropped by the gate's
++    is_not_null() guard. Raises if the signal file is absent (the gate needs it).
++
++    KNOWN LOOK-AHEAD DEBT (operator-gated, audit 2026-06-03) — do NOT trust the rmom-gated
++    research results until fixed + re-validated:
++      1. JOIN-KEY OFF-BY-ONE. Both sides floor ts_ms to a day, but the two sides use DIFFERENT
++         conventions: the residual table's ts_ms is the START-of-day grid (00:00 UTC of decision
++         day D), while this feature panel's ts_ms is the END-of-day stamp (day_start(D)+MS_PER_DAY
++         = 00:00 of D+1). So flooring both maps the day-D event to ``_rm_day`` = D+1 and attaches
++         ``residual_momentum[D+1]`` (= sum residual_return[D-6..D]) instead of [D] — a whole-day
++         shift that pulls residual_return[D] (the event day's own forward residual) into the gate.
++         Correct key: panel side = trading day = date(ts_ms - 1ms) (see _common.trading_day_expr);
++         residual side = date(ts_ms). See strict-xfail test_residual_momentum_join_is_off_by_one_day.
++      2. The residual itself is a FORWARD return (fit_factor_returns target_col='fwd_ret_1d'), so
++         residual_return[d] only completes at d+2; the precompute's rolling_sum(7).shift(1) leaves
++         look-ahead even after the key is fixed (needs shift>=2 for the backtest, >=3 for the live
++         00:00-wake continuous consumer). See scripts/precompute_residual_momentum.py.
++    A coherent fix changes BOTH and alters the LIVE continuous signal on the next auto-refresh +
++    invalidates the rmom-gate MAR verdict, so it must be done with operator coordination + re-run.
+     """
+     sig_path = Path(root) / "residual_momentum.parquet"
+     if not sig_path.exists():
+diff --git a/liquidity_migration/ws_risk.py b/liquidity_migration/ws_risk.py
+index 2051757..bdcd7b4 100644
+--- a/liquidity_migration/ws_risk.py
++++ b/liquidity_migration/ws_risk.py
+@@ -530,7 +530,7 @@ class EventWebSocketRiskEngine:
+             self.reconcile_flat_pending_exit_orders(orders)
+             orders = self._read_orders_combined()
+             self.terminalize_stale_pending_entry_orders(orders)
+-        self.reconcile_positions(write=True)
++        self.reconcile_positions(write=True, require_evidence=True)
+         self.evaluate_symbols(set(self.state.positions_by_symbol))
+         self.repair_exchange_stops()
+         self.adopt_untracked_positions()
+@@ -1263,7 +1263,7 @@ class EventWebSocketRiskEngine:
+             self._write_order_rows_routed(rows)
+             self.state.repairs.extend(rows)
+ 
+-    def reconcile_positions(self, *, write: bool) -> list[dict[str, Any]]:
++    def reconcile_positions(self, *, write: bool, require_evidence: bool = False) -> list[dict[str, Any]]:
+         # ``trading_client`` enables the B3 closed-PnL backfill: when an orphan
+         # is detected, the reconciler calls ``get_closed_pnl`` to fill in
+         # ``exit_price`` / ``gross_trade_return`` / ``net_return`` /
+@@ -1275,6 +1275,11 @@ class EventWebSocketRiskEngine:
+         # the REST positions probe failed the empty ``positions_by_symbol``
+         # would otherwise look like "every open trade has vanished" and
+         # false-positive orphan-close them all on a transient API hiccup.
++        # ``require_evidence`` is set by the bulk REST snapshot callers
++        # (rest_reconcile / bootstrap): a successful-but-empty or partial snapshot
++        # must not zero-PnL-close a trade that ``get_closed_pnl`` can't confirm.
++        # The WS ``on_position_message`` path leaves it False (a WS size=0 is the
++        # close evidence for that symbol).
+         reconciled, rows = _risk_reconcile_missing_positions(
+             self.state.open_trades,
+             position_by_symbol=self.state.positions_by_symbol,
+@@ -1282,6 +1287,7 @@ class EventWebSocketRiskEngine:
+             enabled=self.risk.submit_orders and self.private_client is not None,
+             position_error=self.state.last_position_error,
+             trading_client=self.private_client,
++            require_evidence=require_evidence,
+         )
+         self.state.open_trades = reconciled
+         if rows:
+@@ -1342,7 +1348,7 @@ class EventWebSocketRiskEngine:
+             self.reconcile_flat_pending_exit_orders(orders)
+             orders = self._read_orders_combined()
+             self.terminalize_stale_pending_entry_orders(orders)
+-        self.reconcile_positions(write=True)
++        self.reconcile_positions(write=True, require_evidence=True)
+         self.evaluate_symbols(set(self.state.positions_by_symbol))
+         self.repair_exchange_stops()
+         self.reconcile_untracked_exit_orders()
+diff --git a/scripts/precompute_residual_momentum.py b/scripts/precompute_residual_momentum.py
+index 1346875..7e8e3ed 100644
+--- a/scripts/precompute_residual_momentum.py
++++ b/scripts/precompute_residual_momentum.py
+@@ -4,12 +4,23 @@ This is the offline half of the residual-momentum SELECTION gate (P3, operator-g
+ computes, per (symbol, ts_ms) on the daily grid, the trailing common4-factor-residual momentum
+ known at the signal-close decision (strict lag1 = excludes the signal-day forward residual):
+ 
+-    residual_momentum[D] = sum_{d in [D-7, D-1]} residual_return[d]
++    residual_momentum[D] = sum_{d in [D-7, D-1]} residual_return[d]   (rolling_sum(7).shift(1))
+ 
+ where residual_return[d] is the day-d residual from the validated 6-factor risk model's per-day
+ cross-sectional regression restricted to the 4 always-present (klines/price) factors (common4 —
+-funding/premium are 38.8% null on binance, see binance-derivative-metrics-missing). PIT-clean:
+-residual_return[d] completes at d+1 (<= signal close), and the lag1 shift excludes the signal day.
++funding/premium are 38.8% null on binance, see binance-derivative-metrics-missing).
++
++⚠️ KNOWN LOOK-AHEAD DEBT (operator-gated, audit 2026-06-03 — confirms STATE.md "rmom look-ahead
++unconfirmed"): the residual is fit against a FORWARD return (fit_factor_returns default
++target_col='fwd_ret_1d', which spans first_bar_close[d+1]->[d+2]), so residual_return[d] does NOT
++complete until ~d+2 01:00 UTC — NOT d+1 as previously claimed. Therefore residual_momentum[D] =
++sum residual_return[D-7..D-1] has a newest term (residual_return[D-1]) that only completes at
++D+1 01:00 UTC. For the LIVE continuous consumer, which wakes from 00:00 UTC of day D and reads
++residual_momentum[today], that is up to ~25h of future data; the backtest join is additionally
++off by one day (see volume_events._attach_residual_momentum). Provable-causal fix: shift(1) ->
++shift(3) here (newest summed residual_return[D-3] completes (D-1) 01:00 < D 00:00) AND fix the
++backtest join key. BOTH change the rmom-gate MAR verdict AND the live signal on the next refresh,
++so they must be applied with operator coordination + an rmom33 re-validation — NOT silently here.
+ 
+ The engine (volume_events.run_volume_event_research) left-joins this on (symbol, daily-grid ts_ms)
+ to add a `residual_momentum` column, gated by --liquidity-migration-residual-momentum-max
+@@ -19,9 +30,8 @@ The LIVE continuous demo sleeve joins this table on the CURRENT trading day's ts
+ refresh `--end` MUST advance to today — otherwise the daily systemd refresh keeps writing a table that
+ ends in the past, the live join finds no row for today, the `is_not_null` filter empties the whole
+ cross-section, and the sleeve silently emits zero signal. `--end` therefore defaults to TOMORROW (UTC)
+-so today's causal `residual_momentum[today]` row (built only from days <= today-1) is produced. This is
+-PIT-safe: `residual_return[d]` completes at d+1 and the lag1 `shift(1)` excludes the signal day, so
+-advancing the end can never leak look-ahead — it only stops the table going stale.
++so today's `residual_momentum[today]` row is produced (the staleness fix is correct and independent of
++the look-ahead debt above; advancing `--end` only stops the table going stale).
+ 
+ Dispatch: POLARS_MAX_THREADS=8 .venv/bin/python -u scripts/precompute_residual_momentum.py [--root PATH ...] [--start D] [--end D]
+ """
+diff --git a/scripts/r1_robustness.py b/scripts/r1_robustness.py
+index a6e4bd5..60750a4 100644
+--- a/scripts/r1_robustness.py
++++ b/scripts/r1_robustness.py
+@@ -200,9 +200,15 @@ def _block_bootstrap(cell_r: list[float], base_r: list[float], *, n_boot: int, b
+     ann_deltas, mar_deltas = [], []
+     for _ in range(n_boot):
+         idx: list[int] = []
++        # Non-circular moving-block bootstrap: a block starts only in [0, n-block]
++        # so it never straddles the series boundary. The old circular wrap
++        # ((start+j) % n) stitched the last and first months of the 3-year series
++        # into one contiguous block — fabricating a Dec->Jan regime transition for
++        # a regime-conditional strategy and corrupting the Tier-3 block-bootstrap p5.
++        max_start = max(n - block + 1, 1)
+         while len(idx) < n:
+-            start = rng.randrange(0, n)
+-            idx.extend((start + j) % n for j in range(block))
++            start = rng.randrange(0, max_start)
++            idx.extend(min(start + j, n - 1) for j in range(block))
+         idx = idx[:n]
+         cr = [cell_r[i] for i in idx]
+         br = [base_r[i] for i in idx]

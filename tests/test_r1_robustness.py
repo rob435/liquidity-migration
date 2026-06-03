@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import math
+import random
 import sys
 from pathlib import Path
 
@@ -28,6 +29,31 @@ def _load():
 
 
 MOD = _load()
+
+
+def test_block_bootstrap_indices_never_straddle_the_boundary() -> None:
+    """re-audit rescan-rmom-funding-2: the non-circular moving-block bootstrap must
+    never wrap (no block contains both the last and first index) — that wrap was the
+    bug that stitched unrelated regimes for a regime-conditional strategy."""
+    rng = random.Random(0)
+    n, block = 36, 3
+    for _ in range(300):
+        idx = MOD._resample_block_indices(n, block, rng)
+        assert len(idx) == n
+        assert all(0 <= i < n for i in idx)
+        # Each full block (the resample is laid down in block-length chunks) is a
+        # contiguous ascending run — never a high->low wrap across the boundary.
+        for k in range(0, n - block + 1, block):
+            blk = idx[k:k + block]
+            assert all(0 <= b - a <= 1 for a, b in zip(blk, blk[1:])), blk
+
+
+def test_block_bootstrap_indices_handle_series_shorter_than_block() -> None:
+    """The max(n-block+1, 1) guard must not IndexError when n < block."""
+    rng = random.Random(0)
+    idx = MOD._resample_block_indices(2, 5, rng)
+    assert len(idx) == 2
+    assert all(0 <= i < 2 for i in idx)
 
 
 def test_mar_zero_drawdown_is_nan_not_inf() -> None:

@@ -13,6 +13,19 @@ can be a shared dependency of all three sleeves + ws_risk without a circular imp
 """
 from __future__ import annotations
 
+# The orderLinkId prefix vocabulary — ONE registry so a new sleeve/exit prefix is added in a single
+# place. Entry links are decoded by ``decode_entry_order_link_id``; exit/risk-side links are matched
+# by ``is_exit_link`` (event_demo._is_own_exit_order enumerated these inline; quality-dup-12).
+#   entry:  lm-en-{base}-{ts36} (short) · lm-en-l-… (long) · lm-en-c-…[-seq] (continuous)
+#   exit/risk: lm-ex- (planned exit) · lm-rx- (risk exit) · lm-wx- (watchdog) · lm-ux- (untracked unwind)
+ENTRY_LINK_PREFIX = "lm-en-"
+EXIT_LINK_PREFIXES = ("lm-ex-", "lm-rx-", "lm-wx-", "lm-ux-")
+
+
+def is_exit_link(order_link_id: str) -> bool:
+    """True if ``order_link_id`` is a bot-generated EXIT / risk-side order (any sleeve)."""
+    return bool(order_link_id) and order_link_id.startswith(EXIT_LINK_PREFIXES)
+
 
 def _base36(value: int) -> str:
     chars = "0123456789abcdefghijklmnopqrstuvwxyz"
@@ -48,27 +61,29 @@ def _split_order_link_id(base: str, idx: int) -> str:
     return f"{base[:36 - len(suffix)]}{suffix}"
 
 
-def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int] | None:
-    """Recover (sleeve, signal_ts_ms) from a bot-generated entry orderLinkId.
+def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int, int] | None:
+    """Recover ``(sleeve, signal_ts_ms, reentry_seq)`` from a bot-generated entry orderLinkId.
 
     The strategy generates entry orderLinkIds as
-    ``lm-en-{base}-{base36(signal_ts // 1000)}`` (short) or
-    ``lm-en-l-{base}-{base36(signal_ts // 1000)}`` (long). On a VPS rebuild
-    the local trade ledger is gone but Bybit retains the orderLinkId
-    indefinitely — looking it up + decoding it back to signal_ts is the
-    rebuild-safe way to reconstruct the deterministic strategy trade_id
-    (avoids the lossy ``adopted-*`` fallback that drops strategy context).
+    ``lm-en-{base}-{base36(signal_ts // 1000)}`` (short),
+    ``lm-en-l-{base}-{base36(signal_ts // 1000)}`` (long), or
+    ``lm-en-c-{base}-{base36(signal_ts // 1000)}[-{seq}]`` (continuous; the optional ``-{seq}`` is a
+    re-entry sequence > 0 — see _continuous_order_link_id). On a VPS rebuild the local trade ledger is
+    gone but Bybit retains the orderLinkId indefinitely — decoding it back to (signal_ts, seq) is the
+    rebuild-safe way to reconstruct the deterministic strategy trade_id (avoids the lossy
+    ``adopted-*`` fallback that drops strategy context).
 
-    Returns ``("short", signal_ts_ms)`` or ``("long", signal_ts_ms)`` on a
-    successful decode, or ``None`` if the link does not match a bot-generated
-    entry pattern (e.g. hand-placed positions, risk-side ``lm-ux-*`` links,
-    legacy formats). Returning None means "fall back to adopted-*"."""
+    Returns ``(sleeve, signal_ts_ms, reentry_seq)`` (reentry_seq is 0 for every form except a
+    continuous re-entry), or ``None`` if the link is not a bot-generated entry pattern (hand-placed
+    positions, risk-side ``lm-ux-*`` links, legacy formats). None means "fall back to adopted-*"."""
     if not order_link_id or not order_link_id.startswith("lm-en"):
         return None
     parts = order_link_id.split("-")
-    # Short:      lm-en-{base}-{ts36}     → 4 parts, sleeve="short"
-    # Long:       lm-en-l-{base}-{ts36}   → 5 parts (parts[2]=="l"), sleeve="long"
-    # Continuous: lm-en-c-{base}-{ts36}   → 5 parts (parts[2]=="c"), sleeve="continuous"
+    reentry_seq = 0
+    # Short:      lm-en-{base}-{ts36}             → 4 parts, sleeve="short"
+    # Long:       lm-en-l-{base}-{ts36}           → 5 parts (parts[2]=="l"), sleeve="long"
+    # Continuous: lm-en-c-{base}-{ts36}           → 5 parts (parts[2]=="c"), sleeve="continuous", seq=0
+    # Continuous re-entry: lm-en-c-{base}-{ts36}-{seq} → 6 parts, seq>0
     if len(parts) == 4 and parts[0] == "lm" and parts[1] == "en":
         sleeve = "short"
         ts36 = parts[3]
@@ -78,6 +93,15 @@ def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int] | None:
     elif len(parts) == 5 and parts[0] == "lm" and parts[1] == "en" and parts[2] == "c":
         sleeve = "continuous"
         ts36 = parts[4]
+    elif len(parts) == 6 and parts[0] == "lm" and parts[1] == "en" and parts[2] == "c":
+        sleeve = "continuous"
+        ts36 = parts[4]
+        try:
+            reentry_seq = int(parts[5])
+        except ValueError:
+            return None
+        if reentry_seq <= 0:
+            return None
     else:
         return None
     try:
@@ -86,4 +110,4 @@ def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int] | None:
         return None
     if signal_ts_s <= 0:
         return None
-    return sleeve, signal_ts_s * 1000
+    return sleeve, signal_ts_s * 1000, reentry_seq

@@ -19,7 +19,7 @@ decile (D9). Enter when it is in D9 + liquid + not already held + capacity; exit
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import polars as pl
@@ -57,7 +57,6 @@ class ContinuousDemoCycleConfig:
     # --- execution / book ---
     max_active: int = 25
     max_new_entries_per_cycle: int = 5
-    max_concurrent_entries: int = 4
     max_hold_hours: int = 48              # force-exit cap if a name never leaves the decile
     # ENTRY TIMING (the alpha-sweep #1 finding, 2026-06-02): select ENTRIES from the CONFIRMED bar-close
     # decile + this many hours' delay, NOT the live intra-hour decile cross. The engine validated the
@@ -395,8 +394,8 @@ class LivePanelCache:
             cw = c["close_win"]
             count = int(cw.size) + 1
             if count >= 168:
-                mn = min(float(cw.min()), price) if cw.size else price
-                mx = max(float(cw.max()), price) if cw.size else price
+                mn: float | None = min(float(cw.min()), price) if cw.size else price
+                mx: float | None = max(float(cw.max()), price) if cw.size else price
             else:
                 mn = mx = None
             dist_low = (price - mn) / (mx - mn) if (mn is not None and mx is not None and mx > mn) else None
@@ -489,8 +488,8 @@ def _trade_excursion(
             )
             if not sub.is_empty():
                 lo = sub["low"].min()
-                if lo is not None and float(lo) > 0:
-                    min_low = float(lo)
+                if lo is not None and float(lo) > 0:  # type: ignore[arg-type]  # polars Series value
+                    min_low = float(lo)  # type: ignore[arg-type]  # polars Series value
         if include_live_in_mfe and cur is not None and float(cur) > 0:
             min_low = float(cur) if min_low is None else min(min_low, float(cur))
         if min_low is not None:
@@ -525,7 +524,7 @@ def _protective_exit_reason(
 
 def plan_continuous_exits(
     open_trades: list[dict[str, Any]],
-    live_state: pl.DataFrame,
+    decile_state: pl.DataFrame,
     *,
     now_ms: int,
     config: ContinuousDemoCycleConfig,
@@ -540,17 +539,26 @@ def plan_continuous_exits(
       - stop_approach/failed_fade: squeeze-defence loss cuts (see `_protective_exit_reason`)
       - max_hold  : the force-exit time cap
 
+    continuous-6: ``decile_state`` is the SELECTION signal for the ``left_decile`` exit and MUST be the
+    SAME confirmed-bar decile snapshot that selected the entry (the caller passes ``entry_state``), NOT
+    the live intra-hour decile. ``left_decile`` is the inverse of the entry signal, so it must fire on
+    the same signal at the same cadence the entry (and the validated backtest, continuous_events._run_trades)
+    use — otherwise a name entered on the confirmed decile is evicted within the same hour on a noisier
+    signal it was never entered on (a thrash the engine cannot have). The PROTECTIVE exits below
+    (breakeven / stop_approach / failed_fade / max_hold) are PRICE-driven via ``_trade_excursion`` (live
+    klines + ticker), so squeeze safety stays immediate and live regardless of the decile snapshot.
+
     breakeven/failed_fade are the daily-system exits validated cross-venue in the engine ablation; the
     MFE is reconstructed from the kline lows over [entry, now]; current PnL uses the live ticker price.
     The 25% disaster stop is the server-side resting order, not re-planned here."""
     if not open_trades:
         return []
-    have_state = not live_state.is_empty()
+    have_state = not decile_state.is_empty()
     # Hysteresis band: hold while the name's decile is still >= exit_decile_min; cover only once
     # clearly out. exit_decile_buffer=0 == cover the instant it leaves the top decile (legacy).
     exit_decile_min = config.decile - max(0, config.exit_decile_buffer)
     decile_by_symbol = (
-        {str(s): int(d) for s, d in zip(live_state["symbol"].to_list(), live_state["decile"].to_list())}
+        {str(s): int(d) for s, d in zip(decile_state["symbol"].to_list(), decile_state["decile"].to_list())}
         if have_state else {}
     )
     exits: list[dict[str, Any]] = []
@@ -636,8 +644,27 @@ def _recent_adverse_exit_count(
     adverse = pl.lit(False)
     if "exit_reason" in df.columns:
         adverse = adverse | pl.col("exit_reason").is_in(["stop_approach", "failed_fade"])
+    # DEPLOY NOTE (continuous-4): the stored live `net_return` is gross-of-cost (gtr*notional_weight)
+    # while the BACKTEST `net_return` is NET-of-cost (gross + cost_return + funding_return, see
+    # volume_events._simulate_indexed_trade). The engine's adverse-cover proxy is `net_return<0`
+    # NET-of-fees, so the breaker must compare a cost-consistent number. We do NOT mutate the stored
+    # field (it is also authored by ws_risk via event_demo_exits with the same gross convention -- a
+    # continuous-only rewrite would desync the multi-writer ledger); instead we subtract the realised
+    # round-trip fees here, as a fraction of the trade's equity, to match the engine's net definition.
+    # (Funding is not tracked per-trade live, so a funding residual remains: a cover whose loss is
+    # funding-cost-driven but gross-of-funding positive can still be MISSED. The proxy is strictly
+    # conservative only on the receive-funding side -- it never turns a fee-negative cover benign.)
+    # Threshold (w24/n8) is unchanged.
     if "net_return" in df.columns:
-        adverse = adverse | (pl.col("net_return").fill_null(0.0) < 0.0)
+        net_of_fees = pl.col("net_return").fill_null(0.0)
+        if {"entry_fee_usdt", "exit_fee_usdt", "equity_usdt"} <= set(df.columns):
+            fee_frac = (
+                (pl.col("entry_fee_usdt").fill_null(0.0) + pl.col("exit_fee_usdt").fill_null(0.0))
+                / pl.when(pl.col("equity_usdt").fill_null(0.0) > 0.0)
+                  .then(pl.col("equity_usdt")).otherwise(None)
+            ).fill_null(0.0)
+            net_of_fees = net_of_fees - fee_frac
+        adverse = adverse | (net_of_fees < 0.0)
     return int(df.filter(adverse).height)
 
 
@@ -653,13 +680,30 @@ def entry_circuit_breaker_tripped(
     return count >= config.entry_pause_after_adverse_exits, count
 
 
-def _continuous_order_link_id(prefix: str, *, symbol: str, signal_ts_ms: int) -> str:
-    """lm-{en-c|ux-c}-{base}-{ts36} — 5 parts, the distinct continuous sleeve (ws_risk routing).
-    Delegates to the single canonical builder so the format has ONE source of truth; the int()
-    cast tolerates a non-int signal_ts (continuous-specific defensiveness)."""
+def _continuous_order_link_id(prefix: str, *, symbol: str, signal_ts_ms: int, reentry_seq: int = 0) -> str:
+    """lm-{en-c|ux-c}-{base}-{ts36}[-{seq}] — the distinct continuous sleeve (ws_risk routing).
+    Delegates to the single canonical builder so the format has ONE source of truth; the int() cast
+    tolerates a non-int signal_ts (continuous-specific defensiveness). ``reentry_seq`` > 0 appends a
+    same-signal-window re-entry suffix (continuous-2): seq=0 is byte-identical to the legacy 5-part
+    form, so existing links are unchanged; decode_entry_order_link_id round-trips the seq."""
     from .event_demo import _order_link_id
 
-    return _order_link_id(prefix, symbol=symbol, signal_ts_ms=int(signal_ts_ms))
+    link = _order_link_id(prefix, symbol=symbol, signal_ts_ms=int(signal_ts_ms))
+    if reentry_seq > 0:
+        suffix = f"-{int(reentry_seq)}"
+        link = f"{link[: 36 - len(suffix)]}{suffix}"  # truncate-safe append within Bybit's 36-char cap
+    return link
+
+
+def _continuous_trade_id(strategy_id: str, symbol: str, signal_ts_ms: int, reentry_seq: int = 0) -> str:
+    """Deterministic continuous trade_id. seq=0 is byte-identical to the legacy
+    ``{strategy}-{symbol}-{signal_ts}`` form (existing rows unchanged); a same-signal-window re-entry
+    (after a cover within the deciding-bar hour) gets seq>0 -> a DISTINCT id, so the closed row is not
+    overwritten by storage's trade_id dedup (continuous-2 ledger data loss). A crash-retry of the SAME
+    open recomputes the same seq (the closed row count is unchanged) -> the same id+link -> idempotent.
+    Round-trips with the orderLinkId seq via decode_entry_order_link_id + the ws_risk reconstruction."""
+    base = f"{strategy_id}-{symbol}-{int(signal_ts_ms)}"
+    return f"{base}-{int(reentry_seq)}" if reentry_seq > 0 else base
 
 
 def continuous_strategy_id(config: ContinuousDemoCycleConfig) -> str:
@@ -679,6 +723,7 @@ from typing import Callable  # noqa: E402
 from .bybit import BybitMarketData  # noqa: E402
 from .config import ResearchConfig  # noqa: E402
 from .event_demo import (  # noqa: E402
+    EventDemoCycleConfig,
     _active_position_by_symbol,
     _build_private_client,
     _contract_lookup,
@@ -824,6 +869,13 @@ def _execute_continuous_entries(
         qty_step = _float(contract.get("qty_step")) or 0.001
         capped_notional = equity_usdt * demo.wallet_balance_fraction * order_notional_frac
         max_qty = _float(contract.get("max_market_order_qty")) or _float(contract.get("max_order_qty"))
+        # NOTE (EXEC-3): like the short/long ENTRY paths, a single entry whose qty exceeds Bybit's
+        # per-order maxMktOrderQty is CAPPED here (order_quantity_for_notional floors to max_qty), NOT
+        # split into child orders. At 2% per-name notional the cap effectively never binds for the
+        # liquid (>=$500k/h) names this fade trades, so the live-vs-backtest size gap is nil in practice;
+        # the backtest models no per-order cap. If a cheap-priced name ever does bind it, the position is
+        # silently under-sized vs backtest -- mirror ws_risk's exit-side _split_qty_for_max_order_size
+        # into a multi-child entry here (one trade row, N sub-orders) before relying on the cap as alpha.
         quantity = order_quantity_for_notional(
             notional_usdt=capped_notional, price=price, qty_step=qty_step,
             min_order_qty=_float(contract.get("min_order_qty")),
@@ -835,7 +887,11 @@ def _execute_continuous_entries(
         stop_loss_pct = _float(cand.get("stop_loss_pct"))
         stop_price = _stop_price_for_entry(entry_price=price, side="short", stop_loss_pct=stop_loss_pct, tick_size=tick_size)
         signal_ts_ms = int(cand.get("signal_ts_ms") or now_ms)
-        entry_link = _continuous_order_link_id(CONTINUOUS_ENTRY_LINK_PREFIX, symbol=symbol, signal_ts_ms=signal_ts_ms)
+        reentry_seq = int(cand.get("reentry_seq") or 0)
+        trade_id = _continuous_trade_id(strategy_id, symbol, signal_ts_ms, reentry_seq)
+        entry_link = _continuous_order_link_id(
+            CONTINUOUS_ENTRY_LINK_PREFIX, symbol=symbol, signal_ts_ms=signal_ts_ms, reentry_seq=reentry_seq
+        )
         order_result: dict[str, Any] = {}
         submit_mode, order_status, error = "dry_run", "planned", ""
         filled_qty = _float(qty)
@@ -851,7 +907,7 @@ def _execute_continuous_entries(
                 submit_mode, order_status, error, filled_qty, filled_notional = "error", "failed", f"set_leverage failed: {exc}"[:500], 0.0, 0.0
             if not error:
                 if record_preflight is not None:
-                    record_preflight({"order_link_id": entry_link, "ts_ms": now_ms, "trade_id": f"{strategy_id}-{symbol}-{signal_ts_ms}",
+                    record_preflight({"order_link_id": entry_link, "ts_ms": now_ms, "trade_id": trade_id,
                                       "strategy_id": strategy_id, "symbol": symbol, "side": "Sell", "qty": qty, "reduce_only": False,
                                       "submit_mode": "preflight", "status": "submitted", "trade_side": "short", "sleeve": "continuous",
                                       "signal_ts_ms": signal_ts_ms, "stop_price": stop_price})
@@ -881,7 +937,10 @@ def _execute_continuous_entries(
                     order_status = "filled" if (tgt > 0 and filled_qty + max(tgt * 1e-8, 1e-12) >= tgt) else ("partial" if filled_qty > 0 else "submitted_unconfirmed")
         entry_qty = _decimal_text(Decimal(str(filled_qty))) if filled_qty > 0 else ""
         if not demo.submit_orders or filled_qty > 0.0:
-            trade_id = f"{strategy_id}-{symbol}-{signal_ts_ms}"
+            # trade_id (computed above via _continuous_trade_id) carries the re-entry seq so a same-
+            # signal-window cover-then-re-enter gets a DISTINCT id+orderLinkId — without it, storage's
+            # trade_id dedup would silently overwrite the closed row and Bybit would reject the dup link
+            # (continuous-2 ledger data loss). seq=0 is byte-identical to the legacy form.
             rows.append({
                 # Tag the sleeve explicitly (the exit row below inherits it via
                 # dict(trade)). ws_risk backfills sleeve by root on read, but a
@@ -899,7 +958,7 @@ def _execute_continuous_entries(
                 "entry_order_link_id": entry_link, "entry_order_id": order_result.get("orderId", ""), "submit_mode": submit_mode,
             })
         order_rows.append({
-            "order_link_id": entry_link, "ts_ms": now_ms, "trade_id": f"{strategy_id}-{symbol}-{signal_ts_ms}",
+            "order_link_id": entry_link, "ts_ms": now_ms, "trade_id": trade_id,
             "strategy_id": strategy_id, "symbol": symbol, "side": "Sell", "order_type": demo.entry_order_type,
             "qty": qty, "reduce_only": False, "order_id": order_result.get("orderId", ""), "submit_mode": submit_mode,
             "avg_price": entry_price if filled_qty > 0 else 0.0, "fee_usdt": entry_fee, "exec_time_ms": entry_exec_time_ms,
@@ -1002,7 +1061,10 @@ def run_continuous_demo_cycle(
     with exclusive_file_lock(root / ".locks" / "continuous_demo_cycle.lock", stale_seconds=900):
         public = market_client or BybitMarketData(category=config.exchange.category, testnet=config.exchange.testnet)
         universe, symbols, tickers, ticker_source = _resolve_cycle_universe(
-            public=public, demo=demo, config=config, root=root, cycle_now_ms=cycle_now_ms,
+            public=public,
+            # only universe-building fields (shared by both configs) are read
+            demo=cast(EventDemoCycleConfig, demo),
+            config=config, root=root, cycle_now_ms=cycle_now_ms,
             ticker_cache=ticker_cache, state_cache_stale_seconds=state_cache_stale_seconds)
 
         trading_client = private_client
@@ -1042,7 +1104,7 @@ def run_continuous_demo_cycle(
 
         # ENTRY decile = the validated CONFIRMED-bar +1h state (alpha-sweep #1 fix). Entering on the live
         # intra-hour decile (entry_confirm_delay_hours=0) ~halves MAR (shorts into the first-hour squeeze).
-        # EXITS keep `live_state` (tick-driven protection is good). 0 reverts to the legacy intra-hour entry.
+        # 0 reverts to the legacy intra-hour entry.
         entry_state = live_state
         if demo.entry_confirm_delay_hours > 0 and rmom is not None and not klines.is_empty():
             entry_state = build_confirmed_entry_state(klines, rmom, now_ts_ms=cycle_now_ms, config=demo)
@@ -1060,10 +1122,14 @@ def run_continuous_demo_cycle(
         else:
             preflight_cb = None
 
-        # Exits: left-decile / breakeven / failed-fade / max-hold (the inherited protective exits;
-        # MFE reconstructed from kline lows, current PnL from the live ticker price).
+        # Exits: left-decile / breakeven / failed-fade / max-hold. continuous-6: the `left_decile`
+        # SELECTION exit reads `entry_state` (the SAME confirmed-bar decile that selected the entry), so
+        # a name is covered exactly when the system's real signal drops it out of the fade band — never
+        # thrashed within the same hour on the noisier live intra-hour decile it was not entered on. The
+        # protective exits stay PRICE-driven (MFE from kline lows, current PnL from the live ticker), so
+        # squeeze safety remains immediate regardless of the decile snapshot.
         exit_plans = plan_continuous_exits(
-            open_trades.to_dicts(), live_state, now_ms=cycle_now_ms, config=demo,
+            open_trades.to_dicts(), entry_state, now_ms=cycle_now_ms, config=demo,
             klines=klines, price_by_symbol=price_by_symbol)
         # don't double-submit a symbol that already has a live reduce-only order
         live_exit_syms = _live_open_order_symbols(raw_open_orders, reduce_only=True)
@@ -1111,9 +1177,23 @@ def run_continuous_demo_cycle(
             # signal ts = the deciding (confirmed) bar for the +1h entry, else the current hour (legacy).
             signal_ts = (cur_hour_ts - (1 + demo.entry_confirm_delay_hours) * MS_PER_HOUR
                          if demo.entry_confirm_delay_hours > 0 else cur_hour_ts)
+            # Re-entry seq per symbol for THIS deciding-bar window: the number of ledger trades that
+            # already used (symbol, signal_ts). A cover-then-re-enter within the window therefore gets
+            # seq>0 -> a distinct trade_id/orderLinkId (continuous-2). all_trades here already includes
+            # this cycle's exits (upserted above), and a crash-retry of the same open sees the same
+            # count -> the same seq -> idempotent.
+            prior_by_symbol: dict[str, int] = {}
+            if not all_trades.is_empty() and {"symbol", "signal_ts_ms"} <= set(all_trades.columns):
+                prior_by_symbol = {
+                    str(r["symbol"]): int(r["_n"])
+                    for r in all_trades.filter(pl.col("signal_ts_ms") == signal_ts)
+                    .group_by("symbol").agg(pl.len().alias("_n")).iter_rows(named=True)
+                }
             for c in picks:
+                sym = str(c["symbol"])
                 candidates.append({**c, "signal_ts_ms": signal_ts, "stop_loss_pct": demo.stop_loss_pct,
-                                   "live_price": price_by_symbol.get(str(c["symbol"]), 0.0)})
+                                   "live_price": price_by_symbol.get(sym, 0.0),
+                                   "reentry_seq": prior_by_symbol.get(sym, 0)})
         order_notional_frac = demo.per_position_notional_pct_equity / 100.0
         exec_entries, entry_orders = _execute_continuous_entries(
             candidates, trading_client=trading_client, demo=demo, equity_usdt=equity_usdt,
@@ -1136,7 +1216,8 @@ def run_continuous_demo_cycle(
         # decile join (the is_not_null filter drops every symbol) yet rmom_present would read True.
         # max_rmom_day_ts lets the watchdog distinguish "quiet market" from "stale signal gate".
         max_rmom_day_ts = (
-            int(rmom["day_ts"].max()) if (rmom is not None and not rmom.is_empty() and "day_ts" in rmom.columns
+            int(rmom["day_ts"].max())  # type: ignore[arg-type]  # polars Series value; guarded is_not_null below
+            if (rmom is not None and not rmom.is_empty() and "day_ts" in rmom.columns
                                           and rmom["day_ts"].max() is not None)
             else 0
         )

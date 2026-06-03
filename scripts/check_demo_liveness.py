@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import urllib.request
@@ -49,6 +50,13 @@ from liquidity_migration.telegram import send_telegram_message  # noqa: E402
 # Severity order for message framing only.
 CRITICAL = "CRITICAL"
 WARNING = "WARNING"
+
+
+def _sleeve_on(env_var: str) -> bool:
+    """A sleeve is active unless its kill-switch toggle (deploy/sleeves.env, loaded into this
+    watchdog's env via the liveness service EnvironmentFile) is off. Default (unset) = on, so the
+    watchdog is identical to before the kill-switch unless a sleeve is deliberately retired."""
+    return os.environ.get(env_var, "on").strip().lower() in {"on", "1", "true", "yes"}
 
 
 @dataclass(frozen=True)
@@ -538,10 +546,12 @@ def main() -> int:
     state_file = args.state_file or (args.data_root / ".cache" / "liveness_watchdog.json")
     now_ms = _now_ms()
 
-    alerts = gather_alerts(data_root=args.data_root, units=units, now_ms=now_ms, args=args)
-    if str(args.continuous_root):
+    # Per-sleeve kill-switch: skip an intentionally-off sleeve so a deliberately-retired daemon
+    # doesn't false-page as "down". Default (toggle unset) = on -> identical to before.
+    alerts = gather_alerts(data_root=args.data_root, units=units, now_ms=now_ms, args=args) if _sleeve_on("SHORT_SLEEVE") else []
+    if str(args.continuous_root) and _sleeve_on("CONTINUOUS_SLEEVE"):
         alerts.extend(gather_continuous_alerts(continuous_root=args.continuous_root, now_ms=now_ms, args=args))
-    if str(args.long_root):
+    if str(args.long_root) and _sleeve_on("LONG_SLEEVE"):
         alerts.extend(gather_long_alerts(long_root=args.long_root, now_ms=now_ms, args=args))
     state = _load_state(state_file)
     to_send, resolved, new_state = select_alerts_to_send(

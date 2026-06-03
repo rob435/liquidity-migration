@@ -214,3 +214,15 @@ def test_gather_continuous_alerts_warns_on_empty_universe_and_unverified_stop(tm
     assert "continuous_universe_empty" in keys
     assert "continuous_kline_store_empty" in keys
     assert "stop_verify_unavailable_continuous" in keys
+
+
+def test_sleeve_kill_switch_toggle(monkeypatch) -> None:
+    """The watchdog skips an intentionally-off sleeve (default unset = on)."""
+    monkeypatch.delenv("CONTINUOUS_SLEEVE", raising=False)
+    assert M._sleeve_on("CONTINUOUS_SLEEVE") is True   # unset -> on (identical to pre-kill-switch)
+    for off in ("off", "OFF", "false", "0", "no"):
+        monkeypatch.setenv("CONTINUOUS_SLEEVE", off)
+        assert M._sleeve_on("CONTINUOUS_SLEEVE") is False, off
+    for on in ("on", "ON", "1", "true", "yes"):
+        monkeypatch.setenv("CONTINUOUS_SLEEVE", on)
+        assert M._sleeve_on("CONTINUOUS_SLEEVE") is True, on

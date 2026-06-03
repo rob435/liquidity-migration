@@ -614,5 +614,6 @@ def _build_demo_features(
             .drop("listing_age_days")
         )
     if fingerprint is not None:
+        assert cache_root is not None  # fingerprint is only set when cache_root is not None (see above)
         _write_demo_feature_cache(cache_root, fingerprint, features)
     return features

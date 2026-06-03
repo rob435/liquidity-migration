@@ -176,10 +176,27 @@ def test_normalize_binance_open_interest_maps_period_and_values() -> None:
     }
 
 
-def test_normalize_binance_open_interest_defaults_missing_values_to_zero() -> None:
+def test_normalize_binance_open_interest_missing_values_are_null_not_zero() -> None:
+    # data-download-7: an ABSENT field must be null (genuinely-missing, dropped downstream), NOT a
+    # fabricated 0.0 that would corrupt the OI-change series with a spurious 0->next jump.
     out = _normalize_binance_open_interest("BTCUSDT", [{"timestamp": "1000"}], period="1h")
-    assert out[0]["open_interest"] == 0.0
-    assert out[0]["open_interest_value"] == 0.0
+    assert out[0]["open_interest"] is None
+    assert out[0]["open_interest_value"] is None
+    # A PRESENT zero stays a real zero (distinguishable from missing).
+    present_zero = _normalize_binance_open_interest(
+        "BTCUSDT", [{"timestamp": "1000", "sumOpenInterest": "0", "sumOpenInterestValue": "0"}], period="1h"
+    )
+    assert present_zero[0]["open_interest"] == 0.0
+
+
+def test_normalize_binance_taker_flow_missing_side_is_null_not_zero() -> None:
+    # data-download-7: a malformed row (a side missing) emits nulls for the derived flow fields rather
+    # than fabricating a zero buy/sell that would corrupt the signed-volume / imbalance series.
+    out = _normalize_binance_taker_flow("BTCUSDT", [{"timestamp": "1000", "buyVol": "70"}], period="1h")
+    row = out[0]
+    assert row["sell_volume_base"] is None
+    assert row["signed_volume_base"] is None
+    assert row["taker_imbalance"] is None
 
 
 # --- _normalize_binance_taker_flow ------------------------------------------
@@ -201,7 +218,11 @@ def test_normalize_binance_taker_flow_computes_signed_volume_and_imbalance() -> 
 
 
 def test_normalize_binance_taker_flow_zero_total_avoids_division_by_zero() -> None:
-    out = _normalize_binance_taker_flow("BTCUSDT", [{"timestamp": "1000"}], period="1h")
+    # PRESENT zero volumes (a real no-flow bar) -> imbalance 0, no division by zero. (Distinct from a
+    # row with the fields MISSING, which is now null — see test_..._missing_side_is_null_not_zero.)
+    out = _normalize_binance_taker_flow(
+        "BTCUSDT", [{"timestamp": "1000", "buyVol": "0", "sellVol": "0"}], period="1h"
+    )
     assert out[0]["taker_imbalance"] == 0.0
     assert out[0]["signed_volume_base"] == 0.0
 
@@ -541,6 +562,28 @@ def test_download_symbol_dataset_skips_fetch_when_range_fully_cached(tmp_path) -
     assert calls == []
 
 
+def test_download_symbol_dataset_empty_fresh_fetch_is_not_marked_complete(tmp_path) -> None:
+    """data-download-4: a never-before-covered range that returns [] (a symbol that
+    lists mid-window, a transient empty REST response, or a provider hiccup) must
+    NOT be marked complete — otherwise it is skipped forever (permanent silent
+    coverage gap). The next refresh must re-fetch it."""
+    calls: list[tuple[int, int]] = []
+
+    def _fetch(s: int, e: int) -> list[dict]:
+        calls.append((s, e))
+        return []  # empty: symbol not yet listed at start_ms
+
+    for _ in range(2):
+        _download_symbol_dataset(
+            tmp_path, dataset="funding", symbol="NEWUSDT", index=1, total=1,
+            start_ms=10, end_ms=20, fetch=_fetch,
+        )
+
+    # The marker was withheld on the first empty fetch, so the second run re-fetched
+    # (instead of skipping the symbol forever).
+    assert calls == [(10, 20), (10, 20)]
+
+
 def test_download_symbol_dataset_fetches_tail_only_on_extended_end(tmp_path) -> None:
     # Prior refresh covered [10, 20]. A new refresh asks for [10, 30] — the
     # closure must be invoked with the EFFECTIVE tail (20, 30), not the
@@ -588,3 +631,61 @@ def test_download_symbol_dataset_fetches_full_range_when_no_coverage(tmp_path) -
     )
 
     assert calls == [(10, 30)]
+
+
+def test_download_symbol_dataset_clamped_window_marker_keys_on_covered_range(tmp_path, monkeypatch) -> None:
+    """data-download-1: Binance OI-hist / taker-flow only serve a rolling ~30-day
+    window (get_open_interest_hist / get_taker_buy_sell_volume clamp `start` to
+    now-30d internally). With clamp_window_days set, the success marker must be
+    keyed on the CLAMPED (actually-covered) start, NOT the full requested range —
+    otherwise the uncovered pre-30d prefix is claimed complete and skipped forever
+    (permanent silent coverage gap). The marker start must therefore be > the
+    requested start_ms when the request reaches before the rolling window."""
+    from liquidity_migration import binance
+    from liquidity_migration.downloaders import _download_symbol_dataset, _marker_path
+
+    day_ms = 24 * 60 * 60_000
+    now_ms = 1_700_000_000_000
+    monkeypatch.setattr(binance.time, "time", lambda: now_ms / 1000)
+
+    # Request a 90-day window ending 5 days ago — far older than the 30-day clamp.
+    start_ms = now_ms - 90 * day_ms
+    end_ms = now_ms - 5 * day_ms
+    clamped_start = binance._recent_history_start(start_ms, end_ms, days=30)
+    assert clamped_start > start_ms  # sanity: the request really is clamped
+
+    def _fetch(s: int, e: int) -> list[dict]:
+        # Provider returns only the clamped rolling window.
+        return [{"ts_ms": clamped_start, "symbol": "BTCUSDT", "open_interest": 1.0,
+                 "open_interest_value": 2.0, "open_interest_interval": "1h",
+                 "source": "binance_usdm_open_interest"}]
+
+    _download_symbol_dataset(
+        tmp_path,
+        dataset="binance_usdm_open_interest",
+        symbol="BTCUSDT",
+        index=1,
+        total=1,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        fetch=_fetch,
+        marker_suffix="_1h",
+        clamp_window_days=30,
+    )
+
+    # The marker for the FULL requested range must NOT exist (that would claim the
+    # uncovered pre-30d prefix complete and skip it forever).
+    full_marker = _marker_path(
+        tmp_path, dataset="binance_usdm_open_interest", symbol="BTCUSDT",
+        start_ms=start_ms, end_ms=end_ms, suffix="_1h",
+    )
+    assert not full_marker.exists()
+
+    # The marker that IS written is keyed on the clamped (covered) start, so a
+    # future refresh with the same start_ms (clamped_start > start_ms) re-attempts
+    # the uncovered prefix instead of skipping it.
+    covered_marker = _marker_path(
+        tmp_path, dataset="binance_usdm_open_interest", symbol="BTCUSDT",
+        start_ms=clamped_start, end_ms=end_ms, suffix="_1h",
+    )
+    assert covered_marker.exists()

@@ -149,6 +149,38 @@ def test_bootstrap_skips_far_future_bars() -> None:
     assert store.symbol_count() == 1
 
 
+def test_recover_from_disk_skips_far_future_bars(tmp_path) -> None:
+    """H6 (recovery path, ws-dataplane-3): a corrupt far-future bar in the flush
+    file must not advance the eviction reference and mass-evict every recovered
+    legitimate bar. The insert + bootstrap paths clamp such bars; recovery must too."""
+    import polars as pl
+
+    from liquidity_migration.kline_store import _utc_now_ms
+
+    now = _utc_now_ms()
+    store1 = KlineStore(cache_root=tmp_path, retain_days=2, flush_interval_seconds=0.0)
+    store1.add_bar("BTCUSDT", _ws_bar(now - MS_PER_HOUR), confirmed=True)
+    store1.add_bar("ETHUSDT", _ws_bar(now - 2 * MS_PER_HOUR), confirmed=True)
+    assert store1.flush_to_disk() >= 2
+
+    flush_path = tmp_path / ".cache" / "ws_klines" / "store.parquet"
+    disk = pl.read_parquet(flush_path)
+    # Inject a corrupt far-future bar (e.g. ns-vs-ms parse glitch) into the flush file.
+    future_row = disk.head(1).with_columns(
+        pl.lit("XRPUSDT").alias("symbol"),
+        pl.lit(now + 30 * MS_PER_DAY).cast(disk.schema["ts_ms"]).alias("ts_ms"),
+    )
+    pl.concat([disk, future_row]).write_parquet(flush_path)
+
+    store2 = KlineStore(cache_root=tmp_path, retain_days=2, flush_interval_seconds=0.0)
+    recovered = store2.recover_from_disk()
+    # The two legitimate bars recover; the far-future bar is skipped and does NOT
+    # mass-evict them.
+    assert recovered == 2
+    assert store2.symbol_count() == 2
+    assert store2.get_klines(["BTCUSDT"], start_ms=now - MS_PER_HOUR, end_ms=now).height == 1
+
+
 def test_get_klines_returns_inclusive_window() -> None:
     store = KlineStore(cache_root=None, flush_interval_seconds=0.0)
     for hour in range(10):
@@ -603,3 +635,38 @@ def test_flush_skips_when_store_unchanged(tmp_path: Path) -> None:
     store.add_bar("BTCUSDT", _ws_bar(2 * MS_PER_HOUR, close=101.0), confirmed=True)
     assert store.flush_to_disk() == 2
     assert store._flushes_total == flushes_after_first + 1
+
+
+def test_stats_scan_is_cached_and_recomputed_on_mutation(monkeypatch) -> None:
+    """ws-dataplane-7: oldest_ts_ms + row_count are an O(symbols x bars) scan;
+    stats() must not re-run that scan on every poll when the store is unchanged,
+    and MUST recompute once the store mutates (insert / eviction / recovery)."""
+    store = KlineStore(cache_root=None, retain_days=90, flush_interval_seconds=0.0)
+    base = 100 * MS_PER_DAY
+    store.add_bar("BTCUSDT", _ws_bar(base, close=10.0), confirmed=True)
+    store.add_bar("ETHUSDT", _ws_bar(base + MS_PER_HOUR, close=20.0), confirmed=True)
+
+    # Spy on the locked oldest scan: count how many times the full scan runs.
+    calls = {"n": 0}
+    real = KlineStore._oldest_ts_ms_locked
+
+    def _counting(self):
+        calls["n"] += 1
+        return real(self)
+
+    monkeypatch.setattr(KlineStore, "_oldest_ts_ms_locked", _counting)
+
+    s1 = store.stats()
+    s2 = store.stats()
+    s3 = store.stats()
+    # Three polls, store unchanged -> exactly one scan (the rest are cache hits).
+    assert calls["n"] == 1
+    assert s1["oldest_ts_ms"] == s2["oldest_ts_ms"] == s3["oldest_ts_ms"] == base
+    assert s1["rows"] == s2["rows"] == 2
+
+    # A new bar bumps the mutation version -> the next stats() must recompute.
+    store.add_bar("XRPUSDT", _ws_bar(base + 2 * MS_PER_HOUR, close=5.0), confirmed=True)
+    s4 = store.stats()
+    assert calls["n"] == 2
+    assert s4["rows"] == 3
+    assert s4["oldest_ts_ms"] == base

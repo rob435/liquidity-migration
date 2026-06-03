@@ -423,8 +423,16 @@ class KlineStreamManager:
         # demo rate-limiter at startup; conservative defaults so the bootstrap
         # uses ~half the per-IP budget.
         shared_limiter = BybitRestRateLimiter(max_requests=12, per_seconds=1.0)
+        # Completion threshold is measured against the set ACTUALLY being
+        # bootstrapped (``targets``), not the full universe (ws-dataplane-6).
+        # On the universe-refresh path ``symbols`` is just the new listings,
+        # so a full-universe denominator made the "completion reached" log fire
+        # immediately and misleadingly (the rest of the universe is already
+        # covered in the store) or unreachable when only a couple of names are
+        # being added. Counting coverage within ``targets`` makes the log truthful.
+        target_set = set(targets)
         threshold_count = max(
-            int(len(self._universe) * self.bootstrap_completion_threshold),
+            int(len(targets) * self.bootstrap_completion_threshold),
             1,
         )
         succeeded = 0
@@ -482,7 +490,9 @@ class KlineStreamManager:
                 # Log when we cross the completion threshold for visibility,
                 # but keep iterating so every future's result is counted.
                 if not threshold_logged:
-                    covered_now = len(self._store.symbols_with_coverage_through(recent_bar_ts_ms))
+                    covered_now = len(
+                        self._store.symbols_with_coverage_through(recent_bar_ts_ms) & target_set
+                    )
                     if covered_now >= threshold_count and time.monotonic() > start + 1.0:
                         _logger.info(
                             "%s completion threshold %.0f%% reached with %d/%d "
@@ -490,7 +500,7 @@ class KlineStreamManager:
                             label,
                             self.bootstrap_completion_threshold * 100.0,
                             covered_now,
-                            len(self._universe),
+                            len(targets),
                             len(futures) - succeeded - failed,
                         )
                         threshold_logged = True

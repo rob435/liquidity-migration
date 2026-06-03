@@ -194,16 +194,34 @@ def _leave_one_out(cell_r: list[float], base_r: list[float], months: list[str]) 
     }
 
 
+def _resample_block_indices(n: int, block: int, rng: random.Random) -> list[int]:
+    """Indices for ONE non-circular moving-block bootstrap resample of length n.
+
+    A block starts only in [0, n-block] so it never straddles the series boundary.
+    The old circular wrap ((start+j) % n) stitched the last and first months of the
+    3-year series into one contiguous block — fabricating a Dec->Jan regime
+    transition for a regime-conditional strategy and corrupting the Tier-3
+    block-bootstrap p5.
+
+    Trade-off (re-audit rescan-rmom-funding-1): the first/last (block-1)
+    observations appear in fewer of the n-block+1 possible block positions, so they
+    are mildly under-weighted vs the interior — the standard, well-understood cost
+    of the non-circular variant, and far milder than the boundary-stitching it
+    replaces. ``min(start+j, n-1)`` only clamps in the degenerate n<block case."""
+    max_start = max(n - block + 1, 1)
+    idx: list[int] = []
+    while len(idx) < n:
+        start = rng.randrange(0, max_start)
+        idx.extend(min(start + j, n - 1) for j in range(block))
+    return idx[:n]
+
+
 def _block_bootstrap(cell_r: list[float], base_r: list[float], *, n_boot: int, block: int, seed: int) -> dict:
     rng = random.Random(seed)
     n = len(cell_r)
     ann_deltas, mar_deltas = [], []
     for _ in range(n_boot):
-        idx: list[int] = []
-        while len(idx) < n:
-            start = rng.randrange(0, n)
-            idx.extend((start + j) % n for j in range(block))
-        idx = idx[:n]
+        idx = _resample_block_indices(n, block, rng)
         cr = [cell_r[i] for i in idx]
         br = [base_r[i] for i in idx]
         ann_deltas.append(_annualize(_compound(cr), n) - _annualize(_compound(br), n))

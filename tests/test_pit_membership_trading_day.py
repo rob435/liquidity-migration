@@ -39,10 +39,27 @@ def test_close_stamped_signal_validates_against_trading_day() -> None:
     manifest = _manifest([("FOO", "2026-05-28"), ("FOO", "2026-05-29")])
     out = _attach_event_archive_membership(features, manifest)
     assert out["tradable_membership_flag"].to_list() == [True]
-    # The stamp-day column is preserved for the age features.
+    # The raw stamp-day column is still passed through the output schema.
     assert out["date"].to_list() == ["2026-05-30"]
     # The internal membership-day key must not leak into the output schema.
     assert "_membership_day" not in out.columns
+
+
+def test_symbol_age_keys_on_trading_day_not_stamp_day() -> None:
+    """``symbol_age_days`` / ``pit_age_days`` must be measured from the signal's
+    *trading day* (date(ts_ms-1ms)), the same key the membership flag uses -- not the
+    +1-day stamp ``date``. Keying the age on the stamp inflated every age by exactly one
+    day, shifting the age300 listing-age gate (reconcile-ledger-4)."""
+    # FOO stamped 2026-05-30 00:00 -> 05-29 trading day; first listed 2026-05-20.
+    # Age from the trading day = (05-29 - 05-20) = 9, NOT (05-30 - 05-20) = 10.
+    features = pl.DataFrame(
+        {"symbol": ["FOO"], "ts_ms": [_ms(2026, 5, 30)]},
+        schema={"symbol": pl.Utf8, "ts_ms": pl.Int64},
+    )
+    manifest = _manifest([("FOO", "2026-05-20"), ("FOO", "2026-05-29")])
+    out = _attach_event_archive_membership(features, manifest)
+    assert out["symbol_age_days"].to_list() == [9]
+    assert out["pit_age_days"].to_list() == [9.0]
 
 
 def test_signal_with_no_trading_day_membership_is_rejected() -> None:

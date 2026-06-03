@@ -337,6 +337,29 @@ def target_long_order_notional_pct_equity(
     return base * demo_config.notional_multiplier
 
 
+def _compute_long_order_sizing(
+    *,
+    demo: LongNativeDemoCycleConfig,
+    strategy: LongNativeConfig,
+    features: pl.DataFrame,
+) -> tuple[float, float]:
+    """Per-position notional fraction of equity after the de-risk-only vol-target scalar
+    (long-sleeve-9 extraction — numerically identical to the prior inline block).
+
+    Applies the SAME de-risk-only vol-target scalar the backtest uses, so the live book
+    sizes DOWN in high-BTC-vol regimes (never up). ``btc_rv_30`` is a trailing feature
+    broadcast across symbols; take the latest non-null. Shared helper => no drift.
+    Returns ``(order_notional_pct_equity_after_scale, vol_target_scale)``."""
+    order_notional_pct_equity = target_long_order_notional_pct_equity(demo, strategy)
+    latest_btc_rv: float | None = None
+    if "btc_rv_30" in features.columns and not features.is_empty():
+        _rv = features.sort("ts_ms")["btc_rv_30"].drop_nulls()
+        if len(_rv) > 0:
+            latest_btc_rv = float(_rv[-1])
+    vol_target_scale = _vol_target_scale(strategy, latest_btc_rv)
+    return order_notional_pct_equity * vol_target_scale, vol_target_scale
+
+
 def run_long_native_demo_cycle(
     data_root: str | Path,
     *,
@@ -445,17 +468,8 @@ def run_long_native_demo_cycle(
 
         all_trades = read_dataset(root, trades_dataset)
         all_orders = read_dataset(root, orders_dataset)
-        order_notional_pct_equity = target_long_order_notional_pct_equity(demo, strategy)
-        # div: apply the SAME de-risk-only vol-target scalar the backtest uses, so the live
-        # book sizes DOWN in high-BTC-vol regimes (never up). btc_rv_30 is a trailing feature
-        # broadcast across symbols; take the latest non-null. Shared helper => no drift.
-        latest_btc_rv: float | None = None
-        if "btc_rv_30" in features.columns and not features.is_empty():
-            _rv = features.sort("ts_ms")["btc_rv_30"].drop_nulls()
-            if len(_rv) > 0:
-                latest_btc_rv = float(_rv[-1])
-        vol_target_scale = _vol_target_scale(strategy, latest_btc_rv)
-        order_notional_pct_equity *= vol_target_scale
+        order_notional_pct_equity, vol_target_scale = _compute_long_order_sizing(
+            demo=demo, strategy=strategy, features=features)
 
         cycle_trade_rows: list[dict[str, Any]] = []
         cycle_order_rows: list[dict[str, Any]] = []
@@ -481,12 +495,18 @@ def run_long_native_demo_cycle(
             preflight_callback: Callable[[dict[str, Any]], None] | None = _record_preflight
         else:
             preflight_callback = None
+        # long-sleeve-2: compute price_by_symbol BEFORE exits so a paper/dry-run close marks to
+        # the live ticker price (real forward PnL) instead of a FLAT 0% at entry. It is a pure
+        # function of tickers+klines (both resolved above), so the earlier compute is
+        # side-effect-free; the entry path below reuses the same lookup.
+        price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, klines)
         executed_exits, exit_order_rows = _execute_long_exits(
             exit_plans,
             all_trades,
             trading_client=trading_client,
             demo=demo,
             now_ms=cycle_now_ms,
+            price_by_symbol=price_by_symbol,
             execution_event_router=execution_event_router,
             record_preflight=preflight_callback,
         )
@@ -504,7 +524,6 @@ def run_long_native_demo_cycle(
         # bar per symbol, then check sniper retrace condition against live 1h
         # bars. Each candidate carries enough state to enter at-market this
         # cycle if conditions are met or the deadline has expired.
-        price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, klines)
         contract_by_symbol = _contract_lookup(universe)
         candidates, skip_counts = _select_long_entry_candidates(
             features=features,
@@ -845,9 +864,12 @@ def _select_long_entry_candidates(
 
     # Look at the last 2 closed daily bars so we catch a signal that fired
     # yesterday and is still in its 6h sniper window today.
+    # long-sleeve-1: a daily signal's ts_ms is the day-END stamp, so the current still-forming
+    # bar has a FUTURE ts. Require int(ts) <= now_ms (closed bar) — firing FC on a not-yet-closed
+    # bar is look-ahead vs the backtest's closed-bar signal (a no-look-ahead correctness gate).
     eligible_ts = sorted(
         ts for ts in features["ts_ms"].unique().to_list()
-        if ts is not None and (now_ms - int(ts)) <= SIGNAL_FRESHNESS_MS
+        if ts is not None and int(ts) <= now_ms and (now_ms - int(ts)) <= SIGNAL_FRESHNESS_MS
     )
     if not eligible_ts:
         skips["no_signal"] = 1
@@ -1097,6 +1119,7 @@ def _execute_long_exits(
     trading_client: Any | None,
     demo: LongNativeDemoCycleConfig,
     now_ms: int,
+    price_by_symbol: dict[str, float] | None = None,
     execution_event_router: Any | None = None,
     record_preflight: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
@@ -1193,7 +1216,14 @@ def _execute_long_exits(
                 # Mirror the short-sleeve exit path: realized PnL + venue fee +
                 # venue execTime must land on the close so the ledger carries
                 # the full audit trail without needing the orphan reconciler.
-                final_exit_price = exit_price or _float(trade.get("entry_price"))
+                # long-sleeve-2: a paper/dry-run close marks to the LIVE ticker price so the
+                # forward shadow records real PnL, not a FLAT 0% at entry. Falls back to the
+                # entry price only when no live price is available.
+                final_exit_price = (
+                    exit_price
+                    or _float((price_by_symbol or {}).get(symbol))
+                    or _float(trade.get("entry_price"))
+                )
                 trade_side = str(trade.get("side") or "long")
                 entry_price_for_return = _float(trade.get("entry_price"))
                 gross_trade_return = _trade_return(

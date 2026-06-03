@@ -16,6 +16,7 @@ from typing import Any
 
 import polars as pl
 
+from ._common import coerce_int, finite_float
 from .storage import read_dataset
 
 _logger = logging.getLogger(__name__)
@@ -33,17 +34,16 @@ def _normalized_side(value: Any) -> str:
 
 
 def _float(value: Any) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
+    # Delegates to the finite-guarded _common.finite_float: a torn/partial WS
+    # message or malformed venue field must not admit NaN/inf into reconcile
+    # PnL/size math (quality-dup-1 — the local copy previously passed them through).
+    return finite_float(value, default=0.0) or 0.0
 
 
 def _int(value: Any) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
+    # Thin alias kept so the existing call sites stay untouched; the implementation
+    # is the shared _common.coerce_int (quality-dup-9).
+    return coerce_int(value)
 
 
 def _clean_trades(trades: pl.DataFrame) -> list[dict[str, Any]]:
@@ -234,9 +234,10 @@ def reconcile_paper_demo(
         if not tid:
             continue
         key = (demo_trade["symbol"], demo_trade["side"])
-        paper_idx = paper_tid_in_bucket.get(key, {}).get(tid)
-        if paper_idx is None:
+        paper_idx_opt = paper_tid_in_bucket.get(key, {}).get(tid)
+        if paper_idx_opt is None:
             continue
+        paper_idx = paper_idx_opt  # narrowed to int after the None-guard above
         paper_trade = paper_by_key[key][paper_idx]
         gap = abs(demo_trade["entry_ts_ms"] - paper_trade["entry_ts_ms"])
         # Trade-id matches always pair; tolerance is irrelevant when the id is identical.
@@ -406,7 +407,8 @@ def reconcile_paper_demo(
 
     pairs: list[dict[str, Any]] = [pair for _ts, pair in sorted(matched_pairs, key=lambda item: item[0])]
     entry_bps = [pair["entry_slippage_bps"] for pair in pairs]
-    exit_bps = [pair["exit_slippage_bps"] for pair in pairs if pair["exit_slippage_bps"] is not None]
+    # distinct name from the loop-scoped `exit_bps: float | None` above (same fn scope)
+    exit_bps_list = [pair["exit_slippage_bps"] for pair in pairs if pair["exit_slippage_bps"] is not None]
     exit_gaps = [pair["exit_gap_ms"] for pair in pairs if pair["exit_gap_ms"] is not None]
     fee_gaps = [pair["fee_gap_usdt"] for pair in pairs if pair["fee_gap_usdt"] is not None]
     exit_reason_known = [pair for pair in pairs if pair["exit_reason_match"] is not None]
@@ -417,13 +419,13 @@ def reconcile_paper_demo(
         "paired": len(pairs),
         "paper_only": len(paper) - len(pairs),
         "demo_only": len(demo) - len(pairs),
-        "closed_pairs": len(exit_bps),
+        "closed_pairs": len(exit_bps_list),
         "entry_tolerance_ms": tolerance,
         "entry_slippage_bps_mean": mean(entry_bps) if entry_bps else 0.0,
         "entry_slippage_bps_median": median(entry_bps) if entry_bps else 0.0,
         "entry_slippage_bps_worst": max(entry_bps) if entry_bps else 0.0,
-        "exit_slippage_bps_mean": mean(exit_bps) if exit_bps else 0.0,
-        "exit_slippage_bps_median": median(exit_bps) if exit_bps else 0.0,
+        "exit_slippage_bps_mean": mean(exit_bps_list) if exit_bps_list else 0.0,
+        "exit_slippage_bps_median": median(exit_bps_list) if exit_bps_list else 0.0,
         "exit_gap_ms_mean": mean(exit_gaps) if exit_gaps else 0,
         "exit_gap_ms_median": median(exit_gaps) if exit_gaps else 0,
         "exit_gap_ms_worst": max(exit_gaps) if exit_gaps else 0,
@@ -907,6 +909,8 @@ def reconcile_demo_bybit(
     closed_pnl_records: list[dict[str, Any]],
     open_positions: list[dict[str, Any]],
     funding_records: list[dict[str, Any]] | None = None,
+    *,
+    scope_to_ledger_symbol_sides: bool = True,
 ) -> dict[str, Any]:
     """Reconcile the demo ledger against Bybit's account-level truth.
 
@@ -922,8 +926,28 @@ def reconcile_demo_bybit(
       (should never happen)
     - open_position_mismatch: open ledger trades that Bybit does not
       report as open (or vice-versa)
+
+    reconcile-ledger-7 COVERAGE NOTE: with ``scope_to_ledger_symbol_sides=True``
+    (the default, for the shared/netted account) a Bybit closure/position on a
+    (symbol, side) THIS ledger never traded is dropped before orphan detection, so
+    a sibling sleeve's leg is not mis-flagged. The trade-off: a TRUE orphan whose
+    ledger row was lost ENTIRELY (so its (symbol, side) is absent from this ledger)
+    is also no longer detectable here — that residual is covered only by the
+    orders-ledger orderId->sleeve map, not by this account-level reconcile.
+    ``orphan_in_bybit`` is therefore NOT exhaustive in scoped mode; pass
+    ``scope_to_ledger_symbol_sides=False`` for the raw account-wide detector.
     """
     demo = _clean_trades(demo_trades)
+    # reconcile-ledger-7: on the SHARED demo account Bybit's closed_pnl + open
+    # positions are ACCOUNT-wide, so a sibling sleeve's closure/position on a
+    # symbol+side this ledger never traded would be mis-flagged as an orphan /
+    # untracked here. Scope the venue truth to the (symbol, side) pairs THIS
+    # ledger actually traded. NOTE: closed_pnl carries no orderLinkId, so a
+    # symbol+side traded by BOTH sleeves cannot be split here (that residual
+    # needs an orderId->sleeve map from the orders ledger) -- such a same-key
+    # cross-sleeve closure is still attributed to this ledger, exactly as the
+    # funding path documents.
+    ledger_symbol_sides = {(t["symbol"], t["side"]) for t in demo}
     cleaned_bybit: list[dict[str, Any]] = []
     for record in closed_pnl_records or []:
         symbol = str(record.get("symbol") or "")
@@ -937,6 +961,10 @@ def reconcile_demo_bybit(
         # surfaced — dropping it here would hide a real orphan from the
         # cross-check. The exit-price-gap calc below already guards avg_exit<=0.
         if not symbol or not original_side or closed_size <= 0.0:
+            continue
+        if scope_to_ledger_symbol_sides and (symbol, original_side) not in ledger_symbol_sides:
+            # Sibling-sleeve closure on a symbol+side this ledger never traded:
+            # not OUR orphan. Drop before aggregation + orphan detection.
             continue
         cleaned_bybit.append(
             {
@@ -1075,6 +1103,10 @@ def reconcile_demo_bybit(
         if not symbol or not original_side:
             continue
         key = (symbol, original_side)
+        if scope_to_ledger_symbol_sides and key not in ledger_symbol_sides:
+            # Sibling-sleeve live position on a symbol+side this ledger never
+            # traded: not this sleeve's untracked position. Skip the cross-check.
+            continue
         bybit_open_keys.add(key)
         bybit_open_detail[key] = {
             "size": size,
@@ -1318,7 +1350,10 @@ def run_demo_bybit_reconciliation(
         except Exception:  # noqa: BLE001 - funding visibility is best-effort, never fatal
             funding_records = []
 
-    result = reconcile_demo_bybit(trades, closed_records, open_positions, funding_records)
+    result = reconcile_demo_bybit(
+        trades, closed_records, open_positions, funding_records,
+        scope_to_ledger_symbol_sides=True,
+    )
     report = format_demo_bybit_report(result)
     report_dir = (
         Path(output_dir).expanduser() if output_dir else demo_root_p / "reports" / "demo_bybit_reconciliation"

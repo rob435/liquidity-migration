@@ -41,12 +41,6 @@ class ExchangeConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class TradeFlowConfig:
-    exclude_block_trades: bool = True
-    exclude_rpi_trades: bool = True
-
-
-@dataclass(frozen=True, slots=True)
 class TradeLifecycleConfig:
     score: str = "dollar_volume_rank"
     start_date: str = ""
@@ -138,7 +132,6 @@ class CostConfig:
 @dataclass(frozen=True, slots=True)
 class ResearchConfig:
     exchange: ExchangeConfig = field(default_factory=ExchangeConfig)
-    trade_flow: TradeFlowConfig = field(default_factory=TradeFlowConfig)
     universe: UniverseConfig = field(default_factory=UniverseConfig)
     costs: CostConfig = field(default_factory=CostConfig)
     data_root: Path = DEFAULT_RESEARCH_DATA_ROOT
@@ -203,7 +196,6 @@ def load_config(path: str | Path | None = None, *, data_root: str | Path | None 
     root = Path(data_root or raw.get("data_root") or DEFAULT_RESEARCH_DATA_ROOT).expanduser()
     return ResearchConfig(
         exchange=_merge_dataclass(ExchangeConfig, raw.get("exchange")),
-        trade_flow=_merge_dataclass(TradeFlowConfig, raw.get("trade_flow")),
         universe=_merge_universe_config(raw.get("universe")),
         costs=_merge_dataclass(CostConfig, raw.get("cost_model")),
         data_root=root,

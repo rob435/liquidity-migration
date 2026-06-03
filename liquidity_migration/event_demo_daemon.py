@@ -256,10 +256,16 @@ class EventDemoDaemon:
         # though the cycle keeps running. Counters live in stats for
         # post-mortem audit.
         self._ws_stale_warning_seconds = float(state_cache_stale_seconds)
+        # Forced-reconnect bound for the ticker WS: 3x the stale-warning bound,
+        # mirroring BybitKlineStreamPool's warn(60s)->reconnect(180s) spread
+        # (ws-dataplane-8). Past this, _check_ws_health rebuilds the stream
+        # rather than trusting pybit's internal reconnect (which silently fails).
+        self._ticker_stale_reconnect_seconds = 3.0 * float(state_cache_stale_seconds)
         self._ws_private_stale_warned = False
         self._ws_ticker_stale_warned = False
         self._ws_private_stale_ticks = 0
         self._ws_ticker_stale_ticks = 0
+        self._ws_ticker_reconnects = 0
         self._startup_telegram = bool(startup_telegram)
         self._shutdown_telegram = bool(shutdown_telegram)
         if order_submit_mode not in {"ws", "ws_then_rest", "rest"}:
@@ -915,6 +921,29 @@ class EventDemoDaemon:
                         ticker_silence, threshold,
                     )
                     self._ws_ticker_stale_warned = True
+                # Self-reconnect: BybitPublicTickerStream relies solely on pybit's
+                # internal reconnect, which silently fails sometimes (the kline pool
+                # has a watchdog that force-rebuilds a stale connection; the ticker
+                # stream had none — ws-dataplane-8). Past a harder reconnect bound,
+                # tear the stream down and re-open it. The cycle keeps trading off
+                # the REST ticker fallback meanwhile, so this only RESTORES the fast
+                # path; it never blocks a cycle.
+                if (
+                    ticker_silence > self._ticker_stale_reconnect_seconds
+                    and self._ticker_stream is not None
+                    and not self._shutdown.is_set()
+                ):
+                    self._ws_ticker_reconnects += 1
+                    _logger.warning(
+                        "ticker WS silent %.0fs > reconnect bound %.0fs; "
+                        "forcing stream rebuild",
+                        ticker_silence, self._ticker_stale_reconnect_seconds,
+                    )
+                    self._close_ticker_stream()
+                    try:
+                        self._open_ticker_stream()
+                    except Exception as exc:  # noqa: BLE001
+                        _logger.warning("ticker WS forced reconnect failed: %s", exc)
             elif self._ws_ticker_stale_warned:
                 _logger.info("ticker WS resumed (silence=%.1fs)", ticker_silence)
                 self._ws_ticker_stale_warned = False
@@ -1123,6 +1152,12 @@ def _default_kline_stream_manager_factory(
         0 if demo_config.universe_max_symbols <= 0
         else int(demo_config.universe_max_symbols * 1.25)
     )
+    # Closure over market/top_n so the manager's hourly refresh re-fetches
+    # the live universe. A nested def (vs. a lambda with defaulted params)
+    # lets mypy infer the types; behaviour is identical since neither name
+    # is reassigned before the function returns.
+    def universe_fetcher() -> list[str]:
+        return _build_short_kline_universe(market, top_n=top_n)
     return KlineStreamManager(
         market_data=market,
         cache_root=cache_root,
@@ -1132,7 +1167,7 @@ def _default_kline_stream_manager_factory(
         topics_per_connection=demo_config.ws_klines_topics_per_connection,
         stale_warning_seconds=demo_config.ws_klines_stale_warning_seconds,
         stale_reconnect_seconds=demo_config.ws_klines_stale_reconnect_seconds,
-        universe_fetcher=lambda m=market, n=top_n: _build_short_kline_universe(m, top_n=n),
+        universe_fetcher=universe_fetcher,
     )
 
 

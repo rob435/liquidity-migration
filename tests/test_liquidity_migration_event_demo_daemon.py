@@ -1513,3 +1513,52 @@ def test_daemon_event_wait_falls_back_to_heartbeat_with_no_bar(tmp_path: Path) -
     assert time.monotonic() - t0 >= 0.2
     assert daemon._cycles_kline_triggered == 0
     assert daemon._cycles_timer_triggered == 1
+
+
+def test_check_ws_health_force_reconnects_ticker_stream_when_silent_past_bound(
+    tmp_path: Path,
+) -> None:
+    """ws-dataplane-8: BybitPublicTickerStream had no self-reconnect — it
+    trusted pybit's internal reconnect, which silently fails. When the ticker
+    WS is silent past the harder reconnect bound (3x the warn bound), the
+    watchdog must tear the stream down and re-open it (mirroring the kline
+    pool's stale-reconnect). The cycle keeps trading off REST in the meantime."""
+    private = _StubCache(seeded=True, silence_seconds=1.0)
+    # Ticker silent 500s; with state_cache_stale_seconds=120 the warn bound is
+    # 120 and the reconnect bound is 360, so 500 > 360 must force a rebuild.
+    ticker = _StubCache(seeded=True, silence_seconds=500.0)
+    ticker.symbol_count = lambda: 5  # type: ignore[method-assign]
+    ticker.snapshot_list = lambda *a, **k: [{"symbol": "BTCUSDT"}]  # type: ignore[method-assign]
+
+    opened: list[str] = []
+    closed: list[str] = []
+
+    class _FakeTickerStream:
+        def subscribe_tickers(self, symbols, callback) -> None:
+            opened.append("sub")
+
+        def close(self) -> None:
+            closed.append("close")
+
+    daemon = EventDemoDaemon(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        demo_config=EventDemoCycleConfig(ws_klines_enabled=False),
+        private_state_cache=private,  # type: ignore[arg-type]
+        ticker_cache=ticker,  # type: ignore[arg-type]
+        state_cache_stale_seconds=120.0,
+        ticker_stream_factory=lambda _config: _FakeTickerStream(),
+    )
+    # Pretend a stream is already live so the watchdog rebuilds it.
+    daemon._ticker_stream = _FakeTickerStream()
+
+    daemon._check_ws_health()
+    assert closed, "stale-past-reconnect-bound ticker stream must be closed"
+    assert opened, "a fresh ticker stream must be opened after force-reconnect"
+    assert daemon._ws_ticker_reconnects == 1
+
+    # A second silent tick within the same episode still exceeds the bound, so
+    # the reconnect path runs again — proving it is gated on the harder bound
+    # (not suppressed by the once-per-episode warn flag).
+    daemon._check_ws_health()
+    assert daemon._ws_ticker_reconnects == 2

@@ -204,7 +204,7 @@ class LongNativeDemoDaemon:
                 from .telegram import send_telegram_message
             except Exception:  # noqa: BLE001
                 return
-            def sender(t):  # type: ignore[no-redef]
+            def sender(t):
                 return send_telegram_message(t, enabled=True)
         try:
             sender(text)
@@ -318,6 +318,13 @@ class LongNativeDemoDaemon:
         except Exception as exc:  # noqa: BLE001
             _logger.exception("long ticker cache crashed on event: %s", exc)
 
+    def _pre_resource_teardown(self) -> None:
+        """Hook run at the START of run()'s teardown, BEFORE the shared WS/kline/
+        trade resources are closed. Subclasses that spawn worker threads using those
+        resources (e.g. the continuous protective-exit monitor) override this to stop
+        and join them here, so a draining worker never touches a closed client
+        (ws-daemonloops-1). Base: no-op."""
+
     def run(self) -> dict[str, Any]:
         # Same reasoning as EventDemoDaemon.run: attach the package stderr
         # handler before bootstrap so the operator can see progress.
@@ -372,6 +379,9 @@ class LongNativeDemoDaemon:
                 else:
                     self._wait_for_next_cycle_timer()
         finally:
+            # Stop subclass-owned worker threads BEFORE tearing down the shared
+            # WS/kline/trade resources they use (ws-daemonloops-1).
+            self._pre_resource_teardown()
             self._stop_reconcile_thread()
             self._close_ticker_stream()
             self._stop_kline_stream_manager()
@@ -846,6 +856,10 @@ def _default_long_kline_stream_manager_factory(
     market = BybitMarketData(
         category=config.exchange.category, testnet=config.exchange.testnet,
     )
+    # Nested def (mypy can't infer a lambda with a default-arg capture);
+    # `m` defaults to `market` at def time, matching the prior lambda exactly.
+    def universe_fetcher(m: BybitMarketData = market) -> list[str]:
+        return _build_long_kline_universe(m)
     return KlineStreamManager(
         market_data=market,
         cache_root=cache_root,
@@ -855,7 +869,7 @@ def _default_long_kline_stream_manager_factory(
         topics_per_connection=demo_config.ws_klines_topics_per_connection,
         stale_warning_seconds=demo_config.ws_klines_stale_warning_seconds,
         stale_reconnect_seconds=demo_config.ws_klines_stale_reconnect_seconds,
-        universe_fetcher=lambda m=market: _build_long_kline_universe(m),
+        universe_fetcher=universe_fetcher,
     )
 
 
@@ -952,7 +966,7 @@ def _default_long_state_cache_seeder(
     tickers = public.get_tickers()
     ticker_cache.replace_with_rest_snapshot(tickers)
     if private_client is not None:
-        snap = _collect_private_snapshots(private_client, demo_config)  # type: ignore[arg-type]
+        snap = _collect_private_snapshots(private_client, demo_config)
         private_state_cache.replace_with_rest_snapshot(
             equity_usdt=snap["equity_usdt"],
             wallet_error=snap.get("wallet_error", ""),
@@ -971,7 +985,7 @@ def _default_long_state_cache_seeder(
             api_key=api_key,
             api_secret=api_secret,
         )
-        snap = _collect_private_snapshots(private, demo_config)  # type: ignore[arg-type]
+        snap = _collect_private_snapshots(private, demo_config)
         private_state_cache.replace_with_rest_snapshot(
             equity_usdt=snap["equity_usdt"],
             wallet_error=snap.get("wallet_error", ""),

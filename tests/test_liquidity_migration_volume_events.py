@@ -541,6 +541,34 @@ def test_filter_liquidity_migration_residual_momentum_gate_keeps_low_rmom() -> N
     assert set(result_off["symbol"].to_list()) == {"LOW", "HIGH", "NULLSIG"}, result_off["symbol"].to_list()
 
 
+def test_residual_momentum_join_attaches_decision_day_value(tmp_path) -> None:
+    """The residual-momentum join must attach residual_momentum[D] (start-of-day grid) to a day-D
+    event, NOT residual_momentum[D+1] (audit data-assembly-3, fixed 2026-06-03). The two sides use
+    different ts_ms conventions: the residual table is start-of-day (D), the feature panel is the
+    END-of-day stamp (00:00 of D+1); the panel side is keyed on the trading day = floor(ts_ms-1ms)."""
+    from liquidity_migration.volume_events import _attach_residual_momentum
+
+    ms_per_day = 86_400_000
+    day_d = 1_779_753_600_000  # 2026-05-26 00:00 UTC (a whole multiple of MS_PER_DAY)
+    day_d1 = day_d + ms_per_day  # 2026-05-27 00:00 UTC
+
+    # Residual table: one row per DECISION day at the start-of-day grid.
+    pl.DataFrame(
+        {
+            "symbol": ["AAA", "AAA"],
+            "ts_ms": [day_d, day_d1],
+            "residual_momentum": [1.0, 2.0],  # D -> 1.0 (causal for trading day D), D+1 -> 2.0
+        }
+    ).write_parquet(tmp_path / "residual_momentum.parquet")
+
+    # Feature panel: an event on TRADING DAY D carries the END-of-day stamp (00:00 of D+1).
+    features = pl.DataFrame({"symbol": ["AAA"], "ts_ms": [day_d + ms_per_day]})
+
+    out = _attach_residual_momentum(features, tmp_path)
+    # Causally correct: the day-D event gets residual_momentum for decision day D (1.0), not D+1 (2.0).
+    assert out["residual_momentum"].to_list() == [1.0]
+
+
 def _isolated_liquidity_migration_config(
     *,
     rank_improvement_min: int = 150,

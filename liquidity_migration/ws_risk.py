@@ -13,7 +13,7 @@ from typing import Any
 
 import polars as pl
 
-from ._common import MS_PER_DAY
+from ._common import MS_PER_DAY, coerce_int
 from .bybit import BybitPrivateWebSocketStream, BybitPublicTickerStream, build_ws_trade_client, resolve_private_credentials
 from .config import ResearchConfig
 from decimal import Decimal
@@ -804,8 +804,12 @@ class EventWebSocketRiskEngine:
         trade_id = self.state.submitted_link_to_trade_id.get(order_link_id, "")
         if not trade_id or self.state.all_trades.is_empty():
             return
-        trades = {str(row["trade_id"]): row for row in self.state.all_trades.to_dicts()}
-        trade = dict(trades.get(trade_id, {}))
+        # reconcile-core-5: a tracked-exit fill arrives on the latency-critical WS
+        # path; look the ONE trade up with a column filter instead of materializing
+        # the entire ledger to a Python dict-of-dicts per fill. trade_id is unique,
+        # so the filtered first row is the same row the full map would yield.
+        match = self.state.all_trades.filter(pl.col("trade_id") == trade_id)
+        trade = dict(match.to_dicts()[0]) if not match.is_empty() else {}
         # Load-bearing: REST fallback (on_ws_order_ack -> rest_exit) may have
         # already closed this trade. A late `execution` stream message for the
         # same order_link_id must not append a second close to state.exits. Do
@@ -981,6 +985,9 @@ class EventWebSocketRiskEngine:
             position_by_symbol=self.state.positions_by_symbol,
             price_by_symbol=self.state.price_by_symbol,
             now_ms=_now_ms(),
+            # reconcile-core-2: shared netted account -> cap each sleeve's stop to its
+            # own leg so it can't flatten a sibling sleeve's position on the same symbol.
+            cap_qty_to_trade=self.long_root is not None or self.continuous_root is not None,
         )
         for exit_plan in exits:
             symbol = str(exit_plan.get("symbol", ""))
@@ -1079,15 +1086,16 @@ class EventWebSocketRiskEngine:
         ledger; falls back to the symbol lookup; final fallback is 'short'."""
         if not trade_rows and not order_rows:
             return
-        trade_index = {
-            str(row.get("trade_id") or ""): str(row.get("sleeve") or "")
-            for row in self.state.all_trades.to_dicts()
-        } if not self.state.all_trades.is_empty() else {}
+        # reconcile-core-5: one .to_dicts() pass builds BOTH indexes (was two).
+        trade_index: dict[str, str] = {}
         symbol_index: dict[str, str] = {}
         if not self.state.all_trades.is_empty():
             for row in self.state.all_trades.to_dicts():
+                tid = str(row.get("trade_id") or "")
                 sym = str(row.get("symbol") or "")
                 sleeve = str(row.get("sleeve") or "")
+                if tid:
+                    trade_index[tid] = sleeve
                 if sym and sleeve and sym not in symbol_index:
                     symbol_index[sym] = sleeve
 
@@ -1129,8 +1137,14 @@ class EventWebSocketRiskEngine:
         }
 
     def ws_exit(self, exit_plan: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        trade_lookup = {str(row["trade_id"]): row for row in self.state.all_trades.to_dicts()}
-        trade = dict(trade_lookup[str(exit_plan["trade_id"])])
+        # reconcile-core-5: filter for the single target trade rather than
+        # materializing every ledger row per exit. Preserve the KeyError-on-missing
+        # contract (callers rely on the trade existing) by indexing [0].
+        _wanted = str(exit_plan["trade_id"])
+        _match = self.state.all_trades.filter(pl.col("trade_id") == _wanted)
+        if _match.is_empty():
+            raise KeyError(_wanted)
+        trade = dict(_match.to_dicts()[0])
         side = str(exit_plan.get("side") or trade.get("side") or "short")
         bybit_side = "Buy" if side == "short" else "Sell"
         symbol = str(exit_plan["symbol"])
@@ -1187,6 +1201,8 @@ class EventWebSocketRiskEngine:
                 payload["_lm_order_link_id"] = _link
                 self.events.put(("ws_order_ack", payload))
 
+            if self.trade_client is None:  # ws_exit only runs when trade_client is set (submit_exit guard); explicit (-O-safe) guard
+                raise RuntimeError("ws_exit requires a trade_client (submit_exit guard violated)")
             self.trade_client.place_order(_enqueue_ack, **sub_order_params)
             self.state.submitted_link_to_trade_id[sub_link] = str(trade["trade_id"])
             self.state.submitted_link_submit_mode[sub_link] = "ws_submitted"
@@ -1309,11 +1325,17 @@ class EventWebSocketRiskEngine:
         # closed on a degraded read.
         self.state.ledger_read_error = ""
         prefetch = self._reconcile_prefetch if self.risk.reconcile_prefetch_enabled else None
-        prefetch_fresh = prefetch is not None and (
-            time.monotonic() - float(prefetch["monotonic"]) <= max(self.risk.rest_reconcile_seconds, 1.0)
+        # Narrowed reference (a fresh snapshot dict or None) rather than a parallel
+        # `prefetch_fresh` bool: carrying the value lets the type-checker see the dict is
+        # non-None at every use below, so no assert and no index-ignore are needed.
+        fresh_prefetch = (
+            prefetch
+            if prefetch is not None
+            and time.monotonic() - float(prefetch["monotonic"]) <= max(self.risk.rest_reconcile_seconds, 1.0)
+            else None
         )
-        if prefetch_fresh:
-            raw_positions, error = prefetch["positions"], prefetch["positions_error"]
+        if fresh_prefetch is not None:
+            raw_positions, error = fresh_prefetch["positions"], fresh_prefetch["positions_error"]
         else:
             raw_positions, error = _safe_raw_positions(self.private_client, settle_coin=self.risk.settle_coin)
         if error:
@@ -1324,7 +1346,7 @@ class EventWebSocketRiskEngine:
         # so the orphan reconciler is allowed to act on this fresh state.
         self.state.last_position_error = ""
         snapshot_positions = _active_position_by_symbol(raw_positions)
-        if prefetch_fresh:
+        if fresh_prefetch is not None:
             # UNION with the WS-maintained positions: a position the WS added since
             # the (slightly older) prefetch snapshot is never dropped — so no stop
             # goes unchecked. Orphan-close then only fires for a symbol absent from
@@ -1338,7 +1360,7 @@ class EventWebSocketRiskEngine:
         self.state.open_trades = _open_trades(self.state.all_trades)
         orders = self._read_orders_combined()
         open_orders_ok = self.refresh_live_exit_order_symbols(
-            prefetched=(prefetch["open_orders"], prefetch["open_orders_error"]) if prefetch_fresh else None
+            prefetched=(fresh_prefetch["open_orders"], fresh_prefetch["open_orders_error"]) if fresh_prefetch is not None else None
         )
         self.reconcile_pending_order_fills(orders)
         orders = self._read_orders_combined()
@@ -1586,6 +1608,13 @@ class EventWebSocketRiskEngine:
             )
             return None
         venue_side = "Buy" if side == "long" else "Sell"
+        # Pick the LATEST re-entry, not the first match: a same-signal-window cover-then-re-enter
+        # leaves TWO decodable entry links for one symbol in history (seq=0 covered, seq=1 the live
+        # position). Prefer the highest (reentry_seq, createdTime) so the rebuild adopts the LIVE id
+        # — deterministic regardless of Bybit's get_order_history ordering (re-audit
+        # scan-continuous-identity-1). seq=0-only history (the common case) is unaffected.
+        best_key: tuple[int, int] | None = None
+        best: tuple[str, str, int, str, int] | None = None
         for order in history:
             order_side = str(order.get("side") or "")
             if order_side != venue_side:
@@ -1598,8 +1627,12 @@ class EventWebSocketRiskEngine:
             strategy_id = self._adopt_strategy_id_for_sleeve(decoded_sleeve)
             if not strategy_id:
                 continue
-            return link, strategy_id, signal_ts_ms, decoded_sleeve, reentry_seq
-        return None
+            created_ts = int(_float(order.get("createdTime") or order.get("updatedTime") or 0))
+            key = (reentry_seq, created_ts)
+            if best_key is None or key > best_key:
+                best_key = key
+                best = (link, strategy_id, signal_ts_ms, decoded_sleeve, reentry_seq)
+        return best
 
     def _adopt_strategy_id_for_sleeve(self, sleeve: str) -> str:
         """Resolve the strategy_id used to reconstruct a deterministic
@@ -1681,7 +1714,8 @@ class EventWebSocketRiskEngine:
                     error = "untracked position exit requires REST fallback in Bybit demo mode"
                 else:
                     try:
-                        assert self.private_client is not None
+                        if self.private_client is None:  # explicit (-O-safe) guard; a None here is caught below as a failed submit
+                            raise RuntimeError("submit_orders is set but private_client is unavailable")
                         order_result = self.private_client.place_order(
                             **_order_params(
                                 symbol=symbol,
@@ -1700,6 +1734,8 @@ class EventWebSocketRiskEngine:
                         self.state.errors.append(error)
                     if submit_mode == "submitted":
                         try:
+                            if self.private_client is None:  # unreachable (submit above succeeded); explicit (-O-safe) re-narrow
+                                raise RuntimeError("private_client became None after a successful submit")
                             exec_summary = _execution_summary(
                                 self.private_client.get_trade_history(symbol=symbol, order_link_id=link, limit=50)
                             )
@@ -2431,8 +2467,8 @@ def _ack_order_link(message: dict[str, Any]) -> str:
         message.get("_lm_order_link_id")
         or message.get("orderLinkId")
         or message.get("order_link_id")
-        or data.get("orderLinkId")
-        or data.get("order_link_id")
+        or data.get("orderLinkId")  # type: ignore[union-attr]  # data is a dict (or {}) per the isinstance ternary above
+        or data.get("order_link_id")  # type: ignore[union-attr]  # data is a dict (or {}) per the isinstance ternary above
         or ""
     )
 
@@ -2477,10 +2513,9 @@ def _validate_trade_row_invariants(row: dict[str, Any]) -> tuple[bool, str]:
 
 
 def _int(value: Any) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
+    # Thin alias over the shared _common.coerce_int (quality-dup-9); kept as a
+    # name so the many module-internal call sites stay untouched.
+    return coerce_int(value)
 
 
 def _telegram_dedupe_key(reason: str, payload: dict[str, Any]) -> str:

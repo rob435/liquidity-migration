@@ -124,13 +124,19 @@ def compute_annualized_return(total_return: float, window_days: float) -> float:
 def compute_mar(total_return: float, max_drawdown: float, window_days: float) -> float:
     """MAR = annualized_return / |max_drawdown|.
 
-    Convention: max_drawdown is a negative number (-0.42 = -42%). MAR is
-    signed by annualized_return: positive when profitable, negative when
-    cumulative return is negative, zero when there is no drawdown
-    (degenerate; treat as 0 to avoid divide-by-zero — the cell is rejected
-    on trade-count or other gates anyway)."""
-    if max_drawdown == 0.0:
-        return 0.0
+    Convention: max_drawdown is a negative number (-0.42 = -42%). MAR is signed by
+    annualized_return: positive when profitable, negative when cumulative return is negative. A
+    (near-)zero drawdown makes MAR UNMEASURABLE, so it returns ``nan`` (matching
+    r1_robustness._mar / _engine_mar so the two decision tools treat the same degenerate cell
+    identically — scripts-tooling-6). A nan MAR delta then fails every verdict comparison
+    (``nan > positive`` and ``nan <= falsify`` are both False), so the cell is neither
+    investigation-positive nor MAR-falsified — exactly r1's "unmeasurable" exclusion; it is still
+    caught by the trade-count gate when it is genuinely too thin. (Edge: if the CONTROL cell itself
+    has ~zero drawdown its MAR is nan too, so the MAR-DELTA falsifier abstains for that pairing —
+    the drawdown / trade-count / return-sign falsifiers still fire. The baseline control has real
+    drawdown in practice, so this is descriptive, not a hole.)"""
+    if abs(max_drawdown) <= 1e-9:
+        return float("nan")
     ann = compute_annualized_return(total_return, window_days)
     return ann / abs(max_drawdown)
 

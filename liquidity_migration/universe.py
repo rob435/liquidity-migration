@@ -30,7 +30,7 @@ def run_discover_universe(
     table = build_current_universe_table(instruments, tickers, universe_config=universe_config)
     symbols = table["symbol"].to_list() if not table.is_empty() else []
 
-    payload = {
+    payload: dict[str, Any] = {
         "name": name,
         "config": asdict(universe_config),
         "rows": table.height,

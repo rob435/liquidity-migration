@@ -770,3 +770,42 @@ def test_stats_reflect_ws_freshness_via_lag(tmp_path: Path) -> None:
         assert stats["newest_ts_lag_seconds"] < 3700.0  # within ~1h
     finally:
         manager.stop()
+
+
+def test_universe_refresh_threshold_log_counts_only_new_targets(tmp_path: Path, caplog) -> None:
+    """ws-dataplane-6: the bootstrap completion-threshold log must be measured
+    against the symbols actually being bootstrapped (the new listings on a
+    universe-refresh), not the full universe. Before the fix the full-universe
+    denominator made the 'completion threshold reached' log fire immediately
+    and misleadingly on refresh (the rest of the universe is already covered).
+    After the fix the threshold/coverage are scoped to the new targets."""
+    def _instruments(call_n):
+        if call_n == 1:
+            return _instruments_payload(["BTCUSDT", "ETHUSDT"])
+        return _instruments_payload(["BTCUSDT", "ETHUSDT", "SOLUSDT"])
+
+    manager, _pool, market = _build_manager(
+        tmp_path=tmp_path,
+        initial_symbols=["BTCUSDT", "ETHUSDT"],
+        instruments_factory=_instruments,
+        bootstrap_completion_threshold=1.0,
+    )
+    manager.start()
+    try:
+        with caplog.at_level(
+            "INFO", logger="liquidity_migration.kline_stream_manager"
+        ):
+            manager.force_refresh_universe()
+        # The new listing was bootstrapped.
+        assert "SOLUSDT" in market.kline_calls
+        # Any 'completion threshold reached' log on the refresh path must be
+        # scoped to the 1 new target (denominator == 1), never the 3-symbol
+        # universe. (Pre-fix the log read '.../3'.)
+        threshold_logs = [
+            r.message for r in caplog.records
+            if "completion threshold" in r.message
+        ]
+        for msg in threshold_logs:
+            assert "/3" not in msg, msg
+    finally:
+        manager.stop()

@@ -567,3 +567,151 @@ def test_plan_stop_repairs_detects_missing_exchange_stop() -> None:
     assert repairs[0]["needs_stop_repair"] is True
     assert repairs[0]["needs_take_profit_repair"] is False
 
+
+def test_plan_demo_exits_rank_index_matches_per_trade_scan() -> None:
+    # Two open trades on two symbols; rank_lookup carries entries for both at the
+    # post-entry stamp. The precomputed per-symbol index must yield the SAME
+    # event_decay outcome as the old full-scan: AAA decays, BBB does not.
+    scenario = EventScenario(
+        event_type="liquidity_migration",
+        threshold=0.30,
+        side_hypothesis="reversal",
+        hold_days=1,
+        stop_loss_pct=0.12,
+        cost_multiplier=3.0,
+    )
+    open_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "tA",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "entry_ts_ms": 1_000,
+                "planned_exit_ts_ms": 1_000 + 24 * MS_PER_HOUR,
+                "qty": "1",
+                "stop_price": 112.0,
+            },
+            {
+                "trade_id": "tB",
+                "symbol": "BBBUSDT",
+                "side": "short",
+                "status": "open",
+                "entry_ts_ms": 1_000,
+                "planned_exit_ts_ms": 1_000 + 24 * MS_PER_HOUR,
+                "qty": "1",
+                "stop_price": 112.0,
+            },
+        ]
+    )
+    rank_lookup = {
+        # event_decay fires when rank_fraction < threshold (1-0.30=0.70): AAA dropped
+        # out of the migration rank (0.69<0.70) -> decay; BBB still strongly ranked
+        # (0.95>=0.70) -> no decay. Pins the per-symbol index against the old scan.
+        ("AAAUSDT", 1_000 + MS_PER_HOUR): 0.69,
+        ("BBBUSDT", 1_000 + MS_PER_HOUR): 0.95,
+    }
+    exits = plan_demo_exits(
+        open_trades,
+        rank_lookup=rank_lookup,
+        klines=pl.DataFrame(),
+        price_by_symbol={"AAAUSDT": 99.0, "BBBUSDT": 99.0},
+        now_ms=1_000 + MS_PER_HOUR,
+        config=VolumeEventResearchConfig(require_pit_membership=False, require_full_pit_universe=False),
+        scenario=scenario,
+    )
+    by_trade = {row["trade_id"]: row for row in exits}
+    assert by_trade["tA"]["exit_reason"] == "event_decay"
+    assert "tB" not in by_trade
+
+
+def test_plan_risk_exits_caps_qty_to_trade_on_shared_account() -> None:
+    # This sleeve's ledger row holds qty=1 of AAAUSDT, but the NETTED venue
+    # position is size=3 (this sleeve's 1 + a sibling sleeve's 2). On the shared
+    # account a stop on this sleeve must size to 1, not 3 - else the reduce-only
+    # flattens the sibling's 2 too.
+    open_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "qty": "1",
+                "stop_price": 112.0,
+                "planned_exit_ts_ms": 1_700_100_000_000,
+            }
+        ]
+    )
+    position_by_symbol = {
+        "AAAUSDT": {"symbol": "AAAUSDT", "side": "Sell", "size": "3", "markPrice": "113"},
+    }
+    price_by_symbol = {"AAAUSDT": 113.0}
+    legacy = plan_risk_exits(
+        open_trades,
+        position_by_symbol=position_by_symbol,
+        price_by_symbol=price_by_symbol,
+        now_ms=1_700_000_060_000,
+    )
+    assert legacy[0]["exit_reason"] == "stop_loss"
+    assert legacy[0]["qty"] == "3"
+    capped = plan_risk_exits(
+        open_trades,
+        position_by_symbol=position_by_symbol,
+        price_by_symbol=price_by_symbol,
+        now_ms=1_700_000_060_000,
+        cap_qty_to_trade=True,
+    )
+    assert capped[0]["exit_reason"] == "stop_loss"
+    assert capped[0]["qty"] == "1"
+
+
+def test_plan_demo_exits_books_stop_at_bar_extreme_not_trigger() -> None:
+    scenario = EventScenario(
+        event_type="liquidity_migration",
+        threshold=0.30,
+        side_hypothesis="reversal",
+        hold_days=1,
+        stop_loss_pct=0.12,
+        cost_multiplier=3.0,
+    )
+    entry_ts = 1_700_000_000_000
+    open_trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "symbol": "AAAUSDT",
+                "side": "short",
+                "status": "open",
+                "entry_ts_ms": entry_ts,
+                "entry_price": 100.0,
+                "planned_exit_ts_ms": entry_ts + 24 * MS_PER_HOUR,
+                "qty": "1",
+                "stop_price": 112.0,
+            }
+        ]
+    )
+    # Short stop at 112; the trigger bar spikes high to 120 (past trigger but
+    # within the 10% cap 112*1.10=123.2). Honest fill is the capped bar extreme
+    # (120.0), NOT the optimistic trigger (112.0).
+    klines = pl.DataFrame(
+        [
+            {"ts_ms": entry_ts, "symbol": "AAAUSDT", "open": 100.0, "high": 120.0, "low": 99.0, "close": 118.0},
+        ]
+    )
+    exits = plan_demo_exits(
+        open_trades,
+        rank_lookup={},
+        klines=klines,
+        price_by_symbol={"AAAUSDT": 118.0},
+        now_ms=entry_ts + MS_PER_HOUR,
+        config=VolumeEventResearchConfig(
+            require_pit_membership=False,
+            require_full_pit_universe=False,
+            stop_fill_mode="bar_extreme_capped",
+            stop_slippage_cap_pct=0.10,
+        ),
+        scenario=scenario,
+    )
+    assert exits[0]["exit_reason"] == "stop_loss"
+    assert exits[0]["planned_exit_price"] == 120.0

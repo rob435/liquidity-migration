@@ -47,15 +47,17 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from ._common import finite_float
 
 _logger = logging.getLogger("liquidity_migration.ws_state_cache")
 
 
 def _float(value: Any) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return 0.0
+    # Delegates to the finite-guarded _common.finite_float: a torn/partial WS
+    # ticker/position message must not admit NaN/inf into size/price math
+    # (quality-dup-1 — the local copy previously passed them through, e.g. into
+    # the size>0 position filter and stop-price evaluation).
+    return finite_float(value, default=0.0) or 0.0
 
 
 def _message_rows(message: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -469,6 +471,16 @@ class TickerCache:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._rows_by_symbol: dict[str, dict[str, Any]] = {}
+        # Per-symbol freshness clock: monotonic time of THIS symbol's last update
+        # (WS push OR seed/REST-reconcile). The cache-level last_event_monotonic
+        # gate is GLOBAL — one fresh symbol keeps the whole cache 'fresh', so a
+        # symbol whose own price has gone stale (no WS tick AND missing from the 60s
+        # REST reconcile, e.g. a halted/delisting name) would still feed its last-good
+        # price into the cycle's stop/exit math. snapshot_list(max_age_seconds=...)
+        # uses this map to drop a symbol whose own last update is older than the bound
+        # (ws-dataplane-1). The 60s REST reconcile re-stamps every symbol, so an
+        # illiquid-but-healthy symbol that simply hasn't ticked stays fresh.
+        self._symbol_update_monotonic: dict[str, float] = {}
         self._stats = _TickerStats()
 
     # -- seed ----------------------------------------------------------
@@ -476,11 +488,14 @@ class TickerCache:
     def seed(self, tickers: Iterable[Mapping[str, Any]]) -> None:
         with self._lock:
             self._rows_by_symbol = {}
+            self._symbol_update_monotonic = {}
+            now = time.monotonic()
             for row in tickers:
                 symbol = str(row.get("symbol", "") or "")
                 if not symbol:
                     continue
                 self._rows_by_symbol[symbol] = dict(row)
+                self._symbol_update_monotonic[symbol] = now
             self._stats.seeded = True
             self._stats.last_event_monotonic = time.monotonic()
 
@@ -511,11 +526,28 @@ class TickerCache:
 
     # -- read accessors ------------------------------------------------
 
-    def snapshot_list(self) -> list[dict[str, Any]]:
+    def snapshot_list(self, *, max_age_seconds: float | None = None) -> list[dict[str, Any]]:
         """Bulk tickers in the same shape ``BybitMarketData.get_tickers()``
-        returns — a list of dicts ready for ``_normalize_tickers``."""
+        returns — a list of dicts ready for ``_normalize_tickers``.
+
+        ``max_age_seconds`` applies a PER-SYMBOL staleness filter: a symbol whose own
+        last update (WS push or seed/REST-reconcile) is older than the bound is
+        excluded (ws-dataplane-1). ``None`` (the default) returns every symbol — the
+        subscribe paths pass nothing because they want the full universe; the
+        stop/exit read site (``_resolve_ticker_snapshot``) passes the bound so a stale
+        per-symbol price can never reach stop/exit pricing while another symbol keeps
+        the GLOBAL cache fresh."""
         with self._lock:
-            return [dict(row) for row in self._rows_by_symbol.values()]
+            if max_age_seconds is None:
+                return [dict(row) for row in self._rows_by_symbol.values()]
+            now = time.monotonic()
+            out: list[dict[str, Any]] = []
+            for symbol, row in self._rows_by_symbol.items():
+                last = self._symbol_update_monotonic.get(symbol)
+                if last is None or now - last > max_age_seconds:
+                    continue
+                out.append(dict(row))
+            return out
 
     def get(self, symbol: str) -> dict[str, Any] | None:
         with self._lock:
@@ -567,6 +599,9 @@ class TickerCache:
         symbol = str(row.get("symbol", "") or "")
         if not symbol:
             return
+        # ws-dataplane-1: stamp this symbol's per-symbol freshness clock on every WS
+        # push (covers both the new-symbol and delta-merge branches below).
+        self._symbol_update_monotonic[symbol] = time.monotonic()
         existing = self._rows_by_symbol.get(symbol)
         if existing is None:
             self._rows_by_symbol[symbol] = dict(row)

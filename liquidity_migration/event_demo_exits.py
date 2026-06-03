@@ -22,7 +22,7 @@ from typing import Any, Callable
 import polars as pl
 
 from . import _common  # noqa: F401 — kept for completeness
-from ._common import MS_PER_HOUR
+from ._common import MS_PER_DAY, MS_PER_HOUR
 from .event_demo import (
     PENDING_ORDER_GUARD_MS,
     PENDING_ORDER_STATUSES,
@@ -53,6 +53,10 @@ from .event_demo import (
 )
 
 _logger = logging.getLogger(__name__)
+
+# Bybit's closed-PnL endpoint enforces a <=7-day startTime->endTime span, so a batched
+# account-wide fetch must be PAGED in <=7-day windows (reconcile-core-4 re-audit F1).
+CLOSED_PNL_MAX_WINDOW_MS = 7 * MS_PER_DAY
 
 
 def _terminalize_stale_pending_entry_orders(
@@ -262,6 +266,7 @@ def _execute_exits(
                             fast_poll_interval_seconds=demo.order_fill_fast_poll_interval_seconds,
                             fast_poll_seconds=demo.order_fill_fast_poll_seconds,
                             execution_event_router=execution_event_router,
+                            target_qty=sub_target,  # EXEC-6: aggregate all WS legs before deciding filled/partial
                         )
                     except Exception as exc:  # noqa: BLE001 - order may still fill; reconciliation will retry
                         sub_status = "submitted_unconfirmed"
@@ -1348,7 +1353,19 @@ def _reconcile_open_trades(
     require_evidence = getattr(demo, "orphan_close_require_evidence", True)
     updates: list[dict[str, Any]] = []
     kept = []
-    for trade in open_trades.to_dicts():
+    trade_dicts = open_trades.to_dicts()
+    # reconcile-core-4: one account-wide closed-PnL fetch for the whole pass instead
+    # of one blocking REST call per orphan (see _fetch_account_closed_pnl). The orphan
+    # predicate matches the loop's keep-open check below.
+    cycle_orphans = [
+        t for t in trade_dicts
+        if not (
+            _normalized_position_side(t.get("side"))
+            and size_by_symbol_side.get((str(t["symbol"]), _normalized_position_side(t.get("side"))), 0.0) > 0.0
+        )
+    ]
+    closed_pnl_by_symbol = _fetch_account_closed_pnl(trading_client, cycle_orphans, now_ms=now_ms)
+    for trade in trade_dicts:
         symbol = str(trade["symbol"])
         # Normalize through the same helper so "short" / "Sell" both land
         # on "short" — trade rows carry "short"/"long" and Bybit positions
@@ -1357,8 +1374,16 @@ def _reconcile_open_trades(
         if trade_side and size_by_symbol_side.get((symbol, trade_side), 0.0) > 0.0:
             kept.append(trade)
             continue
+        # reconcile-core-4: a symbol absent from a SUCCESSFUL account-wide fetch means
+        # "no closure for it yet" -> pass [] (the matcher returns {} -> require_evidence
+        # keeps it open), NOT None. None is reserved for a FAILED/absent batch, which
+        # alone falls back to the legacy per-symbol fetch. Using .get(symbol) without the
+        # [] default would re-fire a per-orphan REST call for every not-yet-closed orphan
+        # — exactly the synchronized-mass-close stall this fix removes.
+        symbol_records = closed_pnl_by_symbol.get(symbol, []) if closed_pnl_by_symbol is not None else None
         row = _orphan_close_trade_row(
             trade, now_ms=now_ms, trading_client=trading_client, require_evidence=require_evidence,
+            closed_pnl_records=symbol_records,
         )
         if row is None:
             # FAIL-CLOSED: position absent but no closure evidence — keep the
@@ -1381,6 +1406,7 @@ def _risk_reconcile_missing_positions(
     enabled: bool,
     position_error: str = "",
     trading_client: Any | None = None,
+    require_evidence: bool = False,
 ) -> tuple[pl.DataFrame, list[dict[str, Any]]]:
     """Close ledger rows whose Bybit position has vanished.
 
@@ -1390,34 +1416,88 @@ def _risk_reconcile_missing_positions(
     on a single transient API failure. The caller plumbs the error string from
     :func:`_safe_raw_positions`.
 
+    ``require_evidence`` extends that protection to the *successful-but-empty*
+    snapshot (retCode 0 with an empty ``result.list`` during a venue degradation),
+    which carries no ``position_error`` yet is the same C1 mass-false-close class.
+    With it set, a trade is closed ONLY when ``get_closed_pnl`` confirms a real
+    close since entry; absent that record the trade is kept OPEN (a possibly-live
+    position is never wiped to a zero-PnL ``bybit_position_missing`` row). The bulk
+    REST-snapshot callers (``rest_reconcile`` / ``bootstrap`` / the cycle runner)
+    pass ``True``; the WS ``on_position_message`` path keeps ``False`` because a WS
+    ``size=0`` IS the positive close evidence for that symbol, so its (possibly
+    last-position-emptying) close stays prompt.
+
     When a ``trading_client`` is provided, queries ``get_closed_pnl`` per orphan
     symbol to backfill ``exit_price`` / ``gross_trade_return`` / ``net_return``
-    / ``exit_order_id`` / ``exit_ts_ms`` from the actual close. Missing PnL data
-    is non-fatal -- the trade still closes with ``exit_reason='bybit_position_missing'``
-    and the previous zero-PnL defaults.
+    / ``exit_order_id`` / ``exit_ts_ms`` from the actual close.
     """
     if open_trades.is_empty() or not enabled:
         return open_trades, []
     if position_error:
         return open_trades, []
+    # Side-aware keep-open check, mirroring the cycle path (_reconcile_open_trades):
+    # key on (symbol, normalized_side) so a same-symbol flip (ledger short while the
+    # venue now holds a long on that symbol) is surfaced as a short-side orphan
+    # close instead of being masked by the opposite-side position. position_by_symbol
+    # values carry `side` in both the WS (on_position_message) and REST
+    # (_active_position_by_symbol) population paths.
+    size_by_symbol_side = _position_size_by_symbol_side(list(position_by_symbol.values()))
     updates: list[dict[str, Any]] = []
     kept = []
-    for trade in open_trades.to_dicts():
+    trade_dicts = open_trades.to_dicts()
+    # reconcile-core-4: pre-compute the orphans (ledger rows whose venue position has
+    # vanished) so we can do ONE account-wide closed-PnL fetch instead of one blocking
+    # REST call per orphan inside the loop -- the per-orphan calls stalled the
+    # single-threaded WS consumer on a synchronized multi-position close.
+    orphans = []
+    for trade in trade_dicts:
         symbol = str(trade.get("symbol", ""))
-        if symbol and symbol in position_by_symbol:
+        trade_side = _normalized_position_side(trade.get("side"))
+        if trade_side:
+            keep_open = size_by_symbol_side.get((symbol, trade_side), 0.0) > 0.0
+        else:
+            keep_open = bool(symbol) and symbol in position_by_symbol
+        if not keep_open:
+            orphans.append(trade)
+    closed_pnl_by_symbol = _fetch_account_closed_pnl(trading_client, orphans, now_ms=now_ms)
+    for trade in trade_dicts:
+        symbol = str(trade.get("symbol", ""))
+        trade_side = _normalized_position_side(trade.get("side"))
+        if trade_side:
+            keep_open = size_by_symbol_side.get((symbol, trade_side), 0.0) > 0.0
+        else:
+            # Degenerate row with no parseable side (malformed / schema-drift): fall
+            # back to symbol-only presence so a possibly-live position we simply
+            # can't side-match is never spuriously orphan-closed (re-audit
+            # rescan-reconcile-2). Normal rows always carry "short"/"long".
+            keep_open = bool(symbol) and symbol in position_by_symbol
+        if keep_open:
             kept.append(trade)
             continue
-        # The ws_risk path keeps the legacy close-on-absence behavior here
-        # (require_evidence=False). Its safety against a transient/empty read is
-        # the position_error guard at the caller (a failed/empty positions fetch
-        # does not reach here), NOT a grace window — untracked_position_grace_
-        # seconds gates the OPPOSITE direction (adopting an exchange position with
-        # no ledger row), not this ledger-row-with-no-position close. The
-        # fail-closed evidence requirement (require_evidence=True) is enforced on
-        # the cycle path (_reconcile_open_trades) instead.
-        updates.append(
-            _orphan_close_trade_row(trade, now_ms=now_ms, trading_client=trading_client, require_evidence=False)
+        # reconcile-core-4: a symbol absent from a SUCCESSFUL account-wide fetch means
+        # "no closure for it yet" -> pass [] (the matcher returns {} -> require_evidence
+        # keeps it open), NOT None. None is reserved for a FAILED/absent batch, which
+        # alone falls back to the legacy per-symbol fetch. Using .get(symbol) without the
+        # [] default would re-fire a per-orphan REST call for every not-yet-closed orphan
+        # — exactly the synchronized-mass-close stall this fix removes.
+        symbol_records = closed_pnl_by_symbol.get(symbol, []) if closed_pnl_by_symbol is not None else None
+        row = _orphan_close_trade_row(
+            trade, now_ms=now_ms, trading_client=trading_client, require_evidence=require_evidence,
+            closed_pnl_records=symbol_records,
         )
+        if row is None:
+            # FAIL-CLOSED: position absent but no closure evidence — keep the
+            # trade OPEN rather than wipe a possibly-live position on a degraded/
+            # empty REST snapshot. untracked_position_grace_seconds gates the
+            # OPPOSITE direction (adopting an exchange position with no ledger
+            # row), not this ledger-row-with-no-position close.
+            kept.append(trade)
+            _logger.warning(
+                "risk orphan-close skipped (no closure evidence) symbol=%s trade_id=%s — keeping open",
+                symbol, trade.get("trade_id"),
+            )
+            continue
+        updates.append(row)
     return pl.DataFrame(kept, infer_schema_length=None) if kept else _empty_trades(), updates
 
 def _orphan_close_trade_row(
@@ -1426,6 +1506,7 @@ def _orphan_close_trade_row(
     now_ms: int,
     trading_client: Any | None,
     require_evidence: bool = True,
+    closed_pnl_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any] | None:
     """Build an orphan-close trade row, backfilling PnL from Bybit when possible.
 
@@ -1437,7 +1518,9 @@ def _orphan_close_trade_row(
     ``require_evidence=False`` to restore the legacy close-on-absence behavior
     (zero-PnL close when no record is found).
     """
-    backfill = _orphan_close_pnl_backfill(trade, now_ms=now_ms, trading_client=trading_client)
+    backfill = _orphan_close_pnl_backfill(
+        trade, now_ms=now_ms, trading_client=trading_client, closed_pnl_records=closed_pnl_records,
+    )
     if require_evidence and not backfill:
         return None
     updated = dict(trade)
@@ -1455,26 +1538,106 @@ def _orphan_close_trade_row(
         updated.update(backfill)
     return updated
 
+def _fetch_account_closed_pnl(
+    trading_client: Any | None,
+    orphans: list[dict[str, Any]],
+    *,
+    now_ms: int,
+) -> dict[str, list[dict[str, Any]]] | None:
+    """reconcile-core-4: batched closed-PnL fetch for a whole reconcile pass, grouped
+    by symbol, replacing the per-orphan ``get_closed_pnl(symbol=...)`` round-trips that
+    stalled the single-threaded WS consumer on a synchronized multi-position close
+    (N blocking REST calls inline -> O(span/7d)).
+
+    Covers each orphan's full ``[entry_ts_ms - 1h, now]`` window. Bybit's closed-PnL
+    endpoint enforces a <=7-day startTime->endTime span (re-audit F1), so a SINGLE call
+    from the OLDEST orphan's entry to now would silently drop a RECENT orphan's closure
+    when an old orphan (the long sleeve holds up to ~21 days) shares the pass -- wrongly
+    keeping the recent orphan OPEN under require_evidence. We therefore PAGE the
+    account-wide fetch in disjoint <=7-day windows from the oldest entry to ``now``:
+    O(ceil(span/7d)) calls (~3 for a 21-day horizon), still independent of the orphan
+    COUNT. Records are de-duplicated by orderId so a boundary record returned by two
+    adjacent windows is not double-counted as a phantom multi-leg. The authoritative
+    per-trade filters (``created_ts >= entry_ts_ms`` and close side) are re-applied
+    in-memory by ``_orphan_close_pnl_from_records``, so the paged union yields IDENTICAL
+    matches to N per-symbol windows.
+
+    Returns ``None`` (NOT ``{}``) when the endpoint is absent, the call raises, or any
+    orphan has a non-positive ``entry_ts_ms`` (no reliable window bound) -- the caller
+    then degrades to the legacy per-orphan fetch, never to a close-on-absence. An empty
+    account ({} = no closures) is a real, non-None result and correctly leaves
+    require_evidence orphans OPEN.
+    """
+    if trading_client is None or not orphans:
+        return None
+    get_closed_pnl = getattr(trading_client, "get_closed_pnl", None)
+    if not callable(get_closed_pnl):
+        return None
+    entry_times = [int(t.get("entry_ts_ms") or 0) for t in orphans]
+    if any(ts <= 0 for ts in entry_times):
+        # An unbounded-window orphan (malformed / adopted row) can't be safely covered
+        # by a paged window; fall back to the legacy per-orphan fetch for the whole pass.
+        return None
+    by_symbol: dict[str, list[dict[str, Any]]] = {}
+    seen: set[str] = set()
+    window_start = max(min(entry_times) - MS_PER_HOUR, 0)
+    try:
+        while window_start <= now_ms:
+            # Do NOT cap window_end at now_ms (re-audit F1 Concern A): the legacy per-symbol
+            # fetch has no upper bound, so a close stamped slightly AFTER now_ms (venue clock
+            # ahead / a stale now_ms) must still be captured. The last window runs the full
+            # 7d-1 span (which always reaches >= now_ms), and the matcher applies no upper
+            # time bound either -> matches legacy. Each window is still < 7d (within the clamp).
+            window_end = window_start + CLOSED_PNL_MAX_WINDOW_MS - 1
+            records = get_closed_pnl(
+                symbol=None, start_time_ms=window_start, end_time_ms=window_end, limit=200,
+            )
+            for record in records or []:
+                sym = str(record.get("symbol") or "")
+                if not sym:
+                    continue
+                # Dedup ONLY by a real orderId (re-audit F1 Concern B): windows are disjoint
+                # so overlap can't double-count, but a boundary record returned by Bybit in
+                # two windows shares its orderId. NEVER dedup an orderId-less record by a
+                # content tuple — two DISTINCT legs can share (symbol,createdTime,closedSize,
+                # avgExitPrice) yet differ in fee, and merging them would undercount the close.
+                oid = str(record.get("orderId") or "")
+                if oid:
+                    if oid in seen:
+                        continue
+                    seen.add(oid)
+                by_symbol.setdefault(sym, []).append(record)
+            window_start = window_end + 1
+    except Exception:  # noqa: BLE001 - degrade to per-orphan fetch; never crash reconcile
+        return None
+    return by_symbol
+
+
 def _orphan_close_pnl_backfill(
     trade: dict[str, Any],
     *,
     now_ms: int,
     trading_client: Any | None,
+    closed_pnl_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Query Bybit closed-PnL for an orphan trade and return backfill fields.
 
     Returns an empty dict on any failure -- the caller keeps the zero-PnL defaults.
+
+    reconcile-core-4: when ``closed_pnl_records`` is provided (the symbol's slice of
+    a single account-wide fetch done once per reconcile pass), NO per-orphan REST
+    call is made -- the matcher runs against the supplied in-memory records. When
+    ``None`` the legacy per-symbol ``get_closed_pnl`` fetch runs, so every
+    pre-existing single-call caller is byte-for-byte unchanged.
     """
+    if closed_pnl_records is not None:
+        return _orphan_close_pnl_from_records(trade, now_ms=now_ms, records=closed_pnl_records)
     if trading_client is None:
         return {}
     symbol = str(trade.get("symbol", ""))
     if not symbol:
         return {}
-    side = str(trade.get("side") or "short")
     entry_ts_ms = int(trade.get("entry_ts_ms") or 0)
-    entry_price = _float(trade.get("entry_price"))
-    if entry_price <= 0.0:
-        return {}
     get_closed_pnl = getattr(trading_client, "get_closed_pnl", None)
     if not callable(get_closed_pnl):
         return {}
@@ -1486,8 +1649,32 @@ def _orphan_close_pnl_backfill(
         records = get_closed_pnl(symbol=symbol, start_time_ms=start_time_ms, limit=50)
     except Exception:  # noqa: BLE001 - reconciler must close the row even when backfill fails
         return {}
+    return _orphan_close_pnl_from_records(trade, now_ms=now_ms, records=records)
+
+
+def _orphan_close_pnl_from_records(
+    trade: dict[str, Any],
+    *,
+    now_ms: int,
+    records: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Pure matcher: given already-fetched closed-PnL ``records`` for this trade's
+    symbol, return the backfill fields (or {} when no record evidences a close since
+    entry). Split out of ``_orphan_close_pnl_backfill`` (reconcile-core-4) so the
+    account-wide batched fetch and the legacy per-symbol fetch share ONE matching
+    path -- the body below is unchanged, so results stay numerically identical (no
+    I/O here, fully deterministic).
+    """
     if not records:
         return {}
+    side = str(trade.get("side") or "short")
+    entry_ts_ms = int(trade.get("entry_ts_ms") or 0)
+    entry_price = _float(trade.get("entry_price"))
+    # NOTE: a non-positive entry_price (a malformed / adopted-* row) does NOT
+    # short-circuit here. Closure EVIDENCE (a closed-PnL record) is independent of
+    # entry_price; only the return COMPUTATION below needs it. Bailing here would
+    # let require_evidence=True keep an entry_price<=0 trade OPEN forever even
+    # after a genuine venue close (re-audit rescan-reconcile-3).
     # Close side: for our short trade the closing order is Buy; for long it is Sell.
     expected_close_side = "Buy" if side == "short" else "Sell"
     candidates: list[tuple[int, dict[str, Any]]] = []
@@ -1528,7 +1715,9 @@ def _orphan_close_pnl_backfill(
     # Bybit's createdTime IS the venue execution time; the close completes at
     # the last leg.
     closed_at_ms = int(_float(last_leg.get("createdTime") or last_leg.get("updatedTime") or now_ms)) or now_ms
-    gross_trade_return = _trade_return(entry_price, exit_price, side=side)
+    # A non-positive entry_price can't yield a meaningful return — record the venue
+    # exit (evidence of the close) with a 0 return rather than a garbage one.
+    gross_trade_return = _trade_return(entry_price, exit_price, side=side) if entry_price > 0.0 else 0.0
     notional_weight = _ratio_or_zero(trade.get("notional_usdt"), trade.get("equity_usdt"))
     backfill: dict[str, Any] = {
         "exit_price": exit_price,

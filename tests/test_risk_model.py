@@ -211,19 +211,49 @@ def test_fit_factor_returns_skips_thin_days_and_handles_empty() -> None:
 
 
 def test_decompose_strategy_pnl_splits_explained_and_residual() -> None:
-    # 1 factor f1; trade A entered ts=0, hold 2d, exposure 2.0, realized 0.10.
-    # factor returns: day0=0.01, day1=0.02 -> cum 0.03 -> explained 2.0*0.03=0.06 -> residual 0.04.
+    # 1 factor f1; trade A DECIDED on day 0 (signal_ts = end-of-day-0 = _DAY), enters the next
+    # morning, holds 2d, exposure 2.0, realized 0.10. Loadings are read at the DECISION day (day 0);
+    # factor returns day0=0.01, day1=0.02 -> cum 0.03 -> explained 2.0*0.03=0.06 -> residual 0.04.
     loadings = pl.DataFrame([{"symbol": "A", "ts_ms": 0, "f1": 2.0}])
     fr = pl.DataFrame([
         {"ts_ms": 0, "factor": "f1", "factor_return": 0.01},
         {"ts_ms": _DAY, "factor": "f1", "factor_return": 0.02},
     ])
-    trades = pl.DataFrame([{"symbol": "A", "entry_ts_ms": 0, "hold_days": 2, "realized_return": 0.10}])
+    trades = pl.DataFrame([{
+        "symbol": "A", "signal_ts_ms": _DAY, "entry_ts_ms": _DAY + 3_600_000,
+        "hold_days": 2, "realized_return": 0.10,
+    }])
     out = decompose_strategy_pnl(trades, loadings, fr, factor_cols=["f1"])
     row = out["per_trade"].row(0, named=True)
     assert abs(row["explained"] - 0.06) < 1e-9, row
     assert abs(row["residual"] - 0.04) < 1e-9, row
     assert out["n_trades"] == 1
+
+
+def test_decompose_strategy_pnl_snaps_to_decision_day_not_entry_day() -> None:
+    """risk-config-cli-1: the PnL decomposition must read factor loadings at the DECISION day D, not
+    the entry's calendar day D+1. The trade decides at D's EOD (signal_ts = 00:00 of D+1) and enters
+    +1h into D+1; reading load_map[(sym, D+1)] would be non-causal (look-ahead) AND shift the
+    factor-return window a day. With loadings ONLY at D and factor_return ONLY at D, the trade must
+    resolve (explained != None) via the decision-day key — both the signal_ts path and the
+    floor(entry)-1day fallback."""
+    loadings = pl.DataFrame([{"symbol": "A", "ts_ms": 0, "f1": 1.0}])           # only the DECISION day D=0
+    fr = pl.DataFrame([{"ts_ms": 0, "factor": "f1", "factor_return": 0.05}])    # only factor_return[D=0]
+    entry = _DAY + 3_600_000  # 01:00 of D+1
+    # (a) explicit signal_ts_ms -> decision day floor(signal_ts-1ms) = 0
+    out_sig = decompose_strategy_pnl(
+        pl.DataFrame([{"symbol": "A", "signal_ts_ms": _DAY, "entry_ts_ms": entry, "hold_days": 1, "realized_return": 0.08}]),
+        loadings, fr, factor_cols=["f1"],
+    )
+    assert out_sig["per_trade"].row(0, named=True)["explained"] is not None
+    assert abs(out_sig["per_trade"].row(0, named=True)["explained"] - 0.05) < 1e-9
+    # (b) legacy row without signal_ts_ms -> floor(entry)-1day = 0
+    out_fb = decompose_strategy_pnl(
+        pl.DataFrame([{"symbol": "A", "entry_ts_ms": entry, "hold_days": 1, "realized_return": 0.08}]),
+        loadings, fr, factor_cols=["f1"],
+    )
+    assert out_fb["per_trade"].row(0, named=True)["explained"] is not None
+    assert out_fb["n_unresolved"] == 0
 
 
 def test_decompose_strategy_pnl_missing_exposure_is_null() -> None:

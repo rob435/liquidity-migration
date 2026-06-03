@@ -527,15 +527,19 @@ def _attach_event_archive_membership(features: pl.DataFrame, archive_manifest: p
         .with_columns(
             [
                 pl.col("tradable_membership_flag").fill_null(False),
+                # Age from the TRADING DAY (date(ts_ms-1ms) = _membership_day), NOT the stamp `date`
+                # (= day-after, the END-of-day stamp). The membership flag is keyed on the trading day
+                # (the 2026-05-30 fix), but the ages were still subtracting the stamp date -> a +1-day
+                # age offset feeding the age300 gate (reconcile-ledger-4). Now consistent.
                 (
-                    pl.col("date").str.strptime(pl.Date, "%Y-%m-%d", strict=False)
+                    pl.col("_membership_day").str.strptime(pl.Date, "%Y-%m-%d", strict=False)
                     - pl.col("first_manifest_date").str.strptime(pl.Date, "%Y-%m-%d", strict=False)
                 )
                 .dt.total_days()
                 .cast(pl.Int64)
                 .alias("symbol_age_days"),
                 (
-                    pl.col("date").str.strptime(pl.Date, "%Y-%m-%d", strict=False)
+                    pl.col("_membership_day").str.strptime(pl.Date, "%Y-%m-%d", strict=False)
                     - pl.col("first_manifest_date").str.strptime(pl.Date, "%Y-%m-%d", strict=False)
                 )
                 .dt.total_days()

@@ -16,8 +16,21 @@ from liquidity_migration.ws_state_cache import (
     PrivateStateCache,
     TickerCache,
     _first_price,
+    _float,
     _message_rows,
 )
+
+
+def test_float_rejects_non_finite_values() -> None:
+    """quality-dup-1: a torn/partial WS message must not admit NaN/inf into
+    size/price math — _float now finite-guards (delegates to _common.finite_float)."""
+    assert _float(float("nan")) == 0.0
+    assert _float(float("inf")) == 0.0
+    assert _float(float("-inf")) == 0.0
+    assert _float("not-a-number") == 0.0
+    assert _float(None) == 0.0
+    assert _float("1.5") == 1.5
+    assert _float(3) == 3.0
 
 
 def _ws_message(*rows: dict) -> dict:
@@ -580,3 +593,53 @@ def test_ticker_ws_only_clock_survives_rest_reconcile(monkeypatch) -> None:
     cache.replace_with_rest_snapshot([{"symbol": "BTCUSDT", "lastPrice": "100"}])
     assert cache.seconds_since_last_event() == 0.0
     assert cache.seconds_since_last_ws_event() == 130.0
+
+
+def test_ticker_snapshot_list_drops_per_symbol_stale_rows(monkeypatch) -> None:
+    """ws-dataplane-1: the GLOBAL staleness gate keeps the whole cache 'fresh'
+    when ANY symbol ticks. A per-symbol stale price (no WS tick, missing from
+    the REST reconcile) must be excluded from snapshot_list(max_age_seconds=...)
+    so it cannot feed the cycle's stop/exit math."""
+    import liquidity_migration.ws_state_cache as wsc
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(wsc.time, "monotonic", lambda: clock["t"])
+
+    cache = TickerCache()
+    # Both symbols seeded at t=1000.
+    cache.seed([
+        {"symbol": "BTCUSDT", "lastPrice": "30000"},
+        {"symbol": "STALEUSDT", "lastPrice": "1.0"},
+    ])
+    # 130s later only BTCUSDT ticks; STALEUSDT's last update stays at t=1000.
+    clock["t"] = 1130.0
+    cache.on_ticker_event(_ws_message({"symbol": "BTCUSDT", "lastPrice": "30100"}))
+
+    # Global gate: cache looks fresh because BTCUSDT just ticked.
+    assert cache.is_stale(stale_seconds=120.0) is False
+    # Unfiltered snapshot still returns BOTH (back-compat for the subscribe path).
+    assert {r["symbol"] for r in cache.snapshot_list()} == {"BTCUSDT", "STALEUSDT"}
+    # Per-symbol filter at the stop/exit read bound drops the stale symbol only.
+    fresh = {r["symbol"] for r in cache.snapshot_list(max_age_seconds=120.0)}
+    assert fresh == {"BTCUSDT"}
+    assert "STALEUSDT" not in fresh
+    # A REST reconcile re-stamps every symbol, so the healthy-but-quiet name
+    # returns to the fresh set (proves the reconcile cadence keeps it alive).
+    cache.replace_with_rest_snapshot([
+        {"symbol": "BTCUSDT", "lastPrice": "30100"},
+        {"symbol": "STALEUSDT", "lastPrice": "1.0"},
+    ])
+    assert {r["symbol"] for r in cache.snapshot_list(max_age_seconds=120.0)} == {
+        "BTCUSDT", "STALEUSDT",
+    }
+
+
+def test_ticker_snapshot_list_no_filter_is_backward_compatible() -> None:
+    """snapshot_list() with no arg must keep returning every seeded symbol so
+    the daemon's subscribe path (which wants the full universe) is unchanged."""
+    cache = TickerCache()
+    cache.seed([
+        {"symbol": "BTCUSDT", "lastPrice": "30000"},
+        {"symbol": "ETHUSDT", "lastPrice": "2500"},
+    ])
+    assert {r["symbol"] for r in cache.snapshot_list()} == {"BTCUSDT", "ETHUSDT"}

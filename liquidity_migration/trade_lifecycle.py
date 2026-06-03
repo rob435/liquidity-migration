@@ -408,16 +408,17 @@ def _rank_exit_hit(
     return rank_fraction < threshold
 
 
-def _funding_lookup(funding: pl.DataFrame | None) -> dict[str, dict[str, Any]] | None:
+def _funding_lookup(
+    funding: pl.DataFrame | None,
+    *,
+    interval_by_symbol: dict[str, int] | None = None,
+) -> dict[str, dict[str, Any]] | None:
     if funding is None or funding.is_empty() or "symbol" not in funding.columns or "ts_ms" not in funding.columns:
         return None
     rate_col = "funding_rate" if "funding_rate" in funding.columns else "funding_rate_8h_equiv"
     if rate_col not in funding.columns:
         return None
-    keep = ["symbol", "ts_ms", rate_col]
-    if "funding_interval_min" in funding.columns:
-        keep.append("funding_interval_min")
-    rows = funding.select(keep).drop_nulls(["symbol", "ts_ms"]).sort(["symbol", "ts_ms"])
+    rows = funding.select(["symbol", "ts_ms", rate_col]).drop_nulls(["symbol", "ts_ms"]).sort(["symbol", "ts_ms"])
     # Raw first/last stamp per symbol — used for the coverage ("partial") check.
     raw_span = {
         str(row["symbol"]): (int(row["start_ts_ms"]), int(row["end_ts_ms"]))
@@ -425,20 +426,36 @@ def _funding_lookup(funding: pl.DataFrame | None) -> dict[str, dict[str, Any]] |
         .agg(pl.col("ts_ms").min().alias("start_ts_ms"), pl.col("ts_ms").max().alias("end_ts_ms"))
         .to_dicts()
     }
-    if "funding_interval_min" in rows.columns:
-        # Funding settles once per `funding_interval_min`, but some symbols carry
-        # intra-interval snapshot rows (e.g. hourly rows of an 8h rate). Charging
-        # every row would bill the settlement rate up to 8x, so collapse each
-        # settlement window to its boundary-aligned row.
-        interval_ms = (
-            pl.col("funding_interval_min").cast(pl.Int64, strict=False).fill_null(480).clip(1) * 60_000
+    # Collapse rows belonging to the SAME settlement. Both venues' funding-history endpoints emit ONE
+    # row per settlement, so distinct ts_ms ARE distinct settlements: the default is an exact-stamp
+    # dedup (which also drops overlapping-fetch duplicates) that counts EVERY settlement. The old code
+    # bucketed by the stored funding_interval_min, which _normalize_binance_funding hardcoded to 8h
+    # (and the Bybit funding-history endpoint omits -> also 8h); for a real 4h-settling alt that 8h
+    # window merged two distinct settlements into one and charged HALF the funding, inflating
+    # short-strategy MAR (audit funding-undercount, fixed 2026-06-03). A caller that holds the
+    # AUTHORITATIVE per-symbol settlement interval (e.g. instruments.fundingInterval) may pass
+    # interval_by_symbol to additionally collapse genuine intra-interval SNAPSHOT rows — an operation
+    # only valid with the true interval; symbols absent from the map fall back to exact-stamp dedup.
+    if interval_by_symbol:
+        interval_df = pl.DataFrame(
+            {
+                "symbol": list(interval_by_symbol),
+                "_interval_min": [int(v) for v in interval_by_symbol.values()],
+            }
+        )
+        rows = rows.join(interval_df, on="symbol", how="left").with_columns(
+            pl.when((pl.col("_interval_min").is_not_null()) & (pl.col("_interval_min") > 0))
+            .then(pl.col("ts_ms") // (pl.col("_interval_min") * 60_000))
+            .otherwise(pl.col("ts_ms"))  # no true interval -> one-per-settlement exact-stamp dedup
+            .alias("_settlement")
         )
         rows = (
-            rows.with_columns((pl.col("ts_ms") // interval_ms).alias("_settlement"))
-            .group_by(["symbol", "_settlement"], maintain_order=True)
+            rows.group_by(["symbol", "_settlement"], maintain_order=True)
             .agg(pl.col("ts_ms").first(), pl.col(rate_col).first())
             .sort(["symbol", "ts_ms"])
         )
+    else:
+        rows = rows.unique(["symbol", "ts_ms"], keep="first").sort(["symbol", "ts_ms"])
     output: dict[str, dict[str, Any]] = {}
     for key, part in rows.partition_by("symbol", as_dict=True, maintain_order=True).items():
         symbol = str(key[0] if isinstance(key, tuple) else key)

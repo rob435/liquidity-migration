@@ -4,6 +4,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 from .archive_manifest import DEFAULT_BYBIT_PUBLIC_TRADING_URL
 from .archive_manifest import ArchiveHourlyKlineApiDownloadConfig, ArchiveHourlyKlineDownloadConfig
@@ -121,7 +122,7 @@ def format_event_demo_cycle_summary(payload: dict) -> str:
 
 def _event_demo_timing_text(cycle: dict) -> str:
     try:
-        elapsed_ms = float(cycle.get("cycle_elapsed_ms") or cycle.get("cycle_elapsed_pre_persist_ms"))
+        elapsed_ms = float(cycle.get("cycle_elapsed_ms") or cycle.get("cycle_elapsed_pre_persist_ms"))  # type: ignore[arg-type]  # dict value; guarded by except
     except (TypeError, ValueError):
         elapsed_ms = 0.0
     timing_items: list[tuple[str, float]] = []
@@ -496,7 +497,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if payload["failures"] else 0
 
     if args.command == "archive-download-klines-1h":
-        kline_config = ArchiveHourlyKlineDownloadConfig(
+        kline_config_1h = ArchiveHourlyKlineDownloadConfig(
             start=args.start,
             end=args.end,
             symbols=_csv_str(args.symbols, ()),
@@ -507,7 +508,7 @@ def main(argv: list[str] | None = None) -> int:
             discard_archives_after_success=args.discard_archives_after_success,
             name=args.name,
         )
-        payload = run_archive_hourly_klines_download(data_root, config=kline_config)
+        payload = run_archive_hourly_klines_download(data_root, config=kline_config_1h)
         print(
             "archive 1h klines "
             f"rows={payload['rows']} "
@@ -520,7 +521,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if payload["failures"] else 0
 
     if args.command == "archive-download-klines-1h-api":
-        kline_config = ArchiveHourlyKlineApiDownloadConfig(
+        kline_config_1h_api = ArchiveHourlyKlineApiDownloadConfig(
             api_url=args.api_url,
             category=args.category,
             interval=args.interval,
@@ -537,7 +538,7 @@ def main(argv: list[str] | None = None) -> int:
             timeout_seconds=args.timeout_seconds,
             name=args.name,
         )
-        payload = run_archive_hourly_klines_api_download(data_root, config=kline_config)
+        payload = run_archive_hourly_klines_api_download(data_root, config=kline_config_1h_api)
         print(
             "archive api 1h klines "
             f"rows={payload['rows']} "
@@ -550,6 +551,10 @@ def main(argv: list[str] | None = None) -> int:
         return 1 if payload["failures"] else 0
 
     if args.command == "event-demo-cycle":
+        # Read optional ws_klines_* defaults off a throwaway default INSTANCE: on a
+        # slots dataclass a field accessed via the class is the member_descriptor, not
+        # the value, so an instance read is both correct and mypy-clean (no ignores).
+        _ws_defaults = EventDemoCycleConfig()
         demo_config = EventDemoCycleConfig(
             lookback_days=args.lookback_days,
             universe_rank_end=args.universe_rank_end,
@@ -574,16 +579,16 @@ def main(argv: list[str] | None = None) -> int:
             data_name=args.data_name,
             strategy_profile=args.strategy_profile,
             ws_klines_enabled=getattr(args, "ws_klines_enabled", True),
-            ws_klines_bootstrap_workers=getattr(args, "ws_klines_bootstrap_workers", EventDemoCycleConfig.ws_klines_bootstrap_workers),
-            ws_klines_lookback_days=getattr(args, "ws_klines_lookback_days", EventDemoCycleConfig.ws_klines_lookback_days),
-            ws_klines_universe_refresh_seconds=getattr(args, "ws_klines_universe_refresh_seconds", EventDemoCycleConfig.ws_klines_universe_refresh_seconds),
-            ws_klines_topics_per_connection=getattr(args, "ws_klines_topics_per_connection", EventDemoCycleConfig.ws_klines_topics_per_connection),
-            ws_klines_stale_warning_seconds=getattr(args, "ws_klines_stale_warning_seconds", EventDemoCycleConfig.ws_klines_stale_warning_seconds),
-            ws_klines_stale_reconnect_seconds=getattr(args, "ws_klines_stale_reconnect_seconds", EventDemoCycleConfig.ws_klines_stale_reconnect_seconds),
+            ws_klines_bootstrap_workers=getattr(args, "ws_klines_bootstrap_workers", _ws_defaults.ws_klines_bootstrap_workers),
+            ws_klines_lookback_days=getattr(args, "ws_klines_lookback_days", _ws_defaults.ws_klines_lookback_days),
+            ws_klines_universe_refresh_seconds=getattr(args, "ws_klines_universe_refresh_seconds", _ws_defaults.ws_klines_universe_refresh_seconds),
+            ws_klines_topics_per_connection=getattr(args, "ws_klines_topics_per_connection", _ws_defaults.ws_klines_topics_per_connection),
+            ws_klines_stale_warning_seconds=getattr(args, "ws_klines_stale_warning_seconds", _ws_defaults.ws_klines_stale_warning_seconds),
+            ws_klines_stale_reconnect_seconds=getattr(args, "ws_klines_stale_reconnect_seconds", _ws_defaults.ws_klines_stale_reconnect_seconds),
         )
         if getattr(args, "daemon", False):
             from liquidity_migration.event_demo_daemon import EventDemoDaemon
-            daemon_timing_kwargs: dict[str, object] = {}
+            daemon_timing_kwargs: dict[str, Any] = {}  # heterogeneous daemon kwargs (float|str) passed via **
             if getattr(args, "ticker_reconcile_interval_seconds", None) is not None:
                 daemon_timing_kwargs["ticker_reconcile_interval_seconds"] = args.ticker_reconcile_interval_seconds
             if getattr(args, "state_cache_stale_seconds", None) is not None:
@@ -666,7 +671,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "event-risk-ws":
-        risk_config = EventWebSocketRiskConfig(
+        ws_risk_config = EventWebSocketRiskConfig(
             submit_orders=args.submit_orders,
             confirm_demo_orders=args.confirm_demo_orders,
             telegram=args.telegram,
@@ -695,7 +700,7 @@ def main(argv: list[str] | None = None) -> int:
             continuous_trades_dataset=args.continuous_trades_dataset,
             continuous_orders_dataset=args.continuous_orders_dataset,
         )
-        payload = run_event_ws_risk(data_root, config=config, risk_config=risk_config)
+        payload = run_event_ws_risk(data_root, config=config, risk_config=ws_risk_config)
         _print_event_risk_summary(payload)
         return 0
 
@@ -738,6 +743,9 @@ def main(argv: list[str] | None = None) -> int:
             format_long_demo_cycle_summary,
             run_long_native_demo_cycle,
         )
+        # ws_klines_* defaults read off a throwaway default instance (see the
+        # event-demo block above for why the slots class can't be read directly).
+        _long_ws_defaults = LongNativeDemoCycleConfig()
         long_demo_config = LongNativeDemoCycleConfig(
             universe_size=args.universe_size,
             lookback_days=args.lookback_days,
@@ -760,24 +768,24 @@ def main(argv: list[str] | None = None) -> int:
             data_name=args.data_name,
             strategy_profile=args.strategy_profile,
             ws_klines_enabled=getattr(args, "ws_klines_enabled", True),
-            ws_klines_bootstrap_workers=getattr(args, "ws_klines_bootstrap_workers", LongNativeDemoCycleConfig.ws_klines_bootstrap_workers),
-            ws_klines_lookback_days=getattr(args, "ws_klines_lookback_days", LongNativeDemoCycleConfig.ws_klines_lookback_days),
-            ws_klines_universe_refresh_seconds=getattr(args, "ws_klines_universe_refresh_seconds", LongNativeDemoCycleConfig.ws_klines_universe_refresh_seconds),
-            ws_klines_topics_per_connection=getattr(args, "ws_klines_topics_per_connection", LongNativeDemoCycleConfig.ws_klines_topics_per_connection),
-            ws_klines_stale_warning_seconds=getattr(args, "ws_klines_stale_warning_seconds", LongNativeDemoCycleConfig.ws_klines_stale_warning_seconds),
-            ws_klines_stale_reconnect_seconds=getattr(args, "ws_klines_stale_reconnect_seconds", LongNativeDemoCycleConfig.ws_klines_stale_reconnect_seconds),
+            ws_klines_bootstrap_workers=getattr(args, "ws_klines_bootstrap_workers", _long_ws_defaults.ws_klines_bootstrap_workers),
+            ws_klines_lookback_days=getattr(args, "ws_klines_lookback_days", _long_ws_defaults.ws_klines_lookback_days),
+            ws_klines_universe_refresh_seconds=getattr(args, "ws_klines_universe_refresh_seconds", _long_ws_defaults.ws_klines_universe_refresh_seconds),
+            ws_klines_topics_per_connection=getattr(args, "ws_klines_topics_per_connection", _long_ws_defaults.ws_klines_topics_per_connection),
+            ws_klines_stale_warning_seconds=getattr(args, "ws_klines_stale_warning_seconds", _long_ws_defaults.ws_klines_stale_warning_seconds),
+            ws_klines_stale_reconnect_seconds=getattr(args, "ws_klines_stale_reconnect_seconds", _long_ws_defaults.ws_klines_stale_reconnect_seconds),
         )
         if getattr(args, "daemon", False):
             from liquidity_migration.long_native_event_demo_daemon import LongNativeDemoDaemon
-            daemon = LongNativeDemoDaemon(
+            long_daemon = LongNativeDemoDaemon(
                 data_root,
                 config=config,
                 demo_config=long_demo_config,
                 interval_seconds=args.interval_seconds,
                 event_driven_cycle=not getattr(args, "no_event_driven_cycle", False),
             )
-            daemon.install_signal_handlers()
-            stats = daemon.run()
+            long_daemon.install_signal_handlers()
+            stats = long_daemon.run()
             print(
                 "long-native event demo daemon stopped "
                 f"cycles_run={stats['cycles_run']} "
@@ -805,13 +813,13 @@ def main(argv: list[str] | None = None) -> int:
         )
         if getattr(args, "daemon", False):
             from liquidity_migration.continuous_demo_daemon import ContinuousDemoDaemon
-            daemon = ContinuousDemoDaemon(
+            cont_daemon = ContinuousDemoDaemon(
                 data_root, config=config, demo_config=cont_demo_config,
                 interval_seconds=args.interval_seconds,
                 event_driven_cycle=not getattr(args, "no_event_driven_cycle", False),
             )
-            daemon.install_signal_handlers()
-            stats = daemon.run()
+            cont_daemon.install_signal_handlers()
+            stats = cont_daemon.run()
             print(
                 "continuous demo daemon stopped "
                 f"cycles_run={stats.get('cycles_run')} cycle_errors={stats.get('cycle_errors')}",
@@ -1199,13 +1207,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "reconcile-all":
-        trading_client = None
+        recon_trading_client: BybitPrivateClient | None = None
         if not args.skip_bybit:
             from .bybit import BybitPrivateClient, resolve_private_credentials
 
             api_key, api_secret, demo_flag = resolve_private_credentials()
             if api_key and api_secret:
-                trading_client = BybitPrivateClient(
+                recon_trading_client = BybitPrivateClient(
                     category="linear", demo=demo_flag, api_key=api_key, api_secret=api_secret
                 )
             else:
@@ -1216,7 +1224,7 @@ def main(argv: list[str] | None = None) -> int:
         payload = run_full_reconciliation(
             paper_root=args.paper_data_root,
             demo_root=args.demo_data_root,
-            trading_client=trading_client,
+            trading_client=recon_trading_client,
             backtest_trades_csv=args.backtest_trades_csv,
             entry_tolerance_ms=args.entry_tolerance_ms,
             signal_tolerance_ms=args.signal_tolerance_ms,

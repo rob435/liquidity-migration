@@ -252,7 +252,7 @@ def _write_equity_benchmark_png(
         rgb = tuple(item["color"])
         line(coords, (rgb[0], rgb[1], rgb[2], int(item["alpha"])), int(item["width"]))
 
-    legend_x = left
+    legend_x: float = left
     finals = _chart_final_values(series)
     legend_y = chart_height - 56
     for item in series:
@@ -475,7 +475,7 @@ def _btc_daily_close_series(raw_klines: pl.DataFrame, *, start: str, end: str) -
     ]
 
 def _normalised_price_series(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    cleaned = [
+    cleaned: list[dict[str, Any]] = [
         {"date": str(row["date"]), "value": float(row["value"])}
         for row in rows
         if row.get("value") is not None and math.isfinite(float(row["value"])) and float(row["value"]) > 0.0

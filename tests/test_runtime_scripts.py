@@ -431,22 +431,29 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "liquidity-migration-bybit-demo.service" in text
     assert "liquidity-migration-bybit-risk.service" in text
     assert "retired unit" in text
-    assert "systemctl is-enabled --quiet liquidity-migration-bybit-demo.service" in text
-    # Recovery must bring up the same unit set as deploy_vps_live.sh — paper,
-    # both long sleeves, both timers — otherwise a console-recovered VPS sits
-    # in a partially-configured state until someone deploys again.
-    assert "systemctl enable liquidity-migration-bybit-paper.service" in text
-    assert "systemctl enable liquidity-migration-bybit-long-demo.service" in text
-    assert "systemctl enable liquidity-migration-bybit-long-paper.service" in text
-    assert "systemctl restart liquidity-migration-bybit-paper.service" in text
-    assert "systemctl restart liquidity-migration-bybit-long-demo.service" in text
-    assert "systemctl restart liquidity-migration-bybit-long-paper.service" in text
-    assert "systemctl is-active --quiet liquidity-migration-bybit-paper.service" in text
-    assert "systemctl is-active --quiet liquidity-migration-bybit-long-demo.service" in text
-    assert "systemctl is-active --quiet liquidity-migration-bybit-long-paper.service" in text
-    assert "systemctl is-enabled --quiet liquidity-migration-bybit-paper.service" in text
-    assert "systemctl is-enabled --quiet liquidity-migration-bybit-long-demo.service" in text
-    assert "systemctl is-enabled --quiet liquidity-migration-bybit-long-paper.service" in text
+    # The risk service has NO sleeve toggle — it is the shared reconcile authority for
+    # all three sleeves and must always enable/restart/verify regardless of which
+    # entry sleeves are on (turning a sleeve off must never stop position protection).
+    assert "systemctl enable liquidity-migration-bybit-risk.service" in text
+    assert "systemctl restart liquidity-migration-bybit-risk.service" in text
+    assert "systemctl is-active --quiet liquidity-migration-bybit-risk.service" in text
+    assert "systemctl is-enabled --quiet liquidity-migration-bybit-risk.service" in text
+    # Per-sleeve kill-switch: the deploy sources the shared lib, loads the toggles, then
+    # enables/restarts/verifies each sleeve THROUGH the toggle-aware helpers (an off
+    # sleeve gets `disable --now`d and is not expected up). The exact unit set each
+    # sleeve owns is pinned in deploy/lib_sleeves.sh (asserted just below) so a deploy
+    # still can't silently drop a unit — the names just live in one canonical place.
+    assert "lib_sleeves.sh" in text
+    assert "lm_load_sleeve_toggles" in text
+    for sleeve in ("SHORT", "LONG", "CONTINUOUS"):
+        assert f'apply_sleeve_enable "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
+        assert f'verify_sleeve "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
+    # The canonical unit set (what each sleeve enables/restarts/verifies, and what the
+    # liveness watchdog/recovery must bring up) lives in the lib — pin it there.
+    lib = (repo / "deploy" / "lib_sleeves.sh").read_text(encoding="utf-8")
+    assert 'SHORT_SLEEVE_UNITS="liquidity-migration-bybit-demo.service liquidity-migration-bybit-paper.service"' in lib
+    assert 'LONG_SLEEVE_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service"' in lib
+    assert 'CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service"' in lib
     # Timers ship with the unit files but `systemctl enable` is required to
     # actually schedule them. Pin both timers so a deploy can't silently leave
     # the demo-health watchdog or daily combined-book report inactive.
@@ -492,7 +499,7 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     # look untracked and get flattened. Pin both the enable and restart order.
     assert (
         text.index("systemctl enable liquidity-migration-bybit-risk.service")
-        < text.index("systemctl enable liquidity-migration-bybit-continuous-demo.service")
+        < text.index('apply_sleeve_enable "$CONTINUOUS_SLEEVE"')
     )
     assert (
         text.index("systemctl restart liquidity-migration-bybit-risk.service")
@@ -562,12 +569,21 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "Environment=UNIVERSE_MIN_TURNOVER_24H=0" in text
     assert "Environment=MAX_ACTIVE_SYMBOLS=12" in text  # drop_all_4 promotion 2026-05-30 (was 3)
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
-    # Long-sleeve parity — verify must catch a regression where the long
-    # services were stopped or disabled, since deploy enables + restarts them.
-    assert "systemctl is-enabled --quiet liquidity-migration-bybit-long-demo.service" in text
-    assert "systemctl is-enabled --quiet liquidity-migration-bybit-long-paper.service" in text
-    assert "systemctl is-active --quiet liquidity-migration-bybit-long-demo.service" in text
-    assert "systemctl is-active --quiet liquidity-migration-bybit-long-paper.service" in text
+    # Per-sleeve kill-switch: verify is toggle-aware — it sources the shared lib, loads
+    # the toggles, and routes per-sleeve active+enabled checks through verify_sleeve (so
+    # an intentionally-off sleeve is required DOWN, not flagged as a failed deploy). The
+    # risk service is NOT toggled — always verified up (it protects every sleeve).
+    assert "lib_sleeves.sh" in text
+    assert "lm_load_sleeve_toggles" in text
+    assert "systemctl is-enabled --quiet liquidity-migration-bybit-risk.service" in text
+    assert "systemctl is-active --quiet liquidity-migration-bybit-risk.service" in text
+    for sleeve in ("SHORT", "LONG", "CONTINUOUS"):
+        assert f'verify_sleeve "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
+    # The exact unit set each sleeve must bring up is pinned in the shared lib, so a
+    # regression that stops/disables a sleeve's daemon still fails verify.
+    lib = (repo / "deploy" / "lib_sleeves.sh").read_text(encoding="utf-8")
+    assert 'LONG_SLEEVE_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service"' in lib
+    assert 'CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service"' in lib
     # Read-only verify must catch a missing-timer regression that the deploy
     # script would have caused — parity check, no-write semantics.
     assert "systemctl is-enabled --quiet liquidity-migration-demo-health.timer" in text
@@ -576,11 +592,12 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "systemctl is-active --quiet liquidity-migration-demo-health.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-demo-liveness.timer" in text
     assert "systemctl is-active --quiet liquidity-migration-combined-book-report.timer" in text
-    # Continuous-fade sleeve (live on demo 2026-06-01) — read-only verify must catch
-    # a stopped/disabled continuous daemon or a risk service no longer wired to read
-    # its ledger (which would silently flatten the continuous sleeve's positions).
-    assert "systemctl is-enabled --quiet liquidity-migration-bybit-continuous-demo.service" in text
-    assert "systemctl is-active --quiet liquidity-migration-bybit-continuous-demo.service" in text
+    # Continuous-fade sleeve (live on demo 2026-06-01): its daily rmom-refresh timer is
+    # verified only when the sleeve is on (guarded by sleeve_on); the daemon's own
+    # active+enabled state is covered by the verify_sleeve loop above. The risk service
+    # stays wired to read the continuous ledger even when the sleeve is off (asserted
+    # below, unconditional) — else its open positions would silently flatten.
+    assert 'if sleeve_on "$CONTINUOUS_SLEEVE"; then' in text
     assert "systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer" in text
     assert "Environment=LONG_DATA_ROOT=data/bybit-long-demo-event" in text
     assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text
@@ -602,6 +619,11 @@ def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
     assert '"deploy/systemd/*.service"' in text
     assert '"deploy/systemd/**"' not in text
     assert '"scripts/**"' not in text
+    # Per-sleeve kill-switch files must be in the push path filter, else flipping a
+    # toggle in deploy/sleeves.env wouldn't trigger a redeploy and the sleeve would
+    # never actually stop/start (the deploy sources both at runtime).
+    assert '"deploy/sleeves.env"' in text
+    assert '"deploy/lib_sleeves.sh"' in text
     assert "wait-deploy" in text
     assert "wait_timeout_seconds" in text
     assert "wait_interval_seconds" in text

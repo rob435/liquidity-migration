@@ -2,14 +2,30 @@
 
 This is the offline half of the residual-momentum SELECTION gate (P3, operator-greenlit). It
 computes, per (symbol, ts_ms) on the daily grid, the trailing common4-factor-residual momentum
-known at the signal-close decision (strict lag1 = excludes the signal-day forward residual):
+known strictly before the decision (CAUSAL — see the timing proof below):
 
-    residual_momentum[D] = sum_{d in [D-7, D-1]} residual_return[d]
+    residual_momentum[D] = sum_{d in [D-9, D-3]} residual_return[d]   (rolling_sum(7).shift(3))
 
 where residual_return[d] is the day-d residual from the validated 6-factor risk model's per-day
 cross-sectional regression restricted to the 4 always-present (klines/price) factors (common4 —
-funding/premium are 38.8% null on binance, see binance-derivative-metrics-missing). PIT-clean:
-residual_return[d] completes at d+1 (<= signal close), and the lag1 shift excludes the signal day.
+funding/premium are 38.8% null on binance, see binance-derivative-metrics-missing).
+
+CAUSALITY (fixed 2026-06-03 — was a confirmed look-ahead; STATE.md "rmom look-ahead unconfirmed"):
+the residual is fit against a FORWARD return (fit_factor_returns target_col='fwd_ret_1d' =
+first_bar_close[d+2]/first_bar_close[d+1] - 1, signal_harness._attach_forward_returns), so
+residual_return[d] does NOT complete until first_bar_close[d+2] is available ≈ (d+2) 01:00 UTC. The
+LIVE continuous consumer wakes from 00:00 UTC of day D and reads residual_momentum[day D]; for that
+to be strictly PIT, the NEWEST summed residual_return must complete ≤ D 00:00 UTC, i.e. its index
+≤ D-3. Hence shift(3): residual_momentum[D] = sum residual_return[D-9..D-3], whose newest term
+residual_return[D-3] completes (D-1) 01:00 UTC < D 00:00 UTC. (The old shift(1) summed
+residual_return[D-1], which completes D+1 01:00 UTC — up to ~25h of future data: that was the bug.)
+The backtest event-research join is separately day-aligned in volume_events._attach_residual_momentum
+(panel trading day = date(ts_ms-1ms)); the live/continuous join (continuous_events: floor to
+start-of-day D) was already aligned.
+
+⚠️ DEPLOY NOTE: shift(3) re-bases EVERY residual_momentum value (a 2-day-staler, causal momentum),
+so the rmom-gate MAR verdict AND the live continuous rmom_quantile (0.33) were calibrated on the OLD
+leaky signal and MUST be re-validated / re-calibrated before this is deployed.
 
 The engine (volume_events.run_volume_event_research) left-joins this on (symbol, daily-grid ts_ms)
 to add a `residual_momentum` column, gated by --liquidity-migration-residual-momentum-max
@@ -19,9 +35,8 @@ The LIVE continuous demo sleeve joins this table on the CURRENT trading day's ts
 refresh `--end` MUST advance to today — otherwise the daily systemd refresh keeps writing a table that
 ends in the past, the live join finds no row for today, the `is_not_null` filter empties the whole
 cross-section, and the sleeve silently emits zero signal. `--end` therefore defaults to TOMORROW (UTC)
-so today's causal `residual_momentum[today]` row (built only from days <= today-1) is produced. This is
-PIT-safe: `residual_return[d]` completes at d+1 and the lag1 `shift(1)` excludes the signal day, so
-advancing the end can never leak look-ahead — it only stops the table going stale.
+so today's `residual_momentum[today]` row is produced (the staleness fix is correct and independent of
+the look-ahead debt above; advancing `--end` only stops the table going stale).
 
 Dispatch: POLARS_MAX_THREADS=8 .venv/bin/python -u scripts/precompute_residual_momentum.py [--root PATH ...] [--start D] [--end D]
 """
@@ -46,10 +61,32 @@ from liquidity_migration.risk_model import build_factor_panel, fit_factor_return
 from liquidity_migration.signal_harness import MS_PER_DAY, _date_str_to_ms  # noqa: E402
 
 SHARED = Path.home() / "SHARED_DATA"
-# pad the panel start so the trailing-7d residual window is warm at the first traded signal day
+# pad the panel start so the trailing residual window is warm at the first traded signal day
 START = "2023-03-01"
 COMMON4 = ["btc_beta", "xs_rank_ret_30d", "realized_vol_rank", "liquidity_rank"]
 DEFAULT_ROOTS = [SHARED / "bybit_full_pit", SHARED / "binance_full_pit"]
+
+# residual_momentum[D] = sum residual_return[D-9 .. D-3]: a rolling RMOM_WINDOW-day sum of the daily
+# factor residual, shifted RMOM_CAUSAL_SHIFT days. The shift is the causality guarantee: residual_return
+# is fit against a FORWARD return (fwd_ret_1d = first_bar_close[d+2]/first_bar_close[d+1]-1), so
+# residual_return[d] only completes ≈(d+2) 01:00 UTC. The live continuous consumer reads
+# residual_momentum[day D] from D 00:00 UTC, so the NEWEST summed residual_return must complete ≤ D
+# 00:00, i.e. its index ≤ D-3 -> shift 3 (residual_return[D-3] completes (D-1) 01:00 < D 00:00). See
+# the module docstring; pinned by test_residual_momentum_is_causal_shift3.
+RMOM_WINDOW = 7
+RMOM_CAUSAL_SHIFT = 3
+
+
+def residual_momentum_expr() -> "pl.Expr":
+    """The (causal) residual-momentum polars expression. Factored out so the exact window+shift is a
+    single source of truth and is unit-testable without running the full factor-panel build."""
+    return (
+        pl.col("residual_return")
+        .rolling_sum(window_size=RMOM_WINDOW, min_samples=4)
+        .shift(RMOM_CAUSAL_SHIFT)
+        .over("symbol")
+        .alias("residual_momentum")
+    )
 
 
 def _default_end() -> str:
@@ -82,16 +119,17 @@ def precompute(root: Path, *, start: str, end: str, klines_dataset: str | None =
     _fr, resid = fit_factor_returns(panel, factor_cols=COMMON4)  # symbol, ts_ms, residual_return
     resid = resid.sort(["symbol", "ts_ms"]).select("symbol", "ts_ms", "residual_return")
     # The LIVE join floors `now` to TODAY's day_ts and exact-matches residual_momentum[day_ts]; but
-    # residual_return[d] only completes at d+1, so on a live root the raw table ends ~2 days behind
-    # today and the live decile then drops EVERY symbol (the is_not_null filter empties it -> the
-    # silent zero-signal blackout). residual_momentum[D] = sum residual_return[D-7 .. D-1] is causal
-    # (it never reads residual_return[D] itself), so for any symbol still trading at the trailing edge
-    # we append null-residual rows from its last residual day through `end` (= tomorrow UTC) and let
-    # the SAME rolling_sum(7)+shift(1) carry the trailing sum onto today's (and tomorrow's, covering
-    # the 00:00->00:20 daily-refresh rollover) row. polars rolling_sum ignores in-window nulls and
-    # counts only non-null obs against min_samples, so the sum stays correct. APPEND-ONLY: every
-    # existing residual row keeps a byte-identical residual_momentum (a later row can't change an
-    # earlier rolling window); this only ADDS the trailing-edge rows the old table silently dropped.
+    # residual_return[d] only completes at ≈(d+2) 01:00 UTC (forward-return target), so on a live root
+    # the raw table ends ~2 days behind today and the live decile then drops EVERY symbol (the
+    # is_not_null filter empties it -> the silent zero-signal blackout). residual_momentum[D] =
+    # sum residual_return[D-9 .. D-3] (shift(3)) is strictly causal (its newest term completes
+    # (D-1) 01:00 < D 00:00), so for any symbol still trading at the trailing edge we append
+    # null-residual rows from its last residual day through `end` (= tomorrow UTC) and let the SAME
+    # rolling_sum(7)+shift(3) carry the trailing real-residual sum onto today's (and tomorrow's,
+    # covering the 00:00->00:20 daily-refresh rollover) row. polars rolling_sum ignores in-window
+    # nulls and counts only non-null obs against min_samples, so the sum stays correct. APPEND-ONLY:
+    # every existing residual row keeps a byte-identical residual_momentum (a later row can't change
+    # an earlier rolling window); this only ADDS the trailing-edge rows the old table silently dropped.
     if not resid.is_empty():
         end_day = (_date_str_to_ms(end) // MS_PER_DAY) * MS_PER_DAY
         active_cutoff = end_day - 8 * MS_PER_DAY  # only pad symbols with data within a rolling window of `end`
@@ -108,9 +146,7 @@ def precompute(root: Path, *, start: str, end: str, klines_dataset: str | None =
             resid = pl.concat([resid, pad], how="vertical")
     sig = (
         resid.sort(["symbol", "ts_ms"])
-        .with_columns(
-            pl.col("residual_return").rolling_sum(window_size=7, min_samples=4).shift(1).over("symbol").alias("residual_momentum")
-        )
+        .with_columns(residual_momentum_expr())
         .select("symbol", "ts_ms", "residual_momentum")
         .drop_nulls("residual_momentum")
     )

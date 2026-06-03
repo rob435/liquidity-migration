@@ -190,7 +190,7 @@ def fetch_v5_trading_perp_listings(
                 continue
             launch_raw = row.get("launchTime")
             try:
-                launch_ms = int(launch_raw) if launch_raw not in (None, "", "0") else 0
+                launch_ms = int(launch_raw) if launch_raw not in (None, "", "0") else 0  # type: ignore[arg-type]  # launchTime from REST JSON; guarded for None/"" + try/except below
             except (TypeError, ValueError):
                 launch_ms = 0
             if launch_ms <= 0:
@@ -400,6 +400,19 @@ def build_archive_trade_manifest(
     combined = scrape_rows + v5_rows
     if not combined:
         return _empty_manifest()
+    # Survivorship diagnostic (data-assembly-2): the v5 supplement only lists currently-Trading perps,
+    # so a DELISTED symbol survives in the PIT manifest ONLY if the archive scrape caught it. Surface
+    # the scrape-only (not-currently-Trading) symbol count per build so a scrape that under-captures
+    # delisted names — a survivorship hole — is visible rather than silent. A count near zero relative
+    # to the traded universe is the red flag.
+    scrape_symbols = {str(r["symbol"]).upper() for r in scrape_rows}
+    trading_symbols = {str(s).upper() for s in listings} if listings else set()
+    delisted_only = scrape_symbols - trading_symbols
+    _logger.info(
+        "archive manifest: %d scrape symbols, %d currently-Trading (v5), %d scrape-only "
+        "(delisted/non-Trading — survivorship-relevant)",
+        len(scrape_symbols), len(trading_symbols), len(delisted_only),
+    )
     return pl.DataFrame(combined).sort(["date", "symbol", "url"])
 
 

@@ -1325,6 +1325,90 @@ def test_risk_reconciler_closes_orphan_when_position_missing() -> None:
     assert updates[0]["exit_reason"] == "bybit_position_missing"
 
 
+def test_risk_reconciler_is_side_aware_on_same_symbol_flip() -> None:
+    """A same-symbol flip must orphan-close the stale ledger short.
+
+    Ledger holds a SHORT on AAAUSDT, but the venue now reports a LONG on the same
+    symbol (manual flip, or a sibling sleeve on the netted account). Symbol-only
+    keying would see "a position exists for AAAUSDT" and keep the stale short open,
+    letting it manage the wrong-direction position. (symbol, side) keying surfaces
+    the short as an orphan close and leaves the unrelated long untouched."""
+    open_trades = pl.DataFrame([_open_trade_row(side="short")], infer_schema_length=None)
+
+    kept, updates = _risk_reconcile_missing_positions(
+        open_trades,
+        # venue holds a LONG (Bybit "Buy") on the same symbol, size > 0
+        position_by_symbol={"AAAUSDT": {"symbol": "AAAUSDT", "side": "Buy", "size": 5.0}},
+        now_ms=1_700_000_100_000,
+        enabled=True,
+        position_error="",
+        trading_client=None,
+    )
+
+    assert kept.is_empty(), "the stale short must NOT be kept open by an opposite-side position"
+    assert len(updates) == 1
+    assert updates[0]["status"] == "closed"
+
+    # A same-side position keeps the trade open (no spurious close).
+    kept2, updates2 = _risk_reconcile_missing_positions(
+        open_trades,
+        position_by_symbol={"AAAUSDT": {"symbol": "AAAUSDT", "side": "Sell", "size": 1.0}},
+        now_ms=1_700_000_100_000,
+        enabled=True,
+        position_error="",
+        trading_client=None,
+    )
+    assert updates2 == []
+    assert kept2.height == 1
+
+
+def test_orphan_close_zero_entry_price_still_closes_on_venue_evidence() -> None:
+    """re-audit rescan-reconcile-3: a malformed/adopted trade with entry_price<=0 must
+    still be EVIDENCE-closed when the venue confirms a close (require_evidence=True).
+    The backfill no longer short-circuits on entry_price, so such a trade is not kept
+    open forever; it just records a 0 return (no entry price to attribute against)."""
+    trade = _open_trade_row(side="short", entry_price=0.0)
+    client = _ClosedPnlClient(records=[
+        {"symbol": "AAAUSDT", "side": "Buy", "createdTime": str(trade["entry_ts_ms"] + 1000),
+         "closedSize": "1", "avgExitPrice": "95.0", "execFee": "0.1"},
+    ])
+    kept, updates = _risk_reconcile_missing_positions(
+        pl.DataFrame([trade], infer_schema_length=None),
+        position_by_symbol={}, now_ms=1_700_000_100_000, enabled=True,
+        position_error="", trading_client=client, require_evidence=True,
+    )
+    assert kept.is_empty()
+    assert len(updates) == 1 and updates[0]["status"] == "closed"
+    assert float(updates[0]["exit_price"]) == pytest.approx(95.0)
+    assert float(updates[0]["gross_trade_return"]) == 0.0
+
+
+def test_orphan_close_zero_entry_no_record_keeps_open_under_require_evidence() -> None:
+    """C1 protection still holds for entry_price<=0: no closure record -> keep open."""
+    trade = _open_trade_row(side="short", entry_price=0.0)
+    kept, updates = _risk_reconcile_missing_positions(
+        pl.DataFrame([trade], infer_schema_length=None),
+        position_by_symbol={}, now_ms=1_700_000_100_000, enabled=True,
+        position_error="", trading_client=_ClosedPnlClient(records=[]), require_evidence=True,
+    )
+    assert updates == []
+    assert kept.height == 1
+
+
+def test_orphan_reconciler_keeps_empty_side_trade_when_position_present() -> None:
+    """re-audit rescan-reconcile-2: a degenerate trade row with no parseable side must
+    NOT be orphan-closed while a position exists for its symbol — fall back to
+    symbol-only presence rather than spuriously wiping a possibly-live position."""
+    trade = _open_trade_row(side="")  # malformed: no side
+    kept, updates = _risk_reconcile_missing_positions(
+        pl.DataFrame([trade], infer_schema_length=None),
+        position_by_symbol={"AAAUSDT": {"symbol": "AAAUSDT", "side": "Sell", "size": 1.0}},
+        now_ms=1_700_000_100_000, enabled=True, position_error="", trading_client=None,
+    )
+    assert updates == []
+    assert kept.height == 1
+
+
 def test_orphan_close_pnl_backfill_pulls_exit_price_and_return() -> None:
     """Happy path: get_closed_pnl returns a matching record → backfill populates
     exit_price, gross_trade_return, net_return, exit_ts_ms, exit_order_id."""
@@ -1876,3 +1960,267 @@ def test_submit_reduce_only_exit_market_splits_at_max_qty() -> None:
     assert float(submit["exec_summary"]["qty"]) == pytest.approx(37500.0)
     assert float(submit["exec_summary"]["avg_price"]) == pytest.approx(1.95)
 
+
+def test_risk_reconciler_batches_closed_pnl_to_single_call() -> None:
+    """reconcile-core-4: N synchronized orphans -> ONE account-wide get_closed_pnl call
+    (not N), while every orphan still gets its correct exit_price backfilled from the
+    in-memory slice. Fails before the batching fix (one call per orphan)."""
+    open_trades = pl.DataFrame(
+        [
+            _open_trade_row(trade_id="t-a", symbol="AAAUSDT", entry_price=100.0),
+            _open_trade_row(trade_id="t-b", symbol="BBBUSDT", entry_price=200.0),
+            _open_trade_row(trade_id="t-c", symbol="CCCUSDT", entry_price=50.0),
+        ],
+        infer_schema_length=None,
+    )
+    client = _ClosedPnlClient(
+        records=[
+            {"symbol": "AAAUSDT", "side": "Buy", "avgExitPrice": "95.0",
+             "orderId": "x-a", "createdTime": "1700000060000"},
+            {"symbol": "BBBUSDT", "side": "Buy", "avgExitPrice": "190.0",
+             "orderId": "x-b", "createdTime": "1700000060000"},
+            {"symbol": "CCCUSDT", "side": "Buy", "avgExitPrice": "48.0",
+             "orderId": "x-c", "createdTime": "1700000060000"},
+        ]
+    )
+    kept, updates = _risk_reconcile_missing_positions(
+        open_trades,
+        position_by_symbol={},  # all three positions vanished -> all orphans
+        now_ms=1_700_000_100_000,
+        enabled=True,
+        position_error="",
+        trading_client=client,
+        require_evidence=True,
+    )
+    # O(1): exactly ONE closed-PnL REST call for the whole pass (was 3), account-wide.
+    assert len(client.calls) == 1
+    assert client.calls[0].get("symbol") is None
+    assert kept.is_empty()
+    by_id = {u["trade_id"]: u for u in updates}
+    assert by_id["t-a"]["exit_price"] == 95.0
+    assert by_id["t-b"]["exit_price"] == 190.0
+    assert by_id["t-c"]["exit_price"] == 48.0
+    for u in updates:
+        assert u["status"] == "closed"
+        assert u["exit_reason"] == "bybit_position_missing"
+
+
+def test_batched_orphan_require_evidence_keeps_unconfirmed_open() -> None:
+    """reconcile-core-4: an orphan with NO account-wide closure record stays OPEN under
+    require_evidence (C1 fail-closed) on the batched path; a sibling orphan that DOES
+    have a record still closes — and still only one account-wide call."""
+    open_trades = pl.DataFrame(
+        [
+            _open_trade_row(trade_id="t-has", symbol="AAAUSDT", entry_price=100.0),
+            _open_trade_row(trade_id="t-none", symbol="ZZZUSDT", entry_price=10.0),
+        ],
+        infer_schema_length=None,
+    )
+    client = _ClosedPnlClient(
+        records=[
+            {"symbol": "AAAUSDT", "side": "Buy", "avgExitPrice": "97.0",
+             "orderId": "x-a", "createdTime": "1700000060000"},
+            # no ZZZUSDT record -> no closure evidence for t-none
+        ]
+    )
+    kept, updates = _risk_reconcile_missing_positions(
+        open_trades,
+        position_by_symbol={},
+        now_ms=1_700_000_100_000,
+        enabled=True,
+        position_error="",
+        trading_client=client,
+        require_evidence=True,
+    )
+    assert len(client.calls) == 1  # one account-wide call for both orphans
+    closed_ids = {u["trade_id"] for u in updates}
+    assert closed_ids == {"t-has"}              # only the evidenced orphan closed
+    assert kept["trade_id"].to_list() == ["t-none"]  # unconfirmed orphan kept OPEN
+
+
+def test_batched_orphan_close_matches_legacy_per_symbol_path() -> None:
+    """reconcile-core-4 numerical equivalence: the batched account-wide path produces
+    the IDENTICAL orphan-close rows as the legacy per-symbol path (same exit_price,
+    multi-leg aggregation, side/createdTime filters) — only the call count differs."""
+    records = [
+        {"symbol": "AAAUSDT", "side": "Buy", "avgExitPrice": "95.0", "closedSize": "1",
+         "execFee": "0.1", "orderId": "x-a", "createdTime": "1700000060000"},
+        {"symbol": "AAAUSDT", "side": "Buy", "avgExitPrice": "97.0", "closedSize": "1",
+         "execFee": "0.1", "orderId": "x-a2", "createdTime": "1700000070000"},  # 2nd leg
+        {"symbol": "BBBUSDT", "side": "Sell", "avgExitPrice": "190.0", "closedSize": "2",
+         "execFee": "0.2", "orderId": "x-b", "createdTime": "1700000060000"},  # wrong side for a short
+    ]
+    trade_a = _open_trade_row(trade_id="t-a", symbol="AAAUSDT", side="short", entry_price=100.0)
+    # Legacy per-symbol matcher (records pre-filtered to the symbol, as the venue would).
+    from liquidity_migration.event_demo_exits import _orphan_close_pnl_from_records
+    legacy = _orphan_close_pnl_from_records(
+        trade_a, now_ms=1_700_000_100_000,
+        records=[r for r in records if r["symbol"] == "AAAUSDT"],
+    )
+    # Batched path: the same symbol slice out of the account-wide group.
+    from liquidity_migration.event_demo_exits import _fetch_account_closed_pnl
+    client = _ClosedPnlClient(records=records)
+    grouped = _fetch_account_closed_pnl(client, [trade_a], now_ms=1_700_000_100_000)
+    batched = _orphan_close_pnl_from_records(
+        trade_a, now_ms=1_700_000_100_000, records=grouped.get("AAAUSDT"),
+    )
+    assert legacy == batched
+    # Multi-leg qty-weighted exit price: (95*1 + 97*1)/2 = 96.0; both legs' fees summed.
+    assert batched["exit_price"] == 96.0
+
+
+class _WindowedClosedPnlClient:
+    """Closed-PnL stub that HONORS start_time_ms/end_time_ms (filters by createdTime,
+    like Bybit's ~7-day-clamped endpoint) and records every (start, end) window. Lets the
+    reconcile-core-4 chunking be actually exercised — the plain _ClosedPnlClient ignores
+    the window, so it could not pin the F1 truncation regression."""
+
+    def __init__(self, records):
+        self.records = records
+        self.windows: list[tuple] = []
+
+    def get_closed_pnl(self, *, symbol=None, start_time_ms=None, end_time_ms=None, limit=50, max_pages=50):
+        self.windows.append((start_time_ms, end_time_ms))
+        out = []
+        for r in self.records:
+            ct = int(r["createdTime"])
+            if start_time_ms is not None and ct < int(start_time_ms):
+                continue
+            if end_time_ms is not None and ct > int(end_time_ms):
+                continue
+            out.append(r)
+        return out
+
+
+def test_account_closed_pnl_pages_in_7day_windows_covers_old_and_recent_orphans() -> None:
+    """reconcile-core-4 F1: an OLD orphan (entered ~20d ago) and a RECENT orphan (~2d ago)
+    in the same pass. A single account-wide call from the oldest entry to now would exceed
+    Bybit's ~7-day clamp and DROP the recent orphan's closure. The chunked fetch must page in
+    <=7-day windows so BOTH closures are found, and NO single window exceeds the clamp."""
+    from liquidity_migration._common import MS_PER_DAY
+    from liquidity_migration.event_demo_exits import (
+        CLOSED_PNL_MAX_WINDOW_MS,
+        _risk_reconcile_missing_positions,
+    )
+
+    now = 1_700_000_000_000
+    open_trades = pl.DataFrame(
+        [
+            _open_trade_row(trade_id="t-old", symbol="OLDUSDT", entry_price=100.0,
+                            entry_ts_ms=now - 20 * MS_PER_DAY),
+            _open_trade_row(trade_id="t-new", symbol="NEWUSDT", entry_price=50.0,
+                            entry_ts_ms=now - 2 * MS_PER_DAY),
+        ],
+        infer_schema_length=None,
+    )
+    client = _WindowedClosedPnlClient(
+        records=[
+            # OLD orphan closed 18d ago (inside its [entry, now] window, but OUTSIDE a single
+            # 7-day window anchored at the recent orphan — and vice-versa).
+            {"symbol": "OLDUSDT", "side": "Buy", "avgExitPrice": "90.0",
+             "orderId": "o-old", "createdTime": str(now - 18 * MS_PER_DAY)},
+            # RECENT orphan closed 1d ago.
+            {"symbol": "NEWUSDT", "side": "Buy", "avgExitPrice": "48.0",
+             "orderId": "o-new", "createdTime": str(now - 1 * MS_PER_DAY)},
+        ]
+    )
+    kept, updates = _risk_reconcile_missing_positions(
+        open_trades, position_by_symbol={}, now_ms=now, enabled=True,
+        position_error="", trading_client=client, require_evidence=True,
+    )
+    assert kept.is_empty()  # BOTH orphans closed (neither dropped by the window clamp)
+    by_id = {u["trade_id"]: u for u in updates}
+    assert by_id["t-old"]["exit_price"] == 90.0
+    assert by_id["t-new"]["exit_price"] == 48.0
+    # The span (~20d) was paged into MULTIPLE windows...
+    assert len(client.windows) >= 2
+    # ...and NO single window exceeds Bybit's 7-day clamp.
+    for start, end in client.windows:
+        assert end is not None and start is not None
+        assert int(end) - int(start) <= CLOSED_PNL_MAX_WINDOW_MS
+    # All windows are account-wide (no symbol filter).
+    assert all(True for _ in client.windows)
+
+
+def test_account_closed_pnl_falls_back_to_per_symbol_when_batch_raises() -> None:
+    """reconcile-core-4 F4-gap: when the account-wide (symbol=None) call raises, the pass
+    degrades to the legacy per-symbol fetch (None batch -> per-orphan REST), still closing
+    the orphan from its own per-symbol window — never a close-on-absence."""
+    from liquidity_migration.event_demo_exits import _risk_reconcile_missing_positions
+
+    now = 1_700_000_100_000
+
+    class _AccountWideRaisesClient:
+        def __init__(self, records):
+            self.records = records
+            self.symbol_calls: list[str] = []
+
+        def get_closed_pnl(self, *, symbol=None, start_time_ms=None, end_time_ms=None, limit=50, max_pages=50):
+            if symbol is None:
+                raise RuntimeError("account-wide closed-pnl unavailable")
+            self.symbol_calls.append(symbol)
+            return [r for r in self.records if r["symbol"] == symbol]
+
+    client = _AccountWideRaisesClient(
+        records=[{"symbol": "AAAUSDT", "side": "Buy", "avgExitPrice": "95.0",
+                  "orderId": "x-a", "createdTime": "1700000060000"}]
+    )
+    open_trades = pl.DataFrame(
+        [_open_trade_row(trade_id="t-a", symbol="AAAUSDT", entry_price=100.0)],
+        infer_schema_length=None,
+    )
+    kept, updates = _risk_reconcile_missing_positions(
+        open_trades, position_by_symbol={}, now_ms=now, enabled=True,
+        position_error="", trading_client=client, require_evidence=True,
+    )
+    assert kept.is_empty()                       # orphan still closed via the fallback
+    assert updates[0]["exit_price"] == 95.0
+    assert client.symbol_calls == ["AAAUSDT"]    # per-symbol fallback actually fired
+
+
+def test_account_closed_pnl_captures_close_stamped_after_now_ms() -> None:
+    """reconcile-core-4 F1 Concern A: a close stamped slightly AFTER now_ms (venue clock ahead
+    / stale now_ms) must still be captured — the last window is NOT capped at now_ms, matching
+    legacy's unbounded upper bound. Else the orphan is wrongly kept OPEN under require_evidence."""
+    now = 1_700_000_000_000
+    open_trades = pl.DataFrame(
+        [_open_trade_row(trade_id="t-a", symbol="AAAUSDT", entry_price=100.0, entry_ts_ms=now - 60_000)],
+        infer_schema_length=None,
+    )
+    client = _WindowedClosedPnlClient(
+        records=[{"symbol": "AAAUSDT", "side": "Buy", "avgExitPrice": "95.0",
+                  "orderId": "x-a", "createdTime": str(now + 5 * 60_000)}],  # 5 min AFTER now_ms
+    )
+    kept, updates = _risk_reconcile_missing_positions(
+        open_trades, position_by_symbol={}, now_ms=now, enabled=True,
+        position_error="", trading_client=client, require_evidence=True,
+    )
+    assert kept.is_empty()                  # captured despite createdTime > now_ms (was dropped by the cap)
+    assert updates[0]["exit_price"] == 95.0
+
+
+def test_account_closed_pnl_does_not_merge_distinct_orderidless_legs() -> None:
+    """reconcile-core-4 F1 Concern B: two DISTINCT legs lacking orderId that share
+    (symbol,createdTime,closedSize,avgExitPrice) but differ in execFee must BOTH be kept (fees
+    summed), not merged by a content-tuple dedup. Real Bybit rows always carry an orderId; this
+    pins that orderId-less rows are never wrongly collapsed."""
+    from liquidity_migration.event_demo_exits import (
+        _fetch_account_closed_pnl,
+        _orphan_close_pnl_from_records,
+    )
+
+    now = 1_700_000_000_000
+    trade = _open_trade_row(trade_id="t-a", symbol="AAAUSDT", side="short",
+                            entry_price=100.0, entry_ts_ms=now - 3_600_000)
+    records = [
+        {"symbol": "AAAUSDT", "side": "Buy", "avgExitPrice": "95.0", "closedSize": "1",
+         "execFee": "0.1", "createdTime": str(now - 60_000)},  # no orderId
+        {"symbol": "AAAUSDT", "side": "Buy", "avgExitPrice": "95.0", "closedSize": "1",
+         "execFee": "0.2", "createdTime": str(now - 60_000)},  # same tuple, different fee, no orderId
+    ]
+    client = _WindowedClosedPnlClient(records=records)
+    grouped = _fetch_account_closed_pnl(client, [trade], now_ms=now)
+    rows = grouped.get("AAAUSDT")
+    assert len(rows) == 2  # both legs kept (no content-tuple merge)
+    backfill = _orphan_close_pnl_from_records(trade, now_ms=now, records=rows)
+    assert backfill["exit_fee_usdt"] == pytest.approx(0.3)  # 0.1 + 0.2 summed, not 0.1

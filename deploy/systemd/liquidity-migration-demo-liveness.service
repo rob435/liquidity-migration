@@ -9,6 +9,11 @@ User=root
 Group=root
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+# Per-sleeve kill-switch toggles (deploy/sleeves.env defaults, then the optional host override)
+# so the watchdog skips an intentionally-off sleeve instead of paging it as a dead daemon.
+# `-` = optional (don't fail the unit if absent). Host file (loaded last) wins.
+EnvironmentFile=-/opt/liquidity-migration/deploy/sleeves.env
+EnvironmentFile=-/etc/liquidity-migration/sleeves.env
 Environment=PYTHONDONTWRITEBYTECODE=1
 # Alerts on daemon-down/hung, an UNPROTECTED open position (no/wrong venue
 # stopLoss), ledger<->venue mismatch, WS feed stall, and exchange errors so the

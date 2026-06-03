@@ -65,18 +65,24 @@ if [ "${TELEGRAM_CHAT_ID:-}" != "$EXPECTED_TELEGRAM_CHAT_ID" ]; then
   exit 1
 fi
 
-systemctl is-enabled --quiet liquidity-migration-bybit-demo.service
+# Per-sleeve kill-switch: source the toggle lib so an intentionally-off sleeve is
+# verified DOWN, not flagged as a failed deploy. (Unit FILES are always synced by
+# deploy regardless of toggle, so the `systemctl cat` env checks below still work for
+# an off/disabled sleeve.) The risk service is intentionally NOT toggled.
+. deploy/lib_sleeves.sh
+lm_load_sleeve_toggles
+echo "verify sleeves: SHORT=$SHORT_SLEEVE LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE"
+
+# The risk service (shared reconcile authority for every sleeve) has NO toggle —
+# always verify it enabled regardless of which entry sleeves are on. Per-sleeve
+# enabled+active state is checked post-settle via verify_sleeve (below), so an off
+# sleeve is required DOWN instead of being flagged as a failed deploy.
 systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
-systemctl is-enabled --quiet liquidity-migration-bybit-paper.service
-# Long-sleeve parity — deploy enables + restarts both long services too,
-# so verify needs to catch a missing or disabled long daemon for the same
-# reason it catches the short side.
-systemctl is-enabled --quiet liquidity-migration-bybit-long-demo.service
-systemctl is-enabled --quiet liquidity-migration-bybit-long-paper.service
-# Continuous-fade sleeve (live on demo 2026-06-01) + its daily rmom-refresh timer.
-systemctl is-enabled --quiet liquidity-migration-bybit-continuous-demo.service
-systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer
-systemctl is-active --quiet liquidity-migration-continuous-rmom-refresh.timer
+# The continuous sleeve's daily rmom-refresh timer is toggled with that sleeve.
+if sleeve_on "$CONTINUOUS_SLEEVE"; then
+  systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer
+  systemctl is-active --quiet liquidity-migration-continuous-rmom-refresh.timer
+fi
 # Timer parity — read-only verify must catch a deploy that forgot to enable
 # (or someone manually disabled) the demo-health watchdog or daily
 # combined-book report. Both fail loud if missing.
@@ -105,12 +111,15 @@ if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then
   sleep "$SYSTEMD_SETTLE_SECONDS"
 fi
 
-systemctl is-active --quiet liquidity-migration-bybit-demo.service
+# Risk service always active (no toggle) — turning a sleeve off must never stop
+# position protection.
 systemctl is-active --quiet liquidity-migration-bybit-risk.service
-systemctl is-active --quiet liquidity-migration-bybit-paper.service
-systemctl is-active --quiet liquidity-migration-bybit-long-demo.service
-systemctl is-active --quiet liquidity-migration-bybit-long-paper.service
-systemctl is-active --quiet liquidity-migration-bybit-continuous-demo.service
+# Per-sleeve kill-switch: an ON sleeve must be active AND enabled; an OFF sleeve must
+# be DOWN (verify_sleeve fails loud if an off sleeve is somehow still running).
+# Post-settle so the daemons have had SYSTEMD_SETTLE_SECONDS to come up after restart.
+verify_sleeve "$SHORT_SLEEVE" $SHORT_SLEEVE_UNITS
+verify_sleeve "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
+verify_sleeve "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 
 systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=STRATEGY_PROFILE=promoted'
 systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=INTERVAL_SECONDS=60'

@@ -166,12 +166,30 @@ def test_continuous_order_link_prefix_routes_as_distinct_sleeve() -> None:
     # ws_risk must decode it as the CONTINUOUS sleeve (not short/long), recovering signal_ts
     decoded = decode_entry_order_link_id(link)
     assert decoded is not None
-    sleeve, signal_ts_ms = decoded
+    sleeve, signal_ts_ms, reentry_seq = decoded
     assert sleeve == "continuous"
     assert signal_ts_ms == (sig // 1000) * 1000
+    assert reentry_seq == 0  # a first-entry (5-part) link carries no re-entry seq
     # the short (4-part) and long (en-l) links still decode as their own sleeves
     assert decode_entry_order_link_id("lm-en-BTC-abcd")[0] == "short"
     assert decode_entry_order_link_id("lm-en-l-BTC-abcd")[0] == "long"
+
+    # A same-window RE-ENTRY (seq>0) gets a DISTINCT link + trade_id that still round-trips, and is
+    # idempotent: the same (symbol, signal_ts, seq) reproduces the same link (continuous-2).
+    from liquidity_migration.continuous_demo import _continuous_trade_id
+
+    link0 = _continuous_order_link_id("en-c", symbol="WIFUSDT", signal_ts_ms=sig, reentry_seq=0)
+    link1 = _continuous_order_link_id("en-c", symbol="WIFUSDT", signal_ts_ms=sig, reentry_seq=1)
+    assert link0 == link  # seq=0 is byte-identical to the legacy form
+    assert link1 != link0 and link1 == f"{link0}-1"
+    assert decode_entry_order_link_id(link1) == ("continuous", (sig // 1000) * 1000, 1)
+    tid0 = _continuous_trade_id("STRAT", "WIFUSDT", sig, 0)
+    tid1 = _continuous_trade_id("STRAT", "WIFUSDT", sig, 1)
+    assert tid0 == f"STRAT-WIFUSDT-{sig}"  # seq=0 byte-identical to legacy
+    assert tid1 == f"{tid0}-1" and tid1 != tid0
+    # idempotent: identical inputs reproduce identical id + link
+    assert _continuous_trade_id("STRAT", "WIFUSDT", sig, 1) == tid1
+    assert _continuous_order_link_id("en-c", symbol="WIFUSDT", signal_ts_ms=sig, reentry_seq=1) == link1
 
 
 def test_execute_entries_dry_run_builds_short_rows() -> None:
@@ -621,6 +639,50 @@ def test_protective_exit_cycle_covers_stop_approach_dry_run(tmp_path) -> None:
     assert closed["exit_reason"].to_list() == ["stop_approach"]
 
 
+def test_continuous_same_window_reentry_both_rows_survive(tmp_path) -> None:
+    """continuous-8: a same-signal-window cover-then-re-enter must produce DISTINCT trade_ids so the
+    closed row is NOT overwritten by storage's trade_id dedup (the continuous-2 ledger data loss).
+    Mirrors the cycle's seq accounting: one prior (symbol, signal_ts) trade -> the re-entry gets
+    seq=1; both the closed original and the open re-entry survive write_dataset -> read_dataset."""
+    from liquidity_migration.continuous_demo import _continuous_trade_id, continuous_strategy_id
+    from liquidity_migration.storage import read_dataset, write_dataset
+
+    cfg = ContinuousDemoCycleConfig(submit_orders=False, record_dry_run=True)
+    root = tmp_path / "bybit-continuous-demo-event"
+    trades_ds, _o, _c = continuous_dataset_names(cfg)
+    strat = continuous_strategy_id(cfg)
+    sig = 1_700_000_000_000
+
+    tid0 = _continuous_trade_id(strat, "WIFUSDT", sig, 0)          # original (now covered)
+    tid1 = _continuous_trade_id(strat, "WIFUSDT", sig, 1)          # re-entry, seq=1 (one prior trade)
+    assert tid1 != tid0
+
+    # cycle N: the original closes
+    write_dataset(pl.DataFrame([{
+        "trade_id": tid0, "strategy_id": strat, "symbol": "WIFUSDT", "side": "short",
+        "status": "closed", "signal_ts_ms": sig, "entry_ts_ms": sig + 60_000, "net_return": -0.01,
+    }], infer_schema_length=None), root, trades_ds, partition_by=())
+    # cycle N+k (same window, after cooldown): re-enter with the seq-distinct id
+    write_dataset(pl.DataFrame([{
+        "trade_id": tid1, "strategy_id": strat, "symbol": "WIFUSDT", "side": "short",
+        "status": "open", "signal_ts_ms": sig, "entry_ts_ms": sig + 2_400_000,
+    }], infer_schema_length=None), root, trades_ds, partition_by=())
+
+    after = read_dataset(root, trades_ds)
+    assert sorted(after["trade_id"].to_list()) == sorted([tid0, tid1])
+    assert after.filter(pl.col("status") == "closed").height == 1
+    assert after.filter(pl.col("status") == "open").height == 1
+
+    # Contrast: the OLD scheme reused ONE trade_id across the two writes -> storage dedup keeps a
+    # single row (the closed original is silently overwritten — exactly the data loss the seq fixes).
+    bug_root = tmp_path / "bug"
+    for status in ("closed", "open"):
+        write_dataset(pl.DataFrame([{
+            "trade_id": tid0, "symbol": "WIFUSDT", "side": "short", "status": status, "signal_ts_ms": sig,
+        }], infer_schema_length=None), bug_root, trades_ds, partition_by=())
+    assert read_dataset(bug_root, trades_ds).height == 1
+
+
 def test_protective_exit_cycle_skips_in_flight_exit(tmp_path) -> None:
     """Fast loop must NOT submit a second cover for a trade that already carries an exit_order_link_id
     (a cover in flight, unconfirmed) — the WS-snapshot-independent guard against a double reduce-only,
@@ -781,3 +843,101 @@ def test_format_continuous_demo_cycle_summary_handles_flat_payload() -> None:
     assert "d9=17" in s and "open=2" in s and "rmom=present" in s
     # robust to a missing/None equity and an empty payload (never raises)
     assert "$0.00" in format_continuous_demo_cycle_summary({"rmom_present": False})
+
+
+def test_entry_caps_qty_at_max_order_qty_documented() -> None:
+    """EXEC-3: a single continuous entry whose notional exceeds Bybit's maxMktOrderQty is CAPPED to
+    max_order_qty (documented behaviour), not split. Pins the cap so a future split fix is a conscious
+    change. A cheap-priced name ($0.0001) at 2% of a large equity forces qty > max_qty."""
+    from liquidity_migration.continuous_demo import _execute_continuous_entries
+
+    cfg = ContinuousDemoCycleConfig(submit_orders=False, record_dry_run=True, per_position_notional_pct_equity=2.0)
+    equity = 10_000_000.0  # large equity -> 2% = $200k notional
+    price = 0.0001         # cheap coin -> raw qty = 2e9 contracts
+    contract = {"tick_size": 0.00001, "qty_step": 1.0, "min_order_qty": 1.0,
+                "max_market_order_qty": 1_000_000.0}  # cap well below the 2e9 raw qty
+    rows, _orders = _execute_continuous_entries(
+        [{"symbol": "CHEAPUSDT", "decile": 9, "composite": 0.9}],
+        trading_client=None, demo=cfg, equity_usdt=equity,
+        order_notional_frac=cfg.per_position_notional_pct_equity / 100.0,
+        price_by_symbol={"CHEAPUSDT": price},
+        contract_by_symbol={"CHEAPUSDT": contract}, now_ms=1_700_000_000_000,
+        strategy_id="strat", record_preflight=None, execution_event_router=None)
+    assert len(rows) == 1                       # ONE trade row (no per-child split)
+    qty = float(rows[0]["qty"])
+    assert qty == 1_000_000.0                    # capped at max_market_order_qty, NOT 2e9
+    # documents the under-size: filled notional is the capped qty*price, far below the $200k target
+    assert float(rows[0]["notional_usdt"]) == 1_000_000.0 * price
+
+
+def test_left_decile_exit_keys_on_the_confirmed_selection_decile_not_a_time_floor() -> None:
+    """continuous-6 (correct fix): the `left_decile` SELECTION exit fires exactly when the decile
+    snapshot the caller passes (``entry_state`` = the SAME confirmed-bar decile that selected the entry)
+    drops the name out of the fade band — immediately, with NO hold-time floor. The cycle passes
+    ``entry_state`` (not the live intra-hour decile) so entry and exit read the identical signal, which
+    is what removes the same-hour thrash; the exit itself never delays the system's signal."""
+    cfg = ContinuousDemoCycleConfig(decile=9, exit_decile_buffer=1, max_hold_hours=48)
+    now = 2_000_000_000_000
+    fresh = {"symbol": "FRESH", "entry_ts_ms": now - 5 * 60_000}   # held only 5 min
+    # 1) Confirmed decile still IN the band (D9) -> held, even for an old trade. The exit does not churn
+    #    a name the selection signal still likes.
+    in_band = pl.DataFrame({"symbol": ["FRESH"], "decile": [9], "composite": [0.9], "turnover_quote": [1e6]})
+    assert plan_continuous_exits([fresh], in_band, now_ms=now, config=cfg) == []
+    # 2) Confirmed decile dropped OUT of the band (D3 < D9-1) -> covered IMMEDIATELY, no time floor: the
+    #    exit fires the instant the system's real signal says the name left the fade pool.
+    out_band = pl.DataFrame({"symbol": ["FRESH"], "decile": [3], "composite": [0.1], "turnover_quote": [1e6]})
+    out = plan_continuous_exits([fresh], out_band, now_ms=now, config=cfg)
+    assert [e["exit_reason"] for e in out] == ["left_decile"]
+    # 3) Hysteresis: a one-decile wobble (D8 == decile-buffer) is still held; only a CLEAR drop covers.
+    wobble = pl.DataFrame({"symbol": ["FRESH"], "decile": [8], "composite": [0.5], "turnover_quote": [1e6]})
+    assert plan_continuous_exits([fresh], wobble, now_ms=now, config=cfg) == []
+    # 4) Protective squeeze cover is PRICE-driven and independent of the decile snapshot: a fresh name in
+    #    the band but 25% underwater still fires stop_approach immediately.
+    cfg_stop = ContinuousDemoCycleConfig(decile=9, stop_loss_pct=0.25, stop_approach_frac=0.8)
+    fresh_stop = [{"symbol": "FRESH", "entry_ts_ms": now - 5 * 60_000, "entry_price": 100.0, "qty": "1"}]
+    ex = plan_continuous_exits(fresh_stop, in_band, now_ms=now, config=cfg_stop,
+                               price_by_symbol={"FRESH": 125.0})  # 25% loss on the short -> stop_approach
+    assert [e["exit_reason"] for e in ex] == ["stop_approach"]
+
+
+def test_continuous_cycle_feeds_confirmed_entry_state_to_the_exit_planner() -> None:
+    """continuous-6 (root cause): the cycle must hand `plan_continuous_exits` the SAME confirmed-bar
+    decile snapshot it uses for entries (`entry_state`), NOT the live intra-hour `live_state`. This
+    locks the wiring so entry and exit can never again read disagreeing decile signals."""
+    import inspect
+
+    from liquidity_migration import continuous_demo as cd
+
+    src = inspect.getsource(cd.run_continuous_demo_cycle)
+    # The exit planner is called with the confirmed entry_state as its decile snapshot, never live_state.
+    assert "plan_continuous_exits(" in src
+    assert "open_trades.to_dicts(), entry_state" in src, "exit planner must receive the confirmed entry_state"
+    assert "open_trades.to_dicts(), live_state" not in src, "exit planner must NOT receive the live decile"
+
+
+def test_circuit_breaker_counts_fee_negative_covers_as_adverse() -> None:
+    """continuous-4: a cover with gross net_return >= 0 but NEGATIVE after realised round-trip fees must
+    count as an adverse cover (matching the engine's net-of-cost net_return<0 proxy). Pins the breaker
+    reading a cost-consistent metric without mutating the stored gross net_return."""
+    cfg = ContinuousDemoCycleConfig(entry_pause_after_adverse_exits=2, entry_pause_window_minutes=1440)
+    now = 1_700_000_000_000
+    strat = "continuous_fade_v1"
+    # Two covers, each gross-positive (+0.0001) but fee tax (4 USDT on 10k equity = 0.0004 of equity)
+    # makes them net-NEGATIVE. Old breaker (gross only) sees 0 adverse; fixed breaker sees 2 -> trips.
+    rows = [
+        {"trade_id": f"{strat}-S{i}-{now}", "strategy_id": strat, "symbol": f"S{i}", "status": "closed",
+         "exit_reason": "left_decile", "exit_ts_ms": now - 60 * 60_000,
+         "net_return": 0.0001, "entry_fee_usdt": 2.0, "exit_fee_usdt": 2.0, "equity_usdt": 10_000.0}
+        for i in range(2)
+    ]
+    df = pl.DataFrame(rows, infer_schema_length=None)
+    tripped, count = entry_circuit_breaker_tripped(df, now_ms=now, config=cfg, strategy_id=strat)
+    assert count == 2          # both fee-negative covers counted as adverse
+    assert tripped is True      # >= entry_pause_after_adverse_exits=2 -> breaker trips
+    # control: a genuinely gross-positive cover whose fees do NOT flip it stays benign
+    benign = pl.DataFrame([{
+        "trade_id": f"{strat}-X-{now}", "strategy_id": strat, "symbol": "X", "status": "closed",
+        "exit_reason": "left_decile", "exit_ts_ms": now - 60 * 60_000,
+        "net_return": 0.05, "entry_fee_usdt": 2.0, "exit_fee_usdt": 2.0, "equity_usdt": 10_000.0,
+    }], infer_schema_length=None)
+    assert entry_circuit_breaker_tripped(benign, now_ms=now, config=cfg, strategy_id=strat)[1] == 0

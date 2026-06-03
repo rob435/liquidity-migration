@@ -1,9 +1,31 @@
 ---
 name: equity-curve
-description: "Produce the long-only (long_native v11a) sleeve's equity curve and the official strategy-vs-BTC PNG, on Bybit or Binance. Use when asked for the long-only / long-native equity curve, to run that backtest, to get the equity-vs-BTC chart PNG, or to compare the long sleeve across venues. Covers the canonical invocation (there is NO CLI subcommand — drive it via scripts/long_native_sweep_fc_min_day.py), the correct per-venue full-PIT roots, the output artifacts, and run-label interpretation."
+description: "Produce equity curves for the trading sleeves (SHORT event/daily, LONG v11a, CONTINUOUS fade) from their EXACT deployed profiles, and the official strategy-vs-BTC PNG. Use when asked for any sleeve's equity curve, to backtest the promoted/deployed profile, to get the equity chart PNG, or to compare sleeves/venues. The zero-friction path for ALL sleeves is scripts/equity_curves.sh (profiles from liquidity_migration/promoted.py); the long-only deep-dive is scripts/long_native_sweep_fc_min_day.py. Covers per-venue full-PIT roots, outputs, and run-label interpretation."
 ---
 
-# Long-only sleeve equity curve + official PNG
+# Equity curves — promoted profiles, one command
+
+**For ANY/ALL sleeves' deployed-profile equity curve, use the zero-friction tool:**
+
+```bash
+bash scripts/equity_curves.sh                 # short + long + continuous, last 3 years
+bash scripts/equity_curves.sh --sleeves long  # one sleeve
+bash scripts/equity_curves.sh --years 2       # shorter window (lighter on the 16 GB box)
+```
+
+It runs each sleeve's EXACT deployed profile — sourced from the single source of truth
+`liquidity_migration/promoted.py` (`short_profile`/`long_profile`/`continuous_profile`,
+pinned by `tests/test_promoted_profiles.py`) — emits the equity PNG, and prints the
+`run_label` for every run (a biased/partial-PIT result is flagged, never hidden). No flag
+archaeology, no "what's deployed?" guessing. SHORT requires clean full-PIT (it aborts +
+names the gap if coverage is incomplete); LONG/CONTINUOUS report their label.
+
+The rest of this skill is the **long-only deep-dive** — use it when you need more than the
+one-command run.
+
+---
+
+# Long-only sleeve equity curve + official PNG (deep-dive)
 
 The one command for the long-only (long_native v11a) equity curve + the official
 strategy-vs-BTC PNG is `scripts/long_native_sweep_fc_min_day.py`. Use it instead of

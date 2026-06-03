@@ -1138,7 +1138,7 @@ def test_decode_entry_order_link_id_roundtrips_short_signal_ts() -> None:
     signal_ts_ms = 1_779_667_200_000
     link = _order_link_id("en", symbol="SUPERUSDT", signal_ts_ms=signal_ts_ms)
     decoded = decode_entry_order_link_id(link)
-    assert decoded == ("short", 1_779_667_200_000)
+    assert decoded == ("short", 1_779_667_200_000, 0)  # (sleeve, signal_ts, reentry_seq=0)
 
 
 def test_decode_entry_order_link_id_roundtrips_long_signal_ts() -> None:
@@ -1149,7 +1149,7 @@ def test_decode_entry_order_link_id_roundtrips_long_signal_ts() -> None:
     signal_ts_ms = 1_779_667_200_000
     link = _long_order_link_id(LONG_ENTRY_LINK_PREFIX, symbol="ETHUSDT", signal_ts_ms=signal_ts_ms)
     decoded = decode_entry_order_link_id(link)
-    assert decoded == ("long", 1_779_667_200_000)
+    assert decoded == ("long", 1_779_667_200_000, 0)  # (sleeve, signal_ts, reentry_seq=0)
 
 
 def test_decode_entry_order_link_id_returns_none_for_unknown_patterns() -> None:
@@ -1182,10 +1182,50 @@ def test_all_sleeve_link_builders_share_one_canonical_format() -> None:
     assert short == f"lm-en-SUPER-{ts36}"
     assert long == f"lm-en-l-SUPER-{ts36}"
     assert cont == f"lm-en-c-SUPER-{ts36}"
-    # All three round-trip through the SINGLE decoder to the correct sleeve + ts.
-    assert decode_entry_order_link_id(short) == ("short", ts)
-    assert decode_entry_order_link_id(long) == ("long", ts)
-    assert decode_entry_order_link_id(cont) == ("continuous", ts)
+    # All three round-trip through the SINGLE decoder to the correct sleeve + ts (reentry_seq=0).
+    assert decode_entry_order_link_id(short) == ("short", ts, 0)
+    assert decode_entry_order_link_id(long) == ("long", ts, 0)
+    assert decode_entry_order_link_id(cont) == ("continuous", ts, 0)
+
+
+def test_is_exit_link_matches_exit_and_risk_prefixes_only() -> None:
+    """The exit/risk-side orderLinkId vocabulary lives in ONE registry (quality-dup-12)."""
+    from liquidity_migration.order_link_id import is_exit_link
+
+    assert is_exit_link("lm-ex-BTC-abc")    # planned exit
+    assert is_exit_link("lm-rx-BTC-abc")    # risk exit
+    assert is_exit_link("lm-wx-BTC-abc")    # watchdog
+    assert is_exit_link("lm-ux-c-BTC-abc")  # untracked unwind (continuous)
+    assert not is_exit_link("lm-en-BTC-abc")     # short entry, not an exit
+    assert not is_exit_link("lm-en-c-BTC-abc-1") # continuous re-entry, not an exit
+    assert not is_exit_link("")
+    assert not is_exit_link("manual-order-id")
+
+
+def test_free_entry_slots_counts_open_rows_and_inflight_entries() -> None:
+    """EXEC-4 + quality-godmod-7: free entry slots = max_active - open trade rows - in-flight entry
+    orders that have no trade row yet (an unconfirmed-fill entry leaks a slot otherwise -> transient
+    breach of max_active). A partial fill (symbol already open) must NOT be double-counted; pending
+    EXIT orders must not reduce ENTRY slots."""
+    from liquidity_migration.event_demo import _free_entry_slots
+
+    now = 1_700_000_000_000
+    open_trades = pl.DataFrame([
+        {"symbol": "AAAUSDT", "status": "open"},
+        {"symbol": "BBBUSDT", "status": "submitted"},
+    ])
+    orders = pl.DataFrame([
+        # in-flight ENTRY for a NEW symbol -> consumes a slot
+        {"symbol": "CCCUSDT", "trade_id": "t-c", "reduce_only": False, "status": "submitted", "ts_ms": now, "exit_reason": ""},
+        # in-flight ENTRY for an ALREADY-OPEN symbol -> already counted, must NOT double-count
+        {"symbol": "AAAUSDT", "trade_id": "t-a", "reduce_only": False, "status": "submitted", "ts_ms": now, "exit_reason": ""},
+        # a pending EXIT -> does NOT reduce ENTRY slots
+        {"symbol": "DDDUSDT", "trade_id": "t-d", "reduce_only": True, "status": "submitted", "ts_ms": now, "exit_reason": "stop"},
+    ])
+    # 12 - 2 open - 1 in-flight-NEW(CCC) = 9  (AAA pending not double-counted; DDD is an exit)
+    assert _free_entry_slots(12, open_trades, orders, now_ms=now) == 9
+    assert _free_entry_slots(1, open_trades, orders, now_ms=now) == 0       # never negative
+    assert _free_entry_slots(12, open_trades, pl.DataFrame(), now_ms=now) == 10  # no orders -> open count only
 
 
 def test_validate_demo_config_accepts_unlimited_universe_mode() -> None:

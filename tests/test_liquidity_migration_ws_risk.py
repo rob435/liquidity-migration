@@ -2558,6 +2558,41 @@ def test_ws_risk_recovers_strategy_trade_id_from_bot_order_link(tmp_path: Path) 
     )
 
 
+def test_recover_entry_link_metadata_prefers_latest_reentry(tmp_path: Path) -> None:
+    """re-audit scan-continuous-identity-1: a same-window cover-then-re-enter leaves TWO continuous
+    entry links for one symbol in order history (seq=0 covered, seq=1 the live position). The rebuild
+    must adopt the LATEST (seq=1) so it reconstructs the LIVE id — deterministically, even when the
+    history is NOT newest-first."""
+    import time
+
+    from liquidity_migration.continuous_demo import _continuous_order_link_id
+
+    sig = (int(time.time() * 1000) // 1000) * 1000 - 24 * 60 * 60 * 1000
+    link0 = _continuous_order_link_id("en-c", symbol="WIFUSDT", signal_ts_ms=sig, reentry_seq=0)
+    link1 = _continuous_order_link_id("en-c", symbol="WIFUSDT", signal_ts_ms=sig, reentry_seq=1)
+    # Order history deliberately NOT newest-first (seq=0 listed first) — the tie-break must still win.
+    private_client = FakePrivateClient(order_history=[
+        {"symbol": "WIFUSDT", "side": "Sell", "orderLinkId": link0, "createdTime": str(sig + 60_000)},
+        {"symbol": "WIFUSDT", "side": "Sell", "orderLinkId": link1, "createdTime": str(sig + 2_400_000)},
+    ])
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=False, repair_stops=False, rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0, untracked_position_grace_seconds=0.0,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+    recovered = engine._recover_entry_link_metadata(symbol="WIFUSDT", side="short")
+    assert recovered is not None
+    link, _strategy_id, signal_ts_ms, sleeve, reentry_seq = recovered
+    assert (sleeve, reentry_seq, link) == ("continuous", 1, link1)
+    assert signal_ts_ms == (sig // 1000) * 1000
+
+
 def test_ws_risk_falls_back_to_adopted_when_order_history_has_no_bot_link(tmp_path: Path) -> None:
     """Hand-placed positions (or positions older than the order history
     window) lack a bot-formatted orderLinkId — recovery must NOT synthesize
@@ -3381,3 +3416,90 @@ def test_transient_get_positions_failure_does_not_orphan_close_open_trades(tmp_p
     assert engine.state.open_trades.height == 1, "the open trade must survive the failed fetch"
     assert engine.state.last_position_error, "the positions error must be recorded"
     assert engine.state.reconciliations == [], "no false reconciliation rows"
+
+
+def test_empty_but_successful_positions_snapshot_does_not_orphan_close(tmp_path: Path) -> None:
+    """C1 extension (audit 2026-06-03): a *successful-but-empty* get_positions
+    response (retCode 0, empty result.list during a venue degradation) carries NO
+    position_error, yet is indistinguishable from "all positions closed". With no
+    closed-PnL record confirming a real close, the bulk REST orphan reconciler
+    (require_evidence=True) must KEEP the trade open rather than zero-PnL-wipe a
+    possibly-live position. Distinct from the transient-failure case above: here
+    the fetch SUCCEEDS and sets no error, so the position_error guard does NOT
+    fire — the evidence requirement is the only thing standing between a degraded
+    venue read and a mass false close."""
+    _write_open_trade(tmp_path)
+    # Empty positions, retCode 0, NO error, and the base client returns NO
+    # closed-PnL record (only the *WithClosedPnl subclasses do).
+    private_client = FakePrivateClient(positions=[])
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+            adopt_untracked_positions=False,
+            exit_untracked_positions=False,
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+    engine.bootstrap()
+    assert engine.state.open_trades.height == 1, "loaded from the ledger"
+    assert not engine.state.last_position_error, "an empty-but-successful read records no error"
+
+    engine.rest_reconcile()
+
+    assert engine.state.open_trades.height == 1, (
+        "an empty-but-successful positions snapshot with no closure record must not "
+        "orphan-close a possibly-live trade"
+    )
+    assert engine.state.reconciliations == [], "no false reconciliation rows"
+
+
+def test_ws_exit_and_tracked_fill_use_filtered_single_trade_lookup(tmp_path: Path) -> None:
+    """reconcile-core-5: ws_exit and record_tracked_exit_stream_fill must find the
+    target trade via a column filter, not by materializing every ledger row. With
+    extra unrelated open trades present, the right trade is closed/reduced -- proving
+    the filtered lookup is behaviour-equivalent to the old full-map lookup."""
+    write_dataset(
+        pl.DataFrame(
+            [
+                {"trade_id": "t1", "symbol": "AAAUSDT", "side": "short", "status": "open",
+                 "qty": "1", "entry_price": 100.0, "stop_price": 112.0, "take_profit_price": 80.0,
+                 "planned_exit_ts_ms": 9_999_999_999_999},
+                {"trade_id": "t2", "symbol": "BBBUSDT", "side": "short", "status": "open",
+                 "qty": "3", "entry_price": 50.0, "stop_price": 56.0, "take_profit_price": 40.0,
+                 "planned_exit_ts_ms": 9_999_999_999_999},
+                {"trade_id": "t3", "symbol": "CCCUSDT", "side": "short", "status": "open",
+                 "qty": "2", "entry_price": 10.0, "stop_price": 12.0, "take_profit_price": 8.0,
+                 "planned_exit_ts_ms": 9_999_999_999_999},
+            ]
+        ),
+        tmp_path,
+        "event_demo_trades",
+        partition_by=(),
+    )
+    trade_client = FakeTradeClient()
+    engine = _submit_exit_engine(tmp_path, trade_client)
+    rows, orders = engine.ws_exit({**_SUBMIT_EXIT_PLAN, "exit_trigger_ts_ms": int(time.time() * 1000)})
+    assert orders and orders[0]["trade_id"] == "t1"
+    assert orders[0]["symbol"] == "AAAUSDT" and orders[0]["side"] == "Buy"
+    link = str(orders[0]["order_link_id"])
+    engine.state.submitted_link_to_trade_id[link] = "t1"
+    engine.record_tracked_exit_stream_fill(
+        order_link_id=link, filled_qty=1.0, exit_price=111.0, source="execution",
+    )
+    stored = read_dataset(tmp_path, "event_demo_trades")
+    assert stored.filter(pl.col("trade_id") == "t1").select("status").item() == "closed"
+    assert stored.filter(pl.col("trade_id") == "t2").select("status").item() == "open"
+    assert stored.filter(pl.col("trade_id") == "t3").select("status").item() == "open"
+    with pytest.raises(KeyError):
+        engine.ws_exit({**_SUBMIT_EXIT_PLAN, "trade_id": "does-not-exist",
+                        "exit_trigger_ts_ms": int(time.time() * 1000)})

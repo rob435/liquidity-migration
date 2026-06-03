@@ -1,0 +1,290 @@
+{
+ "EXEC-2|exec-core": {
+  "status": "FIXED",
+  "note": "ws_risk empty-fetch require_evidence (C1)"
+ },
+ "EXEC-1|entries-exits": {
+  "status": "FIXED",
+  "note": "ws_risk empty-fetch require_evidence (C1)"
+ },
+ "PIT-1|signal-pit": {
+  "status": "FLAGGED",
+  "note": "rmom look-ahead (same cluster)"
+ },
+ "PIT-4|signal-pit": {
+  "status": "FLAGGED",
+  "note": "funding undercount: inline diagnosis + strict-xfail; fix=source true fundingInterval from instruments + re-ingest + re-validate"
+ },
+ "EXEC-3|entries-exits": {
+  "status": "FLAGGED",
+  "note": "age300 live!=backtest: flagged (methodology)"
+ },
+ "EXEC-5|entries-exits": {
+  "status": "OPEN",
+  "note": "Anchor the since-entry exit windows on the engine's entry_ready bar (the candidate's entry_ready_ts_ms / the bar the eng"
+ },
+ "EXEC-6|entries-exits": {
+  "status": "FLAGGED",
+  "note": "partial-exit PnL: self-documented KNOWN LIMITATION + accumulator fix flagged"
+ },
+ "EXEC-7|entries-exits": {
+  "status": "FLAGGED",
+  "note": "rmom day_ts causality (same cluster)"
+ },
+ "PIT-3|signal-pit": {
+  "status": "FLAGGED",
+  "note": "age300 live!=backtest"
+ },
+ "PIT-5|signal-pit": {
+  "status": "FLAGGED",
+  "note": "run_label mislabel"
+ },
+ "EXEC-3|exec-core": {
+  "status": "OPEN",
+  "note": "Mirror the short sleeve: pass max_order_qty=0.0 to order_quantity_for_notional and split the entry via _split_qty_for_ma"
+ },
+ "EXEC-5|exec-core": {
+  "status": "FIXED",
+  "note": "side-aware (symbol,side) orphan keying"
+ },
+ "EXEC-6|exec-core": {
+  "status": "OPEN",
+  "note": "When returning a WS-sourced summary whose qty is below the order target, keep polling (REST or WS) until the order is te"
+ },
+ "EXEC-2|entries-exits": {
+  "status": "OPEN",
+  "note": "In the paper (non-submit) exit path, apply the same `_stop_fill_price(mode=bar_extreme_capped)` slippage model the engin"
+ },
+ "EXEC-4|entries-exits": {
+  "status": "OPEN",
+  "note": "Subtract the count of distinct symbols with live (non-stale) pending ENTRY orders from free_slots: `free_slots = max(max"
+ },
+ "EXEC-8|entries-exits": {
+  "status": "OPEN",
+  "note": "Pre-group rank_lookup into dict[symbol] -> sorted[(ts_ms, frac)] once per cycle (or build it that shape in _rank_lookup_"
+ },
+ "PIT-2|signal-pit": {
+  "status": "FLAGGED",
+  "note": "age +1d offset"
+ },
+ "scripts-tooling-1|scripts-tooling": {
+  "status": "FLAGGED",
+  "note": "rmom look-ahead: docstrings corrected + flagged; provable fix = precompute shift(1)->shift(3) + join-key; operator must re-validate+redeploy"
+ },
+ "reconcile-core-1|reconcile-core": {
+  "status": "FIXED",
+  "note": "side-aware (symbol,side) orphan keying"
+ },
+ "continuous-1|continuous": {
+  "status": "FLAGGED",
+  "note": "rmom look-ahead (same cluster)"
+ },
+ "continuous-2|continuous": {
+  "status": "FLAGGED",
+  "note": "dup trade_id: inline doc + full seq-based fix design flagged (live identity/reconcile/rebuild scheme)"
+ },
+ "long-sleeve-1|long-sleeve": {
+  "status": "OPEN",
+  "note": "In `_select_long_entry_candidates`, restrict `eligible_ts` to fully-closed bars: `if ts is not None and now_ms >= int(ts"
+ },
+ "long-sleeve-2|long-sleeve": {
+  "status": "FIXED",
+  "note": "paper exits mark-to-market (price_by_symbol threaded)"
+ },
+ "risk-config-cli-1|risk-config-cli": {
+  "status": "FLAGGED",
+  "note": "decompose day-grid off-by-one: Tier-3 gate; flagged (changes research numbers)"
+ },
+ "reconcile-core-4|reconcile-core": {
+  "status": "OPEN",
+  "note": "Move the closed-PnL backfill off the synchronous WS path: in on_position_message, close orphans WITHOUT a blocking REST "
+ },
+ "reconcile-ledger-3|reconcile-ledger": {
+  "status": "OPEN",
+  "note": "Scope reconcile_demo_bybit's closed_pnl set to the sleeve actually being reconciled before aggregation: filter Bybit clo"
+ },
+ "reconcile-ledger-5|reconcile-ledger": {
+  "status": "OPEN",
+  "note": "Partition the high-churn ledgers by date (partition_by=('date',), deriving date from a ts column) as was already done fo"
+ },
+ "long-sleeve-3|long-sleeve": {
+  "status": "OPEN",
+  "note": "Gate entries on `now_ms >= signal_ts_ms + strategy.entry_delay_hours*MS_PER_HOUR` before evaluating the retrace conditio"
+ },
+ "long-sleeve-4|long-sleeve": {
+  "status": "OPEN",
+  "note": "Either rank the live universe by the same trailing-90d-median turnover the backtest uses, or fetch a wider symbol set (e"
+ },
+ "long-sleeve-5|long-sleeve": {
+  "status": "OPEN",
+  "note": "Read availableBalance/free margin from the wallet snapshot and size against free margin (or a per-sleeve margin budget) "
+ },
+ "reconcile-core-2|reconcile-core": {
+  "status": "OPEN",
+  "note": "On a shared/netted account, risk exits must size to the TRADE's own qty, not the netted position size: change plan_risk_"
+ },
+ "reconcile-core-5|reconcile-core": {
+  "status": "OPEN",
+  "note": "Build the trade_id\u2192row and symbol\u2192sleeve lookups ONCE per cycle (or maintain incremental dicts) instead of per-fill; in "
+ },
+ "reconcile-core-7|reconcile-core": {
+  "status": "OPEN",
+  "note": "Add tests: (1) positions_by_symbol has X with the SIBLING sleeve's size while this sleeve's ledger short is open \u2192 risk "
+ },
+ "reconcile-ledger-4|reconcile-ledger": {
+  "status": "OPEN",
+  "note": "Compute age from the trading day to match membership: use trading_day_expr('ts_ms') in place of pl.col('date') in the tw"
+ },
+ "reconcile-ledger-7|reconcile-ledger": {
+  "status": "OPEN",
+  "note": "Scope the closed_pnl query + orphan classification to closures attributable to THIS sleeve: restrict to (symbol, side) h"
+ },
+ "continuous-4|continuous": {
+  "status": "OPEN",
+  "note": "Subtract entry_fee_usdt+exit_fee_usdt (and a funding estimate where available) from the live net_return, or rename the f"
+ },
+ "continuous-6|continuous": {
+  "status": "OPEN",
+  "note": "Either gate left_decile on the SAME confirmed-bar decile used for entry (so entry and state-exit share a panel), or supp"
+ },
+ "continuous-7|continuous": {
+  "status": "FIXED",
+  "note": "removed dead max_concurrent_entries"
+ },
+ "continuous-8|continuous": {
+  "status": "OPEN",
+  "note": "Add a test: open symbol S at deciding bar T; cover (left_decile/protective); re-enter S in the same wall-clock hour afte"
+ },
+ "long-sleeve-6|long-sleeve": {
+  "status": "OPEN",
+  "note": "Cross-check sibling-sleeve OPEN+PENDING ledgers (short/continuous trades+orders) in addition to the account-wide live sn"
+ },
+ "long-sleeve-8|long-sleeve": {
+  "status": "OPEN",
+  "note": "Iterate `eligible_ts` newest-first (descending) so fresher signals win the per-cycle cap, or collect all candidates then"
+ },
+ "long-sleeve-9|long-sleeve": {
+  "status": "OPEN",
+  "note": "Gate feature computation on enabled patterns (skip residual-beta/OI/metrics/funding blocks when their toggles are off) t"
+ },
+ "risk-config-cli-5|risk-config-cli": {
+  "status": "OPEN",
+  "note": "Either wire TradeFlowConfig into the trade-feed ingestion (if block/RPI filtering is intended) or delete the dataclass +"
+ },
+ "scripts-tooling-6|scripts-tooling": {
+  "status": "OPEN",
+  "note": "Align apply_decision_rule.compute_mar with r1: return float('nan') for |max_drawdown|<=1e-9 and exclude non-finite MAR d"
+ },
+ "scripts-tooling-7|scripts-tooling": {
+  "status": "FIXED",
+  "note": "non-circular moving-block bootstrap"
+ },
+ "data-assembly-3|data-assembly": {
+  "status": "FLAGGED",
+  "note": "rmom join-key off-by-one: strict-xfail test added; fix with the precompute shift"
+ },
+ "quality-godmod-1|quality-godmod": {
+  "status": "FIXED",
+  "note": "ws_risk empty-fetch require_evidence (C1)"
+ },
+ "quality-godmod-3|quality-godmod": {
+  "status": "FLAGGED",
+  "note": "funding undercount (same cluster)"
+ },
+ "ws-dataplane-1|ws-dataplane": {
+  "status": "OPEN",
+  "note": "Track per-(symbol) last_event_monotonic in _rows_by_symbol rows (or a parallel dict) and have snapshot_list()/the consum"
+ },
+ "ws-dataplane-3|ws-dataplane": {
+  "status": "FIXED",
+  "note": "kline recover_from_disk future-ts clamp"
+ },
+ "data-download-1|data-download": {
+  "status": "OPEN",
+  "note": "Either (a) record markers using the ACTUAL fetched/clamped range, not the requested range, for endpoints with provider h"
+ },
+ "data-download-2|data-download": {
+  "status": "FLAGGED",
+  "note": "Bybit funding interval (same class)"
+ },
+ "data-download-4|data-download": {
+  "status": "FIXED",
+  "note": "withhold completion marker on empty fresh fetch"
+ },
+ "data-assembly-2|data-assembly": {
+  "status": "OPEN",
+  "note": "Cross-check scrape symbol coverage against an authoritative dead-instrument source per backtest window and fail/label th"
+ },
+ "quality-godmod-4|quality-godmod": {
+  "status": "FLAGGED",
+  "note": "funding undercount test (covered by xfail)"
+ },
+ "quality-godmod-6|quality-godmod": {
+  "status": "FLAGGED",
+  "note": "partial-exit PnL (same)"
+ },
+ "ws-dataplane-6|ws-dataplane": {
+  "status": "OPEN",
+  "note": "Compute threshold_count and the coverage comparison against len(targets)/the symbols actually being bootstrapped for the"
+ },
+ "ws-dataplane-7|ws-dataplane": {
+  "status": "OPEN",
+  "note": "Maintain an incremental _global_min_ts_ms (or recompute lazily off eviction) the same way _global_max_ts_ms is cached, a"
+ },
+ "ws-dataplane-8|ws-dataplane": {
+  "status": "OPEN",
+  "note": "Add a last_message timestamp + watchdog to BybitPublicTickerStream (mirror the kline pool), and have _check_ws_health ac"
+ },
+ "ws-daemonloops-1|ws-daemonloops": {
+  "status": "FIXED",
+  "note": "_pre_resource_teardown hook stops protective thread before base resource teardown"
+ },
+ "ws-daemonloops-2|ws-daemonloops": {
+  "status": "FIXED",
+  "note": "protective-thread join budget covers in-flight order submit"
+ },
+ "data-download-7|data-download": {
+  "status": "OPEN",
+  "note": "Use a strict accessor returning None for missing keys (like _float_or_none) and let downstream treat null as missing; on"
+ },
+ "quality-dup-1|quality-dup": {
+  "status": "FIXED",
+  "note": "_float NaN/inf guard consolidated into _common.finite_float (+test)"
+ },
+ "quality-dup-2|quality-dup": {
+  "status": "OPEN",
+  "note": "Import MS_PER_DAY/MS_PER_HOUR from ._common in risk_model, signal_harness, continuous_events; delete the local redefinit"
+ },
+ "quality-dup-5|quality-dup": {
+  "status": "OPEN",
+  "note": "Use read_dataset_columns with a column projection (already supported, storage.py:367) and/or a recency window (only read"
+ },
+ "quality-dup-8|quality-dup": {
+  "status": "OPEN",
+  "note": "Centralize a `_contract_precision(contract) -> (tick_size, qty_step)` helper (with the canonical fallbacks) in event_dem"
+ },
+ "quality-dup-9|quality-dup": {
+  "status": "OPEN",
+  "note": "Create _common coercion helpers (_as_float finite-guarded, _as_int, _as_float_or_none) and consolidate the per-module co"
+ },
+ "quality-dup-12|quality-dup": {
+  "status": "OPEN",
+  "note": "Define the prefix constants once in order_link_id.py (ENTRY_PREFIXES, EXIT_PREFIXES per sleeve) and expose is_exit_link "
+ },
+ "quality-godmod-7|quality-godmod": {
+  "status": "OPEN",
+  "note": "Add test_free_slots_respects_open_count_and_caps_new_entries: seed refreshed_open with k open trades, assert exactly max"
+ },
+ "reaudit-reconcile-3": {
+  "status": "FIXED",
+  "note": "re-audit: entry_price<=0 stuck-open regression fixed (+2 tests)"
+ },
+ "reaudit-reconcile-2": {
+  "status": "FIXED",
+  "note": "re-audit: empty-side fallback regression fixed (+test)"
+ },
+ "reaudit-bootstrap": {
+  "status": "FIXED",
+  "note": "re-audit: block-bootstrap helper extracted + doc + 2 tests"
+ }
+}

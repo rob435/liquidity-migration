@@ -12,6 +12,11 @@ on:
       - "liquidity_migration/**"
       - "deploy/systemd/*.service"
       - "deploy/systemd/*.timer"
+      # Per-sleeve kill-switch source-of-truth: flipping a sleeve on/off here (or
+      # editing the shared sleeve lib) must trigger a redeploy so the toggle takes
+      # effect — deploy_vps_live.sh sources both at runtime to enable/disable sleeves.
+      - "deploy/sleeves.env"
+      - "deploy/lib_sleeves.sh"
       # Hand-list every script that is either invoked by this workflow
       # OR launched by a deployed systemd unit. A glob would auto-deploy
       # anything new in scripts/, which tests pin to a strict allowlist
