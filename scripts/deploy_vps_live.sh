@@ -248,9 +248,14 @@ systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Envir
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=LONG_DATA_ROOT=data/bybit-long-demo-event'
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'
 # Continuous sleeve go-live assertions: live order submission + its disaster stop present.
-systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=1'
-systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=STOP_LOSS_PCT=0.25'
-# MONEY-SAFETY: the continuous PAPER shadow must NEVER submit orders. Fail loud if the
+# Only when the sleeve is toggled ON — a retired sleeve's file content must not be an
+# unconditional deploy gate (it would block a deploy if the unit is ever edited while off).
+if sleeve_on "$CONTINUOUS_SLEEVE"; then
+  systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=1'
+  systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=STOP_LOSS_PCT=0.25'
+fi
+# MONEY-SAFETY: the continuous PAPER shadow must NEVER submit orders (kept UNCONDITIONAL —
+# the paper unit must be safe regardless of toggle). Fail loud if the
 # paper unit is mis-wired to submit (it must be a no-money dry-run on its own ledger root).
 systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=0'
 systemctl cat liquidity-migration-bybit-continuous-paper.service --no-pager | grep -E 'Environment=PAPER_MODE=1'

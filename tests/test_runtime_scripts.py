@@ -843,7 +843,20 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "liquidity-migration-bybit-demo.service" in text
     assert "liquidity-migration-bybit-risk.service" in text
     assert "retired unit" in text
-    assert "systemctl is-enabled --quiet liquidity-migration-bybit-demo.service" in text
+    # Recovery routes sleeve enable/restart/verify through the SAME kill-switch as
+    # deploy_vps_live.sh (single source of truth) — NO hardcoded per-sleeve enables that
+    # could resurrect an OFF sleeve (e.g. the look-ahead-disabled continuous sleeve).
+    assert "lib_sleeves.sh" in text
+    assert "lm_load_sleeve_toggles" in text
+    assert "systemctl enable liquidity-migration-bybit-risk.service" in text
+    assert "systemctl restart liquidity-migration-bybit-risk.service" in text
+    assert "systemctl is-enabled --quiet liquidity-migration-bybit-risk.service" in text
+    for sleeve in ("SHORT", "LONG", "CONTINUOUS"):
+        assert f'apply_sleeve_enable "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
+        assert f'verify_sleeve "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
+    # The continuous rmom timer + its go-live asserts are gated behind the toggle, so a
+    # recovery with CONTINUOUS_SLEEVE=off cannot bring the disabled sleeve back.
+    assert 'if sleeve_on "$CONTINUOUS_SLEEVE"; then' in text
     assert "Environment=STRATEGY_PROFILE=promoted" in text
     assert "Environment=INTERVAL_SECONDS=60" in text
     # Match-the-backtest mode: rank-end / max-symbols of 0 disables the

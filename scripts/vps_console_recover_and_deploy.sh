@@ -215,49 +215,57 @@ systemctl disable --now \
   model050426-bybit-demo-signal.timer \
   model050426-bybit-demo-signal.service \
   2>/dev/null || true
-systemctl enable liquidity-migration-bybit-demo.service
+# --- per-sleeve kill-switch (deploy/sleeves.env) — the SAME single source of truth as
+# scripts/deploy_vps_live.sh, so disaster recovery can NEVER resurrect an OFF sleeve.
+# Previously this path hardcoded every sleeve ON, which would re-enable the look-ahead-
+# disabled continuous sleeve (it ships SUBMIT_ORDERS=1) regardless of the toggle. ------
+. deploy/lib_sleeves.sh
+lm_load_sleeve_toggles
+echo "sleeves: SHORT=$SHORT_SLEEVE LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE"
 systemctl enable liquidity-migration-bybit-risk.service
-systemctl enable liquidity-migration-bybit-paper.service
-systemctl enable liquidity-migration-bybit-long-demo.service
-systemctl enable liquidity-migration-bybit-long-paper.service
-# Continuous-fade sleeve (live on demo 2026-06-01) — recovery must bring it back too.
-systemctl enable liquidity-migration-bybit-continuous-demo.service
+apply_sleeve_enable "$SHORT_SLEEVE" $SHORT_SLEEVE_UNITS
+apply_sleeve_enable "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
+apply_sleeve_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 # Timers must be enable --now: enable alone writes the symlink but doesn't
-# start the timer, so the demo-health watchdog + daily combined-book report
-# would sit dormant on a freshly-recovered VPS.
+# start the timer, so the demo-health/liveness watchdogs + daily combined-book
+# report would sit dormant on a freshly-recovered VPS.
 systemctl enable --now liquidity-migration-demo-health.timer
+systemctl enable --now liquidity-migration-demo-liveness.timer
 systemctl enable --now liquidity-migration-combined-book-report.timer
-systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer
-systemctl restart liquidity-migration-bybit-demo.service
+# The continuous rmom-refresh timer is toggled WITH the continuous sleeve.
+if sleeve_on "$CONTINUOUS_SLEEVE"; then
+  systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer
+else
+  systemctl disable --now liquidity-migration-continuous-rmom-refresh.timer 2>/dev/null || true
+fi
+# Restart: risk ALWAYS + FIRST (the shared multi-sleeve tracker reading every *_DATA_ROOT
+# must be up before any sleeve restarts); then only the ON sleeves (off ones were
+# disable --now'd above).
 systemctl restart liquidity-migration-bybit-risk.service
-systemctl restart liquidity-migration-bybit-paper.service
-systemctl restart liquidity-migration-bybit-long-demo.service
-systemctl restart liquidity-migration-bybit-long-paper.service
-# Risk service restarts BEFORE the continuous daemon so the multi-sleeve tracker
-# (which reads CONTINUOUS_DATA_ROOT) is up before continuous starts trading.
-systemctl restart liquidity-migration-bybit-continuous-demo.service
+if sleeve_on "$SHORT_SLEEVE"; then systemctl restart liquidity-migration-bybit-demo.service liquidity-migration-bybit-paper.service; fi
+if sleeve_on "$LONG_SLEEVE"; then systemctl restart liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service; fi
+if sleeve_on "$CONTINUOUS_SLEEVE"; then systemctl restart liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service; fi
 
 if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then
   sleep "$SYSTEMD_SETTLE_SECONDS"
 fi
 
-systemctl is-active --quiet liquidity-migration-bybit-demo.service
+# Risk always runs; each sleeve is verified per its toggle (on => active+enabled,
+# off => NOT active) — identical to deploy_vps_live.sh.
 systemctl is-active --quiet liquidity-migration-bybit-risk.service
-systemctl is-active --quiet liquidity-migration-bybit-paper.service
-systemctl is-active --quiet liquidity-migration-bybit-long-demo.service
-systemctl is-active --quiet liquidity-migration-bybit-long-paper.service
-systemctl is-active --quiet liquidity-migration-bybit-continuous-demo.service
-systemctl is-enabled --quiet liquidity-migration-bybit-demo.service
 systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
-systemctl is-enabled --quiet liquidity-migration-bybit-paper.service
-systemctl is-enabled --quiet liquidity-migration-bybit-long-demo.service
-systemctl is-enabled --quiet liquidity-migration-bybit-long-paper.service
-systemctl is-enabled --quiet liquidity-migration-bybit-continuous-demo.service
-systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer
+verify_sleeve "$SHORT_SLEEVE" $SHORT_SLEEVE_UNITS
+verify_sleeve "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
+verify_sleeve "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
+if sleeve_on "$CONTINUOUS_SLEEVE"; then
+  systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer
+fi
 # Timer parity — recovery must catch a missed enable just like deploy does.
 systemctl is-enabled --quiet liquidity-migration-demo-health.timer
+systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer
 systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer
 systemctl is-active --quiet liquidity-migration-demo-health.timer
+systemctl is-active --quiet liquidity-migration-demo-liveness.timer
 systemctl is-active --quiet liquidity-migration-combined-book-report.timer
 
 for legacy_unit in \
@@ -297,7 +305,11 @@ systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Envir
 # read EVERY sleeve's ledger root, else a sibling sleeve's live positions get flattened.
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=LONG_DATA_ROOT=data/bybit-long-demo-event'
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'
-systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=1'
-systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=STOP_LOSS_PCT=0.25'
+# Continuous go-live config asserts only when the sleeve is toggled ON — a retired
+# sleeve's file content must not be an unconditional recovery gate.
+if sleeve_on "$CONTINUOUS_SLEEVE"; then
+  systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=1'
+  systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=STOP_LOSS_PCT=0.25'
+fi
 
 echo "deploy-verify-ok commit=$(git rev-parse --short HEAD)"

@@ -133,9 +133,12 @@ systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Envir
 # if the risk unit isn't wired to the long + continuous sleeves.
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=LONG_DATA_ROOT=data/bybit-long-demo-event'
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'
-# Continuous sleeve live + its disaster stop.
-systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=1'
-systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=STOP_LOSS_PCT=0.25'
+# Continuous sleeve live config + its disaster stop — only when the sleeve is toggled ON
+# (a retired sleeve's file content must not be an unconditional verify gate).
+if sleeve_on "$CONTINUOUS_SLEEVE"; then
+  systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=1'
+  systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=STOP_LOSS_PCT=0.25'
+fi
 
 systemctl show liquidity-migration-bybit-demo.service \
   --property=ActiveState \

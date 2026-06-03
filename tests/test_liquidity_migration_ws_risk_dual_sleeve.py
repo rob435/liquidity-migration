@@ -37,7 +37,12 @@ def test_active_sleeves_follows_killswitch_and_roots(tmp_path: Path, monkeypatch
 
     for var in ("SHORT_SLEEVE", "LONG_SLEEVE", "CONTINUOUS_SLEEVE"):
         monkeypatch.delenv(var, raising=False)
-    # all 3 owned + unset toggles ⇒ all active ⇒ 1/3 each
+    # Unset toggles mirror deploy/lib_sleeves.sh: short/long default ON, continuous default
+    # OFF (look-ahead-disabled) ⇒ 2 active ⇒ 1/2 each.
+    assert engine._active_sleeves() == ["short", "long"]
+    assert equal_split_budget(engine._active_sleeves()) == {"short": 0.5, "long": 0.5}
+    # Explicitly turn continuous ON ⇒ all 3 active ⇒ 1/3 each.
+    monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
     assert engine._active_sleeves() == ["short", "long", "continuous"]
     assert equal_split_budget(engine._active_sleeves()) == {"short": 1/3, "long": 1/3, "continuous": 1/3}
     # toggle continuous OFF ⇒ 2 active ⇒ 1/2 each

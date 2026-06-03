@@ -494,11 +494,16 @@ class EventWebSocketRiskEngine:
 
     def _active_sleeves(self) -> list[str]:
         """Sleeves that are BOTH enabled (kill-switch toggle in sleeves.env, loaded as this
-        unit's EnvironmentFile; unset ⇒ on) AND owned by this engine (root configured). This
-        is the denominator for the equal-split IM budget = 1/len(active): toggle a sleeve off
-        and the remaining sleeves' shares grow on the very next reconcile pass."""
+        unit's EnvironmentFile) AND owned by this engine (root configured). This is the
+        denominator for the equal-split IM budget = 1/len(active): toggle a sleeve off and the
+        remaining sleeves' shares grow on the next reconcile pass. The unset-defaults mirror
+        deploy/lib_sleeves.sh EXACTLY (SHORT/LONG on, CONTINUOUS off — look-ahead-disabled) so
+        this denominator can never drift from the kill-switch; in production the risk unit's
+        EnvironmentFile always sets the toggles explicitly, so the default only matters off-VPS."""
+        _defaults = {"SHORT_SLEEVE": "on", "LONG_SLEEVE": "on", "CONTINUOUS_SLEEVE": "off"}
+
         def _on(var: str) -> bool:
-            return os.environ.get(var, "on").strip().lower() in {"on", "1", "true", "yes"}
+            return os.environ.get(var, _defaults[var]).strip().lower() in {"on", "1", "true", "yes"}
         active: list[str] = []
         if _on("SHORT_SLEEVE"):  # short root is always this engine's self.root
             active.append("short")
