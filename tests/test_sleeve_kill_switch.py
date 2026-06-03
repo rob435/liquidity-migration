@@ -82,21 +82,33 @@ def test_verify_fails_when_on_sleeve_is_not_running(tmp_path: Path) -> None:
     assert "not active" in err
 
 
-def test_default_toggles_are_all_on(tmp_path: Path) -> None:
-    # Defaults must be all-on so a deploy with no override is identical to before the kill-switch.
+def test_loaded_toggles_keep_short_long_on_continuous_off(tmp_path: Path) -> None:
+    # Loaded toggles: SHORT/LONG run; CONTINUOUS stays OFF (look-ahead-disabled 2026-06-03,
+    # versioned in the committed deploy/sleeves.env so a host rebuild can't resurrect it).
     rc, _calls, err = _run(tmp_path, """
         lm_load_sleeve_toggles
-        test "$SHORT_SLEEVE" = on && test "$LONG_SLEEVE" = on && test "$CONTINUOUS_SLEEVE" = on
-        echo "ALL_ON_OK"
+        test "$SHORT_SLEEVE" = on && test "$LONG_SLEEVE" = on && test "$CONTINUOUS_SLEEVE" = off
+        echo "TOGGLES_OK"
     """)
     assert rc == 0, err
 
 
-def test_committed_sleeves_env_defaults_on() -> None:
-    # The committed file itself must default every sleeve on (no surprise-off on a fresh checkout).
+def test_lib_fallback_defaults_continuous_off_short_long_on(tmp_path: Path) -> None:
+    # Last-resort fallback (NEITHER sleeves.env present): SHORT/LONG default on, CONTINUOUS
+    # OFF — even a stripped checkout can never resurrect the look-ahead-disabled sleeve.
+    rc, _calls, err = _run(tmp_path, """
+        : "${SHORT_SLEEVE:=on}"; : "${LONG_SLEEVE:=on}"; : "${CONTINUOUS_SLEEVE:=off}"
+        test "$SHORT_SLEEVE" = on && test "$LONG_SLEEVE" = on && test "$CONTINUOUS_SLEEVE" = off
+        echo "FALLBACK_OK"
+    """)
+    assert rc == 0, err
+
+
+def test_committed_sleeves_env_keeps_continuous_off() -> None:
+    # The committed file is the source of truth: SHORT/LONG=on, CONTINUOUS=off. Each line must
+    # be systemd-EnvironmentFile-safe (plain KEY=value, no inline comment on the assignment).
     env = (REPO / "deploy" / "sleeves.env").read_text()
-    for flag in ("SHORT_SLEEVE", "LONG_SLEEVE", "CONTINUOUS_SLEEVE"):
-        assert f"{flag}=on" in env, f"{flag} should default to on"
-        # Must be systemd-EnvironmentFile-safe: no inline comment on the assignment line.
+    expected = {"SHORT_SLEEVE": "on", "LONG_SLEEVE": "on", "CONTINUOUS_SLEEVE": "off"}
+    for flag, value in expected.items():
         line = next(ln for ln in env.splitlines() if ln.startswith(f"{flag}="))
-        assert line == f"{flag}=on", f"{flag} line must be plain KEY=on (no inline comment): {line!r}"
+        assert line == f"{flag}={value}", f"{flag} must be plain KEY={value} (no inline comment): {line!r}"

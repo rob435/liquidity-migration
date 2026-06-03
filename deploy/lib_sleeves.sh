@@ -17,9 +17,13 @@ lm_load_sleeve_toggles() {
     _lm_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     [ -f "$_lm_dir/sleeves.env" ] && . "$_lm_dir/sleeves.env"
     [ -f /etc/liquidity-migration/sleeves.env ] && . /etc/liquidity-migration/sleeves.env
+    # Fallbacks if NEITHER file set a toggle (a stripped checkout). SHORT/LONG are
+    # validated + running so default on; CONTINUOUS defaults OFF (look-ahead-disabled
+    # 2026-06-03) so even a missing config can never resurrect the broken sleeve. The
+    # committed deploy/sleeves.env is the real source of truth; these are last-resort.
     : "${SHORT_SLEEVE:=on}"
     : "${LONG_SLEEVE:=on}"
-    : "${CONTINUOUS_SLEEVE:=on}"
+    : "${CONTINUOUS_SLEEVE:=off}"
 }
 
 # sleeve_on <value> -> 0 (true) if the toggle means "run this sleeve".
