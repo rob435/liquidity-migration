@@ -127,6 +127,11 @@ class ContinuousDemoCycleConfig:
     account_type: str = "UNIFIED"
     settle_coin: str = "USDT"
     data_name: str = "continuous-demo-event"
+    # long-sleeve-5/-6: shared cross-sleeve control root (owned by ws_risk; lives in the
+    # short/authority root). None => auto-resolve from this sleeve's root (a safe no-op,
+    # since ws_risk writes the control row only to the authority root); set the short root
+    # in deploy to make continuous consult it. Read-only, fail-open, NO-OP until seeded.
+    cross_sleeve_account_root: str | None = None
     strategy_profile: str = "continuous_v1"
     paper_mode: bool = False
     exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
@@ -747,6 +752,7 @@ from .event_demo import (  # noqa: E402
 )
 from .event_demo_data import _download_recent_1h_klines  # noqa: E402
 from .storage import exclusive_file_lock, read_dataset, write_dataset  # noqa: E402
+from . import cross_sleeve as _cross_sleeve  # noqa: E402
 
 _logger = logging.getLogger(__name__)
 
@@ -1168,8 +1174,21 @@ def run_continuous_demo_cycle(
             _logger.warning(
                 "continuous entry circuit breaker TRIPPED: %d adverse covers in %dmin >= %d — pausing new entries",
                 recent_adverse, demo.entry_pause_window_minutes, demo.entry_pause_after_adverse_exits)
+        # long-sleeve-5: shrink-only IM-budget clamp off the shared control row (read-only,
+        # fail-open). When the continuous sleeve is at/over its IM ceiling _eff_max == 0 and
+        # selection is skipped this pass; NO-OP until the operator seeds a 'continuous' budget.
+        _cs_root = (
+            Path(demo.cross_sleeve_account_root).expanduser()
+            if demo.cross_sleeve_account_root is not None
+            else _cross_sleeve.shared_account_root(root)
+        )
+        _cs_state = _cross_sleeve.read_account_state(_cs_root)
+        _eff_max, _cont_margin_clamped = _cross_sleeve.clamp_max_new_entries(
+            demo.max_new_entries_per_cycle, sleeve="continuous", state=_cs_state)
+        skipped_continuous_margin_budget = demo.max_new_entries_per_cycle if _cont_margin_clamped else 0
+        skipped_continuous_reservation = 0
         candidates: list[dict[str, Any]] = []
-        if not (errors and demo.submit_orders) and not entry_paused:
+        if not (errors and demo.submit_orders) and not entry_paused and _eff_max > 0:
             picks = select_continuous_entries(
                 entry_state, held_symbols=held_symbols, cooldown_symbols=cooldown, open_count=open_count,
                 config=demo, eligible_symbols=eligible)
@@ -1194,6 +1213,15 @@ def run_continuous_demo_cycle(
                 candidates.append({**c, "signal_ts_ms": signal_ts, "stop_loss_pct": demo.stop_loss_pct,
                                    "live_price": price_by_symbol.get(sym, 0.0),
                                    "reentry_seq": prior_by_symbol.get(sym, 0)})
+        # long-sleeve-6: claim each candidate symbol in the shared registry under the
+        # control-row lock before submit; a symbol a sibling holds (active reservation or
+        # live venue position) is dropped, closing the same-minute cross-process race.
+        # Fail-open; submit-only (dry-run/paper never contend for the shared account).
+        if demo.submit_orders and candidates:
+            candidates, skipped_continuous_reservation = _cross_sleeve.partition_claimable(
+                _cs_root, candidates, sleeve="continuous", now_ms=cycle_now_ms,
+                live_position_symbols=live_position_symbols,
+            )
         order_notional_frac = demo.per_position_notional_pct_equity / 100.0
         exec_entries, entry_orders = _execute_continuous_entries(
             candidates, trading_client=trading_client, demo=demo, equity_usdt=equity_usdt,
@@ -1233,6 +1261,8 @@ def run_continuous_demo_cycle(
             "entries": len([r for r in exec_entries if r.get("status") in ("filled", "partial", "planned")]),
             "exits": len(exec_exits), "candidates": len(candidates), "equity_usdt": equity_usdt,
             "entry_paused": entry_paused, "recent_adverse_exits": recent_adverse,
+            "skipped_continuous_margin_budget": skipped_continuous_margin_budget,  # ls-5 cross-sleeve IM clamp
+            "skipped_continuous_reservation": skipped_continuous_reservation,  # ls-6 symbol taken by a sibling
         }
         # Flatten the daemon's reactivity-loop counters (rx_*) into the persisted cycle so the watchdog
         # can see a dead/stale fast protective-exit loop instead of it failing silently.

@@ -18,6 +18,7 @@ from .bybit import BybitMarketData, BybitPrivateClient, BybitRestRateLimiter, re
 from .config import ResearchConfig
 from .downloaders import _normalize_instruments, _normalize_tickers
 from .storage import exclusive_file_lock, read_dataset, write_dataset
+from . import cross_sleeve as _cross_sleeve
 from .telegram import send_telegram_message
 from .trade_lifecycle import _bar_excursion, _side_return
 from ._common import MS_PER_DAY, MS_PER_HOUR, MS_PER_MINUTE, PENDING_ORDER_STATUSES
@@ -82,6 +83,11 @@ class EventDemoCycleConfig:
     settle_coin: str = "USDT"
     data_name: str = "event-demo"
     strategy_profile: str = "promoted"
+    # long-sleeve-5/-6: shared cross-sleeve control root (owned by ws_risk; lives in the
+    # short/authority root). None => auto-resolve from this sleeve's root. The short sleeve
+    # IS the authority root, so it is live as soon as ws_risk writes; NO-OP until then / until
+    # the operator sets a budget split (read-only, fail-open).
+    cross_sleeve_account_root: str | None = None
     max_active_symbols: int = 0  # 0 = use the strategy profile's value; >0 overrides it
     # FAIL-CLOSED orphan invariant (default True): a ledger trade whose Bybit
     # position is absent is orphan-closed ONLY when there is POSITIVE evidence
@@ -370,6 +376,8 @@ class _EntryStageResult:
     wallet_error_entry_skips: int
     live_position_entry_skips: int
     live_open_entry_skips: int
+    short_margin_budget_skips: int  # ls-5: cross-sleeve IM clamp
+    short_reservation_skips: int  # ls-6: symbol taken by a sibling
     entries_parallel_workers: int
     executed_entries: list[dict[str, Any]]
     entry_order_rows: list[dict[str, Any]]
@@ -423,6 +431,18 @@ def _cycle_select_and_execute_entries(
         klines=klines,
     )
     free_slots = _free_entry_slots(strategy.max_active_symbols, refreshed_open, all_orders, now_ms=ctx.cycle_now_ms)
+    # long-sleeve-5: shrink-only IM-budget clamp off the shared control row ws_risk owns
+    # (read-only, fail-open -> neutral no-op). Never upsizes free_slots, never touches a
+    # sibling. NO-OP until the operator seeds a 'short' budget split.
+    _cs_root = (
+        Path(demo.cross_sleeve_account_root).expanduser()
+        if demo.cross_sleeve_account_root is not None
+        else _cross_sleeve.shared_account_root(ctx.root)
+    )
+    _cs_state = _cross_sleeve.read_account_state(_cs_root)
+    _free_slots_before_budget = free_slots
+    free_slots, _short_margin_clamped = _cross_sleeve.clamp_max_new_entries(free_slots, sleeve="short", state=_cs_state)
+    skipped_short_margin_budget = min(len(entry_candidates), _free_slots_before_budget) if _short_margin_clamped else 0
     entry_candidates = entry_candidates[:free_slots]
     entry_candidates, pending_entry_skips = _filter_pending_entry_orders(entry_candidates, all_orders, now_ms=ctx.cycle_now_ms)
     snapshot_error_entry_skips = 0
@@ -430,6 +450,7 @@ def _cycle_select_and_execute_entries(
     wallet_error_entry_skips = 0
     live_position_entry_skips = 0
     live_open_entry_skips = 0
+    short_reservation_skips = 0
     if position_snapshot_error and demo.submit_orders:
         snapshot_error_entry_skips = len(entry_candidates)
         entry_candidates = []
@@ -445,6 +466,14 @@ def _cycle_select_and_execute_entries(
         # paper's — paper relies on its own ledger via _filter_pending_entry_orders.
         entry_candidates, live_position_entry_skips = _filter_live_position_entry_orders(entry_candidates, live_position_symbols)
         entry_candidates, live_open_entry_skips = _filter_live_open_entry_orders(entry_candidates, live_entry_order_symbols)
+        # long-sleeve-6: claim each surviving symbol in the shared registry (under the
+        # control-row lock) before submit; a symbol a sibling holds (active reservation or
+        # live position) is dropped, closing the same-minute cross-process race the venue
+        # snapshot misses. Fail-open (no writer / read error => grant). Submit-only.
+        entry_candidates, short_reservation_skips = _cross_sleeve.partition_claimable(
+            _cs_root, entry_candidates, sleeve="short", now_ms=ctx.cycle_now_ms,
+            live_position_symbols=live_position_symbols,
+        )
     # Live submission fans candidates across a small worker pool (each worker owns
     # its own private client routed through a shared rate limiter).
     private_factory: Callable[[], Any] | None
@@ -488,6 +517,8 @@ def _cycle_select_and_execute_entries(
         wallet_error_entry_skips=wallet_error_entry_skips,
         live_position_entry_skips=live_position_entry_skips,
         live_open_entry_skips=live_open_entry_skips,
+        short_margin_budget_skips=skipped_short_margin_budget,
+        short_reservation_skips=short_reservation_skips,
         entries_parallel_workers=entries_parallel_workers,
         executed_entries=executed_entries,
         entry_order_rows=entry_order_rows,
@@ -840,6 +871,8 @@ def run_event_demo_cycle(
         wallet_error_entry_skips = entry_result.wallet_error_entry_skips
         live_position_entry_skips = entry_result.live_position_entry_skips
         live_open_entry_skips = entry_result.live_open_entry_skips
+        short_margin_budget_skips = entry_result.short_margin_budget_skips
+        short_reservation_skips = entry_result.short_reservation_skips
         entries_parallel_workers = entry_result.entries_parallel_workers
         executed_entries = entry_result.executed_entries
         entry_order_rows = entry_result.entry_order_rows
@@ -972,6 +1005,8 @@ def run_event_demo_cycle(
             "telegram_sent": False,
             "telegram_error": "",
             **{f"skipped_{key}": value for key, value in skip_counts.items()},
+            "skipped_short_margin_budget": short_margin_budget_skips,  # ls-5: cross-sleeve IM clamp
+            "skipped_short_reservation": short_reservation_skips,  # ls-6: symbol taken by a sibling
             "skipped_pending_entry_order": pending_entry_skips,
             "skipped_pending_exit_order": pending_exit_skips,
             "skipped_live_position_entry": live_position_entry_skips,

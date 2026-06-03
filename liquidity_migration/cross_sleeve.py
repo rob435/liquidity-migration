@@ -343,6 +343,40 @@ def clamp_max_new_entries(
     return max_new_entries, False
 
 
+def partition_claimable(
+    account_root: str | Path,
+    candidates: list[dict[str, Any]],
+    *,
+    sleeve: str,
+    now_ms: int,
+    live_position_symbols: set[str] | None = None,
+    ttl_ms: int = RESERVATION_TTL_MS,
+) -> tuple[list[dict[str, Any]], int]:
+    """long-sleeve-6 pre-submit gate for the short/continuous sleeves: claim each
+    candidate's symbol (dict with 'symbol' + 'trade_id') through the shared registry and
+    return (granted_candidates, skipped_count). A candidate whose symbol is taken by a
+    sibling (active foreign reservation OR live venue position) is dropped. Fail-open:
+    claim_symbol_reservation returns True on any error / no-writer, so this never blocks a
+    legitimate entry. Call ONLY on a real submit (dry-run/paper must not reserve)."""
+    granted: list[dict[str, Any]] = []
+    skipped = 0
+    for cand in candidates:
+        ok = claim_symbol_reservation(
+            account_root,
+            symbol=str(cand.get("symbol", "")),
+            sleeve=sleeve,
+            trade_id=str(cand.get("trade_id", "")),
+            now_ms=now_ms,
+            live_position_symbols=live_position_symbols,
+            ttl_ms=ttl_ms,
+        )
+        if ok:
+            granted.append(cand)
+        else:
+            skipped += 1
+    return granted, skipped
+
+
 def claim_symbol_reservation(
     account_root: str | Path,
     *,
