@@ -2747,6 +2747,66 @@ def test_daily_return_frame_nulls_returns_across_mid_history_gap() -> None:
     assert by_ts[ts_out(29)]["daily_return_1d"] is not None
 
 
+def test_daily_return_frame_rolling_windows_are_calendar_not_row_based() -> None:
+    """BAC-1 residual: the rolling windows (prior20_close_high, close_to_high_7d, ...) must
+    count CALENDAR span, not rows. Across a >window mid-history gap the window is empty/short
+    so it NULLs (min_samples), instead of silently pulling pre-gap rows in as if adjacent."""
+    MS_PER_DAY = 86_400_000
+    start = 1_704_067_200_000
+    present_days = list(range(0, 10)) + list(range(40, 50))  # 30-day gap on days 10..39
+    rows = []
+    for day in present_days:
+        day_start = start + day * MS_PER_DAY
+        for hour in range(24):
+            rows.append({
+                "symbol": "AAAUSDT", "ts_ms": day_start + hour * 3_600_000,
+                "open": 100.0, "high": 101.0 + day, "low": 99.0 - day, "close": 100.0 + day,
+                "turnover_quote": 1_000_000.0, "date": "2024-01-01",
+            })
+    frame = _daily_return_frame(pl.DataFrame(rows)).sort(["symbol", "ts_ms"])
+    by_ts = {int(r["ts_ms"]): r for r in frame.to_dicts()}
+
+    def ts_out(day: int) -> int:
+        return start + (day + 1) * MS_PER_DAY
+
+    first_after = by_ts[ts_out(40)]
+    # prior20_close_high: closed="left" over [day40-20d, day40) = days 20..39 -> ALL missing ->
+    # 0 samples < min_samples=5 -> NULL. The row-based shift(1).rolling_max(20) would instead
+    # have returned the pre-gap high (~day9), a 30+-day-stale "20-day high".
+    assert first_after["prior20_close_high"] is None
+    assert first_after["prior20_close_low"] is None
+    # close_to_high_7d: closed="right" over (day40-7d, day40] = only day40 present -> 1 sample
+    # < min_samples=3 -> rolling_max NULL -> ratio NULL (row-based would have been ~0.0).
+    assert first_after["close_to_high_7d"] is None
+    assert first_after["close_to_low_7d"] is None
+
+    deep_tail = by_ts[ts_out(49)]  # days 40..48 fill the prior-20d / prior-7d windows
+    assert deep_tail["prior20_close_high"] is not None
+    assert deep_tail["close_to_high_7d"] is not None
+
+
+def test_volume_features_rolling_sum_is_calendar_not_row_based() -> None:
+    """BAC-1 residual in volume_features: _roll3 / _roll20_mean (feeding volume_change_3d and
+    volume_persistence, core selection scores) must be time-windowed, not bar-count windowed.
+    Mirror the exact inline expression and prove it shrinks across a gap (no-op for contiguous)."""
+    MS_PER_DAY = 86_400_000
+
+    def roll3(df: pl.DataFrame) -> list:
+        return df.sort(["symbol", "ts_ms"]).with_columns(
+            pl.col("tq").rolling_sum_by("ts_ms", window_size=f"{3 * MS_PER_DAY}i", closed="right", min_samples=3)
+            .over("symbol").alias("r3")
+        )["r3"].to_list()
+
+    contiguous = pl.DataFrame({"symbol": ["A"] * 4, "ts_ms": [MS_PER_DAY * d for d in (1, 2, 3, 4)], "tq": [1.0, 2.0, 3.0, 4.0]})
+    # contiguous: rows 0,1 short of 3 samples -> None; row2 = 1+2+3 = 6; row3 = 2+3+4 = 9.
+    assert roll3(contiguous) == [None, None, 6.0, 9.0]
+
+    gapped = pl.DataFrame({"symbol": ["A"] * 4, "ts_ms": [MS_PER_DAY * d for d in (1, 2, 3, 20)], "tq": [1.0, 2.0, 3.0, 4.0]})
+    # row3 sits 17 days after row2 -> its trailing-3-day window holds only itself (1 sample
+    # < 3) -> None. Row-count rolling_sum(3) would have summed 2+3+4=9 across the gap.
+    assert roll3(gapped) == [None, None, 6.0, None]
+
+
 def test_daily_return_frame_last6h_uses_hours_not_rows() -> None:
     """BAC-5: signal_day_last6h_* covers the last 6 HOURS (hour-of-day >= 18), not the last
     6 present ROWS — a gapped final 6h must not pull in earlier hours."""

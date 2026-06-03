@@ -38,8 +38,18 @@ def build_volume_features(klines: pl.DataFrame, *, aggregation_ms: int = MS_PER_
         daily_rows.sort(["symbol", "ts_ms"])
         .with_columns((tq + 1.0).log().alias("log_turnover"))
         .with_columns(
-            tq.rolling_sum(window_size=3).over("symbol").alias("_roll3"),
-            tq.rolling_mean(window_size=20).over("symbol").alias("_roll20_mean"),
+            # BAC-1: calendar-aware rolling (window measured in TIME, not bar-count) so a
+            # mid-history gap shrinks the window instead of silently spanning it — these
+            # feed volume_change_3d / volume_persistence (core selection scores). The window
+            # is N*aggregation_ms ms (bar cadence), closed="right" includes the current bar,
+            # and min_samples matches bare rolling_*'s default (= window_size). No-op for a
+            # contiguous series (verified equivalence; covered by the numpy-reference test).
+            tq.rolling_sum_by("ts_ms", window_size=f"{3 * aggregation_ms}i", closed="right", min_samples=3)
+            .over("symbol")
+            .alias("_roll3"),
+            tq.rolling_mean_by("ts_ms", window_size=f"{20 * aggregation_ms}i", closed="right", min_samples=20)
+            .over("symbol")
+            .alias("_roll20_mean"),
         )
         .with_columns(
             # BAC-7: calendar-aware shifts so a mid-history gap yields NaN, not a

@@ -25,6 +25,39 @@ from .volume_events import (  # noqa: F401  (shared hub helpers)
 )
 
 
+def _cal_roll(
+    expr: pl.Expr,
+    agg: str,
+    n_days: int,
+    *,
+    shifted: bool,
+    min_samples: int,
+) -> pl.Expr:
+    """BAC-1: calendar-aware rolling window over a per-symbol (or market) daily ts_ms grid.
+
+    Row-based ``rolling_*(window_size=N)`` counts ROWS, so it silently spans a
+    mid-history gap — a bar 30 calendar days back counts as "yesterday" when the
+    intervening days are missing (delist/relist or a data gap). ``rolling_*_by``
+    counts CALENDAR span instead, so a gapped window correctly shrinks (and NULLs
+    out under ``min_samples``). For a *contiguous* daily series the two are
+    bit-identical — verified equivalence: ``shift(1).rolling_X(N, min_samples=M)``
+    == ``rolling_X_by(window=N days, closed="left", min_samples=M)`` and
+    ``rolling_X(N, min_samples=M)`` == ``rolling_X_by(..., closed="right", ...)``.
+
+    The caller applies ``.over("symbol")`` (per-symbol grids) or nothing (the
+    single market series). ``min_samples`` is passed explicitly because
+    ``rolling_*_by`` defaults it to 1, whereas bare ``rolling_*`` defaults it to
+    ``window_size`` — matching it keeps the contiguous-case output identical.
+
+    ``shifted=True``  reproduces ``.shift(1).rolling_X(N)`` — the prior N days
+        EXCLUDING the current day — via ``closed="left"``.
+    ``shifted=False`` reproduces ``.rolling_X(N)`` — the trailing N days
+        INCLUDING the current day — via ``closed="right"``.
+    """
+    window = f"{n_days * MS_PER_DAY}i"  # integer ms duration (ts_ms is numeric, not datetime)
+    closed = "left" if shifted else "right"
+    method = getattr(expr, f"rolling_{agg}_by")
+    return method("ts_ms", window_size=window, closed=closed, min_samples=min_samples)
 
 
 def _enriched_event_features(
@@ -140,19 +173,14 @@ def _enriched_event_features(
             expressions.append(calendar_shift(pl.col(col), 7).alias(f"prior7_{col}"))
     expressions.extend(
         [
-            pl.col("volume_persistence_z_rank_frac")
-            .shift(1)
-            .rolling_min(window_size=3, min_samples=1)
+            # BAC-1: calendar-aware (closed="left" == prior N days excluding today).
+            _cal_roll(pl.col("volume_persistence_z_rank_frac"), "min", 3, shifted=True, min_samples=1)
             .over("symbol")
             .alias("prior3_volume_persistence_rank_min"),
-            pl.col("volume_persistence_z_rank_frac")
-            .shift(1)
-            .rolling_max(window_size=7, min_samples=1)
+            _cal_roll(pl.col("volume_persistence_z_rank_frac"), "max", 7, shifted=True, min_samples=1)
             .over("symbol")
             .alias("prior7_volume_persistence_rank_max"),
-            pl.col("abs_daily_return_1d")
-            .shift(1)
-            .rolling_mean(window_size=7, min_samples=1)
+            _cal_roll(pl.col("abs_daily_return_1d"), "mean", 7, shifted=True, min_samples=1)
             .over("symbol")
             .alias("prior7_abs_daily_return_mean"),
             # BAC-1 FLAGSHIP GATE: prior7_liquidity_rank feeds liquidity_rank_improvement_7d
@@ -162,9 +190,7 @@ def _enriched_event_features(
             calendar_shift(pl.col("liquidity_rank"), 7).alias("prior7_liquidity_rank"),
             calendar_shift(pl.col("liquidity_rank"), 1).alias("prior1_liquidity_rank"),
             calendar_shift(pl.col("liquidity_rank"), 3).alias("prior3_liquidity_rank"),
-            pl.col("turnover_quote")
-            .shift(1)
-            .rolling_mean(window_size=7, min_samples=1)
+            _cal_roll(pl.col("turnover_quote"), "mean", 7, shifted=True, min_samples=1)
             .over("symbol")
             .alias("prior7_turnover_quote_mean"),
         ]
@@ -200,20 +226,17 @@ def _funding_feature_frame(funding: pl.DataFrame | None) -> pl.DataFrame:
         .sort(["symbol", "ts_ms"])
         .with_columns(
             [
-                pl.col("funding_rate_1d_sum")
-                .rolling_sum(window_size=3, min_samples=1)
+                # BAC-1: calendar-aware (closed="right" == trailing N days incl today).
+                _cal_roll(pl.col("funding_rate_1d_sum"), "sum", 3, shifted=False, min_samples=1)
                 .over("symbol")
                 .alias("funding_rate_3d_sum"),
-                pl.col("funding_rate_1d_sum")
-                .rolling_sum(window_size=7, min_samples=1)
+                _cal_roll(pl.col("funding_rate_1d_sum"), "sum", 7, shifted=False, min_samples=1)
                 .over("symbol")
                 .alias("funding_rate_7d_sum"),
-                pl.col("funding_rate_1d_sum")
-                .rolling_mean(window_size=7, min_samples=1)
+                _cal_roll(pl.col("funding_rate_1d_sum"), "mean", 7, shifted=False, min_samples=1)
                 .over("symbol")
                 .alias("funding_rate_7d_mean"),
-                pl.col("funding_positive_fraction_1d")
-                .rolling_mean(window_size=7, min_samples=1)
+                _cal_roll(pl.col("funding_positive_fraction_1d"), "mean", 7, shifted=False, min_samples=1)
                 .over("symbol")
                 .alias("funding_positive_fraction_7d"),
             ]
@@ -291,12 +314,11 @@ def _signed_flow_feature_frame(flow: pl.DataFrame | None) -> pl.DataFrame:
         .sort(["symbol", "ts_ms"])
         .with_columns(
             [
-                pl.col("taker_signed_quote_1d")
-                .rolling_sum(window_size=3, min_samples=1)
+                # BAC-1: calendar-aware (closed="right" == trailing N days incl today).
+                _cal_roll(pl.col("taker_signed_quote_1d"), "sum", 3, shifted=False, min_samples=1)
                 .over("symbol")
                 .alias("taker_signed_quote_3d"),
-                pl.col("taker_total_quote_1d")
-                .rolling_sum(window_size=3, min_samples=1)
+                _cal_roll(pl.col("taker_total_quote_1d"), "sum", 3, shifted=False, min_samples=1)
                 .over("symbol")
                 .alias("taker_total_quote_3d"),
             ]
@@ -359,12 +381,11 @@ def _mark_index_basis_frame(mark_price_1h: pl.DataFrame | None, index_price_1h: 
     )
     return basis.with_columns(
         [
-            pl.col("mark_index_basis_1d_mean")
-            .rolling_mean(window_size=3, min_samples=1)
+            # BAC-1: calendar-aware (closed="right" == trailing N days incl today).
+            _cal_roll(pl.col("mark_index_basis_1d_mean"), "mean", 3, shifted=False, min_samples=1)
             .over("symbol")
             .alias("mark_index_basis_3d_mean"),
-            pl.col("mark_index_basis_1d_mean")
-            .rolling_mean(window_size=7, min_samples=1)
+            _cal_roll(pl.col("mark_index_basis_1d_mean"), "mean", 7, shifted=False, min_samples=1)
             .over("symbol")
             .alias("mark_index_basis_7d_mean"),
         ]
@@ -390,12 +411,11 @@ def _premium_index_frame(premium_index_1h: pl.DataFrame | None) -> pl.DataFrame:
     )
     return premium.with_columns(
         [
-            pl.col("premium_index_1d_mean")
-            .rolling_mean(window_size=3, min_samples=1)
+            # BAC-1: calendar-aware (closed="right" == trailing N days incl today).
+            _cal_roll(pl.col("premium_index_1d_mean"), "mean", 3, shifted=False, min_samples=1)
             .over("symbol")
             .alias("premium_index_3d_mean"),
-            pl.col("premium_index_1d_mean")
-            .rolling_mean(window_size=7, min_samples=1)
+            _cal_roll(pl.col("premium_index_1d_mean"), "mean", 7, shifted=False, min_samples=1)
             .over("symbol")
             .alias("premium_index_7d_mean"),
         ]
@@ -470,10 +490,20 @@ def _attach_market_context(features: pl.DataFrame) -> pl.DataFrame:
         .sort("ts_ms")
         .with_columns(
             [
-                pl.col("market_median_return_1d").rolling_sum(7).alias("market_median_return_7d_sum"),
-                pl.col("market_median_return_1d").rolling_sum(30).alias("market_median_return_30d_sum"),
-                pl.col("market_pct_up_1d").rolling_mean(7).alias("market_pct_up_7d_mean"),
-                pl.col("market_pct_up_1d").rolling_mean(30).alias("market_pct_up_30d_mean"),
+                # BAC-1: calendar-aware on the single market-day series (no .over). Bare
+                # rolling_* defaults min_samples=window_size, so match it (7 / 30).
+                _cal_roll(pl.col("market_median_return_1d"), "sum", 7, shifted=False, min_samples=7).alias(
+                    "market_median_return_7d_sum"
+                ),
+                _cal_roll(pl.col("market_median_return_1d"), "sum", 30, shifted=False, min_samples=30).alias(
+                    "market_median_return_30d_sum"
+                ),
+                _cal_roll(pl.col("market_pct_up_1d"), "mean", 7, shifted=False, min_samples=7).alias(
+                    "market_pct_up_7d_mean"
+                ),
+                _cal_roll(pl.col("market_pct_up_1d"), "mean", 30, shifted=False, min_samples=30).alias(
+                    "market_pct_up_30d_mean"
+                ),
             ]
         )
     )
@@ -595,10 +625,11 @@ def _daily_return_frame(klines: pl.DataFrame) -> pl.DataFrame:
                 (calendar_shift(pl.col("close"), 1) / calendar_shift(pl.col("close"), 15) - 1.0).alias(
                     "prior14_return"
                 ),
-                pl.col("close").shift(1).rolling_max(window_size=20, min_samples=5).over("symbol").alias(
+                # BAC-1: calendar-aware (closed="left" == prior N days excluding today).
+                _cal_roll(pl.col("close"), "max", 20, shifted=True, min_samples=5).over("symbol").alias(
                     "prior20_close_high"
                 ),
-                pl.col("close").shift(1).rolling_min(window_size=20, min_samples=5).over("symbol").alias(
+                _cal_roll(pl.col("close"), "min", 20, shifted=True, min_samples=5).over("symbol").alias(
                     "prior20_close_low"
                 ),
                 pl.when((pl.col("high") - pl.col("low")).abs() > 1e-12)
@@ -644,33 +675,27 @@ def _daily_return_frame(klines: pl.DataFrame) -> pl.DataFrame:
         )
         .with_columns(
             [
-                (pl.col("close") / pl.col("high").rolling_max(window_size=7, min_samples=3).over("symbol") - 1.0).alias(
+                # BAC-1: calendar-aware. close_to_*_Nd include today (closed="right");
+                # prior30/prior7 are shift(1)-prior windows (closed="left").
+                (pl.col("close") / _cal_roll(pl.col("high"), "max", 7, shifted=False, min_samples=3).over("symbol") - 1.0).alias(
                     "close_to_high_7d"
                 ),
-                (pl.col("close") / pl.col("high").rolling_max(window_size=30, min_samples=10).over("symbol") - 1.0).alias(
+                (pl.col("close") / _cal_roll(pl.col("high"), "max", 30, shifted=False, min_samples=10).over("symbol") - 1.0).alias(
                     "close_to_high_30d"
                 ),
-                (pl.col("close") / pl.col("low").rolling_min(window_size=7, min_samples=3).over("symbol") - 1.0).alias(
+                (pl.col("close") / _cal_roll(pl.col("low"), "min", 7, shifted=False, min_samples=3).over("symbol") - 1.0).alias(
                     "close_to_low_7d"
                 ),
-                pl.col("daily_return_1d")
-                .shift(1)
-                .rolling_max(window_size=30, min_samples=5)
+                _cal_roll(pl.col("daily_return_1d"), "max", 30, shifted=True, min_samples=5)
                 .over("symbol")
                 .alias("prior30_max_daily_return"),
-                pl.col("daily_return_1d")
-                .shift(1)
-                .rolling_min(window_size=30, min_samples=5)
+                _cal_roll(pl.col("daily_return_1d"), "min", 30, shifted=True, min_samples=5)
                 .over("symbol")
                 .alias("prior30_min_daily_return"),
-                pl.col("daily_return_1d")
-                .shift(1)
-                .rolling_std(window_size=7, min_samples=4)
+                _cal_roll(pl.col("daily_return_1d"), "std", 7, shifted=True, min_samples=4)
                 .over("symbol")
                 .alias("prior7_return_volatility"),
-                pl.col("intraday_range_1d")
-                .shift(1)
-                .rolling_mean(window_size=7, min_samples=4)
+                _cal_roll(pl.col("intraday_range_1d"), "mean", 7, shifted=True, min_samples=4)
                 .over("symbol")
                 .alias("prior7_intraday_range_mean"),
             ]
