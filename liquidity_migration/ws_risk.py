@@ -66,6 +66,8 @@ from .event_demo import (
 from .long_native_event_demo import MULTI_STRAT_V1_STRATEGY_ID
 from .volume_events import VolumeEventResearchConfig
 from .storage import exclusive_file_lock, read_dataset, read_ledger_window, write_dataset
+from . import cross_sleeve as _cross_sleeve
+from .event_demo import wallet_equity_usdt
 
 
 _logger = logging.getLogger("liquidity_migration.ws_risk")
@@ -469,6 +471,55 @@ class EventWebSocketRiskEngine:
     def _write_order_rows_routed(self, rows: list[dict[str, Any]]) -> None:
         self._write_rows_routed(rows, trades=False)
 
+    # --- cross-sleeve control-row OWNER (long-sleeve-5/6) ------------------
+    # ws_risk is the only component that reads all three sleeve roots, so it owns the
+    # one shared control row: each reconcile pass it recomputes aggregate IM-used,
+    # GCs expired reservations, and rewrites the row (UNDER the dataset lock via
+    # cross_sleeve.write_account_state, so a concurrent sleeve reservation claim is
+    # never clobbered). The operator-set margin_budget_pct_by_sleeve is preserved, not
+    # written, here. Every step is self-swallowing — a control-row fault must NEVER
+    # break the reconcile loop (the sleeves just keep reading the last-good row).
+    @property
+    def account_key(self) -> str:
+        return _cross_sleeve.account_key(account_type=self.risk.account_type, settle_coin=self.risk.settle_coin)
+
+    def _sleeve_entry_leverage(self) -> dict[str, float]:
+        # The short sleeve's leverage from ws_risk's own demo config; long/continuous
+        # trades carry their own initial_margin_usdt / entry_leverage, which
+        # compute_im_used prefers, so they need no entry here.
+        demo = getattr(self.config, "demo", None)
+        lev = float(getattr(demo, "entry_leverage", 0.0) or 0.0) if demo is not None else 0.0
+        return {"short": lev} if lev > 0.0 else {}
+
+    def _account_equity_usdt(self) -> float:
+        client = self.private_client
+        if client is None:
+            return 0.0
+        try:
+            return wallet_equity_usdt(
+                client.get_wallet_balance(account_type=self.risk.account_type, coin=self.risk.settle_coin)
+            )
+        except Exception as exc:  # noqa: BLE001 - wallet read must never break reconcile
+            _logger.warning("ws_risk: cross-sleeve equity read failed: %s", exc)
+            return 0.0
+
+    def _refresh_cross_sleeve_account_state(self) -> None:
+        try:
+            equity = self._account_equity_usdt()
+            account_pct, im_by_sleeve = _cross_sleeve.compute_im_used(
+                self.state.open_trades, equity_usdt=equity, sleeve_leverage=self._sleeve_entry_leverage()
+            )
+            _cross_sleeve.write_account_state(
+                self.root,
+                equity_usdt=equity,
+                account_im_used_pct=account_pct,
+                im_used_pct_by_sleeve=im_by_sleeve,
+                now_ms=_now_ms(),
+                account_key=self.account_key,
+            )
+        except Exception as exc:  # noqa: BLE001 - owner write must never break reconcile
+            _logger.error("ws_risk: cross-sleeve state refresh failed (non-fatal): %s", exc)
+
     def _reconcile_prefetch_loop(self) -> None:
         """Background: keep the positions + open-orders REST snapshot fresh on a
         SEPARATE private client (own HTTP session — no concurrency with the
@@ -554,6 +605,7 @@ class EventWebSocketRiskEngine:
         self.adopt_untracked_positions()
         self.exit_untracked_positions()
         self.start_streams()
+        self._refresh_cross_sleeve_account_state()  # OWNER: seed the control row at cold start (ls-5/6)
         self.state.last_reconcile_monotonic = time.monotonic()
         _logger.info(
             "bootstrap complete positions=%d open_trades=%d pending_entry_symbols=%d errors=%d",
@@ -1398,6 +1450,9 @@ class EventWebSocketRiskEngine:
         # fires after a WS silence: this call re-subscribes any tickers that the
         # public stream dropped. Don't move it out of rest_reconcile.
         self.subscribe_tickers(set(self.state.positions_by_symbol) | set(_column_values(self.state.open_trades, "symbol")))
+        # OWNER: recompute IM-used + GC reservations + rewrite the ONE control row each
+        # pass (long-sleeve-5/6), AFTER stop enforcement. Self-swallowing.
+        self._refresh_cross_sleeve_account_state()
         self.state.last_reconcile_monotonic = time.monotonic()
 
     def adopt_untracked_positions(self) -> None:

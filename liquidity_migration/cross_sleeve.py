@@ -276,6 +276,59 @@ def seed_margin_budget(
         ))
 
 
+def account_key(*, account_type: str = "UNIFIED", settle_coin: str = "USDT") -> str:
+    """Stable per-netted-account key (one account => one control row). The exact value is
+    cosmetic for a single netted account (read_account_state reads the sole row), but
+    keying it on account_type+settle_coin keeps it correct if accounts ever coexist."""
+    return f"{account_type}-{settle_coin}"
+
+
+def _trade_im_usdt(trade: dict[str, Any], *, sleeve_leverage: dict[str, float]) -> float:
+    """Initial margin (USDT) for one OPEN trade. Prefer a stored ``initial_margin_usdt``
+    (the long sleeve computes it); else ``notional_usdt / leverage`` where leverage is the
+    trade's own ``entry_leverage``, the sleeve's configured leverage, or — when unknown — a
+    CONSERVATIVE 1.0 (IM = full notional, so the budget clamp triggers EARLIER, never
+    later; over-counting margin is fail-safe, under-counting is not)."""
+    im = float(trade.get("initial_margin_usdt") or 0.0)
+    if im > 0.0:
+        return im
+    notional = float(trade.get("notional_usdt") or 0.0)
+    if notional <= 0.0:
+        return 0.0
+    sleeve = str(trade.get("sleeve") or "")
+    lev = (
+        float(trade.get("entry_leverage") or 0.0)
+        or float(sleeve_leverage.get(sleeve, 0.0) or 0.0)
+        or 1.0
+    )
+    return notional / max(lev, 1.0)
+
+
+def compute_im_used(
+    open_trades: "pl.DataFrame | None",
+    *,
+    equity_usdt: float,
+    sleeve_leverage: dict[str, float],
+) -> tuple[float, dict[str, float]]:
+    """Aggregate initial-margin-used as a fraction of equity across OPEN trades, total +
+    per sleeve. Returns (account_im_used_pct, im_used_pct_by_sleeve). equity<=0 or no open
+    trades => (0.0, {}) — no clamp basis. ws_risk calls this each reconcile pass; the
+    sleeve of each trade is its ``sleeve`` ledger column (short/long/continuous)."""
+    if equity_usdt <= 0.0 or open_trades is None or open_trades.is_empty():
+        return 0.0, {}
+    by_sleeve: dict[str, float] = {}
+    total = 0.0
+    for t in open_trades.to_dicts():
+        im = _trade_im_usdt(t, sleeve_leverage=sleeve_leverage)
+        if im <= 0.0:
+            continue
+        sleeve = str(t.get("sleeve") or "")
+        by_sleeve[sleeve] = by_sleeve.get(sleeve, 0.0) + im
+        total += im
+    eq = float(equity_usdt)
+    return total / eq, {s: v / eq for s, v in by_sleeve.items()}
+
+
 def clamp_max_new_entries(
     max_new_entries: int, *, sleeve: str, state: CrossSleeveAccountState,
 ) -> tuple[int, bool]:

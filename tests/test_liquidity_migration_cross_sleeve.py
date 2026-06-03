@@ -148,3 +148,25 @@ def test_claim_is_atomic_under_true_thread_contention(tmp_path: Path) -> None:
         assert sum(1 for v in out.values() if v) == 1, f"attempt {attempt}: exactly one claim wins"
         active = [r for r in read_account_state(root).reservations if r["symbol"] == "RACEUSDT"]
         assert len(active) == 1, f"attempt {attempt}: exactly one reservation row persisted"
+
+
+def test_compute_im_used_aggregates_per_sleeve_with_fallbacks() -> None:
+    """ws_risk IM computation: prefer stored initial_margin_usdt (long), else
+    notional/leverage (sleeve-leverage map or per-trade entry_leverage), aggregated per
+    sleeve + total / equity. Unknown leverage -> conservative 1.0 (over-count)."""
+    import polars as pl
+
+    from liquidity_migration.cross_sleeve import compute_im_used
+
+    trades = pl.DataFrame([
+        {"sleeve": "long", "notional_usdt": 1000.0, "initial_margin_usdt": 100.0, "entry_leverage": None},
+        {"sleeve": "short", "notional_usdt": 1000.0, "initial_margin_usdt": 0.0, "entry_leverage": None},   # lev from map=2 -> 500
+        {"sleeve": "continuous", "notional_usdt": 600.0, "initial_margin_usdt": 0.0, "entry_leverage": 2.0},  # per-trade lev 2 -> 300
+    ], infer_schema_length=None)
+    account_pct, by_sleeve = compute_im_used(trades, equity_usdt=10_000.0, sleeve_leverage={"short": 2.0})
+    assert by_sleeve["long"] == 100.0 / 10_000      # stored IM
+    assert by_sleeve["short"] == 500.0 / 10_000     # 1000/2 via sleeve map
+    assert by_sleeve["continuous"] == 300.0 / 10_000  # 600/2 via per-trade leverage
+    assert abs(account_pct - (900.0 / 10_000)) < 1e-9
+    # equity 0 -> no clamp basis
+    assert compute_im_used(trades, equity_usdt=0.0, sleeve_leverage={}) == (0.0, {})
