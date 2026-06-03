@@ -27,13 +27,21 @@ All are DONE except the margin-budget adversarial verify (in flight).
    REQUIRED. Steps 2-4 (re-run gated backtest + MAR + recalibrate rmom_quantile=0.33) need backtest
    hardware = operator. Runbook: docs/audit_2026-06-03/rmom_revalidation_runbook.md.
 
-## IN-FLIGHT — finish this on resume
-A read-only adversarial verifier is running on the cross-sleeve build:
-- agentId `a41edcc76e85a234e`, output `/private/tmp/claude-501/-Users-jhbvdnsbkvnsd-Desktop-liquidity-migration/f9f52654-6c96-4562-ae4c-b95759189fc2/tasks/a41edcc76e85a234e.output`.
-- It probes: concurrency (under-lock RMW serialization across ws_risk + 3 sleeves + seed), fail-open/no-op
-  default, IM under-count, reservation ttl/venue-position handoff, dry-run-never-reserves.
-- ON RESUME: read its verdict (the task-notification re-invokes you), apply any real findings (fix → test
-  → commit on the branch), then mark task #19 complete + give the final summary.
+## IN-FLIGHT verify — DONE (round 5, 2026-06-03)
+The read-only adversarial verifier (agentId `a41edcc76e85a234e`) completed. It confirmed the cross-sleeve
+build's no-op-default, fail-open, under-lock RMW, single-row dedup, account_key consistency, stop-ordering,
+and IM attribution all sound under REAL multi-process contention, and found **one real defect**:
+- **CS-1 (medium-high, FIXED in `eb0534a`)** — single-row dedup keeps `max(updated_at_ms)`; ws_risk's
+  fresh-`_now_ms()` IM row could win over a sleeve's stale-`cycle_now_ms` claim row and silently erase a
+  just-granted reservation (claim returned True) → defeats the same-minute-race guard. Fixed with
+  monotonic `updated_at_ms = max(prior+1, now_ms)` in all 3 writers (last-committer-under-lock wins).
+- **CS-7 (low, FIXED)** continuous `trade_id=""` → reservation only TTL-GC'd; now derives the id pre-claim.
+- **CS-8 (low/soft, HARDENED)** leverage-implied IM floor, only when leverage is reliably known.
+- **CS-3 (test, ADDED)** real 3-process spawn contention test (the thread test missed the O_EXCL path).
+- CS-4 (ws_risk live-integration test harness) = remaining low-severity test-adequacy follow-up.
+
+Task #19 is COMPLETE. Full suite **1224 passing**, ruff + mypy clean. Details in SESSION_FIXES.md
+("round 5"). All 5 `/goal` items are built + verified on the branch; nothing pushed (deploy = operator).
 
 ## Key invariants for the cross-sleeve build (don't regress)
 - ALL control-row writes (ws_risk write_account_state, sleeve claim_symbol_reservation, operator
