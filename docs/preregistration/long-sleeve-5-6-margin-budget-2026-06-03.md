@@ -16,35 +16,43 @@ new-entry count if it is at/over its pre-registered IM ceiling (long-sleeve-5), 
 claims each symbol through an under-lock reservation so two processes can't both enter the same
 symbol in the same minute (long-sleeve-6). All writes are under-lock read-modify-write (serialized).
 
-## The numbers to set (OPERATOR DECISION — this is the pre-registered choice)
-Seed the per-sleeve IM ceilings (fractions of equity) via:
-```python
-from liquidity_migration import cross_sleeve
-cross_sleeve.seed_margin_budget(
-    "<SHORT/AUTHORITY ROOT e.g. data/bybit-demo-event>",
-    {"short": 0.35, "long": 0.45, "continuous": 0.20},  # <-- the pre-registered split; sum <= 1.0
-    now_ms=<int(time.time()*1000)>,
-)
-```
-Suggested starting split: **short 0.35 / long 0.45 / continuous 0.20** (sum 1.0; the long sleeve is
-the worst offender so it gets the largest share). Adjust to your risk allocation. `None` clears it
-(back to no-clamp). The split is preserved by ws_risk (never overwritten); only the operator sets it.
+## The split (REVISED 2026-06-03 — DYNAMIC EQUAL SPLIT, operator-directed)
+Superseding the earlier static `seed_margin_budget` choice: ws_risk now computes the split
+**automatically every reconcile pass** as an EQUAL division across the ACTIVE sleeves —
+
+> **budget(sleeve) = 1 / n_active**  (3 active → 0.333… each, 2 → 0.5 each, 1 → 1.0)
+
+`equal_split_budget()` in `cross_sleeve.py` is the equation; `ws_risk._active_sleeves()` is the
+denominator = sleeves that are BOTH owned (root configured on the risk unit) AND enabled (the
+`SHORT_SLEEVE`/`LONG_SLEEVE`/`CONTINUOUS_SLEEVE` kill-switch in `deploy/sleeves.env`, now loaded as
+the risk unit's `EnvironmentFile`; unset ⇒ on). So the split **self-adjusts the instant a sleeve is
+toggled on/off** — no operator reseed. `seed_margin_budget()` remains for tests/manual override but
+is overwritten by ws_risk on the next pass; the live budget is owner-computed.
+
+**Buffer note:** the equal split sums to EXACTLY 1.0 (n × 1/n), i.e. the per-sleeve IM ceilings
+together permit up to 100% of equity as initial margin (no free-margin liquidation buffer at the
+worst case where all sleeves are simultaneously maxed). With leverage this is a large notional. If a
+buffer is wanted, scale the equation by a factor <1 (e.g. 0.8/n each → sums to 0.8); this is a
+one-line change to `equal_split_budget`. Left at 1.0 per the operator's `100/n` instruction.
 
 ## Hypothesis / Predicted / Falsifier
-- **Hypothesis:** bounding aggregate IM prevents one sleeve (esp. long, 10% IM × 10 slots = 100%)
-  from starving the others' margin, without changing per-trade alpha below the ceiling.
-- **Predicted:** no sleeve's IM-used exceeds its ceiling when the book is loaded; entry counts are
-  unchanged BELOW the ceiling; same-symbol cross-sleeve double-entries drop to ~0.
-- **Falsifier:** a sleeve trades through its ceiling, OR below-ceiling entry counts drop (the clamp
-  is mis-triggering), OR two sleeves still enter the same symbol the same minute.
+- **Hypothesis:** an equal IM ceiling prevents one sleeve (esp. long, 10% IM × 10 slots = 100%)
+  from starving the others' margin on the shared netted account, without changing per-trade alpha
+  below the ceiling.
+- **Predicted:** no sleeve's IM-used exceeds 1/n_active when the book is loaded; entry counts are
+  unchanged BELOW the ceiling; same-symbol cross-sleeve double-entries drop to ~0; the split tracks
+  the kill-switch (kill a sleeve → survivors' ceilings rise on the next pass).
+- **Falsifier:** a sleeve trades through its 1/n ceiling, OR below-ceiling entry counts drop (the
+  clamp is mis-triggering), OR two sleeves still enter the same symbol the same minute, OR the split
+  fails to re-divide when a sleeve is toggled.
 
 ## Roots / decision rule
-Forward demo/paper only. Accept iff, after the budget is seeded, the cycle telemetry
-(`skipped_*_margin_budget`, `skipped_*_reservation`) shows the clamp/registry firing ONLY at/over the
-ceiling and never below, and the per-sleeve `im_used_pct_by_sleeve` stays within its ceiling. Do NOT
-treat the feature as validated until observed live (the 3-process race cannot be reproduced offline;
-unit tests pin the lock-atomicity + the budget/IM math + the under-lock RMW that preserves a
-concurrent claim).
+Forward demo/paper only. Accept iff the cycle telemetry (`skipped_*_margin_budget`,
+`skipped_*_reservation`) shows the clamp/registry firing ONLY at/over the 1/n ceiling and never below,
+the per-sleeve `im_used_pct_by_sleeve` stays within 1/n_active, and the split re-divides on a
+kill-switch toggle. Do NOT treat the feature as validated until observed live (the 3-process race
+cannot be reproduced offline; unit tests pin the equation, the lock-atomicity, the budget/IM math, and
+the under-lock RMW that preserves a concurrent claim).
 
 ## Deploy notes (safe-by-default)
 - The whole feature is a **NO-OP until the budget is seeded** AND ws_risk writes the control row;

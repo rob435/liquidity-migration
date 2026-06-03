@@ -12,10 +12,48 @@ from liquidity_migration.cross_sleeve import (
     CrossSleeveAccountState,
     claim_symbol_reservation,
     clamp_max_new_entries,
+    equal_split_budget,
     read_account_state,
     seed_margin_budget,
     write_account_state,
 )
+
+
+# --- equal-split budget equation (dynamic 1/n_active) ----------------------
+def test_equal_split_budget_divides_equally_by_active_count() -> None:
+    assert equal_split_budget(["short", "long", "continuous"]) == {
+        "short": 1 / 3, "long": 1 / 3, "continuous": 1 / 3,
+    }
+    assert equal_split_budget(["short", "long"]) == {"short": 0.5, "long": 0.5}
+    assert equal_split_budget(["short"]) == {"short": 1.0}
+    assert equal_split_budget([]) == {}  # nothing active -> no clamp
+
+
+def test_equal_split_budget_drops_unknowns_and_dedups() -> None:
+    # unknown sleeve names are not budgeted; duplicates collapse (deterministic denominator)
+    assert equal_split_budget(["short", "bogus", "short", "long"]) == {"short": 0.5, "long": 0.5}
+    assert equal_split_budget(["bogus"]) == {}
+
+
+def test_write_account_state_sets_preserves_and_clears_budget(tmp_path: Path) -> None:
+    """ws_risk writes the computed equal split; the sentinel default PRESERVES the prior
+    budget; an explicit None CLEARS it (back to no-clamp)."""
+    # SET: ws_risk writes a computed split
+    write_account_state(tmp_path, equity_usdt=10_000.0, account_im_used_pct=0.2,
+                        im_used_pct_by_sleeve={"short": 0.2}, now_ms=1_000,
+                        margin_budget_pct_by_sleeve={"short": 0.5, "long": 0.5})
+    assert read_account_state(tmp_path).margin_budget_pct_by_sleeve == {"short": 0.5, "long": 0.5}
+    # PRESERVE: a legacy call (no budget arg) keeps the prior split, updates IM only
+    write_account_state(tmp_path, equity_usdt=10_000.0, account_im_used_pct=0.3,
+                        im_used_pct_by_sleeve={"short": 0.3}, now_ms=2_000)
+    st = read_account_state(tmp_path)
+    assert st.margin_budget_pct_by_sleeve == {"short": 0.5, "long": 0.5}
+    assert st.im_used_for("short") == 0.3  # IM did update
+    # CLEAR: explicit None removes the clamp
+    write_account_state(tmp_path, equity_usdt=10_000.0, account_im_used_pct=0.3,
+                        im_used_pct_by_sleeve={"short": 0.3}, now_ms=3_000,
+                        margin_budget_pct_by_sleeve=None)
+    assert read_account_state(tmp_path).margin_budget_pct_by_sleeve is None
 
 
 # --- budget clamp (long-sleeve-5) ------------------------------------------

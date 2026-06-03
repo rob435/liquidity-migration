@@ -491,6 +491,22 @@ class EventWebSocketRiskEngine:
         lev = float(getattr(demo, "entry_leverage", 0.0) or 0.0) if demo is not None else 0.0
         return {"short": lev} if lev > 0.0 else {}
 
+    def _active_sleeves(self) -> list[str]:
+        """Sleeves that are BOTH enabled (kill-switch toggle in sleeves.env, loaded as this
+        unit's EnvironmentFile; unset ⇒ on) AND owned by this engine (root configured). This
+        is the denominator for the equal-split IM budget = 1/len(active): toggle a sleeve off
+        and the remaining sleeves' shares grow on the very next reconcile pass."""
+        def _on(var: str) -> bool:
+            return os.environ.get(var, "on").strip().lower() in {"on", "1", "true", "yes"}
+        active: list[str] = []
+        if _on("SHORT_SLEEVE"):  # short root is always this engine's self.root
+            active.append("short")
+        if self.long_root is not None and _on("LONG_SLEEVE"):
+            active.append("long")
+        if self.continuous_root is not None and _on("CONTINUOUS_SLEEVE"):
+            active.append("continuous")
+        return active
+
     def _account_equity_usdt(self) -> float:
         client = self.private_client
         if client is None:
@@ -509,6 +525,9 @@ class EventWebSocketRiskEngine:
             account_pct, im_by_sleeve = _cross_sleeve.compute_im_used(
                 self.state.open_trades, equity_usdt=equity, sleeve_leverage=self._sleeve_entry_leverage()
             )
+            # Equal-split IM budget = 1/n across the active sleeves, recomputed + written each
+            # pass so it self-adjusts to the kill-switch (3 on → 1/3 each, 2 → 1/2, 1 → 1/1).
+            budget = _cross_sleeve.equal_split_budget(self._active_sleeves())
             _cross_sleeve.write_account_state(
                 self.root,
                 equity_usdt=equity,
@@ -516,6 +535,7 @@ class EventWebSocketRiskEngine:
                 im_used_pct_by_sleeve=im_by_sleeve,
                 now_ms=_now_ms(),
                 account_key=self.account_key,
+                margin_budget_pct_by_sleeve=budget,
             )
         except Exception as exc:  # noqa: BLE001 - owner write must never break reconcile
             _logger.error("ws_risk: cross-sleeve state refresh failed (non-fatal): %s", exc)

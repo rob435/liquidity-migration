@@ -47,7 +47,9 @@ ProtectSystem=full
 ProtectHome=false
 ReadWritePaths=/opt/liquidity-migration
 # 7.6GB RAM + 4GB swap. Cap at 4G so a runaway leak can't consume all RAM
-# before systemd intervenes; normal operation sits well under 1G.
+# before systemd intervenes; normal operation sits well under 1G — the long-sleeve-4
+# 120-name x 100-day WS kline store adds only ~66MB, so 4G stays far more than enough
+# (do NOT lower toward the daemon's working set; a tight cap would OOM-restart-loop).
 MemoryMax=4G
 
 [Install]

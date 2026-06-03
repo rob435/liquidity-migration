@@ -58,6 +58,29 @@ RESERVATION_TTL_MS = 180_000
 VALID_SLEEVES = ("short", "long", "continuous")
 
 
+class _Preserve:
+    """Sentinel default for write_account_state's budget arg: keep the prior on-disk budget
+    (legacy behavior) rather than overwrite it. Distinct from None, which CLEARS the budget."""
+
+    __slots__ = ()
+
+
+_PRESERVE = _Preserve()
+
+
+def equal_split_budget(active_sleeves: Iterable[str]) -> dict[str, float]:
+    """The cross-sleeve IM-budget equation: split the account equally across the ACTIVE
+    sleeves — n active ⇒ 1/n of equity each (3→0.333…, 2→0.5, 1→1.0; 0→{} = no clamp).
+    Unknown names are dropped (only VALID_SLEEVES are budgeted) and duplicates collapse, so
+    the result is deterministic. ws_risk recomputes + writes this EVERY reconcile pass, so
+    the split self-adjusts the instant a sleeve is toggled on/off — no operator reseed."""
+    seen = [s for s in dict.fromkeys(active_sleeves) if s in VALID_SLEEVES]
+    if not seen:
+        return {}
+    share = 1.0 / len(seen)
+    return {s: share for s in seen}
+
+
 def shared_account_root(sleeve_data_root: str | Path) -> Path:
     """Resolve the shared account/control root from a sleeve's own data root (mirrors
     cli.py's sibling convention). If the sleeve IS the account root, returns it."""
@@ -222,14 +245,16 @@ def write_account_state(
     now_ms: int,
     closed_trade_ids: Iterable[str] = (),
     account_key: str = DEFAULT_ACCOUNT_KEY,
+    margin_budget_pct_by_sleeve: dict[str, float] | None | _Preserve = _PRESERVE,
 ) -> None:
     """ws_risk's per-pass control-row write — UNDER-LOCK read-modify-write so it never
     clobbers a reservation a sleeve claimed concurrently (long-sleeve-6 safety). Reads
-    the latest row under the dataset lock, updates ONLY the IM/equity fields, PRESERVES
-    the operator-set ``margin_budget_pct_by_sleeve`` (ws_risk never sets it), GCs
-    reservations (drop expired + any whose trade_id is now closed), and writes under the
-    held lock. Fail-safe: any error is swallowed + logged — a write failure can never
-    break the reconcile loop (the sleeves just keep reading the last-good row)."""
+    the latest row under the dataset lock, updates the IM/equity fields, SETS the
+    ``margin_budget_pct_by_sleeve`` (ws_risk computes the equal split = 1/n_active each
+    pass; pass the sentinel default to PRESERVE the prior budget instead, or None to clear
+    it), GCs reservations (drop expired + any whose trade_id is now closed), and writes
+    under the held lock. Fail-safe: any error is swallowed + logged — a write failure can
+    never break the reconcile loop (the sleeves just keep reading the last-good row)."""
     closed = {str(t) for t in closed_trade_ids}
     try:
         root = ensure_data_root(account_root)
@@ -239,12 +264,17 @@ def write_account_state(
                 r for r in prior.active_reservations(now_ms=now_ms)
                 if str(r.get("trade_id", "")) not in closed
             ]
+            budget = (
+                prior.margin_budget_pct_by_sleeve
+                if isinstance(margin_budget_pct_by_sleeve, _Preserve)
+                else margin_budget_pct_by_sleeve
+            )
             _write_state_locked(root, CrossSleeveAccountState(
                 account_key=prior.account_key or account_key,
                 equity_usdt=float(equity_usdt),
                 account_im_used_pct=float(account_im_used_pct),
                 im_used_pct_by_sleeve=dict(im_used_pct_by_sleeve),
-                margin_budget_pct_by_sleeve=prior.margin_budget_pct_by_sleeve,  # operator-owned
+                margin_budget_pct_by_sleeve=budget,  # ws_risk-computed equal split (or preserved)
                 reservations=kept,
                 # CS-1: monotonic — the LAST committer under the lock must win the single-row
                 # dedup (keep=last by updated_at_ms), regardless of wall-clock skew between a

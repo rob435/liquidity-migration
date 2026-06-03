@@ -21,6 +21,45 @@ from liquidity_migration.ws_risk import (
 )
 
 
+def test_active_sleeves_follows_killswitch_and_roots(tmp_path: Path, monkeypatch) -> None:
+    """The equal-split denominator = sleeves that are BOTH owned (root configured) AND
+    enabled (kill-switch toggle, unset ⇒ on). Toggling a sleeve off shrinks the active set,
+    so the equal-split budget grows for the survivors (3 → 1/3, 2 → 1/2, 1 → 1/1)."""
+    from liquidity_migration.cross_sleeve import equal_split_budget
+
+    short_root = tmp_path / "short"
+    long_root = tmp_path / "long"
+    cont_root = tmp_path / "cont"
+    for r in (short_root, long_root, cont_root):
+        r.mkdir()
+    cfg = EventWebSocketRiskConfig(long_data_root=str(long_root), continuous_data_root=str(cont_root))
+    engine = EventWebSocketRiskEngine(short_root, config=ResearchConfig(), risk_config=cfg)
+
+    for var in ("SHORT_SLEEVE", "LONG_SLEEVE", "CONTINUOUS_SLEEVE"):
+        monkeypatch.delenv(var, raising=False)
+    # all 3 owned + unset toggles ⇒ all active ⇒ 1/3 each
+    assert engine._active_sleeves() == ["short", "long", "continuous"]
+    assert equal_split_budget(engine._active_sleeves()) == {"short": 1/3, "long": 1/3, "continuous": 1/3}
+    # toggle continuous OFF ⇒ 2 active ⇒ 1/2 each
+    monkeypatch.setenv("CONTINUOUS_SLEEVE", "off")
+    assert engine._active_sleeves() == ["short", "long"]
+    assert equal_split_budget(engine._active_sleeves()) == {"short": 0.5, "long": 0.5}
+    # also kill long ⇒ short alone ⇒ 1/1
+    monkeypatch.setenv("LONG_SLEEVE", "0")
+    assert engine._active_sleeves() == ["short"]
+    assert equal_split_budget(engine._active_sleeves()) == {"short": 1.0}
+
+
+def test_active_sleeves_excludes_unconfigured_roots(tmp_path: Path, monkeypatch) -> None:
+    """A sleeve whose root is NOT configured is never in the active set even with its toggle
+    on — ws_risk only budgets sleeves it actually owns/reads."""
+    for var in ("SHORT_SLEEVE", "LONG_SLEEVE", "CONTINUOUS_SLEEVE"):
+        monkeypatch.delenv(var, raising=False)
+    cfg = EventWebSocketRiskConfig()  # short-only (no long/continuous roots)
+    engine = EventWebSocketRiskEngine(tmp_path, config=ResearchConfig(), risk_config=cfg)
+    assert engine._active_sleeves() == ["short"]
+
+
 def test_long_root_unset_keeps_short_only_behavior(tmp_path: Path) -> None:
     cfg = EventWebSocketRiskConfig()  # long_data_root="" → short-only
     engine = EventWebSocketRiskEngine(tmp_path, config=ResearchConfig(), risk_config=cfg)
