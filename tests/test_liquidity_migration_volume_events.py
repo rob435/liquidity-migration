@@ -1064,6 +1064,41 @@ def test_equity_benchmark_chart_honours_custom_png_name(tmp_path: Path) -> None:
     assert chart["monthly_rows"] == 1
     assert "spy" not in chart["series"]
     assert "spy_status" not in chart
+
+
+def test_equity_benchmark_chart_honours_custom_title(tmp_path: Path) -> None:
+    """The continuous sleeve reuses this canonical renderer (BTC overlay + monthly table) but
+    must mark its curve EXPLORATORY via the `title` kwarg. Pins that title/subtitle pass through
+    + the chart still renders the same shape (the continuous wiring depends on this)."""
+    from PIL import Image
+
+    output_dir = tmp_path / "reports"
+    output_dir.mkdir()
+    equity = pl.DataFrame(
+        [
+            {"ts_ms": 1, "date": "2024-01-01", "equity": 1.0, "drawdown": 0.0, "basket_return": 0.0},
+            {"ts_ms": 2, "date": "2024-01-02", "equity": 1.05, "drawdown": 0.0, "basket_return": 0.05},
+        ]
+    )
+    raw_klines = pl.DataFrame(
+        [
+            {"ts_ms": 1, "date": "2024-01-01", "symbol": "BTCUSDT", "close": 100.0},
+            {"ts_ms": 2, "date": "2024-01-02", "symbol": "BTCUSDT", "close": 105.0},
+        ]
+    )
+    chart = _write_equity_benchmark_chart(
+        output_dir,
+        root=tmp_path,
+        equity=equity,
+        raw_klines=raw_klines,
+        png_name="continuous_equity_btc.png",
+        title="Continuous-fade short D9 vs BTC  [EXPLORATORY]",
+    )
+    assert Path(chart["png"]).name == "continuous_equity_btc.png"
+    assert Path(chart["png"]).exists()
+    with Image.open(chart["png"]) as image:
+        assert image.size == (1600, 1460)
+    assert chart["series"]["strategy"] == 2 and chart["series"]["btc"] == 2
     assert chart["annotations"] == []
 
 

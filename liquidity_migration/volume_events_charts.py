@@ -69,11 +69,14 @@ def _write_equity_benchmark_chart(
     raw_klines: pl.DataFrame,
     monthly: pl.DataFrame | None = None,
     png_name: str = "volume_event_best_equity_btc.png",
+    title: str | None = None,
+    subtitle: str | None = None,
 ) -> dict[str, Any]:
     """Write the strategy-vs-BTC equity PNG. ``png_name`` lets other sleeves
-    (e.g. ``long_native``) reuse this without inheriting the short-sleeve
-    filename — each sleeve drops its own ``*_equity_btc.png`` alongside its
-    research report.
+    (e.g. ``long_native``, ``continuous``) reuse this without inheriting the
+    short-sleeve filename — each sleeve drops its own ``*_equity_btc.png``
+    alongside its research report. ``title``/``subtitle`` override the chart
+    header (e.g. an EXPLORATORY-grade sleeve marks its curve as such).
     """
     strategy = _strategy_equity_series(equity)
     if not strategy:
@@ -88,12 +91,18 @@ def _write_equity_benchmark_chart(
     monthly_rows = _monthly_table_rows(equity=equity, monthly=monthly)
     _remove_stale_chart_artifacts(output_dir)
     png_path = output_dir / png_name
+    header: dict[str, Any] = {}
+    if title is not None:
+        header["title"] = title
+    if subtitle is not None:
+        header["subtitle"] = subtitle
     _write_equity_benchmark_png(
         png_path,
         series=series,
         start=start,
         end=end,
         monthly_rows=monthly_rows,
+        **header,
     )
     return {
         "png": str(png_path),

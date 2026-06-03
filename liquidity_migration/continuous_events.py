@@ -699,6 +699,27 @@ def run_continuous_event_research(
                        f"liq>=${int(config.liq_turnover_min/1000)}k | stop {config.stop_loss_pct:.0%} | "
                        f"MAR {splits.get('full', {}).get('mar')}  [EXPLORATORY]"),
             )
+            # Canonical strategy-vs-BTC PNG (same renderer + monthly-return table as the short/long
+            # sleeves) so the continuous curve is visually comparable; equity_curves.sh prefers the
+            # *_equity_btc.png. Marked EXPLORATORY (research-tuned selection + modeled impact).
+            try:
+                from .volume_events_charts import _write_equity_benchmark_chart
+                _date = pl.from_epoch("ts_ms", time_unit="ms").dt.strftime("%Y-%m-%d").alias("date")
+                eq_dated = mtm_equity.with_columns(_date)
+                btc_klines = (
+                    klines.filter(pl.col("symbol") == "BTCUSDT").with_columns(_date)
+                    if not klines.is_empty() else klines
+                )
+                if not eq_dated.is_empty() and not btc_klines.is_empty():
+                    _write_equity_benchmark_chart(
+                        out_dir, root=root, equity=eq_dated, raw_klines=btc_klines, monthly=None,
+                        png_name="continuous_equity_btc.png",
+                        title=(f"Continuous-fade {config.side} D{config.decile} vs BTC | hold "
+                               f"{config.hold_hours}h ({config.exit_mode}) | MTM-MAR {mtm.get('mar')} "
+                               f"DD {abs(mtm.get('max_drawdown') or 0)*100:.1f}%  [EXPLORATORY]"),
+                    )
+            except Exception:  # noqa: BLE001 - chart failure must not fail the run
+                pass
         (out_dir / "continuous_report.json").write_text(json.dumps(payload, indent=2, default=str))
         payload["report_dir"] = str(out_dir)
 
