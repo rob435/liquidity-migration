@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-03
 **Author:** audit (Opus 4.8)
-**Stage:** run-pending
+**Stage:** deployed-to-demo 2026-06-03 (operator-directed) — in-sample comparison backtest deferred
 
 ## What's changing
 Make the daily feature computation **calendar-aware** instead of **positional**: a
@@ -116,7 +116,18 @@ scripts/volume_events_cell.sh --cell-id pit_gapfix --overrides 'PROFILE=promoted
   shipped. LON-6 already captured the dominant per-cell re-read+rebuild cost.
 
 ## Post-run results
-(fill in after the operator runs the validation; include report paths + the commit SHA.)
+(in-sample comparison NOT yet run — see verdict. Fill in report paths + SHA when the
+operator runs `scripts/equity_curves.sh` / the cell wrapper on the corrected signal.)
 
 ## Verdict
-pending — HELD until the validating backtest above is run and the decision rule applied.
+**Deployed to demo 2026-06-03 (operator-directed), ahead of the in-sample comparison run.**
+Rationale: BAC-1/5/7 are **methodology-correctness** fixes — they remove a look-ahead /
+gap-blindness leak (positional shifts/rolling windows spanning a mid-history gap), which
+AGENTS.md classes as a correctness bug to fix, not a parameter to tune. The fix only ever
+NULLs a feature across a gap (never invents one), so it cannot add look-ahead. Contiguous
+output is provably identical (full feature suite + 1259 tests green); only gapped-name
+selections change. The operator elected to put the corrected signal on the **forward-demo
+arbiter** now rather than gate on an in-sample number the local box can't compute (~23GB).
+The decision rule above is **retained** for the in-sample comparison when it is run: if that
+run later shows pooled MAR Δ < −0.5 or a return sign flip on either venue, investigate /
+consider reverting. Until then the demo forward-test is the live check.
