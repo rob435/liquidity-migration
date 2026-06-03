@@ -251,6 +251,7 @@ class EventDemoDaemon:
         self._ticker_reconcile_interval_seconds = float(ticker_reconcile_interval_seconds)
         self._state_cache_stale_seconds = float(state_cache_stale_seconds)
         self._reconcile_thread: threading.Thread | None = None
+        self._seed_thread: threading.Thread | None = None  # tracked so shutdown can join it (DAEM-003)
         self._reconcile_stop = threading.Event()
         self._reconciles_total = 0
         self._reconcile_errors = 0
@@ -529,6 +530,13 @@ class EventDemoDaemon:
                 else:
                     self._wait_for_next_cycle_timer()
         finally:
+            # Join the fire-and-forget seed thread FIRST (shutdown is already set, so it
+            # observes the flag and returns), making it quiescent before we close the
+            # ticker stream / WS it may still be touching (DAEM-003). daemon=True bounds it.
+            seed = self._seed_thread
+            self._seed_thread = None
+            if seed is not None:
+                seed.join(timeout=5.0)
             self._stop_reconcile_thread()
             self._close_ticker_stream()
             self._stop_kline_warmer()
@@ -797,12 +805,12 @@ class EventDemoDaemon:
         caches report ``not seeded``, so the cycle's REST fallback runs.
         Once the seed completes the next cycle picks up the cached snapshot.
         """
-        thread = threading.Thread(
+        self._seed_thread = threading.Thread(
             target=self._run_state_cache_seed,
             name="short-state-cache-seed",
             daemon=True,
         )
-        thread.start()
+        self._seed_thread.start()
 
     def _run_state_cache_seed(self) -> None:
         # The reconcile loop is the SINGLE writer of _reconciles_total / _reconcile_errors
