@@ -246,7 +246,11 @@ def write_account_state(
                 im_used_pct_by_sleeve=dict(im_used_pct_by_sleeve),
                 margin_budget_pct_by_sleeve=prior.margin_budget_pct_by_sleeve,  # operator-owned
                 reservations=kept,
-                updated_at_ms=int(now_ms),
+                # CS-1: monotonic — the LAST committer under the lock must win the single-row
+                # dedup (keep=last by updated_at_ms), regardless of wall-clock skew between a
+                # sleeve's stale cycle_now_ms and ws_risk's fresh _now_ms(). Else a fresh IM
+                # write could clobber a just-claimed reservation while the claim returned True.
+                updated_at_ms=max(prior.updated_at_ms + 1, int(now_ms)),
             ))
     except Exception as exc:  # noqa: BLE001 - control-row write must never break reconcile
         _logger.warning("cross_sleeve write_account_state failed (skipped this pass): %s", exc)
@@ -272,7 +276,7 @@ def seed_margin_budget(
             im_used_pct_by_sleeve=prior.im_used_pct_by_sleeve,
             margin_budget_pct_by_sleeve=margin_budget_pct_by_sleeve,
             reservations=prior.reservations,
-            updated_at_ms=int(now_ms),
+            updated_at_ms=max(prior.updated_at_ms + 1, int(now_ms)),  # CS-1: monotonic last-writer-wins
         ))
 
 
@@ -289,19 +293,26 @@ def _trade_im_usdt(trade: dict[str, Any], *, sleeve_leverage: dict[str, float]) 
     trade's own ``entry_leverage``, the sleeve's configured leverage, or — when unknown — a
     CONSERVATIVE 1.0 (IM = full notional, so the budget clamp triggers EARLIER, never
     later; over-counting margin is fail-safe, under-counting is not)."""
-    im = float(trade.get("initial_margin_usdt") or 0.0)
-    if im > 0.0:
-        return im
+    stored = float(trade.get("initial_margin_usdt") or 0.0)
     notional = float(trade.get("notional_usdt") or 0.0)
-    if notional <= 0.0:
-        return 0.0
     sleeve = str(trade.get("sleeve") or "")
-    lev = (
+    known_lev = (
         float(trade.get("entry_leverage") or 0.0)
         or float(sleeve_leverage.get(sleeve, 0.0) or 0.0)
-        or 1.0
-    )
-    return notional / max(lev, 1.0)
+    )  # 0.0 == unknown (no per-trade leverage and no sleeve-map entry)
+    if stored > 0.0:
+        # CS-8: floor a (possibly stale/low) stored IM at the leverage-implied minimum
+        # notional/lev, but ONLY when leverage is reliably known — never inflate via the
+        # 1.0 unknown-leverage fallback (that would over-count a high-leverage sleeve like
+        # long ~10x). Stale-low stored => floor (fail-safe); accurate stored => no-op.
+        if notional > 0.0 and known_lev > 0.0:
+            return max(stored, notional / known_lev)
+        return stored
+    if notional <= 0.0:
+        return 0.0
+    # No stored IM: notional/leverage, unknown leverage => CONSERVATIVE 1.0 (full notional,
+    # clamps EARLIER not later; over-counting margin is fail-safe, under-counting is not).
+    return notional / max(known_lev or 1.0, 1.0)
 
 
 def compute_im_used(
@@ -424,7 +435,7 @@ def claim_symbol_reservation(
                 im_used_pct_by_sleeve=state.im_used_pct_by_sleeve,
                 margin_budget_pct_by_sleeve=state.margin_budget_pct_by_sleeve,
                 reservations=kept,
-                updated_at_ms=int(now_ms),
+                updated_at_ms=max(state.updated_at_ms + 1, int(now_ms)),  # CS-1: monotonic last-writer-wins
             ))
             return True
     except Exception as exc:  # noqa: BLE001 - reservation must never halt the live book

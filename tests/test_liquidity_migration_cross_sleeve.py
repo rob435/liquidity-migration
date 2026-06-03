@@ -170,3 +170,76 @@ def test_compute_im_used_aggregates_per_sleeve_with_fallbacks() -> None:
     assert abs(account_pct - (900.0 / 10_000)) < 1e-9
     # equity 0 -> no clamp basis
     assert compute_im_used(trades, equity_usdt=0.0, sleeve_leverage={}) == (0.0, {})
+
+
+def test_trade_im_floors_stale_stored_only_when_leverage_known() -> None:
+    """CS-8: a stale/low stored ``initial_margin_usdt`` is floored at notional/leverage when
+    leverage is KNOWN (fail-safe over-count), but must NOT be inflated via the 1.0
+    unknown-leverage fallback — that would over-count a high-leverage sleeve (long ~10x)."""
+    import polars as pl
+
+    from liquidity_migration.cross_sleeve import compute_im_used
+
+    trades = pl.DataFrame([
+        # stale-low stored IM (50) but KNOWN leverage 5 -> floored to 1000/5 = 200.
+        {"sleeve": "short", "notional_usdt": 1000.0, "initial_margin_usdt": 50.0, "entry_leverage": 5.0},
+        # stored IM (100) with UNKNOWN leverage -> trusted as-is, NOT inflated to full notional.
+        {"sleeve": "long", "notional_usdt": 1000.0, "initial_margin_usdt": 100.0, "entry_leverage": None},
+    ], infer_schema_length=None)
+    _, by_sleeve = compute_im_used(trades, equity_usdt=10_000.0, sleeve_leverage={})
+    assert by_sleeve["short"] == 200.0 / 10_000   # floored to notional / known leverage
+    assert by_sleeve["long"] == 100.0 / 10_000    # unknown leverage -> stored trusted, not inflated
+
+
+def test_claim_survives_ws_risk_write_with_higher_now_ms(tmp_path: Path) -> None:
+    """CS-1: ws_risk stamps a FRESH ``_now_ms()`` on its IM row while a sleeve's claim carries
+    a STALE ``cycle_now_ms`` (captured seconds earlier at cycle start). The single-row dedup
+    keeps ``max(updated_at_ms)``, so a naive stamp lets the fresh IM row clobber the just-claimed
+    reservation — the claim returns True yet the reservation vanishes, silently defeating the
+    same-minute-race guard. Monotonic ``updated_at_ms`` makes the last committer under the lock win."""
+    # ws_risk writes the IM row at a HIGH now_ms (fresh clock)...
+    write_account_state(tmp_path, equity_usdt=10_000.0, account_im_used_pct=0.40,
+                        im_used_pct_by_sleeve={"long": 0.40}, now_ms=2_000)
+    # ...then a sleeve claims at a LOWER now_ms (its stale cycle_now_ms).
+    assert claim_symbol_reservation(tmp_path, symbol="AAAUSDT", sleeve="long",
+                                    trade_id="t1", now_ms=1_000) is True
+    st = read_account_state(tmp_path)
+    assert any(r["symbol"] == "AAAUSDT" for r in st.reservations), "CS-1: reservation must not be clobbered"
+    assert st.im_used_pct_by_sleeve.get("long") == 0.40  # IM fields the claim preserved are intact
+
+
+def _mp_claim_worker(root_str: str, symbol: str, sleeve: str, trade_id: str, now_ms: int, q) -> None:  # type: ignore[no-untyped-def]
+    """Top-level (picklable, spawn-safe) worker: claim in a SEPARATE process."""
+    from pathlib import Path as _Path
+
+    from liquidity_migration.cross_sleeve import claim_symbol_reservation as _claim
+    q.put((sleeve, _claim(_Path(root_str), symbol=symbol, sleeve=sleeve,
+                          trade_id=trade_id, now_ms=now_ms, ttl_ms=180_000)))
+
+
+def test_claim_is_atomic_under_true_process_contention(tmp_path: Path) -> None:
+    """CS-3: production races are 3 SEPARATE PROCESSES. The thread test serializes on the
+    in-process thread lock and never exercises the O_EXCL cross-process path; here N real
+    processes race the same symbol through the actual file lock — exactly one wins and exactly
+    one reservation row may persist (never two)."""
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    for attempt in range(2):
+        root = tmp_path / f"attempt{attempt}"
+        root.mkdir()
+        seed_margin_budget(root, {"long": 0.45}, now_ms=1_700_000_000_000)  # create the dataset
+        q = ctx.Queue()
+        procs = [
+            ctx.Process(target=_mp_claim_worker,
+                        args=(str(root), "RACEUSDT", sleeve, f"{sleeve}-1", 1_700_000_100_000, q))
+            for sleeve in ("long", "continuous", "short")
+        ]
+        for p in procs:
+            p.start()
+        results = [q.get(timeout=30.0) for _ in procs]  # drain before join (avoids pipe-buffer stall)
+        for p in procs:
+            p.join(timeout=30.0)
+        assert sum(1 for _, ok in results if ok) == 1, f"attempt {attempt}: exactly one process wins"
+        active = [r for r in read_account_state(root).reservations if r["symbol"] == "RACEUSDT"]
+        assert len(active) == 1, f"attempt {attempt}: exactly one reservation row persisted"

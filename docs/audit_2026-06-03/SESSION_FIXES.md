@@ -82,3 +82,32 @@ independently refuted by a read-only Opus skeptic. Severity converged round over
 **Deploy caveat (already self-documented in STATE.md open-debts):** the residual-momentum causal
 shift (shift1→shift3) + panel join-key fix re-base the rmom gate, so the rmom-gate MAR verdict and the
 live `rmom_quantile=0.33` must be re-validated before that path is deployed.
+
+## Cross-sleeve build (long-sleeve-5/6) — dedicated adversarial verify (round 5)
+A 5th read-only Opus skeptic probed the new `cross_sleeve.py` margin-budget + reservation registry
+under REAL multi-process contention. It confirmed the no-op-default, fail-open reads, under-lock RMW
+serialization, single-row dedup, account_key consistency, stop-ordering, and IM attribution all hold,
+and found **one real defect**:
+- **CS-1 (medium-high, FIXED)** — the single-row dedup keeps `max(updated_at_ms)`. ws_risk stamps a
+  FRESH `_now_ms()` on its IM row each pass while a sleeve's claim carries the STALE cycle-start
+  `cycle_now_ms`; so a fresh IM row could win the dedup and **silently erase a just-granted
+  reservation** while the claim returned True — defeating the same-minute-race guard (the lagging
+  venue snapshot remained as backstop). Fixed by making `updated_at_ms` **monotonic**
+  (`max(prior+1, now_ms)`) in all three writers, so the last committer *under the lock* always wins
+  (commit order = recency, immune to clock skew). Pinned by
+  `test_claim_survives_ws_risk_write_with_higher_now_ms`.
+- **CS-7 (low, FIXED)** — continuous candidates claimed with `trade_id=""` (id derived later), so the
+  close-GC could never match → reservation lingered the full 180s TTL, over-blocking a sibling. Fixed
+  by computing the deterministic `_continuous_trade_id` before the claim.
+- **CS-8 (low/soft, HARDENED)** — a stale-low stored `initial_margin_usdt` could under-count IM. Added
+  a leverage-implied floor (`max(stored, notional/lev)`) that applies ONLY when leverage is reliably
+  known — never inflated via the 1.0 unknown-leverage fallback (which would over-count long ~10x).
+  Pinned by `test_trade_im_floors_stale_stored_only_when_leverage_known`.
+- **CS-3 (test adequacy, ADDRESSED)** — the existing contention test used two threads, which serialize
+  on the in-process thread lock and never hit the `O_EXCL` cross-process path. Added
+  `test_claim_is_atomic_under_true_process_contention` (3 real spawned processes; verified distinct
+  PIDs, one winner, one row).
+- **CS-2/CS-5/CS-6 confirmed-correct; CS-4 noted** — the ws_risk live-integration ordering/fail-open
+  were manually verified by the skeptic; a full ws_risk-cycle integration harness for
+  `_refresh_cross_sleeve_account_state` remains a (low-severity) test-adequacy follow-up. The feature is
+  no-op until a budget is seeded, so its live blast radius today is the reservation registry only.

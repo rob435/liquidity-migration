@@ -1210,9 +1210,14 @@ def run_continuous_demo_cycle(
                 }
             for c in picks:
                 sym = str(c["symbol"])
+                reentry_seq = prior_by_symbol.get(sym, 0)
                 candidates.append({**c, "signal_ts_ms": signal_ts, "stop_loss_pct": demo.stop_loss_pct,
                                    "live_price": price_by_symbol.get(sym, 0.0),
-                                   "reentry_seq": prior_by_symbol.get(sym, 0)})
+                                   "reentry_seq": reentry_seq,
+                                   # CS-7: carry the deterministic trade_id (same one _execute_continuous_entries
+                                   # recomputes) so the cross-sleeve reservation is GC'd on close via
+                                   # closed_trade_ids, not only after the 180s TTL (avoids over-blocking a sibling).
+                                   "trade_id": _continuous_trade_id(strategy_id, sym, signal_ts, reentry_seq)})
         # long-sleeve-6: claim each candidate symbol in the shared registry under the
         # control-row lock before submit; a symbol a sibling holds (active reservation or
         # live venue position) is dropped, closing the same-minute cross-process race.
