@@ -59,3 +59,25 @@ look-ahead materially changes which names the gate trades, so the `rmom_quantile
 on the contaminated shift1 values) and the gated-backtest MAR verdict must be re-run on the shift3
 values (steps 2–4) before continuous-sleeve forward-demo results are treated as promotion evidence.
 Re-run `scripts/rmom_shift_diagnostic.py --quantile <X>` while sweeping to size each candidate.
+
+## Steps 2–4 result + VERDICT (2026-06-03, `alpha_sweep --experiment rmom` on the rebuilt shift3 panels)
+Panel rebuilt with `RMOM_CAUSAL_SHIFT=3` on both research roots (bybit 450,549 rows → 2026-06-04;
+binance 404,678 rows → ~2026-04-28, that root's klines are ~5wk stale so its window ends earlier).
+`alpha_sweep --experiment rmom` (canonical BASE: side=short, decile=9, liq_turnover_min=500k), MTM-MAR:
+
+| quantile | bybit MAR | bybit DD | binance MAR | binance DD |
+|----------|-----------|----------|-------------|------------|
+| q50 | 37.68 | 2.6% | 30.32 | 5.1% |
+| q40 | 37.16 | 2.3% | 39.57 | 3.4% |
+| **q33** | **41.48** | **1.8%** | **50.01** | **2.3%** |
+| q25 | 48.44 | 1.3% | 32.77 | 2.9% |
+
+**VERDICT: ACCEPT `rmom_quantile=0.33` — no deploy change.** It passes the Tier-2 demo-candidate bar
+on BOTH venues (MAR 41.5 / 50.0, DD <2.5%) and is the cross-venue-robust optimum: binance PEAKS at
+0.33 and degrades sharply at 0.25 (50.0→32.8), while bybit is strong at 0.33 (2nd only to 0.25).
+Tightening to 0.25 helps bybit but breaks binance, so 0.33 is the right COMMON choice and sits in the
+plateau. The shift1→shift3 re-base (51% churn) did NOT invalidate 0.33; the honest values look cleaner.
+The `deploy_vps_live.sh:83` assert (`cont.rmom_quantile == 0.33`) stands — no change.
+**Caveats:** MTM-MAR is full-window in-sample (relative quantile ranking is robust to funding, which is
+~flat across quantiles); binance's window is ~5wk short (refresh `binance_full_pit` klines for a fully
+current re-run). Open-debt closed: continuous forward-demo results may now be treated as evidence.
