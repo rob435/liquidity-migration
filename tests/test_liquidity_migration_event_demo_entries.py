@@ -1222,3 +1222,64 @@ def test_wait_for_execution_summary_rest_path_waits_for_cumulative_not_partial()
 def _float_qty(summary) -> float:
     from liquidity_migration.event_demo import _float as _f
     return _f(summary.get("qty"))
+
+
+def test_execute_single_entry_force_attaches_stop_when_first_sub_fails() -> None:
+    """EVE-1: the position-level stop rides on the FIRST sub-order only. If that sub
+    fails to place but a LATER sub fills, the venue position is stopless. The post-fill
+    repair must FORCE-attach the stop even when the recomputed price matches the plan
+    (the normal repair gate would skip it as a no-op and leave the position unprotected)."""
+
+    class _FirstSubFailsClient(FakeRiskClient):
+        def place_order(self, **params: object) -> dict[str, str]:
+            # Bybit param key is camelCase orderLinkId; the first sub carries the stop.
+            if str(params.get("orderLinkId") or "").endswith("-s0"):
+                raise RuntimeError("first sub rejected")
+            return super().place_order(**params)
+
+    candidate = {
+        "trade_id": "split-firstfail-1",
+        "symbol": "REQUSDT",
+        "side": "short",
+        "signal_ts_ms": 1_700_000_000_000,
+        "stop_loss_pct": 0.12,
+        "take_profit_pct": 0.26,
+    }
+    client = _FirstSubFailsClient(
+        fill_market_orders=True,
+        fill_order_prefixes=("lm-en-",),
+        fill_qty="18750",
+        fill_price="0.08676",
+    )
+    rows, orders = _execute_entries(
+        [candidate],
+        trading_client=client,
+        demo=EventDemoCycleConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            order_fill_confirm_seconds=0.0,
+        ),
+        equity_usdt=9756.0,
+        order_notional_pct_equity=0.3333,
+        price_by_symbol={"REQUSDT": 0.08676},
+        contract_by_symbol={
+            "REQUSDT": {
+                "tick_size": 0.00001,
+                "qty_step": 1.0,
+                "min_order_qty": 1.0,
+                "min_notional_value": 5.0,
+                "max_market_order_qty": 20000.0,  # binds -> split into 2 subs
+            },
+        },
+        now_ms=1_700_000_060_000,
+        strategy_id=DEMO_RELAXED_STRATEGY_ID,
+    )
+
+    # A later sub filled -> a real position exists and a trade row is built.
+    assert len(rows) == 1, f"expected 1 aggregated trade row, got {len(rows)}"
+    assert float(rows[0]["qty"]) > 0.0
+    # The stop the first (failed) sub would have carried MUST be force-attached now.
+    assert client.stop_updates, "stop must be force-attached when the first sub failed to place"
+    assert client.stop_updates[-1].get("stop_loss"), "set_trading_stop must include a stop_loss"
+    # And the ledger must surface that protection was (re)submitted, not left blank.
+    assert rows[0].get("entry_stop_update_status") == "submitted"

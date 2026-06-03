@@ -363,6 +363,12 @@ def _execute_single_entry(
         # the submit branch only.
         total_filled_qty_acc = 0.0
         total_fill_value_acc = 0.0
+        # Bybit stops are position-level and ride on the FIRST sub-order only (see the
+        # sub_order_params stop_loss=... if is_first below). Track whether that first sub
+        # actually placed with protection so the repair block can FORCE-attach a stop to
+        # a position filled by a LATER sub when the first sub failed (EVE-1) -- otherwise
+        # a same-price fill leaves a stopless venue position.
+        first_sub_stop_attached = False
         if not error:
             for idx, sub_qty_str in enumerate(sub_qty_strs):
                 is_first = idx == 0
@@ -421,6 +427,9 @@ def _execute_single_entry(
                     submit_mode = "submitted"
                     if is_first:
                         first_order_result = sub_order_result
+                        # The first sub carried the stop_loss/take_profit params, so a
+                        # successful place means position-level protection is attached.
+                        first_sub_stop_attached = stop_price > 0.0 or take_profit_price > 0.0
                 except Exception as exc:  # noqa: BLE001
                     sub_submit_mode = "error"
                     sub_error = f"place_order failed: {exc}"[:500]
@@ -581,9 +590,19 @@ def _execute_single_entry(
                     take_profit_pct=take_profit_pct,
                     tick_size=tick_size,
                 )
-                if not _prices_close(stop_price, filled_stop_price, tolerance_bps=0.0) or (
-                    filled_take_profit_price > 0.0
-                    and not _prices_close(take_profit_price, filled_take_profit_price, tolerance_bps=0.0)
+                # Force the attach when the entry-time stop never landed (the first sub
+                # failed to place but a later sub filled -> stopless venue position),
+                # otherwise repair only when the aggregate fill moved price off the plan.
+                entry_protection_missing = not first_sub_stop_attached and (
+                    filled_stop_price > 0.0 or filled_take_profit_price > 0.0
+                )
+                if (
+                    entry_protection_missing
+                    or not _prices_close(stop_price, filled_stop_price, tolerance_bps=0.0)
+                    or (
+                        filled_take_profit_price > 0.0
+                        and not _prices_close(take_profit_price, filled_take_profit_price, tolerance_bps=0.0)
+                    )
                 ):
                     try:
                         trading_client.set_trading_stop(
