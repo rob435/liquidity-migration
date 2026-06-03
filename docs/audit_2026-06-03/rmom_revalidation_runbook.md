@@ -60,24 +60,31 @@ on the contaminated shift1 values) and the gated-backtest MAR verdict must be re
 values (steps 2–4) before continuous-sleeve forward-demo results are treated as promotion evidence.
 Re-run `scripts/rmom_shift_diagnostic.py --quantile <X>` while sweeping to size each candidate.
 
-## Steps 2–4 result + VERDICT (2026-06-03, `alpha_sweep --experiment rmom` on the rebuilt shift3 panels)
-Panel rebuilt with `RMOM_CAUSAL_SHIFT=3` on both research roots (bybit 450,549 rows → 2026-06-04;
-binance 404,678 rows → ~2026-04-28, that root's klines are ~5wk stale so its window ends earlier).
-`alpha_sweep --experiment rmom` (canonical BASE: side=short, decile=9, liq_turnover_min=500k), MTM-MAR:
+## ❌ RETRACTED interim verdict (2026-06-03 — was computed on a STALE CACHE, INVALID)
+An earlier pass reported "ACCEPT rmom_quantile=0.33, bybit MAR 41.5 / binance 50.0, edge survives
+shift3." **That verdict is WRONG.** It was produced WITHOUT clearing the deciled-panel caches first
+(this runbook's own step-2 instruction), so `alpha_sweep` read `_continuous_engine_panel_rmom*.parquet`
+caches built on the OLD (look-ahead shift1) rmom + data ending 2026-05-27 — NOT the freshly rebuilt
+shift3 panel. `build_continuous_panel` keyed its cache on rmom_quantile ONLY, with no data-freshness
+check, so it silently served the stale (look-ahead) panel. (That masking bug is now fixed:
+`continuous_events._panel_cache_stale` invalidates the cache when the rmom panel is newer.)
 
-| quantile | bybit MAR | bybit DD | binance MAR | binance DD |
-|----------|-----------|----------|-------------|------------|
-| q50 | 37.68 | 2.6% | 30.32 | 5.1% |
-| q40 | 37.16 | 2.3% | 39.57 | 3.4% |
-| **q33** | **41.48** | **1.8%** | **50.01** | **2.3%** |
-| q25 | 48.44 | 1.3% | 32.77 | 2.9% |
+## ✅ TRUE VERDICT (2026-06-03 — caches CLEARED, fresh shift3, both venues): REJECT — edge was LOOK-AHEAD
+Same `alpha_sweep --experiment rmom` (canonical BASE config), after `rm -f _continuous_engine_panel_rmom*.parquet`:
 
-**VERDICT: ACCEPT `rmom_quantile=0.33` — no deploy change.** It passes the Tier-2 demo-candidate bar
-on BOTH venues (MAR 41.5 / 50.0, DD <2.5%) and is the cross-venue-robust optimum: binance PEAKS at
-0.33 and degrades sharply at 0.25 (50.0→32.8), while bybit is strong at 0.33 (2nd only to 0.25).
-Tightening to 0.25 helps bybit but breaks binance, so 0.33 is the right COMMON choice and sits in the
-plateau. The shift1→shift3 re-base (51% churn) did NOT invalidate 0.33; the honest values look cleaner.
-The `deploy_vps_live.sh:83` assert (`cont.rmom_quantile == 0.33`) stands — no change.
-**Caveats:** MTM-MAR is full-window in-sample (relative quantile ranking is robust to funding, which is
-~flat across quantiles); binance's window is ~5wk short (refresh `binance_full_pit` klines for a fully
-current re-run). Open-debt closed: continuous forward-demo results may now be treated as evidence.
+| quantile | bybit ret · MAR · DD | binance ret · MAR · DD |
+|----------|----------------------|------------------------|
+| q50 | −102% · −0.32 · 104% | −155% · −0.33 · 157% |
+| q40 | −80% · −0.31 · 84% | −128% · −0.33 · 131% |
+| q33 | −65% · −0.29 · 73% | −110% · −0.33 · 112% |
+| q25 | −49% · −0.29 · 56% | −85% · −0.32 · 87% |
+
+**EVERY quantile, BOTH venues, flips from large-positive (stale: +189% to +298%) to large-negative.**
+The ONLY change is the rmom panel's causal correctness (look-ahead shift1 → causal shift3); the gross
+edge collapsed ~15× (+319% → +21% on the deployed profile, then costs+funding take it to −68% net). The
+~25h look-ahead WAS the entire edge. The 51% bottom-third churn (step-1 diagnostic) was the tell.
+
+**Action taken:** the live continuous sleeve is DISABLED (`CONTINUOUS_SLEEVE=off` host kill-switch on the
+VPS). The `deploy_vps_live.sh:83` assert (`cont.rmom_quantile == 0.33`) now pins a dead-strategy param —
+moot while the sleeve is off; revisit if/when a genuinely causal continuous signal is built. Do NOT cite
+any continuous-fade backtest as evidence: its historical edge was look-ahead.

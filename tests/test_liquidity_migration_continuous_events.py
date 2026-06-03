@@ -13,6 +13,7 @@ from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
 from liquidity_migration.continuous_events import (
     ContinuousEventConfig,
     _fresh_entries,
+    _panel_cache_stale,
     _round_trip_bps,
     _run_trades,
     build_continuous_panel,
@@ -20,6 +21,25 @@ from liquidity_migration.continuous_events import (
 )
 from liquidity_migration.storage import write_dataset
 from liquidity_migration.volume_events import _indexed_price_bars_by_symbol
+
+
+def test_panel_cache_stale_invalidates_when_rmom_is_newer(tmp_path) -> None:
+    """The deciled-panel cache is keyed only on rmom_quantile, so it MUST be invalidated when the
+    underlying data is refreshed (new klines → rebuilt residual_momentum.parquet). Else it silently
+    serves a panel truncated to the old data end (the 2026-06-03 'continuous curve stuck at May-27
+    after a fresh rebuild' bug). Pins: cache older than rmom → stale; newer → fresh; rmom absent → stale."""
+    import os
+    cache = tmp_path / "_continuous_engine_panel_rmom33.parquet"
+    rmom = tmp_path / "residual_momentum.parquet"
+    cache.write_bytes(b"x")
+    rmom.write_bytes(b"y")
+    os.utime(cache, (1000, 1000))
+    os.utime(rmom, (2000, 2000))   # rmom newer than cache
+    assert _panel_cache_stale(cache, rmom) is True                 # → rebuild
+    os.utime(cache, (3000, 3000))                                  # cache now newer than rmom
+    assert _panel_cache_stale(cache, rmom) is False                # → reuse
+    rmom.unlink()
+    assert _panel_cache_stale(cache, rmom) is True                 # rmom missing → rebuild (safe)
 
 
 # --------------------------------------------------------------------------- cost model

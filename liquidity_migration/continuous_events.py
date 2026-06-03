@@ -134,6 +134,20 @@ def _iso_day(ts_ms: int) -> str:
     return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
 
 
+def _panel_cache_stale(cache_path: Path, rmom_path: Path) -> bool:
+    """The deciled-panel cache is keyed ONLY on rmom_quantile, so a refresh of the underlying
+    data — new klines → a rebuilt residual_momentum.parquet — must invalidate it. Without this
+    the cache silently serves a panel truncated to the OLD data end (observed 2026-06-03: the
+    continuous equity curve stuck at the prior data tail / May-27 after a fresh rebuild, because
+    the Jun-2 cache predated the refreshed klines+rmom). Treat the cache as stale whenever the
+    rmom panel is newer than it (a data refresh rebuilds rmom, bumping its mtime); fail safe to
+    'stale' if either file can't be stat'd so we rebuild rather than serve a possibly-stale panel."""
+    try:
+        return (not rmom_path.exists()) or (cache_path.stat().st_mtime < rmom_path.stat().st_mtime)
+    except OSError:
+        return True
+
+
 def build_continuous_panel(
     data_root: str | Path, config: ContinuousEventConfig, *, cache: bool = True
 ) -> pl.DataFrame:
@@ -146,7 +160,8 @@ def build_continuous_panel(
     """
     root = Path(str(data_root)).expanduser()
     cache_path = root / f"_continuous_engine_panel_rmom{int(round(config.rmom_quantile * 100))}.parquet"
-    if cache and cache_path.exists():
+    rmom_path = root / "residual_momentum.parquet"
+    if cache and cache_path.exists() and not _panel_cache_stale(cache_path, rmom_path):
         return pl.read_parquet(cache_path)
     start_ms, end_ms = _date_str_to_ms(config.start_date), _date_str_to_ms(config.end_date)
     kname = _autodetect_dataset_names(root)["klines_dataset"]
@@ -158,7 +173,6 @@ def build_continuous_panel(
         return pl.DataFrame()
     if config.exclude_symbols:
         k = k.filter(~pl.col("symbol").is_in(list(config.exclude_symbols)))
-    rmom_path = root / "residual_momentum.parquet"
     if not rmom_path.exists():
         raise FileNotFoundError(
             f"{rmom_path} missing -- build it first: "
