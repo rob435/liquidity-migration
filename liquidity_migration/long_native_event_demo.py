@@ -117,7 +117,8 @@ class LongNativeDemoCycleConfig:
     # config (_v11a_long_native_config().universe_size) — div promotion 2026-05-30
     # widened both 10->50. test_demo_universe_matches_strategy guards the sync.
     universe_size: int = 50
-    lookback_days: int = 90
+    universe_superset_size: int = 120  # ls-4: pool ranked by 90d-median turnover, truncated to universe_size
+    lookback_days: int = 100  # ls-4: so >=90 daily bars survive the trims and turnover_median_90d populates
     workers: int = 8
     # Per-position notional scaling. The base per-position notional is
     # `gross_exposure / max_concurrent_positions = 0.2` (20% of equity).
@@ -153,7 +154,7 @@ class LongNativeDemoCycleConfig:
     # the dominant startup cost worth doing once.
     ws_klines_enabled: bool = True
     ws_klines_bootstrap_workers: int = 16
-    ws_klines_lookback_days: int = 90
+    ws_klines_lookback_days: int = 100  # ls-4: lockstep with lookback_days
     ws_klines_universe_refresh_seconds: float = 3600.0
     ws_klines_topics_per_connection: int = 180
     ws_klines_stale_warning_seconds: float = 60.0
@@ -291,10 +292,15 @@ def _validate_long_demo_config(config: LongNativeDemoCycleConfig) -> None:
         raise ValueError(
             f"strategy_profile must be one of: {', '.join(LONG_DEMO_STRATEGY_PROFILES)}"
         )
-    if config.lookback_days < 60:
-        raise ValueError("lookback_days must be at least 60 so 30d realized vol + 30d returns are populated")
+    if config.lookback_days < 95:
+        raise ValueError(
+            "lookback_days must be at least 95 so turnover_median_90d "
+            "(90d-median universe rank, min_samples=90) populates after the bar trims"
+        )
     if config.universe_size <= 0:
         raise ValueError("universe_size must be positive")
+    if config.universe_superset_size < config.universe_size:
+        raise ValueError("universe_superset_size must be >= universe_size")
     if config.notional_multiplier <= 0.0:
         raise ValueError("notional_multiplier must be positive")
     if not 0.0 <= config.max_order_notional_pct_equity <= 10.0:
@@ -464,6 +470,14 @@ def run_long_native_demo_cycle(
                 ).dt.strftime("%Y-%m-%d").alias("date")
             )
         features = build_long_features(klines, funding=None, config=strategy)
+        # ls-4: re-select in_universe on the latest bar to the top-N by 90d-MEDIAN turnover
+        # (the key the backtest ranks on), now that _build_long_universe fetches a superset
+        # instead of the 50-by-24h truncation that neutered the median gate. Keyed on
+        # strategy.universe_size — the SAME value build_long_features used — so steady state
+        # is a no-op byte-match; cold start backfills by 24h (universe_fallback_24h > 0).
+        features, universe_fallback_24h = _apply_median_universe_selection(
+            features, universe_size=strategy.universe_size, snapshot_ts_ms=cycle_now_ms
+        )
         mark_stage("features")
 
         all_trades = read_dataset(root, trades_dataset)
@@ -651,6 +665,7 @@ def run_long_native_demo_cycle(
             "strategy_id": strategy_id,
             "strategy_profile": demo.strategy_profile,
             "symbols": len(symbols),
+            "universe_fallback_24h": universe_fallback_24h,  # ls-4: cold-start 24h backfill count (0 = warm)
             "vol_target_scale": vol_target_scale,  # div: de-risk-only book scalar applied to live sizing
             "kline_rows": klines.height,
             "kline_cache_rows": kline_cache_stats["cache_rows"],
@@ -762,6 +777,47 @@ def _kline_window(now_ms: int, *, lookback_days: int) -> tuple[int, int]:
     return start_ms, end_ms
 
 
+def _apply_median_universe_selection(
+    features: pl.DataFrame, *, universe_size: int, snapshot_ts_ms: int
+) -> tuple[pl.DataFrame, int]:
+    """ls-4: set ``in_universe`` on the LATEST bar to the top ``universe_size`` names by
+    90d-median turnover — the SAME key the backtest ranks on (long_native universe_rank),
+    not the live 24h turnover the superset was fetched by. Backfill by 24h turnover ONLY
+    when fewer than ``universe_size`` names have a finite median (cold start, < ~90 daily
+    bars), so the book is never zeroed during warm-up. Returns (features, fallback_count):
+    in steady state fallback_count==0 and membership is a byte-for-byte match to the
+    backtest's median-rank universe; a non-zero count is surfaced as cycle telemetry."""
+    if features.is_empty() or "turnover_median_90d" not in features.columns:
+        return features, 0
+    latest_ts = features["ts_ms"].max()
+    if latest_ts is None:
+        return features, 0
+    today = features.filter(pl.col("ts_ms") == latest_ts)
+    if today.is_empty():
+        return features, 0
+    finite = today.filter(pl.col("turnover_median_90d").is_finite()).sort(
+        ["turnover_median_90d", "symbol"], descending=[True, False]
+    )
+    members = set(finite.head(universe_size)["symbol"].to_list())
+    fallback_count = 0
+    if len(members) < universe_size and "turnover_quote" in today.columns:
+        need = universe_size - len(members)
+        cold = (
+            today.filter(~pl.col("symbol").is_in(list(members)))
+            .sort(["turnover_quote", "symbol"], descending=[True, False])
+            .head(need)
+        )
+        fallback_count = cold.height
+        members |= set(cold["symbol"].to_list())
+    features = features.with_columns(
+        pl.when(pl.col("ts_ms") == latest_ts)
+        .then(pl.col("symbol").is_in(list(members)))
+        .otherwise(pl.col("in_universe"))
+        .alias("in_universe")
+    )
+    return features, fallback_count
+
+
 def _build_long_universe(
     instruments: pl.DataFrame,
     tickers: pl.DataFrame,
@@ -773,8 +829,8 @@ def _build_long_universe(
         min_turnover_24h=2_000_000.0,  # liquidity floor matches research
         min_age_days=30,
         rank_start=1,
-        rank_end=config.universe_size,
-        max_symbols=config.universe_size,
+        rank_end=config.universe_superset_size,  # ls-4: fetch the superset; the median gate picks the final book
+        max_symbols=config.universe_superset_size,
         exclude_symbols=DEFAULT_EXCLUDED_SYMBOLS,
     )
     return build_current_universe_table(

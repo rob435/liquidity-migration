@@ -814,7 +814,7 @@ def _build_private_ws_stream(config: ResearchConfig) -> BybitPrivateWebSocketStr
 # cache). Scope the manager to the top-50 by turnover — 5x headroom for
 # rank shifts between universe-refresh ticks, and the cycle's REST
 # fallback still covers anything that drops in unexpectedly.
-_LONG_KLINE_UNIVERSE_SIZE = 50
+_LONG_KLINE_UNIVERSE_SIZE = 120  # ls-4: store must cover the 120-name median-rank superset; ~66MB — see RSS prereq
 
 
 def _build_long_kline_universe(

@@ -606,3 +606,66 @@ def test_compute_long_order_sizing_matches_inline_vol_target_block() -> None:
     n0, s0 = _compute_long_order_sizing(demo=demo, strategy=strategy, features=bare)
     assert s0 == _vol_target_scale(strategy, None)
     assert n0 == pytest.approx(target_long_order_notional_pct_equity(demo, strategy) * s0)
+
+
+def test_median_universe_selection_steady_state_is_byte_match_noop() -> None:
+    """ls-4: in steady state (every name has a finite 90d-median) the helper re-selects
+    the SAME top-N-by-median set that build_long_features already wrote to in_universe, so
+    it is a no-op byte-match (fallback_count == 0). This is the consistency guarantee with
+    the backtest's own universe selection."""
+    from liquidity_migration.long_native_event_demo import _apply_median_universe_selection
+
+    now = 1_700_000_000_000
+    prev = now - 86_400_000
+    # 5 names on the latest bar, finite medians 50>40>30>20>10. build_long_features would set
+    # in_universe = top-3 by median = {s50, s40, s30}. Pre-set it that way; the helper must agree.
+    rows = []
+    for sym, med, tq, inu in [("s50", 50.0, 1.0, True), ("s40", 40.0, 1.0, True),
+                              ("s30", 30.0, 1.0, True), ("s20", 20.0, 9.0, False),
+                              ("s10", 10.0, 9.0, False)]:
+        rows.append({"ts_ms": now, "symbol": sym, "turnover_median_90d": med,
+                     "turnover_quote": tq, "in_universe": inu})
+        rows.append({"ts_ms": prev, "symbol": sym, "turnover_median_90d": med,
+                     "turnover_quote": tq, "in_universe": True})  # historical bar (must be untouched)
+    feat = pl.DataFrame(rows)
+    out, fallback = _apply_median_universe_selection(feat, universe_size=3, snapshot_ts_ms=now)
+    assert fallback == 0
+    latest = out.filter(pl.col("ts_ms") == now).sort("symbol")
+    got = dict(zip(latest["symbol"].to_list(), latest["in_universe"].to_list()))
+    assert got == {"s50": True, "s40": True, "s30": True, "s20": False, "s10": False}
+    # historical bar in_universe is preserved (the helper only rewrites the latest bar)
+    hist = out.filter(pl.col("ts_ms") == prev)
+    assert all(hist["in_universe"].to_list())
+
+
+def test_median_universe_selection_cold_start_backfills_by_24h() -> None:
+    """ls-4 cold start: when fewer than N names have a finite median (warm-up, <90 daily
+    bars), the remainder is backfilled by 24h turnover so the book is never zeroed, and the
+    backfill count is surfaced (universe_fallback_24h > 0)."""
+    from liquidity_migration.long_native_event_demo import _apply_median_universe_selection
+
+    now = 1_700_000_000_000
+    rows = [
+        {"ts_ms": now, "symbol": "fin1", "turnover_median_90d": 50.0, "turnover_quote": 1.0, "in_universe": True},
+        {"ts_ms": now, "symbol": "fin2", "turnover_median_90d": 40.0, "turnover_quote": 1.0, "in_universe": True},
+        # null medians (cold) — must NOT count as finite; 24h fallback ranks them by turnover_quote
+        {"ts_ms": now, "symbol": "cold_hi", "turnover_median_90d": None, "turnover_quote": 100.0, "in_universe": False},
+        {"ts_ms": now, "symbol": "cold_lo", "turnover_median_90d": None, "turnover_quote": 10.0, "in_universe": False},
+    ]
+    feat = pl.DataFrame(rows, infer_schema_length=None)
+    out, fallback = _apply_median_universe_selection(feat, universe_size=3, snapshot_ts_ms=now)
+    assert fallback == 1  # one 24h backfill (need 3, only 2 finite)
+    latest = out.filter(pl.col("ts_ms") == now).sort("symbol")
+    got = dict(zip(latest["symbol"].to_list(), latest["in_universe"].to_list()))
+    # the 2 finite + the highest-24h cold name; the low-24h cold name stays out
+    assert got == {"fin1": True, "fin2": True, "cold_hi": True, "cold_lo": False}
+
+
+def test_median_universe_selection_noop_without_median_column() -> None:
+    """ls-4: a features frame lacking turnover_median_90d (degenerate) is returned unchanged
+    with fallback 0 — never crashes the cycle."""
+    from liquidity_migration.long_native_event_demo import _apply_median_universe_selection
+
+    feat = pl.DataFrame([{"ts_ms": 1, "symbol": "x", "turnover_quote": 1.0, "in_universe": True}])
+    out, fallback = _apply_median_universe_selection(feat, universe_size=3, snapshot_ts_ms=1)
+    assert fallback == 0 and out.equals(feat)
