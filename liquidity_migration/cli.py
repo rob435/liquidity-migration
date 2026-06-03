@@ -17,6 +17,7 @@ from .config import (
     ensure_data_root_exists,
     load_config,
 )
+from .storage import ensure_data_root
 from .data_layer import DEFAULT_DATA_LAYER_DATASETS, DataLayerAuditConfig, run_data_layer_audit
 from .downloaders import download_binance_usdm_proxy_data, download_market_data, parse_date_ms
 from .event_demo import (
@@ -248,6 +249,32 @@ _COMMANDS_WITHOUT_DATA_ROOT = frozenset(
     }
 )
 
+# Live daemon entrypoints OWN their ledger root and self-provision it (mkdir -p) so a
+# brand-new sleeve (e.g. a freshly-added paper shadow whose data dir was never created on the
+# box) starts clean on first deploy instead of crash-looping on FileNotFoundError. Research /
+# backtest commands keep the strict ensure_data_root_exists guard below: a missing research
+# root is a misconfiguration to surface loudly, not silently create.
+_COMMANDS_THAT_OWN_DATA_ROOT = frozenset(
+    {
+        "event-demo-cycle",
+        "event-risk-cycle",
+        "event-risk-ws",
+        "long-native-event-demo-cycle",
+        "continuous-event-demo-cycle",
+    }
+)
+
+
+def _resolve_data_root(command: str, data_root: str | Path) -> Path:
+    """Resolve the data root for a CLI command: commands that don't use it get the path as-is;
+    live daemon entrypoints self-provision (create) their ledger root; everything else keeps the
+    strict 'must already exist' guard."""
+    if command in _COMMANDS_WITHOUT_DATA_ROOT:
+        return Path(data_root).expanduser()
+    if command in _COMMANDS_THAT_OWN_DATA_ROOT:
+        return ensure_data_root(Path(data_root).expanduser())
+    return ensure_data_root_exists(data_root)
+
 
 def _expanded_report_dir(report_dir: str | Path | None, *, default: Path) -> Path:
     return Path(report_dir).expanduser() if report_dir else default
@@ -357,10 +384,7 @@ def _run_signal_harness(args, data_root: Path) -> int:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = load_config(args.config, data_root=args.data_root)
-    if args.command in _COMMANDS_WITHOUT_DATA_ROOT:
-        data_root = Path(config.data_root).expanduser()
-    else:
-        data_root = ensure_data_root_exists(config.data_root)
+    data_root = _resolve_data_root(args.command, config.data_root)
 
     if args.command == "download-data":
         if args.fixture:

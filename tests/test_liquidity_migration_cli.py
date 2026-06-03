@@ -5,7 +5,21 @@ from pathlib import Path
 import pytest
 
 from liquidity_migration.config import DEFAULT_EXCLUDED_SYMBOLS
-from liquidity_migration.cli import _print_event_risk_summary, build_parser, main
+from liquidity_migration.cli import _print_event_risk_summary, _resolve_data_root, build_parser, main
+
+
+def test_resolve_data_root_creates_for_daemons_guards_for_research(tmp_path: Path) -> None:
+    """Live daemon entrypoints self-provision a missing ledger root (so a brand-new sleeve
+    doesn't crash-loop on first deploy); research/backtest commands keep the strict
+    must-already-exist guard; no-data-root commands return the path untouched."""
+    missing = tmp_path / "new_sleeve_root"
+    assert not missing.exists()
+    out = _resolve_data_root("continuous-event-demo-cycle", missing)
+    assert out == missing and missing.is_dir()  # daemon command -> self-provisioned
+    with pytest.raises(FileNotFoundError):  # research command -> strict guard
+        _resolve_data_root("volume-events", tmp_path / "absent_research_root")
+    noop = tmp_path / "noop_root"  # no-data-root command -> untouched
+    assert _resolve_data_root("reconcile-all", noop) == noop and not noop.exists()
 
 
 def test_cli_fixture_pipeline_runs_volume_events(tmp_path: Path) -> None:

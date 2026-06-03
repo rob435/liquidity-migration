@@ -96,6 +96,27 @@ def test_systemd_entry_runner_uses_vps_cadence() -> None:
     assert "Environment=PYTHONDONTWRITEBYTECODE=1" in text
 
 
+def test_long_units_lookback_days_satisfies_validation_floor() -> None:
+    """ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
+    lookback_days floor (>=95) — else every long cycle crash-fails (ValueError) and the sleeve
+    silently stops trading. The env override broke this once on deploy (LOOKBACK_DAYS=90 < 95);
+    pin the unit env to the code's requirement so the two can never drift apart again."""
+    import re
+
+    repo = Path(__file__).resolve().parents[1]
+    for unit in (
+        "liquidity-migration-bybit-long-demo.service",
+        "liquidity-migration-bybit-long-paper.service",
+    ):
+        text = (repo / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
+        m = re.search(r"^Environment=LOOKBACK_DAYS=(\d+)", text, re.MULTILINE)
+        assert m is not None, f"{unit}: no LOOKBACK_DAYS env"
+        assert int(m.group(1)) >= 95, (
+            f"{unit}: LOOKBACK_DAYS={m.group(1)} < 95 — _validate_long_demo_config would "
+            "crash-fail every long cycle"
+        )
+
+
 def test_event_entry_runner_submit_profile_allowlist_safe_by_default() -> None:
     """The submit-profile gate is now a CONFIGURABLE allowlist, but still
     safe-by-default: SUBMIT_ORDERS is opt-in and ALLOWED_SUBMIT_PROFILES

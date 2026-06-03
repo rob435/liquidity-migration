@@ -30,7 +30,9 @@ Environment=MAX_ORDER_NOTIONAL_PCT_EQUITY=0
 Environment=MAX_NEW_ENTRIES_PER_CYCLE=5
 # div promotion 2026-05-30 (was 10): must match _v11a_long_native_config().universe_size
 Environment=UNIVERSE_SIZE=50
-Environment=LOOKBACK_DAYS=90
+# ls-4: >=95 so turnover_median_90d populates after the bar trims (_validate_long_demo_config
+# hard-requires it). Was 90 (pre-ls-4) which crash-failed every cycle. Lockstep with demo unit.
+Environment=LOOKBACK_DAYS=100
 Environment=WORKERS=2
 Environment=WS_KLINES_ENABLED=1
 ExecStart=/opt/liquidity-migration/scripts/run_bybit_long_demo_event_engine.sh
