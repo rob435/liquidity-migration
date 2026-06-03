@@ -81,6 +81,12 @@ from .event_demo import (
     order_quantity_for_notional,
     summarize_position_pnl,
 )
+from .cross_sleeve import (
+    claim_symbol_reservation,
+    clamp_max_new_entries,
+    read_account_state,
+    shared_account_root,
+)
 from .long_native import LongNativeConfig, _classify_entry, _vol_target_scale, build_long_features
 from .storage import exclusive_file_lock, read_dataset, write_dataset
 from .telegram import send_telegram_message
@@ -147,6 +153,11 @@ class LongNativeDemoCycleConfig:
     settle_coin: str = "USDT"
     data_name: str = "long-native-event-demo"
     strategy_profile: str = "MultiStratV1"
+    # long-sleeve-5/-6: path to the shared cross-sleeve control root (= the short/account
+    # root, owned by ws_risk). None => auto-resolve from this sleeve's data_root via the
+    # sibling convention (cross_sleeve.shared_account_root). Read-only here; the whole
+    # feature is a NO-OP until ws_risk writes the row AND the operator sets a budget split.
+    cross_sleeve_account_root: str | None = None
     # Mirrors EventDemoCycleConfig — daemon constructs a KlineStreamManager
     # to feed an in-memory store. The long sleeve's small universe makes
     # this less critical than the short side, but consistency simplifies
@@ -539,6 +550,20 @@ def run_long_native_demo_cycle(
         # bars. Each candidate carries enough state to enter at-market this
         # cycle if conditions are met or the deadline has expired.
         contract_by_symbol = _contract_lookup(universe)
+        # long-sleeve-5: read the shared cross-sleeve control row (read-only, swallow
+        # errors -> neutral NO-OP) and SHRINK this cycle's new-entry budget if the long
+        # sleeve is at/over its pre-registered IM ceiling. Null/absent split => unchanged
+        # legacy behavior. Long first -- it is the worst margin offender (10% IM x 10 slots).
+        cross_sleeve_root = (
+            Path(demo.cross_sleeve_account_root).expanduser()
+            if demo.cross_sleeve_account_root is not None
+            else shared_account_root(root)
+        )
+        cross_sleeve_state = read_account_state(cross_sleeve_root)
+        effective_max_new_entries, long_margin_clamped = clamp_max_new_entries(
+            demo.max_new_entries_per_cycle, sleeve="long", state=cross_sleeve_state
+        )
+        skipped_long_margin_budget = demo.max_new_entries_per_cycle if long_margin_clamped else 0
         candidates, skip_counts = _select_long_entry_candidates(
             features=features,
             klines=klines,
@@ -546,7 +571,7 @@ def run_long_native_demo_cycle(
             now_ms=cycle_now_ms,
             strategy=strategy,
             price_by_symbol=price_by_symbol,
-            max_new_entries=demo.max_new_entries_per_cycle,
+            max_new_entries=effective_max_new_entries,
         )
 
         # Apply cooldown / capacity / liveness filters
@@ -589,7 +614,7 @@ def run_long_native_demo_cycle(
         else:
             private_factory = None
 
-        executed_entries, entry_order_rows = _execute_long_entries(
+        executed_entries, entry_order_rows, skipped_long_reservation = _execute_long_entries(
             candidates,
             trading_client=trading_client,
             demo=demo,
@@ -603,6 +628,8 @@ def run_long_native_demo_cycle(
             private_client_factory=private_factory,
             execution_event_router=execution_event_router,
             max_workers=entries_parallel_workers,
+            cross_sleeve_account_root=str(cross_sleeve_root),
+            live_position_symbols=live_position_symbols,
         )
         if executed_entries:
             all_trades = _upsert_rows(all_trades, executed_entries, key="trade_id")
@@ -702,6 +729,8 @@ def run_long_native_demo_cycle(
             "telegram_sent": False,
             "telegram_error": "",
             **{f"skipped_{key}": value for key, value in skip_counts.items()},
+            "skipped_long_margin_budget": skipped_long_margin_budget,  # ls-5: cross-sleeve IM clamp
+            "skipped_long_reservation": skipped_long_reservation,  # ls-6: symbol taken by a sibling
             "skipped_pending_entry_order": pending_skips,
             "skipped_live_position_entry": live_pos_skips,
             "skipped_live_open_entry_order": live_open_skips,
@@ -1351,9 +1380,11 @@ def _execute_long_entries(
     private_client_factory: Callable[[], Any] | None,
     execution_event_router: Any | None,
     max_workers: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    cross_sleeve_account_root: str | None = None,
+    live_position_symbols: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     if not candidates:
-        return [], []
+        return [], [], 0
     # Parallel path is a simplified version of event_demo._execute_entries:
     # candidate count for the long sleeve is small (≤5), and the cycle is
     # signal-sparse, so we do the simpler sequential path. If it becomes a
@@ -1361,7 +1392,27 @@ def _execute_long_entries(
     _ = max_workers, private_client_factory  # reserved for future parallelism
     rows: list[dict[str, Any]] = []
     order_rows: list[dict[str, Any]] = []
+    skipped_reservation = 0
     for cand in candidates:
+        # long-sleeve-6: on a REAL submit, atomically claim the symbol through the shared
+        # control row BEFORE building/placing the order — the claim takes the control-row
+        # dataset lock and rejects iff another sleeve holds an active reservation OR a live
+        # venue position exists, closing the same-minute cross-process race the lagging
+        # venue snapshot misses. Dry-run/paper never reserves (no real order races);
+        # fail-open if no writer/control row yet.
+        if demo.submit_orders and cross_sleeve_account_root is not None:
+            _symbol = str(cand.get("symbol", ""))
+            if not claim_symbol_reservation(
+                cross_sleeve_account_root,
+                symbol=_symbol,
+                sleeve="long",
+                trade_id=str(cand.get("trade_id", "")),
+                now_ms=now_ms,
+                live_position_symbols=live_position_symbols,
+            ):
+                _logger.info("long entry skipped: symbol %s taken by another sleeve (reservation)", _symbol)
+                skipped_reservation += 1
+                continue
         row, order = _execute_single_long_entry(
             cand,
             trading_client=trading_client,
@@ -1379,7 +1430,7 @@ def _execute_long_entries(
             rows.append(row)
         if order is not None:
             order_rows.append(order)
-    return rows, order_rows
+    return rows, order_rows, skipped_reservation
 
 
 def _execute_single_long_entry(
