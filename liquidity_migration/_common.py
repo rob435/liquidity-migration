@@ -93,6 +93,24 @@ def date_ms(value: str) -> int:
     return parsed
 
 
+def calendar_shift(value: pl.Expr, periods: int, *, time_col: str = "ts_ms", day_ms: int = MS_PER_DAY) -> pl.Expr:
+    """A per-symbol positional ``value.shift(periods).over("symbol")`` that is NULL unless
+    the partner row is EXACTLY ``periods`` calendar days back — i.e. gap-aware (BAC-1/BAC-7).
+
+    On the daily feature grid a plain ``shift(N)`` reaches the Nth *present* row, which
+    spans more than N calendar days across a mid-history gap (delist/relist, archive hole),
+    silently measuring the wrong lookback (e.g. a "7-day" liquidity-rank improvement over
+    14+ days — the flagship migration gate). This nulls the value across such a gap instead.
+
+    For a CONTIGUOUS daily series it is byte-identical to ``value.shift(periods).over(
+    "symbol")`` (every partner ts is exactly periods*day_ms back), so it is a no-op except
+    on gapped symbols. Requires the frame sorted by ``[symbol, time_col]`` with a
+    midnight-snapped daily ``time_col``.
+    """
+    aligned = pl.col(time_col).shift(periods).over("symbol") == (pl.col(time_col) - periods * day_ms)
+    return pl.when(aligned).then(value.shift(periods).over("symbol")).otherwise(None)
+
+
 def trading_day_expr(ts_col: str = "ts_ms") -> pl.Expr:
     """The PIT *trading day* as a polars Date expression: ``date(ts_ms - 1ms)``.
 

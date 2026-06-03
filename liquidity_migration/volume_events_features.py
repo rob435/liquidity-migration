@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import polars as pl
 
-from ._common import MS_PER_DAY, trading_day_expr
+from ._common import MS_PER_DAY, MS_PER_HOUR, calendar_shift, trading_day_expr
 from .volume_features import VOLUME_SCORE_COLUMNS
 
 
@@ -135,8 +135,9 @@ def _enriched_event_features(
     expressions = []
     for col in shift_cols:
         if col in enriched.columns:
-            expressions.append(pl.col(col).shift(1).over("symbol").alias(f"prior_{col}"))
-            expressions.append(pl.col(col).shift(7).over("symbol").alias(f"prior7_{col}"))
+            # BAC-1: calendar-aware — NULL across a mid-history gap (no-op for contiguous).
+            expressions.append(calendar_shift(pl.col(col), 1).alias(f"prior_{col}"))
+            expressions.append(calendar_shift(pl.col(col), 7).alias(f"prior7_{col}"))
     expressions.extend(
         [
             pl.col("volume_persistence_z_rank_frac")
@@ -154,9 +155,13 @@ def _enriched_event_features(
             .rolling_mean(window_size=7, min_samples=1)
             .over("symbol")
             .alias("prior7_abs_daily_return_mean"),
-            pl.col("liquidity_rank").shift(7).over("symbol").alias("prior7_liquidity_rank"),
-            pl.col("liquidity_rank").shift(1).over("symbol").alias("prior1_liquidity_rank"),
-            pl.col("liquidity_rank").shift(3).over("symbol").alias("prior3_liquidity_rank"),
+            # BAC-1 FLAGSHIP GATE: prior7_liquidity_rank feeds liquidity_rank_improvement_7d
+            # (the liquidity_migration_rank_improvement_min gate). Calendar-aware so a
+            # gapped symbol's "7-day" improvement isn't measured over 14+ days (NULL across
+            # the gap -> the gate fail-CLOSES on it, matching the documented null policy).
+            calendar_shift(pl.col("liquidity_rank"), 7).alias("prior7_liquidity_rank"),
+            calendar_shift(pl.col("liquidity_rank"), 1).alias("prior1_liquidity_rank"),
+            calendar_shift(pl.col("liquidity_rank"), 3).alias("prior3_liquidity_rank"),
             pl.col("turnover_quote")
             .shift(1)
             .rolling_mean(window_size=7, min_samples=1)
@@ -561,9 +566,11 @@ def _daily_return_frame(klines: pl.DataFrame) -> pl.DataFrame:
                 pl.col("high").max().alias("high"),
                 pl.col("low").min().alias("low"),
                 pl.col("close").last().alias("close"),
-                pl.col("open").tail(6).first().alias("signal_day_last6h_open"),
+                # BAC-5: the last 6 HOURS of the day (hour-of-day >= 18), not the last 6
+                # present ROWS — a gapped final 6h otherwise silently shifts the window.
+                pl.col("open").filter(pl.col("ts_ms") % MS_PER_DAY >= 18 * MS_PER_HOUR).first().alias("signal_day_last6h_open"),
                 pl.col("turnover_quote").sum().alias("signal_day_turnover"),
-                pl.col("turnover_quote").tail(6).sum().alias("signal_day_last6h_turnover"),
+                pl.col("turnover_quote").filter(pl.col("ts_ms") % MS_PER_DAY >= 18 * MS_PER_HOUR).sum().alias("signal_day_last6h_turnover"),
                 pl.col("turnover_quote").filter(pl.col("close") > pl.col("open")).sum().alias("signal_day_up_turnover"),
                 pl.len().alias("hourly_bars"),
             ]
@@ -573,17 +580,19 @@ def _daily_return_frame(klines: pl.DataFrame) -> pl.DataFrame:
         .sort(["symbol", "ts_ms"])
         .with_columns(
             [
-                (pl.col("close") / pl.col("close").shift(1).over("symbol") - 1.0).alias("daily_return_1d"),
-                (pl.col("close") / pl.col("close").shift(3).over("symbol") - 1.0).alias("return_3d"),
-                (pl.col("close") / pl.col("close").shift(7).over("symbol") - 1.0).alias("return_7d"),
-                (pl.col("close") / pl.col("close").shift(14).over("symbol") - 1.0).alias("return_14d"),
-                (pl.col("close") / pl.col("close").shift(30).over("symbol") - 1.0).alias("return_30d"),
+                # BAC-1: calendar-aware shifts — NULL across a mid-history gap instead of
+                # measuring a multi-day move as a "1d"/"Nd" return (no-op for contiguous).
+                (pl.col("close") / calendar_shift(pl.col("close"), 1) - 1.0).alias("daily_return_1d"),
+                (pl.col("close") / calendar_shift(pl.col("close"), 3) - 1.0).alias("return_3d"),
+                (pl.col("close") / calendar_shift(pl.col("close"), 7) - 1.0).alias("return_7d"),
+                (pl.col("close") / calendar_shift(pl.col("close"), 14) - 1.0).alias("return_14d"),
+                (pl.col("close") / calendar_shift(pl.col("close"), 30) - 1.0).alias("return_30d"),
                 (pl.col("high") / pl.col("low") - 1.0).alias("intraday_range_1d"),
                 (pl.col("close") / pl.col("open") - 1.0).alias("daily_intraday_return_1d"),
-                (pl.col("close").shift(1).over("symbol") / pl.col("close").shift(8).over("symbol") - 1.0).alias(
+                (calendar_shift(pl.col("close"), 1) / calendar_shift(pl.col("close"), 8) - 1.0).alias(
                     "prior7_return"
                 ),
-                (pl.col("close").shift(1).over("symbol") / pl.col("close").shift(15).over("symbol") - 1.0).alias(
+                (calendar_shift(pl.col("close"), 1) / calendar_shift(pl.col("close"), 15) - 1.0).alias(
                     "prior14_return"
                 ),
                 pl.col("close").shift(1).rolling_max(window_size=20, min_samples=5).over("symbol").alias(
@@ -628,7 +637,7 @@ def _daily_return_frame(klines: pl.DataFrame) -> pl.DataFrame:
             [
                 (pl.col("close") / pl.col("prior20_close_high") - 1.0).alias("close_vs_prior20_high"),
                 (pl.col("close") / pl.col("prior20_close_low") - 1.0).alias("close_vs_prior20_low"),
-                (pl.col("close").shift(1).over("symbol") / pl.col("prior20_close_high") - 1.0).alias(
+                (calendar_shift(pl.col("close"), 1) / pl.col("prior20_close_high") - 1.0).alias(
                     "prior20_drawdown"
                 ),
             ]

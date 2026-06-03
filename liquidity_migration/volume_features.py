@@ -4,7 +4,7 @@ import numpy as np
 import polars as pl
 
 
-from ._common import MS_PER_DAY, MS_PER_HOUR
+from ._common import MS_PER_DAY, MS_PER_HOUR, calendar_shift
 
 VOLUME_SCORE_COLUMNS = {
     "volume_change_1d": "volume_change_1d_z",
@@ -42,9 +42,11 @@ def build_volume_features(klines: pl.DataFrame, *, aggregation_ms: int = MS_PER_
             tq.rolling_mean(window_size=20).over("symbol").alias("_roll20_mean"),
         )
         .with_columns(
-            ((tq + 1.0) / (tq.shift(1).over("symbol") + 1.0)).log()
+            # BAC-7: calendar-aware shifts so a mid-history gap yields NaN, not a
+            # volume-change over the wrong horizon (no-op for a contiguous series).
+            ((tq + 1.0) / (calendar_shift(tq, 1, day_ms=aggregation_ms) + 1.0)).log()
                 .fill_null(float("nan")).alias("volume_change_1d_raw"),
-            ((pl.col("_roll3") + 1.0) / (pl.col("_roll3").shift(3).over("symbol") + 1.0)).log()
+            ((pl.col("_roll3") + 1.0) / (calendar_shift(pl.col("_roll3"), 3, day_ms=aggregation_ms) + 1.0)).log()
                 .fill_null(float("nan")).alias("volume_change_3d_raw"),
             ((pl.col("_roll3") / 3.0 + 1.0) / (pl.col("_roll20_mean") + 1.0)).log()
                 .fill_null(float("nan")).alias("volume_persistence_raw"),

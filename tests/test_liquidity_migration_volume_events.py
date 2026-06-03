@@ -2695,3 +2695,73 @@ def test_pit_threaded_precompute_is_value_identical_to_recompute() -> None:
         kline_covered_date_symbols=covered,
     )
     assert threaded == recompute
+
+
+def test_calendar_shift_nulls_across_gap_noop_for_contiguous() -> None:
+    """BAC-1 helper: calendar_shift == positional shift for a contiguous daily series,
+    but NULLs the value when the partner row isn't exactly N calendar days back (a gap)."""
+    from liquidity_migration._common import MS_PER_DAY, calendar_shift
+
+    contiguous = pl.DataFrame(
+        {"symbol": ["A", "A", "A"], "ts_ms": [MS_PER_DAY, 2 * MS_PER_DAY, 3 * MS_PER_DAY], "v": [10.0, 20.0, 30.0]}
+    ).sort(["symbol", "ts_ms"]).with_columns(
+        calendar_shift(pl.col("v"), 1).alias("cs"),
+        pl.col("v").shift(1).over("symbol").alias("plain"),
+    )
+    assert contiguous["cs"].to_list() == contiguous["plain"].to_list()  # no-op for contiguous
+
+    gapped = pl.DataFrame(  # day 3 missing -> ts jumps 2day -> 4day
+        {"symbol": ["A", "A", "A"], "ts_ms": [MS_PER_DAY, 2 * MS_PER_DAY, 4 * MS_PER_DAY], "v": [10.0, 20.0, 30.0]}
+    ).sort(["symbol", "ts_ms"]).with_columns(calendar_shift(pl.col("v"), 1).alias("cs"))
+    # row0: no partner; row1: partner=day1 (1 back) -> 10.0; row2: partner=day2 (2 back, gap) -> NULL
+    assert gapped["cs"].to_list() == [None, 10.0, None]
+
+
+def test_daily_return_frame_nulls_returns_across_mid_history_gap() -> None:
+    """BAC-1: a positional shift(7) across a mid-history gap measured a >7-calendar-day move
+    as return_7d; calendar_shift NULLs it. Contiguous tail is unaffected."""
+    MS_PER_DAY = 86_400_000
+    start = 1_704_067_200_000
+    present_days = list(range(0, 10)) + list(range(20, 30))  # gap on days 10..19
+    rows = []
+    for day in present_days:
+        day_start = start + day * MS_PER_DAY
+        for hour in range(24):
+            rows.append({
+                "symbol": "AAAUSDT", "ts_ms": day_start + hour * 3_600_000,
+                "open": 100.0, "high": 101.0, "low": 99.0, "close": 100.0 + day,
+                "turnover_quote": 1_000_000.0, "date": "2024-01-01",
+            })
+    frame = _daily_return_frame(pl.DataFrame(rows)).sort(["symbol", "ts_ms"])
+    by_ts = {int(r["ts_ms"]): r for r in frame.to_dicts()}
+
+    def ts_out(day: int) -> int:
+        return start + (day + 1) * MS_PER_DAY  # _daily_return_frame stamps day_start + MS_PER_DAY
+
+    # Day 20 (first after the gap): the calendar -7 day (13) is missing -> return_7d NULL,
+    # and day 19 is missing -> daily_return_1d NULL (instead of a gap-blind ratio).
+    assert by_ts[ts_out(20)]["return_7d"] is None
+    assert by_ts[ts_out(20)]["daily_return_1d"] is None
+    # Deep in the contiguous tail (day 29): the -7 day (22) IS present -> not null.
+    assert by_ts[ts_out(29)]["return_7d"] is not None
+    assert by_ts[ts_out(29)]["daily_return_1d"] is not None
+
+
+def test_daily_return_frame_last6h_uses_hours_not_rows() -> None:
+    """BAC-5: signal_day_last6h_* covers the last 6 HOURS (hour-of-day >= 18), not the last
+    6 present ROWS — a gapped final 6h must not pull in earlier hours."""
+    start = 1_704_067_200_000
+    hours = list(range(0, 20)) + [21, 22, 23]  # hour 20 missing; 23 bars (>= the 20-bar filter)
+    rows = [{
+        "symbol": "AAAUSDT", "ts_ms": start + hour * 3_600_000,
+        "open": float(hour), "high": 100.0, "low": 1.0, "close": 50.0,
+        "turnover_quote": float(hour), "date": "2024-01-01",
+    } for hour in hours]
+    r = _daily_return_frame(pl.DataFrame(rows)).to_dicts()[0]
+    # The raw last6h_* cols are consumed into these derived outputs. last 6 HOURS =
+    # 18,19,21,22,23 (hour 20 missing; hour 17 NOT pulled in); turnover_quote == hour.
+    total = sum(hours)  # signal_day_turnover
+    last6h = 18 + 19 + 21 + 22 + 23
+    assert r["signal_day_last6h_turnover_share"] == last6h / total
+    # last6h_open = open of the first bar at/after hour 18 = 18.0 -> return = close/open - 1.
+    assert abs(r["signal_day_last6h_return"] - (50.0 / 18.0 - 1.0)) < 1e-9
