@@ -1680,7 +1680,14 @@ def _orphan_close_pnl_from_records(
     candidates: list[tuple[int, dict[str, Any]]] = []
     for record in records:
         record_side = str(record.get("side") or "")
-        if record_side and record_side != expected_close_side:
+        # Fail CLOSED on a missing/empty side. On the SHARED, NETTED demo account
+        # get_closed_pnl is account-wide (symbol-scoped, but every sleeve can trade the
+        # same symbol), and this matcher IS the positive close-evidence under
+        # require_evidence=True. A blank-side record (venue anomaly) must NOT be
+        # accepted as a close for THIS trade -- that would close a still-live position
+        # and book a sibling sleeve's exit price. Mirrors reconciliation.py:957/967,
+        # which already drops empty-side closed-PnL rows on the shared account.
+        if record_side != expected_close_side:
             continue
         # Bybit returns createdTime / updatedTime as ms-since-epoch strings or ints.
         created_ts = int(_float(record.get("createdTime") or record.get("updatedTime") or 0))

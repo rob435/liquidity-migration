@@ -1068,6 +1068,37 @@ def test_prune_cycle_reports_drops_files_older_than_keep_days(tmp_path: Path) ->
     assert pointer.exists(), "latest_*.json pointer must not match the per-cycle prefix"
 
 
+def test_prune_cycle_reports_prunes_md_extension_for_ws_risk(tmp_path: Path) -> None:
+    """ws_risk writes a per-cycle .json AND a paired .md; the json-only default would
+    leak the .md half forever. extensions=("json","md") must prune BOTH."""
+    now_ms = 1_700_000_000_000
+    keep_days = 7
+    old_age = (keep_days + 1) * 86400
+    fresh_age = 3600
+    prefix = "event_ws_risk_cycle_"
+    old_json = tmp_path / f"{prefix}OLD.json"
+    old_md = tmp_path / f"{prefix}OLD.md"
+    fresh_json = tmp_path / f"{prefix}FRESH.json"
+    fresh_md = tmp_path / f"{prefix}FRESH.md"
+    for path in (old_json, old_md, fresh_json, fresh_md):
+        path.write_text("{}", encoding="utf-8")
+    now_s = now_ms / 1000.0
+    import os
+    for path in (old_json, old_md):
+        os.utime(path, (now_s - old_age, now_s - old_age))
+    for path in (fresh_json, fresh_md):
+        os.utime(path, (now_s - fresh_age, now_s - fresh_age))
+
+    _prune_cycle_reports(
+        tmp_path, prefix=prefix, keep_days=keep_days, now_ms=now_ms, extensions=("json", "md"),
+    )
+
+    assert not old_json.exists()
+    assert not old_md.exists(), "the paired .md must be pruned too (the leak this fixes)"
+    assert fresh_json.exists()
+    assert fresh_md.exists()
+
+
 def test_prune_cycle_reports_amortizes_via_hourly_sentinel(tmp_path: Path) -> None:
     """Second call within an hour must be a no-op — even if a new old file
     appears, the sentinel skips the scan. Prevents the 5500-stat-syscalls-per-

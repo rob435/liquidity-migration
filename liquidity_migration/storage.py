@@ -505,12 +505,22 @@ def _collect_ledger_files(
         if columns is not None:
             lf = lf.select([col for col in columns if col in names])
         out = lf.collect()
-    except (pl.exceptions.SchemaError, pl.exceptions.ColumnNotFoundError):
+    except (
+        pl.exceptions.SchemaError,
+        pl.exceptions.ColumnNotFoundError,
+        pl.exceptions.SchemaFieldNotFoundError,
+        pl.exceptions.StructFieldNotFoundError,
+        pl.exceptions.ComputeError,
+        pl.exceptions.ShapeError,
+    ):
         # Month-bucketing spreads schema-drifting ledger rows (different writers /
         # eras add columns) across bucket files, so a unified scan_parquet can hit
-        # SchemaError OR ColumnNotFoundError. The legacy monolith never did (one
-        # diagonal_relaxed-merged file). Fall back to per-file read + diagonal concat,
-        # which tolerates the drift (ledgers are small, so the no-pushdown cost is nil).
+        # SchemaError, ColumnNotFoundError, Schema/StructFieldNotFoundError, or a
+        # ComputeError/ShapeError when the merged scan can't reconcile column shapes.
+        # The legacy monolith never did (one diagonal_relaxed-merged file). Fall back
+        # to per-file read + diagonal concat, which tolerates the drift (ledgers are
+        # small, so the no-pushdown cost is nil). A genuinely torn/unreadable file
+        # still raises out of the per-file read below -- fail-loud, not masked.
         frames = [pl.read_parquet(file) for file in file_paths]
         out = pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
         if _LEDGER_MONTH_COL in out.columns:

@@ -1078,12 +1078,24 @@ def run_event_demo_cycle(
         return payload
 
 
-def _prune_cycle_reports(report_dir: Path, *, prefix: str, keep_days: int, now_ms: int) -> None:
-    """Drop per-cycle JSON files older than ``keep_days`` to keep the report
+def _prune_cycle_reports(
+    report_dir: Path,
+    *,
+    prefix: str,
+    keep_days: int,
+    now_ms: int,
+    extensions: tuple[str, ...] = ("json",),
+) -> None:
+    """Drop per-cycle report files older than ``keep_days`` to keep the report
     directory bounded. The latest_*.json pointer and the partitioned cycle
     ledger preserve full history; per-cycle snapshots are only useful for
     inspecting a recent specific cycle. Best-effort: any unlink error is
     swallowed so a noisy filesystem can't break the cycle.
+
+    ``extensions`` is the set of suffixes (no dot) to prune for this prefix.
+    The short + long cycles write only a per-cycle ``.json``; ws_risk also
+    writes a paired ``.md`` (event_ws_risk_cycle_*.md), so it passes
+    ("json", "md") to avoid leaking the markdown half.
 
     Amortized: only does the full directory scan when the last prune was
     more than 1 hour ago. With 1500 cycles/day per daemon the directory
@@ -1102,12 +1114,13 @@ def _prune_cycle_reports(report_dir: Path, *, prefix: str, keep_days: int, now_m
         return
     cutoff_ts = (now_ms / 1000.0) - keep_days * 86400.0
     try:
-        for path in report_dir.glob(f"{prefix}*.json"):
-            try:
-                if path.stat().st_mtime < cutoff_ts:
-                    path.unlink(missing_ok=True)
-            except OSError:
-                continue
+        for ext in extensions:
+            for path in report_dir.glob(f"{prefix}*.{ext}"):
+                try:
+                    if path.stat().st_mtime < cutoff_ts:
+                        path.unlink(missing_ok=True)
+                except OSError:
+                    continue
         # Touch the sentinel so the next call's gate fires off this run.
         sentinel.touch()
     except OSError:

@@ -39,6 +39,7 @@ from .event_demo import (
     _open_trades,
     _order_params,
     _price_lookup_from_positions,
+    _prune_cycle_reports,
     _quantity_text,
     _risk_order_link_id,
     _risk_reconcile_missing_positions,
@@ -590,9 +591,39 @@ class EventWebSocketRiskEngine:
             try:
                 event_type, message = self.events.get(timeout=timeout)
             except queue.Empty:
-                self.on_idle()
+                try:
+                    self.on_idle()
+                except Exception as exc:  # noqa: BLE001 - isolate one bad idle/reconcile cycle
+                    self._handle_consumer_error(exc, where="on_idle")
                 continue
-            self.handle_event(event_type, message)
+            try:
+                self.handle_event(event_type, message)
+            except Exception as exc:  # noqa: BLE001 - isolate one bad event; never kill the sole authority
+                self._handle_consumer_error(exc, where=f"handle_event:{event_type}")
+
+    def _handle_consumer_error(self, exc: BaseException, *, where: str) -> None:
+        """Isolate a single bad event/idle cycle so one unexpected raise can't kill the
+        SOLE reconcile/exit authority for all three sleeves. A crash here leaves every
+        open position on its server-side disaster stop ONLY -- no intrabar TP/max-hold,
+        no orphan close, no cross-sleeve control-row refresh -- until systemd restarts,
+        and a DETERMINISTIC raise (e.g. a corrupt ledger re-read every bootstrap) would
+        exhaust systemd's default start-limit and PARK the unit (permanent outage). So
+        log + record + persist a handler_error report and continue. The off-thread
+        state-mutation assertion stays a deliberate fail-fast (a programming bug, not a
+        data event) and is re-raised; the report write is itself guarded so a failure
+        while handling an error cannot re-crash the loop."""
+        if isinstance(exc, RuntimeError) and "off the consumer thread" in str(exc):
+            raise exc
+        message = f"consumer-loop error in {where}: {exc}"
+        _logger.exception(message)
+        try:
+            self.state.errors.append(message[:500])
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.write_report(reason="handler_error")
+        except Exception:  # noqa: BLE001 - a report failure during error handling must not re-crash the loop
+            _logger.exception("ws_risk handler_error report write failed")
 
     def bootstrap(self) -> None:
         self.private_client = self.private_client or _build_private_client(self.config)
@@ -2356,6 +2387,20 @@ class EventWebSocketRiskEngine:
             payload["history_report_path"] = str(history_md_path)
             history_json_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
             history_md_path.write_text(format_event_risk_cycle_report(payload), encoding="utf-8")
+            # Bound the history dir. Unlike the short/long cycles (json-only),
+            # ws_risk writes a per-cycle .json AND .md and persists on EVERY
+            # non-heartbeat reason (reconcile/exit/adopt/fill) -- thousands/day on an
+            # active account -- so without pruning the dir grows unbounded until the
+            # disk fills and a LEDGER write fails under the cycle lock (the
+            # orphan-open-position mode). Prune BOTH extensions (the json-only default
+            # would leak the .md). Amortized hourly via a sentinel; scan cost is nil.
+            _prune_cycle_reports(
+                self.report_dir,
+                prefix="event_ws_risk_cycle_",
+                keep_days=7,
+                now_ms=now_ms,
+                extensions=("json", "md"),
+            )
         # Date-partitioned: append-only telemetry, see event_demo.py. partition_by=()
         # made every cycle read + rewrite the whole (unbounded) dataset.
         write_dataset(pl.DataFrame([cycle]), self.root, "event_demo_cycles", partition_by=("date",))

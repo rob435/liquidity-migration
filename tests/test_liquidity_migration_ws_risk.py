@@ -3503,3 +3503,71 @@ def test_ws_exit_and_tracked_fill_use_filtered_single_trade_lookup(tmp_path: Pat
     with pytest.raises(KeyError):
         engine.ws_exit({**_SUBMIT_EXIT_PLAN, "trade_id": "does-not-exist",
                         "exit_trigger_ts_ms": int(time.time() * 1000)})
+
+
+def test_ws_risk_consumer_loop_isolates_handler_exception(tmp_path: Path) -> None:
+    """A single raise out of on_idle/handle_event must NOT crash the sole reconcile
+    authority. The loop logs+records the error and continues to max_runtime (WSR-2)."""
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+            max_runtime_seconds=0.3,
+        ),
+        private_client=FakePrivateClient(),
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+    real_on_idle = engine.on_idle
+    calls = {"n": 0}
+
+    def flaky_on_idle() -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ValueError("boom in idle cycle")
+        real_on_idle()
+
+    engine.on_idle = flaky_on_idle  # type: ignore[method-assign]
+    payload = engine.run()
+
+    assert payload["cycle"]["reason"] == "max_runtime", "loop must survive the handler raise"
+    assert calls["n"] >= 2, "loop must continue iterating after isolating the error"
+    assert any("consumer-loop error in on_idle" in e for e in engine.state.errors)
+
+
+def test_ws_risk_consumer_loop_reraises_off_thread_assertion(tmp_path: Path) -> None:
+    """The off-thread state-mutation assertion is a deliberate fail-fast (a programming
+    bug, not a data event) and must still propagate out of run(), not be isolated."""
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=True,
+            confirm_demo_orders=True,
+            repair_stops=False,
+            order_submit_mode="rest",
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+            max_runtime_seconds=0.3,
+        ),
+        private_client=FakePrivateClient(),
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    def off_thread() -> None:
+        raise RuntimeError(
+            "WebSocketRiskState mutated off the consumer thread -- WS callbacks must enqueue."
+        )
+
+    engine.on_idle = off_thread  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError, match="off the consumer thread"):
+        engine.run()

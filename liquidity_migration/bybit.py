@@ -130,22 +130,28 @@ class BybitRestRateLimiter:
         self._throttled_seconds = 0.0
 
     def acquire(self) -> None:
-        with self._lock:
-            now = time.monotonic()
-            cutoff = now - self._per
-            while self._timestamps and self._timestamps[0] < cutoff:
-                self._timestamps.popleft()
-            if len(self._timestamps) >= self._max:
+        # Compute the throttle wait UNDER the lock, then sleep OUTSIDE it. Sleeping
+        # while holding the lock (the old behaviour) serialised the entire shared REST
+        # worker pool: one throttled worker blocked every other worker from even
+        # checking the window for the full sleep. We re-acquire + re-check after the
+        # sleep, so the sliding-window semantics are preserved (a slot is only ever
+        # claimed when len < max), while concurrent workers can make progress.
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                cutoff = now - self._per
+                while self._timestamps and self._timestamps[0] < cutoff:
+                    self._timestamps.popleft()
+                if len(self._timestamps) < self._max:
+                    self._timestamps.append(now)
+                    return
                 wait = self._per - (now - self._timestamps[0])
-                if wait > 0.0:
-                    self._throttle_events += 1
-                    self._throttled_seconds += wait
-                    time.sleep(wait)
-                    now = time.monotonic()
-                    cutoff = now - self._per
-                    while self._timestamps and self._timestamps[0] < cutoff:
-                        self._timestamps.popleft()
-            self._timestamps.append(now)
+                if wait <= 0.0:
+                    # Window already rolled at the boundary; re-evaluate immediately.
+                    continue
+                self._throttle_events += 1
+                self._throttled_seconds += wait
+            time.sleep(wait)
 
     def stats(self) -> dict[str, Any]:
         with self._lock:

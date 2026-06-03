@@ -1526,6 +1526,28 @@ def test_orphan_close_pnl_backfill_skips_wrong_side() -> None:
     assert _orphan_close_pnl_backfill(trade, now_ms=1_700_000_100_000, trading_client=client) == {}
 
 
+def test_orphan_close_pnl_backfill_skips_empty_side() -> None:
+    """A closed-PnL record with a blank/missing side must NOT count as close evidence.
+    On the shared netted account a sibling sleeve's close (or a venue anomaly that drops
+    the side field) would otherwise close THIS still-live short and book a wrong exit
+    price under require_evidence. Fail CLOSED on empty side (matches reconciliation.py)."""
+    trade = _open_trade_row(side="short")
+    client = _ClosedPnlClient(
+        records=[
+            {
+                "symbol": "AAAUSDT",
+                "side": "",  # blank side -> non-attributable on the shared account
+                "avgEntryPrice": "100.0",
+                "avgExitPrice": "95.0",
+                "orderId": "blank-side",
+                "createdTime": "1_700_000_050_000",
+            }
+        ]
+    )
+
+    assert _orphan_close_pnl_backfill(trade, now_ms=1_700_000_100_000, trading_client=client) == {}
+
+
 def test_risk_reconciler_backfills_pnl_when_trading_client_provided() -> None:
     """End-to-end: reconciler closes the orphan AND fills in exit_price / returns."""
     open_trades = pl.DataFrame([_open_trade_row()], infer_schema_length=None)
