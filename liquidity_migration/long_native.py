@@ -48,6 +48,7 @@ from .trade_lifecycle import (
     summarize_trade_backtest,
 )
 from .volume_events import (
+    _covered_kline_date_symbol_set,
     _date_range,
     _exclude_symbols,
     _full_pit_universe_error,
@@ -407,9 +408,18 @@ def run_long_native_research(
     if metrics_df is not None and not metrics_df.is_empty():
         metrics_df = _exclude_symbols(metrics_df, cfg.exclude_symbols)
 
-    full_pit_universe_pass = _full_pit_universe_pass(klines, archive_manifest)
+    # Compute the covered (date,symbol) set ONCE and thread it through the PIT gate +
+    # manifest metadata; mirrors the volume_events dedup (BAC-1), value-identical.
+    pit_covered_date_symbols = _covered_kline_date_symbol_set(klines)
+    full_pit_universe_pass = _full_pit_universe_pass(
+        klines, archive_manifest, kline_covered_date_symbols=pit_covered_date_symbols
+    )
     if cfg.require_full_pit_universe and not full_pit_universe_pass:
-        raise RuntimeError(_full_pit_universe_error(klines, archive_manifest))
+        raise RuntimeError(
+            _full_pit_universe_error(
+                klines, archive_manifest, kline_covered_date_symbols=pit_covered_date_symbols
+            )
+        )
 
     features = build_long_features(klines, funding=funding, open_interest=open_interest, config=cfg, metrics=metrics_df)
     features = _filter_signal_window(features, start=cfg.start_date, end=cfg.end_date)
@@ -473,7 +483,13 @@ def run_long_native_research(
         "config": asdict(cfg),
         "rows": {"features": features.height, "trades": trades.height, "baskets": baskets.height},
         "date_range": _date_range(features),
-        "pit_manifest": _pit_manifest_metadata(archive_manifest, features, klines),
+        "pit_manifest": _pit_manifest_metadata(
+            archive_manifest,
+            features,
+            klines,
+            full_pit_universe_pass=full_pit_universe_pass,
+            kline_covered_date_symbols=pit_covered_date_symbols,
+        ),
         "cost_model": {
             **asdict(costs), "base_round_trip_cost_bps": costs.base_entry_exit_cost_bps,
             "cost_multiplier": cfg.cost_multiplier,

@@ -24,11 +24,27 @@ def _pit_membership_pass(trades: pl.DataFrame, *, required: bool) -> bool:
     return bool(flags) and all(bool(flag) for flag in flags)
 
 
-def _pit_manifest_metadata(archive_manifest: pl.DataFrame, features: pl.DataFrame, klines: pl.DataFrame) -> dict[str, Any]:
+def _pit_manifest_metadata(
+    archive_manifest: pl.DataFrame,
+    features: pl.DataFrame,
+    klines: pl.DataFrame,
+    *,
+    full_pit_universe_pass: bool | None = None,
+    kline_covered_date_symbols: set[tuple[str, str]] | None = None,
+) -> dict[str, Any]:
+    # The covered-set group_by and the full-PIT pass are expensive over the multi-GB
+    # klines; the caller (run_volume_event_research / long_native) computes them ONCE and
+    # threads them in so they are not recomputed here (BAC-1). Both default to recompute
+    # so every other call site stays behaviourally identical.
     manifest_symbols = _symbol_set(archive_manifest)
     feature_symbols = _symbol_set(features)
     manifest_date_symbols = _date_symbol_set(archive_manifest)
-    kline_covered_date_symbols = _covered_kline_date_symbol_set(klines)
+    if kline_covered_date_symbols is None:
+        kline_covered_date_symbols = _covered_kline_date_symbol_set(klines)
+    if full_pit_universe_pass is None:
+        full_pit_universe_pass = _full_pit_universe_pass(
+            klines, archive_manifest, kline_covered_date_symbols=kline_covered_date_symbols
+        )
     return {
         "rows": archive_manifest.height,
         "symbols": len(manifest_symbols),
@@ -38,7 +54,7 @@ def _pit_manifest_metadata(archive_manifest: pl.DataFrame, features: pl.DataFram
         "manifest_date_symbols": len(manifest_date_symbols),
         "kline_covered_date_symbols": len(kline_covered_date_symbols),
         "manifest_date_symbols_missing_from_klines": len(manifest_date_symbols - kline_covered_date_symbols),
-        "full_pit_universe_pass": _full_pit_universe_pass(klines, archive_manifest),
+        "full_pit_universe_pass": full_pit_universe_pass,
     }
 
 
@@ -94,11 +110,17 @@ def _required_pit_date_symbols(klines: pl.DataFrame, archive_manifest: pl.DataFr
     return out
 
 
-def _full_pit_universe_pass(klines: pl.DataFrame, archive_manifest: pl.DataFrame) -> bool:
+def _full_pit_universe_pass(
+    klines: pl.DataFrame,
+    archive_manifest: pl.DataFrame,
+    *,
+    kline_covered_date_symbols: set[tuple[str, str]] | None = None,
+) -> bool:
     manifest_symbols = _symbol_set(archive_manifest)
     kline_symbols = _symbol_set(klines)
     required_date_symbols = _required_pit_date_symbols(klines, archive_manifest)
-    kline_covered_date_symbols = _covered_kline_date_symbol_set(klines)
+    if kline_covered_date_symbols is None:
+        kline_covered_date_symbols = _covered_kline_date_symbol_set(klines)
     return (
         bool(manifest_symbols)
         and manifest_symbols.issubset(kline_symbols)
@@ -107,12 +129,18 @@ def _full_pit_universe_pass(klines: pl.DataFrame, archive_manifest: pl.DataFrame
     )
 
 
-def _full_pit_universe_error(klines: pl.DataFrame, archive_manifest: pl.DataFrame) -> str:
+def _full_pit_universe_error(
+    klines: pl.DataFrame,
+    archive_manifest: pl.DataFrame,
+    *,
+    kline_covered_date_symbols: set[tuple[str, str]] | None = None,
+) -> str:
     manifest_symbols = _symbol_set(archive_manifest)
     kline_symbols = _symbol_set(klines)
     missing_symbols = sorted(manifest_symbols - kline_symbols)
     required_date_symbols = _required_pit_date_symbols(klines, archive_manifest)
-    kline_covered_date_symbols = _covered_kline_date_symbol_set(klines)
+    if kline_covered_date_symbols is None:
+        kline_covered_date_symbols = _covered_kline_date_symbol_set(klines)
     missing_date_symbols = sorted(required_date_symbols - kline_covered_date_symbols)
     if not manifest_symbols:
         return (

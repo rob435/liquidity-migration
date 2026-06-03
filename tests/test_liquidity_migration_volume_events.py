@@ -2650,3 +2650,48 @@ def test_ratio_helpers_have_distinct_documented_contracts() -> None:
     # Both agree on a valid ratio.
     assert _ratio_or_zero(6.0, 3.0) == 2.0
     assert _ratio_or_nan(6.0, 3.0) == 2.0
+
+
+def test_pit_threaded_precompute_is_value_identical_to_recompute() -> None:
+    """BAC-1: threading a precomputed covered-set + full_pit pass into the PIT helpers
+    must be value-identical to letting them recompute. The gate logic is unchanged;
+    only WHERE the multi-GB group_bys run changes (once, vs 2-3x)."""
+    from liquidity_migration.volume_events import (
+        _covered_kline_date_symbol_set,
+        _pit_manifest_metadata,
+    )
+
+    klines = pl.DataFrame(
+        [{"symbol": "AAAUSDT", "date": "2024-01-02"} for _ in range(24)]
+        + [{"symbol": "AAAUSDT", "date": "2024-01-03"} for _ in range(24)]
+        + [{"symbol": "BBBUSDT", "date": "2024-01-02"} for _ in range(24)]
+    )
+    manifest = pl.DataFrame(
+        [
+            {"symbol": "AAAUSDT", "date": "2024-01-02"},
+            {"symbol": "AAAUSDT", "date": "2024-01-03"},
+            {"symbol": "BBBUSDT", "date": "2024-01-02"},
+        ]
+    )
+    features = pl.DataFrame([{"symbol": "AAAUSDT"}, {"symbol": "BBBUSDT"}])
+    covered = _covered_kline_date_symbol_set(klines)
+
+    assert _full_pit_universe_pass(
+        klines, manifest, kline_covered_date_symbols=covered
+    ) == _full_pit_universe_pass(klines, manifest)
+
+    assert _full_pit_universe_error(
+        klines, manifest, kline_covered_date_symbols=covered
+    ) == _full_pit_universe_error(klines, manifest)
+
+    recompute = _pit_manifest_metadata(manifest, features, klines)
+    threaded = _pit_manifest_metadata(
+        manifest,
+        features,
+        klines,
+        full_pit_universe_pass=_full_pit_universe_pass(
+            klines, manifest, kline_covered_date_symbols=covered
+        ),
+        kline_covered_date_symbols=covered,
+    )
+    assert threaded == recompute

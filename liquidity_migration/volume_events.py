@@ -427,9 +427,19 @@ def run_volume_event_research(
     )
     if config.liquidity_migration_residual_momentum_max < 10.0:
         features = _attach_residual_momentum(features, root)
-    full_pit_universe_pass = _full_pit_universe_pass(klines, archive_manifest)
+    # Compute the covered (date,symbol) set ONCE over the multi-GB klines and thread it
+    # through the PIT gate + manifest metadata below; these group_bys were previously run
+    # 2-3x with identical inputs (BAC-1). Pass-through is value-identical to recomputing.
+    pit_covered_date_symbols = _covered_kline_date_symbol_set(klines)
+    full_pit_universe_pass = _full_pit_universe_pass(
+        klines, archive_manifest, kline_covered_date_symbols=pit_covered_date_symbols
+    )
     if config.require_full_pit_universe and not full_pit_universe_pass:
-        raise RuntimeError(_full_pit_universe_error(klines, archive_manifest))
+        raise RuntimeError(
+            _full_pit_universe_error(
+                klines, archive_manifest, kline_covered_date_symbols=pit_covered_date_symbols
+            )
+        )
     bars = _indexed_price_bars_by_symbol(klines)
     funding_lookup = _funding_lookup(funding)
     rank_lookup_cache = _rank_lookup_cache(features, config=config)
@@ -558,7 +568,13 @@ def run_volume_event_research(
             "promotable": int(summary.filter(pl.col("promotion_gate_pass")).height) if not summary.is_empty() else 0,
         },
         "date_range": _date_range(features),
-        "pit_manifest": _pit_manifest_metadata(archive_manifest, features, klines),
+        "pit_manifest": _pit_manifest_metadata(
+            archive_manifest,
+            features,
+            klines,
+            full_pit_universe_pass=full_pit_universe_pass,
+            kline_covered_date_symbols=pit_covered_date_symbols,
+        ),
         "pit_membership_pass": pit_membership_pass,
         "pit_membership_diagnostic": pit_membership_diagnostic,
         "cost_model": {
