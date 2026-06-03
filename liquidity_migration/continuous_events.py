@@ -710,9 +710,25 @@ def run_continuous_event_research(
                     klines.filter(pl.col("symbol") == "BTCUSDT").with_columns(_date)
                     if not klines.is_empty() else klines
                 )
+                # Real per-month aggregation: trade counts by ENTRY month (not equity rows — the
+                # shared renderer's None-fallback counts pl.len() of daily marks ≈ ~30/month) +
+                # MTM monthly return. Without this the table shows ~days, not the ~hundreds of
+                # trades/month a high-turnover book actually opens.
+                trades_m = (
+                    trades.with_columns(pl.col("entry_date").cast(pl.Utf8).str.slice(0, 7).alias("month"))
+                    .group_by("month").agg(pl.len().alias("trades"))
+                )
+                monthly_df = (
+                    eq_dated.with_columns(pl.col("date").cast(pl.Utf8).str.slice(0, 7).alias("month"))
+                    .group_by("month")
+                    .agg(((pl.col("basket_return") + 1.0).product() - 1.0).alias("strategy_return"))
+                    .join(trades_m, on="month", how="left")
+                    .with_columns(pl.col("trades").fill_null(0))
+                    .sort("month")
+                )
                 if not eq_dated.is_empty() and not btc_klines.is_empty():
                     _write_equity_benchmark_chart(
-                        out_dir, root=root, equity=eq_dated, raw_klines=btc_klines, monthly=None,
+                        out_dir, root=root, equity=eq_dated, raw_klines=btc_klines, monthly=monthly_df,
                         png_name="continuous_equity_btc.png",
                         title=(f"Continuous-fade {config.side} D{config.decile} vs BTC | hold "
                                f"{config.hold_hours}h ({config.exit_mode}) | MTM-MAR {mtm.get('mar')} "

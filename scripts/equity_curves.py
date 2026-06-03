@@ -31,13 +31,25 @@ from liquidity_migration.config import load_config  # noqa: E402
 
 DEFAULT_ROOT = "~/SHARED_DATA/bybit_full_pit"
 DEFAULT_CONFIG = "configs/volume_alpha.default.yaml"
-# The continuous rmom panel ends a few days behind today; clamp its window end so the
-# decile join is not empty on the tail. Other sleeves run through `end`.
-CONTINUOUS_END_CAP = "2026-05-28"
+_CONTINUOUS_END_CAP_FALLBACK = "2026-05-28"
 
 
 def _today() -> dt.date:
     return dt.datetime.now(dt.timezone.utc).date()
+
+
+def _continuous_end_cap(root: str) -> str:
+    """Cap the continuous window to the residual_momentum panel's LAST day. Past it the decile
+    join goes empty and the curve paints a misleading flat tail. Read the panel's max day so this
+    AUTO-TRACKS panel rebuilds (the daily rmom-refresh / a manual precompute) instead of a
+    hardcoded date that silently goes stale and drops recent months (e.g. June)."""
+    try:
+        import polars as pl
+        panel = Path(root).expanduser() / "residual_momentum.parquet"
+        mx = pl.scan_parquet(panel).select(pl.col("ts_ms").max()).collect().item()
+        return dt.datetime.fromtimestamp(int(mx) / 1000, dt.timezone.utc).date().isoformat()
+    except Exception:
+        return _CONTINUOUS_END_CAP_FALLBACK
 
 
 def _run_short(root: str, costs, start: str, end: str, out: Path, pit_tol: float) -> dict:
@@ -58,7 +70,7 @@ def _run_continuous(root: str, costs, start: str, end: str, out: Path, pit_tol: 
     # The continuous engine ranks within the available liquid universe (no manifest
     # full-PIT survivorship label), so pit_tol does not apply.
     from liquidity_migration.continuous_events import run_continuous_event_research
-    end = min(end, CONTINUOUS_END_CAP)  # rmom-panel bound
+    end = min(end, _continuous_end_cap(root))  # rmom-panel bound (auto-tracks the panel's last day)
     cfg = promoted.continuous_profile(start=start, end=end)
     return run_continuous_event_research(root, config=cfg, report_dir=out)
 
