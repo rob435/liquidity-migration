@@ -671,7 +671,9 @@ def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
     assert "SHA256:JaKge+EVSIR9TyX48QqdUz6C9NFVAVqbIwWDqFjmFDY" in text
     assert "ssh-keygen -y -f ~/.ssh/vps_deploy_key" in text
     assert "ssh-keygen -lf ~/.ssh/vps_deploy_key.pub -E sha256" in text
-    assert "ssh-keyscan" in text and "-t ed25519" in text
+    # Host key is PINNED directly (no live keyscan — GitHub runners can't reliably
+    # keyscan this box); the pinned key is fail-closed against the fingerprint.
+    assert 'grep -F "$VPS_ED25519_FINGERPRINT"' in text
     # VPS host key fingerprint — update in lockstep with the rebuild/migration.
     # 2026-05-25 rebuild: SHA256:zQjT3bst... → SHA256:RzhZupfx...
     # 2026-06-04 migrate to new box 116.202.15.128 (old 5.223.42.109 decommissioned for cost):
