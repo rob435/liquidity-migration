@@ -49,10 +49,13 @@ full record: **`docs/research_summary.md`**.
     exclusion keeps sleeves disjoint. Deploy restarts risk BEFORE the continuous daemon. The paper
     shadow submits no orders on its own root, so ws_risk ignores it.
 - **Live VPS** (Hetzner 116.202.15.128, 4 GB — migrated 2026-06-04 from the decommissioned
-  Singapore 5.223.42.109, retired for cost): short `event_demo_daemon` + `ws_risk_daemon` under
-  systemd. Long + continuous + the short paper shadow are retired via the `deploy/sleeves.env`
-  kill-switch to fit the smaller box (`SHORT_PAPER_SLEEVE`/`LONG_SLEEVE`/`CONTINUOUS_SLEEVE`=off);
-  ws_risk still protects any open positions of the retired sleeves until they exit (no flatten).
+  Singapore 5.223.42.109, retired for cost): short `event_demo_daemon`+paper, long
+  `long_native_event_demo_daemon`+paper, and `ws_risk_daemon` under systemd. **All 5 fit in
+  ~1.6 GB RSS (of 3.73), swap untouched** (measured 2026-06-04: short demo 429M / short paper
+  ~430M / long demo 241M / long paper 201M / risk 77M). The long sleeve's forward demo **started
+  2026-06-04** (first time). CONTINUOUS stays OFF (look-ahead-disabled). Per-sleeve toggles in
+  `deploy/sleeves.env` (`SHORT_PAPER_SLEEVE`/`LONG_SLEEVE`=on, `CONTINUOUS_SLEEVE`=off); shed the
+  paper shadows first if the box ever goes memory-tight. CI push-to-deploy works (see git history).
 - **No research runs in-flight.**
 
 **Research state (all arcs CONCLUDED — full record + open debts in `docs/research_summary.md`):**
