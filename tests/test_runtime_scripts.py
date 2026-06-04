@@ -667,7 +667,8 @@ def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
     # .github/workflows/vps-deploy.yml AND the public key in
     # /root/.ssh/authorized_keys on the VPS AND the VPS_SSH_PRIVATE_KEY
     # secret in GitHub.
-    assert "SHA256:KpDkvlvmK93qXC9Ocvb9n4Zsk8Gn/pzDzdvAR0XHkgo" in text
+    # 2026-06-04: rotated for the 116.202.15.128 migration (old SHA256:KpDkvlvm…).
+    assert "SHA256:JaKge+EVSIR9TyX48QqdUz6C9NFVAVqbIwWDqFjmFDY" in text
     assert "ssh-keygen -y -f ~/.ssh/vps_deploy_key" in text
     assert "ssh-keygen -lf ~/.ssh/vps_deploy_key.pub -E sha256" in text
     assert "ssh-keyscan -T 10 -t ed25519" in text
