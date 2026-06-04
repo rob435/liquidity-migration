@@ -111,15 +111,15 @@ def test_short_paper_unit_moved_out_of_short_sleeve_units(tmp_path: Path) -> Non
     assert rc == 0, err
 
 
-def test_loaded_toggles_short_demo_only(tmp_path: Path) -> None:
-    # Loaded toggles reflect the committed short-demo-only box (2026-06-04): the short DEMO runs;
-    # its paper shadow, the long sleeve, and continuous are all OFF (retired to fit a smaller host;
-    # continuous additionally look-ahead-disabled 2026-06-03). Versioned in deploy/sleeves.env so a
-    # host rebuild can't silently resurrect them.
+def test_loaded_toggles_short_long_papers_on_continuous_off(tmp_path: Path) -> None:
+    # Loaded toggles (2026-06-04): SHORT + SHORT_PAPER + LONG all run — short demo measured ~535 MB
+    # on the 4 GB box, leaving headroom for the long sleeve + paper shadows. CONTINUOUS stays OFF
+    # (look-ahead-disabled 2026-06-03). Versioned in deploy/sleeves.env so a host rebuild can't
+    # silently resurrect continuous.
     rc, _calls, err = _run(tmp_path, """
         lm_load_sleeve_toggles
-        test "$SHORT_SLEEVE" = on && test "$SHORT_PAPER_SLEEVE" = off \
-            && test "$LONG_SLEEVE" = off && test "$CONTINUOUS_SLEEVE" = off
+        test "$SHORT_SLEEVE" = on && test "$SHORT_PAPER_SLEEVE" = on \
+            && test "$LONG_SLEEVE" = on && test "$CONTINUOUS_SLEEVE" = off
         echo "TOGGLES_OK"
     """)
     assert rc == 0, err
@@ -139,15 +139,15 @@ def test_lib_fallback_defaults_continuous_off_others_on(tmp_path: Path) -> None:
     assert rc == 0, err
 
 
-def test_committed_sleeves_env_short_demo_only() -> None:
-    # The committed file is the source of truth for the short-demo-only box (2026-06-04): the short
-    # DEMO runs; its paper shadow + long + continuous are OFF. Each line must be systemd-
-    # EnvironmentFile-safe (plain KEY=value, no inline comment on the assignment).
+def test_committed_sleeves_env_short_long_papers_on_continuous_off() -> None:
+    # The committed file is the source of truth (2026-06-04): SHORT + SHORT_PAPER + LONG on,
+    # CONTINUOUS off. Each line must be systemd-EnvironmentFile-safe (plain KEY=value, no inline
+    # comment on the assignment).
     env = (REPO / "deploy" / "sleeves.env").read_text()
     expected = {
         "SHORT_SLEEVE": "on",
-        "SHORT_PAPER_SLEEVE": "off",
-        "LONG_SLEEVE": "off",
+        "SHORT_PAPER_SLEEVE": "on",
+        "LONG_SLEEVE": "on",
         "CONTINUOUS_SLEEVE": "off",
     }
     for flag, value in expected.items():
