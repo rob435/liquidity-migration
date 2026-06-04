@@ -7,7 +7,7 @@ from typing import Any
 try:
     import yaml
 except ModuleNotFoundError:  # pragma: no cover - exercised only in missing dependency envs
-    yaml = None
+    yaml = None  # type: ignore[assignment]  # optional-dep fallback (mypy: Module vs None)
 
 
 DEFAULT_STABLECOIN_SYMBOLS = (
