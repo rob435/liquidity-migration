@@ -217,6 +217,16 @@ class VolumeEventResearchConfig:
     market_pct_up_1d_max: float = 1.0
     btc_return_1d_min: float = -1.0
     btc_return_1d_max: float = 1.0
+    # BTC-30d-trend regime gate (PROPOSED 2026-06-04, EXPLORATORY; off-by-default so the
+    # deployed profile is unchanged). The fade is a risk-on edge: pumps are frothier and
+    # fade more reliably when BTC is in an uptrend. Gate the SELECTION on BTC's trailing
+    # 30-day return, lagged one day (known strictly before the decision; see
+    # btc_return_30d in volume_events_features._attach_market_context):
+    #   "off"       -> no gate (deployed default).
+    #   "uptrend"   -> take the entry only when btc_return_30d > 0.
+    #   "downtrend" -> take the entry only when btc_return_30d <= 0 (the discriminator control).
+    # Pre-reg: docs/preregistration/2026-06-04-btc-trend-regime-gate.md.
+    btc_trend_gate: str = "off"
     stop_pressure_window_days: int = 10
     stop_pressure_stop_count: int = 7
     realized_loss_pressure_window_days: int = 5

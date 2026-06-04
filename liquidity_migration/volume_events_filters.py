@@ -996,6 +996,19 @@ def _apply_market_context_filters(frame: pl.DataFrame, config: VolumeEventResear
             (pl.col("btc_return_1d") >= config.btc_return_1d_min)
             & (pl.col("btc_return_1d") <= config.btc_return_1d_max)
         )
+    gate = config.btc_trend_gate
+    if gate != "off":
+        if gate not in ("uptrend", "downtrend"):
+            raise ValueError(f"btc_trend_gate must be 'off', 'uptrend', or 'downtrend'; got {gate!r}")
+        if "btc_return_30d" not in output.columns:
+            return output.head(0)
+        # Null (insufficient 30d history) is treated as regime-unknown and dropped by the
+        # predicate, matching the btc_return_1d convention above. BTC has multi-year history
+        # so this only bites a brief warm-up at the very start of the series.
+        if gate == "uptrend":
+            output = output.filter(pl.col("btc_return_30d") > 0.0)
+        else:  # downtrend
+            output = output.filter(pl.col("btc_return_30d") <= 0.0)
     return output
 
 def _liquidity_migration_hot_return_threshold_expr(config: VolumeEventResearchConfig) -> pl.Expr:

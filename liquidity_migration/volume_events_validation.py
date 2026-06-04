@@ -289,6 +289,8 @@ def _validate_per_event_config(config: VolumeEventResearchConfig) -> None:
         raise ValueError("market_pct_up_1d_min must be <= market_pct_up_1d_max")
     if config.btc_return_1d_min > config.btc_return_1d_max:
         raise ValueError("btc_return_1d_min must be <= btc_return_1d_max")
+    if config.btc_trend_gate not in ("off", "uptrend", "downtrend"):
+        raise ValueError("btc_trend_gate must be 'off', 'uptrend', or 'downtrend'")
     if config.stop_pressure_window_days < 0:
         raise ValueError("stop_pressure_window_days must be non-negative")
     if config.stop_pressure_stop_count < 0:

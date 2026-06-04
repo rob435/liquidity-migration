@@ -820,6 +820,16 @@ def _add_volume_events_parser(subparsers) -> None:
         help="Maximum PIT same-day BTC return for new event entries; 1 disables.",
     )
     volume_events.add_argument(
+        "--btc-trend-gate",
+        choices=("off", "uptrend", "downtrend"),
+        default=event_defaults.btc_trend_gate,
+        help=(
+            "Causal BTC-30d-trend regime gate (lagged 1d): 'uptrend' takes entries only when "
+            "BTC's trailing-30d return is positive (risk-on), 'downtrend' only when <=0, 'off' "
+            "disables (deployed default). EXPLORATORY; see docs/preregistration/2026-06-04-btc-trend-regime-gate.md."
+        ),
+    )
+    volume_events.add_argument(
         "--stop-pressure-window-days",
         type=int,
         default=event_defaults.stop_pressure_window_days,

@@ -1,7 +1,9 @@
 # Pre-registration — BTC-trend regime gate on the deployed liquidity-migration fade
 
-**Date:** 2026-06-04 · **Author:** self-directed alpha-hunt loop · **Stage:** PROPOSED (exploratory scouting
-done; the §Decision-rule binding confirmation run is PENDING and must precede any promotion claim).
+**Date:** 2026-06-04 · **Author:** self-directed alpha-hunt loop · **Stage:** OPERATOR-DIRECTED DEMO DEPLOY
+(2026-06-04, demo/paper only) on EXPLORATORY in-sample evidence; the §Decision-rule binding Tier-2 run is
+still PENDING and must precede any Tier-2 demo-candidate / promotion claim. See the on-engine + deploy
+sections below.
 **Standard:** `docs/backtesting_errors_we_never_repeat.md` · **Tiers:** `STATE.md`. **Branch:**
 `research/continuous-halflife-fade` (off main; not pushed).
 
@@ -68,5 +70,44 @@ changed without operator sign-off (AGENTS.md: profile change is a hard line) + f
 .venv/bin/python scripts/r1_robustness.py --sweep-tag btc_trend_gate   # Tier-2 verdict
 ```
 
-## Post-run results / Verdict
-(pending the binding confirmation run — the above is EXPLORATORY scouting only)
+## On-engine confirmation (2026-06-04, EXPLORATORY) + OPERATOR-DIRECTED demo deploy
+
+The gate was implemented as a causal, off-by-default `btc_trend_gate` on the deployed SHORT selection
+(`btc_return_30d` = BTC trailing-30d return, lagged 1d via `_cal_roll(shifted=True)`, in
+`_attach_market_context`; the regime filter in `_apply_market_context_filters`; CLI `--btc-trend-gate`;
+config validation; 11 unit tests incl. the look-ahead/truncation-invariance falsifier). The **exact
+deployed promoted profile** (`promoted.short_profile`) was run on Bybit ± the gate over the in-sample
+window 2023-04-01→2026-05-28 (`scripts/btc_trend_gate_run.py`):
+
+| gate | trades | return | max DD | ret/\|DD\| | Sharpe | delisted traded |
+|---|---|---|---|---|---|---|
+| off (deployed) | 596 | +84.7% | −15.6% | 5.42 | 1.43 | 85 |
+| **uptrend (gated)** | 369 | +81.0% | **−7.2%** | **11.33** | 1.75 | 68 |
+| downtrend (control) | 228 | +2.8% | −15.2% | 0.18 | 0.18 | 50 |
+
+The partition is near-exact (369+228≈596). Uptrend trades keep 96% of the return at half the drawdown;
+the downtrend control is near-zero-edge (+2.8% / 0.18) and carries essentially all the drawdown — the
+discriminator falsifier does NOT fire (downtrend ret/|DD| 0.18 ≈ the pre-reg's predicted 0.19). The ~2.1×
+ret/|DD| lift matches the exploratory MAR 1.61→3.12. Ledger believable (63% win, ±1% per-trade fades,
+losing months present, exits mostly `event_decay`). **Labels (honest):** EXPLORATORY, **in-sample** (same
+window the gate was proposed on), `full_pit_universe_pass=False` on the run box but **delisted-inclusive
+(no survivorship — 68 delisted names traded)**; `ret/|DD|` is a quick read, **not** the Tier-2 MAR.
+
+**OPERATOR-DIRECTED demo deploy (2026-06-04).** The owner/operator directed promotion of `uptrend` to the
+deployed SHORT profile (`_demo_event_config(profile="promoted")`) **ahead of** the binding Tier-2 run —
+demo/paper only, no real money, `REAL_MONEY` not toggled; Bybit is the deployed venue and the gate's robust
+venue. Same operator-directed-ahead-of-validation pattern as the BAC-1 deploy. `strategy_id` kept → the
+deploy date is the clean pre/post forward split.
+
+## STILL PENDING (this deploy does NOT discharge them)
+- **Binding Tier-2 battery** (`scripts/r1_robustness.py`: cost-stress ladder, thirds, LOO-month, bootstrap
+  MAR-Δ) — the a-priori decision rule above. NOT yet run. Until it passes, the deploy is operator-directed
+  forward-demo scouting, **not** a Tier-2 demo-candidate verdict.
+- **Binance / cross-venue.** Not run here; the pre-reg fragility battery flagged binance as concentration-
+  FRAGILE. The honest cross-venue claim remains "robust on Bybit, fragile-positive on Binance."
+- **Forward demo (Tier-3)** is the only real-money arbiter; out of scope. The account stays on demo.
+
+## Verdict
+**Operator-directed demo deploy, on-engine EXPLORATORY confirmation only.** The gate does what the pre-reg
+claimed on Bybit (mechanism verified via the discriminator), but the binding Tier-2 confirmation is PENDING
+and no real-money/promotion-grade claim is made on this evidence.

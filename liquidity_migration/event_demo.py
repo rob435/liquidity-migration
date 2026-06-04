@@ -1643,6 +1643,19 @@ def _demo_event_config(config: VolumeEventResearchConfig, *, profile: str) -> Vo
             failed_fade_min_mfe_pct=0.01,
             failed_fade_loss_pct=0.04,
             failed_fade_close_location_min=0.0,
+            # btc_trend_gate=uptrend (2026-06-04, OPERATOR-DIRECTED demo deploy AHEAD of the
+            # binding Tier-2 run — owner sign-off, demo/paper only; same pattern as the BAC-1
+            # operator-directed deploy). The fade is a risk-on edge: condition entries on BTC's
+            # causal trailing-30d trend (lagged 1d) being positive; skip risk-off. On-engine
+            # EXPLORATORY confirmation, Bybit in-sample 2023-04→2026-05 (the deployed venue):
+            # off→uptrend ret +84.7%→+81.0% (keeps 96%), DD −15.6%→−7.2% (halved), ret/|DD|
+            # 5.42→11.33 (~2.1×), Sharpe 1.43→1.75; the downtrend control is near-zero-edge
+            # (+2.8% / −15.2% / 0.18) — the discriminator the gate removes. NOT YET validated:
+            # the binding r1_robustness Tier-2 battery (cost-stress/thirds/LOO/bootstrap) is
+            # PENDING; Binance not run (pre-reg flags it fragile). strategy_id kept → the deploy
+            # date is the clean pre/post split. Receipt:
+            # docs/preregistration/2026-06-04-btc-trend-regime-gate.md.
+            btc_trend_gate="uptrend",                  # was "off" (BTC-30d-trend regime gate)
         )
     if profile == "demo_relaxed":
         return replace(

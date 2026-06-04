@@ -997,6 +997,7 @@ def main(argv: list[str] | None = None) -> int:
             market_pct_up_1d_max=args.market_pct_up_1d_max,
             btc_return_1d_min=args.btc_return_1d_min,
             btc_return_1d_max=args.btc_return_1d_max,
+            btc_trend_gate=args.btc_trend_gate,
             stop_pressure_window_days=args.stop_pressure_window_days,
             stop_pressure_stop_count=args.stop_pressure_stop_count,
             realized_loss_pressure_window_days=args.realized_loss_pressure_window_days,

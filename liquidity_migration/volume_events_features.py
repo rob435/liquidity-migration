@@ -507,12 +507,24 @@ def _attach_market_context(features: pl.DataFrame) -> pl.DataFrame:
             ]
         )
     )
-    btc_context = features.filter(pl.col("symbol") == "BTCUSDT").select(
-        [
-            "ts_ms",
-            pl.col("daily_return_1d").alias("btc_return_1d"),
-            pl.col("abs_daily_return_1d").alias("btc_abs_return_1d"),
-        ]
+    btc_context = (
+        features.filter(pl.col("symbol") == "BTCUSDT")
+        .sort("ts_ms")
+        .select(
+            [
+                "ts_ms",
+                pl.col("daily_return_1d").alias("btc_return_1d"),
+                pl.col("abs_daily_return_1d").alias("btc_abs_return_1d"),
+                # BTC trailing-30d trend, LAGGED ONE DAY (shifted=True -> the prior 30 days
+                # EXCLUDING the current day, so it is known strictly before the decision). A
+                # single contiguous BTC series, so no .over("symbol"). Sum-of-daily-returns
+                # convention, matching market_median_return_30d_sum above. Feeds the
+                # btc_trend_gate regime filter (off by default).
+                _cal_roll(pl.col("daily_return_1d"), "sum", 30, shifted=True, min_samples=30).alias(
+                    "btc_return_30d"
+                ),
+            ]
+        )
     )
     return features.join(market_context, on="ts_ms", how="left").join(btc_context, on="ts_ms", how="left")
 

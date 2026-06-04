@@ -18,6 +18,9 @@ def test_short_profile_is_drop_all_4_age300_ff6() -> None:
     assert cfg.failed_fade_loss_pct == 0.04
     assert cfg.max_active_symbols == 12
     assert cfg.universe_rank_max == 99999
+    # btc_trend_gate=uptrend (2026-06-04 operator-directed demo deploy): the deployed fade
+    # only takes entries when BTC's causal 30d trend is positive (risk-on).
+    assert cfg.btc_trend_gate == "uptrend"
 
 
 def test_long_profile_is_v11a() -> None:
