@@ -87,8 +87,20 @@ jobs:
 
       - name: Verify VPS host key
         run: |
-          ssh-keyscan -T 10 -t ed25519 "$VPS_HOST" > ~/.ssh/known_hosts.tmp
-          ssh-keygen -lf ~/.ssh/known_hosts.tmp | grep -F "$VPS_ED25519_FINGERPRINT"
+          # The box is under constant SSH brute-force load, so a one-shot keyscan
+          # sometimes gets the banner but times out before the key exchange
+          # completes (exit 1, empty file). Retry until we capture a key matching
+          # the pinned fingerprint — the pin still makes this fail-closed.
+          ok=
+          for attempt in 1 2 3 4 5 6; do
+            ssh-keyscan -T 20 -t ed25519 "$VPS_HOST" > ~/.ssh/known_hosts.tmp 2>/dev/null || true
+            if ssh-keygen -lf ~/.ssh/known_hosts.tmp 2>/dev/null | grep -qF "$VPS_ED25519_FINGERPRINT"; then
+              ok=1; echo "host key verified on attempt $attempt"; break
+            fi
+            echo "host key not captured/matched on attempt $attempt; retrying in 5s..."
+            sleep 5
+          done
+          test -n "$ok" || { echo "ERROR: host key verification failed after $attempt attempts" >&2; exit 1; }
           mv ~/.ssh/known_hosts.tmp ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
 
