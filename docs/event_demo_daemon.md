@@ -216,7 +216,7 @@ stores and everything else are preserved so there is no slow re-bootstrap. Every
 wiped dataset is tar.gz'd to `data/_archive/ledger-reset-<ts>.tar.gz` first, so
 the reset is auditable and reversible.
 
-This is a DATA operation on the VPS (5.223.42.109); CI does not run it. Run it
+This is a DATA operation on the VPS (116.202.15.128); CI does not run it. Run it
 in a maintenance window, as root, from `/opt/liquidity-migration`:
 
 ```bash

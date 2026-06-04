@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SSH_TARGET="${SSH_TARGET:-root@5.223.42.109}"
+SSH_TARGET="${SSH_TARGET:-root@116.202.15.128}"
 SSH_OPTS="${SSH_OPTS:--o BatchMode=yes -o ConnectTimeout=10}"
 REPO_URL="${REPO_URL:-https://github.com/rob435/liquidity-migration.git}"
 REPO_DIR="${REPO_DIR:-/opt/liquidity-migration}"
@@ -132,9 +132,10 @@ systemctl disable --now \
 # positions protected until they exit (no flatten). The risk service always runs.
 . deploy/lib_sleeves.sh
 lm_load_sleeve_toggles
-echo "sleeves: SHORT=$SHORT_SLEEVE LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE"
+echo "sleeves: SHORT=$SHORT_SLEEVE SHORT_PAPER=$SHORT_PAPER_SLEEVE LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE"
 systemctl enable liquidity-migration-bybit-risk.service
 apply_sleeve_enable "$SHORT_SLEEVE" $SHORT_SLEEVE_UNITS
+apply_sleeve_enable "$SHORT_PAPER_SLEEVE" $SHORT_PAPER_SLEEVE_UNITS
 apply_sleeve_enable "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 # Timers must be enabled --now: enable alone writes the symlink but does not
@@ -181,7 +182,8 @@ fi
 # Long/continuous share the liquidity_migration package with the short side, so any Python
 # change requires restarting every running sleeve to pick up the new code.
 systemctl restart liquidity-migration-bybit-risk.service
-if sleeve_on "$SHORT_SLEEVE"; then systemctl restart liquidity-migration-bybit-demo.service liquidity-migration-bybit-paper.service; fi
+if sleeve_on "$SHORT_SLEEVE"; then systemctl restart liquidity-migration-bybit-demo.service; fi
+if sleeve_on "$SHORT_SLEEVE" && sleeve_on "$SHORT_PAPER_SLEEVE"; then systemctl restart liquidity-migration-bybit-paper.service; fi
 if sleeve_on "$LONG_SLEEVE"; then systemctl restart liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service; fi
 if sleeve_on "$CONTINUOUS_SLEEVE"; then systemctl restart liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service; fi
 
@@ -193,6 +195,7 @@ fi
 systemctl is-active --quiet liquidity-migration-bybit-risk.service
 systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
 verify_sleeve "$SHORT_SLEEVE" $SHORT_SLEEVE_UNITS
+verify_sleeve "$SHORT_PAPER_SLEEVE" $SHORT_PAPER_SLEEVE_UNITS
 verify_sleeve "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 if sleeve_on "$CONTINUOUS_SLEEVE"; then

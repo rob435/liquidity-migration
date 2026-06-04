@@ -48,9 +48,11 @@ full record: **`docs/research_summary.md`**.
     per-sleeve, and closes continuous orphans into the continuous ledger; account-wide same-symbol
     exclusion keeps sleeves disjoint. Deploy restarts risk BEFORE the continuous daemon. The paper
     shadow submits no orders on its own root, so ws_risk ignores it.
-- **Live VPS** (Singapore 5.223.42.109): `event_demo_daemon` + `ws_risk_daemon` +
-  `long_native_event_demo_daemon` + continuous demo/paper under systemd. Paper shadows mirror each
-  sleeve's profile with no order submission (`data/bybit-{,long-,continuous-}paper-event`).
+- **Live VPS** (Hetzner 116.202.15.128, 4 GB — migrated 2026-06-04 from the decommissioned
+  Singapore 5.223.42.109, retired for cost): short `event_demo_daemon` + `ws_risk_daemon` under
+  systemd. Long + continuous + the short paper shadow are retired via the `deploy/sleeves.env`
+  kill-switch to fit the smaller box (`SHORT_PAPER_SLEEVE`/`LONG_SLEEVE`/`CONTINUOUS_SLEEVE`=off);
+  ws_risk still protects any open positions of the retired sleeves until they exit (no flatten).
 - **No research runs in-flight.**
 
 **Research state (all arcs CONCLUDED — full record + open debts in `docs/research_summary.md`):**

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SSH_TARGET="${SSH_TARGET:-root@5.223.42.109}"
+SSH_TARGET="${SSH_TARGET:-root@116.202.15.128}"
 SSH_OPTS="${SSH_OPTS:--o BatchMode=yes -o ConnectTimeout=10}"
 REPO_DIR="${REPO_DIR:-/opt/liquidity-migration}"
 EXPECTED_COMMIT="${EXPECTED_COMMIT:-}"
@@ -71,7 +71,7 @@ fi
 # an off/disabled sleeve.) The risk service is intentionally NOT toggled.
 . deploy/lib_sleeves.sh
 lm_load_sleeve_toggles
-echo "verify sleeves: SHORT=$SHORT_SLEEVE LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE"
+echo "verify sleeves: SHORT=$SHORT_SLEEVE SHORT_PAPER=$SHORT_PAPER_SLEEVE LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE"
 
 # The risk service (shared reconcile authority for every sleeve) has NO toggle —
 # always verify it enabled regardless of which entry sleeves are on. Per-sleeve
@@ -118,6 +118,7 @@ systemctl is-active --quiet liquidity-migration-bybit-risk.service
 # be DOWN (verify_sleeve fails loud if an off sleeve is somehow still running).
 # Post-settle so the daemons have had SYSTEMD_SETTLE_SECONDS to come up after restart.
 verify_sleeve "$SHORT_SLEEVE" $SHORT_SLEEVE_UNITS
+verify_sleeve "$SHORT_PAPER_SLEEVE" $SHORT_PAPER_SLEEVE_UNITS
 verify_sleeve "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 

@@ -5,7 +5,11 @@
 
 # Space-separated unit lists per sleeve (entry/exit daemons + paper shadow). The risk service
 # is intentionally NOT here — it always runs and protects every sleeve's open positions.
-SHORT_SLEEVE_UNITS="liquidity-migration-bybit-demo.service liquidity-migration-bybit-paper.service"
+# The short sleeve = its demo daemon only (the real forward demo). Its PAPER shadow is a SEPARATE
+# toggle (SHORT_PAPER_SLEEVE) so a small/low-RAM host can run the demo without the second
+# full-universe paper process; long/continuous keep demo+paper bundled under one toggle each.
+SHORT_SLEEVE_UNITS="liquidity-migration-bybit-demo.service"
+SHORT_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-paper.service"
 LONG_SLEEVE_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service"
 CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service"
 # Timer the continuous sleeve owns (the daily rmom-gate refresh). Toggled with the sleeve.
@@ -22,6 +26,9 @@ lm_load_sleeve_toggles() {
     # 2026-06-03) so even a missing config can never resurrect the broken sleeve. The
     # committed deploy/sleeves.env is the real source of truth; these are last-resort.
     : "${SHORT_SLEEVE:=on}"
+    # SHORT_PAPER defaults on (a stripped checkout keeps the historical demo+paper pair); the
+    # committed sleeves.env is the real source of truth and may turn it off for a small host.
+    : "${SHORT_PAPER_SLEEVE:=on}"
     : "${LONG_SLEEVE:=on}"
     : "${CONTINUOUS_SLEEVE:=off}"
 }

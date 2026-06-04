@@ -221,9 +221,10 @@ systemctl disable --now \
 # disabled continuous sleeve (it ships SUBMIT_ORDERS=1) regardless of the toggle. ------
 . deploy/lib_sleeves.sh
 lm_load_sleeve_toggles
-echo "sleeves: SHORT=$SHORT_SLEEVE LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE"
+echo "sleeves: SHORT=$SHORT_SLEEVE SHORT_PAPER=$SHORT_PAPER_SLEEVE LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE"
 systemctl enable liquidity-migration-bybit-risk.service
 apply_sleeve_enable "$SHORT_SLEEVE" $SHORT_SLEEVE_UNITS
+apply_sleeve_enable "$SHORT_PAPER_SLEEVE" $SHORT_PAPER_SLEEVE_UNITS
 apply_sleeve_enable "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 # Timers must be enable --now: enable alone writes the symlink but doesn't
@@ -242,7 +243,8 @@ fi
 # must be up before any sleeve restarts); then only the ON sleeves (off ones were
 # disable --now'd above).
 systemctl restart liquidity-migration-bybit-risk.service
-if sleeve_on "$SHORT_SLEEVE"; then systemctl restart liquidity-migration-bybit-demo.service liquidity-migration-bybit-paper.service; fi
+if sleeve_on "$SHORT_SLEEVE"; then systemctl restart liquidity-migration-bybit-demo.service; fi
+if sleeve_on "$SHORT_SLEEVE" && sleeve_on "$SHORT_PAPER_SLEEVE"; then systemctl restart liquidity-migration-bybit-paper.service; fi
 if sleeve_on "$LONG_SLEEVE"; then systemctl restart liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service; fi
 if sleeve_on "$CONTINUOUS_SLEEVE"; then systemctl restart liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service; fi
 
@@ -255,6 +257,7 @@ fi
 systemctl is-active --quiet liquidity-migration-bybit-risk.service
 systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
 verify_sleeve "$SHORT_SLEEVE" $SHORT_SLEEVE_UNITS
+verify_sleeve "$SHORT_PAPER_SLEEVE" $SHORT_PAPER_SLEEVE_UNITS
 verify_sleeve "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 if sleeve_on "$CONTINUOUS_SLEEVE"; then

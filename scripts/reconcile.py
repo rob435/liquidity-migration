@@ -71,7 +71,7 @@ def _load_dotenv(path: Path) -> None:
 _load_dotenv(REPO / ".env")
 
 # ----------------------------------------------------------------------------- defaults
-VPS_HOST = "root@5.223.42.109"
+VPS_HOST = "root@116.202.15.128"
 VPS_BASE = "/opt/liquidity-migration/data"
 
 DEFAULT_BYBIT_ROOT = "~/SHARED_DATA/bybit_full_pit"

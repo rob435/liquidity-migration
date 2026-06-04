@@ -82,33 +82,74 @@ def test_verify_fails_when_on_sleeve_is_not_running(tmp_path: Path) -> None:
     assert "not active" in err
 
 
-def test_loaded_toggles_keep_short_long_on_continuous_off(tmp_path: Path) -> None:
-    # Loaded toggles: SHORT/LONG run; CONTINUOUS stays OFF (look-ahead-disabled 2026-06-03,
-    # versioned in the committed deploy/sleeves.env so a host rebuild can't resurrect it).
+def test_short_paper_split_keeps_demo_retires_paper(tmp_path: Path) -> None:
+    # The short DEMO and its PAPER shadow are independently toggled, so a small host can run the
+    # real forward demo (SHORT_SLEEVE on) while retiring the second full-universe paper process
+    # (SHORT_PAPER_SLEEVE off). Demo => enabled+active; paper => disable --now + verified DOWN.
+    rc, calls, err = _run(tmp_path, """
+        apply_sleeve_enable on  $SHORT_SLEEVE_UNITS
+        apply_sleeve_enable off $SHORT_PAPER_SLEEVE_UNITS
+        verify_sleeve on  $SHORT_SLEEVE_UNITS
+        verify_sleeve off $SHORT_PAPER_SLEEVE_UNITS
+        echo "SPLIT_OK"
+    """)
+    assert rc == 0, err
+    assert "enable liquidity-migration-bybit-demo.service" in calls
+    assert "disable --now liquidity-migration-bybit-paper.service" in calls
+    # Dropping the paper shadow must NOT drag the demo daemon down with it.
+    assert "disable --now liquidity-migration-bybit-demo.service" not in calls
+
+
+def test_short_paper_unit_moved_out_of_short_sleeve_units(tmp_path: Path) -> None:
+    # The paper unit must live in SHORT_PAPER_SLEEVE_UNITS, not SHORT_SLEEVE_UNITS — else the
+    # short toggle would still drag the paper shadow up/down and the split would be cosmetic.
+    rc, _calls, err = _run(tmp_path, """
+        case " $SHORT_SLEEVE_UNITS " in *bybit-paper.service*) echo "paper still in SHORT_SLEEVE_UNITS" >&2; exit 1 ;; esac
+        case " $SHORT_SLEEVE_UNITS " in *bybit-demo.service*) ;; *) echo "demo missing from SHORT_SLEEVE_UNITS" >&2; exit 1 ;; esac
+        case " $SHORT_PAPER_SLEEVE_UNITS " in *bybit-paper.service*) ;; *) echo "paper missing from SHORT_PAPER_SLEEVE_UNITS" >&2; exit 1 ;; esac
+    """)
+    assert rc == 0, err
+
+
+def test_loaded_toggles_short_demo_only(tmp_path: Path) -> None:
+    # Loaded toggles reflect the committed short-demo-only box (2026-06-04): the short DEMO runs;
+    # its paper shadow, the long sleeve, and continuous are all OFF (retired to fit a smaller host;
+    # continuous additionally look-ahead-disabled 2026-06-03). Versioned in deploy/sleeves.env so a
+    # host rebuild can't silently resurrect them.
     rc, _calls, err = _run(tmp_path, """
         lm_load_sleeve_toggles
-        test "$SHORT_SLEEVE" = on && test "$LONG_SLEEVE" = on && test "$CONTINUOUS_SLEEVE" = off
+        test "$SHORT_SLEEVE" = on && test "$SHORT_PAPER_SLEEVE" = off \
+            && test "$LONG_SLEEVE" = off && test "$CONTINUOUS_SLEEVE" = off
         echo "TOGGLES_OK"
     """)
     assert rc == 0, err
 
 
-def test_lib_fallback_defaults_continuous_off_short_long_on(tmp_path: Path) -> None:
-    # Last-resort fallback (NEITHER sleeves.env present): SHORT/LONG default on, CONTINUOUS
-    # OFF — even a stripped checkout can never resurrect the look-ahead-disabled sleeve.
+def test_lib_fallback_defaults_continuous_off_others_on(tmp_path: Path) -> None:
+    # Last-resort fallback (NEITHER sleeves.env present): SHORT/SHORT_PAPER/LONG default on (a
+    # stripped checkout keeps the historical demo+paper pair), CONTINUOUS OFF — even a stripped
+    # checkout can never resurrect the look-ahead-disabled sleeve. The committed sleeves.env, NOT
+    # this fallback, is the real source of truth (it may turn SHORT_PAPER/LONG off for a small host).
     rc, _calls, err = _run(tmp_path, """
-        : "${SHORT_SLEEVE:=on}"; : "${LONG_SLEEVE:=on}"; : "${CONTINUOUS_SLEEVE:=off}"
-        test "$SHORT_SLEEVE" = on && test "$LONG_SLEEVE" = on && test "$CONTINUOUS_SLEEVE" = off
+        : "${SHORT_SLEEVE:=on}"; : "${SHORT_PAPER_SLEEVE:=on}"; : "${LONG_SLEEVE:=on}"; : "${CONTINUOUS_SLEEVE:=off}"
+        test "$SHORT_SLEEVE" = on && test "$SHORT_PAPER_SLEEVE" = on \
+            && test "$LONG_SLEEVE" = on && test "$CONTINUOUS_SLEEVE" = off
         echo "FALLBACK_OK"
     """)
     assert rc == 0, err
 
 
-def test_committed_sleeves_env_keeps_continuous_off() -> None:
-    # The committed file is the source of truth: SHORT/LONG=on, CONTINUOUS=off. Each line must
-    # be systemd-EnvironmentFile-safe (plain KEY=value, no inline comment on the assignment).
+def test_committed_sleeves_env_short_demo_only() -> None:
+    # The committed file is the source of truth for the short-demo-only box (2026-06-04): the short
+    # DEMO runs; its paper shadow + long + continuous are OFF. Each line must be systemd-
+    # EnvironmentFile-safe (plain KEY=value, no inline comment on the assignment).
     env = (REPO / "deploy" / "sleeves.env").read_text()
-    expected = {"SHORT_SLEEVE": "on", "LONG_SLEEVE": "on", "CONTINUOUS_SLEEVE": "off"}
+    expected = {
+        "SHORT_SLEEVE": "on",
+        "SHORT_PAPER_SLEEVE": "off",
+        "LONG_SLEEVE": "off",
+        "CONTINUOUS_SLEEVE": "off",
+    }
     for flag, value in expected.items():
         line = next(ln for ln in env.splitlines() if ln.startswith(f"{flag}="))
         assert line == f"{flag}={value}", f"{flag} must be plain KEY={value} (no inline comment): {line!r}"

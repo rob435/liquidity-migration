@@ -466,13 +466,17 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     # still can't silently drop a unit — the names just live in one canonical place.
     assert "lib_sleeves.sh" in text
     assert "lm_load_sleeve_toggles" in text
-    for sleeve in ("SHORT", "LONG", "CONTINUOUS"):
+    # SHORT_PAPER is a sub-toggle of the short sleeve (demo runs without its paper shadow on a
+    # small host), wired with the same apply_sleeve_enable/verify_sleeve helpers as the sleeves.
+    for sleeve in ("SHORT", "SHORT_PAPER", "LONG", "CONTINUOUS"):
         assert f'apply_sleeve_enable "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
         assert f'verify_sleeve "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
     # The canonical unit set (what each sleeve enables/restarts/verifies, and what the
-    # liveness watchdog/recovery must bring up) lives in the lib — pin it there.
+    # liveness watchdog/recovery must bring up) lives in the lib — pin it there. The short
+    # sleeve = its demo daemon only; the paper shadow is its own SHORT_PAPER_SLEEVE_UNITS.
     lib = (repo / "deploy" / "lib_sleeves.sh").read_text(encoding="utf-8")
-    assert 'SHORT_SLEEVE_UNITS="liquidity-migration-bybit-demo.service liquidity-migration-bybit-paper.service"' in lib
+    assert 'SHORT_SLEEVE_UNITS="liquidity-migration-bybit-demo.service"' in lib
+    assert 'SHORT_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-paper.service"' in lib
     assert 'LONG_SLEEVE_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service"' in lib
     assert 'CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service"' in lib
     # Timers ship with the unit files but `systemctl enable` is required to
@@ -598,7 +602,7 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "lm_load_sleeve_toggles" in text
     assert "systemctl is-enabled --quiet liquidity-migration-bybit-risk.service" in text
     assert "systemctl is-active --quiet liquidity-migration-bybit-risk.service" in text
-    for sleeve in ("SHORT", "LONG", "CONTINUOUS"):
+    for sleeve in ("SHORT", "SHORT_PAPER", "LONG", "CONTINUOUS"):
         assert f'verify_sleeve "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
     # The exact unit set each sleeve must bring up is pinned in the shared lib, so a
     # regression that stops/disables a sleeve's daemon still fails verify.
@@ -667,9 +671,11 @@ def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
     assert "ssh-keygen -y -f ~/.ssh/vps_deploy_key" in text
     assert "ssh-keygen -lf ~/.ssh/vps_deploy_key.pub -E sha256" in text
     assert "ssh-keyscan -T 10 -t ed25519" in text
-    # VPS host key fingerprint — update in lockstep with the rebuild.
+    # VPS host key fingerprint — update in lockstep with the rebuild/migration.
     # 2026-05-25 rebuild: SHA256:zQjT3bst... → SHA256:RzhZupfx...
-    assert "SHA256:RzhZupfx/+iShppNscC/gh318L6VxNdXdADfE8srMYw" in text
+    # 2026-06-04 migrate to new box 116.202.15.128 (old 5.223.42.109 decommissioned for cost):
+    #   SHA256:RzhZupfx... → SHA256:2Jw88AJV...
+    assert "SHA256:2Jw88AJVSLNaXqVeAOd7fdHaAnd9qgeJLLel0PMpwaE" in text
     assert "scripts/deploy_vps_live.sh" in text
     assert "scripts/verify_vps_live.sh" in text
     assert "scripts/wait_for_vps_recovery_and_deploy.sh" in text
