@@ -75,9 +75,9 @@ assert demo.failed_fade_min_mfe_pct == 0.01
 assert demo.failed_fade_loss_pct == 0.04
 assert demo.failed_fade_close_location_min == 0.0
 
-# Continuous-fade live sleeve (operator-directed values): pin the alpha/risk levers so a
-# silent revert toward the engine defaults cannot ship on the next deploy (audit 2026-06-02
-# #11/#12). rmom 0.33 = alpha-sweep 2026-06-02; breaker w24/n8 = cb1; 25% disaster stop = I-phase.
+# Continuous-fade sleeve (OFF / de-promoted 2026-06-05, look-ahead invalidated): these
+# assertions still pin its config so a silent drift can't ship IF it is ever re-enabled —
+# the sleeve is not deployed (CONTINUOUS_SLEEVE=off). rmom 0.33; breaker w24/n8; 25% stop.
 from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig
 cont = ContinuousDemoCycleConfig()
 assert cont.rmom_quantile == 0.33, cont.rmom_quantile
@@ -246,8 +246,9 @@ systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Envir
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=ORDER_SUBMIT_MODE=ws_then_rest'
 # SHARED-ACCOUNT SAFETY: the single risk service must read EVERY sleeve's ledger
 # root, else a sibling sleeve's live positions look untracked and get flattened.
-# Fail the deploy loud if the risk unit isn't wired to track the long + continuous
-# sleeves (the continuous sleeve trades live as of 2026-06-01).
+# Fail the deploy loud if the risk unit isn't wired to track the long sleeve. (Continuous
+# is OFF/de-promoted; the risk unit still reads its root so any legacy open positions stay
+# tracked rather than flattened.)
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=LONG_DATA_ROOT=data/bybit-long-demo-event'
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'
 # Continuous sleeve go-live assertions: live order submission + its disaster stop present.

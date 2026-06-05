@@ -1,4 +1,4 @@
-"""Tests for the live continuous-fade demo sleeve (liquidity_migration.continuous_demo).
+"""Tests for the continuous-fade demo sleeve (liquidity_migration.continuous_demo) — experimental, OFF / de-promoted.
 
 The headline test is EQUIVALENCE: the live state (confirmed history + live price as the current bar)
 must reproduce the verified backtest decile exactly — the live signal == the backtest signal. Plus

@@ -1511,8 +1511,8 @@ def _add_event_risk_ws_parser(subparsers) -> None:
         default=ws_risk_defaults.continuous_data_root,
         help=(
             "When set, ws_risk ALSO reads/writes the continuous-fade sleeve ledger at this data root "
-            "and routes WS fills per the `sleeve` column. REQUIRED on the shared account once the "
-            "continuous sleeve is live, else its short-direction positions are flattened as untracked."
+            "and routes WS fills per the `sleeve` column. Used when the continuous sleeve is enabled "
+            "(currently OFF / de-promoted); keeps its short-direction positions tracked, not flattened."
         ),
     )
     event_ws_risk.add_argument("--continuous-trades-dataset", default=ws_risk_defaults.continuous_trades_dataset,

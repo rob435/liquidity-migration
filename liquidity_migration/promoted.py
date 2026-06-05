@@ -1,23 +1,31 @@
 """THE single source of truth for what each sleeve runs in the live demo.
 
 If you want to know — or backtest — exactly what is deployed, this is the one
-place to look. Each accessor returns the **exact** config object the live sleeve
+place to look. Each accessor returns the **exact** strategy config the live sleeve
 runs, pulled from that sleeve's canonical factory (no flag duplication, no drift):
 
-    short_profile()      -> the deployed SHORT volume-events profile
-                            (drop_all_4 + age300 + ff6), from event_demo._demo_event_config
-    long_profile()       -> the deployed LONG v11a profile, from _v11a_long_native_config
-    continuous_profile() -> the continuous-fade engine profile matching the live sleeve
-                            (decile 9, rmom 0.33, +1h entry, 25% disaster stop, state exit)
+    short_profile()  -> the deployed SHORT volume-events profile
+                        (drop_all_4 + age300 + ff6 + btc_trend_gate=uptrend),
+                        from event_demo._demo_event_config(profile="promoted")
+    long_profile()   -> the deployed LONG v11a profile (the `div` risk-engineering:
+                        universe 50, max_concurrent 10, de-risk-only vol-target),
+                        from long_native_event_demo._v11a_long_native_config()
 
-The equity-curve tool (`scripts/equity_curves.py`) and any backtest of "the
-promoted profile" should import from here rather than re-deriving flags. When a
-profile changes on deploy, change it in its factory (the live daemon already reads
-that) and this module follows automatically — except the continuous engine config,
-which is a hand-kept mirror of the live `ContinuousDemoCycleConfig` (the live demo
-and the engine are different classes; the shared decile pipeline keeps the *signal*
-identical, but the engine's execution/cost knobs live here). Keep the two in sync;
-`tests/test_promoted_profiles.py` pins the mapping.
+There are exactly TWO promoted sleeves. The CONTINUOUS-fade sleeve was REMOVED from
+the promoted set (2026-06-05): its backtested edge was a residual-momentum look-ahead,
+the live sleeve is OFF, and it is no longer promoted. The continuous engine code still
+exists (continuous_events.py) as a disabled/experimental sleeve — it is simply not
+deployed and must not be presented as such.
+
+When a profile changes on deploy, change it in its factory (the live daemon already
+reads that) and this module follows automatically. `tests/test_promoted_profiles.py`
+pins the mapping.
+
+NB on LONG sizing: `_v11a_long_native_config()` is the 1x research strategy config
+(`notional_multiplier` defaults to 1.0). The LIVE long sleeve applies an
+execution-layer `notional_multiplier=10` / `entry_leverage=10` (an explicit owner
+choice) on top — so an equity curve from `long_profile()` is the 1x signal curve, not
+the live-levered book. Pass a notional override to the equity tool to draw a levered curve.
 """
 from __future__ import annotations
 
@@ -28,8 +36,8 @@ from typing import Any
 
 
 def _windowed(cfg: Any, start: str | None, end: str | None) -> Any:
-    """Return cfg with start_date/end_date overridden when provided (all three
-    sleeve configs expose start_date/end_date as dataclass fields)."""
+    """Return cfg with start_date/end_date overridden when provided (both sleeve
+    configs expose start_date/end_date as dataclass fields)."""
     over: dict[str, str] = {}
     if start:
         over["start_date"] = start
@@ -42,8 +50,9 @@ def _windowed(cfg: Any, start: str | None, end: str | None) -> Any:
 
 
 def short_profile(*, start: str | None = None, end: str | None = None):
-    """The deployed SHORT profile: drop_all_4 + age300 + ff6, exactly as the live
-    `event_demo_daemon` runs it. Source: `event_demo._demo_event_config(profile="promoted")`."""
+    """The deployed SHORT profile: drop_all_4 + age300 + ff6 + btc_trend_gate=uptrend,
+    exactly as the live `event_demo_daemon` runs it. Source:
+    `event_demo._demo_event_config(profile="promoted")`."""
     from .event_demo import _demo_event_config
     from .volume_events import VolumeEventResearchConfig
 
@@ -55,45 +64,13 @@ def short_profile(*, start: str | None = None, end: str | None = None):
 
 
 def long_profile(*, start: str | None = None, end: str | None = None):
-    """The deployed LONG v11a profile (the `div` risk-engineering). Source:
-    `long_native_event_demo._v11a_long_native_config()`."""
+    """The deployed LONG v11a profile (the `div` risk-engineering: universe 50,
+    max_concurrent 10, de-risk-only vol-target 0.60). Source:
+    `long_native_event_demo._v11a_long_native_config()`. This is the 1x research
+    config; live execution applies notional_multiplier=10 / leverage=10 on top."""
     from .long_native_event_demo import _v11a_long_native_config
 
     return _windowed(_v11a_long_native_config(), start, end)
-
-
-# CONTINUOUS (fade) -----------------------------------------------------------
-
-
-def continuous_profile(*, start: str | None = None, end: str | None = None):
-    """The continuous-fade ENGINE config that mirrors the live `continuous_demo`
-    sleeve (`ContinuousDemoCycleConfig`): top fade decile (D9), rmom-low third
-    (0.33), liquid gate $500k/h, +1h confirmed entry, state exit (cover on leaving
-    the decile) with a 48h cap, 25% server-side disaster stop, gross 0.5 across 25
-    names, funding modeled. The live `entry_confirm_delay_hours=1` (the validated
-    ~2x lever) is reflected here as `entry_delay_hours=1`.
-
-    NB: kept in sync with `continuous_demo.ContinuousDemoCycleConfig` by hand (the
-    live daemon and the engine are different classes); the shared decile pipeline
-    keeps the *signal* bit-identical. `gross_exposure` stays at the deployed 0.5
-    (the de-gross to ~0.3 is recommended-but-not-applied — change it in one place
-    here if/when the operator deploys it)."""
-    from .continuous_events import ContinuousEventConfig
-
-    cfg = ContinuousEventConfig(
-        side="short",
-        decile=9,
-        rmom_quantile=0.33,
-        liq_turnover_min=500_000.0,
-        entry_delay_hours=1,
-        exit_mode="state",
-        max_hold_hours=48,
-        stop_loss_pct=0.25,
-        max_active=25,
-        gross_exposure=0.5,
-        use_funding=True,
-    )
-    return _windowed(cfg, start, end)
 
 
 # Registry --------------------------------------------------------------------
@@ -101,5 +78,4 @@ def continuous_profile(*, start: str | None = None, end: str | None = None):
 PROFILES = {
     "short": short_profile,
     "long": long_profile,
-    "continuous": continuous_profile,
 }

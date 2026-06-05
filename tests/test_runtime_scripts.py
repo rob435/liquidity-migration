@@ -1179,9 +1179,9 @@ def test_reset_demo_paper_ledgers_archives_then_wipes_only_ledgers(tmp_path: Pat
 
 
 def test_reset_demo_paper_ledgers_covers_continuous_sleeve(tmp_path: Path) -> None:
-    """The now-live continuous-fade sleeve must be reset too — omitting it would
-    leave stale continuous trades that contaminate the clean pre/post forward-demo
-    split on a strategy overhaul (audit 2026-06-02 #10)."""
+    """The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset —
+    omitting it would leave stale continuous trades that contaminate the clean pre/post
+    forward-demo split on a strategy overhaul (audit 2026-06-02 #10)."""
     import shutil
     import subprocess
 

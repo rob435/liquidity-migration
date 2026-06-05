@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""One-command, self-provisioning demo-forward reconciliation for ALL sleeves.
+"""One-command, self-provisioning demo-forward reconciliation for the promoted sleeves.
 
 This is the zero-friction reconcile: one command pulls the live ledgers, AUTO-
 provisions the research data it needs (PIT manifest + recent klines + residual-
 momentum panel), runs a MINIMAL-window backtest (only as far back as the forward
-ledger needs — not a fixed 150-day slab), and reconciles every sleeve:
+ledger needs — not a fixed 150-day slab), and reconciles each promoted sleeve:
 
     SHORT  (event/daily) : backtest <-> paper <-> demo  (+ Bybit on request)
     LONG   (v11a)        : paper <-> demo
-    CONTINUOUS (fade)    : paper <-> demo  +  signal-consistency vs the engine
+
+CONTINUOUS (fade) is no longer promoted/deployed (de-promoted 2026-06-05, look-ahead
+invalidated; sleeve OFF). It is NOT reconciled by default; pass `--sleeves continuous`
+for diagnostics only (paper <-> demo + signal-consistency vs the engine).
 
 Pipeline (each step maps to an opt-out flag):
     1. pull        — rsync the live demo+paper ledgers for every selected sleeve
@@ -354,8 +357,9 @@ def main() -> int:
         description="One-command self-provisioning reconciliation for all sleeves.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    p.add_argument("--sleeves", default="short,long,continuous",
-                   help="Comma list of sleeves to reconcile (short,long,continuous).")
+    p.add_argument("--sleeves", default="short,long",
+                   help="Comma list of sleeves to reconcile (short,long); add 'continuous' "
+                        "explicitly for diagnostics (de-promoted, OFF).")
     p.add_argument("--bybit-root", default=DEFAULT_BYBIT_ROOT, help="Research root for the backtest + provisioning.")
     p.add_argument("--config", default=DEFAULT_CONFIG, help="Strategy config (the promoted profile).")
     p.add_argument("--vps", default=VPS_HOST, help="VPS ssh target for the ledger pull.")

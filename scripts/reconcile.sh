@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command demo-forward reconciliation (short sleeve).
+# One-command demo-forward reconciliation (promoted sleeves: short + long).
 #
 #   bash scripts/reconcile.sh                 # the whole pipeline, sane defaults
 #   bash scripts/reconcile.sh --dry-run       # print every command, run nothing

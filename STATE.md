@@ -20,34 +20,23 @@ full record: **`docs/research_summary.md`**.
 
 ## What's running (live deployed state)
 
-- **SHORT `promoted` profile = `drop_all_4 + age300 + ff6`** (`event_demo._demo_event_config`):
+- **SHORT `promoted` profile = `drop_all_4 + age300 + ff6 + btc_trend_gate=uptrend`** (`event_demo._demo_event_config`):
   - `age300` SELECTION gate (`pit_age_days_min` 90→**300**, E2) + `ff6_4pct` failed-fade EXIT
     (6h/4%/1%mfe/cloc0) stacked on `drop_all_4` (drops the 4 non-earning vetoes/bounds +
-    `max_active=12`, systemd `MAX_ACTIVE_SYMBOLS=12`). ⚠️ `drop_all_4` **fails the Tier-2 cross-venue
+    `max_active=12`, systemd `MAX_ACTIVE_SYMBOLS=12`) + `btc_trend_gate=uptrend` (only short when BTC
+    causal 30d trend>0; operator-directed 2026-06-04, ahead of Tier-2). ⚠️ `drop_all_4` **fails the Tier-2 cross-venue
     guard** (binance net-negative under the corrected engine) — kept by explicit operator override
     for forward-demo observation; revert if binance stays negative. `strategy_id` kept ⇒ deploy date
     = clean pre/post split. Receipts: `docs/preregistration/{promote-age-ff6-demo-2026-05-31,drop-all-4-promotion}.md`.
-- **LONG `div` profile** (`_v11a_long_native_config`, **code-complete, NOT yet deployed**): universe
+- **LONG `div` profile** (`_v11a_long_native_config`, **deployed** — full book live on the VPS): universe
   10→50, max_concurrent 5→10, de-risk-only vol-target (0.60 annual). Portfolio construction, not a
   new signal (FC is the alpha ceiling). Receipt: `docs/preregistration/div-promotion.md`.
-- **CONTINUOUS-fade sleeve — LIVE demo (`SUBMIT_ORDERS=1`, go-live 2026-06-01) + NEW paper shadow.**
-  4th forward sleeve, separate everything (root `data/bybit-continuous-{demo,paper}-event`, datasets
-  `continuous_fade_{demo,paper}_*`, orderLinkId `lm-en-c-`). Live config: short top decile (D9),
-  `rmom_quantile=0.33` (APPLIED), liq≥$500k/h, `max_active=25`, `max_hold=48h`, **wide server-side
-  disaster stop `0.25`** (the "leave-decile" state-exit is a PROFIT exit, never a risk control), the
-  **circuit breaker ENABLED at w24/n8** (`entry_pause_after_adverse_exits=8`, window 1440min — protective
-  tail insurance, not a validated MAR win; disable via `=0`), and 4 sub-cycle reactivity tiers
-  (tick-driven protective exits + hysteresis + cooldown; a per-bar `LivePanelCache`). **EXPLORATORY** —
-  the demo is the only OOS arbiter. Pending operator deploys (NOT pushed): entry-timing `+1h`
-  (`entry_confirm_delay_hours=1`, the ~2× lever) and the optional de-gross to `~0.3`.
-  - Signal: the live decile is recomputed off the live ticker every 60s, **bit-identical to the
-    backtest** (shared `compute_continuous_decile_panel`); gated on a daily-refreshed
-    `residual_momentum.parquet` (no rmom ⇒ no entries, fail-safe).
-  - **Shared-account safety:** the single `ws_risk` service reads all THREE demo roots
-    (`DATA_ROOT`+`LONG_DATA_ROOT`+`CONTINUOUS_DATA_ROOT`), tags rows by `sleeve`, routes writes
-    per-sleeve, and closes continuous orphans into the continuous ledger; account-wide same-symbol
-    exclusion keeps sleeves disjoint. Deploy restarts risk BEFORE the continuous daemon. The paper
-    shadow submits no orders on its own root, so ws_risk ignores it.
+- **CONTINUOUS-fade sleeve — DE-PROMOTED 2026-06-05 (look-ahead invalidated); live sleeve OFF.**
+  Removed from the promoted set (`promoted.py` exposes short + long only; pinned by
+  `tests/test_promoted_profiles.py`). Its backtested edge was a residual-momentum LOOK-AHEAD;
+  `CONTINUOUS_SLEEVE=off` in `deploy/sleeves.env`. The engine code (`continuous_*.py`) remains a
+  disabled/experimental sleeve for research audit — do NOT present it as deployed/promoted. `ws_risk`
+  still carries `CONTINUOUS_DATA_ROOT` so any legacy open position stays tracked (never flattened).
 - **Live VPS** (Hetzner 116.202.15.128, 4 GB — migrated 2026-06-04 from the decommissioned
   Singapore 5.223.42.109, retired for cost): short `event_demo_daemon`+paper, long
   `long_native_event_demo_daemon`+paper, and `ws_risk_daemon` under systemd. **All 5 fit in

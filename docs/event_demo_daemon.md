@@ -246,7 +246,14 @@ reset — the order doesn't matter for correctness since the reset wipes whateve
 has accumulated, but doing the reset last means the first post-reset cycles are
 already on the fixed code.
 
-## Continuous-fade sleeve (4th sleeve — sub-hourly, ticker-driven) — LIVE on demo (operator-directed 2026-06-01)
+## Continuous-fade sleeve — DE-PROMOTED / OFF (research archive)
+
+> **STATUS (2026-06-05): NOT deployed, NOT promoted.** The continuous-fade edge was a
+> residual-momentum look-ahead (invalidated); `CONTINUOUS_SLEEVE=off`, removed from `promoted.py`
+> (short + long only). The section below documents the engine as it was built/explored (2026-06-01)
+> and is kept as a research/operational reference only — it must NOT be read as a live or promoted sleeve.
+
+### (historical) sub-hourly, ticker-driven continuous-fade engine
 
 A separate forward-demo sleeve for the continuous liquidity-migration fade (`continuous_demo.py`,
 `continuous_demo_daemon.py`, CLI `continuous-event-demo-cycle --daemon`, unit
@@ -270,7 +277,7 @@ via a thin subclass of the long daemon.
 - **Memory:** the kline manager is scoped to the top-250 by 24h turnover (the liquid cross-section it
   trades), not the full ~570 — the full store blew the long sleeve's 1G cap. `MemoryMax=4G`.
 
-### Shared-account safety (three short-direction sleeves, one netted demo account)
+### Shared-account safety (two deployed sleeves + the disabled continuous, one netted demo account)
 
 Short, long, and continuous all trade ONE Bybit demo account (one-way / netted position mode). The
 isolation that makes this safe:

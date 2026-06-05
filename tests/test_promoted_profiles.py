@@ -4,6 +4,9 @@ These assert that the deployed-profile accessors resolve to the exact values the
 sleeves run, so the equity-curve tool (and anyone asking "what's deployed?") can trust
 them and a silent drift fails CI. If a profile legitimately changes on deploy, update
 its factory AND the expected value here in the same change.
+
+Two promoted sleeves only: short + long. The continuous-fade sleeve was de-promoted
+(2026-06-05, invalidated look-ahead; live sleeve OFF) and removed from the registry.
 """
 from __future__ import annotations
 
@@ -29,23 +32,12 @@ def test_long_profile_is_v11a() -> None:
     assert cfg.fc_min_day_return == 0.15    # canonical v11a
 
 
-def test_continuous_profile_matches_live_sleeve() -> None:
-    cfg = promoted.continuous_profile()
-    assert cfg.side == "short"
-    assert cfg.decile == 9
-    assert cfg.rmom_quantile == 0.33
-    assert cfg.entry_delay_hours == 1       # the validated +1h confirmed entry
-    assert cfg.exit_mode == "state"         # cover on leaving the decile
-    assert cfg.stop_loss_pct == 0.25        # server-side disaster stop
-    assert cfg.liq_turnover_min == 500_000.0
-
-
 def test_windowing_sets_dates_on_all_sleeves() -> None:
-    for fn in (promoted.short_profile, promoted.long_profile, promoted.continuous_profile):
+    for fn in (promoted.short_profile, promoted.long_profile):
         cfg = fn(start="2024-01-01", end="2025-01-01")
         assert cfg.start_date == "2024-01-01"
         assert cfg.end_date == "2025-01-01"
 
 
-def test_registry_covers_three_sleeves() -> None:
-    assert set(promoted.PROFILES) == {"short", "long", "continuous"}
+def test_registry_covers_two_sleeves() -> None:
+    assert set(promoted.PROFILES) == {"short", "long"}

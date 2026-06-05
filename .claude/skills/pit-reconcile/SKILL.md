@@ -1,22 +1,22 @@
 ---
 name: pit-reconcile
-description: "Run the demo-forward reconciliation for ALL THREE sleeves (SHORT event/daily backtest<->paper<->demo, LONG v11a paper<->demo, CONTINUOUS fade paper<->demo + signal-consistency) and fix/diagnose PIT membership (archive_trade_manifest) problems. Use whenever asked to reconcile the demo/paper/backtest, when a reconcile shows paper-only / backtest-only mismatches, when a backtest reports pit_membership_fail, or when the archive manifest/klines are stale. Drives scripts/reconcile.sh, which now AUTO-provisions (pulls every sleeve, refreshes the manifest, auto-downloads recent klines, auto-recomputes rmom) and backtests a MINIMAL forward window. The canonical fix for the manifest-lag / missing-recent-coverage class of friction."
+description: "Run the demo-forward reconciliation for the two promoted sleeves (SHORT event/daily backtest<->paper<->demo, LONG v11a paper<->demo) and fix/diagnose PIT membership (archive_trade_manifest) problems. Use whenever asked to reconcile the demo/paper/backtest, when a reconcile shows paper-only / backtest-only mismatches, when a backtest reports pit_membership_fail, or when the archive manifest/klines are stale. Drives scripts/reconcile.sh, which AUTO-provisions (pulls the promoted sleeves, refreshes the manifest, auto-downloads recent klines) and backtests a MINIMAL forward window. The canonical fix for the manifest-lag / missing-recent-coverage class of friction. (Continuous is de-promoted/OFF; reconcile it for diagnostics only via --sleeves continuous.)"
 ---
 
 # PIT reconcile + membership runbook
 
-The one command for a demo-forward reconciliation of **all sleeves** is:
+The one command for a demo-forward reconciliation of the **promoted sleeves (short + long)** is:
 
 ```bash
 bash scripts/reconcile.sh
 ```
 
 It is now zero-friction and self-provisioning. In one shot it:
-1. **pulls** the live demo+paper ledgers for every sleeve (short, long, continuous),
+1. **pulls** the live demo+paper ledgers for the promoted sleeves (short, long),
 2. **refreshes** the archive manifest (PIT membership),
 3. **auto-downloads** the recent klines the manifest covers but the local root lacks
    (the gap that used to need a hand-run `archive-download-klines-1h-api`),
-4. **auto-recomputes** `residual_momentum.parquet` (the continuous gate),
+4. **auto-recomputes** `residual_momentum.parquet` (only when continuous is explicitly selected for diagnostics),
 5. checks PIT coverage (aborts a stale strict run),
 6. backtests the promoted profile over a **minimal** forward window (only as far back
    as the forward ledger needs — ~45d warm-up — not a fixed 150-day slab),
@@ -25,15 +25,15 @@ It is now zero-friction and self-provisioning. In one shot it:
 Safe by default: read-only against the VPS, demo only, never real money. Full
 design: `docs/pit_gate.md`.
 
-## The three sleeves it reconciles
+## The promoted sleeves it reconciles (short + long)
 
 - **SHORT** (event/daily): backtest ↔ paper ↔ demo (`reconcile-all`), +Bybit on request.
 - **LONG** (v11a): paper ↔ demo (`reconcile-long-paper-demo`).
-- **CONTINUOUS** (fade): paper ↔ demo (`reconcile-continuous-paper-demo`) **plus** a
-  signal-consistency check (`scripts/continuous_demo_signal_check.py`) that replays the
-  SHARED decile pipeline over the live root and confirms each demo entry was a genuine
-  top-decile, rmom-low, liquid engine pick. Continuous is intra-hour decile-cross driven,
-  so a ±1-decile difference vs a closed-bar replay is expected, not drift.
+
+> **CONTINUOUS** (fade) is no longer promoted/deployed (de-promoted 2026-06-05, look-ahead
+> invalidated; live sleeve OFF). It is NOT reconciled by default. For diagnostics only you can
+> still run `--sleeves continuous` (`reconcile-continuous-paper-demo` + the
+> `scripts/continuous_demo_signal_check.py` signal-consistency replay).
 
 ## When to use
 

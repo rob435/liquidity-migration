@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -31,51 +32,38 @@ from liquidity_migration.config import load_config  # noqa: E402
 
 DEFAULT_ROOT = "~/SHARED_DATA/bybit_full_pit"
 DEFAULT_CONFIG = "configs/volume_alpha.default.yaml"
-_CONTINUOUS_END_CAP_FALLBACK = "2026-05-28"
 
 
 def _today() -> dt.date:
     return dt.datetime.now(dt.timezone.utc).date()
 
 
-def _continuous_end_cap(root: str) -> str:
-    """Cap the continuous window to the residual_momentum panel's LAST day. Past it the decile
-    join goes empty and the curve paints a misleading flat tail. Read the panel's max day so this
-    AUTO-TRACKS panel rebuilds (the daily rmom-refresh / a manual precompute) instead of a
-    hardcoded date that silently goes stale and drops recent months (e.g. June)."""
-    try:
-        import polars as pl
-        panel = Path(root).expanduser() / "residual_momentum.parquet"
-        mx = pl.scan_parquet(panel).select(pl.col("ts_ms").max()).collect().item()
-        return dt.datetime.fromtimestamp(int(mx) / 1000, dt.timezone.utc).date().isoformat()
-    except Exception:
-        return _CONTINUOUS_END_CAP_FALLBACK
-
-
-def _run_short(root: str, costs, start: str, end: str, out: Path, pit_tol: float) -> dict:
+def _run_short(root: str, costs, start: str, end: str, out: Path, pit_tol: float,
+               short_notional: float | None = None) -> dict:
     from liquidity_migration.volume_events import run_volume_event_research
     cfg = promoted.short_profile(start=start, end=end)
+    if short_notional is not None:
+        # the short sizes via gross_exposure / max_active; scale gross to draw the curve at a
+        # higher (e.g. 3x) leverage — pure leverage on the same signal (costs scale too).
+        cfg = replace(cfg, gross_exposure=cfg.gross_exposure * float(short_notional))
     return run_volume_event_research(root, event_config=cfg, cost_config=costs, report_dir=out)
 
 
-def _run_long(root: str, costs, start: str, end: str, out: Path, pit_tol: float) -> dict:
+def _run_long(root: str, costs, start: str, end: str, out: Path, pit_tol: float,
+              long_notional: float | None = None) -> dict:
     # long_native has its own PIT label (require_full_pit_universe=False → it reports,
     # does not abort); pit_tol does not apply to its engine.
     from liquidity_migration.long_native import run_long_native_research
     cfg = promoted.long_profile(start=start, end=end)
+    if long_notional is not None:
+        # research convention is 1x; --long-notional-multiplier lets the curve reflect a
+        # higher (e.g. 5x) sizing so the otherwise-flat long line is legible. Pure leverage
+        # on the same signal — note it in the caption.
+        cfg = replace(cfg, notional_multiplier=float(long_notional))
     return run_long_native_research(root, config=cfg, cost_config=costs, report_dir=out)
 
 
-def _run_continuous(root: str, costs, start: str, end: str, out: Path, pit_tol: float) -> dict:
-    # The continuous engine ranks within the available liquid universe (no manifest
-    # full-PIT survivorship label), so pit_tol does not apply.
-    from liquidity_migration.continuous_events import run_continuous_event_research
-    end = min(end, _continuous_end_cap(root))  # rmom-panel bound (auto-tracks the panel's last day)
-    cfg = promoted.continuous_profile(start=start, end=end)
-    return run_continuous_event_research(root, config=cfg, report_dir=out)
-
-
-RUNNERS = {"short": _run_short, "long": _run_long, "continuous": _run_continuous}
+RUNNERS = {"short": _run_short, "long": _run_long}
 
 
 def _find_png(out: Path) -> Path | None:
@@ -173,7 +161,13 @@ def _headline(payload: dict) -> str:
 def main() -> int:
     p = argparse.ArgumentParser(description="Promoted-profile equity curves, one command.",
                                 formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    p.add_argument("--sleeves", default="short,long,continuous", help="Comma list (short,long,continuous).")
+    p.add_argument("--sleeves", default="short,long", help="Comma list (short,long).")
+    p.add_argument("--long-notional-multiplier", type=float, default=None,
+                   help="Override the long sleeve's notional_multiplier (research default 1x; "
+                        "e.g. 5 for a legible/levered curve — pure leverage on the same signal).")
+    p.add_argument("--short-notional-multiplier", type=float, default=None,
+                   help="Scale the short sleeve's gross_exposure (research default 1x; e.g. 3 for a "
+                        "matched/levered curve — pure leverage on the same signal).")
     p.add_argument("--years", type=int, default=3, help="Window length in years (ignored if --start given).")
     p.add_argument("--start", default=None, help="Window start YYYY-MM-DD (overrides --years).")
     p.add_argument("--end", default=None, help="Window end YYYY-MM-DD (exclusive; default tomorrow UTC).")
@@ -201,7 +195,14 @@ def main() -> int:
         out.mkdir(parents=True, exist_ok=True)
         print(f"=== {s.upper()} (promoted profile) ===", flush=True)
         try:
-            payload = RUNNERS[s](root, costs, start, end, out, 0.0)
+            if s == "long":
+                payload = RUNNERS[s](root, costs, start, end, out, 0.0,
+                                     long_notional=args.long_notional_multiplier)
+            elif s == "short":
+                payload = RUNNERS[s](root, costs, start, end, out, 0.0,
+                                     short_notional=args.short_notional_multiplier)
+            else:
+                payload = RUNNERS[s](root, costs, start, end, out, 0.0)
         except Exception as exc:  # noqa: BLE001 — report per-sleeve, keep going
             print(f"  ❌ {s} failed: {type(exc).__name__}: {exc}\n", flush=True)
             results[s] = {"error": str(exc)}

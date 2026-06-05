@@ -31,7 +31,7 @@ The engine (volume_events.run_volume_event_research) left-joins this on (symbol,
 to add a `residual_momentum` column, gated by --liquidity-migration-residual-momentum-max
 (keep LOW residual-momentum = short the idiosyncratically-weak candidates).
 
-The LIVE continuous demo sleeve joins this table on the CURRENT trading day's ts, so for the live
+When enabled, the continuous demo sleeve (currently OFF / de-promoted) joins this table on the CURRENT trading day's ts, so for the live
 refresh `--end` MUST advance to today — otherwise the daily systemd refresh keeps writing a table that
 ends in the past, the live join finds no row for today, the `is_not_null` filter empties the whole
 cross-section, and the sleeve silently emits zero signal. `--end` therefore defaults to TOMORROW (UTC)
