@@ -1519,6 +1519,21 @@ def _add_event_risk_ws_parser(subparsers) -> None:
                                help="Dataset name for the continuous-sleeve trades ledger.")
     event_ws_risk.add_argument("--continuous-orders-dataset", default=ws_risk_defaults.continuous_orders_dataset,
                                help="Dataset name for the continuous-sleeve orders ledger.")
+    event_ws_risk.add_argument(
+        "--continuous-addon-data-root",
+        default=ws_risk_defaults.continuous_addon_data_root,
+        help="When set, ws_risk ALSO reads/writes the sparse continuous add-on sleeve ledger at this root.",
+    )
+    event_ws_risk.add_argument(
+        "--continuous-addon-trades-dataset",
+        default=ws_risk_defaults.continuous_addon_trades_dataset,
+        help="Dataset name for the continuous add-on trades ledger.",
+    )
+    event_ws_risk.add_argument(
+        "--continuous-addon-orders-dataset",
+        default=ws_risk_defaults.continuous_addon_orders_dataset,
+        help="Dataset name for the continuous add-on orders ledger.",
+    )
 
 
 def _add_combined_book_report_parser(subparsers) -> None:
@@ -1852,6 +1867,527 @@ def _add_reconcile_continuous_paper_demo_parser(subparsers) -> None:
     reconcile.add_argument("--output-dir", default=None, help="Where to write the continuous reconciliation report.")
 
 
+def _add_continuous_addon_shadow_audit_parser(subparsers) -> None:
+    audit = subparsers.add_parser(
+        "continuous-addon-shadow-audit",
+        help="Audit a two-root continuous add-on paper shadow against an optional historical blend ledger.",
+    )
+    audit.add_argument(
+        "--primary-data-root",
+        required=True,
+        help="Primary continuous paper root, usually the fresh_pop15 shadow root.",
+    )
+    audit.add_argument(
+        "--addon-data-root",
+        required=True,
+        help="Add-on continuous paper root, usually the fresh_pop25 shadow root.",
+    )
+    audit.add_argument(
+        "--historical-blended-trades-csv",
+        default="",
+        help="Optional historical blended_trades.csv to compare add-on keys and churn anatomy.",
+    )
+    audit.add_argument(
+        "--primary-trades-dataset",
+        default="continuous_fade_paper_trades",
+        help="Primary trades dataset name.",
+    )
+    audit.add_argument(
+        "--addon-trades-dataset",
+        default="continuous_fade_paper_trades",
+        help="Add-on trades dataset name.",
+    )
+    audit.add_argument(
+        "--primary-orders-dataset",
+        default="continuous_fade_paper_orders",
+        help="Primary orders dataset name.",
+    )
+    audit.add_argument(
+        "--addon-orders-dataset",
+        default="continuous_fade_paper_orders",
+        help="Add-on orders dataset name.",
+    )
+    audit.add_argument(
+        "--addon-cycles-dataset",
+        default="continuous_fade_paper_cycles",
+        help="Add-on cycles dataset carrying gate skip telemetry.",
+    )
+    audit.add_argument(
+        "--expected-primary-strategy-id",
+        default="",
+        help="Optional identity gate context: expected strategy_id for primary trade rows.",
+    )
+    audit.add_argument(
+        "--expected-addon-strategy-id",
+        default="",
+        help="Optional identity gate context: expected strategy_id for add-on trade rows.",
+    )
+    audit.add_argument(
+        "--expected-primary-entry-order-prefix",
+        default="",
+        help="Optional identity gate context: expected entry orderLinkId prefix for primary entry orders.",
+    )
+    audit.add_argument(
+        "--expected-addon-entry-order-prefix",
+        default="",
+        help="Optional identity gate context: expected entry orderLinkId prefix for add-on entry orders.",
+    )
+    audit.add_argument("--output-dir", default="", help="Where to write the audit report.")
+    audit.add_argument("--report-name", default="continuous_addon_shadow_audit", help="Report filename stem.")
+    audit.add_argument(
+        "--min-addon-trades",
+        type=int,
+        default=0,
+        help="Optional gate: fail/report if the shadow add-on ledger has fewer trades than this.",
+    )
+    audit.add_argument(
+        "--min-matched-addon-keys",
+        type=int,
+        default=0,
+        help="Optional historical gate: minimum matched historical add-on keys.",
+    )
+    audit.add_argument(
+        "--max-missing-addon-keys",
+        type=int,
+        default=-1,
+        help="Optional historical gate: maximum historical add-on keys missing from the shadow; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-extra-addon-keys",
+        type=int,
+        default=-1,
+        help="Optional historical gate: maximum extra shadow add-on keys absent from history; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-missing-addon-key-fraction",
+        type=float,
+        default=-1.0,
+        help="Optional historical gate: missing / historical add-on keys ceiling; negative disables.",
+    )
+    audit.add_argument(
+        "--min-addon-to-primary-ratio",
+        type=float,
+        default=-1.0,
+        help="Optional anatomy gate: minimum add-on trades / primary trades; negative disables.",
+    )
+    audit.add_argument(
+        "--max-addon-to-primary-ratio",
+        type=float,
+        default=-1.0,
+        help="Optional anatomy gate: maximum add-on trades / primary trades; negative disables.",
+    )
+    audit.add_argument(
+        "--min-active-same-symbol-overlap-fraction",
+        type=float,
+        default=-1.0,
+        help="Optional anatomy gate: minimum fraction of add-ons layered onto active same-symbol primaries.",
+    )
+    audit.add_argument(
+        "--max-active-same-symbol-overlap-fraction",
+        type=float,
+        default=-1.0,
+        help="Optional anatomy gate: maximum fraction of add-ons layered onto active same-symbol primaries.",
+    )
+    audit.add_argument(
+        "--min-exact-same-entry-fraction",
+        type=float,
+        default=-1.0,
+        help="Optional anatomy gate: minimum fraction of add-ons sharing the primary entry timestamp.",
+    )
+    audit.add_argument(
+        "--max-exact-same-entry-fraction",
+        type=float,
+        default=-1.0,
+        help="Optional anatomy gate: maximum fraction of add-ons sharing the primary entry timestamp.",
+    )
+    audit.add_argument(
+        "--max-historical-anatomy-drift",
+        type=float,
+        default=-1.0,
+        help=(
+            "Optional historical anatomy gate: maximum absolute drift from historical ratios "
+            "(add-on/primary, same-symbol overlap, exact same-entry); negative disables."
+        ),
+    )
+    audit.add_argument(
+        "--max-addon-top1-weight-share",
+        type=float,
+        default=-1.0,
+        help="Optional concentration gate: maximum add-on weight share in the largest symbol; negative disables.",
+    )
+    audit.add_argument(
+        "--max-addon-top5-weight-share",
+        type=float,
+        default=-1.0,
+        help="Optional concentration gate: maximum add-on weight share in the top 5 symbols; negative disables.",
+    )
+    audit.add_argument(
+        "--max-addon-top10-weight-share",
+        type=float,
+        default=-1.0,
+        help="Optional concentration gate: maximum add-on weight share in the top 10 symbols; negative disables.",
+    )
+    audit.add_argument(
+        "--max-historical-concentration-drift",
+        type=float,
+        default=-1.0,
+        help=(
+            "Optional concentration gate: maximum absolute drift from historical top1/top5/top10 "
+            "symbol weight shares; negative disables."
+        ),
+    )
+    audit.add_argument(
+        "--max-active-addon-weight",
+        type=float,
+        default=-1.0,
+        help="Optional exposure gate: maximum active add-on weight over the shadow ledger; negative disables.",
+    )
+    audit.add_argument(
+        "--max-active-combined-weight",
+        type=float,
+        default=-1.0,
+        help="Optional exposure gate: maximum active primary + add-on weight over the shadow ledger; negative disables.",
+    )
+    audit.add_argument(
+        "--max-unit-weight-rows",
+        type=int,
+        default=-1,
+        help="Optional weight-quality gate: maximum rows using unit-weight fallback; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-primary-trades-per-day",
+        type=int,
+        default=-1,
+        help="Optional ticket-rate gate: maximum primary trade rows on any UTC trade day; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-addon-trades-per-day",
+        type=int,
+        default=-1,
+        help="Optional ticket-rate gate: maximum add-on trade rows on any UTC trade day; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-combined-trades-per-day",
+        type=int,
+        default=-1,
+        help="Optional ticket-rate gate: maximum primary + add-on trade rows on any UTC trade day; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-primary-entry-order-attempts-per-day",
+        type=int,
+        default=-1,
+        help="Optional ticket-rate gate: maximum primary entry-order attempts on any UTC trade day; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-addon-entry-order-attempts-per-day",
+        type=int,
+        default=-1,
+        help="Optional ticket-rate gate: maximum add-on entry-order attempts on any UTC trade day; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-combined-entry-order-attempts-per-day",
+        type=int,
+        default=-1,
+        help="Optional ticket-rate gate: maximum primary + add-on entry-order attempts on any UTC trade day; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-primary-trades-per-symbol-day",
+        type=int,
+        default=-1,
+        help="Optional ticket-rate gate: maximum primary trade rows for one symbol on any UTC trade day; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-addon-trades-per-symbol-day",
+        type=int,
+        default=-1,
+        help="Optional ticket-rate gate: maximum add-on trade rows for one symbol on any UTC trade day; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-combined-trades-per-symbol-day",
+        type=int,
+        default=-1,
+        help="Optional ticket-rate gate: maximum primary + add-on trade rows for one symbol/day; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-primary-entry-order-attempts-per-symbol-day",
+        type=int,
+        default=-1,
+        help="Optional ticket-rate gate: maximum primary entry-order attempts for one symbol/day; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-addon-entry-order-attempts-per-symbol-day",
+        type=int,
+        default=-1,
+        help="Optional ticket-rate gate: maximum add-on entry-order attempts for one symbol/day; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-combined-entry-order-attempts-per-symbol-day",
+        type=int,
+        default=-1,
+        help="Optional ticket-rate gate: maximum primary + add-on entry-order attempts for one symbol/day; -1 disables.",
+    )
+    audit.add_argument(
+        "--min-primary-same-symbol-trade-gap-minutes",
+        type=float,
+        default=-1.0,
+        help="Optional churn gate: minimum minutes between primary trades on the same symbol; -1 disables.",
+    )
+    audit.add_argument(
+        "--min-addon-same-symbol-trade-gap-minutes",
+        type=float,
+        default=-1.0,
+        help="Optional churn gate: minimum minutes between add-on trades on the same symbol; -1 disables.",
+    )
+    audit.add_argument(
+        "--min-combined-same-symbol-trade-gap-minutes",
+        type=float,
+        default=-1.0,
+        help="Optional churn gate: minimum minutes between combined-book trades on the same symbol; -1 disables.",
+    )
+    audit.add_argument(
+        "--min-primary-same-symbol-entry-order-gap-minutes",
+        type=float,
+        default=-1.0,
+        help="Optional churn gate: minimum minutes between primary entry-order attempts on the same symbol; -1 disables.",
+    )
+    audit.add_argument(
+        "--min-addon-same-symbol-entry-order-gap-minutes",
+        type=float,
+        default=-1.0,
+        help="Optional churn gate: minimum minutes between add-on entry-order attempts on the same symbol; -1 disables.",
+    )
+    audit.add_argument(
+        "--min-combined-same-symbol-entry-order-gap-minutes",
+        type=float,
+        default=-1.0,
+        help=(
+            "Optional churn gate: minimum minutes between combined-book entry-order attempts on the same symbol; "
+            "-1 disables."
+        ),
+    )
+    audit.add_argument(
+        "--simulate-addon-same-symbol-trade-cooldown-minutes",
+        type=float,
+        default=-1.0,
+        help=(
+            "Optional paper-only churn diagnostic: simulate skipping add-on trades that re-enter the same symbol "
+            "inside this many minutes; -1 disables."
+        ),
+    )
+    audit.add_argument(
+        "--simulate-addon-same-symbol-entry-order-cooldown-minutes",
+        type=float,
+        default=-1.0,
+        help=(
+            "Optional paper-only churn diagnostic: simulate skipping add-on entry-order attempts that re-enter "
+            "the same symbol inside this many minutes; -1 disables."
+        ),
+    )
+    audit.add_argument(
+        "--max-primary-unexpected-strategy-rows",
+        type=int,
+        default=-1,
+        help="Optional identity gate: maximum primary trade rows not matching --expected-primary-strategy-id.",
+    )
+    audit.add_argument(
+        "--max-addon-unexpected-strategy-rows",
+        type=int,
+        default=-1,
+        help="Optional identity gate: maximum add-on trade rows not matching --expected-addon-strategy-id.",
+    )
+    audit.add_argument(
+        "--max-primary-unexpected-entry-order-prefix-rows",
+        type=int,
+        default=-1,
+        help=(
+            "Optional identity gate: maximum primary entry-order rows not matching "
+            "--expected-primary-entry-order-prefix."
+        ),
+    )
+    audit.add_argument(
+        "--max-addon-unexpected-entry-order-prefix-rows",
+        type=int,
+        default=-1,
+        help=(
+            "Optional identity gate: maximum add-on entry-order rows not matching "
+            "--expected-addon-entry-order-prefix."
+        ),
+    )
+    audit.add_argument(
+        "--max-primary-repeated-entry-rows",
+        type=int,
+        default=-1,
+        help="Optional churn gate: maximum duplicate primary rows for an already-used symbol/signal key; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-addon-repeated-entry-rows",
+        type=int,
+        default=-1,
+        help="Optional churn gate: maximum duplicate add-on rows for an already-used symbol/signal key; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-primary-repeated-entry-order-rows",
+        type=int,
+        default=-1,
+        help="Optional churn gate: maximum duplicate primary entry-order attempts per symbol/signal key; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-addon-repeated-entry-order-rows",
+        type=int,
+        default=-1,
+        help="Optional churn gate: maximum duplicate add-on entry-order attempts per symbol/signal key; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-primary-problem-entry-order-attempts",
+        type=int,
+        default=-1,
+        help="Optional order-health gate: maximum primary entry attempts with error/failed/unconfirmed status; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-addon-problem-entry-order-attempts",
+        type=int,
+        default=-1,
+        help="Optional order-health gate: maximum add-on entry attempts with error/failed/unconfirmed status; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-primary-unmatched-entry-order-attempts",
+        type=int,
+        default=-1,
+        help="Optional reconciliation gate: maximum primary entry-order attempts without a matching trade key; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-addon-unmatched-entry-order-attempts",
+        type=int,
+        default=-1,
+        help="Optional reconciliation gate: maximum add-on entry-order attempts without a matching trade key; -1 disables.",
+    )
+    audit.add_argument(
+        "--max-primary-unmatched-live-entry-order-attempts",
+        type=int,
+        default=-1,
+        help=(
+            "Optional reconciliation gate: maximum primary filled/submitted entry-order attempts "
+            "without a matching trade key; -1 disables."
+        ),
+    )
+    audit.add_argument(
+        "--max-addon-unmatched-live-entry-order-attempts",
+        type=int,
+        default=-1,
+        help=(
+            "Optional reconciliation gate: maximum add-on filled/submitted entry-order attempts "
+            "without a matching trade key; -1 disables."
+        ),
+    )
+    audit.add_argument(
+        "--max-primary-unmatched-entry-order-age-minutes",
+        type=float,
+        default=-1.0,
+        help=(
+            "Optional reconciliation gate: maximum age in minutes for any primary entry-order attempt "
+            "without a matching trade key; -1 disables."
+        ),
+    )
+    audit.add_argument(
+        "--max-addon-unmatched-entry-order-age-minutes",
+        type=float,
+        default=-1.0,
+        help=(
+            "Optional reconciliation gate: maximum age in minutes for any add-on entry-order attempt "
+            "without a matching trade key; -1 disables."
+        ),
+    )
+    audit.add_argument(
+        "--max-primary-unmatched-live-entry-order-age-minutes",
+        type=float,
+        default=-1.0,
+        help=(
+            "Optional reconciliation gate: maximum age in minutes for any primary filled/submitted "
+            "entry-order attempt without a matching trade key; -1 disables."
+        ),
+    )
+    audit.add_argument(
+        "--max-addon-unmatched-live-entry-order-age-minutes",
+        type=float,
+        default=-1.0,
+        help=(
+            "Optional reconciliation gate: maximum age in minutes for any add-on filled/submitted "
+            "entry-order attempt without a matching trade key; -1 disables."
+        ),
+    )
+    audit.add_argument(
+        "--min-cycle-entry-acceptance-fraction",
+        type=float,
+        default=-1.0,
+        help="Optional pressure gate: minimum add-on cycle entries / estimated pre-gate candidate pressure.",
+    )
+    audit.add_argument(
+        "--max-cycle-same-signal-reentry-skip-fraction",
+        type=float,
+        default=-1.0,
+        help="Optional pressure gate: maximum same-signal re-entry skips / estimated candidate pressure.",
+    )
+    audit.add_argument(
+        "--max-cycle-addon-primary-pnl-gate-skip-fraction",
+        type=float,
+        default=-1.0,
+        help="Optional pressure gate: maximum primary-PnL gate skips / estimated candidate pressure.",
+    )
+    audit.add_argument(
+        "--max-cycle-candidate-pressure",
+        type=int,
+        default=-1,
+        help="Optional burst gate: maximum estimated pre-gate candidate pressure in any single add-on cycle.",
+    )
+    audit.add_argument(
+        "--min-worst-cycle-entry-acceptance-fraction",
+        type=float,
+        default=-1.0,
+        help="Optional burst gate: minimum entries / estimated candidate pressure for the worst add-on cycle.",
+    )
+    audit.add_argument(
+        "--max-worst-cycle-same-signal-reentry-skip-fraction",
+        type=float,
+        default=-1.0,
+        help="Optional burst gate: maximum same-signal re-entry skip fraction in any single add-on cycle.",
+    )
+    audit.add_argument(
+        "--max-worst-cycle-addon-primary-pnl-gate-skip-fraction",
+        type=float,
+        default=-1.0,
+        help="Optional burst gate: maximum primary-PnL gate skip fraction in any single add-on cycle.",
+    )
+    audit.add_argument(
+        "--min-addon-cycles",
+        type=int,
+        default=0,
+        help="Optional liveness gate: minimum add-on cycle rows required before readiness passes.",
+    )
+    audit.add_argument(
+        "--max-latest-cycle-age-minutes",
+        type=float,
+        default=-1.0,
+        help="Optional liveness gate: maximum age of the latest add-on cycle row; negative disables.",
+    )
+    audit.add_argument(
+        "--max-cycle-gap-minutes",
+        type=float,
+        default=-1.0,
+        help="Optional liveness gate: maximum gap between consecutive timestamped add-on cycle rows; negative disables.",
+    )
+    audit.add_argument(
+        "--audit-now-ms",
+        type=int,
+        default=0,
+        help="Optional fixed current timestamp in milliseconds for deterministic backfills/tests.",
+    )
+    audit.add_argument(
+        "--fail-on-threshold-breach",
+        action="store_true",
+        help="Return exit code 1 when any configured audit gate fails.",
+    )
+
+
 def _add_continuous_events_parser(subparsers) -> None:
     d = ContinuousEventConfig()
     p = subparsers.add_parser(
@@ -1864,6 +2400,12 @@ def _add_continuous_events_parser(subparsers) -> None:
     p.add_argument("--decile", type=int, default=d.decile, help="Composite decile to trade (9 = top/short).")
     p.add_argument("--rmom-quantile", type=float, default=d.rmom_quantile,
                    help="Keep within-ts residual-momentum rank <= this (rmom-low half).")
+    p.add_argument("--feature-set", default=",".join(d.feature_set),
+                   help="Comma-separated continuous composite features (e.g. rv_168h,max_ret168).")
+    p.add_argument("--btc-trend-gate", default=d.btc_trend_gate, choices=["off", "uptrend", "downtrend"],
+                   help="BTC prior-30d trend regime gate.")
+    p.add_argument("--entry-event-trigger", default=d.entry_event_trigger,
+                   help="Hourly catalyst gate (e.g. fresh_pop10, pop10_gb1, turn5_pop3).")
     p.add_argument("--liq-turnover-min", type=float, default=d.liq_turnover_min,
                    help="Liquid gate: signal-bar hourly turnover_quote (USD).")
     p.add_argument("--entry-delay-hours", type=int, default=d.entry_delay_hours,
@@ -1875,6 +2417,10 @@ def _add_continuous_events_parser(subparsers) -> None:
                    help="State-mode hold cap (force exit if the name never leaves the decile).")
     p.add_argument("--cooldown-hours", type=int, default=d.cooldown_hours,
                    help="Per-symbol re-entry cooldown; 0 = hold_hours.")
+    p.add_argument("--entry-pause-after-adverse-exits", type=int, default=d.entry_pause_after_adverse_exits,
+                   help="Pause new entries after this many net-negative exits in the trailing pause window; 0 = off.")
+    p.add_argument("--entry-pause-window-hours", type=int, default=d.entry_pause_window_hours,
+                   help="Trailing window for --entry-pause-after-adverse-exits.")
     p.add_argument("--stop-loss-pct", type=float, default=d.stop_loss_pct, help="Stop loss fraction; 0 = no stop.")
     p.add_argument("--stop-fill-mode", default=d.stop_fill_mode,
                    choices=["stop", "bar_extreme", "bar_extreme_capped"], help="Stop fill model.")
@@ -1900,7 +2446,7 @@ def _add_continuous_events_parser(subparsers) -> None:
 
 def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
     """CLI for the continuous-fade demo sleeve (sub-hourly, ticker-driven; separate ledger + lm-en-c-)."""
-    from .continuous_demo import ContinuousDemoCycleConfig
+    from .continuous_demo import CONTINUOUS_DEMO_PROFILES, ContinuousDemoCycleConfig
     d = ContinuousDemoCycleConfig()
     p = subparsers.add_parser(
         "continuous-event-demo-cycle",
@@ -1914,6 +2460,16 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
     p.add_argument("--max-active", type=int, default=d.max_active)
     p.add_argument("--max-new-entries-per-cycle", type=int, default=d.max_new_entries_per_cycle)
     p.add_argument("--max-hold-hours", type=int, default=d.max_hold_hours)
+    p.add_argument(
+        "--entry-event-trigger",
+        default=d.entry_event_trigger,
+        help="Optional confirmed-hour event gate for entries, e.g. fresh_pop25. Default none.",
+    )
+    p.add_argument(
+        "--allow-same-signal-reentry",
+        action="store_true",
+        help="Allow cover-then-reopen inside the same symbol/signal window using a re-entry sequence.",
+    )
     p.add_argument("--stop-loss-pct", type=float, default=d.stop_loss_pct)
     p.add_argument("--entry-leverage", type=float, default=d.entry_leverage)
     p.add_argument("--per-position-notional-pct-equity", type=float, default=d.per_position_notional_pct_equity)
@@ -1926,6 +2482,37 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
     p.add_argument("--record-dry-run", action="store_true")
     p.add_argument("--paper-mode", action="store_true")
     p.add_argument("--data-name", default=d.data_name)
+    p.add_argument("--strategy-profile", choices=CONTINUOUS_DEMO_PROFILES, default=d.strategy_profile)
+    p.add_argument(
+        "--addon-primary-pnl-gate",
+        action="store_true",
+        help="Research-stage add-on mode: skip candidates whose same-symbol active primary fade is underwater.",
+    )
+    p.add_argument(
+        "--addon-primary-min-unrealized-return",
+        type=float,
+        default=d.addon_primary_min_unrealized_return,
+        help="Minimum active same-symbol primary unrealized return required for an add-on candidate.",
+    )
+    p.add_argument(
+        "--addon-primary-data-root",
+        default=d.addon_primary_data_root,
+        help="Primary continuous ledger root to consult for --addon-primary-pnl-gate. Defaults to this data root.",
+    )
+    p.add_argument(
+        "--addon-primary-strategy-id",
+        default=d.addon_primary_strategy_id,
+        help="Primary strategy_id to consult for --addon-primary-pnl-gate.",
+    )
+    p.add_argument(
+        "--addon-same-symbol-entry-cooldown-minutes",
+        type=int,
+        default=d.addon_same_symbol_entry_cooldown_minutes,
+        help=(
+            "Default-off add-on churn guard: skip same-symbol add-on entries if this sleeve entered "
+            "that symbol within the last N minutes."
+        ),
+    )
     p.add_argument("--daemon", action="store_true", help="Run the long-lived sub-hourly daemon loop.")
     p.add_argument("--interval-seconds", type=float, default=60.0, help="Heartbeat cadence (sub-hourly reaction).")
     p.add_argument("--no-event-driven-cycle", action="store_true")

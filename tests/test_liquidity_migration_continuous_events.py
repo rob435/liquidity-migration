@@ -12,7 +12,9 @@ import pytest
 from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
 from liquidity_migration.continuous_events import (
     ContinuousEventConfig,
+    _btc_trend_returns,
     _fresh_entries,
+    _panel_cache_path,
     _panel_cache_stale,
     _round_trip_bps,
     _run_trades,
@@ -40,6 +42,20 @@ def test_panel_cache_stale_invalidates_when_rmom_is_newer(tmp_path) -> None:
     assert _panel_cache_stale(cache, rmom) is False                # → reuse
     rmom.unlink()
     assert _panel_cache_stale(cache, rmom) is True                 # rmom missing → rebuild (safe)
+
+
+def test_panel_cache_path_is_keyed_by_feature_set(tmp_path) -> None:
+    """Feature-set sweeps must not share the same cached decile panel."""
+    a = ContinuousEventConfig(rmom_quantile=0.33, feature_set=("rv_168h", "max_ret168"))
+    b = ContinuousEventConfig(rmom_quantile=0.33, feature_set=("rv_168h", "vov"))
+    assert _panel_cache_path(tmp_path, a) != _panel_cache_path(tmp_path, b)
+
+
+def test_panel_cache_path_is_keyed_by_date_window(tmp_path) -> None:
+    """Short smoke runs must not poison full-window research caches."""
+    a = ContinuousEventConfig(start_date="2023-04-01", end_date="2023-05-01")
+    b = ContinuousEventConfig(start_date="2023-04-01", end_date="2026-05-28")
+    assert _panel_cache_path(tmp_path, a) != _panel_cache_path(tmp_path, b)
 
 
 # --------------------------------------------------------------------------- cost model
@@ -109,6 +125,34 @@ def test_fresh_entries_illiquid_hours_in_spell_do_not_create_new_spells() -> Non
     assert got == [("A", 0)]  # ONE spell; hour 3 is a continuation, not a new fresh entry
 
 
+def test_fresh_entries_entry_event_trigger_can_fire_inside_existing_decile_spell() -> None:
+    """Event-trigger mode is not the old always-on decile spell gate.
+
+    If a name is already in D9 for hours 0..2 but the actual hourly catalyst happens at hour 2,
+    the entry should fire at hour 2. That is the event-driven behavior: don't enter merely because
+    D9 exists; enter when a fresh catalyst appears.
+    """
+    h = MS_PER_HOUR
+    panel = pl.DataFrame(
+        {
+            "symbol": ["A", "A", "A"],
+            "ts_ms": [0, h, 2 * h],
+            "decile": [9, 9, 9],
+            "composite": [0.9, 0.9, 0.9],
+            "turnover_quote": [1e6, 1e6, 1e6],
+            "ret1": [0.01, 0.02, 0.11],
+            "max_ret168": [0.01, 0.02, 0.11],
+            "prior6_ret1_max": [None, 0.01, 0.02],
+            "giveback_from_prior6_high": [None, 0.0, 0.0],
+            "turnover_spike_168h": [1.0, 1.0, 1.0],
+        }
+    )
+    cfg = ContinuousEventConfig(decile=9, liq_turnover_min=500_000.0, entry_event_trigger="fresh_pop10")
+    fresh = _fresh_entries(panel, cfg)
+    got = sorted((r["symbol"], int(r["ts_ms"])) for r in fresh.to_dicts())
+    assert got == [("A", 2 * h)]
+
+
 # --------------------------------------------------------------------------- concurrency / cooldown / funding
 
 
@@ -122,6 +166,34 @@ def _grid_klines(symbols: list[str], n_bars: int, *, price: float = 100.0) -> pl
     return pl.DataFrame(rows)
 
 
+def test_btc_trend_returns_are_prior_30d_excluding_current_day() -> None:
+    rows = []
+    for day in range(36):
+        rows.append(
+            {
+                "ts_ms": day * MS_PER_DAY,
+                "symbol": "BTCUSDT",
+                "open": 100.0,
+                "high": 100.0,
+                "low": 100.0,
+                "close": 100.0 * (1.01 ** day),
+            }
+        )
+        rows.append(
+            {
+                "ts_ms": day * MS_PER_DAY,
+                "symbol": "A",
+                "open": 10.0,
+                "high": 10.0,
+                "low": 10.0,
+                "close": 10.0,
+            }
+        )
+    trend = _btc_trend_returns(pl.DataFrame(rows))
+    assert 30 * MS_PER_DAY not in trend
+    assert trend[31 * MS_PER_DAY] == pytest.approx(0.30)
+
+
 def test_run_trades_respects_max_active_cap() -> None:
     syms = [f"S{i}" for i in range(6)]
     bars = _indexed_price_bars_by_symbol(_grid_klines(syms, 40))
@@ -133,6 +205,30 @@ def test_run_trades_respects_max_active_cap() -> None:
     trades, skips = _run_trades(entries, bars, None, cfg)
     assert trades.height == 2
     assert skips["skipped_capacity"] == 4
+
+
+def test_run_trades_btc_trend_gate_uses_signal_day() -> None:
+    bars = _indexed_price_bars_by_symbol(_grid_klines(["A", "B"], 60))
+    entries = pl.DataFrame(
+        {
+            "symbol": ["A", "B"],
+            "ts_ms": [0, MS_PER_DAY],
+            "composite": [0.9, 0.9],
+            "turnover_quote": [1e6, 1e6],
+        }
+    )
+    btc_trend = {0: 0.10, MS_PER_DAY: -0.10}
+    cfg = ContinuousEventConfig(
+        btc_trend_gate="uptrend",
+        max_active=5,
+        hold_hours=1,
+        entry_delay_hours=1,
+        use_funding=False,
+    )
+    trades, skips = _run_trades(entries, bars, None, cfg, btc_trend_daily=btc_trend)
+    assert trades.height == 1
+    assert trades["symbol"][0] == "A"
+    assert skips["skipped_btc_trend"] == 1
 
 
 def test_state_exit_holds_only_while_in_decile() -> None:

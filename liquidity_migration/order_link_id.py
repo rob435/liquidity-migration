@@ -93,8 +93,20 @@ def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int, int] | Non
     elif len(parts) == 5 and parts[0] == "lm" and parts[1] == "en" and parts[2] == "c":
         sleeve = "continuous"
         ts36 = parts[4]
+    elif len(parts) == 5 and parts[0] == "lm" and parts[1] == "en" and parts[2] == "ca":
+        sleeve = "continuous_addon"
+        ts36 = parts[4]
     elif len(parts) == 6 and parts[0] == "lm" and parts[1] == "en" and parts[2] == "c":
         sleeve = "continuous"
+        ts36 = parts[4]
+        try:
+            reentry_seq = int(parts[5])
+        except ValueError:
+            return None
+        if reentry_seq <= 0:
+            return None
+    elif len(parts) == 6 and parts[0] == "lm" and parts[1] == "en" and parts[2] == "ca":
+        sleeve = "continuous_addon"
         ts36 = parts[4]
         try:
             reentry_seq = int(parts[5])

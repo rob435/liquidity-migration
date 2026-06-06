@@ -41,3 +41,13 @@ def test_windowing_sets_dates_on_all_sleeves() -> None:
 
 def test_registry_covers_two_sleeves() -> None:
     assert set(promoted.PROFILES) == {"short", "long"}
+
+
+def test_continuous_overlay_candidate_is_documented_but_not_promoted() -> None:
+    cfg = promoted.CONTINUOUS_OVERLAY_OPERATING_CANDIDATE
+    assert cfg.name == "fresh_pop15_pop25_cap22_binance_pnl_gate"
+    assert cfg.active_overlay_caps == {"bybit": 0.22, "binance": 0.12}
+    assert cfg.venue_scales == {"bybit": 1.8, "binance": 5.0}
+    assert cfg.binance_active_primary_pnl_gate == 0.0
+    assert "not promoted" in cfg.status
+    assert "continuous" not in promoted.PROFILES

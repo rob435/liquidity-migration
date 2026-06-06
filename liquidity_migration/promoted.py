@@ -29,8 +29,63 @@ the live-levered book. Pass a notional override to the equity tool to draw a lev
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from dataclasses import replace
 from typing import Any
+
+
+@dataclass(frozen=True)
+class ContinuousOverlayCandidate:
+    """Research-stage continuous overlay candidate visible from the promoted tab.
+
+    This is intentionally a manifest, not a live profile factory. The continuous
+    sleeve remains outside ``PROFILES`` until forward-demo arbitration says
+    otherwise.
+    """
+
+    name: str
+    status: str
+    primary_root: str
+    addon_execution_root: str
+    primary_signal: str
+    addon_signal: str
+    venue_scales: dict[str, float]
+    active_overlay_caps: dict[str, float]
+    binance_active_primary_pnl_gate: float | None
+    base_artifact_root: str
+    cost_2x_artifact_root: str
+    research_note: str
+
+
+CONTINUOUS_OVERLAY_OPERATING_CANDIDATE = ContinuousOverlayCandidate(
+    name="fresh_pop15_pop25_cap22_binance_pnl_gate",
+    status="research-stage demo-watch candidate; not promoted and not real-money",
+    primary_root=r"C:\Users\user\SHARED_DATA\daily_plus_event_trigger_rescue_v2_binance_daily_throttle_2026-06-05",
+    addon_execution_root=r"C:\Users\user\SHARED_DATA\cont_event_trigger_fresh_pop25_low_churn_prereg_2026-06-05",
+    primary_signal="fresh_pop15 rescue V2 + Binance daily throttle",
+    addon_signal="fresh_pop25 low-churn add-on",
+    venue_scales={"bybit": 1.8, "binance": 5.0},
+    active_overlay_caps={"bybit": 0.22, "binance": 0.12},
+    binance_active_primary_pnl_gate=0.0,
+    base_artifact_root=r"C:\Users\user\SHARED_DATA\fresh_pop15_pop25_cap22_binance_pnl_gate_2026-06-06",
+    cost_2x_artifact_root=r"C:\Users\user\SHARED_DATA\fresh_pop15_pop25_cap22_binance_pnl_gate_2026-06-06_cost200",
+    research_note="docs/research/hourly_event_trigger_cap22_binance_pnl_gate_2026-06-06.md",
+)
+
+CONTINUOUS_OVERLAY_HIGHEST_RETURN_CANDIDATE = ContinuousOverlayCandidate(
+    name="fresh_pop15_pop25_cap22_no_binance_pnl_gate",
+    status="research-stage highest-return variant; not promoted and not real-money",
+    primary_root=CONTINUOUS_OVERLAY_OPERATING_CANDIDATE.primary_root,
+    addon_execution_root=CONTINUOUS_OVERLAY_OPERATING_CANDIDATE.addon_execution_root,
+    primary_signal=CONTINUOUS_OVERLAY_OPERATING_CANDIDATE.primary_signal,
+    addon_signal=CONTINUOUS_OVERLAY_OPERATING_CANDIDATE.addon_signal,
+    venue_scales=CONTINUOUS_OVERLAY_OPERATING_CANDIDATE.venue_scales,
+    active_overlay_caps=CONTINUOUS_OVERLAY_OPERATING_CANDIDATE.active_overlay_caps,
+    binance_active_primary_pnl_gate=None,
+    base_artifact_root=r"C:\Users\user\SHARED_DATA\fresh_pop15_pop25_cap22_no_binance_pnl_gate_2026-06-06",
+    cost_2x_artifact_root=r"C:\Users\user\SHARED_DATA\fresh_pop15_pop25_cap22_no_binance_pnl_gate_2026-06-06_cost200",
+    research_note="docs/research/hourly_event_trigger_trade_cap_frontier_2026-06-06.md",
+)
 
 # Window helpers --------------------------------------------------------------
 

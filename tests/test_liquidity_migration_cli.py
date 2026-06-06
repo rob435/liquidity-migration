@@ -68,6 +68,22 @@ def test_cli_volume_events_maker_fill_probability_defaults_none(tmp_path: Path) 
     assert args0.maker_fill_probability == 0.0
 
 
+def test_cli_continuous_demo_addon_entry_cooldown_parser(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "continuous-event-demo-cycle",
+            "--strategy-profile",
+            "continuous_addon_v1",
+            "--addon-same-symbol-entry-cooldown-minutes",
+            "15",
+        ]
+    )
+
+    assert args.addon_same_symbol_entry_cooldown_minutes == 15
+
+
 def test_cost_config_zero_maker_models_full_taker(tmp_path: Path) -> None:
     """The deployed runner is 100%% taker; maker_fill_probability=0.0 must yield
     the full taker round-trip cost (2 * (taker_fee + taker_slippage) = 15 bps),

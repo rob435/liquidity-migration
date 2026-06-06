@@ -29,13 +29,17 @@ from .config import DEFAULT_EXCLUDED_SYMBOLS
 from .continuous_events import (
     compute_continuous_decile_panel,
     cross_sectional_decile,
+    _entry_event_expr,
     per_symbol_timeseries_features,
 )
 
 CONTINUOUS_STRATEGY_ID = "continuous_fade_v1"
+CONTINUOUS_ADDON_STRATEGY_ID = "continuous_fade_addon_v1"
 CONTINUOUS_ENTRY_LINK_PREFIX = "en-c"   # lm-en-c-{base}-{ts36}  (5-part; distinct sleeve for ws_risk routing)
 CONTINUOUS_EXIT_LINK_PREFIX = "ux-c"    # lm-ux-c-{base}-{ts36}
-CONTINUOUS_DEMO_PROFILES = ("continuous_v1",)
+CONTINUOUS_ADDON_ENTRY_LINK_PREFIX = "en-ca"
+CONTINUOUS_ADDON_EXIT_LINK_PREFIX = "ux-ca"
+CONTINUOUS_DEMO_PROFILES = ("continuous_v1", "continuous_addon_v1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +69,7 @@ class ContinuousDemoCycleConfig:
     # ("no-1h") entry off the live decile. EXITS stay tick-driven regardless (squeeze protection is good).
     # docs/preregistration/alpha-sweep-2026-06-02.md. EXPLORATORY — forward demo is the arbiter.
     entry_confirm_delay_hours: int = 1
+    entry_event_trigger: str = "none"      # opt-in confirmed-hour event gate: none | fresh_pop25 | popX_gbY | ...
     # --- anti-thrash (a name oscillating on the D9 boundary would otherwise churn fees) ---
     # Hysteresis: ENTER on the top decile (`decile`), but only cover on the state-exit ("left
     # decile") once the name is CLEARLY out — its decile has dropped below `decile - exit_decile_buffer`.
@@ -74,6 +79,11 @@ class ContinuousDemoCycleConfig:
     # Re-entry cooldown: after covering a name, do not re-open it for this many minutes even if it
     # is still/again in D9 — stops a boundary name from being re-shorted seconds after an exit.
     reentry_cooldown_minutes: int = 30
+    # One signal window should normally produce at most one entry per symbol. The reentry_seq/id
+    # machinery remains for backwards compatibility and explicit experiments, but the default aligns
+    # live selection with the historical fresh-spell model and prevents cover-then-reopen churn inside
+    # the same confirmed deciding bar.
+    allow_same_signal_reentry: bool = False
     # Proactive stop-approach cover (tick-driven safety, NOT a new selection signal): cover a short
     # once its live loss reaches this fraction of the way to the server-side disaster stop
     # (loss >= stop_approach_frac * stop_loss_pct). Reacts on a ticker tick instead of waiting for
@@ -134,6 +144,19 @@ class ContinuousDemoCycleConfig:
     cross_sleeve_account_root: str | None = None
     strategy_profile: str = "continuous_v1"
     paper_mode: bool = False
+    # --- research-stage dual-sleeve adapter ---
+    # OFF by default. When this runner is used as a paper/demo add-on sleeve,
+    # consult the primary continuous ledger and skip same-symbol add-ons whose
+    # active primary fade is underwater. This mirrors the accepted Binance
+    # risk-mode research rule without changing the default single-sleeve path.
+    addon_primary_pnl_gate: bool = False
+    addon_primary_min_unrealized_return: float = 0.0
+    addon_primary_data_root: str | None = None
+    addon_primary_strategy_id: str = CONTINUOUS_STRATEGY_ID
+    # Default-off add-on churn guard. The existing reentry_cooldown_minutes starts
+    # after an exit; this starts after any add-on entry so a fast close or distinct
+    # signal window cannot immediately re-hit the same symbol.
+    addon_same_symbol_entry_cooldown_minutes: int = 0
     exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
     # --- live panel cache (Tier 2): compute the trailing closed-bar features once per bar close,
     # then refresh only the live-price term + re-rank on each wake. Provably np.allclose-equivalent
@@ -207,7 +230,7 @@ def build_live_continuous_state(
         return _empty_live_state()
     combined = pl.concat([k, cur], how="vertical_relaxed")
     panel = compute_continuous_decile_panel(combined, rmom, rmom_quantile=config.rmom_quantile, start_ms=0)
-    return panel.filter(pl.col("ts_ms") == cur_ts).select("symbol", "decile", "composite", "turnover_quote")
+    return _select_live_state_columns(panel.filter(pl.col("ts_ms") == cur_ts))
 
 
 def build_confirmed_entry_state(
@@ -237,14 +260,24 @@ def build_confirmed_entry_state(
     if k.is_empty():
         return _empty_live_state()
     panel = compute_continuous_decile_panel(k, rmom, rmom_quantile=config.rmom_quantile, start_ms=0)
-    return panel.filter(pl.col("ts_ms") == deciding_ts).select("symbol", "decile", "composite", "turnover_quote")
+    return _select_live_state_columns(panel.filter(pl.col("ts_ms") == deciding_ts))
 
 
 def _empty_live_state() -> pl.DataFrame:
     return pl.DataFrame(
         {"symbol": pl.Series([], dtype=pl.String), "decile": pl.Series([], dtype=pl.Int64),
-         "composite": pl.Series([], dtype=pl.Float64), "turnover_quote": pl.Series([], dtype=pl.Float64)}
+         "composite": pl.Series([], dtype=pl.Float64), "turnover_quote": pl.Series([], dtype=pl.Float64),
+         "ret1": pl.Series([], dtype=pl.Float64), "max_ret168": pl.Series([], dtype=pl.Float64),
+         "prior6_ret1_max": pl.Series([], dtype=pl.Float64),
+         "giveback_from_prior6_high": pl.Series([], dtype=pl.Float64),
+         "turnover_spike_168h": pl.Series([], dtype=pl.Float64)}
     )
+
+
+def _select_live_state_columns(panel: pl.DataFrame) -> pl.DataFrame:
+    base = ["symbol", "decile", "composite", "turnover_quote"]
+    event_cols = ["ret1", "max_ret168", "prior6_ret1_max", "giveback_from_prior6_high", "turnover_spike_168h"]
+    return panel.select(base + [c for c in event_cols if c in panel.columns])
 
 
 class LivePanelCache:
@@ -450,6 +483,8 @@ def select_continuous_entries(
     cand = live_state.filter(
         (pl.col("decile") == config.decile) & (pl.col("turnover_quote") >= config.liq_turnover_min)
     )
+    if config.entry_event_trigger != "none":
+        cand = cand.filter(_entry_event_expr(config.entry_event_trigger))
     if held_symbols:
         cand = cand.filter(~pl.col("symbol").is_in(list(held_symbols)))
     if cooldown_symbols:
@@ -497,6 +532,91 @@ def _trade_excursion(
         if min_low is not None:
             mfe = (entry_price - min_low) / entry_price
     return held_ms, entry_price, mfe, cur_ret
+
+
+def active_primary_pnl_gate_allows_addon(
+    open_primary_trades: list[dict[str, Any]],
+    *,
+    symbol: str,
+    current_price: float | None,
+    min_unrealized_return: float = 0.0,
+) -> tuple[bool, float | None]:
+    """Causal same-symbol add-on gate from open primary ledger rows + current mark.
+
+    The research blend's best risk-adjusted Binance variant allows a `fresh_pop25`
+    add-on only when an already-open same-symbol primary `fresh_pop15` fade is not
+    underwater at the add-on entry. This helper is deliberately pure so live/paper
+    plumbing can use ledger state plus the ticker mark; no realized PnL, Telegram
+    approval, REST call, or post-entry path information is involved.
+
+    Returns ``(allowed, worst_unrealized_return)``. If no same-symbol primary is
+    active, the add-on is allowed and the return is ``None``. If a same-symbol
+    primary is active but the current mark is missing/invalid, fail closed.
+    """
+    sym = str(symbol)
+    same_symbol = [
+        t for t in open_primary_trades
+        if str(t.get("symbol") or "") == sym and str(t.get("status") or "open") == "open"
+    ]
+    if not same_symbol:
+        return True, None
+    mark = float(current_price or 0.0)
+    if mark <= 0.0:
+        return False, None
+    unrealized: list[float] = []
+    for trade in same_symbol:
+        entry = float(trade.get("entry_price") or 0.0)
+        if entry <= 0.0:
+            continue
+        side = str(trade.get("side") or "short").lower()
+        if side in ("buy", "long"):
+            unrealized.append(mark / entry - 1.0)
+        else:
+            unrealized.append(entry / mark - 1.0)
+    if not unrealized:
+        return False, None
+    worst = min(unrealized)
+    return worst >= float(min_unrealized_return), worst
+
+
+def filter_addon_candidates_by_active_primary_pnl_gate(
+    candidates: list[dict[str, Any]],
+    open_primary_trades: list[dict[str, Any]],
+    *,
+    price_by_symbol: dict[str, float],
+    min_unrealized_return: float = 0.0,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Apply the research-stage active-primary PnL gate to add-on candidates.
+
+    This is the demo/paper adapter for the accepted Binance risk-mode rule. It
+    is intentionally side-effect free: it reads only the candidate rows, open
+    primary ledger rows, and current marks supplied by the caller. No order
+    submission, Telegram approval, REST query, or realized future path is used.
+    """
+    kept: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for cand in candidates:
+        symbol = str(cand.get("symbol") or "")
+        mark = float(cand.get("live_price") or price_by_symbol.get(symbol) or 0.0)
+        allowed, worst = active_primary_pnl_gate_allows_addon(
+            open_primary_trades,
+            symbol=symbol,
+            current_price=mark,
+            min_unrealized_return=min_unrealized_return,
+        )
+        if allowed:
+            kept.append(cand)
+        else:
+            skipped.append({
+                "symbol": symbol,
+                "worst_primary_unrealized_return": worst,
+                "current_price": mark if mark > 0.0 else None,
+            })
+    return kept, {
+        "addon_primary_pnl_gate_skips": len(skipped),
+        "addon_primary_pnl_gate_skip_symbols": [r["symbol"] for r in skipped],
+        "addon_primary_pnl_gate_skipped": skipped,
+    }
 
 
 def _protective_exit_reason(
@@ -626,6 +746,43 @@ def _recent_exit_cooldown_symbols(
     return {str(s) for s in recent["symbol"].to_list()} if not recent.is_empty() else set()
 
 
+def _row_ts_ms(row: dict[str, Any], *keys: str) -> int:
+    for key in keys:
+        try:
+            value = int(row.get(key) or 0)
+        except (TypeError, ValueError):
+            value = 0
+        if value > 0:
+            return value
+    return 0
+
+
+def _recent_entry_cooldown_symbols(
+    all_trades: pl.DataFrame,
+    *,
+    now_ms: int,
+    cooldown_minutes: int,
+    strategy_id: str,
+) -> set[str]:
+    """Symbols whose most-recent continuous entry is inside ``cooldown_minutes``.
+
+    Ledger-derived and restart-safe, like the exit cooldown. The live cycle only
+    wires this for the add-on profile unless explicitly changed later.
+    """
+    if cooldown_minutes <= 0 or all_trades.is_empty():
+        return set()
+    cutoff = now_ms - cooldown_minutes * 60_000
+    out: set[str] = set()
+    for row in all_trades.to_dicts():
+        if str(row.get("strategy_id") or "") != strategy_id:
+            continue
+        symbol = str(row.get("symbol") or "")
+        ts_ms = _row_ts_ms(row, "entry_ts_ms", "entry_exec_time_ms", "opened_at_ms", "signal_ts_ms")
+        if symbol and ts_ms >= cutoff:
+            out.add(symbol)
+    return out
+
+
 def _recent_adverse_exit_count(
     all_trades: pl.DataFrame, *, now_ms: int, window_minutes: int, strategy_id: str,
 ) -> int:
@@ -708,8 +865,85 @@ def _continuous_trade_id(strategy_id: str, symbol: str, signal_ts_ms: int, reent
     return f"{base}-{int(reentry_seq)}" if reentry_seq > 0 else base
 
 
+def _continuous_entry_candidates_with_signal_metadata(
+    picks: list[dict[str, Any]],
+    all_trades: pl.DataFrame,
+    *,
+    all_orders: pl.DataFrame | None = None,
+    signal_ts: int,
+    strategy_id: str,
+    price_by_symbol: dict[str, float],
+    stop_loss_pct: float,
+    allow_same_signal_reentry: bool,
+) -> tuple[list[dict[str, Any]], int]:
+    """Attach signal metadata and optionally block same-window re-entry.
+
+    ``continuous-2`` made same-window re-entry rows uniquely identifiable if they exist. The shipped
+    selector should still default to the historical fresh-spell behavior: one symbol, one entry for
+    a confirmed signal window. Explicit experiments can opt back into the seq-based path.
+    """
+    prior_by_symbol: dict[str, int] = {}
+    if not all_trades.is_empty() and {"symbol", "signal_ts_ms"} <= set(all_trades.columns):
+        frame = all_trades.filter(pl.col("signal_ts_ms") == signal_ts)
+        if "strategy_id" in frame.columns:
+            frame = frame.filter(pl.col("strategy_id") == strategy_id)
+        prior_by_symbol = {
+            str(r["symbol"]): int(r["_n"])
+            for r in frame.group_by("symbol").agg(pl.len().alias("_n")).iter_rows(named=True)
+        }
+    if all_orders is not None and not all_orders.is_empty() and {"symbol", "signal_ts_ms"} <= set(all_orders.columns):
+        order_frame = all_orders.filter(pl.col("signal_ts_ms") == signal_ts)
+        if "strategy_id" in order_frame.columns:
+            order_frame = order_frame.filter(pl.col("strategy_id") == strategy_id)
+        if "reduce_only" in order_frame.columns:
+            order_frame = order_frame.filter(~pl.col("reduce_only").fill_null(False))
+        if not order_frame.is_empty():
+            order_key = (
+                "order_link_id"
+                if "order_link_id" in order_frame.columns
+                else ("trade_id" if "trade_id" in order_frame.columns else "")
+            )
+            if order_key:
+                order_frame = order_frame.unique(subset=["symbol", order_key])
+            for r in order_frame.group_by("symbol").agg(pl.len().alias("_n")).iter_rows(named=True):
+                symbol = str(r["symbol"])
+                prior_by_symbol[symbol] = max(prior_by_symbol.get(symbol, 0), int(r["_n"]))
+    candidates: list[dict[str, Any]] = []
+    skipped_same_signal_reentry = 0
+    for c in picks:
+        sym = str(c["symbol"])
+        reentry_seq = prior_by_symbol.get(sym, 0)
+        if reentry_seq > 0 and not allow_same_signal_reentry:
+            skipped_same_signal_reentry += 1
+            continue
+        candidates.append(
+            {
+                **c,
+                "signal_ts_ms": signal_ts,
+                "stop_loss_pct": stop_loss_pct,
+                "live_price": price_by_symbol.get(sym, 0.0),
+                "reentry_seq": reentry_seq,
+                "trade_id": _continuous_trade_id(strategy_id, sym, signal_ts, reentry_seq),
+            }
+        )
+    return candidates, skipped_same_signal_reentry
+
+
 def continuous_strategy_id(config: ContinuousDemoCycleConfig) -> str:
-    return CONTINUOUS_STRATEGY_ID + ("_paper" if config.paper_mode else "")
+    base = CONTINUOUS_ADDON_STRATEGY_ID if config.strategy_profile == "continuous_addon_v1" else CONTINUOUS_STRATEGY_ID
+    return base + ("_paper" if config.paper_mode else "")
+
+
+def continuous_sleeve_name(config: ContinuousDemoCycleConfig) -> str:
+    return "continuous_addon" if config.strategy_profile == "continuous_addon_v1" else "continuous"
+
+
+def _continuous_entry_link_prefix(config: ContinuousDemoCycleConfig) -> str:
+    return CONTINUOUS_ADDON_ENTRY_LINK_PREFIX if continuous_sleeve_name(config) == "continuous_addon" else CONTINUOUS_ENTRY_LINK_PREFIX
+
+
+def _continuous_exit_link_prefix(config: ContinuousDemoCycleConfig) -> str:
+    return CONTINUOUS_ADDON_EXIT_LINK_PREFIX if continuous_sleeve_name(config) == "continuous_addon" else CONTINUOUS_EXIT_LINK_PREFIX
 
 
 # ============================================================================
@@ -762,6 +996,29 @@ def _open_continuous_trades(all_trades: pl.DataFrame, strategy_id: str) -> pl.Da
     )
 
 
+def _open_primary_trades_for_addon_gate(
+    *,
+    current_root: Path,
+    current_trades: pl.DataFrame,
+    trades_dataset: str,
+    primary_data_root: str | None,
+    primary_strategy_id: str,
+) -> list[dict[str, Any]]:
+    """Open primary rows for the add-on PnL gate.
+
+    If the primary root is the current root, reuse the caller's in-memory ledger
+    so same-cycle exits already upserted into ``current_trades`` are respected.
+    Otherwise read the configured primary root's matching paper/demo dataset.
+    """
+    primary_root = Path(primary_data_root).expanduser() if primary_data_root else current_root
+    try:
+        same_root = primary_root.resolve() == current_root.resolve()
+    except OSError:
+        same_root = False
+    rows = current_trades if same_root else read_dataset(primary_root, trades_dataset)
+    return _open_continuous_trades(rows, primary_strategy_id).to_dicts()
+
+
 def _execute_continuous_exits(
     exits: list[dict[str, Any]],
     all_trades: pl.DataFrame,
@@ -784,7 +1041,7 @@ def _execute_continuous_exits(
         qty = str(plan.get("qty") or trade.get("qty") or "")
         if not qty or _float(qty) <= 0.0:
             continue
-        exit_link = _continuous_order_link_id(CONTINUOUS_EXIT_LINK_PREFIX, symbol=symbol, signal_ts_ms=now_ms)
+        exit_link = _continuous_order_link_id(_continuous_exit_link_prefix(demo), symbol=symbol, signal_ts_ms=now_ms)
         order_result: dict[str, Any] = {}
         submit_mode, status, error = "dry_run", "planned", ""
         exit_price = exit_fee = 0.0
@@ -795,7 +1052,8 @@ def _execute_continuous_exits(
             if record_preflight is not None:
                 record_preflight({"order_link_id": exit_link, "ts_ms": now_ms, "trade_id": str(trade.get("trade_id", "")),
                                   "symbol": symbol, "side": "Buy", "qty": qty, "reduce_only": True,
-                                  "submit_mode": "preflight", "status": "submitted", "trade_side": "short", "sleeve": "continuous"})
+                                  "submit_mode": "preflight", "status": "submitted", "trade_side": "short",
+                                  "sleeve": str(trade.get("sleeve") or continuous_sleeve_name(demo))})
             try:
                 order_result = trading_client.place_order(**_order_params(
                     symbol=symbol, side="Buy", qty=qty, order_type=demo.exit_order_type,
@@ -841,7 +1099,8 @@ def _execute_continuous_exits(
                            "reduce_only": True, "order_id": order_result.get("orderId", ""), "submit_mode": submit_mode,
                            "avg_price": exit_price, "fee_usdt": exit_fee, "exec_time_ms": exit_exec_time_ms,
                            "status": status, "trade_side": "short", "exit_reason": str(plan.get("exit_reason", "left_decile")),
-                           "filled_qty": str(filled_qty) if filled_qty > 0 else "", "error": error, "sleeve": "continuous"})
+                           "filled_qty": str(filled_qty) if filled_qty > 0 else "", "error": error,
+                           "sleeve": str(trade.get("sleeve") or continuous_sleeve_name(demo))})
     return rows, order_rows
 
 
@@ -893,7 +1152,7 @@ def _execute_continuous_entries(
         reentry_seq = int(cand.get("reentry_seq") or 0)
         trade_id = _continuous_trade_id(strategy_id, symbol, signal_ts_ms, reentry_seq)
         entry_link = _continuous_order_link_id(
-            CONTINUOUS_ENTRY_LINK_PREFIX, symbol=symbol, signal_ts_ms=signal_ts_ms, reentry_seq=reentry_seq
+            _continuous_entry_link_prefix(demo), symbol=symbol, signal_ts_ms=signal_ts_ms, reentry_seq=reentry_seq
         )
         order_result: dict[str, Any] = {}
         submit_mode, order_status, error = "dry_run", "planned", ""
@@ -912,7 +1171,8 @@ def _execute_continuous_entries(
                 if record_preflight is not None:
                     record_preflight({"order_link_id": entry_link, "ts_ms": now_ms, "trade_id": trade_id,
                                       "strategy_id": strategy_id, "symbol": symbol, "side": "Sell", "qty": qty, "reduce_only": False,
-                                      "submit_mode": "preflight", "status": "submitted", "trade_side": "short", "sleeve": "continuous",
+                                      "submit_mode": "preflight", "status": "submitted", "trade_side": "short",
+                                      "sleeve": continuous_sleeve_name(demo),
                                       "signal_ts_ms": signal_ts_ms, "stop_price": stop_price})
                 try:
                     order_result = trading_client.place_order(**_order_params(
@@ -950,7 +1210,7 @@ def _execute_continuous_entries(
                 # self-identifying row is robust if it is ever routed via a path
                 # that doesn't backfill -- keeps the continuous ledger isolated.
                 "trade_id": trade_id, "strategy_id": strategy_id, "symbol": symbol, "side": "short",
-                "sleeve": "continuous",
+                "sleeve": continuous_sleeve_name(demo),
                 "status": "open", "ts_ms": now_ms, "entry_ts_ms": now_ms, "opened_at_ms": now_ms, "updated_at_ms": now_ms,
                 "signal_ts_ms": signal_ts_ms, "entry_price": entry_price, "qty": entry_qty or qty,
                 "notional_usdt": filled_notional if demo.submit_orders else actual_notional, "equity_usdt": equity_usdt,
@@ -967,7 +1227,7 @@ def _execute_continuous_entries(
             "avg_price": entry_price if filled_qty > 0 else 0.0, "fee_usdt": entry_fee, "exec_time_ms": entry_exec_time_ms,
             "notional_usdt": filled_notional, "status": order_status, "trade_side": "short", "signal_ts_ms": signal_ts_ms,
             "equity_usdt": equity_usdt, "tick_size": tick_size, "qty_step": qty_step, "stop_price": stop_price,
-            "stop_loss_pct": stop_loss_pct, "error": error, "sleeve": "continuous",
+            "stop_loss_pct": stop_loss_pct, "error": error, "sleeve": continuous_sleeve_name(demo),
         })
     return rows, order_rows
 
@@ -1009,7 +1269,10 @@ def format_continuous_demo_cycle_summary(payload: dict[str, Any]) -> str:
         f"max_rmom_day_ts={payload.get('max_rmom_day_ts')} stale_days={payload.get('rmom_stale_days')} "
         f"d9={payload.get('live_d9_symbols')} cand={payload.get('candidates')} "
         f"entries={payload.get('entries')} exits={payload.get('exits')} open={payload.get('open_positions')} "
-        f"equity=${_f(payload.get('equity_usdt')):,.2f} paused={payload.get('entry_paused')}"
+        f"equity=${_f(payload.get('equity_usdt')):,.2f} paused={payload.get('entry_paused')} "
+        f"same_signal_reentry_skips={payload.get('skipped_same_signal_reentry', 0)} "
+        f"addon_entry_cooldown_symbols={payload.get('addon_same_symbol_entry_cooldown_symbols', 0)} "
+        f"addon_pnl_gate_skips={payload.get('addon_primary_pnl_gate_skips', 0)}"
     )
 
 
@@ -1022,6 +1285,20 @@ def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
         raise ValueError("paper_mode=True is incompatible with submit_orders=True")
     if config.paper_mode and not config.record_dry_run:
         raise ValueError("paper_mode=True requires record_dry_run=True so the paper ledger is written")
+    if config.strategy_profile not in CONTINUOUS_DEMO_PROFILES:
+        raise ValueError(f"unknown continuous strategy_profile {config.strategy_profile!r}")
+    if config.addon_primary_pnl_gate and config.submit_orders:
+        if config.strategy_profile != "continuous_addon_v1":
+            raise ValueError("addon_primary_pnl_gate submit requires strategy_profile='continuous_addon_v1'")
+        if not config.addon_primary_data_root:
+            raise ValueError("addon_primary_pnl_gate submit requires addon_primary_data_root")
+    if config.addon_same_symbol_entry_cooldown_minutes > 0 and config.strategy_profile != "continuous_addon_v1":
+        raise ValueError("addon_same_symbol_entry_cooldown_minutes requires strategy_profile='continuous_addon_v1'")
+    if config.entry_event_trigger != "none":
+        if config.entry_confirm_delay_hours <= 0:
+            raise ValueError("entry_event_trigger requires confirmed-bar entry timing")
+        # Parse/validate now, before any order path or cycle work.
+        _entry_event_expr(config.entry_event_trigger)
     from .bybit import validate_order_submit_allowed
 
     validate_order_submit_allowed(
@@ -1055,6 +1332,7 @@ def run_continuous_demo_cycle(
     demo = demo_config or ContinuousDemoCycleConfig()
     _validate_continuous_demo_config(demo)
     strategy_id = continuous_strategy_id(demo)
+    sleeve_name = continuous_sleeve_name(demo)
     trades_dataset, orders_dataset, cycles_dataset = continuous_dataset_names(demo)
     root = Path(data_root).expanduser()
     root.mkdir(parents=True, exist_ok=True)
@@ -1113,6 +1391,7 @@ def run_continuous_demo_cycle(
             entry_state = build_confirmed_entry_state(klines, rmom, now_ts_ms=cycle_now_ms, config=demo)
 
         all_trades = read_dataset(root, trades_dataset)
+        all_orders = read_dataset(root, orders_dataset)
         open_trades = _open_continuous_trades(all_trades, strategy_id)
         held_symbols = set(open_trades["symbol"].to_list()) if not open_trades.is_empty() else set()
 
@@ -1150,12 +1429,23 @@ def run_continuous_demo_cycle(
 
         # Entries: fresh D9 shorts (not held, not in a live position/order, not in re-entry cooldown),
         # age-eligible, capacity-bounded.
-        cooldown = (
-            set(held_symbols) | live_position_symbols | live_entry_order_symbols
-            | _recent_exit_cooldown_symbols(
-                all_trades, now_ms=cycle_now_ms,
-                cooldown_minutes=demo.reentry_cooldown_minutes, strategy_id=strategy_id)
+        exit_cooldown_symbols = _recent_exit_cooldown_symbols(
+            all_trades,
+            now_ms=cycle_now_ms,
+            cooldown_minutes=demo.reentry_cooldown_minutes,
+            strategy_id=strategy_id,
         )
+        addon_entry_cooldown_symbols = (
+            _recent_entry_cooldown_symbols(
+                all_trades,
+                now_ms=cycle_now_ms,
+                cooldown_minutes=demo.addon_same_symbol_entry_cooldown_minutes,
+                strategy_id=strategy_id,
+            )
+            if continuous_sleeve_name(demo) == "continuous_addon"
+            else set()
+        )
+        cooldown = set(held_symbols) | live_position_symbols | live_entry_order_symbols | exit_cooldown_symbols | addon_entry_cooldown_symbols
         open_count = len(held_symbols)
         # age floor (inherited fresh-listing-squeezer defense): eligible = listed >= age_days_min ago.
         eligible = None
@@ -1181,9 +1471,14 @@ def run_continuous_demo_cycle(
         )
         _cs_state = _cross_sleeve.read_account_state(_cs_root)
         _eff_max, _cont_margin_clamped = _cross_sleeve.clamp_max_new_entries(
-            demo.max_new_entries_per_cycle, sleeve="continuous", state=_cs_state)
+            demo.max_new_entries_per_cycle, sleeve=sleeve_name, state=_cs_state)
         skipped_continuous_margin_budget = demo.max_new_entries_per_cycle if _cont_margin_clamped else 0
         skipped_continuous_reservation = 0
+        skipped_same_signal_reentry = 0
+        addon_gate_stats: dict[str, Any] = {
+            "addon_primary_pnl_gate_skips": 0,
+            "addon_primary_pnl_gate_skip_symbols": [],
+        }
         candidates: list[dict[str, Any]] = []
         if not (errors and demo.submit_orders) and not entry_paused and _eff_max > 0:
             picks = select_continuous_entries(
@@ -1193,35 +1488,37 @@ def run_continuous_demo_cycle(
             # signal ts = the deciding (confirmed) bar for the +1h entry, else the current hour (legacy).
             signal_ts = (cur_hour_ts - (1 + demo.entry_confirm_delay_hours) * MS_PER_HOUR
                          if demo.entry_confirm_delay_hours > 0 else cur_hour_ts)
-            # Re-entry seq per symbol for THIS deciding-bar window: the number of ledger trades that
-            # already used (symbol, signal_ts). A cover-then-re-enter within the window therefore gets
-            # seq>0 -> a distinct trade_id/orderLinkId (continuous-2). all_trades here already includes
-            # this cycle's exits (upserted above), and a crash-retry of the same open sees the same
-            # count -> the same seq -> idempotent.
-            prior_by_symbol: dict[str, int] = {}
-            if not all_trades.is_empty() and {"symbol", "signal_ts_ms"} <= set(all_trades.columns):
-                prior_by_symbol = {
-                    str(r["symbol"]): int(r["_n"])
-                    for r in all_trades.filter(pl.col("signal_ts_ms") == signal_ts)
-                    .group_by("symbol").agg(pl.len().alias("_n")).iter_rows(named=True)
-                }
-            for c in picks:
-                sym = str(c["symbol"])
-                reentry_seq = prior_by_symbol.get(sym, 0)
-                candidates.append({**c, "signal_ts_ms": signal_ts, "stop_loss_pct": demo.stop_loss_pct,
-                                   "live_price": price_by_symbol.get(sym, 0.0),
-                                   "reentry_seq": reentry_seq,
-                                   # CS-7: carry the deterministic trade_id (same one _execute_continuous_entries
-                                   # recomputes) so the cross-sleeve reservation is GC'd on close via
-                                   # closed_trade_ids, not only after the 180s TTL (avoids over-blocking a sibling).
-                                   "trade_id": _continuous_trade_id(strategy_id, sym, signal_ts, reentry_seq)})
+            candidates, skipped_same_signal_reentry = _continuous_entry_candidates_with_signal_metadata(
+                picks,
+                all_trades,
+                all_orders=all_orders,
+                signal_ts=signal_ts,
+                strategy_id=strategy_id,
+                price_by_symbol=price_by_symbol,
+                stop_loss_pct=demo.stop_loss_pct,
+                allow_same_signal_reentry=demo.allow_same_signal_reentry,
+            )
+        if demo.addon_primary_pnl_gate and candidates:
+            primary_open = _open_primary_trades_for_addon_gate(
+                current_root=root,
+                current_trades=all_trades,
+                trades_dataset=trades_dataset,
+                primary_data_root=demo.addon_primary_data_root,
+                primary_strategy_id=demo.addon_primary_strategy_id,
+            )
+            candidates, addon_gate_stats = filter_addon_candidates_by_active_primary_pnl_gate(
+                candidates,
+                primary_open,
+                price_by_symbol=price_by_symbol,
+                min_unrealized_return=demo.addon_primary_min_unrealized_return,
+            )
         # long-sleeve-6: claim each candidate symbol in the shared registry under the
         # control-row lock before submit; a symbol a sibling holds (active reservation or
         # live venue position) is dropped, closing the same-minute cross-process race.
         # Fail-open; submit-only (dry-run/paper never contend for the shared account).
         if demo.submit_orders and candidates:
             candidates, skipped_continuous_reservation = _cross_sleeve.partition_claimable(
-                _cs_root, candidates, sleeve="continuous", now_ms=cycle_now_ms,
+                _cs_root, candidates, sleeve=sleeve_name, now_ms=cycle_now_ms,
                 live_position_symbols=live_position_symbols,
             )
         order_notional_frac = demo.per_position_notional_pct_equity / 100.0
@@ -1265,6 +1562,11 @@ def run_continuous_demo_cycle(
             "entry_paused": entry_paused, "recent_adverse_exits": recent_adverse,
             "skipped_continuous_margin_budget": skipped_continuous_margin_budget,  # ls-5 cross-sleeve IM clamp
             "skipped_continuous_reservation": skipped_continuous_reservation,  # ls-6 symbol taken by a sibling
+            "skipped_same_signal_reentry": skipped_same_signal_reentry,
+            "addon_same_symbol_entry_cooldown_symbols": len(addon_entry_cooldown_symbols),
+            "addon_primary_pnl_gate": demo.addon_primary_pnl_gate,
+            "addon_primary_pnl_gate_skips": addon_gate_stats["addon_primary_pnl_gate_skips"],
+            "addon_primary_pnl_gate_skip_symbols": ",".join(addon_gate_stats["addon_primary_pnl_gate_skip_symbols"]),
         }
         # Flatten the daemon's reactivity-loop counters (rx_*) into the persisted cycle so the watchdog
         # can see a dead/stale fast protective-exit loop instead of it failing silently.

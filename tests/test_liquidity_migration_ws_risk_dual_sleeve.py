@@ -30,12 +30,17 @@ def test_active_sleeves_follows_killswitch_and_roots(tmp_path: Path, monkeypatch
     short_root = tmp_path / "short"
     long_root = tmp_path / "long"
     cont_root = tmp_path / "cont"
-    for r in (short_root, long_root, cont_root):
+    addon_root = tmp_path / "cont_addon"
+    for r in (short_root, long_root, cont_root, addon_root):
         r.mkdir()
-    cfg = EventWebSocketRiskConfig(long_data_root=str(long_root), continuous_data_root=str(cont_root))
+    cfg = EventWebSocketRiskConfig(
+        long_data_root=str(long_root),
+        continuous_data_root=str(cont_root),
+        continuous_addon_data_root=str(addon_root),
+    )
     engine = EventWebSocketRiskEngine(short_root, config=ResearchConfig(), risk_config=cfg)
 
-    for var in ("SHORT_SLEEVE", "LONG_SLEEVE", "CONTINUOUS_SLEEVE"):
+    for var in ("SHORT_SLEEVE", "LONG_SLEEVE", "CONTINUOUS_SLEEVE", "CONTINUOUS_ADDON_SLEEVE"):
         monkeypatch.delenv(var, raising=False)
     # Unset toggles mirror deploy/lib_sleeves.sh: short/long default ON, continuous default
     # OFF (look-ahead-disabled) ⇒ 2 active ⇒ 1/2 each.
@@ -45,8 +50,12 @@ def test_active_sleeves_follows_killswitch_and_roots(tmp_path: Path, monkeypatch
     monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
     assert engine._active_sleeves() == ["short", "long", "continuous"]
     assert equal_split_budget(engine._active_sleeves()) == {"short": 1/3, "long": 1/3, "continuous": 1/3}
+    monkeypatch.setenv("CONTINUOUS_ADDON_SLEEVE", "on")
+    assert engine._active_sleeves() == ["short", "long", "continuous", "continuous_addon"]
     # toggle continuous OFF ⇒ 2 active ⇒ 1/2 each
     monkeypatch.setenv("CONTINUOUS_SLEEVE", "off")
+    assert engine._active_sleeves() == ["short", "long", "continuous_addon"]
+    monkeypatch.setenv("CONTINUOUS_ADDON_SLEEVE", "off")
     assert engine._active_sleeves() == ["short", "long"]
     assert equal_split_budget(engine._active_sleeves()) == {"short": 0.5, "long": 0.5}
     # also kill long ⇒ short alone ⇒ 1/1
@@ -58,7 +67,7 @@ def test_active_sleeves_follows_killswitch_and_roots(tmp_path: Path, monkeypatch
 def test_active_sleeves_excludes_unconfigured_roots(tmp_path: Path, monkeypatch) -> None:
     """A sleeve whose root is NOT configured is never in the active set even with its toggle
     on — ws_risk only budgets sleeves it actually owns/reads."""
-    for var in ("SHORT_SLEEVE", "LONG_SLEEVE", "CONTINUOUS_SLEEVE"):
+    for var in ("SHORT_SLEEVE", "LONG_SLEEVE", "CONTINUOUS_SLEEVE", "CONTINUOUS_ADDON_SLEEVE"):
         monkeypatch.delenv(var, raising=False)
     cfg = EventWebSocketRiskConfig()  # short-only (no long/continuous roots)
     engine = EventWebSocketRiskEngine(tmp_path, config=ResearchConfig(), risk_config=cfg)
@@ -440,17 +449,39 @@ def test_all_sleeve_route_datasets_are_registered(tmp_path: Path) -> None:
     short_root = tmp_path / "short"
     long_root = tmp_path / "long"
     cont_root = tmp_path / "cont"
-    for root in (short_root, long_root, cont_root):
+    addon_root = tmp_path / "cont_addon"
+    for root in (short_root, long_root, cont_root, addon_root):
         root.mkdir()
-    cfg = EventWebSocketRiskConfig(long_data_root=str(long_root), continuous_data_root=str(cont_root))
+    cfg = EventWebSocketRiskConfig(
+        long_data_root=str(long_root),
+        continuous_data_root=str(cont_root),
+        continuous_addon_data_root=str(addon_root),
+    )
     engine = EventWebSocketRiskEngine(short_root, config=ResearchConfig(), risk_config=cfg)
     for trades in (True, False):
         for _root, dataset in engine._sleeve_routes(trades=trades).values():
             assert dataset in storage.DATASETS, f"{dataset} not in storage.DATASETS"
             assert dataset in storage.DATASET_KEYS, f"{dataset} has no dedup key"
     for name in (cfg.long_trades_dataset, cfg.long_orders_dataset,
-                 cfg.continuous_trades_dataset, cfg.continuous_orders_dataset):
+                 cfg.continuous_trades_dataset, cfg.continuous_orders_dataset,
+                 cfg.continuous_addon_trades_dataset, cfg.continuous_addon_orders_dataset):
         assert name in storage.DATASETS, f"config default {name} unregistered"
+
+
+def test_continuous_addon_root_routes_writes_independently(tmp_path: Path) -> None:
+    short_root = tmp_path / "short"
+    addon_root = tmp_path / "cont_addon"
+    short_root.mkdir()
+    addon_root.mkdir()
+    cfg = EventWebSocketRiskConfig(continuous_addon_data_root=str(addon_root))
+    engine = EventWebSocketRiskEngine(short_root, config=ResearchConfig(), risk_config=cfg)
+
+    engine._write_trade_rows_routed([
+        {"trade_id": "a1", "sleeve": "continuous_addon", "symbol": "ZZZUSDT", "status": "open", "qty": "1"}
+    ])
+
+    assert read_dataset(addon_root, cfg.continuous_addon_trades_dataset)["trade_id"].to_list() == ["a1"]
+    assert read_dataset(short_root, "event_demo_trades").is_empty()
 
 
 def test_unowned_sleeve_tag_warns_and_counts_as_misroute(tmp_path: Path, caplog) -> None:

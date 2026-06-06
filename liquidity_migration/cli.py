@@ -37,6 +37,7 @@ from .reconciliation import (
     run_long_paper_demo_reconciliation,
     run_paper_demo_reconciliation,
 )
+from .continuous_addon_shadow import ContinuousAddonShadowAuditConfig, run_continuous_addon_shadow_audit
 from .universe import run_discover_universe
 from .continuous_events import ContinuousEventConfig, run_continuous_event_research
 from .volume_events import VolumeEventResearchConfig, run_volume_event_research
@@ -47,6 +48,7 @@ from .cli_parsers import (  # argparse subcommand builders (extracted); build_pa
     _add_archive_download_klines_parser,
     _add_archive_manifest_parser,
     _add_combined_book_report_parser,
+    _add_continuous_addon_shadow_audit_parser,
     _add_continuous_event_demo_cycle_parser,
     _add_continuous_events_parser,
     _add_data_layer_audit_parser,
@@ -226,6 +228,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_reconcile_paper_demo_parser(subparsers)
     _add_reconcile_long_paper_demo_parser(subparsers)
     _add_reconcile_continuous_paper_demo_parser(subparsers)
+    _add_continuous_addon_shadow_audit_parser(subparsers)
     _add_reconcile_demo_bybit_parser(subparsers)
     _add_reconcile_backtest_paper_parser(subparsers)
     _add_reconcile_all_parser(subparsers)
@@ -243,6 +246,8 @@ _COMMANDS_WITHOUT_DATA_ROOT = frozenset(
         # VPS (where the demo runs) and doesn't need to.
         "reconcile-paper-demo",
         "reconcile-long-paper-demo",
+        "reconcile-continuous-paper-demo",
+        "continuous-addon-shadow-audit",
         "reconcile-demo-bybit",
         "reconcile-backtest-paper",
         "reconcile-all",
@@ -726,6 +731,9 @@ def main(argv: list[str] | None = None) -> int:
             continuous_data_root=args.continuous_data_root,
             continuous_trades_dataset=args.continuous_trades_dataset,
             continuous_orders_dataset=args.continuous_orders_dataset,
+            continuous_addon_data_root=args.continuous_addon_data_root,
+            continuous_addon_trades_dataset=args.continuous_addon_trades_dataset,
+            continuous_addon_orders_dataset=args.continuous_addon_orders_dataset,
         )
         payload = run_event_ws_risk(data_root, config=config, risk_config=ws_risk_config)
         _print_event_risk_summary(payload)
@@ -831,12 +839,20 @@ def main(argv: list[str] | None = None) -> int:
             decile=args.decile, rmom_quantile=args.rmom_quantile, liq_turnover_min=args.liq_turnover_min,
             lookback_days=args.lookback_days, workers=args.workers, max_active=args.max_active,
             max_new_entries_per_cycle=args.max_new_entries_per_cycle, max_hold_hours=args.max_hold_hours,
+            entry_event_trigger=args.entry_event_trigger,
+            allow_same_signal_reentry=args.allow_same_signal_reentry,
             stop_loss_pct=args.stop_loss_pct, entry_leverage=args.entry_leverage,
             per_position_notional_pct_equity=args.per_position_notional_pct_equity,
             fallback_equity_usdt=args.fallback_equity_usdt, entry_order_type=args.entry_order_type,
             exit_order_type=args.exit_order_type, submit_orders=args.submit_orders,
             confirm_demo_orders=args.confirm_demo_orders, telegram=args.telegram,
             record_dry_run=args.record_dry_run, paper_mode=args.paper_mode, data_name=args.data_name,
+            strategy_profile=args.strategy_profile,
+            addon_primary_pnl_gate=args.addon_primary_pnl_gate,
+            addon_primary_min_unrealized_return=args.addon_primary_min_unrealized_return,
+            addon_primary_data_root=args.addon_primary_data_root,
+            addon_primary_strategy_id=args.addon_primary_strategy_id,
+            addon_same_symbol_entry_cooldown_minutes=args.addon_same_symbol_entry_cooldown_minutes,
         )
         if getattr(args, "daemon", False):
             from liquidity_migration.continuous_demo_daemon import ContinuousDemoDaemon
@@ -1079,9 +1095,14 @@ def main(argv: list[str] | None = None) -> int:
         cont_config = ContinuousEventConfig(
             start_date=args.start, end_date=args.end, side=args.side, decile=args.decile,
             rmom_quantile=args.rmom_quantile, liq_turnover_min=args.liq_turnover_min,
+            feature_set=tuple(x.strip() for x in args.feature_set.split(",") if x.strip()),
+            btc_trend_gate=args.btc_trend_gate,
+            entry_event_trigger=args.entry_event_trigger,
             entry_delay_hours=args.entry_delay_hours, exit_mode=args.exit_mode,
             hold_hours=args.hold_hours, max_hold_hours=args.max_hold_hours,
             cooldown_hours=args.cooldown_hours, stop_loss_pct=args.stop_loss_pct,
+            entry_pause_after_adverse_exits=args.entry_pause_after_adverse_exits,
+            entry_pause_window_hours=args.entry_pause_window_hours,
             stop_fill_mode=args.stop_fill_mode, stop_slippage_cap_pct=args.stop_slippage_cap_pct,
             gross_exposure=args.gross_exposure, max_active=args.max_active,
             taker_fee_bps=args.taker_fee_bps, spread_bps=args.spread_bps,
@@ -1175,6 +1196,216 @@ def main(argv: list[str] | None = None) -> int:
             f"per_trade_csv={payload.get('pairs_csv_path') or '-'}{warning}"
         )
         return 0
+
+    if args.command == "continuous-addon-shadow-audit":
+        payload = run_continuous_addon_shadow_audit(
+            ContinuousAddonShadowAuditConfig(
+                primary_data_root=args.primary_data_root,
+                addon_data_root=args.addon_data_root,
+                historical_blended_trades_csv=args.historical_blended_trades_csv,
+                primary_trades_dataset=args.primary_trades_dataset,
+                addon_trades_dataset=args.addon_trades_dataset,
+                primary_orders_dataset=args.primary_orders_dataset,
+                addon_orders_dataset=args.addon_orders_dataset,
+                addon_cycles_dataset=args.addon_cycles_dataset,
+                expected_primary_strategy_id=args.expected_primary_strategy_id,
+                expected_addon_strategy_id=args.expected_addon_strategy_id,
+                expected_primary_entry_order_prefix=args.expected_primary_entry_order_prefix,
+                expected_addon_entry_order_prefix=args.expected_addon_entry_order_prefix,
+                output_dir=args.output_dir,
+                report_name=args.report_name,
+                min_addon_trades=args.min_addon_trades,
+                min_matched_addon_keys=args.min_matched_addon_keys,
+                max_missing_addon_keys=args.max_missing_addon_keys,
+                max_extra_addon_keys=args.max_extra_addon_keys,
+                max_missing_addon_key_fraction=args.max_missing_addon_key_fraction,
+                min_addon_to_primary_ratio=args.min_addon_to_primary_ratio,
+                max_addon_to_primary_ratio=args.max_addon_to_primary_ratio,
+                min_active_same_symbol_overlap_fraction=args.min_active_same_symbol_overlap_fraction,
+                max_active_same_symbol_overlap_fraction=args.max_active_same_symbol_overlap_fraction,
+                min_exact_same_entry_fraction=args.min_exact_same_entry_fraction,
+                max_exact_same_entry_fraction=args.max_exact_same_entry_fraction,
+                max_historical_anatomy_drift=args.max_historical_anatomy_drift,
+                max_addon_top1_weight_share=args.max_addon_top1_weight_share,
+                max_addon_top5_weight_share=args.max_addon_top5_weight_share,
+                max_addon_top10_weight_share=args.max_addon_top10_weight_share,
+                max_historical_concentration_drift=args.max_historical_concentration_drift,
+                max_active_addon_weight=args.max_active_addon_weight,
+                max_active_combined_weight=args.max_active_combined_weight,
+                max_unit_weight_rows=args.max_unit_weight_rows,
+                max_primary_trades_per_day=args.max_primary_trades_per_day,
+                max_addon_trades_per_day=args.max_addon_trades_per_day,
+                max_combined_trades_per_day=args.max_combined_trades_per_day,
+                max_primary_entry_order_attempts_per_day=args.max_primary_entry_order_attempts_per_day,
+                max_addon_entry_order_attempts_per_day=args.max_addon_entry_order_attempts_per_day,
+                max_combined_entry_order_attempts_per_day=args.max_combined_entry_order_attempts_per_day,
+                max_primary_trades_per_symbol_day=args.max_primary_trades_per_symbol_day,
+                max_addon_trades_per_symbol_day=args.max_addon_trades_per_symbol_day,
+                max_combined_trades_per_symbol_day=args.max_combined_trades_per_symbol_day,
+                max_primary_entry_order_attempts_per_symbol_day=(
+                    args.max_primary_entry_order_attempts_per_symbol_day
+                ),
+                max_addon_entry_order_attempts_per_symbol_day=args.max_addon_entry_order_attempts_per_symbol_day,
+                max_combined_entry_order_attempts_per_symbol_day=(
+                    args.max_combined_entry_order_attempts_per_symbol_day
+                ),
+                min_primary_same_symbol_trade_gap_minutes=args.min_primary_same_symbol_trade_gap_minutes,
+                min_addon_same_symbol_trade_gap_minutes=args.min_addon_same_symbol_trade_gap_minutes,
+                min_combined_same_symbol_trade_gap_minutes=args.min_combined_same_symbol_trade_gap_minutes,
+                min_primary_same_symbol_entry_order_gap_minutes=(
+                    args.min_primary_same_symbol_entry_order_gap_minutes
+                ),
+                min_addon_same_symbol_entry_order_gap_minutes=args.min_addon_same_symbol_entry_order_gap_minutes,
+                min_combined_same_symbol_entry_order_gap_minutes=(
+                    args.min_combined_same_symbol_entry_order_gap_minutes
+                ),
+                simulate_addon_same_symbol_trade_cooldown_minutes=(
+                    args.simulate_addon_same_symbol_trade_cooldown_minutes
+                ),
+                simulate_addon_same_symbol_entry_order_cooldown_minutes=(
+                    args.simulate_addon_same_symbol_entry_order_cooldown_minutes
+                ),
+                max_primary_unexpected_strategy_rows=args.max_primary_unexpected_strategy_rows,
+                max_addon_unexpected_strategy_rows=args.max_addon_unexpected_strategy_rows,
+                max_primary_unexpected_entry_order_prefix_rows=(
+                    args.max_primary_unexpected_entry_order_prefix_rows
+                ),
+                max_addon_unexpected_entry_order_prefix_rows=args.max_addon_unexpected_entry_order_prefix_rows,
+                max_primary_repeated_entry_rows=args.max_primary_repeated_entry_rows,
+                max_addon_repeated_entry_rows=args.max_addon_repeated_entry_rows,
+                max_primary_repeated_entry_order_rows=args.max_primary_repeated_entry_order_rows,
+                max_addon_repeated_entry_order_rows=args.max_addon_repeated_entry_order_rows,
+                max_primary_problem_entry_order_attempts=args.max_primary_problem_entry_order_attempts,
+                max_addon_problem_entry_order_attempts=args.max_addon_problem_entry_order_attempts,
+                max_primary_unmatched_entry_order_attempts=args.max_primary_unmatched_entry_order_attempts,
+                max_addon_unmatched_entry_order_attempts=args.max_addon_unmatched_entry_order_attempts,
+                max_primary_unmatched_live_entry_order_attempts=args.max_primary_unmatched_live_entry_order_attempts,
+                max_addon_unmatched_live_entry_order_attempts=args.max_addon_unmatched_live_entry_order_attempts,
+                max_primary_unmatched_entry_order_age_minutes=args.max_primary_unmatched_entry_order_age_minutes,
+                max_addon_unmatched_entry_order_age_minutes=args.max_addon_unmatched_entry_order_age_minutes,
+                max_primary_unmatched_live_entry_order_age_minutes=(
+                    args.max_primary_unmatched_live_entry_order_age_minutes
+                ),
+                max_addon_unmatched_live_entry_order_age_minutes=args.max_addon_unmatched_live_entry_order_age_minutes,
+                min_cycle_entry_acceptance_fraction=args.min_cycle_entry_acceptance_fraction,
+                max_cycle_same_signal_reentry_skip_fraction=args.max_cycle_same_signal_reentry_skip_fraction,
+                max_cycle_addon_primary_pnl_gate_skip_fraction=args.max_cycle_addon_primary_pnl_gate_skip_fraction,
+                max_cycle_candidate_pressure=args.max_cycle_candidate_pressure,
+                min_worst_cycle_entry_acceptance_fraction=args.min_worst_cycle_entry_acceptance_fraction,
+                max_worst_cycle_same_signal_reentry_skip_fraction=args.max_worst_cycle_same_signal_reentry_skip_fraction,
+                max_worst_cycle_addon_primary_pnl_gate_skip_fraction=(
+                    args.max_worst_cycle_addon_primary_pnl_gate_skip_fraction
+                ),
+                min_addon_cycles=args.min_addon_cycles,
+                max_latest_cycle_age_minutes=args.max_latest_cycle_age_minutes,
+                max_cycle_gap_minutes=args.max_cycle_gap_minutes,
+                audit_now_ms=args.audit_now_ms,
+            )
+        )
+        summary = payload["summary"]
+        shadow_overlap = summary["shadow_overlap"]
+        anatomy = summary["shadow_anatomy"]
+        concentration = summary["addon_concentration"]
+        exposure = summary["active_exposure"]
+        weight_sources = summary["weight_sources"]
+        ticket_rate = summary["daily_ticket_rate"]
+        symbol_day_ticket_rate = summary["symbol_day_ticket_rate"]
+        same_symbol_gaps = summary["same_symbol_entry_gaps"]
+        cooldown = summary["addon_cooldown_simulation"]
+        primary_strategy = summary["primary_strategy"]
+        addon_strategy = summary["addon_strategy"]
+        primary_order_prefix = summary["primary_order_prefix"]
+        addon_order_prefix = summary["addon_order_prefix"]
+        primary_order_reconciliation = summary["primary_order_trade_reconciliation"]
+        addon_order_reconciliation = summary["addon_order_trade_reconciliation"]
+        gate = summary["gate"]
+        print(
+            "continuous add-on shadow audit "
+            f"primary={summary['primary']['trades']} "
+            f"addon={summary['addon']['trades']} "
+            f"same_symbol_active={shadow_overlap['active_same_symbol_primary']} "
+            f"addon_primary_ratio={anatomy['addon_to_primary_ratio']:.4f} "
+            f"same_symbol_frac={anatomy['active_same_symbol_overlap_fraction']:.4f} "
+            f"top1_symbol_share={concentration['top1_weight_share']:.4f} "
+            f"max_active_addon_weight={exposure['max_active_addon_weight']:.4f} "
+            f"max_active_combined_weight={exposure['max_active_combined_weight']:.4f} "
+            f"current_open_addon_weight={exposure['current_open_addon_weight']:.4f} "
+            f"current_open_combined_weight={exposure['current_open_combined_weight']:.4f} "
+            f"unit_weight_rows={weight_sources['combined_unit_weight_rows']} "
+            f"max_combined_trades_per_day={ticket_rate['max_combined_trades_per_day']} "
+            f"max_combined_entry_order_attempts_per_day="
+            f"{ticket_rate['max_combined_entry_order_attempts_per_day']} "
+            f"max_combined_trades_per_symbol_day="
+            f"{symbol_day_ticket_rate['max_combined_trades_per_symbol_day']} "
+            f"max_combined_entry_order_attempts_per_symbol_day="
+            f"{symbol_day_ticket_rate['max_combined_entry_order_attempts_per_symbol_day']} "
+            f"min_addon_same_symbol_trade_gap_min="
+            f"{same_symbol_gaps['min_addon_same_symbol_trade_gap_minutes']:.4f} "
+            f"min_combined_same_symbol_trade_gap_min="
+            f"{same_symbol_gaps['min_combined_same_symbol_trade_gap_minutes']:.4f} "
+            f"min_addon_same_symbol_entry_order_gap_min="
+            f"{same_symbol_gaps['min_addon_same_symbol_entry_order_gap_minutes']:.4f} "
+            f"min_combined_same_symbol_entry_order_gap_min="
+            f"{same_symbol_gaps['min_combined_same_symbol_entry_order_gap_minutes']:.4f} "
+            f"cooldown_skipped_addon_trades={cooldown['skipped_trades']} "
+            f"cooldown_addon_trade_suppression_frac={cooldown['trade_suppression_fraction']:.4f} "
+            f"cooldown_skipped_addon_trade_return_sum={cooldown['skipped_trade_return_sum']:.4f} "
+            f"cooldown_skipped_addon_trade_return_obs={cooldown['skipped_trade_return_observations']} "
+            f"cooldown_skipped_addon_entry_orders={cooldown['skipped_entry_order_attempts']} "
+            f"cooldown_addon_entry_order_suppression_frac={cooldown['entry_order_suppression_fraction']:.4f} "
+            f"primary_unexpected_strategy_rows={primary_strategy['unexpected_strategy_rows']} "
+            f"addon_unexpected_strategy_rows={addon_strategy['unexpected_strategy_rows']} "
+            f"primary_unexpected_entry_order_prefix_rows="
+            f"{primary_order_prefix['unexpected_entry_order_prefix_rows']} "
+            f"addon_unexpected_entry_order_prefix_rows="
+            f"{addon_order_prefix['unexpected_entry_order_prefix_rows']} "
+            f"primary_repeat_rows={summary['primary']['repeated_entry_rows']} "
+            f"addon_repeat_rows={summary['addon']['repeated_entry_rows']} "
+            f"primary_order_attempts={summary['primary_orders']['entry_order_attempts']} "
+            f"addon_order_attempts={summary['addon_orders']['entry_order_attempts']} "
+            f"primary_order_repeat_rows={summary['primary_orders']['repeated_entry_rows']} "
+            f"addon_order_repeat_rows={summary['addon_orders']['repeated_entry_rows']} "
+            f"primary_problem_order_attempts={summary['primary_orders']['problem_entry_order_attempts']} "
+            f"addon_problem_order_attempts={summary['addon_orders']['problem_entry_order_attempts']} "
+            f"primary_unmatched_order_attempts="
+            f"{primary_order_reconciliation['entry_order_attempts_without_trade_key']} "
+            f"addon_unmatched_order_attempts="
+            f"{addon_order_reconciliation['entry_order_attempts_without_trade_key']} "
+            f"primary_unmatched_live_order_attempts="
+            f"{primary_order_reconciliation['live_entry_order_attempts_without_trade_key']} "
+            f"addon_unmatched_live_order_attempts="
+            f"{addon_order_reconciliation['live_entry_order_attempts_without_trade_key']} "
+            f"primary_unmatched_order_age_min="
+            f"{primary_order_reconciliation['max_unmatched_entry_order_age_minutes']:.4f} "
+            f"addon_unmatched_order_age_min="
+            f"{addon_order_reconciliation['max_unmatched_entry_order_age_minutes']:.4f} "
+            f"primary_unmatched_live_order_age_min="
+            f"{primary_order_reconciliation['max_unmatched_live_entry_order_age_minutes']:.4f} "
+            f"addon_unmatched_live_order_age_min="
+            f"{addon_order_reconciliation['max_unmatched_live_entry_order_age_minutes']:.4f} "
+            f"cycles={summary['addon_cycles']['cycles']} "
+            f"latest_cycle_ts_ms={summary['addon_cycles']['latest_cycle_ts_ms']} "
+            f"latest_cycle_age_min={summary['addon_cycles']['latest_cycle_age_minutes']:.4f} "
+            f"max_cycle_gap_min={summary['addon_cycles']['max_cycle_gap_minutes']:.4f} "
+            f"cycle_pressure={summary['addon_cycles']['candidate_pressure']} "
+            f"cycle_candidates={summary['addon_cycles']['entry_candidates']} "
+            f"cycle_entries={summary['addon_cycles']['entries']} "
+            f"cycle_accept_frac={summary['addon_cycles']['entry_acceptance_fraction']:.4f} "
+            f"gate_skips={summary['addon_cycles']['addon_primary_pnl_gate_skips']} "
+            f"gate_skip_frac={summary['addon_cycles']['addon_primary_pnl_gate_skip_fraction']:.4f} "
+            f"same_signal_reentry_skips={summary['addon_cycles']['skipped_same_signal_reentry']} "
+            f"same_signal_skip_frac={summary['addon_cycles']['same_signal_reentry_skip_fraction']:.4f} "
+            f"max_cycle_pressure={summary['addon_cycles']['max_candidate_pressure']} "
+            f"worst_cycle_accept_frac={summary['addon_cycles']['worst_entry_acceptance_fraction']:.4f} "
+            f"worst_gate_skip_frac={summary['addon_cycles']['worst_addon_primary_pnl_gate_skip_fraction']:.4f} "
+            f"worst_same_signal_skip_frac={summary['addon_cycles']['worst_same_signal_reentry_skip_fraction']:.4f} "
+            f"passed={gate['passed']} "
+            f"path={payload['report_path']}"
+        )
+        if not gate["passed"]:
+            for failure in gate["failures"]:
+                print(f"continuous add-on shadow audit gate failure: {failure}", file=sys.stderr)
+        return 1 if args.fail_on_threshold_breach and not gate["passed"] else 0
 
     if args.command == "reconcile-demo-bybit":
         # Build the trading client lazily here so a credential-less environment

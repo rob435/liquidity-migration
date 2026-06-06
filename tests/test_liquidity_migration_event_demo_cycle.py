@@ -1183,6 +1183,15 @@ def test_decode_entry_order_link_id_roundtrips_long_signal_ts() -> None:
     assert decoded == ("long", 1_779_667_200_000, 0)  # (sleeve, signal_ts, reentry_seq=0)
 
 
+def test_decode_entry_order_link_id_roundtrips_continuous_addon_signal_ts() -> None:
+    from liquidity_migration.continuous_demo import _continuous_order_link_id
+
+    signal_ts_ms = 1_779_667_200_000
+    link = _continuous_order_link_id("en-ca", symbol="ETHUSDT", signal_ts_ms=signal_ts_ms, reentry_seq=2)
+    decoded = decode_entry_order_link_id(link)
+    assert decoded == ("continuous_addon", 1_779_667_200_000, 2)
+
+
 def test_decode_entry_order_link_id_returns_none_for_unknown_patterns() -> None:
     """Hand-placed orders, risk-side exits (lm-ux-*), and legacy formats
     must NOT decode — the caller relies on None to mean 'fall back to the
@@ -1208,15 +1217,18 @@ def test_all_sleeve_link_builders_share_one_canonical_format() -> None:
     short = _order_link_id("en", symbol="SUPERUSDT", signal_ts_ms=ts)
     long = _long_order_link_id("en-l", symbol="SUPERUSDT", signal_ts_ms=ts)
     cont = _continuous_order_link_id("en-c", symbol="SUPERUSDT", signal_ts_ms=ts)
+    cont_addon = _continuous_order_link_id("en-ca", symbol="SUPERUSDT", signal_ts_ms=ts)
     # Identical base + ts36 encoding, differing ONLY by the sleeve prefix => one canonical format.
     ts36 = short.rsplit("-", 1)[1]
     assert short == f"lm-en-SUPER-{ts36}"
     assert long == f"lm-en-l-SUPER-{ts36}"
     assert cont == f"lm-en-c-SUPER-{ts36}"
+    assert cont_addon == f"lm-en-ca-SUPER-{ts36}"
     # All three round-trip through the SINGLE decoder to the correct sleeve + ts (reentry_seq=0).
     assert decode_entry_order_link_id(short) == ("short", ts, 0)
     assert decode_entry_order_link_id(long) == ("long", ts, 0)
     assert decode_entry_order_link_id(cont) == ("continuous", ts, 0)
+    assert decode_entry_order_link_id(cont_addon) == ("continuous_addon", ts, 0)
 
 
 def test_is_exit_link_matches_exit_and_risk_prefixes_only() -> None:

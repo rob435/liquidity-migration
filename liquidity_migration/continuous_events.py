@@ -64,6 +64,7 @@ class ContinuousEventConfig:
     side: str = "short"
     decile: int = 9                       # short the top composite decile
     rmom_quantile: float = 0.5            # rmom-LOW half: keep within-ts rmom rank <= this
+    feature_set: tuple[str, ...] = FEATURES  # composite features; all are trailing/causal
     liq_turnover_min: float = 500_000.0   # liquid gate: signal-bar hourly turnover_quote (USD)
     # --- execution ---
     entry_delay_hours: int = 1            # bars AFTER the deciding bar's close (0 = proxy/look-ahead)
@@ -94,6 +95,8 @@ class ContinuousEventConfig:
     entry_decel_lookback_h: int = 0       # 0=off; require close[t]/close[t-lookback]-1 <= entry_decel_max_ret
     entry_decel_max_ret: float = 0.0      # fade-started confirmation: recent move must be <= this
     market_min_ret_1d: float = -1.0       # skip entry if equal-weight market 1d return < this (-1 = off)
+    btc_trend_gate: str = "off"           # "off" | "uptrend" | "downtrend"; causal prior-30d BTC return
+    entry_event_trigger: str = "none"      # hourly catalyst gate; "none" preserves continuous spell entries
     failed_fade_hours: int = 0            # 0=off; cut a fade that hasn't worked after N hours
     failed_fade_loss_pct: float = 0.0
     failed_fade_min_mfe_pct: float = 0.0
@@ -148,6 +151,21 @@ def _panel_cache_stale(cache_path: Path, rmom_path: Path) -> bool:
         return True
 
 
+def _feature_tag(feature_set: tuple[str, ...]) -> str:
+    raw = "_".join(feature_set) or "none"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:8]
+
+
+def _panel_cache_path(root: Path, config: ContinuousEventConfig) -> Path:
+    window_tag = hashlib.sha256(
+        f"{config.start_date}_{config.end_date}".encode("utf-8")
+    ).hexdigest()[:8]
+    return root / (
+        f"_continuous_engine_panel_v2_rmom{int(round(config.rmom_quantile * 100))}"
+        f"_feat{_feature_tag(config.feature_set)}_{window_tag}.parquet"
+    )
+
+
 def build_continuous_panel(
     data_root: str | Path, config: ContinuousEventConfig, *, cache: bool = True
 ) -> pl.DataFrame:
@@ -159,7 +177,7 @@ def build_continuous_panel(
     which the engine does not use -- it computes the realised fill itself).
     """
     root = Path(str(data_root)).expanduser()
-    cache_path = root / f"_continuous_engine_panel_rmom{int(round(config.rmom_quantile * 100))}.parquet"
+    cache_path = _panel_cache_path(root, config)
     rmom_path = root / "residual_momentum.parquet"
     if cache and cache_path.exists() and not _panel_cache_stale(cache_path, rmom_path):
         return pl.read_parquet(cache_path)
@@ -179,7 +197,13 @@ def build_continuous_panel(
             f"POLARS_MAX_THREADS=8 python scripts/precompute_residual_momentum.py --root {root}"
         )
     rmom = pl.read_parquet(rmom_path).rename({"ts_ms": "day_ts"})
-    panel = compute_continuous_decile_panel(k, rmom, rmom_quantile=config.rmom_quantile, start_ms=start_ms)
+    panel = compute_continuous_decile_panel(
+        k,
+        rmom,
+        rmom_quantile=config.rmom_quantile,
+        start_ms=start_ms,
+        feature_set=config.feature_set,
+    )
     if cache:
         panel.write_parquet(cache_path)
     return panel
@@ -209,6 +233,17 @@ def per_symbol_timeseries_features(k: pl.DataFrame) -> pl.DataFrame:
         pl.when(pl.col("max720") > pl.col("min720"))
         .then((pl.col("close") - pl.col("min720")) / (pl.col("max720") - pl.col("min720")))
         .otherwise(None).alias("dist_low"),
+        pl.col("ret1").shift(1).rolling_max(window_size=6, min_samples=1).over("symbol").alias("prior6_ret1_max"),
+        pl.col("close").shift(1).rolling_max(window_size=6, min_samples=1).over("symbol").alias("prior6_close_max"),
+        pl.col("turnover_quote")
+        .shift(1)
+        .rolling_mean(window_size=168, min_samples=48)
+        .over("symbol")
+        .alias("prior168_turnover_mean"),
+    )
+    k = k.with_columns(
+        (pl.col("close") / pl.col("prior6_close_max") - 1.0).alias("giveback_from_prior6_high"),
+        (pl.col("turnover_quote") / pl.col("prior168_turnover_mean")).alias("turnover_spike_168h"),
     )
     return k
 
@@ -244,7 +279,53 @@ def cross_sectional_decile(
     k = k.with_columns(
         (((pl.col("composite").rank().over("ts_ms") - 1) * 10) // pl.len().over("ts_ms")).clip(0, 9).alias("decile")
     )
-    return k.select("symbol", "ts_ms", "decile", "composite", "turnover_quote").sort(["symbol", "ts_ms"])
+    cols = [
+        "symbol",
+        "ts_ms",
+        "decile",
+        "composite",
+        "turnover_quote",
+    ]
+    event_cols = [
+        "ret1",
+        "max_ret168",
+        "prior6_ret1_max",
+        "giveback_from_prior6_high",
+        "turnover_spike_168h",
+    ]
+    return k.select(cols + [c for c in event_cols if c in k.columns]).sort(["symbol", "ts_ms"])
+
+
+def _entry_event_expr(trigger: str) -> pl.Expr:
+    if trigger == "none":
+        return pl.lit(True)
+    if trigger.startswith("fresh_pop"):
+        threshold = float(trigger.removeprefix("fresh_pop")) / 100.0
+        return (pl.col("ret1") >= threshold) & (pl.col("ret1") >= pl.col("max_ret168") - 1e-12)
+    if trigger.startswith("pop") and "_gb" in trigger:
+        left, right = trigger.split("_gb", 1)
+        pop_min = float(left.removeprefix("pop")) / 100.0
+        gb_min = float(right) / 100.0
+        return (
+            (pl.col("prior6_ret1_max") >= pop_min)
+            & (pl.col("ret1") <= 0.0)
+            & (pl.col("giveback_from_prior6_high") <= -gb_min)
+        )
+    if trigger.startswith("turn") and "_pop" in trigger:
+        left, right = trigger.split("_pop", 1)
+        turn_min = float(left.removeprefix("turn"))
+        pop_min = float(right) / 100.0
+        return (pl.col("turnover_spike_168h") >= turn_min) & (pl.col("ret1") >= pop_min)
+    if trigger.startswith("turn") and "_gb" in trigger:
+        left, right = trigger.split("_gb", 1)
+        turn_min = float(left.removeprefix("turn"))
+        gb_min = float(right) / 100.0
+        return (
+            (pl.col("turnover_spike_168h") >= turn_min)
+            & (pl.col("prior6_ret1_max") >= 0.05)
+            & (pl.col("giveback_from_prior6_high") <= -gb_min)
+        )
+    raise ValueError(f"unknown entry_event_trigger {trigger!r}")
 
 
 def compute_continuous_decile_panel(
@@ -275,6 +356,8 @@ def _fresh_entries(panel: pl.DataFrame, config: ContinuousEventConfig) -> pl.Dat
     if panel.is_empty():
         return panel
     d = panel.filter(pl.col("decile") == config.decile).sort(["symbol", "ts_ms"])
+    if config.entry_event_trigger != "none":
+        d = d.filter(_entry_event_expr(config.entry_event_trigger))
     d = d.with_columns(
         ((pl.col("ts_ms") - pl.col("ts_ms").shift(1).over("symbol")) > MS_PER_HOUR).fill_null(True).alias("fresh")
     )
@@ -313,6 +396,40 @@ def _market_daily_returns(klines: pl.DataFrame) -> dict[int, float]:
     return {int(r[0]): float(r[1]) for r in dc.iter_rows()}
 
 
+def _btc_trend_returns(klines: pl.DataFrame) -> dict[int, float]:
+    """Prior-30d BTC return-sum by day, excluding the current signal day.
+
+    Mirrors ``btc_return_30d`` in the daily event features: the current day is not
+    included, so the regime value is known before any same-day continuous signal.
+    """
+    if klines.is_empty() or "symbol" not in klines.columns:
+        return {}
+    btc = (
+        klines.filter(pl.col("symbol") == "BTCUSDT")
+        .sort("ts_ms")
+        .with_columns(((pl.col("ts_ms") // MS_PER_DAY) * MS_PER_DAY).alias("day"))
+        .group_by("day")
+        .agg(pl.col("close").last().alias("close"))
+        .sort("day")
+        .with_columns((pl.col("close") / pl.col("close").shift(1) - 1.0).alias("ret"))
+        .drop_nulls("ret")
+    )
+    out: dict[int, float] = {}
+    days: list[int] = []
+    rets: list[float] = []
+    lo = 0
+    for day, ret in btc.select("day", "ret").iter_rows():
+        day_i = int(day)
+        while lo < len(days) and days[lo] < day_i - 30 * MS_PER_DAY:
+            lo += 1
+        window = rets[lo:]
+        if len(window) >= 30:
+            out[day_i] = float(sum(window))
+        days.append(day_i)
+        rets.append(float(ret))
+    return out
+
+
 def _entry_vol(close_arr: "np.ndarray", entry_bar: int, window: int = 168, min_n: int = 48) -> float:
     """Trailing hourly return std ending at entry_bar (the per-name vol for risk-sizing)."""
     lo = max(0, entry_bar - window)
@@ -330,6 +447,7 @@ def _run_trades(
     funding_lookup: dict[str, dict[str, Any]] | None,
     config: ContinuousEventConfig,
     market_daily: dict[int, float] | None = None,
+    btc_trend_daily: dict[int, float] | None = None,
 ) -> tuple[pl.DataFrame, dict[str, int]]:
     """Walk fresh entries in ts order; apply concurrency + cooldown + the inherited selection gates
     (age / fade-deceleration / market-context), size by the chosen rule, and simulate each via the
@@ -367,7 +485,10 @@ def _run_trades(
     active: list[int] = []          # min-heap of actual exit timestamps of open positions
     last_entry: dict[str, int] = {}
     rows: list[dict[str, Any]] = []
-    skipped_capacity = skipped_cooldown = skipped_no_bar = skipped_gate = skipped_breaker = 0
+    btc_gate = config.btc_trend_gate
+    if btc_gate not in ("off", "uptrend", "downtrend"):
+        raise ValueError(f"btc_trend_gate must be 'off', 'uptrend', or 'downtrend'; got {btc_gate!r}")
+    skipped_capacity = skipped_cooldown = skipped_no_bar = skipped_gate = skipped_breaker = skipped_btc_trend = 0
     syms = entries["symbol"].to_list()
     tss = entries["ts_ms"].to_list()
     comps = entries["composite"].to_list()
@@ -405,6 +526,17 @@ def _run_trades(
         if age_min_ms > 0 and (entry_bar_end - int(bars["bar_end_ts_ms"][0])) < age_min_ms:
             skipped_gate += 1
             continue
+        if btc_gate != "off":
+            trend = (btc_trend_daily or {}).get((int(sig_ts) // MS_PER_DAY) * MS_PER_DAY)
+            if trend is None:
+                skipped_btc_trend += 1
+                continue
+            if btc_gate == "uptrend" and trend <= 0.0:
+                skipped_btc_trend += 1
+                continue
+            if btc_gate == "downtrend" and trend > 0.0:
+                skipped_btc_trend += 1
+                continue
         if decel_h > 0 and entry_bar - decel_h >= 0:
             base_px = float(close_arr[entry_bar - decel_h])
             recent_ret = (float(close_arr[entry_bar]) / base_px - 1.0) if base_px > 0 else 0.0
@@ -456,6 +588,7 @@ def _run_trades(
         "skipped_no_bar": skipped_no_bar,
         "skipped_gate": skipped_gate,
         "skipped_breaker": skipped_breaker,
+        "skipped_btc_trend": skipped_btc_trend,
     }
     if not rows:
         return _empty_trades(), skips

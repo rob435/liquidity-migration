@@ -180,6 +180,14 @@ class EventWebSocketRiskConfig:
     continuous_trades_dataset: str = "continuous_fade_demo_trades"
     continuous_orders_dataset: str = "continuous_fade_demo_orders"
     adopt_continuous_strategy_id: str = ""
+    # Continuous add-on sleeve (sparse fresh_pop25 overlay). Uses the same
+    # registered continuous dataset names in a separate root, but a distinct
+    # sleeve tag / orderLinkId namespace (`lm-en-ca-*`) so fills and adoptions
+    # cannot collide with the primary continuous sleeve.
+    continuous_addon_data_root: str = ""
+    continuous_addon_trades_dataset: str = "continuous_fade_demo_trades"
+    continuous_addon_orders_dataset: str = "continuous_fade_demo_orders"
+    adopt_continuous_addon_strategy_id: str = ""
     # Per-list cap on the append-only telemetry logs (exits/repairs/
     # reconciliations/pending_fill_reconciliations/errors) so a long-lived
     # daemon can't OOM. Configurable; reports only ever display the last 20.
@@ -309,6 +317,12 @@ class EventWebSocketRiskEngine:
         )
         if self.continuous_root is not None:
             self.continuous_root.mkdir(parents=True, exist_ok=True)
+        self.continuous_addon_root: Path | None = (
+            Path(self.risk.continuous_addon_data_root).expanduser()
+            if self.risk.continuous_addon_data_root else None
+        )
+        if self.continuous_addon_root is not None:
+            self.continuous_addon_root.mkdir(parents=True, exist_ok=True)
         self.private_client = private_client
         self.private_stream = private_stream
         self.public_stream = public_stream
@@ -421,6 +435,11 @@ class EventWebSocketRiskEngine:
         if self.continuous_root is not None:
             routes["continuous"] = (self.continuous_root,
                                     self.risk.continuous_trades_dataset if trades else self.risk.continuous_orders_dataset)
+        if self.continuous_addon_root is not None:
+            routes["continuous_addon"] = (
+                self.continuous_addon_root,
+                self.risk.continuous_addon_trades_dataset if trades else self.risk.continuous_addon_orders_dataset,
+            )
         return routes
 
     def _note_ledger_read_error(self, sleeve: str, dataset: str, exc: BaseException) -> None:
@@ -509,8 +528,12 @@ class EventWebSocketRiskEngine:
         root is unconfigured) -- surface it (counter + warning) rather than silently mis-filing it
         into the short ledger, which would defeat sleeve independence on the netted account."""
         sleeve = str(row.get("sleeve") or "").lower()
-        owned = {"short"} | ({"long"} if self.long_root is not None else set()) | (
-            {"continuous"} if self.continuous_root is not None else set())
+        owned = (
+            {"short"}
+            | ({"long"} if self.long_root is not None else set())
+            | ({"continuous"} if self.continuous_root is not None else set())
+            | ({"continuous_addon"} if self.continuous_addon_root is not None else set())
+        )
         if sleeve in owned:
             return sleeve
         if sleeve:
@@ -580,6 +603,10 @@ class EventWebSocketRiskEngine:
             active.append("long")
         if self.continuous_root is not None and _on("CONTINUOUS_SLEEVE"):
             active.append("continuous")
+        if self.continuous_addon_root is not None and os.environ.get(
+            "CONTINUOUS_ADDON_SLEEVE", "off"
+        ).strip().lower() in {"on", "1", "true", "yes"}:
+            active.append("continuous_addon")
         return active
 
     def _account_equity_usdt(self) -> float:
@@ -1858,6 +1885,9 @@ class EventWebSocketRiskEngine:
         if sleeve == "continuous":
             from .continuous_demo import CONTINUOUS_STRATEGY_ID  # lazy: avoid heavy import at module load
             return self.risk.adopt_continuous_strategy_id or CONTINUOUS_STRATEGY_ID
+        if sleeve == "continuous_addon":
+            from .continuous_demo import CONTINUOUS_ADDON_STRATEGY_ID
+            return self.risk.adopt_continuous_addon_strategy_id or CONTINUOUS_ADDON_STRATEGY_ID
         if sleeve == "short":
             if self.risk.adopt_short_strategy_id:
                 return self.risk.adopt_short_strategy_id

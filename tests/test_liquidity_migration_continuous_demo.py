@@ -14,14 +14,20 @@ from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
 from liquidity_migration.continuous_demo import (
     ContinuousDemoCycleConfig,
     LivePanelCache,
+    _continuous_entry_candidates_with_signal_metadata,
     _validate_continuous_demo_config,
+    active_primary_pnl_gate_allows_addon,
     build_confirmed_entry_state,
     build_live_continuous_state,
     continuous_dataset_names,
+    filter_addon_candidates_by_active_primary_pnl_gate,
     format_continuous_demo_cycle_summary,
     _continuous_order_link_id,
     _protective_exit_reason,
     _recent_exit_cooldown_symbols,
+    _recent_entry_cooldown_symbols,
+    continuous_sleeve_name,
+    continuous_strategy_id,
     entry_circuit_breaker_tripped,
     plan_continuous_exits,
     plan_protective_exits,
@@ -84,6 +90,7 @@ def test_confirmed_entry_state_is_the_deciding_bar_decile_no_live_price() -> Non
     ref = {r["symbol"]: r["decile"] for r in bt.filter(pl.col("ts_ms") == deciding_ts).to_dicts()}
     got = {r["symbol"]: r["decile"] for r in es.to_dicts()}
     assert ref and got == ref                              # confirmed deciding-bar decile, no live bar
+    assert {"ret1", "max_ret168", "prior6_ret1_max"} <= set(es.columns)
 
 
 def test_select_entries_respects_decile_liquidity_held_and_capacity() -> None:
@@ -102,6 +109,29 @@ def test_select_entries_respects_decile_liquidity_held_and_capacity() -> None:
     # capacity: max_active reached -> no entries
     assert select_continuous_entries(state, held_symbols=set(), cooldown_symbols=set(),
                                      open_count=25, config=cfg) == []
+
+
+def test_select_entries_applies_confirmed_event_trigger() -> None:
+    state = pl.DataFrame({
+        "symbol": ["POPUSDT", "OLDPOPUSDT", "SMALLUSDT"],
+        "decile": [9, 9, 9],
+        "composite": [0.7, 0.9, 0.8],
+        "turnover_quote": [1e6, 1e6, 1e6],
+        "ret1": [0.26, 0.26, 0.20],
+        "max_ret168": [0.26, 0.30, 0.20],
+    })
+    cfg = ContinuousDemoCycleConfig(
+        decile=9,
+        entry_event_trigger="fresh_pop25",
+        liq_turnover_min=500_000.0,
+        max_new_entries_per_cycle=5,
+    )
+
+    out = select_continuous_entries(
+        state, held_symbols=set(), cooldown_symbols=set(), open_count=0, config=cfg
+    )
+
+    assert [r["symbol"] for r in out] == ["POPUSDT"]
 
 
 def test_plan_exits_on_left_decile_and_max_hold() -> None:
@@ -150,6 +180,100 @@ def test_exit_failed_fade_when_down_and_never_worked() -> None:
     assert [e["exit_reason"] for e in exits] == ["failed_fade"]
 
 
+def test_active_primary_pnl_gate_allows_addon_when_no_same_symbol_primary() -> None:
+    rows = [{"symbol": "OTHER", "status": "open", "side": "short", "entry_price": 100.0}]
+    allowed, worst = active_primary_pnl_gate_allows_addon(
+        rows, symbol="ADDON", current_price=120.0, min_unrealized_return=0.0
+    )
+    assert allowed is True
+    assert worst is None
+
+
+def test_active_primary_pnl_gate_blocks_underwater_same_symbol_short() -> None:
+    rows = [{"symbol": "RAVEUSDT", "status": "open", "side": "short", "entry_price": 100.0}]
+    allowed, worst = active_primary_pnl_gate_allows_addon(
+        rows, symbol="RAVEUSDT", current_price=110.0, min_unrealized_return=0.0
+    )
+    assert allowed is False
+    assert worst == pytest.approx(100.0 / 110.0 - 1.0)
+
+
+def test_active_primary_pnl_gate_allows_working_same_symbol_short() -> None:
+    rows = [{"symbol": "RAVEUSDT", "status": "open", "side": "short", "entry_price": 100.0}]
+    allowed, worst = active_primary_pnl_gate_allows_addon(
+        rows, symbol="RAVEUSDT", current_price=90.0, min_unrealized_return=0.0
+    )
+    assert allowed is True
+    assert worst == pytest.approx(100.0 / 90.0 - 1.0)
+
+
+def test_active_primary_pnl_gate_uses_worst_active_same_symbol_trade() -> None:
+    rows = [
+        {"symbol": "RAVEUSDT", "status": "open", "side": "short", "entry_price": 100.0},
+        {"symbol": "RAVEUSDT", "status": "open", "side": "short", "entry_price": 120.0},
+        {"symbol": "RAVEUSDT", "status": "closed", "side": "short", "entry_price": 50.0},
+    ]
+    allowed, worst = active_primary_pnl_gate_allows_addon(
+        rows, symbol="RAVEUSDT", current_price=110.0, min_unrealized_return=0.0
+    )
+    assert allowed is False
+    assert worst == pytest.approx(100.0 / 110.0 - 1.0)
+
+
+def test_active_primary_pnl_gate_fails_closed_when_same_symbol_primary_mark_missing() -> None:
+    rows = [{"symbol": "RAVEUSDT", "status": "open", "side": "short", "entry_price": 100.0}]
+    allowed, worst = active_primary_pnl_gate_allows_addon(
+        rows, symbol="RAVEUSDT", current_price=0.0, min_unrealized_return=0.0
+    )
+    assert allowed is False
+    assert worst is None
+
+
+def test_active_primary_pnl_gate_handles_long_side_for_shadow_tests() -> None:
+    rows = [{"symbol": "BTCUSDT", "status": "open", "side": "long", "entry_price": 100.0}]
+    allowed, worst = active_primary_pnl_gate_allows_addon(
+        rows, symbol="BTCUSDT", current_price=101.0, min_unrealized_return=0.0
+    )
+    assert allowed is True
+    assert worst == pytest.approx(0.01)
+
+
+def test_filter_addon_candidates_applies_active_primary_pnl_gate() -> None:
+    primary = [
+        {"symbol": "GOODUSDT", "status": "open", "side": "short", "entry_price": 100.0},
+        {"symbol": "BADUSDT", "status": "open", "side": "short", "entry_price": 100.0},
+    ]
+    candidates = [
+        {"symbol": "GOODUSDT", "live_price": 90.0},
+        {"symbol": "BADUSDT", "live_price": 110.0},
+        {"symbol": "NOPRIMARYUSDT", "live_price": 0.0},
+    ]
+
+    kept, stats = filter_addon_candidates_by_active_primary_pnl_gate(
+        candidates, primary, price_by_symbol={}, min_unrealized_return=0.0
+    )
+
+    assert [r["symbol"] for r in kept] == ["GOODUSDT", "NOPRIMARYUSDT"]
+    assert stats["addon_primary_pnl_gate_skips"] == 1
+    assert stats["addon_primary_pnl_gate_skip_symbols"] == ["BADUSDT"]
+    assert stats["addon_primary_pnl_gate_skipped"][0]["worst_primary_unrealized_return"] == pytest.approx(
+        100.0 / 110.0 - 1.0
+    )
+
+
+def test_filter_addon_candidates_fails_closed_when_primary_mark_missing() -> None:
+    primary = [{"symbol": "BADUSDT", "status": "open", "side": "short", "entry_price": 100.0}]
+    candidates = [{"symbol": "BADUSDT"}]
+
+    kept, stats = filter_addon_candidates_by_active_primary_pnl_gate(
+        candidates, primary, price_by_symbol={}, min_unrealized_return=0.0
+    )
+
+    assert kept == []
+    assert stats["addon_primary_pnl_gate_skips"] == 1
+    assert stats["addon_primary_pnl_gate_skipped"][0]["current_price"] is None
+
+
 def test_age_gate_excludes_ineligible_symbols() -> None:
     state = pl.DataFrame({"symbol": ["A", "B"], "decile": [9, 9], "composite": [0.9, 0.8],
                           "turnover_quote": [1e6, 1e6]})
@@ -183,6 +307,9 @@ def test_continuous_order_link_prefix_routes_as_distinct_sleeve() -> None:
     assert link0 == link  # seq=0 is byte-identical to the legacy form
     assert link1 != link0 and link1 == f"{link0}-1"
     assert decode_entry_order_link_id(link1) == ("continuous", (sig // 1000) * 1000, 1)
+    addon_link = _continuous_order_link_id("en-ca", symbol="WIFUSDT", signal_ts_ms=sig, reentry_seq=1)
+    assert addon_link.startswith("lm-en-ca-")
+    assert decode_entry_order_link_id(addon_link) == ("continuous_addon", (sig // 1000) * 1000, 1)
     tid0 = _continuous_trade_id("STRAT", "WIFUSDT", sig, 0)
     tid1 = _continuous_trade_id("STRAT", "WIFUSDT", sig, 1)
     assert tid0 == f"STRAT-WIFUSDT-{sig}"  # seq=0 byte-identical to legacy
@@ -213,6 +340,33 @@ def test_execute_entries_dry_run_builds_short_rows() -> None:
     assert abs(r["notional_usdt"] - 200.0) < 1e-6        # 2% of 10k
     assert r["status"] == "open" and o["reduce_only"] is False
     assert r["sleeve"] == "continuous"                   # self-identifying for ws_risk routing
+
+
+def test_execute_entries_dry_run_builds_addon_identity_rows() -> None:
+    from liquidity_migration.continuous_demo import _execute_continuous_entries
+
+    cfg = ContinuousDemoCycleConfig(
+        submit_orders=False,
+        record_dry_run=True,
+        strategy_profile="continuous_addon_v1",
+        stop_loss_pct=0.25,
+        per_position_notional_pct_equity=2.0,
+    )
+    cand = [{"symbol": "WIFUSDT", "decile": 9, "composite": 0.95, "turnover_quote": 2e6,
+             "signal_ts_ms": 1_700_000_000_000, "stop_loss_pct": 0.25, "live_price": 100.0}]
+    contracts = {"WIFUSDT": {"tick_size": 0.0001, "qty_step": 0.001, "min_order_qty": 0.001}}
+
+    rows, orders = _execute_continuous_entries(
+        cand, trading_client=None, demo=cfg, equity_usdt=10_000.0, order_notional_frac=0.02,
+        price_by_symbol={"WIFUSDT": 100.0}, contract_by_symbol=contracts, now_ms=1_700_000_000_000,
+        strategy_id=continuous_strategy_id(cfg), record_preflight=None, execution_event_router=None)
+
+    assert continuous_sleeve_name(cfg) == "continuous_addon"
+    assert rows[0]["strategy_id"] == "continuous_fade_addon_v1"
+    assert rows[0]["sleeve"] == "continuous_addon"
+    assert orders[0]["sleeve"] == "continuous_addon"
+    assert rows[0]["entry_order_link_id"].startswith("lm-en-ca-")
+    assert decode_entry_order_link_id(rows[0]["entry_order_link_id"])[0] == "continuous_addon"
 
 
 def test_execute_exits_dry_run_closes_short() -> None:
@@ -314,6 +468,26 @@ def test_cycle_summary_formatter_routing_is_sleeve_safe(tmp_path) -> None:
         tmp_path / "bybit-continuous-demo-event", config=ResearchConfig(),
         demo_config=ContinuousDemoCycleConfig(submit_orders=False), interval_seconds=60.0)
     assert isinstance(daemon._format_cycle_summary(flat), str)
+
+
+def test_cycle_summary_surfaces_addon_primary_pnl_gate_skips() -> None:
+    msg = format_continuous_demo_cycle_summary({
+        "cycle_id": "c1",
+        "mode": "dry_run",
+        "universe_symbols": 5,
+        "rmom_present": True,
+        "live_d9_symbols": 2,
+        "candidates": 1,
+        "entries": 0,
+        "exits": 0,
+        "open_positions": 1,
+        "equity_usdt": 10_000.0,
+        "entry_paused": False,
+        "addon_primary_pnl_gate_skips": 2,
+        "addon_same_symbol_entry_cooldown_symbols": 3,
+    })
+    assert "addon_pnl_gate_skips=2" in msg
+    assert "addon_entry_cooldown_symbols=3" in msg
 
 
 # ============================================================================
@@ -502,6 +676,31 @@ def test_reentry_cooldown_blocks_recently_exited_symbol() -> None:
                                          strategy_id="continuous_fade_v1") == set()
 
 
+def test_recent_entry_cooldown_blocks_recent_addon_entry_symbol() -> None:
+    now = 2_000_000_000_000
+    trades = pl.DataFrame([
+        {"trade_id": "t1", "strategy_id": "continuous_fade_addon_v1", "symbol": "FRESH", "entry_ts_ms": now - 10 * 60_000},
+        {"trade_id": "t2", "strategy_id": "continuous_fade_addon_v1", "symbol": "OLD", "entry_ts_ms": now - 120 * 60_000},
+        {"trade_id": "t3", "strategy_id": "continuous_fade_v1", "symbol": "PRIMARY", "entry_ts_ms": now - 1 * 60_000},
+        {"trade_id": "t4", "strategy_id": "continuous_fade_addon_v1", "symbol": "SIGNAL", "signal_ts_ms": now - 5 * 60_000},
+    ])
+
+    cooled = _recent_entry_cooldown_symbols(
+        trades,
+        now_ms=now,
+        cooldown_minutes=30,
+        strategy_id="continuous_fade_addon_v1",
+    )
+
+    assert cooled == {"FRESH", "SIGNAL"}
+    assert _recent_entry_cooldown_symbols(
+        trades,
+        now_ms=now,
+        cooldown_minutes=0,
+        strategy_id="continuous_fade_addon_v1",
+    ) == set()
+
+
 def test_entry_circuit_breaker_trips_on_adverse_cluster_and_self_clears() -> None:
     """Correlated-squeeze defense: pause entries once >= N adverse covers land within the window;
     disabled by default; self-clears as the cluster ages out of the window (stateless)."""
@@ -683,6 +882,144 @@ def test_continuous_same_window_reentry_both_rows_survive(tmp_path) -> None:
     assert read_dataset(bug_root, trades_ds).height == 1
 
 
+def test_continuous_entry_metadata_blocks_same_signal_reentry_by_default() -> None:
+    cfg = ContinuousDemoCycleConfig()
+    strat = continuous_strategy_id(cfg)
+    sig = 1_700_000_000_000
+    prior = pl.DataFrame(
+        [
+            {
+                "trade_id": f"{strat}-WIFUSDT-{sig}",
+                "strategy_id": strat,
+                "symbol": "WIFUSDT",
+                "status": "closed",
+                "signal_ts_ms": sig,
+            },
+            {
+                "trade_id": f"other-OTHERUSDT-{sig}",
+                "strategy_id": "other",
+                "symbol": "OTHERUSDT",
+                "status": "closed",
+                "signal_ts_ms": sig,
+            },
+        ]
+    )
+
+    candidates, skipped = _continuous_entry_candidates_with_signal_metadata(
+        [
+            {"symbol": "WIFUSDT", "decile": 9, "composite": 1.0},
+            {"symbol": "FRESHUSDT", "decile": 9, "composite": 0.9},
+            {"symbol": "OTHERUSDT", "decile": 9, "composite": 0.8},
+        ],
+        prior,
+        signal_ts=sig,
+        strategy_id=strat,
+        price_by_symbol={"WIFUSDT": 100.0, "FRESHUSDT": 50.0, "OTHERUSDT": 25.0},
+        stop_loss_pct=cfg.stop_loss_pct,
+        allow_same_signal_reentry=False,
+    )
+
+    assert skipped == 1
+    assert [row["symbol"] for row in candidates] == ["FRESHUSDT", "OTHERUSDT"]
+    assert [row["reentry_seq"] for row in candidates] == [0, 0]
+    assert candidates[0]["trade_id"] == f"{strat}-FRESHUSDT-{sig}"
+
+
+def test_continuous_entry_metadata_blocks_same_signal_order_attempt_by_default() -> None:
+    cfg = ContinuousDemoCycleConfig()
+    strat = continuous_strategy_id(cfg)
+    sig = 1_700_000_000_000
+    prior_orders = pl.DataFrame(
+        [
+            {
+                "order_link_id": "lm-en-c-WIF-abc",
+                "trade_id": f"{strat}-WIFUSDT-{sig}",
+                "strategy_id": strat,
+                "symbol": "WIFUSDT",
+                "reduce_only": False,
+                "status": "submitted",
+                "signal_ts_ms": sig,
+            },
+            {
+                "order_link_id": "lm-en-c-WIF-abc",
+                "trade_id": f"{strat}-WIFUSDT-{sig}",
+                "strategy_id": strat,
+                "symbol": "WIFUSDT",
+                "reduce_only": False,
+                "status": "submitted_unconfirmed",
+                "signal_ts_ms": sig,
+            },
+            {
+                "order_link_id": "lm-ux-c-WIF-exit",
+                "trade_id": f"{strat}-WIFUSDT-{sig}",
+                "strategy_id": strat,
+                "symbol": "WIFUSDT",
+                "reduce_only": True,
+                "status": "submitted",
+                "signal_ts_ms": sig,
+            },
+            {
+                "order_link_id": "lm-en-c-OTHER-abc",
+                "trade_id": f"other-OTHERUSDT-{sig}",
+                "strategy_id": "other",
+                "symbol": "OTHERUSDT",
+                "reduce_only": False,
+                "status": "submitted",
+                "signal_ts_ms": sig,
+            },
+        ]
+    )
+
+    candidates, skipped = _continuous_entry_candidates_with_signal_metadata(
+        [
+            {"symbol": "WIFUSDT", "decile": 9, "composite": 1.0},
+            {"symbol": "FRESHUSDT", "decile": 9, "composite": 0.9},
+            {"symbol": "OTHERUSDT", "decile": 9, "composite": 0.8},
+        ],
+        pl.DataFrame(),
+        all_orders=prior_orders,
+        signal_ts=sig,
+        strategy_id=strat,
+        price_by_symbol={"WIFUSDT": 100.0, "FRESHUSDT": 50.0, "OTHERUSDT": 25.0},
+        stop_loss_pct=cfg.stop_loss_pct,
+        allow_same_signal_reentry=False,
+    )
+
+    assert skipped == 1
+    assert [row["symbol"] for row in candidates] == ["FRESHUSDT", "OTHERUSDT"]
+
+
+def test_continuous_entry_metadata_can_allow_same_signal_reentry() -> None:
+    cfg = ContinuousDemoCycleConfig(allow_same_signal_reentry=True)
+    strat = continuous_strategy_id(cfg)
+    sig = 1_700_000_000_000
+    prior = pl.DataFrame(
+        [
+            {
+                "trade_id": f"{strat}-WIFUSDT-{sig}",
+                "strategy_id": strat,
+                "symbol": "WIFUSDT",
+                "status": "closed",
+                "signal_ts_ms": sig,
+            },
+        ]
+    )
+
+    candidates, skipped = _continuous_entry_candidates_with_signal_metadata(
+        [{"symbol": "WIFUSDT", "decile": 9, "composite": 1.0}],
+        prior,
+        signal_ts=sig,
+        strategy_id=strat,
+        price_by_symbol={"WIFUSDT": 100.0},
+        stop_loss_pct=cfg.stop_loss_pct,
+        allow_same_signal_reentry=cfg.allow_same_signal_reentry,
+    )
+
+    assert skipped == 0
+    assert candidates[0]["reentry_seq"] == 1
+    assert candidates[0]["trade_id"] == f"{strat}-WIFUSDT-{sig}-1"
+
+
 def test_protective_exit_cycle_skips_in_flight_exit(tmp_path) -> None:
     """Fast loop must NOT submit a second cover for a trade that already carries an exit_order_link_id
     (a cover in flight, unconfirmed) — the WS-snapshot-independent guard against a double reduce-only,
@@ -806,6 +1143,55 @@ def test_validate_continuous_demo_config_requires_confirm_flag_to_submit() -> No
         _validate_continuous_demo_config(
             ContinuousDemoCycleConfig(submit_orders=True, confirm_demo_orders=False)
         )
+
+
+def test_validate_continuous_demo_config_rejects_event_trigger_without_confirmed_entry() -> None:
+    with pytest.raises(ValueError, match="confirmed-bar"):
+        _validate_continuous_demo_config(
+            ContinuousDemoCycleConfig(entry_event_trigger="fresh_pop25", entry_confirm_delay_hours=0)
+        )
+
+
+def test_validate_continuous_demo_config_requires_addon_profile_for_submit_gate() -> None:
+    with pytest.raises(ValueError, match="continuous_addon_v1"):
+        _validate_continuous_demo_config(
+            ContinuousDemoCycleConfig(
+                addon_primary_pnl_gate=True,
+                submit_orders=True,
+                confirm_demo_orders=True,
+            )
+        )
+
+
+def test_validate_continuous_demo_config_requires_primary_root_for_submit_gate() -> None:
+    with pytest.raises(ValueError, match="addon_primary_data_root"):
+        _validate_continuous_demo_config(
+            ContinuousDemoCycleConfig(
+                strategy_profile="continuous_addon_v1",
+                addon_primary_pnl_gate=True,
+                submit_orders=True,
+                confirm_demo_orders=True,
+            )
+        )
+
+
+def test_validate_continuous_demo_config_requires_addon_profile_for_addon_entry_cooldown() -> None:
+    with pytest.raises(ValueError, match="addon_same_symbol_entry_cooldown_minutes"):
+        _validate_continuous_demo_config(
+            ContinuousDemoCycleConfig(addon_same_symbol_entry_cooldown_minutes=15)
+        )
+
+
+def test_validate_continuous_demo_config_allows_addon_submit_identity_when_rooted(tmp_path) -> None:
+    _validate_continuous_demo_config(
+        ContinuousDemoCycleConfig(
+            strategy_profile="continuous_addon_v1",
+            addon_primary_pnl_gate=True,
+            addon_primary_data_root=str(tmp_path / "primary"),
+            submit_orders=True,
+            confirm_demo_orders=True,
+        )
+    )
 
 
 def test_validate_continuous_demo_config_allows_valid_demo_runs() -> None:

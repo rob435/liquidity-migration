@@ -665,6 +665,126 @@ JSON: `~/SHARED_DATA/rd1_{bybit,binance}_2026-05-30.json`.
 
 ## Useful findings worth keeping
 
+### Hourly event-trigger overlay (2026-06-05/06) -- current research-stage candidate
+
+This section consolidates the June 5-6 hourly event-trigger notes. The
+`docs/preregistration/2026-06-05-*` and
+`docs/preregistration/2026-06-06-hourly-event-trigger-cap22-binance-pnl-gate.md`
+receipts remain the compliance/audit trail; the one-off write-ups are removed
+after this consolidation.
+
+**What changed vs the older continuous-fade program:** the older standalone
+continuous MAX / continuous-fade sleeve did not beat the daily short on MAR as a
+standalone promoted sleeve. The newer profitable object is an hourly
+event-trigger **overlay**: a separate short trade stream evaluated against the
+combined daily+overlay book. It is research-stage only.
+
+**Signal logic.** The overlay is not the daily short's exact filter set. It
+shares the broad liquidity-migration/fomo-fade thesis, but uses hourly gates:
+
+- residual-momentum-low pool: within-hour residual-momentum rank `<= 0.25`;
+- BTC regime: causal prior-30d BTC return `> 0`;
+- liquidity: signal-bar hourly turnover `>= $2m`;
+- composite feature: `max_ret168` / top composite decile (`decile=9`);
+- trigger family:
+  - primary `fresh_pop15`: current 1h return `>= +15%` and equal to the trailing
+    168h max 1h return;
+  - add-on `fresh_pop25`: same, but `>= +25%`;
+- execution: short on the next executable hour (`+1h` entry), fixed 24h-style
+  fade hold, modeled taker/spread/impact costs, funding where available.
+
+**Final operating candidate visible from `promoted.py` but not promoted.**
+`liquidity_migration.promoted.CONTINUOUS_OVERLAY_OPERATING_CANDIDATE` documents
+the best risk-adjusted research candidate for the promoted tab without adding it
+to `PROFILES`:
+
+- primary root: `daily_plus_event_trigger_rescue_v2_binance_daily_throttle_2026-06-05`;
+- add-on execution root: `cont_event_trigger_fresh_pop25_low_churn_prereg_2026-06-05`;
+- venue scales: `bybit=1.8`, `binance=5.0`;
+- active overlay caps: `bybit=0.22`, `binance=0.12`;
+- Binance add-on active-primary PnL gate: `0.00`;
+- status: research-stage demo-watch candidate; not promoted and not real money.
+
+The highest-return variant is the same cap pair without the Binance PnL gate.
+The operating candidate gives up some Binance return for better drawdown/MAR.
+
+**Current rebuilt backtest (`~/SHARED_DATA/promoted_tab_operating_candidate_backtest_2026-06-06`).**
+
+| Venue | Daily raw | Overlay only | Combined return | Combined MAR | Combined Sharpe | Combined max DD |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Bybit | 81.92% | 58.53% | 188.16% | 8.59 | 4.04 | -7.18% |
+| Binance | 8.36% raw / 10.98% effective | 44.03% | 59.75% | 1.90 | 2.24 | -11.00% |
+
+Overlay-only risk:
+
+| Venue | Overlay return | MAR | Sharpe | Max DD |
+| --- | ---: | ---: | ---: | ---: |
+| Bybit | 58.53% | 3.65 | 3.14 | -5.25% |
+| Binance | 44.03% | 2.27 | 2.20 | -6.80% |
+
+Daily-vs-overlay daily return correlation is near zero, not the high redundancy
+first suspected: Bybit `0.005`, Binance effective `0.013`, pooled effective
+`0.008`. The systems are thematically related but are not taking the same trade
+stream. The readable comparison ledgers are under
+`~/SHARED_DATA/trade_compare_daily_vs_overlay_2026-06-06/`; only three
+same-symbol/same-entry-date overlaps were found (`OMNIUSDT`, `JSTUSDT`,
+`SUNUSDT`) across 1,181 combined rows.
+
+**How the candidate evolved.**
+
+- `fresh_pop15` 2m liquidity was the cleaner hourly primary signal.
+- Daily-book-aware entry control improved combined risk: no new overlay entries
+  past prior daily drawdown worse than `-10%`; rescue scale between `-10%` and
+  `-5%`.
+- Binance daily sleeve throttle improved the weak path: set Binance daily sleeve
+  scale to `0` when its prior closed daily-book drawdown is `<= -5%`; keep the
+  hourly overlay active.
+- `fresh_pop25` was accepted as a sparse high-conviction add-on. It cuts trades
+  roughly 70% vs `fresh_pop15` while retaining strong standalone MTM quality.
+- Full double-up failed without real risk control. The accepted risk control is
+  an ex-ante trade-level active overlay cap, not a post-realization daily PnL cap.
+
+**Final hierarchy.**
+
+- Highest-return research candidate: `fresh_pop15` primary + `fresh_pop25`
+  add-on, caps `bybit=0.22`, `binance=0.12`, no Binance PnL gate.
+- Best risk-adjusted operating candidate: same, with Binance active-primary PnL
+  gate at `0.00` (the manifest in `promoted.py`).
+- Conservative Binance fallback: blunt Binance active overlay cap `0.10`.
+- Rejected refinements: hold extension, `cb3w48`, same-symbol cooldown,
+  same-symbol active-notional cap, active same-symbol overlap block, rolling
+  add-on cluster cap, symbol-loss quarantine, `pop20_gb3`, and confirmed-fade
+  add-on as the main replacement.
+
+**BTC 30d gate ablation (2026-06-06, exploratory).** Removing the causal BTC
+30d uptrend gate from the standalone `fresh_pop15` continuous short leg raises
+raw terminal return but worsens risk quality. Holding q25 residual momentum,
+`max_ret168`, `$2m` turnover, `hold=24h`, `fresh_pop15`, impact `50bps`, and
+`$1m` deploy capital fixed:
+
+- Bybit: current BTC-uptrend gate `258` trades, `17.64%` return, Sharpe `3.00`,
+  MAR `2.26`, max DD `-2.56%`; BTC gate off `453` trades, `21.99%` return,
+  Sharpe `1.76`, MAR `1.25`, max DD `-5.68%`.
+- Binance: current BTC-uptrend gate `263` trades, `13.86%` return, Sharpe
+  `2.48`, MAR `1.45`, max DD `-3.35%`; BTC gate off `498` trades, `25.03%`
+  return, Sharpe `1.90`, MAR `0.86`, max DD `-10.19%`.
+- Applying the daily-style `ff6` failed-fade exit on the no-gate set made both
+  venues worse: Bybit `19.80%` return / MAR `0.94` / max DD `-6.80%`; Binance
+  `22.71%` return / MAR `0.78` / max DD `-10.24%`.
+
+Conclusion: the BTC gate is not just cosmetic curve-shaping; it removes weak
+regime trades and materially improves drawdown-adjusted quality. The no-gate
+variant is higher-beta research material, not the operating candidate.
+Artifacts:
+`~/SHARED_DATA/continuous_no_btc_gate_compare_2026-06-06/summary.csv` and
+`comparison_equity_curve.png`.
+
+**Remaining caveats.** The overlay improves 2024-2026 strongly but 2023 remains
+negative: hybrid 2023 combined return was about `-1.15%` Bybit and `-1.69%`
+Binance, with overlay return about `-1.01%` / `-1.92%`. Binance add-on PnL is
+concentrated (top-10 positive share around the mid-50%s depending on gate). This
+is a forward-demo risk flag, not a real-money promotion.
+
 1. **Concentration is the deployed config's main risk.** `max_active` 3→12 cuts worst-day
    −36%→−4.8% and DD −87%→−27.5%. The demo runs 3; research-validated is 12. **Move it.**
 2. **Stop-fill assumption** dominated the old verdict: `bar_extreme` (worst-case wick) vs a
@@ -765,3 +885,10 @@ produced these arcs (`k0*`/`k1a*`/`i1*`/`i2*`/`cv1*`/`rd1*`/`p0*`–`p1m*`) were
 2026-06-02 — git history is their executable backstop. The `docs/preregistration/` receipts
 remain as the binding parameter-change compliance trail. Engine/methodology change receipts are
 in the git commit log; backtest artifacts live under the data roots ([data_roots.md](data_roots.md)).
+
+The June 5-6 hourly event-trigger overlay one-off write-ups
+(`daily_plus_continuous_max_overlay_2026-06-05.md` and
+`hourly_event_trigger_*_2026-06-05/06.md`) were consolidated into the "Hourly
+event-trigger overlay" section above and removed on 2026-06-06. The
+pre-registration receipts remain under `docs/preregistration/`, and the rebuilt
+audit/backtest artifacts remain under `~/SHARED_DATA/`.
