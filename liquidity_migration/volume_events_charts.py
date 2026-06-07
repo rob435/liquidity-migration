@@ -9,6 +9,8 @@ this module's public names at the bottom so external callers
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -72,12 +74,18 @@ def _write_equity_benchmark_chart(
     title: str | None = None,
     subtitle: str | None = None,
     step: bool = True,
+    overlays: Sequence[OverlaySpec] | None = None,
+    strategy_name: str = "Strategy",
 ) -> dict[str, Any]:
     """Write the strategy-vs-BTC equity PNG. ``png_name`` lets other sleeves
     (e.g. ``long_native``, ``continuous``) reuse this without inheriting the
     short-sleeve filename — each sleeve drops its own ``*_equity_btc.png``
     alongside its research report. ``title``/``subtitle`` override the chart
     header (e.g. an EXPLORATORY-grade sleeve marks its curve as such).
+
+    ``overlays`` layers extra normalised benchmark lines (a stock, an index, a
+    second strategy) after BTC — build them with :func:`price_overlay_from_csv`.
+    ``strategy_name`` relabels the strategy line (e.g. ``"Strategy 3x"``).
     """
     strategy = _strategy_equity_series(equity)
     if not strategy:
@@ -88,9 +96,11 @@ def _write_equity_benchmark_chart(
     end = strategy[-1]["date"]
     btc = _normalised_price_series(_btc_daily_close_series(raw_klines, start=start, end=end))
     series = [
-        {"name": "Strategy", "color": (7, 14, 31), "alpha": 255, "width": 4, "points": strategy},
+        {"name": strategy_name, "color": (7, 14, 31), "alpha": 255, "width": 4, "points": strategy},
         {"name": "BTC", "color": (234, 88, 12), "alpha": 215, "width": 3, "points": btc},
     ]
+    overlay_series = _overlay_series_dicts(overlays or [])
+    series.extend(overlay_series)
     monthly_rows = _monthly_table_rows(equity=equity, monthly=monthly)
     _remove_stale_chart_artifacts(output_dir)
     png_path = output_dir / png_name
@@ -112,7 +122,9 @@ def _write_equity_benchmark_chart(
         "series": {
             "strategy": len(strategy),
             "btc": len(btc),
+            **{item["name"]: len(item["points"]) for item in overlay_series},
         },
+        "overlays": [item["name"] for item in overlay_series],
         "monthly_rows": len(monthly_rows),
         "annotations": [],
     }
@@ -522,3 +534,99 @@ def _normalised_price_series(rows: list[dict[str, Any]]) -> list[dict[str, Any]]
         return []
     base = cleaned[0]["value"]
     return [{"date": row["date"], "value": row["value"] / base} for row in cleaned]
+
+
+# --- modular benchmark overlays ------------------------------------------------
+# Any chart can layer extra normalised benchmark lines (a stock, an index, a second
+# strategy) on top of Strategy + BTC. An overlay is just a name + a normalised
+# {date,value} series; pass a list to _write_equity_benchmark_chart(overlays=...).
+# Colors auto-assign from the palette when left None, so callers usually only
+# supply a name + the source CSV (see price_overlay_from_csv).
+_OVERLAY_PALETTE: tuple[tuple[int, int, int], ...] = (
+    (13, 148, 136),   # teal
+    (124, 58, 237),   # violet
+    (217, 70, 239),   # fuchsia
+    (5, 150, 105),    # emerald
+    (202, 138, 4),    # amber
+)
+_OVERLAY_DATE_COLS = ("date", "day", "timestamp", "ts_ms")
+_OVERLAY_VALUE_COLS = ("value", "close", "adj_close", "adjclose", "price")
+
+
+@dataclass
+class OverlaySpec:
+    """One benchmark line to overlay on the official chart.
+
+    ``points`` is a normalised series ($1 at the strategy start) — build it with
+    :func:`price_overlay_from_csv` (CSV of date,close) or hand it any
+    ``[{date, value}]`` already passed through :func:`_normalised_price_series`.
+    ``color=None`` auto-assigns the next palette color.
+    """
+
+    name: str
+    points: list[dict[str, Any]] = field(default_factory=list)
+    color: tuple[int, int, int] | None = None
+    alpha: int = 230
+    width: int = 3
+
+
+def price_overlay_from_csv(
+    path: str | Path,
+    *,
+    name: str,
+    start: str,
+    end: str,
+    color: tuple[int, int, int] | None = None,
+    alpha: int = 230,
+    width: int = 3,
+    date_col: str | None = None,
+    value_col: str | None = None,
+) -> OverlaySpec:
+    """Load a price CSV into a normalised overlay clipped to ``[start, end]``.
+
+    Robust to schema: the date column is auto-detected from
+    (date/day/timestamp/ts_ms) and the value column from
+    (value/close/adj_close/price), or pass ``date_col``/``value_col`` explicitly.
+    Normalisation is to $1 at the first in-window point, matching Strategy/BTC.
+    """
+    df = pl.read_csv(Path(path).expanduser())
+    cols = {c.lower(): c for c in df.columns}
+    dcol = date_col or next((cols[c] for c in _OVERLAY_DATE_COLS if c in cols), None)
+    vcol = value_col or next((cols[c] for c in _OVERLAY_VALUE_COLS if c in cols), None)
+    if dcol is None or vcol is None:
+        raise ValueError(f"{path}: need a date and a value/close column, got {df.columns}")
+    if dcol.lower() == "ts_ms":
+        date_expr = pl.from_epoch(pl.col(dcol), "ms").dt.date().cast(pl.Utf8)
+    else:
+        date_expr = pl.col(dcol).cast(pl.Utf8).str.slice(0, 10)
+    frame = (
+        df.select(date=date_expr, value=pl.col(vcol).cast(pl.Float64, strict=False))
+        .filter((pl.col("date") >= start) & (pl.col("date") <= end) & pl.col("value").is_not_null())
+        .sort("date")
+    )
+    return OverlaySpec(
+        name=name,
+        points=_normalised_price_series(frame.to_dicts()),
+        color=color,
+        alpha=alpha,
+        width=width,
+    )
+
+
+def _overlay_series_dicts(overlays: Sequence[OverlaySpec]) -> list[dict[str, Any]]:
+    """Convert overlay specs to renderer series dicts, auto-coloring from the
+    palette where ``color is None`` and dropping overlays that have no points."""
+    out: list[dict[str, Any]] = []
+    palette_i = 0
+    for overlay in overlays:
+        if not overlay.points:
+            continue
+        color = overlay.color
+        if color is None:
+            color = _OVERLAY_PALETTE[palette_i % len(_OVERLAY_PALETTE)]
+            palette_i += 1
+        out.append(
+            {"name": overlay.name, "color": color, "alpha": overlay.alpha,
+             "width": overlay.width, "points": overlay.points}
+        )
+    return out
