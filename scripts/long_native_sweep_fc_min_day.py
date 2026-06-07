@@ -36,6 +36,8 @@ def main() -> int:
     ap.add_argument("--values", required=True,
                     help="Comma-separated fc_min_day_return values, e.g. 0.07,0.10,0.12,0.15,0.18,0.20,0.25")
     ap.add_argument("--config", default="configs/volume_alpha.default.yaml")
+    ap.add_argument("--start", default=None, help="Signal-window start YYYY-MM-DD (default: full history on the root)")
+    ap.add_argument("--end", default=None, help="Signal-window end YYYY-MM-DD (default: full history on the root)")
     ap.add_argument("--report-subdir", default="long_native_fc_sweep",
                     help="Subdirectory under <data-root>/reports/")
     ap.add_argument("--skip-existing", action="store_true",
@@ -55,6 +57,10 @@ def main() -> int:
     base_report_dir.mkdir(parents=True, exist_ok=True)
 
     base_cfg = _v11a_long_native_config()
+    if args.start or args.end:
+        base_cfg = replace(base_cfg, start_date=args.start or base_cfg.start_date,
+                           end_date=args.end or base_cfg.end_date)
+        print(f"[window] {base_cfg.start_date or '*'} .. {base_cfg.end_date or '*'}", flush=True)
     sweep_summary: list[dict] = []
     shared_inputs: dict | None = None  # LON-6: built once, reused across entry-only cells
 
@@ -103,6 +109,8 @@ def main() -> int:
             "profit_factor": summary.get("profit_factor", 0.0),
             "funding_mode": summary.get("funding_mode", "missing"),
             "run_label": payload.get("run_label", "unknown"),
+            "tainted": payload.get("tainted"),
+            "warnings": payload.get("warnings", []),
             "splits": {s["name"]: s for s in splits},
         }
         sweep_summary.append(row)

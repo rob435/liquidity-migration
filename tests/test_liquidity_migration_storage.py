@@ -635,3 +635,40 @@ def test_pid_started_after_guards_and_current_process() -> None:
         assert storage._pid_started_after(os.getpid(), time.time() + 1e9) is False
     else:
         assert storage._pid_started_after(os.getpid(), 1.0) is None  # no /proc -> unknown
+
+
+def test_funding_resolves_to_binance_usdm_funding_without_symlink(tmp_path: Path) -> None:
+    """A raw per-venue root that stores funding as binance_usdm_funding is read as
+    canonical `funding` with no symlink/rename — read_dataset auto-resolves it."""
+    from liquidity_migration.storage import resolve_dataset_name
+
+    rows = pl.DataFrame(
+        {"ts_ms": [1, 2], "symbol": ["BTCUSDT", "ETHUSDT"], "funding_rate": [0.0001, -0.0002]}
+    )
+    write_dataset(rows, tmp_path, "binance_usdm_funding", partition_by=())
+
+    # canonical 'funding' dir is absent, so the request resolves to the venue variant
+    assert resolve_dataset_name(tmp_path, "funding") == "binance_usdm_funding"
+    got = read_dataset(tmp_path, "funding")
+    assert got.height == 2
+    assert set(got["symbol"].to_list()) == {"BTCUSDT", "ETHUSDT"}
+
+
+def test_funding_canonical_takes_precedence_over_fallback(tmp_path: Path) -> None:
+    """When a root has the canonical `funding` dir, it is used as-is (the fallback
+    only fires when canonical is absent), so existing roots are unaffected."""
+    from liquidity_migration.storage import resolve_dataset_name
+
+    canonical = pl.DataFrame({"ts_ms": [1], "symbol": ["BTCUSDT"], "funding_rate": [0.001]})
+    write_dataset(canonical, tmp_path, "funding", partition_by=())
+    assert resolve_dataset_name(tmp_path, "funding") == "funding"
+    got = read_dataset(tmp_path, "funding")
+    assert got["funding_rate"].to_list() == [0.001]
+
+
+def test_missing_funding_everywhere_returns_empty(tmp_path: Path) -> None:
+    """No canonical and no venue-variant funding -> empty frame, name unchanged."""
+    from liquidity_migration.storage import resolve_dataset_name
+
+    assert resolve_dataset_name(tmp_path, "funding") == "funding"
+    assert read_dataset(tmp_path, "funding").is_empty()

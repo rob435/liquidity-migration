@@ -162,6 +162,38 @@ DATASET_KEYS = {
 }
 
 
+# Canonical-name fallbacks: when a root stores a dataset under a venue-specific
+# name instead of the canonical one, reads of the canonical name transparently
+# resolve to whichever venue variant is actually present. This is why a raw
+# per-venue root (e.g. binance_full_pit, which stores funding as
+# binance_usdm_funding) is funding-modeled with NO symlink/rename — read_dataset
+# (root, "funding") finds binance_usdm_funding on its own. Extend per venue.
+_DATASET_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "funding": ("binance_usdm_funding",),
+    "open_interest": ("binance_usdm_open_interest",),
+}
+
+
+def resolve_dataset_name(data_root: str | Path, dataset: str) -> str:
+    """Map a canonical dataset request to the variant actually present in ``root``.
+
+    Returns ``dataset`` unchanged when the canonical directory exists (or when no
+    fallback applies); otherwise the first known venue-variant that exists on
+    disk. The returned name is always a member of :data:`DATASETS`, so the lock
+    and path helpers stay valid.
+    """
+    fallbacks = _DATASET_FALLBACKS.get(dataset)
+    if not fallbacks:
+        return dataset
+    root = Path(data_root).expanduser()
+    if (root / dataset).exists():
+        return dataset
+    for alt in fallbacks:
+        if (root / alt).exists():
+            return alt
+    return dataset
+
+
 def dataset_path(data_root: str | Path, dataset: str) -> Path:
     if dataset not in DATASETS:
         raise ValueError(f"Unknown dataset: {dataset}")
@@ -521,7 +553,12 @@ def read_dataset_columns(
     saving for wide datasets (e.g. klines_1h) on hot read paths. Any requested
     column absent from a partition is tolerated; the projection is intersected
     with the on-disk schema before collecting.
+
+    A canonical request (e.g. ``funding``) transparently resolves to the
+    venue-specific variant actually present on the root (e.g.
+    ``binance_usdm_funding``); see :func:`resolve_dataset_name`.
     """
+    dataset = resolve_dataset_name(data_root, dataset)
     path = dataset_path(data_root, dataset)
     if not path.exists():
         return pl.DataFrame()

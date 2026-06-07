@@ -39,6 +39,7 @@ import polars as pl
 from ._common import MS_PER_DAY, MS_PER_HOUR, date_ms, pct
 from .config import CostConfig, DEFAULT_EXCLUDED_SYMBOLS, TradeLifecycleConfig
 from .momentum_signals import daily_bars, add_returns_and_age
+from .run_diagnostics import diagnose, is_tainted, render
 from .storage import read_dataset, read_dataset_columns
 from .trade_lifecycle import (
     _funding_lookup,
@@ -513,6 +514,20 @@ def run_long_native_research(
         except Exception:  # noqa: BLE001 - chart failure must not fail the run
             chart_metadata = {}
 
+    data_start = klines["date"].min() if ("date" in klines.columns and klines.height) else None
+    data_end = klines["date"].max() if ("date" in klines.columns and klines.height) else None
+    warnings = diagnose(
+        full_pit_universe_pass=full_pit_universe_pass,
+        funding_mode=funding_mode,
+        archive_manifest_empty=archive_manifest.is_empty(),
+        requested_start=cfg.start_date or None,
+        requested_end=cfg.end_date or None,
+        data_start=str(data_start) if data_start is not None else None,
+        data_end=str(data_end) if data_end is not None else None,
+        n_features=features.height,
+        n_trades=trades.height,
+    )
+
     metadata = {
         "config": asdict(cfg),
         "rows": {"features": features.height, "trades": trades.height, "baskets": baskets.height},
@@ -533,10 +548,13 @@ def run_long_native_research(
         "event_counts": event_counts,
         "run_label": _run_label(full_pit_universe_pass=full_pit_universe_pass, funding_mode=funding_mode,
                                  archive_manifest_empty=archive_manifest.is_empty()),
+        "warnings": [w.as_dict() for w in warnings],
+        "tainted": is_tainted(warnings),
         "equity_chart": chart_metadata,
     }
     (output_dir / "long_native_research_report.json").write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
     (output_dir / "long_native_research_report.md").write_text(format_long_native_report(metadata), encoding="utf-8")
+    print(render(warnings, title=f"long_native {root.name} {cfg.start_date or '*'}..{cfg.end_date or '*'}"), flush=True)
     return {**metadata, "report_dir": str(output_dir)}
 
 

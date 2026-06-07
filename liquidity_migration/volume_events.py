@@ -35,6 +35,7 @@ from .trade_lifecycle import (
     summarize_trade_backtest,
 )
 from ._common import MS_PER_DAY, MS_PER_HOUR, date_ms, pct
+from .run_diagnostics import diagnose, is_tainted, render
 from .volume_features import VOLUME_SCORE_COLUMNS, build_volume_features
 
 
@@ -599,6 +600,22 @@ def run_volume_event_research(
             full_pit_universe_pass=full_pit_universe_pass,
         ),
     }
+    _best = metadata["best_scenario"]
+    _data_start = klines["date"].min() if ("date" in klines.columns and klines.height) else None
+    _data_end = klines["date"].max() if ("date" in klines.columns and klines.height) else None
+    _warnings = diagnose(
+        full_pit_universe_pass=full_pit_universe_pass,
+        funding_mode=str(_best.get("funding_mode", "missing")) if _best else "missing",
+        archive_manifest_empty=archive_manifest.is_empty(),
+        requested_start=config.start_date or None,
+        requested_end=config.end_date or None,
+        data_start=str(_data_start) if _data_start is not None else None,
+        data_end=str(_data_end) if _data_end is not None else None,
+        n_features=features.height,
+        n_trades=int(_best.get("trades", 0)) if _best else 0,
+    )
+    metadata["warnings"] = [w.as_dict() for w in _warnings]
+    metadata["tainted"] = is_tainted(_warnings)
     if pit_membership_diagnostic:
         for _line in _pit_membership_diagnostic_lines(pit_membership_diagnostic):
             print(_line)
@@ -616,6 +633,7 @@ def run_volume_event_research(
         format_volume_event_report(summary, metadata),
         encoding="utf-8",
     )
+    print(render(_warnings, title=f"volume_events {root.name} {config.start_date or '*'}..{config.end_date or '*'}"), flush=True)
     return {
         **metadata,
         "summary": summary.to_dicts() if not summary.is_empty() else [],

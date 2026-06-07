@@ -55,14 +55,24 @@ is crypto-native and long-only — separate from the volume-events short sleeve.
 
 | Venue | Root | Why |
 |---|---|---|
-| Bybit | `~/SHARED_DATA/bybit_full_pit` | funding dataset named `funding` → funding modeled |
-| Binance | `~/SHARED_DATA/binance_full_pit_strategy` | has `funding` (~129k rows) → funding partial/modeled |
+| Bybit | `~/SHARED_DATA/bybit_full_pit` | funding dataset named `funding`, 764 symbols → funding modeled |
+| Binance | `~/SHARED_DATA/binance_full_pit_strategy` (if present) else `~/SHARED_DATA/binance_full_pit` | both funding-readable; coverage is partial (~51 symbols) → `funding_mode=partial` |
 
-**Do NOT use `~/SHARED_DATA/binance_full_pit` for this backtest.** Its funding is
-stored as `binance_usdm_funding`, so `read_dataset(root,"funding")` returns 0 rows
-→ `funding_mode=missing` → not comparable to the Bybit run. The `_strategy` root
-has canonically-named datasets and is the proven path (prior long_native reports
-live there).
+**Funding now auto-resolves — no symlink/rename needed.** As of the run-diagnostics
+refactor, `read_dataset(root,"funding")` transparently falls back to the
+venue-specific dataset present on the root (`binance_usdm_funding`) when a canonical
+`funding/` dir is absent (`storage.resolve_dataset_name`). So `binance_full_pit` is
+funding-readable directly; you do **not** need `binance_full_pit_strategy` or a hand
+symlink. The remaining caveat is *coverage*, not naming: Binance funding only spans
+~51 symbols, so historical windows come back `funding_mode=partial` (some cost
+uncharged) — surfaced as a `FUNDING_PARTIAL` warning, not a silent gap. Prefer
+`binance_full_pit_strategy` only if it exists with broader funding coverage.
+
+Every run now prints a named **warnings block** (and the report JSON carries
+`warnings[]` + a machine `tainted` bool) — read that instead of decoding `run_label`
+by hand. `tainted: true` (e.g. `PIT_SURVIVORSHIP`) means survivorship/look-ahead
+biased → not citable; data-gap warnings (`FUNDING_PARTIAL`, `WINDOW_CLIPPED_*`) are
+non-blocking and tell you exactly what to backfill.
 
 ## Outputs — `<ROOT>/reports/<subdir>/fc_min_day_015/`
 
