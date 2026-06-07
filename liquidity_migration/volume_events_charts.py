@@ -71,6 +71,7 @@ def _write_equity_benchmark_chart(
     png_name: str = "volume_event_best_equity_btc.png",
     title: str | None = None,
     subtitle: str | None = None,
+    step: bool = True,
 ) -> dict[str, Any]:
     """Write the strategy-vs-BTC equity PNG. ``png_name`` lets other sleeves
     (e.g. ``long_native``, ``continuous``) reuse this without inheriting the
@@ -81,6 +82,8 @@ def _write_equity_benchmark_chart(
     strategy = _strategy_equity_series(equity)
     if not strategy:
         return {}
+    if step:
+        strategy = _step_fill_daily(strategy)
     start = strategy[0]["date"]
     end = strategy[-1]["date"]
     btc = _normalised_price_series(_btc_daily_close_series(raw_klines, start=start, end=end))
@@ -461,6 +464,32 @@ def _strategy_equity_series(equity: pl.DataFrame) -> list[dict[str, Any]]:
         if day is not None and math.isfinite(value):
             rows.append({"date": day.isoformat(), "value": value})
     return rows
+
+def _step_fill_daily(points: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Forward-fill an equity series to one point per calendar day so no-trade
+    gaps render flat (a staircase) instead of a misleading diagonal.
+
+    Realised-PnL equity only carries a point on trade-exit days; between exits the
+    book is flat (holds are short and the gaps are position-free), so carrying the
+    last value forward across the gap is the honest shape. Drawing a straight line
+    between two far-apart exit points instead implies smooth daily growth that did
+    not happen. A series already at daily granularity is unchanged: the fill only
+    inserts the days strictly between consecutive points.
+    """
+    if len(points) < 2:
+        return points
+    ordered = sorted(points, key=lambda p: str(p["date"]))
+    filled: list[dict[str, Any]] = []
+    for index, point in enumerate(ordered):
+        if index > 0:
+            prev = ordered[index - 1]
+            prev_day = _parse_day(prev["date"])
+            cur_day = _parse_day(point["date"])
+            if prev_day is not None and cur_day is not None:
+                for ordinal in range(prev_day.toordinal() + 1, cur_day.toordinal()):
+                    filled.append({"date": date.fromordinal(ordinal).isoformat(), "value": prev["value"]})
+        filled.append(point)
+    return filled
 
 def _btc_daily_close_series(raw_klines: pl.DataFrame, *, start: str, end: str) -> list[dict[str, Any]]:
     if raw_klines.is_empty() or not _has_columns(raw_klines, "symbol", "date", "ts_ms", "close"):
