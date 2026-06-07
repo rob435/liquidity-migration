@@ -1,0 +1,3 @@
+[mcp_servers.liqmig-research]
+command = "python"
+args = [".claude/mcp/research_server.py"]
