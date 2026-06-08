@@ -588,6 +588,9 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "EXPECTED_COMMIT" in text
     assert "BatchMode=yes" in text
     assert "git remote set-url" in text
+    assert "GITHUB_TOKEN" in text
+    assert "http.https://github.com/.extraheader" in text
+    assert "x-access-token:%s" in text
     assert 'git checkout -B "$BRANCH" "$REMOTE/$BRANCH"' in text
     assert "liqmig_union_q40_h3_tp26_g100_qsqueeze" in text
     assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text
@@ -823,6 +826,9 @@ def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
     )
     assert "github.event_name == 'workflow_dispatch' && inputs.mode == 'verify'" in text
     assert "VPS_SSH_PRIVATE_KEY" in text
+    assert "permissions:" in text
+    assert "contents: read" in text
+    assert "GITHUB_TOKEN: ${{ github.token }}" in text
     assert "GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT" in text
     # Pin the CI deploy key fingerprint so accidental rotations or tampering
     # of the workflow file get flagged. When you intentionally rotate the
@@ -1004,8 +1010,10 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "git clean -fd" in text
     assert "git ls-files --others --exclude-standard -z" in text
     assert 'tar --null -czf "$untracked_archive" --files-from "$untracked_nul"' in text
-    assert "git clone" in text
+    assert "git_with_optional_github_token clone" in text
     assert "git remote set-url" in text
+    assert "GITHUB_TOKEN" in text
+    assert "http.https://github.com/.extraheader" in text
     assert 'git checkout -B "$BRANCH" "$REMOTE/$BRANCH"' in text
     assert "pip install -e \".[dev]\"" in text
     assert "liqmig_union_q40_h3_tp26_g100_qsqueeze" in text

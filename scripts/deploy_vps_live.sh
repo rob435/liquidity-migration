@@ -10,11 +10,32 @@ BRANCH="${BRANCH:-main}"
 EXPECTED_COMMIT="${EXPECTED_COMMIT:-}"
 EXPECTED_TELEGRAM_CHAT_ID="${EXPECTED_TELEGRAM_CHAT_ID:-8388367561}"
 SYSTEMD_SETTLE_SECONDS="${SYSTEMD_SETTLE_SECONDS:-15}"
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 
 # shellcheck disable=SC2086
-ssh $SSH_OPTS "$SSH_TARGET" \
-  "REPO_URL='$REPO_URL' REPO_DIR='$REPO_DIR' REMOTE='$REMOTE' BRANCH='$BRANCH' EXPECTED_COMMIT='$EXPECTED_COMMIT' EXPECTED_TELEGRAM_CHAT_ID='$EXPECTED_TELEGRAM_CHAT_ID' SYSTEMD_SETTLE_SECONDS='$SYSTEMD_SETTLE_SECONDS' bash -s" <<'REMOTE_SCRIPT'
+{
+  printf 'REPO_URL=%q\n' "$REPO_URL"
+  printf 'REPO_DIR=%q\n' "$REPO_DIR"
+  printf 'REMOTE=%q\n' "$REMOTE"
+  printf 'BRANCH=%q\n' "$BRANCH"
+  printf 'EXPECTED_COMMIT=%q\n' "$EXPECTED_COMMIT"
+  printf 'EXPECTED_TELEGRAM_CHAT_ID=%q\n' "$EXPECTED_TELEGRAM_CHAT_ID"
+  printf 'SYSTEMD_SETTLE_SECONDS=%q\n' "$SYSTEMD_SETTLE_SECONDS"
+  printf 'GITHUB_TOKEN=%q\n' "$GITHUB_TOKEN"
+  cat <<'REMOTE_SCRIPT'
 set -euo pipefail
+
+git_with_optional_github_token() {
+  if [ -n "${GITHUB_TOKEN:-}" ] && [[ "$REPO_URL" == https://github.com/* ]]; then
+    local github_basic_auth
+    github_basic_auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+    GIT_TERMINAL_PROMPT=0 git \
+      -c "http.https://github.com/.extraheader=AUTHORIZATION: Basic $github_basic_auth" \
+      "$@"
+  else
+    GIT_TERMINAL_PROMPT=0 git "$@"
+  fi
+}
 
 cd "$REPO_DIR"
 
@@ -29,7 +50,8 @@ if git remote get-url "$REMOTE" >/dev/null 2>&1; then
 else
   git remote add "$REMOTE" "$REPO_URL"
 fi
-git fetch "$REMOTE" "$BRANCH"
+git_with_optional_github_token fetch "$REMOTE" "$BRANCH"
+unset GITHUB_TOKEN
 git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
 
 if [ -n "$EXPECTED_COMMIT" ]; then
@@ -297,3 +319,4 @@ if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && [ -n "${TELEGRAM_CHAT_ID:-}" ]; then
     >/dev/null 2>&1 || echo "WARN: deploy-confirm telegram send failed (verify still passed)"
 fi
 REMOTE_SCRIPT
+} | ssh $SSH_OPTS "$SSH_TARGET" "bash -s"

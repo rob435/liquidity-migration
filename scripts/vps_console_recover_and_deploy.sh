@@ -11,6 +11,7 @@ LOCAL_SSH_PUBLIC_KEY="${SSH_PUBLIC_KEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFwJ
 GITHUB_ACTIONS_SSH_PUBLIC_KEY="${GITHUB_ACTIONS_SSH_PUBLIC_KEY:-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX liquidity-migration-github-actions-20260519}"
 CLEAN_DIRTY_CHECKOUT="${CLEAN_DIRTY_CHECKOUT:-0}"
 SYSTEMD_SETTLE_SECONDS="${SYSTEMD_SETTLE_SECONDS:-15}"
+GITHUB_TOKEN="${GITHUB_TOKEN:-}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "Run this from the VPS provider console as root." >&2
@@ -92,6 +93,18 @@ else
   service ssh restart || service sshd restart || true
 fi
 
+git_with_optional_github_token() {
+  if [ -n "${GITHUB_TOKEN:-}" ] && [[ "$REPO_URL" == https://github.com/* ]]; then
+    local github_basic_auth
+    github_basic_auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')"
+    GIT_TERMINAL_PROMPT=0 git \
+      -c "http.https://github.com/.extraheader=AUTHORIZATION: Basic $github_basic_auth" \
+      "$@"
+  else
+    GIT_TERMINAL_PROMPT=0 git "$@"
+  fi
+}
+
 if [ -e "$REPO_DIR" ] && [ ! -d "$REPO_DIR/.git" ]; then
   backup_dir="/root/liquidity-migration-deploy-backups"
   mkdir -p "$backup_dir"
@@ -102,7 +115,7 @@ fi
 
 if [ ! -d "$REPO_DIR/.git" ]; then
   mkdir -p "$(dirname "$REPO_DIR")"
-  git clone "$REPO_URL" "$REPO_DIR"
+  git_with_optional_github_token clone "$REPO_URL" "$REPO_DIR"
 fi
 
 cd "$REPO_DIR"
@@ -139,7 +152,8 @@ if git remote get-url "$REMOTE" >/dev/null 2>&1; then
 else
   git remote add "$REMOTE" "$REPO_URL"
 fi
-git fetch "$REMOTE" "$BRANCH"
+git_with_optional_github_token fetch "$REMOTE" "$BRANCH"
+unset GITHUB_TOKEN
 git checkout -B "$BRANCH" "$REMOTE/$BRANCH"
 
 if [ -n "$EXPECTED_COMMIT" ]; then
