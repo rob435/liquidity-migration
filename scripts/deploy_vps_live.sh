@@ -77,7 +77,8 @@ assert demo.failed_fade_close_location_min == 0.0
 
 # Continuous-fade sleeve (OFF / de-promoted 2026-06-05, look-ahead invalidated): these
 # assertions still pin its config so a silent drift can't ship IF it is ever re-enabled —
-# the sleeve is not deployed (CONTINUOUS_SLEEVE=off). rmom 0.33; breaker w24/n8; 25% stop.
+# the order-submitting sleeve is disabled by default (CONTINUOUS_SLEEVE=off). rmom 0.33;
+# breaker w24/n8; 25% stop.
 from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig
 cont = ContinuousDemoCycleConfig()
 assert cont.rmom_quantile == 0.33, cont.rmom_quantile
@@ -132,12 +133,13 @@ systemctl disable --now \
 # positions protected until they exit (no flatten). The risk service always runs.
 . deploy/lib_sleeves.sh
 lm_load_sleeve_toggles
-echo "sleeves: SHORT=$SHORT_SLEEVE SHORT_PAPER=$SHORT_PAPER_SLEEVE LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE"
+echo "sleeves: SHORT=$SHORT_SLEEVE SHORT_PAPER=$SHORT_PAPER_SLEEVE LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE CONTINUOUS_PAPER=$CONTINUOUS_PAPER_SLEEVE"
 systemctl enable liquidity-migration-bybit-risk.service
 apply_sleeve_enable "$SHORT_SLEEVE" $SHORT_SLEEVE_UNITS
 apply_sleeve_enable "$SHORT_PAPER_SLEEVE" $SHORT_PAPER_SLEEVE_UNITS
 apply_sleeve_enable "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
+apply_sleeve_enable "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
 # Timers must be enabled --now: enable alone writes the symlink but does not
 # start the timer, so on a fresh VPS the demo-health watchdog + daily combined-
 # book Telegram report would sit dormant until someone ran systemctl by hand.
@@ -145,10 +147,11 @@ apply_sleeve_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 systemctl enable --now liquidity-migration-demo-health.timer
 systemctl enable --now liquidity-migration-demo-liveness.timer
 systemctl enable --now liquidity-migration-combined-book-report.timer
-# Daily refresh of the continuous-fade rmom gate + the gate seed run ONLY when the
-# continuous sleeve is on (else there is nothing to feed; disable the timer too).
-if sleeve_on "$CONTINUOUS_SLEEVE"; then
+# Daily refresh of the continuous-fade rmom gate + the gate seed run when either the
+# continuous demo sleeve or its no-order paper evidence collector is on.
+if continuous_rmom_refresh_on; then
 systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer
+systemctl enable --now liquidity-migration-continuous-forward-report.timer
 # Seed the rmom gate NOW rather than waiting for the 00:20 UTC timer. Without this a
 # fresh deploy starts the continuous daemon into an EMPTY gate -> the live decile drops
 # every symbol (silent zero-signal blackout — the 2026-06-02 incident). The refresh is a
@@ -159,9 +162,15 @@ systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer
 echo "Seeding continuous rmom gate (residual_momentum.parquet) ..."
 systemctl start liquidity-migration-continuous-rmom-refresh.service \
   || echo "WARN: rmom seed service failed; the 00:20 timer + rmom watchdog will cover it." >&2
-_rmom_rows="$("$PYTHON" - <<'PY' 2>/dev/null || echo 0
+if sleeve_on "$CONTINUOUS_SLEEVE"; then
+  _rmom_root="data/bybit-continuous-demo-event/residual_momentum.parquet"
+else
+  _rmom_root="data/bybit-continuous-paper-event/residual_momentum.parquet"
+fi
+_rmom_rows="$(RMOM_ROOT="$_rmom_root" "$PYTHON" - <<'PY' 2>/dev/null || echo 0
+import os
 import pathlib, polars as pl
-p = pathlib.Path("data/bybit-continuous-demo-event/residual_momentum.parquet")
+p = pathlib.Path(os.environ["RMOM_ROOT"])
 print(pl.read_parquet(p).height if p.exists() else 0)
 PY
 )"
@@ -174,8 +183,9 @@ else
   echo "continuous rmom gate seeded: ${_rmom_rows} rows."
 fi
 else
-  echo "kill-switch: CONTINUOUS_SLEEVE=off -> skipping rmom timer + gate seed." >&2
+  echo "kill-switch: continuous demo+paper sleeves off -> skipping rmom timer + gate seed." >&2
   systemctl disable --now liquidity-migration-continuous-rmom-refresh.timer 2>/dev/null || true
+  systemctl disable --now liquidity-migration-continuous-forward-report.timer 2>/dev/null || true
 fi
 
 # --- restart: only the ON sleeves (off sleeves were disable --now'd above); risk always. ---
@@ -185,7 +195,8 @@ systemctl restart liquidity-migration-bybit-risk.service
 if sleeve_on "$SHORT_SLEEVE"; then systemctl restart liquidity-migration-bybit-demo.service; fi
 if sleeve_on "$SHORT_SLEEVE" && sleeve_on "$SHORT_PAPER_SLEEVE"; then systemctl restart liquidity-migration-bybit-paper.service; fi
 if sleeve_on "$LONG_SLEEVE"; then systemctl restart liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service; fi
-if sleeve_on "$CONTINUOUS_SLEEVE"; then systemctl restart liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service; fi
+if sleeve_on "$CONTINUOUS_SLEEVE"; then systemctl restart liquidity-migration-bybit-continuous-demo.service; fi
+if sleeve_on "$CONTINUOUS_PAPER_SLEEVE"; then systemctl restart liquidity-migration-bybit-continuous-paper.service; fi
 
 if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then
   sleep "$SYSTEMD_SETTLE_SECONDS"
@@ -198,8 +209,12 @@ verify_sleeve "$SHORT_SLEEVE" $SHORT_SLEEVE_UNITS
 verify_sleeve "$SHORT_PAPER_SLEEVE" $SHORT_PAPER_SLEEVE_UNITS
 verify_sleeve "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
-if sleeve_on "$CONTINUOUS_SLEEVE"; then
+verify_sleeve "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
+if continuous_rmom_refresh_on; then
   systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer
+  systemctl is-active --quiet liquidity-migration-continuous-rmom-refresh.timer
+  systemctl is-enabled --quiet liquidity-migration-continuous-forward-report.timer
+  systemctl is-active --quiet liquidity-migration-continuous-forward-report.timer
 fi
 # Timer verification: is-enabled catches "we never enabled it"; is-active
 # catches "we enabled it but something stopped it." Both are fail-loud here
@@ -251,9 +266,9 @@ systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Envir
 # tracked rather than flattened.)
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=LONG_DATA_ROOT=data/bybit-long-demo-event'
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'
-# Continuous sleeve go-live assertions: live order submission + its disaster stop present.
-# Only when the sleeve is toggled ON — a retired sleeve's file content must not be an
-# unconditional deploy gate (it would block a deploy if the unit is ever edited while off).
+# Order-submitting continuous sleeve assertions: submit-orders config + disaster stop present.
+# Only when the sleeve is toggled ON; a retired sleeve's file content must not be an
+# unconditional deploy gate.
 if sleeve_on "$CONTINUOUS_SLEEVE"; then
   systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=1'
   systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=STOP_LOSS_PCT=0.25'

@@ -57,6 +57,23 @@ def _parse_float_list(raw: str) -> tuple[float, ...]:
     return values
 
 
+def _parse_optional_float_grid(raw: str | None, default: float | None) -> tuple[float | None, ...]:
+    if not raw:
+        return (default,)
+    out: list[float | None] = []
+    for part in raw.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        if item.lower() in {"none", "off"}:
+            out.append(None)
+        else:
+            out.append(float(item))
+    if not out:
+        return (default,)
+    return tuple(out)
+
+
 def _parse_venues(raw: str) -> tuple[str, ...]:
     venues = tuple(x.strip() for x in raw.split(",") if x.strip())
     unknown = [venue for venue in venues if venue not in VENUES]
@@ -473,6 +490,8 @@ def _blend_venue(
     cap_label = f"cap{max_active_notional:g}"
     if max_active_symbol_notional > 0.0:
         cap_label = f"{cap_label}_symcap{max_active_symbol_notional:g}"
+    if addon_same_symbol_primary_min_unrealized is not None:
+        cap_label = f"{cap_label}_pnl{addon_same_symbol_primary_min_unrealized:g}"
     out_dir = out_root / f"{cap_label}_cost{cost_multiplier:g}" / venue
     out_dir.mkdir(parents=True, exist_ok=True)
     capped.write_csv(out_dir / "blended_trades.csv")
@@ -540,6 +559,11 @@ def parse_args() -> argparse.Namespace:
         help="Skip add-ons when an active same-symbol primary's unrealized gross return is below this threshold.",
     )
     parser.add_argument(
+        "--addon-same-symbol-primary-min-unrealized-grid",
+        default=None,
+        help="Comma-separated threshold grid for the shared active-primary PnL gate; use 'none' to disable.",
+    )
+    parser.add_argument(
         "--venue-addon-same-symbol-primary-min-unrealized",
         default=None,
         help="Optional venue=threshold map; overrides the shared active-primary unrealized PnL gate.",
@@ -561,6 +585,12 @@ def main() -> int:
     venue_primary_pnl_gates = _parse_venue_floats(args.venue_addon_same_symbol_primary_min_unrealized)
     caps = list(_parse_float_list(args.max_active_notionals))
     symbol_caps = list(_parse_float_list(args.max_active_symbol_notionals))
+    primary_pnl_grid = list(
+        _parse_optional_float_grid(
+            args.addon_same_symbol_primary_min_unrealized_grid,
+            args.addon_same_symbol_primary_min_unrealized,
+        )
+    )
     out_root = Path(args.out).expanduser()
     rows: list[dict[str, Any]] = []
     missing_scales = [venue for venue in venues if venue not in venue_scales]
@@ -572,24 +602,26 @@ def main() -> int:
     }
     if venue_caps:
         cap_venue_pairs = [
-            (venue_caps[venue], venue, venue_symbol_caps.get(venue, symbol_cap))
+            (venue_caps[venue], venue, venue_symbol_caps.get(venue, symbol_cap), threshold)
             for venue in venues
             if venue in venue_caps
             for symbol_cap in symbol_caps
+            for threshold in primary_pnl_grid
         ]
         missing_caps = [venue for venue in venues if venue not in venue_caps]
         if missing_caps:
             raise ValueError(f"missing venue cap(s): {', '.join(missing_caps)}")
     else:
         cap_venue_pairs = [
-            (cap, venue, venue_symbol_caps.get(venue, symbol_cap))
+            (cap, venue, venue_symbol_caps.get(venue, symbol_cap), threshold)
             for cap in caps
             for venue in venues
             for symbol_cap in symbol_caps
+            for threshold in primary_pnl_grid
         ]
-    for cap, venue, symbol_cap in cap_venue_pairs:
+    for cap, venue, symbol_cap, threshold in cap_venue_pairs:
         rolling_cap = venue_rolling_caps.get(venue, float(args.addon_rolling_notional_cap))
-        primary_pnl_gate = venue_primary_pnl_gates.get(venue, args.addon_same_symbol_primary_min_unrealized)
+        primary_pnl_gate = venue_primary_pnl_gates.get(venue, threshold)
         row = _blend_venue(
             primary_root=primary_root,
             addon_execution_root=addon_execution_root,

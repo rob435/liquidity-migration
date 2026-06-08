@@ -84,6 +84,74 @@ def test_cli_continuous_demo_addon_entry_cooldown_parser(tmp_path: Path) -> None
     assert args.addon_same_symbol_entry_cooldown_minutes == 15
 
 
+def test_cli_continuous_events_take_profit_parser(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "continuous-events",
+            "--take-profit-pct",
+            "0.08",
+            "--rank-exit-threshold",
+            "0.8",
+            "--entry-crowding-max-fresh",
+            "4",
+            "--stop-vol-mult",
+            "6",
+            "--sizing-mode",
+            "inverse_vol",
+            "--target-vol-per-name",
+            "0.015",
+            "--vol-weight-clamp",
+            "2.5",
+            "--age-days-min",
+            "300",
+            "--entry-max-ret168-max",
+            "0.2",
+            "--entry-decel-lookback-h",
+            "6",
+            "--entry-decel-max-ret",
+            "0.02",
+            "--market-min-ret-1d",
+            "-0.03",
+            "--round-trip-cost-multiplier",
+            "2",
+            "--failed-fade-hours",
+            "6",
+            "--failed-fade-loss-pct",
+            "0.04",
+            "--failed-fade-min-mfe-pct",
+            "0.01",
+            "--breakeven-arm-pct",
+            "0.08",
+            "--mfe-giveback-trigger-pct",
+            "0.12",
+            "--mfe-giveback-retain-pct",
+            "0.4",
+        ]
+    )
+
+    assert args.take_profit_pct == 0.08
+    assert args.rank_exit_threshold == 0.8
+    assert args.entry_crowding_max_fresh == 4
+    assert args.stop_vol_mult == 6
+    assert args.sizing_mode == "inverse_vol"
+    assert args.target_vol_per_name == 0.015
+    assert args.vol_weight_clamp == 2.5
+    assert args.age_days_min == 300
+    assert args.entry_max_ret168_max == 0.2
+    assert args.entry_decel_lookback_h == 6
+    assert args.entry_decel_max_ret == 0.02
+    assert args.market_min_ret_1d == -0.03
+    assert args.round_trip_cost_multiplier == 2
+    assert args.failed_fade_hours == 6
+    assert args.failed_fade_loss_pct == 0.04
+    assert args.failed_fade_min_mfe_pct == 0.01
+    assert args.breakeven_arm_pct == 0.08
+    assert args.mfe_giveback_trigger_pct == 0.12
+    assert args.mfe_giveback_retain_pct == 0.4
+
+
 def test_cost_config_zero_maker_models_full_taker(tmp_path: Path) -> None:
     """The deployed runner is 100%% taker; maker_fill_probability=0.0 must yield
     the full taker round-trip cost (2 * (taker_fee + taker_slippage) = 15 bps),

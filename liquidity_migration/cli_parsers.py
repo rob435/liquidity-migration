@@ -1867,6 +1867,97 @@ def _add_reconcile_continuous_paper_demo_parser(subparsers) -> None:
     reconcile.add_argument("--output-dir", default=None, help="Where to write the continuous reconciliation report.")
 
 
+def _add_continuous_rebalance_cycle_audit_parser(subparsers) -> None:
+    audit = subparsers.add_parser(
+        "continuous-rebalance-cycle-audit",
+        help="Audit continuous daily-rebalance cycle telemetry for scale/rebalance consistency.",
+    )
+    audit.add_argument(
+        "--data-root",
+        default="data/bybit-continuous-paper-event",
+        help="Continuous paper/demo data root to audit.",
+    )
+    audit.add_argument(
+        "--cycles-dataset",
+        default="continuous_fade_paper_cycles",
+        help="Cycles dataset carrying rebalance telemetry.",
+    )
+    audit.add_argument(
+        "--orders-dataset",
+        default="continuous_fade_paper_orders",
+        help="Orders dataset carrying resize order rows.",
+    )
+    audit.add_argument("--output-dir", default=None, help="Where to write the audit report.")
+
+
+def _add_continuous_forward_readiness_parser(subparsers) -> None:
+    readiness = subparsers.add_parser(
+        "continuous-forward-readiness",
+        help="Strict continuous candidate paper/demo readiness gate: rebalance audits plus paper-demo reconcile.",
+    )
+    readiness.add_argument(
+        "--paper-data-root",
+        default="data/bybit-continuous-paper-event",
+        help="Paper data root holding continuous_fade_paper_* ledgers.",
+    )
+    readiness.add_argument(
+        "--demo-data-root",
+        default="data/bybit-continuous-demo-event",
+        help="Demo data root holding continuous_fade_demo_* ledgers.",
+    )
+    readiness.add_argument(
+        "--entry-tolerance-ms",
+        type=int,
+        default=600_000,
+        help="Max entry-time gap (ms) for pairing a paper trade with a demo trade.",
+    )
+    readiness.add_argument(
+        "--min-pairs-warning",
+        type=int,
+        default=20,
+        help="Fail readiness when paired-trade count is below this threshold.",
+    )
+    readiness.add_argument(
+        "--allow-unmatched",
+        action="store_true",
+        help="Do not fail readiness on paper-only/demo-only trades; still report them.",
+    )
+    readiness.add_argument(
+        "--paper-only",
+        action="store_true",
+        help="Audit only the continuous paper evidence collector; skip demo telemetry and paper-demo reconcile.",
+    )
+    readiness.add_argument("--output-dir", default=None, help="Where to write the readiness report bundle.")
+
+
+def _add_continuous_vs_daily_forward_parser(subparsers) -> None:
+    compare = subparsers.add_parser(
+        "continuous-vs-daily-forward",
+        help="Compare realized forward daily-short and continuous ledgers on same-window return and MAR.",
+    )
+    compare.add_argument(
+        "--daily-data-root",
+        default="data/bybit-paper-event",
+        help="Daily short paper/demo root holding the event_demo_trades ledger.",
+    )
+    compare.add_argument(
+        "--continuous-data-root",
+        default="data/bybit-continuous-paper-event",
+        help="Continuous paper/demo root holding continuous rebalance cycles or trades.",
+    )
+    compare.add_argument("--daily-trades-dataset", default="event_demo_trades")
+    compare.add_argument("--daily-cycles-dataset", default="event_demo_cycles")
+    compare.add_argument("--continuous-cycles-dataset", default="continuous_fade_paper_cycles")
+    compare.add_argument("--continuous-trades-dataset", default="continuous_fade_paper_trades")
+    compare.add_argument(
+        "--min-common-days",
+        type=int,
+        default=30,
+        help="Fail unless the overlapping forward comparison window has at least this many days.",
+    )
+    compare.add_argument("--output-dir", default=None, help="Where to write the comparison report and equity CSVs.")
+
+
 def _add_continuous_addon_shadow_audit_parser(subparsers) -> None:
     audit = subparsers.add_parser(
         "continuous-addon-shadow-audit",
@@ -2411,19 +2502,55 @@ def _add_continuous_events_parser(subparsers) -> None:
     p.add_argument("--entry-delay-hours", type=int, default=d.entry_delay_hours,
                    help="Bars after the deciding bar's close (1 = honest +1h; 0 = proxy/look-ahead).")
     p.add_argument("--exit-mode", default=d.exit_mode, choices=["fixed", "state"],
-                   help="fixed = hold_hours timer; state = hold only while the name stays in the fade decile.")
+                     help="fixed = hold_hours timer; state = hold only while the name stays in the fade decile.")
     p.add_argument("--hold-hours", type=int, default=d.hold_hours, help="Fixed-mode hold horizon (hours).")
     p.add_argument("--max-hold-hours", type=int, default=d.max_hold_hours,
-                   help="State-mode hold cap (force exit if the name never leaves the decile).")
+                     help="State-mode hold cap (force exit if the name never leaves the decile).")
+    p.add_argument("--rank-exit-threshold", type=float, default=d.rank_exit_threshold,
+                   help="Rank-decay exit for continuous shorts; exit when composite rank fraction falls below this. 0 = off.")
     p.add_argument("--cooldown-hours", type=int, default=d.cooldown_hours,
-                   help="Per-symbol re-entry cooldown; 0 = hold_hours.")
+                     help="Per-symbol re-entry cooldown; 0 = hold_hours.")
     p.add_argument("--entry-pause-after-adverse-exits", type=int, default=d.entry_pause_after_adverse_exits,
                    help="Pause new entries after this many net-negative exits in the trailing pause window; 0 = off.")
     p.add_argument("--entry-pause-window-hours", type=int, default=d.entry_pause_window_hours,
-                   help="Trailing window for --entry-pause-after-adverse-exits.")
+                     help="Trailing window for --entry-pause-after-adverse-exits.")
+    p.add_argument("--entry-crowding-max-fresh", type=int, default=d.entry_crowding_max_fresh,
+                   help="Skip signal hours with more fresh continuous candidates than this; 0 = off.")
     p.add_argument("--stop-loss-pct", type=float, default=d.stop_loss_pct, help="Stop loss fraction; 0 = no stop.")
+    p.add_argument("--take-profit-pct", type=float, default=d.take_profit_pct,
+                     help="Take-profit fraction; 0 = no take-profit.")
+    p.add_argument("--stop-vol-mult", type=float, default=d.stop_vol_mult,
+                   help="Vol-scaled stop multiplier on trailing hourly vol; 0 = use fixed stop-loss-pct.")
+    p.add_argument("--sizing-mode", default=d.sizing_mode, choices=["flat", "inverse_vol"],
+                   help="Continuous position sizing mode.")
+    p.add_argument("--target-vol-per-name", type=float, default=d.target_vol_per_name,
+                   help="Inverse-vol sizing target per-name hourly vol.")
+    p.add_argument("--vol-weight-clamp", type=float, default=d.vol_weight_clamp,
+                   help="Clamp inverse-vol sizing multiplier to [1/clamp, clamp].")
+    p.add_argument("--age-days-min", type=int, default=d.age_days_min,
+                   help="Skip entries whose symbol has less loaded PIT kline age than this; 0 = off.")
+    p.add_argument("--entry-max-ret168-max", type=float, default=d.entry_max_ret168_max,
+                   help="Skip entries whose trailing 168h max 1h return is above this; 10 = off.")
+    p.add_argument("--entry-decel-lookback-h", type=int, default=d.entry_decel_lookback_h,
+                   help="Require recent entry-lookback return to be <= --entry-decel-max-ret; 0 = off.")
+    p.add_argument("--entry-decel-max-ret", type=float, default=d.entry_decel_max_ret,
+                   help="Maximum recent return allowed by --entry-decel-lookback-h.")
+    p.add_argument("--market-min-ret-1d", type=float, default=d.market_min_ret_1d,
+                   help="Skip entries when equal-weight market 1d return is below this; -1 = off.")
+    p.add_argument("--failed-fade-hours", type=int, default=d.failed_fade_hours,
+                   help="Exit after this many post-entry completed bars if the fade has not worked; 0 = off.")
+    p.add_argument("--failed-fade-loss-pct", type=float, default=d.failed_fade_loss_pct,
+                   help="Failed-fade exit: side-aware close loss threshold.")
+    p.add_argument("--failed-fade-min-mfe-pct", type=float, default=d.failed_fade_min_mfe_pct,
+                   help="Failed-fade exit remains active only while favorable excursion is below this threshold.")
+    p.add_argument("--breakeven-arm-pct", type=float, default=d.breakeven_arm_pct,
+                   help="After MFE reaches this threshold, exit if the trade returns to entry; 0 = off.")
+    p.add_argument("--mfe-giveback-trigger-pct", type=float, default=d.mfe_giveback_trigger_pct,
+                   help="Activate MFE giveback exit after this favorable excursion; 0 = off.")
+    p.add_argument("--mfe-giveback-retain-pct", type=float, default=d.mfe_giveback_retain_pct,
+                   help="Exit after activation when close return retains no more than this fraction of MFE.")
     p.add_argument("--stop-fill-mode", default=d.stop_fill_mode,
-                   choices=["stop", "bar_extreme", "bar_extreme_capped"], help="Stop fill model.")
+                     choices=["stop", "bar_extreme", "bar_extreme_capped"], help="Stop fill model.")
     p.add_argument("--stop-slippage-cap-pct", type=float, default=d.stop_slippage_cap_pct,
                    help="Adverse-slippage cap for bar_extreme_capped fills.")
     p.add_argument("--gross-exposure", type=float, default=d.gross_exposure,
@@ -2438,7 +2565,9 @@ def _add_continuous_events_parser(subparsers) -> None:
     p.add_argument("--deploy-capital-usd", type=float, default=d.deploy_capital_usd,
                    help="Deploy capital sizing the impact participation (notional/ADV).")
     p.add_argument("--flat-round-trip-bps", type=float, default=None,
-                   help="Override the cost model with a flat round-trip bps (proxy-parity validation).")
+                     help="Override the cost model with a flat round-trip bps (proxy-parity validation).")
+    p.add_argument("--round-trip-cost-multiplier", type=float, default=d.round_trip_cost_multiplier,
+                   help="Multiply the modeled round-trip cost for stress tests.")
     p.add_argument("--no-funding", action="store_true", help="Disable funding-to-exit accounting.")
     p.add_argument("--split-date", default=d.split_date, help="Early/recent split boundary (YYYY-MM-DD).")
     p.add_argument("--report-dir", default=None, help="Output directory for artifacts.")
@@ -2454,6 +2583,11 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
     )
     p.add_argument("--decile", type=int, default=d.decile)
     p.add_argument("--rmom-quantile", type=float, default=d.rmom_quantile)
+    p.add_argument(
+        "--feature-set",
+        default=",".join(d.feature_set),
+        help="Comma-separated causal continuous composite features, e.g. rv_168h,vov,dist_low,xsret7,xsret3 or max_ret168.",
+    )
     p.add_argument("--liq-turnover-min", type=float, default=d.liq_turnover_min)
     p.add_argument("--lookback-days", type=int, default=d.lookback_days)
     p.add_argument("--workers", type=int, default=d.workers)
@@ -2464,6 +2598,12 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
         "--entry-event-trigger",
         default=d.entry_event_trigger,
         help="Optional confirmed-hour event gate for entries, e.g. fresh_pop25. Default none.",
+    )
+    p.add_argument(
+        "--btc-trend-gate",
+        choices=("off", "uptrend", "downtrend"),
+        default=d.btc_trend_gate,
+        help="Causal prior-30d BTC regime gate for new entries.",
     )
     p.add_argument(
         "--allow-same-signal-reentry",
@@ -2481,6 +2621,35 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
     p.add_argument("--telegram", action="store_true")
     p.add_argument("--record-dry-run", action="store_true")
     p.add_argument("--paper-mode", action="store_true")
+    p.add_argument("--daily-rebalance-enabled", action="store_true")
+    p.add_argument(
+        "--daily-rebalance-realized-vol-window-days",
+        type=int,
+        default=d.daily_rebalance_realized_vol_window_days,
+    )
+    p.add_argument("--daily-rebalance-target-daily-vol", type=float, default=d.daily_rebalance_target_daily_vol)
+    p.add_argument("--daily-rebalance-max-scale", type=float, default=d.daily_rebalance_max_scale)
+    p.add_argument(
+        "--daily-rebalance-drawdown-half-threshold",
+        type=float,
+        default=d.daily_rebalance_drawdown_half_threshold,
+    )
+    p.add_argument("--daily-rebalance-resize-cost-bps", type=float, default=d.daily_rebalance_resize_cost_bps)
+    p.add_argument(
+        "--daily-rebalance-strategy-momentum-window-days",
+        type=int,
+        default=d.daily_rebalance_strategy_momentum_window_days,
+    )
+    p.add_argument(
+        "--daily-rebalance-strategy-momentum-min-return",
+        type=float,
+        default=d.daily_rebalance_strategy_momentum_min_return,
+    )
+    p.add_argument(
+        "--daily-rebalance-strategy-momentum-scale-when-below",
+        type=float,
+        default=d.daily_rebalance_strategy_momentum_scale_when_below,
+    )
     p.add_argument("--data-name", default=d.data_name)
     p.add_argument("--strategy-profile", choices=CONTINUOUS_DEMO_PROFILES, default=d.strategy_profile)
     p.add_argument(

@@ -21,6 +21,7 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/check_demo_liveness.py \
     --data-root /opt/liquidity-migration/data/bybit-demo-event \
     --continuous-root /opt/liquidity-migration/data/bybit-continuous-demo-event \
+    --continuous-paper-root /opt/liquidity-migration/data/bybit-continuous-paper-event \
     --long-root /opt/liquidity-migration/data/bybit-long-demo-event \
     --max-cycle-age-min 10 \
     --cooldown-min 30 \

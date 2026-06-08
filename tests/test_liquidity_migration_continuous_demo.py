@@ -14,12 +14,20 @@ from liquidity_migration._common import MS_PER_DAY, MS_PER_HOUR
 from liquidity_migration.continuous_demo import (
     ContinuousDemoCycleConfig,
     LivePanelCache,
+    _build_continuous_rebalance_resize_rows,
+    _continuous_rebalance_cycle_fields,
+    _continuous_rebalance_mark_prices_json,
+    _continuous_rebalance_resize_checked_today,
+    _continuous_rebalance_scale_state_from_cycles,
     _continuous_entry_candidates_with_signal_metadata,
+    _execute_continuous_rebalance_resizes,
     _validate_continuous_demo_config,
     active_primary_pnl_gate_allows_addon,
+    apply_continuous_demo_profile,
     build_confirmed_entry_state,
     build_live_continuous_state,
     continuous_dataset_names,
+    continuous_rebalance_rule,
     filter_addon_candidates_by_active_primary_pnl_gate,
     format_continuous_demo_cycle_summary,
     _continuous_order_link_id,
@@ -35,6 +43,7 @@ from liquidity_migration.continuous_demo import (
     select_continuous_entries,
 )
 from liquidity_migration.continuous_events import compute_continuous_decile_panel
+from liquidity_migration.continuous_rebalance import ContinuousRebalanceResizePlan
 from liquidity_migration.event_demo import decode_entry_order_link_id
 
 
@@ -384,6 +393,716 @@ def test_execute_exits_dry_run_closes_short() -> None:
     assert rows[0]["status"] == "closed" and rows[0]["exit_reason"] == "left_decile"
     assert rows[0]["sleeve"] == "continuous"             # exit row inherits the entry's sleeve tag (dict(trade))
     assert orders[0]["sleeve"] == "continuous" and orders[0]["order_link_id"].startswith("lm-ux-c-")
+
+
+def test_rebalance_resize_rows_reduce_open_short() -> None:
+    cfg = ContinuousDemoCycleConfig(submit_orders=False, record_dry_run=True)
+    trade = {
+        "trade_id": "t1",
+        "strategy_id": continuous_strategy_id(cfg),
+        "symbol": "ABCUSDT",
+        "side": "short",
+        "sleeve": "continuous",
+        "status": "open",
+        "entry_price": 100.0,
+        "qty": "3",
+        "notional_usdt": 300.0,
+        "equity_usdt": 10_000.0,
+        "qty_step": 0.1,
+    }
+    plan = ContinuousRebalanceResizePlan(
+        trade_id="t1",
+        symbol="ABCUSDT",
+        side="Buy",
+        reduce_only=True,
+        qty=1.0,
+        current_notional_usdt=300.0,
+        target_notional_usdt=200.0,
+        delta_notional_usdt=-100.0,
+        reason="rebalance_reduce",
+    )
+
+    rows, orders = _build_continuous_rebalance_resize_rows(
+        [plan],
+        pl.DataFrame([trade]),
+        demo=cfg,
+        price_by_symbol={"ABCUSDT": 100.0},
+        contract_by_symbol={"ABCUSDT": {"qty_step": 0.1, "min_order_qty": 0.1}},
+        now_ms=1_700_100_000_000,
+        strategy_id=continuous_strategy_id(cfg),
+    )
+
+    assert len(rows) == 1 and len(orders) == 1
+    assert rows[0]["status"] == "open"
+    assert rows[0]["qty"] == "2"
+    assert rows[0]["notional_usdt"] == pytest.approx(200.0)
+    assert rows[0]["rebalance_realized_return"] == pytest.approx(0.0)
+    assert orders[0]["side"] == "Buy"
+    assert orders[0]["reduce_only"] is True
+    assert orders[0]["resize_reason"] == "rebalance_reduce"
+    assert orders[0]["order_link_id"].startswith("lm-ux-c-")
+
+
+def test_rebalance_resize_rows_increase_short_reweights_entry() -> None:
+    cfg = ContinuousDemoCycleConfig(submit_orders=False, record_dry_run=True)
+    trade = {
+        "trade_id": "t1",
+        "strategy_id": continuous_strategy_id(cfg),
+        "symbol": "ABCUSDT",
+        "side": "short",
+        "sleeve": "continuous",
+        "status": "open",
+        "entry_price": 100.0,
+        "qty": "1",
+        "notional_usdt": 100.0,
+        "equity_usdt": 10_000.0,
+        "qty_step": 0.1,
+    }
+    plan = ContinuousRebalanceResizePlan(
+        trade_id="t1",
+        symbol="ABCUSDT",
+        side="Sell",
+        reduce_only=False,
+        qty=2.0,
+        current_notional_usdt=120.0,
+        target_notional_usdt=360.0,
+        delta_notional_usdt=240.0,
+        reason="rebalance_increase",
+    )
+
+    rows, orders = _build_continuous_rebalance_resize_rows(
+        [plan],
+        pl.DataFrame([trade]),
+        demo=cfg,
+        price_by_symbol={"ABCUSDT": 120.0},
+        contract_by_symbol={"ABCUSDT": {"qty_step": 0.1, "min_order_qty": 0.1}},
+        now_ms=1_700_100_000_000,
+        strategy_id=continuous_strategy_id(cfg),
+    )
+
+    assert rows[0]["status"] == "open"
+    assert rows[0]["qty"] == "3"
+    assert rows[0]["entry_price"] == pytest.approx((100.0 + 2.0 * 120.0) / 3.0)
+    assert rows[0]["notional_usdt"] == pytest.approx(340.0)
+    assert orders[0]["side"] == "Sell"
+    assert orders[0]["reduce_only"] is False
+    assert orders[0]["order_link_id"].startswith("lm-en-c-")
+
+
+def test_rebalance_resize_rows_zero_scale_closes_short() -> None:
+    cfg = ContinuousDemoCycleConfig(submit_orders=False, record_dry_run=True)
+    trade = {
+        "trade_id": "t1",
+        "strategy_id": continuous_strategy_id(cfg),
+        "symbol": "ABCUSDT",
+        "side": "short",
+        "sleeve": "continuous",
+        "status": "open",
+        "entry_price": 100.0,
+        "qty": "3",
+        "notional_usdt": 300.0,
+        "equity_usdt": 10_000.0,
+        "qty_step": 0.1,
+    }
+    plan = ContinuousRebalanceResizePlan(
+        trade_id="t1",
+        symbol="ABCUSDT",
+        side="Buy",
+        reduce_only=True,
+        qty=3.0,
+        current_notional_usdt=270.0,
+        target_notional_usdt=0.0,
+        delta_notional_usdt=-300.0,
+        reason="rebalance_reduce",
+    )
+
+    rows, orders = _build_continuous_rebalance_resize_rows(
+        [plan],
+        pl.DataFrame([trade]),
+        demo=cfg,
+        price_by_symbol={"ABCUSDT": 90.0},
+        contract_by_symbol={"ABCUSDT": {"qty_step": 0.1, "min_order_qty": 0.1}},
+        now_ms=1_700_100_000_000,
+        strategy_id=continuous_strategy_id(cfg),
+    )
+
+    assert rows[0]["status"] == "closed"
+    assert rows[0]["qty"] == "0"
+    assert rows[0]["exit_reason"] == "rebalance_zero"
+    assert rows[0]["net_return"] == pytest.approx(0.003)
+    assert orders[0]["qty"] == "3"
+    assert orders[0]["notional_usdt"] == pytest.approx(270.0)
+
+
+def test_rebalance_resize_rows_skip_unroundable_dust() -> None:
+    cfg = ContinuousDemoCycleConfig(submit_orders=False, record_dry_run=True)
+    trade = {
+        "trade_id": "t1",
+        "strategy_id": continuous_strategy_id(cfg),
+        "symbol": "ABCUSDT",
+        "side": "short",
+        "sleeve": "continuous",
+        "status": "open",
+        "entry_price": 100.0,
+        "qty": "3",
+        "notional_usdt": 300.0,
+        "equity_usdt": 10_000.0,
+        "qty_step": 1.0,
+    }
+    plan = ContinuousRebalanceResizePlan(
+        trade_id="t1",
+        symbol="ABCUSDT",
+        side="Buy",
+        reduce_only=True,
+        qty=0.01,
+        current_notional_usdt=300.0,
+        target_notional_usdt=299.0,
+        delta_notional_usdt=-1.0,
+        reason="rebalance_reduce",
+    )
+
+    rows, orders = _build_continuous_rebalance_resize_rows(
+        [plan],
+        pl.DataFrame([trade]),
+        demo=cfg,
+        price_by_symbol={"ABCUSDT": 100.0},
+        contract_by_symbol={"ABCUSDT": {"qty_step": 1.0, "min_order_qty": 1.0}},
+        now_ms=1_700_100_000_000,
+        strategy_id=continuous_strategy_id(cfg),
+    )
+
+    assert rows == []
+    assert orders == []
+
+
+def test_execute_rebalance_resizes_submitted_uses_confirmed_fill(monkeypatch: pytest.MonkeyPatch) -> None:
+    import liquidity_migration.continuous_demo as cd
+
+    cfg = ContinuousDemoCycleConfig(submit_orders=True, confirm_demo_orders=True, daily_rebalance_enabled=True)
+    trade = {
+        "trade_id": "t1",
+        "strategy_id": continuous_strategy_id(cfg),
+        "symbol": "ABCUSDT",
+        "side": "short",
+        "sleeve": "continuous",
+        "status": "open",
+        "entry_price": 100.0,
+        "qty": "1",
+        "notional_usdt": 100.0,
+        "equity_usdt": 10_000.0,
+        "qty_step": 0.1,
+    }
+    plan = ContinuousRebalanceResizePlan(
+        trade_id="t1",
+        symbol="ABCUSDT",
+        side="Sell",
+        reduce_only=False,
+        qty=2.0,
+        current_notional_usdt=120.0,
+        target_notional_usdt=360.0,
+        delta_notional_usdt=240.0,
+        reason="rebalance_increase",
+    )
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.orders: list[dict[str, object]] = []
+
+        def place_order(self, **kwargs: object) -> dict[str, str]:
+            self.orders.append(kwargs)
+            return {"orderId": "oid-1"}
+
+    def fake_wait(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {"qty": "2", "avg_price": "120", "fee": "0.12", "exec_time_ms": 7}
+
+    preflight_rows: list[dict[str, object]] = []
+    monkeypatch.setattr(cd, "_wait_for_execution_summary", fake_wait)
+    client = FakeClient()
+
+    rows, orders = _execute_continuous_rebalance_resizes(
+        [plan],
+        pl.DataFrame([trade]),
+        trading_client=client,
+        demo=cfg,
+        price_by_symbol={"ABCUSDT": 120.0},
+        contract_by_symbol={"ABCUSDT": {"qty_step": 0.1, "min_order_qty": 0.1}},
+        now_ms=1_700_100_000_000,
+        strategy_id=continuous_strategy_id(cfg),
+        record_preflight=preflight_rows.append,
+    )
+
+    assert len(client.orders) == 1
+    assert client.orders[0]["side"] == "Sell"
+    assert client.orders[0]["reduceOnly"] is False
+    assert len(preflight_rows) == 1
+    assert rows[0]["qty"] == "3"
+    assert rows[0]["entry_price"] == pytest.approx((100.0 + 2.0 * 120.0) / 3.0)
+    assert rows[0]["last_rebalance_fee_usdt"] == pytest.approx(0.12)
+    assert rows[0]["submit_mode"] == "submitted"
+    assert orders[0]["status"] == "filled"
+    assert orders[0]["order_id"] == "oid-1"
+    assert orders[0]["fee_usdt"] == pytest.approx(0.12)
+
+
+def test_execute_rebalance_resizes_unconfirmed_does_not_mutate_trade(monkeypatch: pytest.MonkeyPatch) -> None:
+    import liquidity_migration.continuous_demo as cd
+
+    cfg = ContinuousDemoCycleConfig(submit_orders=True, confirm_demo_orders=True, daily_rebalance_enabled=True)
+    trade = {
+        "trade_id": "t1",
+        "strategy_id": continuous_strategy_id(cfg),
+        "symbol": "ABCUSDT",
+        "side": "short",
+        "sleeve": "continuous",
+        "status": "open",
+        "entry_price": 100.0,
+        "qty": "1",
+        "notional_usdt": 100.0,
+        "equity_usdt": 10_000.0,
+        "qty_step": 0.1,
+    }
+    plan = ContinuousRebalanceResizePlan(
+        trade_id="t1",
+        symbol="ABCUSDT",
+        side="Sell",
+        reduce_only=False,
+        qty=2.0,
+        current_notional_usdt=120.0,
+        target_notional_usdt=360.0,
+        delta_notional_usdt=240.0,
+        reason="rebalance_increase",
+    )
+
+    class FakeClient:
+        def place_order(self, **_kwargs: object) -> dict[str, str]:
+            return {"orderId": "oid-1"}
+
+    def fake_wait(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {"qty": "0", "avg_price": "0", "fee": "0", "exec_time_ms": 7}
+
+    monkeypatch.setattr(cd, "_wait_for_execution_summary", fake_wait)
+    rows, orders = _execute_continuous_rebalance_resizes(
+        [plan],
+        pl.DataFrame([trade]),
+        trading_client=FakeClient(),
+        demo=cfg,
+        price_by_symbol={"ABCUSDT": 120.0},
+        contract_by_symbol={"ABCUSDT": {"qty_step": 0.1, "min_order_qty": 0.1}},
+        now_ms=1_700_100_000_000,
+        strategy_id=continuous_strategy_id(cfg),
+    )
+
+    assert rows == []
+    assert len(orders) == 1
+    assert orders[0]["status"] == "submitted_unconfirmed"
+    assert orders[0]["filled_qty"] == ""
+
+
+def test_rebalance_scale_state_uses_latest_prior_cycle_per_day() -> None:
+    base = 1_700_000_000_000
+    day0 = (base // MS_PER_DAY) * MS_PER_DAY
+    cycles = pl.DataFrame(
+        [
+            {
+                "ts_ms": day0 + 1,
+                "rebalance_day_ts": day0,
+                "rebalance_raw_return": 0.01,
+                "rebalance_scaled_equity": 1.01,
+                "rebalance_scaled_peak": 1.01,
+            },
+            {
+                "ts_ms": day0 + 2,
+                "rebalance_day_ts": day0,
+                "rebalance_raw_return": 0.02,
+                "rebalance_scaled_equity": 1.02,
+                "rebalance_scaled_peak": 1.02,
+            },
+            {
+                "ts_ms": day0 + MS_PER_DAY + 1,
+                "rebalance_day_ts": day0 + MS_PER_DAY,
+                "rebalance_raw_return": -0.03,
+                "rebalance_scaled_equity": 0.99,
+                "rebalance_scaled_peak": 1.02,
+            },
+        ],
+        infer_schema_length=None,
+    )
+
+    state = _continuous_rebalance_scale_state_from_cycles(
+        cycles,
+        current_day_ts=day0 + 2 * MS_PER_DAY,
+    )
+
+    assert state.prior_raw_returns == pytest.approx((0.02, -0.03))
+    assert state.prior_scaled_equity == pytest.approx(0.99)
+    assert state.prior_scaled_peak == pytest.approx(1.02)
+
+
+def test_rebalance_scale_state_ignores_current_day_and_missing_rows() -> None:
+    base = 1_700_000_000_000
+    day0 = (base // MS_PER_DAY) * MS_PER_DAY
+    current_day = day0 + MS_PER_DAY
+    cycles = pl.DataFrame(
+        [
+            {"ts_ms": day0 + 1, "rebalance_day_ts": day0, "rebalance_raw_return": 0.01},
+            {"ts_ms": current_day + 1, "rebalance_day_ts": current_day, "rebalance_raw_return": 0.50},
+            {"ts_ms": day0 + 3, "rebalance_day_ts": day0 - MS_PER_DAY},
+            {"ts_ms": day0 + 4, "rebalance_raw_return": 0.25},
+        ],
+        infer_schema_length=None,
+    )
+
+    state = _continuous_rebalance_scale_state_from_cycles(cycles, current_day_ts=current_day)
+
+    assert state.prior_raw_returns == pytest.approx((0.01,))
+    assert state.prior_scaled_equity == pytest.approx(1.0)
+    assert state.prior_scaled_peak == pytest.approx(1.0)
+
+
+def test_rebalance_scale_state_empty_defaults_safe() -> None:
+    state = _continuous_rebalance_scale_state_from_cycles(pl.DataFrame(), current_day_ts=1_700_000_000_000)
+
+    assert state.prior_raw_returns == ()
+    assert state.prior_scaled_equity == pytest.approx(1.0)
+    assert state.prior_scaled_peak == pytest.approx(1.0)
+
+
+def test_continuous_rebalance_rule_matches_default_candidate_knobs() -> None:
+    rule = continuous_rebalance_rule(ContinuousDemoCycleConfig(daily_rebalance_enabled=True, record_dry_run=True))
+
+    assert rule.realized_vol_window_days == 90
+    assert rule.target_daily_vol == pytest.approx(0.025)
+    assert rule.max_scale == pytest.approx(4.0)
+    assert rule.drawdown_half_threshold == pytest.approx(-0.04)
+    assert rule.resize_cost_bps == pytest.approx(10.0)
+    assert rule.strategy_momentum_window_days == 180
+    assert rule.strategy_momentum_min_return == pytest.approx(0.02)
+    assert rule.strategy_momentum_scale_when_below == pytest.approx(0.0)
+
+
+def test_continuous_rebalance_profile_resolves_to_pinned_candidate_contract() -> None:
+    cfg = apply_continuous_demo_profile(
+        ContinuousDemoCycleConfig(strategy_profile="continuous_rebalance_v1", paper_mode=True, record_dry_run=True)
+    )
+
+    assert cfg.rmom_quantile == pytest.approx(0.25)
+    assert cfg.feature_set == ("max_ret168",)
+    assert cfg.liq_turnover_min == pytest.approx(500_000.0)
+    assert cfg.max_hold_hours == 24
+    assert cfg.entry_confirm_delay_hours == 1
+    assert cfg.entry_event_trigger == "turn4_pop4"
+    assert cfg.btc_trend_gate == "uptrend"
+    assert cfg.daily_rebalance_enabled is True
+    assert continuous_rebalance_rule(cfg).target_daily_vol == pytest.approx(0.025)
+
+
+def test_continuous_rebalance_mode_requires_persistence_or_submitted_demo() -> None:
+    _validate_continuous_demo_config(ContinuousDemoCycleConfig(daily_rebalance_enabled=True, record_dry_run=True))
+    _validate_continuous_demo_config(
+        ContinuousDemoCycleConfig(
+            daily_rebalance_enabled=True,
+            submit_orders=True,
+            confirm_demo_orders=True,
+            record_dry_run=False,
+        )
+    )
+
+    with pytest.raises(ValueError, match="requires record_dry_run"):
+        _validate_continuous_demo_config(ContinuousDemoCycleConfig(daily_rebalance_enabled=True))
+
+
+def test_rebalance_cycle_fields_bootstrap_marks_without_fake_return() -> None:
+    cfg = ContinuousDemoCycleConfig(daily_rebalance_enabled=True, record_dry_run=True)
+    day = (1_700_000_000_000 // MS_PER_DAY) * MS_PER_DAY
+    trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "strategy_id": continuous_strategy_id(cfg),
+                "symbol": "ABCUSDT",
+                "status": "open",
+                "entry_ts_ms": day - MS_PER_DAY,
+                "entry_price": 100.0,
+                "qty": "2",
+                "equity_usdt": 10_000.0,
+            }
+        ],
+        infer_schema_length=None,
+    )
+
+    fields = _continuous_rebalance_cycle_fields(
+        trades,
+        pl.DataFrame(),
+        price_by_symbol={"ABCUSDT": 90.0},
+        current_day_ts=day,
+        now_ms=day + 1,
+        strategy_id=continuous_strategy_id(cfg),
+        rule=continuous_rebalance_rule(cfg),
+    )
+
+    assert fields["rebalance_raw_return"] == pytest.approx(0.0)
+    assert fields["rebalance_scaled_equity"] == pytest.approx(1.0)
+    assert fields["rebalance_marked_trades"] == 1
+    assert fields["rebalance_mark_prices_json"] == _continuous_rebalance_mark_prices_json({"t1": 90.0})
+
+
+def test_rebalance_cycle_fields_marks_open_short_from_prior_mark() -> None:
+    cfg = ContinuousDemoCycleConfig(daily_rebalance_enabled=True, record_dry_run=True)
+    day0 = (1_700_000_000_000 // MS_PER_DAY) * MS_PER_DAY
+    day1 = day0 + MS_PER_DAY
+    cycles = pl.DataFrame(
+        [
+            {
+                "ts_ms": day0 + 1,
+                "rebalance_day_ts": day0,
+                "rebalance_raw_return": 0.01,
+                "rebalance_scaled_equity": 1.01,
+                "rebalance_scaled_peak": 1.01,
+                "rebalance_mark_prices_json": _continuous_rebalance_mark_prices_json({"t1": 100.0}),
+            }
+        ],
+        infer_schema_length=None,
+    )
+    trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "strategy_id": continuous_strategy_id(cfg),
+                "symbol": "ABCUSDT",
+                "status": "open",
+                "entry_ts_ms": day0 - MS_PER_DAY,
+                "entry_price": 80.0,
+                "qty": "2",
+                "equity_usdt": 10_000.0,
+            }
+        ],
+        infer_schema_length=None,
+    )
+
+    fields = _continuous_rebalance_cycle_fields(
+        trades,
+        cycles,
+        price_by_symbol={"ABCUSDT": 90.0},
+        current_day_ts=day1,
+        now_ms=day1 + 1,
+        strategy_id=continuous_strategy_id(cfg),
+        rule=continuous_rebalance_rule(cfg),
+    )
+
+    expected_raw = ((100.0 - 90.0) / 100.0) * (2.0 * 100.0 / 10_000.0)
+    assert fields["rebalance_raw_return"] == pytest.approx(expected_raw)
+    assert fields["rebalance_target_scale"] == pytest.approx(1.0)
+    assert fields["rebalance_scaled_equity"] == pytest.approx(1.01 * (1.0 + expected_raw))
+    assert fields["rebalance_mark_prices_json"] == _continuous_rebalance_mark_prices_json({"t1": 90.0})
+
+
+def test_rebalance_cycle_fields_normalizes_by_prior_target_scale() -> None:
+    cfg = ContinuousDemoCycleConfig(daily_rebalance_enabled=True, record_dry_run=True)
+    day0 = (1_700_000_000_000 // MS_PER_DAY) * MS_PER_DAY
+    day1 = day0 + MS_PER_DAY
+    cycles = pl.DataFrame(
+        [
+            {
+                "ts_ms": day0 + 1,
+                "rebalance_day_ts": day0,
+                "rebalance_raw_return": 0.01,
+                "rebalance_scaled_equity": 1.02,
+                "rebalance_scaled_peak": 1.02,
+                "rebalance_target_scale": 2.0,
+                "rebalance_mark_prices_json": _continuous_rebalance_mark_prices_json({"t1": 100.0}),
+            }
+        ],
+        infer_schema_length=None,
+    )
+    trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "strategy_id": continuous_strategy_id(cfg),
+                "symbol": "ABCUSDT",
+                "status": "open",
+                "entry_ts_ms": day0 - MS_PER_DAY,
+                "entry_price": 80.0,
+                "qty": "4",
+                "equity_usdt": 10_000.0,
+            }
+        ],
+        infer_schema_length=None,
+    )
+
+    fields = _continuous_rebalance_cycle_fields(
+        trades,
+        cycles,
+        price_by_symbol={"ABCUSDT": 90.0},
+        current_day_ts=day1,
+        now_ms=day1 + 1,
+        strategy_id=continuous_strategy_id(cfg),
+        rule=continuous_rebalance_rule(cfg),
+    )
+
+    observed_scaled = ((100.0 - 90.0) / 100.0) * (4.0 * 100.0 / 10_000.0)
+    assert fields["rebalance_raw_return"] == pytest.approx(observed_scaled / 2.0)
+
+
+def test_rebalance_cycle_fields_includes_closed_trade_since_prior_mark() -> None:
+    cfg = ContinuousDemoCycleConfig(daily_rebalance_enabled=True, record_dry_run=True)
+    day0 = (1_700_000_000_000 // MS_PER_DAY) * MS_PER_DAY
+    day1 = day0 + MS_PER_DAY
+    cycles = pl.DataFrame(
+        [
+            {
+                "ts_ms": day0 + 1,
+                "rebalance_day_ts": day0,
+                "rebalance_mark_prices_json": _continuous_rebalance_mark_prices_json({"t1": 100.0}),
+            }
+        ],
+        infer_schema_length=None,
+    )
+    trades = pl.DataFrame(
+        [
+            {
+                "trade_id": "t1",
+                "strategy_id": continuous_strategy_id(cfg),
+                "symbol": "ABCUSDT",
+                "status": "closed",
+                "entry_ts_ms": day0 - MS_PER_DAY,
+                "exit_ts_ms": day1 + 1000,
+                "entry_price": 80.0,
+                "exit_price": 90.0,
+                "qty": "2",
+                "equity_usdt": 10_000.0,
+            }
+        ],
+        infer_schema_length=None,
+    )
+
+    fields = _continuous_rebalance_cycle_fields(
+        trades,
+        cycles,
+        price_by_symbol={},
+        current_day_ts=day1,
+        now_ms=day1 + 2000,
+        strategy_id=continuous_strategy_id(cfg),
+        rule=continuous_rebalance_rule(cfg),
+    )
+
+    expected_raw = ((100.0 - 90.0) / 100.0) * (2.0 * 100.0 / 10_000.0)
+    assert fields["rebalance_raw_return"] == pytest.approx(expected_raw)
+    assert fields["rebalance_closed_contributors"] == 1
+    assert fields["rebalance_mark_prices_json"] == "{}"
+
+
+def test_rebalance_resize_checked_today_uses_current_day_only() -> None:
+    day0 = (1_700_000_000_000 // MS_PER_DAY) * MS_PER_DAY
+    cycles = pl.DataFrame(
+        [
+            {"rebalance_day_ts": day0, "rebalance_resize_checked": True},
+            {"rebalance_day_ts": day0 + MS_PER_DAY, "rebalance_resize_checked": False},
+        ],
+        infer_schema_length=None,
+    )
+
+    assert _continuous_rebalance_resize_checked_today(cycles, current_day_ts=day0) is True
+    assert _continuous_rebalance_resize_checked_today(cycles, current_day_ts=day0 + MS_PER_DAY) is False
+    assert _continuous_rebalance_resize_checked_today(pl.DataFrame(), current_day_ts=day0) is False
+
+
+def test_continuous_cycle_daily_rebalance_resizes_once_per_day(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import liquidity_migration.continuous_demo as cd
+    from liquidity_migration.config import ResearchConfig
+    from liquidity_migration.storage import read_dataset, write_dataset
+
+    cfg = ContinuousDemoCycleConfig(
+        submit_orders=False,
+        record_dry_run=True,
+        daily_rebalance_enabled=True,
+        stop_approach_frac=0.0,
+        failed_fade_hours=9999,
+        max_hold_hours=9999,
+    )
+    root = tmp_path / "continuous-rebalance-cycle"
+    trades_ds, orders_ds, cycles_ds = continuous_dataset_names(cfg)
+    now = 1_700_000_000_000
+    day = (now // MS_PER_DAY) * MS_PER_DAY
+    strat = continuous_strategy_id(cfg)
+    write_dataset(
+        pl.DataFrame(
+            [
+                {
+                    "trade_id": "t1",
+                    "strategy_id": strat,
+                    "symbol": "ABCUSDT",
+                    "side": "short",
+                    "sleeve": "continuous",
+                    "status": "open",
+                    "entry_ts_ms": day - MS_PER_DAY,
+                    "entry_price": 100.0,
+                    "qty": "1",
+                    "notional_usdt": 100.0,
+                    "equity_usdt": 10_000.0,
+                    "qty_step": 0.1,
+                }
+            ],
+            infer_schema_length=None,
+        ),
+        root,
+        trades_ds,
+        partition_by=(),
+    )
+
+    price = {"value": 100.0}
+
+    def fake_resolve_cycle_universe(**_kwargs: object) -> tuple[pl.DataFrame, list[str], pl.DataFrame, str]:
+        universe = pl.DataFrame(
+            [
+                {
+                    "symbol": "ABCUSDT",
+                    "tick_size": 0.0001,
+                    "qty_step": 0.1,
+                    "min_order_qty": 0.1,
+                    "min_notional_value": 1.0,
+                    "max_market_order_qty": 10_000.0,
+                }
+            ],
+            infer_schema_length=None,
+        )
+        tickers = pl.DataFrame(
+            [{"symbol": "ABCUSDT", "mark_price": price["value"], "last_price": price["value"]}],
+            infer_schema_length=None,
+        )
+        return universe, ["ABCUSDT"], tickers, "test"
+
+    def fake_klines(*_args: object, **_kwargs: object) -> tuple[pl.DataFrame, dict[str, int]]:
+        return pl.DataFrame(), {"store_rows": 0}
+
+    monkeypatch.setattr(cd, "_resolve_cycle_universe", fake_resolve_cycle_universe)
+    monkeypatch.setattr(cd, "_download_recent_1h_klines", fake_klines)
+
+    first = cd.run_continuous_demo_cycle(root, config=ResearchConfig(), demo_config=cfg, now_ms=now)
+    after_first = read_dataset(root, trades_ds)
+    resized = after_first.filter(pl.col("trade_id") == "t1").to_dicts()[0]
+    first_orders = read_dataset(root, orders_ds)
+
+    assert first["rebalance_resize_orders"] == 1
+    assert first["rebalance_resize_skipped_same_day"] is False
+    assert resized["qty"] == "2"
+    assert first_orders.filter(pl.col("resize_reason") == "rebalance_increase").height == 1
+
+    price["value"] = 50.0
+    second = cd.run_continuous_demo_cycle(root, config=ResearchConfig(), demo_config=cfg, now_ms=now + MS_PER_HOUR)
+    after_second = read_dataset(root, trades_ds)
+    second_trade = after_second.filter(pl.col("trade_id") == "t1").to_dicts()[0]
+    second_orders = read_dataset(root, orders_ds)
+    cycles = read_dataset(root, cycles_ds)
+
+    assert second["rebalance_resize_orders"] == 0
+    assert second["rebalance_resize_skipped_same_day"] is True
+    assert second_trade["qty"] == "2"
+    assert second_orders.filter(pl.col("resize_reason") == "rebalance_increase").height == 1
+    assert cycles.filter(pl.col("rebalance_resize_checked") == True).height == 2  # noqa: E712
 
 
 def test_load_rmom_table_degrades_to_none_on_corrupt_file(tmp_path) -> None:

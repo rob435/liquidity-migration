@@ -29,6 +29,7 @@ from .config import ResearchConfig
 from .continuous_demo import (
     ContinuousDemoCycleConfig,
     LivePanelCache,
+    apply_continuous_demo_profile,
     format_continuous_demo_cycle_summary,
     run_continuous_demo_cycle,
     run_continuous_protective_exit_cycle,
@@ -140,7 +141,7 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
     # the long daemon's scaffolding, so self.demo_config is genuinely a ContinuousDemoCycleConfig here.
     # The base stores it via an untyped assignment as LongNativeDemoCycleConfig; narrow it for the
     # checker. (mypy surfaced this real divergence — see the deferred BaseDemoDaemon note.)
-    demo_config: ContinuousDemoCycleConfig  # type: ignore[assignment]
+    demo_config: ContinuousDemoCycleConfig
 
     def __init__(
         self,
@@ -154,7 +155,7 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
         event_driven_cycle: bool = True,
         **kwargs: Any,
     ) -> None:
-        demo_config = demo_config or ContinuousDemoCycleConfig()
+        demo_config = apply_continuous_demo_profile(demo_config or ContinuousDemoCycleConfig())
         # The continuous sleeve genuinely uses ContinuousDemoCycleConfig (not a subclass of the long
         # sleeve's config) but reuses the long daemon's scaffolding, which only touches the common
         # config fields. The class-level `demo_config` annotation re-narrows it for this subclass; the
@@ -177,6 +178,7 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
         self._panel_cache: LivePanelCache | None = (
             LivePanelCache(
                 rmom_quantile=demo_config.rmom_quantile,
+                feature_set=demo_config.feature_set,
                 exclude_symbols=demo_config.exclude_symbols,
             )
             if demo_config.live_panel_cache_enabled

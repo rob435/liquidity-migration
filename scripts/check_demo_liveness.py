@@ -395,17 +395,26 @@ def gather_alerts(*, data_root: Path, units: list[str], now_ms: int, args: argpa
     return alerts
 
 
-def gather_continuous_alerts(*, continuous_root: Path, now_ms: int, args: argparse.Namespace) -> list[Alert]:
+def gather_continuous_alerts(
+    *,
+    continuous_root: Path,
+    now_ms: int,
+    args: argparse.Namespace,
+    cycles_dataset: str = "continuous_fade_demo_cycles",
+    trades_dataset: str = "continuous_fade_demo_trades",
+    check_stops: bool = True,
+) -> list[Alert]:
     """Per-sleeve liveness for the continuous-fade daemon: cycle-age (hung/down), rmom-gate freshness
     (the silent-blackout class), and server-side stop protection on its own open trades. The
-    continuous sleeve writes a SEPARATE ledger root + an unpartitioned ``continuous_fade_demo_cycles``
-    dataset, so it needs its own gather (the short-root ``gather_alerts`` never sees it)."""
+    continuous sleeve writes a SEPARATE ledger root + an unpartitioned cycle dataset, so it needs
+    its own gather (the short-root ``gather_alerts`` never sees it). Paper mode passes the
+    ``continuous_fade_paper_*`` datasets and skips live stop checks because it submits no orders."""
     if not continuous_root.exists():
         return []
     label = continuous_root.name
     alerts: list[Alert] = []
     try:
-        cyc = read_dataset(continuous_root, "continuous_fade_demo_cycles")
+        cyc = read_dataset(continuous_root, cycles_dataset)
     except Exception:  # noqa: BLE001 — watchdog never crashes
         cyc = pl.DataFrame()
     latest_ts = (
@@ -443,14 +452,14 @@ def gather_continuous_alerts(*, continuous_root: Path, now_ms: int, args: argpar
     # Stop protection on the continuous sleeve's own open trades. Account-wide same-symbol exclusion
     # (Rule A) means each netted venue position maps to one sleeve, so the same check is valid here.
     try:
-        tdf = read_dataset(continuous_root, "continuous_fade_demo_trades")
+        tdf = read_dataset(continuous_root, trades_dataset)
         open_ct = (
             tdf.filter(pl.col("status") == "open").to_dicts()
             if (not tdf.is_empty() and "status" in tdf.columns) else []
         )
     except Exception:  # noqa: BLE001
         open_ct = []
-    if open_ct:
+    if check_stops and open_ct:
         positions, perr = _venue_positions(args.settle_coin)
         if perr is None:
             alerts.extend(evaluate_stop_protection(open_trades=open_ct, venue_positions=positions))
@@ -519,12 +528,14 @@ def main() -> int:
         "--unit",
         action="append",
         default=None,
-        help="systemd unit(s) to liveness-check (repeatable). Defaults to the 5 core demo units.",
+        help="systemd unit(s) to liveness-check (repeatable). Defaults to the core demo/paper units.",
     )
     p.add_argument("--max-cycle-age-min", type=float, default=10.0, help="alert if no cycle within this many minutes")
     p.add_argument("--max-ws-lag-hours", type=float, default=6.0, help="warn if the WS kline feed is this stale")
     p.add_argument("--continuous-root", type=Path, default=Path("data/bybit-continuous-demo-event"),
                    help="continuous-fade sleeve root for its per-sleeve cycle-age + rmom-freshness + stop checks ('' to skip)")
+    p.add_argument("--continuous-paper-root", type=Path, default=Path("data/bybit-continuous-paper-event"),
+                   help="continuous-fade paper root for no-order evidence cycle-age + rmom-freshness checks ('' to skip)")
     p.add_argument("--long-root", type=Path, default=Path("data/bybit-long-demo-event"),
                    help="long-native sleeve root for its per-sleeve cycle-age + WS-staleness + stop checks ('' to skip)")
     p.add_argument("--max-rmom-stale-days", type=float, default=2.0,
@@ -542,10 +553,11 @@ def main() -> int:
         "liquidity-migration-bybit-paper.service",
         "liquidity-migration-bybit-long-demo.service",
         "liquidity-migration-bybit-long-paper.service",
-        # Continuous-fade sleeve (went live on demo 2026-06-01) — systemd-failed check here, PLUS its
-        # own per-sleeve cycle-age + rmom-freshness + stop-protection via gather_continuous_alerts
-        # (it reads the SEPARATE continuous root, since this invocation's data_root is the SHORT root).
+        # Continuous-fade demo unit is order-submitting but disabled by default via
+        # CONTINUOUS_SLEEVE=off; gather_alerts skips it when intentionally off. The separate
+        # continuous paper unit can stay on as no-order evidence collection.
         "liquidity-migration-bybit-continuous-demo.service",
+        "liquidity-migration-bybit-continuous-paper.service",
     ]
     state_file = args.state_file or (args.data_root / ".cache" / "liveness_watchdog.json")
     now_ms = _now_ms()
@@ -556,6 +568,17 @@ def main() -> int:
     alerts = gather_alerts(data_root=args.data_root, units=units, now_ms=now_ms, args=args) if _sleeve_on("SHORT_SLEEVE") else []
     if str(args.continuous_root) and _sleeve_on("CONTINUOUS_SLEEVE", default="off"):
         alerts.extend(gather_continuous_alerts(continuous_root=args.continuous_root, now_ms=now_ms, args=args))
+    if str(args.continuous_paper_root) and _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):
+        alerts.extend(
+            gather_continuous_alerts(
+                continuous_root=args.continuous_paper_root,
+                now_ms=now_ms,
+                args=args,
+                cycles_dataset="continuous_fade_paper_cycles",
+                trades_dataset="continuous_fade_paper_trades",
+                check_stops=False,
+            )
+        )
     if str(args.long_root) and _sleeve_on("LONG_SLEEVE"):
         alerts.extend(gather_long_alerts(long_root=args.long_root, now_ms=now_ms, args=args))
     state = _load_state(state_file)

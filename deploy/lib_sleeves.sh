@@ -7,12 +7,15 @@
 # is intentionally NOT here — it always runs and protects every sleeve's open positions.
 # The short sleeve = its demo daemon only (the real forward demo). Its PAPER shadow is a SEPARATE
 # toggle (SHORT_PAPER_SLEEVE) so a small/low-RAM host can run the demo without the second
-# full-universe paper process; long/continuous keep demo+paper bundled under one toggle each.
+# full-universe paper process. Continuous is split the same way: the DEMO order-submitting
+# sleeve stays off while the no-order PAPER evidence collector can run.
 SHORT_SLEEVE_UNITS="liquidity-migration-bybit-demo.service"
 SHORT_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-paper.service"
 LONG_SLEEVE_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service"
-CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service"
-# Timer the continuous sleeve owns (the daily rmom-gate refresh). Toggled with the sleeve.
+CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service"
+CONTINUOUS_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-continuous-paper.service"
+# Timer the continuous sleeve owns (the daily rmom-gate refresh). It runs when either
+# continuous demo or continuous paper is on, because both need residual_momentum.parquet.
 CONTINUOUS_SLEEVE_TIMERS="liquidity-migration-continuous-rmom-refresh.timer"
 
 # Load the toggles: committed defaults first, then an optional per-host override. Resolves the
@@ -31,6 +34,7 @@ lm_load_sleeve_toggles() {
     : "${SHORT_PAPER_SLEEVE:=on}"
     : "${LONG_SLEEVE:=on}"
     : "${CONTINUOUS_SLEEVE:=off}"
+    : "${CONTINUOUS_PAPER_SLEEVE:=on}"
 }
 
 # sleeve_on <value> -> 0 (true) if the toggle means "run this sleeve".
@@ -39,6 +43,10 @@ sleeve_on() {
         on|ON|On|1|true|TRUE|yes|YES) return 0 ;;
         *) return 1 ;;
     esac
+}
+
+continuous_rmom_refresh_on() {
+    sleeve_on "${CONTINUOUS_SLEEVE:-off}" || sleeve_on "${CONTINUOUS_PAPER_SLEEVE:-off}"
 }
 
 # apply_sleeve_enable <flag-value> <unit...> — on: `systemctl enable` each unit; off:

@@ -81,6 +81,13 @@ def test_round_trip_bps_impact_rises_with_size_and_falls_with_liquidity() -> Non
     assert _round_trip_bps(small, 5_000_000.0) < _round_trip_bps(small, 500_000.0)
 
 
+def test_round_trip_bps_uses_scaled_trade_notional_for_impact() -> None:
+    cfg = ContinuousEventConfig(deploy_capital_usd=1_000_000.0, impact_coef_bps=50.0)
+    base = _round_trip_bps(cfg, 1_000_000.0, notional_weight=0.02)
+    scaled = _round_trip_bps(cfg, 1_000_000.0, notional_weight=0.08)
+    assert scaled > base
+
+
 # --------------------------------------------------------------------------- fresh entries
 
 
@@ -153,6 +160,23 @@ def test_fresh_entries_entry_event_trigger_can_fire_inside_existing_decile_spell
     assert got == [("A", 2 * h)]
 
 
+def test_fresh_entries_entry_max_ret168_gate_filters_explosive_pumps() -> None:
+    panel = pl.DataFrame(
+        {
+            "symbol": ["A", "B"],
+            "ts_ms": [0, 0],
+            "decile": [9, 9],
+            "composite": [0.9, 0.9],
+            "turnover_quote": [1e6, 1e6],
+            "max_ret168": [0.08, 0.25],
+        }
+    )
+    cfg = ContinuousEventConfig(decile=9, liq_turnover_min=500_000.0, entry_max_ret168_max=0.20)
+    fresh = _fresh_entries(panel, cfg)
+    got = sorted((r["symbol"], int(r["ts_ms"])) for r in fresh.to_dicts())
+    assert got == [("A", 0)]
+
+
 # --------------------------------------------------------------------------- concurrency / cooldown / funding
 
 
@@ -205,6 +229,84 @@ def test_run_trades_respects_max_active_cap() -> None:
     trades, skips = _run_trades(entries, bars, None, cfg)
     assert trades.height == 2
     assert skips["skipped_capacity"] == 4
+
+
+def test_run_trades_take_profit_exits_short_before_timer() -> None:
+    rows = []
+    for i in range(12):
+        close = 100.0
+        low = 100.0
+        if i == 3:
+            low = 94.0
+            close = 96.0
+        rows.append(
+            {
+                "ts_ms": i * MS_PER_HOUR,
+                "symbol": "A",
+                "open": 100.0,
+                "high": 100.0,
+                "low": low,
+                "close": close,
+            }
+        )
+    bars = _indexed_price_bars_by_symbol(pl.DataFrame(rows))
+    entries = pl.DataFrame({"symbol": ["A"], "ts_ms": [0], "composite": [0.9], "turnover_quote": [1e6]})
+    cfg = ContinuousEventConfig(
+        max_active=5,
+        hold_hours=10,
+        entry_delay_hours=0,
+        take_profit_pct=0.05,
+        use_funding=False,
+        flat_round_trip_bps=0.0,
+    )
+    trades, _ = _run_trades(entries, bars, None, cfg)
+    assert trades.height == 1
+    assert trades["exit_reason"][0] == "take_profit"
+    assert trades["exit_price"][0] == pytest.approx(95.0)
+    assert trades["hold_hours"][0] < 10.0
+
+
+def test_run_trades_rank_exit_cuts_short_when_composite_rank_decays() -> None:
+    bars = _indexed_price_bars_by_symbol(_grid_klines(["A"], 20))
+    entries = pl.DataFrame({"symbol": ["A"], "ts_ms": [0], "composite": [0.9], "turnover_quote": [1e6]})
+    rank_lookup = {("A", i * MS_PER_HOUR): 0.5 for i in range(20)}
+    cfg = ContinuousEventConfig(
+        max_active=5,
+        hold_hours=10,
+        entry_delay_hours=0,
+        rank_exit_threshold=0.8,
+        use_funding=False,
+        flat_round_trip_bps=0.0,
+    )
+    trades, _ = _run_trades(entries, bars, None, cfg, rank_lookup=rank_lookup)
+    assert trades.height == 1
+    assert trades["exit_reason"][0] == "rank_exit"
+    assert trades["hold_hours"][0] < 10.0
+
+
+def test_run_trades_entry_crowding_skips_overcrowded_signal_hours() -> None:
+    syms = ["A", "B", "C", "D"]
+    bars = _indexed_price_bars_by_symbol(_grid_klines(syms, 20))
+    entries = pl.DataFrame(
+        {
+            "symbol": syms,
+            "ts_ms": [0, 0, 0, 5 * MS_PER_HOUR],
+            "composite": [0.9] * 4,
+            "turnover_quote": [1e6] * 4,
+        }
+    )
+    cfg = ContinuousEventConfig(
+        max_active=5,
+        hold_hours=2,
+        entry_delay_hours=0,
+        entry_crowding_max_fresh=2,
+        use_funding=False,
+        flat_round_trip_bps=0.0,
+    )
+    trades, skips = _run_trades(entries, bars, None, cfg)
+    assert trades.height == 1
+    assert trades["symbol"][0] == "D"
+    assert skips["skipped_crowding"] == 3
 
 
 def test_run_trades_btc_trend_gate_uses_signal_day() -> None:
@@ -331,7 +433,7 @@ def test_run_trades_funding_to_exit_credits_short() -> None:
 # --------------------------------------------------------------------------- end-to-end on a synthetic root
 
 
-def _build_synthetic_root(tmp_path, *, n_symbols: int = 26, n_bars: int = 500):
+def _build_synthetic_root(tmp_path, *, n_symbols: int = 26, n_bars: int = 500, include_btc: bool = False):
     """A synthetic full-PIT root: klines_1h + funding + residual_momentum.parquet.
 
     Enough symbols (so the rmom-low half still deciles up to 9) and enough bars (so the 720h
@@ -352,6 +454,21 @@ def _build_synthetic_root(tmp_path, *, n_symbols: int = 26, n_bars: int = 500):
             ts = start + i * MS_PER_HOUR
             rows.append({"ts_ms": ts, "symbol": f"S{s:02d}", "open": p, "high": p * 1.01,
                          "low": p * 0.99, "close": p, "volume_base": 1000.0, "turnover_quote": 1_000_000.0})
+    if include_btc:
+        p = 20_000.0
+        for i in range(n_bars):
+            p *= 1.0005
+            ts = start + i * MS_PER_HOUR
+            rows.append({
+                "ts_ms": ts,
+                "symbol": "BTCUSDT",
+                "open": p,
+                "high": p * 1.001,
+                "low": p * 0.999,
+                "close": p,
+                "volume_base": 1000.0,
+                "turnover_quote": 100_000_000.0,
+            })
     klines = pl.DataFrame(rows)
     write_dataset(klines, root, "klines_1h")
 
@@ -404,3 +521,39 @@ def test_end_to_end_run_produces_trades_equity_and_artifacts(tmp_path) -> None:
     assert (tmp_path / "rep" / "continuous_report.json").exists()
     assert (tmp_path / "rep" / "continuous_trades.csv").exists()
     assert (tmp_path / "rep" / "continuous_equity.png").exists()
+
+
+def test_end_to_end_btc_trend_gate_passes_computed_trend_to_trade_walker(tmp_path) -> None:
+    root, start, _ = _build_synthetic_root(tmp_path, n_symbols=26, n_bars=1200, include_btc=True)
+    cfg = ContinuousEventConfig(
+        start_date=_iso(start + 36 * MS_PER_DAY),
+        end_date=_iso(start + 45 * MS_PER_DAY),
+        hold_hours=6,
+        entry_delay_hours=1,
+        max_active=10,
+        use_funding=False,
+        btc_trend_gate="uptrend",
+        split_date=_iso(start + 40 * MS_PER_DAY),
+    )
+    payload = run_continuous_event_research(root, config=cfg, report_dir=tmp_path / "btc_gate_rep")
+    assert payload["n_fresh_entries"] > 0
+    assert payload["n_trades"] > 0
+    assert payload["skips"]["skipped_btc_trend"] < payload["n_fresh_entries"]
+
+
+def test_end_to_end_age_gate_loads_enough_history_for_age_test(tmp_path) -> None:
+    root, start, _ = _build_synthetic_root(tmp_path, n_symbols=26, n_bars=2200)
+    cfg = ContinuousEventConfig(
+        start_date=_iso(start + 70 * MS_PER_DAY),
+        end_date=_iso(start + 82 * MS_PER_DAY),
+        hold_hours=6,
+        entry_delay_hours=1,
+        max_active=10,
+        use_funding=False,
+        age_days_min=60,
+        split_date=_iso(start + 76 * MS_PER_DAY),
+    )
+    payload = run_continuous_event_research(root, config=cfg, report_dir=tmp_path / "age_gate_rep")
+    assert payload["n_fresh_entries"] > 0
+    assert payload["n_trades"] > 0
+    assert payload["skips"]["skipped_gate"] < payload["n_fresh_entries"]

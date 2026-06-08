@@ -71,8 +71,10 @@ class ContinuousEventConfig:
     exit_mode: str = "fixed"              # "fixed" = hold_hours timer; "state" = hold while in the fade decile
     hold_hours: int = 12                  # fixed-mode hold horizon
     max_hold_hours: int = 48              # state-mode cap (force exit if the name never leaves the decile)
+    rank_exit_threshold: float = 0.0      # 0=off; short exits when composite rank fraction falls below threshold
     cooldown_hours: int = 0               # 0 -> fixed: hold_hours; state: 0 (spell-fresh already dedupes)
     stop_loss_pct: float = 0.0            # 0 -> no stop (proxy parity)
+    take_profit_pct: float = 0.0          # 0 -> no take-profit; short TP exits on favorable downside
     stop_vol_mult: float = 0.0            # >0 -> vol-scaled stop = k * trailing hourly vol (overrides fixed
     #                                       stop_loss_pct per-trade), clamped to [5%,50%]. 0 -> fixed stop.
     stop_fill_mode: str = "bar_extreme_capped"
@@ -87,11 +89,13 @@ class ContinuousEventConfig:
     impact_exponent: float = 0.5
     deploy_capital_usd: float = 1_000_000.0
     flat_round_trip_bps: float | None = None   # override the cost model (proxy-parity validation)
+    round_trip_cost_multiplier: float = 1.0    # stress knob; 1.0 preserves the base cost model
     # --- inherited-from-daily refinements (ablation knobs; default OFF = current baseline) ---
     sizing_mode: str = "flat"             # "flat" (2% each) | "inverse_vol" (size by target_vol/rv, clamped)
     target_vol_per_name: float = 0.02     # inverse_vol: per-name hourly-vol target
     vol_weight_clamp: float = 3.0         # inverse_vol: clamp weight multiplier to [1/clamp, clamp]
     age_days_min: int = 0                 # skip symbols younger than this (fresh-listing squeezers)
+    entry_max_ret168_max: float = 10.0    # skip entries with trailing 168h max 1h return above this; 10=off
     entry_decel_lookback_h: int = 0       # 0=off; require close[t]/close[t-lookback]-1 <= entry_decel_max_ret
     entry_decel_max_ret: float = 0.0      # fade-started confirmation: recent move must be <= this
     market_min_ret_1d: float = -1.0       # skip entry if equal-weight market 1d return < this (-1 = off)
@@ -110,6 +114,7 @@ class ContinuousEventConfig:
     # engine validates the live knob (net_return<0 is the engine-side proxy for the live adverse set).
     entry_pause_after_adverse_exits: int = 0
     entry_pause_window_hours: int = 24
+    entry_crowding_max_fresh: int = 0     # 0=off; skip signal hours with more fresh candidates than this
     # --- funding / splits / universe ---
     use_funding: bool = True
     split_date: str = "2025-06-01"        # early/recent boundary
@@ -366,23 +371,49 @@ def _fresh_entries(panel: pl.DataFrame, config: ContinuousEventConfig) -> pl.Dat
     d = d.with_columns(pl.col("fresh").cum_sum().over("symbol").alias("_spell"))
     d = d.with_columns(pl.col("ts_ms").max().over(["symbol", "_spell"]).alias("spell_end_ts"))
     d = d.filter(pl.col("fresh")).filter(pl.col("turnover_quote") >= config.liq_turnover_min)
+    if config.entry_max_ret168_max < 10.0:
+        if "max_ret168" not in d.columns:
+            raise ValueError("entry_max_ret168_max requires max_ret168 in the continuous panel")
+        d = d.filter(pl.col("max_ret168") <= config.entry_max_ret168_max)
     return d.select("symbol", "ts_ms", "composite", "turnover_quote", "spell_end_ts").sort(["ts_ms", "symbol"])
 
 
-def _round_trip_bps(config: ContinuousEventConfig, turnover_quote: float) -> float:
+def _continuous_rank_lookup(panel: pl.DataFrame, *, delay_ms: int) -> dict[tuple[str, int], float]:
+    """Composite rank by symbol and actionable bar-end timestamp for rank-decay exits."""
+    output: dict[tuple[str, int], float] = {}
+    if panel.is_empty() or "composite" not in panel.columns:
+        return output
+    for part in panel.select("symbol", "ts_ms", "composite").drop_nulls().sort(["ts_ms", "symbol"]).partition_by(
+        "ts_ms", maintain_order=True
+    ):
+        values = part.filter(pl.col("composite").is_finite()).sort("composite")
+        if values.height < 2:
+            continue
+        check_ts = int(values["ts_ms"][0]) + delay_ms
+        denom = max(values.height - 1, 1)
+        for rank, row in enumerate(values.to_dicts()):
+            output[(str(row["symbol"]), check_ts)] = rank / denom
+    return output
+
+
+def _round_trip_bps(
+    config: ContinuousEventConfig, turnover_quote: float, *, notional_weight: float | None = None
+) -> float:
     """Round-trip cost (bps): 2*taker + 2*spread + 2*impact; impact is size/ADV-aware.
 
     participation = position_notional / signal-bar hourly turnover (the ADV proxy).
     A flat_round_trip_bps override bypasses the model for proxy-parity validation.
     """
+    cost_multiplier = max(float(config.round_trip_cost_multiplier), 0.0)
     if config.flat_round_trip_bps is not None:
-        return float(config.flat_round_trip_bps)
+        return float(config.flat_round_trip_bps) * cost_multiplier
     base = 2.0 * (config.taker_fee_bps + config.spread_bps)
-    notional = config.notional_weight * config.deploy_capital_usd
+    weight = config.notional_weight if notional_weight is None else float(notional_weight)
+    notional = max(weight, 0.0) * config.deploy_capital_usd
     adv = max(float(turnover_quote), 1.0)
     participation = notional / adv
     impact = config.impact_coef_bps * (participation ** config.impact_exponent)
-    return base + 2.0 * impact
+    return (base + 2.0 * impact) * cost_multiplier
 
 
 def _market_daily_returns(klines: pl.DataFrame) -> dict[int, float]:
@@ -448,6 +479,7 @@ def _run_trades(
     config: ContinuousEventConfig,
     market_daily: dict[int, float] | None = None,
     btc_trend_daily: dict[int, float] | None = None,
+    rank_lookup: dict[tuple[str, int], float] | None = None,
 ) -> tuple[pl.DataFrame, dict[str, int]]:
     """Walk fresh entries in ts order; apply concurrency + cooldown + the inherited selection gates
     (age / fade-deceleration / market-context), size by the chosen rule, and simulate each via the
@@ -459,7 +491,7 @@ def _run_trades(
     # Exit ladder inherited from the daily engine (off unless the config sets them).
     lifecycle = TradeLifecycleConfig(
         start_date=config.start_date, end_date=config.end_date,
-        hold_days=max(1, round(config.hold_hours / 24)), take_profit_pct=0.0,
+        hold_days=max(1, round(config.hold_hours / 24)), take_profit_pct=max(config.take_profit_pct, 0.0),
         failed_fade_exit_hours=config.failed_fade_hours,
         failed_fade_loss_pct=config.failed_fade_loss_pct,
         failed_fade_min_mfe_pct=config.failed_fade_min_mfe_pct,
@@ -467,6 +499,9 @@ def _run_trades(
         breakeven_arm_pct=config.breakeven_arm_pct,
         mfe_giveback_trigger_pct=config.mfe_giveback_trigger_pct,
         mfe_giveback_retain_pct=config.mfe_giveback_retain_pct,
+        side_mode="long_low_short_high",
+        rank_exit_enabled=config.rank_exit_threshold > 0.0,
+        rank_exit_threshold=config.rank_exit_threshold,
     )
     base_nw = config.notional_weight
     inverse_vol = config.sizing_mode == "inverse_vol"
@@ -481,6 +516,12 @@ def _run_trades(
     stop_pct = config.stop_loss_pct if config.stop_loss_pct > 0.0 else None
     pause_window_ms = config.entry_pause_window_hours * MS_PER_HOUR
     breaker_on = config.entry_pause_after_adverse_exits > 0 and pause_window_ms > 0
+    crowding_on = config.entry_crowding_max_fresh > 0
+    signal_counts: dict[int, int] = {}
+    if crowding_on:
+        for ts in entries["ts_ms"].to_list():
+            ts_i = int(ts)
+            signal_counts[ts_i] = signal_counts.get(ts_i, 0) + 1
     adverse_exit_ts: list[int] = []   # ASCENDING net-negative exit timestamps (circuit-breaker, causal)
     active: list[int] = []          # min-heap of actual exit timestamps of open positions
     last_entry: dict[str, int] = {}
@@ -489,6 +530,7 @@ def _run_trades(
     if btc_gate not in ("off", "uptrend", "downtrend"):
         raise ValueError(f"btc_trend_gate must be 'off', 'uptrend', or 'downtrend'; got {btc_gate!r}")
     skipped_capacity = skipped_cooldown = skipped_no_bar = skipped_gate = skipped_breaker = skipped_btc_trend = 0
+    skipped_crowding = 0
     syms = entries["symbol"].to_list()
     tss = entries["ts_ms"].to_list()
     comps = entries["composite"].to_list()
@@ -502,6 +544,9 @@ def _run_trades(
         entry_bar_end = int(sig_ts) + delay_ms
         while active and active[0] <= entry_bar_end:
             heapq.heappop(active)
+        if crowding_on and signal_counts.get(int(sig_ts), 0) > config.entry_crowding_max_fresh:
+            skipped_crowding += 1
+            continue
         # Circuit breaker: pause this entry if too many net-negative covers have CLOSED in the trailing
         # window (a correlated alt-squeeze). Causal — adverse_exit_ts holds only exits already simulated,
         # and the [entry_bar_end-window, entry_bar_end) slice counts only those that closed before now.
@@ -569,8 +614,8 @@ def _run_trades(
             rank=int(config.decile), basket_id=_iso_day(entry_bar_end), signal_ts_ms=int(sig_ts),
             entry_bar=int(entry_bar), symbol_bars=bars, planned_exit_ts_ms=planned_exit,
             notional_weight=nw, position_weight=1.0, config=lifecycle,
-            round_trip_cost_bps=_round_trip_bps(config, turn), stop_pct=trade_stop,
-            rank_lookup={}, event_decay_threshold=0.0,
+            round_trip_cost_bps=_round_trip_bps(config, turn, notional_weight=nw), stop_pct=trade_stop,
+            rank_lookup=rank_lookup or {}, event_decay_threshold=0.0,
             funding_lookup=funding_lookup if config.use_funding else None,
             stop_fill_mode=config.stop_fill_mode, stop_slippage_cap_pct=config.stop_slippage_cap_pct,
         )
@@ -589,6 +634,7 @@ def _run_trades(
         "skipped_gate": skipped_gate,
         "skipped_breaker": skipped_breaker,
         "skipped_btc_trend": skipped_btc_trend,
+        "skipped_crowding": skipped_crowding,
     }
     if not rows:
         return _empty_trades(), skips
@@ -784,8 +830,10 @@ def run_continuous_event_research(
     kname = _autodetect_dataset_names(root)["klines_dataset"]
     start_ms, end_ms = _date_str_to_ms(config.start_date), _date_str_to_ms(config.end_date)
     pad_fwd = (config.hold_hours + config.entry_delay_hours + 4) * MS_PER_HOUR
+    pad_back_days = max(31 if config.btc_trend_gate != "off" else 0, max(config.age_days_min, 0))
+    pad_back = pad_back_days * MS_PER_DAY
     klines = _read_window(
-        root, kname, start_ms=start_ms, end_ms=end_ms + pad_fwd,
+        root, kname, start_ms=start_ms - pad_back, end_ms=end_ms + pad_fwd,
         columns=["ts_ms", "symbol", "open", "high", "low", "close"],
     )
     if config.exclude_symbols and not klines.is_empty():
@@ -802,8 +850,18 @@ def run_continuous_event_research(
     if config.market_min_ret_1d > -1.0 and not klines.is_empty():
         market_daily = _market_daily_returns(klines)
 
+    btc_trend_daily = None
+    if config.btc_trend_gate != "off" and not klines.is_empty():
+        btc_trend_daily = _btc_trend_returns(klines)
+
+    rank_lookup = None
+    if config.rank_exit_threshold > 0.0 and not panel.is_empty():
+        rank_lookup = _continuous_rank_lookup(panel, delay_ms=(1 + config.entry_delay_hours) * MS_PER_HOUR)
+
     if not entries.is_empty() and symbol_bars:
-        trades, skips = _run_trades(entries, symbol_bars, funding_lookup, config, market_daily)
+        trades, skips = _run_trades(
+            entries, symbol_bars, funding_lookup, config, market_daily, btc_trend_daily, rank_lookup
+        )
     else:
         trades, skips = _empty_trades(), {}
 

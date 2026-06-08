@@ -2,10 +2,21 @@
 
 The active VPS services are:
 
-- `liquidity-migration-bybit-demo.service`: event entry/normal lifecycle runner.
-- `liquidity-migration-bybit-risk.service`: fast exit-only risk runner.
-- `liquidity-migration-bybit-paper.service`: dry-run paper shadow of the demo
-  runner on a separate data root (`data/bybit-paper-event`) — submits no orders.
+- `liquidity-migration-bybit-demo.service`: short event entry/normal lifecycle runner.
+- `liquidity-migration-bybit-paper.service`: dry-run paper shadow of the short runner
+  on `data/bybit-paper-event` — submits no orders.
+- `liquidity-migration-bybit-long-demo.service` and
+  `liquidity-migration-bybit-long-paper.service`: long-native v11a demo/paper pair.
+- `liquidity-migration-bybit-risk.service`: shared fast exit-only risk runner for every
+  configured ledger root; it has no sleeve toggle.
+- `liquidity-migration-bybit-continuous-paper.service`: no-order continuous evidence
+  collector when `CONTINUOUS_PAPER_SLEEVE=on`.
+
+`liquidity-migration-bybit-continuous-demo.service` is present but disabled by default:
+`CONTINUOUS_SLEEVE=off` is the committed safety toggle, so continuous demo order submission
+does not start on deploy. `deploy/sleeves.env` plus optional
+`/etc/liquidity-migration/sleeves.env` are the source of truth for which sleeves are
+enabled.
 
 Install or refresh it on the VPS from a trusted local checkout:
 
@@ -16,15 +27,15 @@ EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/verify_vps_live.sh
 
 The script refuses a dirty VPS checkout, forces the configured remote URL,
 resets the deploy branch to `origin/main`, runs focused runtime tests, checks
-the promoted TP26 and live TP21+FF6 strategy constants, backs up
-`/etc/liquidity-migration/bybit-demo.env`, enforces the expected Telegram chat ID,
-disables retired legacy units (`model050426.service` plus the old daily signal
-timer/service), refreshes both active systemd units, restarts both services, and
-prints the active systemd state plus non-secret entry-profile settings. The
-verify script is read-only and checks the same commit, strategy
-constants, Telegram chat ID, systemd unit settings, and active service state
-without pulling or restarting; it also fails if retired legacy units are still
-active or enabled.
+the promoted strategy constants, backs up `/etc/liquidity-migration/bybit-demo.env`,
+enforces the expected Telegram chat ID, disables retired legacy units
+(`model050426.service` plus the old daily signal timer/service), syncs all
+`deploy/systemd/liquidity-migration-*` service/timer files, applies the sleeve
+kill-switches, restarts the shared risk service and only the enabled sleeve units,
+and prints active systemd state plus non-secret entry-profile settings. The verify
+script is read-only and checks the same commit, strategy constants, Telegram chat ID,
+systemd unit settings, sleeve active/enabled state, and retired-unit state without
+pulling or restarting.
 Both scripts wait briefly before checking service activity so a process that
 dies immediately after startup does not produce a false pass. Override with
 `SYSTEMD_SETTLE_SECONDS=<seconds>` if needed.
@@ -53,11 +64,11 @@ ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX
 ```
 
 On the VPS, the target file is normally `/root/.ssh/authorized_keys` for the
-default `SSH_TARGET=root@204.168.202.167`.
+default `SSH_TARGET=root@116.202.15.128`.
 
-The current VPS address `204.168.202.167` resolves to Hetzner Online's
-Helsinki cloud network. If SSH is unavailable but the Hetzner Cloud web console
-opens the installed OS as root, run the recovery deploy directly on the VPS:
+The current VPS address is `116.202.15.128`. If SSH is unavailable but the
+Hetzner Cloud web console opens the installed OS as root, run the recovery deploy
+directly on the VPS:
 
 ```bash
 scripts/print_vps_recovery_command.sh
@@ -97,12 +108,13 @@ same fingerprints, clones or repairs `/opt/liquidity-migration`,
 forces the configured remote URL, resets the deploy branch to `origin/main`,
 builds the local venv if needed, installs missing Ubuntu deploy prerequisites,
 writes an sshd recovery override for root public-key login, prints the effective
-sshd root-login settings, validates the promoted TP26 and live TP21+FF6
-constants, refreshes systemd, restarts both live services, and prints non-secret
-service state. It prints `deploy-verify-ok` only after it has also verified the
-active units are enabled, retired legacy units are inactive and disabled, the
-demo service has the expected one-minute `promoted` settings, and the risk
-service uses `ORDER_SUBMIT_MODE=ws_then_rest`. Set
+sshd root-login settings, validates the promoted strategy constants, refreshes
+systemd, applies the same sleeve kill-switches as the normal deploy, restarts the
+shared risk service and enabled sleeves, and prints non-secret service state. It
+prints `deploy-verify-ok` only after it has also verified enabled sleeves are
+active/enabled, disabled sleeves are down, retired legacy units are inactive and
+disabled, the demo service has the expected one-minute `promoted` settings, and
+the risk service uses `ORDER_SUBMIT_MODE=ws_then_rest`. Set
 `EXPECTED_COMMIT=<full sha>` before `bash` if you want the console deploy to
 refuse anything except one pinned commit.
 The console script also waits before checking active service state; override
@@ -116,19 +128,23 @@ diffs, status, and a tarball/list of untracked non-ignored files under
 removed by that clean command. The generated strict command omits
 `CLEAN_DIRTY_CHECKOUT=1` and refuses a dirty checkout.
 
-Manual install or refresh on the VPS:
+Manual install or refresh on the VPS, if you are deliberately bypassing the checked
+deploy scripts:
 
 ```bash
-cp deploy/systemd/liquidity-migration-bybit-demo.service /etc/systemd/system/liquidity-migration-bybit-demo.service
-cp deploy/systemd/liquidity-migration-bybit-risk.service /etc/systemd/system/liquidity-migration-bybit-risk.service
-cp deploy/systemd/liquidity-migration-bybit-paper.service /etc/systemd/system/liquidity-migration-bybit-paper.service
+cp deploy/systemd/liquidity-migration-*.service /etc/systemd/system/
+cp deploy/systemd/liquidity-migration-*.timer /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now liquidity-migration-bybit-demo.service
 systemctl enable --now liquidity-migration-bybit-risk.service
 systemctl enable --now liquidity-migration-bybit-paper.service
-systemctl restart liquidity-migration-bybit-demo.service
-systemctl restart liquidity-migration-bybit-risk.service
-systemctl restart liquidity-migration-bybit-paper.service
+systemctl enable --now liquidity-migration-bybit-long-demo.service
+systemctl enable --now liquidity-migration-bybit-long-paper.service
+systemctl enable --now liquidity-migration-demo-health.timer
+systemctl enable --now liquidity-migration-demo-liveness.timer
+systemctl enable --now liquidity-migration-combined-book-report.timer
+# Enable continuous paper only if the sleeve toggle says it should run; keep continuous demo off
+# unless the operator explicitly enables order submission.
 ```
 
 Required secrets live outside git in:

@@ -61,7 +61,7 @@ EXPECTED_COMMIT="$commit_sha" scripts/verify_vps_live.sh
 EXPECTED_COMMIT="$commit_sha" scripts/wait_for_vps_recovery_and_deploy.sh
 
 # Recommended full Hetzner Cloud console recovery, as root:
-# Open the Hetzner Cloud web console for 204.168.202.167, then paste this
+# Open the Hetzner Cloud web console for 116.202.15.128, then paste this
 # into the installed OS shell as root. If that console is unavailable, enable
 # Hetzner Rescue and use the rescue command above first.
 $recommended_command

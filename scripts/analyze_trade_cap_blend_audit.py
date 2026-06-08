@@ -92,7 +92,11 @@ def _venue_dir(root: Path, venue: str) -> Path:
     summary = _run_summary(root, venue)
     cap = float(summary["max_active_notional"])
     cost = float(summary["cost_multiplier"])
-    return root / f"cap{cap:g}_cost{cost:g}" / venue
+    label = f"cap{cap:g}"
+    threshold = summary.get("addon_same_symbol_primary_min_unrealized")
+    if threshold not in (None, ""):
+        label = f"{label}_pnl{float(threshold):g}"
+    return root / f"{label}_cost{cost:g}" / venue
 
 
 def _equity_from_returns(rows: pl.DataFrame, ret_col: str) -> pl.DataFrame:
@@ -672,6 +676,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runs", required=True, help="Comma-separated label=trade_cap_root entries.")
     parser.add_argument("--out", required=True)
+    parser.add_argument("--venues", default=",".join(VENUES), help="Comma-separated venues to audit.")
     parser.add_argument(
         "--cooldown-hours",
         default="6,12,24,48",
@@ -688,6 +693,10 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     runs = _parse_runs(args.runs)
+    venues = tuple(v.strip() for v in args.venues.split(",") if v.strip())
+    unknown = [venue for venue in venues if venue not in VENUES]
+    if unknown:
+        raise SystemExit(f"unknown venue(s): {', '.join(unknown)}")
     cooldown_hours = _parse_cooldown_hours(args.cooldown_hours)
     primary_pnl_thresholds = _parse_float_grid(args.primary_pnl_thresholds)
     out_root = Path(args.out).expanduser()
@@ -702,7 +711,7 @@ def main() -> int:
     cooldown_rows: list[dict[str, Any]] = []
     summary_rows: list[dict[str, Any]] = []
     for label, root in runs.items():
-        for venue in VENUES:
+        for venue in venues:
             summary_rows.append({"run": label, **_run_summary(root, venue)})
             period_rows.extend(_period_rows(label, venue, root))
             src, sym, conc = _trade_rows(label, venue, root)

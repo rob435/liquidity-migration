@@ -18,7 +18,8 @@ decile (D9). Enter when it is in D9 + liquid + not already held + capacity; exit
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from dataclasses import dataclass, replace
 from typing import Any, cast
 
 import numpy as np
@@ -27,8 +28,10 @@ import polars as pl
 from ._common import MS_PER_DAY, MS_PER_HOUR
 from .config import DEFAULT_EXCLUDED_SYMBOLS
 from .continuous_events import (
+    FEATURES,
     compute_continuous_decile_panel,
     cross_sectional_decile,
+    _btc_trend_returns,
     _entry_event_expr,
     per_symbol_timeseries_features,
 )
@@ -39,7 +42,7 @@ CONTINUOUS_ENTRY_LINK_PREFIX = "en-c"   # lm-en-c-{base}-{ts36}  (5-part; distin
 CONTINUOUS_EXIT_LINK_PREFIX = "ux-c"    # lm-ux-c-{base}-{ts36}
 CONTINUOUS_ADDON_ENTRY_LINK_PREFIX = "en-ca"
 CONTINUOUS_ADDON_EXIT_LINK_PREFIX = "ux-ca"
-CONTINUOUS_DEMO_PROFILES = ("continuous_v1", "continuous_addon_v1")
+CONTINUOUS_DEMO_PROFILES = ("continuous_v1", "continuous_addon_v1", "continuous_rebalance_v1")
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +57,7 @@ class ContinuousDemoCycleConfig:
     # validated rmom squeeze-filter used tighter (NOT a new signal). ~−23% return = MAR-primary win.
     # docs/preregistration/alpha-sweep-2026-06-02.md. EXPLORATORY — forward demo is the arbiter.
     rmom_quantile: float = 0.33
+    feature_set: tuple[str, ...] = FEATURES
     liq_turnover_min: float = 500_000.0   # liquid gate: signal-bar hourly turnover_quote (USD)
     side: str = "short"
     # --- live state window ---
@@ -70,6 +74,7 @@ class ContinuousDemoCycleConfig:
     # docs/preregistration/alpha-sweep-2026-06-02.md. EXPLORATORY — forward demo is the arbiter.
     entry_confirm_delay_hours: int = 1
     entry_event_trigger: str = "none"      # opt-in confirmed-hour event gate: none | fresh_pop25 | popX_gbY | ...
+    btc_trend_gate: str = "off"            # off | uptrend | downtrend; causal prior-30d BTC return gate.
     # --- anti-thrash (a name oscillating on the D9 boundary would otherwise churn fees) ---
     # Hysteresis: ENTER on the top decile (`decile`), but only cover on the state-exit ("left
     # decile") once the name is CLEARLY out — its decile has dropped below `decile - exit_decile_buffer`.
@@ -157,6 +162,18 @@ class ContinuousDemoCycleConfig:
     # after an exit; this starts after any add-on entry so a fast close or distinct
     # signal window cannot immediately re-hit the same symbol.
     addon_same_symbol_entry_cooldown_minutes: int = 0
+    # --- research-stage daily-rebalance adapter ---
+    # Default OFF. Submitted demo resizes route through the venue client and
+    # mutate the ledger only after confirmed fills.
+    daily_rebalance_enabled: bool = False
+    daily_rebalance_realized_vol_window_days: int = 90
+    daily_rebalance_target_daily_vol: float = 0.025
+    daily_rebalance_max_scale: float = 4.0
+    daily_rebalance_drawdown_half_threshold: float = -0.04
+    daily_rebalance_resize_cost_bps: float = 10.0
+    daily_rebalance_strategy_momentum_window_days: int = 180
+    daily_rebalance_strategy_momentum_min_return: float = 0.02
+    daily_rebalance_strategy_momentum_scale_when_below: float = 0.0
     exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
     # --- live panel cache (Tier 2): compute the trailing closed-bar features once per bar close,
     # then refresh only the live-price term + re-rank on each wake. Provably np.allclose-equivalent
@@ -229,7 +246,13 @@ def build_live_continuous_state(
     if cur.is_empty():
         return _empty_live_state()
     combined = pl.concat([k, cur], how="vertical_relaxed")
-    panel = compute_continuous_decile_panel(combined, rmom, rmom_quantile=config.rmom_quantile, start_ms=0)
+    panel = compute_continuous_decile_panel(
+        combined,
+        rmom,
+        rmom_quantile=config.rmom_quantile,
+        start_ms=0,
+        feature_set=config.feature_set,
+    )
     return _select_live_state_columns(panel.filter(pl.col("ts_ms") == cur_ts))
 
 
@@ -259,7 +282,13 @@ def build_confirmed_entry_state(
         k = k.filter(~pl.col("symbol").is_in(list(config.exclude_symbols)))
     if k.is_empty():
         return _empty_live_state()
-    panel = compute_continuous_decile_panel(k, rmom, rmom_quantile=config.rmom_quantile, start_ms=0)
+    panel = compute_continuous_decile_panel(
+        k,
+        rmom,
+        rmom_quantile=config.rmom_quantile,
+        start_ms=0,
+        feature_set=config.feature_set,
+    )
     return _select_live_state_columns(panel.filter(pl.col("ts_ms") == deciding_ts))
 
 
@@ -301,10 +330,17 @@ class LivePanelCache:
     fallback in the cycle, so a cache bug degrades to "slower", never "wrong".
     """
 
-    __slots__ = ("_rmom_quantile", "_exclude", "_cur_ts", "_sig", "_carry", "refreshes", "live_updates")
+    __slots__ = ("_rmom_quantile", "_feature_set", "_exclude", "_cur_ts", "_sig", "_carry", "refreshes", "live_updates")
 
-    def __init__(self, *, rmom_quantile: float = 0.5, exclude_symbols: tuple[str, ...] = ()) -> None:
+    def __init__(
+        self,
+        *,
+        rmom_quantile: float = 0.5,
+        feature_set: tuple[str, ...] = FEATURES,
+        exclude_symbols: tuple[str, ...] = (),
+    ) -> None:
         self._rmom_quantile = float(rmom_quantile)
+        self._feature_set = tuple(feature_set)
         self._exclude = tuple(exclude_symbols)
         self._cur_ts: int | None = None
         self._sig: tuple[int, int, float, float] | None = None
@@ -457,7 +493,12 @@ class LivePanelCache:
                     "rv_168h": pl.Float64, "vov": pl.Float64, "dist_low": pl.Float64,
                     "ret72": pl.Float64, "ret168": pl.Float64},
         )
-        panel = cross_sectional_decile(frame, rmom, rmom_quantile=self._rmom_quantile)
+        panel = cross_sectional_decile(
+            frame,
+            rmom,
+            rmom_quantile=self._rmom_quantile,
+            feature_set=self._feature_set,
+        )
         return panel.select("symbol", "decile", "composite", "turnover_quote")
 
 
@@ -525,8 +566,8 @@ def _trade_excursion(
             )
             if not sub.is_empty():
                 lo = sub["low"].min()
-                if lo is not None and float(lo) > 0:  # type: ignore[arg-type]  # polars Series value
-                    min_low = float(lo)  # type: ignore[arg-type]  # polars Series value
+                if lo is not None and float(lo) > 0:
+                    min_low = float(lo)
         if include_live_in_mfe and cur is not None and float(cur) > 0:
             min_low = float(cur) if min_low is None else min(min_low, float(cur))
         if min_low is not None:
@@ -938,6 +979,68 @@ def continuous_sleeve_name(config: ContinuousDemoCycleConfig) -> str:
     return "continuous_addon" if config.strategy_profile == "continuous_addon_v1" else "continuous"
 
 
+def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> ContinuousDemoCycleConfig:
+    """Resolve named demo profiles into explicit knobs.
+
+    ``continuous_rebalance_v1`` is the current research-stage implementation
+    target pinned in promoted.py. It stays outside PROFILES and remains
+    default-off; selecting the profile makes a paper/demo cycle reproduce the
+    candidate contract instead of the older de-promoted continuous sleeve.
+    """
+    if config.strategy_profile != "continuous_rebalance_v1":
+        return config
+    return replace(
+        config,
+        rmom_quantile=0.25,
+        feature_set=("max_ret168",),
+        liq_turnover_min=500_000.0,
+        max_hold_hours=24,
+        entry_confirm_delay_hours=1,
+        entry_event_trigger="turn4_pop4",
+        btc_trend_gate="uptrend",
+        daily_rebalance_enabled=True,
+        daily_rebalance_realized_vol_window_days=90,
+        daily_rebalance_target_daily_vol=0.025,
+        daily_rebalance_max_scale=4.0,
+        daily_rebalance_drawdown_half_threshold=-0.04,
+        daily_rebalance_resize_cost_bps=10.0,
+        daily_rebalance_strategy_momentum_window_days=180,
+        daily_rebalance_strategy_momentum_min_return=0.02,
+        daily_rebalance_strategy_momentum_scale_when_below=0.0,
+    )
+
+
+def continuous_rebalance_rule(config: ContinuousDemoCycleConfig) -> ContinuousRebalanceRule:
+    return ContinuousRebalanceRule(
+        realized_vol_window_days=int(config.daily_rebalance_realized_vol_window_days),
+        target_daily_vol=float(config.daily_rebalance_target_daily_vol),
+        max_scale=float(config.daily_rebalance_max_scale),
+        drawdown_half_threshold=float(config.daily_rebalance_drawdown_half_threshold),
+        resize_cost_bps=float(config.daily_rebalance_resize_cost_bps),
+        strategy_momentum_window_days=int(config.daily_rebalance_strategy_momentum_window_days),
+        strategy_momentum_min_return=float(config.daily_rebalance_strategy_momentum_min_return),
+        strategy_momentum_scale_when_below=float(config.daily_rebalance_strategy_momentum_scale_when_below),
+    )
+
+
+def _btc_trend_gate_allows_entries(
+    klines: pl.DataFrame,
+    *,
+    signal_ts_ms: int,
+    config: ContinuousDemoCycleConfig,
+) -> bool:
+    gate = config.btc_trend_gate
+    if gate == "off":
+        return True
+    if gate not in ("uptrend", "downtrend"):
+        raise ValueError(f"btc_trend_gate must be 'off', 'uptrend', or 'downtrend'; got {gate!r}")
+    day = (int(signal_ts_ms) // MS_PER_DAY) * MS_PER_DAY
+    trend = _btc_trend_returns(klines).get(day)
+    if trend is None:
+        return False
+    return trend > 0.0 if gate == "uptrend" else trend <= 0.0
+
+
 def _continuous_entry_link_prefix(config: ContinuousDemoCycleConfig) -> str:
     return CONTINUOUS_ADDON_ENTRY_LINK_PREFIX if continuous_sleeve_name(config) == "continuous_addon" else CONTINUOUS_ENTRY_LINK_PREFIX
 
@@ -957,6 +1060,13 @@ from pathlib import Path  # noqa: E402
 from typing import Callable  # noqa: E402
 
 from .bybit import BybitMarketData  # noqa: E402
+from .continuous_rebalance import (  # noqa: E402
+    compute_continuous_rebalance_scale,
+    ContinuousRebalanceResizePlan,
+    ContinuousRebalanceRule,
+    ContinuousRebalanceScaleState,
+    plan_continuous_rebalance_resizes,
+)
 from .config import ResearchConfig  # noqa: E402
 from .event_demo import (  # noqa: E402
     EventDemoCycleConfig,
@@ -994,6 +1104,238 @@ def _open_continuous_trades(all_trades: pl.DataFrame, strategy_id: str) -> pl.Da
     return all_trades.filter(
         (pl.col("status") == "open") & (pl.col("strategy_id") == strategy_id)
     )
+
+
+def _finite_or_none(value: Any) -> float | None:
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if out != out or out in (float("inf"), float("-inf")):
+        return None
+    return out
+
+
+def _continuous_rebalance_scale_state_from_cycles(
+    cycles: pl.DataFrame,
+    *,
+    current_day_ts: int,
+) -> ContinuousRebalanceScaleState:
+    """Reconstruct rebalance scale state from prior persisted cycle rows.
+
+    The live/paper daily-rebalance rule must size from state known before the
+    current rebalance day. Cycle rows may be written multiple times per day, so
+    use the latest row per prior ``rebalance_day_ts`` and ignore current/future
+    rows entirely.
+    """
+    if cycles.is_empty():
+        return ContinuousRebalanceScaleState(prior_raw_returns=())
+
+    current_day = (int(current_day_ts) // MS_PER_DAY) * MS_PER_DAY
+    latest_by_day: dict[int, tuple[tuple[int, int], float, dict[str, Any]]] = {}
+    for idx, row in enumerate(cycles.to_dicts()):
+        day_value = _finite_or_none(row.get("rebalance_day_ts"))
+        raw_value = _finite_or_none(row.get("rebalance_raw_return"))
+        if day_value is None or raw_value is None:
+            continue
+        day = (int(day_value) // MS_PER_DAY) * MS_PER_DAY
+        if day >= current_day:
+            continue
+        ts_value = _finite_or_none(row.get("ts_ms"))
+        order_key = (int(ts_value) if ts_value is not None else 0, idx)
+        previous = latest_by_day.get(day)
+        if previous is None or order_key > previous[0]:
+            latest_by_day[day] = (order_key, raw_value, row)
+
+    if not latest_by_day:
+        return ContinuousRebalanceScaleState(prior_raw_returns=())
+
+    days = sorted(latest_by_day)
+    raw_returns = tuple(latest_by_day[day][1] for day in days)
+    latest_row = latest_by_day[days[-1]][2]
+    equity = _finite_or_none(latest_row.get("rebalance_scaled_equity"))
+    peak = _finite_or_none(latest_row.get("rebalance_scaled_peak"))
+    prior_equity = equity if equity is not None and equity > 0.0 else 1.0
+    prior_peak = peak if peak is not None and peak > 0.0 else max(prior_equity, 1.0)
+    return ContinuousRebalanceScaleState(
+        prior_raw_returns=raw_returns,
+        prior_scaled_equity=prior_equity,
+        prior_scaled_peak=max(prior_peak, prior_equity),
+    )
+
+
+def _continuous_rebalance_mark_prices_json(mark_prices: dict[str, float]) -> str:
+    clean: dict[str, float] = {}
+    for key, value in mark_prices.items():
+        mark = _finite_or_none(value)
+        if str(key) and mark is not None and mark > 0.0:
+            clean[str(key)] = mark
+    return json.dumps(clean, sort_keys=True, separators=(",", ":"))
+
+
+def _continuous_rebalance_parse_mark_prices(value: Any) -> dict[str, float]:
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    out: dict[str, float] = {}
+    for key, raw in parsed.items():
+        mark = _finite_or_none(raw)
+        if str(key) and mark is not None and mark > 0.0:
+            out[str(key)] = mark
+    return out
+
+
+def _continuous_rebalance_previous_mark_state(
+    cycles: pl.DataFrame,
+    *,
+    current_day_ts: int,
+) -> tuple[int, dict[str, float], float]:
+    if cycles.is_empty():
+        return 0, {}, 1.0
+    current_day = (int(current_day_ts) // MS_PER_DAY) * MS_PER_DAY
+    best_key: tuple[int, int, int] | None = None
+    best_day = 0
+    best_marks: dict[str, float] = {}
+    best_scale = 1.0
+    for idx, row in enumerate(cycles.to_dicts()):
+        day_value = _finite_or_none(row.get("rebalance_day_ts"))
+        if day_value is None:
+            continue
+        day = (int(day_value) // MS_PER_DAY) * MS_PER_DAY
+        if day >= current_day:
+            continue
+        marks = _continuous_rebalance_parse_mark_prices(row.get("rebalance_mark_prices_json"))
+        if not marks:
+            continue
+        ts_value = _finite_or_none(row.get("ts_ms"))
+        key = (day, int(ts_value) if ts_value is not None else 0, idx)
+        if best_key is None or key > best_key:
+            best_key = key
+            best_day = day
+            best_marks = marks
+            scale = _finite_or_none(row.get("rebalance_target_scale"))
+            best_scale = scale if scale is not None and scale > 0.0 else 1.0
+    return best_day, best_marks, best_scale
+
+
+def _continuous_rebalance_cycle_fields(
+    all_trades: pl.DataFrame,
+    cycles: pl.DataFrame,
+    *,
+    price_by_symbol: dict[str, float],
+    current_day_ts: int,
+    now_ms: int,
+    strategy_id: str,
+    rule: ContinuousRebalanceRule,
+) -> dict[str, Any]:
+    """Build the daily-rebalance mark/return fields for a cycle payload.
+
+    The first row bootstraps marks with raw return 0. Later rows measure raw
+    return from the latest prior-day mark to the current mark/exit, then update
+    the scaled equity state that tomorrow's scale decision will read.
+    """
+    current_day = (int(current_day_ts) // MS_PER_DAY) * MS_PER_DAY
+    prior_state = _continuous_rebalance_scale_state_from_cycles(cycles, current_day_ts=current_day)
+    target_scale = compute_continuous_rebalance_scale(prior_state, rule)
+    previous_day, previous_marks, previous_scale = _continuous_rebalance_previous_mark_state(
+        cycles,
+        current_day_ts=current_day,
+    )
+    has_previous_marks = bool(previous_marks)
+    mark_prices: dict[str, float] = {}
+    scaled_observed_return = 0.0
+    marked_trades = 0
+    missing_marks = 0
+    closed_contributors = 0
+
+    if not all_trades.is_empty():
+        for row in all_trades.to_dicts():
+            if str(row.get("strategy_id") or "") != strategy_id:
+                continue
+            trade_id = str(row.get("trade_id") or "")
+            symbol = str(row.get("symbol") or "")
+            qty = abs(_float(row.get("qty")))
+            entry_price = _float(row.get("entry_price"))
+            equity_usdt = _float(row.get("equity_usdt"))
+            if not trade_id or not symbol or qty <= 0.0 or entry_price <= 0.0 or equity_usdt <= 0.0:
+                continue
+            entry_ts = int(_float(row.get("entry_ts_ms") or row.get("ts_ms") or 0))
+            status = str(row.get("status") or "")
+            previous_price = previous_marks.get(trade_id)
+            if previous_price is None:
+                if has_previous_marks and entry_ts > previous_day:
+                    previous_price = entry_price
+                else:
+                    previous_price = entry_price
+                    if has_previous_marks:
+                        # Open legacy row without a prior mark: seed today's mark, do not invent a return.
+                        previous_price = 0.0
+
+            if status == "open":
+                current_price = _float(price_by_symbol.get(symbol))
+                if current_price <= 0.0:
+                    missing_marks += 1
+                    continue
+                mark_prices[trade_id] = current_price
+                marked_trades += 1
+                if has_previous_marks and previous_price > 0.0:
+                    scaled_observed_return += _trade_return(previous_price, current_price, side="short") * _ratio_or_zero(
+                        qty * previous_price,
+                        equity_usdt,
+                    )
+            else:
+                exit_ts = int(_float(row.get("exit_ts_ms") or row.get("closed_at_ms") or 0))
+                exit_price = _float(row.get("exit_price"))
+                if not has_previous_marks or exit_ts <= previous_day or exit_ts > int(now_ms) or exit_price <= 0.0:
+                    continue
+                if previous_price <= 0.0:
+                    previous_price = entry_price if entry_ts > previous_day else 0.0
+                if previous_price <= 0.0:
+                    continue
+                scaled_observed_return += _trade_return(previous_price, exit_price, side="short") * _ratio_or_zero(
+                    qty * previous_price,
+                    equity_usdt,
+                )
+                closed_contributors += 1
+
+    raw_return = scaled_observed_return / previous_scale if has_previous_marks and previous_scale > 0.0 else 0.0
+    scaled_return = raw_return * target_scale
+    scaled_equity = prior_state.prior_scaled_equity * (1.0 + scaled_return)
+    scaled_peak = max(prior_state.prior_scaled_peak, scaled_equity)
+    return {
+        "rebalance_day_ts": current_day,
+        "rebalance_raw_return": raw_return,
+        "rebalance_target_scale": target_scale,
+        "rebalance_scaled_return": scaled_return,
+        "rebalance_scaled_equity": scaled_equity,
+        "rebalance_scaled_peak": scaled_peak,
+        "rebalance_mark_prices_json": _continuous_rebalance_mark_prices_json(mark_prices),
+        "rebalance_marked_trades": marked_trades,
+        "rebalance_missing_marks": missing_marks,
+        "rebalance_closed_contributors": closed_contributors,
+    }
+
+
+def _continuous_rebalance_resize_checked_today(cycles: pl.DataFrame, *, current_day_ts: int) -> bool:
+    if cycles.is_empty():
+        return False
+    current_day = (int(current_day_ts) // MS_PER_DAY) * MS_PER_DAY
+    for row in cycles.to_dicts():
+        day_value = _finite_or_none(row.get("rebalance_day_ts"))
+        if day_value is None or (int(day_value) // MS_PER_DAY) * MS_PER_DAY != current_day:
+            continue
+        value = row.get("rebalance_resize_checked")
+        if value is True:
+            return True
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "y"}:
+            return True
+    return False
 
 
 def _open_primary_trades_for_addon_gate(
@@ -1102,6 +1444,351 @@ def _execute_continuous_exits(
                            "filled_qty": str(filled_qty) if filled_qty > 0 else "", "error": error,
                            "sleeve": str(trade.get("sleeve") or continuous_sleeve_name(demo))})
     return rows, order_rows
+
+
+def _build_continuous_rebalance_resize_rows(
+    plans: list[ContinuousRebalanceResizePlan],
+    all_trades: pl.DataFrame,
+    *,
+    demo: ContinuousDemoCycleConfig,
+    price_by_symbol: dict[str, float],
+    contract_by_symbol: dict[str, dict[str, Any]],
+    now_ms: int,
+    strategy_id: str,
+    execution_by_trade_id: dict[str, dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build dry-run/paper ledger rows for daily-rebalance resize intents.
+
+    This bridges the research rebalance planner into the paper/demo ledger
+    vocabulary without submitting orders. Live submission must call the venue
+    router and confirm fills before using the same ledger transforms.
+    """
+    if not plans or all_trades.is_empty():
+        return [], []
+
+    lookup = {str(r.get("trade_id") or ""): r for r in all_trades.to_dicts()}
+    trade_rows: list[dict[str, Any]] = []
+    order_rows: list[dict[str, Any]] = []
+
+    for plan in plans:
+        trade = dict(lookup.get(str(plan.trade_id), {}))
+        if not trade:
+            continue
+        symbol = str(plan.symbol or trade.get("symbol") or "")
+        execution = (execution_by_trade_id or {}).get(str(plan.trade_id), {})
+        price = _float(execution.get("avg_price")) or _float(price_by_symbol.get(symbol))
+        entry_price = _float(trade.get("entry_price"))
+        current_qty = abs(_float(trade.get("qty")))
+        equity_usdt = _float(trade.get("equity_usdt"))
+        if not symbol or price <= 0.0 or entry_price <= 0.0 or current_qty <= 0.0:
+            continue
+
+        contract = contract_by_symbol.get(symbol, {})
+        qty_step = _float(contract.get("qty_step")) or _float(trade.get("qty_step")) or 0.001
+        if execution:
+            order_qty = abs(_float(execution.get("qty")))
+        else:
+            max_qty = _float(contract.get("max_market_order_qty")) or _float(contract.get("max_order_qty"))
+            quantity = order_quantity_for_notional(
+                notional_usdt=abs(plan.delta_notional_usdt),
+                price=price,
+                qty_step=qty_step,
+                min_order_qty=_float(contract.get("min_order_qty")),
+                min_notional_value=_float(contract.get("min_notional_value")),
+                max_order_qty=max_qty,
+            )
+            if quantity is None:
+                continue
+
+            raw_qty_text, _actual_notional = quantity
+            order_qty = _float(raw_qty_text)
+        if plan.reduce_only:
+            order_qty = min(order_qty, current_qty)
+        if order_qty <= 0.0:
+            continue
+
+        order_qty_text = _decimal_text(Decimal(str(order_qty)))
+        order_notional = order_qty * price
+        link_prefix = _continuous_exit_link_prefix(demo) if plan.reduce_only else _continuous_entry_link_prefix(demo)
+        order_link = str(execution.get("order_link_id") or _continuous_order_link_id(link_prefix, symbol=symbol, signal_ts_ms=now_ms))
+        sleeve = str(trade.get("sleeve") or continuous_sleeve_name(demo))
+        resize_reason = plan.reason or ("rebalance_reduce" if plan.reduce_only else "rebalance_increase")
+        submit_mode = str(execution.get("submit_mode") or "dry_run")
+        order_status = str(execution.get("status") or "planned")
+        fee_usdt = _float(execution.get("fee_usdt"))
+        exec_time_ms = int(_float(execution.get("exec_time_ms") or 0))
+        order_id = str(execution.get("order_id") or "")
+        error = str(execution.get("error") or "")
+
+        upd = dict(trade)
+        prior_realized = _float(trade.get("rebalance_realized_return"))
+        if plan.reduce_only:
+            realized_gross = _trade_return(entry_price, price, side="short")
+            realized_weight = _ratio_or_zero(order_qty * entry_price, equity_usdt)
+            realized_delta = realized_gross * realized_weight
+            total_realized = prior_realized + realized_delta
+            remaining_qty = max(current_qty - order_qty, 0.0)
+            if remaining_qty <= qty_step * 0.5:
+                upd.update(
+                    {
+                        "status": "closed",
+                        "qty": "0",
+                        "notional_usdt": 0.0,
+                        "exit_ts_ms": now_ms,
+                        "exit_price": price,
+                        "exit_fee_usdt": fee_usdt,
+                        "exit_exec_time_ms": exec_time_ms,
+                        "gross_trade_return": realized_gross,
+                        "net_return": total_realized,
+                        "rebalance_realized_return": total_realized,
+                        "exit_reason": "rebalance_zero",
+                        "exit_order_link_id": order_link,
+                        "exit_order_id": order_id,
+                        "submit_mode": submit_mode,
+                        "closed_at_ms": now_ms,
+                        "updated_at_ms": now_ms,
+                    }
+                )
+            else:
+                upd.update(
+                    {
+                        "qty": _decimal_text(Decimal(str(remaining_qty))),
+                        "notional_usdt": remaining_qty * entry_price,
+                        "rebalance_realized_return": total_realized,
+                        "last_rebalance_ts_ms": now_ms,
+                        "last_rebalance_price": price,
+                        "last_rebalance_reason": resize_reason,
+                        "last_rebalance_order_link_id": order_link,
+                        "last_rebalance_fee_usdt": fee_usdt,
+                        "submit_mode": submit_mode,
+                        "updated_at_ms": now_ms,
+                    }
+                )
+        else:
+            add_qty = order_qty
+            new_qty = current_qty + add_qty
+            old_cost_basis = current_qty * entry_price
+            add_cost_basis = add_qty * price
+            new_entry = (old_cost_basis + add_cost_basis) / new_qty
+            upd.update(
+                {
+                    "qty": _decimal_text(Decimal(str(new_qty))),
+                    "entry_price": new_entry,
+                    "notional_usdt": old_cost_basis + add_cost_basis,
+                    "last_rebalance_ts_ms": now_ms,
+                    "last_rebalance_price": price,
+                    "last_rebalance_reason": resize_reason,
+                    "last_rebalance_order_link_id": order_link,
+                    "last_rebalance_fee_usdt": fee_usdt,
+                    "submit_mode": submit_mode,
+                    "updated_at_ms": now_ms,
+                }
+            )
+
+        trade_rows.append(upd)
+        order_rows.append(
+            {
+                "order_link_id": order_link,
+                "ts_ms": now_ms,
+                "trade_id": str(trade.get("trade_id", "")),
+                "strategy_id": strategy_id,
+                "symbol": symbol,
+                "side": plan.side,
+                "order_type": "Market",
+                "qty": order_qty_text,
+                "reduce_only": bool(plan.reduce_only),
+                "order_id": order_id,
+                "submit_mode": submit_mode,
+                "avg_price": price,
+                "fee_usdt": fee_usdt,
+                "exec_time_ms": exec_time_ms,
+                "notional_usdt": order_notional,
+                "status": order_status,
+                "trade_side": "short",
+                "signal_ts_ms": now_ms,
+                "equity_usdt": equity_usdt,
+                "qty_step": qty_step,
+                "resize_reason": resize_reason,
+                "target_notional_usdt": plan.target_notional_usdt,
+                "current_notional_usdt": plan.current_notional_usdt,
+                "delta_notional_usdt": plan.delta_notional_usdt,
+                "filled_qty": order_qty_text,
+                "error": error,
+                "sleeve": sleeve,
+            }
+        )
+
+    return trade_rows, order_rows
+
+
+def _execute_continuous_rebalance_resizes(
+    plans: list[ContinuousRebalanceResizePlan],
+    all_trades: pl.DataFrame,
+    *,
+    trading_client: Any | None,
+    demo: ContinuousDemoCycleConfig,
+    price_by_symbol: dict[str, float],
+    contract_by_symbol: dict[str, dict[str, Any]],
+    now_ms: int,
+    strategy_id: str,
+    execution_event_router: Any | None = None,
+    record_preflight: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not plans:
+        return [], []
+    if not demo.submit_orders:
+        return _build_continuous_rebalance_resize_rows(
+            plans,
+            all_trades,
+            demo=demo,
+            price_by_symbol=price_by_symbol,
+            contract_by_symbol=contract_by_symbol,
+            now_ms=now_ms,
+            strategy_id=strategy_id,
+        )
+
+    assert trading_client is not None
+    execution_by_trade_id: dict[str, dict[str, Any]] = {}
+    failed_orders: list[dict[str, Any]] = []
+    lookup = {str(r.get("trade_id") or ""): r for r in all_trades.to_dicts()} if not all_trades.is_empty() else {}
+    for plan in plans:
+        trade = dict(lookup.get(str(plan.trade_id), {}))
+        symbol = str(plan.symbol or trade.get("symbol") or "")
+        price = _float(price_by_symbol.get(symbol))
+        if not trade or not symbol or price <= 0.0:
+            continue
+        contract = contract_by_symbol.get(symbol, {})
+        qty_step = _float(contract.get("qty_step")) or _float(trade.get("qty_step")) or 0.001
+        max_qty = _float(contract.get("max_market_order_qty")) or _float(contract.get("max_order_qty"))
+        quantity = order_quantity_for_notional(
+            notional_usdt=abs(plan.delta_notional_usdt),
+            price=price,
+            qty_step=qty_step,
+            min_order_qty=_float(contract.get("min_order_qty")),
+            min_notional_value=_float(contract.get("min_notional_value")),
+            max_order_qty=max_qty,
+        )
+        if quantity is None:
+            continue
+        qty, planned_notional = quantity
+        current_qty = abs(_float(trade.get("qty")))
+        if plan.reduce_only and _float(qty) > current_qty:
+            qty = _decimal_text(Decimal(str(current_qty)))
+            planned_notional = current_qty * price
+        if _float(qty) <= 0.0:
+            continue
+
+        link_prefix = _continuous_exit_link_prefix(demo) if plan.reduce_only else _continuous_entry_link_prefix(demo)
+        order_link = _continuous_order_link_id(link_prefix, symbol=symbol, signal_ts_ms=now_ms)
+        preflight = {
+            "order_link_id": order_link,
+            "ts_ms": now_ms,
+            "trade_id": str(plan.trade_id),
+            "strategy_id": strategy_id,
+            "symbol": symbol,
+            "side": plan.side,
+            "order_type": "Market",
+            "qty": qty,
+            "reduce_only": bool(plan.reduce_only),
+            "submit_mode": "preflight",
+            "status": "submitted",
+            "trade_side": "short",
+            "signal_ts_ms": now_ms,
+            "notional_usdt": planned_notional,
+            "resize_reason": plan.reason,
+            "sleeve": str(trade.get("sleeve") or continuous_sleeve_name(demo)),
+        }
+        if record_preflight is not None:
+            record_preflight(preflight)
+
+        order_result: dict[str, Any] = {}
+        submit_mode = "submitted"
+        status = "submitted_unconfirmed"
+        error = ""
+        filled_qty = 0.0
+        avg_price = price
+        fee_usdt = 0.0
+        exec_time_ms = 0
+        try:
+            order_result = trading_client.place_order(
+                **_order_params(
+                    symbol=symbol,
+                    side=plan.side,
+                    qty=qty,
+                    order_type="Market",
+                    order_link_id=order_link,
+                    reduce_only=bool(plan.reduce_only),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            submit_mode, status, error = "error", "failed", f"place_order failed: {exc}"[:500]
+        else:
+            try:
+                summ = _wait_for_execution_summary(
+                    trading_client,
+                    symbol=symbol,
+                    order_link_id=order_link,
+                    poll_seconds=demo.order_fill_confirm_seconds,
+                    poll_interval_seconds=demo.order_fill_poll_interval_seconds,
+                    fast_poll_interval_seconds=demo.order_fill_fast_poll_interval_seconds,
+                    fast_poll_seconds=demo.order_fill_fast_poll_seconds,
+                    execution_event_router=execution_event_router,
+                )
+            except Exception as exc:  # noqa: BLE001
+                error = f"fill confirm failed: {exc}"[:500]
+            else:
+                filled_qty = _float(summ.get("qty"))
+                avg_price = _float(summ.get("avg_price")) or price
+                fee_usdt = _float(summ.get("fee"))
+                exec_time_ms = int(_float(summ.get("exec_time_ms") or 0))
+                target_qty = _float(qty)
+                status = (
+                    "filled"
+                    if target_qty > 0.0 and filled_qty + max(target_qty * 1e-8, 1e-12) >= target_qty
+                    else ("partial" if filled_qty > 0.0 else "submitted_unconfirmed")
+                )
+
+        execution_row = {
+            "order_link_id": order_link,
+            "qty": filled_qty,
+            "avg_price": avg_price,
+            "fee_usdt": fee_usdt,
+            "exec_time_ms": exec_time_ms,
+            "order_id": order_result.get("orderId", ""),
+            "submit_mode": submit_mode,
+            "status": status,
+            "error": error,
+        }
+        if filled_qty > 0.0:
+            execution_by_trade_id[str(plan.trade_id)] = execution_row
+        else:
+            failed_orders.append(
+                {
+                    **preflight,
+                    "order_id": order_result.get("orderId", ""),
+                    "submit_mode": submit_mode,
+                    "status": status,
+                    "avg_price": avg_price if status != "failed" else 0.0,
+                    "fee_usdt": fee_usdt,
+                    "exec_time_ms": exec_time_ms,
+                    "filled_qty": "",
+                    "error": error,
+                }
+            )
+
+    filled_plan_ids = set(execution_by_trade_id)
+    filled_plans = [plan for plan in plans if str(plan.trade_id) in filled_plan_ids]
+    rows, orders = _build_continuous_rebalance_resize_rows(
+        filled_plans,
+        all_trades,
+        demo=demo,
+        price_by_symbol=price_by_symbol,
+        contract_by_symbol=contract_by_symbol,
+        now_ms=now_ms,
+        strategy_id=strategy_id,
+        execution_by_trade_id=execution_by_trade_id,
+    )
+    return rows, orders + failed_orders
 
 
 def _execute_continuous_entries(
@@ -1285,8 +1972,16 @@ def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
         raise ValueError("paper_mode=True is incompatible with submit_orders=True")
     if config.paper_mode and not config.record_dry_run:
         raise ValueError("paper_mode=True requires record_dry_run=True so the paper ledger is written")
+    if config.daily_rebalance_enabled and not config.submit_orders and not config.record_dry_run:
+        raise ValueError("daily_rebalance_enabled requires record_dry_run=True so resize rows are persisted")
     if config.strategy_profile not in CONTINUOUS_DEMO_PROFILES:
         raise ValueError(f"unknown continuous strategy_profile {config.strategy_profile!r}")
+    if config.btc_trend_gate not in ("off", "uptrend", "downtrend"):
+        raise ValueError(
+            f"btc_trend_gate must be 'off', 'uptrend', or 'downtrend'; got {config.btc_trend_gate!r}"
+        )
+    if not config.feature_set:
+        raise ValueError("feature_set must contain at least one causal feature")
     if config.addon_primary_pnl_gate and config.submit_orders:
         if config.strategy_profile != "continuous_addon_v1":
             raise ValueError("addon_primary_pnl_gate submit requires strategy_profile='continuous_addon_v1'")
@@ -1329,7 +2024,7 @@ def run_continuous_demo_cycle(
     When ``panel_cache`` is supplied (and ``live_panel_cache_enabled``) the live decile is sourced
     from the Tier-2 within-hour cache (heavy features once per bar close, cheap re-rank per wake); a
     cache failure transparently falls back to the full recompute, so the cache is purely a speedup."""
-    demo = demo_config or ContinuousDemoCycleConfig()
+    demo = apply_continuous_demo_profile(demo_config or ContinuousDemoCycleConfig())
     _validate_continuous_demo_config(demo)
     strategy_id = continuous_strategy_id(demo)
     sleeve_name = continuous_sleeve_name(demo)
@@ -1337,6 +2032,7 @@ def run_continuous_demo_cycle(
     root = Path(data_root).expanduser()
     root.mkdir(parents=True, exist_ok=True)
     cycle_now_ms = now_ms if now_ms is not None else _utc_now_ms()
+    cur_day_ts = (cycle_now_ms // MS_PER_DAY) * MS_PER_DAY
     cycle_id = f"{_yyyymmddhhmmss(cycle_now_ms)}-{int(time.time_ns())}"
 
     with exclusive_file_lock(root / ".locks" / "continuous_demo_cycle.lock", stale_seconds=900):
@@ -1392,6 +2088,21 @@ def run_continuous_demo_cycle(
 
         all_trades = read_dataset(root, trades_dataset)
         all_orders = read_dataset(root, orders_dataset)
+        all_cycles = read_dataset(root, cycles_dataset) if demo.daily_rebalance_enabled else pl.DataFrame()
+        rebalance_rule = continuous_rebalance_rule(demo) if demo.daily_rebalance_enabled else None
+        rebalance_target_scale = (
+            compute_continuous_rebalance_scale(
+                _continuous_rebalance_scale_state_from_cycles(all_cycles, current_day_ts=cur_day_ts),
+                rebalance_rule,
+            )
+            if rebalance_rule is not None
+            else 1.0
+        )
+        rebalance_resize_checked = (
+            _continuous_rebalance_resize_checked_today(all_cycles, current_day_ts=cur_day_ts)
+            if demo.daily_rebalance_enabled
+            else False
+        )
         open_trades = _open_continuous_trades(all_trades, strategy_id)
         held_symbols = set(open_trades["symbol"].to_list()) if not open_trades.is_empty() else set()
 
@@ -1480,14 +2191,25 @@ def run_continuous_demo_cycle(
             "addon_primary_pnl_gate_skip_symbols": [],
         }
         candidates: list[dict[str, Any]] = []
-        if not (errors and demo.submit_orders) and not entry_paused and _eff_max > 0:
+        cur_hour_ts = (cycle_now_ms // MS_PER_HOUR) * MS_PER_HOUR
+        # signal ts = the deciding (confirmed) bar for the +1h entry, else the current hour (legacy).
+        signal_ts = (cur_hour_ts - (1 + demo.entry_confirm_delay_hours) * MS_PER_HOUR
+                     if demo.entry_confirm_delay_hours > 0 else cur_hour_ts)
+        btc_trend_gate_allows_entry = _btc_trend_gate_allows_entries(
+            klines,
+            signal_ts_ms=signal_ts,
+            config=demo,
+        )
+        if (
+            not (errors and demo.submit_orders)
+            and not entry_paused
+            and _eff_max > 0
+            and rebalance_target_scale > 0.0
+            and btc_trend_gate_allows_entry
+        ):
             picks = select_continuous_entries(
                 entry_state, held_symbols=held_symbols, cooldown_symbols=cooldown, open_count=open_count,
                 config=demo, eligible_symbols=eligible)
-            cur_hour_ts = (cycle_now_ms // MS_PER_HOUR) * MS_PER_HOUR
-            # signal ts = the deciding (confirmed) bar for the +1h entry, else the current hour (legacy).
-            signal_ts = (cur_hour_ts - (1 + demo.entry_confirm_delay_hours) * MS_PER_HOUR
-                         if demo.entry_confirm_delay_hours > 0 else cur_hour_ts)
             candidates, skipped_same_signal_reentry = _continuous_entry_candidates_with_signal_metadata(
                 picks,
                 all_trades,
@@ -1522,6 +2244,8 @@ def run_continuous_demo_cycle(
                 live_position_symbols=live_position_symbols,
             )
         order_notional_frac = demo.per_position_notional_pct_equity / 100.0
+        if demo.daily_rebalance_enabled:
+            order_notional_frac *= rebalance_target_scale
         exec_entries, entry_orders = _execute_continuous_entries(
             candidates, trading_client=trading_client, demo=demo, equity_usdt=equity_usdt,
             order_notional_frac=order_notional_frac, price_by_symbol=price_by_symbol,
@@ -1531,6 +2255,58 @@ def run_continuous_demo_cycle(
             cycle_trade_rows.extend(exec_entries)
         if entry_orders and (demo.submit_orders or demo.record_dry_run):
             cycle_order_rows.extend(entry_orders)
+
+        resize_rows: list[dict[str, Any]] = []
+        resize_orders: list[dict[str, Any]] = []
+        post_trade_ledger = all_trades
+        if exec_entries:
+            post_trade_ledger = _upsert_rows(post_trade_ledger, exec_entries, key="trade_id")
+        if demo.daily_rebalance_enabled and not rebalance_resize_checked:
+            resize_plans = plan_continuous_rebalance_resizes(
+                _open_continuous_trades(post_trade_ledger, strategy_id).to_dicts(),
+                price_by_symbol=price_by_symbol,
+                equity_usdt=equity_usdt,
+                base_notional_pct_equity=demo.per_position_notional_pct_equity,
+                target_scale=rebalance_target_scale,
+            )
+            resize_rows, resize_orders = _execute_continuous_rebalance_resizes(
+                resize_plans,
+                post_trade_ledger,
+                trading_client=trading_client,
+                demo=demo,
+                price_by_symbol=price_by_symbol,
+                contract_by_symbol=contract_by_symbol,
+                now_ms=cycle_now_ms,
+                strategy_id=strategy_id,
+                execution_event_router=execution_event_router,
+                record_preflight=preflight_cb,
+            )
+            if resize_rows:
+                post_trade_ledger = _upsert_rows(post_trade_ledger, resize_rows, key="trade_id")
+                if demo.submit_orders or demo.record_dry_run:
+                    cycle_trade_rows.extend(resize_rows)
+            if resize_orders and (demo.submit_orders or demo.record_dry_run):
+                cycle_order_rows.extend(resize_orders)
+
+        rebalance_fields: dict[str, Any] = {}
+        if demo.daily_rebalance_enabled:
+            rebalance_fields = _continuous_rebalance_cycle_fields(
+                post_trade_ledger,
+                all_cycles,
+                price_by_symbol=price_by_symbol,
+                current_day_ts=cur_day_ts,
+                now_ms=cycle_now_ms,
+                strategy_id=strategy_id,
+                rule=rebalance_rule if rebalance_rule is not None else continuous_rebalance_rule(demo),
+            )
+            rebalance_fields.update(
+                {
+                    "rebalance_resize_checked": True,
+                    "rebalance_resize_orders": len(resize_orders),
+                    "rebalance_resize_trade_rows": len(resize_rows),
+                    "rebalance_resize_skipped_same_day": rebalance_resize_checked,
+                }
+            )
 
         # Ledger flush: orders first, then trades (crash-durability ordering).
         if cycle_order_rows:
@@ -1543,14 +2319,15 @@ def run_continuous_demo_cycle(
         # decile join (the is_not_null filter drops every symbol) yet rmom_present would read True.
         # max_rmom_day_ts lets the watchdog distinguish "quiet market" from "stale signal gate".
         max_rmom_day_ts = (
-            int(rmom["day_ts"].max())  # type: ignore[arg-type]  # polars Series value; guarded is_not_null below
+            int(rmom["day_ts"].max())
             if (rmom is not None and not rmom.is_empty() and "day_ts" in rmom.columns
                                           and rmom["day_ts"].max() is not None)
             else 0
         )
-        cur_day_ts = (cycle_now_ms // MS_PER_DAY) * MS_PER_DAY
         payload = {
             "cycle_id": cycle_id, "ts_ms": cycle_now_ms, "strategy_id": strategy_id, "mode": "submit" if demo.submit_orders else "dry_run",
+            "strategy_profile": demo.strategy_profile,
+            "feature_set": ",".join(demo.feature_set),
             "universe_symbols": len(symbols), "ticker_source": ticker_source, "kline_store_rows": kline_stats.get("store_rows", 0),
             "rmom_present": rmom is not None, "max_rmom_day_ts": max_rmom_day_ts,
             # 0-floored: the refresh seeds a today/tomorrow row (the daily-rollover guard) so the gate
@@ -1559,6 +2336,9 @@ def run_continuous_demo_cycle(
             "live_d9_symbols": live_d9, "open_positions": open_count,
             "entries": len([r for r in exec_entries if r.get("status") in ("filled", "partial", "planned")]),
             "exits": len(exec_exits), "candidates": len(candidates), "equity_usdt": equity_usdt,
+            "entry_signal_ts_ms": signal_ts,
+            "btc_trend_gate": demo.btc_trend_gate,
+            "btc_trend_gate_allows_entry": btc_trend_gate_allows_entry,
             "entry_paused": entry_paused, "recent_adverse_exits": recent_adverse,
             "skipped_continuous_margin_budget": skipped_continuous_margin_budget,  # ls-5 cross-sleeve IM clamp
             "skipped_continuous_reservation": skipped_continuous_reservation,  # ls-6 symbol taken by a sibling
@@ -1568,6 +2348,7 @@ def run_continuous_demo_cycle(
             "addon_primary_pnl_gate_skips": addon_gate_stats["addon_primary_pnl_gate_skips"],
             "addon_primary_pnl_gate_skip_symbols": ",".join(addon_gate_stats["addon_primary_pnl_gate_skip_symbols"]),
         }
+        payload.update(rebalance_fields)
         # Flatten the daemon's reactivity-loop counters (rx_*) into the persisted cycle so the watchdog
         # can see a dead/stale fast protective-exit loop instead of it failing silently.
         if reactivity_stats:
@@ -1617,7 +2398,7 @@ def run_continuous_protective_exit_cycle(
     Shares the continuous cycle file-lock so it never races the main cycle or ws_risk on the ledger;
     reads prices from the WS ticker cache and MFE klines from the WS store (never REST). The state
     (left-decile) exit is intentionally NOT here — that needs the panel and belongs to the main cycle."""
-    demo = demo_config or ContinuousDemoCycleConfig()
+    demo = apply_continuous_demo_profile(demo_config or ContinuousDemoCycleConfig())
     if not (demo.submit_orders or demo.record_dry_run):
         return {"exits": 0, "open_positions": 0, "skipped": "no-submit"}
     if demo.submit_orders and trading_client is None:

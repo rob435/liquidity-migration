@@ -32,12 +32,12 @@ design: `docs/pit_gate.md`.
 
 > **CONTINUOUS** (fade) is no longer promoted/deployed (de-promoted 2026-06-05, look-ahead
 > invalidated; live sleeve OFF). It is NOT reconciled by default. For diagnostics only you can
-> still run `--sleeves continuous` (`reconcile-continuous-paper-demo` + the
+> still run `--sleeves continuous` (`continuous-forward-readiness` + the
 > `scripts/continuous_demo_signal_check.py` signal-consistency replay).
 
 ## When to use
 
-- "reconcile the backtest / paper / demo / all sleeves", "is the live matching the model?"
+- "reconcile the backtest / paper / demo / all promoted sleeves", "is the live matching the model?"
 - A reconcile shows `paper-only` / `backtest-only` / `pit_membership_fail`.
 - The archive manifest looks stale, or the local klines are behind the forward trades.
 
@@ -54,7 +54,8 @@ design: `docs/pit_gate.md`.
 
 ## Flags (all optional)
 
-- `--sleeves short,long,continuous` — pick a subset (default all three).
+- `--sleeves short,long,continuous` — pick a subset (default `short,long`;
+  add `continuous` explicitly for diagnostics only).
 - `--dry-run` — print every command, run nothing.
 - `--no-pull` / `--no-manifest` / `--no-kline-fill` / `--no-rmom` — skip a
   provisioning step that is already fresh.

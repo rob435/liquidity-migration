@@ -11,12 +11,12 @@ WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 Environment=DATA_ROOT=data/bybit-continuous-demo-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
-# LIVE (operator-directed go-live 2026-06-01): this sleeve submits demo orders on deploy.
-# Preconditions wired + verified before flipping (do NOT revert these): the risk service reads
-# CONTINUOUS_DATA_ROOT (so continuous positions are tracked, not flattened — see the risk unit),
-# the continuous_fade_* datasets are registered in storage, and ws_risk reconciles continuous
-# orphans into the continuous ledger. To pause trading without removing the sleeve: SUBMIT_ORDERS=0.
-# Demo account ONLY — never REAL_MONEY.
+# Dormant order-submitting unit. The committed deploy toggle keeps CONTINUOUS_SLEEVE=off,
+# so deploy disables this unit by default; the continuous paper collector is the only
+# continuous service expected to run unless the operator explicitly re-enables demo orders.
+# Preconditions are still wired before any future enable: the risk service reads
+# CONTINUOUS_DATA_ROOT, the continuous_fade_* datasets are registered, and ws_risk routes
+# continuous fills/orphans into the continuous ledger. Demo account ONLY; never REAL_MONEY.
 Environment=SUBMIT_ORDERS=1
 Environment=CONFIRM_DEMO_ORDERS=1
 Environment=TELEGRAM_ENABLED=1
@@ -27,7 +27,12 @@ Environment=LOOKBACK_DAYS=45
 Environment=WORKERS=2
 Environment=MAX_ACTIVE=25
 Environment=MAX_NEW_ENTRIES_PER_CYCLE=5
-Environment=MAX_HOLD_HOURS=48
+Environment=MAX_HOLD_HOURS=24
+Environment=STRATEGY_PROFILE=continuous_rebalance_v1
+Environment=FEATURE_SET=max_ret168
+Environment=ENTRY_EVENT_TRIGGER=turn4_pop4
+Environment=BTC_TREND_GATE=uptrend
+Environment=DAILY_REBALANCE_ENABLED=1
 # Wide server-side disaster stop (Bybit-managed; fires even if the daemon is down). The state exit
 # ("left the decile") is a PROFIT exit a squeezing short never triggers, so this is the only hard
 # catastrophe cap. 0.25 = operator I-phase cap. Set 0 ONLY for an explicit unstopped diagnostic.

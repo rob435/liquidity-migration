@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One command → the promoted-profile equity curve for every sleeve.
+"""One command → the promoted-profile equity curve for both promoted sleeves.
 
 Zero friction: no flag archaeology, no reverse-engineering "what's deployed". Each
 sleeve's curve is run from its EXACT deployed profile (`liquidity_migration.promoted`),
@@ -7,7 +7,7 @@ over a window you pick, and the equity-vs-BTC PNG is emitted (or plotted from th
 equity CSV if the engine doesn't draw one). The run_label is printed for every run so
 a biased/partial-PIT result can never masquerade as clean.
 
-    bash scripts/equity_curves.sh                      # all sleeves, last 3 years, bybit_full_pit
+    bash scripts/equity_curves.sh                      # both promoted sleeves, last 3 years, bybit_full_pit
     bash scripts/equity_curves.sh --sleeves short      # just one
     bash scripts/equity_curves.sh --years 2            # shorter window (lighter on RAM)
     bash scripts/equity_curves.sh --start 2023-06-01 --end 2026-06-02

@@ -2,9 +2,10 @@
 """One-command, self-provisioning demo-forward reconciliation for the promoted sleeves.
 
 This is the zero-friction reconcile: one command pulls the live ledgers, AUTO-
-provisions the research data it needs (PIT manifest + recent klines + residual-
-momentum panel), runs a MINIMAL-window backtest (only as far back as the forward
-ledger needs — not a fixed 150-day slab), and reconciles each promoted sleeve:
+provisions the research data it needs (PIT manifest + recent klines, plus the
+residual-momentum panel when continuous diagnostics are selected), runs a
+MINIMAL-window backtest (only as far back as the forward ledger needs — not a
+fixed 150-day slab), and reconciles each promoted sleeve:
 
     SHORT  (event/daily) : backtest <-> paper <-> demo  (+ Bybit on request)
     LONG   (v11a)        : paper <-> demo
@@ -18,15 +19,16 @@ Pipeline (each step maps to an opt-out flag):
     2. manifest    — refresh archive_trade_manifest (PIT membership)            [--no-manifest]
     3. kline-fill  — auto-download the recent klines the manifest now covers but [--no-kline-fill]
                      the local root is missing (the old "think for hours" gap)
-    4. rmom        — auto-recompute residual_momentum (continuous needs it)      [--no-rmom]
+    4. rmom        — auto-recompute residual_momentum when continuous selected  [--no-rmom]
     5. coverage    — print the PIT coverage table; refuse a stale strict backtest
     6. backtest    — promoted profile over the MINIMAL forward window            [--full-window]
     7. reconcile   — per-sleeve paper/demo (+ backtest, + signal check)          [--sleeves]
-    8. summary     — one consolidated headline across all sleeves
+    8. summary     — one consolidated headline across selected sleeves
 
 Safe by default: read-only against the VPS, demo only, never real money.
 
-    bash scripts/reconcile.sh                       # all sleeves, fully auto
+    bash scripts/reconcile.sh                       # promoted sleeves (short + long), fully auto
+    bash scripts/reconcile.sh --sleeves continuous  # continuous diagnostics only
     bash scripts/reconcile.sh --sleeves short        # just the short sleeve
     bash scripts/reconcile.sh --dry-run              # print every command, run nothing
     bash scripts/reconcile.sh --full-window          # 150-day backtest (old behaviour)
@@ -335,11 +337,13 @@ def reconcile_long(step: Step, *, paper: str, demo: str) -> str:
 
 
 def reconcile_continuous(step: Step, *, paper: str, demo: str) -> tuple[str, str]:
-    step.banner("Reconcile CONTINUOUS: paper <-> demo + signal-consistency")
-    _, out = step.run_capture(_cli("reconcile-continuous-paper-demo", "--paper-data-root", paper, "--demo-data-root", demo))
-    pd_summary = _first_summary_line(out, "continuous paper-demo reconciliation")
-    # Signal-consistency: are the live demo entries genuine engine D9 picks?
-    _, sig = step.run_capture(_script("continuous_demo_signal_check.py", "--root", demo))
+    step.banner("Reconcile CONTINUOUS: paper-readiness + signal-consistency")
+    _, out = step.run_capture(
+        _cli("continuous-forward-readiness", "--paper-data-root", paper, "--demo-data-root", demo, "--paper-only")
+    )
+    pd_summary = _first_summary_line(out, "continuous forward readiness")
+    # Signal-consistency: are the no-order paper entries genuine engine D9 picks?
+    _, sig = step.run_capture(_script("continuous_demo_signal_check.py", "--root", paper))
     sig_summary = _first_summary_line(sig, "SUMMARY:")
     return pd_summary, sig_summary
 
@@ -354,7 +358,7 @@ def _first_summary_line(out: str, needle: str) -> str:
 # ----------------------------------------------------------------------------- main
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="One-command self-provisioning reconciliation for all sleeves.",
+        description="One-command self-provisioning reconciliation for promoted sleeves.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     p.add_argument("--sleeves", default="short,long",
@@ -446,7 +450,7 @@ def main() -> int:
 
     # 8. Unified headline.
     if not args.dry_run:
-        print(f"\n{'=' * 72}\nRECONCILIATION SUMMARY — ALL SLEEVES\n{'=' * 72}")
+        print(f"\n{'=' * 72}\nRECONCILIATION SUMMARY — SELECTED SLEEVES\n{'=' * 72}")
         for s in sleeves:
             print(f"\n## {SLEEVES[s]['label']}")
             print(f"  {summary.get(s, '(skipped)')}")

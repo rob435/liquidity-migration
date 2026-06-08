@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = REPO_ROOT / "scripts" / "check_demo_liveness.py"
@@ -216,6 +217,58 @@ def test_gather_continuous_alerts_warns_on_empty_universe_and_unverified_stop(tm
     assert "stop_verify_unavailable_continuous" in keys
 
 
+def test_gather_continuous_paper_alerts_uses_paper_datasets_without_stop_check(tmp_path, monkeypatch) -> None:
+    """Paper evidence writes continuous_fade_paper_* datasets and submits no orders, so the
+    liveness watchdog must read the paper cycle ledger but skip venue stop verification."""
+    import polars as pl
+
+    args = SimpleNamespace(max_cycle_age_min=10, max_rmom_stale_days=2, settle_coin="USDT")
+    now = 10_000_000
+    root = tmp_path / "bybit-continuous-paper-event"
+    root.mkdir()
+
+    from liquidity_migration.storage import write_dataset
+
+    write_dataset(
+        pl.DataFrame([
+            {
+                "ts_ms": now - 60 * 60_000,
+                "max_rmom_day_ts": 0,
+                "universe_symbols": 0,
+                "kline_store_rows": 0,
+            }
+        ]),
+        root,
+        "continuous_fade_paper_cycles",
+        partition_by=(),
+    )
+    write_dataset(
+        pl.DataFrame([{"trade_id": "paper1", "symbol": "WIFUSDT", "status": "open"}]),
+        root,
+        "continuous_fade_paper_trades",
+        partition_by=(),
+    )
+    monkeypatch.setattr(M, "_venue_positions", lambda settle_coin="USDT": (_ for _ in ()).throw(AssertionError))
+
+    keys = {
+        a.key
+        for a in M.gather_continuous_alerts(
+            continuous_root=root,
+            now_ms=now,
+            args=args,
+            cycles_dataset="continuous_fade_paper_cycles",
+            trades_dataset="continuous_fade_paper_trades",
+            check_stops=False,
+        )
+    }
+
+    assert "liveness:bybit-continuous-paper-event" in keys
+    assert "rmom:bybit-continuous-paper-event" in keys
+    assert "continuous_universe_empty" in keys
+    assert "continuous_kline_store_empty" in keys
+    assert "stop_verify_unavailable_continuous" not in keys
+
+
 def test_sleeve_kill_switch_toggle(monkeypatch) -> None:
     """The watchdog skips an intentionally-off sleeve. Explicit env always wins; the
     unset-default is per-sleeve and mirrors deploy/lib_sleeves.sh (continuous off, short/long on)."""
@@ -231,3 +284,5 @@ def test_sleeve_kill_switch_toggle(monkeypatch) -> None:
     assert M._sleeve_on("CONTINUOUS_SLEEVE", default="off") is False
     monkeypatch.delenv("SHORT_SLEEVE", raising=False)
     assert M._sleeve_on("SHORT_SLEEVE") is True
+    monkeypatch.delenv("CONTINUOUS_PAPER_SLEEVE", raising=False)
+    assert M._sleeve_on("CONTINUOUS_PAPER_SLEEVE") is True

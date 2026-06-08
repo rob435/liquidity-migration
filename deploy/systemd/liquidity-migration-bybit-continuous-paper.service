@@ -29,7 +29,12 @@ Environment=WORKERS=2
 # Every knob below MUST match the demo unit so the paper run is a true shadow.
 Environment=MAX_ACTIVE=25
 Environment=MAX_NEW_ENTRIES_PER_CYCLE=5
-Environment=MAX_HOLD_HOURS=48
+Environment=MAX_HOLD_HOURS=24
+Environment=STRATEGY_PROFILE=continuous_rebalance_v1
+Environment=FEATURE_SET=max_ret168
+Environment=ENTRY_EVENT_TRIGGER=turn4_pop4
+Environment=BTC_TREND_GATE=uptrend
+Environment=DAILY_REBALANCE_ENABLED=1
 Environment=STOP_LOSS_PCT=0.25
 Environment=ENTRY_LEVERAGE=2
 Environment=PER_POSITION_NOTIONAL_PCT_EQUITY=2

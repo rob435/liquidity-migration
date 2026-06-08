@@ -1,0 +1,25 @@
+[Unit]
+Description=liquidity-migration continuous-vs-daily forward comparator report
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/liquidity-migration
+EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/continuous_forward_report.py \
+    --daily-data-root data/bybit-paper-event \
+    --daily-cycles-dataset event_demo_cycles \
+    --continuous-data-root data/bybit-continuous-paper-event \
+    --min-common-days 30 \
+    --stale-coverage-gap-days 2 \
+    --telegram
+SuccessExitStatus=0
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/opt/liquidity-migration

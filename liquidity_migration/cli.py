@@ -31,7 +31,10 @@ from .ingestion import generate_fixture_data
 from .pit_coverage import coverage_status, format_coverage
 from .reconciliation import (
     run_backtest_paper_reconciliation,
+    run_continuous_forward_readiness,
     run_continuous_paper_demo_reconciliation,
+    run_continuous_rebalance_cycle_audit,
+    run_continuous_vs_daily_forward_comparison,
     run_demo_bybit_reconciliation,
     run_full_reconciliation,
     run_long_paper_demo_reconciliation,
@@ -49,6 +52,9 @@ from .cli_parsers import (  # argparse subcommand builders (extracted); build_pa
     _add_archive_manifest_parser,
     _add_combined_book_report_parser,
     _add_continuous_addon_shadow_audit_parser,
+    _add_continuous_forward_readiness_parser,
+    _add_continuous_rebalance_cycle_audit_parser,
+    _add_continuous_vs_daily_forward_parser,
     _add_continuous_event_demo_cycle_parser,
     _add_continuous_events_parser,
     _add_data_layer_audit_parser,
@@ -228,6 +234,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_reconcile_paper_demo_parser(subparsers)
     _add_reconcile_long_paper_demo_parser(subparsers)
     _add_reconcile_continuous_paper_demo_parser(subparsers)
+    _add_continuous_rebalance_cycle_audit_parser(subparsers)
+    _add_continuous_forward_readiness_parser(subparsers)
+    _add_continuous_vs_daily_forward_parser(subparsers)
     _add_continuous_addon_shadow_audit_parser(subparsers)
     _add_reconcile_demo_bybit_parser(subparsers)
     _add_reconcile_backtest_paper_parser(subparsers)
@@ -835,11 +844,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "continuous-event-demo-cycle":
         from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig, run_continuous_demo_cycle
+        feature_set = tuple(part.strip() for part in str(args.feature_set).split(",") if part.strip())
         cont_demo_config = ContinuousDemoCycleConfig(
             decile=args.decile, rmom_quantile=args.rmom_quantile, liq_turnover_min=args.liq_turnover_min,
+            feature_set=feature_set,
             lookback_days=args.lookback_days, workers=args.workers, max_active=args.max_active,
             max_new_entries_per_cycle=args.max_new_entries_per_cycle, max_hold_hours=args.max_hold_hours,
             entry_event_trigger=args.entry_event_trigger,
+            btc_trend_gate=args.btc_trend_gate,
             allow_same_signal_reentry=args.allow_same_signal_reentry,
             stop_loss_pct=args.stop_loss_pct, entry_leverage=args.entry_leverage,
             per_position_notional_pct_equity=args.per_position_notional_pct_equity,
@@ -847,6 +859,15 @@ def main(argv: list[str] | None = None) -> int:
             exit_order_type=args.exit_order_type, submit_orders=args.submit_orders,
             confirm_demo_orders=args.confirm_demo_orders, telegram=args.telegram,
             record_dry_run=args.record_dry_run, paper_mode=args.paper_mode, data_name=args.data_name,
+            daily_rebalance_enabled=args.daily_rebalance_enabled,
+            daily_rebalance_realized_vol_window_days=args.daily_rebalance_realized_vol_window_days,
+            daily_rebalance_target_daily_vol=args.daily_rebalance_target_daily_vol,
+            daily_rebalance_max_scale=args.daily_rebalance_max_scale,
+            daily_rebalance_drawdown_half_threshold=args.daily_rebalance_drawdown_half_threshold,
+            daily_rebalance_resize_cost_bps=args.daily_rebalance_resize_cost_bps,
+            daily_rebalance_strategy_momentum_window_days=args.daily_rebalance_strategy_momentum_window_days,
+            daily_rebalance_strategy_momentum_min_return=args.daily_rebalance_strategy_momentum_min_return,
+            daily_rebalance_strategy_momentum_scale_when_below=args.daily_rebalance_strategy_momentum_scale_when_below,
             strategy_profile=args.strategy_profile,
             addon_primary_pnl_gate=args.addon_primary_pnl_gate,
             addon_primary_min_unrealized_return=args.addon_primary_min_unrealized_return,
@@ -871,7 +892,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         payload = run_continuous_demo_cycle(data_root, config=config, demo_config=cont_demo_config)
         print(
-            f"continuous-demo cycle [{payload['mode']}] universe={payload.get('universe_symbols')} "
+            f"continuous-demo cycle [{payload['mode']}] profile={payload.get('strategy_profile')} "
+            f"universe={payload.get('universe_symbols')} "
             f"rmom={payload.get('rmom_present')} d9={payload.get('live_d9_symbols')} "
             f"open={payload.get('open_positions')} entries={payload.get('entries')} exits={payload.get('exits')}",
             flush=True,
@@ -1098,17 +1120,36 @@ def main(argv: list[str] | None = None) -> int:
             feature_set=tuple(x.strip() for x in args.feature_set.split(",") if x.strip()),
             btc_trend_gate=args.btc_trend_gate,
             entry_event_trigger=args.entry_event_trigger,
-            entry_delay_hours=args.entry_delay_hours, exit_mode=args.exit_mode,
-            hold_hours=args.hold_hours, max_hold_hours=args.max_hold_hours,
-            cooldown_hours=args.cooldown_hours, stop_loss_pct=args.stop_loss_pct,
-            entry_pause_after_adverse_exits=args.entry_pause_after_adverse_exits,
-            entry_pause_window_hours=args.entry_pause_window_hours,
+              entry_delay_hours=args.entry_delay_hours, exit_mode=args.exit_mode,
+              hold_hours=args.hold_hours, max_hold_hours=args.max_hold_hours,
+              rank_exit_threshold=args.rank_exit_threshold,
+              cooldown_hours=args.cooldown_hours, stop_loss_pct=args.stop_loss_pct,
+              take_profit_pct=args.take_profit_pct,
+              stop_vol_mult=args.stop_vol_mult,
+              sizing_mode=args.sizing_mode,
+              target_vol_per_name=args.target_vol_per_name,
+              vol_weight_clamp=args.vol_weight_clamp,
+              age_days_min=args.age_days_min,
+              entry_max_ret168_max=args.entry_max_ret168_max,
+              entry_decel_lookback_h=args.entry_decel_lookback_h,
+              entry_decel_max_ret=args.entry_decel_max_ret,
+              market_min_ret_1d=args.market_min_ret_1d,
+              failed_fade_hours=args.failed_fade_hours,
+              failed_fade_loss_pct=args.failed_fade_loss_pct,
+              failed_fade_min_mfe_pct=args.failed_fade_min_mfe_pct,
+              breakeven_arm_pct=args.breakeven_arm_pct,
+              mfe_giveback_trigger_pct=args.mfe_giveback_trigger_pct,
+              mfe_giveback_retain_pct=args.mfe_giveback_retain_pct,
+              entry_pause_after_adverse_exits=args.entry_pause_after_adverse_exits,
+              entry_pause_window_hours=args.entry_pause_window_hours,
+              entry_crowding_max_fresh=args.entry_crowding_max_fresh,
             stop_fill_mode=args.stop_fill_mode, stop_slippage_cap_pct=args.stop_slippage_cap_pct,
-            gross_exposure=args.gross_exposure, max_active=args.max_active,
-            taker_fee_bps=args.taker_fee_bps, spread_bps=args.spread_bps,
-            impact_coef_bps=args.impact_coef_bps, impact_exponent=args.impact_exponent,
-            deploy_capital_usd=args.deploy_capital_usd, flat_round_trip_bps=args.flat_round_trip_bps,
-            use_funding=not args.no_funding, split_date=args.split_date,
+              gross_exposure=args.gross_exposure, max_active=args.max_active,
+              taker_fee_bps=args.taker_fee_bps, spread_bps=args.spread_bps,
+              impact_coef_bps=args.impact_coef_bps, impact_exponent=args.impact_exponent,
+              deploy_capital_usd=args.deploy_capital_usd, flat_round_trip_bps=args.flat_round_trip_bps,
+              round_trip_cost_multiplier=args.round_trip_cost_multiplier,
+              use_funding=not args.no_funding, split_date=args.split_date,
         )
         payload = run_continuous_event_research(
             data_root, config=cont_config,
@@ -1196,6 +1237,82 @@ def main(argv: list[str] | None = None) -> int:
             f"per_trade_csv={payload.get('pairs_csv_path') or '-'}{warning}"
         )
         return 0
+
+    if args.command == "continuous-rebalance-cycle-audit":
+        payload = run_continuous_rebalance_cycle_audit(
+            args.data_root,
+            cycles_dataset=args.cycles_dataset,
+            orders_dataset=args.orders_dataset,
+            output_dir=args.output_dir,
+        )
+        result = payload["result"]
+        summary = result["summary"]
+        print(
+            "continuous rebalance cycle audit "
+            f"ok={result['ok']} "
+            f"cycles={summary['cycles']} "
+            f"rebalance_cycles={summary['rebalance_cycles']} "
+            f"scale_mismatches={summary['scale_mismatches']} "
+            f"same_day_resize_violations={summary['same_day_resize_violations']} "
+            f"resize_order_count_mismatch={summary['resize_order_count_mismatch']} "
+            f"path={payload['report_path']}"
+        )
+        return 0 if result["ok"] else 1
+
+    if args.command == "continuous-forward-readiness":
+        payload = run_continuous_forward_readiness(
+            args.paper_data_root,
+            args.demo_data_root,
+            entry_tolerance_ms=args.entry_tolerance_ms,
+            min_pairs_warning=args.min_pairs_warning,
+            require_no_unmatched=not args.allow_unmatched,
+            require_demo=not args.paper_only,
+            output_dir=args.output_dir,
+        )
+        summary = payload["summary"]
+        print(
+            "continuous forward readiness "
+            f"ok={payload['ok']} "
+            f"paper_only_mode={summary['paper_only_mode']} "
+            f"paper_rebalance_ok={summary['paper_rebalance_ok']} "
+            f"demo_rebalance_ok={summary['demo_rebalance_ok']} "
+            f"paired={summary['paired']} "
+            f"paper_only={summary['paper_only']} "
+            f"demo_only={summary['demo_only']} "
+            f"sample_warning={summary['sample_warning']} "
+            f"path={payload['report_path']}"
+        )
+        return 0 if payload["ok"] else 1
+
+    if args.command == "continuous-vs-daily-forward":
+        payload = run_continuous_vs_daily_forward_comparison(
+            args.daily_data_root,
+            args.continuous_data_root,
+            daily_trades_dataset=args.daily_trades_dataset,
+            daily_cycles_dataset=args.daily_cycles_dataset,
+            continuous_cycles_dataset=args.continuous_cycles_dataset,
+            continuous_trades_dataset=args.continuous_trades_dataset,
+            min_common_days=args.min_common_days,
+            output_dir=args.output_dir,
+        )
+        summary = payload["summary"]
+        daily = payload["daily"]
+        continuous = payload["continuous"]
+        print(
+            "continuous vs daily forward "
+            f"ok={payload['ok']} "
+            f"common_days={summary['common_days']} "
+            f"common_days_remaining={summary['common_days_remaining']} "
+            f"daily_observed_days={summary['daily_observed_days']} "
+            f"continuous_observed_days={summary['continuous_observed_days']} "
+            f"continuous_return={continuous['total_return']:.6f} "
+            f"daily_return={daily['total_return']:.6f} "
+            f"continuous_mar={continuous['mar'] if continuous['mar'] is not None else 'NA'} "
+            f"daily_mar={daily['mar'] if daily['mar'] is not None else 'NA'} "
+            f"path={payload['report_path']} "
+            f"json={payload['json_path']}"
+        )
+        return 0 if payload["ok"] else 1
 
     if args.command == "continuous-addon-shadow-audit":
         payload = run_continuous_addon_shadow_audit(

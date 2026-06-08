@@ -1,5 +1,5 @@
 [Unit]
-Description=Refresh the continuous-fade rmom gate (residual_momentum.parquet) on the demo + paper data roots
+Description=Refresh the continuous-fade rmom gate (residual_momentum.parquet) on enabled continuous roots
 Wants=network-online.target
 After=network-online.target
 
@@ -10,15 +10,11 @@ Group=root
 WorkingDirectory=/opt/liquidity-migration
 Environment=POLARS_MAX_THREADS=8
 Environment=PYTHONDONTWRITEBYTECODE=1
-# The continuous signal gates on residual_momentum.parquet; rebuild it daily from the
-# continuous sleeve's own kline store so rmom[today] (trailing-7d residual, lag1) is fresh.
-# Without it the daemon runs but emits no signal (fail-safe: no rmom -> no entries).
-# The DEMO root must succeed (live orders gate on it). The PAPER root is best-effort
-# (`-` prefix): on a fresh deploy its kline store has not bootstrapped yet, and a paper
-# failure must NOT abort the authoritative demo seed. The next daily run fills paper once
-# its daemon has klines. Paper is a no-money shadow, so a one-day rmom lag is harmless.
-ExecStart=/opt/liquidity-migration/.venv/bin/python -u scripts/precompute_residual_momentum.py --root data/bybit-continuous-demo-event
-ExecStart=-/opt/liquidity-migration/.venv/bin/python -u scripts/precompute_residual_momentum.py --root data/bybit-continuous-paper-event
+# The continuous signal gates on residual_momentum.parquet; rebuild it daily from each
+# enabled continuous root's own kline store so rmom[today] (trailing-7d residual, lag1)
+# is fresh. The wrapper reads deploy/sleeves.env plus /etc overrides, so paper-only
+# evidence collection works while the order-submitting demo sleeve remains off.
+ExecStart=/bin/bash /opt/liquidity-migration/scripts/run_continuous_rmom_refresh.sh
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7

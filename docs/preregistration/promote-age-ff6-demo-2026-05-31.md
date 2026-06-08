@@ -48,8 +48,8 @@ orphaning live open positions).
 
 ## Evidence — A. standalone (age/ff6 on the standard baseline, full-PIT, 45bps×3, bar_extreme_capped)
 
-`docs/preregistration/age-ff6-no-rmom-2026-05-31.md` (just run). ff6 is NOT inert on the age
-book (it was rmom, not age, that neutralized it in the combined run):
+The age+ff6 decision is intentionally **no-rmom**. ff6 is NOT inert on the age
+book (historically it was rmom, not age, that neutralized it in the combined run):
 
 | venue | cell | trades | return | maxDD | Sharpe | MAR | `failed_fade` |
 |---|---|---:|---:|---:|---:|---:|---:|

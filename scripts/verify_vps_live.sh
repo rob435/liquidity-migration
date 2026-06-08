@@ -71,17 +71,20 @@ fi
 # an off/disabled sleeve.) The risk service is intentionally NOT toggled.
 . deploy/lib_sleeves.sh
 lm_load_sleeve_toggles
-echo "verify sleeves: SHORT=$SHORT_SLEEVE SHORT_PAPER=$SHORT_PAPER_SLEEVE LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE"
+echo "verify sleeves: SHORT=$SHORT_SLEEVE SHORT_PAPER=$SHORT_PAPER_SLEEVE LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE CONTINUOUS_PAPER=$CONTINUOUS_PAPER_SLEEVE"
 
 # The risk service (shared reconcile authority for every sleeve) has NO toggle —
 # always verify it enabled regardless of which entry sleeves are on. Per-sleeve
 # enabled+active state is checked post-settle via verify_sleeve (below), so an off
 # sleeve is required DOWN instead of being flagged as a failed deploy.
 systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
-# The continuous sleeve's daily rmom-refresh timer is toggled with that sleeve.
-if sleeve_on "$CONTINUOUS_SLEEVE"; then
+# The continuous rmom-refresh timer is required if either continuous demo or
+# paper evidence collection is enabled.
+if continuous_rmom_refresh_on; then
   systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer
   systemctl is-active --quiet liquidity-migration-continuous-rmom-refresh.timer
+  systemctl is-enabled --quiet liquidity-migration-continuous-forward-report.timer
+  systemctl is-active --quiet liquidity-migration-continuous-forward-report.timer
 fi
 # Timer parity — read-only verify must catch a deploy that forgot to enable
 # (or someone manually disabled) the demo-health watchdog or daily
@@ -121,6 +124,7 @@ verify_sleeve "$SHORT_SLEEVE" $SHORT_SLEEVE_UNITS
 verify_sleeve "$SHORT_PAPER_SLEEVE" $SHORT_PAPER_SLEEVE_UNITS
 verify_sleeve "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
+verify_sleeve "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
 
 systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=STRATEGY_PROFILE=promoted'
 systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=INTERVAL_SECONDS=60'
@@ -134,7 +138,7 @@ systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Envir
 # if the risk unit isn't wired to the long + continuous sleeves.
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=LONG_DATA_ROOT=data/bybit-long-demo-event'
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'
-# Continuous sleeve live config + its disaster stop — only when the sleeve is toggled ON
+# Order-submitting continuous sleeve config + its disaster stop — only when toggled ON
 # (a retired sleeve's file content must not be an unconditional verify gate).
 if sleeve_on "$CONTINUOUS_SLEEVE"; then
   systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=SUBMIT_ORDERS=1'

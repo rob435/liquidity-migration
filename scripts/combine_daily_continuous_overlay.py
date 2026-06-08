@@ -250,7 +250,8 @@ def _write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _venue_overlay(
-    venue_root: Path,
+    overlay_venue_root: Path,
+    daily_venue_root: Path,
     out_root: Path,
     *,
     venue: str,
@@ -264,13 +265,13 @@ def _venue_overlay(
     daily_throttle_trigger: float | None,
     daily_throttle_scale: float | None,
 ) -> dict[str, Any]:
-    daily_dir = venue_root / "daily_short_baseline"
+    daily_dir = daily_venue_root / "daily_short_baseline"
     daily_report = _load_report(daily_dir / "volume_event_research_report.json")
     daily_best = dict(daily_report.get("best_scenario") or {})
     daily_equity = pl.read_csv(daily_dir / "volume_event_best_equity.csv")
     daily_metrics = _daily_pnl_metrics(daily_equity)
     daily = _daily_returns(daily_dir / "volume_event_best_equity.csv", "daily_return")
-    overlay_root = venue_root / "cells" / cell_id / construction
+    overlay_root = overlay_venue_root / "cells" / cell_id / construction
     overlay_path = overlay_root / "mtm_equity.csv"
     overlay_report = _load_report(overlay_root / "report.json")
     out_dir = out_root / venue
@@ -409,6 +410,11 @@ def parse_args() -> argparse.Namespace:
         "--execution-root",
         default=str(Path.home() / "SHARED_DATA" / "cont_btc_trend_max_2026-06-05" / "max_ret168"),
     )
+    parser.add_argument(
+        "--daily-baseline-root",
+        default=None,
+        help="Optional execution root to read daily_short_baseline artifacts from; defaults to --execution-root.",
+    )
     parser.add_argument("--cell-id", default=DEFAULT_CELL)
     parser.add_argument("--overlay-construction", default="ls", choices=["ls", "short_only", "short_leg", "long_leg"])
     parser.add_argument("--scale", type=float, default=1.0)
@@ -452,6 +458,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     execution_root = Path(args.execution_root).expanduser()
+    daily_baseline_root = Path(args.daily_baseline_root).expanduser() if args.daily_baseline_root else execution_root
     out_root = Path(args.out).expanduser()
     out_root.mkdir(parents=True, exist_ok=True)
     venue_scales = _parse_venue_scales(args.venue_scales)
@@ -464,6 +471,7 @@ def main() -> int:
     rows = [
         _venue_overlay(
             execution_root / venue,
+            daily_baseline_root / venue,
             out_root,
             venue=venue,
             cell_id=args.cell_id,
@@ -483,6 +491,7 @@ def main() -> int:
     verdict = {
         "pre_registration": args.pre_registration,
         "execution_root": str(execution_root),
+        "daily_baseline_root": str(daily_baseline_root),
         "cell_id": args.cell_id,
         "overlay_construction": args.overlay_construction,
         "overlay_scale": args.scale,

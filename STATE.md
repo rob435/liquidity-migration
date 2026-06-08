@@ -1,173 +1,204 @@
-# Research-program state
+# Research Program State
 
-**Last updated:** 2026-06-02. This file = **live/operational state + binding decision rules**.
-**All research findings, results, verdicts, and open methodology debts live in ONE file:
-[docs/research_summary.md](docs/research_summary.md)** (per-arc write-ups + one-off research
-scripts were consolidated there and deleted; git history is the backstop).
+**Last updated:** 2026-06-08
+This file is live/operational state plus binding decision rules. Research conclusions live in
+[docs/research_summary.md](docs/research_summary.md).
 
-> First session here? Read this file, then `docs/research_summary.md`. That's the whole map.
+## First Read
 
-## Current status (one paragraph)
+Read these two files only:
 
-Bybit (+Binance) liquidity-migration **short**, research-stage — the live demo + paper run a
-frozen `promoted` profile; **NOT real money**. The alpha is the **SELECTION** signal (the
-liquidity-migration event = candidate pool; a fade short on seasoned names, not catch-the-top)
-+ a plain +1h short. E1 falsified the EXECUTION half (fade-confirmation entry ≈ immediate), so
-the open lead is **SELECTION refinement** — the **age gate + residual-momentum gate** (both
-Tier-2 demo-candidates, in-sample). The intraday-kernel and continuous-fade arcs **concluded**
-(marginal/redundant — see summary). Nothing is promoted; forward demo is the arbiter. Numbers +
-full record: **`docs/research_summary.md`**.
+1. `STATE.md` - what is running and what rules bind us.
+2. `docs/research_summary.md` - consolidated research findings and next direction.
 
-## What's running (live deployed state)
+Old one-off research receipts were consolidated and deleted. Git history is the archive.
 
-- **SHORT `promoted` profile = `drop_all_4 + age300 + ff6 + btc_trend_gate=uptrend`** (`event_demo._demo_event_config`):
-  - `age300` SELECTION gate (`pit_age_days_min` 90→**300**, E2) + `ff6_4pct` failed-fade EXIT
-    (6h/4%/1%mfe/cloc0) stacked on `drop_all_4` (drops the 4 non-earning vetoes/bounds +
-    `max_active=12`, systemd `MAX_ACTIVE_SYMBOLS=12`) + `btc_trend_gate=uptrend` (only short when BTC
-    causal 30d trend>0; operator-directed 2026-06-04, ahead of Tier-2). ⚠️ `drop_all_4` **fails the Tier-2 cross-venue
-    guard** (binance net-negative under the corrected engine) — kept by explicit operator override
-    for forward-demo observation; revert if binance stays negative. `strategy_id` kept ⇒ deploy date
-    = clean pre/post split. Receipts: `docs/preregistration/{promote-age-ff6-demo-2026-05-31,drop-all-4-promotion}.md`.
-- **LONG `div` profile** (`_v11a_long_native_config`, **deployed** — full book live on the VPS): universe
-  10→50, max_concurrent 5→10, de-risk-only vol-target (0.60 annual). Portfolio construction, not a
-  new signal (FC is the alpha ceiling). Receipt: `docs/preregistration/div-promotion.md`.
-- **CONTINUOUS-fade sleeve — DE-PROMOTED 2026-06-05 (look-ahead invalidated); live sleeve OFF.**
-  Removed from the promoted set (`promoted.py` exposes short + long only; pinned by
-  `tests/test_promoted_profiles.py`). Its backtested edge was a residual-momentum LOOK-AHEAD;
-  `CONTINUOUS_SLEEVE=off` in `deploy/sleeves.env`. The engine code (`continuous_*.py`) remains a
-  disabled/experimental sleeve for research audit — do NOT present it as deployed/promoted. `ws_risk`
-  still carries `CONTINUOUS_DATA_ROOT` so any legacy open position stays tracked (never flattened).
-- **Live VPS** (Hetzner 116.202.15.128, 4 GB — migrated 2026-06-04 from the decommissioned
-  Singapore 5.223.42.109, retired for cost): short `event_demo_daemon`+paper, long
-  `long_native_event_demo_daemon`+paper, and `ws_risk_daemon` under systemd. **All 5 fit in
-  ~1.6 GB RSS (of 3.73), swap untouched** (measured 2026-06-04: short demo 429M / short paper
-  ~430M / long demo 241M / long paper 201M / risk 77M). The long sleeve's forward demo **started
-  2026-06-04** (first time). CONTINUOUS stays OFF (look-ahead-disabled). Per-sleeve toggles in
-  `deploy/sleeves.env` (`SHORT_PAPER_SLEEVE`/`LONG_SLEEVE`=on, `CONTINUOUS_SLEEVE`=off); shed the
-  paper shadows first if the box ever goes memory-tight. CI push-to-deploy works (see git history).
-- **No research runs in-flight.**
+## Current Status
 
-**Research state (all arcs CONCLUDED — full record + open debts in `docs/research_summary.md`):**
-- **Daily age+rmom (the validated lead):** `age300` ~doubles cross-venue MAR (robust to
-  threshold/regime/cost/stop-fill); the `rmom` gate is a squeeze-filter that fixes the recent decay.
-  Both Tier-2 demo-candidates, in-sample. The rmom gate must be live-wired for a faithful forward demo.
-- **Open pre-registered cell (run-pending):** the `age+rmom+ff6` combined stack (do the three
-  separately-validated refinements add or overlap?). Receipt `docs/preregistration/age-rmom-ff6-combined-2026-05-31.md`.
-- **Intraday kernel + burst-short:** CONCLUDED — fill-timing dead (E1), detection-timing dead (K1a),
-  standalone intraday burst-short marginal + unvalidated (funding eats ~85%); the daily late entry
-  sidesteps the intraday squeeze. I3 engine-grade test is an operator-gated coin-flip (deprioritised).
-- **Continuous-fade:** a real, all-weather, cross-venue signal tradeable on liquid names, **but it
-  does NOT beat the daily on MAR** and the continuous short is 0.65–0.72 correlated with the live
-  daily short (redundant capacity). Its market-neutral L/S overlay is a *candidate* diversifier — but
-  the existing long sleeve already diversifies better; the gating test is **G1 (3-way redundancy
-  backtest)** in the summary. Alpha-program wins (entry-timing +1h, rmom33, de-gross 0.3) are in the
-  continuous live-config above.
-- **Open methodology debts (2026-06-02 audit, operator-gated):** binance funding-interval undercount
-  (~50% on 4h alts — inflates the binance promotion-gate MAR), age300 live≠backtest definition, rmom
-  look-ahead unconfirmed, decompose day-grid off-by-one. Detail in the summary.
+Liquidity-migration is research-stage. Nothing is approved for real money.
 
-- **Open actions (operator's call — profile change is a hard line):** (a) forward-demo the age gate
-  (deploy-ready) and/or the residual-momentum gate (live-wire the signal first); (b) the deployed
-  short demo runs `max_active=3` vs the validated `max_active=12` — consider moving it + `risk_equal`
-  sizing; (c) deploy the continuous entry-timing `+1h` ± de-gross; (d) run G1 (continuous redundancy).
+The current short profile is the code-resolved promoted profile:
+`drop_all_4 + age300 + ff6 + btc_trend_gate=uptrend`. It does **not** use rmom;
+`liquidity_migration_residual_momentum_max=10.0` is the inactive sentinel. The
+continuous work is research-only. The right continuous direction is no longer
+"independent system replaces old candidate"; it is "old rebalance engine plus cleaner
+independent entry/exit logic."
 
-## Engine defaults (current)
+## What's Running
 
-- **Stop fill: `bar_extreme_capped` (10% cap)** — realistic bad-case. `stop` (optimistic) /
-  `bar_extreme` (worst-case) selectable via `--stop-fill-mode`.
-- **Cost:** 100% taker; 15 bps base round-trip; sweeps default to ×3 = 45 bps.
-- **Full-PIT universe required** (engine aborts on coverage gaps); the PIT gate is scoped to each
-  symbol's traded span `[first_kline, last_kline]`.
-- **Universe sourcing:** the `rank_end: 120` in `configs/volume_alpha.default.yaml` is NOT the trading
-  universe — it's a current-turnover snapshot read ONLY by `discover-universe` (survivorship-biased,
-  scouting only). The `volume-events` backtest + the live demo/paper trade the full-PIT root on PIT
-  daily liquidity ranks (`UNIVERSE_RANK_END=0` ⇒ full ~750-perp universe). The pre-2026-05-24 narrow
-  current-universe demo was a real bias (caused the DRIFTUSDT divergence); match-the-backtest fixed it.
+- **SHORT demo/paper:** frozen promoted short profile:
+  `drop_all_4 + age300 + ff6 + btc_trend_gate=uptrend`; rmom inactive at `10.0`.
+  It remains demo/paper only.
+  Key receipts kept:
+  - `docs/preregistration/promote-age-ff6-demo-2026-05-31.md`
+  - `docs/preregistration/drop-all-4-promotion.md`
+- **LONG demo/paper:** `div` profile. Portfolio/diversification sleeve, not standalone
+  real-money proof. Receipt kept: `docs/preregistration/div-promotion.md`.
+- **CONTINUOUS:** not promoted. Continuous demo orders are off. No-order paper evidence can
+  run only as an evidence collector. Do not present continuous as deployed, promoted, or
+  real-money ready.
+- **VPS:** Hetzner live host runs demo/paper services. Keep `REAL_MONEY=false`; never enable
+  real money without explicit owner instruction.
 
-## Decision rules currently binding — three-tier, demo-arbiter
+## Current Research Direction
 
-Principle: permissive where being wrong is free (backtest→demo is paper), strict where it costs real
-money. Forward demo/paper is the arbiter. MAR-primary (Return/Drawdown), Sharpe secondary.
+### Daily Short
 
-### Tier 1 — Investigation — unchanged
-- MAR Δ > 0 on majority venues (2/2 OR 1/2 with other ≥ −0.5 MAR)
-- No return sign-flip vs control; ≥30 Bybit / ≥20 Binance trades
-- Falsifier: MAR Δ ≤ −1.0 either venue OR return negative OR DD > 70% OR <10 trades/sub-period
+Currently used profile: `drop_all_4 + age300 + ff6 + btc_trend_gate=uptrend`.
 
-### Tier 2 — Demo-candidate (→ forward demo) — LOOSENED
-- Return positive on **both** venues (direction guard)
-- **Pooled** MAR Δ > +0.1 (mean of the two venue MAR deltas)
-- Neither venue worse than MAR Δ ≥ −0.5
-- ≥30 Bybit / ≥20 Binance trades total
-- Fragility diagnostics (bootstrap p5, LOO, sign-consistency, residual Sharpe) REPORTED,
-  non-blocking — set demo order, not eligibility
+- Age gate around 300d is robust.
+- Rmom is not in the promoted short. Historical rmom work is research-only and not a
+  current run instruction.
+- Execution timing is not the main lever.
 
-### Tier 3 — Real-money (demo → mainnet) — STRICT, not loosened
-- Forward-demo OOS pass (no internal pre-2023 OOS root — pristine OOS = the forward demo/paper
-  ledgers, per `docs/data_roots.md`): MAR > 0 both venues over the forward window; DD < 50%; sign-consistent
-- ≥30 days forward demo + daily paper-shadow reconciliation
-- Block-bootstrap pooled MAR-Δ p5 ≥ 0 (seed=0, block=3mo, n=5000)
-- Residual Sharpe ≥ +0.3 (factor-model residual; `liquidity_migration/risk_model.py`
-  `decompose_strategy_pnl`, see `docs/preregistration/r4-risk-model-verdict.md`)
-- Stress pass + capacity ≥ 10× deployment size
+### Continuous
 
-`scripts/r1_robustness.py` emits the Tier-2 verdict + fragility from per-cell ledgers;
-`scripts/apply_decision_rule.py` is the legacy strict (Sharpe) bar only.
+The strongest old continuous object is still the decomposed daily-rebalance candidate:
 
-## What's broken
+```text
+q25_liq500k_btcup_turn4_pop4_decomp_rebalance_w90_tv25_max4_dd4_trend180_hurdle2
+```
 
-Nothing known. Pre-push gate clean: `.venv/bin/python -m ruff check liquidity_migration tests`
-+ `.venv/bin/python -m pytest -q` both pass (1129).
+Keep what works from it:
 
-Recent landed work (full detail in git history / `docs/research_summary.md`):
-- **2026-06-02 — zero-friction all-sleeve reconcile + continuous PAPER sleeve (NOT pushed).**
-  `scripts/reconcile.sh` is self-provisioning + all-sleeve: pull all sleeves → refresh manifest →
-  **auto-download recent klines** → **auto-recompute rmom** → coverage check → **minimal-window**
-  backtest (~45d warm-up vs 150d, validated to reproduce the identical forward trade set; the 300d
-  age gate is manifest-derived so a short kline window is exact) → reconcile SHORT/LONG/CONTINUOUS →
-  one headline. New: `reconcile-continuous-paper-demo` + the continuous signal-consistency replay +
-  the operationalized continuous paper sleeve (systemd + `--paper-mode` + deploy verify asserts it
-  never submits). Skill `pit-reconcile`; design `docs/pit_gate.md`.
-- **2026-06-02 — continuous rmom blackout fixed + monitored** (the gate built zero rows since go-live;
-  klines-dataset sniff + trailing null-residual rows through `end` + a staleness watchdog).
-- **2026-05-30 — PIT gate / reconcile plumbing** (membership keyed on `date(ts_ms-1ms)` = trading day;
-  one-command reconcile). Op note: the 16 GB VPS can't run a full `bybit_full_pit` cell (~23 GB).
+- decomposed daily rebalance accounting;
+- 90d realized-vol targeting;
+- 2.5% target daily vol;
+- max 4x scale;
+- -4% drawdown half-scale;
+- 10 bps resize cost;
+- optional 180d strategy-equity momentum hurdle.
 
-## Helpers (when you need them)
+The merged test is complete. Keep the better independent trade logic:
 
-- **Demo-forward reconcile (one command, ALL sleeves):** `bash scripts/reconcile.sh` —
-  self-provisioning (pull → manifest → auto kline-fill → auto-rmom → minimal-window backtest →
-  reconcile short/long/continuous → headline). `--sleeves` to subset, `--dry-run` to preview,
-  `--full-window` for the old 150d. Skill `pit-reconcile`; design `docs/pit_gate.md`.
-- **CLI baseline wrapper:** `scripts/volume_events_cell.sh --cell-id X --overrides 'KEY=VAL,…'`.
-- **Decision-rule analyzer:** `scripts/apply_decision_rule.py SUMMARY.csv --control 00_baseline`.
-- **Tier-2 verdict + fragility:** `scripts/r1_robustness.py --sweep-tag <TAG>`.
-- **Equity curves (one command, ALL sleeves):** `bash scripts/equity_curves.sh [--sleeves …]
-  [--years 3]` — runs each sleeve's EXACT deployed profile over the window and emits the
-  equity-vs-BTC PNG + run_label. The promoted profiles live in ONE place:
-  **`liquidity_migration/promoted.py`** (`short_profile`/`long_profile`/`continuous_profile`,
-  pinned by `tests/test_promoted_profiles.py`) — never reverse-engineer flags again.
-- **Continuous signal-consistency:** `scripts/continuous_demo_signal_check.py --root <demo-root>`.
-- **Skill `research-phase-runner`** (auto-loads) — per-experiment run/verdict workflow.
-- **MCP tools** on `liqmig-research`: `current_state`, `data_roots`, `list_reports`, `parse_report`,
-  `audit_run_artifacts`, `apply_decision_rule`.
-- **Full-PIT op note:** one `volume-events` cell peaks ~23 GB → run full-PIT sweeps at
-  `SWEEP_MAX_WORKERS=1 POLARS_MAX_THREADS=8`; clear `<root>/.locks/*.lock` after any OOM/kill.
+- age >= 240d;
+- `turn3_pop3` entry trigger;
+- crowd cap 2;
+- TP10;
+- 24h hold;
+- no hard stop, no rank-decay exit, no giveback exit by default.
 
-## Non-negotiables (every session)
+Current cleaner cross-venue continuous research candidate:
 
-1. Pre-push gate (`ruff` + `pytest`) before every `git push`.
-2. Never `REAL_MONEY=true`. Demo + paper only.
-3. Never commit or push without operator confirmation.
-4. Never modify `docs/backtesting_errors_we_never_repeat.md`, `docs/parameter_pre_registration.md`,
-   or `configs/volume_alpha.default.yaml` without operator instruction.
-5. The three-tier decision structure is pre-committed — no further loosening to rescue a specific
-   cell; the Tier-3 real-money gate is NOT loosened.
-6. MAR-primary, Sharpe-secondary is pre-committed.
-7. Strategy stays at the frozen promoted profile until the Tier-3 gate passes AND ≥30 days forward
-   demo evidence accumulates.
+```text
+q25_liq500k_btcup_turn3_pop3_age240_tp10_crowd2_decomp_rebalance_w90_tv25_max4_dd4
+```
 
-## How to update this file
+Use it **without** strategy-equity momentum. Soft 0.25x, soft 0.5x, and the old hard-off
+180d/+2% hurdle all hurt the merged signal; hard-off was especially weak under 2x costs.
+Details are consolidated in `docs/research_summary.md`; the per-run continuous receipts
+were deleted because continuous is not promoted or paper-ready.
 
-Keep it short (live/operational state + decision rules). Research results go in
-`docs/research_summary.md`, not here. Keep under ~120 lines.
+The 2026-06-08 derivatives-positioning frontier rejected causal funding,
+premium-index, and mark-index-basis hard filters for this merged stream. The
+filters had near-complete coverage but reduced MAR versus the unfiltered control.
+The closest return retarget was the unfiltered high-scale rule, not a filter:
+Bybit +137.46% / MAR 4.39, Binance +112.77% / MAR 4.70, worst DD -10.00%.
+That still fails the +120% both-venue and MAR 6 target.
+
+The current best continuous research lead is the scale/window-interpolated
+downtrend-extended ensemble, still research-only:
+
+```text
+winner_up_p3_30_p4p3_20_p4p5_30_tp14_20_plus_dt40_turn4p5_premium_decomp_rebalance_w70_tv45_max10_dd4
+```
+
+It uses the uptrend weighted ensemble
+`turn3p3=0.30, turn4p3=0.20, turn4p5=0.30, age210tp14=0.20`, then adds a 40%
+downtrend-only `dt_turn4p5` sleeve filtered to `premium_24h_mean >= 0`. Base
+validation: Bybit +265.24% / MAR 7.50 / -11.28% DD / 31-of-38 green months;
+Binance +190.87% / MAR 6.84 / -9.06% DD / 29-of-36 green months. Common
+both-venue green months are 28/38. 2x cost remains profitable: Bybit +177.28%
+/ MAR 5.11; Binance +134.13% / MAR 4.85 / -8.98% DD; common both-venue green
+months 24/38. Treat it as a cost-robust research winner, not paper-ready evidence.
+Worst-DD equality versus the prior row is within float tolerance. Stricter premium
+thresholds, market/BTC micro-context filters, and broad component filters were
+tested and rejected as replacements. The later TP14 stress-repair retry under
+the accepted 40%/70d engine also failed replacement bars: BTC-filtered TP14
+helped 2023-12 Bybit, but broad return/MAR and base drawdown got worse.
+
+Component-specific uptrend filtering also did not replace the winner. Hard
+`turn4p5` premium/funding filters cut too much return. Partial premium-positive
+`age210tp14` replacement produced a useful risk-stability lead
+(`u_tp14f15`: base min MAR 6.57, DD -10.19%, 2x min MAR 4.30), but it worsened
+the 2024-12 / 2025-04 stress cluster and is not the default winner. Market-context
+component filters improved green-month count/DD but cut Binance return/MAR, so they
+are rejected replacements too.
+
+Downtrend micro-context filters also did not beat sign-only premium. A 40%/60d
+aggressive row improved return/MAR but missed 2x common-green by one month; the
+subsequent scale/window interpolation found that `0.4` downtrend scale with a 70d
+vol window recovers the strict 2x common-green bar while preserving the return/MAR
+improvement.
+All June 7-8 continuous run receipts are consolidated in `docs/research_summary.md`;
+the durable artifacts remain under `C:\Users\user\SHARED_DATA\...`.
+
+## Binding Decision Rules
+
+Forward demo/paper is the arbiter. MAR is primary; Sharpe is secondary.
+
+### Tier 1 - Investigation
+
+- MAR delta positive on majority venues, or one venue positive with the other not badly worse.
+- No return sign-flip versus control.
+- At least 30 Bybit trades and 20 Binance trades, unless explicitly labeled a tiny scout.
+
+### Tier 2 - Demo Candidate
+
+- Positive return on both venues.
+- Pooled MAR delta > +0.1.
+- Neither venue worse than MAR delta -0.5.
+- Trade counts clear Tier 1.
+- Fragility diagnostics are reported, not used to rescue weak cells.
+
+### Tier 3 - Real Money
+
+Strict and not loosened:
+
+- At least 30 days forward demo/paper evidence.
+- Forward MAR > 0 both venues.
+- Drawdown < 50%.
+- Daily paper/demo reconciliation.
+- Bootstrap pooled MAR-delta left tail >= 0.
+- Residual Sharpe >= +0.3.
+- Stress pass and capacity >= 10x deployment size.
+
+No internal pre-2023 OOS substitute exists.
+
+## Methodology Debts
+
+These can still move numbers:
+
+- Binance funding interval handling.
+- Live age definition versus PIT backtest age definition.
+- Residual-momentum causality at decision timestamp.
+- Factor/residual day-grid alignment.
+- Continuous forward window is immature; current local evidence is not enough.
+
+Risk-model receipt kept: `docs/preregistration/r4-risk-model-verdict.md`.
+PIT membership receipt kept: `docs/preregistration/pit-membership-trading-day-fix.md`.
+
+## Helpers
+
+- Reconcile all sleeves: `bash scripts/reconcile.sh`
+- Run daily research cell: `scripts/volume_events_cell.sh --cell-id X --overrides 'KEY=VAL,...'`
+- Tier-2 robustness: `python scripts/r1_robustness.py --sweep-tag <TAG>`
+- Legacy strict analyzer: `python scripts/apply_decision_rule.py SUMMARY.csv --control 00_baseline`
+- Continuous readiness diagnostic: `python -m liquidity_migration continuous-forward-readiness --paper-only`
+- Continuous vs daily forward comparator: `python -m liquidity_migration continuous-vs-daily-forward`
+
+## Non-Negotiables
+
+1. Never set `REAL_MONEY=true` without explicit owner instruction.
+2. Never present continuous as promoted or paper-ready.
+3. Both venues matter; single-venue Bybit wins are not enough.
+4. Full-PIT, causal features, ledgers, and cost modeling are correctness gates.
+5. Do not loosen Tier 3 to rescue a result.
+6. Pre-push gate before any push: ruff plus pytest.
+7. Do not commit or push without operator confirmation.
+
+## How To Update
+
+Keep this file short. Put research results in `docs/research_summary.md`. Keep
+`docs/preregistration/` small and only for receipts that still bind an active
+deployment, candidate, or methodology decision.

@@ -5,7 +5,7 @@ description: "Produce equity curves for the two promoted trading sleeves (SHORT 
 
 # Equity curves — promoted profiles, one command
 
-**For ANY/ALL sleeves' deployed-profile equity curve, use the zero-friction tool:**
+**For either/both promoted sleeves' deployed-profile equity curve, use the zero-friction tool:**
 
 ```bash
 bash scripts/equity_curves.sh                 # short + long, last 3 years

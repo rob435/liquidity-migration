@@ -92,19 +92,20 @@ strict.
 ## The one-command workflow
 
 `scripts/reconcile.sh` (driver: `scripts/reconcile.py`) is self-provisioning and
-reconciles ALL sleeves (short, long, continuous). In order:
+reconciles the promoted sleeves by default (short, long). Continuous is opt-in
+diagnostics only via `--sleeves continuous`. In order:
 
 1. **pull** — rsync every selected sleeve's demo + paper ledgers from the VPS
-   (short `event_demo_*`, long `long_native_{demo,paper}_*`, continuous
-   `continuous_fade_{demo,paper}_*` + the continuous rmom panel + WS kline store),
-   read-only.
+   (short `event_demo_*`, long `long_native_{demo,paper}_*`; when explicitly
+   selected, continuous `continuous_fade_{demo,paper}_*` + the continuous rmom
+   panel + WS kline store), read-only.
 2. **manifest** — refresh `archive_trade_manifest` to `today+2` on the research root.
 3. **kline-fill** — if `klines_1h` is behind today, auto-download the missing recent
    klines via `archive-download-klines-1h-api` (manifest-gated). This closes the
    "the local root won't have recent coverage" gap that used to be a hand-run step.
    Skip with `--no-kline-fill`.
-4. **rmom** — auto-recompute `residual_momentum.parquet` (the continuous gate) on the
-   research root. Skip with `--no-rmom`.
+4. **rmom** — when continuous is selected, auto-recompute `residual_momentum.parquet`
+   (the continuous gate) on the research root. Skip with `--no-rmom`.
 5. **coverage** — print the PIT coverage table; abort the strict backtest if the
    manifest can't validate the latest signal day (override: `--diagnostic` / `--force`).
 6. **backtest** — run the promoted `volume-events` profile over a **minimal** forward
@@ -115,14 +116,14 @@ reconciles ALL sleeves (short, long, continuous). In order:
    + 3d hold) and the 300d age gate is **manifest-derived**, so it needs no extra
    klines. `--full-window` restores the 150d slab; `--warmup-days N` overrides.
 7. **reconcile** — per sleeve: SHORT `reconcile-all` (backtest↔paper↔demo,
-   `+--with-bybit`), LONG `reconcile-long-paper-demo`, CONTINUOUS
-   `reconcile-continuous-paper-demo` + a signal-consistency replay.
-8. **summary** — one consolidated headline across all sleeves.
+   `+--with-bybit`), LONG `reconcile-long-paper-demo`, and, only when selected,
+   CONTINUOUS `continuous-forward-readiness --paper-only` + a signal-consistency replay.
+8. **summary** — one consolidated headline across selected sleeves.
 
 Common flags: `--sleeves short,long,continuous`, `--dry-run`, `--no-pull`,
 `--no-manifest`, `--no-kline-fill`, `--no-rmom`, `--no-backtest`, `--full-window`,
 `--warmup-days N`, `--diagnostic`, `--with-bybit`, `--force`. The matching skill is
-`.claude/skills/pit-reconcile`.
+`.codex/skills/pit-reconcile`.
 
 ## When a reconcile shows `paper-only` / `pit_membership_fail`
 

@@ -111,7 +111,22 @@ def test_short_paper_unit_moved_out_of_short_sleeve_units(tmp_path: Path) -> Non
     assert rc == 0, err
 
 
-def test_loaded_toggles_short_long_papers_on_continuous_off(tmp_path: Path) -> None:
+def test_continuous_paper_split_keeps_demo_orders_off_runs_paper(tmp_path: Path) -> None:
+    rc, calls, err = _run(tmp_path, """
+        apply_sleeve_enable off $CONTINUOUS_SLEEVE_UNITS
+        apply_sleeve_enable on  $CONTINUOUS_PAPER_SLEEVE_UNITS
+        verify_sleeve off $CONTINUOUS_SLEEVE_UNITS
+        verify_sleeve on  $CONTINUOUS_PAPER_SLEEVE_UNITS
+        case " $CONTINUOUS_SLEEVE_UNITS " in *continuous-paper.service*) echo "paper still bundled with demo" >&2; exit 1 ;; esac
+        echo "CONTINUOUS_SPLIT_OK"
+    """)
+    assert rc == 0, err
+    assert "disable --now liquidity-migration-bybit-continuous-demo.service" in calls
+    assert "enable liquidity-migration-bybit-continuous-paper.service" in calls
+    assert "enable liquidity-migration-bybit-continuous-demo.service" not in calls
+
+
+def test_loaded_toggles_short_long_papers_on_continuous_demo_off_paper_on(tmp_path: Path) -> None:
     # Loaded toggles (2026-06-04): SHORT + SHORT_PAPER + LONG all run — short demo measured ~535 MB
     # on the 4 GB box, leaving headroom for the long sleeve + paper shadows. CONTINUOUS stays OFF
     # (look-ahead-disabled 2026-06-03). Versioned in deploy/sleeves.env so a host rebuild can't
@@ -119,27 +134,29 @@ def test_loaded_toggles_short_long_papers_on_continuous_off(tmp_path: Path) -> N
     rc, _calls, err = _run(tmp_path, """
         lm_load_sleeve_toggles
         test "$SHORT_SLEEVE" = on && test "$SHORT_PAPER_SLEEVE" = on \
-            && test "$LONG_SLEEVE" = on && test "$CONTINUOUS_SLEEVE" = off
+            && test "$LONG_SLEEVE" = on && test "$CONTINUOUS_SLEEVE" = off \
+            && test "$CONTINUOUS_PAPER_SLEEVE" = on
         echo "TOGGLES_OK"
     """)
     assert rc == 0, err
 
 
-def test_lib_fallback_defaults_continuous_off_others_on(tmp_path: Path) -> None:
+def test_lib_fallback_defaults_continuous_demo_off_papers_on(tmp_path: Path) -> None:
     # Last-resort fallback (NEITHER sleeves.env present): SHORT/SHORT_PAPER/LONG default on (a
     # stripped checkout keeps the historical demo+paper pair), CONTINUOUS OFF — even a stripped
     # checkout can never resurrect the look-ahead-disabled sleeve. The committed sleeves.env, NOT
     # this fallback, is the real source of truth (it may turn SHORT_PAPER/LONG off for a small host).
     rc, _calls, err = _run(tmp_path, """
-        : "${SHORT_SLEEVE:=on}"; : "${SHORT_PAPER_SLEEVE:=on}"; : "${LONG_SLEEVE:=on}"; : "${CONTINUOUS_SLEEVE:=off}"
+        : "${SHORT_SLEEVE:=on}"; : "${SHORT_PAPER_SLEEVE:=on}"; : "${LONG_SLEEVE:=on}"; : "${CONTINUOUS_SLEEVE:=off}"; : "${CONTINUOUS_PAPER_SLEEVE:=on}"
         test "$SHORT_SLEEVE" = on && test "$SHORT_PAPER_SLEEVE" = on \
-            && test "$LONG_SLEEVE" = on && test "$CONTINUOUS_SLEEVE" = off
+            && test "$LONG_SLEEVE" = on && test "$CONTINUOUS_SLEEVE" = off \
+            && test "$CONTINUOUS_PAPER_SLEEVE" = on
         echo "FALLBACK_OK"
     """)
     assert rc == 0, err
 
 
-def test_committed_sleeves_env_short_long_papers_on_continuous_off() -> None:
+def test_committed_sleeves_env_short_long_papers_on_continuous_demo_off_paper_on() -> None:
     # The committed file is the source of truth (2026-06-04): SHORT + SHORT_PAPER + LONG on,
     # CONTINUOUS off. Each line must be systemd-EnvironmentFile-safe (plain KEY=value, no inline
     # comment on the assignment).
@@ -149,6 +166,7 @@ def test_committed_sleeves_env_short_long_papers_on_continuous_off() -> None:
         "SHORT_PAPER_SLEEVE": "on",
         "LONG_SLEEVE": "on",
         "CONTINUOUS_SLEEVE": "off",
+        "CONTINUOUS_PAPER_SLEEVE": "on",
     }
     for flag, value in expected.items():
         line = next(ln for ln in env.splitlines() if ln.startswith(f"{flag}="))

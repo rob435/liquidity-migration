@@ -66,6 +66,161 @@ def test_runtime_scripts_do_not_delete_live_cycle_locks() -> None:
         assert "mkdir -p \"$DATA_ROOT/.locks\"" in text
 
 
+def test_continuous_rebalance_cycle_audit_parser_defaults() -> None:
+    from liquidity_migration.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["continuous-rebalance-cycle-audit"])
+
+    assert args.command == "continuous-rebalance-cycle-audit"
+    assert args.data_root == "data/bybit-continuous-paper-event"
+    assert args.cycles_dataset == "continuous_fade_paper_cycles"
+    assert args.orders_dataset == "continuous_fade_paper_orders"
+
+
+def test_continuous_forward_readiness_parser_defaults() -> None:
+    from liquidity_migration.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["continuous-forward-readiness"])
+
+    assert args.command == "continuous-forward-readiness"
+    assert args.paper_data_root == "data/bybit-continuous-paper-event"
+    assert args.demo_data_root == "data/bybit-continuous-demo-event"
+    assert args.entry_tolerance_ms == 600_000
+    assert args.min_pairs_warning == 20
+    assert args.allow_unmatched is False
+    assert args.paper_only is False
+
+
+def test_continuous_vs_daily_forward_parser_defaults() -> None:
+    from liquidity_migration.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["continuous-vs-daily-forward"])
+
+    assert args.command == "continuous-vs-daily-forward"
+    assert args.daily_data_root == "data/bybit-paper-event"
+    assert args.continuous_data_root == "data/bybit-continuous-paper-event"
+    assert args.daily_trades_dataset == "event_demo_trades"
+    assert args.daily_cycles_dataset == "event_demo_cycles"
+    assert args.continuous_cycles_dataset == "continuous_fade_paper_cycles"
+    assert args.continuous_trades_dataset == "continuous_fade_paper_trades"
+    assert args.min_common_days == 30
+
+
+def test_continuous_event_demo_cycle_parser_rebalance_profile_flags() -> None:
+    from liquidity_migration.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "continuous-event-demo-cycle",
+            "--strategy-profile",
+            "continuous_rebalance_v1",
+            "--feature-set",
+            "max_ret168",
+            "--entry-event-trigger",
+            "turn4_pop4",
+            "--btc-trend-gate",
+            "uptrend",
+            "--daily-rebalance-enabled",
+        ]
+    )
+
+    assert args.command == "continuous-event-demo-cycle"
+    assert args.strategy_profile == "continuous_rebalance_v1"
+    assert args.feature_set == "max_ret168"
+    assert args.entry_event_trigger == "turn4_pop4"
+    assert args.btc_trend_gate == "uptrend"
+    assert args.daily_rebalance_enabled is True
+
+
+def test_continuous_runner_wires_rebalance_profile_env() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    text = (repo / "scripts" / "run_bybit_continuous_demo_event_engine.sh").read_text(encoding="utf-8")
+
+    assert 'STRATEGY_PROFILE="${STRATEGY_PROFILE:-continuous_v1}"' in text
+    assert "--strategy-profile \"$STRATEGY_PROFILE\"" in text
+    assert 'DAILY_REBALANCE_ENABLED="${DAILY_REBALANCE_ENABLED:-0}"' in text
+    assert "--daily-rebalance-enabled" in text
+    assert "--daily-rebalance-strategy-momentum-min-return" in text
+
+
+def test_reconcile_continuous_uses_forward_readiness_gate() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    text = (repo / "scripts" / "reconcile.py").read_text(encoding="utf-8")
+
+    assert '"continuous-forward-readiness"' in text
+    assert '"--paper-only"' in text
+    assert '"--root", paper' in text
+    assert '"reconcile-continuous-paper-demo"' not in text
+
+
+def test_continuous_units_target_rebalance_profile_but_stay_kill_switch_controlled() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    for unit_name in (
+        "liquidity-migration-bybit-continuous-demo.service",
+        "liquidity-migration-bybit-continuous-paper.service",
+    ):
+        text = (repo / "deploy" / "systemd" / unit_name).read_text(encoding="utf-8")
+        assert "Environment=STRATEGY_PROFILE=continuous_rebalance_v1" in text
+        assert "Environment=FEATURE_SET=max_ret168" in text
+        assert "Environment=ENTRY_EVENT_TRIGGER=turn4_pop4" in text
+        assert "Environment=BTC_TREND_GATE=uptrend" in text
+        assert "Environment=DAILY_REBALANCE_ENABLED=1" in text
+
+
+def test_continuous_rmom_refresh_is_toggle_aware_for_paper_only_evidence() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    service = (
+        repo / "deploy" / "systemd" / "liquidity-migration-continuous-rmom-refresh.service"
+    ).read_text(encoding="utf-8")
+    script = (repo / "scripts" / "run_continuous_rmom_refresh.sh").read_text(encoding="utf-8")
+
+    assert "run_continuous_rmom_refresh.sh" in service
+    assert 'sleeve_on "$CONTINUOUS_SLEEVE"' in script
+    assert 'sleeve_on "$CONTINUOUS_PAPER_SLEEVE"' in script
+    assert "--root data/bybit-continuous-demo-event" in script
+    assert "--root data/bybit-continuous-paper-event" in script
+
+
+def test_liveness_watchdog_checks_continuous_paper_evidence_root() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    service = (repo / "deploy" / "systemd" / "liquidity-migration-demo-liveness.service").read_text(
+        encoding="utf-8"
+    )
+    script = (repo / "scripts" / "check_demo_liveness.py").read_text(encoding="utf-8")
+
+    assert "--continuous-paper-root /opt/liquidity-migration/data/bybit-continuous-paper-event" in service
+    assert "liquidity-migration-bybit-continuous-paper.service" in script
+    assert "_sleeve_on(\"CONTINUOUS_PAPER_SLEEVE\")" in script
+
+
+def test_continuous_forward_report_timer_wired_to_paper_evidence_gate() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    service = (
+        repo / "deploy" / "systemd" / "liquidity-migration-continuous-forward-report.service"
+    ).read_text(encoding="utf-8")
+    timer = (
+        repo / "deploy" / "systemd" / "liquidity-migration-continuous-forward-report.timer"
+    ).read_text(encoding="utf-8")
+    deploy = (repo / "scripts" / "deploy_vps_live.sh").read_text(encoding="utf-8")
+    verify = (repo / "scripts" / "verify_vps_live.sh").read_text(encoding="utf-8")
+    recovery = (repo / "scripts" / "vps_console_recover_and_deploy.sh").read_text(encoding="utf-8")
+
+    assert "scripts/continuous_forward_report.py" in service
+    assert "--daily-data-root data/bybit-paper-event" in service
+    assert "--daily-cycles-dataset event_demo_cycles" in service
+    assert "--continuous-data-root data/bybit-continuous-paper-event" in service
+    assert "--stale-coverage-gap-days 2" in service
+    assert "--telegram" in service
+    assert "OnCalendar=*-*-* 08:10:00" in timer
+    for text in (deploy, verify, recovery):
+        assert "continuous_rmom_refresh_on" in text
+        assert "liquidity-migration-continuous-forward-report.timer" in text
+
+
 def test_event_entry_runner_default_cadence_is_rate_limit_safe() -> None:
     repo = Path(__file__).resolve().parents[1]
     text = (repo / "scripts" / "run_bybit_demo_event_engine.sh").read_text(encoding="utf-8")
@@ -468,7 +623,7 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "lm_load_sleeve_toggles" in text
     # SHORT_PAPER is a sub-toggle of the short sleeve (demo runs without its paper shadow on a
     # small host), wired with the same apply_sleeve_enable/verify_sleeve helpers as the sleeves.
-    for sleeve in ("SHORT", "SHORT_PAPER", "LONG", "CONTINUOUS"):
+    for sleeve in ("SHORT", "SHORT_PAPER", "LONG", "CONTINUOUS", "CONTINUOUS_PAPER"):
         assert f'apply_sleeve_enable "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
         assert f'verify_sleeve "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
     # The canonical unit set (what each sleeve enables/restarts/verifies, and what the
@@ -478,7 +633,12 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert 'SHORT_SLEEVE_UNITS="liquidity-migration-bybit-demo.service"' in lib
     assert 'SHORT_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-paper.service"' in lib
     assert 'LONG_SLEEVE_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service"' in lib
-    assert 'CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service"' in lib
+    assert 'CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service"' in lib
+    assert 'CONTINUOUS_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-continuous-paper.service"' in lib
+    assert "continuous_rmom_refresh_on()" in lib
+    sleeves = (repo / "deploy" / "sleeves.env").read_text(encoding="utf-8")
+    assert "CONTINUOUS_SLEEVE=off" in sleeves
+    assert "CONTINUOUS_PAPER_SLEEVE=on" in sleeves
     # Timers ship with the unit files but `systemctl enable` is required to
     # actually schedule them. Pin both timers so a deploy can't silently leave
     # the demo-health watchdog or daily combined-book report inactive.
@@ -503,7 +663,9 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     # Continuous-fade sleeve (live on demo 2026-06-01): brought up like the other
     # live daemons, plus its rmom timer; risk service wired to read its ledger.
     assert "liquidity-migration-bybit-continuous-demo.service" in text
+    assert "liquidity-migration-bybit-continuous-paper.service" in text
     assert "liquidity-migration-continuous-rmom-refresh.timer" in text
+    assert "continuous_rmom_refresh_on" in text
     assert "Environment=LONG_DATA_ROOT=data/bybit-long-demo-event" in text
     assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text
     assert "Environment=SUBMIT_ORDERS=1" in text
@@ -513,10 +675,11 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     # blacks out until 00:20 UTC (the 2026-06-02 incident). Seed must run BEFORE the
     # continuous daemon restart so the parquet exists when it starts; empty-gate WARN is fail-safe.
     assert "systemctl start liquidity-migration-continuous-rmom-refresh.service" in text
-    assert (
-        text.index("systemctl start liquidity-migration-continuous-rmom-refresh.service")
-        < text.index("systemctl restart liquidity-migration-bybit-continuous-demo.service")
+    first_continuous_restart = min(
+        text.index("systemctl restart liquidity-migration-bybit-continuous-demo.service"),
+        text.index("systemctl restart liquidity-migration-bybit-continuous-paper.service"),
     )
+    assert text.index("systemctl start liquidity-migration-continuous-rmom-refresh.service") < first_continuous_restart
     assert "rmom gate is EMPTY after seed" in text
     # Reboot-safety invariant (audit 2026-06-02 #51): the risk service (the single
     # reconcile authority that tracks the continuous sleeve's positions) must come
@@ -602,13 +765,14 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "lm_load_sleeve_toggles" in text
     assert "systemctl is-enabled --quiet liquidity-migration-bybit-risk.service" in text
     assert "systemctl is-active --quiet liquidity-migration-bybit-risk.service" in text
-    for sleeve in ("SHORT", "SHORT_PAPER", "LONG", "CONTINUOUS"):
+    for sleeve in ("SHORT", "SHORT_PAPER", "LONG", "CONTINUOUS", "CONTINUOUS_PAPER"):
         assert f'verify_sleeve "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
     # The exact unit set each sleeve must bring up is pinned in the shared lib, so a
     # regression that stops/disables a sleeve's daemon still fails verify.
     lib = (repo / "deploy" / "lib_sleeves.sh").read_text(encoding="utf-8")
     assert 'LONG_SLEEVE_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service"' in lib
-    assert 'CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service liquidity-migration-bybit-continuous-paper.service"' in lib
+    assert 'CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service"' in lib
+    assert 'CONTINUOUS_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-continuous-paper.service"' in lib
     # Read-only verify must catch a missing-timer regression that the deploy
     # script would have caused — parity check, no-write semantics.
     assert "systemctl is-enabled --quiet liquidity-migration-demo-health.timer" in text
@@ -622,7 +786,7 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     # active+enabled state is covered by the verify_sleeve loop above. The risk service
     # stays wired to read the continuous ledger even when the sleeve is off (asserted
     # below, unconditional) — else its open positions would silently flatten.
-    assert 'if sleeve_on "$CONTINUOUS_SLEEVE"; then' in text
+    assert "continuous_rmom_refresh_on" in text
     assert "systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer" in text
     assert "Environment=LONG_DATA_ROOT=data/bybit-long-demo-event" in text
     assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text
@@ -860,12 +1024,12 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "systemctl enable liquidity-migration-bybit-risk.service" in text
     assert "systemctl restart liquidity-migration-bybit-risk.service" in text
     assert "systemctl is-enabled --quiet liquidity-migration-bybit-risk.service" in text
-    for sleeve in ("SHORT", "LONG", "CONTINUOUS"):
+    for sleeve in ("SHORT", "SHORT_PAPER", "LONG", "CONTINUOUS", "CONTINUOUS_PAPER"):
         assert f'apply_sleeve_enable "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
         assert f'verify_sleeve "${sleeve}_SLEEVE" ${sleeve}_SLEEVE_UNITS' in text
     # The continuous rmom timer + its go-live asserts are gated behind the toggle, so a
     # recovery with CONTINUOUS_SLEEVE=off cannot bring the disabled sleeve back.
-    assert 'if sleeve_on "$CONTINUOUS_SLEEVE"; then' in text
+    assert "continuous_rmom_refresh_on" in text
     assert "Environment=STRATEGY_PROFILE=promoted" in text
     assert "Environment=INTERVAL_SECONDS=60" in text
     # Match-the-backtest mode: rank-end / max-symbols of 0 disables the

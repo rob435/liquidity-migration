@@ -9,6 +9,7 @@ does not. Unpaired trades on either side are fill-rate divergence.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from statistics import mean, median
@@ -17,11 +18,17 @@ from typing import Any
 import polars as pl
 
 from ._common import coerce_int, finite_float
+from .continuous_rebalance import (
+    ContinuousRebalanceRule,
+    ContinuousRebalanceScaleState,
+    compute_continuous_rebalance_scale,
+)
 from .storage import read_dataset
 
 _logger = logging.getLogger(__name__)
 
 DEFAULT_ENTRY_TOLERANCE_MS = 600_000
+MS_PER_DAY = 86_400_000
 
 
 def _normalized_side(value: Any) -> str:
@@ -1447,6 +1454,693 @@ def run_continuous_paper_demo_reconciliation(
     summary = payload["result"]["summary"]
     summary["min_pairs_warning_threshold"] = int(min_pairs_warning)
     summary["sample_warning"] = bool(summary["paired"] < int(min_pairs_warning))
+    return payload
+
+
+def _rebalance_prior_state_from_cycles(cycles: pl.DataFrame, *, current_day_ts: int) -> ContinuousRebalanceScaleState:
+    if cycles.is_empty():
+        return ContinuousRebalanceScaleState(prior_raw_returns=())
+    current_day = (int(current_day_ts) // MS_PER_DAY) * MS_PER_DAY
+    latest_by_day: dict[int, tuple[tuple[int, int], float, dict[str, Any]]] = {}
+    for idx, row in enumerate(cycles.to_dicts()):
+        day = _int(row.get("rebalance_day_ts"))
+        raw = _float(row.get("rebalance_raw_return"))
+        if day <= 0 or day >= current_day:
+            continue
+        day = (day // MS_PER_DAY) * MS_PER_DAY
+        key = (_int(row.get("ts_ms")), idx)
+        prev = latest_by_day.get(day)
+        if prev is None or key > prev[0]:
+            latest_by_day[day] = (key, raw, row)
+    if not latest_by_day:
+        return ContinuousRebalanceScaleState(prior_raw_returns=())
+    days = sorted(latest_by_day)
+    latest = latest_by_day[days[-1]][2]
+    equity = _float(latest.get("rebalance_scaled_equity")) or 1.0
+    peak = _float(latest.get("rebalance_scaled_peak")) or max(equity, 1.0)
+    return ContinuousRebalanceScaleState(
+        prior_raw_returns=tuple(latest_by_day[day][1] for day in days),
+        prior_scaled_equity=equity if equity > 0.0 else 1.0,
+        prior_scaled_peak=max(peak, equity, 1.0),
+    )
+
+
+def audit_continuous_rebalance_cycles(
+    cycles: pl.DataFrame,
+    orders: pl.DataFrame,
+    *,
+    rule: ContinuousRebalanceRule | None = None,
+    scale_tolerance: float = 1e-9,
+) -> dict[str, Any]:
+    """Audit daily-rebalance cycle telemetry for causal scale and resize discipline."""
+    rule = rule or ContinuousRebalanceRule()
+    issues: list[dict[str, Any]] = []
+    if cycles.is_empty():
+        return {
+            "ok": False,
+            "summary": {
+                "cycles": 0,
+                "rebalance_cycles": 0,
+                "days": 0,
+                "scale_mismatches": 0,
+                "same_day_resize_violations": 0,
+                "resize_order_count_mismatch": False,
+            },
+            "issues": [{"kind": "empty_cycles", "message": "no cycle rows"}],
+        }
+
+    if "rebalance_day_ts" not in cycles.columns:
+        return {
+            "ok": False,
+            "summary": {
+                "cycles": cycles.height,
+                "rebalance_cycles": 0,
+                "days": 0,
+                "scale_mismatches": 0,
+                "same_day_resize_violations": 0,
+                "resize_order_count_mismatch": False,
+            },
+            "issues": [{"kind": "missing_rebalance_columns", "message": "rebalance_day_ts column missing"}],
+        }
+
+    rebalance = cycles.filter(pl.col("rebalance_day_ts").is_not_null()).sort("ts_ms")
+    scale_mismatches = 0
+    for row in rebalance.to_dicts():
+        day = _int(row.get("rebalance_day_ts"))
+        if day <= 0:
+            continue
+        expected = compute_continuous_rebalance_scale(
+            _rebalance_prior_state_from_cycles(rebalance, current_day_ts=day),
+            rule,
+        )
+        observed = _float(row.get("rebalance_target_scale"))
+        if abs(expected - observed) > scale_tolerance:
+            scale_mismatches += 1
+            issues.append(
+                {
+                    "kind": "scale_mismatch",
+                    "cycle_id": str(row.get("cycle_id") or ""),
+                    "day_ts": day,
+                    "expected": expected,
+                    "observed": observed,
+                }
+            )
+
+    same_day_violations = 0
+    for day in sorted({(_int(r.get("rebalance_day_ts")) // MS_PER_DAY) * MS_PER_DAY for r in rebalance.to_dicts()}):
+        if day <= 0:
+            continue
+        rows = [
+            r for r in rebalance.to_dicts()
+            if (_int(r.get("rebalance_day_ts")) // MS_PER_DAY) * MS_PER_DAY == day
+        ]
+        rows.sort(key=lambda r: _int(r.get("ts_ms")))
+        active_resize_rows = [r for r in rows if _int(r.get("rebalance_resize_orders")) > 0]
+        if len(active_resize_rows) > 1:
+            same_day_violations += 1
+            issues.append({"kind": "same_day_multiple_resize", "day_ts": day, "count": len(active_resize_rows)})
+        for idx, row in enumerate(rows[1:], start=1):
+            skipped = str(row.get("rebalance_resize_skipped_same_day")).strip().lower() in {"1", "true", "yes"}
+            if not skipped:
+                same_day_violations += 1
+                issues.append(
+                    {
+                        "kind": "same_day_skip_missing",
+                        "day_ts": day,
+                        "cycle_id": str(row.get("cycle_id") or ""),
+                        "row_index": idx,
+                    }
+                )
+
+    cycle_resize_orders = sum(_int(r.get("rebalance_resize_orders")) for r in rebalance.to_dicts())
+    order_resize_orders = 0
+    if not orders.is_empty() and "resize_reason" in orders.columns:
+        order_resize_orders = orders.filter(pl.col("resize_reason").is_not_null()).height
+    mismatch = order_resize_orders != cycle_resize_orders
+    if mismatch:
+        issues.append(
+            {
+                "kind": "resize_order_count_mismatch",
+                "cycle_resize_orders": cycle_resize_orders,
+                "order_resize_orders": order_resize_orders,
+            }
+        )
+
+    summary = {
+        "cycles": cycles.height,
+        "rebalance_cycles": rebalance.height,
+        "days": len({(_int(r.get("rebalance_day_ts")) // MS_PER_DAY) * MS_PER_DAY for r in rebalance.to_dicts()}),
+        "scale_mismatches": scale_mismatches,
+        "same_day_resize_violations": same_day_violations,
+        "cycle_resize_orders": cycle_resize_orders,
+        "order_resize_orders": order_resize_orders,
+        "resize_order_count_mismatch": mismatch,
+    }
+    return {"ok": not issues, "summary": summary, "issues": issues}
+
+
+def format_continuous_rebalance_audit_report(payload: dict[str, Any]) -> str:
+    summary = payload["summary"]
+    lines = [
+        "# Continuous Daily-Rebalance Cycle Audit",
+        "",
+        f"ok: `{payload['ok']}`",
+        f"cycles: `{summary['cycles']}`",
+        f"rebalance_cycles: `{summary['rebalance_cycles']}`",
+        f"days: `{summary['days']}`",
+        f"scale_mismatches: `{summary['scale_mismatches']}`",
+        f"same_day_resize_violations: `{summary['same_day_resize_violations']}`",
+        f"cycle_resize_orders: `{summary.get('cycle_resize_orders', 0)}`",
+        f"order_resize_orders: `{summary.get('order_resize_orders', 0)}`",
+        "",
+        "This is a ledger-consistency audit, not promotion or OOS evidence.",
+    ]
+    issues = payload.get("issues") or []
+    if issues:
+        lines.extend(["", "## Issues"])
+        for issue in issues[:50]:
+            lines.append(f"- `{issue.get('kind')}`: {issue}")
+    return "\n".join(lines) + "\n"
+
+
+def run_continuous_rebalance_cycle_audit(
+    data_root: str | Path,
+    *,
+    cycles_dataset: str = "continuous_fade_paper_cycles",
+    orders_dataset: str = "continuous_fade_paper_orders",
+    output_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    root = Path(data_root).expanduser()
+    payload = audit_continuous_rebalance_cycles(
+        read_dataset(root, cycles_dataset),
+        read_dataset(root, orders_dataset),
+    )
+    report = format_continuous_rebalance_audit_report(payload)
+    report_dir = Path(output_dir).expanduser() if output_dir else root / "reports" / "continuous_rebalance_cycle_audit"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / "continuous_rebalance_cycle_audit.md"
+    report_path.write_text(report, encoding="utf-8")
+    return {"result": payload, "report": report, "report_path": str(report_path)}
+
+
+def format_continuous_forward_readiness_report(payload: dict[str, Any]) -> str:
+    summary = payload["summary"]
+    paper_summary = payload["paper_rebalance"]["result"]["summary"]
+    demo_rebalance = payload.get("demo_rebalance")
+    paper_demo = payload.get("paper_demo")
+    demo_summary = demo_rebalance["result"]["summary"] if demo_rebalance is not None else None
+    reconcile_summary = paper_demo["result"]["summary"] if paper_demo is not None else None
+    mode_text = (
+        "paper-only telemetry gate for the no-order evidence collector"
+        if summary.get("paper_only_mode")
+        else "paper/demo ledger-readiness gate"
+    )
+    lines = [
+        "# Continuous Forward-Readiness Gate",
+        "",
+        f"ok: `{payload['ok']}`",
+        "",
+        f"This is a {mode_text}, not promotion or real-money evidence.",
+        "",
+        "## Summary",
+        "",
+        f"- paper-only mode: `{summary['paper_only_mode']}`",
+        f"- paper rebalance ok: `{summary['paper_rebalance_ok']}`",
+        f"- demo rebalance ok: `{summary['demo_rebalance_ok']}`",
+        f"- paired trades: `{summary['paired']}`",
+        f"- sample warning: `{summary['sample_warning']}`",
+        f"- paper-only trades: `{summary['paper_only']}`",
+        f"- demo-only trades: `{summary['demo_only']}`",
+        f"- no unmatched required: `{summary['require_no_unmatched']}`",
+        "",
+        "## Paper Rebalance",
+        "",
+        f"- cycles: `{paper_summary['cycles']}`",
+        f"- rebalance_cycles: `{paper_summary['rebalance_cycles']}`",
+        f"- scale_mismatches: `{paper_summary['scale_mismatches']}`",
+        f"- same_day_resize_violations: `{paper_summary['same_day_resize_violations']}`",
+        f"- resize_order_count_mismatch: `{paper_summary['resize_order_count_mismatch']}`",
+        f"- report: `{payload['paper_rebalance']['report_path']}`",
+    ]
+    if demo_summary is not None and demo_rebalance is not None:
+        lines.extend(
+            [
+                "",
+                "## Demo Rebalance",
+                "",
+                f"- cycles: `{demo_summary['cycles']}`",
+                f"- rebalance_cycles: `{demo_summary['rebalance_cycles']}`",
+                f"- scale_mismatches: `{demo_summary['scale_mismatches']}`",
+                f"- same_day_resize_violations: `{demo_summary['same_day_resize_violations']}`",
+                f"- resize_order_count_mismatch: `{demo_summary['resize_order_count_mismatch']}`",
+                f"- report: `{demo_rebalance['report_path']}`",
+            ]
+        )
+    else:
+        lines.extend(["", "## Demo Rebalance", "", "- skipped: `paper_only_mode`"])
+    if reconcile_summary is not None and paper_demo is not None:
+        lines.extend(
+            [
+                "",
+                "## Paper vs Demo",
+                "",
+                f"- paired: `{reconcile_summary['paired']}`",
+                f"- paper_only: `{reconcile_summary['paper_only']}`",
+                f"- demo_only: `{reconcile_summary['demo_only']}`",
+                f"- entry_slippage_bps_mean: `{reconcile_summary['entry_slippage_bps_mean']:.2f}`",
+                f"- exit_slippage_bps_mean: `{reconcile_summary['exit_slippage_bps_mean']:.2f}`",
+                f"- report: `{paper_demo['report_path']}`",
+                f"- pairs_csv: `{paper_demo.get('pairs_csv_path') or ''}`",
+            ]
+        )
+    else:
+        lines.extend(["", "## Paper vs Demo", "", "- skipped: `paper_only_mode`"])
+    if not payload["ok"]:
+        lines.extend(["", "## Blocking Issues", ""])
+        for issue in payload["issues"]:
+            lines.append(f"- {issue}")
+    return "\n".join(lines) + "\n"
+
+
+def run_continuous_forward_readiness(
+    paper_root: str | Path,
+    demo_root: str | Path,
+    *,
+    entry_tolerance_ms: int = 600_000,
+    min_pairs_warning: int = 20,
+    require_no_unmatched: bool = True,
+    require_demo: bool = True,
+    output_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    """Run the continuous candidate's forward-ledger readiness checks.
+
+    This combines the daily-rebalance telemetry audit on both paper and demo
+    roots with the paper↔demo trade reconciliation. It deliberately does not
+    label alpha or promotion; it only says whether the forward ledgers are clean
+    enough to be used as the next arbiter.
+    """
+    paper_root_p = Path(paper_root).expanduser()
+    demo_root_p = Path(demo_root).expanduser()
+    out_root = (
+        Path(output_dir).expanduser()
+        if output_dir
+        else paper_root_p / "reports" / "continuous_forward_readiness"
+    )
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    paper_rebalance = run_continuous_rebalance_cycle_audit(
+        paper_root_p,
+        cycles_dataset="continuous_fade_paper_cycles",
+        orders_dataset="continuous_fade_paper_orders",
+        output_dir=out_root / "paper_rebalance",
+    )
+    demo_rebalance = None
+    paper_demo = None
+    rec_summary: dict[str, Any] = {
+        "paired": 0,
+        "paper_only": 0,
+        "demo_only": 0,
+        "sample_warning": False,
+        "min_pairs_warning_threshold": min_pairs_warning,
+    }
+    if require_demo:
+        demo_rebalance = run_continuous_rebalance_cycle_audit(
+            demo_root_p,
+            cycles_dataset="continuous_fade_demo_cycles",
+            orders_dataset="continuous_fade_demo_orders",
+            output_dir=out_root / "demo_rebalance",
+        )
+        paper_demo = run_continuous_paper_demo_reconciliation(
+            paper_root_p,
+            demo_root_p,
+            entry_tolerance_ms=entry_tolerance_ms,
+            min_pairs_warning=min_pairs_warning,
+            output_dir=out_root / "paper_demo",
+        )
+        rec_summary = paper_demo["result"]["summary"]
+
+    issues: list[str] = []
+    if not paper_rebalance["result"]["ok"]:
+        issues.append("paper rebalance telemetry audit failed")
+    if require_demo and demo_rebalance is not None and not demo_rebalance["result"]["ok"]:
+        issues.append("demo rebalance telemetry audit failed")
+    if require_demo and rec_summary.get("sample_warning"):
+        issues.append(
+            f"paired trades {rec_summary['paired']} below min_pairs_warning {rec_summary['min_pairs_warning_threshold']}"
+        )
+    if (
+        require_demo
+        and require_no_unmatched
+        and (int(rec_summary["paper_only"]) > 0 or int(rec_summary["demo_only"]) > 0)
+    ):
+        issues.append(
+            f"unmatched trades present: paper_only={rec_summary['paper_only']} demo_only={rec_summary['demo_only']}"
+        )
+    demo_rebalance_ok = None
+    if require_demo:
+        assert demo_rebalance is not None
+        demo_rebalance_ok = bool(demo_rebalance["result"]["ok"])
+
+    summary = {
+        "paper_only_mode": not require_demo,
+        "paper_rebalance_ok": bool(paper_rebalance["result"]["ok"]),
+        "demo_rebalance_ok": demo_rebalance_ok,
+        "paired": int(rec_summary["paired"]),
+        "paper_only": int(rec_summary["paper_only"]),
+        "demo_only": int(rec_summary["demo_only"]),
+        "sample_warning": bool(rec_summary.get("sample_warning")),
+        "min_pairs_warning_threshold": int(rec_summary.get("min_pairs_warning_threshold", min_pairs_warning)),
+        "require_no_unmatched": bool(require_no_unmatched),
+    }
+    payload = {
+        "ok": not issues,
+        "summary": summary,
+        "issues": issues,
+        "paper_rebalance": paper_rebalance,
+        "demo_rebalance": demo_rebalance,
+        "paper_demo": paper_demo,
+    }
+    report = format_continuous_forward_readiness_report(payload)
+    report_path = out_root / "continuous_forward_readiness.md"
+    report_path.write_text(report, encoding="utf-8")
+    payload["report"] = report
+    payload["report_path"] = str(report_path)
+    return payload
+
+
+def _row_timestamp(row: dict[str, Any], keys: tuple[str, ...]) -> int:
+    for key in keys:
+        value = _int(row.get(key))
+        if value > 0:
+            return value
+    return 0
+
+
+def _latest_trade_rows(trades: pl.DataFrame) -> list[dict[str, Any]]:
+    if trades.is_empty():
+        return []
+    rows = trades.to_dicts()
+    if "trade_id" not in trades.columns:
+        return rows
+    latest: dict[str, tuple[tuple[int, int], dict[str, Any]]] = {}
+    for idx, row in enumerate(rows):
+        trade_id = str(row.get("trade_id") or "")
+        if not trade_id:
+            continue
+        ts = _row_timestamp(row, ("updated_at_ms", "closed_at_ms", "exit_ts_ms", "entry_ts_ms", "ts_ms"))
+        key = (ts, idx)
+        if trade_id not in latest or key > latest[trade_id][0]:
+            latest[trade_id] = (key, row)
+    return [item[1] for item in latest.values()] if latest else rows
+
+
+def _fee_adjusted_return(row: dict[str, Any]) -> float | None:
+    has_return = False
+    ret = 0.0
+    for key in ("net_return", "gross_trade_return"):
+        value = row.get(key)
+        if value not in (None, ""):
+            ret = _float(value)
+            has_return = True
+            break
+    if not has_return:
+        entry = _float(row.get("entry_price"))
+        exit_price = _float(row.get("exit_price"))
+        if entry <= 0.0 or exit_price <= 0.0:
+            return None
+        side = _normalized_side(row.get("side") or row.get("trade_side") or "short")
+        ret = (entry - exit_price) / entry if side == "short" else (exit_price - entry) / entry
+        notional = _float(row.get("notional_usdt"))
+        equity = _float(row.get("equity_usdt"))
+        if notional > 0.0 and equity > 0.0:
+            ret *= notional / equity
+    equity = _float(row.get("equity_usdt"))
+    if equity > 0.0:
+        fees = _float(row.get("entry_fee_usdt")) + _float(row.get("exit_fee_usdt"))
+        ret -= fees / equity
+    return ret
+
+
+def _trade_ledger_daily_returns(trades: pl.DataFrame) -> dict[int, float]:
+    daily: dict[int, float] = {}
+    for row in _latest_trade_rows(trades):
+        ts = _row_timestamp(row, ("exit_ts_ms", "closed_at_ms"))
+        if ts <= 0:
+            continue
+        ret = _fee_adjusted_return(row)
+        if ret is None:
+            continue
+        day = (ts // MS_PER_DAY) * MS_PER_DAY
+        daily[day] = daily.get(day, 0.0) + float(ret)
+    return daily
+
+
+def _cycle_zero_daily_returns(cycles: pl.DataFrame) -> dict[int, float]:
+    if cycles.is_empty() or "ts_ms" not in cycles.columns:
+        return {}
+    daily: dict[int, float] = {}
+    for row in cycles.to_dicts():
+        ts = _row_timestamp(row, ("ts_ms",))
+        if ts <= 0:
+            continue
+        daily[(ts // MS_PER_DAY) * MS_PER_DAY] = 0.0
+    return daily
+
+
+def _daily_forward_returns(trades: pl.DataFrame, cycles: pl.DataFrame) -> tuple[dict[int, float], str]:
+    cycle_returns = _cycle_zero_daily_returns(cycles)
+    trade_returns = _trade_ledger_daily_returns(trades)
+    if not cycle_returns:
+        return trade_returns, "event_demo_trades"
+    merged = dict(cycle_returns)
+    merged.update(trade_returns)
+    source = "event_demo_cycles+event_demo_trades" if trade_returns else "event_demo_cycles"
+    return merged, source
+
+
+def _continuous_cycle_daily_returns(cycles: pl.DataFrame) -> dict[int, float]:
+    if cycles.is_empty() or "rebalance_day_ts" not in cycles.columns:
+        return {}
+    latest: dict[int, tuple[tuple[int, int], float]] = {}
+    for idx, row in enumerate(cycles.to_dicts()):
+        day = _int(row.get("rebalance_day_ts"))
+        if day <= 0:
+            continue
+        day = (day // MS_PER_DAY) * MS_PER_DAY
+        ret = _float(row.get("rebalance_scaled_return"))
+        key = (_row_timestamp(row, ("ts_ms", "updated_at_ms")), idx)
+        if day not in latest or key > latest[day][0]:
+            latest[day] = (key, ret)
+    return {day: item[1] for day, item in latest.items()}
+
+
+def _calendar_metrics(returns_by_day: dict[int, float], *, start_day: int, end_day: int) -> dict[str, Any]:
+    if start_day <= 0 or end_day < start_day:
+        return {
+            "days": 0,
+            "total_return": 0.0,
+            "annualized_return": 0.0,
+            "max_drawdown": 0.0,
+            "mar": None,
+            "worst_day_return": 0.0,
+            "equity": [],
+        }
+    days = list(range(start_day, end_day + MS_PER_DAY, MS_PER_DAY))
+    equity = 1.0
+    peak = 1.0
+    max_drawdown = 0.0
+    curve: list[dict[str, Any]] = []
+    worst = 0.0
+    for day in days:
+        ret = float(returns_by_day.get(day, 0.0))
+        equity += ret
+        peak = max(peak, equity)
+        dd = equity - peak
+        max_drawdown = min(max_drawdown, dd)
+        worst = min(worst, ret)
+        curve.append({"ts_ms": day, "basket_return": ret, "equity": equity, "drawdown": dd})
+    total = equity - 1.0
+    years = max((len(days) - 1) / 365.25, 1e-9)
+    annualized = total / years
+    mar = annualized / abs(max_drawdown) if abs(max_drawdown) > 1e-12 else None
+    return {
+        "days": len(days),
+        "total_return": total,
+        "annualized_return": annualized,
+        "max_drawdown": max_drawdown,
+        "mar": mar,
+        "worst_day_return": worst,
+        "equity": curve,
+    }
+
+
+def _format_mar(value: float | None) -> str:
+    return "NA" if value is None else f"{value:.6f}"
+
+
+def _latest_day(returns_by_day: dict[int, float]) -> int:
+    return max(returns_by_day) if returns_by_day else 0
+
+
+def _maturity_day(start_day: int, min_common_days: int) -> int:
+    if start_day <= 0 or min_common_days <= 0:
+        return 0
+    return start_day + (min_common_days - 1) * MS_PER_DAY
+
+
+def format_continuous_vs_daily_forward_report(payload: dict[str, Any]) -> str:
+    summary = payload["summary"]
+    daily = payload["daily"]
+    continuous = payload["continuous"]
+    lines = [
+        "# Continuous vs Daily Forward Comparator",
+        "",
+        f"ok: `{payload['ok']}`",
+        "",
+        "This compares realized forward ledger performance over the same calendar window.",
+        "",
+        "## Summary",
+        "",
+        f"- common_start_day_ts: `{summary['common_start_day_ts']}`",
+        f"- common_end_day_ts: `{summary['common_end_day_ts']}`",
+        f"- common_days: `{summary['common_days']}`",
+        f"- min_common_days: `{summary['min_common_days']}`",
+        f"- common_days_remaining: `{summary['common_days_remaining']}`",
+        f"- maturity_day_ts: `{summary['maturity_day_ts']}`",
+        f"- daily_observed_days: `{summary['daily_observed_days']}`",
+        f"- continuous_observed_days: `{summary['continuous_observed_days']}`",
+        f"- latest_daily_day_ts: `{summary['latest_daily_day_ts']}`",
+        f"- latest_continuous_day_ts: `{summary['latest_continuous_day_ts']}`",
+        f"- continuous beats return: `{summary['continuous_beats_return']}`",
+        f"- continuous beats MAR: `{summary['continuous_beats_mar']}`",
+        "",
+        "## Daily Short",
+        "",
+        f"- source: `{summary['daily_source']}`",
+        f"- total_return: `{daily['total_return']:.6f}`",
+        f"- annualized_return: `{daily['annualized_return']:.6f}`",
+        f"- max_drawdown: `{daily['max_drawdown']:.6f}`",
+        f"- mar: `{_format_mar(daily['mar'])}`",
+        f"- worst_day_return: `{daily['worst_day_return']:.6f}`",
+        "",
+        "## Continuous",
+        "",
+        f"- source: `{summary['continuous_source']}`",
+        f"- total_return: `{continuous['total_return']:.6f}`",
+        f"- annualized_return: `{continuous['annualized_return']:.6f}`",
+        f"- max_drawdown: `{continuous['max_drawdown']:.6f}`",
+        f"- mar: `{_format_mar(continuous['mar'])}`",
+        f"- worst_day_return: `{continuous['worst_day_return']:.6f}`",
+    ]
+    if not payload["ok"]:
+        lines.extend(["", "## Blocking Issues", ""])
+        for issue in payload["issues"]:
+            lines.append(f"- {issue}")
+    return "\n".join(lines) + "\n"
+
+
+def run_continuous_vs_daily_forward_comparison(
+    daily_root: str | Path,
+    continuous_root: str | Path,
+    *,
+    daily_trades_dataset: str = "event_demo_trades",
+    daily_cycles_dataset: str = "event_demo_cycles",
+    continuous_cycles_dataset: str = "continuous_fade_paper_cycles",
+    continuous_trades_dataset: str = "continuous_fade_paper_trades",
+    min_common_days: int = 30,
+    output_dir: str | Path | None = None,
+) -> dict[str, Any]:
+    daily_root_p = Path(daily_root).expanduser()
+    continuous_root_p = Path(continuous_root).expanduser()
+    daily_returns, daily_source = _daily_forward_returns(
+        read_dataset(daily_root_p, daily_trades_dataset),
+        read_dataset(daily_root_p, daily_cycles_dataset),
+    )
+    cycles = read_dataset(continuous_root_p, continuous_cycles_dataset)
+    continuous_returns = _continuous_cycle_daily_returns(cycles)
+    continuous_source = continuous_cycles_dataset
+    if not continuous_returns:
+        continuous_returns = _trade_ledger_daily_returns(read_dataset(continuous_root_p, continuous_trades_dataset))
+        continuous_source = continuous_trades_dataset
+
+    issues: list[str] = []
+    if not daily_returns:
+        issues.append(
+            f"daily return series is empty from {daily_root_p}/{daily_cycles_dataset}+{daily_trades_dataset}"
+        )
+    if not continuous_returns:
+        issues.append(f"continuous return series is empty from {continuous_root_p}/{continuous_source}")
+
+    start = max(min(daily_returns) if daily_returns else 0, min(continuous_returns) if continuous_returns else 0)
+    end = min(max(daily_returns) if daily_returns else 0, max(continuous_returns) if continuous_returns else 0)
+    common_days = ((end - start) // MS_PER_DAY + 1) if start > 0 and end >= start else 0
+    if common_days < int(min_common_days):
+        issues.append(f"common forward window {common_days}d below min_common_days {int(min_common_days)}")
+
+    daily = _calendar_metrics(daily_returns, start_day=start, end_day=end)
+    continuous = _calendar_metrics(continuous_returns, start_day=start, end_day=end)
+    continuous_beats_return = bool(continuous["total_return"] > daily["total_return"])
+    daily_mar = daily["mar"]
+    continuous_mar = continuous["mar"]
+    continuous_beats_mar = bool(
+        continuous_mar is not None and daily_mar is not None and continuous_mar > daily_mar
+    )
+    performance_window_ready = common_days >= int(min_common_days) and bool(daily_returns) and bool(continuous_returns)
+    if performance_window_ready and not continuous_beats_return:
+        issues.append(
+            f"continuous return {continuous['total_return']:.6f} <= daily return {daily['total_return']:.6f}"
+        )
+    if performance_window_ready and not continuous_beats_mar:
+        issues.append(f"continuous MAR {_format_mar(continuous_mar)} <= daily MAR {_format_mar(daily_mar)}")
+
+    summary = {
+        "common_start_day_ts": start,
+        "common_end_day_ts": end,
+        "common_days": common_days,
+        "min_common_days": int(min_common_days),
+        "common_days_remaining": max(int(min_common_days) - common_days, 0),
+        "maturity_day_ts": _maturity_day(start, int(min_common_days)),
+        "daily_observed_days": len(daily_returns),
+        "continuous_observed_days": len(continuous_returns),
+        "latest_daily_day_ts": _latest_day(daily_returns),
+        "latest_continuous_day_ts": _latest_day(continuous_returns),
+        "daily_source": daily_source,
+        "continuous_source": continuous_source,
+        "continuous_beats_return": continuous_beats_return,
+        "continuous_beats_mar": continuous_beats_mar,
+    }
+    payload = {
+        "ok": not issues,
+        "inputs": {
+            "daily_root": str(daily_root_p),
+            "continuous_root": str(continuous_root_p),
+            "daily_trades_dataset": daily_trades_dataset,
+            "daily_cycles_dataset": daily_cycles_dataset,
+            "continuous_cycles_dataset": continuous_cycles_dataset,
+            "continuous_trades_dataset": continuous_trades_dataset,
+            "min_common_days": int(min_common_days),
+        },
+        "summary": summary,
+        "daily": {k: v for k, v in daily.items() if k != "equity"},
+        "continuous": {k: v for k, v in continuous.items() if k != "equity"},
+        "issues": issues,
+    }
+    report = format_continuous_vs_daily_forward_report(payload)
+    report_dir = Path(output_dir).expanduser() if output_dir else continuous_root_p / "reports" / "continuous_vs_daily_forward"
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / "continuous_vs_daily_forward.md"
+    report_path.write_text(report, encoding="utf-8")
+    json_path = report_dir / "continuous_vs_daily_forward.json"
+    daily_equity_csv = report_dir / "daily_forward_equity.csv"
+    continuous_equity_csv = report_dir / "continuous_forward_equity.csv"
+    pl.DataFrame(daily["equity"]).write_csv(daily_equity_csv)
+    pl.DataFrame(continuous["equity"]).write_csv(continuous_equity_csv)
+    payload["report"] = report
+    payload["report_path"] = str(report_path)
+    payload["json_path"] = str(json_path)
+    payload["daily_equity_csv"] = str(daily_equity_csv)
+    payload["continuous_equity_csv"] = str(continuous_equity_csv)
+    json_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
     return payload
 
 

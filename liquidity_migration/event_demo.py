@@ -1653,8 +1653,8 @@ def _demo_event_config(config: VolumeEventResearchConfig, *, profile: str) -> Vo
             # (+2.8% / −15.2% / 0.18) — the discriminator the gate removes. NOT YET validated:
             # the binding r1_robustness Tier-2 battery (cost-stress/thirds/LOO/bootstrap) is
             # PENDING; Binance not run (pre-reg flags it fragile). strategy_id kept → the deploy
-            # date is the clean pre/post split. Receipt:
-            # docs/preregistration/2026-06-04-btc-trend-regime-gate.md.
+            # date is the clean pre/post split. Current state is documented in
+            # STATE.md; stale one-off preregistration receipts were consolidated.
             btc_trend_gate="uptrend",                  # was "off" (BTC-30d-trend regime gate)
         )
     if profile == "demo_relaxed":
