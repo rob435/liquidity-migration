@@ -858,6 +858,11 @@ def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
     # demo-health.service launches check_demo_entry_health.py; pin it so
     # script-only changes to the health check still trigger the deploy.
     assert "scripts/check_demo_entry_health.py" in text
+    # The deploy script runs this smoke subset on the VPS. If a test-only fix is
+    # needed to unblock deploy, the push must trigger the workflow again.
+    assert "tests/test_runtime_scripts.py" in text
+    assert "tests/test_liquidity_migration_cli.py" in text
+    assert "tests/test_liquidity_migration_event_demo_cycle.py" in text
     assert "EXPECTED_COMMIT=\"$GITHUB_SHA\"" in text
     assert "EXPECTED_TELEGRAM_CHAT_ID" in text
 

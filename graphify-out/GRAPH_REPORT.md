@@ -1,11 +1,11 @@
 # Graph Report - liquidity-migration  (2026-06-08)
 
 ## Corpus Check
-- 159 files · ~401,980 words
+- 159 files · ~402,020 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 5980 nodes · 18916 edges · 339 communities detected
+- 5986 nodes · 18916 edges · 345 communities detected
 - Extraction: 40% EXTRACTED · 60% INFERRED · 0% AMBIGUOUS · INFERRED: 11261 edges (avg confidence: 0.59)
 - Token cost: 0 input · 0 output
 
@@ -349,6 +349,12 @@
 - [[_COMMUNITY_Community 338|Community 338]]
 - [[_COMMUNITY_Community 339|Community 339]]
 - [[_COMMUNITY_Community 340|Community 340]]
+- [[_COMMUNITY_Community 341|Community 341]]
+- [[_COMMUNITY_Community 342|Community 342]]
+- [[_COMMUNITY_Community 343|Community 343]]
+- [[_COMMUNITY_Community 344|Community 344]]
+- [[_COMMUNITY_Community 345|Community 345]]
+- [[_COMMUNITY_Community 346|Community 346]]
 
 ## God Nodes (most connected - your core abstractions)
 1. `ResearchConfig` - 1255 edges
@@ -546,367 +552,367 @@ Nodes (1): Extract (orderId, orderLinkId) — accept Bybit's camelCase or the   
 
 ### Community 44 - "Community 44"
 Cohesion: 1.0
-Nodes (1): Read the lock file text with a hard timeout. Returns None if the read     block
+Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
 
 ### Community 45 - "Community 45"
 Cohesion: 1.0
-Nodes (1): True if the live process ``pid`` started strictly AFTER ``created_ts`` (epoch
+Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
 
 ### Community 46 - "Community 46"
 Cohesion: 1.0
-Nodes (1): Add the int yyyymm _ledger_month partition column for a bucketed ledger     dat
+Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
 
 ### Community 47 - "Community 47"
 Cohesion: 1.0
-Nodes (1): The most-recent ``months_back`` _ledger_month=* bucket dirs plus the     legacy
+Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
 
 ### Community 48 - "Community 48"
 Cohesion: 1.0
-Nodes (1): Eagerly read a dataset, optionally projecting only ``columns``.      ``columns
+Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
 
 ### Community 49 - "Community 49"
 Cohesion: 1.0
-Nodes (1): Union a set of parquet part files into one frame, transparently dropping the
+Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
 
 ### Community 50 - "Community 50"
 Cohesion: 1.0
-Nodes (1): Windowed read of a month-bucketed ledger: only the most-recent ``months_back``
+Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
 
 ### Community 51 - "Community 51"
 Cohesion: 1.0
-Nodes (1): Write the strategy-vs-BTC equity PNG. ``png_name`` lets other sleeves     (e.g.
+Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
 
 ### Community 52 - "Community 52"
 Cohesion: 1.0
-Nodes (1): [date(str), ret] of per-day returns, robust to the sleeve's CSV schema.
+Nodes (1): Read the lock file text with a hard timeout. Returns None if the read     block
 
 ### Community 53 - "Community 53"
 Cohesion: 1.0
-Nodes (1): [month, tr] real trade counts from a sleeve's monthly CSV (empty if absent).
+Nodes (1): True if the live process ``pid`` started strictly AFTER ``created_ts`` (epoch
 
 ### Community 54 - "Community 54"
 Cohesion: 1.0
-Nodes (1): BTCUSDT klines (symbol,date,ts_ms,close) for the window — the renderer's benchma
+Nodes (1): Add the int yyyymm _ledger_month partition column for a bucketed ledger     dat
 
 ### Community 55 - "Community 55"
 Cohesion: 1.0
-Nodes (1): Load KEY=VALUE pairs from a .env file into os.environ (without overriding     a
+Nodes (1): The most-recent ``months_back`` _ledger_month=* bucket dirs plus the     legacy
 
 ### Community 56 - "Community 56"
 Cohesion: 1.0
-Nodes (1): Pretty, predictable step banners + command echo.
+Nodes (1): Eagerly read a dataset, optionally projecting only ``columns``.      ``columns
 
 ### Community 57 - "Community 57"
 Cohesion: 1.0
-Nodes (1): Run a command, echo it, stream+capture stdout. Used for the per-sleeve
+Nodes (1): Union a set of parquet part files into one frame, transparently dropping the
 
 ### Community 58 - "Community 58"
 Cohesion: 1.0
-Nodes (1): Return signal_ts_ms values from a sleeve trade ledger (empty list if absent).
+Nodes (1): Windowed read of a month-bucketed ledger: only the most-recent ``months_back``
 
 ### Community 59 - "Community 59"
 Cohesion: 1.0
-Nodes (1): Fill the recent klines the manifest now covers but the local root lacks.
+Nodes (1): Write the strategy-vs-BTC equity PNG. ``png_name`` lets other sleeves     (e.g.
 
 ### Community 60 - "Community 60"
 Cohesion: 1.0
-Nodes (1): Recompute residual_momentum.parquet on the research root so the continuous
+Nodes (1): [date(str), ret] of per-day returns, robust to the sleeve's CSV schema.
 
 ### Community 61 - "Community 61"
 Cohesion: 1.0
-Nodes (1): [start, end) for the SHORT backtest. Start = earliest forward ledger signal
+Nodes (1): [month, tr] real trade counts from a sleeve's monthly CSV (empty if absent).
 
 ### Community 62 - "Community 62"
 Cohesion: 1.0
-Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
+Nodes (1): BTCUSDT klines (symbol,date,ts_ms,close) for the window — the renderer's benchma
 
 ### Community 63 - "Community 63"
 Cohesion: 1.0
-Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
+Nodes (1): Load KEY=VALUE pairs from a .env file into os.environ (without overriding     a
 
 ### Community 64 - "Community 64"
 Cohesion: 1.0
-Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
+Nodes (1): Pretty, predictable step banners + command echo.
 
 ### Community 65 - "Community 65"
 Cohesion: 1.0
-Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
+Nodes (1): Run a command, echo it, stream+capture stdout. Used for the per-sleeve
 
 ### Community 66 - "Community 66"
 Cohesion: 1.0
-Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
+Nodes (1): Return signal_ts_ms values from a sleeve trade ledger (empty list if absent).
 
 ### Community 67 - "Community 67"
 Cohesion: 1.0
-Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
+Nodes (1): Fill the recent klines the manifest now covers but the local root lacks.
 
 ### Community 68 - "Community 68"
 Cohesion: 1.0
-Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
+Nodes (1): Recompute residual_momentum.parquet on the research root so the continuous
 
 ### Community 69 - "Community 69"
 Cohesion: 1.0
-Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
+Nodes (1): [start, end) for the SHORT backtest. Start = earliest forward ledger signal
 
 ### Community 70 - "Community 70"
 Cohesion: 1.0
-Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
+Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
 
 ### Community 71 - "Community 71"
 Cohesion: 1.0
-Nodes (1): Adapt the volume-events backtest trade ledger (`volume_event_best_trades.csv`)
+Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
 
 ### Community 72 - "Community 72"
 Cohesion: 1.0
-Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
+Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
 
 ### Community 73 - "Community 73"
 Cohesion: 1.0
-Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr
+Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
 
 ### Community 74 - "Community 74"
 Cohesion: 1.0
-Nodes (1): Both short + long bash runners must surface --record-dry-run via the     RECORD
+Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
 
 ### Community 75 - "Community 75"
 Cohesion: 1.0
-Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr
+Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
 
 ### Community 76 - "Community 76"
 Cohesion: 1.0
-Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
+Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
 
 ### Community 77 - "Community 77"
 Cohesion: 1.0
-Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en
+Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
 
 ### Community 78 - "Community 78"
 Cohesion: 1.0
-Nodes (1): 2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-
+Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
 
 ### Community 79 - "Community 79"
 Cohesion: 1.0
-Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
+Nodes (1): Adapt the volume-events backtest trade ledger (`volume_event_best_trades.csv`)
 
 ### Community 80 - "Community 80"
 Cohesion: 1.0
-Nodes (1): All four demo services (short+long, demo+paper) must enable the WS     kline ma
+Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
 
 ### Community 81 - "Community 81"
 Cohesion: 1.0
-Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
+Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr
 
 ### Community 82 - "Community 82"
 Cohesion: 1.0
-Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
+Nodes (1): Both short + long bash runners must surface --record-dry-run via the     RECORD
 
 ### Community 83 - "Community 83"
 Cohesion: 1.0
-Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
+Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr
 
 ### Community 84 - "Community 84"
 Cohesion: 1.0
-Nodes (1): Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r
+Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
 
 ### Community 85 - "Community 85"
 Cohesion: 1.0
-Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
+Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en
 
 ### Community 86 - "Community 86"
 Cohesion: 1.0
-Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
+Nodes (1): 2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-
 
 ### Community 87 - "Community 87"
 Cohesion: 1.0
-Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
+Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
 
 ### Community 88 - "Community 88"
 Cohesion: 1.0
-Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
+Nodes (1): All four demo services (short+long, demo+paper) must enable the WS     kline ma
 
 ### Community 89 - "Community 89"
 Cohesion: 1.0
-Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
+Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
 
 ### Community 90 - "Community 90"
 Cohesion: 1.0
-Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
+Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
 
 ### Community 91 - "Community 91"
 Cohesion: 1.0
-Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
+Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
 
 ### Community 92 - "Community 92"
 Cohesion: 1.0
-Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
+Nodes (1): Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r
 
 ### Community 93 - "Community 93"
 Cohesion: 1.0
-Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
+Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
 
 ### Community 94 - "Community 94"
 Cohesion: 1.0
-Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
+Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
 
 ### Community 95 - "Community 95"
 Cohesion: 1.0
-Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
+Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
 
 ### Community 96 - "Community 96"
 Cohesion: 1.0
-Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
+Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
 
 ### Community 97 - "Community 97"
 Cohesion: 1.0
-Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
+Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
 
 ### Community 98 - "Community 98"
 Cohesion: 1.0
-Nodes (1): The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-
+Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
 
 ### Community 99 - "Community 99"
 Cohesion: 1.0
-Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
+Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
 
 ### Community 100 - "Community 100"
 Cohesion: 1.0
-Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr
+Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
 
 ### Community 101 - "Community 101"
 Cohesion: 1.0
-Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
+Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
 
 ### Community 102 - "Community 102"
 Cohesion: 1.0
-Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en
+Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
 
 ### Community 103 - "Community 103"
 Cohesion: 1.0
-Nodes (1): 2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-
+Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
 
 ### Community 104 - "Community 104"
 Cohesion: 1.0
-Nodes (1): Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac
+Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
 
 ### Community 105 - "Community 105"
 Cohesion: 1.0
-Nodes (1): All four demo services (short+long, demo+paper) must enable the WS     kline ma
+Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
 
 ### Community 106 - "Community 106"
 Cohesion: 1.0
-Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
+Nodes (1): The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-
 
 ### Community 107 - "Community 107"
 Cohesion: 1.0
-Nodes (1): The hourly entry-health watchdog timer + service must ship together so     'no
+Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
 
 ### Community 108 - "Community 108"
 Cohesion: 1.0
-Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
+Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr
 
 ### Community 109 - "Community 109"
 Cohesion: 1.0
-Nodes (1): Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r
+Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
 
 ### Community 110 - "Community 110"
 Cohesion: 1.0
-Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
+Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en
 
 ### Community 111 - "Community 111"
 Cohesion: 1.0
-Nodes (1): Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc
+Nodes (1): 2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-
 
 ### Community 112 - "Community 112"
 Cohesion: 1.0
-Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
+Nodes (1): Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac
 
 ### Community 113 - "Community 113"
 Cohesion: 1.0
-Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
+Nodes (1): All four demo services (short+long, demo+paper) must enable the WS     kline ma
 
 ### Community 114 - "Community 114"
 Cohesion: 1.0
-Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
+Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
 
 ### Community 115 - "Community 115"
 Cohesion: 1.0
-Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
+Nodes (1): The hourly entry-health watchdog timer + service must ship together so     'no
 
 ### Community 116 - "Community 116"
 Cohesion: 1.0
-Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
+Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
 
 ### Community 117 - "Community 117"
 Cohesion: 1.0
-Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
+Nodes (1): Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r
 
 ### Community 118 - "Community 118"
 Cohesion: 1.0
-Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
+Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
 
 ### Community 119 - "Community 119"
 Cohesion: 1.0
-Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
+Nodes (1): Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc
 
 ### Community 120 - "Community 120"
 Cohesion: 1.0
-Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
+Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
 
 ### Community 121 - "Community 121"
 Cohesion: 1.0
-Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
+Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
 
 ### Community 122 - "Community 122"
 Cohesion: 1.0
-Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
+Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
 
 ### Community 123 - "Community 123"
 Cohesion: 1.0
-Nodes (1): Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac
+Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
 
 ### Community 124 - "Community 124"
 Cohesion: 1.0
-Nodes (1): Both short + long bash runners must surface --record-dry-run via the     RECORD
+Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
 
 ### Community 125 - "Community 125"
 Cohesion: 1.0
-Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
+Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
 
 ### Community 126 - "Community 126"
 Cohesion: 1.0
-Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
+Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
 
 ### Community 127 - "Community 127"
 Cohesion: 1.0
-Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
+Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
 
 ### Community 128 - "Community 128"
 Cohesion: 1.0
-Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
+Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
 
 ### Community 129 - "Community 129"
 Cohesion: 1.0
-Nodes (1): Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac
+Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
 
 ### Community 130 - "Community 130"
 Cohesion: 1.0
-Nodes (1): Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc
+Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
 
 ### Community 131 - "Community 131"
 Cohesion: 1.0
-Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
+Nodes (1): Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac
 
 ### Community 132 - "Community 132"
 Cohesion: 1.0
-Nodes (1): The hourly entry-health watchdog timer + service must ship together so     'no
+Nodes (1): Both short + long bash runners must surface --record-dry-run via the     RECORD
 
 ### Community 133 - "Community 133"
 Cohesion: 1.0
-Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
+Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
 
 ### Community 134 - "Community 134"
 Cohesion: 1.0
-Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
+Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
 
 ### Community 135 - "Community 135"
 Cohesion: 1.0
@@ -914,91 +920,91 @@ Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer    
 
 ### Community 136 - "Community 136"
 Cohesion: 1.0
-Nodes (1): Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc
+Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
 
 ### Community 137 - "Community 137"
 Cohesion: 1.0
-Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
+Nodes (1): Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac
 
 ### Community 138 - "Community 138"
 Cohesion: 1.0
-Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
+Nodes (1): Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc
 
 ### Community 139 - "Community 139"
 Cohesion: 1.0
-Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
+Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
 
 ### Community 140 - "Community 140"
 Cohesion: 1.0
-Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
+Nodes (1): The hourly entry-health watchdog timer + service must ship together so     'no
 
 ### Community 141 - "Community 141"
 Cohesion: 1.0
-Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
+Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
 
 ### Community 142 - "Community 142"
 Cohesion: 1.0
-Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
+Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
 
 ### Community 143 - "Community 143"
 Cohesion: 1.0
-Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
+Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
 
 ### Community 144 - "Community 144"
 Cohesion: 1.0
-Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
+Nodes (1): Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc
 
 ### Community 145 - "Community 145"
 Cohesion: 1.0
-Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
+Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
 
 ### Community 146 - "Community 146"
 Cohesion: 1.0
-Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
+Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
 
 ### Community 147 - "Community 147"
 Cohesion: 1.0
-Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr
+Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
 
 ### Community 148 - "Community 148"
 Cohesion: 1.0
-Nodes (1): The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-
+Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
 
 ### Community 149 - "Community 149"
 Cohesion: 1.0
-Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
+Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
 
 ### Community 150 - "Community 150"
 Cohesion: 1.0
-Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
+Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
 
 ### Community 151 - "Community 151"
 Cohesion: 1.0
-Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
+Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
 
 ### Community 152 - "Community 152"
 Cohesion: 1.0
-Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en
+Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
 
 ### Community 153 - "Community 153"
 Cohesion: 1.0
-Nodes (1): 2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-
+Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
 
 ### Community 154 - "Community 154"
 Cohesion: 1.0
-Nodes (1): Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac
+Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
 
 ### Community 155 - "Community 155"
 Cohesion: 1.0
-Nodes (1): All four demo services (short+long, demo+paper) must enable the WS     kline ma
+Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr
 
 ### Community 156 - "Community 156"
 Cohesion: 1.0
-Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
+Nodes (1): The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-
 
 ### Community 157 - "Community 157"
 Cohesion: 1.0
-Nodes (1): The hourly entry-health watchdog timer + service must ship together so     'no
+Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
 
 ### Community 158 - "Community 158"
 Cohesion: 1.0
@@ -1006,734 +1012,758 @@ Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned  
 
 ### Community 159 - "Community 159"
 Cohesion: 1.0
-Nodes (1): Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r
+Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
 
 ### Community 160 - "Community 160"
 Cohesion: 1.0
-Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
+Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en
 
 ### Community 161 - "Community 161"
 Cohesion: 1.0
-Nodes (1): Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc
+Nodes (1): 2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-
 
 ### Community 162 - "Community 162"
 Cohesion: 1.0
-Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
+Nodes (1): Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac
 
 ### Community 163 - "Community 163"
 Cohesion: 1.0
-Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
+Nodes (1): All four demo services (short+long, demo+paper) must enable the WS     kline ma
 
 ### Community 164 - "Community 164"
 Cohesion: 1.0
-Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
+Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
 
 ### Community 165 - "Community 165"
 Cohesion: 1.0
-Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
+Nodes (1): The hourly entry-health watchdog timer + service must ship together so     'no
 
 ### Community 166 - "Community 166"
 Cohesion: 1.0
-Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
+Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
 
 ### Community 167 - "Community 167"
 Cohesion: 1.0
-Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
+Nodes (1): Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r
 
 ### Community 168 - "Community 168"
 Cohesion: 1.0
-Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
+Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
 
 ### Community 169 - "Community 169"
 Cohesion: 1.0
-Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
+Nodes (1): Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc
 
 ### Community 170 - "Community 170"
 Cohesion: 1.0
-Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
+Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
 
 ### Community 171 - "Community 171"
 Cohesion: 1.0
-Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
+Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
 
 ### Community 172 - "Community 172"
 Cohesion: 1.0
-Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
+Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
 
 ### Community 173 - "Community 173"
 Cohesion: 1.0
-Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
+Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
 
 ### Community 174 - "Community 174"
 Cohesion: 1.0
-Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
+Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
 
 ### Community 175 - "Community 175"
 Cohesion: 1.0
-Nodes (1): Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r
+Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
 
 ### Community 176 - "Community 176"
 Cohesion: 1.0
-Nodes (1): 2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-
+Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
 
 ### Community 177 - "Community 177"
 Cohesion: 1.0
-Nodes (1): Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac
+Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
 
 ### Community 178 - "Community 178"
 Cohesion: 1.0
-Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
+Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
 
 ### Community 179 - "Community 179"
 Cohesion: 1.0
-Nodes (1): Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r
+Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
 
 ### Community 180 - "Community 180"
 Cohesion: 1.0
-Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
+Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
 
 ### Community 181 - "Community 181"
 Cohesion: 1.0
-Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
+Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
 
 ### Community 182 - "Community 182"
 Cohesion: 1.0
-Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
+Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
 
 ### Community 183 - "Community 183"
 Cohesion: 1.0
-Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
+Nodes (1): Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r
 
 ### Community 184 - "Community 184"
 Cohesion: 1.0
-Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
+Nodes (1): 2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-
 
 ### Community 185 - "Community 185"
 Cohesion: 1.0
-Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
+Nodes (1): Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac
 
 ### Community 186 - "Community 186"
 Cohesion: 1.0
-Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
+Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
 
 ### Community 187 - "Community 187"
 Cohesion: 1.0
-Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
+Nodes (1): Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r
 
 ### Community 188 - "Community 188"
 Cohesion: 1.0
-Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
+Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
 
 ### Community 189 - "Community 189"
 Cohesion: 1.0
-Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
+Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
 
 ### Community 190 - "Community 190"
 Cohesion: 1.0
-Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
+Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
 
 ### Community 191 - "Community 191"
 Cohesion: 1.0
-Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
+Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
 
 ### Community 192 - "Community 192"
 Cohesion: 1.0
-Nodes (1): Both short + long bash runners must surface --record-dry-run via the     RECORD
+Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
 
 ### Community 193 - "Community 193"
 Cohesion: 1.0
-Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
+Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
 
 ### Community 194 - "Community 194"
 Cohesion: 1.0
-Nodes (1): Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r
+Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
 
 ### Community 195 - "Community 195"
 Cohesion: 1.0
-Nodes (1): Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac
+Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
 
 ### Community 196 - "Community 196"
 Cohesion: 1.0
-Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
+Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
 
 ### Community 197 - "Community 197"
 Cohesion: 1.0
-Nodes (1): The hourly entry-health watchdog timer + service must ship together so     'no
+Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
 
 ### Community 198 - "Community 198"
 Cohesion: 1.0
-Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
+Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
 
 ### Community 199 - "Community 199"
 Cohesion: 1.0
-Nodes (1): Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r
+Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
 
 ### Community 200 - "Community 200"
 Cohesion: 1.0
-Nodes (1): Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc
+Nodes (1): Both short + long bash runners must surface --record-dry-run via the     RECORD
 
 ### Community 201 - "Community 201"
 Cohesion: 1.0
-Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
+Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
 
 ### Community 202 - "Community 202"
 Cohesion: 1.0
-Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
+Nodes (1): Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r
 
 ### Community 203 - "Community 203"
 Cohesion: 1.0
-Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
+Nodes (1): Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac
 
 ### Community 204 - "Community 204"
 Cohesion: 1.0
-Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
+Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
 
 ### Community 205 - "Community 205"
 Cohesion: 1.0
-Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
+Nodes (1): The hourly entry-health watchdog timer + service must ship together so     'no
 
 ### Community 206 - "Community 206"
 Cohesion: 1.0
-Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
+Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
 
 ### Community 207 - "Community 207"
 Cohesion: 1.0
-Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
+Nodes (1): Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r
 
 ### Community 208 - "Community 208"
 Cohesion: 1.0
-Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
+Nodes (1): Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc
 
 ### Community 209 - "Community 209"
 Cohesion: 1.0
-Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
+Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
 
 ### Community 210 - "Community 210"
 Cohesion: 1.0
-Nodes (1): Orchestration coverage (audit 2026-06-02 #54): gather_alerts must feed the live
+Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
 
 ### Community 211 - "Community 211"
 Cohesion: 1.0
-Nodes (1): The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must
+Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
 
 ### Community 212 - "Community 212"
 Cohesion: 1.0
-Nodes (1): Continuous-sleeve diagnosability: a zero universe / empty kline store is the sam
+Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
 
 ### Community 213 - "Community 213"
 Cohesion: 1.0
-Nodes (1): The watchdog skips an intentionally-off sleeve. Explicit env always wins; the
+Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
 
 ### Community 214 - "Community 214"
 Cohesion: 1.0
-Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
+Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
 
 ### Community 215 - "Community 215"
 Cohesion: 1.0
-Nodes (1): Both short + long bash runners must surface --record-dry-run via the     RECORD
+Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
 
 ### Community 216 - "Community 216"
 Cohesion: 1.0
-Nodes (1): Both short + long bash runners must surface --record-dry-run via the     RECORD
+Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
 
 ### Community 217 - "Community 217"
 Cohesion: 1.0
-Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en
+Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
 
 ### Community 218 - "Community 218"
 Cohesion: 1.0
-Nodes (1): 2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-
+Nodes (1): Orchestration coverage (audit 2026-06-02 #54): gather_alerts must feed the live
 
 ### Community 219 - "Community 219"
 Cohesion: 1.0
-Nodes (1): Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac
+Nodes (1): The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must
 
 ### Community 220 - "Community 220"
 Cohesion: 1.0
-Nodes (1): All four demo services (short+long, demo+paper) must enable the WS     kline ma
+Nodes (1): Continuous-sleeve diagnosability: a zero universe / empty kline store is the sam
 
 ### Community 221 - "Community 221"
 Cohesion: 1.0
-Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
+Nodes (1): The watchdog skips an intentionally-off sleeve. Explicit env always wins; the
 
 ### Community 222 - "Community 222"
 Cohesion: 1.0
-Nodes (1): The hourly entry-health watchdog timer + service must ship together so     'no
+Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
 
 ### Community 223 - "Community 223"
 Cohesion: 1.0
-Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
+Nodes (1): Both short + long bash runners must surface --record-dry-run via the     RECORD
 
 ### Community 224 - "Community 224"
 Cohesion: 1.0
-Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
+Nodes (1): Both short + long bash runners must surface --record-dry-run via the     RECORD
 
 ### Community 225 - "Community 225"
 Cohesion: 1.0
-Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
+Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en
 
 ### Community 226 - "Community 226"
 Cohesion: 1.0
-Nodes (1): Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc
+Nodes (1): 2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-
 
 ### Community 227 - "Community 227"
 Cohesion: 1.0
-Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
+Nodes (1): Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac
 
 ### Community 228 - "Community 228"
 Cohesion: 1.0
-Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
+Nodes (1): All four demo services (short+long, demo+paper) must enable the WS     kline ma
 
 ### Community 229 - "Community 229"
 Cohesion: 1.0
-Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
+Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
 
 ### Community 230 - "Community 230"
 Cohesion: 1.0
-Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
+Nodes (1): The hourly entry-health watchdog timer + service must ship together so     'no
 
 ### Community 231 - "Community 231"
 Cohesion: 1.0
-Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
+Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
 
 ### Community 232 - "Community 232"
 Cohesion: 1.0
-Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
+Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
 
 ### Community 233 - "Community 233"
 Cohesion: 1.0
-Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
+Nodes (1): A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th
 
 ### Community 234 - "Community 234"
 Cohesion: 1.0
-Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
+Nodes (1): Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc
 
 ### Community 235 - "Community 235"
 Cohesion: 1.0
-Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
+Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
 
 ### Community 236 - "Community 236"
 Cohesion: 1.0
-Nodes (1): The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-
+Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
 
 ### Community 237 - "Community 237"
 Cohesion: 1.0
-Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr
+Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
 
 ### Community 238 - "Community 238"
 Cohesion: 1.0
-Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en
+Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
 
 ### Community 239 - "Community 239"
 Cohesion: 1.0
-Nodes (1): 2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-
+Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
 
 ### Community 240 - "Community 240"
 Cohesion: 1.0
-Nodes (1): All four demo services (short+long, demo+paper) must enable the WS     kline ma
+Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
 
 ### Community 241 - "Community 241"
 Cohesion: 1.0
-Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
+Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
 
 ### Community 242 - "Community 242"
 Cohesion: 1.0
-Nodes (1): The hourly entry-health watchdog timer + service must ship together so     'no
+Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
 
 ### Community 243 - "Community 243"
 Cohesion: 1.0
-Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
+Nodes (1): The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-
 
 ### Community 244 - "Community 244"
 Cohesion: 1.0
-Nodes (1): Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r
+Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr
 
 ### Community 245 - "Community 245"
 Cohesion: 1.0
-Nodes (1): Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc
+Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en
 
 ### Community 246 - "Community 246"
 Cohesion: 1.0
-Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
+Nodes (1): 2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-
 
 ### Community 247 - "Community 247"
 Cohesion: 1.0
-Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
+Nodes (1): All four demo services (short+long, demo+paper) must enable the WS     kline ma
 
 ### Community 248 - "Community 248"
 Cohesion: 1.0
-Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
+Nodes (1): Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI
 
 ### Community 249 - "Community 249"
 Cohesion: 1.0
-Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
+Nodes (1): The hourly entry-health watchdog timer + service must ship together so     'no
 
 ### Community 250 - "Community 250"
 Cohesion: 1.0
-Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
+Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
 
 ### Community 251 - "Community 251"
 Cohesion: 1.0
-Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
+Nodes (1): Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r
 
 ### Community 252 - "Community 252"
 Cohesion: 1.0
-Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
+Nodes (1): Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc
 
 ### Community 253 - "Community 253"
 Cohesion: 1.0
-Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
+Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
 
 ### Community 254 - "Community 254"
 Cohesion: 1.0
-Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
+Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
 
 ### Community 255 - "Community 255"
 Cohesion: 1.0
-Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
+Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
 
 ### Community 256 - "Community 256"
 Cohesion: 1.0
-Nodes (1): The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-
+Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
 
 ### Community 257 - "Community 257"
 Cohesion: 1.0
-Nodes (1): Both short + long bash runners must surface --record-dry-run via the     RECORD
+Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
 
 ### Community 258 - "Community 258"
 Cohesion: 1.0
-Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr
+Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
 
 ### Community 259 - "Community 259"
 Cohesion: 1.0
-Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
+Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
 
 ### Community 260 - "Community 260"
 Cohesion: 1.0
-Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en
+Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
 
 ### Community 261 - "Community 261"
 Cohesion: 1.0
-Nodes (1): 2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-
+Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
 
 ### Community 262 - "Community 262"
 Cohesion: 1.0
-Nodes (1): All four demo services (short+long, demo+paper) must enable the WS     kline ma
+Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
 
 ### Community 263 - "Community 263"
 Cohesion: 1.0
-Nodes (1): The hourly entry-health watchdog timer + service must ship together so     'no
+Nodes (1): The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-
 
 ### Community 264 - "Community 264"
 Cohesion: 1.0
-Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
+Nodes (1): Both short + long bash runners must surface --record-dry-run via the     RECORD
 
 ### Community 265 - "Community 265"
 Cohesion: 1.0
-Nodes (1): Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r
+Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr
 
 ### Community 266 - "Community 266"
 Cohesion: 1.0
-Nodes (1): Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc
+Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
 
 ### Community 267 - "Community 267"
 Cohesion: 1.0
-Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
+Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en
 
 ### Community 268 - "Community 268"
 Cohesion: 1.0
-Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
+Nodes (1): 2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-
 
 ### Community 269 - "Community 269"
 Cohesion: 1.0
-Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
+Nodes (1): All four demo services (short+long, demo+paper) must enable the WS     kline ma
 
 ### Community 270 - "Community 270"
 Cohesion: 1.0
-Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
+Nodes (1): The hourly entry-health watchdog timer + service must ship together so     'no
 
 ### Community 271 - "Community 271"
 Cohesion: 1.0
-Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
+Nodes (1): Helper for the watchdog tests: write cycles to the date-partitioned     layout
 
 ### Community 272 - "Community 272"
 Cohesion: 1.0
-Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
+Nodes (1): Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r
 
 ### Community 273 - "Community 273"
 Cohesion: 1.0
-Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
+Nodes (1): Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc
 
 ### Community 274 - "Community 274"
 Cohesion: 1.0
-Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
+Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
 
 ### Community 275 - "Community 275"
 Cohesion: 1.0
-Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
+Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
 
 ### Community 276 - "Community 276"
 Cohesion: 1.0
-Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
+Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
 
 ### Community 277 - "Community 277"
 Cohesion: 1.0
-Nodes (1): The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-
+Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
 
 ### Community 278 - "Community 278"
 Cohesion: 1.0
-Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr
+Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
 
 ### Community 279 - "Community 279"
 Cohesion: 1.0
-Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr
+Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
 
 ### Community 280 - "Community 280"
 Cohesion: 1.0
-Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
+Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
 
 ### Community 281 - "Community 281"
 Cohesion: 1.0
-Nodes (1): 2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-
+Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
 
 ### Community 282 - "Community 282"
 Cohesion: 1.0
-Nodes (1): 2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-
+Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
 
 ### Community 283 - "Community 283"
 Cohesion: 1.0
-Nodes (1): Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac
+Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
 
 ### Community 284 - "Community 284"
 Cohesion: 1.0
-Nodes (1): All four demo services (short+long, demo+paper) must enable the WS     kline ma
+Nodes (1): The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-
 
 ### Community 285 - "Community 285"
 Cohesion: 1.0
-Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
+Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr
 
 ### Community 286 - "Community 286"
 Cohesion: 1.0
-Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
+Nodes (1): Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr
 
 ### Community 287 - "Community 287"
 Cohesion: 1.0
-Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
+Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
 
 ### Community 288 - "Community 288"
 Cohesion: 1.0
-Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
+Nodes (1): 2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-
 
 ### Community 289 - "Community 289"
 Cohesion: 1.0
-Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
+Nodes (1): 2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-
 
 ### Community 290 - "Community 290"
 Cohesion: 1.0
-Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
+Nodes (1): Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac
 
 ### Community 291 - "Community 291"
 Cohesion: 1.0
-Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
+Nodes (1): All four demo services (short+long, demo+paper) must enable the WS     kline ma
 
 ### Community 292 - "Community 292"
 Cohesion: 1.0
-Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
+Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
 
 ### Community 293 - "Community 293"
 Cohesion: 1.0
-Nodes (1): Adapt the volume-events backtest trade ledger (`volume_event_best_trades.csv`)
+Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
 
 ### Community 294 - "Community 294"
 Cohesion: 1.0
-Nodes (1): Adverse entry slippage in basis points. Positive means the demo fill was     wo
+Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
 
 ### Community 295 - "Community 295"
 Cohesion: 1.0
-Nodes (1): Adverse exit slippage in basis points. Closing a short is a buy (a higher     f
+Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
 
 ### Community 296 - "Community 296"
 Cohesion: 1.0
-Nodes (1): Render a fill price for a markdown table. Prices span BTC (~1e5) to micro-cap
+Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
 
 ### Community 297 - "Community 297"
 Cohesion: 1.0
-Nodes (1): Write the per-paired-trade detail to a sibling CSV next to the markdown     rep
+Nodes (1): JS observability: the health watchdog surfaces the WS-first % so a     silently
 
 ### Community 298 - "Community 298"
 Cohesion: 1.0
-Nodes (1): Pair paper and demo trades by trade_id, then signal_ts, then entry_ts.     Meas
+Nodes (1): scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth
 
 ### Community 299 - "Community 299"
 Cohesion: 1.0
-Nodes (1): Render a reconciliation result (from reconcile_paper_demo) as markdown.
+Nodes (1): Adapt the volume-events backtest trade ledger (`volume_event_best_trades.csv`)
 
 ### Community 300 - "Community 300"
 Cohesion: 1.0
-Nodes (1): Reconcile the offline volume-events backtest against the live paper     (dry-ru
+Nodes (1): Adverse entry slippage in basis points. Positive means the demo fill was     wo
 
 ### Community 301 - "Community 301"
 Cohesion: 1.0
-Nodes (1): Render a backtest↔paper reconciliation as markdown.
+Nodes (1): Adverse exit slippage in basis points. Closing a short is a buy (a higher     f
 
 ### Community 302 - "Community 302"
 Cohesion: 1.0
-Nodes (1): Read the volume-events backtest trade CSV and the paper ledger, then     reconc
+Nodes (1): Render a fill price for a markdown table. Prices span BTC (~1e5) to micro-cap
 
 ### Community 303 - "Community 303"
 Cohesion: 1.0
-Nodes (1): Quantity-weighted average price over ``(size, price)`` legs, ignoring legs
+Nodes (1): Write the per-paired-trade detail to a sibling CSV next to the markdown     rep
 
 ### Community 304 - "Community 304"
 Cohesion: 1.0
-Nodes (1): Fold a multi-order close into one logical closure.      Bybit's closed_pnl ret
+Nodes (1): Pair paper and demo trades by trade_id, then signal_ts, then entry_ts.     Meas
 
 ### Community 305 - "Community 305"
 Cohesion: 1.0
-Nodes (1): Sum Bybit funding-settlement transaction-log rows into a signed total and     a
+Nodes (1): Render a reconciliation result (from reconcile_paper_demo) as markdown.
 
 ### Community 306 - "Community 306"
 Cohesion: 1.0
-Nodes (1): Reconcile the demo ledger against Bybit's account-level truth.      Returns a
+Nodes (1): Reconcile the offline volume-events backtest against the live paper     (dry-ru
 
 ### Community 307 - "Community 307"
 Cohesion: 1.0
-Nodes (1): Render a demo↔Bybit reconciliation as markdown.
+Nodes (1): Render a backtest↔paper reconciliation as markdown.
 
 ### Community 308 - "Community 308"
 Cohesion: 1.0
-Nodes (1): Pull Bybit closed_pnl + open positions live, reconcile against the demo     led
+Nodes (1): Read the volume-events backtest trade CSV and the paper ledger, then     reconc
 
 ### Community 309 - "Community 309"
 Cohesion: 1.0
-Nodes (1): Read the paper and demo trade ledgers, reconcile them, write a markdown     rep
+Nodes (1): Quantity-weighted average price over ``(size, price)`` legs, ignoring legs
 
 ### Community 310 - "Community 310"
 Cohesion: 1.0
-Nodes (1): B.4 — same pairing as the short reconciler but reads the long sleeve's     own
+Nodes (1): Fold a multi-order close into one logical closure.      Bybit's closed_pnl ret
 
 ### Community 311 - "Community 311"
 Cohesion: 1.0
-Nodes (1): Continuous-fade sleeve (3rd sleeve) paper/demo execution-slippage     reconcile
+Nodes (1): Sum Bybit funding-settlement transaction-log rows into a signed total and     a
 
 ### Community 312 - "Community 312"
 Cohesion: 1.0
-Nodes (1): Run the full reconciliation triangle (or quadrilateral when a backtest     CSV
+Nodes (1): Reconcile the demo ledger against Bybit's account-level truth.      Returns a
 
 ### Community 313 - "Community 313"
 Cohesion: 1.0
-Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
+Nodes (1): Render a demo↔Bybit reconciliation as markdown.
 
 ### Community 314 - "Community 314"
 Cohesion: 1.0
-Nodes (1): The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-
+Nodes (1): Pull Bybit closed_pnl + open positions live, reconcile against the demo     led
 
 ### Community 315 - "Community 315"
 Cohesion: 1.0
-Nodes (1): Both short + long bash runners must surface --record-dry-run via the     RECORD
+Nodes (1): Read the paper and demo trade ledgers, reconcile them, write a markdown     rep
 
 ### Community 316 - "Community 316"
 Cohesion: 1.0
-Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
+Nodes (1): B.4 — same pairing as the short reconciler but reads the long sleeve's     own
 
 ### Community 317 - "Community 317"
 Cohesion: 1.0
-Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en
+Nodes (1): Continuous-fade sleeve (3rd sleeve) paper/demo execution-slippage     reconcile
 
 ### Community 318 - "Community 318"
 Cohesion: 1.0
-Nodes (1): Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac
+Nodes (1): Run the full reconciliation triangle (or quadrilateral when a backtest     CSV
 
 ### Community 319 - "Community 319"
 Cohesion: 1.0
-Nodes (1): All four demo services (short+long, demo+paper) must enable the WS     kline ma
+Nodes (1): ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's
 
 ### Community 320 - "Community 320"
 Cohesion: 1.0
-Nodes (1): The hourly entry-health watchdog timer + service must ship together so     'no
+Nodes (1): The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-
 
 ### Community 321 - "Community 321"
 Cohesion: 1.0
-Nodes (1): Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc
+Nodes (1): Both short + long bash runners must surface --record-dry-run via the     RECORD
 
 ### Community 322 - "Community 322"
 Cohesion: 1.0
-Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
+Nodes (1): Long-paper writes need to land in long_native_paper_* datasets so the     recon
 
 ### Community 323 - "Community 323"
 Cohesion: 1.0
-Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
+Nodes (1): The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en
 
 ### Community 324 - "Community 324"
 Cohesion: 1.0
-Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
+Nodes (1): Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac
 
 ### Community 325 - "Community 325"
 Cohesion: 1.0
-Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
+Nodes (1): All four demo services (short+long, demo+paper) must enable the WS     kline ma
 
 ### Community 326 - "Community 326"
 Cohesion: 1.0
-Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
+Nodes (1): The hourly entry-health watchdog timer + service must ship together so     'no
 
 ### Community 327 - "Community 327"
 Cohesion: 1.0
-Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
+Nodes (1): Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc
 
 ### Community 328 - "Community 328"
 Cohesion: 1.0
-Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
+Nodes (1): After a VPS rebuild the daemon has only been running a few hours.     The 24h w
 
 ### Community 329 - "Community 329"
 Cohesion: 1.0
-Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
+Nodes (1): The deploy script runs a pinned pytest subset as a pre-restart smoke test.
 
 ### Community 330 - "Community 330"
 Cohesion: 1.0
-Nodes (1): Fixed round-trip bps before impact, honoring the cost stress multiplier.
+Nodes (1): The 2026-05-25 alert chain confused operators by saying "feature     pipeline b
 
 ### Community 331 - "Community 331"
 Cohesion: 1.0
-Nodes (1): Decompose a fixed-notional continuous MTM ledger into scalable components.
+Nodes (1): The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is
 
 ### Community 332 - "Community 332"
 Cohesion: 1.0
-Nodes (1): Entry cost after scaling; fixed bps scale linearly, impact bps rise with partici
+Nodes (1): Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w
 
 ### Community 333 - "Community 333"
 Cohesion: 1.0
-Nodes (1): Plan resize orders needed to match a daily rebalance scale.      The continuous
+Nodes (1): Regression for the 2026-05-30 false page. The exact telemetry that paged     th
 
 ### Community 334 - "Community 334"
 Cohesion: 1.0
-Nodes (1): Apply a causal daily scale rule and rebuild decomposed equity.
+Nodes (1): The genuine-anomaly half of the floor: many submitted candidates with     zero
 
 ### Community 335 - "Community 335"
 Cohesion: 1.0
-Nodes (1): Fixed round-trip bps before impact, honoring the cost stress multiplier.
+Nodes (1): The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset
 
 ### Community 336 - "Community 336"
 Cohesion: 1.0
-Nodes (1): Decompose a fixed-notional continuous MTM ledger into scalable components.
+Nodes (1): Fixed round-trip bps before impact, honoring the cost stress multiplier.
 
 ### Community 337 - "Community 337"
 Cohesion: 1.0
-Nodes (1): Entry cost after scaling; fixed bps scale linearly, impact bps rise with partici
+Nodes (1): Decompose a fixed-notional continuous MTM ledger into scalable components.
 
 ### Community 338 - "Community 338"
 Cohesion: 1.0
-Nodes (1): Apply a causal daily scale rule and rebuild decomposed equity.
+Nodes (1): Entry cost after scaling; fixed bps scale linearly, impact bps rise with partici
 
 ### Community 339 - "Community 339"
 Cohesion: 1.0
-Nodes (1): Return days, raw returns, base gross, entry cost events, base funding by day.
+Nodes (1): Plan resize orders needed to match a daily rebalance scale.      The continuous
 
 ### Community 340 - "Community 340"
+Cohesion: 1.0
+Nodes (1): Apply a causal daily scale rule and rebuild decomposed equity.
+
+### Community 341 - "Community 341"
+Cohesion: 1.0
+Nodes (1): Fixed round-trip bps before impact, honoring the cost stress multiplier.
+
+### Community 342 - "Community 342"
+Cohesion: 1.0
+Nodes (1): Decompose a fixed-notional continuous MTM ledger into scalable components.
+
+### Community 343 - "Community 343"
+Cohesion: 1.0
+Nodes (1): Entry cost after scaling; fixed bps scale linearly, impact bps rise with partici
+
+### Community 344 - "Community 344"
+Cohesion: 1.0
+Nodes (1): Apply a causal daily scale rule and rebuild decomposed equity.
+
+### Community 345 - "Community 345"
+Cohesion: 1.0
+Nodes (1): Return days, raw returns, base gross, entry cost events, base funding by day.
+
+### Community 346 - "Community 346"
 Cohesion: 1.0
 Nodes (1): The exit/risk-side orderLinkId vocabulary lives in ONE registry (quality-dup-12)
 
 ## Knowledge Gaps
-- **837 isolated node(s):** `The requested archive URL returned HTTP 404.      Distinct from transient netw`, `Config for ``build_archive_trade_manifest``.      The manifest is always built`, `Fetch currently-listed Bybit v5 perpetual symbols + their launchTime (ms).`, `Build manifest rows from v5-Trading listings for ``(symbol, date)``     pairs m`, `Build the Bybit PIT trade manifest by merging two sources:      1. ``public.by` (+832 more)
+- **843 isolated node(s):** `The requested archive URL returned HTTP 404.      Distinct from transient netw`, `Config for ``build_archive_trade_manifest``.      The manifest is always built`, `Fetch currently-listed Bybit v5 perpetual symbols + their launchTime (ms).`, `Build manifest rows from v5-Trading listings for ``(symbol, date)``     pairs m`, `Build the Bybit PIT trade manifest by merging two sources:      1. ``public.by` (+838 more)
   These have ≤1 connection - possible missing edges or undocumented components.
 - **Thin community `Community 35`** (11 nodes): `test_promoted_profiles.py`, `Pin the single-source-of-truth promoted profiles (liquidity_migration.promoted).`, `test_continuous_merged_rebalance_candidate_is_not_promoted()`, `test_continuous_overlay_candidate_is_documented_but_not_promoted()`, `test_continuous_performance_frontier_is_not_promoted()`, `test_continuous_rebalance_candidate_is_not_promoted()`, `test_continuous_standalone_return_candidate_is_not_promoted()`, `test_long_profile_is_v11a()`, `test_registry_covers_two_sleeves()`, `test_short_profile_is_drop_all_4_age300_ff6()`, `test_windowing_sets_dates_on_all_sleeves()`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
@@ -1743,610 +1773,622 @@ Nodes (1): The exit/risk-side orderLinkId vocabulary lives in ONE registry (qual
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 42`** (1 nodes): `Extract (orderId, orderLinkId) — accept Bybit's camelCase or the         snake_`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 44`** (1 nodes): `Read the lock file text with a hard timeout. Returns None if the read     block`
+- **Thin community `Community 44`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 45`** (1 nodes): `True if the live process ``pid`` started strictly AFTER ``created_ts`` (epoch`
+- **Thin community `Community 45`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 46`** (1 nodes): `Add the int yyyymm _ledger_month partition column for a bucketed ledger     dat`
+- **Thin community `Community 46`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 47`** (1 nodes): `The most-recent ``months_back`` _ledger_month=* bucket dirs plus the     legacy`
+- **Thin community `Community 47`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 48`** (1 nodes): `Eagerly read a dataset, optionally projecting only ``columns``.      ``columns`
+- **Thin community `Community 48`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 49`** (1 nodes): `Union a set of parquet part files into one frame, transparently dropping the`
+- **Thin community `Community 49`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 50`** (1 nodes): `Windowed read of a month-bucketed ledger: only the most-recent ``months_back```
+- **Thin community `Community 50`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 51`** (1 nodes): `Write the strategy-vs-BTC equity PNG. ``png_name`` lets other sleeves     (e.g.`
+- **Thin community `Community 51`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 52`** (1 nodes): `[date(str), ret] of per-day returns, robust to the sleeve's CSV schema.`
+- **Thin community `Community 52`** (1 nodes): `Read the lock file text with a hard timeout. Returns None if the read     block`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 53`** (1 nodes): `[month, tr] real trade counts from a sleeve's monthly CSV (empty if absent).`
+- **Thin community `Community 53`** (1 nodes): `True if the live process ``pid`` started strictly AFTER ``created_ts`` (epoch`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 54`** (1 nodes): `BTCUSDT klines (symbol,date,ts_ms,close) for the window — the renderer's benchma`
+- **Thin community `Community 54`** (1 nodes): `Add the int yyyymm _ledger_month partition column for a bucketed ledger     dat`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 55`** (1 nodes): `Load KEY=VALUE pairs from a .env file into os.environ (without overriding     a`
+- **Thin community `Community 55`** (1 nodes): `The most-recent ``months_back`` _ledger_month=* bucket dirs plus the     legacy`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 56`** (1 nodes): `Pretty, predictable step banners + command echo.`
+- **Thin community `Community 56`** (1 nodes): `Eagerly read a dataset, optionally projecting only ``columns``.      ``columns`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 57`** (1 nodes): `Run a command, echo it, stream+capture stdout. Used for the per-sleeve`
+- **Thin community `Community 57`** (1 nodes): `Union a set of parquet part files into one frame, transparently dropping the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 58`** (1 nodes): `Return signal_ts_ms values from a sleeve trade ledger (empty list if absent).`
+- **Thin community `Community 58`** (1 nodes): `Windowed read of a month-bucketed ledger: only the most-recent ``months_back```
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 59`** (1 nodes): `Fill the recent klines the manifest now covers but the local root lacks.`
+- **Thin community `Community 59`** (1 nodes): `Write the strategy-vs-BTC equity PNG. ``png_name`` lets other sleeves     (e.g.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 60`** (1 nodes): `Recompute residual_momentum.parquet on the research root so the continuous`
+- **Thin community `Community 60`** (1 nodes): `[date(str), ret] of per-day returns, robust to the sleeve's CSV schema.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 61`** (1 nodes): `[start, end) for the SHORT backtest. Start = earliest forward ledger signal`
+- **Thin community `Community 61`** (1 nodes): `[month, tr] real trade counts from a sleeve's monthly CSV (empty if absent).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 62`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
+- **Thin community `Community 62`** (1 nodes): `BTCUSDT klines (symbol,date,ts_ms,close) for the window — the renderer's benchma`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 63`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
+- **Thin community `Community 63`** (1 nodes): `Load KEY=VALUE pairs from a .env file into os.environ (without overriding     a`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 64`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
+- **Thin community `Community 64`** (1 nodes): `Pretty, predictable step banners + command echo.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 65`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
+- **Thin community `Community 65`** (1 nodes): `Run a command, echo it, stream+capture stdout. Used for the per-sleeve`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 66`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
+- **Thin community `Community 66`** (1 nodes): `Return signal_ts_ms values from a sleeve trade ledger (empty list if absent).`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 67`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
+- **Thin community `Community 67`** (1 nodes): `Fill the recent klines the manifest now covers but the local root lacks.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 68`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
+- **Thin community `Community 68`** (1 nodes): `Recompute residual_momentum.parquet on the research root so the continuous`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 69`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
+- **Thin community `Community 69`** (1 nodes): `[start, end) for the SHORT backtest. Start = earliest forward ledger signal`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 70`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
+- **Thin community `Community 70`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 71`** (1 nodes): `Adapt the volume-events backtest trade ledger (`volume_event_best_trades.csv`)`
+- **Thin community `Community 71`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 72`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
+- **Thin community `Community 72`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 73`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr`
+- **Thin community `Community 73`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 74`** (1 nodes): `Both short + long bash runners must surface --record-dry-run via the     RECORD`
+- **Thin community `Community 74`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 75`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr`
+- **Thin community `Community 75`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 76`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
+- **Thin community `Community 76`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 77`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en`
+- **Thin community `Community 77`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 78`** (1 nodes): `2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-`
+- **Thin community `Community 78`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 79`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
+- **Thin community `Community 79`** (1 nodes): `Adapt the volume-events backtest trade ledger (`volume_event_best_trades.csv`)`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 80`** (1 nodes): `All four demo services (short+long, demo+paper) must enable the WS     kline ma`
+- **Thin community `Community 80`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 81`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
+- **Thin community `Community 81`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 82`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
+- **Thin community `Community 82`** (1 nodes): `Both short + long bash runners must surface --record-dry-run via the     RECORD`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 83`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
+- **Thin community `Community 83`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 84`** (1 nodes): `Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r`
+- **Thin community `Community 84`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 85`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
+- **Thin community `Community 85`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 86`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
+- **Thin community `Community 86`** (1 nodes): `2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 87`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
+- **Thin community `Community 87`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 88`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
+- **Thin community `Community 88`** (1 nodes): `All four demo services (short+long, demo+paper) must enable the WS     kline ma`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 89`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
+- **Thin community `Community 89`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 90`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
+- **Thin community `Community 90`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 91`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
+- **Thin community `Community 91`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 92`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
+- **Thin community `Community 92`** (1 nodes): `Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 93`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
+- **Thin community `Community 93`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 94`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
+- **Thin community `Community 94`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 95`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
+- **Thin community `Community 95`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 96`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
+- **Thin community `Community 96`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 97`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
+- **Thin community `Community 97`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 98`** (1 nodes): `The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-`
+- **Thin community `Community 98`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 99`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
+- **Thin community `Community 99`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 100`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr`
+- **Thin community `Community 100`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 101`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
+- **Thin community `Community 101`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 102`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en`
+- **Thin community `Community 102`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 103`** (1 nodes): `2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-`
+- **Thin community `Community 103`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 104`** (1 nodes): `Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac`
+- **Thin community `Community 104`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 105`** (1 nodes): `All four demo services (short+long, demo+paper) must enable the WS     kline ma`
+- **Thin community `Community 105`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 106`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
+- **Thin community `Community 106`** (1 nodes): `The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 107`** (1 nodes): `The hourly entry-health watchdog timer + service must ship together so     'no`
+- **Thin community `Community 107`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 108`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
+- **Thin community `Community 108`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 109`** (1 nodes): `Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r`
+- **Thin community `Community 109`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 110`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
+- **Thin community `Community 110`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 111`** (1 nodes): `Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc`
+- **Thin community `Community 111`** (1 nodes): `2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 112`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
+- **Thin community `Community 112`** (1 nodes): `Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 113`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
+- **Thin community `Community 113`** (1 nodes): `All four demo services (short+long, demo+paper) must enable the WS     kline ma`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 114`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
+- **Thin community `Community 114`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 115`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
+- **Thin community `Community 115`** (1 nodes): `The hourly entry-health watchdog timer + service must ship together so     'no`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 116`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
+- **Thin community `Community 116`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 117`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
+- **Thin community `Community 117`** (1 nodes): `Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 118`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
+- **Thin community `Community 118`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 119`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
+- **Thin community `Community 119`** (1 nodes): `Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 120`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
+- **Thin community `Community 120`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 121`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
+- **Thin community `Community 121`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 122`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
+- **Thin community `Community 122`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 123`** (1 nodes): `Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac`
+- **Thin community `Community 123`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 124`** (1 nodes): `Both short + long bash runners must surface --record-dry-run via the     RECORD`
+- **Thin community `Community 124`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 125`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
+- **Thin community `Community 125`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 126`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
+- **Thin community `Community 126`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 127`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
+- **Thin community `Community 127`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 128`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
+- **Thin community `Community 128`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 129`** (1 nodes): `Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac`
+- **Thin community `Community 129`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 130`** (1 nodes): `Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc`
+- **Thin community `Community 130`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 131`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
+- **Thin community `Community 131`** (1 nodes): `Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 132`** (1 nodes): `The hourly entry-health watchdog timer + service must ship together so     'no`
+- **Thin community `Community 132`** (1 nodes): `Both short + long bash runners must surface --record-dry-run via the     RECORD`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 133`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
+- **Thin community `Community 133`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 134`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
+- **Thin community `Community 134`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 135`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 136`** (1 nodes): `Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc`
+- **Thin community `Community 136`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 137`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
+- **Thin community `Community 137`** (1 nodes): `Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 138`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
+- **Thin community `Community 138`** (1 nodes): `Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 139`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
+- **Thin community `Community 139`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 140`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
+- **Thin community `Community 140`** (1 nodes): `The hourly entry-health watchdog timer + service must ship together so     'no`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 141`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
+- **Thin community `Community 141`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 142`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
+- **Thin community `Community 142`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 143`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
+- **Thin community `Community 143`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 144`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
+- **Thin community `Community 144`** (1 nodes): `Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 145`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
+- **Thin community `Community 145`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 146`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
+- **Thin community `Community 146`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 147`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr`
+- **Thin community `Community 147`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 148`** (1 nodes): `The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-`
+- **Thin community `Community 148`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 149`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
+- **Thin community `Community 149`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 150`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
+- **Thin community `Community 150`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 151`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
+- **Thin community `Community 151`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 152`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en`
+- **Thin community `Community 152`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 153`** (1 nodes): `2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-`
+- **Thin community `Community 153`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 154`** (1 nodes): `Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac`
+- **Thin community `Community 154`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 155`** (1 nodes): `All four demo services (short+long, demo+paper) must enable the WS     kline ma`
+- **Thin community `Community 155`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 156`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
+- **Thin community `Community 156`** (1 nodes): `The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 157`** (1 nodes): `The hourly entry-health watchdog timer + service must ship together so     'no`
+- **Thin community `Community 157`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 - **Thin community `Community 158`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 159`** (1 nodes): `Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r`
+- **Thin community `Community 159`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 160`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
+- **Thin community `Community 160`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 161`** (1 nodes): `Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc`
+- **Thin community `Community 161`** (1 nodes): `2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 162`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
+- **Thin community `Community 162`** (1 nodes): `Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 163`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
+- **Thin community `Community 163`** (1 nodes): `All four demo services (short+long, demo+paper) must enable the WS     kline ma`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 164`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
+- **Thin community `Community 164`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 165`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
+- **Thin community `Community 165`** (1 nodes): `The hourly entry-health watchdog timer + service must ship together so     'no`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 166`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
+- **Thin community `Community 166`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 167`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
+- **Thin community `Community 167`** (1 nodes): `Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 168`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
+- **Thin community `Community 168`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 169`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
+- **Thin community `Community 169`** (1 nodes): `Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 170`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
+- **Thin community `Community 170`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 171`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
+- **Thin community `Community 171`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 172`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
+- **Thin community `Community 172`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 173`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
+- **Thin community `Community 173`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 174`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
+- **Thin community `Community 174`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 175`** (1 nodes): `Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r`
+- **Thin community `Community 175`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 176`** (1 nodes): `2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-`
+- **Thin community `Community 176`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 177`** (1 nodes): `Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac`
+- **Thin community `Community 177`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 178`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
+- **Thin community `Community 178`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 179`** (1 nodes): `Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r`
+- **Thin community `Community 179`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 180`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
+- **Thin community `Community 180`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 181`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
+- **Thin community `Community 181`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 182`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
+- **Thin community `Community 182`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 183`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
+- **Thin community `Community 183`** (1 nodes): `Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 184`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
+- **Thin community `Community 184`** (1 nodes): `2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 185`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
+- **Thin community `Community 185`** (1 nodes): `Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 186`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
+- **Thin community `Community 186`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 187`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
+- **Thin community `Community 187`** (1 nodes): `Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 188`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
+- **Thin community `Community 188`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 189`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
+- **Thin community `Community 189`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 190`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
+- **Thin community `Community 190`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 191`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
+- **Thin community `Community 191`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 192`** (1 nodes): `Both short + long bash runners must surface --record-dry-run via the     RECORD`
+- **Thin community `Community 192`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 193`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
+- **Thin community `Community 193`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 194`** (1 nodes): `Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r`
+- **Thin community `Community 194`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 195`** (1 nodes): `Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac`
+- **Thin community `Community 195`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 196`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
+- **Thin community `Community 196`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 197`** (1 nodes): `The hourly entry-health watchdog timer + service must ship together so     'no`
+- **Thin community `Community 197`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 198`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
+- **Thin community `Community 198`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 199`** (1 nodes): `Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r`
+- **Thin community `Community 199`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 200`** (1 nodes): `Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc`
+- **Thin community `Community 200`** (1 nodes): `Both short + long bash runners must surface --record-dry-run via the     RECORD`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 201`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
+- **Thin community `Community 201`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 202`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
+- **Thin community `Community 202`** (1 nodes): `Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 203`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
+- **Thin community `Community 203`** (1 nodes): `Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 204`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
+- **Thin community `Community 204`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 205`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
+- **Thin community `Community 205`** (1 nodes): `The hourly entry-health watchdog timer + service must ship together so     'no`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 206`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
+- **Thin community `Community 206`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 207`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
+- **Thin community `Community 207`** (1 nodes): `Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 208`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
+- **Thin community `Community 208`** (1 nodes): `Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 209`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
+- **Thin community `Community 209`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 210`** (1 nodes): `Orchestration coverage (audit 2026-06-02 #54): gather_alerts must feed the live`
+- **Thin community `Community 210`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 211`** (1 nodes): `The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must`
+- **Thin community `Community 211`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 212`** (1 nodes): `Continuous-sleeve diagnosability: a zero universe / empty kline store is the sam`
+- **Thin community `Community 212`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 213`** (1 nodes): `The watchdog skips an intentionally-off sleeve. Explicit env always wins; the`
+- **Thin community `Community 213`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 214`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
+- **Thin community `Community 214`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 215`** (1 nodes): `Both short + long bash runners must surface --record-dry-run via the     RECORD`
+- **Thin community `Community 215`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 216`** (1 nodes): `Both short + long bash runners must surface --record-dry-run via the     RECORD`
+- **Thin community `Community 216`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 217`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en`
+- **Thin community `Community 217`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 218`** (1 nodes): `2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-`
+- **Thin community `Community 218`** (1 nodes): `Orchestration coverage (audit 2026-06-02 #54): gather_alerts must feed the live`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 219`** (1 nodes): `Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac`
+- **Thin community `Community 219`** (1 nodes): `The LONG sleeve runs on its own root with no rmom gate. gather_long_alerts must`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 220`** (1 nodes): `All four demo services (short+long, demo+paper) must enable the WS     kline ma`
+- **Thin community `Community 220`** (1 nodes): `Continuous-sleeve diagnosability: a zero universe / empty kline store is the sam`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 221`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
+- **Thin community `Community 221`** (1 nodes): `The watchdog skips an intentionally-off sleeve. Explicit env always wins; the`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 222`** (1 nodes): `The hourly entry-health watchdog timer + service must ship together so     'no`
+- **Thin community `Community 222`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 223`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
+- **Thin community `Community 223`** (1 nodes): `Both short + long bash runners must surface --record-dry-run via the     RECORD`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 224`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
+- **Thin community `Community 224`** (1 nodes): `Both short + long bash runners must surface --record-dry-run via the     RECORD`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 225`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
+- **Thin community `Community 225`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 226`** (1 nodes): `Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc`
+- **Thin community `Community 226`** (1 nodes): `2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 227`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
+- **Thin community `Community 227`** (1 nodes): `Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 228`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
+- **Thin community `Community 228`** (1 nodes): `All four demo services (short+long, demo+paper) must enable the WS     kline ma`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 229`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
+- **Thin community `Community 229`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 230`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
+- **Thin community `Community 230`** (1 nodes): `The hourly entry-health watchdog timer + service must ship together so     'no`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 231`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
+- **Thin community `Community 231`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 232`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
+- **Thin community `Community 232`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 233`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
+- **Thin community `Community 233`** (1 nodes): `A daemon that's stuck in bootstrap or OOM-looping emits far fewer     cycles th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 234`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
+- **Thin community `Community 234`** (1 nodes): `Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 235`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
+- **Thin community `Community 235`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 236`** (1 nodes): `The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-`
+- **Thin community `Community 236`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 237`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr`
+- **Thin community `Community 237`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 238`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en`
+- **Thin community `Community 238`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 239`** (1 nodes): `2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-`
+- **Thin community `Community 239`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 240`** (1 nodes): `All four demo services (short+long, demo+paper) must enable the WS     kline ma`
+- **Thin community `Community 240`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 241`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
+- **Thin community `Community 241`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 242`** (1 nodes): `The hourly entry-health watchdog timer + service must ship together so     'no`
+- **Thin community `Community 242`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 243`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
+- **Thin community `Community 243`** (1 nodes): `The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 244`** (1 nodes): `Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r`
+- **Thin community `Community 244`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 245`** (1 nodes): `Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc`
+- **Thin community `Community 245`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 246`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
+- **Thin community `Community 246`** (1 nodes): `2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 247`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
+- **Thin community `Community 247`** (1 nodes): `All four demo services (short+long, demo+paper) must enable the WS     kline ma`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 248`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
+- **Thin community `Community 248`** (1 nodes): `Both short + long bash runners must expose the WS_KLINES_* env vars     as CLI`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 249`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
+- **Thin community `Community 249`** (1 nodes): `The hourly entry-health watchdog timer + service must ship together so     'no`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 250`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
+- **Thin community `Community 250`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 251`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
+- **Thin community `Community 251`** (1 nodes): `Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 252`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
+- **Thin community `Community 252`** (1 nodes): `Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 253`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
+- **Thin community `Community 253`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 254`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
+- **Thin community `Community 254`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 255`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
+- **Thin community `Community 255`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 256`** (1 nodes): `The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-`
+- **Thin community `Community 256`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 257`** (1 nodes): `Both short + long bash runners must surface --record-dry-run via the     RECORD`
+- **Thin community `Community 257`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 258`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr`
+- **Thin community `Community 258`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 259`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
+- **Thin community `Community 259`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 260`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en`
+- **Thin community `Community 260`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 261`** (1 nodes): `2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-`
+- **Thin community `Community 261`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 262`** (1 nodes): `All four demo services (short+long, demo+paper) must enable the WS     kline ma`
+- **Thin community `Community 262`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 263`** (1 nodes): `The hourly entry-health watchdog timer + service must ship together so     'no`
+- **Thin community `Community 263`** (1 nodes): `The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 264`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
+- **Thin community `Community 264`** (1 nodes): `Both short + long bash runners must surface --record-dry-run via the     RECORD`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 265`** (1 nodes): `Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r`
+- **Thin community `Community 265`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 266`** (1 nodes): `Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc`
+- **Thin community `Community 266`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 267`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
+- **Thin community `Community 267`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 268`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
+- **Thin community `Community 268`** (1 nodes): `2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 269`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
+- **Thin community `Community 269`** (1 nodes): `All four demo services (short+long, demo+paper) must enable the WS     kline ma`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 270`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
+- **Thin community `Community 270`** (1 nodes): `The hourly entry-health watchdog timer + service must ship together so     'no`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 271`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
+- **Thin community `Community 271`** (1 nodes): `Helper for the watchdog tests: write cycles to the date-partitioned     layout`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 272`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
+- **Thin community `Community 272`** (1 nodes): `Even with entries > 0, a non-zero coverage_gap means the universe     doesn't r`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 273`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
+- **Thin community `Community 273`** (1 nodes): `Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 274`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
+- **Thin community `Community 274`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 275`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
+- **Thin community `Community 275`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 276`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
+- **Thin community `Community 276`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 277`** (1 nodes): `The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-`
+- **Thin community `Community 277`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 278`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr`
+- **Thin community `Community 278`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 279`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr`
+- **Thin community `Community 279`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 280`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
+- **Thin community `Community 280`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 281`** (1 nodes): `2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-`
+- **Thin community `Community 281`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 282`** (1 nodes): `2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-`
+- **Thin community `Community 282`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 283`** (1 nodes): `Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac`
+- **Thin community `Community 283`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 284`** (1 nodes): `All four demo services (short+long, demo+paper) must enable the WS     kline ma`
+- **Thin community `Community 284`** (1 nodes): `The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 285`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
+- **Thin community `Community 285`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 286`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
+- **Thin community `Community 286`** (1 nodes): `Paper services must set RECORD_DRY_RUN=1 so their dry-run cycles     persist tr`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 287`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
+- **Thin community `Community 287`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 288`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
+- **Thin community `Community 288`** (1 nodes): `2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 289`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
+- **Thin community `Community 289`** (1 nodes): `2026-05-24 found 15min lag rejected every signal as stale (the legacy     REST-`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 290`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
+- **Thin community `Community 290`** (1 nodes): `Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 291`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
+- **Thin community `Community 291`** (1 nodes): `All four demo services (short+long, demo+paper) must enable the WS     kline ma`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 292`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
+- **Thin community `Community 292`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 293`** (1 nodes): `Adapt the volume-events backtest trade ledger (`volume_event_best_trades.csv`)`
+- **Thin community `Community 293`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 294`** (1 nodes): `Adverse entry slippage in basis points. Positive means the demo fill was     wo`
+- **Thin community `Community 294`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 295`** (1 nodes): `Adverse exit slippage in basis points. Closing a short is a buy (a higher     f`
+- **Thin community `Community 295`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 296`** (1 nodes): `Render a fill price for a markdown table. Prices span BTC (~1e5) to micro-cap`
+- **Thin community `Community 296`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 297`** (1 nodes): `Write the per-paired-trade detail to a sibling CSV next to the markdown     rep`
+- **Thin community `Community 297`** (1 nodes): `JS observability: the health watchdog surfaces the WS-first % so a     silently`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 298`** (1 nodes): `Pair paper and demo trades by trade_id, then signal_ts, then entry_ts.     Meas`
+- **Thin community `Community 298`** (1 nodes): `scripts/reset_demo_paper_ledgers.sh must (a) preview without touching     anyth`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 299`** (1 nodes): `Render a reconciliation result (from reconcile_paper_demo) as markdown.`
+- **Thin community `Community 299`** (1 nodes): `Adapt the volume-events backtest trade ledger (`volume_event_best_trades.csv`)`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 300`** (1 nodes): `Reconcile the offline volume-events backtest against the live paper     (dry-ru`
+- **Thin community `Community 300`** (1 nodes): `Adverse entry slippage in basis points. Positive means the demo fill was     wo`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 301`** (1 nodes): `Render a backtest↔paper reconciliation as markdown.`
+- **Thin community `Community 301`** (1 nodes): `Adverse exit slippage in basis points. Closing a short is a buy (a higher     f`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 302`** (1 nodes): `Read the volume-events backtest trade CSV and the paper ledger, then     reconc`
+- **Thin community `Community 302`** (1 nodes): `Render a fill price for a markdown table. Prices span BTC (~1e5) to micro-cap`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 303`** (1 nodes): `Quantity-weighted average price over ``(size, price)`` legs, ignoring legs`
+- **Thin community `Community 303`** (1 nodes): `Write the per-paired-trade detail to a sibling CSV next to the markdown     rep`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 304`** (1 nodes): `Fold a multi-order close into one logical closure.      Bybit's closed_pnl ret`
+- **Thin community `Community 304`** (1 nodes): `Pair paper and demo trades by trade_id, then signal_ts, then entry_ts.     Meas`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 305`** (1 nodes): `Sum Bybit funding-settlement transaction-log rows into a signed total and     a`
+- **Thin community `Community 305`** (1 nodes): `Render a reconciliation result (from reconcile_paper_demo) as markdown.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 306`** (1 nodes): `Reconcile the demo ledger against Bybit's account-level truth.      Returns a`
+- **Thin community `Community 306`** (1 nodes): `Reconcile the offline volume-events backtest against the live paper     (dry-ru`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 307`** (1 nodes): `Render a demo↔Bybit reconciliation as markdown.`
+- **Thin community `Community 307`** (1 nodes): `Render a backtest↔paper reconciliation as markdown.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 308`** (1 nodes): `Pull Bybit closed_pnl + open positions live, reconcile against the demo     led`
+- **Thin community `Community 308`** (1 nodes): `Read the volume-events backtest trade CSV and the paper ledger, then     reconc`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 309`** (1 nodes): `Read the paper and demo trade ledgers, reconcile them, write a markdown     rep`
+- **Thin community `Community 309`** (1 nodes): `Quantity-weighted average price over ``(size, price)`` legs, ignoring legs`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 310`** (1 nodes): `B.4 — same pairing as the short reconciler but reads the long sleeve's     own`
+- **Thin community `Community 310`** (1 nodes): `Fold a multi-order close into one logical closure.      Bybit's closed_pnl ret`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 311`** (1 nodes): `Continuous-fade sleeve (3rd sleeve) paper/demo execution-slippage     reconcile`
+- **Thin community `Community 311`** (1 nodes): `Sum Bybit funding-settlement transaction-log rows into a signed total and     a`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 312`** (1 nodes): `Run the full reconciliation triangle (or quadrilateral when a backtest     CSV`
+- **Thin community `Community 312`** (1 nodes): `Reconcile the demo ledger against Bybit's account-level truth.      Returns a`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 313`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
+- **Thin community `Community 313`** (1 nodes): `Render a demo↔Bybit reconciliation as markdown.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 314`** (1 nodes): `The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-`
+- **Thin community `Community 314`** (1 nodes): `Pull Bybit closed_pnl + open positions live, reconcile against the demo     led`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 315`** (1 nodes): `Both short + long bash runners must surface --record-dry-run via the     RECORD`
+- **Thin community `Community 315`** (1 nodes): `Read the paper and demo trade ledgers, reconcile them, write a markdown     rep`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 316`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
+- **Thin community `Community 316`** (1 nodes): `B.4 — same pairing as the short reconciler but reads the long sleeve's     own`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 317`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en`
+- **Thin community `Community 317`** (1 nodes): `Continuous-fade sleeve (3rd sleeve) paper/demo execution-slippage     reconcile`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 318`** (1 nodes): `Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac`
+- **Thin community `Community 318`** (1 nodes): `Run the full reconciliation triangle (or quadrilateral when a backtest     CSV`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 319`** (1 nodes): `All four demo services (short+long, demo+paper) must enable the WS     kline ma`
+- **Thin community `Community 319`** (1 nodes): `ls-4: the deployed long demo/paper units MUST pass _validate_long_demo_config's`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 320`** (1 nodes): `The hourly entry-health watchdog timer + service must ship together so     'no`
+- **Thin community `Community 320`** (1 nodes): `The submit-profile gate is now a CONFIGURABLE allowlist, but still     safe-by-`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 321`** (1 nodes): `Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc`
+- **Thin community `Community 321`** (1 nodes): `Both short + long bash runners must surface --record-dry-run via the     RECORD`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 322`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
+- **Thin community `Community 322`** (1 nodes): `Long-paper writes need to land in long_native_paper_* datasets so the     recon`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 323`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
+- **Thin community `Community 323`** (1 nodes): `The long-sleeve bash runner must surface --paper-mode via the     PAPER_MODE en`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 324`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
+- **Thin community `Community 324`** (1 nodes): `Paper used to run in legacy single-cycle mode (USE_DAEMON=0) which made     eac`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 325`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
+- **Thin community `Community 325`** (1 nodes): `All four demo services (short+long, demo+paper) must enable the WS     kline ma`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 326`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
+- **Thin community `Community 326`** (1 nodes): `The hourly entry-health watchdog timer + service must ship together so     'no`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 327`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
+- **Thin community `Community 327`** (1 nodes): `Sanity: the happy path still returns 0 when coverage gap is 0,     cycle cadenc`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 328`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
+- **Thin community `Community 328`** (1 nodes): `After a VPS rebuild the daemon has only been running a few hours.     The 24h w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 329`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
+- **Thin community `Community 329`** (1 nodes): `The deploy script runs a pinned pytest subset as a pre-restart smoke test.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 330`** (1 nodes): `Fixed round-trip bps before impact, honoring the cost stress multiplier.`
+- **Thin community `Community 330`** (1 nodes): `The 2026-05-25 alert chain confused operators by saying "feature     pipeline b`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 331`** (1 nodes): `Decompose a fixed-notional continuous MTM ledger into scalable components.`
+- **Thin community `Community 331`** (1 nodes): `The truly-silent case (no candidates, no stale-skips, kline feed     fresh) is`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 332`** (1 nodes): `Entry cost after scaling; fixed bps scale linearly, impact bps rise with partici`
+- **Thin community `Community 332`** (1 nodes): `Pre-2026-05-25 the watchdog summed skipped_stale across all cycles     in the w`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 333`** (1 nodes): `Plan resize orders needed to match a daily rebalance scale.      The continuous`
+- **Thin community `Community 333`** (1 nodes): `Regression for the 2026-05-30 false page. The exact telemetry that paged     th`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 334`** (1 nodes): `Apply a causal daily scale rule and rebuild decomposed equity.`
+- **Thin community `Community 334`** (1 nodes): `The genuine-anomaly half of the floor: many submitted candidates with     zero`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 335`** (1 nodes): `Fixed round-trip bps before impact, honoring the cost stress multiplier.`
+- **Thin community `Community 335`** (1 nodes): `The continuous-fade sleeve (now OFF / de-promoted) is still covered by the reset`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 336`** (1 nodes): `Decompose a fixed-notional continuous MTM ledger into scalable components.`
+- **Thin community `Community 336`** (1 nodes): `Fixed round-trip bps before impact, honoring the cost stress multiplier.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 337`** (1 nodes): `Entry cost after scaling; fixed bps scale linearly, impact bps rise with partici`
+- **Thin community `Community 337`** (1 nodes): `Decompose a fixed-notional continuous MTM ledger into scalable components.`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 338`** (1 nodes): `Apply a causal daily scale rule and rebuild decomposed equity.`
+- **Thin community `Community 338`** (1 nodes): `Entry cost after scaling; fixed bps scale linearly, impact bps rise with partici`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 339`** (1 nodes): `Return days, raw returns, base gross, entry cost events, base funding by day.`
+- **Thin community `Community 339`** (1 nodes): `Plan resize orders needed to match a daily rebalance scale.      The continuous`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
-- **Thin community `Community 340`** (1 nodes): `The exit/risk-side orderLinkId vocabulary lives in ONE registry (quality-dup-12)`
+- **Thin community `Community 340`** (1 nodes): `Apply a causal daily scale rule and rebuild decomposed equity.`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 341`** (1 nodes): `Fixed round-trip bps before impact, honoring the cost stress multiplier.`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 342`** (1 nodes): `Decompose a fixed-notional continuous MTM ledger into scalable components.`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 343`** (1 nodes): `Entry cost after scaling; fixed bps scale linearly, impact bps rise with partici`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 344`** (1 nodes): `Apply a causal daily scale rule and rebuild decomposed equity.`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 345`** (1 nodes): `Return days, raw returns, base gross, entry cost events, base funding by day.`
+  Too small to be a meaningful cluster - may be noise or needs more connections extracted.
+- **Thin community `Community 346`** (1 nodes): `The exit/risk-side orderLinkId vocabulary lives in ONE registry (quality-dup-12)`
   Too small to be a meaningful cluster - may be noise or needs more connections extracted.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
 
 - **Why does `ResearchConfig` connect `Community 1` to `Community 0`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 14`?**
-  _High betweenness centrality (0.139) - this node is a cross-community bridge._
-- **Why does `VolumeEventResearchConfig` connect `Community 2` to `Community 0`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 12`, `Community 20`?**
-  _High betweenness centrality (0.108) - this node is a cross-community bridge._
+  _High betweenness centrality (0.135) - this node is a cross-community bridge._
 - **Why does `main()` connect `Community 2` to `Community 0`, `Community 1`, `Community 3`, `Community 5`, `Community 6`, `Community 7`, `Community 8`, `Community 9`, `Community 10`, `Community 12`, `Community 14`, `Community 15`, `Community 16`, `Community 19`?**
-  _High betweenness centrality (0.103) - this node is a cross-community bridge._
+  _High betweenness centrality (0.102) - this node is a cross-community bridge._
+- **Why does `VolumeEventResearchConfig` connect `Community 2` to `Community 0`, `Community 3`, `Community 4`, `Community 5`, `Community 6`, `Community 7`, `Community 12`, `Community 20`?**
+  _High betweenness centrality (0.098) - this node is a cross-community bridge._
 - **Are the 1253 inferred relationships involving `ResearchConfig` (e.g. with `ContinuousDemoCycleConfig` and `LivePanelCache`) actually correct?**
   _`ResearchConfig` has 1253 INFERRED edges - model-reasoned connections that need verification._
 - **Are the 765 inferred relationships involving `EventDemoCycleConfig` (e.g. with `One-line `event demo cycle ...` summary used by both the legacy bash-loop     r` and `Coverage table + (when stale) a prominent WARNING that download-data does not`) actually correct?**
