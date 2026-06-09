@@ -33,6 +33,18 @@ independent entry/exit logic."
   observed-fill cost calibration). Honest status: continuous remains research-stage
   and NOT promoted; demo fills are execution evidence, not alpha proof; the rmom
   latency knife-edge caveat stands.
+- **CONTINUOUS (the only live sleeve, 2026-06-10):** demo orders ON + paper shadow.
+  Base book = `continuous_rebalance_v1` (turn4_pop4 + w90/max4 rebalance + uptrend gate
+  + rmom q25 — a validated continuous object), already submitting demo orders.
+  **BTC-beta HEDGE: LIVE as a daily dry-run** (`continuous-hedge.timer`, 00:35 UTC) —
+  computes the banked hedge size (trailing-90 beta -0.026 -> ~2.6% long-BTC, Buy plan
+  verified on the box) and LOGS it; order submission is GATED (SUBMIT_HEDGE=0) pending
+  one verified cycle + ws_risk adoption-schema confirmation. Module
+  `continuous_hedge_manager.py` (8 tests), warm-start from the UN-hedged control book.
+  SNIPER: Tier-2 demo candidate (Amendment 6) — live wiring (resting +8% limit per
+  entry) is the NEXT build, not yet in the daemon. Full 4-component ensemble (vs the
+  single turn4_pop4 live) also next. Honest: continuous is research-stage; demo fills =
+  execution evidence, not alpha proof.
 - SHORT (off-box, promoted-in-code): `drop_all_4 + age300 + ff6 + btc_trend_gate=uptrend`;
   rmom inactive at `10.0`. Receipts: `promote-age-ff6-demo-2026-05-31.md`,
   `drop-all-4-promotion.md`.

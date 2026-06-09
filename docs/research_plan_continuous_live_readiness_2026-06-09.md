@@ -129,3 +129,9 @@ continuous-only; wire tonight's findings into live demo. Integration map (assemb
 
 Until the v2 executor ships, what is LIVE tonight: decile demo (orders, fills ->
 Amendment-5 calibration), paper shadow, risk service, rmom refresh, forward report.
+- 2026-06-10: HEDGE LIVE (dry-run). continuous_hedge_manager.py + runner + daily timer
+  deployed; computes the banked ~2.6% long-BTC hedge on the box (beta -0.026, Buy plan).
+  Submit GATED (SUBMIT_HEDGE=0) -> flip after one verified cycle + ws_risk
+  adoption-schema check. Warm-start fixed to the UN-hedged control book (the hedged
+  forward ledger had beta pre-neutralized -> would size 0). NEXT: verify a cycle + flip
+  submit; wire sniper resting-limit; faithful 4-component ensemble entries.
