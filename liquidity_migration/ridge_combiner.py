@@ -21,6 +21,7 @@ fold alone. These are pinned by tests (poison-future invariance, fold isolation)
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import cast
 
 import numpy as np
 import polars as pl
@@ -119,10 +120,8 @@ def _standardize_apply(x: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.n
 
 def _rank(v: np.ndarray) -> np.ndarray:
     """Average-rank of a 1-D array (ties share their mean rank)."""
-    order = np.argsort(v, kind="mergesort")
-    ranks = np.empty(len(v), dtype=float)
-    ranks[order] = np.arange(len(v), dtype=float)
-    # Resolve ties to their average rank for a stable Spearman.
+    # Resolve ties to their average rank for a stable Spearman. (np.unique sorts,
+    # so cum/avg are positional ranks of the sorted uniques; inv maps them back.)
     _, inv, counts = np.unique(v, return_inverse=True, return_counts=True)
     cum = np.cumsum(counts) - counts
     avg = cum + (counts - 1) / 2.0
@@ -198,8 +197,10 @@ def select_lambda(
 def _span_days(panel: pl.DataFrame) -> int:
     if panel.is_empty():
         return 0
-    lo = int(panel["ts_ms"].min())
-    hi = int(panel["ts_ms"].max())
+    lo_raw, hi_raw = panel["ts_ms"].min(), panel["ts_ms"].max()
+    if lo_raw is None or hi_raw is None:  # all-null ts_ms: no usable span
+        return 0
+    lo, hi = int(cast(int, lo_raw)), int(cast(int, hi_raw))
     return max(1, (hi - lo) // 86_400_000)
 
 

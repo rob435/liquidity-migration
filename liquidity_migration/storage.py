@@ -277,9 +277,14 @@ def exclusive_file_lock(
             owned_key: tuple[int, int] | None = (_owned.st_dev, _owned.st_ino)
         except OSError:
             owned_key = None  # can't fstat -> fall back to legacy unlink-by-path
+        # CROS-1b (audit 2026-06-09): (dev, ino) equality is NOT proof the path is
+        # still OUR lock — ext4/overlayfs can hand a freed inode straight to a
+        # successor's lock file created at the same path. A per-acquisition token
+        # in the payload is the tiebreaker the inode check can't provide.
+        owned_token = os.urandom(16).hex()
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps({"pid": os.getpid(), "created": time.time()}))
+                handle.write(json.dumps({"pid": os.getpid(), "created": time.time(), "token": owned_token}))
             yield
         finally:
             if owned_key is None:
@@ -292,6 +297,17 @@ def exclusive_file_lock(
                     release_ours = False  # already gone -> nothing to unlink
                 except OSError:
                     release_ours = True  # can't inode-check (e.g. Windows delete-pending) -> preserve legacy self-heal
+                if release_ours:
+                    # Inode matched — confirm the payload token before unlinking
+                    # (inode-reuse defense, CROS-1b). An unreadable file keeps
+                    # release_ours=True: failing to remove our own lock would
+                    # strand waiters until stale eviction.
+                    text = _read_lock_text_safe(lock_path)
+                    if text is not None:
+                        try:
+                            release_ours = json.loads(text).get("token") == owned_token
+                        except (json.JSONDecodeError, AttributeError, TypeError, ValueError):
+                            release_ours = False  # foreign/corrupt payload -> not ours
                 if release_ours:
                     _unlink_with_retry(lock_path)
 

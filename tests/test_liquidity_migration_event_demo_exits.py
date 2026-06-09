@@ -1979,8 +1979,58 @@ def test_submit_reduce_only_exit_market_splits_at_max_qty() -> None:
     for row in submit["order_rows"]:
         assert row["reduce_only"] is True
         assert float(row["qty"]) <= 20000.0
+        # Per-leg venue fee must ride on each sub-order row (audit 2026-06-09:
+        # the split path dropped it, so risk-exit ledger rows lost their fees).
+        assert row["fee_usdt"] == pytest.approx(0.06)
     assert float(submit["exec_summary"]["qty"]) == pytest.approx(37500.0)
     assert float(submit["exec_summary"]["avg_price"]) == pytest.approx(1.95)
+    # Aggregate fee = sum of per-leg execFee (0.06 * 2), NOT the old hardcoded 0.0
+    # that wrote exit_fee_usdt=0.0 on every ws_risk market exit.
+    assert float(submit["exec_summary"]["fee"]) == pytest.approx(0.12)
+
+
+def test_submit_reduce_only_exit_market_split_aggregates_exec_time() -> None:
+    """The split market exit must carry the venue execTime through: the
+    aggregate exec_summary takes the LATEST leg fill time (order completed
+    when the last leg filled), and each sub-order row keeps its own leg time.
+    Before the 2026-06-09 audit fix the split path dropped exec_time_ms
+    entirely (exit_exec_time_ms=0 on every split risk exit)."""
+    from liquidity_migration.event_demo import _submit_reduce_only_exit, EventRiskCycleConfig
+
+    class _TimedFillClient(FakeRiskClient):
+        def __init__(self) -> None:
+            super().__init__(
+                fill_market_orders=True,
+                fill_order_prefixes=("lm-rx-",),
+                fill_qty="18750",
+                fill_price="1.95",
+            )
+            self._exec_times = iter(("1700000061000", "1700000062500"))
+
+        def get_trade_history(self, *, symbol=None, order_link_id=None, limit=50):
+            rows = super().get_trade_history(symbol=symbol, order_link_id=order_link_id, limit=limit)
+            exec_time = next(self._exec_times, "0")
+            return [dict(row, execTime=exec_time) for row in rows]
+
+    submit = _submit_reduce_only_exit(
+        symbol="SUPERUSDT",
+        bybit_side="Buy",
+        qty="37500",
+        trading_client=_TimedFillClient(),
+        risk=EventRiskCycleConfig(submit_orders=True, exit_order_mode="market"),
+        now_ms=1_700_000_060_000,
+        reference_price=1.95,
+        tick_size=0.0001,
+        max_qty_per_order=20000.0,
+        qty_step=1.0,
+    )
+
+    assert len(submit["order_rows"]) == 2
+    assert int(submit["order_rows"][0]["exec_time_ms"]) == 1_700_000_061_000
+    assert int(submit["order_rows"][1]["exec_time_ms"]) == 1_700_000_062_500
+    # Aggregate = latest leg fill (full-close completion time), matching the
+    # cycle-exit split path and _execution_summary semantics.
+    assert int(submit["exec_summary"]["exec_time_ms"]) == 1_700_000_062_500
 
 
 def test_risk_reconciler_batches_closed_pnl_to_single_call() -> None:

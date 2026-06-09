@@ -9,7 +9,7 @@
 # Thin wrapper around scripts/equity_curves.py. Each curve runs the EXACT deployed
 # profile from liquidity_migration/promoted.py — the one place "what's promoted" lives.
 # POLARS_MAX_THREADS is capped because the full-PIT roots are memory-heavy on a 16 GB box.
-set -eu
+set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$HERE/.venv/bin/python"

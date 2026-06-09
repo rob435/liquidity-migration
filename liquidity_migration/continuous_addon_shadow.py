@@ -426,7 +426,7 @@ def _entry_order_attempt_rows(*, source: str, rows: list[dict[str, Any]]) -> lis
     for row in cleaned:
         key = _entry_order_key(row)
         key_counts[key] = key_counts.get(key, 0) + 1
-    out = [
+    out: list[dict[str, Any]] = [
         {
             "source": source,
             "symbol": _str(row, "symbol"),

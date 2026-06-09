@@ -224,11 +224,6 @@ for unit in deploy/systemd/liquidity-migration-*.service deploy/systemd/liquidit
     cp "$unit" "/etc/systemd/system/$(basename "$unit")"
 done
 systemctl daemon-reload
-systemctl disable --now \
-  model050426.service \
-  model050426-bybit-demo-signal.timer \
-  model050426-bybit-demo-signal.service \
-  2>/dev/null || true
 # --- per-sleeve kill-switch (deploy/sleeves.env) — the SAME single source of truth as
 # scripts/deploy_vps_live.sh, so disaster recovery can NEVER resurrect an OFF sleeve.
 # Previously this path hardcoded every sleeve ON, which would re-enable the look-ahead-
@@ -294,20 +289,6 @@ systemctl is-active --quiet liquidity-migration-demo-health.timer
 systemctl is-active --quiet liquidity-migration-demo-liveness.timer
 systemctl is-active --quiet liquidity-migration-combined-book-report.timer
 
-for legacy_unit in \
-  model050426.service \
-  model050426-bybit-demo-signal.timer \
-  model050426-bybit-demo-signal.service; do
-  if systemctl is-active --quiet "$legacy_unit" 2>/dev/null; then
-    echo "Verification failed: retired unit $legacy_unit is still active." >&2
-    exit 1
-  fi
-  if systemctl is-enabled --quiet "$legacy_unit" 2>/dev/null; then
-    echo "Verification failed: retired unit $legacy_unit is still enabled." >&2
-    exit 1
-  fi
-done
-
 systemctl show liquidity-migration-bybit-demo.service \
   --property=ActiveState \
   --property=SubState \
@@ -339,3 +320,18 @@ if sleeve_on "$CONTINUOUS_SLEEVE"; then
 fi
 
 echo "deploy-verify-ok commit=$(git rev-parse --short HEAD)"
+
+# --- HOST-KEY PIN REMINDER (2026-06-09 incident) -----------------------------------
+# A rescue/re-image regenerates the box's SSH host keys, which silently breaks BOTH
+# the CI deploy (.github/workflows/vps-deploy.yml pins the ED25519 host key — by
+# design; do NOT re-add keyscan) and the operator's local known_hosts. The 2026-06-08
+# recovery left the 2026-06-04 pin stale, so every subsequent auto-deploy fails host
+# verification. Print the new identity loudly so updating the pin is part of every
+# recovery, not an afterthought.
+echo ""
+echo "=== ACTION REQUIRED: update the pinned host key after this recovery ==="
+echo "new known_hosts line for the vps-deploy.yml printf (and your local known_hosts):"
+echo "$(hostname -I 2>/dev/null | awk '{print $1}') $(cut -d' ' -f1,2 /etc/ssh/ssh_host_ed25519_key.pub)"
+ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256 || true
+echo "ALSO update the VPS_ED25519_FINGERPRINT repo secret/var to the SHA256 above."
+echo "Until the pin matches, pushes to main will NOT deploy (host verification fails — by design)."

@@ -566,8 +566,10 @@ def _trade_excursion(
             )
             if not sub.is_empty():
                 lo = sub["low"].min()
-                if lo is not None and float(lo) > 0:
-                    min_low = float(lo)
+                if lo is not None:
+                    lo_f = float(cast(float, lo))  # polars min() widens; "low" is numeric
+                    if lo_f > 0:
+                        min_low = lo_f
         if include_live_in_mfe and cur is not None and float(cur) > 0:
             min_low = float(cur) if min_low is None else min(min_low, float(cur))
         if min_low is not None:
@@ -2318,12 +2320,12 @@ def run_continuous_demo_cycle(
         # Surface the rmom FRESHNESS (not just file-existence): a stale table silently empties the
         # decile join (the is_not_null filter drops every symbol) yet rmom_present would read True.
         # max_rmom_day_ts lets the watchdog distinguish "quiet market" from "stale signal gate".
-        max_rmom_day_ts = (
-            int(rmom["day_ts"].max())
-            if (rmom is not None and not rmom.is_empty() and "day_ts" in rmom.columns
-                                          and rmom["day_ts"].max() is not None)
-            else 0
+        _rmom_day_max = (
+            rmom["day_ts"].max()
+            if (rmom is not None and not rmom.is_empty() and "day_ts" in rmom.columns)
+            else None
         )
+        max_rmom_day_ts = int(cast(int, _rmom_day_max)) if _rmom_day_max is not None else 0
         payload = {
             "cycle_id": cycle_id, "ts_ms": cycle_now_ms, "strategy_id": strategy_id, "mode": "submit" if demo.submit_orders else "dry_run",
             "strategy_profile": demo.strategy_profile,

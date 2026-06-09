@@ -570,6 +570,9 @@ def run_volume_event_research(
         if not pit_membership_pass
         else {}
     )
+    # Typed local (not metadata["best_scenario"], which mypy widens to `object`):
+    # the .get() calls below need the dict type.
+    best_scenario: dict[str, Any] = summary.head(1).to_dicts()[0] if not summary.is_empty() else {}
     metadata = {
         "config": asdict(config),
         "rows": {
@@ -592,7 +595,7 @@ def run_volume_event_research(
             **asdict(costs),
             "base_round_trip_cost_bps": costs.base_entry_exit_cost_bps,
         },
-        "best_scenario": summary.head(1).to_dicts()[0] if not summary.is_empty() else {},
+        "best_scenario": best_scenario,
         "best_equity_chart": best_chart,
         "run_label": _run_label(config=config, archive_manifest=archive_manifest, full_pit_universe_pass=full_pit_universe_pass),
         "promotion_note": _promotion_note(
@@ -600,7 +603,7 @@ def run_volume_event_research(
             full_pit_universe_pass=full_pit_universe_pass,
         ),
     }
-    _best = metadata["best_scenario"]
+    _best = best_scenario
     _data_start = klines["date"].min() if ("date" in klines.columns and klines.height) else None
     _data_end = klines["date"].max() if ("date" in klines.columns and klines.height) else None
     _warnings = diagnose(

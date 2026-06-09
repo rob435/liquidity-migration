@@ -35,6 +35,8 @@ graphify-out/.graphify_root
 
 # Runtime scratch files
 .claude/scheduled_tasks.lock
+# Per-machine Claude Code permissions (never shared)
+.claude/settings.local.json
 # Research run logs (large, rotated by the analyst, not source-of-truth)
 docs/*.log
 # Scratch plot outputs at repo root (use docs/ for plots that belong in source control)

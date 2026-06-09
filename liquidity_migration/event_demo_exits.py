@@ -1008,6 +1008,8 @@ def _submit_reduce_only_exit(
         order_rows: list[dict[str, Any]] = []
         total_filled_qty = 0.0
         total_fill_value = 0.0
+        total_fee = 0.0
+        max_exec_time_ms = 0
         first_order_id = ""
         any_submitted_unconfirmed = False
         last_error = ""
@@ -1081,6 +1083,16 @@ def _submit_reduce_only_exit(
                     sub_status = "submitted_unconfirmed"
                     any_submitted_unconfirmed = True
             sub_avg_price = _float(sub_exec_summary.get("avg_price"))
+            # Fee + venue fill-time aggregation (audit 2026-06-09): the cycle-exit
+            # split path and the limit-chase path both carry execFee / execTime
+            # through to the trade row; this market split path dropped them
+            # (hardcoded agg fee 0.0), so every ws_risk market exit recorded
+            # exit_fee_usdt=0.0 and exit_exec_time_ms=0. Mirror the cycle path.
+            sub_fee = _float(sub_exec_summary.get("fee"))
+            sub_exec_time_ms = int(_float(sub_exec_summary.get("exec_time_ms") or 0))
+            total_fee += sub_fee
+            if sub_exec_time_ms > max_exec_time_ms:
+                max_exec_time_ms = sub_exec_time_ms
             total_filled_qty += sub_filled_qty
             if sub_filled_qty > 0.0 and sub_avg_price > 0.0:
                 total_fill_value += sub_avg_price * sub_filled_qty
@@ -1103,6 +1115,8 @@ def _submit_reduce_only_exit(
                     "target_qty": sub_qty_str,
                     "filled_qty": _decimal_text(Decimal(str(sub_filled_qty))) if sub_filled_qty > 0.0 else "",
                     "avg_price": sub_avg_price,
+                    "fee_usdt": sub_fee,
+                    "exec_time_ms": sub_exec_time_ms,
                     "notional_usdt": abs(sub_avg_price * sub_filled_qty) if sub_avg_price > 0.0 else 0.0,
                 }
             )
@@ -1117,7 +1131,8 @@ def _submit_reduce_only_exit(
         agg_summary: dict[str, Any] = {
             "qty": _decimal_text(Decimal(str(total_filled_qty))) if total_filled_qty > 0.0 else "",
             "avg_price": avg_price,
-            "fee": 0.0,
+            "fee": total_fee,
+            "exec_time_ms": max_exec_time_ms,
             "executions": sum(1 for r in order_rows if _float(r.get("filled_qty")) > 0.0),
         }
         _ = (any_submitted_unconfirmed, last_error, target_qty)

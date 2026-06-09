@@ -141,11 +141,6 @@ for unit in deploy/systemd/liquidity-migration-*.service deploy/systemd/liquidit
     cp "$unit" "/etc/systemd/system/$(basename "$unit")"
 done
 systemctl daemon-reload
-systemctl disable --now \
-  model050426.service \
-  model050426-bybit-demo-signal.timer \
-  model050426-bybit-demo-signal.service \
-  2>/dev/null || true
 
 # --- per-sleeve kill-switch (deploy/sleeves.env) ----------------------------------------
 # Single source of truth for which strategy sleeves run. Default (all "on") is byte-identical
@@ -247,20 +242,6 @@ systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer
 systemctl is-active --quiet liquidity-migration-demo-health.timer
 systemctl is-active --quiet liquidity-migration-demo-liveness.timer
 systemctl is-active --quiet liquidity-migration-combined-book-report.timer
-
-for legacy_unit in \
-  model050426.service \
-  model050426-bybit-demo-signal.timer \
-  model050426-bybit-demo-signal.service; do
-  if systemctl is-active --quiet "$legacy_unit" 2>/dev/null; then
-    echo "Verification failed: retired unit $legacy_unit is still active." >&2
-    exit 1
-  fi
-  if systemctl is-enabled --quiet "$legacy_unit" 2>/dev/null; then
-    echo "Verification failed: retired unit $legacy_unit is still enabled." >&2
-    exit 1
-  fi
-done
 
 systemctl show liquidity-migration-bybit-demo.service \
   --property=ActiveState \

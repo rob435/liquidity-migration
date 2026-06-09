@@ -464,6 +464,51 @@ lead's 2x common-green count from 23/38 to 24/38 while retaining materially bett
 return/MAR than the previous 30%/90d winner. This supersedes the 40%/60d row as
 the current strict research winner.
 
+### 2026-06-09 — rmom latency falsification: FAIL (methodology debt #3 verdict)
+
+The pre-registered latency-delay falsification
+(`docs/preregistration/rmom-latency-falsification-2026-06-09.md`,
+`scripts/rmom_latency_falsification.py`) ran the merged-candidate selection layer
+(q25/liq500k/btcup/turn3_pop3/age240/h24) with rmom rebuilt at shifts {2,3,4,5,7} —
+residuals computed once, 100.0% exact replication of the production shift3 table,
+production parquets restored after.
+
+Pooled short-stream MAR by shift: 0.67 (s2, 1h-leak diagnostic) → **1.13 (s3,
+control)** → 0.10 (s4) → −0.01 (s5) → −0.16 (s7). Bybit return sign-flips at s4.
+Per-day selection Jaccard vs control: ~0.56 at ±1 day.
+
+**Verdict: FAIL.** The rmom edge is a knife-edge at exactly the freshest legal
+staleness — not a 7-day momentum factor. shift2 (more information) being WORSE argues
+against a simple leak, but a noise-peak/timing-artifact reading fits everything: the
+edge has zero operational margin (one day of data delay live reproduces shift4 = dead).
+Consequences (binding, pre-registered): rmom supports NO deployment-grade claim; the
+frozen continuous winner rests on a boundary-concentrated feature and is downgraded
+accordingly; any future continuous promotion requires resolving debts #3+#4 at the
+data layer first (factor/residual day-grid alignment audit, then re-test). The
+deployed SHORT is unaffected (rmom inactive, sentinel 10.0).
+
+## 2026-06-09 — Continuous window freeze (binding)
+
+The 2023-04→2026-05 window is declared **spent** for continuous variant
+adjudication. Rationale: the continuous winner is the product of a long
+selection chain on a single window — component weight simplex → retarget grid →
+downtrend add-on → premium gate → scale/window interpolation — with the
+replacement bars themselves computed on the same window. After that much
+selection, the reported MAR (6.8–7.5 base) is an order statistic, not an
+expectation; the honest forward prior is heavy shrinkage toward the unweighted
+base (~MAR 4) or below. Every additional sweep on this window makes the number
+we will eventually trust *worse*, because it spends researcher degrees of
+freedom without adding any out-of-window information.
+
+Binding consequences (mirrored in STATE.md):
+
+1. The 40%/70d downtrend-extended ensemble is frozen as-is.
+2. No further accept/reject sweeps, weight tweaks, filter frontiers, or
+   risk-rule retargets on this window.
+3. New continuous evidence = forward no-order paper only.
+4. Exempt: methodology-falsification/causality audits (they can only kill the
+   line, not improve it) and bug-fix re-runs of the frozen winner.
+
 ## Rejected Continuous Ideas
 
 Do not re-run these unless there is a new reason:
@@ -506,13 +551,409 @@ Do not re-run these unless there is a new reason:
 - Pure retargeting of the hand-picked ensemble; it reached return but stalled at min
   MAR 5.21, so the final improvement came from component weighting, not another DD knob.
 
+## 2026-06-09 — BTC-trend gate Tier-2 validation: DEMO-ELIGIBLE
+
+The deployed `btc_trend_gate=uptrend` (operator-directed 2026-06-04, validation was
+PENDING) got its binding Tier-2 battery: gate off vs uptrend, both venues, full-PIT
+clean, exact deployed profile. Receipt with full numbers:
+`docs/preregistration/btc-gate-tier2-validation-2026-06-09.md`.
+
+Verdict line: `by MARΔ +1.52  bn MARΔ −0.12  pooled +0.70 → DEMO-ELIGIBLE`.
+
+Read: on Bybit the gate is a genuine risk transform (DD −15.6%→−7.2%, MAR 1.38→2.89,
+bootstrap P(MAR Δ>0)=98%, all thirds positive) at the cost of ~4% of return. On
+Binance it is a coin flip (P=59%) that cuts return by more than half — the gate is NOT
+cross-venue evidence of regime alpha; it is venue-fit risk engineering for the deployed
+Bybit book. A run-quality note: the first battery attempt was TAINTED
+(PIT_SURVIVORSHIP) by a single missing kline partition (WDCUSDT 2026-05-29; manifest
+row carried a `bybit_v5_listing` sentinel URL the downloader can't fetch); it was
+killed, the partition backfilled from the public archive, and the battery re-run clean.
+The same sentinel-URL failure mode can silently break future backfills — worth a
+downloader fix.
+
+## 2026-06-09 — Levered long-sleeve stress (the live 10x multiplier vs 1x evidence)
+
+The live long sleeve applies `notional_multiplier=10 / entry_leverage=10` on top of the
+1x-validated v11a+div profile. All promoted evidence is the 1x curve. The levered read
+(`scripts/long_sleeve_10x_stress.py` over the 1x backtest ledger, 189 trades
+2023-06→2026-05; report `.../reports/equity_curves/long/levered_stress_10x.md`):
+
+| metric | 1x (evidence) | 10x (live config) |
+|---|---:|---:|
+| max drawdown | −8.4% | **−60.5%** |
+| worst single exit-day | −2.28% | −22.8% |
+| funding P&L (sum) | −1.68% | −16.8% |
+
+Key findings:
+
+1. **Zero isolated liquidations**: no trade's intratrade MAE (computed from klines; the
+   ledger's mae column is NaN) reached the −9.5% 10x liq distance — the ~−5% ATR stops
+   protect single names. No near-misses either (≤80% of liq distance: 0).
+2. **But the stop→liq cushion is thinner than one hourly bar**: in 139/189 trades a
+   single bar's open→low range exceeded the stop→liquidation cushion — if such a bar
+   arrives with price just above the stop, the fill is at/past liquidation. Gap risk is
+   structural on FC names (entered *because* they pumped ≥15%).
+3. **Margin exhaustion**: peak 8 concurrent positions → peak account gross leverage
+   **11.6x**, peak margin demand **116% of equity** (5 events >100%). The live book
+   cannot replicate the backtest at 10x — entries would be rejected at the margin
+   boundary, so the levered backtest curve is not executable as modeled.
+4. **Correlated-crash wipeout**: at peak gross leverage a uniform **−8.6%** book move
+   ends the account. FC entries cluster in same-day FOMO names; crypto-wide flash-crash
+   days of that size occur in-window. Median in-market gross leverage is only 2.5x —
+   the danger is episodic concentration at peaks, which coincide with peak-FOMO markets.
+5. The 10x exit-compounded "return" (+12,023%) is a linear fantasy — it ignores (3) and
+   (4); do not cite it.
+
+Caveat: ledger vintage is the 2026-06-05 equity-curves run (pre PIT-gap fix,
+current-universe-labeled). The risk *shape* is robust to that; the headline 1x return is
+not the point here.
+
+**Recommendation to owner**: either cap live concurrency/notional so peak gross
+leverage stays ≤ ~5x (wipe threshold −20%), or produce levered forward-demo evidence
+with margin telemetry before trusting any 10x extrapolation. The 1x evidence does not
+transfer linearly to 10x.
+
+## 2026-06-09 — Book-level regime concentration (one trade, three wrappers)
+
+`scripts/book_regime_concentration.py` over the fresh ungated short baseline ledger
+(btc_gate_tier2 00_baseline) + the long ledger, window 2023-04→2026-05 (1,153 days).
+Report: `.../btc_gate_tier2_2026-06-09/00_baseline/book_regime_concentration.md`.
+
+- SHORT regime-on (btc_ret30>0, lag1): **57%** of days. LONG regime-on (BTC&ETH>SMA30):
+  40%. Both deployed sleeves simultaneously on: **37%**; P(long_on | short_on) = 65%.
+  The frozen continuous uptrend ensemble shares the short indicator.
+- **The 37% both-on days carry ~82% of total book P&L** (+102.9% of ~+126% combined at
+  1x). The book is, quantitatively, one BTC-regime trade expressed three ways.
+- Regime flips in-window: 107 (short) / 95 (long) — the 30d-return-sign indicator
+  chatters; many flips are day-scale whipsaws, so effective independent regime
+  observations are well below 107 but well above the naive "one bull cycle = 2-3".
+- **Regime-transition chop is where the short bleeds**: the 2025-04 flip cluster shows
+  −5.8%/−6.9%/−9.4%/−5.8%/−7.4% 11-day short P&L windows around successive flips. The
+  deployed uptrend gate removes downtrend entries but cannot remove boundary chop (the
+  gate itself flips late by construction).
+- The "10 worst BTC days" joint table shows no booked blowups, but it books P&L on
+  EXIT days — open-position marks on crash days surface later; treat that table as a
+  lower bound on crash-day pain, not proof of immunity.
+
+Consequence: portfolio-level risk work should treat "BTC-uptrend-on" as THE factor
+exposure of the whole program; diversification claims between sleeves measured on
+full-sample daily correlation overstate independence (see long-sleeve-diversifier note).
+
+## 2026-06-09 — Funding-interval debt quantified (methodology debt #1 closed-as-scoped)
+
+Empirical audit of both roots' funding datasets vs the code's assumptions.
+
+**Data-layer facts:**
+
+- Bybit `funding`: 764 symbols, 2.44M settlement rows — coverage is effectively
+  complete. Empirical modal settlement interval per symbol: 349 @8h, 322 @4h, 17 @2h,
+  **76 @1h**. By 2025-2026, **76-86% of settlement rows are ≤4h-spaced**.
+- Binance `binance_usdm_funding`: **only 51 symbols** have any funding data (39 @4h,
+  10 @8h). This is a COVERAGE hole, not an interval bug — every trade on the other
+  ~700 symbols books `funding_mode=missing` → zero funding.
+- The stored `funding_interval_min` is **480 for every row on both venues** (the
+  ingestion default), regardless of true interval.
+
+**Code-path consequences:**
+
+1. **P&L path: CORRECT since 2026-06-03.** `_funding_lookup` exact-stamp dedup counts
+   every settlement row present in data; the old interval-bucketing undercount is fixed.
+   Bybit funding P&L is therefore right; Binance funding P&L is right *only* for the 51
+   covered symbols.
+2. **Window-SUM features are correct** (`funding_24h_sum`, `funding_3d/7d_sum`, daily
+   sums): because stored interval=480 makes `funding_rate_8h_equiv == funding_rate`,
+   summing raw per-settlement rates over a window gives the true window funding. The
+   2026-06-08 derivatives frontier's `funding_24h_sum` was computed correctly.
+3. **Per-settlement LEVEL features are mis-scaled** for sub-8h symbols
+   (`funding_rate_last`, `funding_recent`, `fs_recent_funding_min` thresholds): a 4h
+   symbol's last-rate is ~half the true 8h-equivalent, 1h symbols ~1/8. **No deployed
+   profile consumes these** (short funding gates at sentinel ±10; long funding-squeeze
+   pattern disabled) — research-only exposure.
+4. **Binance results are biased OPTIMISTIC by missing funding** — empirically, this
+   strategy's shorts PAY funding on net (Bybit baseline ledger: funding_return sums to
+   **−11.6%** across 596 trades, 595 fully modeled, vs +65.4% total net; post-pop
+   shorts sit in negative-funding regimes). Missing Binance coverage therefore omits a
+   real COST. The trade-level bias band is quantified in the Binance-gap section below.
+   (The naive "shorts collect positive funding" prior is wrong for THIS event
+   population.)
+
+**Recommendations (data work, operator-schedulable):**
+
+- Rebuild Binance funding coverage (`download-data --datasets funding` reach-back, or
+  archive source) — this directly moves the cross-venue arbiter for the short sleeve.
+- At ingestion, set `funding_interval_min` from the empirical per-symbol modal spacing
+  (or instruments `fundingInterval*`) instead of defaulting 480, so `8h_equiv` level
+  features become trustworthy before any research consumes them.
+
+## 2026-06-09 — Binance gap decomposed (selection vs execution vs universe)
+
+`scripts/binance_gap_decomposition.py` over the fresh full-PIT ungated baseline ledgers
+(btc_gate_tier2 00_baseline, both venues; Binance window clipped at its data end
+2026-04-30). Report: `.../binance_full_pit/.../00_baseline/binance_gap_decomposition.md`.
+
+| | bybit | binance |
+|---|---:|---:|
+| trades / symbols | 596 / 272 | 307 / 182 |
+| mean gross fade per trade | +0.167% | +0.101% (60% of bybit) |
+| **shared-symbol** mean gross | +0.203% (316 tr) | +0.159% (252 tr) — **79% of bybit** |
+| gross win rate | 61.9% | 57.3% |
+| mean net per trade | +0.110% | +0.062% |
+| sum net | +65.4% | +19.1% |
+
+Verdict on the three hypotheses:
+
+- **NOT pure Bybit microstructure**: on the like-for-like shared-name pool the fade
+  transfers at ~79% of Bybit's per-trade gross with a comparable win rate. The
+  cross-venue arbiter remains meaningful.
+- **UNIVERSE composition is the biggest drag**: each venue's exclusive names are weaker
+  than the shared pool (bybit-only names dilute bybit's mean too); Binance's 41
+  exclusive traded names drag it hardest, and Binance fires only ~half the events.
+- **EXECUTION costs are symmetric** (identical mean cost) — but the **funding hole is
+  not**: 296/307 Binance trades book zero funding (coverage). Using Bybit's per-trade
+  funding distribution as proxy, unbooked Binance funding ≈ **−5.8%** total (band
+  −3.1%..+1.5%) → honest Binance sum-net ≈ **+13%**, i.e. the published +19.1% is
+  ~30% optimistic. Risk-adjusted (ret/DD 1.10 vs 5.42) the venue gap stays severe:
+  fewer, lumpier trades against a similar DD.
+
+Actionable: (1) the Binance funding-coverage rebuild directly de-biases the arbiter;
+(2) a shared-universe-only profile variant is a legitimate FUTURE pre-registerable idea
+(both venues' exclusive names underperform the shared pool) — not run here.
+
+## 2026-06-09 — Long-sleeve improvement program (structural sweep + TSMOM overlay)
+
+Operator-directed improvement pass on the long sleeve ("better returns, better MAR,
+fix the step-function curve"). Constraint honored: the 5-wave signal-family search is
+exhausted (FC is the selection ceiling) — this program tested PORTFOLIO/EXECUTION
+structure plus one literature-sourced new mechanism. All cells EXPLORATORY, full-PIT
+clean, both venues, window 2023-04-01→2026-05-28 (`scripts/long_improve_sweep.py`,
+`scripts/long_tsmom_overlay.py`; reports under `.../reports/long_improve_2026-06-09/`).
+
+**Accepted candidate (receipt: `docs/preregistration/long-volup-candidate-2026-06-09.md`):**
+`vol_target_max_scale` 1.0 → **1.25** — return +23.3%→+28.9% (bybit) / +19.0%→+23.6%
+(binance) with ret/DD ≥ 99.6% of baseline and Sharpe unchanged on both venues.
+Identical trade set — pure Moreira-Muir exposure timing (lever the calm regimes), the
+symmetric half of the already-promoted div de-risking. Both 1.25 and 1.5 passed the
+pre-registered rule; the pre-committed tie-break picked 1.25 because of the live 10x
+leverage interaction. NOT deployed — operator sign-off required, and it should ride
+with the leverage-cap decision.
+
+**Clean nulls (do not re-run):**
+
+- Candidate breadth (fc_top_volume_rank_max 10→20/30, daily-best-N): ret/DD collapses
+  ~50-65% on both venues. The top-10-liquidity gate is load-bearing for FC quality.
+- Hold extension (3d→7d), ATR trailing stop, scaled exits: all materially worse —
+  the 72h time-stop is right; FC's edge is fully decayed by day 3.
+- Pyramiding (max_per_symbol_concurrent 2): no-op (cooldown binds first).
+- **Majors TSMOM/Donchian overlay**: literature-mined (Zarattini/Han/Man — published
+  Sharpe 1.5+ spot, no funding). On 2023-26 perp data with REAL funding the anomaly
+  survives but degrades to MAR 0.92 (sma50 best; published Donchian ensemble: 0.42),
+  corr +0.35 to the FC stream — every blend weight DILUTES combined MAR
+  monotonically (2.38 → 2.25 @ 10% → 1.73 @ 50%). Anti-finding from the same
+  literature pass: post-listing drift is a SHORT phenomenon (89% of 2025 listings
+  negative) — never a long candidate.
+
+**The step-function curve was substantially an accounting artifact.** The engine books
+P&L on exit only. Rendered as daily mark-to-market (every open trade marks daily;
+costs+funding on exit day; same per-trade totals), the FC book's honest curve is
+already continuous-ish: MAR 2.38, DD −8.5%, Sharpe(daily) 1.66, active 26% of days.
+The right "fix" was rendering, not diluting the book with a weaker always-on sleeve.
+
+## 2026-06-09 — Cross-listing filter: REJECTED (Tier-1 fail, with a sharpened insight)
+
+Follow-up to the Binance-gap decomposition. Hypothesis: "listed on both venues at
+decision time" is a PIT-computable quality proxy (single-venue listings = the scammier
+tail). Ledger-level scout on tonight's clean cells (PIT cross-listing from the other
+venue's kline coverage at entry date, 1000x-prefix symbol normalization, trailing-7d
+window; ledger filtering is conservative — freed slots aren't reallocated):
+
+| venue/cell | unfiltered MAR | cross-listed-only MAR | dropped P&L |
+|---|---:|---:|---:|
+| bybit baseline | 2.17 | 1.28 | +18.4% (165 tr) |
+| bybit uptrend | 7.89 | 4.12 | +24.1% (105 tr) |
+| binance baseline | 0.52 | 0.75 | −2.3% (25 tr) |
+| binance uptrend | 0.38 | 0.62 | −2.4% (14 tr) |
+
+**Verdict: REJECTED as a universal filter** — helps Binance, materially hurts Bybit
+(Tier-1 fail: MAR Δ −0.89 / +0.23). The outcome-side proxy in the gap decomposition
+("traded on both venues") had conditioned on the name also EVENTING on Binance — a far
+stronger condition than being listed there. Sharpened conclusion: **Bybit-exclusive
+listings carry real, diversifying edge; only Binance's own exclusive listings are
+toxic.** A Binance-only gate would be venue-specific tuning and is not proposed.
+Do not re-run as a cross-venue candidate.
+
+## 2026-06-09 — Binance funding REBUILT + gate re-verified; ridge combiner REJECTED
+
+**Funding rebuild (receipt: `docs/preregistration/binance-funding-rebuild-2026-06-09.md`):**
+`binance_usdm_funding` rebuilt from the survivorship-free data.binance.vision monthly
+fundingRate archives (+ fapi top-up): **51 → 697 symbols**, ~2.23M rows, TRUE
+per-settlement intervals stored (1.26M of 2.23M rows are sub-8h — closing both halves
+of the old funding debt). Old dataset kept as `.bak`. Re-measured Binance gate cells on
+honest funding: baseline +18.7%→+14.2% (−4.5% abs, inside the predicted −3..−6 band),
+uptrend +8.1%→+6.9%, trades unchanged. **Gate Tier-2 verdict re-checked and HOLDS:
+binance MAR Δ −0.05 (better than the pre-rebuild −0.12), pooled +0.73 → DEMO-ELIGIBLE.**
+All future Binance numbers use this basis; pre-rebuild Binance results are ~3-6% abs
+optimistic on 3y windows.
+
+**Ridge combiner (operator's pre-registered scout): REJECTED.** Bybit pooled
+out-of-fold rank-IC **−0.04** (anti-predictive, 7 folds, coefficients stable);
+Binance arm unmeasurable (0 folds — OI history there starts ~2026-04). The Tier-1
+gate (positive IC both venues) fails; engine-sizing wiring does not proceed. A re-run
+needs a Binance OI backfill (vision metrics archive reaches 2020-09) + a freshly
+pre-registered feature set. Receipt: `docs/preregistration/ridge-combiner-2026-06-09.md`.
+
+## 2026-06-09 — Day-grid alignment audit: GRID CORRECT (debt #4 closed)
+
+End-to-end audit of the factor/residual day-grid timeline (the blocking prerequisite
+for any continuous revival, and the prime suspect behind the rmom knife-edge):
+
+1. **Producer verified.** Panel rows are start-of-day 00:00-UTC stamps; features at
+   row D are EOD-of-D observables; `fwd_ret_1d` = first-bar close (D+1)01:00 →
+   (D+2)01:00 via calendar-exact joins (gap days null, never misaligned).
+   **Empirically recomputed from raw klines for sample (symbol, day)s: bit-exact
+   match.** `residual_return[d]` therefore completes (d+2)01:00 as documented, and
+   rmom[D]'s newest term completes (D−1)01:00.
+2. **Consumers verified.** Continuous engine joins rmom[bar's own day] — causal for
+   every hourly bar with ≥24h margin to the newest residual. The volume-events
+   trading-day join consumes rmom one further day stale (extra-conservative;
+   feature inactive in the deployed short anyway). The falsification driver's
+   shift3 rebuild matched the production table 100.0% — pipeline self-consistent.
+
+**Verdict: no off-by-one anywhere.** Consequences:
+
+- The rmom latency-FAIL is re-interpreted: NOT leakage — a **genuine ultra-fast-decay
+  idiosyncratic reversal effect** (alive at 23–47h staleness, dead past 47h). The
+  binding consequence is unchanged (zero operational margin for a daily system; rmom
+  still supports no deployment-grade claim), but the mechanism is now understood.
+- The residual-Sharpe machinery (Tier-3 gate input) is methodologically trustworthy.
+- Methodology debt #4 is CLOSED; any future continuous revival now needs an
+  intraday-class execution design (to consume a <2-day-half-life signal), not a
+  data-layer fix.
+
+## 2026-06-09 — Live-vs-backtest age definition audited (debt #2 closed-as-acceptable)
+
+The two definitions: backtest `pit_age_days` = trading day − first archive-manifest
+date; live `listing_age_days` = now − instruments `launchTime`. Quantified against a
+live Bybit instruments snapshot × the manifest (569 symbols compared):
+
+- **Median divergence 0 days; 564/569 within ±3 days.** The definitions agree for
+  essentially the whole universe.
+- 5 outliers, ALL with live age YOUNGER (launchTime resets on contract
+  relaunch/migration: ETH/SOL/UNI/SUSHI — ancient either way, no gate impact — and
+  FHEUSDT: backtest 419d vs live 153d, the known 54-day archive-gap name).
+- **Exactly 1 symbol flips the age-300 gate today (FHEUSDT), and in the SAFE
+  direction: live skips a name the backtest would trade.** There is no case where
+  live trades something the backtest's gate would reject.
+
+Verdict: divergence is rare (≈0.2% of the universe) and conservative-by-direction.
+Accepted as-is; no code change. If a relaunched major ever re-enters the young-age
+band, the live gate errs toward skipping — acceptable for a fade strategy.
+
+## 2026-06-09 — Combined-book construction (deployed short × volup125 long)
+
+Daily-grid combination of the two real books (bybit, window 2023-04→2026-05): the
+deployed gated short (exit-day booked, 3d holds) × the accepted long volup125
+candidate (honest daily-MTM stream).
+
+- **corr(short, long) daily = −0.03** — effectively zero.
+- | book | total | ann | maxDD | MAR | Sharpe | worst day |
+  |---|---:|---:|---:|---:|---:|---:|
+  | short only (deployed) | +81.0% | +20.7% | −7.2% | 2.89 | 1.67 | −2.87% |
+  | long only (volup125) | +28.2% | +8.2% | −3.6% | 2.25 | 1.68 | −1.66% |
+  | **combined 30% short** | +42.9% | +12.0% | **−2.5%** | **4.87** | **2.40** | −1.33% |
+  | combined 50% short | +53.3% | +14.5% | −3.8% | 3.82 | 2.20 | −1.56% |
+  | combined 70% short | +64.1% | +17.0% | −5.1% | 3.30 | 1.94 | −2.08% |
+
+Caveats (attach when citing): mixed booking conventions slightly flatter the short
+side; in-sample, 1x research scale, bybit only; daily corr ≈ 0 does NOT remove the
+regime-flip joint-tail exposure (see the regime-concentration section) — both sleeves'
+crash risk clusters at BTC-trend transitions. The split row is a research
+illustration, not a deployment instruction; the live netted account currently runs no
+explicit budget split (margin-budget feature shipped OFF). Notable: the combined-book
+case strengthens the volup125 sign-off — the long candidate composes with the short
+book at near-zero daily correlation.
+
+**Binance addendum (same session, honest refunded ledgers):** corr(short, long) =
+**−0.037 — the near-zero correlation REPLICATES cross-venue** (structure, not a Bybit
+artifact). But the venues mirror: Binance's strong leg is the LONG (MAR 1.80 vs the
+refunded gated short's 0.17), so any fixed blend dilutes the stronger sleeve there
+(30% short: 1.80→1.38). Cross-venue-robust conclusion: two structurally uncorrelated
+sleeves, each venue's book dominated by its stronger leg; a single global split
+prescription does NOT fall out of the data — venue-level sizing is an operator
+risk-preference decision, not a fitted parameter.
+
+## 2026-06-09 — Capacity quantified for the deployed short (Tier-3 input)
+
+First explicit capacity computation (per-trade participation = per-trade notional
+[C × gross/max_active = C/12] ÷ entry-day symbol turnover; gated cells, both venues):
+
+| venue | entry-day turnover (median / p10) | C @ 1% participation (median trade / p10 thinnest) | C @ 5% |
+|---|---|---|---|
+| bybit | $9M / $1.9M | **$1.1M / $0.2M** | $5.6M / $1.2M |
+| binance | $36M / $7.3M | $4.3M / $0.9M | $21.6M / $4.4M |
+
+Read: the strategy shorts thin names BY CONSTRUCTION (the liquidity-migration event
+selects them), so capacity is structurally small — disciplined (1%-participation)
+capacity is **single-digit $M on Bybit**, with the thin tail binding well below $1M.
+Tier-3's "capacity ≥ 10x deployment" passes comfortably at personal scale (≤$100k
+deployment) and becomes binding around $0.5-1M deployment. The research configs'
+$1M deploy-capital / 50bps impact assumptions sit right at this edge — cost-stress
+results should be read with that in mind. This closes the "nobody has computed
+capacity" gap in the Tier-3 checklist.
+
+## 2026-06-09 — Funding-settlement-aware exits: NULL at the bound (don't build)
+
+With full settlement timestamps now in data, scouted whether the short book pays
+funding it could dodge by exiting just before a settlement: of the gated Bybit book's
++4.51% total funding cost (equity-rel, 3y, 339 funded trades), only **+0.55%** sits at
+settlements ≤1h before exit (51 trades) — the hard upper bound on any exit-timing
+recovery is ~0.18%/yr. Not worth an engine change; recorded so it's never mined.
+
+## 2026-06-09 — PROPOSED (operator gate): intraday-class harvest of the fast-decay residual signal
+
+Status: **design proposal only — nothing runs without operator greenlight + a fresh
+pre-registration.** This is the one creative direction tonight's falsification work
+actually EARNED, written down before it's forgotten.
+
+**What we verified (not conjecture):** the residual-reversal signal (rmom family) is
+real but lives at 23–47h staleness and is dead past 47h (latency falsification,
+shifts 2-7, grid audited bit-exact). A daily-rebalanced system structurally cannot
+harvest a <2-day-half-life signal with margin — that's WHY continuous failed, not
+because the idio reversal doesn't exist.
+
+**Design sketch (the only shape that fits the verified physics):**
+- Decision cadence: hourly bar close (infrastructure EXISTS: the continuous engine is
+  hourly; live WS klines + state caches are deployed).
+- Signal: residual-return reversal computed on a rolling intraday grid — residuals
+  vs the same 4-factor model, but fit on hourly/6h windows so the newest legal
+  information is hours old, not 23h. (The day-grid machinery is verified correct;
+  this is a finer grid, same construction.)
+- Holding: 12–24h max (inside the verified decay window), TP/time exits only (hard
+  stops are a documented null in this family).
+- Costs are the killer risk: hourly-cadence shorts on thin alts at 45bps+ round trip
+  — the EDGE PER TRADE must clear ~2x the daily system's because turnover doubles.
+  The capacity ceiling (single-digit $M) gets TIGHTER, not looser.
+
+**Validation plan (freeze-compatible):** ONE pre-registered backtest shot (no
+iterative sweeps — design frozen on paper first, exactly like the ridge receipt),
+then no-order paper collection. The 2023-26 window freeze covers continuous VARIANT
+adjudication; a single pre-committed test of a structurally new design with
+forward-first emphasis is the carve-out the freeze anticipated — but the operator
+owns that call.
+
+**Recommendation:** park until (a) the forward demo has produced its first
+Tier-3-relevant evidence on the existing book and (b) the operator decides the
+program wants a second research arc. Written here so the option is preserved with
+its rationale, not re-derived from scratch later.
+
 ## Open Methodology Debts
 
 These are still real and can move numbers:
 
-1. **Binance funding interval.** Some Binance alts settle funding every 4h, but parts of the
-   stack historically assumed 8h. Any Binance result with incomplete funding handling must be
-   treated cautiously.
+1. **Binance funding COVERAGE** (re-scoped 2026-06-09; interval arithmetic audited and
+   resolved — see the dated section above). The local Binance funding dataset covers only
+   ~51 symbols; all other Binance trades book zero funding, biasing Binance short returns
+   DOWN. Remaining work: rebuild Binance funding coverage; set per-symbol
+   `funding_interval_min` at ingestion.
 2. **Age definition.** Live age and PIT backtest age may differ near threshold boundaries.
 3. **Residual-momentum causality.** Rmom features must be proven causal at the decision
    timestamp before any deployment/paper-ready claim.

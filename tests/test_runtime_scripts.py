@@ -605,11 +605,11 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "sed -i \"s/^TELEGRAM_CHAT_ID=" in text
     assert "SYSTEMD_SETTLE_SECONDS" in text
     assert "systemctl disable --now" in text
-    assert "model050426.service" in text
-    assert "model050426-bybit-demo-signal.timer" in text
+    # 2026-06-09 audit: the model050426 retired-unit cleanup/assertions were removed —
+    # the 2026-06-04 box (116.202.15.128) is a fresh host that never ran those units.
+    assert "model050426" not in text
     assert "liquidity-migration-bybit-demo.service" in text
     assert "liquidity-migration-bybit-risk.service" in text
-    assert "retired unit" in text
     # The risk service has NO sleeve toggle — it is the shared reconcile authority for
     # all three sleeves and must always enable/restart/verify regardless of which
     # entry sleeves are on (turning a sleeve off must never stop position protection).
@@ -744,9 +744,8 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
 
     assert "git pull" not in text
     assert "systemctl restart" not in text
-    assert "retired unit" in text
-    assert "model050426.service" in text
-    assert "model050426-bybit-demo-signal.timer" in text
+    # 2026-06-09 audit: retired-unit (model050426) checks removed — fresh 2026-06-04 box.
+    assert "model050426" not in text
     assert "liqmig_union_q40_h3_tp26_g100_qsqueeze" in text
     assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text
     assert "TELEGRAM_CHAT_ID" in text
@@ -1024,11 +1023,10 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "liqmig_union_q40_h3_tp26_g100_qsqueeze" in text
     assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text
     assert "systemctl disable --now" in text
-    assert "model050426.service" in text
-    assert "model050426-bybit-demo-signal.timer" in text
+    # 2026-06-09 audit: retired-unit (model050426) cleanup removed — fresh 2026-06-04 box.
+    assert "model050426" not in text
     assert "liquidity-migration-bybit-demo.service" in text
     assert "liquidity-migration-bybit-risk.service" in text
-    assert "retired unit" in text
     # Recovery routes sleeve enable/restart/verify through the SAME kill-switch as
     # deploy_vps_live.sh (single source of truth) — NO hardcoded per-sleeve enables that
     # could resurrect an OFF sleeve (e.g. the look-ahead-disabled continuous sleeve).

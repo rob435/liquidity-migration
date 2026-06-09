@@ -10,7 +10,7 @@
 #
 # Thin wrapper around scripts/reconcile.py so the invocation stays trivial and
 # the orchestration logic lives in well-tested Python. See docs/pit_gate.md.
-set -eu
+set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 PY="$HERE/.venv/bin/python"

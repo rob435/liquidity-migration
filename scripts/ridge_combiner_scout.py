@@ -30,13 +30,16 @@ import argparse
 import csv
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
-import numpy as np
-import polars as pl
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # repo bootstrap (matches sibling scripts)
 
-from liquidity_migration.ridge_combiner import (
+import numpy as np  # noqa: E402
+import polars as pl  # noqa: E402
+
+from liquidity_migration.ridge_combiner import (  # noqa: E402
     FROZEN_FEATURES,
     RidgeCombinerConfig,
     coefficient_sign_consistency,

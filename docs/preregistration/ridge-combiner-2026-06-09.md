@@ -72,7 +72,28 @@ POLARS_MAX_THREADS=8 .venv/bin/python scripts/ridge_combiner_scout.py \
 ```
 
 ## Post-run results
-(fill in after run; include report paths + commit SHA at which the runs landed)
+
+Scout run 2026-06-09 (per-venue invocations of the pre-registered command on the local
+full-PIT roots — the 16GB box handled it at POLARS_MAX_THREADS≤6; the "not runnable"
+note above was stale). Outputs: `~/SHARED_DATA/ridge_combiner_2026-06-09/`
+(summary.csv, fold_coefficients.csv, run_receipt.json, per-venue score parquets).
+
+- **bybit:** pooled OUT-OF-FOLD rank-IC = **−0.0396** over 7 folds (anti-predictive).
+  Sign-stable features (≥80% folds): dist_from_30d_high, funding_rate_z,
+  liquidity_rank, oi_to_adv, realized_vol_7d — stable coefficients, no usable signal.
+- **binance:** **0 folds** — the frozen 8-feature panel is not computable on Binance
+  history (open-interest coverage there begins ~2026-04; funding covered only 51
+  symbols at run time), so the panel emptied after feature joins. The arm is
+  unmeasurable as pre-registered, not a measured zero.
 
 ## Verdict
-(accepted | rejected | inconclusive — with one-paragraph why)
+
+**rejected (cheap falsification — the scout did its job).** The Tier-1 gate required
+positive pooled OOF rank-IC on BOTH venues; bybit is negative, so the engine-sizing
+wiring milestone does not proceed. The hypothesis ("same return, fewer researcher
+degrees of freedom") is not supported: the frozen causal feature set carries no
+out-of-fold predictive ranking signal within the event pool on the deployed venue.
+Conditions under which a re-run would be legitimate (new receipt required): (1) the
+2026-06-09 Binance funding rebuild + a Binance OI backfill (data.binance.vision
+metrics archive reaches 2020-09) making the panel computable cross-venue, AND (2) a
+revised feature set pre-registered BEFORE seeing any new fold output.

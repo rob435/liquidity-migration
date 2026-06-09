@@ -842,7 +842,7 @@ def _normalize_funding(symbol: str, rows: list[dict]) -> list[dict]:
             "ts_ms": int(row["fundingRateTimestamp"]),
             "symbol": symbol,
             "funding_rate": float(row["fundingRate"]),
-            "funding_interval_min": int(row.get("fundingIntervalHour", 8)) * 60,
+            "funding_interval_min": int(row.get("fundingIntervalHour") or 8) * 60,
         }
         for row in rows
     ]

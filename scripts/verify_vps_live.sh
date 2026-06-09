@@ -96,20 +96,6 @@ systemctl is-active --quiet liquidity-migration-demo-health.timer
 systemctl is-active --quiet liquidity-migration-demo-liveness.timer
 systemctl is-active --quiet liquidity-migration-combined-book-report.timer
 
-for legacy_unit in \
-  model050426.service \
-  model050426-bybit-demo-signal.timer \
-  model050426-bybit-demo-signal.service; do
-  if systemctl is-active --quiet "$legacy_unit" 2>/dev/null; then
-    echo "Verification failed: retired unit $legacy_unit is still active." >&2
-    exit 1
-  fi
-  if systemctl is-enabled --quiet "$legacy_unit" 2>/dev/null; then
-    echo "Verification failed: retired unit $legacy_unit is still enabled." >&2
-    exit 1
-  fi
-done
-
 if [ "$SYSTEMD_SETTLE_SECONDS" -gt 0 ]; then
   sleep "$SYSTEMD_SETTLE_SECONDS"
 fi

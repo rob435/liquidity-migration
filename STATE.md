@@ -1,6 +1,6 @@
 # Research Program State
 
-**Last updated:** 2026-06-08
+**Last updated:** 2026-06-09
 This file is live/operational state plus binding decision rules. Research conclusions live in
 [docs/research_summary.md](docs/research_summary.md).
 
@@ -46,12 +46,52 @@ independent entry/exit logic."
 
 Currently used profile: `drop_all_4 + age300 + ff6 + btc_trend_gate=uptrend`.
 
+- **btc_trend_gate=uptrend is Tier-2 VALIDATED (2026-06-09): DEMO-ELIGIBLE.**
+  by MARΔ +1.52 / bn MARΔ −0.12 / pooled +0.70, full-PIT both venues. The case is
+  carried by Bybit (MAR 1.38→2.89, bootstrap P(Δ>0)=98%); Binance is a wash
+  (P(Δ>0)=59%, final third negative) — reported, non-blocking. Receipt:
+  `docs/preregistration/btc-gate-tier2-validation-2026-06-09.md`.
 - Age gate around 300d is robust.
 - Rmom is not in the promoted short. Historical rmom work is research-only and not a
   current run instruction.
 - Execution timing is not the main lever.
+- 2026-06-09 risk/data findings (details in research_summary): the book is one
+  BTC-regime trade (37% of days carry ~82% of book P&L); live LONG 10x multiplier is
+  not supported by 1x evidence (peak gross leverage 11.6x, wipe at −8.6% uniform day);
+  Binance funding coverage hole (51 symbols) makes its results ~30% optimistic.
+
+### Long
+
+- **volup125 candidate ACCEPTED 2026-06-09** (pre-registered): `vol_target_max_scale`
+  1.0→1.25, +24% relative return both venues at unchanged ret/DD/Sharpe, identical
+  trade set. NOT deployed — needs operator sign-off and must ride with the
+  long-sleeve leverage-cap decision (live 10x multiplier interaction). Receipt:
+  `docs/preregistration/long-volup-candidate-2026-06-09.md`.
+- Structural nulls (don't re-run): FC breadth, hold-extension/trailing/scaled exits,
+  pyramiding, majors TSMOM/Donchian overlay (dilutes MAR at every weight).
+- The long "step function" equity curve is an exit-booking artifact; daily-MTM
+  rendering (`scripts/long_tsmom_overlay.py` engine) shows MAR 2.38 / DD −8.5%.
 
 ### Continuous
+
+**FROZEN 2026-06-09 — the 2023-04→2026-05 window is SPENT for continuous
+adjudication.** The window has adjudicated hundreds of accept/reject decisions
+(the 06-07/06-08 sweeps alone left ~25 artifact roots); further variant
+selection on it only degrades the believability of the numbers it already
+produced. Binding until forward evidence exists:
+
+- The 40%/70d downtrend-extended ensemble below stays the frozen research
+  winner. No further accept/reject sweeps, weight tweaks, filter frontiers, or
+  risk-rule retargets on this window.
+- **2026-06-09 downgrade:** the rmom latency falsification FAILED (see Methodology
+  Debts) — every continuous candidate rides rmom q25, so the whole line now rests on
+  a boundary-concentrated feature. Day-grid alignment audit is the blocking
+  prerequisite before any continuous promotion case.
+- Forward no-order paper evidence is the only admissible new continuous
+  evidence (`continuous-forward-readiness` / `continuous-vs-daily-forward`).
+- EXEMPT from the freeze: methodology-falsification and causality audits (e.g.
+  the rmom latency-delay test) — tests that can only kill the line, not
+  improve it — and bug-fix re-runs of the frozen winner.
 
 The strongest old continuous object is still the decomposed daily-rebalance candidate:
 
@@ -133,6 +173,15 @@ improvement.
 All June 7-8 continuous run receipts are consolidated in `docs/research_summary.md`;
 the durable artifacts remain under `C:\Users\user\SHARED_DATA\...`.
 
+### Ridge Combiner — REJECTED 2026-06-09 (scout falsified it cheaply)
+
+The pre-registered walk-forward ridge scout ran: bybit pooled OUT-OF-FOLD rank-IC
+**−0.04** (anti-predictive; coefficients stable but no signal); binance arm
+unmeasurable (0 folds — OI/funding feature coverage holes). Tier-1 gate (positive IC
+both venues) fails → engine-sizing wiring does NOT proceed. Re-run requires the
+Binance funding rebuild + an OI backfill AND a freshly pre-registered feature set.
+Receipt: `docs/preregistration/ridge-combiner-2026-06-09.md`.
+
 ## Binding Decision Rules
 
 Forward demo/paper is the arbiter. MAR is primary; Sharpe is secondary.
@@ -169,10 +218,23 @@ No internal pre-2023 OOS substitute exists.
 
 These can still move numbers:
 
-- Binance funding interval handling.
-- Live age definition versus PIT backtest age definition.
-- Residual-momentum causality at decision timestamp.
-- Factor/residual day-grid alignment.
+- ~~Binance funding coverage~~ **RESOLVED 2026-06-09**: dataset rebuilt from
+  data.binance.vision (51→697 symbols, true settlement intervals); Binance gate cells
+  re-measured (−4.5% abs baseline, inside the predicted band); gate verdict HOLDS
+  (pooled +0.73). Pre-rebuild Binance numbers are ~3-6% abs optimistic. Receipt:
+  `docs/preregistration/binance-funding-rebuild-2026-06-09.md`.
+- ~~Live age vs PIT backtest age~~ **CLOSED 2026-06-09 (quantified-acceptable)**:
+  median divergence 0d (564/569 within ±3d); rare outliers are all conservative
+  (live launchTime resets on relaunch → live skips). 1 symbol flips the 300d gate
+  today (FHEUSDT), in the safe direction.
+- **Residual-momentum: latency falsification FAILED (2026-06-09).** The rmom edge is a
+  knife-edge at shift3 only (+1d delay → pooled MAR 1.13→0.10, Bybit sign-flip); rmom
+  supports no deployment-grade claim until debts here + day-grid alignment are resolved
+  at the data layer. Receipt: `docs/preregistration/rmom-latency-falsification-2026-06-09.md`.
+- ~~Factor/residual day-grid alignment~~ **CLOSED 2026-06-09: audited end-to-end,
+  GRID CORRECT** (empirical bit-exact recompute; all consumer joins causal with
+  ≥24h margin). The rmom knife-edge is genuine fast decay, not leakage; a continuous
+  revival now needs an intraday-class execution design, not a data fix.
 - Continuous forward window is immature; current local evidence is not enough.
 
 Risk-model receipt kept: `docs/preregistration/r4-risk-model-verdict.md`.
@@ -186,6 +248,7 @@ PIT membership receipt kept: `docs/preregistration/pit-membership-trading-day-fi
 - Legacy strict analyzer: `python scripts/apply_decision_rule.py SUMMARY.csv --control 00_baseline`
 - Continuous readiness diagnostic: `python -m liquidity_migration continuous-forward-readiness --paper-only`
 - Continuous vs daily forward comparator: `python -m liquidity_migration continuous-vs-daily-forward`
+- Ridge combiner falsification scout: `python scripts/ridge_combiner_scout.py` (receipt: `docs/preregistration/ridge-combiner-2026-06-09.md`)
 
 ## Non-Negotiables
 
