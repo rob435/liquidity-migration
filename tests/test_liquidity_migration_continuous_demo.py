@@ -15,6 +15,7 @@ from liquidity_migration.continuous_demo import (
     ContinuousDemoCycleConfig,
     LivePanelCache,
     _build_continuous_rebalance_resize_rows,
+    _continuous_age_eligible_symbols,
     _continuous_rebalance_cycle_fields,
     _continuous_rebalance_mark_prices_json,
     _continuous_rebalance_resize_checked_today,
@@ -290,6 +291,46 @@ def test_age_gate_excludes_ineligible_symbols() -> None:
     out = select_continuous_entries(state, held_symbols=set(), cooldown_symbols=set(), open_count=0,
                                     config=cfg, eligible_symbols={"A"})  # B too young
     assert [r["symbol"] for r in out] == ["A"]
+
+
+def test_continuous_age_uses_universe_listing_age_not_kline_cache() -> None:
+    """The authoritative v5 launchTime age (universe.listing_age_days) wins over the rolling
+    kline cache: a genuinely-old coin (A) is eligible even though its cache only reaches a few
+    days back, while a genuinely-young coin (B) is excluded — the live-vs-PIT age fix."""
+    now = 1_000 * MS_PER_DAY
+    universe = pl.DataFrame({"symbol": ["A", "B"], "listing_age_days": [400.0, 10.0]})
+    # Cache disagrees: only ~5 days of bars for BOTH (cache-first-bar would wrongly gate out A).
+    klines = pl.DataFrame(
+        {"symbol": ["A", "A", "B", "B"],
+         "ts_ms": [now - 5 * MS_PER_DAY, now, now - 5 * MS_PER_DAY, now]}
+    )
+    assert _continuous_age_eligible_symbols(universe, klines, age_days_min=300, now_ms=now) == {"A"}
+
+
+def test_continuous_age_excludes_null_listing_age() -> None:
+    universe = pl.DataFrame({"symbol": ["A", "B"], "listing_age_days": [400.0, None]})
+    elig = _continuous_age_eligible_symbols(universe, pl.DataFrame(), age_days_min=30, now_ms=MS_PER_DAY)
+    assert elig == {"A"}  # null/unknown launch age is ineligible (conservative)
+
+
+def test_continuous_age_floor_zero_means_no_gate() -> None:
+    universe = pl.DataFrame({"symbol": ["A"], "listing_age_days": [1.0]})
+    assert _continuous_age_eligible_symbols(universe, pl.DataFrame(), age_days_min=0, now_ms=0) is None
+
+
+def test_continuous_age_falls_back_to_kline_cache_without_listing_age() -> None:
+    """Degraded universe (no listing_age_days) → legacy kline-cache first-bar gate."""
+    now = 1_000 * MS_PER_DAY
+    universe = pl.DataFrame({"symbol": ["A", "B"]})
+    klines = pl.DataFrame(
+        {"symbol": ["A", "B"], "ts_ms": [now - 60 * MS_PER_DAY, now - 10 * MS_PER_DAY]}
+    )
+    assert _continuous_age_eligible_symbols(universe, klines, age_days_min=30, now_ms=now) == {"A"}
+
+
+def test_continuous_age_no_source_returns_none() -> None:
+    """No listing age and no klines → cannot gate → None (preserves empty-klines cycle behavior)."""
+    assert _continuous_age_eligible_symbols(pl.DataFrame(), pl.DataFrame(), age_days_min=30, now_ms=0) is None
 
 
 def test_continuous_order_link_prefix_routes_as_distinct_sleeve() -> None:

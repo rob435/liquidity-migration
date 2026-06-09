@@ -2004,6 +2004,45 @@ def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
     )
 
 
+def _continuous_age_eligible_symbols(
+    universe: pl.DataFrame,
+    klines: pl.DataFrame,
+    *,
+    age_days_min: int,
+    now_ms: int,
+) -> set[str] | None:
+    """Symbols old enough to trade under the fresh-listing-squeezer floor.
+
+    ``None`` means no age gate (floor <= 0). Prefers the AUTHORITATIVE per-cycle
+    universe listing age (``listing_age_days`` = (now - Bybit v5 launchTime)/day,
+    the same source the daily sleeve's ``pit_age_days`` gate uses), so the
+    continuous sleeve no longer infers age from its rolling kline cache: a
+    genuinely old coin whose cache only reaches back a few weeks would otherwise
+    be wrongly gated out (the live-vs-PIT age definition debt). A null/unknown
+    launch age is treated as ineligible (conservative, matches the universe-build
+    age filter). Falls back to the kline-cache first bar only when the universe
+    carries no listing age — correct only when the cache spans >= age_days_min days.
+    """
+    if age_days_min <= 0:
+        return None
+    if not universe.is_empty() and "listing_age_days" in universe.columns:
+        eligible = universe.filter(
+            pl.col("listing_age_days").is_not_null()
+            & (pl.col("listing_age_days") >= float(age_days_min))
+        )
+        return set(eligible["symbol"].to_list())
+    if not klines.is_empty():
+        _logger.warning(
+            "continuous age gate falling back to kline-cache first bar (universe has no "
+            "listing_age_days); only correct when the cache spans >= %d days",
+            age_days_min,
+        )
+        age_min_ms = age_days_min * MS_PER_DAY
+        firsts = klines.group_by("symbol").agg(pl.col("ts_ms").min().alias("first"))
+        return set(firsts.filter((now_ms - pl.col("first")) >= age_min_ms)["symbol"].to_list())
+    return None
+
+
 def run_continuous_demo_cycle(
     data_root: str | Path,
     *,
@@ -2160,12 +2199,12 @@ def run_continuous_demo_cycle(
         )
         cooldown = set(held_symbols) | live_position_symbols | live_entry_order_symbols | exit_cooldown_symbols | addon_entry_cooldown_symbols
         open_count = len(held_symbols)
-        # age floor (inherited fresh-listing-squeezer defense): eligible = listed >= age_days_min ago.
-        eligible = None
-        age_min_ms = demo.age_days_min * MS_PER_DAY
-        if age_min_ms > 0 and not klines.is_empty():
-            firsts = klines.group_by("symbol").agg(pl.col("ts_ms").min().alias("first"))
-            eligible = set(firsts.filter((cycle_now_ms - pl.col("first")) >= age_min_ms)["symbol"].to_list())
+        # age floor (fresh-listing-squeezer defense): eligible = listed >= age_days_min ago.
+        # Authoritative listing age from the v5 universe (matches the daily sleeve's pit_age_days
+        # gate), not the rolling kline cache — see _continuous_age_eligible_symbols.
+        eligible = _continuous_age_eligible_symbols(
+            universe, klines, age_days_min=demo.age_days_min, now_ms=cycle_now_ms
+        )
         # Portfolio circuit breaker: pause NEW entries during a correlated alt-squeeze (many recent
         # adverse covers) so the sleeve does not keep shorting into a melt-up. Exits are unaffected.
         entry_paused, recent_adverse = entry_circuit_breaker_tripped(

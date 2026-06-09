@@ -80,9 +80,12 @@ adjudication.** The window has adjudicated hundreds of accept/reject decisions
 selection on it only degrades the believability of the numbers it already
 produced. Binding until forward evidence exists:
 
-- The 40%/70d downtrend-extended ensemble below stays the frozen research
-  winner. No further accept/reject sweeps, weight tweaks, filter frontiers, or
-  risk-rule retargets on this window.
+- No further accept/reject sweeps, weight tweaks, filter frontiers, or
+  risk-rule retargets on this window. (The 40%/70d downtrend-extended ensemble was
+  the frozen winner when this freeze was written; a same-day parallel session's
+  pre-registered fragility receipt DEMOTED it — see the 2026-06-09 re-anchor below.
+  The freeze and the demotion are compatible: the demotion was a completed
+  pre-registered decision, and the freeze governs everything from here on.)
 - **2026-06-09 downgrade:** the rmom latency falsification FAILED (see Methodology
   Debts) — every continuous candidate rides rmom q25, so the whole line now rests on
   a boundary-concentrated feature. Day-grid alignment audit is the blocking
@@ -136,41 +139,50 @@ The closest return retarget was the unfiltered high-scale rule, not a filter:
 Bybit +137.46% / MAR 4.39, Binance +112.77% / MAR 4.70, worst DD -10.00%.
 That still fails the +120% both-venue and MAR 6 target.
 
-The current best continuous research lead is the scale/window-interpolated
-downtrend-extended ensemble, still research-only:
+**2026-06-09 re-anchor (WP2):** the downtrend-extended ensemble (7.50/6.84 headline)
+is **DEMOTED** — its `premium_24h_ge0` downtrend sleeve is fragile/overfit (85/91
+trades on ~10 active days; `dt_scale=0.4` sits at a cliff). The canonical continuous
+research object is the parsimonious **uptrend ensemble winner_base**
+`{turn3p3:0.30, turn4p3:0.20, turn4p5:0.40, age210tp14:0.10}` @ w90 rebalance, quoted
+at **max4-6 leverage** (max4: bybit +84%/MAR 5.0, binance +60%/MAR 4.6; the max10
+6.18/6.01 headline is recent-regime-flattered; `tv` is a dead knob — scale pins at
+`max_scale`). It passed a pre-registered 5/5 falsification battery. Receipts:
+`docs/preregistration/continuous-winner-robustness-2026-06-09.md`,
+`docs/preregistration/continuous-demote-downtrend-extension-2026-06-09.md`.
 
-```text
-winner_up_p3_30_p4p3_20_p4p5_30_tp14_20_plus_dt40_turn4p5_premium_decomp_rebalance_w70_tv45_max10_dd4
-```
+**Regime program (docs/research_plan_continuous_regime_2026-06-09.md):** WP1a ran
+2026-06-09 — trailing alt-vs-BTC relative strength does NOT predict squeezes (IC
+~+0.01..+0.06 both venues vs pre-registered <= -0.08 bar; NO-GO; WP1b gate forms
+dead). Mechanism confirmed contemporaneous: same-day RS vs book return -0.26/-0.30,
+but alt-RS is a daily martingale (AR1 ~+0.03) — the exposure can be HEDGED, not
+timed. Receipt: `docs/preregistration/continuous-rs-squeeze-probe-2026-06-09.md`.
+WP3 ran same day in two pre-registered stages and is BANKED (in-sample candidate,
+Tier-2 ceiling): Stage-A instrument comparison (PASS 6/6; BTC selected over alt_top10
+and the non-tradeable alt_ew ceiling; real funding charged) then Stage-B through the
+engine — hedge leg now lives inside `apply_rebalance_rule`
+(`ContinuousHedgeRule(w90/min60/cap2)`, causal beta, DD-state on hedged equity;
+unhedged path unchanged; 8 new tests). Stage-B PASS 8/8 at binding max4: ΔMAR
++0.50/+1.07, ΔSharpe +0.23/+0.38, 2023-24 Sharpe +0.44/+0.63; survives 2x/4x hedge
+cost, funding-off, window grid, 1-day beta latency, and 2x BOOK cost (where it helps
+MORE: ΔMAR +0.89/+1.03). Durable claim = regime-robustness (recent-tilt flattens;
+2025 unchanged); part of raw return gain is bull-sample-specific. Receipts:
+`docs/preregistration/continuous-hedge-{overlay,engine}-2026-06-09.md`.
 
-It uses the uptrend weighted ensemble
-`turn3p3=0.30, turn4p3=0.20, turn4p5=0.30, age210tp14=0.20`, then adds a 40%
-downtrend-only `dt_turn4p5` sleeve filtered to `premium_24h_mean >= 0`. Base
-validation: Bybit +265.24% / MAR 7.50 / -11.28% DD / 31-of-38 green months;
-Binance +190.87% / MAR 6.84 / -9.06% DD / 29-of-36 green months. Common
-both-venue green months are 28/38. 2x cost remains profitable: Bybit +177.28%
-/ MAR 5.11; Binance +134.13% / MAR 4.85 / -8.98% DD; common both-venue green
-months 24/38. Treat it as a cost-robust research winner, not paper-ready evidence.
-Worst-DD equality versus the prior row is within float tolerance. Stricter premium
-thresholds, market/BTC micro-context filters, and broad component filters were
-tested and rejected as replacements. The later TP14 stress-repair retry under
-the accepted 40%/70d engine also failed replacement bars: BTC-filtered TP14
-helped 2023-12 Bybit, but broad return/MAR and base drawdown got worse.
-
-Component-specific uptrend filtering also did not replace the winner. Hard
-`turn4p5` premium/funding filters cut too much return. Partial premium-positive
-`age210tp14` replacement produced a useful risk-stability lead
-(`u_tp14f15`: base min MAR 6.57, DD -10.19%, 2x min MAR 4.30), but it worsened
-the 2024-12 / 2025-04 stress cluster and is not the default winner. Market-context
-component filters improved green-month count/DD but cut Binance return/MAR, so they
-are rejected replacements too.
-
-Downtrend micro-context filters also did not beat sign-only premium. A 40%/60d
-aggressive row improved return/MAR but missed 2x common-green by one month; the
-subsequent scale/window interpolation found that `0.4` downtrend scale with a 70d
-vol window recovers the strict 2x common-green bar while preserving the return/MAR
-improvement.
-All June 7-8 continuous run receipts are consolidated in `docs/research_summary.md`;
+**Live-readiness program (operator granted full authority 2026-06-09):**
+`docs/research_plan_continuous_live_readiness_2026-06-09.md` — ALL autonomous items
+done 2026-06-09: R0 funding debt CLOSED (verified vs raw datasets). R1 weight-overfit
+DEAD (causal haircut 13.8%; equal-weight matches winner OOS; live policy = frozen
+weights, no re-estimation). R2 hedge executor functions + backtest<->live parity
+tests. R3 no-order forward replay collector built (config-hash pin, drift alarm,
+idempotent) and SEEDED on real data (rebuilds the banked ledger exactly; clock at 0
+days awaiting fresh roots). R5 capacity (pre-stated bar): combined Tier-3-safe
+deployment ~$200-300k — a SMALL-BOOK strategy; turnover-capped sizing is the unrun
+capacity lever. R4 impact calibration BLOCKED on operator (needs the VPS demo fill
+ledgers; `bash scripts/reconcile.sh` pull). Operator decisions pending: data-root
+refresh (starts the clock), R4 ledger pull, commit/push of the working tree, any demo
+enablement. Guardrails unchanged: REAL_MONEY=false, Tier-3 strict, no push without
+operator.
+All June 7-9 continuous run receipts are consolidated in `docs/research_summary.md`;
 the durable artifacts remain under `C:\Users\user\SHARED_DATA\...`.
 
 ### Ridge Combiner — REJECTED 2026-06-09 (scout falsified it cheaply)
@@ -181,6 +193,33 @@ unmeasurable (0 folds — OI/funding feature coverage holes). Tier-1 gate (posit
 both venues) fails → engine-sizing wiring does NOT proceed. Re-run requires the
 Binance funding rebuild + an OI backfill AND a freshly pre-registered feature set.
 Receipt: `docs/preregistration/ridge-combiner-2026-06-09.md`.
+
+**Cross-session governance note (2026-06-09):** two parallel sessions worked this
+day without awareness of each other. This session's continuous results (hedge
+banking, live-readiness, sniper/downtrend arcs below) were run before the freeze
+above was visible; their receipts stand as pre-registered in-sample records, but
+they ride rmom-q25-gated components and therefore INHERIT the rmom latency-knife-edge
+caveat (see Methodology Debts) — no continuous promotion case proceeds until that is
+resolved, and the window freeze binds all future continuous adjudication, including
+any revival of this session's Tier-1 leads.
+
+**Downtrend-sleeve + sniper program (operator goal 2026-06-09, +30% pooled MAR):**
+`docs/research_plan_downtrend_sleeve_2026-06-09.md`. D1 found real down-regime
+cross-sectional reversal (D10-D1 -51/-24 bps); D2 reversal L/S FAILED Stage-A
+(binance 0/8; funding -28..-43% + costs eat it) -> downtrend capital stays hedge+cash.
+S1 sniper arc (4 pre-registered amendments): additive quarter-size snipe at the +8%
+wick = real Tier-1 lead (pooled MAR 5.58 -> 6.30 at 1x, +13%, both venues, per-fill
+alpha +2-3%) but FAILS the 2x-cost leg on binance (pooled +0.30 < +0.5) incl. maker
+economics -> NOT banked; revival needs demo-fill-calibrated maker/queue realism (R4)
+or forward evidence. D3 bounce-long (declared-door revisit): standalone bar passes
+(funding-receive confirmed; bybit Sh 2.03/binance 0.81) but the COMBINED bar fails
+catastrophically (sleeve DD -30..-44% vs the book's -5% budget) -> **downtrend
+question CLOSED: hedge + cash is final** (a high-vol bounce book would be a separate
+product with its own risk budget). +30% goal NOT honestly reachable in-sample;
+remaining paths: engine-grade snipe + R4 calibration, WP4 residual-momentum build
+(operator-gated), forward demo. Receipts:
+downtrend-{opportunity-map,reversal-ls,bounce-long}-2026-06-09.md,
+sniper-staged-entries-2026-06-09.md.
 
 ## Binding Decision Rules
 
@@ -235,7 +274,12 @@ These can still move numbers:
   GRID CORRECT** (empirical bit-exact recompute; all consumer joins causal with
   ≥24h margin). The rmom knife-edge is genuine fast decay, not leakage; a continuous
   revival now needs an intraday-class execution design, not a data fix.
+- ~~Binance funding interval ACCRUAL (continuous path)~~ **CLOSED 2026-06-09** —
+  distinct from the coverage rebuild above: per-event accrual/sign/scaling verified
+  end-to-end vs raw datasets (40/40 trades to 5e-20). Receipt:
+  `docs/preregistration/continuous-funding-debt-closure-2026-06-09.md`.
 - Continuous forward window is immature; current local evidence is not enough.
+- Impact calibration at deployed size (live-readiness R4).
 
 Risk-model receipt kept: `docs/preregistration/r4-risk-model-verdict.md`.
 PIT membership receipt kept: `docs/preregistration/pit-membership-trading-day-fix.md`.

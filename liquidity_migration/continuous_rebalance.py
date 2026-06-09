@@ -36,6 +36,24 @@ class ContinuousRebalanceRule:
 
 
 @dataclass(frozen=True)
+class ContinuousHedgeRule:
+    """Causal rolling-beta hedge leg (long hedge instrument against the short book).
+
+    Beta is estimated on trailing LEDGER days strictly before the day being sized
+    (per-unit book return vs hedge-instrument return), so the hedge ratio for day d
+    uses data through d-1 only. ``beta_extra_lag_days`` shifts the estimation window
+    one or more further days back (latency falsifier). The hedge is long-only:
+    ``H(d) = clip(-beta, 0, hedge_cap) * scale(d)``.
+    """
+
+    beta_window_days: int = 90
+    beta_min_obs: int = 60
+    hedge_cap: float = 2.0
+    cost_bps: float = 5.0
+    beta_extra_lag_days: int = 0
+
+
+@dataclass(frozen=True)
 class ContinuousRebalanceComponents:
     days: list[int]
     raw_by_day: dict[int, float]
@@ -130,6 +148,55 @@ def decompose_continuous_components(
         cost_events=dict(cost_events),
         funding_by_day=dict(base_funding_by_day),
         active_gross_start=active_gross_start,
+        impact_exponent=impact_exponent,
+    )
+
+
+def combine_continuous_components(
+    pieces: dict[str, ContinuousRebalanceComponents],
+    weights: dict[str, float],
+) -> ContinuousRebalanceComponents:
+    """Weighted combine of decomposed component ledgers (canonical implementation).
+
+    Moved from the ensemble scout (`scripts/continuous_ensemble_rebalance_scout.py`),
+    which now delegates here. Impact bps scale by ``weight ** impact_exponent``
+    (participation shrinks with the slice of notional).
+    """
+    raw_by_day: dict[int, float] = defaultdict(float)
+    gross_by_day: dict[int, float] = defaultdict(float)
+    funding_by_day: dict[int, float] = defaultdict(float)
+    active_gross_start: dict[int, float] = defaultdict(float)
+    cost_events: dict[int, list[tuple[float, float, float]]] = defaultdict(list)
+    impact_exponent = 0.5
+    day_set: set[int] = set()
+
+    for source, weight in weights.items():
+        if weight <= 0.0:
+            continue
+        comp = pieces[source]
+        impact_exponent = comp.impact_exponent
+        day_set.update(comp.days)
+        impact_weight = weight**comp.impact_exponent
+        for day, value in comp.raw_by_day.items():
+            raw_by_day[int(day)] += weight * float(value)
+        for day, value in comp.gross_by_day.items():
+            gross_by_day[int(day)] += weight * float(value)
+        for day, value in comp.funding_by_day.items():
+            funding_by_day[int(day)] += weight * float(value)
+        for day, value in comp.active_gross_start.items():
+            active_gross_start[int(day)] += weight * float(value)
+        for day, events in comp.cost_events.items():
+            for old_w, fixed_bps, impact_bps in events:
+                cost_events[int(day)].append((old_w * weight, fixed_bps, impact_bps * impact_weight))
+
+    days = sorted(day_set)
+    return ContinuousRebalanceComponents(
+        days=days,
+        raw_by_day={day: raw_by_day.get(day, 0.0) for day in days},
+        gross_by_day={day: gross_by_day.get(day, 0.0) for day in days},
+        cost_events=dict(cost_events),
+        funding_by_day=dict(funding_by_day),
+        active_gross_start={day: active_gross_start.get(day, 0.0) for day in days},
         impact_exponent=impact_exponent,
     )
 
@@ -247,17 +314,145 @@ def plan_continuous_rebalance_resizes(
     return plans
 
 
+def compute_hedge_beta(
+    raw_rets: list[float],
+    hedge_rets: list[float | None],
+    idx: int,
+    hedge_rule: ContinuousHedgeRule,
+) -> float:
+    """OLS beta of per-unit book return on hedge return over trailing ledger days.
+
+    Uses pairs strictly before ``idx`` (minus ``beta_extra_lag_days``); only days
+    where the hedge return is known enter the estimate.
+    """
+    end = idx - int(hedge_rule.beta_extra_lag_days)
+    if end <= 0:
+        return 0.0
+    pairs = [
+        (raw_rets[j], hedge_rets[j])
+        for j in range(max(0, end - int(hedge_rule.beta_window_days)), end)
+        if hedge_rets[j] is not None
+    ]
+    if len(pairs) < int(hedge_rule.beta_min_obs):
+        return 0.0
+    ys = [p[0] for p in pairs]
+    hs = [float(p[1]) for p in pairs]  # type: ignore[arg-type]
+    n = len(pairs)
+    h_mean = sum(hs) / n
+    y_mean = sum(ys) / n
+    var = sum((h - h_mean) ** 2 for h in hs) / n
+    if var <= 0.0:
+        return 0.0
+    cov = sum((h - h_mean) * (y - y_mean) for h, y in zip(hs, ys)) / n
+    return cov / var
+
+
+@dataclass(frozen=True)
+class ContinuousHedgeState:
+    """Prior-only state required to compute the live/paper hedge ratio.
+
+    ``prior_raw_returns`` are per-unit (scale=1) book day returns and
+    ``prior_hedge_returns`` the hedge-instrument day returns for the SAME ledger
+    days, oldest to newest, both excluding the day being sized. ``None`` entries
+    mark days with no hedge-instrument data (excluded from the estimate).
+    """
+
+    prior_raw_returns: tuple[float, ...]
+    prior_hedge_returns: tuple[float | None, ...]
+
+
+def compute_continuous_hedge_ratio(
+    state: ContinuousHedgeState,
+    hedge_rule: ContinuousHedgeRule,
+    target_scale: float,
+) -> float:
+    """Live/paper twin of the hedge sizing inside ``apply_rebalance_rule``.
+
+    Returns the long-hedge notional as a fraction of equity:
+    ``clip(-beta, 0, hedge_cap) * target_scale``. Must match the backtest loop's
+    ``hedge_ratio`` when fed the same prior series (parity-tested).
+    """
+    raw = [float(x) for x in state.prior_raw_returns]
+    hs = list(state.prior_hedge_returns)
+    if len(raw) != len(hs):
+        raise ValueError("prior_raw_returns and prior_hedge_returns must be aligned")
+    beta = compute_hedge_beta(raw, hs, len(raw), hedge_rule)
+    return min(max(-beta, 0.0), float(hedge_rule.hedge_cap)) * max(float(target_scale), 0.0)
+
+
+def plan_continuous_hedge_resize(
+    *,
+    hedge_symbol: str,
+    current_qty: float,
+    price: float,
+    equity_usdt: float,
+    hedge_ratio: float,
+    min_resize_notional_usdt: float = 5.0,
+) -> ContinuousRebalanceResizePlan | None:
+    """Plan the order that brings the LONG hedge leg to ``equity * hedge_ratio``.
+
+    The hedge leg is a long (opposite of the short book): positive delta means
+    increase the long with a non-reduce-only Buy; negative delta means trim it
+    with a reduce-only Sell capped at the current position. Venue qty/step
+    filters are the executor's job, as in ``plan_continuous_rebalance_resizes``.
+    """
+    px = _finite_float(price)
+    qty = max(_finite_float(current_qty), 0.0)
+    if px <= 0.0:
+        return None
+    target = max(_finite_float(equity_usdt), 0.0) * max(_finite_float(hedge_ratio), 0.0)
+    current = qty * px
+    delta = target - current
+    if abs(delta) < max(_finite_float(min_resize_notional_usdt), 0.0):
+        return None
+    if delta > 0.0:
+        side, reduce_only, order_qty, reason = "Buy", False, delta / px, "hedge_increase"
+    else:
+        side, reduce_only, order_qty, reason = "Sell", True, min(qty, abs(delta) / px), "hedge_reduce"
+    if order_qty <= 0.0:
+        return None
+    return ContinuousRebalanceResizePlan(
+        trade_id="hedge",
+        symbol=hedge_symbol,
+        side=side,
+        reduce_only=reduce_only,
+        qty=order_qty,
+        current_notional_usdt=current,
+        target_notional_usdt=target,
+        delta_notional_usdt=delta,
+        reason=reason,
+    )
+
+
 def apply_rebalance_rule(
     components: ContinuousRebalanceComponents,
     rule: ContinuousRebalanceRule,
+    hedge_rule: ContinuousHedgeRule | None = None,
+    hedge_returns: dict[int, float] | None = None,
+    hedge_funding: dict[int, float] | None = None,
 ) -> pl.DataFrame:
-    """Apply a causal daily scale rule and rebuild decomposed equity."""
-    out: list[tuple[int, float, float, float, float, float, float, float]] = []
+    """Apply a causal daily scale rule and rebuild decomposed equity.
+
+    With ``hedge_rule`` set, a long hedge leg is added inside the daily loop:
+    ``H(day) = clip(-beta, 0, cap) * scale(day)`` with beta causal at day open
+    (trailing ledger days through day-1). The hedge PnL/funding/turnover-cost flow
+    into ``basket_return`` BEFORE equity compounding, so the drawdown half-scale
+    state reacts to hedged equity. The vol-target scale stays on the raw book
+    returns (matching the live planner's ``prior_raw_returns`` semantics). On flat
+    gaps the hedge is closed and reopened (turnover charged both ways); the final
+    ledger day is charged the closing turnover.
+    """
+    hedged = hedge_rule is not None
+    h_ret = hedge_returns or {}
+    h_fund = hedge_funding or {}
+    out: list[tuple] = []
     equity = 1.0
     peak = 1.0
     prev_scale = 1.0
+    prev_hedge_ratio = 0.0
     days = components.days
     raw_rets = [components.raw_by_day[d] for d in days]
+    hedge_rets: list[float | None] = [h_ret.get(d) for d in days]
 
     for idx, day in enumerate(days):
         scale = compute_continuous_rebalance_scale(
@@ -283,23 +478,52 @@ def apply_rebalance_rule(
             / 10_000.0
         )
         basket_return = gross + funding + entry_cost + resize_cost
+
+        hedge_ratio = 0.0
+        hedge_return = 0.0
+        hedge_funding_return = 0.0
+        hedge_cost_return = 0.0
+        if hedged:
+            assert hedge_rule is not None
+            beta = compute_hedge_beta(raw_rets, hedge_rets, idx, hedge_rule)
+            day_h = hedge_rets[idx]
+            if day_h is not None:
+                hedge_ratio = min(max(-beta, 0.0), float(hedge_rule.hedge_cap)) * scale
+                hedge_return = hedge_ratio * float(day_h)
+                hedge_funding_return = -hedge_ratio * float(h_fund.get(day, 0.0))
+            if idx == 0 or days[idx] - days[idx - 1] == MS_PER_DAY:
+                turnover = abs(hedge_ratio - prev_hedge_ratio)
+            else:
+                turnover = abs(prev_hedge_ratio) + abs(hedge_ratio)
+            if idx == len(days) - 1:
+                turnover += abs(hedge_ratio)
+            hedge_cost_return = -turnover * float(hedge_rule.cost_bps) / 10_000.0
+            basket_return += hedge_return + hedge_funding_return + hedge_cost_return
+            prev_hedge_ratio = hedge_ratio
+
         equity *= 1.0 + basket_return
         peak = max(peak, equity)
-        out.append((day, basket_return, scale, gross, entry_cost, funding, resize_cost, equity))
+        row = (day, basket_return, scale, gross, entry_cost, funding, resize_cost, equity)
+        if hedged:
+            row = row + (hedge_ratio, hedge_return, hedge_funding_return, hedge_cost_return)
+        out.append(row)
         prev_scale = scale
 
+    schema = [
+        "ts_ms",
+        "basket_return",
+        "scale",
+        "gross_return",
+        "entry_cost_return",
+        "funding_return",
+        "resize_cost_return",
+        "equity",
+    ]
+    if hedged:
+        schema += ["hedge_ratio", "hedge_return", "hedge_funding_return", "hedge_cost_return"]
     return pl.DataFrame(
         out,
-        schema=[
-            "ts_ms",
-            "basket_return",
-            "scale",
-            "gross_return",
-            "entry_cost_return",
-            "funding_return",
-            "resize_cost_return",
-            "equity",
-        ],
+        schema=schema,
         orient="row",
     ).with_columns((pl.col("equity") / pl.col("equity").cum_max() - 1.0).alias("drawdown"))
 

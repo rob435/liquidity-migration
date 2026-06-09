@@ -847,7 +847,9 @@ def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
     # 2026-05-25 rebuild: SHA256:zQjT3bst... → SHA256:RzhZupfx...
     # 2026-06-04 migrate to new box 116.202.15.128 (old 5.223.42.109 decommissioned for cost):
     #   SHA256:RzhZupfx... → SHA256:2Jw88AJV...
-    assert "SHA256:2Jw88AJVSLNaXqVeAOd7fdHaAnd9qgeJLLel0PMpwaE" in text
+    # 2026-06-09 operator full rebuild of 116.202.15.128 (fresh Ubuntu 24.04; rescue-mode key
+    #   restore performed from the research box): SHA256:2Jw88AJV... → SHA256:TJRbvgB8...
+    assert "SHA256:TJRbvgB8nfhwmNDv4hM3jDkPXnRv6BGLQ3cPst2PfE4" in text
     assert "scripts/deploy_vps_live.sh" in text
     assert "scripts/verify_vps_live.sh" in text
     assert "scripts/wait_for_vps_recovery_and_deploy.sh" in text

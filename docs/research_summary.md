@@ -502,12 +502,86 @@ freedom without adding any out-of-window information.
 
 Binding consequences (mirrored in STATE.md):
 
-1. The 40%/70d downtrend-extended ensemble is frozen as-is.
+1. The 40%/70d downtrend-extended ensemble is frozen as-is. (A same-day parallel
+   session's pre-registered fragility receipt DEMOTED it and re-anchored the
+   canonical to the uptrend core @ max4-6 — see the regime-robustness section
+   below; the freeze governs everything after these completed decisions.)
 2. No further accept/reject sweeps, weight tweaks, filter frontiers, or
    risk-rule retargets on this window.
 3. New continuous evidence = forward no-order paper only.
 4. Exempt: methodology-falsification/causality audits (they can only kill the
    line, not improve it) and bug-fix re-runs of the frozen winner.
+
+*(The following regime-robustness program ran in a PARALLEL session the same day, without awareness of the freeze above. Its receipts stand as pre-registered records; its continuous results inherit the rmom latency-knife-edge caveat; the freeze binds all future continuous adjudication including any revival of its Tier-1 leads.)*
+
+### Regime-robustness program (2026-06-09) — demotion, re-anchor, RS-gate null
+
+The 2026-06-09 sessions (commit 5e1c960 + working tree) closed the refinement era
+and opened the regime program (`docs/research_plan_continuous_regime_2026-06-09.md`):
+
+- **Winner robustness battery (5/5 PASS, pre-registered):** the uptrend ensemble
+  `winner_base = {turn3p3:0.30, turn4p3:0.20, turn4p5:0.40, age210tp14:0.10}` @ w90
+  is a robust plateau, not weight-overfit — all 286 simplex vectors both-venue
+  positive; survives de-lever to max4 (bybit +84%/MAR 5.0, binance +60%/4.6) and 3x
+  cost; all sub-periods positive. `tv` is a dead knob (scale pins at `max_scale`).
+  Real residual risks: recent-tilt, uncalibrated impact at max10, funding-interval
+  debt, no forward OOS. Receipt:
+  `docs/preregistration/continuous-winner-robustness-2026-06-09.md`.
+- **Downtrend extension DEMOTED (WP2):** the 7.50/6.84 downtrend-extended headline
+  rests on a fragile sliver (85/91 trades on ~10 active days; `dt_scale=0.4` at a
+  cliff — binance collapses to MAR 3.3/-17% DD at a=0.7). Canonical re-anchored to
+  the uptrend core at max4-6. Receipt:
+  `docs/preregistration/continuous-demote-downtrend-extension-2026-06-09.md`.
+- **Refinement levers tapped out:** parsimony (DoF-only), carry/funding (rank-IC
+  +0.04/+0.06), multi-horizon (bybit-only; 24h is the cross-venue horizon),
+  conviction-by-score (weak), entry circuit-breaker (null on component pool),
+  rmom-gate loosening (0.25 optimal; looser adds correlated breadth, blows out DD).
+  Ridge within-pool combiner rejected at Tier-1 (negative OOF IC; receipt
+  `docs/preregistration/ridge-combiner-2026-06-09.md`).
+- **WP1a alt-RS squeeze probe (pre-registered, NO-GO):** trailing EW-alt-minus-BTC
+  relative strength does NOT predict forward squeezes — primary Spearman ICs
+  +0.004..+0.061 (bybit) / -0.010..+0.055 (binance) vs the a-priori <= -0.08 bar;
+  all sensitivities agree; squeeze days at the 51st RS-percentile. The mechanism is
+  real but CONTEMPORANEOUS: same-day RS vs per-unit book return -0.26/-0.30 (raw
+  alt-market return -0.30/-0.36), while alt-RS itself is a daily martingale
+  (AR1 +0.02/+0.03; trailing RS does not predict next-day RS). Conclusion: the
+  alt-season exposure cannot be timed at daily granularity — gate forms (WP1b) are
+  dead a-priori; the treatment is a HEDGE. Receipt:
+  `docs/preregistration/continuous-rs-squeeze-probe-2026-06-09.md`; artifacts
+  `~/SHARED_DATA/continuous_rs_probe_2026-06-09/`.
+- **BTC-beta hedge BANKED (WP3, two pre-registered stages, both PASS):**
+  - *Stage-A instrument comparison (PASS 6/6, overlay-level):* btc vs alt_ew vs
+    alt_top10, causal 90d beta, long-only, REAL funding charged. BTC selected — the
+    only instrument improving MAR on both venues (ΔMAR +0.34/+1.07); alt_ew (highest
+    ΔSharpe +0.34/+0.51) confirms the WP1a mechanism ceiling but is non-tradeable
+    and worsens bybit MAR/DD; alt_top10 dominated. Quirk: alt funding was
+    net-receivable for longs on book-on days. Receipt:
+    `docs/preregistration/continuous-hedge-overlay-2026-06-09.md`.
+  - *Stage-B through the engine (PASS 8/8, engine-grade `candidate`):* hedge leg
+    integrated into `apply_rebalance_rule` (`ContinuousHedgeRule(w90/min60/cap2)`,
+    causal beta on trailing ledger days, DD-half state on HEDGED equity, gap
+    close/reopen turnover; unhedged path byte-identical; 8 tests). Controls
+    reproduce the benchmark bit-close. Binding max4: ΔMAR +0.50 bybit / +1.07
+    binance, ΔSharpe +0.233/+0.382, 2023-24 Sharpe +0.436/+0.627. Survives 2x/4x
+    hedge cost, funding-off, 60-150d window grid, 1-day beta latency, and 2x BOOK
+    cost — where the hedge helps MORE (ΔMAR +0.89/+1.03, bybit DD +0.58pp better).
+    At max10: hedged MAR 8.39/8.17 vs 6.17/6.00. Mean hedge ~4-6% of equity (max4).
+    Receipt: `docs/preregistration/continuous-hedge-engine-2026-06-09.md`; artifacts
+    `~/SHARED_DATA/continuous_hedge_{overlay,engine}_2026-06-09/`.
+  - Durable claim = REGIME-ROBUSTNESS (the recent-tilt flattens, 2025 unchanged);
+    part of the raw return gain is bull-sample-specific long-BTC drift. In-sample
+    candidate — Tier-2 ceiling; forward demo is the only Tier-3 arbiter. Remaining
+    (operator): live hedge-leg executor plumbing + forward-demo accumulation.
+- **Live-readiness R0+R1 (2026-06-09, operator full-authority mandate):** the binance
+  funding-interval debt is CLOSED for the continuous path (accrual verified vs raw
+  datasets 40/40 to 5e-20; receipt `continuous-funding-debt-closure-2026-06-09.md`),
+  and the walk-forward causal-allocator falsifier KILLED the weight-overfit concern
+  (pre-registered): causal-chooser OOS haircut 13.8% (≤15% bar), equal-weight matches
+  the fixed winner OOS (pooled Sharpe 2.334 vs 2.317 → weights not load-bearing), and
+  adaptive re-weighting actively hurts (wandering choices + switch costs). Live weight
+  policy: FROZEN receipt weights, no re-estimation. Receipt:
+  `continuous-walkforward-allocator-2026-06-09.md`. Program doc:
+  `docs/research_plan_continuous_live_readiness_2026-06-09.md`.
 
 ## Rejected Continuous Ideas
 
@@ -522,6 +596,9 @@ Do not re-run these unless there is a new reason:
 - Drawdown-zero threshold in the old rebalance candidate; it slightly helped one stress
   metric but hurt base-cost Binance and robustness.
 - Giveback-style entry triggers (`turn*_gb*`, `pop*_gb*`); they reintroduced ugly tails.
+- Trailing alt-vs-BTC relative-strength entry gates at daily granularity (hard gate,
+  size-down, BTC-30d replacement): alt-RS is a daily martingale, so trailing RS cannot
+  forecast the squeeze it causes contemporaneously (2026-06-09 WP1a, pre-registered NO-GO).
 - Weak-market skip; it reduced opportunity and did not improve the profile.
 - Funding, premium-index, or mark-index-basis hard filters on the merged continuous
   stream; they lost MAR versus the unfiltered stream in the 2026-06-08 frontier.
@@ -949,11 +1026,13 @@ its rationale, not re-derived from scratch later.
 
 These are still real and can move numbers:
 
-1. **Binance funding COVERAGE** (re-scoped 2026-06-09; interval arithmetic audited and
-   resolved — see the dated section above). The local Binance funding dataset covers only
-   ~51 symbols; all other Binance trades book zero funding, biasing Binance short returns
-   DOWN. Remaining work: rebuild Binance funding coverage; set per-symbol
-   `funding_interval_min` at ingestion.
+1. **Binance funding — RESOLVED on both axes (2026-06-09, two parallel sessions).**
+   COVERAGE: dataset rebuilt from data.binance.vision (51→697 symbols, true settlement
+   intervals); pre-rebuild Binance numbers are ~3-6% abs optimistic (receipt:
+   `binance-funding-rebuild-2026-06-09.md`). ACCRUAL: per-event arithmetic verified
+   end-to-end vs raw datasets — 40/40 sampled continuous trades to 5e-20, interval-
+   agnostic exact-stamp dedup (receipt:
+   `continuous-funding-debt-closure-2026-06-09.md`).
 2. **Age definition.** Live age and PIT backtest age may differ near threshold boundaries.
 3. **Residual-momentum causality.** Rmom features must be proven causal at the decision
    timestamp before any deployment/paper-ready claim.

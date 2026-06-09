@@ -22,6 +22,7 @@ from liquidity_migration.continuous_rebalance import (  # noqa: E402
     ContinuousRebalanceComponents,
     ContinuousRebalanceRule,
     apply_rebalance_rule,
+    combine_continuous_components,
     decompose_continuous_components,
     rebalance_rule_id,
 )
@@ -175,43 +176,9 @@ def _combine_components(
     pieces: dict[str, ContinuousRebalanceComponents],
     weights: dict[str, float],
 ) -> ContinuousRebalanceComponents:
-    raw_by_day: dict[int, float] = defaultdict(float)
-    gross_by_day: dict[int, float] = defaultdict(float)
-    funding_by_day: dict[int, float] = defaultdict(float)
-    active_gross_start: dict[int, float] = defaultdict(float)
-    cost_events: dict[int, list[tuple[float, float, float]]] = defaultdict(list)
-    impact_exponent = 0.5
-    day_set: set[int] = set()
-
-    for source, weight in weights.items():
-        if weight <= 0.0:
-            continue
-        comp = pieces[source]
-        impact_exponent = comp.impact_exponent
-        day_set.update(comp.days)
-        impact_weight = weight ** comp.impact_exponent
-        for day, value in comp.raw_by_day.items():
-            raw_by_day[int(day)] += weight * float(value)
-        for day, value in comp.gross_by_day.items():
-            gross_by_day[int(day)] += weight * float(value)
-        for day, value in comp.funding_by_day.items():
-            funding_by_day[int(day)] += weight * float(value)
-        for day, value in comp.active_gross_start.items():
-            active_gross_start[int(day)] += weight * float(value)
-        for day, events in comp.cost_events.items():
-            for old_w, fixed_bps, impact_bps in events:
-                cost_events[int(day)].append((old_w * weight, fixed_bps, impact_bps * impact_weight))
-
-    days = sorted(day_set)
-    return ContinuousRebalanceComponents(
-        days=days,
-        raw_by_day={day: raw_by_day.get(day, 0.0) for day in days},
-        gross_by_day={day: gross_by_day.get(day, 0.0) for day in days},
-        cost_events=dict(cost_events),
-        funding_by_day=dict(funding_by_day),
-        active_gross_start={day: active_gross_start.get(day, 0.0) for day in days},
-        impact_exponent=impact_exponent,
-    )
+    # Canonical implementation moved to the package (combine_continuous_components);
+    # this thin alias keeps the scout's public surface stable for existing drivers.
+    return combine_continuous_components(pieces, weights)
 
 
 def _apply_cost_multiplier(

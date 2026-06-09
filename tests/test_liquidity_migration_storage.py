@@ -614,15 +614,29 @@ def test_exclusive_file_lock_release_unlinks_its_own_lock(tmp_path: Path) -> Non
 def test_lock_owner_is_dead_evicts_reused_pid(tmp_path: Path, monkeypatch) -> None:
     """CROS-2: a live-but-REUSED pid (started after the lock's created ts) is treated as
     dead so the stale lock self-heals immediately instead of waiting out the stale timeout.
-    An unknown start time (non-Linux / no /proc) stays conservative (owner alive)."""
+    An unknown start time (non-Linux / no /proc) stays conservative (owner alive).
+
+    Uses a live CHILD process pid, not pid 1: pid 1 does not exist on Windows, so
+    os.kill(pid, 0) classifies the owner dead before the reused-pid logic is ever
+    reached (the long-standing env-artifact failure on the Windows research box)."""
+    import subprocess
+    import sys
+
     from liquidity_migration import storage
 
-    lock = tmp_path / "y.lock"
-    lock.write_text(json.dumps({"pid": 1, "created": time.time() - 100}), encoding="utf-8")
-    monkeypatch.setattr(storage, "_pid_started_after", lambda pid, created: True)
-    assert storage._lock_owner_is_dead(lock) is True
-    monkeypatch.setattr(storage, "_pid_started_after", lambda pid, created: None)
-    assert storage._lock_owner_is_dead(lock) is False
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        lock = tmp_path / "y.lock"
+        lock.write_text(
+            json.dumps({"pid": proc.pid, "created": time.time() - 100}), encoding="utf-8"
+        )
+        monkeypatch.setattr(storage, "_pid_started_after", lambda pid, created: True)
+        assert storage._lock_owner_is_dead(lock) is True
+        monkeypatch.setattr(storage, "_pid_started_after", lambda pid, created: None)
+        assert storage._lock_owner_is_dead(lock) is False
+    finally:
+        proc.kill()
+        proc.wait()
 
 
 def test_pid_started_after_guards_and_current_process() -> None:
