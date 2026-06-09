@@ -89,3 +89,43 @@ continuous-winner-robustness, continuous-demote-downtrend-extension (all 2026-06
   `continuous-capacity-impact-2026-06-09.md`. **Program state: everything autonomous is
   done; all remaining items need operator decisions (data refresh, ledger pull,
   commit/push, demo).**
+
+## R2-LIVE build spec (2026-06-10, operator-directed): ensemble + hedge + sniper demo executor
+
+Operator decisions now in force: sniper = Tier-2 demo candidate (Amendment 6); VPS is
+continuous-only; wire tonight's findings into live demo. Integration map (assembled
+2026-06-10, do not re-discover):
+
+1. **Hedge manager** (`liquidity_migration/continuous_hedge_manager.py`, daily systemd
+   timer): own ledger root `data/bybit-continuous-hedge-event`, datasets named
+   `continuous_fade_demo_{trades,orders}` -> registered with the risk service via
+   `continuous_addon_data_root` (ws_risk.py:187; adoption namespace `lm-en-ca-*`,
+   `adopt_continuous_addon_strategy_id` set). Trade rows mirror the schema written at
+   continuous_demo.py:~2356 (cycle_trade_rows). Orders: `BybitPrivateClient.place_order`
+   (REST; demo has no WS-trade), link ids via `_continuous_order_link_id` with the
+   `lm-en-ca` prefix. Sizing: beta from `compute_continuous_hedge_ratio` (frozen
+   ContinuousHedgeRule(90,60,2.0); parity-tested) on per-unit book returns; live series
+   seeded from the winner_base research ledger (ship
+   `continuous_forward_state_2026-06-09/{venue}/forward_ledger.csv` unit returns + BTC
+   daily series as the warm-start artifact, clearly labeled), appended with live days
+   from the primary continuous ledger; H_equity_frac = clip(-beta,0,2) x
+   (live_gross_short_frac / 0.5) [the backtest book is 0.5-gross at scale 1].
+2. **Ensemble entries** in the demo daemon: the signal pipeline already computes the
+   shared decile panel (composite max_ret168, rmom q25 gate, btc uptrend gate, age,
+   liq); ADD trigger predicates (turnover_spike_168h >= {3,4} AND ret1 >= {3%,5%} —
+   continuous_events.py:319-323) + fixed exits (TP10/TP14 via exchange-native TP, 24h
+   max-hold) as a new exit_mode alongside the state machine; 4 components = weight
+   fractions {.30,.20,.40,.10} of book notional, crowd cap 2 per component;
+   `compute_continuous_rebalance_scale` (live function, exists) for w90/max4 daily
+   scale with prior_raw_returns seeded from the component research ledgers.
+3. **Sniper add-on**: on each new entry, place a resting limit Sell at entry x 1.08
+   for 0.25 x entry notional (lm-en-ca-snipe link id); cancel at trade exit; tranche
+   exits with the trade (Amendment-1 exit design; own-TP optional later).
+4. **Order-slot swap**: v2 ensemble executor takes CONTINUOUS_SLEEVE order submission;
+   the decile daemon drops to paper (single-submitter rule, runbook). Keep both paper
+   shadows running.
+5. Tests: trigger predicate parity vs continuous_events exprs; hedge state round-trip;
+   ledger-row schema accepted by ws_risk reconstruction; link-id round-trips.
+
+Until the v2 executor ships, what is LIVE tonight: decile demo (orders, fills ->
+Amendment-5 calibration), paper shadow, risk service, rmom refresh, forward report.
