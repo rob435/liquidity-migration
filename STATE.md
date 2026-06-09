@@ -39,6 +39,15 @@ independent entry/exit logic."
   real-money ready.
 - **VPS:** Hetzner live host runs demo/paper services. Keep `REAL_MONEY=false`; never enable
   real money without explicit owner instruction.
+  **2026-06-09 FULL REBUILD (operator):** fresh Ubuntu 24.04; all prior demo/paper ledger
+  HISTORY was lost with no backup (operator confirmed nothing material was collected).
+  Reprovisioned same day from local checkout @ 92db7e4 (rescue-mode SSH restore -> direct
+  git push -> venv -> units): all sleeves per `deploy/sleeves.env` (short+long demo/paper
+  ON, continuous orders OFF, continuous no-order paper collector ON). **All forward
+  demo/paper Tier-3 clocks restart 2026-06-09.** New host key SHA256:TJRbvgB8... (workflow
+  default updated; the GitHub Actions VARIABLE `VPS_ED25519_FINGERPRINT` may still be stale
+  -> operator must update/delete it for CI deploys to pass). Root password + demo API keys
+  + Telegram token passed through chat during recovery -> rotate when convenient.
 
 ## Current Research Direction
 
