@@ -33,6 +33,8 @@ on:
       - "scripts/run_bybit_demo_ws_risk_engine.sh"
       - "scripts/run_bybit_long_demo_event_engine.sh"
       - "scripts/run_bybit_continuous_demo_event_engine.sh"
+      - "scripts/run_continuous_hedge.sh"
+      - "scripts/run_continuous_hedge.py"
       - "scripts/check_demo_entry_health.py"
       - "scripts/check_demo_liveness.py"
       # The checked deploy runs this smoke-test subset on the VPS before it

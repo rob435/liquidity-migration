@@ -1,0 +1,18 @@
+[Unit]
+Description=Daily BTC-beta hedge for the continuous demo book (WP3; demo-only, dry-run until submit-armed)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/liquidity-migration
+EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=HEDGE_VENUE=bybit
+Environment=PRIMARY_ROOT=data/bybit-continuous-demo-event
+Environment=HEDGE_DATA_ROOT=data/bybit-continuous-hedge-event
+# Dry-run by default. Flip to 1 (with CONFIRM_DEMO_ORDERS=1 in the env file) only
+# after a verified dry-run cycle + ws_risk adoption-schema confirmation.
+Environment=SUBMIT_HEDGE=0
+ExecStart=/bin/bash /opt/liquidity-migration/scripts/run_continuous_hedge.sh

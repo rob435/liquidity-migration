@@ -1,0 +1,12 @@
+[Unit]
+Description=Daily BTC-beta hedge run for the continuous demo book (WP3)
+
+[Timer]
+# After the 00:20 rmom refresh so the book's prior-day state is settled before the
+# hedge re-sizes against it.
+OnCalendar=*-*-* 00:35:00 UTC
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target
