@@ -27,6 +27,11 @@ UNTRACKED_POSITION_GRACE_SECONDS="${UNTRACKED_POSITION_GRACE_SECONDS:-90}"
 # Leave empty to keep short-only behavior (legacy default).
 LONG_DATA_ROOT="${LONG_DATA_ROOT:-}"
 CONTINUOUS_DATA_ROOT="${CONTINUOUS_DATA_ROOT:-}"
+# Continuous BTC-beta hedge ledger (WP3). When set, ws_risk reads it so the hedge's
+# BTC long is TRACKED (in open_symbols -> never adopted/mis-routed); the hedge rows
+# carry stop/tp/planned_exit=0 so the risk service never force-exits it (the daily
+# hedge manager is its sole manager). See continuous_hedge_manager.build_hedge_trade_row.
+CONTINUOUS_ADDON_DATA_ROOT="${CONTINUOUS_ADDON_DATA_ROOT:-}"
 
 # SAFETY: exit_untracked_positions flattens any Bybit position not in the ledgers
 # this engine reads. On this SHARED demo account it must read EVERY sibling sleeve's
@@ -87,6 +92,10 @@ fi
 if [[ -n "$CONTINUOUS_DATA_ROOT" ]]; then
     dual_sleeve_args+=(--continuous-data-root "$CONTINUOUS_DATA_ROOT")
     mkdir -p "$CONTINUOUS_DATA_ROOT/.locks"
+fi
+if [[ -n "$CONTINUOUS_ADDON_DATA_ROOT" ]]; then
+    dual_sleeve_args+=(--continuous-addon-data-root "$CONTINUOUS_ADDON_DATA_ROOT")
+    mkdir -p "$CONTINUOUS_ADDON_DATA_ROOT/.locks"
 fi
 
 mkdir -p "$DATA_ROOT/.locks"

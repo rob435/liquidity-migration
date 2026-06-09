@@ -165,6 +165,49 @@ def compute_hedge_decision(
     )
 
 
+def build_hedge_trade_row(
+    config: ContinuousHedgeConfig,
+    *,
+    qty: float,
+    entry_price: float,
+    now_ms: int,
+    order_link_id: str,
+    order_id: str = "",
+) -> dict[str, Any]:
+    """Conforming OPEN trade row for the hedge BTC long.
+
+    SAFETY CONTRACT (verified against ws_risk.plan_risk_exits): stop_price,
+    take_profit_price and planned_exit_ts_ms are ALL 0, so the risk service TRACKS
+    this position (its symbol enters open_symbols -> adoption skips it) but NEVER
+    force-exits it — the daily hedge manager is its sole manager. side='long',
+    sleeve='continuous_addon' routes it to the addon ledger the risk service reads.
+    """
+    return {
+        "trade_id": f"hedge-{order_link_id}",
+        "strategy_id": config.strategy_id,
+        "symbol": HEDGE_SYMBOL,
+        "side": "long",
+        "sleeve": "continuous_addon",
+        "status": "open",
+        "ts_ms": now_ms,
+        "entry_ts_ms": now_ms,
+        "opened_at_ms": now_ms,
+        "updated_at_ms": now_ms,
+        "signal_ts_ms": now_ms,
+        "entry_price": float(entry_price),
+        "qty": float(qty),
+        "notional_usdt": abs(float(entry_price) * float(qty)),
+        # The three force-exit triggers, all disabled — externally managed.
+        "stop_price": 0.0,
+        "take_profit_price": 0.0,
+        "planned_exit_ts_ms": 0,
+        "stop_loss_pct": 0.0,
+        "entry_order_link_id": order_link_id,
+        "entry_order_id": order_id,
+        "submit_mode": "submitted" if order_id else "dry_run",
+    }
+
+
 def hedge_order_link_id(now_ms: int) -> str:
     """Stable-namespaced link id for the hedge leg (ws_risk continuous-addon route)."""
     from .event_demo import _order_link_id

@@ -35,6 +35,10 @@ Environment=LONG_DATA_ROOT=data/bybit-long-demo-event
 # read its ledger, else any legacy/future continuous positions look untracked and get
 # flattened. Keep wired even while CONTINUOUS_SLEEVE=off; required before any future enable.
 Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event
+# Continuous BTC-beta hedge ledger (WP3): the risk service reads it so the hedge's
+# BTC long is tracked (never adopted/flattened); hedge rows carry stop/tp/hold=0 so
+# the risk service never force-exits it (the daily hedge manager owns its lifecycle).
+Environment=CONTINUOUS_ADDON_DATA_ROOT=data/bybit-continuous-hedge-event
 ExecStart=/opt/liquidity-migration/scripts/run_bybit_demo_ws_risk_engine.sh
 Restart=always
 RestartSec=2

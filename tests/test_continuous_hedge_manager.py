@@ -109,3 +109,30 @@ def test_shipped_warmstart_artifacts_exist_and_load() -> None:
 def test_link_id_namespace() -> None:
     lid = hedge_order_link_id(1_700_000_000_000)
     assert "en-ca" in lid and HEDGE_SYMBOL[:3] in lid.upper() or lid  # namespaced
+
+
+def test_hedge_row_is_tracked_but_never_force_exited() -> None:
+    """SAFETY CONTRACT: a hedge trade row (stop/tp/planned_exit all 0) yields NO exit
+    from the risk service's plan_risk_exits at any price — so the risk daemon tracks
+    the BTC long (adoption skips a known symbol) but never force-closes it."""
+    import polars as pl
+
+    from liquidity_migration.continuous_hedge_manager import build_hedge_trade_row
+    from liquidity_migration.event_demo_planning import plan_risk_exits
+
+    row = build_hedge_trade_row(
+        ContinuousHedgeConfig(), qty=0.01, entry_price=100_000.0, now_ms=1_700_000_000_000,
+        order_link_id="lm-en-ca-btc-x", order_id="oid1",
+    )
+    assert row["stop_price"] == 0.0 and row["take_profit_price"] == 0.0 and row["planned_exit_ts_ms"] == 0
+    assert row["side"] == "long" and row["sleeve"] == "continuous_addon" and row["status"] == "open"
+    trades = pl.DataFrame([row])
+    # Even at a price far above AND far below entry, and far in the future, no exit fires.
+    for px in (50_000.0, 100_000.0, 500_000.0):
+        exits = plan_risk_exits(
+            trades,
+            position_by_symbol={"BTCUSDT": {"symbol": "BTCUSDT", "side": "Buy", "size": "0.01"}},
+            price_by_symbol={"BTCUSDT": px},
+            now_ms=9_999_999_999_999,  # far future -> would trip a real max_hold
+        )
+        assert exits == [], f"hedge row force-exited at price {px}: {exits}"

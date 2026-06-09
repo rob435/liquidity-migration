@@ -174,6 +174,14 @@ class ContinuousDemoCycleConfig:
     daily_rebalance_strategy_momentum_window_days: int = 180
     daily_rebalance_strategy_momentum_min_return: float = 0.02
     daily_rebalance_strategy_momentum_scale_when_below: float = 0.0
+    # --- sniper add-on (S1, Tier-2 demo candidate Amendment 6, 2026-06-09) ---
+    # On each fresh short entry, ALSO rest a Sell limit ABOVE entry at +sniper_wick_pct
+    # for sniper_size_frac x the base notional — adding short into a squeeze wick where
+    # the base fill was losing (per-fill +2-3% alpha; pooled +13% MAR demo-candidate).
+    # Default OFF; the resting limit is reduce_only=False, cancelled at the trade exit.
+    sniper_enabled: bool = False
+    sniper_wick_pct: float = 0.08
+    sniper_size_frac: float = 0.25
     exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
     # --- live panel cache (Tier 2): compute the trailing closed-bar features once per bar close,
     # then refresh only the live-price term + re-rank on each wake. Provably np.allclose-equivalent
@@ -533,6 +541,47 @@ def select_continuous_entries(
     if eligible_symbols is not None:
         cand = cand.filter(pl.col("symbol").is_in(list(eligible_symbols)))
     return cand.sort("composite", descending=True).head(min(config.max_new_entries_per_cycle, room)).to_dicts()
+
+
+def plan_continuous_sniper_orders(
+    entries: list[dict[str, Any]],
+    *,
+    config: ContinuousDemoCycleConfig,
+    price_by_symbol: dict[str, float],
+) -> list[dict[str, Any]]:
+    """Pure planner for the sniper resting-limit leg (S1 Amendment 6).
+
+    For each freshly-entered short, plan ONE resting Sell limit at
+    ``entry_price * (1 + sniper_wick_pct)`` (above entry — fills only if the name
+    squeezes up into the wick) sized to ``sniper_size_frac`` of the base entry
+    notional. reduce_only=False (it ADDS short). Returns [] when disabled or when
+    an entry has no usable price/notional. The caller submits + cancels-on-exit;
+    this function does no I/O so it is unit-testable.
+    """
+    if not config.sniper_enabled or config.sniper_size_frac <= 0.0 or config.sniper_wick_pct <= 0.0:
+        return []
+    plans: list[dict[str, Any]] = []
+    for entry in entries:
+        symbol = str(entry.get("symbol", ""))
+        entry_price = _float(entry.get("entry_price")) or price_by_symbol.get(symbol, 0.0)
+        base_notional = _float(entry.get("notional_usdt"))
+        base_qty = _float(entry.get("qty"))
+        if not symbol or entry_price <= 0.0 or base_qty <= 0.0:
+            continue
+        limit_price = entry_price * (1.0 + config.sniper_wick_pct)
+        plans.append({
+            "symbol": symbol,
+            "side": "Sell",
+            "reduce_only": False,
+            "order_type": "Limit",
+            "limit_price": limit_price,
+            "qty": base_qty * config.sniper_size_frac,
+            "notional_usdt": base_notional * config.sniper_size_frac,
+            "base_trade_id": str(entry.get("trade_id", "")),
+            "signal_ts_ms": int(entry.get("signal_ts_ms") or 0),
+            "reason": "sniper_wick_add",
+        })
+    return plans
 
 
 def _trade_excursion(

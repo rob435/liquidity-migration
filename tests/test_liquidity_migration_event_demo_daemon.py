@@ -1526,7 +1526,10 @@ def test_daemon_event_wait_falls_back_to_heartbeat_with_no_bar(tmp_path: Path) -
     daemon._max_idle_seconds = 0.2
     t0 = time.monotonic()
     daemon._wait_for_next_cycle_event()
-    assert time.monotonic() - t0 >= 0.2
+    # Allow ~one Windows timer tick (~15ms) of slack: condition.wait(0.2) can return a
+    # hair early on coarse-resolution clocks. A real "didn't wait" regression returns
+    # near-instantly (<<0.18), so this still catches it. (env-artifact flake fix.)
+    assert time.monotonic() - t0 >= 0.2 - 0.03
     assert daemon._cycles_kline_triggered == 0
     assert daemon._cycles_timer_triggered == 1
 
