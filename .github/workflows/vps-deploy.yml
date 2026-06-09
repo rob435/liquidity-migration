@@ -71,7 +71,7 @@ jobs:
     env:
       VPS_HOST: ${{ vars.VPS_HOST || '116.202.15.128' }}
       VPS_USER: ${{ vars.VPS_USER || 'root' }}
-      VPS_ED25519_FINGERPRINT: ${{ vars.VPS_ED25519_FINGERPRINT || 'SHA256:2Jw88AJVSLNaXqVeAOd7fdHaAnd9qgeJLLel0PMpwaE' }}
+      VPS_ED25519_FINGERPRINT: ${{ vars.VPS_ED25519_FINGERPRINT || 'SHA256:TJRbvgB8nfhwmNDv4hM3jDkPXnRv6BGLQ3cPst2PfE4' }}
       EXPECTED_TELEGRAM_CHAT_ID: ${{ vars.EXPECTED_TELEGRAM_CHAT_ID || '8388367561' }}
       GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT: SHA256:JaKge+EVSIR9TyX48QqdUz6C9NFVAVqbIwWDqFjmFDY
     steps:
@@ -102,7 +102,7 @@ jobs:
           # also strictly MORE secure than a live TOFU scan, and is not secret.
           # Fail-closed: the pinned key must still match the pinned fingerprint.
           mkdir -p ~/.ssh; chmod 700 ~/.ssh
-          printf '%s\n' '116.202.15.128 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIJndibtjVLalGWRrT+KnumRZ1NlYn55XPYcwzdgNTG0l' > ~/.ssh/known_hosts
+          printf '%s\n' '116.202.15.128 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICf7380psA4UujIrKaLuxWINmEl7vmBAKLMa7CpL7Dvq' > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
           ssh-keygen -lf ~/.ssh/known_hosts | grep -F "$VPS_ED25519_FINGERPRINT"
 
