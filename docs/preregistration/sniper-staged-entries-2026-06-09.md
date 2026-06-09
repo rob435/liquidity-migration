@@ -177,3 +177,17 @@ SHA256:U8+LvEB...). Protocol, locked while blind to the data:
   impact x2). BANK iff pooled dMAR >= +0.5 with both venues positive at the
   2x-calibrated stress, same DD/fill bars as Amendment 2. Insufficient fills ->
   no banking claim; record and wait for more forward evidence.
+
+## AMENDMENT 6 (2026-06-10) — OPERATOR ADOPTION DECISION: Tier-2 demo candidate
+
+The operator directed taking the improvement. Re-judged against the BINDING STATE.md
+Tier-2 bar (the Amendment-2/3 "+0.5 pooled at 2x cost" was this program's own stricter
+overlay, not the house rule): positive return both venues YES; pooled dMAR +0.72 >
++0.1 YES (and still +0.375 > +0.1 at 2x cost); neither venue < -0.5 YES; trade counts
+YES (fills ~38-40% of ~3k trades). Under the house framework the 2x-cost stress is a
+fragility diagnostic — REPORTED, NOT BLOCKING for demo candidacy — and it remains
+reported above unchanged. **VERDICT: x8_b25 additive snipe = Tier-2 DEMO CANDIDATE by
+operator decision; proceeds to live demo wiring with the ensemble+hedge executor.**
+Unchanged and non-negotiable: Tier-3 (real money) stays strict; the 2x-cost margin
+question gets settled by the demo box's observed-fill calibration (Amendment 5), which
+is accruing as of 2026-06-09.

@@ -219,11 +219,13 @@ any revival of this session's Tier-1 leads.
 `docs/research_plan_downtrend_sleeve_2026-06-09.md`. D1 found real down-regime
 cross-sectional reversal (D10-D1 -51/-24 bps); D2 reversal L/S FAILED Stage-A
 (binance 0/8; funding -28..-43% + costs eat it) -> downtrend capital stays hedge+cash.
-S1 sniper arc (4 pre-registered amendments): additive quarter-size snipe at the +8%
-wick = real Tier-1 lead (pooled MAR 5.58 -> 6.30 at 1x, +13%, both venues, per-fill
-alpha +2-3%) but FAILS the 2x-cost leg on binance (pooled +0.30 < +0.5) incl. maker
-economics -> NOT banked; revival needs demo-fill-calibrated maker/queue realism (R4)
-or forward evidence. D3 bounce-long (declared-door revisit): standalone bar passes
+S1 sniper arc (4 pre-registered amendments + Amendment 6): additive quarter-size
+snipe at the +8% wick = pooled MAR 5.58 -> 6.30 at 1x (+13%, both venues, per-fill
+alpha +2-3%). **Tier-2 DEMO CANDIDATE by operator decision 2026-06-10**: it passes the
+binding Tier-2 bar even at 2x cost (pooled +0.375 > +0.1, both venues positive); the
+program's stricter +0.5-at-2x banking overlay remains failed-and-reported as a
+fragility diagnostic (non-blocking for demo under the house framework). Real-cost
+calibration from demo fills (Amendment 5) decides the Tier-3-facing margin question. D3 bounce-long (declared-door revisit): standalone bar passes
 (funding-receive confirmed; bybit Sh 2.03/binance 0.81) but the COMBINED bar fails
 catastrophically (sleeve DD -30..-44% vs the book's -5% budget) -> **downtrend
 question CLOSED: hedge + cash is final** (a high-vol bounce book would be a separate
