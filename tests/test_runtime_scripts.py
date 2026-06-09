@@ -837,7 +837,7 @@ def test_github_vps_deploy_workflow_uses_checked_scripts_and_host_key() -> None:
     # /root/.ssh/authorized_keys on the VPS AND the VPS_SSH_PRIVATE_KEY
     # secret in GitHub.
     # 2026-06-04: rotated for the 116.202.15.128 migration (old SHA256:KpDkvlvm…).
-    assert "SHA256:JaKge+EVSIR9TyX48QqdUz6C9NFVAVqbIwWDqFjmFDY" in text
+    assert "SHA256:Gki6YjdsUksh/TozZ/55sxSwimK7T9MOf2pgWSbqFNU" in text
     assert "ssh-keygen -y -f ~/.ssh/vps_deploy_key" in text
     assert "ssh-keygen -lf ~/.ssh/vps_deploy_key.pub -E sha256" in text
     # Host key is PINNED directly (no live keyscan — GitHub runners can't reliably
@@ -931,7 +931,7 @@ def test_vps_ssh_restore_script_only_restores_access() -> None:
 
     assert "/root/.ssh/authorized_keys" in text
     assert "AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp" in text
-    assert "AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX" in text
+    assert "AAAAC3NzaC1lZDI1NTE5AAAAICWcgpE3GLy65yWFuh5RAH5CEgyLqRPAGvROXGwAxmVv" in text
     assert "PermitRootLogin prohibit-password" in text
     assert "AuthenticationMethods publickey" in text
     assert "Include /etc/ssh/sshd_config.d/*.conf" in text
@@ -963,7 +963,7 @@ def test_vps_rescue_restore_script_mounts_installed_root_and_restores_keys() -> 
     assert 'mount "$device" "$MOUNT_ROOT"' in text
     assert "/root/.ssh/authorized_keys" in text
     assert "AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp" in text
-    assert "AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX" in text
+    assert "AAAAC3NzaC1lZDI1NTE5AAAAICWcgpE3GLy65yWFuh5RAH5CEgyLqRPAGvROXGwAxmVv" in text
     assert "chroot \"$target_root\" usermod -U root" in text
     assert "99-liquidity-migration-recovery.conf" in text
     assert "PermitRootLogin prohibit-password" in text
@@ -985,7 +985,7 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
 
     assert "/root/.ssh/authorized_keys" in text
     assert "AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp" in text
-    assert "AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX" in text
+    assert "AAAAC3NzaC1lZDI1NTE5AAAAICWcgpE3GLy65yWFuh5RAH5CEgyLqRPAGvROXGwAxmVv" in text
     assert "GITHUB_ACTIONS_SSH_PUBLIC_KEY" in text
     assert "for binary in git python3 sshd" in text
     assert "apt-get install -y ca-certificates git openssh-server python3 python3-venv python3-pip" in text
