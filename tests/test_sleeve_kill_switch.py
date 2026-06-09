@@ -156,16 +156,17 @@ def test_lib_fallback_defaults_continuous_demo_off_papers_on(tmp_path: Path) -> 
     assert rc == 0, err
 
 
-def test_committed_sleeves_env_short_long_papers_on_continuous_demo_off_paper_on() -> None:
-    # The committed file is the source of truth (2026-06-04): SHORT + SHORT_PAPER + LONG on,
-    # CONTINUOUS off. Each line must be systemd-EnvironmentFile-safe (plain KEY=value, no inline
+def test_committed_sleeves_env_continuous_only() -> None:
+    # The committed file is the source of truth (2026-06-09 operator instruction): the VPS
+    # runs ONLY the continuous system — SHORT/SHORT_PAPER/LONG off, CONTINUOUS demo + paper
+    # on. Each line must be systemd-EnvironmentFile-safe (plain KEY=value, no inline
     # comment on the assignment).
     env = (REPO / "deploy" / "sleeves.env").read_text()
     expected = {
-        "SHORT_SLEEVE": "on",
-        "SHORT_PAPER_SLEEVE": "on",
-        "LONG_SLEEVE": "on",
-        "CONTINUOUS_SLEEVE": "off",
+        "SHORT_SLEEVE": "off",
+        "SHORT_PAPER_SLEEVE": "off",
+        "LONG_SLEEVE": "off",
+        "CONTINUOUS_SLEEVE": "on",
         "CONTINUOUS_PAPER_SLEEVE": "on",
     }
     for flag, value in expected.items():

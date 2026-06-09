@@ -26,17 +26,20 @@ independent entry/exit logic."
 
 ## What's Running
 
-- **SHORT demo/paper:** frozen promoted short profile:
-  `drop_all_4 + age300 + ff6 + btc_trend_gate=uptrend`; rmom inactive at `10.0`.
-  It remains demo/paper only.
-  Key receipts kept:
-  - `docs/preregistration/promote-age-ff6-demo-2026-05-31.md`
-  - `docs/preregistration/drop-all-4-promotion.md`
-- **LONG demo/paper:** `div` profile. Portfolio/diversification sleeve, not standalone
-  real-money proof. Receipt kept: `docs/preregistration/div-promotion.md`.
-- **CONTINUOUS:** not promoted. Continuous demo orders are off. No-order paper evidence can
-  run only as an evidence collector. Do not present continuous as deployed, promoted, or
-  real-money ready.
+- **2026-06-09 operator re-shape: the VPS runs ONLY the continuous system.**
+  SHORT/SHORT_PAPER/LONG sleeves toggled OFF (`deploy/sleeves.env`); their profiles
+  stay promoted-in-code and redeployable. CONTINUOUS demo orders + paper shadow
+  toggled ON by explicit operator instruction (demo account only; forward evidence +
+  observed-fill cost calibration). Honest status: continuous remains research-stage
+  and NOT promoted; demo fills are execution evidence, not alpha proof; the rmom
+  latency knife-edge caveat stands.
+- SHORT (off-box, promoted-in-code): `drop_all_4 + age300 + ff6 + btc_trend_gate=uptrend`;
+  rmom inactive at `10.0`. Receipts: `promote-age-ff6-demo-2026-05-31.md`,
+  `drop-all-4-promotion.md`.
+- LONG (off-box, promoted-in-code): `div` profile **+ volup125** (`vol_target_max_scale`
+  1.0→1.25, operator-promoted 2026-06-09; receipt `long-volup-candidate-2026-06-09.md`;
+  note: the live 10x multiplier interaction flagged by the risk audit must be resolved
+  before the long sleeve is re-enabled on a box).
 - **VPS:** Hetzner live host runs demo/paper services. Keep `REAL_MONEY=false`; never enable
   real money without explicit owner instruction.
   **2026-06-09 FULL REBUILD (operator):** fresh Ubuntu 24.04; all prior demo/paper ledger

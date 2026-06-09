@@ -640,7 +640,8 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert 'CONTINUOUS_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-continuous-paper.service"' in lib
     assert "continuous_rmom_refresh_on()" in lib
     sleeves = (repo / "deploy" / "sleeves.env").read_text(encoding="utf-8")
-    assert "CONTINUOUS_SLEEVE=off" in sleeves
+    # 2026-06-09 operator instruction: continuous-only box (demo orders ON, demo-account only).
+    assert "CONTINUOUS_SLEEVE=on" in sleeves
     assert "CONTINUOUS_PAPER_SLEEVE=on" in sleeves
     # Timers ship with the unit files but `systemctl enable` is required to
     # actually schedule them. Pin both timers so a deploy can't silently leave

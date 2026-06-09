@@ -258,11 +258,15 @@ def _v11a_long_native_config() -> LongNativeConfig:
         vol_estimate_window_days=30,
         vol_floor_annual=0.30,
         max_position_weight=0.30,
-        # div: de-risk-only volatility targeting (Moreira-Muir) — scale the book by
-        # vol_target/BTC-realized-vol, capped at 1.0 (never lever up), floored at 0.30.
+        # div: volatility targeting (Moreira-Muir) — scale the book by
+        # vol_target/BTC-realized-vol, floored at 0.30. volup125 (operator-promoted
+        # 2026-06-09): cap raised 1.0 -> 1.25, allowing MILD scale-up in calm-vol
+        # regimes (+24% relative return both venues at unchanged ret/DD/Sharpe,
+        # identical trade set; receipt
+        # docs/preregistration/long-volup-candidate-2026-06-09.md).
         enable_vol_target=True,
         vol_target_annual=0.60,
-        vol_target_max_scale=1.0,
+        vol_target_max_scale=1.25,
         vol_target_min_scale=0.30,
         cost_multiplier=3.0,
         require_pit_membership=False,

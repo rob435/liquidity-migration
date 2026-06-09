@@ -84,7 +84,7 @@ def test_v11a_config_matches_research_run() -> None:
     # div risk-engineering (promoted 2026-05-30): de-risk-only volatility targeting
     assert cfg.enable_vol_target
     assert cfg.vol_target_annual == pytest.approx(0.60)
-    assert cfg.vol_target_max_scale == pytest.approx(1.0)
+    assert cfg.vol_target_max_scale == pytest.approx(1.25)  # volup125, operator-promoted 2026-06-09
     assert cfg.vol_target_min_scale == pytest.approx(0.30)
 
 
@@ -95,11 +95,13 @@ def test_demo_universe_matches_strategy() -> None:
     assert LongNativeDemoCycleConfig().universe_size == _v11a_long_native_config().universe_size == 50
 
 
-def test_vol_target_scale_de_risk_only() -> None:
+def test_vol_target_scale_volup125() -> None:
+    """volup125 (operator-promoted 2026-06-09): the cap is 1.25 — mild scale-UP in calm
+    regimes, de-risk unchanged. Receipt: long-volup-candidate-2026-06-09.md."""
     from liquidity_migration.long_native import _vol_target_scale
 
-    cfg = _v11a_long_native_config()  # enable_vol_target=True, annual=0.60, max=1.0, min=0.30
-    assert _vol_target_scale(cfg, 0.30) == pytest.approx(1.0)   # calm -> capped at 1.0 (never lever up)
+    cfg = _v11a_long_native_config()  # enable_vol_target=True, annual=0.60, max=1.25, min=0.30
+    assert _vol_target_scale(cfg, 0.30) == pytest.approx(1.25)  # calm -> mild lever-up, capped at 1.25
     assert _vol_target_scale(cfg, 0.60) == pytest.approx(1.0)   # at target -> 1.0
     assert _vol_target_scale(cfg, 1.20) == pytest.approx(0.5)   # storm -> de-risk to 0.5
     assert _vol_target_scale(cfg, 10.0) == pytest.approx(0.30)  # extreme -> floored at min_scale
