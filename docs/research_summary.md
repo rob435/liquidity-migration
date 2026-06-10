@@ -1324,6 +1324,29 @@ operator authority with a pre-registered scout + one pre-registered amendment
   evidence sources are exclusively operator-gated (forward clocks, R4 fills, fapi
   stage-2, liquidation/bookdepth maturation).
 
+## 2026-06-10 — DC1 depth-based impact calibration: the books INVERT (first bookdepth-layer use)
+
+Measurement receipt `depth-impact-calibration-2026-06-10.md` (no alpha claims) —
+the deployed books' binance entries joined to entry-hour entry-side depth
+(notional within 1% of mid; 91–99% join coverage):
+
+- **SHORT (deployed gated profile): median entry name has $98k of bid depth within
+  1% (p10 $23k)** → implied taker impact at the modeled $83k/trade is 85 bps
+  median / 366 p90; 50 bps median impact is reached at **~$0.59M deploy** — the
+  50bps-at-$1M assumption is OPTIMISTIC for instantaneous execution on the DEEPER
+  venue. Reconciliation: the turnover-based frontier ($4.3M median) measures
+  patient daily flow; depth measures the instant book. Taker capacity ~$0.5M,
+  patient capacity single-digit $M — execution style IS the capacity decision.
+  At personal scale (≤$100k) median implied impact ~8.5 bps: comfortably inside
+  the modeled stresses.
+- **LONG (accepted v11a): $2.5M median to move 1%** → 4 bps median impact at
+  $100k/trade, 50 bps at ~$12.5M deploy. **The long book is the structurally
+  scalable product (~10–20× the short's depth capacity)** — composition and
+  scaling decisions should weight that.
+- Partially closes the R4-class impact debt with market data (instant-impact
+  curves per entry); realized-fill calibration still awaits VPS fills. Any cost-
+  model change motivated by this gets its own receipt.
+
 ## What To Keep In Repo
 
 Keep only:
