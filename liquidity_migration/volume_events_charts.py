@@ -383,17 +383,24 @@ def _draw_monthly_return_table(
             text(x + block_w - 10, y + 7, str(int(row.get("trades") or 0)), (51, 65, 85, 255), font_table, anchor="ra")
 
 def _chart_font(image_font: Any, size: int, *, bold: bool = False) -> Any:
+    # Windows paths included: without them the loop exhausts and falls back to
+    # PIL's fixed-size bitmap default, which IGNORES `size` — every chart
+    # rendered on a Windows box came out with unreadably tiny text.
     names = (
         [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
             "/Library/Fonts/Arial Bold.ttf",
+            "C:/Windows/Fonts/arialbd.ttf",
+            "C:/Windows/Fonts/segoeuib.ttf",
         ]
         if bold
         else [
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/System/Library/Fonts/Supplemental/Arial.ttf",
             "/Library/Fonts/Arial.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/segoeui.ttf",
         ]
     )
     for name in names:
