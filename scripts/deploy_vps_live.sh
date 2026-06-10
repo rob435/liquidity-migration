@@ -152,6 +152,9 @@ systemctl daemon-reload
 lm_load_sleeve_toggles
 echo "sleeves: SHORT=$SHORT_SLEEVE SHORT_PAPER=$SHORT_PAPER_SLEEVE LONG=$LONG_SLEEVE CONTINUOUS=$CONTINUOUS_SLEEVE CONTINUOUS_PAPER=$CONTINUOUS_PAPER_SLEEVE"
 systemctl enable liquidity-migration-bybit-risk.service
+# Forward-only data collection (P3, operator-approved 2026-06-10): liquidation
+# history is unbuyable, so the collector runs always-on like the risk service.
+systemctl enable --now liquidity-migration-liquidation-collector.service
 apply_sleeve_enable "$SHORT_SLEEVE" $SHORT_SLEEVE_UNITS
 apply_sleeve_enable "$SHORT_PAPER_SLEEVE" $SHORT_PAPER_SLEEVE_UNITS
 apply_sleeve_enable "$LONG_SLEEVE" $LONG_SLEEVE_UNITS

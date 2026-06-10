@@ -1,0 +1,16 @@
+[Unit]
+Description=Live liquidation collectors (Bybit allLiquidation + Binance forceOrder; append-only JSONL, no order path)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/liquidity-migration
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/liquidity-migration/.venv/bin/python -m liquidity_migration.liquidation_collector --root data/liquidations
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
