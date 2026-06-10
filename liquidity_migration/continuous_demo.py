@@ -42,7 +42,12 @@ CONTINUOUS_ENTRY_LINK_PREFIX = "en-c"   # lm-en-c-{base}-{ts36}  (5-part; distin
 CONTINUOUS_EXIT_LINK_PREFIX = "ux-c"    # lm-ux-c-{base}-{ts36}
 CONTINUOUS_ADDON_ENTRY_LINK_PREFIX = "en-ca"
 CONTINUOUS_ADDON_EXIT_LINK_PREFIX = "ux-ca"
-CONTINUOUS_DEMO_PROFILES = ("continuous_v1", "continuous_addon_v1", "continuous_rebalance_v1")
+CONTINUOUS_DEMO_PROFILES = (
+    "continuous_v1",
+    "continuous_addon_v1",
+    "continuous_rebalance_v1",  # DEPRECATED 2026-06-10: single-component turn4_pop4 (kept resolvable for old ledgers)
+    "continuous_ensemble_v1",   # the validated winner_base 4-component ensemble (the live default)
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +187,18 @@ class ContinuousDemoCycleConfig:
     sniper_enabled: bool = False
     sniper_wick_pct: float = 0.08
     sniper_size_frac: float = 0.25
+    # --- dynamic-exit FORWARD SHADOW (paper-only; P5 was an in-sample NULL) ---
+    # Logs what the fade-completion exit WOULD have done per live entry into
+    # continuous_dynexit_shadow.jsonl. Zero order impact; forward evidence is the
+    # only path that can ever promote it (receipt continuous-dynexit-forward-shadow).
+    dynexit_shadow_enabled: bool = True
+    # --- winner_base 4-component ensemble (the validated research object) ---
+    # (name, entry_event_trigger|"none", age_days_min, take_profit_pct, weight).
+    # Non-empty => the cycle selects entries PER COMPONENT (each with its own event
+    # trigger, age floor and venue-side TP) and sizes each entry by weight x the base
+    # per-position notional — the live form of combine_continuous_components on the
+    # frozen receipt weights (no re-estimation; R1 walk-forward falsifier).
+    ensemble_components: tuple[tuple[str, str, int, float, float], ...] = ()
     exclude_symbols: tuple[str, ...] = DEFAULT_EXCLUDED_SYMBOLS
     # --- live panel cache (Tier 2): compute the trailing closed-bar features once per bar close,
     # then refresh only the live-price term + re-rank on each wake. Provably np.allclose-equivalent
@@ -586,9 +603,227 @@ def plan_continuous_sniper_orders(
             "notional_usdt": base_notional * config.sniper_size_frac,
             "base_trade_id": str(entry.get("trade_id", "")),
             "signal_ts_ms": int(entry.get("signal_ts_ms") or 0),
+            "tick_size": _float(entry.get("tick_size")),
+            "qty_step": _float(entry.get("qty_step")),
             "reason": "sniper_wick_add",
         })
     return plans
+
+
+SNIPER_REASON = "sniper_wick_add"
+SNIPER_TRADE_SUFFIX = "-snipe"
+
+
+def _continuous_sniper_link_prefix(config: ContinuousDemoCycleConfig) -> str:
+    return _continuous_entry_link_prefix(config) + "s"
+
+
+def _sniper_round_qty(qty: float, qty_step: float) -> float:
+    """Floor a snipe qty to the contract qty step (0 when it can't meet one step)."""
+    if qty <= 0.0:
+        return 0.0
+    if qty_step <= 0.0:
+        return qty
+    steps = int(Decimal(str(qty)) / Decimal(str(qty_step)))
+    return float(Decimal(steps) * Decimal(str(qty_step)))
+
+
+def _sniper_trade_id(base_trade_id: str) -> str:
+    return f"{base_trade_id}{SNIPER_TRADE_SUFFIX}"
+
+
+def _execute_sniper_placements(
+    exec_entries: list[dict[str, Any]],
+    *,
+    trading_client: Any | None,
+    demo: ContinuousDemoCycleConfig,
+    now_ms: int,
+    strategy_id: str,
+    price_by_symbol: dict[str, float],
+    record_preflight: Callable[[dict[str, Any]], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Place the sniper resting limits for this cycle's fresh entries (S1 Amendment 6).
+
+    One PostOnly Sell limit per fresh short at entry*(1+wick), quarter-size, with the
+    book's disaster stop attached venue-side (a fill between cycles is protected even
+    before its ledger row exists). Returns ORDER rows only — a snipe becomes a TRADE
+    row when `reconcile_continuous_snipes` observes its fill. Dry-run records planned
+    rows without submitting.
+    """
+    from .event_demo import _stop_price_for_entry
+
+    plans = plan_continuous_sniper_orders(exec_entries, config=demo, price_by_symbol=price_by_symbol)
+    order_rows: list[dict[str, Any]] = []
+    for plan in plans:
+        symbol = plan["symbol"]
+        qty = _sniper_round_qty(_float(plan.get("qty")), _float(plan.get("qty_step")))
+        if qty <= 0.0:
+            continue
+        tick = _float(plan.get("tick_size"))
+        limit_price = _float(plan.get("limit_price"))
+        if tick > 0.0:
+            limit_price = float(Decimal(str(round(limit_price / tick))) * Decimal(str(tick)))
+        stop_price = _stop_price_for_entry(
+            entry_price=limit_price, side="short", stop_loss_pct=demo.stop_loss_pct, tick_size=tick
+        )
+        signal_ts = int(plan.get("signal_ts_ms") or now_ms)
+        link = _continuous_order_link_id(
+            _continuous_sniper_link_prefix(demo), symbol=symbol, signal_ts_ms=signal_ts
+        )
+        trade_id = _sniper_trade_id(str(plan.get("base_trade_id", "")))
+        qty_text = _decimal_text(Decimal(str(qty)))
+        submit_mode, status, order_id, error = "dry_run", "resting", "", ""
+        if demo.submit_orders:
+            assert trading_client is not None
+            if record_preflight is not None:
+                record_preflight({
+                    "order_link_id": link, "ts_ms": now_ms, "trade_id": trade_id,
+                    "strategy_id": strategy_id, "symbol": symbol, "side": "Sell", "qty": qty_text,
+                    "reduce_only": False, "submit_mode": "preflight", "status": "submitted",
+                    "trade_side": "short", "sleeve": continuous_sleeve_name(demo),
+                    "signal_ts_ms": signal_ts, "stop_price": stop_price, "reason": SNIPER_REASON,
+                })
+            try:
+                result = trading_client.place_order(**_order_params(
+                    symbol=symbol, side="Sell", qty=qty_text, order_type="Limit",
+                    order_link_id=link, reduce_only=False, price=limit_price,
+                    time_in_force="PostOnly", stop_loss=stop_price if stop_price > 0 else None,
+                ))
+                submit_mode = "submitted"
+                order_id = str(result.get("orderId", ""))
+            except Exception as exc:  # noqa: BLE001 — a failed snipe must never block the base entry
+                submit_mode, status, error = "error", "failed", f"sniper place_order failed: {exc}"[:500]
+        order_rows.append({
+            "order_link_id": link, "ts_ms": now_ms, "trade_id": trade_id,
+            "strategy_id": strategy_id, "symbol": symbol, "side": "Sell", "order_type": "Limit",
+            "qty": qty_text, "reduce_only": False, "order_id": order_id, "submit_mode": submit_mode,
+            "avg_price": 0.0, "notional_usdt": qty * limit_price, "status": status,
+            "trade_side": "short", "signal_ts_ms": signal_ts, "tick_size": tick,
+            "qty_step": _float(plan.get("qty_step")), "stop_price": stop_price,
+            "stop_loss_pct": demo.stop_loss_pct, "error": error,
+            "sleeve": continuous_sleeve_name(demo), "reason": SNIPER_REASON,
+            "limit_price": limit_price, "base_trade_id": str(plan.get("base_trade_id", "")),
+        })
+    return order_rows
+
+
+def _sniper_order_state(all_orders: pl.DataFrame) -> list[dict[str, Any]]:
+    """Latest-state view of sniper orders: one dict per link still RESTING."""
+    if all_orders.is_empty() or "reason" not in all_orders.columns:
+        return []
+    snipes = all_orders.filter(pl.col("reason") == SNIPER_REASON)
+    if snipes.is_empty():
+        return []
+    resting: dict[str, dict[str, Any]] = {}
+    terminal: set[str] = set()
+    for row in snipes.sort("ts_ms").to_dicts():
+        link = str(row.get("order_link_id", ""))
+        status = str(row.get("status", ""))
+        if status in ("filled", "cancelled", "closed", "failed"):
+            terminal.add(link)
+        elif status == "resting" and str(row.get("submit_mode")) in ("submitted", "dry_run"):
+            resting[link] = row
+    return [row for link, row in resting.items() if link not in terminal]
+
+
+def reconcile_continuous_snipes(
+    all_trades: pl.DataFrame,
+    all_orders: pl.DataFrame,
+    *,
+    trading_client: Any | None,
+    demo: ContinuousDemoCycleConfig,
+    now_ms: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Per-cycle sniper lifecycle sweep. Returns (fill_trade_rows, order_update_rows, snipe_exit_plans).
+
+    1. FILLS: a resting snipe no longer on the venue's open-order book is resolved via
+       order history — executed qty becomes an OPEN short trade row (first-class: the
+       normal exit machinery manages it from here), else a terminal cancel marker.
+    2. CANCELS: a still-resting snipe whose BASE trade is no longer open is cancelled
+       (the wick window died with the base thesis).
+    3. BASE-EXIT: an open snipe TRADE whose base trade closed is planned for exit
+       (reason ``base_exited``) — the research form's exit-with-base semantics.
+    Dry-run mode does the bookkeeping without client calls.
+    """
+    open_base_ids: set[str] = set()
+    open_snipe_trades: list[dict[str, Any]] = []
+    have_trades = not all_trades.is_empty() and "status" in all_trades.columns
+    if have_trades:
+        for t in all_trades.filter(pl.col("status") == "open").to_dicts():
+            tid = str(t.get("trade_id", ""))
+            if tid.endswith(SNIPER_TRADE_SUFFIX):
+                open_snipe_trades.append(t)
+            else:
+                open_base_ids.add(tid)
+    known_trade_ids: set[str] = (
+        set(all_trades["trade_id"].cast(pl.String).to_list()) if have_trades and "trade_id" in all_trades.columns else set()
+    )
+
+    fill_rows: list[dict[str, Any]] = []
+    update_rows: list[dict[str, Any]] = []
+    for row in _sniper_order_state(all_orders):
+        link = str(row.get("order_link_id", ""))
+        symbol = str(row.get("symbol", ""))
+        base_id = str(row.get("base_trade_id", ""))
+        trade_id = str(row.get("trade_id", "")) or _sniper_trade_id(base_id)
+        base_open = base_id in open_base_ids
+        if str(row.get("submit_mode")) != "submitted" or trading_client is None:
+            if not base_open:  # dry-run bookkeeping: retire the planned snipe with its base
+                update_rows.append({**row, "ts_ms": now_ms, "status": "cancelled", "submit_mode": "dry_run"})
+            continue
+        try:
+            open_orders = trading_client.get_open_orders(symbol=symbol)
+        except Exception:  # noqa: BLE001 — fail-safe: try again next cycle
+            continue
+        still_open = any(str(o.get("orderLinkId", "")) == link for o in open_orders)
+        if still_open:
+            if not base_open:
+                try:
+                    trading_client.cancel_order(symbol=symbol, order_link_id=link)
+                    update_rows.append({**row, "ts_ms": now_ms, "status": "cancelled", "submit_mode": "cancel"})
+                except Exception as exc:  # noqa: BLE001
+                    update_rows.append({**row, "ts_ms": now_ms, "status": "resting",
+                                        "error": f"sniper cancel failed: {exc}"[:300]})
+            continue
+        # no longer resting on the venue: resolve filled-vs-cancelled from history
+        try:
+            history = trading_client.get_order_history(symbol=symbol, order_link_id=link)
+        except Exception:  # noqa: BLE001
+            continue
+        exec_qty = 0.0
+        avg_price = 0.0
+        exec_ts = now_ms
+        for h in history:
+            if str(h.get("orderLinkId", "")) != link:
+                continue
+            exec_qty = _float(h.get("cumExecQty"))
+            avg_price = _float(h.get("avgPrice"))
+            exec_ts = int(_float(h.get("updatedTime")) or now_ms)
+            break
+        if exec_qty > 0.0 and avg_price > 0.0 and trade_id not in known_trade_ids:
+            fill_rows.append({
+                "trade_id": trade_id, "strategy_id": str(row.get("strategy_id", "")),
+                "symbol": symbol, "side": "short", "sleeve": continuous_sleeve_name(demo),
+                "status": "open", "ts_ms": exec_ts, "entry_ts_ms": exec_ts, "opened_at_ms": exec_ts,
+                "updated_at_ms": now_ms, "signal_ts_ms": int(_float(row.get("signal_ts_ms")) or exec_ts),
+                "entry_price": avg_price, "qty": _decimal_text(Decimal(str(exec_qty))),
+                "notional_usdt": abs(avg_price * exec_qty), "equity_usdt": 0.0,
+                "entry_leverage": demo.entry_leverage, "tick_size": _float(row.get("tick_size")),
+                "qty_step": _float(row.get("qty_step")), "stop_price": _float(row.get("stop_price")),
+                "stop_loss_pct": demo.stop_loss_pct, "entry_order_link_id": link,
+                "entry_order_id": str(row.get("order_id", "")), "submit_mode": "submitted",
+                "base_trade_id": base_id, "reason": SNIPER_REASON,
+            })
+            update_rows.append({**row, "ts_ms": now_ms, "status": "filled", "avg_price": avg_price})
+        else:
+            update_rows.append({**row, "ts_ms": now_ms, "status": "cancelled"})
+
+    snipe_exit_plans = [
+        {**t, "exit_reason": "base_exited", "exit_trigger_ts_ms": now_ms}
+        for t in open_snipe_trades
+        if str(t.get("base_trade_id", "")) not in open_base_ids
+    ]
+    return fill_rows, update_rows, snipe_exit_plans
 
 
 def _trade_excursion(
@@ -1045,6 +1280,38 @@ def apply_continuous_demo_profile(config: ContinuousDemoCycleConfig) -> Continuo
     default-off; selecting the profile makes a paper/demo cycle reproduce the
     candidate contract instead of the older de-promoted continuous sleeve.
     """
+    if config.strategy_profile == "continuous_ensemble_v1":
+        # The validated winner_base ensemble (frozen receipt weights; receipts:
+        # continuous-winner-robustness-2026-06-09 + continuous-walkforward-allocator
+        # [weights frozen, no re-estimation] + continuous-hedge-2f-engine-2026-06-10).
+        # Research rule w90/tv0.045/max4/ddh-0.04, NO strategy-momentum hurdle (the
+        # merged test's winning arm). Per-component age floors and TPs are enforced
+        # per entry; venue-side TP attached at order placement.
+        return replace(
+            config,
+            rmom_quantile=0.25,
+            feature_set=("max_ret168",),
+            liq_turnover_min=500_000.0,
+            max_hold_hours=24,
+            entry_confirm_delay_hours=1,
+            entry_event_trigger="none",
+            btc_trend_gate="uptrend",
+            daily_rebalance_enabled=True,
+            daily_rebalance_realized_vol_window_days=90,
+            daily_rebalance_target_daily_vol=0.045,
+            daily_rebalance_max_scale=4.0,
+            daily_rebalance_drawdown_half_threshold=-0.04,
+            daily_rebalance_resize_cost_bps=10.0,
+            daily_rebalance_strategy_momentum_window_days=0,
+            daily_rebalance_strategy_momentum_min_return=0.0,
+            daily_rebalance_strategy_momentum_scale_when_below=0.0,
+            ensemble_components=(
+                ("p3", "turn3_pop3", 240, 0.10, 0.30),
+                ("p4p3", "turn4_pop3", 240, 0.10, 0.20),
+                ("p4p5", "turn4_pop5", 240, 0.10, 0.40),
+                ("tp14", "none", 210, 0.14, 0.10),
+            ),
+        )
     if config.strategy_profile != "continuous_rebalance_v1":
         return config
     return replace(
@@ -1875,7 +2142,9 @@ def _execute_continuous_entries(
             continue
         tick_size = _float(contract.get("tick_size")) or 0.0001
         qty_step = _float(contract.get("qty_step")) or 0.001
-        capped_notional = equity_usdt * demo.wallet_balance_fraction * order_notional_frac
+        component = str(cand.get("component") or "")
+        component_weight = _float(cand.get("component_weight")) or 1.0
+        capped_notional = equity_usdt * demo.wallet_balance_fraction * order_notional_frac * component_weight
         max_qty = _float(contract.get("max_market_order_qty")) or _float(contract.get("max_order_qty"))
         # NOTE (EXEC-3): like the short/long ENTRY paths, a single entry whose qty exceeds Bybit's
         # per-order maxMktOrderQty is CAPPED here (order_quantity_for_notional floors to max_qty), NOT
@@ -1894,11 +2163,22 @@ def _execute_continuous_entries(
         qty, actual_notional = quantity
         stop_loss_pct = _float(cand.get("stop_loss_pct"))
         stop_price = _stop_price_for_entry(entry_price=price, side="short", stop_loss_pct=stop_loss_pct, tick_size=tick_size)
+        take_profit_pct = _float(cand.get("take_profit_pct"))
+        take_profit_price = 0.0
+        if take_profit_pct > 0.0:
+            raw_tp = price * (1.0 - take_profit_pct)
+            take_profit_price = (
+                float(Decimal(str(round(raw_tp / tick_size))) * Decimal(str(tick_size))) if tick_size > 0 else raw_tp
+            )
         signal_ts_ms = int(cand.get("signal_ts_ms") or now_ms)
         reentry_seq = int(cand.get("reentry_seq") or 0)
         trade_id = _continuous_trade_id(strategy_id, symbol, signal_ts_ms, reentry_seq)
+        link_prefix = _continuous_entry_link_prefix(demo)
+        if component:
+            trade_id = f"{trade_id}-{component}"
+            link_prefix = f"{link_prefix}{component}"
         entry_link = _continuous_order_link_id(
-            _continuous_entry_link_prefix(demo), symbol=symbol, signal_ts_ms=signal_ts_ms, reentry_seq=reentry_seq
+            link_prefix, symbol=symbol, signal_ts_ms=signal_ts_ms, reentry_seq=reentry_seq
         )
         order_result: dict[str, Any] = {}
         submit_mode, order_status, error = "dry_run", "planned", ""
@@ -1923,7 +2203,8 @@ def _execute_continuous_entries(
                 try:
                     order_result = trading_client.place_order(**_order_params(
                         symbol=symbol, side="Sell", qty=qty, order_type=demo.entry_order_type,
-                        order_link_id=entry_link, reduce_only=False, stop_loss=stop_price if stop_price > 0 else None))
+                        order_link_id=entry_link, reduce_only=False, stop_loss=stop_price if stop_price > 0 else None,
+                        take_profit=take_profit_price if take_profit_price > 0 else None))
                     submit_mode = "submitted"
                 except Exception as exc:  # noqa: BLE001
                     submit_mode, order_status, error, filled_qty, filled_notional = "error", "submitted_unconfirmed", f"place_order failed: {exc}"[:500], 0.0, 0.0
@@ -1962,6 +2243,8 @@ def _execute_continuous_entries(
                 "notional_usdt": filled_notional if demo.submit_orders else actual_notional, "equity_usdt": equity_usdt,
                 "entry_leverage": demo.entry_leverage, "tick_size": tick_size, "qty_step": qty_step,
                 "max_market_order_qty": max_qty, "stop_price": stop_price, "stop_loss_pct": stop_loss_pct,
+                "take_profit_price": take_profit_price, "take_profit_pct": take_profit_pct,
+                "component": component, "component_weight": component_weight,
                 "entry_fee_usdt": entry_fee, "entry_exec_time_ms": entry_exec_time_ms,
                 "decile": int(cand.get("decile") or 0), "composite": _float(cand.get("composite")),
                 "entry_order_link_id": entry_link, "entry_order_id": order_result.get("orderId", ""), "submit_mode": submit_mode,
@@ -2247,6 +2530,31 @@ def run_continuous_demo_cycle(
         if exit_orders and (demo.submit_orders or demo.record_dry_run):
             cycle_order_rows.extend(exit_orders)
 
+        # Sniper lifecycle sweep (S1 Amendment 6, wired 2026-06-10): resolve fills of
+        # resting snipes into first-class open trade rows, cancel snipes whose base
+        # closed, and exit filled snipes alongside their base (reason base_exited).
+        if demo.sniper_enabled:
+            snipe_fills, snipe_updates, snipe_exit_plans = reconcile_continuous_snipes(
+                all_trades, all_orders, trading_client=trading_client, demo=demo, now_ms=cycle_now_ms)
+            if snipe_fills:
+                all_trades = _upsert_rows(all_trades, snipe_fills, key="trade_id")
+                if demo.submit_orders or demo.record_dry_run:
+                    cycle_trade_rows.extend(snipe_fills)
+                held_symbols |= {str(r["symbol"]) for r in snipe_fills}
+            if snipe_updates and (demo.submit_orders or demo.record_dry_run):
+                cycle_order_rows.extend(snipe_updates)
+            if snipe_exit_plans:
+                snipe_exits, snipe_exit_orders = _execute_continuous_exits(
+                    snipe_exit_plans, all_trades, trading_client=trading_client, demo=demo,
+                    now_ms=cycle_now_ms, execution_event_router=execution_event_router,
+                    record_preflight=preflight_cb)
+                if snipe_exits:
+                    all_trades = _upsert_rows(all_trades, snipe_exits, key="trade_id")
+                    if demo.submit_orders or demo.record_dry_run:
+                        cycle_trade_rows.extend(snipe_exits)
+                if snipe_exit_orders and (demo.submit_orders or demo.record_dry_run):
+                    cycle_order_rows.extend(snipe_exit_orders)
+
         # Entries: fresh D9 shorts (not held, not in a live position/order, not in re-entry cooldown),
         # age-eligible, capacity-bounded.
         exit_cooldown_symbols = _recent_exit_cooldown_symbols(
@@ -2316,19 +2624,53 @@ def run_continuous_demo_cycle(
             and rebalance_target_scale > 0.0
             and btc_trend_gate_allows_entry
         ):
-            picks = select_continuous_entries(
-                entry_state, held_symbols=held_symbols, cooldown_symbols=cooldown, open_count=open_count,
-                config=demo, eligible_symbols=eligible)
-            candidates, skipped_same_signal_reentry = _continuous_entry_candidates_with_signal_metadata(
-                picks,
-                all_trades,
-                all_orders=all_orders,
-                signal_ts=signal_ts,
-                strategy_id=strategy_id,
-                price_by_symbol=price_by_symbol,
-                stop_loss_pct=demo.stop_loss_pct,
-                allow_same_signal_reentry=demo.allow_same_signal_reentry,
-            )
+            if demo.ensemble_components:
+                # winner_base ensemble: select PER COMPONENT (own trigger + age floor),
+                # in declared order, capped at _eff_max total new entries this cycle.
+                # The same symbol may enter under multiple components (the research
+                # combine sums weighted exposures); trade ids/links carry the
+                # component tag so the rows never collide.
+                for comp_name, comp_trigger, comp_age, comp_tp, comp_weight in demo.ensemble_components:
+                    if len(candidates) >= _eff_max:
+                        break
+                    cfg_c = replace(demo, entry_event_trigger=comp_trigger)
+                    eligible_c = _continuous_age_eligible_symbols(
+                        universe, klines, age_days_min=comp_age, now_ms=cycle_now_ms)
+                    picks_c = select_continuous_entries(
+                        entry_state, held_symbols=held_symbols, cooldown_symbols=cooldown,
+                        open_count=open_count + len(candidates), config=cfg_c,
+                        eligible_symbols=eligible_c)
+                    cands_c, skipped_c = _continuous_entry_candidates_with_signal_metadata(
+                        picks_c,
+                        all_trades,
+                        all_orders=all_orders,
+                        signal_ts=signal_ts,
+                        strategy_id=strategy_id,
+                        price_by_symbol=price_by_symbol,
+                        stop_loss_pct=demo.stop_loss_pct,
+                        allow_same_signal_reentry=demo.allow_same_signal_reentry,
+                    )
+                    skipped_same_signal_reentry += skipped_c
+                    for cand in cands_c:
+                        if len(candidates) >= _eff_max:
+                            break
+                        candidates.append({**cand, "component": comp_name,
+                                           "component_weight": comp_weight,
+                                           "take_profit_pct": comp_tp})
+            else:
+                picks = select_continuous_entries(
+                    entry_state, held_symbols=held_symbols, cooldown_symbols=cooldown, open_count=open_count,
+                    config=demo, eligible_symbols=eligible)
+                candidates, skipped_same_signal_reentry = _continuous_entry_candidates_with_signal_metadata(
+                    picks,
+                    all_trades,
+                    all_orders=all_orders,
+                    signal_ts=signal_ts,
+                    strategy_id=strategy_id,
+                    price_by_symbol=price_by_symbol,
+                    stop_loss_pct=demo.stop_loss_pct,
+                    allow_same_signal_reentry=demo.allow_same_signal_reentry,
+                )
         if demo.addon_primary_pnl_gate and candidates:
             primary_open = _open_primary_trades_for_addon_gate(
                 current_root=root,
@@ -2364,6 +2706,29 @@ def run_continuous_demo_cycle(
             cycle_trade_rows.extend(exec_entries)
         if entry_orders and (demo.submit_orders or demo.record_dry_run):
             cycle_order_rows.extend(entry_orders)
+        # Sniper placement (S1 Amendment 6): one resting PostOnly Sell limit per fresh
+        # short at entry*(1+wick), quarter-size, disaster stop attached venue-side.
+        if demo.sniper_enabled and exec_entries:
+            sniper_orders = _execute_sniper_placements(
+                exec_entries, trading_client=trading_client, demo=demo, now_ms=cycle_now_ms,
+                strategy_id=strategy_id, price_by_symbol=price_by_symbol,
+                record_preflight=preflight_cb)
+            if sniper_orders and (demo.submit_orders or demo.record_dry_run):
+                cycle_order_rows.extend(sniper_orders)
+
+        # Dynamic-exit forward shadow (paper-only bookkeeping; can never affect orders).
+        if demo.dynexit_shadow_enabled:
+            try:
+                from .continuous_dynexit_shadow import update_dynexit_shadow
+                post_entry_ledger = all_trades
+                if exec_entries:
+                    post_entry_ledger = _upsert_rows(post_entry_ledger, exec_entries, key="trade_id")
+                update_dynexit_shadow(
+                    root, all_trades=post_entry_ledger,
+                    fresh_entries=[r for r in exec_entries if r.get("status") == "open"] if exec_entries else [],
+                    klines=klines, now_ms=cycle_now_ms)
+            except Exception:  # noqa: BLE001 — the shadow must never break the live cycle
+                _logger.exception("dynexit shadow sweep failed (non-fatal)")
 
         resize_rows: list[dict[str, Any]] = []
         resize_orders: list[dict[str, Any]] = []

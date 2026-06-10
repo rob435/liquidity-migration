@@ -1057,6 +1057,162 @@ Tier-3-relevant evidence on the existing book and (b) the operator decides the
 program wants a second research arc. Written here so the option is preserved with
 its rationale, not re-derived from scratch later.
 
+## 2026-06-10 — Alpha-hunt charter session 1: cov-sizer dead a priori; BTC+ETH two-factor hedge beats the banked hedge (Stage-A PASS)
+
+Charter: `docs/research_plan_alpha_hunt_2026-06-10.md`. Two results:
+
+**1. §4-A covariance-aware within-book sizing — KILLED BY FEASIBILITY PROBE (no shot
+burned).** The continuous winner_base book is too thin for a within-book correlation
+allocator: at entry the median trade has **1 peer** open, 28–30% have zero, only 38% have
+≥2 (bybit 3184 / binance 2617 component trades, symbol-deduped). The allocator is
+mechanically a no-op for ~62% of trades and noise for most of the rest. The "correlated
+breadth blew out DD" failure came from *loosened* gates — re-loosening is a pre-registered
+null. Do not re-mine §4-A at current book breadth; it only becomes live again if the book
+is ever structurally broadened (which the freeze forbids on this window).
+
+**2. §4-C hedge upgrade Stage-A — `btc_eth_2f` PASS 6/6, SELECTED (pre-registered:**
+`docs/preregistration/continuous-hedge-upgrade-2026-06-10.md`**).** Two-factor causal
+90d-OLS of unit book return on (BTC, ETH), separate long legs, joint 2×scale cap, real
+funding, same machinery as the banked WP3 hedge (c0 parity exact). vs the banked BTC-only
+hedge at max4: ΔSharpe +0.200/+0.079 (pooled +0.140), ΔMAR +0.37/+0.50 (pooled +0.43),
+survives 2× hedge cost, funding-off, 1-day beta lag, W{60,120,150}, and 23-24 sub-period;
+improves 2025 on both venues (bybit 3.52→4.09) where the BTC-only hedge was flat —
+mechanism = ETH is the tradeable proxy for the alt-factor exposure WP1a/WP3 identified
+(alt_ew ceiling). `shrunk_btc` near-miss (pooled ΔSh +0.036 < +0.05 bar, dominated);
+`basket5050` dead (fixed 50/50 destroys the free split's information). In-sample, Tier-2
+ceiling, rmom caveat inherited; part of the return gain is bull-sample ETH drift — the
+durable claim is variance/regime-robustness. Artifacts:
+`C:\Users\user\SHARED_DATA\continuous_hedge_upgrade_2026-06-10\`.
+
+**3. §4-C Stage-B — engine-grade PASS s0–s8 (pre-registered:**
+`docs/preregistration/continuous-hedge-2f-engine-2026-06-10.md`**): the BTC+ETH
+two-factor hedge is the new recommended hedge form (in-sample candidate, Tier-2
+ceiling).** Two-leg mode added to `apply_rebalance_rule` (`compute_hedge_betas_2f`
+bivariate causal betas, joint 2×scale cap, per-leg funding/turnover, live twin
+`compute_continuous_hedge_ratios_2f`; 10 new tests; unhedged/single-leg paths
+byte-identical — s0 parity reproduced the banked WP3 numbers to the digit). Binding
+max4 vs the banked single-BTC engine hedge: bybit +102.99%/MAR 6.12/Sh 2.862
+(ΔSharpe +0.212, ΔMAR +0.60), binance +76.95%/6.17/2.463 (+0.080, +0.53); pooled
+ΔSharpe +0.146 / ΔMAR +0.56; survives 2× hedge cost, funding-off, lag-1, W-grid, 2×
+book cost; DD not worse; improves 2024 AND 2025 on bybit (per-year Sharpe 1.55→1.70,
+3.52→4.14). Remaining (operator): second-leg hedge-manager wiring + forward demo.
+
+**4. §4-B participation-capped sizing — pre-registered NULL on dominance (B3), with a
+usable capacity frontier (receipt:**
+`docs/preregistration/continuous-participation-cap-2026-06-10.md`**).** Per-trade
+participation at $1M inverted EXACTLY from the ledger cost model; cap m=min(1,
+5%/(k·4·cw·π)); daily paths rebuilt per-trade from panel midnight closes (P0 parity vs
+the official control: corr 0.9999/0.9998, deltas ≈0 — the split machinery is a verified
+reusable primitive). B1/B2/B4 pass; **B3 fails: at 5×$1M the capped book (pooled MAR
+3.83) does not beat uncapped (4.17)**. Venue asymmetry is the finding: binance capping
+mildly HELPS at scale (k10: 4.42 vs 4.02; deeper books, ~3% trades capped); bybit
+capping destroys MAR (k5: 3.31 vs 4.10; 25% of trades capped) — **bybit's thin-name
+fade tail carries its MAR** (consistent with CV1). Honest frontier (trust-region,
+all-capped): ~$5M combined → pooled MAR ~3.8, ~$10M → ~3.6, both venues positive,
+survives 2× cost — graceful, but uncapped k≥5 numbers ride the untrusted √π
+extrapolation, so any >$1M sizing decision waits on R4 fill calibration. Cap NOT
+adopted; binance-only cap not proposed (venue-specific tuning). Do not re-mine without
+calibrated impact.
+
+**5. §8-P4 residual attribution of the continuous book (analysis, receipt:**
+`docs/preregistration/continuous-residual-attribution-2026-06-10.md`**):
+residual-alpha-positive vs the validated 6-factor model + market legs.** S3 residual
+Sharpe 3.91/3.91 (on-joined-days convention — don't mix with calendar-grid receipt
+Sharpes), S3 R² of the 2f-hedged book just 1.5%/6.8%, alpha ≈ +40%/yr at max4. The
+hedge mechanism confirmed independently at daily granularity: the raw book's market
+beta is **ETH-shaped not BTC-shaped** (β_eth −0.03/−0.04 vs β_btc ≈ 0); BTC-only
+hedging leaves β_eth untouched; the 2f hedge zeroes BOTH legs and raw Sharpe rises as
+R² falls (the removed exposure was uncompensated). Caveats: the factor set contains no
+short-horizon-reversal factor, so "residual" includes any systematic STR premium
+(p0/p2-1 say the fade is substantially STR-shaped); coverage = 633/401 joined days.
+
+**6. §8-P1 data layer + Stage-1 scout PASS:** `binance_usdm_metrics_5m` backfilled
+COMPLETE from data.binance.vision daily `metrics` (670 symbols / 112.3M 5-min rows of
+OI + taker/top-trader ratios, 2023-01→, survivorship-FREE — delisted symbols served;
+`scripts/backfill_binance_metrics_vision.py`; also satisfies the ridge-rerun OI
+precondition). The pre-registered **OI-flow scout PASSED 4/4** (receipt
+`continuous-oi-flow-scout-2026-06-10.md`): pops with RISING OI (new-long-driven) fade
+better — IC(ΔOI_6h, net_return) +0.082 binance (n=852, 100% coverage, positive EVERY
+year) / +0.086 bybit (survivor subset, 67% coverage — pooled IC carried by 2026,
+2023-25 ≈ 0 there; do not cite bybit early years); 24h/tercile/lag falsifiers all
+hold; not a turnover proxy (corr with trigger score +0.07). Discovered en route: Bybit
+serves NO historical OI for delisted symbols (REST verified) — bybit OI history is
+structurally survivor-only for 2023-25; binance Vision is the only survivorship-clean
+derivatives-history source, hence the primary arm. Economic size at event level is
+modest (~1e-4/trade tercile spread) — information real, money unproven. **Stage-2 RAN
+same day — pre-registered NULL** (receipt `continuous-oi-tilt-stage2-2026-06-10.md`):
+the tanh size tilt fails Tier-2 (pooled ΔMAR −1.07) for two documented reasons —
+(1) ΔOI_6h right-skew made mean-centering mechanically de-lever 6-8% (caught by the
+pre-registered ±5% gross guard), and (2) beyond leverage, binance ΔSharpe −0.183:
+up-sizing crowded pumps adds squeeze VARIANCE faster than the mean edge. The Stage-1
+information stands; the daily-granularity size-tilt conversion is CLOSED. Legitimate
+future forms (fresh receipts only): down-only asymmetric sizing, intraday
+burst-anchored OI features, forward liquidation-collector data. Do not re-tune tanh/
+rank variants on this window.
+
+**7. §8-P5 dynamic exit — pre-registered NULL; §4-D CLOSED PERMANENTLY (receipt:**
+`continuous-dynamic-exit-2026-06-10.md`**).** Bar-accurate fade-completion target
+(tp = entry×(1−0.5·anchor), anchor = trailing-24h run-up) vs the fixed-TP/24h clock,
+with a PERFECT T0 (100.0% trade-level exit replay both venues — the re-simulator is
+now a verified primitive for §8-P2 execution work). Result: the cleanest cross-venue
+mirage on record — bybit ΔMAR **+1.74**/ΔSharpe +0.485 (would have shipped in a
+single-venue shop), binance ΔMAR **−2.10**/ΔSharpe −0.300; pooled −0.18 → NULL. The
+fade's realizable depth profile is venue-specific; the 24h clock + fixed TP stands.
+Per the pre-commitment, no future exit work on this window absent fundamentally new
+data. **Forensic addendum (trade-ledger comparison, in the receipt):** populations
+near-identical, within-venue logic identical (delta monotone in pump size on BOTH
+venues) — the divergence is the post-TP10 continuation profile: riding past −10%
+pays +40bps/trade on bybit but −261bps on binance (binance fades exhaust at ~7-10%
+and bounce; bybit's thin-tail names keep collapsing — consistent with CV1). And the
+bybit headline is 2026-carried (per-year Δ: −7/+17/+17/+94bps) while binance is
+negative every year — even the attractive half of the mirage is recency-tilted.
+
+**8. §8-P7 passive-first entries — pre-registered NULL (receipt:**
+`continuous-passive-entry-2026-06-10.md`**).** Lower-bound maker-fill test (limit at
+signal close, strictly-through fill, escalate to the ledger's taker entry): fill rate
+96-99% at 1h granularity (not selective), and the squeeze-continuation TAIL destroys
+the risk profile — bybit return +1.1pp but ΔMAR −0.77 (DD/Sharpe damage), binance
+ΔMAR −3.74; pooled −2.26. The ~6-8bps maker savings can't pay for selection against
+continuation tails. Mechanically explains why the sniper's wick-deep resting ladder IS
+the working passive form. Naive passive-at-touch base entries CLOSED; the execution
+path = sniper ladder + R4-calibrated sub-hour designs.
+
+**9. §8-P8 down-only OI de-sizing — pre-registered NULL; the OI sizing arc is FULLY
+closed (receipt:** `continuous-oi-downsize-2026-06-10.md`**).** De-sizing falling-OI
+pops to 0.5× (trailing q25, causal): bybit ΔMAR −0.94 (its de-sized survivor-subset
+events were profitable, not riskier), binance +0.33 (mild, under bar, gross band
+violated); pooled −0.305. With the tilt NULL: no daily-granularity sizing form
+converts the OI-flow information into Tier-2 economics on this window. Stage-1's
+event-level fact stands; remaining OI value = intraday designs / forward collector
+data / (separate-receipt) daily-short selection. **P9 bookDepth: LAUNCHED** (idle-time,
+same session) — `backfill_binance_bookdepth_vision.py`, hourly-aggregated per-band
+depth into `binance_usdm_bookdepth_1h/` (execution-realism input for P2 +
+deletion-risk insurance); smoke-verified, resume-safe.
+
+**10. LIVE WIRING (operator-directed, 2026-06-10 second pass):** the demo daemon's
+default book is now `continuous_ensemble_v1` — the validated winner_base 4-component
+ensemble live (per-component triggers/age floors/venue-side TPs, frozen receipt
+weights, weighted sizing, component-tagged trade ids; research rule w90/tv0.045/max4/
+ddh-0.04, momentum hurdle OFF per the merged test). The single-component
+`continuous_rebalance_v1` is deprecated (kept resolvable). Also wired same day:
+2f hedge live path (HEDGE_MODE=2f, gated submit), sniper full lifecycle
+(CONTINUOUS_SNIPER=1, default off), dynamic-exit forward shadow (paper-only).
+Repo cleanse: concluded receipts/plan docs consolidated here and deleted
+(36→23 receipts); STATE.md rewritten to current state.
+
+**11. §4-F new-data scoping (background recon, no run):**
+`docs/research_notes_new_data_scoping_2026-06-10.md`. Key facts: Binance Vision
+`metrics` (5-min OI + taker ratios, every UM perp, 2020-09→current) is free and
+PIT-clean — it also satisfies the Binance-OI-backfill precondition on the ridge re-run
+door. Raw liquidation HISTORY for 2023-2025 is **unbuyable**: Binance deleted its
+`liquidationSnapshot` archive, Bybit never published one, and Tardis has a Bybit gap
+2023-04→2025-02; every liquidation feed is also 1-per-second sampled (undercounts
+cascades). Consequence: a liquidation signal must be a cross-venue PROXY (taker-flow
+bursts + OI drops from free tick/metrics data), and a live `allLiquidation`/`forceOrder`
+collector should start ASAP (forward history cannot be bought later — operator/deploy
+decision). Binance `bookDepth` (2023-01→) is a free depth option; options skew via
+Tardis/Laevitas if ever needed.
+
 ## Open Methodology Debts
 
 These are still real and can move numbers:

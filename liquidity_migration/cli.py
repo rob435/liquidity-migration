@@ -892,6 +892,9 @@ def main(argv: list[str] | None = None) -> int:
             addon_primary_data_root=args.addon_primary_data_root,
             addon_primary_strategy_id=args.addon_primary_strategy_id,
             addon_same_symbol_entry_cooldown_minutes=args.addon_same_symbol_entry_cooldown_minutes,
+            sniper_enabled=args.sniper_enabled,
+            sniper_wick_pct=args.sniper_wick_pct,
+            sniper_size_frac=args.sniper_size_frac,
         )
         if getattr(args, "daemon", False):
             from liquidity_migration.continuous_demo_daemon import ContinuousDemoDaemon

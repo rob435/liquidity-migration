@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily BTC-beta hedge for the continuous demo book (WP3; demo-only, dry-run until submit-armed)
+Description=Daily BTC+ETH 2f hedge for the continuous demo book (banked 2026-06-10; demo-only)
 After=network-online.target
 Wants=network-online.target
 
@@ -12,7 +12,11 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=HEDGE_VENUE=bybit
 Environment=PRIMARY_ROOT=data/bybit-continuous-demo-event
 Environment=HEDGE_DATA_ROOT=data/bybit-continuous-hedge-event
-# Dry-run by default. Flip to 1 (with CONFIRM_DEMO_ORDERS=1 in the env file) only
-# after a verified dry-run cycle + ws_risk adoption-schema confirmation.
-Environment=SUBMIT_HEDGE=0
+# Banked BTC+ETH two-factor form (receipts continuous-hedge-{upgrade,2f-engine}-2026-06-10).
+Environment=HEDGE_MODE=2f
+# Submit ARMED by operator instruction 2026-06-10 (demo account only; the runner
+# refuses without demo credentials and CONFIRM_DEMO_ORDERS=1, and hard-refuses
+# REAL_MONEY=true). Set SUBMIT_HEDGE=0 to fall back to dry-run logging.
+Environment=SUBMIT_HEDGE=1
+Environment=CONFIRM_DEMO_ORDERS=1
 ExecStart=/bin/bash /opt/liquidity-migration/scripts/run_continuous_hedge.sh

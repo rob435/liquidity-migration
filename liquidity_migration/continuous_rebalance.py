@@ -347,6 +347,78 @@ def compute_hedge_beta(
     return cov / var
 
 
+HEDGE_2F_COLLINEARITY_GUARD = 0.995
+
+
+def compute_hedge_betas_2f(
+    raw_rets: list[float],
+    hedge_rets_1: list[float | None],
+    hedge_rets_2: list[float | None],
+    idx: int,
+    hedge_rule: ContinuousHedgeRule,
+) -> tuple[float, float]:
+    """Bivariate OLS betas of per-unit book return on two hedge legs.
+
+    Trailing ``beta_window_days`` ledger rows strictly before ``idx`` (minus
+    ``beta_extra_lag_days``); only rows where BOTH leg returns are known enter;
+    min ``beta_min_obs`` joint rows. If the legs are collinear within the window
+    (|corr| > HEDGE_2F_COLLINEARITY_GUARD) or the system is degenerate, fall back
+    to the single-factor beta on leg 1 with b2 = 0.
+    """
+    end = idx - int(hedge_rule.beta_extra_lag_days)
+    if end <= 0:
+        return 0.0, 0.0
+    lo = max(0, end - int(hedge_rule.beta_window_days))
+    rows = [
+        (raw_rets[j], float(hedge_rets_1[j]), float(hedge_rets_2[j]))  # type: ignore[arg-type]
+        for j in range(lo, end)
+        if hedge_rets_1[j] is not None and hedge_rets_2[j] is not None
+    ]
+    if len(rows) < int(hedge_rule.beta_min_obs):
+        return 0.0, 0.0
+    n = len(rows)
+    ys = [r[0] for r in rows]
+    x1 = [r[1] for r in rows]
+    x2 = [r[2] for r in rows]
+    m1 = sum(x1) / n
+    m2 = sum(x2) / n
+    my = sum(ys) / n
+    s11 = sum((a - m1) ** 2 for a in x1)
+    s22 = sum((b - m2) ** 2 for b in x2)
+    if s11 <= 0.0 or s22 <= 0.0:
+        return 0.0, 0.0
+    s12 = sum((a - m1) * (b - m2) for a, b in zip(x1, x2))
+    sy1 = sum((a - m1) * (y - my) for a, y in zip(x1, ys))
+    sy2 = sum((b - m2) * (y - my) for b, y in zip(x2, ys))
+    corr = s12 / (s11 * s22) ** 0.5
+    det = s11 * s22 - s12 * s12
+    if abs(corr) > HEDGE_2F_COLLINEARITY_GUARD or det <= 0.0:
+        return sy1 / s11, 0.0
+    b1 = (s22 * sy1 - s12 * sy2) / det
+    b2 = (s11 * sy2 - s12 * sy1) / det
+    return b1, b2
+
+
+def _capped_hedge_legs(
+    b1: float,
+    b2: float,
+    scale: float,
+    hedge_cap: float,
+    leg1_known: bool,
+    leg2_known: bool,
+) -> tuple[float, float]:
+    """Long-only per-leg ratios with a joint proportional cap of ``hedge_cap*scale``."""
+    r1 = min(max(-b1, 0.0), hedge_cap) * scale if leg1_known else 0.0
+    r2 = min(max(-b2, 0.0), hedge_cap) * scale if leg2_known else 0.0
+    tot = r1 + r2
+    cap_tot = hedge_cap * scale
+    if tot > cap_tot and tot > 0.0:
+        shrink = cap_tot / tot
+        r1 *= shrink
+        r2 *= shrink
+    return r1, r2
+
+
 @dataclass(frozen=True)
 class ContinuousHedgeState:
     """Prior-only state required to compute the live/paper hedge ratio.
@@ -359,6 +431,36 @@ class ContinuousHedgeState:
 
     prior_raw_returns: tuple[float, ...]
     prior_hedge_returns: tuple[float | None, ...]
+
+
+@dataclass(frozen=True)
+class ContinuousHedge2FState:
+    """Prior-only state for the two-leg (BTC+ETH) hedge ratio computation."""
+
+    prior_raw_returns: tuple[float, ...]
+    prior_hedge_returns_1: tuple[float | None, ...]
+    prior_hedge_returns_2: tuple[float | None, ...]
+
+
+def compute_continuous_hedge_ratios_2f(
+    state: ContinuousHedge2FState,
+    hedge_rule: ContinuousHedgeRule,
+    target_scale: float,
+) -> tuple[float, float]:
+    """Live/paper twin of the two-leg hedge sizing inside ``apply_rebalance_rule``.
+
+    Returns per-leg long-hedge notionals as fractions of equity. Must match the
+    backtest loop's per-leg ratios when fed the same prior series (parity-tested).
+    """
+    raw = [float(x) for x in state.prior_raw_returns]
+    h1 = list(state.prior_hedge_returns_1)
+    h2 = list(state.prior_hedge_returns_2)
+    if not (len(raw) == len(h1) == len(h2)):
+        raise ValueError("prior_raw_returns and both prior_hedge_returns must be aligned")
+    b1, b2 = compute_hedge_betas_2f(raw, h1, h2, len(raw), hedge_rule)
+    return _capped_hedge_legs(
+        b1, b2, max(float(target_scale), 0.0), float(hedge_rule.hedge_cap), True, True
+    )
 
 
 def compute_continuous_hedge_ratio(
@@ -430,6 +532,8 @@ def apply_rebalance_rule(
     hedge_rule: ContinuousHedgeRule | None = None,
     hedge_returns: dict[int, float] | None = None,
     hedge_funding: dict[int, float] | None = None,
+    hedge_returns_2: dict[int, float] | None = None,
+    hedge_funding_2: dict[int, float] | None = None,
 ) -> pl.DataFrame:
     """Apply a causal daily scale rule and rebuild decomposed equity.
 
@@ -441,18 +545,31 @@ def apply_rebalance_rule(
     returns (matching the live planner's ``prior_raw_returns`` semantics). On flat
     gaps the hedge is closed and reopened (turnover charged both ways); the final
     ledger day is charged the closing turnover.
+
+    With ``hedge_returns_2`` also set, the hedge becomes TWO legs (e.g. BTC+ETH):
+    bivariate causal betas (``compute_hedge_betas_2f``), per-leg long-only clips
+    with a joint proportional cap of ``hedge_cap*scale``, per-leg funding and
+    turnover. The total hedge columns keep their meaning; per-leg ratios are
+    appended as ``hedge_ratio_leg1``/``hedge_ratio_leg2``. The unhedged and
+    single-leg code paths are unchanged.
     """
     hedged = hedge_rule is not None
+    two_leg = hedged and hedge_returns_2 is not None
     h_ret = hedge_returns or {}
     h_fund = hedge_funding or {}
+    h_ret2 = hedge_returns_2 or {}
+    h_fund2 = hedge_funding_2 or {}
     out: list[tuple] = []
     equity = 1.0
     peak = 1.0
     prev_scale = 1.0
     prev_hedge_ratio = 0.0
+    prev_r1 = 0.0
+    prev_r2 = 0.0
     days = components.days
     raw_rets = [components.raw_by_day[d] for d in days]
     hedge_rets: list[float | None] = [h_ret.get(d) for d in days]
+    hedge_rets2: list[float | None] = [h_ret2.get(d) for d in days]
 
     for idx, day in enumerate(days):
         scale = compute_continuous_rebalance_scale(
@@ -483,7 +600,33 @@ def apply_rebalance_rule(
         hedge_return = 0.0
         hedge_funding_return = 0.0
         hedge_cost_return = 0.0
-        if hedged:
+        r1 = 0.0
+        r2 = 0.0
+        if two_leg:
+            assert hedge_rule is not None
+            b1, b2 = compute_hedge_betas_2f(raw_rets, hedge_rets, hedge_rets2, idx, hedge_rule)
+            day_h1 = hedge_rets[idx]
+            day_h2 = hedge_rets2[idx]
+            r1, r2 = _capped_hedge_legs(
+                b1, b2, scale, float(hedge_rule.hedge_cap), day_h1 is not None, day_h2 is not None
+            )
+            hedge_ratio = r1 + r2
+            if day_h1 is not None:
+                hedge_return += r1 * float(day_h1)
+            if day_h2 is not None:
+                hedge_return += r2 * float(day_h2)
+            hedge_funding_return = -(r1 * float(h_fund.get(day, 0.0)) + r2 * float(h_fund2.get(day, 0.0)))
+            if idx == 0 or days[idx] - days[idx - 1] == MS_PER_DAY:
+                turnover = abs(r1 - prev_r1) + abs(r2 - prev_r2)
+            else:
+                turnover = abs(prev_r1) + abs(r1) + abs(prev_r2) + abs(r2)
+            if idx == len(days) - 1:
+                turnover += abs(r1) + abs(r2)
+            hedge_cost_return = -turnover * float(hedge_rule.cost_bps) / 10_000.0
+            basket_return += hedge_return + hedge_funding_return + hedge_cost_return
+            prev_r1 = r1
+            prev_r2 = r2
+        elif hedged:
             assert hedge_rule is not None
             beta = compute_hedge_beta(raw_rets, hedge_rets, idx, hedge_rule)
             day_h = hedge_rets[idx]
@@ -506,6 +649,8 @@ def apply_rebalance_rule(
         row = (day, basket_return, scale, gross, entry_cost, funding, resize_cost, equity)
         if hedged:
             row = row + (hedge_ratio, hedge_return, hedge_funding_return, hedge_cost_return)
+        if two_leg:
+            row = row + (r1, r2)
         out.append(row)
         prev_scale = scale
 
@@ -521,6 +666,8 @@ def apply_rebalance_rule(
     ]
     if hedged:
         schema += ["hedge_ratio", "hedge_return", "hedge_funding_return", "hedge_cost_return"]
+    if two_leg:
+        schema += ["hedge_ratio_leg1", "hedge_ratio_leg2"]
     return pl.DataFrame(
         out,
         schema=schema,

@@ -2622,6 +2622,13 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
     p.add_argument("--max-new-entries-per-cycle", type=int, default=d.max_new_entries_per_cycle)
     p.add_argument("--max-hold-hours", type=int, default=d.max_hold_hours)
     p.add_argument(
+        "--sniper-enabled", action="store_true", default=d.sniper_enabled,
+        help="S1 Amendment 6 Tier-2 demo candidate: rest a PostOnly Sell limit at "
+             "entry*(1+wick) per fresh short (quarter-size, disaster stop attached).",
+    )
+    p.add_argument("--sniper-wick-pct", type=float, default=d.sniper_wick_pct)
+    p.add_argument("--sniper-size-frac", type=float, default=d.sniper_size_frac)
+    p.add_argument(
         "--entry-event-trigger",
         default=d.entry_event_trigger,
         help="Optional confirmed-hour event gate for entries, e.g. fresh_pop25. Default none.",

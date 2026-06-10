@@ -34,7 +34,10 @@ WORKERS="${WORKERS:-4}"
 MAX_ACTIVE="${MAX_ACTIVE:-25}"
 MAX_NEW_ENTRIES_PER_CYCLE="${MAX_NEW_ENTRIES_PER_CYCLE:-5}"
 MAX_HOLD_HOURS="${MAX_HOLD_HOURS:-48}"
-STRATEGY_PROFILE="${STRATEGY_PROFILE:-continuous_v1}"
+# 2026-06-10: the live default is the validated winner_base 4-component ensemble
+# (frozen receipt weights). The old single-component profiles remain selectable
+# via the env for rollback/diagnostics only.
+STRATEGY_PROFILE="${STRATEGY_PROFILE:-continuous_ensemble_v1}"
 FEATURE_SET="${FEATURE_SET:-rv_168h,vov,dist_low,xsret7,xsret3}"
 ENTRY_EVENT_TRIGGER="${ENTRY_EVENT_TRIGGER:-none}"
 BTC_TREND_GATE="${BTC_TREND_GATE:-off}"
@@ -85,6 +88,10 @@ if [[ -n "${KLINES_FOLLOW_ROOT:-}" ]]; then
     fi
     order_args+=(--klines-follow-root "$KLINES_FOLLOW_ROOT")
 fi
+# S1 Amendment 6 sniper (Tier-2 demo candidate, wired 2026-06-10): resting PostOnly
+# Sell limit at entry*(1+8%) per fresh short, quarter-size, disaster stop attached.
+# Off by default; the operator arms it with CONTINUOUS_SNIPER=1.
+[[ "${CONTINUOUS_SNIPER:-0}" == "1" ]] && order_args+=(--sniper-enabled)
 
 echo "continuous-demo engine: data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS submit_orders=${SUBMIT_ORDERS:-0} profile=$STRATEGY_PROFILE klines_follow_root=${KLINES_FOLLOW_ROOT:-}"
 exec "$PYTHON_BIN" -m liquidity_migration \

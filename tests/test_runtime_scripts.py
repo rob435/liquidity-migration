@@ -150,11 +150,14 @@ def test_continuous_runner_wires_rebalance_profile_env() -> None:
     repo = Path(__file__).resolve().parents[1]
     text = (repo / "scripts" / "run_bybit_continuous_demo_event_engine.sh").read_text(encoding="utf-8")
 
-    assert 'STRATEGY_PROFILE="${STRATEGY_PROFILE:-continuous_v1}"' in text
+    # 2026-06-10: the live default is the validated winner_base 4-component ensemble.
+    assert 'STRATEGY_PROFILE="${STRATEGY_PROFILE:-continuous_ensemble_v1}"' in text
     assert "--strategy-profile \"$STRATEGY_PROFILE\"" in text
     assert 'DAILY_REBALANCE_ENABLED="${DAILY_REBALANCE_ENABLED:-0}"' in text
     assert "--daily-rebalance-enabled" in text
     assert "--daily-rebalance-strategy-momentum-min-return" in text
+    # sniper arm switch present (default off; CONTINUOUS_SNIPER=1 arms it)
+    assert "CONTINUOUS_SNIPER" in text
 
 
 def test_reconcile_continuous_uses_forward_readiness_gate() -> None:
@@ -169,16 +172,28 @@ def test_reconcile_continuous_uses_forward_readiness_gate() -> None:
 
 def test_continuous_units_target_rebalance_profile_but_stay_kill_switch_controlled() -> None:
     repo = Path(__file__).resolve().parents[1]
+    # 2026-06-10: both units run the validated winner_base 4-component ensemble
+    # (the profile owns triggers/age/TP per component; unit-level trigger is none).
     for unit_name in (
         "liquidity-migration-bybit-continuous-demo.service",
         "liquidity-migration-bybit-continuous-paper.service",
     ):
         text = (repo / "deploy" / "systemd" / unit_name).read_text(encoding="utf-8")
-        assert "Environment=STRATEGY_PROFILE=continuous_rebalance_v1" in text
+        assert "Environment=STRATEGY_PROFILE=continuous_ensemble_v1" in text
         assert "Environment=FEATURE_SET=max_ret168" in text
-        assert "Environment=ENTRY_EVENT_TRIGGER=turn4_pop4" in text
+        assert "Environment=ENTRY_EVENT_TRIGGER=none" in text
         assert "Environment=BTC_TREND_GATE=uptrend" in text
         assert "Environment=DAILY_REBALANCE_ENABLED=1" in text
+    demo_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-demo.service").read_text(encoding="utf-8")
+    paper_text = (repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-paper.service").read_text(encoding="utf-8")
+    # sniper armed on the DEMO unit only (paper is a no-order shadow)
+    assert "Environment=CONTINUOUS_SNIPER=1" in demo_text
+    assert "CONTINUOUS_SNIPER=1" not in paper_text
+    # 2f hedge submit armed (demo-only; runner enforces demo credentials + confirm flag)
+    hedge_text = (repo / "deploy" / "systemd" / "liquidity-migration-continuous-hedge.service").read_text(encoding="utf-8")
+    assert "Environment=HEDGE_MODE=2f" in hedge_text
+    assert "Environment=SUBMIT_HEDGE=1" in hedge_text
+    assert "Environment=CONFIRM_DEMO_ORDERS=1" in hedge_text
 
 
 def test_continuous_rmom_refresh_is_toggle_aware_for_paper_only_evidence() -> None:

@@ -27,15 +27,19 @@ from pathlib import Path
 from typing import Any
 
 from .continuous_rebalance import (
+    ContinuousHedge2FState,
     ContinuousHedgeRule,
     ContinuousHedgeState,
     ContinuousRebalanceResizePlan,
     compute_continuous_hedge_ratio,
+    compute_continuous_hedge_ratios_2f,
 )
 
 HEDGE_SYMBOL = "BTCUSDT"
+HEDGE_SYMBOL_2 = "ETHUSDT"  # second leg of the banked 2f hedge (2026-06-10 Stage-B)
 HEDGE_LINK_PREFIX = "en-ca"  # ws_risk continuous-addon adoption namespace
-# Frozen hedge rule — the banked engine-leg parameters (Stage-B, 8/8 pass).
+# Frozen hedge rule — the banked engine-leg parameters (Stage-B, 8/8 pass; the same
+# rule object parameterizes both the single-leg WP3 form and the 2f form).
 FROZEN_HEDGE_RULE = ContinuousHedgeRule(beta_window_days=90, beta_min_obs=60, hedge_cap=2.0, cost_bps=5.0)
 # The backtest book is 0.5-gross-short at scale 1; live H_equity_frac scales by the
 # live book's actual gross-short fraction relative to that reference.
@@ -49,8 +53,12 @@ class ContinuousHedgeConfig:
     trades_dataset: str = "continuous_fade_demo_trades"
     orders_dataset: str = "continuous_fade_demo_orders"
     strategy_id: str = "continuous_btc_hedge_v1"
+    # "2f" = the banked BTC+ETH two-factor hedge (Stage-B s0-s8 PASS, 2026-06-10);
+    # "btc" = the prior single-leg WP3 form (fallback; also used when the warm-start
+    # has no eth_ret column or too few joint observations).
+    hedge_mode: str = "2f"
     min_resize_notional_usdt: float = 25.0
-    max_hedge_equity_frac: float = 0.30  # hard sanity cap on live hedge size
+    max_hedge_equity_frac: float = 0.30  # hard sanity cap on TOTAL live hedge size
     fallback_equity_usdt: float = 10_000.0
     submit_orders: bool = False
     confirm_demo_orders: bool = False
@@ -71,11 +79,23 @@ class HedgeDecision:
 
 def load_warmstart(path: str | Path) -> tuple[list[float], list[float | None]]:
     """Return (unit_returns, btc_returns) oldest->newest from the shipped warm-start CSV."""
+    unit, btc, _eth = load_warmstart_2f(path)
+    return unit, btc
+
+
+def load_warmstart_2f(path: str | Path) -> tuple[list[float], list[float | None], list[float | None]]:
+    """Return (unit_returns, btc_returns, eth_returns) oldest->newest.
+
+    ``eth_ret`` is an optional column (older warm-start files lack it); missing or
+    blank entries load as None so the 2f path can fall back to single-leg when the
+    joint-observation count is insufficient.
+    """
     unit: list[float] = []
     btc: list[float | None] = []
+    eth: list[float | None] = []
     p = Path(path)
     if not p.exists():
-        return unit, btc
+        return unit, btc, eth
     with p.open(encoding="utf-8") as fh:
         for row in csv.DictReader(fh):
             try:
@@ -83,12 +103,13 @@ def load_warmstart(path: str | Path) -> tuple[list[float], list[float | None]]:
             except (KeyError, TypeError, ValueError):
                 continue
             unit.append(u)
-            b = row.get("btc_ret")
-            try:
-                btc.append(float(b) if b not in (None, "") else None)
-            except (TypeError, ValueError):
-                btc.append(None)
-    return unit, btc
+            for col, out in (("btc_ret", btc), ("eth_ret", eth)):
+                v = row.get(col)
+                try:
+                    out.append(float(v) if v not in (None, "") else None)
+                except (TypeError, ValueError):
+                    out.append(None)
+    return unit, btc, eth
 
 
 def extend_with_live_days(
@@ -177,6 +198,99 @@ def _beta_window_observation_count(
     return sum(1 for b in btc_returns[start:end] if b is not None)
 
 
+@dataclass(slots=True)
+class HedgeDecision2F:
+    """The computed two-leg (BTC+ETH) hedge action for one daily run (pure; no I/O)."""
+
+    beta_window_days: int
+    ratio_btc: float
+    ratio_eth: float
+    target_btc_usdt: float
+    target_eth_usdt: float
+    n_obs_joint: int
+    plan_btc: ContinuousRebalanceResizePlan | None
+    plan_eth: ContinuousRebalanceResizePlan | None
+    fell_back_to_btc: bool
+    diagnostics: dict[str, Any] = field(default_factory=dict)
+
+
+def compute_hedge_decision_2f(
+    config: ContinuousHedgeConfig,
+    *,
+    unit_returns: list[float],
+    btc_returns: list[float | None],
+    eth_returns: list[float | None],
+    live_gross_short_frac: float,
+    btc_price: float,
+    eth_price: float,
+    current_btc_qty: float,
+    current_eth_qty: float,
+    equity_usdt: float,
+) -> HedgeDecision2F:
+    """Pure two-leg hedge sizing for one daily run (no orders, no I/O).
+
+    Per-leg ratios come from the parity-tested live twin
+    (``compute_continuous_hedge_ratios_2f``, frozen Stage-B rule). If the joint
+    BTC+ETH observation count is below ``beta_min_obs`` the twin returns (0, 0);
+    in that case this falls back to the single-leg BTC decision so a thin ETH
+    history can never leave the book unhedged. The TOTAL is hard-capped at
+    ``max_hedge_equity_frac`` (legs scaled proportionally).
+    """
+    from .continuous_rebalance import plan_continuous_hedge_resize
+
+    target_scale = max(live_gross_short_frac, 0.0) / REFERENCE_GROSS_SHORT_FRAC
+    n_joint = sum(1 for b, e in zip(btc_returns, eth_returns) if b is not None and e is not None)
+    state = ContinuousHedge2FState(
+        prior_raw_returns=tuple(unit_returns),
+        prior_hedge_returns_1=tuple(btc_returns),
+        prior_hedge_returns_2=tuple(eth_returns),
+    )
+    r_btc, r_eth = compute_continuous_hedge_ratios_2f(state, FROZEN_HEDGE_RULE, target_scale)
+    fell_back = False
+    if r_btc == 0.0 and r_eth == 0.0 and n_joint < FROZEN_HEDGE_RULE.beta_min_obs:
+        single = compute_continuous_hedge_ratio(
+            ContinuousHedgeState(prior_raw_returns=tuple(unit_returns), prior_hedge_returns=tuple(btc_returns)),
+            FROZEN_HEDGE_RULE,
+            target_scale,
+        )
+        r_btc, r_eth, fell_back = single, 0.0, True
+    total = r_btc + r_eth
+    if total > config.max_hedge_equity_frac and total > 0.0:
+        shrink = config.max_hedge_equity_frac / total
+        r_btc *= shrink
+        r_eth *= shrink
+    plan_btc = plan_eth = None
+    if btc_price > 0.0:
+        plan_btc = plan_continuous_hedge_resize(
+            hedge_symbol=HEDGE_SYMBOL, current_qty=current_btc_qty, price=btc_price,
+            equity_usdt=equity_usdt, hedge_ratio=r_btc,
+            min_resize_notional_usdt=config.min_resize_notional_usdt,
+        )
+    if eth_price > 0.0:
+        plan_eth = plan_continuous_hedge_resize(
+            hedge_symbol=HEDGE_SYMBOL_2, current_qty=current_eth_qty, price=eth_price,
+            equity_usdt=equity_usdt, hedge_ratio=r_eth,
+            min_resize_notional_usdt=config.min_resize_notional_usdt,
+        )
+    eq = max(equity_usdt, 0.0)
+    return HedgeDecision2F(
+        beta_window_days=FROZEN_HEDGE_RULE.beta_window_days,
+        ratio_btc=r_btc,
+        ratio_eth=r_eth,
+        target_btc_usdt=eq * r_btc,
+        target_eth_usdt=eq * r_eth,
+        n_obs_joint=n_joint,
+        plan_btc=plan_btc,
+        plan_eth=plan_eth,
+        fell_back_to_btc=fell_back,
+        diagnostics={
+            "target_scale": target_scale,
+            "live_gross_short_frac": live_gross_short_frac,
+            "history_days": len(unit_returns),
+        },
+    )
+
+
 def build_hedge_trade_row(
     config: ContinuousHedgeConfig,
     *,
@@ -185,6 +299,7 @@ def build_hedge_trade_row(
     now_ms: int,
     order_link_id: str,
     order_id: str = "",
+    symbol: str = HEDGE_SYMBOL,
 ) -> dict[str, Any]:
     """Conforming OPEN trade row for a submitted hedge BTC long."""
     return build_hedge_tracking_row(
@@ -197,6 +312,7 @@ def build_hedge_trade_row(
         order_id=order_id,
         signal_ts_ms=now_ms,
         submit_mode="submitted" if order_id else "dry_run",
+        symbol=symbol,
     )
 
 
@@ -211,6 +327,7 @@ def build_hedge_tracking_row(
     order_id: str = "",
     signal_ts_ms: int | None = None,
     submit_mode: str | None = None,
+    symbol: str = HEDGE_SYMBOL,
 ) -> dict[str, Any]:
     """Conforming OPEN tracking row for the externally managed hedge BTC long.
 
@@ -223,7 +340,7 @@ def build_hedge_tracking_row(
     return {
         "trade_id": f"hedge-{order_link_id}",
         "strategy_id": config.strategy_id,
-        "symbol": HEDGE_SYMBOL,
+        "symbol": symbol,
         "side": "long",
         "sleeve": "continuous_addon",
         "status": "open",
@@ -246,11 +363,11 @@ def build_hedge_tracking_row(
     }
 
 
-def hedge_order_link_id(now_ms: int) -> str:
-    """Stable-namespaced link id for the hedge leg (ws_risk continuous-addon route)."""
+def hedge_order_link_id(now_ms: int, symbol: str = HEDGE_SYMBOL) -> str:
+    """Stable-namespaced link id for a hedge leg (ws_risk continuous-addon route)."""
     from .event_demo import _order_link_id
 
-    return _order_link_id(HEDGE_LINK_PREFIX, symbol=HEDGE_SYMBOL, signal_ts_ms=int(now_ms))
+    return _order_link_id(HEDGE_LINK_PREFIX, symbol=symbol, signal_ts_ms=int(now_ms))
 
 
 def utc_today_iso() -> str:
