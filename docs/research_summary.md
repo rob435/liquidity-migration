@@ -1235,6 +1235,40 @@ These are still real and can move numbers:
 5. **Forward evidence.** Continuous-vs-daily forward comparison is immature locally; current
    common-window evidence is not enough to claim success.
 
+## 2026-06-10 — DR1 hedged-bounce FALSIFIED; downtrend_bounce_v1 ships as a standalone PAPER product (operator-directed)
+
+Operator directive (full authority): build a system that trades BTC-30d-down
+regimes, where the continuous book is hedge+cash. This reopened the closed
+downtrend question along the one path the D3 close-out reserved: a **separate
+product with its own risk budget**.
+
+- **DR1 (pre-registered, `downtrend-hedged-bounce-2026-06-10.md`): FAIL —
+  hypothesis falsified.** The untested synthesis (D3's verified bounce cells +
+  the WP3-mirrored causal short-BTC hedge) does NOT transform the risk class:
+  controls reproduce D3 to the digit; mean hedge ratio ~0.70 yet DD moves only
+  ~2pp (bybit −29.6→−27.9, binance −35.6→−33.5 on liq500k_k1) while dragging
+  −19..−21% return; MAR worsens everywhere; binance Sharpe degrades (0.81→0.72).
+  Mechanism: (1) the bounce DD is alt-idiosyncratic crash risk a 90d index beta
+  cannot see; (2) trailing-down regime ⇒ mildly positive forward BTC drift ⇒ a
+  standing short-BTC overlay is systematically losing. **In-sample downtrend
+  constructions RE-CLOSE, now including the hedged-bounce synthesis — do not
+  re-mine.** Artifacts: `~/SHARED_DATA/downtrend_hedged_bounce_2026-06-10/`.
+- **The shipped system: `downtrend_bounce_v1`** (module
+  `liquidity_migration/downtrend_bounce.py`, CLI `downtrend-bounce-paper`,
+  tests `tests/test_downtrend_bounce.py`). D3-frozen profile (BTC-30d-down,
+  long bottom-decile ret_7d, ≥$500k, gross 0.5×, k=1, UNHEDGED per DR1),
+  PAPER-ONLY daily collector: JSONL targets + close-to-close marks with 12 bps
+  RT costs and real funding (coverage-flagged). Forward clock + promotion bar
+  pre-registered in `downtrend-bounce-forward-paper-2026-06-10.md`: ≥60
+  in-regime paper days, net>0 both venues, DD within 1.5× the in-sample class,
+  ≥90% funding coverage, operator risk budget, and an **account-level latched
+  disaster stop wired before any demo order** (session finding: the demo stack
+  has per-position stops + entry-pause breaker but NO account-level halt).
+- Clocks seeded 2026-06-10 in-regime (bybit btc30 ≈ −0.25, fresh to 06-09;
+  binance to 05-31 pending the fapi stage-2 refresh). First bybit mark:
+  +3.39% net (gross +2.61%, funding +0.81% received — the documented bear-funding
+  tailwind). Known risk class (pre-stated): in-regime DD −30..−44%.
+
 ## What To Keep In Repo
 
 Keep only:
