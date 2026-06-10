@@ -77,7 +77,13 @@ OFF (`deploy/sleeves.env`).
    liquidation capture needs a host in a permitted region (operator decision);
    the leg idles harmlessly and will capture if access ever opens.
 6. OPEN: volup125 + long-sleeve leverage-cap decision (long sleeve is off).
-7. ARMED (data-refresh-triggered, no operator action needed until then): PE2
+7. OPEN (one command, operator-gated enable): bybit forward DEPTH collector built +
+   smoke-tested (`liquidity_migration/depth_collector.py`, unit
+   `liquidity-migration-depth-collector.service`, NOT auto-enabled by deploy).
+   Bybit has no historical book data — every month unenabled is deployed-venue
+   capacity data lost forever (DC1 measured binance only). Enable on the VPS:
+   `systemctl enable --now liquidity-migration-depth-collector`.
+8. ARMED (data-refresh-triggered, no operator action needed until then): PE2
    long provisional-entry OOS re-judgment — when BOTH full-PIT roots extend ≥60d
    past 2026-05-28 (and ≥30 prov trades/venue), run the pre-registered cells per
    `docs/preregistration/long-provisional-entry-engine-2026-06-10.md` §OOS. The

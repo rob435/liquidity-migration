@@ -1,0 +1,16 @@
+[Unit]
+Description=Bybit forward order-book depth collector (hourly band snapshots; public REST, append-only JSONL, no order path). NOT auto-enabled by deploy: operator enables explicitly (systemctl enable --now liquidity-migration-depth-collector).
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/liquidity-migration
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/liquidity-migration/.venv/bin/python -m liquidity_migration.depth_collector --root data/depth
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
