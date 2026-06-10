@@ -154,7 +154,11 @@ echo "sleeves: SHORT=$SHORT_SLEEVE SHORT_PAPER=$SHORT_PAPER_SLEEVE LONG=$LONG_SL
 systemctl enable liquidity-migration-bybit-risk.service
 # Forward-only data collection (P3, operator-approved 2026-06-10): liquidation
 # history is unbuyable, so the collector runs always-on like the risk service.
-systemctl enable --now liquidity-migration-liquidation-collector.service
+# RESTART (not just enable --now, which is a no-op on a running unit) so deployed
+# collector code changes actually take effect — append-only JSONL, no order path,
+# so a bounce loses at most the in-flight websocket messages.
+systemctl enable liquidity-migration-liquidation-collector.service
+systemctl restart liquidity-migration-liquidation-collector.service
 apply_sleeve_enable "$SHORT_SLEEVE" $SHORT_SLEEVE_UNITS
 apply_sleeve_enable "$SHORT_PAPER_SLEEVE" $SHORT_PAPER_SLEEVE_UNITS
 apply_sleeve_enable "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
