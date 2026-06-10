@@ -61,3 +61,20 @@ def test_writer_rotates_by_utc_day_and_venue(tmp_path) -> None:
     byb = [p for p in tmp_path.rglob("*.jsonl") if "bybit" in str(p) and p.stem != ""][0]
     lines = [json.loads(x) for x in byb.read_text(encoding="utf-8").splitlines() if x]
     assert len(lines) >= 2
+
+
+def test_writer_counts_rows_per_venue(tmp_path) -> None:
+    """The alive heartbeat must be able to show a SILENT leg — a venue stuck at 0
+    while the other streams was indistinguishable from healthy with only a total."""
+    from liquidity_migration.liquidation_collector import JsonlDayWriter
+
+    writer = JsonlDayWriter(tmp_path)
+    writer.write(
+        [
+            {"venue": "bybit", "recv_ms": 1_781_100_000_000, "symbol": "AUSDT"},
+            {"venue": "bybit", "recv_ms": 1_781_100_000_000, "symbol": "BUSDT"},
+            {"venue": "binance", "recv_ms": 1_781_100_000_000, "symbol": "CUSDT"},
+        ]
+    )
+    assert writer.written == 3
+    assert writer.written_by_venue == {"bybit": 2, "binance": 1}

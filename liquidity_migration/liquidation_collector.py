@@ -89,21 +89,31 @@ class JsonlDayWriter:
         self.root = Path(root)
         self._lock = threading.Lock()
         self.written = 0
+        # Per-venue counts so the alive heartbeat can show a SILENT leg (a venue
+        # stuck at 0 while the other streams) — a totals-only counter hid exactly
+        # that on 2026-06-10 (binance leg quiet for 70+ min, indistinguishable
+        # from healthy in the journal).
+        self.written_by_venue: dict[str, int] = {}
 
     def write(self, rows: list[dict[str, Any]]) -> None:
         if not rows:
             return
         with self._lock:
             by_path: dict[Path, list[str]] = {}
+            venue_counts: dict[str, int] = {}
             for r in rows:
                 day = datetime.fromtimestamp(r["recv_ms"] / 1000, tz=timezone.utc).date().isoformat()
                 p = self.root / r["venue"] / f"{day}.jsonl"
                 by_path.setdefault(p, []).append(json.dumps(r, separators=(",", ":")))
+                venue = str(r["venue"])
+                venue_counts[venue] = venue_counts.get(venue, 0) + 1
             for p, lines in by_path.items():
                 p.parent.mkdir(parents=True, exist_ok=True)
                 with p.open("a", encoding="utf-8") as fh:
                     fh.write("\n".join(lines) + "\n")
                 self.written += len(lines)
+            for venue, count in venue_counts.items():
+                self.written_by_venue[venue] = self.written_by_venue.get(venue, 0) + count
 
 
 def bybit_linear_symbols() -> list[str]:
@@ -165,7 +175,24 @@ def _run_binance(writer: JsonlDayWriter, stop: threading.Event) -> None:
                 except (json.JSONDecodeError, TypeError, ValueError):
                     pass
 
-            ws = websocket.WebSocketApp(BINANCE_WS, on_message=on_message)
+            # Connection-state logging is load-bearing here: run_forever returns
+            # (rather than raises) on a refused/dropped connection, so without
+            # these handlers a permanently-failing leg retried SILENTLY forever
+            # and the journal showed nothing — observed 2026-06-10 while
+            # diagnosing a zero-row binance leg.
+            def on_open(_ws: Any) -> None:
+                _logger.info("binance collector: connected to %s", BINANCE_WS)
+
+            def on_error(_ws: Any, error: Any) -> None:
+                _logger.warning("binance collector ws error: %s", error)
+
+            def on_close(_ws: Any, status_code: Any, msg: Any) -> None:
+                _logger.warning("binance collector ws closed (code=%s msg=%s)", status_code, msg)
+
+            ws = websocket.WebSocketApp(
+                BINANCE_WS, on_message=on_message, on_open=on_open,
+                on_error=on_error, on_close=on_close,
+            )
             ws.run_forever(ping_interval=180, ping_timeout=30)
         except Exception:  # noqa: BLE001
             _logger.exception("binance collector error; reconnecting")
@@ -192,7 +219,12 @@ def main() -> int:
     try:
         while True:
             time.sleep(600)
-            _logger.info("liquidation collector alive: %d rows written", writer.written)
+            per_venue = " ".join(
+                f"{venue}={writer.written_by_venue.get(venue, 0)}" for venue in sorted(venues)
+            )
+            _logger.info(
+                "liquidation collector alive: %d rows written (%s)", writer.written, per_venue,
+            )
     except KeyboardInterrupt:
         stop.set()
     return 0
