@@ -1299,6 +1299,31 @@ receipts: `long-regularity-program-2026-06-10.md` (LR), `long-provisional-entry-
   cross-venue bars: NOT adopted, no rescue. The flag stays in the engine, default
   OFF; only NEW (forward) evidence may re-judge it.
 
+## 2026-06-10 — IR1 intraday residual-reversal scout: signal CONFIRMED, economics FAIL; the intraday-class proposal closes
+
+The one operator-gated creative direction the 2026-06-09 falsification work earned
+(hourly-cadence harvest of the fast-decay residual signal) was run under blanket
+operator authority with a pre-registered scout + one pre-registered amendment
+(`intraday-residual-scout-2026-06-10.md`).
+
+- **The physics is now CONFIRMED on the hourly grid, cross-venue:** trailing-24h
+  single-factor residual momentum REVERSES (IC −0.030..−0.038 at 6/12/24h, p=0.0,
+  ~28k hourly cross-sections per venue) and the information decays exactly as the
+  audited day-grid latency work said (fresh −0.038 → 24h-stale −0.009 → 48h-stale
+  −0.003). Universe-wide it is a REVERSAL; P3's "idio-weak keeps falling" sign is
+  event-conditional, not universe-wide — a genuinely useful clarification.
+- **The economics FAIL by an order of magnitude:** gross D1−D10 spread +13/+32 bps
+  per 12h/24h vs 45 bps RT taker costs; every pre-registered costed form negative
+  on both venues (long-bottom −65 bps/period; L/S −29..−40). The proposal's own
+  killer-risk caveat ("edge per trade must clear ~2× the daily system's") was
+  exactly right. Recorded, not proposed: maker-economics after R4 calibration is
+  the only conceivable revival (~25–32 bps gross vs ~10–15 bps maker costs —
+  marginal at best).
+- **IR1 CLOSED per its FAIL clause.** With LR/PE1/PE2 (long sleeve) and this, every
+  agent-runnable creative direction in the record now has a receipt; remaining
+  evidence sources are exclusively operator-gated (forward clocks, R4 fills, fapi
+  stage-2, liquidation/bookdepth maturation).
+
 ## What To Keep In Repo
 
 Keep only:
