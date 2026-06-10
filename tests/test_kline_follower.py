@@ -127,6 +127,74 @@ def test_follower_degrades_gracefully_while_snapshot_missing(tmp_path: Path) -> 
         follower.stop()
 
 
+def test_follower_prunes_symbols_the_leader_trimmed(tmp_path: Path) -> None:
+    """Leader universe trims (restart/refresh) -> the departed symbol must leave the
+    follower too: recovery only ADDS, so without the prune the stale symbol would
+    pollute universe_symbols() and memory until its bars age out."""
+    leader = _leader_with_bars(tmp_path, symbols=("AAAUSDT", "BBBUSDT", "OLDUSDT"))
+    follower = FollowerKlineStreamManager(leader_root=tmp_path, poll_seconds=3600.0)
+    try:
+        follower.start()
+        assert "OLDUSDT" in follower.universe_symbols()
+        leader.keep_only_symbols(["AAAUSDT", "BBBUSDT"])
+        new_bar_ts = _hour_floor_now_ms()
+        assert leader.add_bar("AAAUSDT", _ws_bar(new_bar_ts, close=150.0), confirmed=True)
+        assert leader.flush_to_disk() > 0
+        assert follower._refresh() is True
+        assert follower.universe_symbols() == ["AAAUSDT", "BBBUSDT"]
+        assert not follower.store().has_symbol("OLDUSDT")
+        assert follower.stats()["last_pruned_rows"] > 0
+    finally:
+        follower.stop()
+
+
+def test_follower_warns_once_when_leader_snapshot_goes_stale(tmp_path: Path, caplog) -> None:
+    """Leader daemon down -> snapshot freezes -> the follower keeps serving (REST
+    fallback covers correctness) but must surface the degradation exactly once
+    per episode, and expose snapshot_age_seconds for telemetry."""
+    import logging
+    import os
+
+    _leader_with_bars(tmp_path)
+    snapshot = tmp_path / ".cache" / "ws_klines" / "store.parquet"
+    follower = FollowerKlineStreamManager(
+        leader_root=tmp_path, poll_seconds=3600.0, stale_warning_seconds=60.0,
+    )
+    try:
+        follower.start()
+        assert follower.stats()["snapshot_age_seconds"] < 60.0
+        # age the snapshot past the threshold
+        old = time.time() - 3600.0
+        os.utime(snapshot, (old, old))
+        follower._last_sig = None  # re-stat picks up the aged mtime
+        with caplog.at_level(logging.WARNING, logger="liquidity_migration.kline_follower"):
+            follower._refresh()
+            follower._refresh()  # second pass must NOT re-warn (once per episode)
+        stale_warnings = [r for r in caplog.records if "has not changed" in r.message]
+        assert len(stale_warnings) == 1
+        assert follower.stats()["snapshot_age_seconds"] > 60.0
+        assert follower.stats()["poll_thread_alive"] is True
+    finally:
+        follower.stop()
+
+
+def test_follower_factory_refuses_circular_self_follow(tmp_path: Path) -> None:
+    import pytest
+
+    cfg = ContinuousDemoCycleConfig(klines_follow_root=str(tmp_path))
+    with pytest.raises(ValueError, match="self-follow|own data root"):
+        _follower_continuous_kline_stream_manager_factory(None, cfg, tmp_path)
+
+
+def test_run_script_refuses_circular_self_follow() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    script = (repo / "scripts" / "run_bybit_continuous_demo_event_engine.sh").read_text(
+        encoding="utf-8"
+    )
+    assert 'if [[ "$KLINES_FOLLOW_ROOT" == "$DATA_ROOT" ]]' in script
+    assert "circular self-follow" in script
+
+
 def test_daemon_factory_selection_prefers_explicit_then_follow_root() -> None:
     follow_cfg = ContinuousDemoCycleConfig(klines_follow_root="data/leader-root")
     own_cfg = ContinuousDemoCycleConfig()

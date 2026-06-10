@@ -77,6 +77,12 @@ fi
 # snapshot (+rmom gate) read-only instead of running a second WS pool — one
 # shared market-data plane per box. Empty = this sleeve runs its own pool.
 if [[ -n "${KLINES_FOLLOW_ROOT:-}" ]]; then
+    if [[ "$KLINES_FOLLOW_ROOT" == "$DATA_ROOT" ]]; then
+        # A follower never writes the snapshot — following your own root means a
+        # permanently frozen kline store. Only the SHADOW sleeve sets this.
+        echo "KLINES_FOLLOW_ROOT must not equal DATA_ROOT (circular self-follow)." >&2
+        exit 2
+    fi
     order_args+=(--klines-follow-root "$KLINES_FOLLOW_ROOT")
 fi
 

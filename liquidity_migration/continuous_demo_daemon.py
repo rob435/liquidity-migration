@@ -106,10 +106,23 @@ def _follower_continuous_kline_stream_manager_factory(
 
     Selected when ``klines_follow_root`` is set — the paper shadow co-located with
     the demo sleeve shares the demo daemon's market-data plane instead of running a
-    duplicate one. ``cache_root`` (the follower's own root) is deliberately unused:
-    the follower writes nothing."""
-    del config, cache_root
-    return FollowerKlineStreamManager(leader_root=demo_config.klines_follow_root)
+    duplicate one. ``cache_root`` (the follower's own root) is only used to refuse
+    a circular self-follow: the follower writes nothing, so a daemon following its
+    OWN root would read a snapshot nobody updates — a frozen store from day one."""
+    del config
+    leader = Path(demo_config.klines_follow_root).expanduser()
+    try:
+        is_self_follow = leader.resolve() == Path(cache_root).expanduser().resolve()
+    except OSError:
+        is_self_follow = False
+    if is_self_follow:
+        raise ValueError(
+            f"klines_follow_root ({demo_config.klines_follow_root}) resolves to this "
+            "sleeve's own data root — a follower never writes the snapshot, so following "
+            "yourself yields a permanently frozen kline store. Set KLINES_FOLLOW_ROOT "
+            "only on the shadow sleeve, pointing at the LEADER's root."
+        )
+    return FollowerKlineStreamManager(leader_root=leader)
 
 
 def _select_kline_stream_manager_factory(
@@ -117,7 +130,12 @@ def _select_kline_stream_manager_factory(
     explicit: Callable[..., Any] | None,
 ) -> Callable[..., Any]:
     """An explicitly injected factory (tests) always wins; otherwise follow when
-    ``klines_follow_root`` is set, else run the sleeve's own WS pool."""
+    ``klines_follow_root`` is set, else run the sleeve's own WS pool.
+
+    NOTE: the base daemon only invokes the selected factory when
+    ``ws_klines_enabled`` is True (`_start_kline_stream_manager` returns early
+    otherwise) — follow mode rides the same gate, so WS_KLINES_ENABLED=0 +
+    KLINES_FOLLOW_ROOT means NO manager at all (pure REST path), not a follower."""
     if explicit is not None:
         return explicit
     if demo_config.klines_follow_root:
