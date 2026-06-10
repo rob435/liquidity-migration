@@ -65,7 +65,11 @@ OFF (`deploy/sleeves.env`).
    hold NO trades yet (book restarted 06-09; no entries fired). R4 calibration
    waits for fills to accrue under the ensemble.
 4. ~~Data-root refresh~~ bybit_full_pit extended to 2026-06-09 (forward replay
-   clock can tick); binance refresh running.
+   clock can tick); binance klines+manifest extended to 2026-05-31 (vision).
+   Binance fapi ancillary June top-ups FAILED from this box (fapi unreachable
+   locally — same block as the futures WS; the completeness guard refused a
+   biased write). To finish: run `bash scripts/build_full_pit_binance.sh`
+   stage 2 on the VPS (Hetzner reaches fapi) or any non-blocked host.
 5. ~~P3 collectors~~ DONE (operator-approved): `liquidation_collector.py` +
    always-on unit, deployed. Bybit WS live-verified; check the Binance leg's
    "alive: N rows" journal line on the VPS (dev box cannot reach fstream).
