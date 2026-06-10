@@ -150,3 +150,12 @@ drawdown (−5% vs −12%) and far lower real-impact exposure — and set the fo
 from the **weaker 2023–24 sub-period (ann. MAR ~1.5–2.5)**, not the 2025 number. The next
 robustness gates are the **funding-interval correctness fix**, a **real impact calibration**,
 and **forward-demo accumulation** — not another weight/component sweep.
+
+**Addendum 2026-06-10:** residual risk (3) is CLOSED: funding accrual was verified
+against raw datasets (`continuous-funding-debt-closure-2026-06-09.md`) and the
+Binance funding dataset was rebuilt from 51 to 697 symbols
+(`binance-funding-rebuild-2026-06-09.md`). Status of the three gates as of
+2026-06-10: funding fix DONE; impact calibration BLOCKED on fresh fill accrual
+(R4, `continuous-capacity-impact-2026-06-09.md`); forward-demo accumulation
+started (demo orders ON, replay collector seeded). The 2023-04→2026-05 window is
+FROZEN — no further in-window sweeps.

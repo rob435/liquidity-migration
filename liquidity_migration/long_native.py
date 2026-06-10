@@ -36,7 +36,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
-from ._common import MS_PER_DAY, MS_PER_HOUR, date_ms, pct
+from ._common import MS_PER_DAY, MS_PER_HOUR, calendar_roll, calendar_shift, date_ms, pct
 from .config import CostConfig, DEFAULT_EXCLUDED_SYMBOLS, TradeLifecycleConfig
 from .momentum_signals import daily_bars, add_returns_and_age
 from .run_diagnostics import diagnose, is_tainted, render
@@ -569,7 +569,7 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
     intra = (
         klines_1h.sort(["symbol", "ts_ms"])
         .with_columns(
-            (pl.col("close") / pl.col("close").shift(win).over("symbol")).log().alias("_pump_intra")
+            (pl.col("close") / calendar_shift(pl.col("close"), win, day_ms=MS_PER_HOUR)).log().alias("_pump_intra")
         )
         .group_by(["symbol", "date"])
         .agg(pl.col("_pump_intra").max().alias("intra_max_Nh_pump_log"))
@@ -584,50 +584,50 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
           .then((pl.col("close") - pl.col("low")) / (pl.col("high") - pl.col("low")))
           .otherwise(0.5).alias("close_location"),
         # rolling realized vol
-        (pl.col("log_return").rolling_std(window_size=config.vol_estimate_window_days,
-                                          min_samples=config.vol_estimate_window_days)
-         .over("symbol") * annualization).alias("realized_vol"),
+            (_cal_roll(pl.col("log_return"), "std", config.vol_estimate_window_days,
+                       min_samples=config.vol_estimate_window_days)
+             .over("symbol") * annualization).alias("realized_vol"),
         # trailing turnover for universe
-        pl.col("turnover_quote").rolling_median(window_size=config.universe_volume_window_days,
-                                                min_samples=config.universe_volume_window_days)
-         .over("symbol").alias("turnover_median_90d"),
+            _cal_roll(pl.col("turnover_quote"), "median", config.universe_volume_window_days,
+                      min_samples=config.universe_volume_window_days)
+             .over("symbol").alias("turnover_median_90d"),
         # rolling 5-day return for capitulation flush detection
-        (pl.col("close") / pl.col("close").shift(config.cap_flush_window_days).over("symbol") - 1.0)
-         .alias("return_5d"),
+            (pl.col("close") / calendar_shift(pl.col("close"), config.cap_flush_window_days) - 1.0)
+             .alias("return_5d"),
         # rolling min low over flush window
-        pl.col("low").rolling_min(window_size=config.cap_flush_window_days, min_samples=config.cap_flush_window_days)
-          .over("symbol").alias("low_5d"),
+            _cal_roll(pl.col("low"), "min", config.cap_flush_window_days, min_samples=config.cap_flush_window_days)
+              .over("symbol").alias("low_5d"),
         # 14d return for oversold bounce
-        (pl.col("close") / pl.col("close").shift(config.ob_flush_window_days).over("symbol") - 1.0)
-         .alias("return_14d_ob"),
+            (pl.col("close") / calendar_shift(pl.col("close"), config.ob_flush_window_days) - 1.0)
+             .alias("return_14d_ob"),
         # 7d return (for uptrend dip)
-        (pl.col("close") / pl.col("close").shift(7).over("symbol") - 1.0).alias("return_7d"),
+            (pl.col("close") / calendar_shift(pl.col("close"), 7) - 1.0).alias("return_7d"),
         # coin SMA for uptrend filter
-        pl.col("close").rolling_mean(window_size=config.ud_sma_days, min_samples=config.ud_sma_days)
-         .over("symbol").alias("coin_sma"),
+            _cal_roll(pl.col("close"), "mean", config.ud_sma_days, min_samples=config.ud_sma_days)
+             .over("symbol").alias("coin_sma"),
         # streak of days above own SMA
-        (pl.col("close") > pl.col("close").rolling_mean(window_size=config.ud_sma_days, min_samples=config.ud_sma_days).over("symbol"))
-         .cast(pl.Int64).alias("_above_sma_flag"),
+            (pl.col("close") > _cal_roll(pl.col("close"), "mean", config.ud_sma_days, min_samples=config.ud_sma_days).over("symbol"))
+             .cast(pl.Int64).alias("_above_sma_flag"),
         # coin's own 30d return for FC filter
-        (pl.col("close") / pl.col("close").shift(30).over("symbol") - 1.0).alias("coin_30d_return"),
+            (pl.col("close") / calendar_shift(pl.col("close"), 30) - 1.0).alias("coin_30d_return"),
         # coin's own 60d return (FC v2 — late-cycle chase guard)
-        (pl.col("close") / pl.col("close").shift(60).over("symbol") - 1.0).alias("coin_60d_return"),
+            (pl.col("close") / calendar_shift(pl.col("close"), 60) - 1.0).alias("coin_60d_return"),
         # turnover-vs-own-30d-median (FC v2 — relative volume confirmation, not exhaustion)
-        pl.col("turnover_quote").rolling_median(window_size=30, min_samples=15)
-         .over("symbol").alias("turnover_median_30d"),
+            _cal_roll(pl.col("turnover_quote"), "median", 30, min_samples=15)
+             .over("symbol").alias("turnover_median_30d"),
     ])
     daily = daily.with_columns(
         (pl.col("turnover_quote") / pl.col("turnover_median_30d")).alias("vol_vs_30d_median")
     )
     # v4: multi-day cumulative log returns + per-window close locations + daily sigma
     daily = daily.with_columns([
-        (pl.col("close") / pl.col("close").shift(3).over("symbol")).log().alias("pump_3d_log"),
-        (pl.col("close") / pl.col("close").shift(7).over("symbol")).log().alias("pump_7d_log"),
+            (pl.col("close") / calendar_shift(pl.col("close"), 3)).log().alias("pump_3d_log"),
+            (pl.col("close") / calendar_shift(pl.col("close"), 7)).log().alias("pump_7d_log"),
         # 3d high/low for 3d close-location
-        pl.col("high").rolling_max(window_size=3, min_samples=3).over("symbol").alias("high_3d"),
-        pl.col("low").rolling_min(window_size=3, min_samples=3).over("symbol").alias("low_3d"),
-        pl.col("high").rolling_max(window_size=7, min_samples=7).over("symbol").alias("high_7d"),
-        pl.col("low").rolling_min(window_size=7, min_samples=7).over("symbol").alias("low_7d"),
+            _cal_roll(pl.col("high"), "max", 3, min_samples=3).over("symbol").alias("high_3d"),
+            _cal_roll(pl.col("low"), "min", 3, min_samples=3).over("symbol").alias("low_3d"),
+            _cal_roll(pl.col("high"), "max", 7, min_samples=7).over("symbol").alias("high_7d"),
+            _cal_roll(pl.col("low"), "min", 7, min_samples=7).over("symbol").alias("low_7d"),
         # daily sigma derived from annualized 30d realized vol
         (pl.col("realized_vol") / math.sqrt(365.0)).alias("sigma_daily_30d"),
     ]).with_columns([
@@ -641,38 +641,38 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
     # coin own N-day SMA (FC filter) — computed only if enabled to keep features small
     if config.fc_coin_above_own_sma_days > 0:
         daily = daily.with_columns(
-            pl.col("close").rolling_mean(window_size=config.fc_coin_above_own_sma_days,
-                                         min_samples=config.fc_coin_above_own_sma_days).over("symbol")
+                _cal_roll(pl.col("close"), "mean", config.fc_coin_above_own_sma_days,
+                          min_samples=config.fc_coin_above_own_sma_days).over("symbol")
             .alias("coin_fc_sma")
         )
     else:
         daily = daily.with_columns(pl.lit(None, dtype=pl.Float64).alias("coin_fc_sma"))
     daily = daily.with_columns([
         # 7d volume avg for confirmation
-        pl.col("turnover_quote").rolling_mean(window_size=config.cap_volume_lookback_days,
-                                              min_samples=config.cap_volume_lookback_days)
-         .over("symbol").alias("vol7d_mean"),
-        pl.col("turnover_quote").rolling_mean(window_size=config.res_volume_lookback_days,
-                                              min_samples=config.res_volume_lookback_days)
-         .over("symbol").alias("vol7d_mean_res"),
+            _cal_roll(pl.col("turnover_quote"), "mean", config.cap_volume_lookback_days,
+                      min_samples=config.cap_volume_lookback_days)
+             .over("symbol").alias("vol7d_mean"),
+            _cal_roll(pl.col("turnover_quote"), "mean", config.res_volume_lookback_days,
+                      min_samples=config.res_volume_lookback_days)
+             .over("symbol").alias("vol7d_mean_res"),
         # 14d volume avg for oversold bounce
-        pl.col("turnover_quote").rolling_mean(window_size=config.ob_volume_lookback_days,
-                                              min_samples=config.ob_volume_lookback_days)
-         .over("symbol").alias("vol14d_mean"),
+            _cal_roll(pl.col("turnover_quote"), "mean", config.ob_volume_lookback_days,
+                      min_samples=config.ob_volume_lookback_days)
+             .over("symbol").alias("vol14d_mean"),
         # ATR for trailing stop
         pl.max_horizontal([
             pl.col("high") - pl.col("low"),
-            (pl.col("high") - pl.col("close").shift(1).over("symbol")).abs(),
-            (pl.col("low") - pl.col("close").shift(1).over("symbol")).abs(),
+                (pl.col("high") - calendar_shift(pl.col("close"), 1)).abs(),
+                (pl.col("low") - calendar_shift(pl.col("close"), 1)).abs(),
         ]).alias("true_range"),
     ])
     daily = daily.with_columns([
-        pl.col("true_range").rolling_mean(window_size=config.trailing_atr_window_days,
-                                          min_samples=config.trailing_atr_window_days)
-        .over("symbol").alias("atr_20d"),
+            _cal_roll(pl.col("true_range"), "mean", config.trailing_atr_window_days,
+                      min_samples=config.trailing_atr_window_days)
+            .over("symbol").alias("atr_20d"),
         # 14d ATR for FC dynamic exits + ATR filter (shorter window = more responsive)
-        pl.col("true_range").rolling_mean(window_size=14, min_samples=7)
-        .over("symbol").alias("atr_14d"),
+            _cal_roll(pl.col("true_range"), "mean", 14, min_samples=7)
+            .over("symbol").alias("atr_14d"),
     ])
     daily = daily.with_columns(
         (pl.col("atr_14d") / pl.col("close")).alias("atr_14d_pct")
@@ -681,14 +681,15 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
     qwin = max(30, int(config.fc_atr_quantile_window_days))
     daily = daily.with_columns([
         # coin's own past-90d pump quantile (e.g. P95 of own log_return distribution)
-        pl.col("log_return").rolling_quantile(
-            quantile=config.fc_pump_quantile, window_size=qwin, min_samples=30
-        ).over("symbol").alias("own_pump_quantile_90d"),
+            _cal_roll(
+                pl.col("log_return"), "quantile", qwin, min_samples=30,
+                quantile=config.fc_pump_quantile,
+            ).over("symbol").alias("own_pump_quantile_90d"),
         # coin's own past-90d ATR quantile (used to detect "unusually high vol for this coin")
-        pl.col("atr_14d_pct").rolling_quantile(
-            quantile=min(0.99, max(0.50, config.fc_max_atr_own_percentile)),
-            window_size=qwin, min_samples=30
-        ).over("symbol").alias("own_atr_quantile_90d"),
+            _cal_roll(
+                pl.col("atr_14d_pct"), "quantile", qwin, min_samples=30,
+                quantile=min(0.99, max(0.50, config.fc_max_atr_own_percentile)),
+            ).over("symbol").alias("own_atr_quantile_90d"),
     ])
 
     # universe rank by today's volume (descending)
@@ -697,17 +698,17 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
     )
     # rolling turnover-rank percentile based on 30d average rank
     daily = daily.with_columns(
-        pl.col("today_volume_rank").rolling_mean(window_size=config.res_prior_rank_lookback_days,
-                                                 min_samples=config.res_prior_rank_lookback_days)
-         .over("symbol").alias("avg_rank_30d")
+            _cal_roll(pl.col("today_volume_rank"), "mean", config.res_prior_rank_lookback_days,
+                      min_samples=config.res_prior_rank_lookback_days)
+             .over("symbol").alias("avg_rank_30d")
     )
     # Normalize avg rank to a percentile (0=best, 1=worst) vs configured universe size.
     daily = daily.with_columns(
         (pl.col("avg_rank_30d") / pl.lit(float(config.universe_size))).clip(0.0, 1.0).alias("avg_rank_pct_30d")
     )
     daily = daily.with_columns([
-        pl.col("close").rolling_max(window_size=90, min_samples=30).over("symbol").alias("high_90d"),
-        pl.col("close").rolling_min(window_size=90, min_samples=30).over("symbol").alias("low_90d"),
+            _cal_roll(pl.col("close"), "max", 90, min_samples=30).over("symbol").alias("high_90d"),
+            _cal_roll(pl.col("close"), "min", 90, min_samples=30).over("symbol").alias("low_90d"),
     ])
     daily = daily.with_columns(
         pl.when((pl.col("high_90d") - pl.col("low_90d")).abs() > 1e-12)
@@ -737,22 +738,23 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
         w = max(20, int(config.xsec_beta_window))
         daily = daily.join(_btc_lr, on="ts_ms", how="left").with_columns(pl.col("btc_lr").fill_null(0.0))
         daily = daily.sort(["symbol", "ts_ms"]).with_columns([
-            (pl.col("log_return") * pl.col("btc_lr")).rolling_mean(w, min_samples=w).over("symbol").alias("_xy"),
-            pl.col("log_return").rolling_mean(w, min_samples=w).over("symbol").alias("_mx"),
-            pl.col("btc_lr").rolling_mean(w, min_samples=w).over("symbol").alias("_my"),
-            (pl.col("btc_lr") ** 2).rolling_mean(w, min_samples=w).over("symbol").alias("_yy"),
+                _cal_roll(pl.col("log_return") * pl.col("btc_lr"), "mean", w, min_samples=w).over("symbol").alias("_xy"),
+                _cal_roll(pl.col("log_return"), "mean", w, min_samples=w).over("symbol").alias("_mx"),
+                _cal_roll(pl.col("btc_lr"), "mean", w, min_samples=w).over("symbol").alias("_my"),
+                _cal_roll(pl.col("btc_lr") ** 2, "mean", w, min_samples=w).over("symbol").alias("_yy"),
         ]).with_columns(
             ((pl.col("_xy") - pl.col("_mx") * pl.col("_my")) /
              (pl.col("_yy") - pl.col("_my") ** 2).clip(lower_bound=1e-9)).alias("_beta")
         ).with_columns(
             (pl.col("log_return") - pl.col("_beta") * pl.col("btc_lr")).alias("_resid_lr")
         ).with_columns(
-            pl.col("_resid_lr").rolling_sum(config.xsec_lookback_days, min_samples=config.xsec_lookback_days)
-            .over("symbol").alias("mom_score")
+                _cal_roll(pl.col("_resid_lr"), "sum", config.xsec_lookback_days,
+                          min_samples=config.xsec_lookback_days)
+                .over("symbol").alias("mom_score")
         )
     else:
         daily = daily.with_columns(
-            (pl.col("close") / pl.col("close").shift(config.xsec_lookback_days).over("symbol") - 1.0).alias("mom_score")
+                (pl.col("close") / calendar_shift(pl.col("close"), config.xsec_lookback_days) - 1.0).alias("mom_score")
         )
     daily = daily.with_columns(
         pl.when(pl.col("in_universe") & pl.col("mom_score").is_not_null())
@@ -772,19 +774,19 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
     btc = daily.filter(pl.col("symbol") == config.regime_symbol).sort("ts_ms")
     if not btc.is_empty():
         btc = btc.with_columns([
-            pl.col("close").rolling_mean(window_size=config.regime_sma_days, min_samples=config.regime_sma_days).alias("regime_sma"),
-            pl.col("close").rolling_mean(window_size=200, min_samples=100).alias("regime_sma_200"),
-            (pl.col("log_return").rolling_std(window_size=30, min_samples=20) * math.sqrt(365.0)).alias("btc_rv_30"),
+                _cal_roll(pl.col("close"), "mean", config.regime_sma_days, min_samples=config.regime_sma_days).alias("regime_sma"),
+                _cal_roll(pl.col("close"), "mean", 200, min_samples=100).alias("regime_sma_200"),
+                (_cal_roll(pl.col("log_return"), "std", 30, min_samples=20) * math.sqrt(365.0)).alias("btc_rv_30"),
         ])
         btc = btc.with_columns([
-            pl.col("btc_rv_30").rolling_min(window_size=365, min_samples=120).alias("_rvmin"),
-            pl.col("btc_rv_30").rolling_max(window_size=365, min_samples=120).alias("_rvmax"),
+                _cal_roll(pl.col("btc_rv_30"), "min", 365, min_samples=120).alias("_rvmin"),
+                _cal_roll(pl.col("btc_rv_30"), "max", 365, min_samples=120).alias("_rvmax"),
         ])
         # Pick the larger of the two high-window settings for computing the rolling max
         high_w = max(config.fc_btc_not_near_high_window_days, config.fc_btc_must_be_near_high_window_days)
         if high_w > 0:
             btc = btc.with_columns(
-                pl.col("close").rolling_max(window_size=high_w, min_samples=high_w).alias("btc_recent_high")
+                    _cal_roll(pl.col("close"), "max", high_w, min_samples=high_w).alias("btc_recent_high")
             ).with_columns(
                 (pl.col("close") / pl.col("btc_recent_high")).alias("btc_high_proximity")
             )
@@ -820,7 +822,7 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
     eth = daily.filter(pl.col("symbol") == "ETHUSDT").sort("ts_ms")
     if not eth.is_empty():
         eth = eth.with_columns(
-            pl.col("close").rolling_mean(window_size=config.regime_sma_days, min_samples=config.regime_sma_days).alias("eth_sma")
+                _cal_roll(pl.col("close"), "mean", config.regime_sma_days, min_samples=config.regime_sma_days).alias("eth_sma")
         ).with_columns(
             (pl.col("close") > pl.col("eth_sma")).alias("eth_regime_on")
         ).select(["ts_ms", "eth_regime_on"])
@@ -847,9 +849,9 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
                 .rename({"ts_ms_day_end": "ts_ms"})
                 .sort(["symbol", "ts_ms"])
                 .with_columns(
-                    pl.col("funding_day_sum").rolling_sum(window_size=config.fs_funding_lookback_days,
-                                                          min_samples=1).over("symbol")
-                     .alias("funding_lookback_sum")
+                        _cal_roll(pl.col("funding_day_sum"), "sum", config.fs_funding_lookback_days,
+                                  min_samples=1).over("symbol")
+                         .alias("funding_lookback_sum")
                 )
                 .select(["ts_ms", "symbol", "funding_lookback_sum", "funding_recent"])
             )
@@ -888,8 +890,8 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
             .rename({"ts_ms_day_end": "ts_ms"})
             .sort(["symbol", "ts_ms"])
             .with_columns([
-                (pl.col("oi") / pl.col("oi").shift(3).over("symbol") - 1.0).alias("oi_chg_3d"),
-                (pl.col("oi") / pl.col("oi").shift(7).over("symbol") - 1.0).alias("oi_chg_7d"),
+                    (pl.col("oi") / calendar_shift(pl.col("oi"), 3) - 1.0).alias("oi_chg_3d"),
+                    (pl.col("oi") / calendar_shift(pl.col("oi"), 7) - 1.0).alias("oi_chg_7d"),
             ])
             .select(["ts_ms", "symbol", "oi", "oi_chg_3d", "oi_chg_7d"])
         )
@@ -911,7 +913,7 @@ def build_long_features(klines_1h: pl.DataFrame, *, funding: pl.DataFrame | None
     # Build a cross-sectional factor score per config.metrics_factor, then rank in-universe.
     if metrics is not None and not metrics.is_empty() and "global_lsr" in metrics.columns:
         m = metrics.sort(["symbol", "ts_ms"]).with_columns(
-            (pl.col("oi") / pl.col("oi").shift(7).over("symbol") - 1.0).alias("oi_chg7_m")
+                (pl.col("oi") / calendar_shift(pl.col("oi"), 7) - 1.0).alias("oi_chg7_m")
         ).select(["ts_ms", "symbol", "toptrader_lsr", "global_lsr", "taker_lsr", "oi_chg7_m"])
         daily = daily.join(m, on=["ts_ms", "symbol"], how="left")
         factor = config.metrics_factor
@@ -1532,11 +1534,82 @@ def _run_long_pipeline(
                     "lowvol": 0, "reversal": 0, "funding_carry": 0, "oi_momentum": 0, "metrics": 0}
     round_trip_cost_bps = costs.base_entry_exit_cost_bps * config.cost_multiplier
     notional_weight = config.gross_exposure / max(config.max_concurrent_positions, 1)
+    if config.sizing not in {"vol_parity", "equal"}:
+        raise ValueError(f"unsupported long-native sizing mode: {config.sizing!r}")
+    window_end_ts_ms = date_ms(config.end_date) if config.end_date else None
     # drawdown-throttle state (realized book equity from closed trades)
     dd_realized_pnl = 0.0
     dd_peak_eq = 1.0
     dd_counted = 0
     dd_cur = 0.0
+
+    def _scan_position_exit(symbol: str, pos: dict[str, Any], through_ts: int) -> bool:
+        bars = bars_by_symbol.get(symbol)
+        if bars is None or through_ts <= int(pos["entry_ts_ms"]):
+            return False
+        ends = bars["ends"]
+        start_after = max(int(pos.get("last_exit_scan_ts_ms", pos["entry_ts_ms"])), int(pos["entry_ts_ms"]))
+        start_idx = bisect_right(ends, start_after)
+        end_idx = bisect_right(ends, through_ts)
+        for idx in range(max(start_idx, int(pos["entry_bar_idx"]) + 1), end_idx):
+            bar_high = float(bars["high"][idx])
+            bar_low = float(bars["low"][idx])
+            bar_close = float(bars["close"][idx])
+            bar_end_ts = int(bars["bar_end_ts_ms"][idx])
+            entry_price = pos["entry_price"]
+            if config.fc_use_scaled_exit and pos.get("pattern") == "fomo_chase" and not pos.get("be_armed", False):
+                half_tp_price = entry_price * (1.0 + pos["tp_pct"] / 2.0)
+                if bar_high >= half_tp_price:
+                    if entry_price > pos["stop_price"]:
+                        pos["stop_price"] = entry_price
+                    pos["be_armed"] = True
+            if config.use_trailing_stop and pos.get("trailing_atr") is not None:
+                pos["high_water_close"] = max(pos.get("high_water_close", entry_price), bar_close)
+                trail_stop = pos["high_water_close"] - config.trailing_atr_multiple * pos["trailing_atr"]
+                if trail_stop > pos["stop_price"]:
+                    pos["stop_price"] = trail_stop
+            if (
+                config.fc_use_scaled_exit
+                and pos.get("be_armed", False)
+                and config.fc_scaled_exit_trail_atr_mult > 0
+                and pos.get("trailing_atr") is not None
+            ):
+                pos["high_water_close"] = max(pos.get("high_water_close", entry_price), bar_close)
+                trail = pos["high_water_close"] - config.fc_scaled_exit_trail_atr_mult * pos["trailing_atr"]
+                if trail > pos["stop_price"]:
+                    pos["stop_price"] = trail
+            if bar_low <= pos["stop_price"]:
+                trade_rows.append(_finalize_trade(
+                    pos, exit_ts_ms=bar_end_ts, exit_price=pos["stop_price"],
+                    reason="stop_loss", notional_weight=notional_weight,
+                    round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
+                    notional_multiplier=config.notional_multiplier,
+                ))
+                cooldown_until[symbol] = bar_end_ts + config.cooldown_days * MS_PER_DAY
+                stats["exits_stop"] += 1
+                return True
+            if bar_high >= pos["take_profit_price"]:
+                trade_rows.append(_finalize_trade(
+                    pos, exit_ts_ms=bar_end_ts, exit_price=pos["take_profit_price"],
+                    reason="take_profit", notional_weight=notional_weight,
+                    round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
+                    notional_multiplier=config.notional_multiplier,
+                ))
+                cooldown_until[symbol] = bar_end_ts + config.cooldown_days * MS_PER_DAY
+                stats["exits_take_profit"] += 1
+                return True
+            if bar_end_ts >= pos["planned_exit_ts_ms"]:
+                trade_rows.append(_finalize_trade(
+                    pos, exit_ts_ms=bar_end_ts, exit_price=bar_close,
+                    reason="time_stop", notional_weight=notional_weight,
+                    round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
+                    notional_multiplier=config.notional_multiplier,
+                ))
+                cooldown_until[symbol] = bar_end_ts + config.cooldown_days * MS_PER_DAY
+                stats["exits_time"] += 1
+                return True
+        pos["last_exit_scan_ts_ms"] = through_ts
+        return False
 
     for ts in dates_all:
         rows_today = features_by_date.get(ts, [])
@@ -1544,77 +1617,7 @@ def _run_long_pipeline(
         # ---- check exits for currently held positions ----
         for symbol in list(open_positions.keys()):
             pos = open_positions[symbol]
-            bars = bars_by_symbol.get(symbol)
-            if bars is None:
-                continue
-            # Iterate this day's 1h bars (24 hours) from pos["entry_ts_ms"] onwards
-            day_end_ts = ts  # day_end timestamp = ts
-            # Find indices in the symbol's 1h bars whose bar_end is within (yesterday_end, today_end]
-            ends = bars["ends"]
-            start_idx = bisect_right(ends, day_end_ts - MS_PER_DAY)
-            end_idx = bisect_right(ends, day_end_ts)
-            exited = False
-            for idx in range(max(start_idx, pos["entry_bar_idx"] + 1), end_idx):
-                bar_high = float(bars["high"][idx])
-                bar_low = float(bars["low"][idx])
-                bar_close = float(bars["close"][idx])
-                bar_end_ts = int(bars["bar_end_ts_ms"][idx])
-                entry_price = pos["entry_price"]
-                # v11 exit alpha: move stop to breakeven once bar_high reaches half-TP
-                if config.fc_use_scaled_exit and pos.get("pattern") == "fomo_chase" and not pos.get("be_armed", False):
-                    half_tp_price = entry_price * (1.0 + pos["tp_pct"] / 2.0)
-                    if bar_high >= half_tp_price:
-                        if entry_price > pos["stop_price"]:
-                            pos["stop_price"] = entry_price  # raise to breakeven
-                        pos["be_armed"] = True
-                # Update trailing stop if enabled
-                if config.use_trailing_stop and pos.get("trailing_atr") is not None:
-                    pos["high_water_close"] = max(pos.get("high_water_close", entry_price), bar_close)
-                    trail_stop = pos["high_water_close"] - config.trailing_atr_multiple * pos["trailing_atr"]
-                    if trail_stop > pos["stop_price"]:
-                        pos["stop_price"] = trail_stop
-                # v11 scaled-exit ATR trail (after BE move, trail by K × ATR)
-                if (config.fc_use_scaled_exit and pos.get("be_armed", False)
-                        and config.fc_scaled_exit_trail_atr_mult > 0
-                        and pos.get("trailing_atr") is not None):
-                    pos["high_water_close"] = max(pos.get("high_water_close", entry_price), bar_close)
-                    trail = pos["high_water_close"] - config.fc_scaled_exit_trail_atr_mult * pos["trailing_atr"]
-                    if trail > pos["stop_price"]:
-                        pos["stop_price"] = trail
-                # Stop check (use bar low for long)
-                if bar_low <= pos["stop_price"]:
-                    trade = _finalize_trade(pos, exit_ts_ms=bar_end_ts, exit_price=pos["stop_price"],
-                                            reason="stop_loss", notional_weight=notional_weight,
-                                            round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
-                                            notional_multiplier=config.notional_multiplier)
-                    trade_rows.append(trade)
-                    cooldown_until[symbol] = bar_end_ts + config.cooldown_days * MS_PER_DAY
-                    stats["exits_stop"] += 1
-                    exited = True
-                    break
-                # Take profit check
-                if bar_high >= pos["take_profit_price"]:
-                    trade = _finalize_trade(pos, exit_ts_ms=bar_end_ts, exit_price=pos["take_profit_price"],
-                                            reason="take_profit", notional_weight=notional_weight,
-                                            round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
-                                            notional_multiplier=config.notional_multiplier)
-                    trade_rows.append(trade)
-                    cooldown_until[symbol] = bar_end_ts + config.cooldown_days * MS_PER_DAY
-                    stats["exits_take_profit"] += 1
-                    exited = True
-                    break
-                # Time-stop check (if bar_end past planned_exit_ts)
-                if bar_end_ts >= pos["planned_exit_ts_ms"]:
-                    trade = _finalize_trade(pos, exit_ts_ms=bar_end_ts, exit_price=bar_close,
-                                            reason="time_stop", notional_weight=notional_weight,
-                                            round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
-                                            notional_multiplier=config.notional_multiplier)
-                    trade_rows.append(trade)
-                    cooldown_until[symbol] = bar_end_ts + config.cooldown_days * MS_PER_DAY
-                    stats["exits_time"] += 1
-                    exited = True
-                    break
-            if exited:
+            if _scan_position_exit(symbol, pos, int(ts)):
                 del open_positions[symbol]
 
         # update realized-equity drawdown (from trades closed so far) for the throttle
@@ -1696,6 +1699,9 @@ def _run_long_pipeline(
                 stats["skipped_capacity"] += 1
                 continue
             entry_ts_ms = ts + config.entry_delay_hours * MS_PER_HOUR
+            if window_end_ts_ms is not None and entry_ts_ms > window_end_ts_ms:
+                stats["skipped_no_entry_bar"] += 1
+                continue
             bars = bars_by_symbol.get(symbol)
             entry_idx = bars["by_end"].get(entry_ts_ms) if bars else None
             if entry_idx is None or bars is None:
@@ -1733,12 +1739,19 @@ def _run_long_pipeline(
                     if config.fc_sniper_skip_on_no_retrace:
                         stats["skipped_no_entry_bar"] += 1
                         continue
-                    # Else fall through: use deadline entry (or original entry_ts_ms if deadline missing)
+                    # Else fall through: use the actual deadline bar. If that bar
+                    # is absent, the deadline decision cannot be backfilled to
+                    # hour-1 without look-ahead.
                     deadline_ts = ts + deadline_h * MS_PER_HOUR
+                    if window_end_ts_ms is not None and deadline_ts > window_end_ts_ms:
+                        stats["skipped_no_entry_bar"] += 1
+                        continue
                     deadline_idx = bars["by_end"].get(deadline_ts)
-                    if deadline_idx is not None:
-                        entry_ts_ms = deadline_ts
-                        entry_idx = deadline_idx
+                    if deadline_idx is None:
+                        stats["skipped_no_entry_bar"] += 1
+                        continue
+                    entry_ts_ms = deadline_ts
+                    entry_idx = deadline_idx
             entry_price = float(bars["close"][entry_idx])
             if not math.isfinite(entry_price) or entry_price <= 0.0:
                 stats["skipped_no_entry_bar"] += 1
@@ -1747,11 +1760,13 @@ def _run_long_pipeline(
             take_profit_price = entry_price * (1.0 + tp_pct)
             planned_exit_ts_ms = entry_ts_ms + hold_days * MS_PER_DAY
 
-            # Position weight via inverse vol
-            vol_est = _safe_float(row.get("realized_vol")) or config.vol_floor_annual
-            vol_used = max(vol_est, config.vol_floor_annual)
-            position_weight = min(config.vol_floor_annual / vol_used, config.max_position_weight / notional_weight)
-            position_weight = max(position_weight, 0.25)
+            if config.sizing == "equal":
+                position_weight = 1.0
+            else:
+                vol_est = _safe_float(row.get("realized_vol")) or config.vol_floor_annual
+                vol_used = max(vol_est, config.vol_floor_annual)
+                position_weight = min(config.vol_floor_annual / vol_used, config.max_position_weight / notional_weight)
+                position_weight = max(position_weight, 0.25)
             # FC v6: scale position weight by alpha score (full at score=1.0, half at score=0.5)
             if config.fc_score_size_scaling and pattern == "fomo_chase":
                 position_weight = position_weight * max(0.3, min(1.0, score))
@@ -1763,15 +1778,6 @@ def _run_long_pipeline(
                     continue
                 position_weight = position_weight * tr_scale
 
-            # B.3: per-symbol weight cap on gross exposure. notional_weight is
-            # the slot-fraction (gross_exposure / max_concurrent_positions);
-            # the effective gross share is notional_weight * position_weight.
-            # Cap that at max_per_symbol_weight by reducing position_weight.
-            if config.max_per_symbol_weight > 0.0:
-                effective_gross = notional_weight * position_weight
-                if effective_gross > config.max_per_symbol_weight:
-                    position_weight = config.max_per_symbol_weight / max(notional_weight, 1e-12)
-
             # Volatility-managed book scalar (applied last so it's a clean book-level tilt):
             # size inversely to BTC realized vol, clipped. PIT-safe (btc_rv_30 is trailing).
             # _vol_target_scale is SHARED with the live demo cycle so they can't drift.
@@ -1782,12 +1788,21 @@ def _run_long_pipeline(
             if config.enable_dd_throttle and dd_cur <= config.dd_throttle_trigger:
                 position_weight = position_weight * config.dd_throttle_scale
 
+            # B.3: per-symbol weight cap on final gross exposure. This must bind
+            # after all entry quality, vol-target and drawdown multipliers; otherwise
+            # a later book-level scalar can silently blow through the configured cap.
+            if config.max_per_symbol_weight > 0.0:
+                effective_gross = notional_weight * position_weight
+                if effective_gross > config.max_per_symbol_weight:
+                    position_weight = config.max_per_symbol_weight / max(notional_weight, 1e-12)
+
             trailing_atr = _safe_float(row.get("atr_20d"))
             open_positions[symbol] = {
                 "symbol": symbol,
                 "pattern": pattern,
                 "entry_signal_ts_ms": int(ts),
                 "entry_ts_ms": int(entry_ts_ms),
+                "last_exit_scan_ts_ms": int(entry_ts_ms),
                 "entry_bar_idx": int(entry_idx),
                 "entry_price": float(entry_price),
                 "stop_price": float(stop_price),
@@ -1802,14 +1817,24 @@ def _run_long_pipeline(
                 "trailing_atr": trailing_atr,
             }
 
-    # Force-close at end
+    # Force-close at the configured research boundary, not at the tail of the
+    # whole loaded root. A windowed run must not leak future bars into its final
+    # mark. Before marking, scan all hourly bars up to the same boundary so stops
+    # and targets still fire when daily feature rows are missing.
     if open_positions:
         for symbol, pos in list(open_positions.items()):
             bars = bars_by_symbol.get(symbol)
             if bars is None or len(bars["close"]) == 0:
                 continue
-            exit_price = float(bars["close"][-1])
-            exit_ts = int(bars["bar_end_ts_ms"][-1])
+            force_close_through_ts = window_end_ts_ms if window_end_ts_ms is not None else int(bars["bar_end_ts_ms"][-1])
+            if _scan_position_exit(symbol, pos, int(force_close_through_ts)):
+                del open_positions[symbol]
+                continue
+            exit_idx = bisect_right(bars["ends"], int(force_close_through_ts)) - 1
+            if exit_idx < 0 or int(bars["bar_end_ts_ms"][exit_idx]) < int(pos["entry_ts_ms"]):
+                continue
+            exit_price = float(bars["close"][exit_idx])
+            exit_ts = int(bars["bar_end_ts_ms"][exit_idx])
             trade = _finalize_trade(pos, exit_ts_ms=exit_ts, exit_price=exit_price,
                                     reason="data_end", notional_weight=notional_weight,
                                     round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
@@ -1930,6 +1955,25 @@ def _split_rows(
 SHARPE_PROMOTION_THRESHOLD = 0.7  # Daily-aligned honest Sharpe; whole-period gate.
 
 
+def _cal_roll(
+    expr: pl.Expr,
+    agg: str,
+    n_days: int,
+    *,
+    shifted: bool = False,
+    min_samples: int | None = None,
+    **kwargs: Any,
+) -> pl.Expr:
+    return calendar_roll(
+        expr,
+        agg,
+        n_days,
+        shifted=shifted,
+        min_samples=n_days if min_samples is None else min_samples,
+        **kwargs,
+    )
+
+
 def _evaluate_promotion(*, splits, summary, funding_mode, full_pit_universe_pass) -> dict[str, Any]:
     """Whole-period promotion gate. Splits are diagnostic only.
 
@@ -1944,6 +1988,11 @@ def _evaluate_promotion(*, splits, summary, funding_mode, full_pit_universe_pass
     funding_ok = funding_mode != "missing"
     splits_with_baskets = [r for r in splits if r["basket_count"] > 0]
     all_pos = bool(splits_with_baskets) and all(r["total_return"] > 0 for r in splits_with_baskets)
+    avg_split_sharpe = (
+        sum(float(r.get("sharpe_like", 0.0)) for r in splits_with_baskets) / len(splits_with_baskets)
+        if splits_with_baskets
+        else 0.0
+    )
 
     reasons: list[str] = []
     if not full_pit_universe_pass:
@@ -1972,6 +2021,7 @@ def _evaluate_promotion(*, splits, summary, funding_mode, full_pit_universe_pass
         "sharpe_threshold": SHARPE_PROMOTION_THRESHOLD,
         "splits_with_baskets": len(splits_with_baskets),
         "all_splits_positive": all_pos,
+        "avg_split_sharpe": avg_split_sharpe,
         "promotion_reasons": reasons,
     }
 

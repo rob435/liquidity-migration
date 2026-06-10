@@ -105,7 +105,8 @@ If any answer is weak, the backtest is not ready to influence real-money work.
   fee/slippage stressed but funding-missing.
 - Legacy fixed-day rebalance-grid benchmarks are retired — do not cite their
   results as evidence for the event-driven system. (The fade-confirmation
-  *execution* is the live strategy, a different thing — see STATE.md.)
+  *execution* is the promoted short strategy, a different thing; which sleeves are
+  actually live on the box is tracked in STATE.md > What's Running.)
 - Demo/forward execution is execution evidence only, never alpha proof.
 
 If the `liqmig-research` MCP server is available, its `audit_run_artifacts` tool

@@ -167,8 +167,7 @@ systemctl enable --now liquidity-migration-combined-book-report.timer
 # Daily refresh of the continuous-fade rmom gate + the gate seed run when either the
 # continuous demo sleeve or its no-order paper evidence collector is on.
 if continuous_rmom_refresh_on; then
-systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer
-systemctl enable --now liquidity-migration-continuous-forward-report.timer
+apply_timer_enable on $CONTINUOUS_SLEEVE_TIMERS $CONTINUOUS_FORWARD_REPORT_TIMERS
 # Seed the rmom gate NOW rather than waiting for the 00:20 UTC timer. Without this a
 # fresh deploy starts the continuous daemon into an EMPTY gate -> the live decile drops
 # every symbol (silent zero-signal blackout — the 2026-06-02 incident). The refresh is a
@@ -201,9 +200,9 @@ else
 fi
 else
   echo "kill-switch: continuous demo+paper sleeves off -> skipping rmom timer + gate seed." >&2
-  systemctl disable --now liquidity-migration-continuous-rmom-refresh.timer 2>/dev/null || true
-  systemctl disable --now liquidity-migration-continuous-forward-report.timer 2>/dev/null || true
+  apply_timer_enable off $CONTINUOUS_SLEEVE_TIMERS $CONTINUOUS_FORWARD_REPORT_TIMERS
 fi
+apply_timer_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS
 
 # --- restart: only the ON sleeves (off sleeves were disable --now'd above); risk always. ---
 # Long/continuous share the liquidity_migration package with the short side, so any Python
@@ -228,11 +227,11 @@ verify_sleeve "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
 if continuous_rmom_refresh_on; then
-  systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer
-  systemctl is-active --quiet liquidity-migration-continuous-rmom-refresh.timer
-  systemctl is-enabled --quiet liquidity-migration-continuous-forward-report.timer
-  systemctl is-active --quiet liquidity-migration-continuous-forward-report.timer
+  verify_timer on $CONTINUOUS_SLEEVE_TIMERS $CONTINUOUS_FORWARD_REPORT_TIMERS
+else
+  verify_timer off $CONTINUOUS_SLEEVE_TIMERS $CONTINUOUS_FORWARD_REPORT_TIMERS
 fi
+verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS
 # Timer verification: is-enabled catches "we never enabled it"; is-active
 # catches "we enabled it but something stopped it." Both are fail-loud here
 # so deploys can't silently leave the watchdog or daily report off.

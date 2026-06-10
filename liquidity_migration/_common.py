@@ -111,6 +111,31 @@ def calendar_shift(value: pl.Expr, periods: int, *, time_col: str = "ts_ms", day
     return pl.when(aligned).then(value.shift(periods).over("symbol")).otherwise(None)
 
 
+def calendar_roll(
+    expr: pl.Expr,
+    agg: str,
+    n_periods: int,
+    *,
+    shifted: bool,
+    min_samples: int,
+    time_col: str = "ts_ms",
+    period_ms: int = MS_PER_DAY,
+    **kwargs: Any,
+) -> pl.Expr:
+    """Calendar-aware rolling window over an integer timestamp grid.
+
+    Row-based ``rolling_*(window_size=N)`` counts present rows, so a missing
+    calendar day silently stretches a "30d" feature across more than 30 days.
+    ``rolling_*_by`` measures the timestamp span instead. For contiguous data it
+    is numerically equivalent to the row-based rolling call with the same
+    ``min_samples``.
+    """
+    window = f"{int(n_periods) * int(period_ms)}i"
+    closed = "left" if shifted else "right"
+    method = getattr(expr, f"rolling_{agg}_by")
+    return method(time_col, window_size=window, closed=closed, min_samples=min_samples, **kwargs)
+
+
 def trading_day_expr(ts_col: str = "ts_ms") -> pl.Expr:
     """The PIT *trading day* as a polars Date expression: ``date(ts_ms - 1ms)``.
 

@@ -127,7 +127,7 @@ def test_ws_cancel_success_returns_ack_data_without_rest() -> None:
     router = BybitTradeRouter(rest_client=rest, ws_client=ws)
     result = router.cancel_order(symbol="BTCUSDT", order_link_id="lm-A")
     assert result == {"orderId": "ws-cancel-1"}
-    assert ws.cancel_params == [{"symbol": "BTCUSDT", "orderLinkId": "lm-A"}]
+    assert ws.cancel_params == [{"symbol": "BTCUSDT", "order_link_id": "lm-A"}]
     assert rest.cancel_calls == []
 
 

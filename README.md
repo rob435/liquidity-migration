@@ -3,8 +3,8 @@
 A research codebase for a Bybit liquidity-migration short strategy — a
 cross-sectional strategy that ranks the perpetual-futures universe by a
 volume / liquidity-migration signal and shorts the weakest-ranked names.
-A long-only sleeve (`MultiStratV1` / v11a, FOMO-chase) runs alongside on
-demo.
+A long-only sleeve (`MultiStratV1` / v11a, FOMO-chase) is promoted alongside it
+but is currently toggled off on the live box; see [STATE.md](STATE.md).
 
 ## Status: research-stage — selection + execution, live demo running
 
@@ -15,14 +15,16 @@ catch-the-top strategy). The earlier "Round 2 = documented null" verdict has bee
 **retracted** (substantially a methodology artifact). Under realistic capped stop
 fills at `max_active=12`, the daily strategy is **gross-positive on both venues
 in-sample**. It stays in-sample; the Bybit demo forward test is the arbiter;
-nothing is promoted; real money stays off. Dated numbers + full record (the one
+nothing is promoted to real money. Dated numbers + full record (the one
 research file): [docs/research_summary.md](docs/research_summary.md); live state +
 what's next: [STATE.md](STATE.md).
 
-A demo (paper) forward test of the frozen `promoted` short profile + the v11a
-long sleeve runs on a Bybit demo account on a VPS — that demo is the actual
-forward out-of-sample test (deployed parameters are tracked in [STATE.md](STATE.md)). No real-money
-trading is active: a real-money execution path exists in the code but
+A Bybit demo account on a VPS hosts the forward tests. As of 2026-06-09 the box
+runs only the continuous sleeve (research-stage, demo orders + paper shadow) plus
+the risk engine and a dry-run BTC hedge timer; the frozen promoted short profile
+and v11a long sleeve are toggled off in `deploy/sleeves.env` but remain
+promoted-in-code and redeployable. Forward demo is the arbiter; clocks restarted
+2026-06-09. No real-money trading is active: a real-money execution path exists in the code but
 the account is a plain `.env` toggle (`DEMO` / `REAL_MONEY`, mutually
 exclusive) that defaults to demo. The strategy is not validated for real
 money.

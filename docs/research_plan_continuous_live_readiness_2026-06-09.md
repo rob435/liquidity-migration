@@ -37,13 +37,14 @@ continuous-winner-robustness, continuous-demote-downtrend-extension (all 2026-06
   venue qty filters deferred to executor) + tests; mirrors
   `plan_continuous_rebalance_resizes` so the demo daemon can adopt it. No demo orders
   without operator say-so.
-- **R3 — forward Tier-3 clock on the right object.** Audit what the continuous
-  paper/no-order evidence collector currently tracks (`continuous-forward-readiness`
-  CLI); wire/spec the winner+hedge object as the tracked configuration so forward
-  evidence accrues for the thing we would deploy. Demo orders remain OFF.
-- **R4 — impact calibration.** Reconcile modeled entry-impact (impact_exponent 0.5,
-  fixed bps) against OBSERVED daily-demo fills (shared execution path) at deployed
-  sizes; restate winner+hedge numbers under calibrated impact if it differs materially.
+- **R3 — forward Tier-3 clock on the right object. DONE.** The Road-B signal-replay
+  collector is built, config-hash pinned, seeded, and awaiting fresh roots. The rebuilt
+  VPS also runs continuous demo orders on the single-component live book; full
+  four-component ensemble execution is separate R2-LIVE work below.
+- **R4 — impact calibration. BLOCKED on fresh fills.** Reconcile modeled entry-impact
+  (impact_exponent 0.5, fixed bps) against observed fills from the rebuilt continuous
+  demo sleeve's shared execution path; restate winner+hedge numbers under calibrated
+  impact if it differs materially.
 - **R5 — capacity statement.** Per-symbol participation at target deploy size ×10
   (Tier-3 requires capacity ≥10x deployment); document the binding names.
 
@@ -135,3 +136,8 @@ Amendment-5 calibration), paper shadow, risk service, rmom refresh, forward repo
   adoption-schema check. Warm-start fixed to the UN-hedged control book (the hedged
   forward ledger had beta pre-neutralized -> would size 0). NEXT: verify a cycle + flip
   submit; wire sniper resting-limit; faithful 4-component ensemble entries.
+- 2026-06-10 (151c685): sniper limit planner built
+  (`plan_continuous_sniper_orders`, default-off) and hedge ledger registered with
+  `ws_risk` (tracked, never force-exited; test-asserted). Remaining:
+  order-submission glue for sniper+hedge, one verified live hedge cycle, the
+  `SUBMIT_HEDGE` flip, and faithful four-component ensemble entries.

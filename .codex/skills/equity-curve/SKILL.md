@@ -79,7 +79,7 @@ live there).
 ## Canonical v11a profile (for context when reporting)
 
 - Universe / regime parameters (universe size, turnover lookback, BTC regime
-  gate) come from `_v11a_long_native_config()` in `liquidity_migration/long_native.py`
+  gate) come from `_v11a_long_native_config()` in `liquidity_migration/long_native_event_demo.py`
   — read them there rather than trusting a copy here. Membership is PIT-recomputed
   daily, so the count of distinct symbols traded exceeds the universe size as it
   rotates over the years.

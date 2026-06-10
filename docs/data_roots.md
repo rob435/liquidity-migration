@@ -48,7 +48,8 @@ These roots are **not committed** (data, not code).
 
 When the per-venue roots span their full available histories there is no
 clean internal OOS window left in either venue. **Pristine OOS henceforth is
-the forward demo + paper ledgers, ticking from 2026-05-22.**
+the forward demo + paper ledgers, ticking from the latest forward-clock restart
+(2026-06-09, full VPS rebuild — see STATE.md for the current clock).**
 
 When a candidate parameter set is promoted, the forward ledgers accumulate
 clean OOS PnL that no backtest sweep can touch. Cite forward returns as the
@@ -61,18 +62,29 @@ The live Bybit demo runner intentionally uses a separate operational root,
 
 ```text
 /opt/liquidity-migration/data/bybit-demo-event
+/opt/liquidity-migration/data/bybit-paper-event
 /opt/liquidity-migration/data/bybit-long-demo-event
+/opt/liquidity-migration/data/bybit-long-paper-event
+/opt/liquidity-migration/data/bybit-continuous-demo-event
+/opt/liquidity-migration/data/bybit-continuous-paper-event
+/opt/liquidity-migration/data/bybit-continuous-hedge-event
 ```
 
-The VPS ledgers were unaffected by the 2026-05-27 research-root deletion.
+Which sleeves are live at any moment is `deploy/sleeves.env` + STATE.md, not
+this file; every root keeps its ledgers regardless of toggle state because
+`ws_risk` reads all configured roots.
+
+VPS ledger history restarted from a clean slate at the 2026-06-09 full rebuild
+(all prior demo/paper history lost — see STATE.md). The research roots and VPS
+roots remain fully independent.
 Do not point the live demo order/trade ledgers at any research root. Each
 demo root contains its forward kline cache, order ledgers, trade ledgers,
 cycle reports, and risk-watchdog reports.
 
-The parallel paper (dry-run) runner uses its own separate root
-(`data/bybit-paper-event`). It shadows the demo runner — same strategy
-profile, universe, and cadence — but submits no orders and records
-idealized fills at the signal price. Comparing the paper and demo ledgers
+Each sleeve has a paper (dry-run) shadow on its own root (short:
+`data/bybit-paper-event`, long: `data/bybit-long-paper-event`, continuous:
+`data/bybit-continuous-paper-event`) — same profile/universe/cadence, no
+orders, idealized fills at signal price. Comparing the paper and demo ledgers
 measures demo-vs-paper execution slippage. Run `bash scripts/reconcile.sh`
 (skill: `pit-reconcile`) for the full demo↔paper↔backtest↔Bybit reconcile — it is
 the only reconcile entrypoint; do not hand-assemble the `reconcile-*` calls.

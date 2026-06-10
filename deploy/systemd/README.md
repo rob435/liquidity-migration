@@ -1,6 +1,6 @@
 # VPS systemd deployment
 
-The active VPS services are:
+The deployable VPS units are:
 
 - `liquidity-migration-bybit-demo.service`: short event entry/normal lifecycle runner.
 - `liquidity-migration-bybit-paper.service`: dry-run paper shadow of the short runner
@@ -9,14 +9,17 @@ The active VPS services are:
   `liquidity-migration-bybit-long-paper.service`: long-native v11a demo/paper pair.
 - `liquidity-migration-bybit-risk.service`: shared fast exit-only risk runner for every
   configured ledger root; it has no sleeve toggle.
+- `liquidity-migration-bybit-continuous-demo.service`: continuous-fade demo runner.
 - `liquidity-migration-bybit-continuous-paper.service`: no-order continuous evidence
-  collector when `CONTINUOUS_PAPER_SLEEVE=on`.
+  collector.
+- Timers include demo health/liveness, combined-book report, continuous rmom refresh,
+  continuous BTC-hedge dry-run, and continuous forward report.
 
-`liquidity-migration-bybit-continuous-demo.service` is present but disabled by default:
-`CONTINUOUS_SLEEVE=off` is the committed safety toggle, so continuous demo order submission
-does not start on deploy. `deploy/sleeves.env` plus optional
+Which sleeve units actually run is governed by `deploy/sleeves.env` plus optional
 `/etc/liquidity-migration/sleeves.env` are the source of truth for which sleeves are
-enabled.
+enabled. As of 2026-06-09 the live set is the continuous pair only
+(`CONTINUOUS_SLEEVE=on`, `CONTINUOUS_PAPER_SLEEVE=on`); short/short-paper/long are
+off but redeployable.
 
 Install or refresh it on the VPS from a trusted local checkout:
 
@@ -28,13 +31,12 @@ EXPECTED_COMMIT="$(git rev-parse HEAD)" scripts/verify_vps_live.sh
 The script refuses a dirty VPS checkout, forces the configured remote URL,
 resets the deploy branch to `origin/main`, runs focused runtime tests, checks
 the promoted strategy constants, backs up `/etc/liquidity-migration/bybit-demo.env`,
-enforces the expected Telegram chat ID, disables retired legacy units
-(`model050426.service` plus the old daily signal timer/service), syncs all
+enforces the expected Telegram chat ID, syncs all
 `deploy/systemd/liquidity-migration-*` service/timer files, applies the sleeve
 kill-switches, restarts the shared risk service and only the enabled sleeve units,
 and prints active systemd state plus non-secret entry-profile settings. The verify
 script is read-only and checks the same commit, strategy constants, Telegram chat ID,
-systemd unit settings, sleeve active/enabled state, and retired-unit state without
+systemd unit settings, and sleeve active/enabled state without
 pulling or restarting.
 Both scripts wait briefly before checking service activity so a process that
 dies immediately after startup does not produce a false pass. Override with
@@ -60,7 +62,7 @@ recovery script also installs the GitHub Actions public deploy key shown below.
 
 ```text
 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFwJNtc1cVhkzNKmxmq6mogten+Q/5yfLulf9wxZxMNp hetzner
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX liquidity-migration-github-actions-20260519
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICWcgpE3GLy65yWFuh5RAH5CEgyLqRPAGvROXGwAxmVv liquidity-migration-github-actions-20260609
 ```
 
 On the VPS, the target file is normally `/root/.ssh/authorized_keys` for the
@@ -112,9 +114,9 @@ sshd root-login settings, validates the promoted strategy constants, refreshes
 systemd, applies the same sleeve kill-switches as the normal deploy, restarts the
 shared risk service and enabled sleeves, and prints non-secret service state. It
 prints `deploy-verify-ok` only after it has also verified enabled sleeves are
-active/enabled, disabled sleeves are down, retired legacy units are inactive and
-disabled, the demo service has the expected one-minute `promoted` settings, and
-the risk service uses `ORDER_SUBMIT_MODE=ws_then_rest`. Set
+active/enabled, disabled sleeves are down, the demo service has the expected
+one-minute `promoted` settings, and the risk service uses
+`ORDER_SUBMIT_MODE=ws_then_rest`. Set
 `EXPECTED_COMMIT=<full sha>` before `bash` if you want the console deploy to
 refuse anything except one pinned commit.
 The console script also waits before checking active service state; override
@@ -135,16 +137,17 @@ deploy scripts:
 cp deploy/systemd/liquidity-migration-*.service /etc/systemd/system/
 cp deploy/systemd/liquidity-migration-*.timer /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable --now liquidity-migration-bybit-demo.service
+# Enable only the units whose toggle is on in deploy/sleeves.env, plus the always-on
+# risk service and support timers. As of 2026-06-09:
 systemctl enable --now liquidity-migration-bybit-risk.service
-systemctl enable --now liquidity-migration-bybit-paper.service
-systemctl enable --now liquidity-migration-bybit-long-demo.service
-systemctl enable --now liquidity-migration-bybit-long-paper.service
+systemctl enable --now liquidity-migration-bybit-continuous-demo.service
+systemctl enable --now liquidity-migration-bybit-continuous-paper.service
 systemctl enable --now liquidity-migration-demo-health.timer
 systemctl enable --now liquidity-migration-demo-liveness.timer
 systemctl enable --now liquidity-migration-combined-book-report.timer
-# Enable continuous paper only if the sleeve toggle says it should run; keep continuous demo off
-# unless the operator explicitly enables order submission.
+systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer
+systemctl enable --now liquidity-migration-continuous-hedge.timer
+systemctl enable --now liquidity-migration-continuous-forward-report.timer
 ```
 
 Required secrets live outside git in:
@@ -159,10 +162,11 @@ expected target, preserving the API secrets and bot token. Telegram is enabled
 for material alerts only: entries, exits, position reconciliation, or
 position-report errors. Quiet no-trade cycles still write local reports but must
 not notify. The services submit demo orders only.
-The entry service uses `STRATEGY_PROFILE=promoted` at `close_location_min = 0.30`
+The short entry service (currently toggled off via `SHORT_SLEEVE=off` but
+promoted-in-code and redeployable) pins `STRATEGY_PROFILE=promoted` at `close_location_min = 0.30`
 with `MAX_ACTIVE_SYMBOLS=12` — the de-concentrated (12 concurrent positions)
-`drop_all_4` package promoted 2026-05-30 (see
-`docs/preregistration/drop-all-4-promotion.md`), on the conservative
+`drop_all_4` package plus the age300 gate, ff6 failed-fade exit, and
+`btc_trend_gate=uptrend`, on the conservative
 `promoted_quality_squeeze` entry router. It runs match-the-backtest universe mode
 (`UNIVERSE_RANK_END=0 / UNIVERSE_MAX_SYMBOLS=0`, the full perp universe) — the
 `drop_all_4` package drops the rank-max band so the strategy trades from rank 31
@@ -183,8 +187,7 @@ stops keep covering open risk.
 Single-submitter safety: the active demo systemd unit pins
 `Environment=STRATEGY_PROFILE=promoted`, and
 `scripts/run_bybit_demo_event_engine.sh` refuses `SUBMIT_ORDERS=1` unless
-`STRATEGY_PROFILE=promoted`. The `demo_relaxed`, no-crowding, sniper,
-execution-only, and hedge candidates are shadow-only.
-
-The retired `model050426-bybit-demo-signal.timer` / `.service` daily signal scan
-must stay disabled; the active runner is the event-driven loop above.
+`STRATEGY_PROFILE=promoted`. The `demo_relaxed`, no-crowding, sniper, and
+execution-only candidates are shadow-only. The BTC hedge now runs as a deployed daily
+dry-run timer (`liquidity-migration-continuous-hedge.timer`); order submission is
+gated by `SUBMIT_HEDGE=0` in the unit.

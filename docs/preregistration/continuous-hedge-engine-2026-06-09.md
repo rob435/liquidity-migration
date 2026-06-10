@@ -8,7 +8,8 @@ hedge params FIXED a-priori from Stage-A — no re-tuning here); else `explorato
 
 ## What Stage-B adds over Stage-A
 
-The hedge leg now lives INSIDE `apply_rebalance_rule` (commit-pending working tree):
+The hedge leg now lives INSIDE `apply_rebalance_rule` (implemented on main after this
+receipt; current code path):
 hedge PnL/funding/turnover-cost flow into `basket_return` BEFORE equity compounding, so
 the drawdown half-scale state reacts to HEDGED equity (Stage-A hedged after the scale
 path was fixed). Vol-target scale stays on raw book returns (live-planner semantics).
@@ -82,3 +83,14 @@ Artifacts: `~/SHARED_DATA/continuous_hedge_engine_2026-06-09/{cells.csv, report.
 Engine change: `liquidity_migration/continuous_rebalance.py` (`ContinuousHedgeRule`,
 `compute_hedge_beta`, hedged `apply_rebalance_rule`; unhedged path byte-identical) +
 `tests/test_continuous_rebalance_hedge.py` (8 tests).
+
+## Addendum 2026-06-10
+
+Executor plumbing is now built and deployed as a daily dry-run:
+`ContinuousHedgeState`, `compute_continuous_hedge_ratio`, and
+`plan_continuous_hedge_resize` live in `continuous_hedge_manager.py` with
+backtest/live parity tests. The VPS runs
+`liquidity-migration-continuous-hedge.timer` with order submission gated by
+`SUBMIT_HEDGE=0`. Remaining to `paper_ready`: explicit operator flip for hedge
+submission plus forward demo accumulation; all Tier-3 clocks restarted on the
+2026-06-09 rebuild.

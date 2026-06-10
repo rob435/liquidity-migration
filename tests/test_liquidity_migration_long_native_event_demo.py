@@ -37,11 +37,13 @@ from liquidity_migration.long_native_event_demo import (
     _open_long_trades,
     _plan_time_stop_exits,
     _select_long_entry_candidates,
+    _validate_long_demo_config,
     _v11a_long_native_config,
     _vol_parity_weight,
     format_combined_book_summary,
     format_long_demo_cycle_summary,
     format_long_telegram_status_message,
+    projected_long_initial_margin_pct_equity,
     target_long_order_notional_pct_equity,
     _long_telegram_reason,
 )
@@ -93,6 +95,35 @@ def test_demo_universe_matches_strategy() -> None:
     # They MUST stay in sync — otherwise the live demo silently trades a different universe
     # than the validated backtest. This guard exists because exactly that drift shipped once.
     assert LongNativeDemoCycleConfig().universe_size == _v11a_long_native_config().universe_size == 50
+
+
+def test_demo_default_notional_multiplier_is_research_1x() -> None:
+    demo = LongNativeDemoCycleConfig()
+    strategy = _v11a_long_native_config()
+    assert demo.notional_multiplier == pytest.approx(1.0)
+    assert target_long_order_notional_pct_equity(demo, strategy) == pytest.approx(
+        strategy.gross_exposure / strategy.max_concurrent_positions
+    )
+
+
+def test_projected_margin_guard_rejects_unsafe_levered_full_book() -> None:
+    strategy = _v11a_long_native_config()
+    unsafe = LongNativeDemoCycleConfig(notional_multiplier=10.0)
+    projection = projected_long_initial_margin_pct_equity(unsafe, strategy)
+    assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(1.25)
+    with pytest.raises(ValueError, match="projected full-book initial margin"):
+        _validate_long_demo_config(unsafe, strategy)
+
+
+def test_projected_margin_guard_allows_explicit_safe_levered_demo() -> None:
+    strategy = _v11a_long_native_config()
+    safe = LongNativeDemoCycleConfig(
+        notional_multiplier=4.0,
+        max_projected_initial_margin_pct_equity=0.50,
+    )
+    projection = projected_long_initial_margin_pct_equity(safe, strategy)
+    assert projection["full_book_initial_margin_pct_equity"] == pytest.approx(0.50)
+    _validate_long_demo_config(safe, strategy)
 
 
 def test_vol_target_scale_volup125() -> None:
@@ -235,6 +266,34 @@ def test_sniper_falls_through_after_deadline_when_no_retrace() -> None:
     )
     assert len(candidates) == 1
     assert candidates[0]["entry_reason"] == "sniper_deadline_fallthru"
+
+
+def test_long_candidates_rank_before_max_new_entries_truncation() -> None:
+    strategy = _v11a_long_native_config()
+    signal_ts = 1_700_000_000_000
+    now = signal_ts + 2 * MS_PER_HOUR
+    low = _build_features_with_fc_signal(symbol="LOWUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
+    high = _build_features_with_fc_signal(symbol="HIGHUSDT", signal_ts_ms=signal_ts, signal_close=100.0)
+    low = low.with_columns([
+        pl.lit(math.log1p(0.16)).alias("log_return"),
+        pl.lit(10).alias("today_volume_rank"),
+    ])
+    high = high.with_columns([
+        pl.lit(math.log1p(0.30)).alias("log_return"),
+        pl.lit(1).alias("today_volume_rank"),
+    ])
+    features = pl.concat([low, high], how="vertical_relaxed")
+    candidates, skips = _select_long_entry_candidates(
+        features=features,
+        klines=pl.DataFrame(),
+        all_trades=pl.DataFrame(),
+        now_ms=now,
+        strategy=strategy,
+        price_by_symbol={"LOWUSDT": 98.5, "HIGHUSDT": 98.5},
+        max_new_entries=1,
+    )
+    assert skips["no_retrace_yet"] == 0
+    assert [c["symbol"] for c in candidates] == ["HIGHUSDT"]
 
 
 def test_sniper_waits_when_within_window_and_no_retrace() -> None:
@@ -473,11 +532,17 @@ def test_format_long_telegram_message_contains_essentials() -> None:
     assert "10×" in text or "10x" in text or "x10" in text or "x" in text  # multiplier marker present
 
 
-def test_combined_book_summary_reads_both_sleeves(tmp_path: Path) -> None:
+def test_combined_book_summary_reads_every_live_sleeve(tmp_path: Path) -> None:
     short_root = tmp_path / "short"
     long_root = tmp_path / "long"
+    continuous_root = tmp_path / "continuous"
+    continuous_paper_root = tmp_path / "continuous-paper"
+    hedge_root = tmp_path / "hedge"
     short_root.mkdir()
     long_root.mkdir()
+    continuous_root.mkdir()
+    continuous_paper_root.mkdir()
+    hedge_root.mkdir()
     # Short ledger: 1 closed winning short trade
     write_dataset(
         pl.DataFrame([{
@@ -494,16 +559,50 @@ def test_combined_book_summary_reads_both_sleeves(tmp_path: Path) -> None:
         }]),
         long_root, LONG_DEMO_TRADES_DATASET, partition_by=(),
     )
+    write_dataset(
+        pl.DataFrame([{
+            "trade_id": "c1", "sleeve": "continuous", "symbol": "ETHUSDT", "side": "short",
+            "status": "open", "qty": 2.0, "entry_price": 2_000.0,
+        }]),
+        continuous_root, "continuous_fade_demo_trades", partition_by=(),
+    )
+    write_dataset(
+        pl.DataFrame([{"ts_ms": 1_700_000_000_000 - 60_000, "mode": "submit"}]),
+        continuous_root, "continuous_fade_demo_cycles", partition_by=(),
+    )
+    write_dataset(
+        pl.DataFrame([{"ts_ms": 1_700_000_000_000 - 120_000, "mode": "dry_run"}]),
+        continuous_paper_root, "continuous_fade_paper_cycles", partition_by=(),
+    )
     text = format_combined_book_summary(
-        short_root=short_root, long_root=long_root, now_ms=1_700_000_000_000,
+        short_root=short_root,
+        long_root=long_root,
+        continuous_root=continuous_root,
+        continuous_paper_root=continuous_paper_root,
+        continuous_hedge_root=hedge_root,
+        now_ms=1_700_000_000_000,
+        sleeve_states={
+            "SHORT_SLEEVE": "off",
+            "LONG_SLEEVE": "off",
+            "CONTINUOUS_SLEEVE": "on",
+            "CONTINUOUS_PAPER_SLEEVE": "on",
+        },
     )
     assert "Combined book" in text
-    assert "Short sleeve" in text
-    assert "Long sleeve" in text
+    assert "Live sleeves" in text
+    assert "Continuous demo (ON)" in text
+    assert "Short (OFF)" in text
+    assert "Long (OFF)" in text
+    assert "BTC hedge (DRY-RUN)" in text
+    assert "Continuous paper (ON)" in text
+    assert "Action: No action needed." in text
     # Short realized PnL: (100 - 90) * 1 = 10
     assert "$10.00" in text
     # Long open notional: 0.001 * 50_000 = 50
     assert "$50.00" in text
+    # Continuous open notional: 2 * 2_000 = 4,000
+    assert "$4,000.00" in text
+    assert "trades=0" not in text
 
 
 def test_combined_book_summary_fails_open_on_missing_roots(tmp_path: Path) -> None:
@@ -512,10 +611,14 @@ def test_combined_book_summary_fails_open_on_missing_roots(tmp_path: Path) -> No
     text = format_combined_book_summary(
         short_root=tmp_path / "no-such-short",
         long_root=tmp_path / "no-such-long",
+        continuous_root=tmp_path / "no-such-continuous",
+        continuous_paper_root=tmp_path / "no-such-continuous-paper",
+        continuous_hedge_root=tmp_path / "no-such-hedge",
         now_ms=1_700_000_000_000,
     )
     assert "Combined book" in text
-    assert "trades=0" in text
+    assert "no ledger yet" in text
+    assert "Action:" in text
 
 
 def test_long_demo_cycle_summary_includes_key_fields() -> None:

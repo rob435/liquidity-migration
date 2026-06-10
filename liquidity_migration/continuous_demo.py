@@ -469,6 +469,7 @@ class LivePanelCache:
             win = win[~np.isnan(win)] if win.size else win
             rv_vals = np.concatenate([win, np.array([ret1_cur])]) if win.size else np.array([ret1_cur])
             rv_cur: float | None = float(np.std(rv_vals, ddof=1)) if rv_vals.size >= 48 else None
+            max_ret168_cur: float | None = float(np.max(rv_vals)) if rv_vals.size >= 48 else None
             # min720/max720: rolling 720 min/max over confirmed close tail + the live close
             cw = c["close_win"]
             count = int(cw.size) + 1
@@ -490,7 +491,7 @@ class LivePanelCache:
             ret168_cur = (price / c["close_168"] - 1.0) if c["close_168"] else None
             rows.append({
                 "symbol": symbol, "ts_ms": cur_ts, "turnover_quote": c["turnover"],
-                "rv_168h": rv_cur, "vov": vov_cur, "dist_low": dist_low,
+                "rv_168h": rv_cur, "max_ret168": max_ret168_cur, "vov": vov_cur, "dist_low": dist_low,
                 "ret72": ret72_cur, "ret168": ret168_cur,
             })
         if not rows:
@@ -498,7 +499,7 @@ class LivePanelCache:
         frame = pl.DataFrame(
             rows,
             schema={"symbol": pl.String, "ts_ms": pl.Int64, "turnover_quote": pl.Float64,
-                    "rv_168h": pl.Float64, "vov": pl.Float64, "dist_low": pl.Float64,
+                    "rv_168h": pl.Float64, "max_ret168": pl.Float64, "vov": pl.Float64, "dist_low": pl.Float64,
                     "ret72": pl.Float64, "ret168": pl.Float64},
         )
         panel = cross_sectional_decile(

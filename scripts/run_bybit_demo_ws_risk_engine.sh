@@ -38,11 +38,11 @@ CONTINUOUS_ADDON_DATA_ROOT="${CONTINUOUS_ADDON_DATA_ROOT:-}"
 # ledger (long + continuous) or that sleeve's open positions look untracked and get
 # force-closed. Refuse to start with EXIT_UNTRACKED_POSITIONS=1 unless BOTH sibling
 # roots are set (or disable EXIT_UNTRACKED_POSITIONS for a genuinely dedicated account).
-if [[ "$EXIT_UNTRACKED_POSITIONS" == "1" && ( -z "$LONG_DATA_ROOT" || -z "$CONTINUOUS_DATA_ROOT" ) ]]; then
-    echo "Refusing to start: EXIT_UNTRACKED_POSITIONS=1 requires BOTH LONG_DATA_ROOT and" >&2
-    echo "CONTINUOUS_DATA_ROOT on this shared demo account, else a sibling sleeve's positions" >&2
-    echo "would be flattened as untracked. Set both roots, or set EXIT_UNTRACKED_POSITIONS=0." >&2
-    echo "  LONG_DATA_ROOT=${LONG_DATA_ROOT:-(unset)} CONTINUOUS_DATA_ROOT=${CONTINUOUS_DATA_ROOT:-(unset)}" >&2
+if [[ "$EXIT_UNTRACKED_POSITIONS" == "1" && ( -z "$LONG_DATA_ROOT" || -z "$CONTINUOUS_DATA_ROOT" || -z "$CONTINUOUS_ADDON_DATA_ROOT" ) ]]; then
+    echo "Refusing to start: EXIT_UNTRACKED_POSITIONS=1 requires LONG_DATA_ROOT," >&2
+    echo "CONTINUOUS_DATA_ROOT, and CONTINUOUS_ADDON_DATA_ROOT on this shared demo account, else a sibling sleeve's positions" >&2
+    echo "would be flattened as untracked. Set all three roots, or set EXIT_UNTRACKED_POSITIONS=0." >&2
+    echo "  LONG_DATA_ROOT=${LONG_DATA_ROOT:-(unset)} CONTINUOUS_DATA_ROOT=${CONTINUOUS_DATA_ROOT:-(unset)} CONTINUOUS_ADDON_DATA_ROOT=${CONTINUOUS_ADDON_DATA_ROOT:-(unset)}" >&2
     exit 2
 fi
 

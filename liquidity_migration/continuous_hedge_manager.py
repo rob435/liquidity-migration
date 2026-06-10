@@ -136,7 +136,7 @@ def compute_hedge_decision(
     target_scale = max(live_gross_short_frac, 0.0) / REFERENCE_GROSS_SHORT_FRAC
     ratio = compute_continuous_hedge_ratio(state, FROZEN_HEDGE_RULE, target_scale)
     ratio = min(ratio, config.max_hedge_equity_frac)
-    n_obs = sum(1 for b in btc_returns if b is not None)
+    n_obs = _beta_window_observation_count(btc_returns, FROZEN_HEDGE_RULE)
     plan: ContinuousRebalanceResizePlan | None = None
     if btc_price > 0.0:
         from .continuous_rebalance import plan_continuous_hedge_resize
@@ -161,8 +161,20 @@ def compute_hedge_decision(
             "target_scale": target_scale,
             "live_gross_short_frac": live_gross_short_frac,
             "history_days": len(unit_returns),
+            "beta_window_observations": n_obs,
         },
     )
+
+
+def _beta_window_observation_count(
+    btc_returns: list[float | None],
+    hedge_rule: ContinuousHedgeRule,
+) -> int:
+    end = len(btc_returns) - int(hedge_rule.beta_extra_lag_days)
+    if end <= 0:
+        return 0
+    start = max(0, end - int(hedge_rule.beta_window_days))
+    return sum(1 for b in btc_returns[start:end] if b is not None)
 
 
 def build_hedge_trade_row(
@@ -174,7 +186,33 @@ def build_hedge_trade_row(
     order_link_id: str,
     order_id: str = "",
 ) -> dict[str, Any]:
-    """Conforming OPEN trade row for the hedge BTC long.
+    """Conforming OPEN trade row for a submitted hedge BTC long."""
+    return build_hedge_tracking_row(
+        config,
+        qty=qty,
+        entry_price=entry_price,
+        opened_ms=now_ms,
+        updated_ms=now_ms,
+        order_link_id=order_link_id,
+        order_id=order_id,
+        signal_ts_ms=now_ms,
+        submit_mode="submitted" if order_id else "dry_run",
+    )
+
+
+def build_hedge_tracking_row(
+    config: ContinuousHedgeConfig,
+    *,
+    qty: float,
+    entry_price: float,
+    opened_ms: int,
+    updated_ms: int,
+    order_link_id: str,
+    order_id: str = "",
+    signal_ts_ms: int | None = None,
+    submit_mode: str | None = None,
+) -> dict[str, Any]:
+    """Conforming OPEN tracking row for the externally managed hedge BTC long.
 
     SAFETY CONTRACT (verified against ws_risk.plan_risk_exits): stop_price,
     take_profit_price and planned_exit_ts_ms are ALL 0, so the risk service TRACKS
@@ -189,11 +227,11 @@ def build_hedge_trade_row(
         "side": "long",
         "sleeve": "continuous_addon",
         "status": "open",
-        "ts_ms": now_ms,
-        "entry_ts_ms": now_ms,
-        "opened_at_ms": now_ms,
-        "updated_at_ms": now_ms,
-        "signal_ts_ms": now_ms,
+        "ts_ms": opened_ms,
+        "entry_ts_ms": opened_ms,
+        "opened_at_ms": opened_ms,
+        "updated_at_ms": updated_ms,
+        "signal_ts_ms": opened_ms if signal_ts_ms is None else signal_ts_ms,
         "entry_price": float(entry_price),
         "qty": float(qty),
         "notional_usdt": abs(float(entry_price) * float(qty)),
@@ -204,7 +242,7 @@ def build_hedge_trade_row(
         "stop_loss_pct": 0.0,
         "entry_order_link_id": order_link_id,
         "entry_order_id": order_id,
-        "submit_mode": "submitted" if order_id else "dry_run",
+        "submit_mode": submit_mode or ("submitted" if order_id else "dry_run"),
     }
 
 

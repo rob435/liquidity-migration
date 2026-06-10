@@ -311,6 +311,86 @@ def test_live_ws_position_push_clears_stale_reconcile_error() -> None:
     assert cache.snapshot()["position_error"] == ""
 
 
+def test_rest_reconcile_preserves_ws_position_open_after_snapshot_start(monkeypatch) -> None:
+    import liquidity_migration.ws_state_cache as wsc
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(wsc.time, "monotonic", lambda: clock["t"])
+    cache = PrivateStateCache()
+    cache.seed(positions=[])
+
+    snapshot_started = clock["t"]
+    clock["t"] = 1001.0
+    cache.on_position_event(_ws_message({"symbol": "BTCUSDT", "size": "1.0", "side": "Buy"}))
+    clock["t"] = 1002.0
+    cache.replace_with_rest_snapshot(positions=[], snapshot_started_monotonic=snapshot_started)
+
+    assert {row["symbol"] for row in cache.snapshot()["raw_positions"]} == {"BTCUSDT"}
+
+
+def test_rest_reconcile_does_not_resurrect_position_closed_after_snapshot_start(monkeypatch) -> None:
+    import liquidity_migration.ws_state_cache as wsc
+
+    clock = {"t": 2000.0}
+    monkeypatch.setattr(wsc.time, "monotonic", lambda: clock["t"])
+    cache = PrivateStateCache()
+    cache.seed(positions=[{"symbol": "BTCUSDT", "size": "1.0", "side": "Buy"}])
+
+    snapshot_started = clock["t"]
+    clock["t"] = 2001.0
+    cache.on_position_event(_ws_message({"symbol": "BTCUSDT", "size": "0", "side": "Buy"}))
+    clock["t"] = 2002.0
+    cache.replace_with_rest_snapshot(
+        positions=[{"symbol": "BTCUSDT", "size": "1.0", "side": "Buy"}],
+        snapshot_started_monotonic=snapshot_started,
+    )
+
+    assert cache.snapshot()["raw_positions"] == []
+
+
+def test_rest_reconcile_preserves_ws_order_open_after_snapshot_start(monkeypatch) -> None:
+    import liquidity_migration.ws_state_cache as wsc
+
+    clock = {"t": 3000.0}
+    monkeypatch.setattr(wsc.time, "monotonic", lambda: clock["t"])
+    cache = PrivateStateCache()
+    cache.seed(open_orders=[])
+
+    snapshot_started = clock["t"]
+    clock["t"] = 3001.0
+    cache.on_order_event(_ws_message({
+        "orderId": "o1", "orderLinkId": "l1", "symbol": "BTCUSDT", "orderStatus": "New",
+    }))
+    clock["t"] = 3002.0
+    cache.replace_with_rest_snapshot(open_orders=[], snapshot_started_monotonic=snapshot_started)
+
+    assert [row["orderId"] for row in cache.snapshot()["raw_open_orders"]] == ["o1"]
+
+
+def test_rest_reconcile_does_not_resurrect_terminal_ws_order(monkeypatch) -> None:
+    import liquidity_migration.ws_state_cache as wsc
+
+    clock = {"t": 4000.0}
+    monkeypatch.setattr(wsc.time, "monotonic", lambda: clock["t"])
+    cache = PrivateStateCache()
+    cache.seed(open_orders=[{
+        "orderId": "o1", "orderLinkId": "l1", "symbol": "BTCUSDT", "orderStatus": "New",
+    }])
+
+    snapshot_started = clock["t"]
+    clock["t"] = 4001.0
+    cache.on_order_event(_ws_message({
+        "orderId": "o1", "orderLinkId": "l1", "symbol": "BTCUSDT", "orderStatus": "Filled",
+    }))
+    clock["t"] = 4002.0
+    cache.replace_with_rest_snapshot(
+        open_orders=[{"orderId": "o1", "orderLinkId": "l1", "symbol": "BTCUSDT", "orderStatus": "New"}],
+        snapshot_started_monotonic=snapshot_started,
+    )
+
+    assert cache.snapshot()["raw_open_orders"] == []
+
+
 def test_is_stale_returns_true_when_no_events() -> None:
     cache = PrivateStateCache()
     # Never seeded / never updated — instantly stale.
@@ -419,6 +499,21 @@ def test_ticker_replace_with_rest_snapshot_overwrites_state() -> None:
     cache.replace_with_rest_snapshot([{"symbol": "BTCUSDT", "lastPrice": "31000"}])
     assert cache.symbol_count() == 1
     assert cache.get("BTCUSDT")["lastPrice"] == "31000"
+
+
+def test_ticker_empty_rest_snapshot_does_not_wipe_existing_or_stamp(monkeypatch) -> None:
+    import liquidity_migration.ws_state_cache as wsc
+
+    clock = {"t": 100.0}
+    monkeypatch.setattr(wsc.time, "monotonic", lambda: clock["t"])
+    cache = TickerCache()
+    cache.seed([{"symbol": "BTCUSDT", "lastPrice": "30000"}])
+
+    clock["t"] = 200.0
+    cache.replace_with_rest_snapshot([])
+
+    assert cache.get("BTCUSDT")["lastPrice"] == "30000"
+    assert cache.seconds_since_last_event() == 100.0
 
 
 def test_ticker_is_stale_after_no_events() -> None:

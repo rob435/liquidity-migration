@@ -1537,12 +1537,11 @@ def _add_event_risk_ws_parser(subparsers) -> None:
 
 
 def _add_combined_book_report_parser(subparsers) -> None:
-    """Daily/weekly aggregate report covering both sleeves.
+    """Daily/weekly aggregate report covering the shared Bybit demo account.
 
-    Reads the short ledger from one data root and the long ledger from another,
+    Reads the short, long, continuous demo, continuous paper, and hedge roots,
     computes realized + open PnL and live Bybit positions, and sends a single
-    Telegram message. Owner explicitly asked for "daily position notifications,
-    long would add ~weekly, aggregate pnl and everything, make new notifications".
+    operator-readable Telegram message.
     Schedule on cron / systemd timer for the daily/weekly cadence.
     """
     report = subparsers.add_parser(
@@ -1561,6 +1560,21 @@ def _add_combined_book_report_parser(subparsers) -> None:
         "Defaults to <data-root parent>/bybit-long-demo-event.",
     )
     report.add_argument(
+        "--continuous-data-root",
+        default=None,
+        help="Data root of the continuous demo sleeve. Defaults to <data-root parent>/bybit-continuous-demo-event.",
+    )
+    report.add_argument(
+        "--continuous-paper-data-root",
+        default=None,
+        help="Data root of the continuous paper collector. Defaults to <data-root parent>/bybit-continuous-paper-event.",
+    )
+    report.add_argument(
+        "--continuous-hedge-data-root",
+        default=None,
+        help="Data root of the continuous BTC-hedge dry-run/live ledger. Defaults to <data-root parent>/bybit-continuous-hedge-event.",
+    )
+    report.add_argument(
         "--include-live-positions", action="store_true",
         help="Also include a live Bybit REST snapshot of open positions in the message.",
     )
@@ -1573,11 +1587,11 @@ def _add_combined_book_report_parser(subparsers) -> None:
 def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
     """CLI for the v11a long sleeve forward-testing cycle. Mirrors event-demo-cycle.
 
-    Per owner: profile is `MultiStratV1` (v11a uni10 sniper retrace 1%/6h
-    fall-through). Per-position notional defaults to 10× the short sleeve's
-    base (notional_multiplier=10). Runs on the same Bybit demo account with
-    order-link prefix lm-en-l-* so the extended ws_risk routes fills back to
-    the long ledger.
+    Profile is `MultiStratV1` (v11a uni50 sniper retrace 1%/6h fall-through).
+    Per-position notional defaults to 1x research sizing; levered demo sizing
+    must be passed explicitly and must satisfy the projected initial-margin cap.
+    Runs on the same Bybit demo account with order-link prefix lm-en-l-* so the
+    extended ws_risk routes fills back to the long ledger.
     """
     from .long_native_event_demo import (
         LONG_DEMO_STRATEGY_PROFILE_CHOICES,
@@ -1598,9 +1612,15 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
         type=float,
         default=demo_defaults.notional_multiplier,
         help="Per-position notional multiplier vs the base gross/max_concurrent. "
-             "Owner default 10× (research peak was 5×).",
+             "Default 1×; levered demo sizing is explicit opt-in.",
     )
     long_demo.add_argument("--entry-leverage", type=float, default=demo_defaults.entry_leverage)
+    long_demo.add_argument(
+        "--max-projected-initial-margin-pct-equity",
+        type=float,
+        default=demo_defaults.max_projected_initial_margin_pct_equity,
+        help="Reject configs whose worst-case full-book initial margin exceeds this equity fraction.",
+    )
     long_demo.add_argument(
         "--max-order-notional-pct-equity",
         type=float,

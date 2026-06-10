@@ -95,6 +95,22 @@ def test_min_obs_no_hedge_before_warmup() -> None:
     assert d.hedge_ratio_equity_frac == 0.0  # beta=0 until min_obs satisfied
 
 
+def test_n_obs_counts_beta_window_only() -> None:
+    btc: list[float | None] = [0.01 if i % 2 == 0 else -0.01 for i in range(150)]
+    for i in range(60, 91):
+        btc[i] = None
+    unit = [-0.2 * float(b) if b is not None else 0.0 for b in btc]
+
+    d = compute_hedge_decision(
+        ContinuousHedgeConfig(), unit_returns=unit, btc_returns=btc,
+        live_gross_short_frac=0.5, btc_price=100_000.0, current_hedge_qty=0.0, equity_usdt=10_000.0,
+    )
+
+    assert d.n_obs == 59
+    assert d.diagnostics["beta_window_observations"] == 59
+    assert d.hedge_ratio_equity_frac == 0.0
+
+
 def test_shipped_warmstart_artifacts_exist_and_load() -> None:
     repo = Path(__file__).resolve().parent.parent
     for venue in ("bybit", "binance"):
@@ -108,7 +124,8 @@ def test_shipped_warmstart_artifacts_exist_and_load() -> None:
 
 def test_link_id_namespace() -> None:
     lid = hedge_order_link_id(1_700_000_000_000)
-    assert "en-ca" in lid and HEDGE_SYMBOL[:3] in lid.upper() or lid  # namespaced
+    assert lid.startswith("lm-en-ca-")
+    assert f"-{HEDGE_SYMBOL[:3]}-" in lid
 
 
 def test_hedge_row_is_tracked_but_never_force_exited() -> None:

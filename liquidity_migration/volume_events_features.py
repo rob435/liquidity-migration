@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import polars as pl
 
-from ._common import MS_PER_DAY, MS_PER_HOUR, calendar_shift, trading_day_expr
+from ._common import MS_PER_DAY, MS_PER_HOUR, calendar_roll, calendar_shift, trading_day_expr
 from .volume_features import VOLUME_SCORE_COLUMNS
 
 
@@ -54,10 +54,7 @@ def _cal_roll(
     ``shifted=False`` reproduces ``.rolling_X(N)`` — the trailing N days
         INCLUDING the current day — via ``closed="right"``.
     """
-    window = f"{n_days * MS_PER_DAY}i"  # integer ms duration (ts_ms is numeric, not datetime)
-    closed = "left" if shifted else "right"
-    method = getattr(expr, f"rolling_{agg}_by")
-    return method("ts_ms", window_size=window, closed=closed, min_samples=min_samples)
+    return calendar_roll(expr, agg, n_days, shifted=shifted, min_samples=min_samples)
 
 
 def _enriched_event_features(
@@ -264,22 +261,22 @@ def _open_interest_feature_frame(open_interest: pl.DataFrame | None, daily_retur
         daily = daily.with_columns(pl.lit(None, dtype=pl.Float64).alias("open_interest_quote"))
     return daily.with_columns(
         [
-            (pl.col("open_interest") / pl.col("open_interest").shift(1).over("symbol") - 1.0).alias(
+            (pl.col("open_interest") / calendar_shift(pl.col("open_interest"), 1) - 1.0).alias(
                 "open_interest_return_1d"
             ),
-            (pl.col("open_interest") / pl.col("open_interest").shift(3).over("symbol") - 1.0).alias(
+            (pl.col("open_interest") / calendar_shift(pl.col("open_interest"), 3) - 1.0).alias(
                 "open_interest_return_3d"
             ),
-            (pl.col("open_interest") / pl.col("open_interest").shift(7).over("symbol") - 1.0).alias(
+            (pl.col("open_interest") / calendar_shift(pl.col("open_interest"), 7) - 1.0).alias(
                 "open_interest_return_7d"
             ),
-            (pl.col("open_interest_quote") / pl.col("open_interest_quote").shift(1).over("symbol") - 1.0).alias(
+            (pl.col("open_interest_quote") / calendar_shift(pl.col("open_interest_quote"), 1) - 1.0).alias(
                 "open_interest_quote_return_1d"
             ),
-            (pl.col("open_interest_quote") / pl.col("open_interest_quote").shift(3).over("symbol") - 1.0).alias(
+            (pl.col("open_interest_quote") / calendar_shift(pl.col("open_interest_quote"), 3) - 1.0).alias(
                 "open_interest_quote_return_3d"
             ),
-            (pl.col("open_interest_quote") / pl.col("open_interest_quote").shift(7).over("symbol") - 1.0).alias(
+            (pl.col("open_interest_quote") / calendar_shift(pl.col("open_interest_quote"), 7) - 1.0).alias(
                 "open_interest_quote_return_7d"
             ),
         ]

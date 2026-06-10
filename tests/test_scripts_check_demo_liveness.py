@@ -286,3 +286,22 @@ def test_sleeve_kill_switch_toggle(monkeypatch) -> None:
     assert M._sleeve_on("SHORT_SLEEVE") is True
     monkeypatch.delenv("CONTINUOUS_PAPER_SLEEVE", raising=False)
     assert M._sleeve_on("CONTINUOUS_PAPER_SLEEVE") is True
+
+
+def test_default_unit_monitoring_follows_sleeve_toggles(monkeypatch) -> None:
+    monkeypatch.setenv("SHORT_SLEEVE", "off")
+    monkeypatch.setenv("SHORT_PAPER_SLEEVE", "off")
+    monkeypatch.setenv("LONG_SLEEVE", "on")
+    monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
+    monkeypatch.setenv("CONTINUOUS_PAPER_SLEEVE", "off")
+
+    units = M._default_units_for_toggles()
+
+    assert "liquidity-migration-bybit-risk.service" in units
+    assert "liquidity-migration-bybit-demo.service" not in units
+    assert "liquidity-migration-bybit-paper.service" not in units
+    assert "liquidity-migration-bybit-long-demo.service" in units
+    assert "liquidity-migration-bybit-long-paper.service" in units
+    assert "liquidity-migration-bybit-continuous-demo.service" in units
+    assert "liquidity-migration-continuous-hedge.timer" in units
+    assert "liquidity-migration-bybit-continuous-paper.service" not in units

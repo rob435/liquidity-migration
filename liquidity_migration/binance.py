@@ -185,6 +185,10 @@ class BinanceUSDMData:
                     raise BinanceDataError(f"Binance {path} failed: {payload}")
                 return payload
             except Exception as exc:  # noqa: BLE001 - urllib raises transport-specific errors
+                if isinstance(exc, BinanceDataError):
+                    self.error_events += 1
+                    self.last_error = str(exc)[:500]
+                    raise
                 last_error = exc
                 self.error_events += 1
                 self.last_error = str(exc)[:500]

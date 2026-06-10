@@ -186,8 +186,8 @@ pass. The hardening only made the evidence honest.
 
 R4 is done and frozen as the Tier-3 residual-Sharpe foundation. (Historical: the then-current
 forward plan was E1 → E2 → E3; that round concluded — verdicts in
-[research_summary.md](../research_summary.md), forward plan now
-[research_plan_intraday_kernel.md](../research_plan_intraday_kernel.md).) At
+[research_summary.md](../research_summary.md); current forward plans are the
+`docs/research_plan_*_2026-06-09.md` files.) At
 the Tier-3 gate, residualize each demo-candidate cell on this model (`decompose_strategy_pnl`)
 and require residual Sharpe ≥ +0.3. The risk model needs no further work to support that —
 it is the foundation, not an open phase.

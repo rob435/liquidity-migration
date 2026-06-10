@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-09
 **Author:** claude (for owner)
-**Stage:** run-pending
+**Stage:** run-complete — Tier-2 validated
 
 ## What's changing
 

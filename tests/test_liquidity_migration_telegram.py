@@ -6,7 +6,14 @@ import urllib.parse
 import pytest
 
 from liquidity_migration import telegram
-from liquidity_migration.telegram import TelegramConfig, send_telegram_message
+from liquidity_migration.telegram import (
+    TelegramConfig,
+    format_age_ms,
+    format_pct,
+    format_usd,
+    format_utc_time_ms,
+    send_telegram_message,
+)
 
 
 class FakeResponse:
@@ -246,3 +253,12 @@ def test_empty_message_text_is_still_sent(monkeypatch: pytest.MonkeyPatch) -> No
         calls[0]["data"].decode("utf-8"), keep_blank_values=True
     )
     assert decoded["text"] == [""]
+
+
+def test_human_format_helpers_are_stable() -> None:
+    assert format_usd(12.3, signed=True) == "+$12.30"
+    assert format_usd(-4.5, signed=True) == "-$4.50"
+    assert format_pct(0.0123, signed=True) == "+1.23%"
+    assert format_utc_time_ms(1_700_000_000_000) == "2023-11-14 22:13 UTC"
+    assert format_age_ms(now_ms=1_700_000_000_000, then_ms=1_700_000_000_000 - 60_000) == "just now"
+    assert format_age_ms(now_ms=1_700_000_000_000, then_ms=1_700_000_000_000 - 30 * 60_000) == "30 min ago"

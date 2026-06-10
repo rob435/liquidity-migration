@@ -66,6 +66,16 @@ def test_runtime_scripts_do_not_delete_live_cycle_locks() -> None:
         assert "mkdir -p \"$DATA_ROOT/.locks\"" in text
 
 
+def test_ws_risk_runner_requires_every_shared_account_root() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    text = (repo / "scripts" / "run_bybit_demo_ws_risk_engine.sh").read_text(encoding="utf-8")
+
+    assert "-z \"$LONG_DATA_ROOT\"" in text
+    assert "-z \"$CONTINUOUS_DATA_ROOT\"" in text
+    assert "-z \"$CONTINUOUS_ADDON_DATA_ROOT\"" in text
+    assert "Set all three roots" in text
+
+
 def test_continuous_rebalance_cycle_audit_parser_defaults() -> None:
     from liquidity_migration.cli import build_parser
 
@@ -216,9 +226,28 @@ def test_continuous_forward_report_timer_wired_to_paper_evidence_gate() -> None:
     assert "--stale-coverage-gap-days 2" in service
     assert "--telegram" in service
     assert "OnCalendar=*-*-* 08:10:00" in timer
+    lib = (repo / "deploy" / "lib_sleeves.sh").read_text(encoding="utf-8")
     for text in (deploy, verify, recovery):
         assert "continuous_rmom_refresh_on" in text
-        assert "liquidity-migration-continuous-forward-report.timer" in text
+        assert "apply_timer_enable" in text or "verify_timer" in text
+        assert "CONTINUOUS_FORWARD_REPORT_TIMERS" in text
+    assert 'CONTINUOUS_FORWARD_REPORT_TIMERS="liquidity-migration-continuous-forward-report.timer"' in lib
+    assert 'CONTINUOUS_HEDGE_TIMERS="liquidity-migration-continuous-hedge.timer"' in lib
+
+
+def test_combined_book_report_includes_continuous_roots_and_sleeve_toggles() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    service = (repo / "deploy" / "systemd" / "liquidity-migration-combined-book-report.service").read_text(
+        encoding="utf-8"
+    )
+
+    assert "EnvironmentFile=-/opt/liquidity-migration/deploy/sleeves.env" in service
+    assert "EnvironmentFile=-/etc/liquidity-migration/sleeves.env" in service
+    assert "--short-data-root data/bybit-demo-event" in service
+    assert "--long-data-root data/bybit-long-demo-event" in service
+    assert "--continuous-data-root data/bybit-continuous-demo-event" in service
+    assert "--continuous-paper-data-root data/bybit-continuous-paper-event" in service
+    assert "--continuous-hedge-data-root data/bybit-continuous-hedge-event" in service
 
 
 def test_event_entry_runner_default_cadence_is_rate_limit_safe() -> None:
@@ -343,6 +372,21 @@ def test_long_runner_wires_paper_mode() -> None:
     assert "--paper-mode" in text, "long runner does not pass --paper-mode"
 
 
+def test_long_runner_and_units_default_to_safe_1x_sizing() -> None:
+    repo = Path(__file__).resolve().parents[1]
+    runner = (repo / "scripts" / "run_bybit_long_demo_event_engine.sh").read_text(encoding="utf-8")
+    assert 'NOTIONAL_MULTIPLIER="${NOTIONAL_MULTIPLIER:-1}"' in runner
+    assert 'MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY="${MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY:-0.5}"' in runner
+    assert "--max-projected-initial-margin-pct-equity" in runner
+    for unit in (
+        "liquidity-migration-bybit-long-demo.service",
+        "liquidity-migration-bybit-long-paper.service",
+    ):
+        text = (repo / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
+        assert "Environment=NOTIONAL_MULTIPLIER=1" in text, f"{unit} must not default to 10x"
+        assert "Environment=MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY=0.5" in text
+
+
 def test_demo_services_use_unblocked_entry_lag() -> None:
     """2026-05-24 found 15min lag rejected every signal as stale (the legacy
     REST-only kline path made the feature pipeline build 3-4h late). Demo
@@ -426,9 +470,13 @@ def test_demo_health_watchdog_units_present() -> None:
 
     assert "check_demo_entry_health.py" in service
     assert "--telegram" in service
+    assert "EnvironmentFile=-/opt/liquidity-migration/deploy/sleeves.env" in service
+    assert "EnvironmentFile=-/etc/liquidity-migration/sleeves.env" in service
+    assert "--sleeve-env-var SHORT_SLEEVE" in service
     assert "SuccessExitStatus=0 1" in service, "alert exit code 1 must not register as failure"
     assert "OnCalendar=" in timer
     assert "--window-hours" in script and "--telegram" in script
+    assert "sleeve_enabled" in script
 
 
 def _write_demo_cycle_parquet(
@@ -509,6 +557,48 @@ def test_health_watchdog_alerts_on_cycle_starvation(tmp_path: Path) -> None:
     code, msg = check_entries(data_root=tmp_path, window_hours=24)
     assert code == 1
     assert "cycles in last 24h" in msg
+
+
+def test_health_watchdog_sleeve_off_skip(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The short entry-health timer must not page when SHORT_SLEEVE is intentionally off."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    from check_demo_entry_health import sleeve_enabled
+
+    monkeypatch.setenv("SHORT_SLEEVE", "off")
+    assert sleeve_enabled("SHORT_SLEEVE") is False
+    monkeypatch.setenv("SHORT_SLEEVE", "on")
+    assert sleeve_enabled("SHORT_SLEEVE") is True
+    monkeypatch.delenv("SHORT_SLEEVE", raising=False)
+    assert sleeve_enabled("SHORT_SLEEVE", default="on") is True
+    assert sleeve_enabled("SHORT_SLEEVE", default="off") is False
+
+
+def test_health_watchdog_main_skips_before_reading_retired_sleeve(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The systemd timer path should return OK without requiring any short-root cycle files."""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+    import check_demo_entry_health as health
+
+    monkeypatch.setenv("SHORT_SLEEVE", "off")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check_demo_entry_health.py",
+            "--data-root",
+            str(tmp_path / "missing-short-root"),
+            "--window-hours",
+            "24",
+            "--sleeve-env-var",
+            "SHORT_SLEEVE",
+        ],
+    )
+
+    assert health.main() == 0
+    assert "OK (skipped): SHORT_SLEEVE=off" in capsys.readouterr().out
 
 
 def test_health_watchdog_passes_when_coverage_ok_and_entries_present(tmp_path: Path) -> None:
@@ -604,7 +694,9 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert "bybit-demo.env.backup" in text
     assert "sed -i \"s/^TELEGRAM_CHAT_ID=" in text
     assert "SYSTEMD_SETTLE_SECONDS" in text
-    assert "systemctl disable --now" in text
+    lib = (repo / "deploy" / "lib_sleeves.sh").read_text(encoding="utf-8")
+    assert "apply_timer_enable" in text
+    assert "systemctl disable --now" in lib
     # 2026-06-09 audit: the model050426 retired-unit cleanup/assertions were removed —
     # the 2026-06-04 box (116.202.15.128) is a fresh host that never ran those units.
     assert "model050426" not in text
@@ -638,6 +730,9 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     assert 'LONG_SLEEVE_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service"' in lib
     assert 'CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service"' in lib
     assert 'CONTINUOUS_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-continuous-paper.service"' in lib
+    assert 'CONTINUOUS_HEDGE_TIMERS="liquidity-migration-continuous-hedge.timer"' in lib
+    assert "apply_timer_enable()" in lib
+    assert "verify_timer()" in lib
     assert "continuous_rmom_refresh_on()" in lib
     sleeves = (repo / "deploy" / "sleeves.env").read_text(encoding="utf-8")
     # 2026-06-09 operator instruction: continuous-only box (demo orders ON, demo-account only).
@@ -668,7 +763,9 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
     # live daemons, plus its rmom timer; risk service wired to read its ledger.
     assert "liquidity-migration-bybit-continuous-demo.service" in text
     assert "liquidity-migration-bybit-continuous-paper.service" in text
-    assert "liquidity-migration-continuous-rmom-refresh.timer" in text
+    assert 'CONTINUOUS_SLEEVE_TIMERS="liquidity-migration-continuous-rmom-refresh.timer"' in lib
+    assert 'apply_timer_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' in text
+    assert 'verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' in text
     assert "continuous_rmom_refresh_on" in text
     assert "Environment=LONG_DATA_ROOT=data/bybit-long-demo-event" in text
     assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text
@@ -776,6 +873,7 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert 'LONG_SLEEVE_UNITS="liquidity-migration-bybit-long-demo.service liquidity-migration-bybit-long-paper.service"' in lib
     assert 'CONTINUOUS_SLEEVE_UNITS="liquidity-migration-bybit-continuous-demo.service"' in lib
     assert 'CONTINUOUS_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-continuous-paper.service"' in lib
+    assert 'CONTINUOUS_HEDGE_TIMERS="liquidity-migration-continuous-hedge.timer"' in lib
     # Read-only verify must catch a missing-timer regression that the deploy
     # script would have caused — parity check, no-write semantics.
     assert "systemctl is-enabled --quiet liquidity-migration-demo-health.timer" in text
@@ -790,7 +888,8 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     # stays wired to read the continuous ledger even when the sleeve is off (asserted
     # below, unconditional) — else its open positions would silently flatten.
     assert "continuous_rmom_refresh_on" in text
-    assert "systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer" in text
+    assert "verify_timer on $CONTINUOUS_SLEEVE_TIMERS $CONTINUOUS_FORWARD_REPORT_TIMERS" in text
+    assert 'verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' in text
     assert "Environment=LONG_DATA_ROOT=data/bybit-long-demo-event" in text
     assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text
     assert "Environment=SUBMIT_ORDERS=1" in text
@@ -1025,7 +1124,9 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "pip install -e \".[dev]\"" in text
     assert "liqmig_union_q40_h3_tp26_g100_qsqueeze" in text
     assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text
-    assert "systemctl disable --now" in text
+    lib = (repo / "deploy" / "lib_sleeves.sh").read_text(encoding="utf-8")
+    assert "apply_timer_enable" in text
+    assert "systemctl disable --now" in lib
     # 2026-06-09 audit: retired-unit (model050426) cleanup removed — fresh 2026-06-04 box.
     assert "model050426" not in text
     assert "liquidity-migration-bybit-demo.service" in text
@@ -1056,7 +1157,9 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     # Continuous-fade sleeve (live on demo 2026-06-01): brought up like the other
     # live daemons, plus its rmom timer; risk service wired to read its ledger.
     assert "liquidity-migration-bybit-continuous-demo.service" in text
-    assert "liquidity-migration-continuous-rmom-refresh.timer" in text
+    assert 'CONTINUOUS_SLEEVE_TIMERS="liquidity-migration-continuous-rmom-refresh.timer"' in lib
+    assert 'apply_timer_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' in text
+    assert 'verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS' in text
     assert "Environment=LONG_DATA_ROOT=data/bybit-long-demo-event" in text
     assert "Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event" in text
     assert "Environment=SUBMIT_ORDERS=1" in text

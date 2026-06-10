@@ -353,9 +353,11 @@ def test_reconnect_backoff_does_not_sleep_under_lock() -> None:
         assert reconnects == 1
         assert elapsed < 1.0, f"reconnect blocked {elapsed:.2f}s — backoff slept under lock"
         # A second check within the backoff window is gated out (no thrash).
+        state = pool._connections[0]  # type: ignore[attr-defined]
         state.last_message_monotonic = time.monotonic() - 5.0
         assert pool.check_stale_connections() == 0
         # Once the backoff has elapsed, the connection is eligible again.
+        state = pool._connections[0]  # type: ignore[attr-defined]
         state.last_reconnect_monotonic = time.monotonic() - 6.0
         state.last_message_monotonic = time.monotonic() - 5.0
         assert pool.check_stale_connections() == 1
@@ -425,6 +427,7 @@ def test_failed_reconnect_keeps_slice_for_retry() -> None:
         factory.fail_enabled = False
         reconnects = pool.check_stale_connections()
         assert reconnects == 1, "watchdog must retry the failed reconnect"
+        state = pool._connections[0]  # type: ignore[attr-defined]
         assert state.closed is False
         assert set(state.assigned_symbols) == {"AAA_USDT", "BBB_USDT"}
         # The new (last) WebSocket is subscribed.

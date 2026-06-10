@@ -19,10 +19,11 @@ import numpy as np
 import polars as pl
 import pytest
 
-from liquidity_migration._common import MS_PER_HOUR
+from liquidity_migration._common import MS_PER_HOUR, date_ms
 from liquidity_migration.config import CostConfig
 from liquidity_migration.long_native import (
     LongNativeConfig,
+    _evaluate_promotion,
     _finalize_trade,
     _load_sector_map,
     _run_long_pipeline,
@@ -92,6 +93,7 @@ def _features_row(*, symbol: str, ts_ms: int, day_return: float = 0.20) -> dict:
         # pattern-specific flags (used by other detectors but harmless here)
         "is_top_rank": True,
         "btc_high_proximity": 0.5,
+        "btc_rv_30": 0.6,
         "own_pump_quantile_90d": 0.05,
         "own_atr_quantile_90d": 0.05,
     }
@@ -350,6 +352,226 @@ def test_max_per_symbol_weight_disabled_passes_through() -> None:
     if not trades.is_empty():
         pw = float(trades["position_weight"][0])
         assert math.isfinite(pw) and pw > 0
+
+
+def test_equal_sizing_uses_equal_position_weight() -> None:
+    cfg = LongNativeConfig(
+        enable_capitulation_rebound=False,
+        enable_volume_resurrection=False,
+        enable_funding_squeeze=False,
+        enable_fomo_chase=True,
+        fc_min_day_return=0.05,
+        fc_eth_regime_required=False,
+        fc_btc_regime_required=False,
+        fc_min_close_location=0.0,
+        fc_top_volume_rank_max=10,
+        fc_max_atr_pct=1.0,
+        fc_use_sigma_threshold=False,
+        max_concurrent_positions=1,
+        gross_exposure=1.0,
+        sizing="equal",
+        max_position_weight=0.01,
+        max_per_symbol_weight=0.0,
+        max_per_sector_concurrent=0,
+        cooldown_days=0,
+        require_pit_membership=False,
+        require_full_pit_universe=False,
+        cost_multiplier=0.0,
+    )
+    day_ts = 1_700_000_000_000
+    row = _features_row(symbol="WIFUSDT", ts_ms=day_ts, day_return=0.20)
+    row["realized_vol"] = 10.0
+    trades, _stats, _events = _run_long_pipeline(
+        features=pl.DataFrame([row]),
+        bars_by_symbol={"WIFUSDT": _bars_for("WIFUSDT", day_ts_ms=day_ts)},
+        funding_lookup=None,
+        config=cfg,
+        costs=CostConfig(),
+    )
+    assert not trades.is_empty()
+    assert float(trades["position_weight"][0]) == pytest.approx(1.0)
+
+
+def test_symbol_weight_cap_binds_after_vol_target_scale() -> None:
+    cfg = LongNativeConfig(
+        enable_capitulation_rebound=False,
+        enable_volume_resurrection=False,
+        enable_funding_squeeze=False,
+        enable_fomo_chase=True,
+        fc_min_day_return=0.05,
+        fc_eth_regime_required=False,
+        fc_btc_regime_required=False,
+        fc_min_close_location=0.0,
+        fc_top_volume_rank_max=10,
+        fc_max_atr_pct=1.0,
+        fc_use_sigma_threshold=False,
+        max_concurrent_positions=1,
+        gross_exposure=1.0,
+        sizing="equal",
+        enable_vol_target=True,
+        vol_target_annual=1.0,
+        vol_target_min_scale=0.1,
+        vol_target_max_scale=10.0,
+        max_per_symbol_weight=0.10,
+        max_per_sector_concurrent=0,
+        cooldown_days=0,
+        require_pit_membership=False,
+        require_full_pit_universe=False,
+        cost_multiplier=0.0,
+    )
+    day_ts = 1_700_000_000_000
+    row = _features_row(symbol="WIFUSDT", ts_ms=day_ts, day_return=0.20)
+    row["btc_rv_30"] = 0.10
+    trades, _stats, _events = _run_long_pipeline(
+        features=pl.DataFrame([row]),
+        bars_by_symbol={"WIFUSDT": _bars_for("WIFUSDT", day_ts_ms=day_ts)},
+        funding_lookup=None,
+        config=cfg,
+        costs=CostConfig(),
+    )
+    assert not trades.is_empty()
+    effective_gross = (cfg.gross_exposure / cfg.max_concurrent_positions) * float(trades["position_weight"][0])
+    assert effective_gross == pytest.approx(cfg.max_per_symbol_weight)
+
+
+def test_sniper_fallthrough_skips_when_deadline_bar_missing() -> None:
+    signal_ts = 1_700_000_000_000 + MS_PER_HOUR
+    cfg = LongNativeConfig(
+        enable_capitulation_rebound=False,
+        enable_volume_resurrection=False,
+        enable_funding_squeeze=False,
+        enable_fomo_chase=True,
+        fc_min_day_return=0.05,
+        fc_eth_regime_required=False,
+        fc_btc_regime_required=False,
+        fc_min_close_location=0.0,
+        fc_top_volume_rank_max=10,
+        fc_max_atr_pct=1.0,
+        fc_use_sigma_threshold=False,
+        fc_use_sniper_entry=True,
+        fc_sniper_retrace_pct=0.50,
+        fc_sniper_deadline_hours=6,
+        fc_sniper_skip_on_no_retrace=False,
+        max_concurrent_positions=1,
+        max_per_symbol_weight=0.0,
+        max_per_sector_concurrent=0,
+        cooldown_days=0,
+        require_pit_membership=False,
+        require_full_pit_universe=False,
+        cost_multiplier=0.0,
+    )
+    bars = _bars_for("WIFUSDT", day_ts_ms=signal_ts - MS_PER_HOUR, hours=6)
+    trades, stats, _events = _run_long_pipeline(
+        features=pl.DataFrame([_features_row(symbol="WIFUSDT", ts_ms=signal_ts, day_return=0.20)]),
+        bars_by_symbol={"WIFUSDT": bars},
+        funding_lookup=None,
+        config=cfg,
+        costs=CostConfig(),
+    )
+    assert trades.is_empty()
+    assert stats["skipped_no_entry_bar"] == 1
+
+
+def test_final_exit_scan_catches_stop_when_no_later_feature_rows() -> None:
+    day_ts = 1_700_000_000_000
+    cfg = LongNativeConfig(
+        enable_capitulation_rebound=False,
+        enable_volume_resurrection=False,
+        enable_funding_squeeze=False,
+        enable_fomo_chase=True,
+        fc_min_day_return=0.05,
+        fc_eth_regime_required=False,
+        fc_btc_regime_required=False,
+        fc_min_close_location=0.0,
+        fc_top_volume_rank_max=10,
+        fc_max_atr_pct=1.0,
+        fc_use_sigma_threshold=False,
+        fc_stop_pct=0.05,
+        fc_take_profit_pct=10.0,
+        max_concurrent_positions=1,
+        max_per_symbol_weight=0.0,
+        max_per_sector_concurrent=0,
+        cooldown_days=0,
+        require_pit_membership=False,
+        require_full_pit_universe=False,
+        cost_multiplier=0.0,
+    )
+    bars = _bars_for("WIFUSDT", day_ts_ms=day_ts, hours=12)
+    bars["low"][2] = 94.0
+    trades, stats, _events = _run_long_pipeline(
+        features=pl.DataFrame([_features_row(symbol="WIFUSDT", ts_ms=day_ts, day_return=0.20)]),
+        bars_by_symbol={"WIFUSDT": bars},
+        funding_lookup=None,
+        config=cfg,
+        costs=CostConfig(),
+    )
+    assert not trades.is_empty()
+    assert trades["exit_reason"][0] == "stop_loss"
+    assert int(trades["exit_ts_ms"][0]) == int(bars["bar_end_ts_ms"][2])
+    assert stats["exits_stop"] == 1
+
+
+def test_windowed_force_close_uses_configured_end_date() -> None:
+    start = "2025-01-01"
+    end = "2025-01-02"
+    day_ts = date_ms(start)
+    cfg = LongNativeConfig(
+        start_date=start,
+        end_date=end,
+        enable_capitulation_rebound=False,
+        enable_volume_resurrection=False,
+        enable_funding_squeeze=False,
+        enable_fomo_chase=True,
+        fc_min_day_return=0.05,
+        fc_eth_regime_required=False,
+        fc_btc_regime_required=False,
+        fc_min_close_location=0.0,
+        fc_top_volume_rank_max=10,
+        fc_max_atr_pct=1.0,
+        fc_use_sigma_threshold=False,
+        fc_stop_pct=0.50,
+        fc_take_profit_pct=10.0,
+        max_concurrent_positions=1,
+        max_per_symbol_weight=0.0,
+        max_per_sector_concurrent=0,
+        cooldown_days=0,
+        require_pit_membership=False,
+        require_full_pit_universe=False,
+        cost_multiplier=0.0,
+    )
+    bars = _bars_for("WIFUSDT", day_ts_ms=day_ts, hours=48)
+    end_idx = bars["by_end"][date_ms(end)]
+    bars["close"][end_idx] = 110.0
+    bars["high"][end_idx] = 111.0
+    bars["low"][end_idx] = 109.0
+    bars["close"][end_idx + 1:] = 200.0
+    bars["high"][end_idx + 1:] = 201.0
+    bars["low"][end_idx + 1:] = 199.0
+    trades, _stats, _events = _run_long_pipeline(
+        features=pl.DataFrame([_features_row(symbol="WIFUSDT", ts_ms=day_ts, day_return=0.20)]),
+        bars_by_symbol={"WIFUSDT": bars},
+        funding_lookup=None,
+        config=cfg,
+        costs=CostConfig(),
+    )
+    assert not trades.is_empty()
+    assert int(trades["exit_ts_ms"][0]) == date_ms(end)
+    assert float(trades["exit_price"][0]) == pytest.approx(110.0)
+    assert float(trades["gross_trade_return"][0]) < 0.20
+
+
+def test_evaluate_promotion_reports_avg_split_sharpe() -> None:
+    promo = _evaluate_promotion(
+        splits=[
+            {"basket_count": 2, "total_return": 0.10, "sharpe_like": 1.0},
+            {"basket_count": 0, "total_return": 0.0, "sharpe_like": 99.0},
+            {"basket_count": 3, "total_return": 0.20, "sharpe_like": 2.0},
+        ],
+        summary={"sharpe_like": 3.0, "max_drawdown": -0.10},
+        funding_mode="partial",
+        full_pit_universe_pass=True,
+    )
+    assert promo["avg_split_sharpe"] == pytest.approx(1.5)
 
 
 def test_run_long_native_research_precomputed_inputs_are_equivalent(tmp_path) -> None:

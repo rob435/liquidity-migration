@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-09
 **Author:** claude (for owner)
-**Stage:** run-pending
+**Stage:** run-complete — rebuilt basis accepted
 
 ## What's changing
 

@@ -246,12 +246,11 @@ systemctl enable --now liquidity-migration-combined-book-report.timer
 # The continuous rmom-refresh timer is required if either continuous demo or
 # paper evidence collection is enabled.
 if continuous_rmom_refresh_on; then
-  systemctl enable --now liquidity-migration-continuous-rmom-refresh.timer
-  systemctl enable --now liquidity-migration-continuous-forward-report.timer
+  apply_timer_enable on $CONTINUOUS_SLEEVE_TIMERS $CONTINUOUS_FORWARD_REPORT_TIMERS
 else
-  systemctl disable --now liquidity-migration-continuous-rmom-refresh.timer 2>/dev/null || true
-  systemctl disable --now liquidity-migration-continuous-forward-report.timer 2>/dev/null || true
+  apply_timer_enable off $CONTINUOUS_SLEEVE_TIMERS $CONTINUOUS_FORWARD_REPORT_TIMERS
 fi
+apply_timer_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS
 # Restart: risk ALWAYS + FIRST (the shared multi-sleeve tracker reading every *_DATA_ROOT
 # must be up before any sleeve restarts); then only the ON sleeves (off ones were
 # disable --now'd above).
@@ -276,11 +275,11 @@ verify_sleeve "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
 if continuous_rmom_refresh_on; then
-  systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer
-  systemctl is-active --quiet liquidity-migration-continuous-rmom-refresh.timer
-  systemctl is-enabled --quiet liquidity-migration-continuous-forward-report.timer
-  systemctl is-active --quiet liquidity-migration-continuous-forward-report.timer
+  verify_timer on $CONTINUOUS_SLEEVE_TIMERS $CONTINUOUS_FORWARD_REPORT_TIMERS
+else
+  verify_timer off $CONTINUOUS_SLEEVE_TIMERS $CONTINUOUS_FORWARD_REPORT_TIMERS
 fi
+verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS
 # Timer parity — recovery must catch a missed enable just like deploy does.
 systemctl is-enabled --quiet liquidity-migration-demo-health.timer
 systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer

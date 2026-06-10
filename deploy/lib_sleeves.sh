@@ -17,6 +17,9 @@ CONTINUOUS_PAPER_SLEEVE_UNITS="liquidity-migration-bybit-continuous-paper.servic
 # Timer the continuous sleeve owns (the daily rmom-gate refresh). It runs when either
 # continuous demo or continuous paper is on, because both need residual_momentum.parquet.
 CONTINUOUS_SLEEVE_TIMERS="liquidity-migration-continuous-rmom-refresh.timer"
+CONTINUOUS_FORWARD_REPORT_TIMERS="liquidity-migration-continuous-forward-report.timer"
+# The BTC-beta hedge is an order-submitting continuous-demo addon, not paper evidence.
+CONTINUOUS_HEDGE_TIMERS="liquidity-migration-continuous-hedge.timer"
 
 # Load the toggles: committed defaults first, then an optional per-host override. Resolves the
 # repo dir from this file's location so it works regardless of the caller's CWD.
@@ -47,6 +50,32 @@ sleeve_on() {
 
 continuous_rmom_refresh_on() {
     sleeve_on "${CONTINUOUS_SLEEVE:-off}" || sleeve_on "${CONTINUOUS_PAPER_SLEEVE:-off}"
+}
+
+apply_timer_enable() {
+    _ate_flag="$1"; shift
+    if sleeve_on "$_ate_flag"; then
+        for _ate_u in "$@"; do systemctl enable --now "$_ate_u"; done
+    else
+        echo "kill-switch: timer group OFF -> disable --now: $*" >&2
+        for _ate_u in "$@"; do systemctl disable --now "$_ate_u" 2>/dev/null || true; done
+    fi
+}
+
+verify_timer() {
+    _vt_flag="$1"; shift
+    if sleeve_on "$_vt_flag"; then
+        for _vt_u in "$@"; do
+            systemctl is-enabled --quiet "$_vt_u" || { echo "verify failed: $_vt_u timer not enabled" >&2; return 1; }
+            systemctl is-active --quiet "$_vt_u" || { echo "verify failed: $_vt_u timer not active" >&2; return 1; }
+        done
+    else
+        for _vt_u in "$@"; do
+            if systemctl is-active --quiet "$_vt_u" 2>/dev/null; then
+                echo "verify failed: $_vt_u timer is OFF in sleeves.env but still active" >&2; return 1
+            fi
+        done
+    fi
 }
 
 # apply_sleeve_enable <flag-value> <unit...> — on: `systemctl enable` each unit; off:

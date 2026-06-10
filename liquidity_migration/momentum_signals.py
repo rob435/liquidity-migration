@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import polars as pl
 
-from ._common import MS_PER_DAY
+from ._common import MS_PER_DAY, calendar_shift
 
 
 # This module is what remains of an earlier momentum-strategy iteration.
@@ -92,7 +92,7 @@ def add_returns_and_age(daily: pl.DataFrame) -> pl.DataFrame:
         daily.sort(["symbol", "ts_ms"])
         .with_columns(
             [
-                (pl.col("close").log() - pl.col("close").log().shift(1).over("symbol")).alias("log_return"),
+                (pl.col("close").log() - calendar_shift(pl.col("close"), 1).log()).alias("log_return"),
                 ((pl.col("ts_ms") - pl.col("ts_ms").min().over("symbol")) / MS_PER_DAY + 1).cast(pl.Int64).alias("symbol_age_days"),
             ]
         )

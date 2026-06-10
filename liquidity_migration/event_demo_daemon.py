@@ -1367,6 +1367,7 @@ def _default_short_state_cache_seeder(
     tickers = public.get_tickers()
     ticker_cache.replace_with_rest_snapshot(tickers)
     if private_client is not None:
+        snapshot_started = time.monotonic()
         snap = _collect_private_snapshots(private_client, demo_config)
         private_state_cache.replace_with_rest_snapshot(
             equity_usdt=snap["equity_usdt"],
@@ -1375,6 +1376,7 @@ def _default_short_state_cache_seeder(
             open_orders=snap["raw_open_orders"],
             position_error=snap.get("position_error", ""),
             open_order_error=snap.get("open_order_error", ""),
+            snapshot_started_monotonic=snapshot_started,
         )
         return
     api_key, api_secret, demo = resolve_private_credentials()
@@ -1386,6 +1388,7 @@ def _default_short_state_cache_seeder(
             api_key=api_key,
             api_secret=api_secret,
         )
+        snapshot_started = time.monotonic()
         snap = _collect_private_snapshots(private, demo_config)
         private_state_cache.replace_with_rest_snapshot(
             equity_usdt=snap["equity_usdt"],
@@ -1394,6 +1397,7 @@ def _default_short_state_cache_seeder(
             open_orders=snap["raw_open_orders"],
             position_error=snap.get("position_error", ""),
             open_order_error=snap.get("open_order_error", ""),
+            snapshot_started_monotonic=snapshot_started,
         )
     else:
         private_state_cache.replace_with_rest_snapshot()

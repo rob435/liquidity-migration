@@ -9,10 +9,15 @@ User=root
 Group=root
 WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
+# Per-sleeve kill-switch toggles. The short entry daemon can be intentionally off
+# while continuous runs; entry-health must skip that root instead of paging.
+EnvironmentFile=-/opt/liquidity-migration/deploy/sleeves.env
+EnvironmentFile=-/etc/liquidity-migration/sleeves.env
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/check_demo_entry_health.py \
     --data-root /opt/liquidity-migration/data/bybit-demo-event \
     --window-hours 24 \
+    --sleeve-env-var SHORT_SLEEVE \
     --telegram
 # Exit code 1 = no entries (alert sent via Telegram); not a service "failure"
 SuccessExitStatus=0 1

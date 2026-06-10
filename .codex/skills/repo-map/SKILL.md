@@ -6,8 +6,9 @@ description: "Orient in the liquidity-migration codebase: module map, core abstr
 # Repo map
 
 A Bybit (+Binance) research codebase for a liquidity-migration **short** strategy
-(plus a long-native v11a sleeve). Research-stage; a frozen `promoted` profile runs
-on demo + paper only, not real money. Live state + what's next live in **STATE.md**;
+(plus long-native v11a and continuous-fade research sleeves). Research-stage;
+promoted profiles are demo/paper only and actual running sleeves are operator-toggled
+in `deploy/sleeves.env`; never real money. Live state + what's next live in **STATE.md**;
 the single consolidated research record is **docs/research_summary.md** — this file is
 just the map.
 
@@ -39,6 +40,9 @@ and `graphify-out/GRAPH_REPORT.md`.
 - `event_demo.py` / `event_demo_daemon.py` / `ws_risk.py` — the live demo
   forward-cycle runner + websocket-first risk watchdog (REST fallback).
 - `long_native.py` — the long-native v11a sleeve (the `equity-curve` skill drives it).
+- `continuous_demo.py` / `continuous_demo_daemon.py` / `continuous_rebalance.py` /
+  `continuous_hedge_manager.py` — continuous-fade demo/paper collector, rebalance
+  engine, and BTC-hedge dry-run path.
 - `kline_store.py` / `kline_stream_manager.py` / `ws_state_cache.py` — the
   WS-driven event runtime.
 - `risk_model.py` — factor model + per-trade residual-P&L decomposition

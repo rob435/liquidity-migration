@@ -463,14 +463,20 @@ class BybitPrivateClient:
         payload = self._call("cancel_all_orders", **params)
         return payload.get("result", {})
 
-    def get_open_orders(self, *, symbol: str | None = None, settle_coin: str | None = "USDT") -> list[dict[str, Any]]:
-        params: dict[str, Any] = {"category": self.category}
+    def get_open_orders(
+        self,
+        *,
+        symbol: str | None = None,
+        settle_coin: str | None = "USDT",
+        limit: int = 50,
+        max_pages: int = 20,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"category": self.category, "limit": max(1, min(int(limit), 50))}
         if symbol:
             params["symbol"] = symbol
         elif settle_coin:
             params["settleCoin"] = settle_coin
-        payload = self._call("get_open_orders", **params)
-        return payload.get("result", {}).get("list", [])
+        return self._cursor_result_list("get_open_orders", params, max_pages=max_pages)
 
     def get_order_history(
         self,
@@ -502,14 +508,35 @@ class BybitPrivateClient:
         payload = self._call_optional(("get_executions", "get_trade_history"), **params)
         return payload.get("result", {}).get("list", []) if payload else []
 
-    def get_positions(self, *, symbol: str | None = None, settle_coin: str | None = None) -> list[dict[str, Any]]:
-        params: dict[str, Any] = {"category": self.category}
+    def get_positions(
+        self,
+        *,
+        symbol: str | None = None,
+        settle_coin: str | None = None,
+        limit: int = 200,
+        max_pages: int = 20,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"category": self.category, "limit": max(1, min(int(limit), 200))}
         if symbol:
             params["symbol"] = symbol
         elif settle_coin:
             params["settleCoin"] = settle_coin
-        payload = self._call("get_positions", **params)
-        return payload.get("result", {}).get("list", [])
+        return self._cursor_result_list("get_positions", params, max_pages=max_pages)
+
+    def _cursor_result_list(self, method_name: str, base_params: Mapping[str, Any], *, max_pages: int) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        cursor: str | None = None
+        for _ in range(max(1, int(max_pages))):
+            params = dict(base_params)
+            if cursor:
+                params["cursor"] = cursor
+            payload = self._call(method_name, **params)
+            result = payload.get("result", {})
+            rows.extend(result.get("list", []))
+            cursor = result.get("nextPageCursor") or None
+            if not cursor:
+                break
+        return rows
 
     def get_closed_pnl(
         self,
@@ -985,7 +1012,7 @@ class BybitTradeRouter:
         if self._should_attempt_ws():
             try:
                 return self._ws_call_sync(
-                    "cancel_order", symbol=symbol, orderLinkId=order_link_id,
+                    "cancel_order", symbol=symbol, order_link_id=order_link_id,
                 )
             except _RouterWsFailed as failure:
                 if not self._rest_fallback:
@@ -1555,12 +1582,19 @@ class BybitKlineStreamPool:
     ) -> None:
         if not symbols:
             return
+        subscribed = self._subscribe_client_chunks(state, symbols)
+        for symbol in subscribed:
+            state.assigned_symbols.add(symbol)
+            self._symbol_to_connection[symbol] = state.index
+
+    def _subscribe_client_chunks(self, state: _KlineConnectionState, symbols: list[str]) -> set[str]:
         callback = self._make_callback(state)
         # Chunk the subscribe so each WS message stays under Bybit's per-message
         # args cap. pybit accepts repeated kline_stream calls per WebSocket;
         # each issues another subscribe frame on the same connection.
         chunk = self.subscribe_args_per_message
         symbols_list = list(symbols)
+        subscribed: set[str] = set()
         for i in range(0, len(symbols_list), chunk):
             slice_ = symbols_list[i : i + chunk]
             try:
@@ -1583,23 +1617,21 @@ class BybitKlineStreamPool:
                     # every refresh, silently dropping later new listings.
                     if len(slice_) > 1:
                         for symbol in slice_:
-                            self._subscribe_to_connection_locked(state, [symbol])
+                            subscribed.update(self._subscribe_client_chunks(state, [symbol]))
                         continue
                     _logger_ws_klines.debug(
                         "kline topic already subscribed conn=%d; adopting %s",
                         state.index, slice_[0],
                     )
-                    state.assigned_symbols.add(slice_[0])
-                    self._symbol_to_connection[slice_[0]] = state.index
+                    subscribed.add(slice_[0])
                     continue
                 _logger_ws_klines.warning(
                     "kline_stream subscribe failed conn=%d slice=%d/%d: %s",
                     state.index, len(slice_), len(symbols_list), exc,
                 )
                 raise
-            for symbol in slice_:
-                state.assigned_symbols.add(symbol)
-                self._symbol_to_connection[symbol] = state.index
+            subscribed.update(slice_)
+        return subscribed
 
     def _unsubscribe_symbol_locked(self, symbol: str) -> None:
         index = self._symbol_to_connection.pop(symbol, None)
@@ -1736,15 +1768,28 @@ class BybitKlineStreamPool:
                         "kline connection idle: conn=%d gap=%.1fs symbols=%d",
                         state.index, gap, len(state.assigned_symbols),
                     )
+            reconnect_jobs: list[tuple[int, list[str], Any, int, float]] = []
             for index in to_reconnect:
-                self._reconnect_connection_locked(index)
-                reconnects += 1
+                job = self._prepare_reconnect_locked(index)
+                if job is not None:
+                    reconnect_jobs.append(job)
+        for index, slice_symbols, old_client, prior_reconnect_count, attempt_monotonic in reconnect_jobs:
+            self._reconnect_connection(
+                index,
+                slice_symbols,
+                old_client,
+                prior_reconnect_count,
+                attempt_monotonic,
+            )
+            reconnects += 1
         return reconnects
 
-    def _reconnect_connection_locked(self, index: int) -> None:
+    def _prepare_reconnect_locked(self, index: int) -> tuple[int, list[str], Any, int, float] | None:
         if index >= len(self._connections):
-            return
+            return None
         state = self._connections[index]
+        if not state.assigned_symbols:
+            return None
         # Snapshot the slice BEFORE clearing — we need to preserve it so a
         # mid-reconnect failure leaves the watchdog enough state to retry
         # on the next tick. Previously assigned_symbols was cleared
@@ -1758,12 +1803,24 @@ class BybitKlineStreamPool:
         # spaces the next retry even if the factory build below raises. This
         # replaces the old in-lock time.sleep(backoff) that throttled storms at
         # the cost of holding the pool lock for the whole sleep.
-        state.last_reconnect_monotonic = time.monotonic()
+        attempt_monotonic = time.monotonic()
+        state.last_reconnect_monotonic = attempt_monotonic
+        state.closed = True
         _logger_ws_klines.warning(
             "kline connection reconnect conn=%d symbols=%d", index, len(slice_symbols),
         )
+        return index, slice_symbols, state.client, state.reconnect_count, attempt_monotonic
+
+    def _reconnect_connection(
+        self,
+        index: int,
+        slice_symbols: list[str],
+        old_client: Any,
+        prior_reconnect_count: int,
+        attempt_monotonic: float,
+    ) -> None:
         try:
-            self._close_state(state)
+            _close_ws_client(old_client)
         except Exception as exc:  # noqa: BLE001
             _logger_ws_klines.warning("close on reconnect failed conn=%d: %s", index, exc)
         try:
@@ -1778,29 +1835,64 @@ class BybitKlineStreamPool:
             # State stays closed=True with assigned_symbols populated; the
             # watchdog's closed+assigned branch above picks it up next tick.
             return
-        # Successful new client: clear the stale symbol→conn mapping (the
-        # closed client's entries are now invalid) and assigned_symbols
-        # (subscribe rebuilds it), then resubscribe.
-        for symbol in slice_symbols:
-            self._symbol_to_connection.pop(symbol, None)
-        state.assigned_symbols.clear()
-        state.client = new_client
-        state.closed = False
-        state.last_message_monotonic = time.monotonic()
-        state.reconnect_count += 1
-        self._reconnects_total += 1
-        if slice_symbols:
+        new_state = _KlineConnectionState(
+            index=index,
+            client=new_client,
+            assigned_symbols=set(),
+            last_message_monotonic=time.monotonic(),
+            reconnect_count=prior_reconnect_count + 1,
+            last_reconnect_monotonic=attempt_monotonic,
+        )
+        try:
+            subscribed = self._subscribe_client_chunks(new_state, slice_symbols)
+        except Exception as exc:  # noqa: BLE001
+            _logger_ws_klines.exception(
+                "kline reconnect resubscribe failed conn=%d: %s; "
+                "marking closed for retry", index, exc,
+            )
+            _close_ws_client(new_client)
+            return
+        stale_subscriptions: list[str] = []
+        close_new_client = False
+        with self._lock:
+            if self._closed or index >= len(self._connections):
+                close_new_client = True
+            else:
+                old_state = self._connections[index]
+                desired_symbols = set(old_state.assigned_symbols)
+                install_symbols = sorted(set(subscribed) & desired_symbols)
+                # Successful new client: clear the stale symbol->conn mapping
+                # (the closed client's entries are now invalid). The fresh state
+                # is already subscribed; the lock is only for publishing it.
+                for symbol in slice_symbols:
+                    self._symbol_to_connection.pop(symbol, None)
+                if not install_symbols:
+                    old_state.assigned_symbols.clear()
+                    old_state.closed = True
+                    close_new_client = True
+                else:
+                    new_state.assigned_symbols = set(install_symbols)
+                    for symbol in install_symbols:
+                        self._symbol_to_connection[symbol] = index
+                    self._connections[index] = new_state
+                    stale_subscriptions = sorted(set(subscribed) - set(install_symbols))
+                self._reconnects_total += 1
+        if close_new_client:
+            _close_ws_client(new_client)
+        elif stale_subscriptions:
+            self._unsubscribe_client_symbols(new_client, stale_subscriptions)
+
+    def _unsubscribe_client_symbols(self, client: Any, symbols: Iterable[str]) -> None:
+        unsubscribe = getattr(client, "unsubscribe", None)
+        if not callable(unsubscribe):
+            return
+        for symbol in symbols:
             try:
-                self._subscribe_to_connection_locked(state, slice_symbols)
+                unsubscribe(topic=f"kline.{self.interval_minutes}.{symbol}")
             except Exception as exc:  # noqa: BLE001
-                _logger_ws_klines.exception(
-                    "kline reconnect resubscribe failed conn=%d: %s; "
-                    "marking closed for retry", index, exc,
+                _logger_ws_klines.warning(
+                    "kline stale unsubscribe failed symbol=%s: %s", symbol, exc,
                 )
-                # Subscribe failure: put the slice back on assigned_symbols
-                # and mark closed so the watchdog retries.
-                state.assigned_symbols.update(slice_symbols)
-                self._close_state(state)
 
     # -- shutdown -------------------------------------------------------
 

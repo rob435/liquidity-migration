@@ -11,12 +11,11 @@ WorkingDirectory=/opt/liquidity-migration
 EnvironmentFile=/etc/liquidity-migration/bybit-demo.env
 Environment=DATA_ROOT=data/bybit-continuous-demo-event
 Environment=CONFIG_PATH=configs/volume_alpha.default.yaml
-# Dormant order-submitting unit. The committed deploy toggle keeps CONTINUOUS_SLEEVE=off,
-# so deploy disables this unit by default; the continuous paper collector is the only
-# continuous service expected to run unless the operator explicitly re-enables demo orders.
-# Preconditions are still wired before any future enable: the risk service reads
-# CONTINUOUS_DATA_ROOT, the continuous_fade_* datasets are registered, and ws_risk routes
-# continuous fills/orphans into the continuous ledger. Demo account ONLY; never REAL_MONEY.
+# Order-submitting demo unit. The committed deploy toggle currently sets
+# CONTINUOUS_SLEEVE=on by explicit operator instruction (2026-06-09); demo fills
+# are execution evidence only, not promotion evidence. The risk service reads
+# CONTINUOUS_DATA_ROOT, the continuous_fade_* datasets are registered, and ws_risk
+# routes continuous fills/orphans into the continuous ledger. Demo account ONLY; never REAL_MONEY.
 Environment=SUBMIT_ORDERS=1
 Environment=CONFIRM_DEMO_ORDERS=1
 Environment=TELEGRAM_ENABLED=1

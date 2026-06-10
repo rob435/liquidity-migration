@@ -51,6 +51,17 @@ from ._common import finite_float
 
 _logger = logging.getLogger("liquidity_migration.ws_state_cache")
 
+_ORDER_TERMINAL_STATUSES = {
+    "filled",
+    "cancelled",
+    "canceled",
+    "rejected",
+    "deactivated",
+    "expired",
+    "partiallyfilledcanceled",
+    "partiallyfilledcancelled",
+}
+
 
 def _float(value: Any) -> float:
     # Delegates to the finite-guarded _common.finite_float: a torn/partial WS
@@ -80,6 +91,14 @@ def _first_price(row: Mapping[str, Any], keys: tuple[str, ...]) -> float:
         if value > 0.0:
             return value
     return 0.0
+
+
+def _venue_updated_ms(row: Mapping[str, Any]) -> int:
+    for key in ("updatedTime", "updated_time", "createdTime", "created_time"):
+        value = _float(row.get(key))
+        if value > 0.0:
+            return int(value)
+    return 0
 
 
 # -- PrivateStateCache --------------------------------------------------
@@ -128,10 +147,13 @@ class PrivateStateCache:
         # snapshot so the cycle sees the same shape REST would have returned.
         self._orders_by_id: dict[str, dict[str, Any]] = {}
         self._link_to_id: dict[str, str] = {}
+        self._order_update_monotonic: dict[str, float] = {}
+        self._order_tombstone_monotonic: dict[str, float] = {}
         # Positions keyed by symbol. Bybit pushes zero-size events when a
         # position closes; we treat those as a removal so the cache mirrors
         # what `get_positions(settle_coin)` returns: only OPEN positions.
         self._positions_by_symbol: dict[str, dict[str, Any]] = {}
+        self._position_update_monotonic: dict[str, float] = {}
         self._equity_usdt: float = float(fallback_equity_usdt)
         self._wallet_error: str = ""
         # Last error reported by the REST reconcile for positions / open
@@ -172,22 +194,25 @@ class PrivateStateCache:
         and propagate the error so the cycle's orphan guard engages.
         """
         with self._lock:
+            now = time.monotonic()
             if equity_usdt is not None:
                 self._equity_usdt = float(equity_usdt)
             self._wallet_error = str(wallet_error)
             self._position_error = str(position_error)
             if not position_error and positions is not None:
                 self._positions_by_symbol = {}
+                self._position_update_monotonic = {}
                 for row in positions:
-                    self._upsert_position_locked(row)
+                    self._upsert_position_locked(row, local_update_monotonic=now)
             self._open_order_error = str(open_order_error)
             if not open_order_error and open_orders is not None:
                 self._orders_by_id = {}
                 self._link_to_id = {}
+                self._order_update_monotonic = {}
                 for row in open_orders:
-                    self._upsert_order_locked(row)
+                    self._upsert_order_locked(row, local_update_monotonic=now)
             self._stats.seeded = True
-            self._stats.last_event_monotonic = time.monotonic()
+            self._stats.last_event_monotonic = now
 
     def replace_with_rest_snapshot(
         self,
@@ -198,19 +223,43 @@ class PrivateStateCache:
         open_orders: Iterable[Mapping[str, Any]] | None = None,
         position_error: str = "",
         open_order_error: str = "",
+        snapshot_started_monotonic: float | None = None,
     ) -> None:
         """Like ``seed`` but called periodically — overwrites the cached
         positions + orders + equity with a fresh REST snapshot so any
         events the WS missed (transient disconnect, server-side drop) are
         recovered. Distinct from ``seed`` only in intent for clarity."""
-        self.seed(
-            equity_usdt=equity_usdt,
-            wallet_error=wallet_error,
-            positions=positions,
-            open_orders=open_orders,
-            position_error=position_error,
-            open_order_error=open_order_error,
-        )
+        if snapshot_started_monotonic is None:
+            self.seed(
+                equity_usdt=equity_usdt,
+                wallet_error=wallet_error,
+                positions=positions,
+                open_orders=open_orders,
+                position_error=position_error,
+                open_order_error=open_order_error,
+            )
+            return
+        with self._lock:
+            now = time.monotonic()
+            if equity_usdt is not None:
+                self._equity_usdt = float(equity_usdt)
+            self._wallet_error = str(wallet_error)
+            self._position_error = str(position_error)
+            if not position_error and positions is not None:
+                self._replace_positions_from_rest_locked(
+                    positions,
+                    snapshot_started_monotonic=snapshot_started_monotonic,
+                    local_update_monotonic=now,
+                )
+            self._open_order_error = str(open_order_error)
+            if not open_order_error and open_orders is not None:
+                self._replace_orders_from_rest_locked(
+                    open_orders,
+                    snapshot_started_monotonic=snapshot_started_monotonic,
+                    local_update_monotonic=now,
+                )
+            self._stats.seeded = True
+            self._stats.last_event_monotonic = now
 
     # -- WS event update paths ----------------------------------------
 
@@ -249,21 +298,11 @@ class PrivateStateCache:
 
         Schema-drift safety: see ``on_position_event``.
         """
-        terminal_statuses = {
-            "filled",
-            "cancelled",
-            "canceled",
-            "rejected",
-            "deactivated",
-            "expired",
-            "partiallyfilledcanceled",
-            "partiallyfilledcancelled",
-        }
         with self._lock:
             applied = 0
             for row in _message_rows(message):
                 try:
-                    self._apply_order_update_locked(row, terminal_statuses)
+                    self._apply_order_update_locked(row, _ORDER_TERMINAL_STATUSES)
                     applied += 1
                 except Exception as exc:  # noqa: BLE001
                     self._stats.dropped_events += 1
@@ -385,10 +424,12 @@ class PrivateStateCache:
 
     # -- internals -----------------------------------------------------
 
-    def _upsert_position_locked(self, row: Mapping[str, Any]) -> None:
+    def _upsert_position_locked(self, row: Mapping[str, Any], *, local_update_monotonic: float | None = None) -> None:
         symbol = str(row.get("symbol", ""))
         if not symbol:
             return
+        updated = local_update_monotonic if local_update_monotonic is not None else time.monotonic()
+        self._position_update_monotonic[symbol] = updated
         size = _float(row.get("size"))
         if size > 0.0:
             self._positions_by_symbol[symbol] = dict(row)
@@ -401,19 +442,149 @@ class PrivateStateCache:
             return
         status = str(row.get("orderStatus") or row.get("order_status") or "").lower()
         if status in terminal_statuses:
-            self._orders_by_id.pop(order_id, None)
-            if link and self._link_to_id.get(link) == order_id:
+            updated = time.monotonic()
+            ids_to_remove = {order_id}
+            if link and self._link_to_id.get(link):
+                ids_to_remove.add(self._link_to_id[link])
+            for remove_id in ids_to_remove:
+                if not remove_id:
+                    continue
+                self._orders_by_id.pop(remove_id, None)
+                self._order_update_monotonic.pop(remove_id, None)
+                self._order_tombstone_monotonic[remove_id] = updated
+            if link:
                 self._link_to_id.pop(link, None)
+                self._order_tombstone_monotonic[link] = updated
             return
         self._upsert_order_locked(row)
 
-    def _upsert_order_locked(self, row: Mapping[str, Any]) -> None:
+    def _upsert_order_locked(self, row: Mapping[str, Any], *, local_update_monotonic: float | None = None) -> None:
         order_id, link = self._order_keys(row)
         if not order_id:
             return
+        if link:
+            prior_id = self._link_to_id.get(link)
+            if prior_id and prior_id != order_id:
+                self._orders_by_id.pop(prior_id, None)
+                self._order_update_monotonic.pop(prior_id, None)
+        updated = local_update_monotonic if local_update_monotonic is not None else time.monotonic()
         self._orders_by_id[order_id] = dict(row)
+        self._order_update_monotonic[order_id] = updated
         if link:
             self._link_to_id[link] = order_id
+
+    def _replace_positions_from_rest_locked(
+        self,
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        snapshot_started_monotonic: float,
+        local_update_monotonic: float,
+    ) -> None:
+        rest_by_symbol: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            symbol = str(row.get("symbol", "") or "")
+            if not symbol or _float(row.get("size")) <= 0.0:
+                continue
+            rest_by_symbol[symbol] = dict(row)
+
+        next_positions: dict[str, dict[str, Any]] = {}
+        next_updates: dict[str, float] = {}
+        for symbol, rest_row in rest_by_symbol.items():
+            local_update = self._position_update_monotonic.get(symbol, 0.0)
+            existing = self._positions_by_symbol.get(symbol)
+            if local_update > snapshot_started_monotonic:
+                if existing is not None:
+                    next_positions[symbol] = existing
+                    next_updates[symbol] = local_update
+                continue
+            if (
+                existing is not None
+                and _venue_updated_ms(existing) > _venue_updated_ms(rest_row) > 0
+            ):
+                next_positions[symbol] = existing
+                next_updates[symbol] = local_update or local_update_monotonic
+                continue
+            next_positions[symbol] = rest_row
+            next_updates[symbol] = local_update_monotonic
+
+        for symbol, existing in self._positions_by_symbol.items():
+            if symbol in rest_by_symbol:
+                continue
+            local_update = self._position_update_monotonic.get(symbol, 0.0)
+            if local_update > snapshot_started_monotonic:
+                next_positions[symbol] = existing
+                next_updates[symbol] = local_update
+
+        self._positions_by_symbol = next_positions
+        self._position_update_monotonic = next_updates
+
+    def _replace_orders_from_rest_locked(
+        self,
+        rows: Iterable[Mapping[str, Any]],
+        *,
+        snapshot_started_monotonic: float,
+        local_update_monotonic: float,
+    ) -> None:
+        rest_by_id: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            order_id, _link = self._order_keys(row)
+            if not order_id:
+                continue
+            status = str(row.get("orderStatus") or row.get("order_status") or "").lower()
+            if status in _ORDER_TERMINAL_STATUSES:
+                continue
+            rest_by_id[order_id] = dict(row)
+
+        next_orders: dict[str, dict[str, Any]] = {}
+        next_links: dict[str, str] = {}
+        next_updates: dict[str, float] = {}
+        for order_id, rest_row in rest_by_id.items():
+            _row_order_id, link = self._order_keys(rest_row)
+            tombstone = max(
+                self._order_tombstone_monotonic.get(order_id, 0.0),
+                self._order_tombstone_monotonic.get(link, 0.0) if link else 0.0,
+            )
+            if tombstone > snapshot_started_monotonic:
+                continue
+            existing = self._orders_by_id.get(order_id)
+            local_update = self._order_update_monotonic.get(order_id, 0.0)
+            if local_update > snapshot_started_monotonic and existing is not None:
+                self._copy_order_to_maps(existing, next_orders, next_links, next_updates, local_update)
+                continue
+            if (
+                existing is not None
+                and _venue_updated_ms(existing) > _venue_updated_ms(rest_row) > 0
+            ):
+                self._copy_order_to_maps(existing, next_orders, next_links, next_updates, local_update or local_update_monotonic)
+                continue
+            self._copy_order_to_maps(rest_row, next_orders, next_links, next_updates, local_update_monotonic)
+
+        for order_id, existing in self._orders_by_id.items():
+            if order_id in rest_by_id:
+                continue
+            local_update = self._order_update_monotonic.get(order_id, 0.0)
+            if local_update > snapshot_started_monotonic:
+                self._copy_order_to_maps(existing, next_orders, next_links, next_updates, local_update)
+
+        self._orders_by_id = next_orders
+        self._link_to_id = next_links
+        self._order_update_monotonic = next_updates
+
+    def _copy_order_to_maps(
+        self,
+        row: Mapping[str, Any],
+        orders: dict[str, dict[str, Any]],
+        links: dict[str, str],
+        updates: dict[str, float],
+        updated_monotonic: float,
+    ) -> None:
+        order_id, link = self._order_keys(row)
+        if not order_id:
+            return
+        orders[order_id] = dict(row)
+        updates[order_id] = updated_monotonic
+        if link:
+            links[link] = order_id
 
     @staticmethod
     def _order_keys(row: Mapping[str, Any]) -> tuple[str, str]:
@@ -485,24 +656,25 @@ class TickerCache:
 
     # -- seed ----------------------------------------------------------
 
-    def seed(self, tickers: Iterable[Mapping[str, Any]]) -> None:
+    def seed(self, tickers: Iterable[Mapping[str, Any]], *, allow_empty: bool = True) -> None:
+        rows = [dict(row) for row in tickers if str(row.get("symbol", "") or "")]
         with self._lock:
+            if not rows and not allow_empty and self._rows_by_symbol:
+                return
             self._rows_by_symbol = {}
             self._symbol_update_monotonic = {}
             now = time.monotonic()
-            for row in tickers:
+            for row in rows:
                 symbol = str(row.get("symbol", "") or "")
-                if not symbol:
-                    continue
                 self._rows_by_symbol[symbol] = dict(row)
                 self._symbol_update_monotonic[symbol] = now
             self._stats.seeded = True
-            self._stats.last_event_monotonic = time.monotonic()
+            self._stats.last_event_monotonic = now
 
     def replace_with_rest_snapshot(self, tickers: Iterable[Mapping[str, Any]]) -> None:
         """Periodic reconcile — overwrites whatever the WS deltas have
         accumulated with a fresh REST snapshot. Same effect as ``seed``."""
-        self.seed(tickers)
+        self.seed(tickers, allow_empty=False)
 
     # -- WS event update path ------------------------------------------
 

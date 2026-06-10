@@ -4,6 +4,7 @@ import os
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -11,6 +12,44 @@ class TelegramConfig:
     token_env: str = "TELEGRAM_BOT_TOKEN"
     chat_id_env: str = "TELEGRAM_CHAT_ID"
     timeout_seconds: float = 10.0
+
+
+def format_usd(value: object, *, signed: bool = False) -> str:
+    try:
+        amount = float(value or 0.0)
+    except (TypeError, ValueError):
+        amount = 0.0
+    if amount < 0:
+        return f"-${abs(amount):,.2f}"
+    sign = "+" if signed and amount > 0 else ""
+    return f"{sign}${amount:,.2f}"
+
+
+def format_pct(value: object, *, signed: bool = False) -> str:
+    try:
+        pct = float(value or 0.0)
+    except (TypeError, ValueError):
+        pct = 0.0
+    sign = "+" if signed and pct > 0 else ""
+    return f"{sign}{pct:.2%}"
+
+
+def format_utc_time_ms(ts_ms: int) -> str:
+    return datetime.fromtimestamp(ts_ms / 1000, tz=UTC).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def format_age_ms(*, now_ms: int, then_ms: int | None) -> str:
+    if not then_ms:
+        return "no recent cycle"
+    age_min = max(0.0, (now_ms - int(then_ms)) / 60_000.0)
+    if age_min < 2:
+        return "just now"
+    if age_min < 90:
+        return f"{age_min:.0f} min ago"
+    age_h = age_min / 60.0
+    if age_h < 48:
+        return f"{age_h:.1f}h ago"
+    return f"{age_h / 24.0:.1f}d ago"
 
 
 def send_telegram_message(

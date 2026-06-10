@@ -2558,6 +2558,74 @@ def test_ws_risk_recovers_strategy_trade_id_from_bot_order_link(tmp_path: Path) 
     )
 
 
+def test_ws_risk_recovers_continuous_addon_hedge_as_tracking_row(tmp_path: Path) -> None:
+    from liquidity_migration.continuous_hedge_manager import HEDGE_SYMBOL
+    from liquidity_migration.event_demo import _order_link_id
+
+    addon_root = tmp_path / "continuous-addon"
+    signal_ts_ms = 1_700_000_000_000
+    opened_ms = signal_ts_ms + 60_000
+    entry_link = _order_link_id("en-ca", symbol=HEDGE_SYMBOL, signal_ts_ms=signal_ts_ms)
+    private_client = FakePrivateClient(
+        positions=[
+            {
+                "symbol": HEDGE_SYMBOL,
+                "side": "Buy",
+                "size": "0.02",
+                "avgPrice": "100000",
+                "markPrice": "100000",
+                "positionValue": "2000",
+                "unrealisedPnl": "0",
+                "createdTime": str(opened_ms),
+            },
+        ],
+        order_history=[
+            {
+                "symbol": HEDGE_SYMBOL,
+                "side": "Buy",
+                "orderLinkId": entry_link,
+                "orderStatus": "Filled",
+                "qty": "0.02",
+                "avgPrice": "100000",
+                "createdTime": str(opened_ms),
+            },
+        ],
+    )
+    engine = EventWebSocketRiskEngine(
+        tmp_path,
+        config=ResearchConfig(data_root=tmp_path),
+        risk_config=EventWebSocketRiskConfig(
+            submit_orders=False,
+            repair_stops=False,
+            rest_reconcile_seconds=0.0,
+            heartbeat_seconds=0.0,
+            untracked_position_grace_seconds=0.0,
+            continuous_addon_data_root=str(addon_root),
+        ),
+        private_client=private_client,
+        private_stream=FakePrivateStream(),
+        public_stream=FakePublicStream(),
+    )
+
+    engine.bootstrap()
+
+    stored = read_dataset(addon_root, "continuous_fade_demo_trades")
+    assert stored.height == 1
+    trade = stored.to_dicts()[0]
+    assert trade["trade_id"] == f"hedge-{entry_link}"
+    assert trade["strategy_id"] == "continuous_btc_hedge_v1"
+    assert trade["symbol"] == HEDGE_SYMBOL
+    assert trade["side"] == "long"
+    assert trade["sleeve"] == "continuous_addon"
+    assert trade["entry_order_link_id"] == entry_link
+    assert trade["signal_ts_ms"] == signal_ts_ms
+    assert trade["entry_ts_ms"] == opened_ms
+    assert trade["stop_price"] == 0.0
+    assert trade["take_profit_price"] == 0.0
+    assert trade["planned_exit_ts_ms"] == 0
+    assert trade["submit_mode"] == "adopted_recovered"
+
+
 def test_recover_entry_link_metadata_prefers_latest_reentry(tmp_path: Path) -> None:
     """re-audit scan-continuous-identity-1: a same-window cover-then-re-enter leaves TWO continuous
     entry links for one symbol in order history (seq=0 covered, seq=1 the live position). The rebuild

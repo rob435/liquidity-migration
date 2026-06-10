@@ -12,6 +12,10 @@ a capable box: `bash scripts/reconcile.sh` (pull step rsyncs from `root@116.202.
 or hand over the `event_demo_*` order/fill datasets. Until then the impact model stays
 "stress-tested, uncalibrated" — explicitly carried as a Tier-3 risk item.
 
+**Addendum 2026-06-10:** the 2026-06-09 VPS rebuild invalidated any pre-rebuild
+fill history for calibration. R4 is now blocked on fresh observed fills from the
+rebuilt continuous demo sleeve; the valid fill clock starts on 2026-06-09.
+
 ## R5 — capacity statement (bar PRE-STATED before measurement)
 
 Bar: capacity = largest deployment equity E such that the p95 ensemble trade-entry

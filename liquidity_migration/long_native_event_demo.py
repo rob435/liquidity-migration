@@ -18,9 +18,9 @@ Operating model
 - Each entry is submitted with venue-managed stop_loss + take_profit (Bybit
   enforces at sub-ms venue speed). Stop/TP are ATR-derived (fc_atr_stop_mult=1.5,
   fc_atr_tp_mult=4.0 of ATR_14d).
-- Per-position notional defaults to 10× the short sleeve's per-position
-  notional. Owner picked 10× explicitly; research peak Sharpe was 5×. Sizing
-  scales by inverse vol within max_position_weight=0.30.
+- Per-position notional defaults to the 1x research sizing. Levered demo sizing
+  is explicit opt-in and is rejected if projected full-book initial margin
+  exceeds the configured safety ceiling.
 - Time-stop at 3 days is closed by the cycle (reduce-only market).
 - Ledger writes to `long_native_demo_trades` / `long_native_demo_orders` in
   the long-side data root. ws_risk reads both ledgers and routes by prefix.
@@ -90,7 +90,7 @@ from .cross_sleeve import (
 )
 from .long_native import LongNativeConfig, _classify_entry, _vol_target_scale, build_long_features
 from .storage import exclusive_file_lock, read_dataset, write_dataset
-from .telegram import send_telegram_message
+from .telegram import format_age_ms, format_pct, format_usd, format_utc_time_ms, send_telegram_message
 from .universe import build_current_universe_table
 
 
@@ -104,6 +104,10 @@ LONG_DEMO_STRATEGY_PROFILE_CHOICES = LONG_DEMO_STRATEGY_PROFILES
 # Dataset names for the long-side ledger. Distinct from short's
 # event_demo_trades / event_demo_orders so the two sleeves don't collide.
 LONG_DEMO_TRADES_DATASET = "long_native_demo_trades"
+CONTINUOUS_DEMO_TRADES_DATASET = "continuous_fade_demo_trades"
+CONTINUOUS_DEMO_CYCLES_DATASET = "continuous_fade_demo_cycles"
+CONTINUOUS_PAPER_TRADES_DATASET = "continuous_fade_paper_trades"
+CONTINUOUS_PAPER_CYCLES_DATASET = "continuous_fade_paper_cycles"
 
 # Order-link prefixes for the long sleeve. ws_risk routes fills to the long
 # ledger by these prefixes. The base helper `_long_order_link_id` builds
@@ -127,15 +131,13 @@ class LongNativeDemoCycleConfig:
     universe_superset_size: int = 120  # ls-4: pool ranked by 90d-median turnover, truncated to universe_size
     lookback_days: int = 100  # ls-4: so >=90 daily bars survive the trims and turnover_median_90d populates
     workers: int = 8
-    # Per-position notional scaling. The base per-position notional is
-    # `gross_exposure / max_concurrent_positions = 0.2` (20% of equity).
-    # `notional_multiplier=10` (owner pick) makes it 200% of equity per
-    # position; combined with entry_leverage=10 the initial margin per
-    # position is 20% of equity, so 5 concurrent positions consume the
-    # account's full margin budget.
-    notional_multiplier: float = 10.0
+    # Per-position notional scaling. The default is the validated 1x research
+    # sizing; levered demo sizing must be passed explicitly and pass the
+    # projected full-book initial-margin guard below.
+    notional_multiplier: float = 1.0
     entry_leverage: float = 10.0
     max_order_notional_pct_equity: float = 0.0  # 0 = derive from notional_multiplier
+    max_projected_initial_margin_pct_equity: float = 0.50
     wallet_balance_fraction: float = 1.0
     fallback_equity_usdt: float = 10_000.0
     max_new_entries_per_cycle: int = 5
@@ -303,7 +305,10 @@ def _long_risk_order_link_id(prefix: str, *, symbol: str, ts_ms: int, attempt: i
     return _risk_order_link_id(prefix, symbol=symbol, ts_ms=ts_ms, attempt=attempt)
 
 
-def _validate_long_demo_config(config: LongNativeDemoCycleConfig) -> None:
+def _validate_long_demo_config(
+    config: LongNativeDemoCycleConfig,
+    strategy_config: LongNativeConfig | None = None,
+) -> None:
     if config.strategy_profile not in LONG_DEMO_STRATEGY_PROFILES:
         raise ValueError(
             f"strategy_profile must be one of: {', '.join(LONG_DEMO_STRATEGY_PROFILES)}"
@@ -327,8 +332,25 @@ def _validate_long_demo_config(config: LongNativeDemoCycleConfig) -> None:
         raise ValueError("wallet_balance_fraction must be in (0, 1]")
     if config.entry_leverage <= 0.0:
         raise ValueError("entry_leverage must be positive")
+    if not 0.0 < config.max_projected_initial_margin_pct_equity <= 1.0:
+        raise ValueError("max_projected_initial_margin_pct_equity must be in (0, 1]")
     if config.max_new_entries_per_cycle <= 0:
         raise ValueError("max_new_entries_per_cycle must be positive")
+    margin_projection = projected_long_initial_margin_pct_equity(
+        config,
+        strategy_config or _long_demo_event_config(config.strategy_profile),
+    )
+    if (
+        margin_projection["full_book_initial_margin_pct_equity"]
+        > config.max_projected_initial_margin_pct_equity + 1e-12
+    ):
+        raise ValueError(
+            "projected full-book initial margin "
+            f"{margin_projection['full_book_initial_margin_pct_equity']:.2%} exceeds "
+            "max_projected_initial_margin_pct_equity "
+            f"{config.max_projected_initial_margin_pct_equity:.2%}; lower notional_multiplier, "
+            "lower vol_target_max_scale/max_concurrent_positions, or explicitly choose a safe cap"
+        )
     # B.4: paper-shadow mode is a no-submit ledger writer. Refuse the
     # paper_mode + submit_orders combo loudly so a misconfigured paper unit
     # cannot fire real orders.
@@ -357,6 +379,29 @@ def target_long_order_notional_pct_equity(
         return demo_config.max_order_notional_pct_equity
     base = strategy_config.gross_exposure / max(strategy_config.max_concurrent_positions, 1)
     return base * demo_config.notional_multiplier
+
+
+def projected_long_initial_margin_pct_equity(
+    demo_config: LongNativeDemoCycleConfig,
+    strategy_config: LongNativeConfig,
+) -> dict[str, float]:
+    per_order_notional_pct = target_long_order_notional_pct_equity(demo_config, strategy_config)
+    worst_case_vol_scale = (
+        float(strategy_config.vol_target_max_scale)
+        if strategy_config.enable_vol_target
+        else 1.0
+    )
+    worst_case_order_notional_pct = per_order_notional_pct * worst_case_vol_scale
+    full_book_positions = max(int(strategy_config.max_concurrent_positions), 0)
+    cycle_entries = min(max(int(demo_config.max_new_entries_per_cycle), 0), full_book_positions)
+    leverage = max(float(demo_config.entry_leverage), 1e-12)
+    return {
+        "per_order_notional_pct_equity": per_order_notional_pct,
+        "worst_case_vol_target_scale": worst_case_vol_scale,
+        "worst_case_order_notional_pct_equity": worst_case_order_notional_pct,
+        "cycle_initial_margin_pct_equity": worst_case_order_notional_pct * cycle_entries / leverage,
+        "full_book_initial_margin_pct_equity": worst_case_order_notional_pct * full_book_positions / leverage,
+    }
 
 
 def _compute_long_order_sizing(
@@ -400,7 +445,7 @@ def run_long_native_demo_cycle(
     demo = demo_config or LongNativeDemoCycleConfig()
     strategy = strategy_config or _long_demo_event_config(demo.strategy_profile)
     strategy_id = _long_demo_strategy_id(demo.strategy_profile)
-    _validate_long_demo_config(demo)
+    _validate_long_demo_config(demo, strategy)
     trades_dataset, orders_dataset, cycles_dataset = _long_demo_dataset_names(demo)
 
     root = Path(data_root).expanduser()
@@ -498,6 +543,7 @@ def run_long_native_demo_cycle(
 
         all_trades = read_dataset(root, trades_dataset)
         all_orders = read_dataset(root, orders_dataset)
+        margin_projection = projected_long_initial_margin_pct_equity(demo, strategy)
         order_notional_pct_equity, vol_target_scale = _compute_long_order_sizing(
             demo=demo, strategy=strategy, features=features)
 
@@ -719,6 +765,9 @@ def run_long_native_demo_cycle(
             "open_long_positions_after": _count_open_long_positions(all_trades),
             "equity_usdt": equity_usdt,
             "order_notional_pct_equity": order_notional_pct_equity,
+            "projected_full_book_initial_margin_pct_equity": margin_projection["full_book_initial_margin_pct_equity"],
+            "projected_cycle_initial_margin_pct_equity": margin_projection["cycle_initial_margin_pct_equity"],
+            "max_projected_initial_margin_pct_equity": demo.max_projected_initial_margin_pct_equity,
             "entry_leverage": demo.entry_leverage,
             "notional_multiplier": demo.notional_multiplier,
             "bybit_positions": bybit_position_summary["positions"],
@@ -1015,6 +1064,8 @@ def _select_long_entry_candidates(
                 max_position_weight=strategy.max_position_weight,
                 notional_weight=notional_weight,
             )
+            candidate_score = _float(row.get("log_return"))
+            volume_rank = _float(row.get("today_volume_rank")) or 1e9
             candidate = {
                 "trade_id": _long_trade_id(symbol=symbol, signal_ts_ms=int(ts)),
                 "symbol": symbol,
@@ -1034,6 +1085,8 @@ def _select_long_entry_candidates(
                 "atr_14d_pct": atr_pct,
                 "realized_vol": realized_vol,
                 "position_weight": position_weight,
+                "candidate_score": candidate_score,
+                "today_volume_rank": volume_rank,
                 "entry_policy": "v11a_sniper_retrace_fallthru",
                 "entry_quality_tier": entry_reason,
                 "entry_rule": (
@@ -1042,10 +1095,6 @@ def _select_long_entry_candidates(
                 ),
             }
             candidates.append(candidate)
-            if len(candidates) >= max_new_entries:
-                break
-        if len(candidates) >= max_new_entries:
-            break
 
     # Dedupe by symbol — if a symbol fired on both ts (yesterday + 2d-ago),
     # keep the most-recent (highest signal_ts_ms).
@@ -1056,7 +1105,14 @@ def _select_long_entry_candidates(
         if existing is None or cand["signal_ts_ms"] > existing["signal_ts_ms"]:
             by_symbol[sym] = cand
     deduped = list(by_symbol.values())
-    deduped.sort(key=lambda c: -int(c["signal_ts_ms"]))
+    deduped.sort(
+        key=lambda c: (
+            -int(c["signal_ts_ms"]),
+            -float(c.get("candidate_score") or 0.0),
+            float(c.get("today_volume_rank") or 1e9),
+            str(c["symbol"]),
+        )
+    )
     return deduped[:max_new_entries], skips
 
 
@@ -1889,46 +1945,160 @@ def format_long_telegram_status_message(payload: dict[str, Any], *, reason: str)
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class _LedgerSummary:
+    available: bool
+    trade_count: int = 0
+    open_count: int = 0
+    realized_pnl_usdt: float = 0.0
+    open_notional_usdt: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class _CycleSummary:
+    available: bool
+    cycle_count: int = 0
+    latest_ts_ms: int | None = None
+    latest_mode: str = ""
+
+
 def format_combined_book_summary(
     *,
     short_root: Path | None,
     long_root: Path | None,
+    continuous_root: Path | None = None,
+    continuous_paper_root: Path | None = None,
+    continuous_hedge_root: Path | None = None,
     now_ms: int,
     bybit_position_summary: dict[str, Any] | None = None,
     bybit_positions: list[dict[str, Any]] | None = None,
+    sleeve_states: dict[str, str] | None = None,
 ) -> str:
-    """Build a daily aggregate message covering both sleeves' positions and PnL.
+    """Build a human daily aggregate message across every demo/paper sleeve.
 
-    Reads short/long ledgers from disk so the message stays consistent even
-    when called from a sleeve other than the one that owned the trade. Caller
-    is expected to pass live Bybit position summary from a fresh REST call so
-    mark-to-market matches venue.
+    Reads ledgers from disk so the message stays consistent even when called
+    from a sleeve other than the one that owned the trade. Missing roots fail
+    open and render as "no ledger yet"; the report timer must never crash just
+    because a retired sleeve has no files.
     """
-    lines = [
-        "[Combined book] Bybit demo daily roll-up",
-        f"time={_iso_dt(now_ms)}",
-    ]
-    if bybit_position_summary is not None:
-        lines.append(
-            f"Bybit live: {bybit_position_summary.get('positions', 0)} positions, "
-            f"value=${_float(bybit_position_summary.get('position_value_usdt')):,.2f}, "
-            f"uPnL=${_float(bybit_position_summary.get('unrealized_pnl_usdt')):,.2f} "
-            f"({_float(bybit_position_summary.get('pnl_pct')):.2%})"
+    states = {k: str(v).strip().lower() for k, v in (sleeve_states or {}).items()}
+    short = _ledger_summary(short_root, "event_demo_trades")
+    long = _ledger_summary(long_root, LONG_DEMO_TRADES_DATASET)
+    continuous = _ledger_summary(continuous_root, CONTINUOUS_DEMO_TRADES_DATASET)
+    continuous_paper = _ledger_summary(continuous_paper_root, CONTINUOUS_PAPER_TRADES_DATASET)
+    hedge = _ledger_summary(continuous_hedge_root, CONTINUOUS_DEMO_TRADES_DATASET)
+    continuous_cycles = _cycle_summary(continuous_root, CONTINUOUS_DEMO_CYCLES_DATASET, now_ms=now_ms)
+    continuous_paper_cycles = _cycle_summary(
+        continuous_paper_root, CONTINUOUS_PAPER_CYCLES_DATASET, now_ms=now_ms,
+    )
+
+    live_summaries = [short, long, continuous, hedge]
+    tracked_open_count = sum(s.open_count for s in live_summaries)
+    tracked_open_value = sum(s.open_notional_usdt for s in live_summaries)
+    tracked_realized = sum(s.realized_pnl_usdt for s in live_summaries)
+    live_positions = int((bybit_position_summary or {}).get("positions") or 0)
+    live_value = _float((bybit_position_summary or {}).get("position_value_usdt"))
+    live_upnl = _float((bybit_position_summary or {}).get("unrealized_pnl_usdt"))
+    live_pnl_pct = _float((bybit_position_summary or {}).get("pnl_pct"))
+
+    if live_positions == 0 and tracked_open_count == 0:
+        status = "flat: no open Bybit positions and no open tracked live-sleeve trades."
+    elif live_positions > 0:
+        status = (
+            f"{live_positions} live Bybit position(s), {format_usd(live_value)} exposure, "
+            f"uPnL {format_usd(live_upnl, signed=True)} ({format_pct(live_pnl_pct, signed=True)})."
         )
-    short_short_pnl = _ledger_pnl(short_root, "event_demo_trades") if short_root else (0, 0.0, 0.0)
-    long_pnl = _ledger_pnl(long_root, LONG_DEMO_TRADES_DATASET) if long_root else (0, 0.0, 0.0)
+    else:
+        status = f"{tracked_open_count} tracked open trade(s), {format_usd(tracked_open_value)} ledger open value."
+
+    lines = [
+        "Combined book - Bybit demo",
+        format_utc_time_ms(now_ms),
+        "",
+        f"Status: {status}",
+        f"Tracked live sleeves: realized {format_usd(tracked_realized, signed=True)}, "
+        f"open value {format_usd(tracked_open_value)}.",
+    ]
+
     lines.extend([
-        f"Short sleeve: trades={short_short_pnl[0]}, realized=${short_short_pnl[1]:,.2f}, open_value=${short_short_pnl[2]:,.2f}",
-        f"Long sleeve:  trades={long_pnl[0]}, realized=${long_pnl[1]:,.2f}, open_value=${long_pnl[2]:,.2f}",
+        "",
+        "Live sleeves",
+        _format_book_line(
+            "Continuous demo",
+            _state_label(states.get("CONTINUOUS_SLEEVE"), default="off"),
+            continuous,
+            continuous_cycles,
+            now_ms=now_ms,
+        ),
+        _format_book_line("Short", _state_label(states.get("SHORT_SLEEVE"), default="on"), short, None, now_ms=now_ms),
+        _format_book_line("Long", _state_label(states.get("LONG_SLEEVE"), default="on"), long, None, now_ms=now_ms),
+        _format_book_line("BTC hedge", "DRY-RUN", hedge, None, now_ms=now_ms),
+        "",
+        "Evidence collectors",
+        _format_book_line(
+            "Continuous paper",
+            _state_label(states.get("CONTINUOUS_PAPER_SLEEVE"), default="on"),
+            continuous_paper,
+            continuous_paper_cycles,
+            now_ms=now_ms,
+        ),
     ])
+
     if bybit_positions:
-        lines.append("Live positions:")
+        lines.extend(["", "Open Bybit positions"])
         for row in bybit_positions[:12]:
             lines.append(
-                f"- {row['symbol']} {row['side']} qty={_float(row['qty']):g} "
-                f"uPnL=${_float(row['unrealized_pnl_usdt']):,.2f} ({_float(row['pnl_pct']):.2%})"
+                f"- {row['symbol']} {row['side']} { _float(row['qty']):g} "
+                f"uPnL {format_usd(row.get('unrealized_pnl_usdt'), signed=True)} "
+                f"({format_pct(row.get('pnl_pct'), signed=True)})"
             )
+
+    action = "No action needed."
+    if live_positions > 0 and tracked_open_count == 0:
+        action = "Check ledger mapping: Bybit has live positions but tracked live ledgers show flat."
+    elif _cycle_stale(continuous_cycles, now_ms=now_ms, stale_minutes=20.0) and states.get("CONTINUOUS_SLEEVE", "off") != "off":
+        action = "Continuous demo cycle is stale; check the continuous daemon and liveness journal."
+    lines.extend(["", f"Action: {action}"])
     return "\n".join(lines)[:3900]
+
+
+def _state_label(value: str | None, *, default: str) -> str:
+    raw = (value or default).strip().lower()
+    if raw in {"on", "1", "true", "yes"}:
+        return "ON"
+    if raw in {"off", "0", "false", "no"}:
+        return "OFF"
+    return raw.upper() or default.upper()
+
+
+def _format_book_line(
+    name: str,
+    state: str,
+    ledger: _LedgerSummary,
+    cycles: _CycleSummary | None,
+    *,
+    now_ms: int,
+) -> str:
+    if not ledger.available:
+        base = "no ledger yet"
+    elif ledger.open_count:
+        base = f"{ledger.open_count} open, {format_usd(ledger.open_notional_usdt)} open value"
+    else:
+        base = "flat"
+    parts = [f"- {name} ({state}): {base}", f"realized {format_usd(ledger.realized_pnl_usdt, signed=True)}"]
+    if ledger.available:
+        parts.append(f"{ledger.trade_count} trade row(s)")
+    if cycles is not None and cycles.available:
+        parts.append(f"last cycle {format_age_ms(now_ms=now_ms, then_ms=cycles.latest_ts_ms)}")
+    elif cycles is not None:
+        parts.append("no cycle ledger yet")
+    return "; ".join(parts)
+
+
+def _cycle_stale(cycles: _CycleSummary, *, now_ms: int, stale_minutes: float) -> bool:
+    if not cycles.available or cycles.latest_ts_ms is None:
+        return True
+    return (now_ms - cycles.latest_ts_ms) > stale_minutes * 60_000.0
 
 
 def _ledger_pnl(root: Path | None, dataset: str) -> tuple[int, float, float]:
@@ -1943,23 +2113,29 @@ def _ledger_pnl(root: Path | None, dataset: str) -> tuple[int, float, float]:
     Used by the combined-book summary; fails open (returns zeros) so a
     missing/empty ledger never breaks the message build.
     """
+    summary = _ledger_summary(root, dataset)
+    return summary.trade_count, summary.realized_pnl_usdt, summary.open_notional_usdt
+
+
+def _ledger_summary(root: Path | None, dataset: str) -> _LedgerSummary:
     if root is None:
-        return 0, 0.0, 0.0
+        return _LedgerSummary(available=False)
+    if not root.exists():
+        return _LedgerSummary(available=False)
     try:
         trades = read_dataset(root, dataset)
     except Exception:  # noqa: BLE001 - aggregate roll-up must never crash a cycle
-        return 0, 0.0, 0.0
+        return _LedgerSummary(available=False)
     if trades.is_empty():
-        return 0, 0.0, 0.0
+        return _LedgerSummary(available=True)
     trade_count = trades.height
     realized = 0.0
     open_notional = 0.0
+    open_count = 0
     if "status" not in trades.columns:
-        return trade_count, realized, open_notional
+        return _LedgerSummary(available=True, trade_count=trade_count)
     has_entry_fee = "entry_fee_usdt" in trades.columns
     has_exit_fee = "exit_fee_usdt" in trades.columns
-    # Realized PnL needs entry+exit+qty; if any are missing we skip realized
-    # but still try to compute open_notional, which needs only qty+entry.
     if {"entry_price", "exit_price", "qty"}.issubset(trades.columns):
         closed = trades.filter(pl.col("status") == "closed")
         if not closed.is_empty():
@@ -1977,14 +2153,42 @@ def _ledger_pnl(root: Path | None, dataset: str) -> tuple[int, float, float]:
                 )
                 realized += gross - fee
     if {"entry_price", "qty"}.issubset(trades.columns):
-        open_trades = trades.filter(pl.col("status") == "open")  # "submitted" is dead for trade rows (LON-4)
+        open_trades = trades.filter(pl.col("status") == "open")
+        open_count = open_trades.height
         if not open_trades.is_empty():
             for row in open_trades.to_dicts():
                 qty = _float(row.get("qty"))
                 entry = _float(row.get("entry_price"))
                 if qty > 0.0 and entry > 0.0:
                     open_notional += qty * entry
-    return trade_count, realized, open_notional
+    return _LedgerSummary(
+        available=True,
+        trade_count=trade_count,
+        open_count=open_count,
+        realized_pnl_usdt=realized,
+        open_notional_usdt=open_notional,
+    )
+
+
+def _cycle_summary(root: Path | None, dataset: str, *, now_ms: int) -> _CycleSummary:
+    del now_ms  # kept for call-site symmetry and future windowing without API churn
+    if root is None:
+        return _CycleSummary(available=False)
+    if not root.exists():
+        return _CycleSummary(available=False)
+    try:
+        cycles = read_dataset(root, dataset)
+    except Exception:  # noqa: BLE001 - report must fail open
+        return _CycleSummary(available=False)
+    if cycles.is_empty() or "ts_ms" not in cycles.columns:
+        return _CycleSummary(available=True, cycle_count=cycles.height)
+    latest = cycles.sort("ts_ms").tail(1).to_dicts()[0]
+    return _CycleSummary(
+        available=True,
+        cycle_count=cycles.height,
+        latest_ts_ms=int(latest.get("ts_ms") or 0) or None,
+        latest_mode=str(latest.get("mode") or ""),
+    )
 
 
 def format_long_demo_cycle_summary(payload: dict[str, Any]) -> str:

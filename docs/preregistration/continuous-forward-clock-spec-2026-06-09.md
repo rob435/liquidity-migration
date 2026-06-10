@@ -15,6 +15,12 @@
 - `continuous-forward-readiness` (reconciliation.py) scores that stream's paper
   evidence. `continuous_addon_shadow.py` audits a primary-vs-addon pair of paper streams.
 
+**Addendum 2026-06-10:** this audit snapshot was superseded by the 2026-06-09
+operator re-shape. The rebuilt VPS now runs continuous demo orders plus a paper
+shadow; the live base book is `continuous_rebalance_v1` (single-component
+turn4_pop4 rebalance book), not the old decile machine audited above. Continuous
+remains research-stage and not promoted; demo fills are execution evidence only.
+
 ## The gap
 
 The BANKED candidate is a different object: 4 trigger-based components
@@ -23,6 +29,12 @@ TP10/TP14, fixed 24h holds, age/crowd/rmom-0.25/btc-uptrend gates) combined at F
 weights `{.30,.20,.40,.10}` through the `w90/tv0.045/max4/ddh-0.04` rebalance, plus the
 BTC hedge leg (`ContinuousHedgeRule(90,60,2.0,5bps)`). **No forward stream tracks this
 object.** Tier-3's 30-day clock is therefore not running for the thing we would deploy.
+
+**Addendum 2026-06-10:** this gap is partially closed. The Road-B replay
+collector is built, tested, and seeded on real data with the clock at 0 days
+pending a fresh data-root refresh. The live demo book tracks a single-component
+turn4_pop4 rebalance object with real orders; full four-component ensemble wiring
+and sniper/hedge submission remain separate live-readiness work.
 
 ## Design decision: Road B (signal-replay collector) before Road A (live ensemble executor)
 
@@ -68,4 +80,7 @@ order-risk second.
 
 ## Status
 
-Audit complete (this receipt). Next: build item 1+2 (replay module + tests).
+Audit complete. Build items 1+2 were completed on 2026-06-09:
+`liquidity_migration/continuous_forward_replay.py` plus tests, seeded on real data
+(clock 0 days, awaiting data-root refresh; see
+`continuous-capacity-impact-2026-06-09.md`).

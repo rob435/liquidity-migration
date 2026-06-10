@@ -11,6 +11,10 @@ Add the `div` risk-engineering overlay to the deployed long-FC profile
 volatility targeting (`enable_vol_target=True`, `vol_target_annual=0.60`,
 `vol_target_max_scale=1.0`, `vol_target_min_scale=0.30`). No signal change.
 
+**2026-06-09 addendum:** `vol_target_max_scale` has since been raised 1.0 -> 1.25
+(volup125; receipt `long-volup-candidate-2026-06-09.md`). All other div fields
+stand as promoted here.
+
 ## Hypothesis
 Portfolio construction, not a new signal (FC remains the alpha ceiling — ~12
 alternative signals were exhausted as nulls). A wider universe + more

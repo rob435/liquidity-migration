@@ -1,0 +1,1028 @@
+{
+ "updates": [
+  {
+   "path": "README.md",
+   "verdict": "update",
+   "rationale": "Core repo-overview doc, still needed, but its live-deployment description predates the 2026-06-09 operator re-shape: it claims the promoted short profile + v11a long sleeve are running on the VPS, when deploy/sleeves.env now has SHORT/SHORT_PAPER/LONG off and only the (non-promoted, research-stage) continuous sleeve live with demo orders + paper shadow. It also says 'nothing is promoted' which contradicts both its own next paragraph and promoted.py. File references and research-status framing otherwise verify.",
+   "staleClaims": [
+    {
+     "line": 6,
+     "claim": "A long-only sleeve (`MultiStratV1` / v11a, FOMO-chase) runs alongside on demo.",
+     "reality": "LONG_SLEEVE=off in deploy/sleeves.env since the 2026-06-09 operator re-shape; the long sleeve is promoted-in-code (div + volup125) but not running on the box (held pending the 10x-multiplier decision).",
+     "fix": "Replace with: 'A long-only sleeve (`MultiStratV1` / v11a, FOMO-chase) is promoted alongside it (currently toggled off on the live box \u2014 see STATE.md).'"
+    },
+    {
+     "line": 17,
+     "claim": "It stays in-sample; the Bybit demo forward test is the arbiter; nothing is promoted; real money stays off.",
+     "reality": "Short (drop_all_4+age300+ff6+btc_trend_gate) and long (div+volup125) profiles ARE promoted-in-code to demo/paper (liquidity_migration/promoted.py); nothing is promoted to REAL MONEY. As written it contradicts the 'frozen promoted short profile' wording at line 22.",
+     "fix": "Replace 'nothing is promoted; real money stays off' with 'nothing is promoted to real money'."
+    },
+    {
+     "line": 22,
+     "claim": "A demo (paper) forward test of the frozen `promoted` short profile + the v11a long sleeve runs on a Bybit demo account on a VPS \u2014 that demo is the actual forward out-of-sample test",
+     "reality": "Since the 2026-06-09 operator re-shape (verified in deploy/sleeves.env), the VPS runs ONLY the continuous sleeve (demo orders + paper shadow), the ws_risk engine, a BTC-hedge daily dry-run timer (SUBMIT_HEDGE=0), and support timers. The promoted short/long sleeves are toggled off but redeployable; all Tier-3 forward clocks restarted 2026-06-09 after the full VPS rebuild.",
+     "fix": "Replace with: 'A Bybit demo account on a VPS hosts the forward tests. As of 2026-06-09 the box runs ONLY the continuous sleeve (research-stage, demo orders + paper shadow) plus the risk engine and a dry-run BTC-hedge timer; the frozen promoted short profile and the v11a long sleeve are toggled off in deploy/sleeves.env but remain promoted-in-code and redeployable. Forward demo is the arbiter; clocks restarted 2026-06-09 (see STATE.md).'"
+    }
+   ],
+   "group": "root"
+  },
+  {
+   "path": "STATE.md",
+   "verdict": "update",
+   "rationale": "The canonical live-state file and it is substantially current \u2014 sleeves.env, promoted.py, the hedge timer (00:35 UTC, SUBMIT_HEDGE=0), all ~20 preregistration receipts, research-plan docs, helper scripts, and CLI subcommands it references all verify. Four small claims lag the latest commits/dates and should be touched up; nothing structural.",
+   "staleClaims": [
+    {
+     "line": 3,
+     "claim": "**Last updated:** 2026-06-09",
+     "reality": "The file contains 2026-06-10 content (line 36 'the only live sleeve, 2026-06-10'; line 236 sniper Tier-2 'operator decision 2026-06-10').",
+     "fix": "Change to '**Last updated:** 2026-06-10'."
+    },
+    {
+     "line": 44,
+     "claim": "SNIPER: Tier-2 demo candidate (Amendment 6) \u2014 live wiring (resting +8% limit per entry) is the NEXT build, not yet in the daemon.",
+     "reality": "Commit 151c685 merged the live wiring scaffold: `plan_continuous_sniper_orders` in liquidity_migration/continuous_demo.py (default-off via `sniper_enabled=False`, wick +8%, size 0.25x, unit-tested). It is still not invoked by the daemon cycle (no call site in the package).",
+     "fix": "Replace with: 'SNIPER: Tier-2 demo candidate (Amendment 6) \u2014 planner scaffold MERGED (`plan_continuous_sniper_orders`, default-off `sniper_enabled=False`); daemon-cycle wiring + demo enablement are the NEXT step.'"
+    },
+    {
+     "line": 42,
+     "claim": "Module `continuous_hedge_manager.py` (8 tests), warm-start from the UN-hedged control book.",
+     "reality": "tests/test_continuous_hedge_manager.py now has 9 test functions (one added in 151c685, the risk-tracked hedge-ledger commit).",
+     "fix": "Change '(8 tests)' to '(9 tests)' or drop the count to avoid churn."
+    },
+    {
+     "line": 60,
+     "claim": "Reprovisioned same day from local checkout @ 92db7e4 ... all sleeves per `deploy/sleeves.env` (short+long demo/paper ON, continuous orders OFF, continuous no-order paper collector ON).",
+     "reality": "That parenthetical describes the rebuild-time provisioning, which was superseded the same day by the operator re-shape (the bullet at line 29): current deploy/sleeves.env is SHORT/SHORT_PAPER/LONG=off, CONTINUOUS=on, CONTINUOUS_PAPER=on. Read in isolation it states the wrong current sleeve set.",
+     "fix": "Append a clarifier: '(initial rebuild shape \u2014 superseded the same day by the operator re-shape above; deploy/sleeves.env is the current truth: continuous demo+paper ON, short/short-paper/long OFF).'"
+    }
+   ],
+   "group": "root"
+  },
+  {
+   "path": "AGENTS.md",
+   "verdict": "update",
+   "rationale": "Rules doc, still needed and almost entirely accurate: DEMO/REAL_MONEY toggle semantics match bybit.resolve_private_credentials() exactly (including the mutual-exclusion raise), docs/parameter_pre_registration.md exists, bybit_full_pit/binance_full_pit roots are documented in docs/data_roots.md, graphify-out/GRAPH_REPORT.md is tracked and graph.json is gitignored (line 33), and .codex/skills/ exists (Codex-owned \u2014 not recommending Claude edit those). One factual claim about the live deployment shape is stale after the 2026-06-09 re-shape.",
+   "staleClaims": [
+    {
+     "line": 20,
+     "claim": "A frozen `promoted` profile runs on demo + paper only (forward-demo arbiter); nothing is promoted to real money.",
+     "reality": "Since the 2026-06-09 operator re-shape, the promoted short/long profiles are toggled OFF on the live box (deploy/sleeves.env) \u2014 promoted-in-code and redeployable, but not currently running; the only live sleeve is the research-stage continuous sleeve on the demo account. The demo-only / no-real-money guard itself still holds.",
+     "fix": "Replace the clause with: 'Promoted profiles deploy to demo + paper only (forward-demo arbiter); which sleeves actually run is operator-toggled in `deploy/sleeves.env` (see STATE.md \"What's Running\"); nothing is promoted to real money.'"
+    }
+   ],
+   "group": "root"
+  },
+  {
+   "path": "docs/data_roots.md",
+   "verdict": "update",
+   "rationale": "Still the canonical data-root index (CLAUDE.md points to it) and the full-PIT root descriptions, rebuild scripts (scripts/build_full_pit_roots.sh, build_full_pit_bybit.sh, build_full_pit_binance.sh, archive_pre_rebuild_reports.sh, verify_full_pit_rebuild.sh all exist), and binance_full_pit_strategy reference (used by scripts/equity_curves.py, scripts/verify_div_promotion.py) all check out. But the 'Live demo + paper roots' section predates the 2026-06-09 VPS full rebuild: the forward-OOS clock date is superseded, the VPS root list is missing 5 of the 7 per-sleeve roots that exist in deploy/systemd, and the 2026-05-27 'ledgers unaffected' note is now misleading because all prior VPS ledger history was in fact lost on 2026-06-09.",
+   "staleClaims": [
+    {
+     "claim": "Pristine OOS henceforth is the forward demo + paper ledgers, ticking from 2026-05-22.",
+     "line": 51,
+     "reality": "The 2026-06-09 full VPS rebuild (Hetzner 116.202.15.128) lost all prior demo/paper ledger history; STATE.md states 'All forward demo/paper Tier-3 clocks restart 2026-06-09.' The 2026-05-22 clock no longer exists.",
+     "fix": "Replace with: 'the forward demo + paper ledgers, ticking from the latest forward-clock restart (2026-06-09, full VPS rebuild \u2014 see STATE.md for the current clock).'"
+    },
+    {
+     "claim": "VPS operational roots listed as only /opt/liquidity-migration/data/bybit-demo-event and /opt/liquidity-migration/data/bybit-long-demo-event",
+     "line": 63,
+     "reality": "deploy/systemd units define seven per-sleeve roots: bybit-demo-event (short demo, ws_risk primary), bybit-paper-event (short paper), bybit-long-demo-event, bybit-long-paper-event, bybit-continuous-demo-event, bybit-continuous-paper-event, bybit-continuous-hedge-event (hedge ledger). Which sleeves actually run is governed by deploy/sleeves.env (as of 2026-06-09 operator instruction: CONTINUOUS_SLEEVE=on + CONTINUOUS_PAPER_SLEEVE=on only; SHORT/SHORT_PAPER/LONG off).",
+     "fix": "Expand the text block to list all seven roots (one line each: bybit-demo-event, bybit-paper-event, bybit-long-demo-event, bybit-long-paper-event, bybit-continuous-demo-event, bybit-continuous-paper-event, bybit-continuous-hedge-event) and add: 'Which sleeves are live at any moment is deploy/sleeves.env + STATE.md, not this file; every root keeps its ledgers regardless of toggle state because ws_risk reads all configured roots.'"
+    },
+    {
+     "claim": "The VPS ledgers were unaffected by the 2026-05-27 research-root deletion.",
+     "line": 67,
+     "reality": "Superseded: the 2026-06-09 full VPS rebuild lost ALL prior demo/paper ledger history (no backup; operator confirmed nothing material was collected \u2014 STATE.md). The 2026-05-27 reassurance is now actively misleading about ledger continuity.",
+     "fix": "Replace the sentence with: 'VPS ledger history restarted from a clean slate at the 2026-06-09 full rebuild (all prior demo/paper history lost \u2014 see STATE.md); the research roots and the VPS roots remain fully independent.'"
+    },
+    {
+     "claim": "The parallel paper (dry-run) runner uses its own separate root (data/bybit-paper-event). It shadows the demo runner...",
+     "line": 73,
+     "reality": "Accurate for the short sleeve only. Each sleeve now has its own paper root: data/bybit-long-paper-event (long) and data/bybit-continuous-paper-event (continuous no-order collector), per deploy/systemd units.",
+     "fix": "Generalize to: 'Each sleeve has a paper (dry-run) shadow on its own root (short: data/bybit-paper-event, long: data/bybit-long-paper-event, continuous: data/bybit-continuous-paper-event) \u2014 same profile/universe/cadence, no orders, idealized fills at signal price.'"
+    }
+   ],
+   "group": "docs-core"
+  },
+  {
+   "path": "docs/parameter_pre_registration.md",
+   "verdict": "update",
+   "rationale": "Still binding policy, referenced from AGENTS.md; the template docs/preregistration/_template.md exists, the error-number cross-references (#17/#18/#19) match backtesting_errors_we_never_repeat.md exactly, and the directory is actively used (27 receipts). One honesty rule now conflicts with the newer STATE.md retention policy ('keep docs/preregistration/ small and only for receipts that still bind an active deployment, candidate, or methodology decision' \u2014 closed receipts get folded into research_summary.md and deleted, with git history as the archive). The doc should distinguish 'never rewrite a verdict' (still correct) from 'never delete the file' (superseded). Minor grammar bug on line 11 ('we have no longer have') included as a fix.",
+   "staleClaims": [
+    {
+     "claim": "The `Verdict` is committed to git. Do not delete or rewrite an `accepted` / `rejected` verdict.",
+     "line": 86,
+     "reality": "STATE.md ('How To Update') now sets the retention policy: docs/preregistration/ stays small, holding only receipts that still bind an active deployment, candidate, or methodology decision; receipts for closed/dead questions are folded (one-line verdict summary into docs/research_summary.md) and the file deleted, with git history as the permanent archive. So deletion-after-folding is sanctioned; silent rewriting/softening of a verdict remains forbidden.",
+     "fix": "Replace with: 'The `Verdict` is committed to git and must never be rewritten or softened after the fact. Receipt FILES may later be folded and removed per the STATE.md retention policy (docs/preregistration/ holds only receipts that still bind an active deployment, candidate, or methodology decision; the verdict must be recorded in docs/research_summary.md before deletion, and git history remains the archive).'"
+    },
+    {
+     "claim": "and we have no longer have a clean internal OOS surface to recover that value from",
+     "line": 11,
+     "reality": "Grammar error (double 'have'); the substance is correct (no internal OOS root exists \u2014 see docs/data_roots.md).",
+     "fix": "Replace with: 'and we no longer have a clean internal OOS surface to recover that value from'."
+    }
+   ],
+   "group": "docs-core"
+  },
+  {
+   "path": "docs/timestamp_glossary.md",
+   "verdict": "update",
+   "rationale": "Valuable and mostly accurate: trade_id format {scenario_id}-{symbol}-{signal_ts_ms} (event_demo.py:2888), base36(signal_ts_ms // 1000) orderLinkId encoding (order_link_id.py:43), opened_at_ms from position createdTime (ws_risk.py:1710), planned_exit semantics, all four invariants, and the pinning test tests/test_liquidity_migration_ws_risk.py::test_ws_risk_recovers_strategy_trade_id_from_bot_order_link (line 2457) all verify. But the entry_ready_ts_ms definition mis-states the field's value (conflates the model's configured 1h entry delay with the ~218-min real-world feature-pipeline lag), and the section heading miscounts the timestamps it documents.",
+   "staleClaims": [
+    {
+     "claim": "entry_ready_ts_ms is 'typically signal_ts_ms + feature_build_lag (~218 min in production...)'; 'Set by: the feature pipeline.'",
+     "line": 27,
+     "reality": "Code sets entry_ready_ts_ms = signal_ts_ms + entry_delay_hours (1h) for the fixed-delay policy (liquidity_migration/volume_events.py:1023, 1058; entry_delay_hours=1 at line 111), or the first qualifying bar for the promoted quality-squeeze policy; the long sleeve sets it to now_ms at candidate build (long_native_event_demo.py:1029). The ~218 min is the real-world feature-pipeline availability lag that the stale gate's max_entry_lag_minutes=360 budget absorbs (event_demo.py:68 comment), NOT the value of the field. The stale-check semantics ('now - entry_ready_ts_ms > max_entry_lag_minutes -> stale', event_demo_planning.py:130) are correctly described.",
+     "fix": "Replace the definition with: '**The earliest moment the signal may be acted on under the backtest model**: signal_ts_ms + entry_delay_hours (1h) for the fixed-delay policy, or the first qualifying squeeze bar (long sleeve: now_ms at candidate build). In production the feature pipeline only surfaces the candidate ~218 min after bar close; the stale gate budgets for that with max_entry_lag_minutes=360 (now - entry_ready_ts_ms > max_entry_lag_minutes -> reject as stale).' and change 'Set by: the feature pipeline.' to 'Set by: the volume-events entry decision (short) / candidate builder (long).'"
+    },
+    {
+     "claim": "## The 5 timestamps",
+     "line": 13,
+     "reality": "Six timestamps are documented in the section: signal_ts_ms, entry_ready_ts_ms, entry_ts_ms, opened_at_ms, planned_exit_ts_ms, and ts_ms.",
+     "fix": "Rename the heading to '## The 6 timestamps' (or '## The 5 trade timestamps (+ the row's own ts_ms)' if ts_ms is meant to be the odd one out)."
+    }
+   ],
+   "group": "docs-core"
+  },
+  {
+   "path": "docs/event_demo_daemon.md",
+   "verdict": "update",
+   "rationale": "Referenced from CLAUDE.md as the demo-daemon runbook and still the only document covering daemon mechanics, safety boundaries, the ledger-reset procedure, and continuous-sleeve plumbing. The mechanics verified clean against code: USE_DAEMON=1 in deploy/systemd/liquidity-migration-bybit-demo.service; event-driven cycle telemetry (cycles_kline_triggered/cycles_timer_triggered) and --no-event-driven-cycle exist; ws_gap_threshold_seconds=120.0 and state_cache_stale_seconds=120.0 defaults match event_demo_daemon.py; 15 req/s default + BYBIT_PRIVATE_REST_RATE_LIMIT_PER_SECOND env verified in event_demo_data.py:488-500; rmom refresh timer is 00:20 UTC and precompute_residual_momentum.py defaults --end to tomorrow UTC; continuous roots/datasets/lm-en-c- prefixes, compute_continuous_decile_panel, MemoryMax=4G, LIQ_TURNOVER_MIN=500000 all verified; every named function/script exists. But the continuous-sleeve status content is inverted vs the 2026-06-09 operator re-shape (deploy/sleeves.env: CONTINUOUS_SLEEVE=on, SHORT/SHORT_PAPER/LONG=off), and the reset runbook is dangerously stale: it says 'four roots' (the script covers six) and its systemctl stop/start lists omit the continuous units \u2014 the ONLY entry daemons actually writing on the current box. When updating, also add the new live-continuous support timers absent from the doc: liquidity-migration-continuous-hedge.timer (daily 00:35 UTC BTC-beta hedge DRY-RUN, SUBMIT_HEDGE=0) and liquidity-migration-continuous-forward-report.timer.",
+   "staleClaims": [
+    {
+     "claim": "Line 84-85: \"the demo daemon uses `BybitPrivateRateLimiter` with a conservative 15 req/s\"",
+     "reality": "No class named BybitPrivateRateLimiter exists. The daemon builds a private-budget `BybitRestRateLimiter` (liquidity_migration/bybit.py:109) sized by `_demo_private_rest_rate_limit_per_second()` (event_demo_data.py:488-500, default 15, env BYBIT_PRIVATE_REST_RATE_LIMIT_PER_SECOND). The 15 req/s and env-var facts are correct; only the class name is wrong.",
+     "fix": "Replace \"`BybitPrivateRateLimiter`\" with \"a private-budget `BybitRestRateLimiter`\".",
+     "line": 84
+    },
+    {
+     "claim": "Lines 212-214: the reset script \"only touches the `event_demo_*` / `long_native_demo_*` / `long_native_paper_*` trade/order/cycle datasets across the four roots (`data/bybit-demo-event`, `data/bybit-paper-event`, `data/bybit-long-demo-event`, `data/bybit-long-paper-event`)\"",
+     "reality": "scripts/reset_demo_paper_ledgers.sh (header lines 7-12, dataset table lines 57-74) now covers SIX roots: the four listed plus `data/bybit-continuous-demo-event` (continuous_fade_demo_{trades,orders,cycles}) and `data/bybit-continuous-paper-event` (continuous_fade_paper_{trades,orders,cycles}).",
+     "fix": "Replace with: \"It only touches the `event_demo_*` / `long_native_demo_*` / `long_native_paper_*` / `continuous_fade_*` trade/order/cycle datasets across the six roots (`data/bybit-demo-event`, `data/bybit-paper-event`, `data/bybit-long-demo-event`, `data/bybit-long-paper-event`, `data/bybit-continuous-demo-event`, `data/bybit-continuous-paper-event`)\".",
+     "line": 212
+    },
+    {
+     "claim": "Lines 228-241: the reset runbook's `systemctl stop`/`start` lists name only the short demo/paper, risk, long demo/paper units plus demo-health and combined-book-report timers",
+     "reality": "The lists omit `liquidity-migration-bybit-continuous-demo` and `liquidity-migration-bybit-continuous-paper` \u2014 which, per deploy/sleeves.env (2026-06-09), are the ONLY entry daemons currently running and writing ledgers on the live box \u2014 plus the newer timers (`liquidity-migration-demo-liveness.timer`, `liquidity-migration-continuous-rmom-refresh.timer`, `liquidity-migration-continuous-hedge.timer`, `liquidity-migration-continuous-forward-report.timer`). Following the runbook as written would wipe continuous ledgers while the continuous daemons keep writing.",
+     "fix": "Add the two continuous services and the demo-liveness/continuous timers to both lists, and add a note: \"stop every sleeve unit that is `on` in deploy/sleeves.env \u2014 as of 2026-06-09 that is the continuous demo + paper pair\".",
+     "line": 228
+    },
+    {
+     "claim": "Lines 249-255: heading \"Continuous-fade sleeve \u2014 DE-PROMOTED / ORDER SUBMISSION OFF\" and banner \"STATUS (2026-06-08): NOT promoted; continuous demo orders are off. `CONTINUOUS_SLEEVE=off` disables the order-submitting demo unit on deploy\"",
+     "reality": "deploy/sleeves.env (2026-06-09 explicit operator instruction) sets CONTINUOUS_SLEEVE=on and CONTINUOUS_PAPER_SLEEVE=on; SHORT/SHORT_PAPER/LONG are off. Continuous demo orders ARE submitting and continuous is the only live sleeve (STATE.md: \"CONTINUOUS (the only live sleeve, 2026-06-10): demo orders ON + paper shadow\"). Still NOT promoted \u2014 promoted.py PROFILES still exposes short + long only (that part of the banner remains true).",
+     "fix": "Retitle to \"Continuous-fade sleeve \u2014 LIVE ON DEMO (research-stage, NOT promoted)\" and replace the banner with: \"STATUS (2026-06-09 operator re-shape): the VPS runs ONLY the continuous system \u2014 CONTINUOUS_SLEEVE=on (demo orders) + CONTINUOUS_PAPER_SLEEVE=on (no-order shadow); SHORT/SHORT_PAPER/LONG sleeves are toggled off but remain promoted-in-code. Continuous remains research-stage and NOT promoted (`promoted.py` still exposes short + long only); demo fills are execution/cost evidence, not alpha proof. Demo account only; never REAL_MONEY.\"",
+     "line": 249
+    },
+    {
+     "claim": "Lines 273-275: \"State-exit: short fresh rmom-gated D9 (liquid \u2265$500k/h), cover when it leaves D9 or at max-hold; resting stop + the `ws_risk` intrabar path handle stops\" presented as the engine description",
+     "reality": "The deployed continuous units (deploy/systemd/liquidity-migration-bybit-continuous-{demo,paper}.service) now run STRATEGY_PROFILE=continuous_rebalance_v1 with ENTRY_EVENT_TRIGGER=turn4_pop4, FEATURE_SET=max_ret168, BTC_TREND_GATE=uptrend, DAILY_REBALANCE_ENABLED=1, MAX_HOLD_HOURS=24, MAX_ACTIVE=25, STOP_LOSS_PCT=0.25, LIQ_TURNOVER_MIN=500000 \u2014 a daily-rebalanced rmom-q25 book, not the pure leave-the-decile state-exit engine described. The section is labelled \"(historical)\" but is the only engine description in the doc.",
+     "fix": "Add after this bullet: \"DEPLOYED SHAPE (2026-06-09): the live units run `continuous_rebalance_v1` \u2014 turn4_pop4 entry trigger, max_ret168 D9, rmom q25, BTC-30d uptrend gate, daily rebalance, 24h max hold, max_active 25, 25% server-side disaster stop, \u2265$500k/h liquidity floor \u2014 see the unit files for the authoritative knob set.\"",
+     "line": 274
+    },
+    {
+     "claim": "Lines 284-288: heading \"Shared-account safety (two order-submitting sleeves + continuous paper, one netted demo account)\" and \"Short and long submit demo orders into ONE Bybit demo account... Continuous order submission is disabled by default; if the operator ever re-enables it, the same isolation is already wired\"",
+     "reality": "Inverted: continuous is currently the only order-submitting sleeve; short and long entry daemons are toggled off (deploy/sleeves.env 2026-06-09). The isolation mechanics described (ws_risk three-root reconcile authority, Rule A, hard-fail wiring in run_bybit_demo_ws_risk_engine.sh:41-44, risk unit carrying LONG_DATA_ROOT + CONTINUOUS_DATA_ROOT) all still verify and matter \u2014 short/long are redeployable.",
+     "fix": "Rephrase the heading to \"Shared-account safety (multiple sleeves, one netted demo account)\" and the intro to: \"All sleeves submit demo orders into ONE Bybit demo account (one-way / netted position mode). As of 2026-06-09 continuous is the only order-submitting sleeve (short/long entry daemons are toggled off but redeployable); the isolation below is wired for any combination:\".",
+     "line": 284
+    },
+    {
+     "claim": "Lines 306-308: \"**Current default:** deploy syncs the continuous demo unit file but disables it because `CONTINUOUS_SLEEVE=off`. The file still contains `SUBMIT_ORDERS=1` so an explicit future toggle-on is unambiguous, but that toggle is the deploy gate.\"",
+     "reality": "Committed deploy/sleeves.env now has CONTINUOUS_SLEEVE=on (2026-06-09); deploy enables and starts the order-submitting continuous demo unit. The rest of the paragraph (paper unit env, rmom-refresh timer behaviour, --end tomorrow-UTC default, liveness watchdog, max_rmom_day_ts telemetry) verified accurate.",
+     "fix": "Replace the first two sentences with: \"**Current default (2026-06-09):** `CONTINUOUS_SLEEVE=on` \u2014 deploy enables and starts the order-submitting continuous demo unit (`SUBMIT_ORDERS=1`); the sleeves.env toggle remains the single deploy gate to turn it back off.\"",
+     "line": 306
+    }
+   ],
+   "group": "docs-ops"
+  },
+  {
+   "path": "deploy/systemd/README.md",
+   "verdict": "update",
+   "rationale": "The canonical VPS deploy/recovery reference (the vps-migrate skill points at it) and most of it verifies: scripts deploy_vps_live.sh / verify_vps_live.sh / print_vps_recovery_command.sh (--recommended-only/--rescue-only) / vps_restore_ssh_access.sh / vps_rescue_restore_ssh_access.sh / wait_for_vps_recovery_and_deploy.sh / vps_console_recover_and_deploy.sh all exist; workflow modes verify/deploy/wait-deploy and vars VPS_HOST/VPS_USER/VPS_ED25519_FINGERPRINT/EXPECTED_TELEGRAM_CHAT_ID match .github/workflows/vps-deploy.yml; deploy-key fingerprint pre-check, SYSTEMD_SETTLE_SECONDS, deploy-verify-ok, CLEAN_DIRTY_CHECKOUT behaviour, IP 116.202.15.128, ORDER_SUBMIT_MODE=ws_then_rest, close_location_min=0.30 (volume_events.py:194), MAX_ACTIVE_SYMBOLS=12, promoted_quality_squeeze router, UNIVERSE_RANK_END=0 mode, ALLOWED_SUBMIT_PROFILES single-submitter guard, and execution.fast default-off all check out. But it is stale on the 2026-06-09 reality in four ways that bite an operator: the active-services list is inverted vs deploy/sleeves.env, the printed GitHub Actions deploy public key is the RETIRED pre-rebuild key (pasting it restores a dead key the workflow fingerprint check will then reject), the retired-legacy-unit (model050426) machinery it describes was removed in the 2026-06-09 audit (tests now assert its absence from the scripts), and the manual-install list both contradicts sleeves.env and omits the continuous demo unit and the rmom-refresh/hedge/forward-report timers.",
+   "staleClaims": [
+    {
+     "claim": "Lines 3-13: \"The active VPS services are:\" listing short demo, short paper, long demo+paper, risk, and continuous paper \u2014 with continuous-demo framed (lines 15-17) as \"present but disabled by default: CONTINUOUS_SLEEVE=off ... continuous demo order submission does not start on deploy\"",
+     "reality": "deploy/sleeves.env (2026-06-09 operator instruction) sets SHORT_SLEEVE=off, SHORT_PAPER_SLEEVE=off, LONG_SLEEVE=off, CONTINUOUS_SLEEVE=on, CONTINUOUS_PAPER_SLEEVE=on. The live set is: continuous demo (order-submitting) + continuous paper + always-on risk service + support timers. Short/long units remain synced and promoted-in-code but disabled.",
+     "fix": "Reframe lines 3-19 as a unit inventory governed by deploy/sleeves.env, e.g.: \"The deployable units are: bybit-demo + bybit-paper (short event sleeve), bybit-long-demo + bybit-long-paper (long v11a), bybit-continuous-demo + bybit-continuous-paper (continuous fade), and the always-on bybit-risk service (no toggle). Which sleeve units actually run is governed by `deploy/sleeves.env` (+ optional /etc/liquidity-migration/sleeves.env). As of 2026-06-09 the live set is ONLY the continuous pair (CONTINUOUS_SLEEVE=on submits demo orders; CONTINUOUS_PAPER_SLEEVE=on is its no-order shadow); SHORT/SHORT_PAPER/LONG are off but redeployable.\"",
+     "line": 3
+    },
+    {
+     "claim": "Lines 32-33: deploy \"disables retired legacy units (`model050426.service` plus the old daily signal timer/service)\"",
+     "reality": "Removed in the 2026-06-09 audit: tests/test_runtime_scripts.py (lines 608-610, 748-749, 1029-1030) now asserts \"model050426\" appears in NONE of deploy_vps_live.sh / verify_vps_live.sh / vps_console_recover_and_deploy.sh \u2014 the 2026-06-04 box is a fresh host that never ran those units.",
+     "fix": "Delete the clause \"disables retired legacy units (`model050426.service` plus the old daily signal timer/service),\".",
+     "line": 32
+    },
+    {
+     "claim": "Lines 36-38: the verify script \"checks the same commit, strategy constants, Telegram chat ID, systemd unit settings, sleeve active/enabled state, and retired-unit state\"",
+     "reality": "Retired-unit checks were removed from verify_vps_live.sh in the 2026-06-09 audit (test-asserted absence). The remaining checks listed are accurate.",
+     "fix": "Drop \", and retired-unit state\" from the sentence.",
+     "line": 37
+    },
+    {
+     "claim": "Line 63: GitHub Actions public deploy key \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX liquidity-migration-github-actions-20260519\"",
+     "reality": "RETIRED key. The recovery scripts (vps_restore_ssh_access.sh:5, vps_rescue_restore_ssh_access.sh:5, vps_console_recover_and_deploy.sh:11) now install the rotated key \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICWcgpE3GLy65yWFuh5RAH5CEgyLqRPAGvROXGwAxmVv liquidity-migration-github-actions-20260609\" (rotated after the 2026-06-09 VPS rebuild / chat-passed-credential rotation). An operator pasting the README block into authorized_keys re-installs a dead deploy key that the workflow's fingerprint pre-check will reject. (These are public keys; the line 62 \"hetzner\" key still matches the scripts.)",
+     "fix": "Replace line 63 with: \"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICWcgpE3GLy65yWFuh5RAH5CEgyLqRPAGvROXGwAxmVv liquidity-migration-github-actions-20260609\".",
+     "line": 63
+    },
+    {
+     "claim": "Lines 114-117: console recovery \"prints `deploy-verify-ok` only after it has also verified enabled sleeves are active/enabled, disabled sleeves are down, retired legacy units are inactive and disabled, ...\"",
+     "reality": "The retired-legacy-unit verification was removed from vps_console_recover_and_deploy.sh in the 2026-06-09 audit (test-asserted). The sleeve-state, promoted-settings, and ws_then_rest checks remain accurate.",
+     "fix": "Remove \"retired legacy units are inactive and disabled,\" from the list.",
+     "line": 115
+    },
+    {
+     "claim": "Lines 134-148: manual-install block enables short demo/paper + long demo/paper by hand and says \"Enable continuous paper only if the sleeve toggle says it should run; keep continuous demo off unless the operator explicitly enables order submission\"",
+     "reality": "Contradicts deploy/sleeves.env on both sides: short/long are toggled OFF (enabling them by hand resurrects retired sleeves the next deploy would re-disable), and continuous demo IS operator-enabled (CONTINUOUS_SLEEVE=on since 2026-06-09). The list also omits the continuous demo/paper units and the `liquidity-migration-continuous-rmom-refresh.timer`, `liquidity-migration-continuous-hedge.timer` (daily 00:35 UTC BTC-hedge dry-run, SUBMIT_HEDGE=0), and `liquidity-migration-continuous-forward-report.timer` \u2014 all part of the current live set.",
+     "fix": "Replace the hardcoded enable list with: \"enable only the units whose toggle is `on` in deploy/sleeves.env plus the always-on risk service and timers. As of 2026-06-09 that is: bybit-risk, bybit-continuous-demo, bybit-continuous-paper, and the demo-health / demo-liveness / combined-book-report / continuous-rmom-refresh / continuous-hedge / continuous-forward-report timers. Prefer the checked deploy script, which applies the toggles for you.\"",
+     "line": 138
+    },
+    {
+     "claim": "Lines 162-171: \"The entry service uses `STRATEGY_PROFILE=promoted` at `close_location_min = 0.30` with `MAX_ACTIVE_SYMBOLS=12` \u2014 the de-concentrated (12 concurrent positions) `drop_all_4` package promoted 2026-05-30 ...\"",
+     "reality": "Two issues: (a) the promoted profile is now drop_all_4 + age300 + ff6 + btc_trend_gate=uptrend (promoted.py:8 and event_demo.py _demo_event_config lines 1631-1658: pit_age_days_min=300, failed_fade_exit_hours=6, btc_trend_gate=\"uptrend\" added 2026-05-31 and 2026-06-04 on top of the 2026-05-30 drop_all_4 base) \u2014 the doc describes only the 2026-05-30 base; (b) \"the entry service uses\" implies it is running, but SHORT_SLEEVE=off since 2026-06-09 \u2014 the unit is configured-and-redeployable, not active. The 0.30 / 12 / promoted_quality_squeeze / rank-31-upward facts themselves verify.",
+     "fix": "Rephrase to: \"The short entry service (currently toggled off via SHORT_SLEEVE=off but promoted-in-code and redeployable) pins `STRATEGY_PROFILE=promoted` at `close_location_min = 0.30` with `MAX_ACTIVE_SYMBOLS=12` \u2014 the `drop_all_4` package (2026-05-30) plus the age300 gate + ff6 failed-fade exit (2026-05-31) and `btc_trend_gate=uptrend` (Tier-2 validated 2026-06-09); see `liquidity_migration/promoted.py` for the exact deployed profile.\"",
+     "line": 162
+    },
+    {
+     "claim": "Lines 186-187: \"The `demo_relaxed`, no-crowding, sniper, execution-only, and hedge candidates are shadow-only.\"",
+     "reality": "Mostly still true, but the hedge is no longer just a shadow candidate: it is deployed as a daily systemd timer (`liquidity-migration-continuous-hedge.timer`, 00:35 UTC) running in DRY-RUN (SUBMIT_HEDGE=0 in the unit) against the continuous demo book; and the sniper has a default-off live wiring scaffold (plan_continuous_sniper_orders).",
+     "fix": "Append: \"(the BTC-hedge now runs as a deployed daily dry-run timer \u2014 `liquidity-migration-continuous-hedge.timer`, order submission gated by SUBMIT_HEDGE=0 in the unit; the sniper's live wiring scaffold is default-off).\"",
+     "line": 186
+    },
+    {
+     "claim": "Lines 190-191: \"The retired `model050426-bybit-demo-signal.timer` / `.service` daily signal scan must stay disabled; the active runner is the event-driven loop above.\"",
+     "reality": "Obsolete instruction: the 2026-06-04/2026-06-09 rebuilt host never ran those units, and the deploy/verify/recovery scripts no longer reference or police them (2026-06-09 audit, test-asserted absence). There is nothing for an operator to keep disabled.",
+     "fix": "Delete the paragraph.",
+     "line": 190
+    }
+   ],
+   "group": "docs-ops"
+  },
+  {
+   "path": "docs/research_plan_continuous_live_readiness_2026-06-09.md",
+   "verdict": "update",
+   "rationale": "ACTIVE program doc, not adjudicated: the R2-LIVE build spec (lines 93-137, operator-directed 2026-06-10) is the binding integration map for work currently in flight on the rebuilt continuous-only VPS (hedge daily dry-run timer LIVE with SUBMIT_HEDGE=0; sniper Tier-2 demo candidate wiring; 4-component ensemble entries pending). Every verifiable technical claim checks out against code: ws_risk.py:187 continuous_addon_data_root (exact line), continuous_events.py:319-323 turn/pop trigger predicates (exact), continuous_demo.py cycle_trade_rows (~2345-2404, '~2356' accurate), compute_continuous_rebalance_scale exists (continuous_rebalance.py:214), data/bybit-continuous-hedge-event root + liquidity-migration-continuous-hedge.timer + SUBMIT_HEDGE=0 all match deploy/systemd/ and scripts/run_continuous_hedge.{py,sh}, lm-en-ca link-id namespace matches ws_risk.py. R0-R5 status entries match STATE.md lines 195-208. The only stale item is the final status-log entry, which predates commit 151c685.",
+   "staleClaims": [
+    {
+     "line": 136,
+     "claim": "NEXT: verify a cycle + flip submit; wire sniper resting-limit; faithful 4-component ensemble entries.",
+     "reality": "Commit 151c685 (2026-06-10 00:36, after this entry was written) already landed part of this NEXT list: plan_continuous_sniper_orders (pure +8% resting Sell-limit planner, default-off config flags, tested) in liquidity_migration/continuous_demo.py:546, plus the risk-tracked hedge ledger (ws_risk reads CONTINUOUS_ADDON_DATA_ROOT=data/bybit-continuous-hedge-event via the risk unit env; continuous_hedge_manager.build_hedge_trade_row rows are tracked-but-never-force-exited, test-asserted). Still genuinely pending: sniper/hedge order-submission glue, one verified live hedge cycle, the SUBMIT_HEDGE flip, and the faithful 4-component ensemble entries.",
+     "fix": "Append a status-log entry after line 137: '- 2026-06-10 (151c685): sniper limit PLANNER built (plan_continuous_sniper_orders, default-off) + hedge ledger registered with ws_risk (tracked, never force-exited; test-asserted). Remaining: order-submission glue for sniper+hedge, one verified live hedge cycle, SUBMIT_HEDGE flip, faithful 4-component ensemble entries.'"
+    }
+   ],
+   "group": "docs-plans"
+  },
+  {
+   "path": "docs/research_summary.md",
+   "verdict": "update",
+   "rationale": "THE consolidated research record \u2014 research content is sound and all cited scripts/receipts/plan docs exist (verified against scripts/, docs/preregistration/, docs/research_plan_*). But the front-matter and several operational/live-state claims lag the 2026-06-09/10 operational flip (continuous-only VPS with demo orders ON, hedge dry-run deployed, volup125 promoted-in-code), the 'Open Methodology Debts' list contradicts the doc's own 2026-06-09 closure sections, the 'Current Map' prescribes work the doc itself reports as completed-then-frozen, and the entire 2026-06-09/10 sniper + downtrend-sleeve arc (Amendment 6 Tier-2 demo candidate per ground truth and STATE.md:230-248) is absent despite six existing receipts and the doc's own line-6 'single research source of truth' claim.",
+   "staleClaims": [
+    {
+     "claim": "Header: 'Updated: 2026-06-08'",
+     "line": 3,
+     "reality": "The doc contains ~15 dated 2026-06-09 sections including binding decisions (continuous window freeze, debt closures, combined-book construction).",
+     "fix": "Change to '**Updated:** 2026-06-10' (or the date of the next edit)."
+    },
+    {
+     "claim": "'This file is the single research source of truth' \u2014 yet the doc contains no record of the 2026-06-09/10 downtrend-sleeve + sniper program",
+     "line": 6,
+     "reality": "The sniper arc (4 pre-registered amendments + Amendment 6; pooled MAR 5.58\u21926.30 at 1x; Tier-2 DEMO CANDIDATE by operator decision 2026-06-10) and the downtrend D1/D2/D3 closure ('hedge + cash is final') exist only in STATE.md (lines 230-248) and six preregistration receipts (sniper-conditional-walkforward-2026-06-09.md, sniper-staged-entries-2026-06-09.md, downtrend-{opportunity-map,reversal-ls,bounce-long}-2026-06-09.md, wp4-rmom-standalone-ls-2026-06-09.md). grep confirms zero 'sniper' / downtrend-receipt mentions in research_summary.md \u2014 a violation of the doc's own fold-back policy (lines 1057-1064).",
+     "fix": "Add a short dated section, e.g. '## 2026-06-09/10 \u2014 Downtrend-sleeve + sniper program: downtrend CLOSED (hedge+cash final), sniper Tier-2 DEMO CANDIDATE' recording: D1 real down-regime cross-sectional reversal; D2 reversal L/S FAILED Stage-A (funding+costs); D3 bounce-long standalone pass but combined-bar catastrophic fail (sleeve DD \u221230..\u221244%) \u2192 downtrend question CLOSED; S1 sniper additive quarter-size snipe at the +8% wick = pooled MAR 5.58\u21926.30 at 1x, passes the binding Tier-2 bar at 2x cost (pooled +0.375), Amendment 6 = Tier-2 demo candidate by operator decision 2026-06-10; live wiring scaffold (plan_continuous_sniper_orders) exists default-off. Cite the six receipts above."
+    },
+    {
+     "claim": "'Continuous demo orders remain off unless explicitly re-enabled by the operator.'",
+     "line": 15,
+     "reality": "Explicitly re-enabled by operator instruction 2026-06-09: deploy/sleeves.env has CONTINUOUS_SLEEVE=on and CONTINUOUS_PAPER_SLEEVE=on; the rebuilt VPS (2026-06-09, Tier-3 clocks restarted) runs ONLY the continuous sleeve (demo orders + paper shadow) plus the hedge dry-run timer and ws_risk; SHORT/SHORT_PAPER/LONG are toggled off but promoted-in-code and redeployable.",
+     "fix": "Replace with: 'The continuous sleeve is not promoted. As of 2026-06-09 (explicit operator instruction, rebuilt VPS) the live box runs ONLY the continuous sleeve \u2014 demo orders ON plus a no-order paper shadow \u2014 to accumulate forward execution evidence; demo fills are execution evidence, not alpha proof. The short and long sleeves are toggled off in deploy/sleeves.env but remain promoted-in-code and redeployable.'"
+    },
+    {
+     "claim": "'Current Map' continuous bullet: 'The strongest existing result is the old decomposed daily-rebalance candidate\u2026 The correct direction from here is merge the good pieces\u2026 Test with and without the old strategy-equity momentum gate.'",
+     "line": 29,
+     "reality": "Internal contradiction with the doc's own later sections: the merged test was completed 2026-06-07 (line 169) and the no-momentum arm won (line 175); the program then ran the ensemble/downtrend extension, the 2026-06-09 demotion + re-anchor to the uptrend core @ max4-6 (line 517+), the BTC-beta hedge was banked, and the 2023-04\u21922026-05 window was FROZEN for continuous variant adjudication (line 490).",
+     "fix": "Rewrite Current Map item 2 and lines 33-40 to: 'Continuous fade \u2014 research-only, NOT promoted. Canonical object: the uptrend-core ensemble at max4-6 with the banked BTC-beta hedge (downtrend extension demoted 2026-06-09). The 2023-04\u21922026-05 window is FROZEN for variant adjudication; new continuous evidence = forward demo/paper only (the rebuilt VPS is currently collecting it).' Delete the now-completed 'merge the good pieces' directive."
+    },
+    {
+     "claim": "Hedge section: 'Remaining (operator): live hedge-leg executor plumbing + forward-demo accumulation.'",
+     "line": 574,
+     "reality": "The hedge-leg executor plumbing is BUILT and DEPLOYED as a daily dry-run on the live VPS (continuous-hedge.timer at 00:35 UTC, SUBMIT_HEDGE=0; continuous_hedge_manager.py, 8 tests; STATE.md lines 39-43; commits 8bb9c9d/151c685).",
+     "fix": "Replace with: 'Remaining (operator): observe the daily dry-run (deployed 2026-06-09: continuous-hedge.timer, SUBMIT_HEDGE=0 gate) then flip SUBMIT_HEDGE=1 for live demo hedge submission + forward-demo accumulation.'"
+    },
+    {
+     "claim": "'The live long sleeve applies notional_multiplier=10 / entry_leverage=10 on top of the 1x-validated v11a+div profile.'",
+     "line": 656,
+     "reality": "The long sleeve is toggled OFF on the rebuilt VPS (LONG_SLEEVE=off in deploy/sleeves.env since 2026-06-09); the 10x multiplier remains the configured execution layer in code (promoted.py docstring) but no long sleeve currently runs live.",
+     "fix": "Replace with: 'The long sleeve's live execution config applies notional_multiplier=10 / entry_leverage=10 on top of the 1x-validated v11a+div profile (the sleeve is currently toggled off on the rebuilt VPS pending the leverage-cap decision; the 10x config is what it would run).'"
+    },
+    {
+     "claim": "volup125: 'NOT deployed \u2014 operator sign-off required, and it should ride with the leverage-cap decision.'",
+     "line": 814,
+     "reality": "Operator sign-off HAS happened: volup125 was operator-promoted into the code profile 2026-06-09 (liquidity_migration/long_native_event_demo.py:269, vol_target_max_scale=1.25, comment cites this receipt). What remains is redeployment of the long sleeve itself (toggled off on the rebuilt box) pending the 10x-multiplier decision.",
+     "fix": "Replace with: 'PROMOTED into the code profile by operator 2026-06-09 (vol_target_max_scale=1.25 in _v11a_long_native_config). The long sleeve is not redeployed on the rebuilt VPS \u2014 it rides with the 10x-multiplier/leverage-cap decision.'"
+    },
+    {
+     "claim": "Open Methodology Debts #2: 'Age definition. Live age and PIT backtest age may differ near threshold boundaries.' listed as still open ('These are still real and can move numbers')",
+     "line": 1036,
+     "reality": "Closed-as-acceptable by the doc's own section at line 909 ('Live-vs-backtest age definition audited (debt #2 closed-as-acceptable)'): median divergence 0 days, 564/569 within \u00b13 days, the single gate-flipping name errs in the safe direction.",
+     "fix": "Mark as: '2. Age definition \u2014 CLOSED-AS-ACCEPTABLE 2026-06-09 (audit above: divergence \u22480.2% of universe, conservative-by-direction; no code change).'"
+    },
+    {
+     "claim": "Open Methodology Debts #3: 'Residual-momentum causality. Rmom features must be proven causal at the decision timestamp before any deployment/paper-ready claim.' listed as still open",
+     "line": 1038,
+     "reality": "Answered by the doc's own 2026-06-09 sections (line 467 latency falsification FAIL + line 898 day-grid audit): rmom IS causal (no leak, grid bit-exact) but is a knife-edge ultra-fast-decay effect with zero operational margin \u2014 it supports no deployment-grade claim. The causality question is resolved; the binding consequence stands.",
+     "fix": "Mark as: '3. Residual-momentum causality \u2014 CLOSED-WITH-VERDICT 2026-06-09 (latency falsification + day-grid audit above): causal, no leak, but zero operational margin; rmom supports NO deployment-grade claim; any harvest needs an intraday-class design (see proposal section).'"
+    },
+    {
+     "claim": "Open Methodology Debts #4: 'Residual/factor day grid. Factor decomposition day alignment must be audited before relying on residual Sharpe for real-money gates.' listed as still open",
+     "line": 1040,
+     "reality": "The doc's own line 905 states 'Methodology debt #4 is CLOSED' (day-grid alignment audit: GRID CORRECT, bit-exact recomputation; residual-Sharpe machinery trustworthy).",
+     "fix": "Mark as: '4. Residual/factor day grid \u2014 CLOSED 2026-06-09 (end-to-end audit above: no off-by-one; residual-Sharpe machinery methodologically trustworthy).' Leaving #5 (forward evidence) as the only open debt, optionally noting the rebuilt VPS (Tier-3 clocks restarted 2026-06-09) is now accumulating exactly that."
+    }
+   ],
+   "group": "docs-summary"
+  },
+  {
+   "path": "docs/preregistration/btc-gate-tier2-validation-2026-06-09.md",
+   "verdict": "update",
+   "rationale": "Binding receipt for the Tier-2 validation of the deployed btc_trend_gate=uptrend (live in event_demo.py promoted branch line 1658; referenced from STATE.md line 77 and research_summary.md line 636). Scripts cited (scripts/btc_trend_gate_run.py, scripts/r1_robustness.py) exist. Two stale claims: the Stage field was never flipped after the run completed, and the Binance result rows are on the pre-funding-rebuild basis that the 2026-06-09 rebuild receipt explicitly supersedes ('all future Binance numbers move to this basis').",
+   "staleClaims": [
+    {
+     "line": 5,
+     "claim": "**Stage:** run-pending",
+     "reality": "The run completed; Post-run results and a DEMO-ELIGIBLE (accepted) verdict are recorded in this same file.",
+     "fix": "Change line 5 to: **Stage:** run-complete \u2014 accepted (DEMO-ELIGIBLE)"
+    },
+    {
+     "line": 79,
+     "claim": "Binance cells: 00_baseline +18.7% / \u221217.0% DD, 01_uptrend +8.1% / \u221211.8%; Binance MAR \u0394 \u22120.12 (line 87)",
+     "reality": "Superseded by the 2026-06-09 Binance funding rebuild (51\u2192697 symbols). Re-measured refunded cells (binance-funding-rebuild-2026-06-09.md): baseline +14.2% / \u221219.5%, gated +6.9% / \u221212.6%, MAR \u0394 \u22120.05, pooled +0.73 \u2014 verdict HOLDS, marginally stronger pooled.",
+     "fix": "Append one line after the Verdict section: '2026-06-09 addendum: the Binance cells above are pre-funding-rebuild; re-measured on the rebuilt funding dataset (receipt binance-funding-rebuild-2026-06-09.md) the gate verdict HOLDS \u2014 binance MAR \u0394 \u22120.05, pooled +0.73; the refunded numbers are the citable basis.'"
+    }
+   ],
+   "group": "prereg-active"
+  },
+  {
+   "path": "docs/preregistration/drop-all-4-promotion.md",
+   "verdict": "update",
+   "rationale": "Binding receipt for the first layer of the live short profile \u2014 every drop_all_4 field verified present in event_demo.py promoted branch (max_active_symbols=12 line 1634, day_return_min=-1.0, stop/loss-pressure 999, universe_rank_max=99999 lines 1636-1639); MAX_ACTIVE_SYMBOLS=12 still asserted by deploy_vps_live.sh line 263; UNIVERSE_RANK_END=0/UNIVERSE_MAX_SYMBOLS=0 confirmed in the systemd units; event_demo.py cites this receipt by name. One caveat paragraph is now factually wrong post the 2026-06-09 funding rebuild, including a disproven direction claim.",
+   "staleClaims": [
+    {
+     "line": 56,
+     "claim": "Binance funding is not wired (`funding-missing`), so the modeled Binance PnL omits a real cash flow (for a short, often a credit)",
+     "reality": "Binance funding was rebuilt 2026-06-09 (51\u2192697 symbols, true settlement intervals; receipt binance-funding-rebuild-2026-06-09.md). The direction prior is also disproven for this event population: these shorts PAY funding on net (Bybit \u221211.6% summed; honest Binance funding moved the baseline DOWN \u22124.5% abs), so the missing cash flow was a debit, not a credit.",
+     "fix": "Append an addendum after 'Not changed': '2026-06-09 addendum: Binance funding has since been rebuilt (receipt binance-funding-rebuild-2026-06-09.md); caveat (2) above is obsolete and its direction was wrong \u2014 these shorts pay funding on net, so the pre-rebuild Binance numbers here are ~3-6% abs optimistic. The promoted profile has since gained age300 + ff6 (promote-age-ff6-demo-2026-05-31.md) and btc_trend_gate=uptrend (btc-gate-tier2-validation-2026-06-09.md) on top of this package.'"
+    }
+   ],
+   "group": "prereg-active"
+  },
+  {
+   "path": "docs/preregistration/promote-age-ff6-demo-2026-05-31.md",
+   "verdict": "update",
+   "rationale": "Binding receipt for the age300+ff6 layer of the live short profile. All profile fields verified in event_demo.py promoted branch (pit_age 300 line 1641, ff6 knobs lines 1642-1645), strategy_id matches PROMOTED_DEMO_STRATEGY_ID='liqmig_union_q40_h3_tp26_g100_qsqueeze' (event_demo.py line 41), deploy asserts confirmed (deploy_vps_live.sh lines 89-98), cited tests exist (test_promoted_profile_carries_drop_all_4_age300_and_ff6 at test_liquidity_migration_event_demo_cycle.py:829). Already maintained once (dead link removed 2026-06-08). Two minor stale claims remain.",
+   "staleClaims": [
+    {
+     "line": 132,
+     "claim": "deploy ... restarts the 6 systemd daemons",
+     "reality": "Deploy restarts are now sleeve-toggle conditional (deploy/sleeves.env, the per-sleeve kill-switch added 2026-06-03): risk always restarts; each sleeve daemon restarts only if its toggle is on (deploy_vps_live.sh lines 211-216). On the current box only the continuous demo+paper and risk services run; SHORT/SHORT_PAPER/LONG are off.",
+     "fix": "Replace 'restarts the 6 systemd daemons' with 'restarts the risk service plus each sleeve daemon whose deploy/sleeves.env toggle is on (6 daemons at the time of this deploy)'."
+    },
+    {
+     "line": 49,
+     "claim": "All Binance evidence rows (\u00a7A lines 58-59, \u00a7B lines 82-84, all-weather line 100) are presented on the then-current 'funding blind' basis",
+     "reality": "The 2026-06-09 Binance funding rebuild (receipt binance-funding-rebuild-2026-06-09.md) is now the citable basis; pre-rebuild Binance results should be discounted ~3-6% absolute on 3y windows.",
+     "fix": "Append one addendum line after the VERDICT paragraph: '2026-06-09 addendum: Binance numbers in this receipt are pre-funding-rebuild (funding-blind) and ~3-6% abs optimistic; see binance-funding-rebuild-2026-06-09.md for the current basis. The GO decision rested on Bybit (funding-real) and is unaffected.'"
+    }
+   ],
+   "group": "prereg-active"
+  },
+  {
+   "path": "docs/preregistration/div-promotion.md",
+   "verdict": "update",
+   "rationale": "Binding receipt for the promoted long profile's div risk-engineering \u2014 verified in long_native_event_demo.py (_v11a_long_native_config: universe_size=50 line 216, max_concurrent_positions=10 line 253, enable_vol_target=True, vol_target_annual=0.60, vol_target_min_scale=0.30); long_native.py line 362 cites this receipt; scripts/verify_div_promotion.py exists. One field value has since been superseded by the operator-promoted volup125 change.",
+   "staleClaims": [
+    {
+     "line": 12,
+     "claim": "vol_target_max_scale=1.0 (de-risk-only volatility targeting)",
+     "reality": "vol_target_max_scale is now 1.25 in _v11a_long_native_config (long_native_event_demo.py line 269, comment: 'volup125 (operator-promoted 2026-06-09)'); the rest of the div package is unchanged. The de-risk-only (cap 1.0) characterization no longer describes the promoted code.",
+     "fix": "Append after the Verdict: '2026-06-09 addendum: vol_target_max_scale has since been raised 1.0 \u2192 1.25 (volup125, receipt long-volup-candidate-2026-06-09.md); all other div fields stand as promoted here.'"
+    }
+   ],
+   "group": "prereg-active"
+  },
+  {
+   "path": "docs/preregistration/long-volup-candidate-2026-06-09.md",
+   "verdict": "update",
+   "rationale": "Binding receipt for the accepted volup125 candidate, referenced from STATE.md line 93, research_summary.md line 808, the code comment at long_native_event_demo.py line 266, and tests/test_liquidity_migration_long_native_event_demo.py:100. Script cited (scripts/long_improve_sweep.py) exists. Two claims overtaken by events: the Stage field, and the deployment-status sentence \u2014 operator sign-off has since happened (the 1.25 cap is promoted in code), though the long sleeve itself is toggled off (deploy/sleeves.env LONG_SLEEVE=off) and not redeployed pending the 10x-multiplier decision. (Note for the caller: STATE.md line ~90-93 carries the same stale 'needs operator sign-off' wording.)",
+   "staleClaims": [
+    {
+     "line": 5,
+     "claim": "**Stage:** run-pending (bybit arm complete; this receipt is written BEFORE the binance confirmation results are read)",
+     "reality": "Both arms ran; Post-run results and an 'accepted (candidate)' verdict are recorded in this file, and the change has since been operator-promoted into _v11a_long_native_config.",
+     "fix": "Change line 5 to: **Stage:** run-complete \u2014 accepted (operator-promoted into code 2026-06-09; long sleeve not redeployed)"
+    },
+    {
+     "line": 83,
+     "claim": "NOT deployed: the profile change requires operator sign-off ... Deploy ONLY together with (or after) the long-sleeve leverage decision.",
+     "reality": "Operator sign-off happened 2026-06-09: vol_target_max_scale=1.25 is now in _v11a_long_native_config (long_native_event_demo.py line 269). It is still not LIVE \u2014 the LONG sleeve is toggled off on the rebuilt VPS (deploy/sleeves.env LONG_SLEEVE=off) and redeploy remains gated on the 10x notional-multiplier decision.",
+     "fix": "Append after the Verdict: '2026-06-09 addendum: operator signed off \u2014 vol_target_max_scale=1.25 is promoted in code (_v11a_long_native_config). The long sleeve remains toggled off on the live box; redeploy is still gated on the 10x-multiplier/leverage decision.'"
+    }
+   ],
+   "group": "prereg-active"
+  },
+  {
+   "path": "docs/preregistration/r4-risk-model-verdict.md",
+   "verdict": "update",
+   "rationale": "Binding validation record for the Tier-3 residual-Sharpe foundation, explicitly retained by STATE.md line 310 ('Risk-model receipt kept'). Verified current: liquidity_migration/risk_model.py _FACTOR_COLUMNS carries exactly the 6 kept factors (btc_beta, xs_rank_ret_30d, realized_vol_rank, funding_rate_z, liquidity_rank, premium_index_z \u2014 xs_rank_ret_3d dropped, lines 53-55); tests/test_risk_model.py exists; the retired runner scripts/r4_risk_model_validation.py is indeed absent; no risk-model CLI subcommand exists (consistent with 'deferred'); risk_model.py cites this receipt. One dead doc link.",
+   "staleClaims": [
+    {
+     "line": 191,
+     "claim": "forward plan now [research_plan_intraday_kernel.md](../research_plan_intraday_kernel.md)",
+     "reality": "docs/research_plan_intraday_kernel.md does not exist (no file in docs/ and no other repo reference). The current forward-plan docs are research_plan_continuous_live_readiness_2026-06-09.md, research_plan_continuous_regime_2026-06-09.md, and research_plan_downtrend_sleeve_2026-06-09.md; the consolidated record is docs/research_summary.md.",
+     "fix": "Replace the dead link with: 'verdicts in [research_summary.md](../research_summary.md); current forward plans are the docs/research_plan_*_2026-06-09.md files.'"
+    }
+   ],
+   "group": "prereg-active"
+  },
+  {
+   "path": "docs/preregistration/binance-funding-rebuild-2026-06-09.md",
+   "verdict": "update",
+   "rationale": "Binding data-basis receipt \u2014 it declares that all future Binance numbers move to the rebuilt funding basis, is the linked receipt for the resolved coverage debt in STATE.md line 290, is recorded in research_summary.md lines 863-867, and is cited by scripts/backfill_binance_funding_vision.py (which exists). Only the Stage field is stale.",
+   "staleClaims": [
+    {
+     "line": 5,
+     "claim": "**Stage:** run-pending",
+     "reality": "The rebuild landed (697 symbols / ~2.23M rows), the gate cells were re-measured, and the file records the verdict 'accepted (landed)'.",
+     "fix": "Change line 5 to: **Stage:** accepted (landed)"
+    }
+   ],
+   "group": "prereg-active"
+  },
+  {
+   "path": "docs/preregistration/rmom-latency-falsification-2026-06-09.md",
+   "verdict": "update",
+   "rationale": "Binding falsification receipt \u2014 its FAIL verdict annotates the frozen continuous winner and is linked from STATE.md Methodology Debts (line 298) and research_summary.md line 470; scripts/rmom_latency_falsification.py exists and cites it; the 'deployed short does not use rmom; sentinel 10.0' claim verified (liquidity_migration_residual_momentum_max sentinel 10.0, volume_events_filters.py lines 484/762). Two claims overtaken: the Stage field, and the debt-#4-still-open framing \u2014 the day-grid audit has since run and CLOSED debt #4 (grid correct).",
+   "staleClaims": [
+    {
+     "line": 5,
+     "claim": "**Stage:** run-pending",
+     "reality": "The falsification ran; Post-run results and the FAIL verdict are recorded in this file.",
+     "fix": "Change line 5 to: **Stage:** run-complete \u2014 FAIL (rmom not validated for deployment-grade claims)"
+    },
+    {
+     "line": 24,
+     "claim": "methodology debt #4 (factor/residual day-grid alignment) is still open (and verdict line 113: 'must first resolve methodology debts #3+#4 at the data layer \u2014 day-grid alignment audit, then re-test')",
+     "reality": "Debt #4 was CLOSED later on 2026-06-09 (STATE.md: audited end-to-end, GRID CORRECT, bit-exact recompute, all consumer joins causal with \u226524h margin). Per STATE.md the knife-edge is genuine fast decay, not leakage; a continuous revival now needs an intraday-class execution design, not a data fix.",
+     "fix": "Append after the Verdict: '2026-06-09 addendum: the debt-#4 day-grid audit has since completed \u2014 GRID CORRECT (STATE.md Methodology Debts). The shift3 knife-edge is therefore genuine fast decay, not leakage; the deployment-blocking consequence stands, and any revival requires an intraday-class execution design rather than a data-layer fix.'"
+    }
+   ],
+   "group": "prereg-active"
+  },
+  {
+   "path": "docs/preregistration/continuous-capacity-impact-2026-06-09.md",
+   "verdict": "update",
+   "rationale": "Still binding: the R5 capacity statement (~$200-300k combined Tier-3-safe) is the detailed record behind STATE.md's two-line summary and binds Tier-3 sizing for the active continuous candidate; R4 (impact calibration) is an OPEN Tier-3 risk item carried in STATE.md; referenced by docs/research_plan_continuous_live_readiness_2026-06-09.md:89. VPS IP and reconcile pull mechanism verified (scripts/reconcile.py VPS_HOST=root@116.202.15.128). But the R4 unblock path was invalidated by the 2026-06-09 VPS full rebuild.",
+   "staleClaims": [
+    {
+     "line": 8,
+     "claim": "Calibration against OBSERVED fills needs the daily demo order/fill ledgers, which exist only on the VPS; unblock = run the documented pull (`bash scripts/reconcile.sh`).",
+     "reality": "The VPS was fully rebuilt 2026-06-09 and ALL prior demo/paper ledger history was lost with no backup (STATE.md 'What's Running', 2026-06-09 FULL REBUILD). There are no historical fill ledgers to pull; observed-fill evidence only accrues from 2026-06-09 forward, from the continuous demo book whose orders were toggled ON at the operator re-shape.",
+     "fix": "Append a dated addendum after line 13: '**Addendum 2026-06-10:** the VPS was fully rebuilt 2026-06-09 and all prior demo/paper ledger history was lost (STATE.md). There is no historical fill ledger to pull; R4 calibration now waits on fresh observed fills accruing from the live continuous demo book (orders ON since the 2026-06-09 re-shape). The impact model remains \"stress-tested, uncalibrated\".'"
+    },
+    {
+     "line": 12,
+     "claim": "\u2026or hand over the `event_demo_*` order/fill datasets.",
+     "reality": "The short event sleeve is toggled OFF on the rebuilt box (deploy/sleeves.env); the only live sleeve is continuous, which writes the `continuous_fade_demo_{trades,orders,cycles}` datasets (liquidity_migration/storage.py:100-105). For calibrating the continuous winner+hedge impact model those are the relevant fill datasets going forward, not `event_demo_*`.",
+     "fix": "In the same addendum note: 'the relevant observed-fill datasets are now `continuous_fade_demo_{trades,orders,cycles}` (continuous is the only live sleeve), not `event_demo_*`.'"
+    }
+   ],
+   "group": "prereg-continuous"
+  },
+  {
+   "path": "docs/preregistration/continuous-forward-clock-spec-2026-06-09.md",
+   "verdict": "update",
+   "rationale": "Still needed: documents the Road-B design decision that governs how forward Tier-3 evidence accrues for the banked continuous object (liquidity_migration/continuous_forward_replay.py implements it and the live-readiness plan tracks it). But its live-state audit and status sections were overtaken by same-day/next-day events: the R3 collector was built+seeded, and the 2026-06-09 operator re-shape turned continuous demo orders ON with a new live profile.",
+   "staleClaims": [
+    {
+     "line": 12,
+     "claim": "Per the runbook (2026-06-08): NOT promoted, demo orders OFF, only a no-order evidence collector may run. Bybit-only.",
+     "reality": "2026-06-09 operator re-shape (STATE.md 'What's Running'): the VPS now runs ONLY the continuous system with demo orders ON + paper shadow; the live base book is `continuous_rebalance_v1` (turn4_pop4 + w90/max4 rebalance + uptrend gate + rmom q25), one of three profiles in continuous_demo.py \u2014 the audited OLD decile state machine (`continuous_v1`, rmom 0.33/age 30/btc off/48h defaults, verified in code) is no longer the live profile. Continuous remains NOT promoted.",
+     "fix": "Add a dated addendum: '**Addendum 2026-06-10:** superseded by the 2026-06-09 operator re-shape \u2014 continuous demo orders are ON (demo account) + paper shadow; the live profile is `continuous_rebalance_v1` (turn4_pop4 single-component rebalance book), not the decile machine audited above. Continuous remains research-stage/NOT promoted; demo fills are execution evidence only.'"
+    },
+    {
+     "line": 24,
+     "claim": "No forward stream tracks this object. Tier-3's 30-day clock is therefore not running for the thing we would deploy.",
+     "reality": "Narrowed since: the Road-B replay collector was built (`liquidity_migration/continuous_forward_replay.py`: config-hash pin, overlap-drift alarm, idempotent append) and SEEDED on real data \u2014 signal-level clock at 0 days awaiting data-root refresh (STATE.md R3). The live demo book now tracks a single-component (turn4_pop4) rebalance object with real orders; the full 4-component ensemble + sniper wiring is the next build (STATE.md:44-46). Tier-3 clocks restarted 2026-06-09 after the VPS rebuild.",
+     "fix": "Cover in the same addendum: 'The gap is partially closed: the Road-B collector is built and seeded (clock at 0 days awaiting root refresh); the live demo book runs the single-component turn4_pop4 rebalance object, with full-ensemble wiring as the next build.'"
+    },
+    {
+     "line": 71,
+     "claim": "Audit complete (this receipt). Next: build item 1+2 (replay module + tests).",
+     "reality": "Build items 1+2 are DONE (2026-06-09, same day): `liquidity_migration/continuous_forward_replay.py` + tests exist; seeded and verified on real data per `continuous-capacity-impact-2026-06-09.md` R3 section and the live-readiness plan status log.",
+     "fix": "Replace the Status line with: 'Audit complete. Build items 1+2 DONE 2026-06-09 \u2014 `liquidity_migration/continuous_forward_replay.py` + tests, seeded on real data (clock 0 days, awaiting data-root refresh; see `continuous-capacity-impact-2026-06-09.md`).'"
+    }
+   ],
+   "group": "prereg-continuous"
+  },
+  {
+   "path": "docs/preregistration/continuous-hedge-engine-2026-06-09.md",
+   "verdict": "update",
+   "rationale": "Binding banking receipt for the BTC hedge leg that is LIVE as a daily dry-run on the rebuilt VPS (continuous-hedge.timer, SUBMIT_HEDGE=0) \u2014 its fixed parameters (ContinuousHedgeRule(90,60,2.0,5bps)) are the deployed hedge's provenance and are cited by continuous_forward_replay.py. Code claims verified: ContinuousHedgeRule/compute_hedge_beta/hedged apply_rebalance_rule exist in continuous_rebalance.py; tests/test_continuous_rebalance_hedge.py exists (8 tests at receipt time, 12 now after R2 parity additions \u2014 additive, not flagged). Numbers match research_summary.md:560-570 and STATE.md:183-193 exactly. Two forward-looking lines were overtaken by events.",
+   "staleClaims": [
+    {
+     "line": 11,
+     "claim": "The hedge leg now lives INSIDE `apply_rebalance_rule` (commit-pending working tree)",
+     "reality": "Committed since: the hedge engine landed in commit 844e7ef and the live wiring in 151c685/8bb9c9d; `liquidity_migration/continuous_rebalance.py` on main contains ContinuousHedgeRule, compute_hedge_beta, and the hedged apply_rebalance_rule.",
+     "fix": "Minor \u2014 cover in the dated addendum: 'committed to main (844e7ef + live wiring 151c685)'. No standalone edit needed."
+    },
+    {
+     "line": 78,
+     "claim": "Remaining to `paper_ready`: live hedge-leg executor plumbing (a resize-planner for the BTC long leg analogous to `plan_continuous_rebalance_resizes`) + forward demo accumulation \u2014 both operator decisions.",
+     "reality": "The executor plumbing now EXISTS and is deployed: R2 built `ContinuousHedgeState`/`compute_continuous_hedge_ratio`/`plan_continuous_hedge_resize` with a backtest<->live parity test, and `liquidity_migration/continuous_hedge_manager.py` runs LIVE as a daily dry-run on the VPS (`deploy/systemd/liquidity-migration-continuous-hedge.{service,timer}`, 00:35 UTC, order submission gated SUBMIT_HEDGE=0) \u2014 STATE.md 'What's Running'. Forward demo accumulation is still pending (Tier-3 clocks restarted 2026-06-09 after the VPS rebuild).",
+     "fix": "Append: '**Addendum 2026-06-10:** executor plumbing built (R2 live-twin functions + parity tests; `continuous_hedge_manager.py`) and deployed as a daily DRY-RUN on the VPS (SUBMIT_HEDGE=0). Remaining to paper_ready: enable hedge order submission (operator) + forward demo accumulation (Tier-3 clocks restarted 2026-06-09).'"
+    }
+   ],
+   "group": "prereg-continuous"
+  },
+  {
+   "path": "docs/preregistration/continuous-winner-robustness-2026-06-09.md",
+   "verdict": "update",
+   "rationale": "Foundation receipt for the active canonical continuous object (winner_base, re-anchored to max4-6): referenced by STATE.md:174, docs/research_summary.md:528, the regime plan, and continuous_forward_replay.py's provenance comment. Battery results, scripts, and numbers all verified consistent. Two residual-risk/next-step statements have since been resolved and should carry a dated addendum so a future reader doesn't treat closed debts as open.",
+   "staleClaims": [
+    {
+     "line": 143,
+     "claim": "(3) Funding drag (~\u221228%/\u221220% of return) rests on the open Binance funding-interval debt (4h vs 8h).",
+     "reality": "CLOSED same day, after this receipt: R0 verified continuous-path funding accrual against the raw datasets (receipt docs/preregistration/continuous-funding-debt-closure-2026-06-09.md; STATE.md Methodology Debts marks it CLOSED), and the Binance funding dataset itself was rebuilt 51\u2192697 symbols with true per-settlement intervals (docs/preregistration/binance-funding-rebuild-2026-06-09.md).",
+     "fix": "Append: '**Addendum 2026-06-10:** residual risk (3) is CLOSED \u2014 funding accrual verified vs raw datasets (`continuous-funding-debt-closure-2026-06-09.md`) and the Binance funding dataset rebuilt 51\u2192697 symbols (`binance-funding-rebuild-2026-06-09.md`).'"
+    },
+    {
+     "line": 151,
+     "claim": "The next robustness gates are the funding-interval correctness fix, a real impact calibration, and forward-demo accumulation \u2014 not another weight/component sweep.",
+     "reality": "Partially done: funding fix CLOSED (R0); impact calibration BLOCKED on fresh observed fills (R4 \u2014 the 2026-06-09 VPS rebuild lost all prior fill history; fills now accrue from the live continuous demo book); forward-demo accumulation STARTED (continuous demo orders ON 2026-06-09; R3 signal-replay collector built and seeded, clock at 0 days awaiting root refresh). The continuous research window itself is FROZEN 2026-06-09.",
+     "fix": "In the same addendum: 'Status of the three gates as of 2026-06-10: funding fix DONE; impact calibration BLOCKED on fresh fill accrual (R4, `continuous-capacity-impact-2026-06-09.md`); forward-demo accumulation started (demo orders ON, replay collector seeded). The 2023-04\u21922026-05 window is FROZEN \u2014 no further in-window sweeps.'"
+    }
+   ],
+   "group": "prereg-continuous"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/docs/preregistration/sniper-staged-entries-2026-06-09.md",
+   "verdict": "update",
+   "rationale": "BINDING \u2014 must stay in the prereg folder. Amendment 6 is the operator adoption decision making x8_b25 the active Tier-2 demo candidate (STATE.md cites this receipt for the live sniper line), and Amendment 5 is the still-pending R4-calibrated banking test that decides the Tier-3-facing 2x-cost margin question. The live wiring scaffold matches the receipt exactly (liquidity_migration/continuous_demo.py:546 plan_continuous_sniper_orders; sniper_wick_pct=0.08, sniper_size_frac=0.25, sniper_enabled=False default-off). Amendments 1-4 numbers, bars, and the Amendment-3 reconciliation are internally consistent and match STATE.md (5.58 -> 6.30 pooled at 1x, +0.375 at 2x). Three claims about live infrastructure are stale post-rebuild (below). Because pre-registered protocol text should not be silently rewritten, the fixes should land as a short dated addendum (e.g. 'Amendment 5 addendum, 2026-06-10') rather than edits to the locked protocol wording.",
+   "staleClaims": [
+    {
+     "line": 162,
+     "claim": "Amendment 5: 'Operator authorized the VPS key + confirmed the host key (pinned SHA256:U8+LvEB...)'.",
+     "reality": "That fingerprint is the PRE-rebuild host key. The operator fully rebuilt the VPS on 2026-06-09; the current pinned host key is SHA256:TJRbvgB8nfhwmNDv4hM3jDkPXnRv6BGLQ3cPst2PfE4 (.github/workflows/vps-deploy.yml line 76; STATE.md ~line 62).",
+     "fix": "Add a dated addendum under Amendment 5: 'Addendum 2026-06-10: the box was fully rebuilt 2026-06-09 after this was written; host key rotated (current pin = the workflow default SHA256:TJRbvgB8...); the U8+LvEB pin above is the pre-rebuild key.'"
+    },
+    {
+     "line": 165,
+     "claim": "Amendment 5 calibration input: 'the daily-demo order/fill ledgers (event demo sleeve \u2014 the shared execution path)'.",
+     "reality": "On the rebuilt box the event demo (SHORT) sleeve is OFF (deploy/sleeves.env: SHORT_SLEEVE=off, SHORT_PAPER_SLEEVE=off, LONG_SLEEVE=off); the ONLY order-submitting sleeve is CONTINUOUS (CONTINUOUS_SLEEVE=on). All pre-rebuild ledger history was lost in the 2026-06-09 rebuild, so calibration fills can only come from the continuous demo sleeve, with the >=30-day fill clock starting 2026-06-09.",
+     "fix": "Same dated addendum: 'Calibration source amended: the rebuilt box runs only the continuous demo sleeve (same shared execution path \u2014 taker orders on the same venue/account); pre-rebuild ledgers were lost, so the >=200-fills/>=30-days validity clock starts 2026-06-09 on continuous-sleeve fills.'"
+    },
+    {
+     "line": 193,
+     "claim": "Amendment 6: the observed-fill calibration (Amendment 5) 'is accruing as of 2026-06-09'.",
+     "reality": "Accruing is correct and the date coincides with the rebuild, but the accruing source is the continuous demo sleeve, not the 'event demo sleeve' named in Amendment 5; the pre-rebuild history that Amendment 5 envisaged pulling no longer exists.",
+     "fix": "Covered by the same addendum \u2014 one sentence noting the accrual source is the continuous demo sleeve on the rebuilt box (clock start 2026-06-09)."
+    }
+   ],
+   "group": "prereg-downtrend"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/.claude/skills/backtest-integrity/SKILL.md",
+   "verdict": "update",
+   "rationale": "Methodology content is accurate and load-bearing; all referenced files/flags verified (docs/backtesting_errors_we_never_repeat.md, scripts/volume_events_cell.sh, r1_robustness.py, apply_decision_rule.py, --allow-partial-pit at cli_parsers.py:1097, audit_run_artifacts MCP). One parenthetical drifted after the 2026-06-09 continuous-only VPS re-shape.",
+   "staleClaims": [
+    {
+     "line": 107,
+     "claim": "(The fade-confirmation *execution* is the live strategy, a different thing \u2014 see STATE.md.)",
+     "reality": "Since the 2026-06-09 operator re-shape the live VPS runs ONLY the continuous rebalance sleeve; the fade-confirmation daily short is promoted-in-code but toggled OFF in deploy/sleeves.env (SHORT_SLEEVE=off).",
+     "fix": "Replace with: '(The fade-confirmation *execution* is the promoted short strategy \u2014 a different thing; which sleeves are actually live on the box is tracked in STATE.md > What's Running.)'"
+    }
+   ],
+   "group": "skills"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/.claude/skills/equity-curve/SKILL.md",
+   "verdict": "update",
+   "rationale": "The zero-friction tool path is current and verified (scripts/equity_curves.sh, --long-notional-multiplier in equity_curves.py:165, promoted.py short/long profiles incl. volup125 vol_target_max_scale=1.25, fc_min_day_015 matches v11a default 0.15, storage.resolve_dataset_name funding fallback at storage.py:177, run labels in long_native.py:1994). Two claims are stale.",
+   "staleClaims": [
+    {
+     "line": 90,
+     "claim": "Universe / regime parameters ... come from `_v11a_long_native_config()` in `liquidity_migration/long_native.py`",
+     "reality": "`_v11a_long_native_config()` is defined in `liquidity_migration/long_native_event_demo.py` (line 202); long_native.py only holds LongNativeConfig and run_long_native_research.",
+     "fix": "Replace 'in `liquidity_migration/long_native.py`' with 'in `liquidity_migration/long_native_event_demo.py` (the same factory `promoted.long_profile()` wraps)'."
+    },
+    {
+     "line": 3,
+     "claim": "(Continuous was de-promoted 2026-06-05 and is no longer part of the equity tool.)",
+     "reality": "Still not promoted and still excluded from promoted.PROFILES/the equity tool, but as of 2026-06-09 continuous is the ONLY live sleeve on the VPS (demo orders ON + paper shadow), so 'de-promoted' alone now misleads about live status.",
+     "fix": "Replace with: '(Continuous is research-stage, NOT promoted, and not part of the equity tool \u2014 even though it is the live demo sleeve on the VPS since 2026-06-09.)'"
+    }
+   ],
+   "group": "skills"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/.claude/skills/pit-reconcile/SKILL.md",
+   "verdict": "update",
+   "rationale": "The runbook itself is correct (scripts/reconcile.sh exists; provisioning steps, flags, minimal-window logic all match scripts/reconcile.py), but the live-sleeve status and the --sleeves default are stale. The Codex copy already fixed the default text \u2014 port it.",
+   "staleClaims": [
+    {
+     "line": 3,
+     "claim": "Description tail: '(Continuous is de-promoted/OFF; reconcile it for diagnostics only via --sleeves continuous.)'",
+     "reality": "Continuous demo orders + paper shadow were toggled ON 2026-06-09 (CONTINUOUS_SLEEVE=on in deploy/sleeves.env); it is the only live sleeve, though still research-stage and NOT promoted. Diagnostics-only reconcile remains correct.",
+     "fix": "Replace with '(Continuous is NOT promoted \u2014 it runs live on demo since 2026-06-09 for forward evidence only; reconcile it for diagnostics via --sleeves continuous.)'"
+    },
+    {
+     "line": 34,
+     "claim": "de-promoted 2026-06-05, look-ahead invalidated; live sleeve OFF). It is NOT reconciled by default.",
+     "reality": "The de-promotion date and not-reconciled-by-default are correct, but the live sleeve is ON since 2026-06-09 (continuous-only box, demo orders + paper shadow); status remains research-stage/not promoted.",
+     "fix": "Replace 'live sleeve OFF' with 'live sleeve re-enabled 2026-06-09 for forward evidence collection only \u2014 still NOT promoted'."
+    },
+    {
+     "line": 57,
+     "claim": "`--sleeves short,long,continuous` \u2014 pick a subset (default all three).",
+     "reality": "scripts/reconcile.py line 364: default=\"short,long\"; continuous must be added explicitly.",
+     "fix": "Replace with the Codex copy's text: '`--sleeves short,long,continuous` \u2014 pick a subset (default `short,long`; add `continuous` explicitly for diagnostics only).'"
+    },
+    {
+     "line": 8,
+     "claim": "The one command for a demo-forward reconciliation of the promoted sleeves (short + long)",
+     "reality": "Still the right tool, but the short/long live sleeves are toggled OFF on the 2026-06-09 rebuilt VPS and all prior ledger history was lost (Tier-3 clocks restarted) \u2014 their forward demo/paper ledgers will not grow until the sleeves are re-enabled.",
+     "fix": "Add one sentence after the command: 'Note: as of the 2026-06-09 VPS re-shape the short/long live sleeves are toggled OFF (deploy/sleeves.env) and ledger history restarted with the rebuild \u2014 expect empty/static forward ledgers until they are re-enabled.'"
+    }
+   ],
+   "group": "skills"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/.claude/skills/repo-map/SKILL.md",
+   "verdict": "update",
+   "rationale": "Doc pointers all verified (docs/pit_gate.md, data_roots.md, event_demo_daemon.md, GRAPH_REPORT.md exist; volume_features.py is genuinely imported by volume_events.py). But the live-sleeve framing and module map predate the 2026-06-09 continuous-only re-shape and omit the entire continuous_* family that is now the live system.",
+   "staleClaims": [
+    {
+     "line": 9,
+     "claim": "Research-stage; a frozen `promoted` profile runs on demo + paper only, not real money.",
+     "reality": "The promoted short/long profiles are toggled OFF on the live box since 2026-06-09; what runs on demo+paper is the NON-promoted research-stage continuous sleeve (plus the BTC-hedge dry-run timer and ws_risk).",
+     "fix": "Replace with: 'Research-stage; nothing runs real money. The promoted short/long profiles are promoted-in-code but currently off-box; the live VPS runs only the (non-promoted) continuous sleeve on demo + paper \u2014 see STATE.md > What's Running.'"
+    },
+    {
+     "line": 39,
+     "claim": "`event_demo.py` / `event_demo_daemon.py` / `ws_risk.py` \u2014 the live demo forward-cycle runner + websocket-first risk watchdog (REST fallback).",
+     "reality": "event_demo* is the SHORT sleeve's runner, currently toggled off on the box. The live entry daemon is the continuous one (continuous_demo.py / continuous_demo_daemon.py / continuous_rebalance.py), plus continuous_hedge_manager.py (daily BTC-beta hedge dry-run). ws_risk still runs. The map lists none of the continuous_* modules.",
+     "fix": "Reword to: '`event_demo.py` / `event_demo_daemon.py` \u2014 the SHORT sleeve's demo forward-cycle runner (currently off-box); `ws_risk.py` \u2014 the always-on websocket-first risk watchdog (REST fallback).' and add a bullet: '`continuous_demo.py` / `continuous_demo_daemon.py` / `continuous_rebalance.py` / `continuous_hedge_manager.py` \u2014 the continuous-fade live demo sleeve (the only live sleeve since 2026-06-09) + its BTC-beta hedge manager.'"
+    }
+   ],
+   "group": "skills"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/.claude/skills/research-phase-runner/SKILL.md",
+   "verdict": "update",
+   "rationale": "Workflow, decision-tier framing, scripts (volume_events_cell.sh, _sweep_runtime.py, r1_robustness.py, apply_decision_rule.py) and the pre-registration receipt step all verified. Three STATE.md section pointers are dangling \u2014 STATE.md headers are now First Read / Current Status / What's Running / Current Research Direction / Binding Decision Rules / Methodology Debts / Helpers / Non-Negotiables.",
+   "staleClaims": [
+    {
+     "line": 9,
+     "claim": "The current open experiments live in STATE.md (\"Open actions\") and docs/research_summary.md",
+     "reality": "STATE.md has no 'Open actions' section; open work is tracked under 'Current Status' and 'Current Research Direction'.",
+     "fix": "Replace '(\"Open actions\")' with '(\"Current Status\" / \"Current Research Direction\")'. Also update the same phrase in the YAML description on line 3."
+    },
+    {
+     "line": 27,
+     "claim": "The exact thresholds are owned by STATE.md (\"Decision rules currently binding\")",
+     "reality": "The STATE.md section is titled 'Binding Decision Rules' (line 250).",
+     "fix": "Replace '(\"Decision rules currently binding\")' with '(\"Binding Decision Rules\")'."
+    },
+    {
+     "line": 56,
+     "claim": "use the worker/thread settings in STATE.md (\"full-PIT op note\"); over-parallelizing OOMs the box",
+     "reality": "No 'full-PIT op note' exists in STATE.md. The memory-aware worker default and the SWEEP_MAX_WORKERS / POLARS_MAX_THREADS env knobs are documented in scripts/_sweep_runtime.py itself (header lines 18-22, _resolve_max_workers).",
+     "fix": "Replace with: 'use the SWEEP_MAX_WORKERS / POLARS_MAX_THREADS env knobs documented at the top of scripts/_sweep_runtime.py (memory-aware default); over-parallelizing OOMs the box.'"
+    }
+   ],
+   "group": "skills"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/.claude/skills/vps-migrate/SKILL.md",
+   "verdict": "update",
+   "rationale": "Structure and procedures are correct and badly needed (SSH_TARGET root@116.202.15.128, EXPECTED_TELEGRAM_CHAT_ID=8388367561, workflow modes, recovery scripts all verified), but the three pinned key values predate the 2026-06-09 rebuild + key rotation and are now actively wrong \u2014 following them verbatim would re-pin rotated credentials. These are public keys/fingerprints (not secrets). Consider also adding 'read the canonical value from vps-deploy.yml / vps_restore_ssh_access.sh' so the doc cannot drift again.",
+   "staleClaims": [
+    {
+     "line": 64,
+     "claim": "VPS_ED25519_FINGERPRINT \u2192 e.g. SHA256:2Jw88AJVSLNaXqVeAOd7fdHaAnd9qgeJLLel0PMpwaE",
+     "reality": "That was the pre-rebuild host key. After the 2026-06-09 full VPS rebuild the workflow default (vps-deploy.yml:76) and tests/test_runtime_scripts.py:853 pin SHA256:TJRbvgB8nfhwmNDv4hM3jDkPXnRv6BGLQ3cPst2PfE4.",
+     "fix": "Replace the example with 'SHA256:TJRbvgB8nfhwmNDv4hM3jDkPXnRv6BGLQ3cPst2PfE4 (the 2026-06-09 rebuild pin)' and add: 'the canonical default lives in .github/workflows/vps-deploy.yml \u2014 read it from there, every rebuild changes it.'"
+    },
+    {
+     "line": 81,
+     "claim": "Secret VPS_SSH_PRIVATE_KEY must derive to this fingerprint ... SHA256:JaKge+EVSIR9TyX48QqdUz6C9NFVAVqbIwWDqFjmFDY",
+     "reality": "The deploy key was rotated after the 2026-06-09 recovery (credentials had passed through chat). The workflow (vps-deploy.yml:78) and tests/test_runtime_scripts.py:841 now pin SHA256:Gki6YjdsUksh/TozZ/55sxSwimK7T9MOf2pgWSbqFNU.",
+     "fix": "Replace the fingerprint block with SHA256:Gki6YjdsUksh/TozZ/55sxSwimK7T9MOf2pgWSbqFNU and note the source of truth is GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT in .github/workflows/vps-deploy.yml."
+    },
+    {
+     "line": 87,
+     "claim": "Matching public key ... ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1KapzJXdFORWMhjaNFC4zPeEZkOAbu32aTXX liquidity-migration-github-actions-20260519",
+     "reality": "Rotated. The canonical GA public key installed by the recovery scripts (scripts/vps_restore_ssh_access.sh:5, vps_console_recover_and_deploy.sh:11) is now ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICWcgpE3GLy65yWFuh5RAH5CEgyLqRPAGvROXGwAxmVv liquidity-migration-github-actions-20260609. The operator console key (hetzner) on line 93 is unchanged and correct.",
+     "fix": "Replace the public-key block with the -20260609 key and point to scripts/vps_restore_ssh_access.sh as the canonical source."
+    }
+   ],
+   "group": "skills"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/graphify-out/GRAPH_REPORT.md",
+   "verdict": "update",
+   "rationale": "Needed (AGENTS.md mandates reading it before architecture questions) but stale: it is a GENERATED artifact dated 2026-06-08 and the codebase moved on 2026-06-09/10. Do not hand-edit \u2014 the fix is to regenerate with `graphify update .` (AST-only, no API cost), which AGENTS.md already requires after code changes.",
+   "staleClaims": [
+    {
+     "line": 1,
+     "claim": "Graph Report - liquidity-migration (2026-06-08)",
+     "reality": "Generated before commits 5e1c960/844e7ef (2026-06-09: ridge_combiner.py, continuous_forward_replay.py, regime/sniper arc) and 8bb9c9d/151c685 (2026-06-10: continuous_hedge_manager.py, hedge ledger + plan_continuous_sniper_orders). Zero mentions of continuous_hedge_manager, continuous_forward_replay, ridge_combiner, or the sniper planner anywhere in the report; god-node list and the 159-file corpus count (line 4) predate them.",
+     "fix": "Regenerate: run `graphify update .` (or `python3 -m graphify update .`) from the repo root and commit the refreshed GRAPH_REPORT.md."
+    }
+   ],
+   "group": "skills"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/.codex/skills/backtest-integrity/SKILL.md",
+   "verdict": "update",
+   "rationale": "codex-owned \u2014 flag only, do not edit. Differs from the Claude copy only in MCP-availability phrasing (lines 111-114); shares the same single stale parenthetical.",
+   "staleClaims": [
+    {
+     "line": 107,
+     "claim": "(The fade-confirmation *execution* is the live strategy, a different thing \u2014 see STATE.md.)",
+     "reality": "Since 2026-06-09 the live VPS runs only the continuous sleeve; the fade-confirmation short is promoted-in-code but toggled OFF (deploy/sleeves.env).",
+     "fix": "codex-owned: Codex should reword to 'the promoted short strategy' and defer live status to STATE.md > What's Running."
+    }
+   ],
+   "group": "skills"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/.codex/skills/equity-curve/SKILL.md",
+   "verdict": "update",
+   "rationale": "codex-owned \u2014 flag only, do not edit. This copy is BEHIND the Claude copy: it predates the run-diagnostics refactor (funding auto-resolution via storage.resolve_dataset_name, storage.py:177, and the warnings[]/tainted report block) and shares the _v11a location error.",
+   "staleClaims": [
+    {
+     "line": 61,
+     "claim": "Do NOT use ~/SHARED_DATA/binance_full_pit for this backtest. Its funding is stored as binance_usdm_funding, so read_dataset(root,\"funding\") returns 0 rows \u2192 funding_mode=missing",
+     "reality": "read_dataset now transparently resolves to the venue-specific funding dataset (storage.resolve_dataset_name, storage.py:177); binance_full_pit is funding-readable directly, coming back funding_mode=partial (~51 symbols) with a named FUNDING_PARTIAL warning, not missing. binance_full_pit_strategy is only preferable if it has broader coverage.",
+     "fix": "codex-owned: Codex should replace this block (and the line 58-59 root table) with the auto-resolution text the Claude copy carries (lines 58-69 there), plus the warnings[]/tainted report-block guidance."
+    },
+    {
+     "line": 82,
+     "claim": "come from `_v11a_long_native_config()` in `liquidity_migration/long_native.py`",
+     "reality": "`_v11a_long_native_config()` is in `liquidity_migration/long_native_event_demo.py` (line 202).",
+     "fix": "codex-owned: point at long_native_event_demo.py."
+    },
+    {
+     "line": 3,
+     "claim": "(Continuous was de-promoted 2026-06-05 and is no longer part of the equity tool.)",
+     "reality": "Still not promoted/not in the equity tool, but continuous is the only LIVE sleeve since 2026-06-09 (demo orders ON), so the phrasing now misleads about live status.",
+     "fix": "codex-owned: clarify 'not promoted and not in the equity tool, though it is the live demo sleeve since 2026-06-09'."
+    }
+   ],
+   "group": "skills"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/.codex/skills/pit-reconcile/SKILL.md",
+   "verdict": "update",
+   "rationale": "codex-owned \u2014 flag only, do not edit. This copy already has the correct --sleeves default ('default short,long', line 57) but still carries the stale continuous live status.",
+   "staleClaims": [
+    {
+     "line": 3,
+     "claim": "Description tail: '(Continuous is de-promoted/OFF; reconcile it for diagnostics only via --sleeves continuous.)'",
+     "reality": "Continuous demo orders + paper shadow toggled ON 2026-06-09 (CONTINUOUS_SLEEVE=on); only live sleeve, still NOT promoted.",
+     "fix": "codex-owned: reword to 'NOT promoted \u2014 live on demo since 2026-06-09 for forward evidence only'."
+    },
+    {
+     "line": 34,
+     "claim": "de-promoted 2026-06-05, look-ahead invalidated; live sleeve OFF",
+     "reality": "Live sleeve is ON since 2026-06-09 (continuous-only box); de-promotion/not-promoted status unchanged.",
+     "fix": "codex-owned: replace 'live sleeve OFF' with 'live sleeve re-enabled 2026-06-09 for forward evidence \u2014 still NOT promoted'."
+    }
+   ],
+   "group": "skills"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/.codex/skills/repo-map/SKILL.md",
+   "verdict": "update",
+   "rationale": "codex-owned \u2014 flag only, do not edit. Byte-identical to the Claude copy, so it shares the same stale claims (lines 9 and 39): pre-2026-06-09 live-sleeve framing and a module map that omits the continuous_* family now running live (continuous_demo_daemon.py, continuous_rebalance.py, continuous_hedge_manager.py).",
+   "staleClaims": [
+    {
+     "line": 9,
+     "claim": "a frozen `promoted` profile runs on demo + paper only, not real money",
+     "reality": "Promoted short/long are off-box since 2026-06-09; the live demo runs only the non-promoted continuous sleeve.",
+     "fix": "codex-owned: same fix as the Claude copy \u2014 defer live shape to STATE.md > What's Running."
+    },
+    {
+     "line": 39,
+     "claim": "`event_demo.py` / `event_demo_daemon.py` / `ws_risk.py` \u2014 the live demo forward-cycle runner",
+     "reality": "event_demo* is the (currently off-box) short runner; the live daemon is continuous_demo_daemon.py; continuous_* modules are absent from the map.",
+     "fix": "codex-owned: add a continuous_* bullet and reword the event_demo line as in the Claude copy's fix."
+    }
+   ],
+   "group": "skills"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/.codex/skills/research-phase-runner/SKILL.md",
+   "verdict": "update",
+   "rationale": "codex-owned \u2014 flag only, do not edit. Differs from the Claude copy only in MCP-availability phrasing; shares the same three dangling STATE.md pointers.",
+   "staleClaims": [
+    {
+     "line": 9,
+     "claim": "experiments live in STATE.md (\"Open actions\")",
+     "reality": "No 'Open actions' section in STATE.md; the sections are 'Current Status' / 'Current Research Direction'.",
+     "fix": "codex-owned: repoint to the current section names (also in the line 3 description)."
+    },
+    {
+     "line": 27,
+     "claim": "STATE.md (\"Decision rules currently binding\")",
+     "reality": "Section is titled 'Binding Decision Rules' (STATE.md:250).",
+     "fix": "codex-owned: rename the quoted section."
+    },
+    {
+     "line": 56,
+     "claim": "worker/thread settings in STATE.md (\"full-PIT op note\")",
+     "reality": "No such note in STATE.md; SWEEP_MAX_WORKERS / POLARS_MAX_THREADS and the memory-aware default are documented in scripts/_sweep_runtime.py (lines 18-22).",
+     "fix": "codex-owned: point at scripts/_sweep_runtime.py's header."
+    }
+   ],
+   "group": "skills"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/.codex/skills/vps-migrate/SKILL.md",
+   "verdict": "update",
+   "rationale": "codex-owned \u2014 flag only, do not edit. Byte-identical to the Claude copy, so it carries the same three pre-rotation key values, which are actively dangerous in a migration runbook (re-pinning rotated credentials).",
+   "staleClaims": [
+    {
+     "line": 64,
+     "claim": "VPS_ED25519_FINGERPRINT example SHA256:2Jw88AJVSLNaXqVeAOd7fdHaAnd9qgeJLLel0PMpwaE",
+     "reality": "Post 2026-06-09 rebuild the pinned host key is SHA256:TJRbvgB8nfhwmNDv4hM3jDkPXnRv6BGLQ3cPst2PfE4 (vps-deploy.yml:76, tests/test_runtime_scripts.py:853).",
+     "fix": "codex-owned: update example and reference vps-deploy.yml as source of truth."
+    },
+    {
+     "line": 81,
+     "claim": "Deploy key must derive to SHA256:JaKge+EVSIR9TyX48QqdUz6C9NFVAVqbIwWDqFjmFDY",
+     "reality": "Deploy key rotated post-recovery; current pin SHA256:Gki6YjdsUksh/TozZ/55sxSwimK7T9MOf2pgWSbqFNU (vps-deploy.yml:78, tests:841).",
+     "fix": "codex-owned: replace fingerprint, cite GITHUB_ACTIONS_DEPLOY_KEY_FINGERPRINT in the workflow."
+    },
+    {
+     "line": 87,
+     "claim": "GA public key ...20260519 (AAAAC3NzaC1lZDI1NTE5AAAAIKykZKBc1Kapz...)",
+     "reality": "Rotated to ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAICWcgpE3GLy65yWFuh5RAH5CEgyLqRPAGvROXGwAxmVv liquidity-migration-github-actions-20260609 (scripts/vps_restore_ssh_access.sh:5).",
+     "fix": "codex-owned: replace public-key block; the operator 'hetzner' key on line 93 is still correct."
+    }
+   ],
+   "group": "skills"
+  }
+ ],
+ "keeps": [
+  "CLAUDE.md",
+  "docs/backtesting_errors_we_never_repeat.md",
+  "docs/pit_gate.md",
+  "docs/preregistration/_template.md",
+  "docs/preregistration/pit-membership-trading-day-fix.md",
+  "docs/preregistration/continuous-funding-debt-closure-2026-06-09.md",
+  "docs/preregistration/continuous-demote-downtrend-extension-2026-06-09.md",
+  "docs/preregistration/continuous-hedge-overlay-2026-06-09.md",
+  "docs/preregistration/continuous-walkforward-allocator-2026-06-09.md",
+  "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/.claude/skills/research-report/SKILL.md",
+  "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/.claude/skills/run-strategy/SKILL.md",
+  "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/.codex/skills/research-report/SKILL.md",
+  "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/.codex/skills/run-strategy/SKILL.md"
+ ],
+ "removals": [
+  {
+   "path": "docs/research_plan_continuous_regime_2026-06-09.md",
+   "verdict": "fold",
+   "foldTarget": "docs/research_summary.md \u2014 the existing 'Regime-robustness program (2026-06-09)' section (lines ~517-584)",
+   "rationale": "Fully adjudicated plan with no future in-sample path. WP1a ran and is NO-GO (gate forms dead a-priori), WP2 DONE (downtrend extension demoted, canonical re-anchored), WP3 DONE/BANKED (BTC-beta hedge, two pre-registered PASSes) \u2014 all three verdicts, including the diagnosis content of section 1 and the benchmark of section 2, are already fully recorded with receipts in docs/research_summary.md lines 517-584 and STATE.md lines 166-193. WP4 (the only 'pending' item, marked OPERATOR-GATED at line 113) was subsequently RUN under the downtrend program's full-authority grant and FAILED both pre-registered bars (receipt docs/preregistration/wp4-rmom-standalone-ls-2026-06-09.md). The continuous 2023-04..2026-05 window was FROZEN 2026-06-09 (STATE.md), so this plan's in-sample program can never resume; forward work continues under research_plan_continuous_live_readiness. Section 4's reproduction pointers (component-ledger paths, winner equity ledger, engine config) are duplicated in research_summary.md and docs/preregistration/continuous-winner-robustness-2026-06-09.md (verified by grep), and section 5's 'uncommitted handoff' is moot (tree clean, receipts committed, age-gate debt CLOSED per STATE.md Methodology Debts). Fold = add one line to the research_summary regime section recording the WP4 Stage-A FAIL (currently recorded NOWHERE outside this plan family: 'WP4 rmom standalone cross-sectional L/S Stage-A FAILED both bars 2026-06-09 \u2014 best Sharpe 1.09/0.88 < 1.0 both-venue bar, all combined deltas negative, -18..-37% DD risk-class mismatch, return is funding carry minus costs; receipt wp4-rmom-standalone-ls-2026-06-09.md'), then delete the file and fix the two dangling references: docs/research_summary.md:520 and STATE.md:177 cite this plan's path.",
+   "staleClaims": [
+    {
+     "line": 3,
+     "claim": "Status: proposed program.",
+     "reality": "Every work package is adjudicated: WP1a NO-GO, WP2 DONE, WP3 BANKED, WP4 Stage-A FAILED (run 2026-06-09 under the downtrend program's full-authority grant, receipt wp4-rmom-standalone-ls-2026-06-09.md). The continuous window was FROZEN 2026-06-09, barring any resumption of this in-sample program.",
+     "fix": "Superseded by the fold \u2014 record the program as CLOSED in the research_summary regime section rather than editing this line."
+    },
+    {
+     "line": 113,
+     "claim": "WP4 \u2014 The big-win swing (OPERATOR-GATED). Scope the residual-momentum standalone cross-sectional L/S ... Needs an engine build + explicit operator greenlight.",
+     "reality": "WP4 Stage-A ran 2026-06-09 (the operator full-authority grant taken as the research greenlight) and FAILED both pre-registered bars: best Sharpe 1.09/0.88 below the 1.0 both-venue bar, all combined deltas negative, -18..-37% DD risk-class mismatch, return is funding carry minus costs. Receipt: docs/preregistration/wp4-rmom-standalone-ls-2026-06-09.md.",
+     "fix": "Fold the WP4 FAIL verdict into docs/research_summary.md's regime-robustness section as a one-line entry with the receipt path (it is not recorded there or in STATE.md today)."
+    },
+    {
+     "line": 160,
+     "claim": "Repo state at handoff (commit 5e1c960 + uncommitted working-tree changes) \u2014 Uncommitted: liquidity_migration/continuous_demo.py + test ... filled-in receipts ridge-combiner / continuous-winner-robustness ... Decide with the operator whether to commit these before starting WP1.",
+     "reality": "All listed items are committed (working tree is clean; both receipts exist in docs/preregistration/; HEAD is 151c685, well past 5e1c960). The continuous-demo age-gate fix is reflected in STATE.md's CLOSED 'Live age vs PIT backtest age' methodology debt.",
+     "fix": "No replacement needed \u2014 section is moot and is dropped by the fold."
+    }
+   ],
+   "group": "docs-plans"
+  },
+  {
+   "path": "docs/research_plan_downtrend_sleeve_2026-06-09.md",
+   "verdict": "fold",
+   "foldTarget": "docs/research_summary.md \u2014 add a new 'Downtrend-sleeve + sniper program (2026-06-09)' subsection (research_summary currently has ZERO coverage of D1/D2/D3/S1/WP4 or the program lesson; only STATE.md lines 230-248 summarize it)",
+   "rationale": "Self-declared 'PROGRAM TERMINAL STATE': D1 DONE (down-regime reversal lead found), D2 FAILED Stage-A, D3 bounce-long combined-bar FAILED with the pre-registered close-out applied ('downtrend question CLOSED \u2014 hedge + cash is final'), S1 sniper arc COMPLETE, WP4 Stage-A FAILED. Each verdict has its own receipt (downtrend-{opportunity-map,reversal-ls,bounce-long}-2026-06-09.md, sniper-staged-entries-2026-06-09.md, sniper-conditional-walkforward-2026-06-09.md, wp4-rmom-standalone-ls-2026-06-09.md \u2014 all verified present), and STATE.md carries the operational summary including the post-doc Amendment 6 upgrade. The one live thread (sniper) is governed by its receipt (Amendment 6 lives in sniper-staged-entries-2026-06-09.md), STATE.md, and the live-readiness plan's R2-LIVE build spec \u2014 this doc adds nothing operational and its sniper-status lines are now stale/misleading (still call sniper 'Tier-1, NOT banked'). Per house policy research conclusions belong in research_summary.md, which has no record of this program. Fold paragraph should carry: D1 lead (D10-D1 -51/-24 bps down-regime reversal, receipt), D2 FAIL (binance 0/8, funding+costs), D3 standalone-pass/combined-catastrophic-fail and 'downtrend capital = hedge + cash, FINAL', S1 sniper arc through Amendment 6 (additive quarter-size +8% snipe, pooled MAR 5.58->6.30 at 1x; 2x-cost overlay failed-and-reported; operator adopted at the binding Tier-2 bar 2026-06-10 -> demo candidate, Amendment-5 fill calibration decides the margin question), WP4 Stage-A FAIL, and the program lesson (3 independent confirmations: the edge is EVENT SELECTION + EXECUTION; daily cross-sectional books fail on DD-class + costs; new alpha needs new DATA \u2014 orderbook/L2/ticks \u2014 not recombinations of mined daily/hourly data). Then delete the file and fix the dangling reference at STATE.md:231.",
+   "staleClaims": [
+    {
+     "line": 63,
+     "claim": "**Tier-1 lead, NOT banked.** Receipt `sniper-staged-entries-2026-06-09.md`.",
+     "reality": "Superseded by Amendment 6 (2026-06-10, recorded in that same receipt): the operator adopted the x8_b25 additive snipe at the BINDING STATE.md Tier-2 bar (pooled dMAR +0.72 > +0.1 at 1x and +0.375 > +0.1 even at 2x; both venues positive) \u2014 it is now a Tier-2 DEMO CANDIDATE proceeding to live demo wiring; the '+0.5-at-2x' bar it failed was this program's own stricter banking overlay, reported as a fragility diagnostic. The live wiring scaffold (plan_continuous_sniper_orders, default-off) already exists in continuous_demo.py (commit 151c685).",
+     "fix": "Carry into the fold paragraph: 'sniper = Tier-2 DEMO CANDIDATE by operator decision 2026-06-10 (Amendment 6, binding house Tier-2 bar); the program-internal +0.5-at-2x banking overlay remains failed-and-reported as a fragility diagnostic; Amendment-5 observed-fill calibration decides the Tier-3-facing margin question.'"
+    },
+    {
+     "line": 64,
+     "claim": "GOAL ASSESSMENT: ... Honest remaining paths: (1) engine-grade snipe with maker/queue realism CALIBRATED from demo fills (R4 pull, operator), ...",
+     "reality": "Path (1) is now in motion: continuous demo orders are ON on the rebuilt VPS (2026-06-09 operator re-shape) and Amendment 5 fill calibration is accruing from the demo box; sniper itself was adopted as a Tier-2 demo candidate without waiting for the calibration (Amendment 6).",
+     "fix": "Reflect in the fold paragraph that Amendment-5 calibration is accruing on the live continuous-only demo box as of 2026-06-09/10."
+    },
+    {
+     "line": 86,
+     "claim": "Goal terminal state stands: banked 5.58, sniper Tier-1 6.30 unbanked, +30% operator-keyed.",
+     "reality": "Sniper is no longer 'Tier-1 unbanked' \u2014 Amendment 6 (2026-06-10) made it a Tier-2 demo candidate headed into the live ensemble+hedge executor build (research_plan_continuous_live_readiness R2-LIVE spec). The 'banked 5.58' hedged-uptrend-core headline and the closed downtrend question are unchanged.",
+     "fix": "Same as line 63 \u2014 fold the Amendment-6 status into the research_summary paragraph instead of leaving the stale Tier-1 framing as the terminal record."
+    }
+   ],
+   "group": "docs-plans"
+  },
+  {
+   "path": "docs/preregistration/continuous-rs-squeeze-probe-2026-06-09.md",
+   "verdict": "fold",
+   "foldTarget": "docs/research_summary.md",
+   "rationale": "Closed/dead question, exactly the class the STATE.md prereg policy says to fold: the WP1a NO-GO killed all WP1b trailing-RS gate forms a-priori, and the verdict is already FULLY recorded in docs/research_summary.md:541-551 (ICs, mechanism corr \u22120.26/\u22120.30, AR1 martingale finding, artifacts path) plus the Rejected Continuous Ideas list (lines 599-601), and summarized in STATE.md:177-182. Nothing binds an active deployment \u2014 the mechanism finding fed WP3, whose evidence lives in the kept hedge-overlay/engine receipts. Nothing material is missing from research_summary, so the fold is a pure delete; when deleting, prune the file-path references at STATE.md:182, docs/research_summary.md:550, and docs/preregistration/continuous-hedge-overlay-2026-06-09.md:8 to '(receipt folded 2026-06-10; git history is the archive)'.",
+   "staleClaims": [],
+   "group": "prereg-continuous"
+  },
+  {
+   "path": "docs/preregistration/ridge-combiner-2026-06-09.md",
+   "verdict": "fold",
+   "foldTarget": "docs/research_summary.md",
+   "rationale": "Closed/dead question per the STATE.md prereg policy: REJECTED at Tier-1 with no engine change (ridge never wired into sizing), and the verdict + binance 0-folds cause + re-run prerequisites are fully recorded in docs/research_summary.md (lines 539-540 and the dedicated section at 861-879) and STATE.md:212-219. Nothing active rides on it, and any re-attempt requires a freshly pre-registered feature set anyway, so the old frozen design does not bind future work. One detail worth a one-liner in research_summary's ridge section when folding: the independent same-day replication (second execution reproduced bybit pooled OOF rank-IC \u22120.0396 vs \u22120.0404). After deleting, prune the path references at STATE.md:219, the STATE.md Helpers line (~321), and docs/research_summary.md:540/879 to '(receipt folded; git history is the archive)'. All factual claims verified before folding: scripts/ridge_combiner_scout.py exists, all 8 frozen features exist in signal_harness FEATURE_REGISTRY, and the numbers match the research_summary record.",
+   "staleClaims": [],
+   "group": "prereg-continuous"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/docs/preregistration/downtrend-opportunity-map-2026-06-09.md",
+   "verdict": "fold",
+   "foldTarget": "docs/research_summary.md (new section: Downtrend-sleeve + sniper program, 2026-06-09)",
+   "rationale": "Closed/dead question. D1 was the Tier-1 opportunity map whose GO fed D2; D2 FAILED and D3 then CLOSED the entire downtrend question ('hedge + cash is final'). It binds no active deployment, candidate, or methodology decision. Per STATE.md policy, closed-arc receipts fold into research_summary.md \u2014 which currently has ZERO record of this arc (verified by grep; only STATE.md lines ~230-248 summarize it). Internal claims verified: scripts/downtrend_opportunity_map.py and docs/research_plan_downtrend_sleeve_2026-06-09.md exist; no stale claims. Fold paragraph should preserve the durable finding: regime-conditional cross-sectional REVERSAL on BTC-30d-down days (ret_7d/ret_1d, D10-D1 -51/-24 bps, both-venue sign agreement, sign flips in up-regime) \u2014 descriptive structure, not net-tradeable (per D2). When deleting, also update STATE.md line ~247 which cites this file by name.",
+   "staleClaims": [],
+   "group": "prereg-downtrend"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/docs/preregistration/downtrend-reversal-ls-2026-06-09.md",
+   "verdict": "fold",
+   "foldTarget": "docs/research_summary.md (same Downtrend-sleeve + sniper program section)",
+   "rationale": "Closed/dead question \u2014 pre-registered FAIL ('decisive, per the pre-registered bar': binance 0/8 cells net-positive; bybit-only wins killed by the both-venue rule). Binds nothing active. Verdict is NOT in research_summary.md (verified); fold it there per STATE.md policy. References verified: scripts/downtrend_reversal_ls.py exists, the cited continuous-capacity receipt (continuous-capacity-impact-2026-06-09.md) exists. Durable content for the fold paragraph: attribution \u2014 the LONG leg (buy 7d losers) carried real gross alpha both venues (+135% bybit / +58-60% binance) while REAL funding (-28..-43%, shorting bear-market relative-winners pays their deeply negative funding) plus turnover (-16..-43%) killed the L/S; this motivated and gates the D3 record. Update the STATE.md receipt pointer on deletion.",
+   "staleClaims": [],
+   "group": "prereg-downtrend"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/docs/preregistration/downtrend-bounce-long-2026-06-09.md",
+   "verdict": "fold",
+   "foldTarget": "docs/research_summary.md (same Downtrend-sleeve + sniper program section)",
+   "rationale": "Closed question with a FINAL close-out clause: 'downtrend question is CLOSED for this program: hedge + cash is final; no further downtrend constructions.' That standing decision is already recorded in STATE.md (~line 242-244), so the receipt no longer needs to live in the prereg folder; per policy it folds into research_summary.md, which currently lacks it. The fold paragraph MUST preserve the close-out clause verbatim plus the durable finding: bounce alpha is real (longs RECEIVE bear funding +7.7..+33.6%; liq500k_k1 Sharpe 2.03 bybit / 0.81 binance standalone) but it is a -30..-44% DD object vs the deployable's ~-5% budget \u2014 wrong risk class; a standalone high-vol bounce book would be a separate product. Script scripts/downtrend_bounce_long.py exists; no stale claims. Conservative note: this is the receipt that BINDS the no-further-downtrend-work decision \u2014 if the orchestrator wants one downtrend receipt retained, this is the one; otherwise the STATE.md record + fold paragraph carry it. Update the STATE.md receipt pointer on deletion.",
+   "staleClaims": [],
+   "group": "prereg-downtrend"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/docs/preregistration/sniper-conditional-walkforward-2026-06-09.md",
+   "verdict": "fold",
+   "foldTarget": "docs/research_summary.md (same section, sniper sub-part)",
+   "rationale": "Closed sub-question: the walk-forward race rejected conditional sizing \u2014 P0 fixed x8/b25 STANDS (stitched-OOS hedged-max4 deltas +1.06 bybit / +0.60 binance, pooled +0.83, vs P1 +0.39/+0.47 and P2 +0.54/+0.41). The binding definition of the ACTIVE Tier-2 sniper candidate lives in sniper-staged-entries Amendment 6, and STATE.md's program receipt list (~line 246-248) already omits this file. Its verdict is recorded nowhere else (research_summary.md has nothing on it \u2014 verified), so fold first: the paragraph must record the OOS deltas, that this is the only stitched-OOS (never-seen-quarters) evidence for the fixed snipe, and the durable program lesson ('third independent confirmation: simple fixed parameters beat adaptive/fitted ones out-of-window' \u2014 ensemble weights, snipe-c, ridge-b). The doc also carries stale live-state text (listed below) that would need fixing if kept, which further argues for folding the durable verdict instead.",
+   "staleClaims": [
+    {
+     "line": 41,
+     "claim": "Leftover '## Verdict (filled in after the run)' stub containing only '_pending_' sits above the real filled verdict (lines 43-58).",
+     "reality": "The verdict was filled in the same day under a second duplicate heading; the _pending_ stub was never removed.",
+     "fix": "If folding, irrelevant (file deleted). If kept instead: delete lines 39-41 (the duplicate '## Verdict (filled in after the run)' + '_pending_' stub)."
+    },
+    {
+     "line": 57,
+     "claim": "'Banking still awaits the calibrated-cost test (R4: VPS key authorization pending \u2014 this box's id_ed25519.pub needs adding to the VPS authorized_keys; host key verified+pinned 2026-06-09).'",
+     "reality": "Superseded same day: sniper-staged-entries Amendment 5 records the operator authorized the VPS key; then the operator FULL-rebuilt the VPS 2026-06-09 (new host key SHA256:TJRbvgB8... pinned in .github/workflows/vps-deploy.yml line 76; STATE.md line ~62), pre-rebuild ledgers were lost, and fill calibration is now accruing from the continuous demo sleeve (deploy/sleeves.env: CONTINUOUS_SLEEVE=on, SHORT_SLEEVE=off).",
+     "fix": "If kept instead of folded, append a dated note: 'Update 2026-06-10: key authorized + box fully rebuilt 2026-06-09 (new pinned host key; ledger history reset); R4 calibration accrues from the rebuilt box's continuous demo sleeve per sniper-staged-entries Amendment 5/6.'"
+    }
+   ],
+   "group": "prereg-downtrend"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/docs/preregistration/wp4-rmom-standalone-ls-2026-06-09.md",
+   "verdict": "fold",
+   "foldTarget": "docs/research_summary.md (same section, plus the 'durable program lesson' line)",
+   "rationale": "Closed/dead question \u2014 'FAIL, WP4 Stage-A closed': no cell passed the standalone bar, combined-book bar failed everywhere (best delta bybit -0.20 / binance -2.80), and 'the goal terminates with the operator-keyed menu'. Binds nothing active (STATE.md keeps only the operator-gated WP4 ENGINE-build as a remaining path; the standalone-book question is falsified). Verdict is recorded NOWHERE else \u2014 research_summary.md has nothing and STATE.md's program paragraph omits the WP4 Stage-A result and omits this receipt from its list \u2014 so the fold paragraph is mandatory before deletion. It must capture: (a) the FAIL + attribution (returns dominated by funding carry +31..+69% net of turnover -20..-56%; -18..-37% standalone DD vs the -5% deployable budget \u2014 same risk-class mismatch as D3); (b) the durable lesson 'this system's edge is EVENT SELECTION + EXECUTION; daily cross-sectional books fail on DD-class and cost/funding at our scale'; (c) a caveat: the disposition's 'as a SELECTION gate it remains validated research' must be folded together with the rmom latency-knife-edge caveat (STATE.md Methodology Debts: rmom supports no deployment-grade claim) so the summary does not overstate rmom. References verified: scripts/wp4_rmom_standalone_ls.py and tests/test_precompute_residual_momentum.py::test_residual_momentum_is_causal_shift3 both exist. Minor artifact: leftover '_pending_' verdict stub at line 45 (moot once folded).",
+   "staleClaims": [
+    {
+     "line": 45,
+     "claim": "Leftover '## Verdict (filled in after the run)' heading with '_pending_' above the filled FAIL verdict (line 47+).",
+     "reality": "The verdict was filled the same day under a second duplicate heading; the stub was never removed.",
+     "fix": "Irrelevant once folded/deleted; if kept, remove lines 43-45."
+    }
+   ],
+   "group": "prereg-downtrend"
+  },
+  {
+   "path": "/Users/jhbvdnsbkvnsd/Desktop/liquidity-migration/docs/preregistration/exploratory/",
+   "verdict": "delete",
+   "rationale": "Empty directory \u2014 contains zero files (verified with ls; created 2026-05-30, never populated). Nothing to list or assess. Vestigial: per AGENTS.md, EXPLORATORY runs are the ones that DON'T require receipts, so a dedicated receipts subdirectory for them has no role; git does not track empty directories, so it exists only in the local working tree. Safe to remove (superseded by the AGENTS.md exploratory-runs-need-no-receipt rule and the STATE.md keep-preregistration-small policy).",
+   "staleClaims": [],
+   "group": "prereg-downtrend"
+  }
+ ]
+}

@@ -77,3 +77,11 @@ forward ledger pre/post.
 
 No real-money toggle (demo + paper only). No cost model, no entry-quality filters,
 no signal logic. `demo_relaxed` and the long sleeve are untouched.
+
+**2026-06-09 addendum:** Binance funding has since been rebuilt (receipt
+`binance-funding-rebuild-2026-06-09.md`); caveat (2) above is obsolete and its
+direction was wrong — these shorts pay funding on net, so the pre-rebuild Binance
+numbers here are roughly 3-6% absolute optimistic. The promoted profile has since
+gained age300 + ff6 (`promote-age-ff6-demo-2026-05-31.md`) and
+`btc_trend_gate=uptrend` (`btc-gate-tier2-validation-2026-06-09.md`) on top of
+this package.

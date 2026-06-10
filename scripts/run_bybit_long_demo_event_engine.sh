@@ -29,8 +29,9 @@ fi
 LOOKBACK_DAYS="${LOOKBACK_DAYS:-90}"
 UNIVERSE_SIZE="${UNIVERSE_SIZE:-50}"  # div promotion 2026-05-30 (was 10); systemd unit also sets 50
 WORKERS="${WORKERS:-4}"
-NOTIONAL_MULTIPLIER="${NOTIONAL_MULTIPLIER:-10}"
+NOTIONAL_MULTIPLIER="${NOTIONAL_MULTIPLIER:-1}"
 ENTRY_LEVERAGE="${ENTRY_LEVERAGE:-10}"
+MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY="${MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY:-0.5}"
 MAX_ORDER_NOTIONAL_PCT_EQUITY="${MAX_ORDER_NOTIONAL_PCT_EQUITY:-0}"
 MAX_NEW_ENTRIES_PER_CYCLE="${MAX_NEW_ENTRIES_PER_CYCLE:-5}"
 ORDER_FILL_CONFIRM_SECONDS="${ORDER_FILL_CONFIRM_SECONDS:-2}"
@@ -106,7 +107,7 @@ echo "long-native demo engine starting"
 echo "repo=$REPO_ROOT"
 echo "strategy_profile=$STRATEGY_PROFILE"
 echo "data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS submit_orders=${SUBMIT_ORDERS:-0} use_daemon=${USE_DAEMON:-1}"
-echo "per-position notional_multiplier=${NOTIONAL_MULTIPLIER}x entry_leverage=${ENTRY_LEVERAGE}x universe_size=${UNIVERSE_SIZE}"
+echo "per-position notional_multiplier=${NOTIONAL_MULTIPLIER}x entry_leverage=${ENTRY_LEVERAGE}x max_projected_im=${MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY} universe_size=${UNIVERSE_SIZE}"
 
 mkdir -p "$DATA_ROOT/.locks"
 
@@ -125,6 +126,7 @@ if [[ "${USE_DAEMON:-1}" == "1" ]]; then
         --workers "$WORKERS" \
         --notional-multiplier "$NOTIONAL_MULTIPLIER" \
         --entry-leverage "$ENTRY_LEVERAGE" \
+        --max-projected-initial-margin-pct-equity "$MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY" \
         --max-order-notional-pct-equity "$MAX_ORDER_NOTIONAL_PCT_EQUITY" \
         --max-new-entries-per-cycle "$MAX_NEW_ENTRIES_PER_CYCLE" \
         --order-fill-confirm-seconds "$ORDER_FILL_CONFIRM_SECONDS" \
@@ -150,6 +152,7 @@ while true; do
         --workers "$WORKERS" \
         --notional-multiplier "$NOTIONAL_MULTIPLIER" \
         --entry-leverage "$ENTRY_LEVERAGE" \
+        --max-projected-initial-margin-pct-equity "$MAX_PROJECTED_INITIAL_MARGIN_PCT_EQUITY" \
         --max-order-notional-pct-equity "$MAX_ORDER_NOTIONAL_PCT_EQUITY" \
         --max-new-entries-per-cycle "$MAX_NEW_ENTRIES_PER_CYCLE" \
         --order-fill-confirm-seconds "$ORDER_FILL_CONFIRM_SECONDS" \

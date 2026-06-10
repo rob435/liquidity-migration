@@ -81,11 +81,11 @@ systemctl is-enabled --quiet liquidity-migration-bybit-risk.service
 # The continuous rmom-refresh timer is required if either continuous demo or
 # paper evidence collection is enabled.
 if continuous_rmom_refresh_on; then
-  systemctl is-enabled --quiet liquidity-migration-continuous-rmom-refresh.timer
-  systemctl is-active --quiet liquidity-migration-continuous-rmom-refresh.timer
-  systemctl is-enabled --quiet liquidity-migration-continuous-forward-report.timer
-  systemctl is-active --quiet liquidity-migration-continuous-forward-report.timer
+  verify_timer on $CONTINUOUS_SLEEVE_TIMERS $CONTINUOUS_FORWARD_REPORT_TIMERS
+else
+  verify_timer off $CONTINUOUS_SLEEVE_TIMERS $CONTINUOUS_FORWARD_REPORT_TIMERS
 fi
+verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS
 # Timer parity — read-only verify must catch a deploy that forgot to enable
 # (or someone manually disabled) the demo-health watchdog or daily
 # combined-book report. Both fail loud if missing.

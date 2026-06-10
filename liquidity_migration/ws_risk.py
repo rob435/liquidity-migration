@@ -1739,6 +1739,25 @@ class EventWebSocketRiskEngine:
         recovered = self._recover_entry_link_metadata(symbol=symbol, side=side)
         if recovered is not None:
             link, strategy_id, signal_ts_ms, decoded_sleeve, reentry_seq = recovered
+            if decoded_sleeve == "continuous_addon":
+                from .continuous_hedge_manager import (
+                    HEDGE_SYMBOL,
+                    ContinuousHedgeConfig,
+                    build_hedge_tracking_row,
+                )
+
+                if symbol == HEDGE_SYMBOL and side == "long":
+                    return build_hedge_tracking_row(
+                        ContinuousHedgeConfig(),
+                        qty=_float(qty),
+                        entry_price=entry_price,
+                        opened_ms=opened_ms,
+                        updated_ms=now_ms,
+                        order_link_id=link,
+                        order_id="",
+                        signal_ts_ms=signal_ts_ms,
+                        submit_mode="adopted_recovered",
+                    )
             # Rebuild the deterministic trade_id, carrying the continuous re-entry seq so a rebuilt
             # same-signal-window re-entry reconstructs its DISTINCT id (continuous-2). seq=0 (every
             # short/long link + a first continuous entry) reproduces the legacy form verbatim.

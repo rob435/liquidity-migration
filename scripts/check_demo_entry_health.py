@@ -14,6 +14,7 @@ Add `--telegram` to post the alert via the same Telegram channel the demo uses
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -73,6 +74,17 @@ def ws_first_ratio(df: pl.DataFrame) -> dict[str, float]:
         out["private_pct"] = 100.0 * ws_n / rows
     # Only return when BOTH are present so the caller's f-string is safe.
     return out if {"ticker_pct", "private_pct"} <= out.keys() else {}
+
+
+def sleeve_enabled(env_var: str, *, default: str = "on") -> bool:
+    """Return whether this watchdog's sleeve should be monitored.
+
+    The entry-health timer watches the short demo root. After the 2026-06-09
+    sleeve reshape that root can be intentionally stopped via SHORT_SLEEVE=off;
+    paging on its old cycle count is then a false alarm. Keep the default "on"
+    for manual/backward-compatible invocations that do not load sleeves.env.
+    """
+    return os.environ.get(env_var, default).strip().lower() in {"on", "1", "true", "yes"}
 
 
 def check_entries(
@@ -292,7 +304,22 @@ def main() -> int:
         "fill) are treated as normal sparse operation, not an anomaly.",
     )
     p.add_argument("--telegram", action="store_true", help="Post alert via Telegram if unhealthy")
+    p.add_argument(
+        "--sleeve-env-var",
+        default="SHORT_SLEEVE",
+        help="Environment kill-switch to honor before checking this root. Default: SHORT_SLEEVE.",
+    )
+    p.add_argument(
+        "--sleeve-default",
+        default="on",
+        choices=("on", "off"),
+        help="Default sleeve state when --sleeve-env-var is unset. Default: on.",
+    )
     args = p.parse_args()
+
+    if not sleeve_enabled(args.sleeve_env_var, default=args.sleeve_default):
+        print(f"OK (skipped): {args.sleeve_env_var}=off; entry-health watchdog disabled for {args.data_root}")
+        return 0
 
     code, msg = check_entries(
         data_root=args.data_root,

@@ -17,7 +17,7 @@
 - Be honest and call out wrong decisions directly.
 - Ask for exact intent, constraints, and success metrics when a request is vague.
 - Do not optimize for a vague goal; define the objective before expensive research.
-- The liquidity-migration short signal is statistically real but regime-conditional; the strategy is research-stage — see `docs/research_summary.md`. A frozen `promoted` profile runs on demo + paper only (forward-demo arbiter); nothing is promoted to real money. Do not make real-money deployment or promotion claims — the bar is the three-tier demo-arbiter gate in STATE.md (Tier-3 pass + funding costed).
+- The liquidity-migration short signal is statistically real but regime-conditional; the strategy is research-stage — see `docs/research_summary.md`. Promoted profiles deploy to demo + paper only (forward-demo arbiter); which sleeves actually run is operator-toggled in `deploy/sleeves.env` (see STATE.md "What's Running"); nothing is promoted to real money. Do not make real-money deployment or promotion claims — the bar is the three-tier demo-arbiter gate in STATE.md (Tier-3 pass + funding costed).
 - A real-money (mainnet) execution path exists; the account is a `.env` toggle (`DEMO` / `REAL_MONEY`, mutually exclusive) read by `bybit.resolve_private_credentials()`, defaulting to demo. Keep it on demo — do not set `REAL_MONEY=true` without explicit owner instruction. The strategy is not validated for real money.
 - Telegram may notify; it must not approve or submit orders.
 - Serious research runs should leave enough report output to audit the decision.

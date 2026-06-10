@@ -1,6 +1,6 @@
 # Research Summary - Liquidity Migration
 
-**Updated:** 2026-06-08
+**Updated:** 2026-06-10
 **Status:** research-stage only. Demo and paper evidence are allowed; real-money promotion is not.
 
 This file is the single research source of truth. Old per-experiment receipts and one-off
@@ -11,9 +11,11 @@ change is meant to become a formal candidate/promotion decision.
 ## Non-Negotiable Status
 
 - Nothing is approved for real money.
-- The short sleeve and long sleeve can run on demo/paper only.
-- The continuous sleeve is not promoted. Continuous demo orders remain off unless explicitly
-  re-enabled by the operator.
+- The short sleeve and long sleeve can run on demo/paper only; they are currently
+  toggled off on the live box but remain promoted-in-code and redeployable.
+- The continuous sleeve is not promoted. As of the 2026-06-09 rebuilt VPS, it is
+  the only live sleeve: demo orders ON plus a no-order paper shadow, collecting
+  forward execution evidence. Demo fills are not alpha proof.
 - Forward demo/paper is the real out-of-sample arbiter. There is no clean internal pre-2023
   OOS root.
 - Full-PIT data, causal features, cost/funding awareness, and trade/equity ledgers are
@@ -26,18 +28,11 @@ There are two separate research lines:
 1. **Daily liquidity-migration short.** The current promoted short profile is
    `drop_all_4 + age300 + ff6 + btc_trend_gate=uptrend`. It does **not** use rmom;
    `liquidity_migration_residual_momentum_max=10.0` is the inactive sentinel.
-2. **Continuous fade.** This is research-only. The strongest existing result is the old
-   decomposed daily-rebalance candidate. Recent independent work improved its trade logic
-   and tail quality, but does not replace the rebalance engine.
-
-The correct direction from here is **merge the good pieces**:
-
-- Keep the old continuous rebalance/risk engine.
-- Inject the cleaner independent entry/exit logic.
-- Test with and without the old strategy-equity momentum gate.
-
-Do not frame the independent continuous branch as a separate replacement system unless it
-beats the rebalance candidate after the same portfolio construction is applied.
+2. **Continuous fade.** Research-only, NOT promoted. Canonical object: the uptrend-core
+   ensemble at max4-6 with the banked BTC-beta hedge; the downtrend extension was
+   demoted 2026-06-09. The 2023-04→2026-05 window is frozen for continuous variant
+   adjudication. New continuous evidence is forward demo/paper only, which the rebuilt
+   VPS is now collecting.
 
 ## Daily Short - Durable Findings
 
@@ -517,7 +512,7 @@ Binding consequences (mirrored in STATE.md):
 ### Regime-robustness program (2026-06-09) — demotion, re-anchor, RS-gate null
 
 The 2026-06-09 sessions (commit 5e1c960 + working tree) closed the refinement era
-and opened the regime program (`docs/research_plan_continuous_regime_2026-06-09.md`):
+and opened the regime program (plan folded 2026-06-10; git history is the archive):
 
 - **Winner robustness battery (5/5 PASS, pre-registered):** the uptrend ensemble
   `winner_base = {turn3p3:0.30, turn4p3:0.20, turn4p5:0.40, age210tp14:0.10}` @ w90
@@ -536,8 +531,8 @@ and opened the regime program (`docs/research_plan_continuous_regime_2026-06-09.
   +0.04/+0.06), multi-horizon (bybit-only; 24h is the cross-venue horizon),
   conviction-by-score (weak), entry circuit-breaker (null on component pool),
   rmom-gate loosening (0.25 optimal; looser adds correlated breadth, blows out DD).
-  Ridge within-pool combiner rejected at Tier-1 (negative OOF IC; receipt
-  `docs/preregistration/ridge-combiner-2026-06-09.md`).
+  Ridge within-pool combiner rejected at Tier-1 (negative OOF IC; receipt folded
+  2026-06-10; git history is the archive).
 - **WP1a alt-RS squeeze probe (pre-registered, NO-GO):** trailing EW-alt-minus-BTC
   relative strength does NOT predict forward squeezes — primary Spearman ICs
   +0.004..+0.061 (bybit) / -0.010..+0.055 (binance) vs the a-priori <= -0.08 bar;
@@ -546,8 +541,7 @@ and opened the regime program (`docs/research_plan_continuous_regime_2026-06-09.
   alt-market return -0.30/-0.36), while alt-RS itself is a daily martingale
   (AR1 +0.02/+0.03; trailing RS does not predict next-day RS). Conclusion: the
   alt-season exposure cannot be timed at daily granularity — gate forms (WP1b) are
-  dead a-priori; the treatment is a HEDGE. Receipt:
-  `docs/preregistration/continuous-rs-squeeze-probe-2026-06-09.md`; artifacts
+  dead a-priori; the treatment is a HEDGE. Receipt folded 2026-06-10; artifacts
   `~/SHARED_DATA/continuous_rs_probe_2026-06-09/`.
 - **BTC-beta hedge BANKED (WP3, two pre-registered stages, both PASS):**
   - *Stage-A instrument comparison (PASS 6/6, overlay-level):* btc vs alt_ew vs
@@ -571,7 +565,9 @@ and opened the regime program (`docs/research_plan_continuous_regime_2026-06-09.
   - Durable claim = REGIME-ROBUSTNESS (the recent-tilt flattens, 2025 unchanged);
     part of the raw return gain is bull-sample-specific long-BTC drift. In-sample
     candidate — Tier-2 ceiling; forward demo is the only Tier-3 arbiter. Remaining
-    (operator): live hedge-leg executor plumbing + forward-demo accumulation.
+    (operator): observe the daily dry-run (deployed 2026-06-09:
+    `continuous-hedge.timer`, `SUBMIT_HEDGE=0` gate), then explicitly flip
+    `SUBMIT_HEDGE=1` for live demo hedge submission + forward-demo accumulation.
 - **Live-readiness R0+R1 (2026-06-09, operator full-authority mandate):** the binance
   funding-interval debt is CLOSED for the continuous path (accrual verified vs raw
   datasets 40/40 to 5e-20; receipt `continuous-funding-debt-closure-2026-06-09.md`),
@@ -648,10 +644,12 @@ killed, the partition backfilled from the public archive, and the battery re-run
 The same sentinel-URL failure mode can silently break future backfills — worth a
 downloader fix.
 
-## 2026-06-09 — Levered long-sleeve stress (the live 10x multiplier vs 1x evidence)
+## 2026-06-09 — Levered long-sleeve stress (10x stress vs 1x evidence)
 
-The live long sleeve applies `notional_multiplier=10 / entry_leverage=10` on top of the
-1x-validated v11a+div profile. All promoted evidence is the 1x curve. The levered read
+The long sleeve's code and systemd defaults now use the 1x-validated v11a+div+volup125
+profile. Levered demo sizing is explicit opt-in and rejected if projected full-book
+initial margin exceeds the configured cap. This section is the historical stress test
+that explains why 10x must not be treated as a default. The levered read
 (`scripts/long_sleeve_10x_stress.py` over the 1x backtest ledger, 189 trades
 2023-06→2026-05; report `.../reports/equity_curves/long/levered_stress_10x.md`):
 
@@ -810,9 +808,11 @@ clean, both venues, window 2023-04-01→2026-05-28 (`scripts/long_improve_sweep.
 (binance) with ret/DD ≥ 99.6% of baseline and Sharpe unchanged on both venues.
 Identical trade set — pure Moreira-Muir exposure timing (lever the calm regimes), the
 symmetric half of the already-promoted div de-risking. Both 1.25 and 1.5 passed the
-pre-registered rule; the pre-committed tie-break picked 1.25 because of the live 10x
-leverage interaction. NOT deployed — operator sign-off required, and it should ride
-with the leverage-cap decision.
+pre-registered rule; the pre-committed tie-break picked 1.25 because of the leverage
+interaction. PROMOTED into the code profile by operator 2026-06-09
+(`vol_target_max_scale=1.25` in `_v11a_long_native_config`). The long sleeve is not
+redeployed on the rebuilt VPS; any levered demo sizing is explicit opt-in and must
+pass the projected full-book initial-margin guard.
 
 **Clean nulls (do not re-run):**
 
@@ -876,7 +876,7 @@ out-of-fold rank-IC **−0.04** (anti-predictive, 7 folds, coefficients stable);
 Binance arm unmeasurable (0 folds — OI history there starts ~2026-04). The Tier-1
 gate (positive IC both venues) fails; engine-sizing wiring does not proceed. A re-run
 needs a Binance OI backfill (vision metrics archive reaches 2020-09) + a freshly
-pre-registered feature set. Receipt: `docs/preregistration/ridge-combiner-2026-06-09.md`.
+pre-registered feature set. Receipt folded 2026-06-10; git history is the archive.
 
 ## 2026-06-09 — Day-grid alignment audit: GRID CORRECT (debt #4 closed)
 
@@ -924,6 +924,41 @@ live Bybit instruments snapshot × the manifest (569 symbols compared):
 Verdict: divergence is rare (≈0.2% of the universe) and conservative-by-direction.
 Accepted as-is; no code change. If a relaunched major ever re-enters the young-age
 band, the live gate errs toward skipping — acceptable for a fade strategy.
+
+## 2026-06-09/10 — Downtrend sleeve + sniper program closure
+
+This folds the terminal downtrend/sniper/WP4 program receipts into the research source of
+truth. The original preregistration files were closed/dead questions; git history remains
+the archive.
+
+- **D1 opportunity map:** BTC-30d-down regimes showed real cross-sectional reversal
+  structure (ret_7d/ret_1d, D10-D1 about -51/-24 bps, both-venue sign agreement, sign
+  flips in up-regime). This was descriptive structure, not net-tradeable proof.
+- **D2 reversal L/S:** FAILED Stage-A. The long leg (buy 7d losers) carried real gross
+  alpha both venues, but the short leg's bear-market funding + turnover killed the L/S
+  book; Binance had 0/8 net-positive cells.
+- **D3 bounce-long:** standalone bounce alpha was real and funding-positive, but combined
+  bars failed catastrophically because the sleeve is a -30% to -44% drawdown object,
+  outside the deployable risk class. Standing close-out: **downtrend question CLOSED for
+  this program; hedge + cash is final; no further downtrend constructions.**
+- **Sniper conditional walk-forward:** fixed P0 x8/b25 stands. Stitched-OOS hedged-max4
+  deltas were +1.06 bybit / +0.60 binance, pooled +0.83; adaptive/fitted variants lagged.
+  Durable lesson: simple fixed parameters beat adaptive/fitted ones out-of-window.
+- **Sniper staged entries:** quarter-size +8% snipe is additive at the Tier-2 bar:
+  pooled MAR 5.58 -> 6.30 at 1x, and the 2x-cost overlay still passed the reported
+  margin (+0.375 pooled). Amendment 6 made it a Tier-2 demo candidate by operator
+  decision on 2026-06-10. Live planner scaffold exists (`plan_continuous_sniper_orders`)
+  and remains default-off until daemon wiring/demo enablement.
+- **WP4 rmom standalone L/S:** FAILED Stage-A. No cell passed the standalone bar and the
+  combined-book bar failed everywhere (best delta bybit -0.20 / binance -2.80). Returns
+  were dominated by funding carry but drawdowns (-18% to -37%) and costs were the wrong
+  risk class. Selection-gate evidence remains research-only and must be read with the
+  rmom latency verdict: causal, but no deployment-grade operational margin.
+
+Program lesson: the edge here is **event selection + execution**. Daily cross-sectional
+books built from recombinations of the mined daily/hourly factors fail on drawdown class,
+costs, or funding at our scale. New alpha needs new data (order book, L2, ticks), not
+another sweep of the spent 2023-04->2026-05 continuous window.
 
 ## 2026-06-09 — Combined-book construction (deployed short × volup125 long)
 
@@ -1033,11 +1068,14 @@ These are still real and can move numbers:
    end-to-end vs raw datasets — 40/40 sampled continuous trades to 5e-20, interval-
    agnostic exact-stamp dedup (receipt:
    `continuous-funding-debt-closure-2026-06-09.md`).
-2. **Age definition.** Live age and PIT backtest age may differ near threshold boundaries.
-3. **Residual-momentum causality.** Rmom features must be proven causal at the decision
-   timestamp before any deployment/paper-ready claim.
-4. **Residual/factor day grid.** Factor decomposition day alignment must be audited before
-   relying on residual Sharpe for real-money gates.
+2. **Age definition — CLOSED-AS-ACCEPTABLE 2026-06-09.** Audit above: median
+   divergence 0 days, 564/569 within ±3 days, and the single gate-flipping name errs
+   in the safe direction.
+3. **Residual-momentum causality — CLOSED-WITH-VERDICT 2026-06-09.** Latency
+   falsification + day-grid audit above: causal/no leak, but zero operational margin;
+   rmom supports no deployment-grade claim without an intraday-class design.
+4. **Residual/factor day grid — CLOSED 2026-06-09.** End-to-end audit above found no
+   off-by-one; residual-Sharpe machinery is methodologically trustworthy.
 5. **Forward evidence.** Continuous-vs-daily forward comparison is immature locally; current
    common-window evidence is not enough to claim success.
 

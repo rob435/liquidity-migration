@@ -1,12 +1,12 @@
 ---
 name: research-phase-runner
-description: "Execution workflow for running a pre-registered research experiment in this quant repo. Current open experiments are tracked in STATE.md ('Open actions') + docs/research_summary.md; the per-arc forward plans were consolidated there. Use any time you are about to run, conditionally-run, or write up an experiment — covers pre-checks, dispatch, the three-tier demo-arbiter decision rule (scripts/r1_robustness.py + scripts/apply_decision_rule.py), the verdict receipt, STATE.md update, and the commit. Keeps the three-tier thresholds intact; the Tier-3 real-money gate stays strict."
+description: "Execution workflow for running a pre-registered research experiment in this quant repo. Current open experiments are tracked in STATE.md ('Current Status' / 'Current Research Direction') + docs/research_summary.md; the per-arc forward plans were consolidated there. Use any time you are about to run, conditionally-run, or write up an experiment — covers pre-checks, dispatch, the three-tier demo-arbiter decision rule (scripts/r1_robustness.py + scripts/apply_decision_rule.py), the verdict receipt, STATE.md update, and the commit. Keeps the three-tier thresholds intact; the Tier-3 real-money gate stays strict."
 ---
 
 # Running a research experiment
 
 Use this every time you run, conditionally-run, or write up an experiment. **The current
-open experiments live in STATE.md ("Open actions") and `docs/research_summary.md`** — the
+open experiments live in STATE.md ("Current Status" / "Current Research Direction") and `docs/research_summary.md`** — the
 per-arc forward plans (intraday kernel, continuous-fade) concluded and were consolidated into
 the summary (git history has the originals). Always read **STATE.md** first — it tells you
 what's done, what's pending, and the current binding decision rules.
@@ -23,7 +23,7 @@ full record + open methodology debts are in `docs/research_summary.md`.
 ## The decision framework — three-tier, demo-arbiter
 
 Ordered by how expensive a false positive is. **The exact thresholds are owned by
-STATE.md ("Decision rules currently binding") — read them there; do not copy the
+STATE.md ("Binding Decision Rules") — read them there; do not copy the
 numbers here (that is how they drift).**
 
 1. **Investigation** — keep studying? Loose (MAR-Δ direction + trade minimums).
@@ -54,8 +54,10 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
    `scripts/_sweep_runtime.py`-based dispatcher for the experiment (the old R-phase
    dispatchers were deleted — `_sweep_runtime.py` is the reusable primitive: a
    dispatcher declares `BASELINE_PARAMS` + a list of `Cell`s and imports it).
-   Full-PIT sweeps are memory-bound — use the worker/thread settings in STATE.md
-   ("full-PIT op note"); over-parallelizing OOMs the box. Always run **both venues**.
+   Full-PIT sweeps are memory-bound — use the `SWEEP_MAX_WORKERS` /
+   `POLARS_MAX_THREADS` env knobs documented at the top of
+   `scripts/_sweep_runtime.py` (memory-aware default); over-parallelizing OOMs
+   the box. Always run **both venues**.
 
 4. **Apply the decision rule.**
    ```bash

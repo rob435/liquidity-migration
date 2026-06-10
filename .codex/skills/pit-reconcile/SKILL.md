@@ -1,6 +1,6 @@
 ---
 name: pit-reconcile
-description: "Run the demo-forward reconciliation for the two promoted sleeves (SHORT event/daily backtest<->paper<->demo, LONG v11a paper<->demo) and fix/diagnose PIT membership (archive_trade_manifest) problems. Use whenever asked to reconcile the demo/paper/backtest, when a reconcile shows paper-only / backtest-only mismatches, when a backtest reports pit_membership_fail, or when the archive manifest/klines are stale. Drives scripts/reconcile.sh, which AUTO-provisions (pulls the promoted sleeves, refreshes the manifest, auto-downloads recent klines) and backtests a MINIMAL forward window. The canonical fix for the manifest-lag / missing-recent-coverage class of friction. (Continuous is de-promoted/OFF; reconcile it for diagnostics only via --sleeves continuous.)"
+description: "Run the demo-forward reconciliation for promoted short/long sleeves and optional continuous diagnostics, and fix/diagnose PIT membership (archive_trade_manifest) problems. Use whenever asked to reconcile the demo/paper/backtest, when a reconcile shows paper-only / backtest-only mismatches, when a backtest reports pit_membership_fail, or when the archive manifest/klines are stale. Drives scripts/reconcile.sh, which AUTO-provisions (pulls ledgers, refreshes the manifest, auto-downloads recent klines) and backtests a MINIMAL forward window. The canonical fix for the manifest-lag / missing-recent-coverage class of friction. Continuous is live research-stage demo/paper as of 2026-06-09; include it explicitly with --sleeves continuous for diagnostics."
 ---
 
 # PIT reconcile + membership runbook
@@ -30,9 +30,9 @@ design: `docs/pit_gate.md`.
 - **SHORT** (event/daily): backtest ↔ paper ↔ demo (`reconcile-all`), +Bybit on request.
 - **LONG** (v11a): paper ↔ demo (`reconcile-long-paper-demo`).
 
-> **CONTINUOUS** (fade) is no longer promoted/deployed (de-promoted 2026-06-05, look-ahead
-> invalidated; live sleeve OFF). It is NOT reconciled by default. For diagnostics only you can
-> still run `--sleeves continuous` (`continuous-forward-readiness` + the
+> **CONTINUOUS** (fade) is not promoted, but it is live research-stage demo/paper as of
+> 2026-06-09. It is NOT reconciled by default. For diagnostics you can run
+> `--sleeves continuous` (`continuous-forward-readiness` + the
 > `scripts/continuous_demo_signal_check.py` signal-consistency replay).
 
 ## When to use

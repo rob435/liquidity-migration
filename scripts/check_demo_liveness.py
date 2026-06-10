@@ -314,6 +314,31 @@ def _unit_states(units: list[str]) -> dict[str, str]:
     return states
 
 
+def _default_units_for_toggles() -> list[str]:
+    units = ["liquidity-migration-bybit-risk.service"]
+    if _sleeve_on("SHORT_SLEEVE"):
+        units.append("liquidity-migration-bybit-demo.service")
+    if _sleeve_on("SHORT_PAPER_SLEEVE"):
+        units.append("liquidity-migration-bybit-paper.service")
+    if _sleeve_on("LONG_SLEEVE"):
+        units.extend(
+            [
+                "liquidity-migration-bybit-long-demo.service",
+                "liquidity-migration-bybit-long-paper.service",
+            ]
+        )
+    if _sleeve_on("CONTINUOUS_SLEEVE", default="off"):
+        units.extend(
+            [
+                "liquidity-migration-bybit-continuous-demo.service",
+                "liquidity-migration-continuous-hedge.timer",
+            ]
+        )
+    if _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):
+        units.append("liquidity-migration-bybit-continuous-paper.service")
+    return units
+
+
 def _venue_positions(settle_coin: str = "USDT") -> tuple[dict[str, dict], str | None]:
     """Return (positions_by_symbol, error). Degrades gracefully if creds/API down.
 
@@ -547,25 +572,16 @@ def main() -> int:
     p.add_argument("--state-file", type=Path, default=None, help="cooldown state file (default: <data-root>/.cache/liveness_watchdog.json)")
     args = p.parse_args()
 
-    units = args.unit or [
-        "liquidity-migration-bybit-demo.service",
-        "liquidity-migration-bybit-risk.service",
-        "liquidity-migration-bybit-paper.service",
-        "liquidity-migration-bybit-long-demo.service",
-        "liquidity-migration-bybit-long-paper.service",
-        # Continuous-fade demo unit is order-submitting but disabled by default via
-        # CONTINUOUS_SLEEVE=off; gather_alerts skips it when intentionally off. The separate
-        # continuous paper unit can stay on as no-order evidence collection.
-        "liquidity-migration-bybit-continuous-demo.service",
-        "liquidity-migration-bybit-continuous-paper.service",
-    ]
+    units = args.unit or _default_units_for_toggles()
     state_file = args.state_file or (args.data_root / ".cache" / "liveness_watchdog.json")
     now_ms = _now_ms()
 
     # Per-sleeve kill-switch: skip an intentionally-off sleeve so a deliberately-retired daemon
     # doesn't false-page as "down". Unset-defaults mirror deploy/lib_sleeves.sh: SHORT/LONG on,
     # CONTINUOUS off (look-ahead-disabled — never page for it nor expect it up if env is missing).
-    alerts = gather_alerts(data_root=args.data_root, units=units, now_ms=now_ms, args=args) if _sleeve_on("SHORT_SLEEVE") else []
+    alerts = evaluate_unit_states(_unit_states(units))
+    if _sleeve_on("SHORT_SLEEVE"):
+        alerts.extend(gather_alerts(data_root=args.data_root, units=[], now_ms=now_ms, args=args))
     if str(args.continuous_root) and _sleeve_on("CONTINUOUS_SLEEVE", default="off"):
         alerts.extend(gather_continuous_alerts(continuous_root=args.continuous_root, now_ms=now_ms, args=args))
     if str(args.continuous_paper_root) and _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):

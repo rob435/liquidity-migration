@@ -104,6 +104,11 @@ binance carried by a strong early half). Full-window both venues positive.
 **VERDICT: GO.** Bybit MAR 0.61→1.74 (far better, not worse → GO rule satisfied); ret +96.3%
 (positive). Binance rescued from −0.10 to +0.34 (the upside case). Deploy the stack to demo+paper.
 
+**2026-06-09 addendum:** Binance numbers in this receipt are pre-funding-rebuild
+(funding-blind) and roughly 3-6% absolute optimistic; see
+`binance-funding-rebuild-2026-06-09.md` for the current basis. The GO decision
+rested on Bybit (funding-real) and is unaffected.
+
 ## Decision rule (pre-committed)
 
 Tier-2 demo-candidate, MAR-primary. This promotion deploys to **demo + paper only**; the
@@ -129,7 +134,8 @@ from drop_all_4 (Bybit lead must hold).
 
 Deploy = `git push` to main → GitHub Actions `vps-deploy.yml` auto-runs
 `scripts/deploy_vps_live.sh` via SSH → pytest smoke subset + the strategy-settings assertion
-block (now updated for age300+ff6) → restarts the 6 systemd daemons. Pre-push gate (CI
+block (now updated for age300+ff6) → restarts the risk service plus each sleeve daemon
+whose `deploy/sleeves.env` toggle is on (6 daemons at the time of this deploy). Pre-push gate (CI
 parity): `ruff check liquidity_migration tests` + `pytest -q` MUST pass locally first.
 strategy_id kept → deploy date = pre/post split. No real-money toggle touched (demo stays demo).
 

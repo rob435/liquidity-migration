@@ -1321,6 +1321,29 @@ def test_live_panel_cache_matches_full_recompute() -> None:
     assert checked >= 5
 
 
+def test_live_panel_cache_supports_rebalance_profile_max_ret168() -> None:
+    """continuous_rebalance_v1 ranks on max_ret168; the cheap live cache must carry it too."""
+    klines, rmom, start, n_bars = _dispersed_synth()
+    cfg = apply_continuous_demo_profile(ContinuousDemoCycleConfig(strategy_profile="continuous_rebalance_v1"))
+    assert cfg.feature_set == ("max_ret168",)
+    cache = LivePanelCache(
+        rmom_quantile=cfg.rmom_quantile,
+        feature_set=cfg.feature_set,
+        exclude_symbols=cfg.exclude_symbols,
+    )
+    T = start + (n_bars - 1) * MS_PER_HOUR
+    hist = klines.filter(pl.col("ts_ms") < T)
+    price = {r["symbol"]: r["close"] for r in klines.filter(pl.col("ts_ms") == T).to_dicts()}
+
+    ref = build_live_continuous_state(hist, price, rmom, now_ts_ms=T + 1_800_000, config=cfg)
+    cac = cache.state(hist, price, rmom, now_ts_ms=T + 1_800_000, config=cfg)
+
+    assert not cac.is_empty()
+    assert set(_decile_map(ref)) == set(_decile_map(cac))
+    assert {s for s, d in _decile_map(ref).items() if d == 9} == \
+           {s for s, d in _decile_map(cac).items() if d == 9}
+
+
 def test_live_panel_cache_intra_hour_reuse() -> None:
     """Within one hour slot the confirmed-bar carry is reused: only the live-price term refreshes
     (refreshes stays 1, live_updates increments), and the result still matches the full recompute."""

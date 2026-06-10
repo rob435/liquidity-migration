@@ -358,7 +358,7 @@ def test_bybit_private_client_wraps_cancel_all_and_positions_by_settle(monkeypat
     assert cancelled["success"] == "1"
     assert positions[0]["symbol"] == "BTCUSDT"
     assert client._client.cancel_all_calls == [{"category": "linear", "settleCoin": "USDT"}]
-    assert client._client.position_calls == [{"category": "linear", "settleCoin": "USDT"}]
+    assert client._client.position_calls == [{"category": "linear", "limit": 200, "settleCoin": "USDT"}]
 
 
 def test_bybit_private_client_wraps_open_orders_by_settle(monkeypatch) -> None:
@@ -377,7 +377,59 @@ def test_bybit_private_client_wraps_open_orders_by_settle(monkeypatch) -> None:
     orders = client.get_open_orders()
 
     assert orders[0]["orderStatus"] == "New"
-    assert client._client.open_order_calls == [{"category": "linear", "settleCoin": "USDT"}]
+    assert client._client.open_order_calls == [{"category": "linear", "limit": 50, "settleCoin": "USDT"}]
+
+
+def test_bybit_private_client_paginates_open_orders(monkeypatch) -> None:
+    pages = {
+        None: {"retCode": 0, "result": {"list": [{"orderId": "o1"}], "nextPageCursor": "p2"}},
+        "p2": {"retCode": 0, "result": {"list": [{"orderId": "o2"}], "nextPageCursor": ""}},
+    }
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.open_order_calls = []
+
+        def get_open_orders(self, **params):
+            self.open_order_calls.append(params)
+            return pages[params.get("cursor")]
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+
+    orders = client.get_open_orders(settle_coin="USDT")
+
+    assert [row["orderId"] for row in orders] == ["o1", "o2"]
+    assert client._client.open_order_calls == [
+        {"category": "linear", "limit": 50, "settleCoin": "USDT"},
+        {"category": "linear", "limit": 50, "settleCoin": "USDT", "cursor": "p2"},
+    ]
+
+
+def test_bybit_private_client_paginates_positions(monkeypatch) -> None:
+    pages = {
+        None: {"retCode": 0, "result": {"list": [{"symbol": "AAAUSDT"}], "nextPageCursor": "p2"}},
+        "p2": {"retCode": 0, "result": {"list": [{"symbol": "BBBUSDT"}], "nextPageCursor": ""}},
+    }
+
+    class FakeHTTP:
+        def __init__(self, **kwargs):
+            self.position_calls = []
+
+        def get_positions(self, **params):
+            self.position_calls.append(params)
+            return pages[params.get("cursor")]
+
+    monkeypatch.setattr(bybit, "HTTP", FakeHTTP)
+    client = bybit.BybitPrivateClient(api_key="key", api_secret="secret", demo=True)
+
+    positions = client.get_positions(settle_coin="USDT")
+
+    assert [row["symbol"] for row in positions] == ["AAAUSDT", "BBBUSDT"]
+    assert client._client.position_calls == [
+        {"category": "linear", "limit": 200, "settleCoin": "USDT"},
+        {"category": "linear", "limit": 200, "settleCoin": "USDT", "cursor": "p2"},
+    ]
 
 
 def test_bybit_private_client_sets_demo_leverage(monkeypatch) -> None:

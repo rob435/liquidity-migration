@@ -80,8 +80,8 @@ a full heartbeat interval.
 **The risk service still runs as a separate process** (`liquidity-migration-bybit-risk`).
 That side already had its own WS connection for executions and is unaffected
 by this change. Both services authenticate with the same demo API key, so the
-private REST rate budget is shared — the demo daemon uses
-`BybitPrivateRateLimiter` with a conservative 15 req/s (env
+private REST rate budget is shared — the demo daemon uses a private-budget
+`BybitRestRateLimiter` with a conservative 15 req/s (env
 `BYBIT_PRIVATE_REST_RATE_LIMIT_PER_SECOND`) to leave headroom.
 
 ## Design notes
@@ -209,9 +209,10 @@ promotions) the accumulated forward ledgers belong to the *old* config. To
 restart the forward demo/paper run — and the Tier-3 30-day clock — from a clean
 slate, archive + wipe the trading ledgers with
 `scripts/reset_demo_paper_ledgers.sh`. It only touches the
-`event_demo_*` / `long_native_demo_*` / `long_native_paper_*` trade/order/cycle
-datasets across the four roots (`data/bybit-demo-event`, `data/bybit-paper-event`,
-`data/bybit-long-demo-event`, `data/bybit-long-paper-event`); the WS kline
+`event_demo_*` / `long_native_demo_*` / `long_native_paper_*` / `continuous_fade_*`
+trade/order/cycle datasets across the six roots (`data/bybit-demo-event`,
+`data/bybit-paper-event`, `data/bybit-long-demo-event`, `data/bybit-long-paper-event`,
+`data/bybit-continuous-demo-event`, `data/bybit-continuous-paper-event`); the WS kline
 stores and everything else are preserved so there is no slow re-bootstrap. Every
 wiped dataset is tar.gz'd to `data/_archive/ledger-reset-<ts>.tar.gz` first, so
 the reset is auditable and reversible.
@@ -229,7 +230,12 @@ systemctl stop \
   liquidity-migration-bybit-demo liquidity-migration-bybit-paper \
   liquidity-migration-bybit-risk liquidity-migration-bybit-long-demo \
   liquidity-migration-bybit-long-paper \
-  liquidity-migration-demo-health.timer liquidity-migration-combined-book-report.timer
+  liquidity-migration-bybit-continuous-demo liquidity-migration-bybit-continuous-paper \
+  liquidity-migration-demo-health.timer liquidity-migration-demo-liveness.timer \
+  liquidity-migration-combined-book-report.timer \
+  liquidity-migration-continuous-rmom-refresh.timer \
+  liquidity-migration-continuous-hedge.timer \
+  liquidity-migration-continuous-forward-report.timer
 # 2. Preview, then run the reset:
 scripts/reset_demo_paper_ledgers.sh --dry-run
 scripts/reset_demo_paper_ledgers.sh
@@ -238,21 +244,29 @@ systemctl start \
   liquidity-migration-bybit-demo liquidity-migration-bybit-paper \
   liquidity-migration-bybit-risk liquidity-migration-bybit-long-demo \
   liquidity-migration-bybit-long-paper \
-  liquidity-migration-demo-health.timer liquidity-migration-combined-book-report.timer
+  liquidity-migration-bybit-continuous-demo liquidity-migration-bybit-continuous-paper \
+  liquidity-migration-demo-health.timer liquidity-migration-demo-liveness.timer \
+  liquidity-migration-combined-book-report.timer \
+  liquidity-migration-continuous-rmom-refresh.timer \
+  liquidity-migration-continuous-hedge.timer \
+  liquidity-migration-continuous-forward-report.timer
 ```
+
+Stop every sleeve unit that is `on` in `deploy/sleeves.env`; as of 2026-06-09 that
+is the continuous demo + paper pair. The long list above is conservative for a
+manual reset.
 
 Deploy the code first (so the daemons restart on the fixed engine), then run the
 reset — the order doesn't matter for correctness since the reset wipes whatever
 has accumulated, but doing the reset last means the first post-reset cycles are
 already on the fixed code.
 
-## Continuous-fade sleeve — DE-PROMOTED / ORDER SUBMISSION OFF
+## Continuous-fade sleeve — research-stage live demo collection
 
-> **STATUS (2026-06-08): NOT promoted; continuous demo orders are off.**
-> `CONTINUOUS_SLEEVE=off` disables the order-submitting demo unit on deploy, and
-> `promoted.py` still exposes short + long only. `CONTINUOUS_PAPER_SLEEVE=on` may run
-> a no-order dry-run evidence collector. Do not read any continuous unit or service file
-> as a promoted, paper-ready, or real-money sleeve.
+> **STATUS (2026-06-10): NOT promoted; continuous demo orders are on by explicit
+> operator instruction.** `deploy/sleeves.env` currently has `CONTINUOUS_SLEEVE=on`
+> and `CONTINUOUS_PAPER_SLEEVE=on`, while short/short-paper/long are off. Demo fills
+> are execution evidence, not alpha proof; real money remains off.
 
 ### (historical) sub-hourly, ticker-driven continuous-fade engine
 
@@ -283,11 +297,12 @@ It reuses the same WS plumbing (kline pool + `TickerCache` + `PrivateStateCache`
 ### Shared-account safety (two order-submitting sleeves + continuous paper, one netted demo account)
 
 Short and long submit demo orders into ONE Bybit demo account (one-way / netted
-position mode). Continuous order submission is disabled by default; if the operator
-ever re-enables it, the same isolation is already wired:
+position mode). Continuous order submission is currently enabled on demo by explicit
+operator toggle; the same isolation applies to every enabled sleeve:
 
-- **One reconcile authority.** A single `ws_risk` service reads ALL THREE ledger roots (`DATA_ROOT` +
-  `LONG_DATA_ROOT` + `CONTINUOUS_DATA_ROOT`), tags every row with its `sleeve`, and routes each
+- **One reconcile authority.** A single `ws_risk` service reads all configured ledger roots
+  (`DATA_ROOT` + `LONG_DATA_ROOT` + `CONTINUOUS_DATA_ROOT` + `CONTINUOUS_ADDON_DATA_ROOT`),
+  tags every row with its `sleeve`, and routes each
   write back to that sleeve's ledger (`_write_*_rows_routed`). So a continuous position is *tracked*
   (never flattened as untracked), and a continuous orphan (server-side disaster stop fired) is closed —
   with the real venue PnL backfilled from `get_closed_pnl` — into the **continuous** ledger, not short's.
@@ -298,17 +313,20 @@ ever re-enables it, the same isolation is already wired:
   sleeves never both hold the same symbol — the netted account stays effectively per-sleeve-disjoint.
   Entries are also blocked entirely on a position-fetch error (no empty-fetch-as-flat false entry).
 - **Hard-fail wiring.** `run_bybit_demo_ws_risk_engine.sh` refuses to start with
-  `EXIT_UNTRACKED_POSITIONS=1` unless BOTH `LONG_DATA_ROOT` and `CONTINUOUS_DATA_ROOT` are set, and
-  `deploy_vps_live.sh` verify asserts the risk unit carries both roots — so a stale unit can't silently
+  `EXIT_UNTRACKED_POSITIONS=1` unless `LONG_DATA_ROOT`, `CONTINUOUS_DATA_ROOT`, and
+  `CONTINUOUS_ADDON_DATA_ROOT` are all set, and `deploy_vps_live.sh` verify asserts the
+  risk unit carries all roots — so a stale unit can't silently
   leave a sleeve's positions exposed to flattening. The deploy also restarts the risk service BEFORE any
   enabled sleeve daemons, so the tracker is up before trading starts.
 
-**Current default:** deploy syncs the continuous demo unit file but disables it because
-`CONTINUOUS_SLEEVE=off`. The file still contains `SUBMIT_ORDERS=1` so an explicit future
-toggle-on is unambiguous, but that toggle is the deploy gate. The continuous paper unit can
-run with `SUBMIT_ORDERS=0`, `RECORD_DRY_RUN=1`, and `PAPER_MODE=1`; it writes
-`continuous_fade_paper_*` evidence without touching the demo account. The
-`continuous-rmom-refresh` timer runs when either continuous demo or paper is enabled. The
+**Current toggle state:** `CONTINUOUS_SLEEVE=on` starts the order-submitting demo unit,
+and `CONTINUOUS_PAPER_SLEEVE=on` starts the no-order paper shadow
+(`SUBMIT_ORDERS=0`, `RECORD_DRY_RUN=1`, `PAPER_MODE=1`). The paper unit writes
+`continuous_fade_paper_*` evidence without touching the demo account.
+`liquidity-migration-continuous-hedge.timer` runs the daily BTC-beta hedge dry-run
+at 00:35 UTC with `SUBMIT_HEDGE=0`; `liquidity-migration-continuous-forward-report.timer`
+publishes the forward evidence report. The `continuous-rmom-refresh` timer runs when
+either continuous demo or paper is enabled. The
 refresh defaults `--end` to **tomorrow (UTC)** so it keeps `residual_momentum[today]`
 fresh on every daily run; a stale table would silently empty the decile. The liveness
 watchdog pages on stale rmom, and cycle telemetry surfaces `max_rmom_day_ts` rather than

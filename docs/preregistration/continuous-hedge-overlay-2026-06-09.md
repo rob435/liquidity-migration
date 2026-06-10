@@ -3,9 +3,9 @@
 **Date:** 2026-06-09 (registered BEFORE the run)
 **Run label:** `exploratory` (Stage-A ledger-level overlay; a PASS gates Stage-B engine
 integration — it is not itself promotion evidence)
-**Program:** `docs/research_plan_continuous_regime_2026-06-09.md` WP3 (+ WP1c folded in),
-upgraded by the WP1a mechanism finding (same-day alt-market corr −0.30/−0.36 beats BTC's
-−0.22/−0.27; receipt `continuous-rs-squeeze-probe-2026-06-09.md`).
+**Program:** continuous regime robustness WP3 (+ WP1c folded in; plan and WP1a
+receipt folded into `docs/research_summary.md` on 2026-06-10), upgraded by the WP1a
+mechanism finding (same-day alt-market corr −0.30/−0.36 beats BTC's −0.22/−0.27).
 
 ## Hypothesis
 

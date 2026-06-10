@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -755,7 +756,13 @@ def main(argv: list[str] | None = None) -> int:
         from liquidity_migration.telegram import send_telegram_message
         short_root = Path(args.short_data_root or config.data_root).expanduser()
         long_default = data_root.parent / "bybit-long-demo-event"
+        continuous_default = data_root.parent / "bybit-continuous-demo-event"
+        continuous_paper_default = data_root.parent / "bybit-continuous-paper-event"
+        continuous_hedge_default = data_root.parent / "bybit-continuous-hedge-event"
         long_root = Path(args.long_data_root or long_default).expanduser()
+        continuous_root = Path(args.continuous_data_root or continuous_default).expanduser()
+        continuous_paper_root = Path(args.continuous_paper_data_root or continuous_paper_default).expanduser()
+        continuous_hedge_root = Path(args.continuous_hedge_data_root or continuous_hedge_default).expanduser()
         bybit_position_summary: dict[str, object] | None = None
         bybit_positions: list[dict[str, object]] | None = None
         if args.include_live_positions:
@@ -770,9 +777,18 @@ def main(argv: list[str] | None = None) -> int:
         message = format_combined_book_summary(
             short_root=short_root,
             long_root=long_root,
+            continuous_root=continuous_root,
+            continuous_paper_root=continuous_paper_root,
+            continuous_hedge_root=continuous_hedge_root,
             now_ms=_utc_now_ms(),
             bybit_position_summary=bybit_position_summary,
             bybit_positions=bybit_positions,
+            sleeve_states={
+                "SHORT_SLEEVE": os.environ.get("SHORT_SLEEVE", "on"),
+                "LONG_SLEEVE": os.environ.get("LONG_SLEEVE", "on"),
+                "CONTINUOUS_SLEEVE": os.environ.get("CONTINUOUS_SLEEVE", "off"),
+                "CONTINUOUS_PAPER_SLEEVE": os.environ.get("CONTINUOUS_PAPER_SLEEVE", "on"),
+            },
         )
         if args.print_only:
             print(message)
@@ -796,6 +812,7 @@ def main(argv: list[str] | None = None) -> int:
             workers=args.workers,
             notional_multiplier=args.notional_multiplier,
             entry_leverage=args.entry_leverage,
+            max_projected_initial_margin_pct_equity=args.max_projected_initial_margin_pct_equity,
             max_order_notional_pct_equity=args.max_order_notional_pct_equity,
             wallet_balance_fraction=args.wallet_balance_fraction,
             fallback_equity_usdt=args.fallback_equity_usdt,

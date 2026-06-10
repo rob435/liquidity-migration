@@ -8,8 +8,8 @@ This is the standard antidote to the parameter-mining (error #17), OOS reuse
 (#18) and multiple-testing-denial (#19) failure modes catalogued in
 [backtesting_errors_we_never_repeat.md](backtesting_errors_we_never_repeat.md).
 Without it, every additional sweep on the per-venue datasets dilutes their
-evidentiary value — and we have no longer have a clean internal OOS surface
-to recover that value from.
+evidentiary value — and we no longer have a clean internal OOS surface to
+recover that value from.
 
 ## When pre-reg is mandatory
 
@@ -84,8 +84,12 @@ accepted | rejected | inconclusive — with one-paragraph why.
 - The pre-reg's `Decision rule` is binding. If you find yourself wanting to
   loosen the rule after seeing the result, the rule was wrong — write a
   retrospective addendum, do not silently soften it.
-- The `Verdict` is committed to git. Do not delete or rewrite an
-  `accepted` / `rejected` verdict.
+- The `Verdict` is committed to git and must never be rewritten or softened
+  after the fact. Receipt files may later be folded and removed per the
+  STATE.md retention policy: `docs/preregistration/` holds only receipts that
+  still bind an active deployment, candidate, or methodology decision; the
+  verdict must be recorded in `docs/research_summary.md` before deletion, and
+  git history remains the archive.
 
 ## Cross-venue rule
 

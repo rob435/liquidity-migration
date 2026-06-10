@@ -2,8 +2,9 @@
 
 **Date:** 2026-06-09 (registered BEFORE the run). **Label:** `exploratory` Stage-A
 (ledger-level; engine-grade intrabar build follows only on a PASS).
-**Program:** `docs/research_plan_downtrend_sleeve_2026-06-09.md` S1 (operator's idea:
-stops systematically sold the squeeze wick → enter INTO the wick instead).
+**Program:** downtrend/sniper S1 (program plan folded into
+`docs/research_summary.md` on 2026-06-10; operator's idea: stops systematically sold
+the squeeze wick → enter INTO the wick instead).
 
 ## Mechanism
 
@@ -177,6 +178,14 @@ SHA256:U8+LvEB...). Protocol, locked while blind to the data:
   impact x2). BANK iff pooled dMAR >= +0.5 with both venues positive at the
   2x-calibrated stress, same DD/fill bars as Amendment 2. Insufficient fills ->
   no banking claim; record and wait for more forward evidence.
+
+**Addendum 2026-06-10:** the box was fully rebuilt on 2026-06-09 after Amendment 5
+was written; the host key rotated (current workflow default pin:
+`SHA256:TJRbvgB8nfhwmNDv4hM3jDkPXnRv6BGLQ3cPst2PfE4`), so the `U8+LvEB` pin above
+is the pre-rebuild key. Calibration source is amended to the rebuilt continuous
+demo sleeve, which uses the same venue/account shared execution path; pre-rebuild
+ledgers were lost, so the >=200-fills / >=30-days validity clock starts on
+2026-06-09 from continuous-sleeve fills.
 
 ## AMENDMENT 6 (2026-06-10) — OPERATOR ADOPTION DECISION: Tier-2 demo candidate
 

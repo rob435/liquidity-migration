@@ -1,8 +1,8 @@
 # Decision receipt: WP2 — demote the downtrend extension, re-anchor the continuous canonical
 
 **Date:** 2026-06-09
-**Type:** decision receipt over existing evidence (no new run). Program:
-`docs/research_plan_continuous_regime_2026-06-09.md` WP2.
+**Type:** decision receipt over existing evidence (no new run). Program: continuous
+regime robustness WP2 (plan folded into `docs/research_summary.md` on 2026-06-10).
 **Evidence base:** the 2026-06-09 refinement-campaign + robustness-battery session
 (commit 5e1c960; receipt `docs/preregistration/continuous-winner-robustness-2026-06-09.md`;
 artifacts `~/SHARED_DATA/continuous_{robustness,multihorizon,breaker,rmom_probe,rmomgate}_2026-06-09`).

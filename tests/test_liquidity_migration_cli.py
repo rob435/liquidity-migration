@@ -683,3 +683,15 @@ def test_cli_long_native_paper_mode_defaults_off(tmp_path: Path) -> None:
         ]
     )
     assert args.paper_mode is False
+
+
+def test_cli_long_native_sizing_defaults_are_safe(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--data-root",
+            str(tmp_path),
+            "long-native-event-demo-cycle",
+        ]
+    )
+    assert args.notional_multiplier == 1.0
+    assert args.max_projected_initial_margin_pct_equity == 0.5

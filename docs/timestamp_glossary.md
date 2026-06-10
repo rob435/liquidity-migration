@@ -10,7 +10,7 @@ both `event_decay` and `planned_exit_ts_ms` tripped early.
 Read this before touching anything in the trade-row builder, the adoption
 path, the cycle's exit logic, or reconciliation.
 
-## The 5 timestamps
+## The 6 timestamps
 
 ### `signal_ts_ms`
 **The kline bar timestamp that triggered the entry.** Always the closing
@@ -24,13 +24,15 @@ as base36(signal_ts_ms // 1000).
   - Survives a VPS rebuild: yes (decoded back from orderLinkId).
 
 ### `entry_ready_ts_ms`
-**The earliest moment the signal can be acted on**, typically
-`signal_ts_ms + feature_build_lag` (~218 min in production — the strategy
-needs the bar to close AND the feature pipeline to compute its rolling
-windows). Used by the cycle's stale check:
+**The earliest moment the signal may be acted on under the backtest model**:
+`signal_ts_ms + entry_delay_hours` (1h) for the fixed-delay policy, or the
+first qualifying squeeze bar for quality-squeeze entries. The long sleeve sets
+this to `now_ms` when the live candidate builder emits the candidate. In
+production the feature pipeline only surfaces candidates after bar close and
+feature computation; the stale gate budgets for that operational lag:
 `now - entry_ready_ts_ms > MAX_ENTRY_LAG_MINUTES` → reject as stale.
 
-  - Set by: the feature pipeline.
+  - Set by: the volume-events entry decision (short) / candidate builder (long).
   - Read by: stale-skip gate.
 
 ### `entry_ts_ms`

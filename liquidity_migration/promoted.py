@@ -22,10 +22,10 @@ reads that) and this module follows automatically. `tests/test_promoted_profiles
 pins the mapping.
 
 NB on LONG sizing: `_v11a_long_native_config()` is the 1x research strategy config
-(`notional_multiplier` defaults to 1.0). The LIVE long sleeve applies an
-execution-layer `notional_multiplier=10` / `entry_leverage=10` (an explicit owner
-choice) on top — so an equity curve from `long_profile()` is the 1x signal curve, not
-the live-levered book. Pass a notional override to the equity tool to draw a levered curve.
+(`notional_multiplier` defaults to 1.0). Live execution also defaults to 1x now;
+levered demo sizing must be passed explicitly and must pass the projected
+full-book initial-margin guard. Pass a notional override to the equity tool only
+when deliberately drawing a levered curve.
 """
 from __future__ import annotations
 
@@ -236,9 +236,9 @@ def short_profile(*, start: str | None = None, end: str | None = None):
 
 def long_profile(*, start: str | None = None, end: str | None = None):
     """The deployed LONG v11a profile (the `div` risk-engineering: universe 50,
-    max_concurrent 10, de-risk-only vol-target 0.60). Source:
+    max_concurrent 10, volup125 vol-target 0.60/1.25 cap). Source:
     `long_native_event_demo._v11a_long_native_config()`. This is the 1x research
-    config; live execution applies notional_multiplier=10 / leverage=10 on top."""
+    config; levered live demo sizing is explicit opt-in outside this profile."""
     from .long_native_event_demo import _v11a_long_native_config
 
     return _windowed(_v11a_long_native_config(), start, end)

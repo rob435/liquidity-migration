@@ -2,8 +2,8 @@
 
 **Date:** 2026-06-09
 **Author:** claude (for owner)
-**Stage:** run-pending (bybit arm complete; this receipt is written BEFORE the
-binance confirmation results are read)
+**Stage:** run-complete — accepted (operator-promoted into code 2026-06-09; long
+sleeve not redeployed)
 
 ## What's changing
 
@@ -44,11 +44,11 @@ Using the sweep's summary metric (engine summary, same metric both venues, cells
 
 - **Accept** a volup variant iff, on BOTH venues: return strictly above baseline AND
   ret/DD ≥ 90% of baseline's.
-- If both 1.25 and 1.5 qualify, **pick 1.25** (pre-committed: the live sleeve already
-  runs a contested 10x notional multiplier; the conservative variant is the only one
-  responsibly deployable until the leverage decision is resolved — at live 10x,
-  max_scale 1.5 implies peak gross leverage ~17x, which the 10x stress already showed
-  is unsurvivable).
+- If both 1.25 and 1.5 qualify, **pick 1.25** (pre-committed: levered long demo
+  sizing was contested; the conservative variant is the only one responsibly
+  deployable if an operator later opts into leverage. Under the old 10x stress,
+  max_scale 1.5 implied peak gross leverage ~17x, which the stress already showed
+  was unsurvivable).
 - If neither qualifies on Binance, **reject** and the long sleeve keeps its current
   profile; the sweep's nulls stand as the documented result.
 
@@ -80,9 +80,9 @@ Both qualify → pre-committed tie-break picks **1.25**.
 **accepted (candidate)** — `vol_target_max_scale=1.25` lifts return ~+24% relative on
 both venues at unchanged risk-adjusted quality (ret/DD ≥ 99.6%, Sharpe unchanged,
 trade set identical — pure exposure timing, no selection change; mechanism is
-documented Moreira-Muir vol-management, not mined signal). NOT deployed: the profile
-change requires operator sign-off, and the live-leverage interaction is binding —
-at the live notional_multiplier=10 this raises peak gross leverage ~25% on top of a
-configuration the 2026-06-09 stress already flagged unsurvivable in a correlated
-crash. Deploy ONLY together with (or after) the long-sleeve leverage decision.
-Forward demo/paper remains the arbiter.
+documented Moreira-Muir vol-management, not mined signal).
+
+2026-06-09 addendum: operator signed off — `vol_target_max_scale=1.25` is promoted
+in code (`_v11a_long_native_config`). The long sleeve remains toggled off on the live
+box; any levered demo sizing is now explicit opt-in and must pass the projected
+full-book initial-margin guard. Forward demo/paper remains the arbiter.
