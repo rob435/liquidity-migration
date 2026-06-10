@@ -2611,6 +2611,13 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
     p.add_argument("--liq-turnover-min", type=float, default=d.liq_turnover_min)
     p.add_argument("--lookback-days", type=int, default=d.lookback_days)
     p.add_argument("--workers", type=int, default=d.workers)
+    p.add_argument(
+        "--klines-follow-root",
+        default=d.klines_follow_root,
+        help="Follow this root's flushed WS kline snapshot (+rmom gate) READ-ONLY instead of "
+             "running a second WS pool — for a paper shadow co-located with the demo sleeve. "
+             "Empty (default) = run this sleeve's own pool.",
+    )
     p.add_argument("--max-active", type=int, default=d.max_active)
     p.add_argument("--max-new-entries-per-cycle", type=int, default=d.max_new_entries_per_cycle)
     p.add_argument("--max-hold-hours", type=int, default=d.max_hold_hours)

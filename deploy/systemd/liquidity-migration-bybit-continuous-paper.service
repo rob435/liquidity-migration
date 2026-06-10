@@ -40,6 +40,17 @@ Environment=ENTRY_LEVERAGE=2
 Environment=PER_POSITION_NOTIONAL_PCT_EQUITY=2
 Environment=LIQ_TURNOVER_MIN=500000
 Environment=WS_KLINES_ENABLED=1
+# Shared market-data plane: this shadow FOLLOWS the demo root's flushed kline
+# snapshot (+rmom gate) read-only instead of running a second identical WS pool
+# (halves the box's WS decode CPU; decision inputs stay byte-identical to demo).
+# If the demo sleeve is ever retired while this paper sleeve stays on, drop this
+# line so the shadow runs its own pool again.
+Environment=KLINES_FOLLOW_ROOT=data/bybit-continuous-demo-event
+# Two daemons x full-width default threadpools on a 2-core box just buys context
+# switching; pin to 1 — the daemon's own WORKERS parallelism is the intended knob.
+Environment=POLARS_MAX_THREADS=1
+Environment=OMP_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
 ExecStart=/opt/liquidity-migration/scripts/run_bybit_continuous_demo_event_engine.sh
 Restart=always
 RestartSec=30

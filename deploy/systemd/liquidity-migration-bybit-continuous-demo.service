@@ -40,6 +40,11 @@ Environment=ENTRY_LEVERAGE=2
 Environment=PER_POSITION_NOTIONAL_PCT_EQUITY=2
 Environment=LIQ_TURNOVER_MIN=500000
 Environment=WS_KLINES_ENABLED=1
+# Two daemons x full-width default threadpools on a 2-core box just buys context
+# switching; pin to 1 — the daemon's own WORKERS parallelism is the intended knob.
+Environment=POLARS_MAX_THREADS=1
+Environment=OMP_NUM_THREADS=1
+Environment=OPENBLAS_NUM_THREADS=1
 ExecStart=/opt/liquidity-migration/scripts/run_bybit_continuous_demo_event_engine.sh
 Restart=always
 RestartSec=30

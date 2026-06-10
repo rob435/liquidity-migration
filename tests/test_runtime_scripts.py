@@ -182,6 +182,10 @@ def test_continuous_units_target_rebalance_profile_but_stay_kill_switch_controll
 
 
 def test_continuous_rmom_refresh_is_toggle_aware_for_paper_only_evidence() -> None:
+    """The paper shadow FOLLOWS the demo root's klines + rmom gate (shared WS data
+    plane), so the refresh keeps the FOLLOWED demo root fresh whenever EITHER
+    continuous sleeve is on (paper-only evidence included) and never rebuilds the
+    paper root's gate from its dormant store."""
     repo = Path(__file__).resolve().parents[1]
     service = (
         repo / "deploy" / "systemd" / "liquidity-migration-continuous-rmom-refresh.service"
@@ -189,10 +193,35 @@ def test_continuous_rmom_refresh_is_toggle_aware_for_paper_only_evidence() -> No
     script = (repo / "scripts" / "run_continuous_rmom_refresh.sh").read_text(encoding="utf-8")
 
     assert "run_continuous_rmom_refresh.sh" in service
-    assert 'sleeve_on "$CONTINUOUS_SLEEVE"' in script
-    assert 'sleeve_on "$CONTINUOUS_PAPER_SLEEVE"' in script
+    # continuous_rmom_refresh_on == demo-on OR paper-on (deploy/lib_sleeves.sh)
+    assert "continuous_rmom_refresh_on" in script
     assert "--root data/bybit-continuous-demo-event" in script
-    assert "--root data/bybit-continuous-paper-event" in script
+    assert "--root data/bybit-continuous-paper-event" not in script
+
+
+def test_continuous_paper_unit_follows_demo_kline_plane() -> None:
+    """One shared WS kline plane per box: the paper unit follows the demo root's
+    snapshot read-only, the run script forwards the env as --klines-follow-root,
+    and both continuous units pin their compute threadpools (2-core box)."""
+    repo = Path(__file__).resolve().parents[1]
+    paper = (
+        repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-paper.service"
+    ).read_text(encoding="utf-8")
+    demo = (
+        repo / "deploy" / "systemd" / "liquidity-migration-bybit-continuous-demo.service"
+    ).read_text(encoding="utf-8")
+    run_script = (
+        repo / "scripts" / "run_bybit_continuous_demo_event_engine.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "Environment=KLINES_FOLLOW_ROOT=data/bybit-continuous-demo-event" in paper
+    # the LEADER must never follow anyone
+    assert "KLINES_FOLLOW_ROOT" not in demo
+    assert "--klines-follow-root" in run_script
+    for unit in (paper, demo):
+        assert "Environment=POLARS_MAX_THREADS=1" in unit
+        assert "Environment=OMP_NUM_THREADS=1" in unit
+        assert "Environment=OPENBLAS_NUM_THREADS=1" in unit
 
 
 def test_liveness_watchdog_checks_continuous_paper_evidence_root() -> None:

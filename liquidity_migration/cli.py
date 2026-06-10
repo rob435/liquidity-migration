@@ -866,6 +866,7 @@ def main(argv: list[str] | None = None) -> int:
             decile=args.decile, rmom_quantile=args.rmom_quantile, liq_turnover_min=args.liq_turnover_min,
             feature_set=feature_set,
             lookback_days=args.lookback_days, workers=args.workers, max_active=args.max_active,
+            klines_follow_root=args.klines_follow_root,
             max_new_entries_per_cycle=args.max_new_entries_per_cycle, max_hold_hours=args.max_hold_hours,
             entry_event_trigger=args.entry_event_trigger,
             btc_trend_gate=args.btc_trend_gate,

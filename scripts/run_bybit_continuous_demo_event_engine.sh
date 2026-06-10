@@ -73,8 +73,14 @@ fi
 if [[ "$DAILY_REBALANCE_ENABLED" == "1" ]]; then
     order_args+=(--daily-rebalance-enabled)
 fi
+# KLINES_FOLLOW_ROOT: the paper shadow follows the demo root's flushed kline
+# snapshot (+rmom gate) read-only instead of running a second WS pool — one
+# shared market-data plane per box. Empty = this sleeve runs its own pool.
+if [[ -n "${KLINES_FOLLOW_ROOT:-}" ]]; then
+    order_args+=(--klines-follow-root "$KLINES_FOLLOW_ROOT")
+fi
 
-echo "continuous-demo engine: data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS submit_orders=${SUBMIT_ORDERS:-0} profile=$STRATEGY_PROFILE"
+echo "continuous-demo engine: data_root=$DATA_ROOT interval_seconds=$INTERVAL_SECONDS submit_orders=${SUBMIT_ORDERS:-0} profile=$STRATEGY_PROFILE klines_follow_root=${KLINES_FOLLOW_ROOT:-}"
 exec "$PYTHON_BIN" -m liquidity_migration \
     --config "$CONFIG_PATH" \
     --data-root "$DATA_ROOT" \

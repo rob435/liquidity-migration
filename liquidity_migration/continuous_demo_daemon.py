@@ -34,6 +34,7 @@ from .continuous_demo import (
     run_continuous_demo_cycle,
     run_continuous_protective_exit_cycle,
 )
+from .kline_follower import FollowerKlineStreamManager
 from .kline_stream_manager import KlineStreamManager
 from .long_native_event_demo_daemon import LongNativeDemoDaemon
 
@@ -94,6 +95,34 @@ def _build_continuous_kline_universe(
             candidates.append((turnover, symbol))
     candidates.sort(reverse=True)
     return [symbol for _, symbol in candidates[: max(top_n, 1)]]
+
+
+def _follower_continuous_kline_stream_manager_factory(
+    config: ResearchConfig,
+    demo_config: ContinuousDemoCycleConfig,
+    cache_root: Path,
+) -> FollowerKlineStreamManager:
+    """Read-only follower of the leader root's flushed kline snapshot (no WS pool).
+
+    Selected when ``klines_follow_root`` is set — the paper shadow co-located with
+    the demo sleeve shares the demo daemon's market-data plane instead of running a
+    duplicate one. ``cache_root`` (the follower's own root) is deliberately unused:
+    the follower writes nothing."""
+    del config, cache_root
+    return FollowerKlineStreamManager(leader_root=demo_config.klines_follow_root)
+
+
+def _select_kline_stream_manager_factory(
+    demo_config: ContinuousDemoCycleConfig,
+    explicit: Callable[..., Any] | None,
+) -> Callable[..., Any]:
+    """An explicitly injected factory (tests) always wins; otherwise follow when
+    ``klines_follow_root`` is set, else run the sleeve's own WS pool."""
+    if explicit is not None:
+        return explicit
+    if demo_config.klines_follow_root:
+        return _follower_continuous_kline_stream_manager_factory
+    return _default_continuous_kline_stream_manager_factory
 
 
 def _default_continuous_kline_stream_manager_factory(
@@ -168,7 +197,7 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
             cycle_runner=cycle_runner,
             kline_stream_manager_factory=cast(
                 "Callable[[ResearchConfig, LongNativeDemoCycleConfig, Path], Any] | None",
-                kline_stream_manager_factory or _default_continuous_kline_stream_manager_factory,
+                _select_kline_stream_manager_factory(demo_config, kline_stream_manager_factory),
             ),  # only common config fields used
             event_driven_cycle=event_driven_cycle,
             **kwargs,

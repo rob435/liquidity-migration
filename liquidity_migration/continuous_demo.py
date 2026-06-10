@@ -199,6 +199,12 @@ class ContinuousDemoCycleConfig:
     ticker_batch_wake_threshold: int = 0
     # --- WS kline stream (same shape as the other sleeves) ---
     ws_klines_enabled: bool = True
+    # Follow ANOTHER root's flushed WS kline snapshot (read-only) instead of running a
+    # second WS pool — the paper shadow co-located with the demo sleeve sets this to the
+    # demo root so both sleeves share one market-data plane AND decide on identical
+    # signal inputs: the rmom gate is read from the followed root too (it is derived
+    # purely from that root's klines). Empty = run the sleeve's own pool (default).
+    klines_follow_root: str = ""
     ws_klines_bootstrap_workers: int = 16
     ws_klines_lookback_days: int = 45
     ws_klines_universe_refresh_seconds: float = 3600.0
@@ -1971,6 +1977,17 @@ def _execute_continuous_entries(
     return rows, order_rows
 
 
+def _signal_source_root(demo: ContinuousDemoCycleConfig, root: Path) -> Path:
+    """Root serving the cycle's derived signal inputs (the rmom gate parquet).
+
+    A follower sleeve (``klines_follow_root`` set — the paper shadow co-located with
+    the demo sleeve) reads klines from the leader's store snapshot, so the rmom gate
+    must come from the SAME root: it is derived purely from those klines, and reading
+    the leader's copy keeps both sleeves deciding on identical inputs (and lets the
+    follower's own dormant store skip the daily rmom rebuild entirely)."""
+    return Path(demo.klines_follow_root).expanduser() if demo.klines_follow_root else root
+
+
 def _load_rmom_table(root: Path) -> pl.DataFrame | None:
     path = root / "residual_momentum.parquet"
     if not path.exists():
@@ -2152,7 +2169,7 @@ def run_continuous_demo_cycle(
             symbols, start_ms=start_ms, end_ms=end_ms, config=config, workers=demo.workers,
             market_client=public if market_client is not None else None, cache_root=root, kline_store=kline_store)
 
-        rmom = _load_rmom_table(root)
+        rmom = _load_rmom_table(_signal_source_root(demo, root))
         price_by_symbol = _price_lookup_from_tickers_and_klines(tickers, klines)
         contract_by_symbol = _contract_lookup(universe)
 
