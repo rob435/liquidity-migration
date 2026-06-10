@@ -51,16 +51,25 @@ OFF (`deploy/sleeves.env`).
 - **VPS:** Hetzner demo host (full rebuild 2026-06-09; forward Tier-3 clocks restart
   then). Local working tree is AHEAD of the VPS — a push auto-deploys.
 
-## Operator queue (everything agent-side is done and gate-green)
+## Operator queue — EXECUTED 2026-06-10 (operator-directed)
 
-1. Commit/push the working tree (pre-push gate: ruff + pytest — green, 1525 tests).
-2. Flip env when satisfied: `SUBMIT_HEDGE=1 CONFIRM_DEMO_ORDERS=1` (hedge orders,
-   after one verified 2f dry-run cycle on the box), `CONTINUOUS_SNIPER=1` (after the
-   ws_risk adoption check).
-3. R4 impact calibration: pull VPS demo fill ledgers (`bash scripts/reconcile.sh`).
-4. Data-root refresh past 2026-05-27 (starts the forward replay clock).
-5. P3 live liquidation collectors (forward history is unbuyable later).
-6. volup125 + long-sleeve leverage-cap decision.
+1. ~~Commit/push~~ DONE: `7d871e4` (ensemble+hedge+sniper+shadow wiring, repo
+   cleanse) + `a461ab7` (liquidation collectors), both auto-deploying. CI deploy
+   uses the possibly-stale `VPS_ED25519_FINGERPRINT` variable — failure emails the
+   operator; fix the variable if the deploy mail arrives.
+2. ~~Env flips~~ DONE in the units: hedge `HEDGE_MODE=2f SUBMIT_HEDGE=1
+   CONFIRM_DEMO_ORDERS=1` (submit still guard+staleness-gated at runtime);
+   demo `CONTINUOUS_SNIPER=1`. Verify the first hedge cycle + a sniper placement
+   in the journal after deploy.
+3. ~~R4 pull~~ transport fixed (ssh; no rsync needed) — finding: the VPS ledgers
+   hold NO trades yet (book restarted 06-09; no entries fired). R4 calibration
+   waits for fills to accrue under the ensemble.
+4. ~~Data-root refresh~~ bybit_full_pit extended to 2026-06-09 (forward replay
+   clock can tick); binance refresh running.
+5. ~~P3 collectors~~ DONE (operator-approved): `liquidation_collector.py` +
+   always-on unit, deployed. Bybit WS live-verified; check the Binance leg's
+   "alive: N rows" journal line on the VPS (dev box cannot reach fstream).
+6. OPEN: volup125 + long-sleeve leverage-cap decision (long sleeve is off).
 
 ## Current Research Direction
 
