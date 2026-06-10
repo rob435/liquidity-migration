@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import time
@@ -62,7 +61,6 @@ from .cli_parsers import (  # argparse subcommand builders (extracted); build_pa
     _add_data_layer_audit_parser,
     _add_discover_universe_parser,
     _add_download_binance_proxy_parser,
-    _add_downtrend_bounce_paper_parser,
     _add_download_data_parser,
     _add_event_demo_cycle_parser,
     _add_event_risk_cycle_parser,
@@ -241,7 +239,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_continuous_forward_readiness_parser(subparsers)
     _add_continuous_vs_daily_forward_parser(subparsers)
     _add_continuous_addon_shadow_audit_parser(subparsers)
-    _add_downtrend_bounce_paper_parser(subparsers)
     _add_reconcile_demo_bybit_parser(subparsers)
     _add_reconcile_backtest_paper_parser(subparsers)
     _add_reconcile_all_parser(subparsers)
@@ -1307,23 +1304,6 @@ def main(argv: list[str] | None = None) -> int:
             f"path={payload['report_path']}"
         )
         return 0 if payload["ok"] else 1
-
-    if args.command == "downtrend-bounce-paper":
-        import datetime as _dt
-        from pathlib import Path as _Path
-
-        from .downtrend_bounce import run_paper_cycle
-
-        root = _Path(args.data_root)
-        ledger = (
-            _Path(args.ledger)
-            if args.ledger
-            else root / "downtrend_bounce_paper" / f"{args.venue}_ledger.jsonl"
-        )
-        decision = _dt.date.fromisoformat(args.decision_date) if args.decision_date else None
-        summary = run_paper_cycle(root, args.venue, ledger, decision_date=decision)
-        print(f"downtrend-bounce-paper {json.dumps(summary, default=str)}")
-        return 0
 
     if args.command == "continuous-vs-daily-forward":
         payload = run_continuous_vs_daily_forward_comparison(

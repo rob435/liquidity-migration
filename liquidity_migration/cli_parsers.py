@@ -2719,25 +2719,3 @@ def _add_continuous_event_demo_cycle_parser(subparsers) -> None:
     p.add_argument("--daemon", action="store_true", help="Run the long-lived sub-hourly daemon loop.")
     p.add_argument("--interval-seconds", type=float, default=60.0, help="Heartbeat cadence (sub-hourly reaction).")
     p.add_argument("--no-event-driven-cycle", action="store_true")
-
-
-def _add_downtrend_bounce_paper_parser(subparsers) -> None:
-    p = subparsers.add_parser(
-        "downtrend-bounce-paper",
-        help=(
-            "One daily paper cycle of the standalone down-regime bounce product "
-            "(downtrend_bounce_v1; D3-frozen profile, unhedged per DR1). Paper only - no orders."
-        ),
-    )
-    p.add_argument("--data-root", required=True, help="Full-PIT data root with klines_1h date partitions.")
-    p.add_argument("--venue", required=True, choices=["bybit", "binance"])
-    p.add_argument(
-        "--ledger",
-        default=None,
-        help="JSONL paper ledger path (default <data-root>/downtrend_bounce_paper/<venue>_ledger.jsonl).",
-    )
-    p.add_argument(
-        "--decision-date",
-        default=None,
-        help="ISO date of the decision close (default: latest klines_1h partition).",
-    )

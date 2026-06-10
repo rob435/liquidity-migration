@@ -44,17 +44,6 @@ OFF (`deploy/sleeves.env`).
 - **Shared kline data plane (2026-06-10 parallel session):** the paper shadow
   follows the demo root's flushed kline snapshot read-only (`KLINES_FOLLOW_ROOT`,
   hardened follower: prune/staleness/self-follow guard) — one WS pool per box.
-- **downtrend_bounce_v1 — standalone down-regime PAPER product (operator-directed
-  2026-06-10): LIVE on paper, in-regime now.** D3-frozen bounce profile, UNHEDGED
-  (DR1 falsified the short-BTC hedge — receipt
-  `downtrend-hedged-bounce-2026-06-10.md`). Daily cycle:
-  `python -m liquidity_migration downtrend-bounce-paper --data-root <full_pit>
-  --venue {bybit,binance}`; ledgers under `<root>/downtrend_bounce_paper/`. Forward
-  clock + demo-promotion bar pre-registered
-  (`downtrend-bounce-forward-paper-2026-06-10.md`); NEEDS a daily run (timer or
-  operator habit) + root freshness to tick. Known risk class: in-regime DD
-  −30..−44%; demo orders gated on operator risk budget + an account-level latched
-  disaster stop (none exists in the demo stack today).
 - SHORT (off-box, promoted-in-code): `drop_all_4 + age300 + ff6 + btc_trend_gate=
   uptrend` (gate Tier-2 validated; rmom inactive sentinel 10.0).
 - LONG (off-box, promoted-in-code): `div` + volup125 accepted candidate — NOT
@@ -88,9 +77,6 @@ OFF (`deploy/sleeves.env`).
    liquidation capture needs a host in a permitted region (operator decision);
    the leg idles harmlessly and will capture if access ever opens.
 6. OPEN: volup125 + long-sleeve leverage-cap decision (long sleeve is off).
-7. OPEN: schedule the daily `downtrend-bounce-paper` cycles (both venues) — the
-   forward clock only ticks when cycles run on a fresh root; binance also waits
-   on the fapi stage-2 refresh (item 4).
 
 ## Current Research Direction
 
