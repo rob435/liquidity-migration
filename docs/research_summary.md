@@ -1250,6 +1250,42 @@ These are still real and can move numbers:
 5. **Forward evidence.** Continuous-vs-daily forward comparison is immature locally; current
    common-window evidence is not enough to claim success.
 
+## 2026-06-10 — LR long-regularity program: densification closed by evidence; MTM rendering shipped; PE1 lead recorded
+
+Operator directive ("the long system looks like a step function; concentrated
+months; make it more frequent like the continuous system"). Two pre-registered
+receipts: `long-regularity-program-2026-06-10.md` (LR), `long-provisional-entry-2026-06-10.md` (PE1).
+
+- **Complaint quantified (cross-venue):** baseline v11a+div+volup125 is active
+  27%/26% of days; top-3 months carry **81%/76%** of total net. The concentration is
+  the FC signal's nature.
+- **LR cells ALL FAIL their bars** (clean full-PIT, both venues): same-day entry
+  throttles best2/best3 (best3 improves ret/DD 1.04× both venues — below the 1.10×
+  bar; not adopted), and the dormant intraday trigger `intra6` fails decisively
+  (2.2× trades, ret/DD 8.30→1.85 bybit / 5.90→0.41 binance).
+- **Hourly-cadence scout: GO bar FAIL.** Extra (unconfirmed-by-close) events are
+  NEGATIVE at 24/48/72h on both venues. With intra6 + the v11a-era non-selection,
+  this is the third independent confirmation: **the daily-close confirmation IS the
+  FC signal.** Six densification constructions across two programs are now closed.
+- **PE1 (execution timing, fresh receipt): FAIL on its bar-2 tail (binance cut p10
+  −12.8% < −10%) but a STRONG recorded lead** — on confirmed events the
+  trigger-hour entry nets +11.0%/+6.1% vs +1.7%/−1.4% for the day-late proxy entry
+  (cross-venue agreement): most of FC's continuation happens in the first hours.
+  Revival path (fresh receipt, engine-grade only): provisional trigger-hour entry
+  with ATR stops active from entry + cut at unconfirmed close, judged against the
+  REAL engine lifecycle. The proxy EV ratio (~5×) is NOT citable (no sniper
+  retrace / ATR exits in the proxy).
+- **Shipped (rendering, not strategy): honest daily-MTM artifacts** in every
+  long_native run — `long_native_equity_mtm.csv` + `long_native_equity_mtm.png` +
+  `equity_mtm` report block (`_mtm_daily_curve`, tests). The step-function LOOK was
+  substantially exit-day booking (2026-06-09 finding, now first-class). Bybit
+  baseline honest view: MTM Sharpe ~1.9-class, DD −3.5%-class at 1x — the
+  deployment-true curve for operator review.
+- Book-level note (unchanged evidence): drawdown balancing comes from COMPOSITION —
+  corr(short,long) ≈ −0.03 both venues; combined 30%-short MAR 4.87 vs 2.89/2.25
+  single-sleeve (2026-06-09 section). Sleeve allocation remains an operator
+  risk-preference decision.
+
 ## What To Keep In Repo
 
 Keep only:

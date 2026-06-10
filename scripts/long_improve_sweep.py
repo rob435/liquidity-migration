@@ -52,6 +52,12 @@ CELLS: dict[str, dict[str, object]] = {
     "31_volup150": {"vol_target_max_scale": 1.5},
     # pyramiding: allow a second concurrent unit on continued strength
     "40_pyramid2": {"max_per_symbol_concurrent": 2},
+    # --- LR program (docs/preregistration/long-regularity-program-2026-06-10.md) ---
+    # same-day FOMO-cluster throttle (DD balancing; the episodic-concentration tail)
+    "LR10_best2": {"fc_daily_best_n": 2},
+    "LR11_best3": {"fc_daily_best_n": 3},
+    # intraday-pump trigger at daily cadence (frequency; STRICT adoption bar — see receipt)
+    "LR20_intra6": {"fc_enable_intraday_trigger": True},
 }
 
 

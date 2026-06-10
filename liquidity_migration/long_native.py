@@ -26,9 +26,11 @@ This is heuristic trader-style technical analysis, NOT factor research.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import math
 from bisect import bisect_right
+from datetime import date as dt_date
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -437,6 +439,152 @@ def build_long_research_inputs(data_root: str | Path, *, config: LongNativeConfi
     }
 
 
+def _mtm_daily_curve(trades: pl.DataFrame, klines: pl.DataFrame) -> pl.DataFrame:
+    """Honest daily mark-to-market book curve.
+
+    The engine books P&L on exit day only, which renders the sparse FC book as a
+    step function (2026-06-09 finding). This marks every open trade daily off the
+    symbol's daily close (entry day: close vs entry price; exit day: exit price vs
+    prior close, costs+funding booked there), so each trade's gross telescopes to
+    the same per-trade total. Flat days are zero. Columns: date, mtm_return,
+    equity, drawdown.
+    """
+    if trades.is_empty():
+        return pl.DataFrame({"date": pl.Series([], dtype=pl.Date),
+                             "mtm_return": pl.Series([], dtype=pl.Float64),
+                             "equity": pl.Series([], dtype=pl.Float64),
+                             "drawdown": pl.Series([], dtype=pl.Float64)})
+    daily_close = (
+        klines.sort("ts_ms")
+        .group_by(["symbol", "date"], maintain_order=True)
+        .agg(pl.col("close").last())
+    )
+    closes: dict[str, dict[str, float]] = {}
+    for sym, date_s, close in daily_close.iter_rows():
+        closes.setdefault(sym, {})[str(date_s)] = float(close)
+
+    by_day: dict[dt_date, float] = {}
+    min_d: dt_date | None = None
+    max_d: dt_date | None = None
+    for row in trades.to_dicts():
+        sym = str(row["symbol"])
+        nw = float(row.get("notional_weight") or 0.0)
+        entry_px = float(row.get("entry_price") or 0.0)
+        exit_px = float(row.get("exit_price") or 0.0)
+        costfund = float(row.get("cost_return") or 0.0) + float(row.get("funding_return") or 0.0)
+        d0 = dt.datetime.fromtimestamp(int(row["entry_ts_ms"]) / 1000, tz=dt.timezone.utc).date()
+        d1 = dt.datetime.fromtimestamp(int(row["exit_ts_ms"]) / 1000, tz=dt.timezone.utc).date()
+        if entry_px <= 0 or exit_px <= 0 or nw == 0.0 or d1 < d0:
+            continue
+        sym_closes = closes.get(sym, {})
+        prev_px = entry_px
+        d = d0
+        while d <= d1:
+            if d == d1:
+                px = exit_px
+            else:
+                c = sym_closes.get(d.isoformat())
+                px = c if c is not None and c > 0 else prev_px
+            pnl = nw * (px / prev_px - 1.0)
+            if d == d1:
+                pnl += costfund
+            by_day[d] = by_day.get(d, 0.0) + pnl
+            prev_px = px
+            d += dt.timedelta(days=1)
+        min_d = d0 if min_d is None or d0 < min_d else min_d
+        max_d = d1 if max_d is None or d1 > max_d else max_d
+
+    if min_d is None or max_d is None:
+        return pl.DataFrame({"date": pl.Series([], dtype=pl.Date),
+                             "mtm_return": pl.Series([], dtype=pl.Float64),
+                             "equity": pl.Series([], dtype=pl.Float64),
+                             "drawdown": pl.Series([], dtype=pl.Float64)})
+    days: list[dt_date] = []
+    d = min_d
+    while d <= max_d:
+        days.append(d)
+        d += dt.timedelta(days=1)
+    rets = [by_day.get(d, 0.0) for d in days]
+    eq: list[float] = []
+    acc = 1.0
+    for r in rets:
+        acc *= 1.0 + r
+        eq.append(acc)
+    peak = 0.0
+    dd: list[float] = []
+    for e in eq:
+        peak = max(peak, e)
+        dd.append(e / peak - 1.0)
+    return pl.DataFrame({"date": days, "mtm_return": rets, "equity": eq, "drawdown": dd})
+
+
+def _mtm_summary(mtm: pl.DataFrame) -> dict[str, Any]:
+    if mtm.is_empty():
+        return {}
+    rets = np.asarray(mtm["mtm_return"].to_list())
+    eq = np.asarray(mtm["equity"].to_list())
+    n_days = len(rets)
+    total = float(eq[-1] - 1.0)
+    years = n_days / 365.25
+    maxdd = float(min(mtm["drawdown"].min(), 0.0))
+    std = float(rets.std())
+    return {
+        "mtm_total_return": round(total, 6),
+        "mtm_max_drawdown": round(maxdd, 6),
+        "mtm_mar": round((total / years) / abs(maxdd), 3) if maxdd < 0 and years > 0 else None,
+        "mtm_daily_sharpe": round(float(rets.mean() / std * math.sqrt(365.25)), 3) if std > 0 else None,
+        "mtm_active_day_frac": round(float((rets != 0.0).mean()), 4),
+    }
+
+
+def _write_mtm_chart(output_dir: Path, mtm: pl.DataFrame, exit_booked: pl.DataFrame | None,
+                     png_name: str = "long_native_equity_mtm.png") -> dict[str, Any]:
+    """Daily-MTM equity + drawdown PNG with the exit-booked curve for contrast."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    def _as_dt(values: list[Any]) -> list[dt.datetime]:
+        out = []
+        for v in values:
+            if isinstance(v, str):
+                out.append(dt.datetime.fromisoformat(v[:10]))
+            elif isinstance(v, dt.datetime):
+                out.append(v)
+            elif isinstance(v, dt_date):
+                out.append(dt.datetime(v.year, v.month, v.day))
+            else:
+                out.append(v)
+        return out
+
+    s = _mtm_summary(mtm)
+    fig, (ax, axd) = plt.subplots(2, 1, figsize=(12, 7), sharex=True,
+                                  gridspec_kw={"height_ratios": [3, 1]})
+    days = _as_dt(mtm["date"].to_list())
+    ax.plot(days, mtm["equity"].to_list(), color="#1f77b4", lw=1.4,
+            label=(f"daily MTM (deployment-true): ret {s['mtm_total_return']:+.1%} "
+                   f"DD {s['mtm_max_drawdown']:.1%} Sharpe {s['mtm_daily_sharpe']}"))
+    if exit_booked is not None and not exit_booked.is_empty() and "equity" in exit_booked.columns:
+        cols = exit_booked.columns
+        date_col = "date" if "date" in cols else cols[0]
+        ax.plot(_as_dt(exit_booked[date_col].to_list()), exit_booked["equity"].to_list(),
+                color="#7f7f7f", lw=1.0, ls="--", label="exit-day booked (legacy rendering)")
+    ax.legend(loc="upper left", fontsize=9)
+    ax.grid(alpha=0.25)
+    ax.set_ylabel("equity (x)")
+    ax.set_title("long_native — honest daily mark-to-market vs exit-booked rendering")
+    axd.fill_between(days, [d * 100 for d in mtm["drawdown"].to_list()], 0.0,
+                     color="#2c3e50", alpha=0.55)
+    axd.set_ylabel("MTM drawdown (%)")
+    axd.grid(alpha=0.25)
+    fig.tight_layout()
+    out = output_dir / png_name
+    fig.savefig(out, dpi=130)
+    plt.close(fig)
+    return {"mtm_png": str(out), **s}
+
+
 def run_long_native_research(
     data_root: str | Path,
     *,
@@ -495,6 +643,17 @@ def run_long_native_research(
     if not monthly.is_empty():
         monthly.write_csv(output_dir / "long_native_monthly.csv")
 
+    # Honest daily mark-to-market rendering (the exit-booked curve reads as a step
+    # function on this sparse book; the MTM view is the deployment-true one).
+    mtm_metadata: dict[str, Any] = {}
+    try:
+        mtm = _mtm_daily_curve(trades, klines)
+        if not mtm.is_empty():
+            mtm.write_csv(output_dir / "long_native_equity_mtm.csv")
+            mtm_metadata = _write_mtm_chart(output_dir, mtm, equity if not equity.is_empty() else None)
+    except Exception:  # noqa: BLE001 - rendering must not fail the run
+        mtm_metadata = {}
+
     # Equity-vs-BTC PNG mirrors the short-sleeve `volume_event_best_equity_btc.png`
     # so operators get a comparable visual benchmark without a side-step renderer.
     # The long-only sleeve fires sparse FOMO-chase setups so the strategy line is
@@ -551,6 +710,7 @@ def run_long_native_research(
         "warnings": [w.as_dict() for w in warnings],
         "tainted": is_tainted(warnings),
         "equity_chart": chart_metadata,
+        "equity_mtm": mtm_metadata,
     }
     (output_dir / "long_native_research_report.json").write_text(json.dumps(metadata, indent=2, default=str), encoding="utf-8")
     (output_dir / "long_native_research_report.md").write_text(format_long_native_report(metadata), encoding="utf-8")
