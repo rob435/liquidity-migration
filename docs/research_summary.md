@@ -1285,6 +1285,19 @@ receipts: `long-regularity-program-2026-06-10.md` (LR), `long-provisional-entry-
   corr(short,long) ≈ −0.03 both venues; combined 30%-short MAR 4.87 vs 2.89/2.25
   single-sleeve (2026-06-09 section). Sleeve allocation remains an operator
   risk-preference decision.
+- **PE2 engine-grade provisional entry (same night, fresh receipt
+  `long-provisional-entry-engine-2026-06-10.md`): FAIL by 1% on the binance bar —
+  the frequency question is now FULLY closed (LR + PE1 + PE2).** The build is real
+  and shipped (`fc_provisional_entry` flag, trigger panel, confirmation-cut
+  lifecycle, 3 tests, flag-off byte-identical, 1585 suite green): enter at the
+  trigger hour with ATR stops live, cut at an unconfirmed daily close. At the
+  deployed 3× cost stress it transformed bybit (ret/DD 8.30→12.75, return
+  +28.9%→+38.6%, worst-day −1.50%→−1.09%, active days 27.6%→32.6%, all years
+  positive) and improved binance on most axes (worst-day −1.51%→−1.12%, active
+  27.0%→31.8%, return +22.8%→+24.5%) — but binance ret/DD landed 6.42 vs the
+  6.49 the 1.10× bar required, and partial-2026 flipped to −1.2%. Conjunctive
+  cross-venue bars: NOT adopted, no rescue. The flag stays in the engine, default
+  OFF; only NEW (forward) evidence may re-judge it.
 
 ## What To Keep In Repo
 

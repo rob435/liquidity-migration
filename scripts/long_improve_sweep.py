@@ -58,6 +58,10 @@ CELLS: dict[str, dict[str, object]] = {
     "LR11_best3": {"fc_daily_best_n": 3},
     # intraday-pump trigger at daily cadence (frequency; STRICT adoption bar — see receipt)
     "LR20_intra6": {"fc_enable_intraday_trigger": True},
+    # PE2 engine-grade provisional trigger-hour entry
+    # (docs/preregistration/long-provisional-entry-engine-2026-06-10.md)
+    "LR30_prov": {"fc_provisional_entry": True},
+    "LR31_prov_cost2x": {"fc_provisional_entry": True, "cost_multiplier": 2.0},
 }
 
 

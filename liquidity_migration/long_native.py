@@ -187,6 +187,12 @@ class LongNativeConfig:
     # --- FC v13: ADAPTIVE sniper — retrace pct = K × coin's ATR_14d/close ---
     fc_sniper_use_atr_retrace: bool = False  # if True, retrace_pct = atr_mult × atr_14d_pct
     fc_sniper_atr_mult: float = 0.5          # 0.5 × ATR = ~half-day move retrace
+    # --- PE2: provisional trigger-hour entry (long-provisional-entry-engine-2026-06-10) ---
+    # Enter at the FIRST hourly close where the trailing-24h FC condition fires (same
+    # thresholds as the daily trigger, gates read from the PRIOR day's feature row),
+    # ATR stop/TP live immediately; cut at the daily close if the standard daily FC
+    # classification does not confirm. False -> byte-identical legacy paths.
+    fc_provisional_entry: bool = False
     # --- FC v11: scaled exit + breakeven move ---
     fc_use_scaled_exit: bool = False        # If True, take 50% off at TP/2 then move stop to BE
     fc_scaled_exit_trail_atr_mult: float = 0.0  # If >0, trail remainder by K × ATR after BE move
@@ -612,11 +618,15 @@ def run_long_native_research(
     full_pit_universe_pass = inputs["full_pit_universe_pass"]
     pit_covered_date_symbols = inputs["pit_covered_date_symbols"]
 
+    provisional_triggers = (
+        _provisional_trigger_panel(klines, features, cfg) if cfg.fc_provisional_entry else None
+    )
     trades, lifecycle_stats, event_counts = _run_long_pipeline(
         features=features,
         bars_by_symbol=bars_by_symbol,
         funding_lookup=funding_lookup,
         config=cfg, costs=costs,
+        provisional_triggers=provisional_triggers,
     )
 
     bt_config = TradeLifecycleConfig(
@@ -1601,6 +1611,77 @@ def _classify_entry(row: dict[str, Any], cfg: LongNativeConfig) -> tuple[str | N
     return None, 0.0, 0.0, 0
 
 
+def _provisional_trigger_panel(
+    klines: pl.DataFrame, features: pl.DataFrame, cfg: LongNativeConfig
+) -> dict[int, list[tuple[int, str]]]:
+    """PE2: hourly trailing-24h FC trigger panel (long-provisional-entry-engine receipt).
+
+    At each hourly close: trailing-24h log return >= the same threshold the daily FC
+    trigger uses (sigma from the PRIOR day's feature row), trailing-24h
+    close-location >= ``fc_min_close_location``, trailing-24h turnover rank <=
+    ``fc_top_volume_rank_max``, in-universe + regime gates from the PRIOR day's
+    feature row. Per-symbol 24h cluster dedup keeps the cluster head. Returns
+    ``{daily_signal_ts_ms: [(trigger_bar_end_ts_ms, symbol), ...]}`` keyed by the
+    close of the trigger's own calendar day (the confirmation boundary).
+    """
+    h = (
+        klines.select(["ts_ms", "symbol", "high", "low", "close", "turnover_quote"])
+        .sort(["symbol", "ts_ms"])
+        .with_columns((pl.col("ts_ms") + MS_PER_HOUR).alias("bar_end_ts_ms"))
+        .with_columns(
+            (pl.col("close").log() - pl.col("close").log().shift(24)).over("symbol").alias("ret24_log"),
+            pl.col("high").rolling_max(24, min_samples=24).over("symbol").alias("hi24"),
+            pl.col("low").rolling_min(24, min_samples=24).over("symbol").alias("lo24"),
+            pl.col("turnover_quote").rolling_sum(24, min_samples=24).over("symbol").alias("turn24"),
+        )
+        .with_columns(
+            ((pl.col("close") - pl.col("lo24")) / (pl.col("hi24") - pl.col("lo24"))).alias("cl24"),
+            pl.col("turn24").rank(method="ordinal", descending=True).over("ts_ms").alias("rank24"),
+            (((pl.col("bar_end_ts_ms") - 1) // MS_PER_DAY + 1) * MS_PER_DAY).alias("day_end_ts_ms"),
+        )
+    )
+    ctx = features.select(
+        pl.col("symbol"),
+        (pl.col("ts_ms") + MS_PER_DAY).alias("day_end_ts_ms"),
+        pl.col("sigma_daily_30d").alias("sigma_prev"),
+        pl.col("in_universe").alias("in_universe_prev"),
+        pl.col("regime_on").alias("regime_prev"),
+        pl.col("eth_regime_on").alias("eth_regime_prev"),
+    )
+    h = h.join(ctx, on=["symbol", "day_end_ts_ms"], how="inner")
+    thr = (
+        pl.when(
+            pl.lit(cfg.fc_use_sigma_threshold)
+            & pl.col("sigma_prev").is_not_null()
+            & (pl.col("sigma_prev") > 0)
+        )
+        .then(pl.col("sigma_prev") * cfg.fc_sigma_mult)
+        .otherwise(math.log1p(cfg.fc_min_day_return))
+    )
+    cond = (
+        (pl.col("ret24_log") >= thr)
+        & (pl.col("cl24") >= cfg.fc_min_close_location)
+        & (pl.col("rank24") <= cfg.fc_top_volume_rank_max)
+        & pl.col("in_universe_prev").fill_null(False)
+    )
+    if cfg.fc_btc_regime_required:
+        cond = cond & pl.col("regime_prev").fill_null(False)
+    if cfg.fc_eth_regime_required:
+        cond = cond & pl.col("eth_regime_prev").fill_null(False)
+    trig = h.filter(cond).select(["symbol", "bar_end_ts_ms", "day_end_ts_ms"]).sort(["symbol", "bar_end_ts_ms"])
+    out: dict[int, list[tuple[int, str]]] = {}
+    last_kept: dict[str, int] = {}
+    for sym, bar_end, day_end in trig.iter_rows():
+        prev = last_kept.get(sym)
+        if prev is not None and bar_end - prev < 24 * MS_PER_HOUR:
+            continue
+        last_kept[sym] = bar_end
+        out.setdefault(int(day_end), []).append((int(bar_end), str(sym)))
+    for v in out.values():
+        v.sort()
+    return out
+
+
 def _bars_by_symbol(klines: pl.DataFrame) -> dict[str, dict[str, Any]]:
     required = {"ts_ms", "symbol", "open", "high", "low", "close"}
     missing = required - set(klines.columns)
@@ -1671,6 +1752,7 @@ def _run_long_pipeline(
     funding_lookup: dict[str, dict[str, Any]] | None,
     config: LongNativeConfig,
     costs: CostConfig,
+    provisional_triggers: dict[int, list[tuple[int, str]]] | None = None,
 ) -> tuple[pl.DataFrame, dict[str, int], dict[str, int]]:
     dates_all = sorted(int(ts) for ts in features["ts_ms"].unique().to_list())
     features_by_date: dict[int, list[dict[str, Any]]] = {}
@@ -1688,6 +1770,7 @@ def _run_long_pipeline(
         "skipped_already_held": 0, "skipped_no_entry_bar": 0,
         "skipped_sector_cap": 0, "skipped_symbol_cap": 0,
         "exits_stop": 0, "exits_take_profit": 0, "exits_time": 0,
+        "provisional_entries": 0, "exits_unconfirmed_cut": 0, "provisional_confirmed": 0,
     }
     event_counts = {"capitulation_rebound": 0, "funding_squeeze": 0, "volume_resurrection": 0,
                     "oversold_bounce": 0, "fomo_chase": 0, "uptrend_dip": 0, "xsec_momentum": 0,
@@ -1774,6 +1857,80 @@ def _run_long_pipeline(
     for ts in dates_all:
         rows_today = features_by_date.get(ts, [])
 
+        # ---- PE2: provisional trigger-hour entries during the day ending at ts ----
+        # Processed BEFORE the exit scan (conservative: capacity freed by day-D exits
+        # is not available to day-D triggers) and with all gates evaluated at the
+        # trigger hour off the PRIOR day's feature row (causal). ATR stop/TP are live
+        # from entry, so the same-iteration exit scan below can already stop them out.
+        if provisional_triggers:
+            prev_rows = features_by_date.get(ts - MS_PER_DAY, [])
+            prev_by_symbol = {str(r["symbol"]): r for r in prev_rows}
+            for trig_ts, symbol in provisional_triggers.get(ts, []):
+                if trig_ts >= ts:
+                    continue  # the daily-close bar itself belongs to the standard path
+                if window_end_ts_ms is not None and trig_ts > window_end_ts_ms:
+                    continue
+                if symbol in open_positions:
+                    stats["skipped_already_held"] += 1
+                    continue
+                if cooldown_until.get(symbol, 0) > trig_ts:
+                    stats["skipped_cooldown"] += 1
+                    continue
+                if len(open_positions) >= config.max_concurrent_positions:
+                    stats["skipped_capacity"] += 1
+                    continue
+                row_prev = prev_by_symbol.get(symbol)
+                if row_prev is None:
+                    continue
+                bars = bars_by_symbol.get(symbol)
+                entry_idx = bars["by_end"].get(trig_ts) if bars else None
+                if entry_idx is None or bars is None:
+                    stats["skipped_no_entry_bar"] += 1
+                    continue
+                entry_price = float(bars["close"][entry_idx])
+                if not math.isfinite(entry_price) or entry_price <= 0.0:
+                    stats["skipped_no_entry_bar"] += 1
+                    continue
+                stop_pct, tp_pct = _fc_exit_params(row_prev, config)
+                if config.sizing == "equal":
+                    position_weight = 1.0
+                else:
+                    vol_est = _safe_float(row_prev.get("realized_vol")) or config.vol_floor_annual
+                    vol_used = max(vol_est, config.vol_floor_annual)
+                    position_weight = min(config.vol_floor_annual / vol_used,
+                                          config.max_position_weight / notional_weight)
+                    position_weight = max(position_weight, 0.25)
+                position_weight = position_weight * _vol_target_scale(
+                    config, _safe_float(row_prev.get("btc_rv_30")))
+                if config.enable_dd_throttle and dd_cur <= config.dd_throttle_trigger:
+                    position_weight = position_weight * config.dd_throttle_scale
+                if config.max_per_symbol_weight > 0.0:
+                    effective_gross = notional_weight * position_weight
+                    if effective_gross > config.max_per_symbol_weight:
+                        position_weight = config.max_per_symbol_weight / max(notional_weight, 1e-12)
+                stats["provisional_entries"] += 1
+                event_counts["fomo_chase"] += 1
+                open_positions[symbol] = {
+                    "symbol": symbol,
+                    "pattern": "fomo_chase",
+                    "entry_signal_ts_ms": int(trig_ts),
+                    "entry_ts_ms": int(trig_ts),
+                    "last_exit_scan_ts_ms": int(trig_ts),
+                    "entry_bar_idx": int(entry_idx),
+                    "entry_price": entry_price,
+                    "stop_price": float(entry_price * (1.0 - stop_pct)),
+                    "take_profit_price": float(entry_price * (1.0 + tp_pct)),
+                    "planned_exit_ts_ms": int(trig_ts + config.fc_max_hold_days * MS_PER_DAY),
+                    "position_weight": float(position_weight),
+                    "stop_pct": float(stop_pct),
+                    "tp_pct": float(tp_pct),
+                    "max_hold_days": int(config.fc_max_hold_days),
+                    "basket_id": f"native-prov-{_iso_date(int(ts))}-{symbol}",
+                    "high_water_close": entry_price,
+                    "trailing_atr": _safe_float(row_prev.get("atr_20d")),
+                    "provisional_day_ts": int(ts),
+                }
+
         # ---- check exits for currently held positions ----
         for symbol in list(open_positions.keys()):
             pos = open_positions[symbol]
@@ -1805,6 +1962,35 @@ def _run_long_pipeline(
             stats["candidates_total"] += 1
             event_counts[pattern] += 1
             candidates.append((row, pattern, stop_pct, tp_pct, hold_days, score))
+
+        # ---- PE2: confirmation boundary at the daily close ----
+        # A provisional position opened during this day continues (the standard entry
+        # loop skips it as already-held) iff the daily FC classification fired for the
+        # symbol today; otherwise it is cut AT the daily-close bar (the same bar the
+        # confirmation reads — the convention PE1 measured), standard cooldown applies.
+        if provisional_triggers:
+            confirmed_fc = {str(c[0]["symbol"]) for c in candidates if c[1] == "fomo_chase"}
+            for symbol in list(open_positions):
+                pos = open_positions[symbol]
+                if pos.get("provisional_day_ts") != ts:
+                    continue
+                if symbol in confirmed_fc:
+                    pos["provisional_day_ts"] = None
+                    stats["provisional_confirmed"] += 1
+                    continue
+                bars = bars_by_symbol.get(symbol)
+                close_idx = bars["by_end"].get(ts) if bars else None
+                if close_idx is None:
+                    continue  # no daily-close bar: leave to the stop/TP/time machinery
+                trade_rows.append(_finalize_trade(
+                    pos, exit_ts_ms=int(ts), exit_price=float(bars["close"][close_idx]),
+                    reason="unconfirmed_cut", notional_weight=notional_weight,
+                    round_trip_cost_bps=round_trip_cost_bps, funding_lookup=funding_lookup,
+                    notional_multiplier=config.notional_multiplier,
+                ))
+                cooldown_until[symbol] = int(ts) + config.cooldown_days * MS_PER_DAY
+                stats["exits_unconfirmed_cut"] += 1
+                del open_positions[symbol]
 
         # Rank candidates: by score if v6 enabled, else by raw 24h log return
         if config.fc_rank_by_score:
