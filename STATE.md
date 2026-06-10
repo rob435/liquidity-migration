@@ -71,8 +71,11 @@ OFF (`deploy/sleeves.env`).
    biased write). To finish: run `bash scripts/build_full_pit_binance.sh`
    stage 2 on the VPS (Hetzner reaches fapi) or any non-blocked host.
 5. ~~P3 collectors~~ DONE (operator-approved): `liquidation_collector.py` +
-   always-on unit, deployed. Bybit WS live-verified; check the Binance leg's
-   "alive: N rows" journal line on the VPS (dev box cannot reach fstream).
+   always-on unit, deployed. Bybit leg CAPTURING (1.5k+ rows day one). Binance
+   leg: VERIFIED silently region-restricted from the Hetzner IP (WS connects,
+   zero data even on btcusdt@aggTrade) — same for the dev box. Binance forward
+   liquidation capture needs a host in a permitted region (operator decision);
+   the leg idles harmlessly and will capture if access ever opens.
 6. OPEN: volup125 + long-sleeve leverage-cap decision (long sleeve is off).
 
 ## Current Research Direction
