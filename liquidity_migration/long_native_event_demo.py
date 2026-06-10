@@ -66,6 +66,7 @@ from .event_demo import (
     _private_credentials_present,
     _refresh_positions_and_orders,
     _resolve_private_snapshot,
+    resolve_snapshot_equity,
     _risk_order_link_id,
     _resolve_ticker_snapshot,
     _ratio_or_zero,
@@ -495,7 +496,7 @@ def run_long_native_demo_cycle(
             private_state_cache=private_state_cache,
             state_cache_stale_seconds=state_cache_stale_seconds,
         )
-        equity_usdt = snapshot.get("equity_usdt", demo.fallback_equity_usdt) or demo.fallback_equity_usdt
+        equity_usdt = resolve_snapshot_equity(snapshot, fallback_equity_usdt=demo.fallback_equity_usdt)
         wallet_error = snapshot.get("wallet_error", "")
         raw_open_orders = snapshot.get("raw_open_orders", [])
         bybit_open_order_error = snapshot.get("open_order_error", "")

@@ -236,6 +236,13 @@ def main() -> int:
     if submit_guard_error:
         out["status"] = "submit_blocked_order_submit_guard"
         out["error"] = submit_guard_error
+    elif btc_price <= 0.0:
+        # No BTC price (kline store missing/unreadable and no --btc-price): the plan
+        # is necessarily None. Without an explicit status this read as a healthy
+        # "dry_run_ok"/"submit_no_action" no-op — silently masking a dead input.
+        out["status"] = (
+            "submit_blocked_btc_price_unavailable" if args.submit else "dry_run_btc_price_unavailable"
+        )
     elif args.submit and warmstart_stale:
         out["status"] = "submit_blocked_stale_warmstart"
     elif args.submit and decision.plan is not None:

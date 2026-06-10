@@ -674,6 +674,7 @@ class KlineStore:
                 self._last_flush_monotonic = time.monotonic()
                 self._last_flush_version = version
             return 0
+        temp_path: Path | None = None
         try:
             self._flush_dir.mkdir(parents=True, exist_ok=True)
             frame = pl.DataFrame(
@@ -696,6 +697,14 @@ class KlineStore:
             frame.write_parquet(temp_path)
             temp_path.replace(self._flush_path)
         except (OSError, pl.exceptions.PolarsError) as exc:
+            # A failed write/rename must not leak the temp file: each retry uses a
+            # fresh time_ns name, so leftovers would accumulate one per failure
+            # for the daemon's lifetime.
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             with self._lock:
                 self._flush_errors += 1
             _logger.warning("kline_store flush write failed: %s", exc)

@@ -670,3 +670,20 @@ def test_stats_scan_is_cached_and_recomputed_on_mutation(monkeypatch) -> None:
     assert calls["n"] == 2
     assert s4["rows"] == 3
     assert s4["oldest_ts_ms"] == base
+
+
+def test_flush_failure_cleans_up_temp_file(tmp_path: Path, monkeypatch) -> None:
+    """A failed rename must not leak the .tmp file — each retry uses a fresh
+    time_ns name, so leftovers would accumulate one per failure forever."""
+    store = KlineStore(cache_root=tmp_path, flush_interval_seconds=0.0)
+    store.add_bar("BTCUSDT", _ws_bar(MS_PER_HOUR, close=100.0), confirmed=True)
+
+    def boom(self, target):  # noqa: ANN001
+        raise OSError("simulated rename failure")
+
+    monkeypatch.setattr(Path, "replace", boom)
+    assert store.flush_to_disk() == 0
+    assert store.stats()["flush_errors"] == 1
+    flush_dir = tmp_path / ".cache" / "ws_klines"
+    leftovers = list(flush_dir.glob("*.tmp")) if flush_dir.exists() else []
+    assert leftovers == []

@@ -105,3 +105,28 @@ def test_submit_uses_central_real_money_guard(monkeypatch, tmp_path, capsys) -> 
 
     assert out["status"] == "submit_blocked_order_submit_guard"
     assert "REAL_MONEY=true" in out["error"]
+
+
+def test_missing_btc_price_is_surfaced_not_silent(monkeypatch, tmp_path, capsys) -> None:
+    """No kline store + no --btc-price -> plan is None; the status must SAY the
+    input was dead instead of reading as a healthy dry_run_ok no-op."""
+    unit = [-0.002, 0.002] * 45
+    btc = [0.01, -0.01] * 45
+
+    monkeypatch.setattr(hedge_runner, "REPO", tmp_path)  # no .cache/ws_klines under tmp
+    monkeypatch.setattr(hedge_runner, "load_warmstart", lambda path: (unit, btc))
+    monkeypatch.setattr(hedge_runner, "_warmstart_last_date", lambda path: date.today())
+    monkeypatch.setattr(
+        hedge_runner,
+        "_live_book_state",
+        lambda root, dataset: hedge_runner.LiveBookState({}, 0.5, True, "test"),
+    )
+    monkeypatch.setattr(hedge_runner, "_current_hedge_qty", lambda root, dataset: 0.0)
+    monkeypatch.setattr(sys, "argv", ["run_continuous_hedge.py", "--equity-usdt", "10000"])
+
+    assert hedge_runner.main() == 0
+    out = json.loads(capsys.readouterr().out)
+
+    assert out["btc_price"] == 0.0
+    assert out["plan"] is None
+    assert out["status"] == "dry_run_btc_price_unavailable"

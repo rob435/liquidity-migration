@@ -1140,6 +1140,7 @@ from .event_demo import (  # noqa: E402
     _private_credentials_present,
     _resolve_cycle_universe,
     _resolve_private_snapshot,
+    resolve_snapshot_equity,
     _ratio_or_zero,
     _stop_price_for_entry,
     _trade_return,
@@ -2157,7 +2158,7 @@ def run_continuous_demo_cycle(
             trading_client = _build_private_client(config)
         snapshot, _src = _resolve_private_snapshot(
             trading_client, demo, private_state_cache=private_state_cache, state_cache_stale_seconds=state_cache_stale_seconds)
-        equity_usdt = snapshot.get("equity_usdt", demo.fallback_equity_usdt) or demo.fallback_equity_usdt
+        equity_usdt = resolve_snapshot_equity(snapshot, fallback_equity_usdt=demo.fallback_equity_usdt)
         raw_open_orders = snapshot.get("raw_open_orders", [])
         raw_positions = snapshot.get("raw_positions", [])
         errors = bool(snapshot.get("wallet_error") or snapshot.get("open_order_error") or snapshot.get("position_error"))

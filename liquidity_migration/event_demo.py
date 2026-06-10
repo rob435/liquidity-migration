@@ -2241,6 +2241,26 @@ def _refresh_positions_and_orders(
         return positions_future.result(), orders_future.result()
 
 
+def resolve_snapshot_equity(snapshot: dict[str, Any], *, fallback_equity_usdt: float) -> float:
+    """Sizing equity from a private snapshot — fallback ONLY when the value is absent.
+
+    A MISSING/None ``equity_usdt`` means the read path supplied nothing (no client,
+    malformed cache row) -> use the fallback so paper/dry-run keeps working. A
+    PRESENT zero (or negative) equity is REAL information — the wallet read
+    SUCCEEDED and the account has no sizable capital; masking it with the fallback
+    would size a whole book on phantom equity. (The REST error path never reaches
+    here with 0: ``_safe_wallet_equity_usdt`` substitutes the fallback itself and
+    sets ``wallet_error``.) Clamped at 0 so sizing degrades to no-entries."""
+    raw = snapshot.get("equity_usdt")
+    if raw is None:
+        return fallback_equity_usdt
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return fallback_equity_usdt
+    return max(value, 0.0)
+
+
 def _resolve_private_snapshot(
     trading_client: Any | None,
     demo: Any,

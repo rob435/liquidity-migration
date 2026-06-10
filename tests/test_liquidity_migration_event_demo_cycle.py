@@ -1368,3 +1368,19 @@ def test_dry_run_cycle_ignores_demo_owned_live_position_symbols(tmp_path: Path) 
     assert orders[0]["status"] == "planned"
     assert orders[0]["submit_mode"] == "dry_run"
 
+
+
+def test_resolve_snapshot_equity_fallback_only_when_absent() -> None:
+    """A PRESENT zero equity is real information (wallet read succeeded, account
+    drained) and must NOT be masked to the fallback — masking would size a whole
+    book on phantom capital. Absent/None/unparseable -> fallback (read path
+    supplied nothing); negative clamps to 0 (degrade to no-entries)."""
+    from liquidity_migration.event_demo import resolve_snapshot_equity
+
+    fallback = 10_000.0
+    assert resolve_snapshot_equity({"equity_usdt": 0.0}, fallback_equity_usdt=fallback) == 0.0
+    assert resolve_snapshot_equity({"equity_usdt": 9994.4}, fallback_equity_usdt=fallback) == 9994.4
+    assert resolve_snapshot_equity({"equity_usdt": -5.0}, fallback_equity_usdt=fallback) == 0.0
+    assert resolve_snapshot_equity({"equity_usdt": None}, fallback_equity_usdt=fallback) == fallback
+    assert resolve_snapshot_equity({}, fallback_equity_usdt=fallback) == fallback
+    assert resolve_snapshot_equity({"equity_usdt": "bogus"}, fallback_equity_usdt=fallback) == fallback
