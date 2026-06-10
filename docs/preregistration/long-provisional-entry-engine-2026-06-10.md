@@ -85,3 +85,23 @@ decomposition), not a new fact. `fc_provisional_entry` stays in the engine,
 default OFF, fully tested — a future program with fresh forward data (or the
 shared-universe profile idea from the Binance-gap receipt) may re-judge it on NEW
 evidence, never by re-mining this window.
+
+## Forward OOS re-judgment (pre-registered 2026-06-10, ARMED — the only revival path)
+
+PE2 has ZERO parameters tuned on any window (every threshold is the deployed daily
+profile's; the mechanism is a boolean), so data accruing after the window freeze
+(2026-05-28) is genuine out-of-sample for this receipt. Pre-committed rule:
+
+- **Trigger:** both venues' full-PIT roots cover ≥ 60 calendar days past
+  2026-05-28 AND the extension yields ≥ 30 LR30_prov trades per venue (extend the
+  wait until both hold; no peeking before the trigger).
+- **Run:** `00_baseline` vs `LR30_prov` ONLY (this receipt's frozen cells, the
+  same driver), window `--start 2026-05-29` → root end, research gates ON, both
+  venues. ONE run; no amendments, no new cells.
+- **OOS adoption bar (ALL):** prov return > 0 both venues; prov ret/DD ≥ baseline
+  ret/DD on BOTH venues (parity — OOS evidence carries the margin the in-sample
+  1.10× bar demanded); prov worst exit-day not worse than baseline by > 1pp.
+  PASS → promote `fc_provisional_entry=True` into the profile with this receipt.
+  FAIL → the flag is removed from the engine (dead code policy) and the question
+  is closed permanently.
+- The in-sample record above is context, never evidence, for that decision.

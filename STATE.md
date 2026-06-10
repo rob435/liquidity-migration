@@ -77,6 +77,12 @@ OFF (`deploy/sleeves.env`).
    liquidation capture needs a host in a permitted region (operator decision);
    the leg idles harmlessly and will capture if access ever opens.
 6. OPEN: volup125 + long-sleeve leverage-cap decision (long sleeve is off).
+7. ARMED (data-refresh-triggered, no operator action needed until then): PE2
+   long provisional-entry OOS re-judgment — when BOTH full-PIT roots extend ≥60d
+   past 2026-05-28 (and ≥30 prov trades/venue), run the pre-registered cells per
+   `docs/preregistration/long-provisional-entry-engine-2026-06-10.md` §OOS. The
+   in-sample near-miss (bybit ret/DD 8.30→12.75; binance 1.088× vs 1.10× bar) is
+   context only.
 
 ## Current Research Direction
 
