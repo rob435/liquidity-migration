@@ -1347,6 +1347,29 @@ the deployed books' binance entries joined to entry-hour entry-side depth
   curves per entry); realized-fill calibration still awaits VPS fills. Any cost-
   model change motivated by this gets its own receipt.
 
+## 2026-06-11 — TA1 trade-outcome atlas: no clean survivor; two forward-watch leads armed
+
+Operator-directed winner/loser characterization done the honest way (receipt
+`trade-atlas-2026-06-11.md`): 952 trades across the four deployed-profile ledgers
+(SHORT/LONG × venues), an 11-feature FIXED entry-context menu, cross-book +
+cross-venue consistency as the filter, and the application path fixed up front
+(forward/OOS only — never spent-window promotion).
+
+- The strongest pattern (`mkt_day_ret`, mirror-signed across all four books with
+  3/4 CIs excluding zero) was DISQUALIFIED in review: the entry-day market return
+  is ~23h of future information at the 01:00 entries — it re-confirms the
+  contemporaneous-beta structure the hedge already treats. A menu-causality slip
+  caught by the process; recorded as such.
+- **Forward-watch leads armed** (recompute on forward trades when ≥100/book
+  accumulate; graduation needs matching direction + pooled ≥2σ forward):
+  #1 repeat-name penalty (repeat30d entries win less in ALL FOUR books,
+  −0.8..−13.3pp, individually ns); #2 weekend-entry bonus (+10..+17pp on three
+  books, flat on bybit short).
+- Everything else (depth-at-entry, imbalance, crowding, concurrency, turnover
+  tier, trailing book PnL, btc30 magnitude) showed no consistently-signed effect.
+  The spent window again declined to mint in-sample alpha; the leads now ride the
+  forward clocks where they can be judged for free.
+
 ## What To Keep In Repo
 
 Keep only:
