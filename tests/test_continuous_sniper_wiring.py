@@ -178,3 +178,43 @@ def test_reconcile_dry_run_retires_with_base() -> None:
         _trades_df(base_open=False), _orders_df([_resting_order_row(submitted=False)]),
         trading_client=None, demo=_cfg(submit_orders=False, confirm_demo_orders=False), now_ms=5)
     assert fills == [] and len(updates) == 1 and updates[0]["status"] == "cancelled"
+
+
+def test_reconcile_empty_history_leaves_snipe_unresolved() -> None:
+    """REGRESSION (audit 2026-06-11, empty-fetch-as-deletion class): an order absent
+    from a (possibly degraded/empty) get_open_orders snapshot with NO history row must
+    NOT be terminalized — terminal 'cancelled' is permanent (_sniper_order_state), so a
+    still-resting PostOnly order became an unmanaged ghost: never cancelled, and its
+    later fill produced no trade row. No evidence -> retry next cycle."""
+    client = FakeClient()
+    client.open_orders = []  # link missing from the snapshot
+    client.history = []      # ...and the venue has no history row yet (lag)
+    fills, updates, exits = reconcile_continuous_snipes(
+        _trades_df(base_open=True), _orders_df([_resting_order_row()]),
+        trading_client=client, demo=_cfg(), now_ms=1_700_000_300_000)
+    assert fills == [] and updates == [] and exits == []
+
+
+def test_reconcile_nonterminal_history_status_is_not_cancelled() -> None:
+    client = FakeClient()
+    client.open_orders = []
+    client.history = [{"orderLinkId": "lnk1", "symbol": "AAAUSDT", "cumExecQty": "0",
+                       "avgPrice": "0", "orderStatus": "New",
+                       "updatedTime": "1700000200000"}]
+    fills, updates, exits = reconcile_continuous_snipes(
+        _trades_df(base_open=True), _orders_df([_resting_order_row()]),
+        trading_client=client, demo=_cfg(), now_ms=1_700_000_300_000)
+    assert fills == [] and updates == []
+
+
+def test_reconcile_terminal_cancelled_history_terminalizes() -> None:
+    client = FakeClient()
+    client.open_orders = []
+    client.history = [{"orderLinkId": "lnk1", "symbol": "AAAUSDT", "cumExecQty": "0",
+                       "avgPrice": "0", "orderStatus": "Cancelled",
+                       "updatedTime": "1700000200000"}]
+    fills, updates, exits = reconcile_continuous_snipes(
+        _trades_df(base_open=True), _orders_df([_resting_order_row()]),
+        trading_client=client, demo=_cfg(), now_ms=1_700_000_300_000)
+    assert fills == []
+    assert any(u["status"] == "cancelled" for u in updates)

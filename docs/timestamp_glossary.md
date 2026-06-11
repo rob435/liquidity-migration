@@ -32,7 +32,7 @@ production the feature pipeline only surfaces candidates after bar close and
 feature computation; the stale gate budgets for that operational lag:
 `now - entry_ready_ts_ms > MAX_ENTRY_LAG_MINUTES` → reject as stale.
 
-  - Set by: the volume-events entry decision (short) / candidate builder (long).
+  - Set by: the sleeve's entry decision / candidate builder (the short engine's site was erased 2026-06-11).
   - Read by: stale-skip gate.
 
 ### `entry_ts_ms`

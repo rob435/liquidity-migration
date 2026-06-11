@@ -130,3 +130,97 @@ def test_missing_btc_price_is_surfaced_not_silent(monkeypatch, tmp_path, capsys)
     assert out["btc_price"] == 0.0
     assert out["plan"] is None
     assert out["status"] == "dry_run_btc_price_unavailable"
+
+
+# ---------------------------------------------------------------------------
+# Hedge ledger booking (audit 2026-06-11: armed BUYs double-booked through
+# ws_risk's pending-fill reconciler; reduce-only SELLs never touched the
+# trade rows, so the planner re-sold a phantom hedge daily)
+# ---------------------------------------------------------------------------
+
+
+def _open_hedge_row(trade_id: str, qty: float, entry_ts_ms: int) -> dict:
+    return {
+        "trade_id": trade_id, "strategy_id": "continuous_hedge_v1", "symbol": "BTCUSDT",
+        "side": "long", "sleeve": "continuous_addon", "status": "open",
+        "ts_ms": entry_ts_ms, "entry_ts_ms": entry_ts_ms, "opened_at_ms": entry_ts_ms,
+        "updated_at_ms": entry_ts_ms, "entry_price": 100_000.0, "qty": qty,
+        "notional_usdt": 100_000.0 * qty, "stop_price": 0.0, "take_profit_price": 0.0,
+        "planned_exit_ts_ms": 0,
+    }
+
+
+def test_hedge_reduce_books_against_open_trade_rows_oldest_first(monkeypatch, tmp_path) -> None:
+    ledger = pl.DataFrame([
+        _open_hedge_row("hedge-a", 0.3, 1_700_000_000_000),
+        _open_hedge_row("hedge-b", 0.4, 1_700_000_100_000),
+    ], infer_schema_length=None)
+    written: list[pl.DataFrame] = []
+    monkeypatch.setattr(hedge_runner, "read_dataset", lambda root, dataset: ledger)
+    monkeypatch.setattr(
+        hedge_runner, "write_dataset",
+        lambda df, root, dataset, **kw: written.append(df),
+    )
+    cfg = hedge_runner.ContinuousHedgeConfig()
+    hedge_runner._apply_hedge_reduce_to_trades(
+        tmp_path, cfg, symbol="BTCUSDT", sold_qty=0.5, exit_price=99_000.0,
+        now_ms=1_700_000_200_000,
+    )
+    assert len(written) == 1
+    rows = {r["trade_id"]: r for r in written[0].to_dicts()}
+    # oldest row fully consumed -> closed with the reduce exit stamp
+    assert rows["hedge-a"]["status"] == "closed"
+    assert rows["hedge-a"]["exit_reason"] == "hedge_reduce"
+    assert rows["hedge-a"]["exit_price"] == 99_000.0
+    # remainder (0.5 - 0.3 = 0.2) partially reduces the second row: 0.4 -> 0.2
+    assert rows["hedge-b"]["status"] == "open"
+    assert abs(rows["hedge-b"]["qty"] - 0.2) < 1e-9
+    assert rows["hedge-b"]["updated_at_ms"] == 1_700_000_200_000
+
+
+def test_hedge_reduce_with_no_open_rows_is_a_noop(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(hedge_runner, "read_dataset", lambda root, dataset: pl.DataFrame())
+    written: list[pl.DataFrame] = []
+    monkeypatch.setattr(
+        hedge_runner, "write_dataset",
+        lambda df, root, dataset, **kw: written.append(df),
+    )
+    hedge_runner._apply_hedge_reduce_to_trades(
+        tmp_path, hedge_runner.ContinuousHedgeConfig(), symbol="BTCUSDT",
+        sold_qty=0.5, exit_price=99_000.0, now_ms=1_700_000_200_000,
+    )
+    assert written == []
+
+
+def test_hedge_buy_order_row_is_terminal_for_ws_risk_reconciler() -> None:
+    """REGRESSION (audit 2026-06-11): the runner books the market fill itself, so its
+    order row must read status='filled' with filled_qty set — a 'submitted' row with
+    no filled_qty made ws_risk's pending-fill reconciler delta-add the FULL venue
+    fill onto the runner-booked trade row (qty doubled on every armed BUY)."""
+    from liquidity_migration.event_demo import EventDemoCycleConfig
+    from liquidity_migration.event_demo_exits import _reconcile_pending_order_fills
+    import sys as _sys
+    _sys.path.insert(0, "tests")
+    from _event_demo_fixtures import FakeRiskClient
+
+    now = 1_700_000_000_000
+    order_row = {
+        "order_link_id": "lm-en-ca-BTC-t72ncw", "ts_ms": now,
+        "trade_id": "hedge-lm-en-ca-BTC-t72ncw", "strategy_id": "continuous_hedge_v1",
+        "symbol": "BTCUSDT", "side": "Buy", "order_type": "Market", "qty": 0.5,
+        "reduce_only": False, "order_id": "oid-1", "submit_mode": "submitted",
+        "status": "filled", "filled_qty": 0.5, "target_qty": 0.5,
+        "trade_side": "long", "sleeve": "continuous_addon",
+        "notional_usdt": 50_000.0, "reason": "hedge_add", "updated_at_ms": now,
+    }
+    trade_row = _open_hedge_row("hedge-lm-en-ca-BTC-t72ncw", 0.5, now)
+    trades, order_updates = _reconcile_pending_order_fills(
+        pl.DataFrame([order_row], infer_schema_length=None),
+        pl.DataFrame([trade_row], infer_schema_length=None),
+        trading_client=FakeRiskClient(fill_market_orders=True, fill_order_prefixes=("lm-en-",)),
+        demo=EventDemoCycleConfig(submit_orders=True, confirm_demo_orders=True),
+        now_ms=now + 120_000,
+    )
+    # terminal order row -> the reconciler must not touch the runner-booked trade
+    assert trades == []
+    assert order_updates == []

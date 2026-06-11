@@ -1,9 +1,7 @@
-"""Extracted from volume_events.py — see that module's docstring.
-
-A cohesive slice of volume_events, split out to keep the hub readable.
-Imports shared helpers from volume_events (the hub); the hub re-imports
-this module's public names at the bottom so external callers
-(`from liquidity_migration.volume_events import X`) keep working.
+"""Shared chart writers. Originally a slice of the volume_events hub (the daily
+SHORT engine, ERASED 2026-06-11 by operator order — `from
+liquidity_migration.volume_events import X` no longer works); this module
+survives standalone, consumed by the long/continuous report paths.
 """
 
 from __future__ import annotations

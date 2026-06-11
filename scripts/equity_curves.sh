@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# One command → the promoted-profile equity curve for both promoted sleeves.
+# One command → the promoted-profile equity curve (LONG is the only promoted sleeve
+# since the 2026-06-11 short-sleeve erasure).
 #
-#   bash scripts/equity_curves.sh                 # both promoted sleeves, last 3 years
-#   bash scripts/equity_curves.sh --sleeves short # one sleeve
+#   bash scripts/equity_curves.sh                 # the promoted LONG sleeve, last 3 years
+#   bash scripts/equity_curves.sh --sleeves long  # explicit (long is the only promoted sleeve)
 #   bash scripts/equity_curves.sh --years 2       # shorter window (lighter on RAM)
 #   bash scripts/equity_curves.sh --help          # all options
 #

@@ -200,12 +200,17 @@ def _run_binance(writer: JsonlDayWriter, stop: threading.Event) -> None:
             time.sleep(10)
 
 
-def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+def build_arg_parser() -> argparse.ArgumentParser:
+    # Exposed for the unit↔argparse parity test (unit ExecStart args must parse).
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="data/liquidations")
     ap.add_argument("--venues", default="bybit,binance")
-    args = ap.parse_args()
+    return ap
+
+
+def main() -> int:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    args = build_arg_parser().parse_args()
     writer = JsonlDayWriter(Path(args.root))
     stop = threading.Event()
     threads = []

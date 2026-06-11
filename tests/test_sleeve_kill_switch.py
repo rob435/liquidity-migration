@@ -109,18 +109,33 @@ def test_loaded_toggles_continuous_on_long_off(tmp_path: Path) -> None:
 
 
 def test_lib_fallback_defaults_continuous_demo_off_papers_on(tmp_path: Path) -> None:
-    # Last-resort fallback (NEITHER sleeves.env present): SHORT/SHORT_PAPER/LONG default on (a
-    # stripped checkout keeps the historical demo+paper pair), CONTINUOUS OFF — even a stripped
-    # checkout can never resurrect the look-ahead-disabled sleeve. The committed sleeves.env, NOT
-    # this fallback, is the real source of truth (it may turn SHORT_PAPER/LONG off for a small host).
-    rc, _calls, err = _run(tmp_path, """
-        : "${SHORT_SLEEVE:=on}"; : "${SHORT_PAPER_SLEEVE:=on}"; : "${LONG_SLEEVE:=on}"; : "${CONTINUOUS_SLEEVE:=off}"; : "${CONTINUOUS_PAPER_SLEEVE:=on}"
-        test "$SHORT_SLEEVE" = on && test "$SHORT_PAPER_SLEEVE" = on \
-            && test "$LONG_SLEEVE" = on && test "$CONTINUOUS_SLEEVE" = off \
-            && test "$CONTINUOUS_PAPER_SLEEVE" = on
+    """Last-resort fallback (NEITHER sleeves.env present — a stripped checkout):
+    LONG defaults on, CONTINUOUS OFF (a missing config can never resurrect a
+    disabled order-submitting sleeve), CONTINUOUS_PAPER on. Exercises the lib's
+    ACTUAL lm_load_sleeve_toggles against a copy with no sleeves.env beside it —
+    the previous version of this test set the defaults itself inside the snippet
+    and asserted its own assignments (vacuous; audit 2026-06-11), while still
+    pinning SHORT toggles that were erased from the system."""
+    import pytest
+
+    if Path("/etc/liquidity-migration/sleeves.env").exists():
+        pytest.skip("host sleeves.env override present — fallback path untestable here")
+    lib_dir = tmp_path / "lib"
+    lib_dir.mkdir()
+    (lib_dir / "lib_sleeves.sh").write_text((REPO / "deploy" / "lib_sleeves.sh").read_text())
+    script = textwrap.dedent(f"""
+        set -euo pipefail
+        unset LONG_SLEEVE CONTINUOUS_SLEEVE CONTINUOUS_PAPER_SLEEVE 2>/dev/null || true
+        . "{lib_dir}/lib_sleeves.sh"
+        lm_load_sleeve_toggles
+        test "$LONG_SLEEVE" = on
+        test "$CONTINUOUS_SLEEVE" = off
+        test "$CONTINUOUS_PAPER_SLEEVE" = on
         echo "FALLBACK_OK"
     """)
-    assert rc == 0, err
+    proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    assert "FALLBACK_OK" in proc.stdout
 
 
 def test_committed_sleeves_env_continuous_only() -> None:

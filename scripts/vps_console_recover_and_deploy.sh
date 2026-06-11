@@ -173,24 +173,25 @@ PYTHON=.venv/bin/python
 
 "$PYTHON" -m pytest \
   tests/test_runtime_scripts.py \
-  tests/test_liquidity_migration_cli.py::test_cli_volume_events_defaults_to_selected_liquidity_migration \
-  tests/test_liquidity_migration_event_demo.py::test_demo_relaxed_profile_lowers_gates_for_more_demo_trades
+  tests/test_promoted_profiles.py
 
 "$PYTHON" - <<'PY'
-from liquidity_migration.event_demo import _demo_event_config, _demo_strategy_id
-from liquidity_migration.volume_events import VolumeEventResearchConfig
+# The daily-short sleeve was ERASED 2026-06-11 (operator order). Pin the surviving
+# deployed configs — identical to the strategy-settings gate in deploy_vps_live.sh.
+from liquidity_migration.long_native_event_demo import _v11a_long_native_config
 
-promoted = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
-demo = _demo_event_config(VolumeEventResearchConfig(), profile="demo_relaxed")
+long_cfg = _v11a_long_native_config()
+assert long_cfg.universe_size == 50
+assert long_cfg.max_concurrent_positions == 10
+assert long_cfg.cooldown_days == 7
+assert long_cfg.weekend_size_mult == 1.5
 
-assert _demo_strategy_id("promoted") == "liqmig_union_q40_h3_tp26_g100_qsqueeze"
-assert _demo_strategy_id("demo_relaxed") == "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6"
-assert promoted.take_profit_pcts == (0.26,)
-assert demo.take_profit_pcts == (0.21,)
-assert demo.failed_fade_exit_hours == 6
-assert demo.failed_fade_min_mfe_pct == 0.01
-assert demo.failed_fade_loss_pct == 0.04
-assert demo.failed_fade_close_location_min == 0.0
+from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig
+cont = ContinuousDemoCycleConfig()
+assert cont.rmom_quantile == 0.33, cont.rmom_quantile
+assert cont.entry_pause_after_adverse_exits == 8, cont.entry_pause_after_adverse_exits
+assert cont.entry_pause_window_minutes == 1440, cont.entry_pause_window_minutes
+assert cont.stop_loss_pct == 0.25, cont.stop_loss_pct
 print("strategy-settings-ok")
 PY
 
@@ -242,9 +243,9 @@ apply_sleeve_enable "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 apply_sleeve_enable "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
 # Timers must be enable --now: enable alone writes the symlink but doesn't
-# start the timer, so the demo-health/liveness watchdogs + daily combined-book
-# report would sit dormant on a freshly-recovered VPS.
-systemctl enable --now liquidity-migration-demo-health.timer
+# start the timer, so the liveness watchdog + daily combined-book report would
+# sit dormant on a freshly-recovered VPS. (The demo-health watchdog was erased
+# with the short sleeve 2026-06-11 and is removed from the host above.)
 systemctl enable --now liquidity-migration-demo-liveness.timer
 systemctl enable --now liquidity-migration-combined-book-report.timer
 # The continuous rmom-refresh timer is required if either continuous demo or
@@ -255,6 +256,14 @@ else
   apply_timer_enable off $CONTINUOUS_SLEEVE_TIMERS $CONTINUOUS_FORWARD_REPORT_TIMERS
 fi
 apply_timer_enable "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS
+# Seed the continuous rmom gate BEFORE restarting the continuous daemon — same fix as
+# deploy_vps_live.sh (the 2026-06-02 empty-gate blackout: a daemon started into an
+# empty gate emits zero entries silently). Best-effort: a first boot with the kline
+# store still bootstrapping yields no rows — the 00:20 timer + rmom watchdog cover it.
+if continuous_rmom_refresh_on; then
+  systemctl start liquidity-migration-continuous-rmom-refresh.service \
+    || echo "WARN: rmom seed failed; the daily timer + rmom watchdog will cover it." >&2
+fi
 # Restart: risk ALWAYS + FIRST (the shared multi-sleeve tracker reading every *_DATA_ROOT
 # must be up before any sleeve restarts); then only the ON sleeves (off ones were
 # disable --now'd above).
@@ -281,19 +290,12 @@ else
 fi
 verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS
 # Timer parity — recovery must catch a missed enable just like deploy does.
-systemctl is-enabled --quiet liquidity-migration-demo-health.timer
+# (demo-health was erased with the short sleeve 2026-06-11 — don't check it.)
 systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer
 systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer
-systemctl is-active --quiet liquidity-migration-demo-health.timer
 systemctl is-active --quiet liquidity-migration-demo-liveness.timer
 systemctl is-active --quiet liquidity-migration-combined-book-report.timer
 
-systemctl show liquidity-migration-bybit-demo.service \
-  --property=ActiveState \
-  --property=SubState \
-  --property=MainPID \
-  --property=ExecMainStatus \
-  --no-pager
 systemctl show liquidity-migration-bybit-risk.service \
   --property=ActiveState \
   --property=SubState \

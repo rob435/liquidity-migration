@@ -1813,6 +1813,13 @@ def _execute_single_long_entry(
         "entry_stop_update_error": protection_update_error,
         "error": error,
         "sleeve": "long",
+        # filled_qty/target_qty: ws_risk's pending-fill reconciler delta-adds
+        # (venue cumulative − filled_qty); without filled_qty a "partial" entry's
+        # already-booked leg double-added on the next reconcile (audit 2026-06-11).
+        # target_qty is the SUBMITTED qty — the row's "qty" is already the filled
+        # amount on a partial, which made fully_filled misread the order as done.
+        "filled_qty": entry_qty,
+        "target_qty": qty,
     }
     return trade_row, order_row
 
@@ -1876,11 +1883,14 @@ def _preflight_long_entry_order_row(
 def _maybe_long_notify(payload: dict[str, Any], *, enabled: bool) -> tuple[bool, str]:
     if not enabled:
         return False, "disabled"
-    reason = _long_telegram_reason(payload)
-    if not reason:
-        return False, "quiet_no_material_event"
-    text = format_long_telegram_status_message(payload, reason=reason)
     try:
+        # Reason + formatter INSIDE the try: the formatter does direct subscripts on the
+        # cycle payload, and a malformed payload must degrade to a reported error — never
+        # propagate into the cycle after orders have executed (EVE-2 pattern).
+        reason = _long_telegram_reason(payload)
+        if not reason:
+            return False, "quiet_no_material_event"
+        text = format_long_telegram_status_message(payload, reason=reason)
         sent = send_telegram_message(text, enabled=True)
     except Exception as exc:  # noqa: BLE001
         return False, str(exc)[:500]
@@ -2040,9 +2050,14 @@ def format_combined_book_summary(
             continuous_cycles,
             now_ms=now_ms,
         ),
-        _format_book_line("Short", _state_label(states.get("SHORT_SLEEVE"), default="on"), short, None, now_ms=now_ms),
+        # The daily SHORT sleeve was ERASED 2026-06-11 (no toggle remains) — its
+        # legacy ledger is shown for residual-position wind-down only, never as ON.
+        _format_book_line("Short (erased)", _state_label(states.get("SHORT_SLEEVE"), default="off"), short, None, now_ms=now_ms),
         _format_book_line("Long", _state_label(states.get("LONG_SLEEVE"), default="on"), long, None, now_ms=now_ms),
-        _format_book_line("BTC hedge", "DRY-RUN", hedge, None, now_ms=now_ms),
+        # The hedge timer rides the continuous toggle (deploy: apply_timer_enable
+        # "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS). Never hardcode a mode label:
+        # "DRY-RUN" misstated the SUBMIT_HEDGE=1-armed hedge (operator-armed 2026-06-10).
+        _format_book_line("BTC hedge", _state_label(states.get("CONTINUOUS_SLEEVE"), default="off"), hedge, None, now_ms=now_ms),
         "",
         "Evidence collectors",
         _format_book_line(

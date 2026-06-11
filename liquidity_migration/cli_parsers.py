@@ -580,7 +580,7 @@ def _add_long_native_event_demo_cycle_parser(subparsers) -> None:
     )
     long_demo.add_argument(
         "--daemon", action="store_true",
-        help="Long-running daemon mode mirroring event_demo_daemon: WS execution router + REST fallback.",
+        help="Long-running daemon mode: WS execution router + REST fallback.",
     )
     long_demo.add_argument("--interval-seconds", type=float, default=60.0,
                            help="Seconds between cycles in --daemon mode.")

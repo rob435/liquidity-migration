@@ -610,6 +610,10 @@ def main(argv: list[str] | None = None) -> int:
             adopt_stop_loss_pct=args.adopt_stop_loss_pct,
             adopt_take_profit_pct=args.adopt_take_profit_pct,
             adopt_hold_days=args.adopt_hold_days,
+            # Legacy escape hatch (short sleeve erased 2026-06-11): the config field
+            # documents "set explicitly to adopt old short rows" — env passthrough is
+            # that setting (it was otherwise unreachable without a code edit).
+            adopt_short_strategy_id=os.environ.get("ADOPT_SHORT_STRATEGY_ID", ""),
             data_name=args.data_name,
             long_data_root=args.long_data_root,
             long_trades_dataset=args.long_trades_dataset,
@@ -660,7 +664,9 @@ def main(argv: list[str] | None = None) -> int:
             bybit_position_summary=bybit_position_summary,
             bybit_positions=bybit_positions,
             sleeve_states={
-                "SHORT_SLEEVE": os.environ.get("SHORT_SLEEVE", "on"),
+                # SHORT was ERASED 2026-06-11 — no toggle exists, so the unset default
+                # must be "off" (an "on" default rendered the erased sleeve live forever).
+                "SHORT_SLEEVE": os.environ.get("SHORT_SLEEVE", "off"),
                 "LONG_SLEEVE": os.environ.get("LONG_SLEEVE", "on"),
                 "CONTINUOUS_SLEEVE": os.environ.get("CONTINUOUS_SLEEVE", "off"),
                 "CONTINUOUS_PAPER_SLEEVE": os.environ.get("CONTINUOUS_PAPER_SLEEVE", "on"),

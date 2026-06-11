@@ -40,10 +40,15 @@ and `graphify-out/GRAPH_REPORT.md`.
 
 - `cli.py` — argparse entry point for `python -m liquidity_migration` (run
   `--help` for the subcommand list).
-- `volume_events.py` — the active event-driven **short** strategy (full-PIT gates,
-  ledger, reports); `volume_features.py` builds its features.
-- `event_demo.py` / `event_demo_daemon.py` / `ws_risk.py` — the live demo
-  forward-cycle runner + websocket-first risk watchdog (REST fallback).
+- `continuous_demo.py` / `continuous_demo_daemon.py` / `continuous_events.py` —
+  the LIVE continuous-fade system (the demo book; sub-hourly ticker-driven).
+  (The daily SHORT engine — `volume_events.py` + `event_demo_daemon.py` — was
+  ERASED 2026-06-11 by operator order; git history is the archive.)
+- `event_demo.py` / `event_demo_exits.py` / `ws_risk.py` — shared live-execution
+  helpers + the websocket-first risk watchdog (REST fallback; always-on).
+- `trade_lifecycle.py` / `_common.py` / `momentum_signals.py` — the shared
+  simulate stack, date/frame utils, and the rmom builder (relocated from the
+  erased hub).
 - `long_native.py` — the long-native v11a sleeve (the `equity-curve` skill drives it).
 - `kline_store.py` / `kline_stream_manager.py` / `ws_state_cache.py` — the
   WS-driven event runtime.

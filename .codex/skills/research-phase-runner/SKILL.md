@@ -55,8 +55,8 @@ surface — uncapped. MAR-primary (pooled), Sharpe secondary.
 2. **Plan the arms/cells.** Re-read the experiment's section in the plan. Do NOT add
    off-menu cells without a dated amendment (a new pre-registration receipt) first.
 
-3. **Dispatch.** Single cells: `scripts/volume_events_cell.sh` (fills the
-   production-baseline flags; you pass overrides). Multi-cell sweeps: write a
+3. **Dispatch.** (`volume_events_cell.sh` was erased with the short engine —
+   single-cell runs now go through a dispatcher too.) Sweeps: write a
    `scripts/_sweep_runtime.py`-based dispatcher for the experiment (the old R-phase
    dispatchers were deleted — `_sweep_runtime.py` is the reusable primitive: a
    dispatcher declares `BASELINE_PARAMS` + a list of `Cell`s and imports it).

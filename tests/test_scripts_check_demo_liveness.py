@@ -91,16 +91,6 @@ def test_ws_staleness_threshold() -> None:
     assert stale is not None and stale.severity == M.WARNING
 
 
-def test_exchange_errors_surface_recent() -> None:
-    recent = [
-        {"position_report_error": "", "pending_order_fill_errors": 0},
-        {"position_report_error": "wallet unavailable", "pending_order_fill_errors": 2},
-    ]
-    alerts = {a.key: a for a in M.evaluate_exchange_errors(recent=recent, label="demo")}
-    assert "exch_pos_err:demo" in alerts
-    assert "exch_fill_err:demo" in alerts
-
-
 def test_cooldown_sends_new_suppresses_persisting_then_reresends_and_resolves() -> None:
     now = 1_000 * HOUR
     a = M.Alert(key="liveness:demo", severity=M.CRITICAL, message="down")

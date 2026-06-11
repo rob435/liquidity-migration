@@ -35,6 +35,9 @@ on:
       - "scripts/run_continuous_hedge.sh"
       - "scripts/run_continuous_hedge.py"
       - "scripts/check_demo_liveness.py"
+      - "scripts/run_continuous_rmom_refresh.sh"
+      - "scripts/precompute_residual_momentum.py"
+      - "scripts/continuous_forward_report.py"
       # The checked deploy runs this smoke-test subset on the VPS before it
       # restarts services. Test-only fixes to that gate must trigger a redeploy.
       - "tests/test_runtime_scripts.py"

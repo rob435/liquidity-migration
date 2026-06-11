@@ -637,22 +637,6 @@ def _empty_baskets() -> pl.DataFrame:
     )
 
 
-def _exit_reason_rows(trades: pl.DataFrame) -> list[dict[str, Any]]:
-    if trades.is_empty():
-        return []
-    return (
-        trades.group_by("exit_reason")
-        .agg(
-            [
-                pl.len().alias("trades"),
-                pl.col("net_return").sum().alias("net_return"),
-                pl.col("net_return").mean().alias("avg_trade_return"),
-            ]
-        )
-        .sort("net_return", descending=True)
-        .to_dicts()
-    )
-
 # --- shared indexed-bar simulation core (relocated from volume_events.py when the
 # daily-short research engine was erased, operator order 2026-06-11; used by the
 # continuous engine and any future event-trade simulation) ---

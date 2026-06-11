@@ -545,30 +545,33 @@ def test_vps_deploy_script_verifies_promoted_live_settings() -> None:
 
 
 def test_vps_deploy_script_pytest_nodeids_still_collect() -> None:
-    """The deploy script runs a pinned pytest subset as a pre-restart smoke test.
-    Because it `set -euo pipefail`s, a stale node-id (e.g. a test moved by a
-    test-file split) makes pytest exit non-zero and aborts the deploy. The
-    existing string-presence test can't catch a moved path, so verify every
-    `tests/...` node-id the script references actually collects."""
+    """The deploy + disaster-recovery scripts run pinned pytest subsets as
+    pre-restart smoke tests. Because they `set -euo pipefail`, a stale node-id
+    (e.g. a test moved by a test-file split, or deleted in a purge) makes pytest
+    exit non-zero and aborts the deploy/recovery. String-presence tests can't
+    catch a moved path, so verify every `tests/...` node-id BOTH scripts
+    reference actually collects. (The 2026-06-11 short-sleeve erasure left the
+    recovery script pinning two deleted node-ids; only deploy was scanned then.)"""
     import re
     import subprocess
     import sys
 
     repo = Path(__file__).resolve().parents[1]
-    text = (repo / "scripts" / "deploy_vps_live.sh").read_text(encoding="utf-8")
-    nodeids = re.findall(r"tests/[^\s\\]+\.py(?:::\w+)?", text)
-    assert nodeids, "expected deploy_vps_live.sh to pin a pytest smoke subset"
-    for nodeid in nodeids:
-        proc = subprocess.run(
-            [sys.executable, "-m", "pytest", "--collect-only", "-q", nodeid],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-        )
-        assert proc.returncode == 0 and "no tests ran" not in proc.stdout.lower(), (
-            f"deploy smoke-test node-id no longer collects: {nodeid}\n"
-            f"{proc.stdout}\n{proc.stderr}"
-        )
+    for script in ("deploy_vps_live.sh", "vps_console_recover_and_deploy.sh"):
+        text = (repo / "scripts" / script).read_text(encoding="utf-8")
+        nodeids = re.findall(r"tests/[^\s\\]+\.py(?:::\w+)?", text)
+        assert nodeids, f"expected {script} to pin a pytest smoke subset"
+        for nodeid in nodeids:
+            proc = subprocess.run(
+                [sys.executable, "-m", "pytest", "--collect-only", "-q", nodeid],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+            )
+            assert proc.returncode == 0 and "no tests ran" not in proc.stdout.lower(), (
+                f"{script} smoke-test node-id no longer collects: {nodeid}\n"
+                f"{proc.stdout}\n{proc.stderr}"
+            )
 
 
 def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
@@ -579,8 +582,12 @@ def test_vps_verify_script_is_read_only_and_checks_live_state() -> None:
     assert "systemctl restart" not in text
     # 2026-06-09 audit: retired-unit (model050426) checks removed — fresh 2026-06-04 box.
     assert "model050426" not in text
-    assert "liqmig_union_q40_h3_tp26_g100_qsqueeze" in text
-    assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text
+    # 2026-06-11 erasure: verify must pin the SURVIVING configs and must NOT import
+    # the erased short engine — a dead import made every verify invocation fail.
+    assert "liquidity_migration.volume_events" not in text
+    assert "_demo_event_config" not in text
+    assert "_v11a_long_native_config" in text
+    assert "ContinuousDemoCycleConfig" in text
     assert "TELEGRAM_CHAT_ID" in text
     assert "SYSTEMD_SETTLE_SECONDS" in text
     assert "Environment=ORDER_SUBMIT_MODE=ws_then_rest" in text
@@ -843,8 +850,11 @@ def test_vps_console_recovery_script_restores_key_and_deploys() -> None:
     assert "http.https://github.com/.extraheader" in text
     assert 'git checkout -B "$BRANCH" "$REMOTE/$BRANCH"' in text
     assert "pip install -e \".[dev]\"" in text
-    assert "liqmig_union_q40_h3_tp26_g100_qsqueeze" in text
-    assert "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6" in text
+    # 2026-06-11 erasure: recovery pins the SURVIVING configs, never the erased engine.
+    assert "liquidity_migration.volume_events" not in text
+    assert "_demo_event_config" not in text
+    assert "_v11a_long_native_config" in text
+    assert "ContinuousDemoCycleConfig" in text
     lib = (repo / "deploy" / "lib_sleeves.sh").read_text(encoding="utf-8")
     assert "apply_timer_enable" in text
     assert "systemctl disable --now" in lib
@@ -981,3 +991,84 @@ def test_reset_demo_paper_ledgers_covers_continuous_sleeve(tmp_path: Path) -> No
     assert real.returncode == 0, real.stderr
     assert not cont.exists(), "continuous trade ledger must be wiped"
     assert cont_klines.exists(), "continuous WS kline store must be preserved"
+
+
+def test_unit_execstart_args_parse_against_their_script_parsers() -> None:
+    """THE class-test for the 2026-06-11 demo-liveness crash-loop: the unit kept
+    passing --data-root after the purge dropped that argparse argument, every
+    string-presence unit test stayed green, and only the VPS journal noticed the
+    watchdog dying every 3 minutes. For every unit whose ExecStart invokes a repo
+    python script or module with flags, parse the unit's actual argv against the
+    target's actual parser — argv↔argparse drift fails HERE, not on the box.
+    (run_*.sh wrapper units are env-driven, not argv-driven — out of scope.)"""
+    import shlex
+
+    repo = Path(__file__).resolve().parents[1]
+
+    def _execstart_tokens(unit_text: str) -> list[str]:
+        lines = unit_text.splitlines()
+        for i, line in enumerate(lines):
+            if line.startswith("ExecStart="):
+                block = [line[len("ExecStart="):]]
+                while block[-1].rstrip().endswith("\\"):
+                    block[-1] = block[-1].rstrip()[:-1]
+                    i += 1
+                    block.append(lines[i])
+                return shlex.split(" ".join(block))
+        return []
+
+    import importlib.util
+    import sys as _sys
+
+    def _script_parser(script: str):
+        spec = importlib.util.spec_from_file_location(f"_parity_{Path(script).stem}", repo / script)
+        module = importlib.util.module_from_spec(spec)
+        _sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    checked = 0
+    for unit_path in sorted((repo / "deploy" / "systemd").glob("*.service")):
+        tokens = _execstart_tokens(unit_path.read_text(encoding="utf-8"))
+        assert tokens, f"{unit_path.name}: no ExecStart found"
+        # locate the target: a scripts/*.py path, a -m module, or a wrapper (skip)
+        argv: list[str] | None = None
+        parse = None
+        for idx, tok in enumerate(tokens):
+            if tok.endswith(".sh"):
+                break  # env-driven wrapper
+            if tok.endswith(".py"):
+                script_rel = tok.removeprefix("/opt/liquidity-migration/")
+                mod = _script_parser(script_rel)
+                argv = tokens[idx + 1:]
+
+                def parse(a, m=mod):
+                    fn = m.build_arg_parser().parse_args if hasattr(m, "build_arg_parser") else m.parse_args
+                    return fn(a)
+                break
+            if tok == "-m":
+                target = tokens[idx + 1]
+                argv = tokens[idx + 2:]
+                if target == "liquidity_migration":
+                    from liquidity_migration.cli import build_parser
+
+                    def parse(a, _build=build_parser):
+                        return _build().parse_args(a)
+                else:
+                    module = __import__(target, fromlist=["build_arg_parser"])
+
+                    def parse(a, m=module):
+                        return m.build_arg_parser().parse_args(a)
+                break
+        if parse is None or argv is None:
+            continue
+        try:
+            parse(argv)
+        except SystemExit as exc:
+            raise AssertionError(
+                f"{unit_path.name}: ExecStart args do not parse against the target's "
+                f"argparse (exit {exc.code}): {argv}"
+            ) from exc
+        checked += 1
+    # the units this test exists for must actually be covered
+    assert checked >= 4, f"expected at least 4 argv-driven units, checked {checked}"

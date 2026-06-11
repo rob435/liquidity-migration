@@ -19,7 +19,7 @@ and execution model. Anything else is a bug report, not alpha.
 
 ## Use this skill when
 
-- About to run or design a `volume-events` / any backtest.
+- About to run or design any backtest.
 - Interpreting a research report or judging whether a result is trustworthy.
 - Tempted to call a result "edge", "candidate", or "promotion evidence".
 - Changing strategy gates, features, data ingestion, or fill/cost logic.
@@ -102,10 +102,10 @@ If any answer is weak, the backtest is not ready to influence real-money work.
   signal under research, the decision timestamp is the rolling bar-close and the entry
   delay may be 0 *only because the feature is already a causal trailing window*
   (research-gated) — never relax the delay for the daily profile.
-- Run the `volume-events` backtest via `scripts/volume_events_cell.sh` (it fills
-  the ~30 baseline flags) — do not hand-assemble them. The Tier-2 verdict comes
-  from `scripts/r1_robustness.py`; the legacy strict Sharpe bar from
-  `scripts/apply_decision_rule.py`. `volume-events` requires full PIT by default;
+- Run sweeps via a `scripts/_sweep_runtime.py`-based dispatcher — do not
+  hand-assemble engine flags. The Tier-2 verdict comes from
+  `scripts/r1_robustness.py`; the legacy strict Sharpe bar from
+  `scripts/apply_decision_rule.py`. Every engine requires full PIT by default;
   `--allow-partial-pit` is for explicitly biased diagnostics only, labelled biased.
 - Funding is a known gap on roots without a funding dataset — mark such runs
   fee/slippage stressed but funding-missing.

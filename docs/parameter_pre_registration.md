@@ -14,8 +14,8 @@ recover that value from.
 ## When pre-reg is mandatory
 
 - Any new parameter sweep over the v11a long-only sleeve.
-- Any change to a `volume-events` knob with an effect on per-venue backtest
-  numbers.
+- Any change to a sleeve-engine knob (long-native, continuous) with an effect
+  on per-venue backtest numbers.
 - Any addition or alteration of a pattern (FOMO_CHASE / CAPITULATION_REBOUND /
   etc.) that touches per-venue backtest numbers.
 - Any change to cost / funding / slippage assumptions.

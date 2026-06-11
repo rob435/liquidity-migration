@@ -36,7 +36,6 @@ money.
   open methodology debts, decision rules). All per-arc docs/scripts fold in here.
 - `docs/backtesting_errors_we_never_repeat.md` — research methodology standard.
 - `docs/data_roots.md` — data-root contract (research / live demo / OOS).
-- `docs/event_demo_daemon.md` — demo forward-cycle daemon runbook + infra-hardening changelog.
 - `.claude/` — Claude Code skills and an MCP server for working in this repo.
 - `AGENTS.md` — repo rules.
 

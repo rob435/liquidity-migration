@@ -1,5 +1,12 @@
 # The PIT membership gate (and how to never break the reconcile again)
 
+> **2026-06-11:** the daily SHORT sleeve was ERASED from the system by operator
+> order — the short engine, its CLI reconcile commands, and the short ledgers'
+> live writers no longer exist. The PIT gate itself survives (it is generic);
+> everything below that mentions the short sleeve is HISTORICAL. The current
+> reconcile default is the LONG sleeve (`--sleeves long`), with continuous as
+> opt-in diagnostics.
+
 This is the operator + maintainer reference for the point-in-time (PIT) universe
 membership gate — the thing that decides whether a backtest signal is allowed to
 trade, and the thing that broke the backtest↔paper reconciliation on 2026-05-30.
@@ -92,13 +99,13 @@ strict.
 ## The one-command workflow
 
 `scripts/reconcile.sh` (driver: `scripts/reconcile.py`) is self-provisioning and
-reconciles the promoted sleeves by default (short, long). Continuous is opt-in
-diagnostics only via `--sleeves continuous`. In order:
+reconciles the promoted LONG sleeve by default (`--sleeves long`). Continuous is
+opt-in diagnostics only via `--sleeves continuous`. In order:
 
 1. **pull** — rsync every selected sleeve's demo + paper ledgers from the VPS
-   (short `event_demo_*`, long `long_native_{demo,paper}_*`; when explicitly
-   selected, continuous `continuous_fade_{demo,paper}_*` + the continuous rmom
-   panel + WS kline store), read-only.
+   (long `long_native_{demo,paper}_*`; when explicitly selected, continuous
+   `continuous_fade_{demo,paper}_*` + the continuous rmom panel + WS kline
+   store), read-only.
 2. **manifest** — refresh `archive_trade_manifest` to `today+2` on the research root.
 3. **kline-fill** — if `klines_1h` is behind today, auto-download the missing recent
    klines via `archive-download-klines-1h-api` (manifest-gated). This closes the
@@ -108,19 +115,20 @@ diagnostics only via `--sleeves continuous`. In order:
    (the continuous gate) on the research root. Skip with `--no-rmom`.
 5. **coverage** — print the PIT coverage table; abort the strict backtest if the
    manifest can't validate the latest signal day (override: `--diagnostic` / `--force`).
-6. **backtest** — run the promoted `volume-events` profile over a **minimal** forward
+6. **backtest** — run the promoted LONG profile over a **minimal** forward
    window: `[earliest forward-ledger signal − ~45d warm-up, today+1]`, not a fixed
    150-day slab. The `backtest_paper` reconcile auto-windows the *comparison* to the
    paper ledger's first signal, so warm-up trades never become false `backtest-only`
    rows; the 45d warm-up covers the deepest kline lookback (30d features + 5d cooldown
    + 3d hold) and the 300d age gate is **manifest-derived**, so it needs no extra
    klines. `--full-window` restores the 150d slab; `--warmup-days N` overrides.
-7. **reconcile** — per sleeve: SHORT `reconcile-all` (backtest↔paper↔demo,
-   `+--with-bybit`), LONG `reconcile-long-paper-demo`, and, only when selected,
-   CONTINUOUS `continuous-forward-readiness --paper-only` + a signal-consistency replay.
+7. **reconcile** — per sleeve: LONG `reconcile-long-paper-demo`, and, only when
+   selected, CONTINUOUS `continuous-forward-readiness --paper-only` + a
+   signal-consistency replay. (The SHORT `reconcile-all` path was erased with
+   the sleeve, 2026-06-11.)
 8. **summary** — one consolidated headline across selected sleeves.
 
-Common flags: `--sleeves short,long,continuous`, `--dry-run`, `--no-pull`,
+Common flags: `--sleeves long,continuous`, `--dry-run`, `--no-pull`,
 `--no-manifest`, `--no-kline-fill`, `--no-rmom`, `--no-backtest`, `--full-window`,
 `--warmup-days N`, `--diagnostic`, `--with-bybit`, `--force`. The matching skill is
 `.codex/skills/pit-reconcile`.

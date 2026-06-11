@@ -2110,3 +2110,85 @@ def test_circuit_breaker_counts_fee_negative_covers_as_adverse() -> None:
         "net_return": 0.05, "entry_fee_usdt": 2.0, "exit_fee_usdt": 2.0, "equity_usdt": 10_000.0,
     }], infer_schema_length=None)
     assert entry_circuit_breaker_tripped(benign, now_ms=now, config=cfg, strategy_id=strat)[1] == 0
+
+
+# ---------------------------------------------------------------------------
+# Per-cycle telegram (added 2026-06-11 — the live sleeve previously sent NOTHING
+# despite TELEGRAM_ENABLED=1 in its unit; only ws_risk's exit alerts fired)
+# ---------------------------------------------------------------------------
+
+
+def test_continuous_telegram_quiet_cycle_sends_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    import liquidity_migration.continuous_demo as cd
+
+    sent: list[str] = []
+    monkeypatch.setattr(
+        "liquidity_migration.telegram.send_telegram_message",
+        lambda text, enabled=True: sent.append(text) or True,
+    )
+    payload = {"entries": 0, "exits": 0, "mode": "submit", "equity_usdt": 10_000.0}
+    ok, why = cd._maybe_continuous_notify(payload, [], [], enabled=True)
+    assert not ok and why == "quiet_no_material_event"
+    assert sent == []
+    # disabled flag short-circuits before any work
+    ok, why = cd._maybe_continuous_notify(payload, [], [], enabled=False)
+    assert not ok and why == "disabled"
+
+
+def test_continuous_telegram_entry_and_error_reasons(monkeypatch: pytest.MonkeyPatch) -> None:
+    import liquidity_migration.continuous_demo as cd
+
+    sent: list[str] = []
+    monkeypatch.setattr(
+        "liquidity_migration.telegram.send_telegram_message",
+        lambda text, enabled=True: sent.append(text) or True,
+    )
+    entry = {"symbol": "AAAUSDT", "qty": 5.0, "entry_price": 1.25, "status": "filled"}
+    payload = {"entries": 1, "exits": 0, "mode": "submit", "equity_usdt": 10_000.0,
+               "open_positions": 1, "candidates": 3, "rmom_present": True, "entry_paused": False}
+    ok, why = cd._maybe_continuous_notify(payload, [entry], [], enabled=True)
+    assert ok and why == ""
+    assert len(sent) == 1
+    assert "[Continuous sleeve]" in sent[0]
+    assert "AAAUSDT" in sent[0]
+    assert "reason=continuous_entry_executed" in sent[0]
+    # an errored entry row outranks the executed-count reason
+    bad = dict(entry, submit_mode="error")
+    assert cd._continuous_telegram_reason(payload, [bad], []) == "continuous_entry_error"
+
+
+def test_continuous_telegram_failure_is_isolated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A telegram/formatter fault must degrade to a reported error, never raise into
+    the cycle (orders have already executed by the time the notify runs)."""
+    import liquidity_migration.continuous_demo as cd
+
+    def _boom(text: str, enabled: bool = True) -> bool:
+        raise RuntimeError("telegram down")
+
+    monkeypatch.setattr("liquidity_migration.telegram.send_telegram_message", _boom)
+    payload = {"entries": 1, "exits": 0}
+    ok, why = cd._maybe_continuous_notify(payload, [], [], enabled=True)
+    assert not ok and "telegram down" in why
+
+
+def test_component_and_sniper_links_decode_as_continuous() -> None:
+    """REGRESSION (audit 2026-06-11): the deployed continuous_ensemble_v1 appends the
+    component tag to the link prefix ('en-c'+'p3' -> lm-en-cp3-...) and the sniper
+    appends 's' (lm-en-cs-...). The decoder only knew bare 'c' — every LIVE entry's
+    link decoded to None, so on a VPS rebuild/orphan ws_risk's side-based fallback
+    adopted continuous positions into the ERASED short sleeve's legacy root with the
+    default adopt stops instead of the ensemble contract."""
+    sig = 1_765_400_000_000
+    expected_ts = (sig // 1000) * 1000
+    # every component tag the deployed profile can emit (continuous_demo profile
+    # components) + the sniper form, first-entry and re-entry
+    for component in ("p3", "p4p3", "p4p5", "tp14", "s"):
+        link = _continuous_order_link_id(f"en-c{component}", symbol="WLDUSDT", signal_ts_ms=sig)
+        assert decode_entry_order_link_id(link) == ("continuous", expected_ts, 0), link
+        relink = _continuous_order_link_id(f"en-c{component}", symbol="WLDUSDT", signal_ts_ms=sig, reentry_seq=2)
+        assert decode_entry_order_link_id(relink) == ("continuous", expected_ts, 2), relink
+    # the addon (hedge) prefix must NOT be swallowed by the component family
+    addon = _continuous_order_link_id("en-ca", symbol="BTCUSDT", signal_ts_ms=sig)
+    assert decode_entry_order_link_id(addon) == ("continuous_addon", expected_ts, 0)
+    # junk tags still fall back to None (adopted-*)
+    assert decode_entry_order_link_id("lm-en-x9-BTC-abcd") is None

@@ -593,14 +593,6 @@ def order_quantity_for_notional(
     return _decimal_text(qty), actual_notional
 
 
-# A `universe_rank_max` at or above this is treated as "no upper bound" rather
-# than a real, binding rank ceiling. The live USDT-perp universe is ~750
-# symbols, so any ceiling in the thousands is non-binding — most notably the
-# drop_all_4 promotion's `universe_rank_max=99999` "off" sentinel. Together with
-# `<= 0` (the documented disable value the filters gate on via `rank_max > 0`)
-# this distinguishes a dropped bound from a real one.
-_UNIVERSE_RANK_MAX_UNBOUNDED = 10_000
-
 # Below this many symbols the cycle treats the universe as anomalously shrunk
 # and retries once with a forced-fresh fetch. In match-the-backtest mode
 # (universe_max_symbols == universe_rank_end == 0) there is NO requested size,
@@ -620,21 +612,6 @@ def _universe_shrink_floor(demo: "EventDemoCycleConfig") -> int:
     was dead code — falls back to the absolute :data:`_MATCH_BACKTEST_UNIVERSE_FLOOR`."""
     requested = demo.universe_max_symbols or demo.universe_rank_end
     return int(requested * 0.75) if requested > 0 else _MATCH_BACKTEST_UNIVERSE_FLOOR
-
-
-def _universe_rank_max_is_binding(rank_max: int) -> bool:
-    """True when ``universe_rank_max`` is a real, binding upper rank ceiling.
-
-    ``<= 0`` is the documented disable sentinel (the live/backtest filters apply
-    the ceiling only when ``rank_max > 0``); ``>= _UNIVERSE_RANK_MAX_UNBOUNDED``
-    is the same "no upper bound" intent expressed as a non-binding number (e.g.
-    the ``99999`` the drop_all_4 promoted profile uses to drop the bound). In
-    both cases the trading band spans the whole universe, so the prior7-rank
-    coverage check does not apply — computing ``required = rank_max +
-    improvement`` against such a sentinel is what produced the spurious ~100k
-    ``coverage_gap`` and the false "signal generation blocked" health alert.
-    """
-    return 0 < rank_max < _UNIVERSE_RANK_MAX_UNBOUNDED
 
 
 def _validate_risk_config(config: EventRiskCycleConfig) -> None:

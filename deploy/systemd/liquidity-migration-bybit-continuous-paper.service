@@ -22,7 +22,6 @@ Environment=RECORD_DRY_RUN=1
 Environment=PAPER_MODE=1
 Environment=TELEGRAM_ENABLED=0
 Environment=INTERVAL_SECONDS=60
-Environment=USE_DAEMON=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=LOOKBACK_DAYS=45
 Environment=WORKERS=2
@@ -40,7 +39,6 @@ Environment=STOP_LOSS_PCT=0.25
 Environment=ENTRY_LEVERAGE=2
 Environment=PER_POSITION_NOTIONAL_PCT_EQUITY=2
 Environment=LIQ_TURNOVER_MIN=500000
-Environment=WS_KLINES_ENABLED=1
 # Shared market-data plane: this shadow FOLLOWS the demo root's flushed kline
 # snapshot (+rmom gate) read-only instead of running a second identical WS pool
 # (halves the box's WS decode CPU; decision inputs stay byte-identical to demo).

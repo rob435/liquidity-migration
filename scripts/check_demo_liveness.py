@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Fast liveness + safety watchdog for the live demo book.
 
-Complements ``check_demo_entry_health.py`` (which answers "is the strategy
-*firing*?", hourly). This watchdog answers "is the system ALIVE and are open
-positions PROTECTED?" and runs every few minutes so the operator can manually
-close positions when something breaks. It Telegrams on:
+Answers "is the system ALIVE and are open positions PROTECTED?" and runs every
+few minutes so the operator can manually close positions when something breaks.
+(The hourly short-sleeve entry-health companion was erased with that sleeve,
+2026-06-11.) It Telegrams on:
 
   * DAEMON DOWN / HUNG -- no cycle has been written within --max-cycle-age-min
     (catches a crash-loop under ``Restart=always``, a hang, or a stop), and/or a
@@ -16,7 +16,6 @@ close positions when something breaks. It Telegrams on:
   * LEDGER<->VENUE MISMATCH -- a position open on one side but not the other.
   * WS FEED STALL -- the WS kline store's newest bar is far behind wall clock
     (REST still covers correctness, so this is a warning).
-  * EXCHANGE ERRORS -- recent cycles reporting position/order snapshot errors.
 
 Alerts are de-duplicated with a cooldown state file: a new condition alerts
 immediately, a persisting one re-alerts at most every --cooldown-min, and a
@@ -214,31 +213,6 @@ def evaluate_rmom_staleness(
     return None
 
 
-def evaluate_exchange_errors(*, recent: list[dict], label: str) -> list[Alert]:
-    """Recent cycles reporting position/order snapshot errors or fill failures."""
-    pos_errs = [str(r.get("position_report_error") or "") for r in recent]
-    pos_errs = [e for e in pos_errs if e]
-    fill_errs = sum(int(r.get("pending_order_fill_errors") or 0) for r in recent)
-    alerts: list[Alert] = []
-    if pos_errs:
-        alerts.append(
-            Alert(
-                key=f"exch_pos_err:{label}",
-                severity=WARNING,
-                message=f"{label}: position-snapshot errors in recent cycles: {pos_errs[-1]}",
-            )
-        )
-    if fill_errs > 0:
-        alerts.append(
-            Alert(
-                key=f"exch_fill_err:{label}",
-                severity=WARNING,
-                message=f"{label}: {fill_errs} order-fill reconciliation error(s) in recent cycles.",
-            )
-        )
-    return alerts
-
-
 def select_alerts_to_send(
     *, active: list[Alert], state: dict[str, int], now_ms: int, cooldown_minutes: float
 ) -> tuple[list[Alert], list[str], dict[str, int]]:
@@ -290,16 +264,6 @@ def _latest_cycle_df(cycles_root: Path) -> pl.DataFrame | None:
         return None
 
 
-def _open_trades(data_root: Path) -> list[dict]:
-    try:
-        df = read_dataset(data_root, "event_demo_trades")
-    except Exception:  # noqa: BLE001
-        return []
-    if df.is_empty() or "status" not in df.columns:
-        return []
-    return df.filter(pl.col("status") == "open").to_dicts()
-
-
 def _unit_states(units: list[str]) -> dict[str, str]:
     states: dict[str, str] = {}
     for unit in units:
@@ -328,6 +292,11 @@ def _default_units_for_toggles() -> list[str]:
             [
                 "liquidity-migration-bybit-continuous-demo.service",
                 "liquidity-migration-continuous-hedge.timer",
+                # The SERVICE too, not just the timer: a failed oneshot leaves the
+                # timer active/waiting, so a crashed (order-submitting, SUBMIT_HEDGE=1)
+                # hedge run would otherwise never page — is-active on a failed oneshot
+                # reports "failed", which evaluate_unit_states alerts on.
+                "liquidity-migration-continuous-hedge.service",
             ]
         )
     if _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):
@@ -503,7 +472,10 @@ def gather_long_alerts(*, long_root: Path, now_ms: int, args: argparse.Namespace
     return alerts
 
 
-def main() -> int:
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Exposed for the unit↔argparse parity test: the demo-liveness unit once
+    passed an arg this script had dropped (--data-root, 2026-06-11 purge) and
+    the watchdog crash-looped with only the VPS journal noticing."""
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "--unit",
@@ -513,11 +485,14 @@ def main() -> int:
     )
     p.add_argument("--max-cycle-age-min", type=float, default=10.0, help="alert if no cycle within this many minutes")
     p.add_argument("--max-ws-lag-hours", type=float, default=6.0, help="warn if the WS kline feed is this stale")
-    p.add_argument("--continuous-root", type=Path, default=Path("data/bybit-continuous-demo-event"),
+    # Roots stay str (NOT type=Path): argparse type=Path turns the documented '' skip
+    # sentinel into Path('.') — truthy and existing — so the skip never skipped and the
+    # gather ran against the repo CWD, paging a FALSE CRITICAL with an empty label.
+    p.add_argument("--continuous-root", default="data/bybit-continuous-demo-event",
                    help="continuous-fade sleeve root for its per-sleeve cycle-age + rmom-freshness + stop checks ('' to skip)")
-    p.add_argument("--continuous-paper-root", type=Path, default=Path("data/bybit-continuous-paper-event"),
+    p.add_argument("--continuous-paper-root", default="data/bybit-continuous-paper-event",
                    help="continuous-fade paper root for no-order evidence cycle-age + rmom-freshness checks ('' to skip)")
-    p.add_argument("--long-root", type=Path, default=Path("data/bybit-long-demo-event"),
+    p.add_argument("--long-root", default="data/bybit-long-demo-event",
                    help="long-native sleeve root for its per-sleeve cycle-age + WS-staleness + stop checks ('' to skip)")
     p.add_argument("--max-rmom-stale-days", type=float, default=2.0,
                    help="alert if the continuous rmom signal gate's newest day is older than this (silent-blackout guard)")
@@ -525,23 +500,31 @@ def main() -> int:
     p.add_argument("--cooldown-min", type=float, default=30.0, help="re-alert interval for a persisting condition")
     p.add_argument("--heartbeat-url", default=None, help="ping this URL on a healthy run (external dead-man's-switch)")
     p.add_argument("--telegram", action="store_true", help="send alerts via Telegram (else stdout only)")
-    p.add_argument("--state-file", type=Path, default=None, help="cooldown state file (default: <data-root>/.cache/liveness_watchdog.json)")
-    args = p.parse_args()
+    p.add_argument("--state-file", type=Path, default=None, help="cooldown state file (default: <continuous-root>/.cache/liveness_watchdog.json)")
+    return p
+
+
+def main() -> int:
+    args = build_arg_parser().parse_args()
 
     units = args.unit or _default_units_for_toggles()
-    state_file = args.state_file or (args.continuous_root / ".cache" / "liveness_watchdog.json")
+    continuous_root = Path(args.continuous_root) if str(args.continuous_root).strip() else None
+    continuous_paper_root = Path(args.continuous_paper_root) if str(args.continuous_paper_root).strip() else None
+    long_root = Path(args.long_root) if str(args.long_root).strip() else None
+    _state_root = continuous_root or long_root or Path("data")
+    state_file = args.state_file or (_state_root / ".cache" / "liveness_watchdog.json")
     now_ms = _now_ms()
 
     # Per-sleeve kill-switch: skip an intentionally-off sleeve so a deliberately-retired daemon
     # doesn't false-page as "down". Unset-defaults mirror deploy/lib_sleeves.sh: LONG on,
     # CONTINUOUS off. (The daily-short sleeve was erased 2026-06-11.)
     alerts = evaluate_unit_states(_unit_states(units))
-    if str(args.continuous_root) and _sleeve_on("CONTINUOUS_SLEEVE", default="off"):
-        alerts.extend(gather_continuous_alerts(continuous_root=args.continuous_root, now_ms=now_ms, args=args))
-    if str(args.continuous_paper_root) and _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):
+    if continuous_root is not None and _sleeve_on("CONTINUOUS_SLEEVE", default="off"):
+        alerts.extend(gather_continuous_alerts(continuous_root=continuous_root, now_ms=now_ms, args=args))
+    if continuous_paper_root is not None and _sleeve_on("CONTINUOUS_PAPER_SLEEVE"):
         alerts.extend(
             gather_continuous_alerts(
-                continuous_root=args.continuous_paper_root,
+                continuous_root=continuous_paper_root,
                 now_ms=now_ms,
                 args=args,
                 cycles_dataset="continuous_fade_paper_cycles",
@@ -549,8 +532,8 @@ def main() -> int:
                 check_stops=False,
             )
         )
-    if str(args.long_root) and _sleeve_on("LONG_SLEEVE"):
-        alerts.extend(gather_long_alerts(long_root=args.long_root, now_ms=now_ms, args=args))
+    if long_root is not None and _sleeve_on("LONG_SLEEVE"):
+        alerts.extend(gather_long_alerts(long_root=long_root, now_ms=now_ms, args=args))
     state = _load_state(state_file)
     to_send, resolved, new_state = select_alerts_to_send(
         active=alerts, state=state, now_ms=now_ms, cooldown_minutes=args.cooldown_min

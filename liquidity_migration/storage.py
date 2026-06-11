@@ -71,12 +71,11 @@ DATASETS = {
     "mark_price_1h",
     "index_price_1h",
     "premium_index_1h",
-    # Read-only legacy: download path was deleted with the signed_flow
-    # cleanup (validated as not-an-edge across 5+ tests, see commit
-    # 6e5e977). volume_events still consumes signed_flow_1h when present
-    # via _signed_flow_feature_frame for the taker_imbalance research
-    # knobs; without this allowlist entry read_dataset throws
-    # "Unknown dataset" on roots that have no signed_flow_1h directory.
+    # Read-only legacy: the download path was deleted with the signed_flow
+    # cleanup (validated as not-an-edge, commit 6e5e977) and its last consumer
+    # (volume_events._signed_flow_feature_frame) was erased with the short
+    # engine 2026-06-11. Kept ONLY so old research roots that still hold a
+    # signed_flow_1h directory stay readable by ad-hoc tooling.
     "signed_flow_1h",
     "ticker_snapshots",
     "archive_trade_manifest",

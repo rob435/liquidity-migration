@@ -585,15 +585,17 @@ class EventWebSocketRiskEngine:
         unit's EnvironmentFile) AND owned by this engine (root configured). This is the
         denominator for the equal-split IM budget = 1/len(active): toggle a sleeve off and the
         remaining sleeves' shares grow on the next reconcile pass. The unset-defaults mirror
-        deploy/lib_sleeves.sh EXACTLY (SHORT/LONG on, CONTINUOUS off — look-ahead-disabled) so
-        this denominator can never drift from the kill-switch; in production the risk unit's
-        EnvironmentFile always sets the toggles explicitly, so the default only matters off-VPS."""
-        _defaults = {"SHORT_SLEEVE": "on", "LONG_SLEEVE": "on", "CONTINUOUS_SLEEVE": "off"}
+        deploy/lib_sleeves.sh EXACTLY (LONG on, CONTINUOUS off) so this denominator can never
+        drift from the kill-switch; in production the risk unit's EnvironmentFile always sets
+        the toggles explicitly, so the default only matters off-VPS. The daily-short sleeve
+        was ERASED 2026-06-11 — no toggle exists and it can never trade, so it must not claim
+        a budget share (the legacy root stays read-only reconciled regardless)."""
+        _defaults = {"SHORT_SLEEVE": "off", "LONG_SLEEVE": "on", "CONTINUOUS_SLEEVE": "off"}
 
         def _on(var: str) -> bool:
             return os.environ.get(var, _defaults[var]).strip().lower() in {"on", "1", "true", "yes"}
         active: list[str] = []
-        if _on("SHORT_SLEEVE"):  # short root is always this engine's self.root
+        if _on("SHORT_SLEEVE"):  # legacy escape hatch only — see docstring
             active.append("short")
         if self.long_root is not None and _on("LONG_SLEEVE"):
             active.append("long")

@@ -591,9 +591,12 @@ def test_combined_book_summary_reads_every_live_sleeve(tmp_path: Path) -> None:
     assert "Combined book" in text
     assert "Live sleeves" in text
     assert "Continuous demo (ON)" in text
-    assert "Short (OFF)" in text
+    # 2026-06-11 erasure: the short line is a legacy-ledger wind-down view, never ON.
+    assert "Short (erased) (OFF)" in text
     assert "Long (OFF)" in text
-    assert "BTC hedge (DRY-RUN)" in text
+    # The hedge label rides the continuous toggle — never a hardcoded "DRY-RUN"
+    # (the live unit ships SUBMIT_HEDGE=1; a hardcoded dry-run label misstated it).
+    assert "BTC hedge (ON)" in text
     assert "Continuous paper (ON)" in text
     assert "Action: No action needed." in text
     # Short realized PnL: (100 - 90) * 1 = 10

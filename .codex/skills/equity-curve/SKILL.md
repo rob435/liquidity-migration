@@ -64,11 +64,13 @@ is crypto-native and long-only — separate from the volume-events short sleeve.
 | Bybit | `~/SHARED_DATA/bybit_full_pit` | funding dataset named `funding` → funding modeled |
 | Binance | `~/SHARED_DATA/binance_full_pit_strategy` | has `funding` (~129k rows) → funding partial/modeled |
 
-**Do NOT use `~/SHARED_DATA/binance_full_pit` for this backtest.** Its funding is
-stored as `binance_usdm_funding`, so `read_dataset(root,"funding")` returns 0 rows
-→ `funding_mode=missing` → not comparable to the Bybit run. The `_strategy` root
-has canonically-named datasets and is the proven path (prior long_native reports
-live there).
+**Root note:** `~/SHARED_DATA/binance_full_pit` stores funding as
+`binance_usdm_funding`; since the venue-alias resolver landed,
+`read_dataset(root, "funding")` resolves that name automatically (no symlink),
+so funding IS modeled there — the old "returns 0 rows" warning is obsolete.
+The `_strategy` root remains the proven default path for these backtests
+(prior long_native reports live there); check the report's funding warnings
+rather than assuming either way.
 
 ## Outputs — `<ROOT>/reports/<subdir>/fc_min_day_015/`
 

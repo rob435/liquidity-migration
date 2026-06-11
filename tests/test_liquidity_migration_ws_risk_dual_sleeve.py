@@ -42,26 +42,31 @@ def test_active_sleeves_follows_killswitch_and_roots(tmp_path: Path, monkeypatch
 
     for var in ("SHORT_SLEEVE", "LONG_SLEEVE", "CONTINUOUS_SLEEVE", "CONTINUOUS_ADDON_SLEEVE"):
         monkeypatch.delenv(var, raising=False)
-    # Unset toggles mirror deploy/lib_sleeves.sh: short/long default ON, continuous default
-    # OFF (look-ahead-disabled) ⇒ 2 active ⇒ 1/2 each.
-    assert engine._active_sleeves() == ["short", "long"]
-    assert equal_split_budget(engine._active_sleeves()) == {"short": 0.5, "long": 0.5}
-    # Explicitly turn continuous ON ⇒ all 3 active ⇒ 1/3 each.
+    # Unset toggles mirror deploy/lib_sleeves.sh: LONG defaults ON, CONTINUOUS OFF. The
+    # daily-short sleeve was ERASED 2026-06-11 — no toggle exists and it can never trade,
+    # so it must NOT claim a budget share by default (an "on" default would starve the
+    # live sleeves the day the equal-split budget is ever wired).
+    assert engine._active_sleeves() == ["long"]
+    assert equal_split_budget(engine._active_sleeves()) == {"long": 1.0}
+    # Explicitly turn continuous ON ⇒ 2 active ⇒ 1/2 each.
     monkeypatch.setenv("CONTINUOUS_SLEEVE", "on")
-    assert engine._active_sleeves() == ["short", "long", "continuous"]
-    assert equal_split_budget(engine._active_sleeves()) == {"short": 1/3, "long": 1/3, "continuous": 1/3}
+    assert engine._active_sleeves() == ["long", "continuous"]
+    assert equal_split_budget(engine._active_sleeves()) == {"long": 0.5, "continuous": 0.5}
     monkeypatch.setenv("CONTINUOUS_ADDON_SLEEVE", "on")
-    assert engine._active_sleeves() == ["short", "long", "continuous", "continuous_addon"]
-    # toggle continuous OFF ⇒ 2 active ⇒ 1/2 each
+    assert engine._active_sleeves() == ["long", "continuous", "continuous_addon"]
+    # toggle continuous OFF ⇒ survivors' split grows
     monkeypatch.setenv("CONTINUOUS_SLEEVE", "off")
-    assert engine._active_sleeves() == ["short", "long", "continuous_addon"]
+    assert engine._active_sleeves() == ["long", "continuous_addon"]
     monkeypatch.setenv("CONTINUOUS_ADDON_SLEEVE", "off")
+    assert engine._active_sleeves() == ["long"]
+    # the legacy escape hatch still works when set EXPLICITLY (old short-ledger adoption)
+    monkeypatch.setenv("SHORT_SLEEVE", "on")
     assert engine._active_sleeves() == ["short", "long"]
     assert equal_split_budget(engine._active_sleeves()) == {"short": 0.5, "long": 0.5}
-    # also kill long ⇒ short alone ⇒ 1/1
+    monkeypatch.delenv("SHORT_SLEEVE", raising=False)
+    # also kill long ⇒ nothing active (no sleeve can claim the erased short's share)
     monkeypatch.setenv("LONG_SLEEVE", "0")
-    assert engine._active_sleeves() == ["short"]
-    assert equal_split_budget(engine._active_sleeves()) == {"short": 1.0}
+    assert engine._active_sleeves() == []
 
 
 def test_active_sleeves_excludes_unconfigured_roots(tmp_path: Path, monkeypatch) -> None:
@@ -69,9 +74,10 @@ def test_active_sleeves_excludes_unconfigured_roots(tmp_path: Path, monkeypatch)
     on — ws_risk only budgets sleeves it actually owns/reads."""
     for var in ("SHORT_SLEEVE", "LONG_SLEEVE", "CONTINUOUS_SLEEVE", "CONTINUOUS_ADDON_SLEEVE"):
         monkeypatch.delenv(var, raising=False)
-    cfg = EventWebSocketRiskConfig()  # short-only (no long/continuous roots)
+    cfg = EventWebSocketRiskConfig()  # legacy-root-only (no long/continuous roots)
     engine = EventWebSocketRiskEngine(tmp_path, config=ResearchConfig(), risk_config=cfg)
-    assert engine._active_sleeves() == ["short"]
+    # long/continuous have no roots; the erased short defaults OFF ⇒ nothing active.
+    assert engine._active_sleeves() == []
 
 
 def test_long_root_unset_keeps_short_only_behavior(tmp_path: Path) -> None:

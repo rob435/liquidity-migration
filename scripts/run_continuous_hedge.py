@@ -226,20 +226,84 @@ def _submit_plan(plan, cfg: ContinuousHedgeConfig, data_root: Path, now_ms: int)
         "order_link_id": link, "ts_ms": now_ms, "trade_id": f"hedge-{link}",
         "strategy_id": cfg.strategy_id, "symbol": plan.symbol, "side": plan.side,
         "order_type": "Market", "qty": plan.qty, "reduce_only": plan.reduce_only,
-        "order_id": order_id, "submit_mode": "submitted", "status": "submitted",
+        # status "filled" + filled_qty/target_qty: this runner books the market
+        # fill itself (trade row below / reduce booking below), so the order row
+        # must say so. ws_risk's pending-fill reconciler delta-adds
+        # (venue cumulative − filled_qty) onto the trade row; an order row left
+        # "submitted" with no filled_qty read previous=0 and re-added the FULL
+        # fill — every armed BUY double-booked (audit 2026-06-11).
+        "order_id": order_id, "submit_mode": "submitted", "status": "filled",
+        "filled_qty": plan.qty, "target_qty": plan.qty,
         "trade_side": "long", "sleeve": "continuous_addon",
         "notional_usdt": abs(plan.delta_notional_usdt), "reason": plan.reason,
+        "updated_at_ms": now_ms,
     }
     write_dataset(pl.DataFrame([order_row]), data_root, cfg.orders_dataset, append=True)
+    price = abs(plan.delta_notional_usdt) / max(plan.qty, 1e-12)
     if plan.side == "Buy" and not plan.reduce_only:
-        price = abs(plan.delta_notional_usdt) / max(plan.qty, 1e-12)
         trade_row = build_hedge_trade_row(
             cfg, qty=plan.qty, entry_price=max(price, 0.0), now_ms=now_ms,
             order_link_id=link, order_id=order_id, symbol=plan.symbol,
         )
         write_dataset(pl.DataFrame([trade_row]), data_root, cfg.trades_dataset, append=True)
+    elif plan.side == "Sell" and plan.reduce_only:
+        _apply_hedge_reduce_to_trades(
+            data_root, cfg, symbol=plan.symbol, sold_qty=plan.qty,
+            exit_price=max(price, 0.0), now_ms=now_ms,
+        )
     return {"symbol": plan.symbol, "side": plan.side, "qty": plan.qty,
             "reduce_only": plan.reduce_only, "order_id": order_id, "link": link}
+
+
+def _apply_hedge_reduce_to_trades(
+    data_root: Path, cfg: ContinuousHedgeConfig, *, symbol: str,
+    sold_qty: float, exit_price: float, now_ms: int,
+) -> None:
+    """Book a reduce-only Sell against the open hedge trade rows, oldest-first.
+
+    Until 2026-06-11 reduces never touched the trade rows at all (the Sell's order
+    row keys trade_id 'hedge-{sell-link}', matching no trade row, so ws_risk's
+    reduce branch no-ops): _current_hedge_qty then overstated the live hedge and
+    the planner re-sold the phantom excess daily until the venue went flat —
+    leaving the book unhedged while the ledger showed an open hedge."""
+    try:
+        trades = read_dataset(data_root, cfg.trades_dataset)
+    except (FileNotFoundError, OSError):
+        return
+    if trades.is_empty() or "status" not in trades.columns or "symbol" not in trades.columns:
+        return
+    open_rows = [
+        row
+        for row in (
+            trades.filter((pl.col("status") == "open") & (pl.col("symbol") == symbol))
+            .sort("entry_ts_ms")
+            .to_dicts()
+        )
+        if _is_long_hedge_trade(row)
+    ]
+    remaining = float(sold_qty)
+    updates: list[dict] = []
+    for row in open_rows:
+        if remaining <= 1e-12:
+            break
+        row_qty = abs(_float(row.get("qty")))
+        take = min(row_qty, remaining)
+        remaining -= take
+        upd = dict(row)
+        upd["updated_at_ms"] = now_ms
+        if take >= row_qty - 1e-12:
+            upd.update({
+                "status": "closed", "exit_price": float(exit_price),
+                "exit_ts_ms": now_ms, "exit_reason": "hedge_reduce",
+            })
+        else:
+            upd["qty"] = row_qty - take
+        updates.append(upd)
+    if remaining > 1e-9:
+        print(f"WARN: hedge reduce sold {sold_qty:.6f} {symbol} but the ledger held "
+              f"only {sold_qty - remaining:.6f} open — venue/ledger drift, inspect the addon ledger.")
+    if updates:
+        write_dataset(pl.DataFrame(updates, infer_schema_length=None), data_root, cfg.trades_dataset, append=True)
 
 
 def main() -> int:

@@ -127,12 +127,17 @@ def collect_cycle(root: Path, symbols: list[str]) -> dict[str, int]:
     return {"ok": ok, "errors": err}
 
 
-def main() -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
+    # Exposed for the unit↔argparse parity test (unit ExecStart args must parse).
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--root", default="data/depth")
     ap.add_argument("--once", action="store_true", help="One cycle then exit (smoke/test).")
     ap.add_argument("--symbols", default=None, help="Comma list override (default: live Trading universe).")
-    args = ap.parse_args()
+    return ap
+
+
+def main() -> None:
+    args = build_arg_parser().parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     root = Path(args.root)
     while True:

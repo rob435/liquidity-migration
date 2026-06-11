@@ -1,6 +1,6 @@
 ---
 name: pit-reconcile
-description: "Run the demo-forward reconciliation for the promoted LONG v11a sleeve (paper<->demo) and fix/diagnose PIT membership (archive_trade_manifest) problems. Use whenever asked to reconcile the demo/paper/backtest, when a reconcile shows paper-only / backtest-only mismatches, when a backtest reports pit_membership_fail, or when the archive manifest/klines are stale. Drives scripts/reconcile.sh, which AUTO-provisions (pulls the promoted sleeves, refreshes the manifest, auto-downloads recent klines) and backtests a MINIMAL forward window. The canonical fix for the manifest-lag / missing-recent-coverage class of friction. (Continuous is de-promoted/OFF; reconcile it for diagnostics only via --sleeves continuous.)"
+description: "Run the demo-forward reconciliation for the promoted LONG v11a sleeve (paper<->demo) and fix/diagnose PIT membership (archive_trade_manifest) problems. Use whenever asked to reconcile the demo/paper/backtest, when a reconcile shows paper-only / backtest-only mismatches, when a backtest reports pit_membership_fail, or when the archive manifest/klines are stale. Drives scripts/reconcile.sh, which AUTO-provisions (pulls the promoted sleeves, refreshes the manifest, auto-downloads recent klines) and backtests a MINIMAL forward window. The canonical fix for the manifest-lag / missing-recent-coverage class of friction. (Continuous is the LIVE demo book since 2026-06-09 — research-stage, NOT promoted; reconcile it for diagnostics via --sleeves continuous.)"
 ---
 
 > **ERASURE NOTE (2026-06-11, operator order):** the daily SHORT sleeve was
@@ -32,12 +32,14 @@ design: `docs/pit_gate.md`.
 
 ## The promoted sleeves it reconciles (short + long)
 
-- **SHORT** (event/daily): backtest ↔ paper ↔ demo (`reconcile-all`), +Bybit on request.
-- **LONG** (v11a): paper ↔ demo (`reconcile-long-paper-demo`).
+- **LONG** (v11a): paper ↔ demo (`reconcile-long-paper-demo`). The default sleeve.
+- The SHORT legs were ERASED 2026-06-11 with the sleeve.
 
-> **CONTINUOUS** (fade) is no longer promoted/deployed (de-promoted 2026-06-05, look-ahead
-> invalidated; live sleeve OFF). It is NOT reconciled by default. For diagnostics only you can
-> still run `--sleeves continuous` (`reconcile-continuous-paper-demo` + the
+> **CONTINUOUS** (fade) is the LIVE demo book (operator re-shape 2026-06-09:
+> the VPS runs ONLY the continuous system). It remains research-stage — NOT
+> promoted (rmom latency knife-edge stands; never present it as promoted). It is
+> NOT reconciled by default; run `--sleeves continuous` for diagnostics
+> (`continuous-forward-readiness --paper-only` + the
 > `scripts/continuous_demo_signal_check.py` signal-consistency replay).
 
 ## When to use

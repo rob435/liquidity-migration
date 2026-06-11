@@ -16,7 +16,11 @@ from __future__ import annotations
 # The orderLinkId prefix vocabulary — ONE registry so a new sleeve/exit prefix is added in a single
 # place. Entry links are decoded by ``decode_entry_order_link_id``; exit/risk-side links are matched
 # by ``is_exit_link`` (event_demo._is_own_exit_order enumerated these inline; quality-dup-12).
-#   entry:  lm-en-{base}-{ts36} (short) · lm-en-l-… (long) · lm-en-c-…[-seq] (continuous)
+#   entry:  lm-en-{base}-{ts36} (short, erased 2026-06-11 — decoded for legacy adoption only)
+#           lm-en-l-… (long) · lm-en-c{tag}-…[-seq] (continuous: plain "c", ensemble component
+#           tags "cp3"/"cp4p3"/"cp4p5"/"ctp14", sniper "cs") · lm-en-ca-… (continuous_addon/hedge)
+#           CONSTRAINT: a continuous component tag must never begin with "a" — "c"+"a…" would
+#           collide with the "ca" addon prefix and mis-route the fill.
 #   exit/risk: lm-ex- (planned exit) · lm-rx- (risk exit) · lm-wx- (watchdog) · lm-ux- (untracked unwind)
 ENTRY_LINK_PREFIX = "lm-en-"
 EXIT_LINK_PREFIXES = ("lm-ex-", "lm-rx-", "lm-wx-", "lm-ux-")
@@ -80,40 +84,38 @@ def decode_entry_order_link_id(order_link_id: str) -> tuple[str, int, int] | Non
         return None
     parts = order_link_id.split("-")
     reentry_seq = 0
-    # Short:      lm-en-{base}-{ts36}             → 4 parts, sleeve="short"
-    # Long:       lm-en-l-{base}-{ts36}           → 5 parts (parts[2]=="l"), sleeve="long"
-    # Continuous: lm-en-c-{base}-{ts36}           → 5 parts (parts[2]=="c"), sleeve="continuous", seq=0
-    # Continuous re-entry: lm-en-c-{base}-{ts36}-{seq} → 6 parts, seq>0
+    # Short:      lm-en-{base}-{ts36}                → 4 parts, sleeve="short" (legacy adoption)
+    # Long:       lm-en-l-{base}-{ts36}              → 5 parts (parts[2]=="l"), sleeve="long"
+    # Continuous: lm-en-c{tag}-{base}-{ts36}[-{seq}] → 5/6 parts; tag is "" (plain), an ensemble
+    #             component ("p3"/"p4p3"/"p4p5"/"tp14" → "cp3"…), or the sniper "s" → "cs".
+    #             The deployed continuous_ensemble_v1 emits ONLY component-tagged links — a
+    #             decoder that knew bare "c" alone sent every live entry to the adopted-*
+    #             fallback as sleeve="short" on rebuild (audit 2026-06-11).
+    # Addon:      lm-en-ca-{base}-{ts36}[-{seq}]     → sleeve="continuous_addon" (hedge). Checked
+    #             BEFORE the generic "c" family; component tags must never start with "a".
     if len(parts) == 4 and parts[0] == "lm" and parts[1] == "en":
         sleeve = "short"
         ts36 = parts[3]
-    elif len(parts) == 5 and parts[0] == "lm" and parts[1] == "en" and parts[2] == "l":
-        sleeve = "long"
-        ts36 = parts[4]
-    elif len(parts) == 5 and parts[0] == "lm" and parts[1] == "en" and parts[2] == "c":
-        sleeve = "continuous"
-        ts36 = parts[4]
-    elif len(parts) == 5 and parts[0] == "lm" and parts[1] == "en" and parts[2] == "ca":
-        sleeve = "continuous_addon"
-        ts36 = parts[4]
-    elif len(parts) == 6 and parts[0] == "lm" and parts[1] == "en" and parts[2] == "c":
-        sleeve = "continuous"
-        ts36 = parts[4]
-        try:
-            reentry_seq = int(parts[5])
-        except ValueError:
+    elif len(parts) in (5, 6) and parts[0] == "lm" and parts[1] == "en":
+        tag = parts[2]
+        if tag == "l":
+            sleeve = "long"
+        elif tag.startswith("ca"):
+            sleeve = "continuous_addon"
+        elif tag.startswith("c"):
+            sleeve = "continuous"
+        else:
             return None
-        if reentry_seq <= 0:
-            return None
-    elif len(parts) == 6 and parts[0] == "lm" and parts[1] == "en" and parts[2] == "ca":
-        sleeve = "continuous_addon"
         ts36 = parts[4]
-        try:
-            reentry_seq = int(parts[5])
-        except ValueError:
-            return None
-        if reentry_seq <= 0:
-            return None
+        if len(parts) == 6:
+            if tag == "l":
+                return None  # the long sleeve never emits a re-entry seq
+            try:
+                reentry_seq = int(parts[5])
+            except ValueError:
+                return None
+            if reentry_seq <= 0:
+                return None
     else:
         return None
     try:

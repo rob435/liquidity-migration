@@ -60,6 +60,11 @@ def _status(payload: dict[str, Any], *, stale_coverage_gap_days: int = 2) -> str
     summary = payload.get("summary", {})
     common_days = int(summary.get("common_days") or 0)
     min_common_days = int(summary.get("min_common_days") or 30)
+    # Zero continuous data is its own state: _continuous_age_days returns 0 for an
+    # empty/missing ledger (latest<=0), so the STALE branch below can never fire and
+    # an entirely-dead ledger would otherwise masquerade as CONTINUOUS-ONLY forever.
+    if int(summary.get("continuous_observed_days") or 0) == 0:
+        return "NO-CONTINUOUS-DATA"
     if _continuous_age_days(summary) >= max(int(stale_coverage_gap_days), 1) + 1:
         return "STALE"
     daily_dead = (
@@ -107,7 +112,8 @@ def format_message(payload: dict[str, Any], *, stale_coverage_gap_days: int = 2)
     return "\n".join(lines)
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    # argv parameter exposed for the unit↔argparse parity test (None = sys.argv).
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--daily-data-root", default="data/bybit-paper-event")
     p.add_argument("--continuous-data-root", default="data/bybit-continuous-paper-event")
@@ -129,7 +135,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Send Telegram even while the common forward window is still below --min-common-days.",
     )
-    return p.parse_args()
+    return p.parse_args(argv)
 
 
 def main() -> int:

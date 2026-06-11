@@ -612,6 +612,13 @@ def plan_continuous_sniper_orders(
 
 SNIPER_REASON = "sniper_wick_add"
 SNIPER_TRADE_SUFFIX = "-snipe"
+# Bybit v5 terminal orderStatus values — the ONLY evidence that may terminalize a
+# sniper order row. A missing/lagging history row or a non-terminal status (New,
+# PartiallyFilled, Untriggered, Triggered) means "still alive somewhere": re-resolve
+# next cycle instead of ghosting a resting order (empty-fetch-as-deletion class).
+_SNIPER_TERMINAL_ORDER_STATUSES = frozenset(
+    {"Filled", "Cancelled", "Rejected", "Deactivated", "PartiallyFilledCanceled"}
+)
 
 
 def _continuous_sniper_link_prefix(config: ContinuousDemoCycleConfig) -> str:
@@ -793,12 +800,14 @@ def reconcile_continuous_snipes(
         exec_qty = 0.0
         avg_price = 0.0
         exec_ts = now_ms
+        history_status = ""
         for h in history:
             if str(h.get("orderLinkId", "")) != link:
                 continue
             exec_qty = _float(h.get("cumExecQty"))
             avg_price = _float(h.get("avgPrice"))
             exec_ts = int(_float(h.get("updatedTime")) or now_ms)
+            history_status = str(h.get("orderStatus", ""))
             break
         if exec_qty > 0.0 and avg_price > 0.0 and trade_id not in known_trade_ids:
             fill_rows.append({
@@ -815,8 +824,16 @@ def reconcile_continuous_snipes(
                 "base_trade_id": base_id, "reason": SNIPER_REASON,
             })
             update_rows.append({**row, "ts_ms": now_ms, "status": "filled", "avg_price": avg_price})
-        else:
-            update_rows.append({**row, "ts_ms": now_ms, "status": "cancelled"})
+        elif history_status in _SNIPER_TERMINAL_ORDER_STATUSES:
+            # Positive terminal evidence from history. An already-booked fill (trade_id
+            # known) marks "filled", everything else "cancelled" — both terminal.
+            terminal = "filled" if exec_qty > 0.0 else "cancelled"
+            update_rows.append({**row, "ts_ms": now_ms, "status": terminal, "avg_price": avg_price})
+        # else: empty/lagging history or a non-terminal orderStatus — the open-orders
+        # snapshot may have been empty/partial (the empty-fetch-as-deletion class,
+        # audit 2026-06-11: terminalizing here ghosted a still-resting PostOnly order
+        # forever — no cancel ever issued, no trade row if it later filled). Leave the
+        # row as-is and re-resolve next cycle; never terminalize without evidence.
 
     snipe_exit_plans = [
         {**t, "exit_reason": "base_exited", "exit_trigger_ts_ms": now_ms}
@@ -1418,6 +1435,7 @@ from .event_demo import (  # noqa: E402
     order_quantity_for_notional,
 )
 from .event_demo_data import _download_recent_1h_klines  # noqa: E402
+from .event_demo_exits import _partial_exit_trade_update  # noqa: E402
 from .storage import exclusive_file_lock, read_dataset, write_dataset  # noqa: E402
 from . import cross_sleeve as _cross_sleeve  # noqa: E402
 
@@ -1760,6 +1778,16 @@ def _execute_continuous_exits(
                             "exit_order_link_id": exit_link, "exit_order_id": order_result.get("orderId", ""),
                             "submit_mode": submit_mode, "closed_at_ms": now_ms, "updated_at_ms": now_ms})
             else:
+                if status == "partial" and filled_qty > 0.0:
+                    # Book the filled leg NOW (qty -= filled_qty + partial_exit_* stamp).
+                    # ws_risk's reduce branch deducts only fills BEYOND the order row's
+                    # recorded filled_qty, so an unbooked first leg overstated the open
+                    # short by that leg until final close (audit 2026-06-11).
+                    upd = _partial_exit_trade_update(
+                        upd, plan, filled_qty=filled_qty, exit_price=exit_price,
+                        order_link_id=exit_link, order_id=str(order_result.get("orderId", "")),
+                        now_ms=now_ms,
+                    )
                 upd.update({"exit_order_link_id": exit_link, "submit_mode": submit_mode, "updated_at_ms": now_ms})
             rows.append(upd)
         order_rows.append({"order_link_id": exit_link, "ts_ms": now_ms, "trade_id": str(trade.get("trade_id", "")),
@@ -2257,6 +2285,10 @@ def _execute_continuous_entries(
             "notional_usdt": filled_notional, "status": order_status, "trade_side": "short", "signal_ts_ms": signal_ts_ms,
             "equity_usdt": equity_usdt, "tick_size": tick_size, "qty_step": qty_step, "stop_price": stop_price,
             "stop_loss_pct": stop_loss_pct, "error": error, "sleeve": continuous_sleeve_name(demo),
+            # filled_qty/target_qty: ws_risk's pending-fill reconciler delta-adds
+            # (venue cumulative − filled_qty); without filled_qty a "partial" entry's
+            # already-booked leg double-added on the next reconcile (audit 2026-06-11).
+            "filled_qty": str(filled_qty) if filled_qty > 0 else "", "target_qty": qty,
         })
     return rows, order_rows
 
@@ -2314,6 +2346,96 @@ def format_continuous_demo_cycle_summary(payload: dict[str, Any]) -> str:
         f"addon_entry_cooldown_symbols={payload.get('addon_same_symbol_entry_cooldown_symbols', 0)} "
         f"addon_pnl_gate_skips={payload.get('addon_primary_pnl_gate_skips', 0)}"
     )
+
+
+def _continuous_telegram_reason(
+    payload: dict[str, Any],
+    entry_rows: list[dict[str, Any]],
+    exit_rows: list[dict[str, Any]],
+) -> str:
+    """Material-event filter for the continuous per-cycle telegram — quiet cycles send nothing.
+    Mirrors long_native_event_demo._long_telegram_reason."""
+    if any(
+        str(r.get("submit_mode", "")) == "error" or str(r.get("status", "")) == "failed"
+        for r in entry_rows
+    ):
+        return "continuous_entry_error"
+    if any(str(r.get("submit_mode", "")) == "error" for r in exit_rows):
+        return "continuous_exit_error"
+    if int(payload.get("entries") or 0) > 0:
+        return "continuous_entry_executed"
+    if int(payload.get("exits") or 0) > 0:
+        return "continuous_exit_executed"
+    return ""
+
+
+def format_continuous_telegram_status_message(
+    payload: dict[str, Any],
+    entry_rows: list[dict[str, Any]],
+    exit_rows: list[dict[str, Any]],
+    *,
+    reason: str,
+) -> str:
+    def _f(v: Any) -> float:
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return 0.0
+
+    lines = [
+        "[Continuous sleeve] Bybit demo",
+        f"reason={reason}",
+        f"mode={payload.get('mode')} equity=${_f(payload.get('equity_usdt')):,.2f}",
+        f"entries={payload.get('entries')} exits={payload.get('exits')} "
+        f"open={payload.get('open_positions')} cand={payload.get('candidates')}",
+        f"rmom={'present' if payload.get('rmom_present') else 'MISSING'} "
+        f"paused={payload.get('entry_paused')}",
+    ]
+    if entry_rows:
+        lines.append("Entries:")
+        for row in entry_rows[:6]:
+            lines.append(
+                f"- {row.get('symbol', '')} qty={_f(row.get('qty')):g} "
+                f"@${_f(row.get('entry_price')):.6g} status={row.get('status', '')}"
+            )
+    if exit_rows:
+        lines.append("Exits:")
+        for row in exit_rows[:6]:
+            lines.append(
+                f"- {row.get('symbol', '')} reason={row.get('exit_reason', '')} "
+                f"@${_f(row.get('exit_price')):.6g} mode={row.get('submit_mode', '')}"
+            )
+    return "\n".join(lines)[:3900]
+
+
+def _maybe_continuous_notify(
+    payload: dict[str, Any],
+    entry_rows: list[dict[str, Any]],
+    exit_rows: list[dict[str, Any]],
+    *,
+    enabled: bool,
+) -> tuple[bool, str]:
+    """Per-cycle telegram for the LIVE order-submitting continuous sleeve. Until 2026-06-11
+    this sleeve sent NO trade notifications at all despite TELEGRAM_ENABLED=1 in its unit
+    (only ws_risk's exit-class alerts fired). Fully exception-isolated — the formatter runs
+    INSIDE the try so a malformed payload can never break the order path (EVE-2 pattern)."""
+    if not enabled:
+        return False, "disabled"
+    try:
+        reason = _continuous_telegram_reason(payload, entry_rows, exit_rows)
+        if not reason:
+            return False, "quiet_no_material_event"
+        text = format_continuous_telegram_status_message(
+            payload, entry_rows, exit_rows, reason=reason
+        )
+        from .telegram import send_telegram_message
+
+        sent = send_telegram_message(text, enabled=True)
+    except Exception as exc:  # noqa: BLE001 — telegram must never break the cycle
+        return False, str(exc)[:500]
+    if not sent:
+        return False, "telegram env missing or Telegram API returned false"
+    return True, ""
 
 
 def _validate_continuous_demo_config(config: ContinuousDemoCycleConfig) -> None:
@@ -2828,6 +2950,15 @@ def run_continuous_demo_cycle(
         if reactivity_stats:
             payload.update({f"rx_{k}": v for k, v in reactivity_stats.items()})
         write_dataset(pl.DataFrame([payload], infer_schema_length=None), root, cycles_dataset, partition_by=())
+        # Per-cycle telegram AFTER the ledger write (a notify failure can never cost a
+        # row) and exception-isolated. Outcome rides only on the returned payload — the
+        # persisted cycle row above keeps its schema.
+        telegram_sent, telegram_error = _maybe_continuous_notify(
+            payload, exec_entries, exec_exits, enabled=demo.telegram
+        )
+        payload["telegram_sent"] = telegram_sent
+        if telegram_error:
+            payload["telegram_error"] = telegram_error
         return payload
 
 

@@ -34,20 +34,23 @@ else
 fi
 
 "$PYTHON" - <<'PY'
-from liquidity_migration.event_demo import _demo_event_config, _demo_strategy_id
-from liquidity_migration.volume_events import VolumeEventResearchConfig
+# The daily-short sleeve was ERASED 2026-06-11 (operator order). Pin the surviving
+# deployed configs — the LONG promoted profile and the continuous sleeve's guards —
+# mirroring the strategy-settings gate in scripts/deploy_vps_live.sh.
+from liquidity_migration.long_native_event_demo import _v11a_long_native_config
 
-promoted = _demo_event_config(VolumeEventResearchConfig(), profile="promoted")
-demo = _demo_event_config(VolumeEventResearchConfig(), profile="demo_relaxed")
+long_cfg = _v11a_long_native_config()
+assert long_cfg.universe_size == 50
+assert long_cfg.max_concurrent_positions == 10
+assert long_cfg.cooldown_days == 7
+assert long_cfg.weekend_size_mult == 1.5
 
-assert _demo_strategy_id("promoted") == "liqmig_union_q40_h3_tp26_g100_qsqueeze"
-assert _demo_strategy_id("demo_relaxed") == "demo_relaxed_liqmig_q40_h3_tp21_g100_qsqueeze_ff6"
-assert promoted.take_profit_pcts == (0.26,)
-assert demo.take_profit_pcts == (0.21,)
-assert demo.failed_fade_exit_hours == 6
-assert demo.failed_fade_min_mfe_pct == 0.01
-assert demo.failed_fade_loss_pct == 0.04
-assert demo.failed_fade_close_location_min == 0.0
+from liquidity_migration.continuous_demo import ContinuousDemoCycleConfig
+cont = ContinuousDemoCycleConfig()
+assert cont.rmom_quantile == 0.33, cont.rmom_quantile
+assert cont.entry_pause_after_adverse_exits == 8, cont.entry_pause_after_adverse_exits
+assert cont.entry_pause_window_minutes == 1440, cont.entry_pause_window_minutes
+assert cont.stop_loss_pct == 0.25, cont.stop_loss_pct
 print("strategy-settings-ok")
 PY
 
@@ -87,12 +90,11 @@ else
 fi
 verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS
 # Timer parity — read-only verify must catch a deploy that forgot to enable
-# (or someone manually disabled) the demo-health watchdog or daily
-# combined-book report. Both fail loud if missing.
-systemctl is-enabled --quiet liquidity-migration-demo-health.timer
+# (or someone manually disabled) the liveness watchdog or daily combined-book
+# report. Both fail loud if missing. (The demo-health watchdog was erased with
+# the short sleeve 2026-06-11; deploy removes it from hosts — don't check it.)
 systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer
 systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer
-systemctl is-active --quiet liquidity-migration-demo-health.timer
 systemctl is-active --quiet liquidity-migration-demo-liveness.timer
 systemctl is-active --quiet liquidity-migration-combined-book-report.timer
 
@@ -110,12 +112,6 @@ verify_sleeve "$LONG_SLEEVE" $LONG_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_SLEEVE" $CONTINUOUS_SLEEVE_UNITS
 verify_sleeve "$CONTINUOUS_PAPER_SLEEVE" $CONTINUOUS_PAPER_SLEEVE_UNITS
 
-systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=STRATEGY_PROFILE=promoted'
-systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=INTERVAL_SECONDS=60'
-systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=UNIVERSE_RANK_END=0'
-systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=UNIVERSE_MAX_SYMBOLS=0'
-systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=UNIVERSE_MIN_TURNOVER_24H=0'
-systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=MAX_ACTIVE_SYMBOLS=12'
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=ORDER_SUBMIT_MODE=ws_then_rest'
 # SHARED-ACCOUNT SAFETY: the single risk service must read EVERY sleeve's ledger root,
 # else a sibling sleeve's live positions look untracked and get flattened. Fail loud
@@ -129,12 +125,6 @@ if sleeve_on "$CONTINUOUS_SLEEVE"; then
   systemctl cat liquidity-migration-bybit-continuous-demo.service --no-pager | grep -E 'Environment=STOP_LOSS_PCT=0.25'
 fi
 
-systemctl show liquidity-migration-bybit-demo.service \
-  --property=ActiveState \
-  --property=SubState \
-  --property=MainPID \
-  --property=ExecMainStatus \
-  --no-pager
 systemctl show liquidity-migration-bybit-risk.service \
   --property=ActiveState \
   --property=SubState \

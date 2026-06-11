@@ -1,28 +1,17 @@
-"""Point-in-time (PIT) membership + full-PIT universe validation for the volume-events
-backtest engine — the methodology-critical no-look-ahead / no-survivorship gate, isolated
-into one heavily-tested module. Re-exported by volume_events (the hub), mirroring how
-volume_events_filters / _validation / _features / _charts are split out: the shared frame
-helpers stay in the hub and are imported here, and volume_events re-imports these funcs at
-its bottom (after the helpers are defined) — the package always loads volume_events first."""
+"""Point-in-time (PIT) membership + full-PIT universe validation — the
+methodology-critical no-look-ahead / no-survivorship gate, isolated into one
+heavily-tested module. Originally a slice of the volume_events hub (the daily
+SHORT engine, ERASED 2026-06-11 by operator order); it survives standalone as
+the generic PIT gate consumed by the long/continuous engines, with its shared
+frame helpers imported from _common / trade_lifecycle."""
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 import polars as pl
 
-from ._common import trading_day_expr
 
 from ._common import _date_symbol_set, _symbol_set
 from .trade_lifecycle import _has_columns
-
-
-def _pit_membership_pass(trades: pl.DataFrame, *, required: bool) -> bool:
-    if not required:
-        return True
-    if trades.is_empty() or "tradable_membership_flag" not in trades.columns:
-        return False
-    flags = trades["tradable_membership_flag"].to_list()
-    return bool(flags) and all(bool(flag) for flag in flags)
 
 
 def _pit_manifest_metadata(
@@ -176,46 +165,3 @@ def _covered_kline_date_symbol_set(klines: pl.DataFrame, *, min_hourly_bars: int
     return _date_symbol_set(covered)
 
 
-def _pit_membership_diagnostic(
-    data_root: str | Path,
-    archive_manifest: pl.DataFrame,
-    features: pl.DataFrame,
-) -> dict[str, Any]:
-    """Actionable detail for a `pit_membership_fail`: how far the archive manifest
-    lags the signal universe, and the count of feature rows whose TRADING DAY (the
-    date of `ts_ms - 1ms`; see `_attach_event_archive_membership`) falls past the
-    manifest's coverage end — the "uncovered tail" that the strict gate rejects.
-
-    Cheap: manifest end is read from the data-root's `date=` partitions (no parquet
-    read); the uncovered-tail count is a single polars expression over `features`.
-    """
-    from .pit_coverage import coverage_status
-
-    manifest_end = coverage_status(data_root).manifest_end
-    uncovered_tail = 0
-    if manifest_end is not None and not features.is_empty() and "ts_ms" in features.columns:
-        # Trading day = date of (ts_ms - 1ms); count distinct (symbol, trading day)
-        # event rows whose trading day is strictly after the manifest coverage end.
-        trading_day = trading_day_expr("ts_ms")
-        uncovered_tail = int(
-            features.select(trading_day.alias("_td"))
-            .filter(pl.col("_td") > pl.lit(manifest_end))
-            .height
-        )
-    return {
-        "manifest_end": manifest_end.isoformat() if manifest_end is not None else None,
-        "uncovered_tail_event_rows": uncovered_tail,
-    }
-
-
-def _pit_membership_diagnostic_lines(diagnostic: dict[str, Any]) -> list[str]:
-    """Concise, actionable remediation block for a membership rejection."""
-    manifest_end = diagnostic.get("manifest_end")
-    uncovered = diagnostic.get("uncovered_tail_event_rows", 0)
-    return [
-        "⚠️  pit_membership_fail — the archive manifest does not cover every traded signal day.",
-        f"     archive manifest coverage end : {manifest_end if manifest_end is not None else 'MISSING'}",
-        f"     event rows past coverage end  : {uncovered} (trading day = date of ts_ms-1ms; the uncovered tail)",
-        "     FIX: run `archive-manifest` to refresh PIT membership, or pass "
-        "`--pit-membership current-universe` for a labeled biased same-day diagnostic (never promotion evidence).",
-    ]

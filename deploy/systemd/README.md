@@ -12,8 +12,9 @@ The deployable VPS units are:
 - `liquidity-migration-bybit-continuous-demo.service`: continuous-fade demo runner.
 - `liquidity-migration-bybit-continuous-paper.service`: no-order continuous evidence
   collector.
-- Timers include demo health/liveness, combined-book report, continuous rmom refresh,
-  continuous BTC-hedge dry-run, and continuous forward report.
+- Timers include the demo-liveness watchdog, combined-book report, continuous rmom
+  refresh, the daily continuous BTC+ETH hedge (submit-armed; see below), and the
+  continuous forward report. (The demo-health timer was erased with the short sleeve.)
 
 Which sleeve units actually run is governed by `deploy/sleeves.env` plus optional
 `/etc/liquidity-migration/sleeves.env` are the source of truth for which sleeves are
@@ -173,10 +174,12 @@ demo private socket rejects that topic.
 blocked subscription is reported while REST reconciliation and exchange-native
 stops keep covering open risk.
 
-Single-submitter safety: the active demo systemd unit pins
-`Environment=STRATEGY_PROFILE=promoted`, and
-`scripts/run_bybit_demo_event_engine.sh` refuses `SUBMIT_ORDERS=1` unless
-`STRATEGY_PROFILE=promoted`. The `demo_relaxed`, no-crowding, sniper, and
-execution-only candidates are shadow-only. The BTC hedge now runs as a deployed daily
-dry-run timer (`liquidity-migration-continuous-hedge.timer`); order submission is
-gated by `SUBMIT_HEDGE=0` in the unit.
+Single-submitter safety (post the 2026-06-11 short-sleeve erasure): the
+order-submitting units are the continuous demo sleeve
+(`liquidity-migration-bybit-continuous-demo.service`, `SUBMIT_ORDERS=1` +
+venue-side disaster stop) and the daily BTC+ETH hedge timer
+(`liquidity-migration-continuous-hedge.timer`) — the hedge unit ships
+**`SUBMIT_HEDGE=1` + `CONFIRM_DEMO_ORDERS=1` (operator-armed 2026-06-10)**, so
+it SUBMITS demo orders; runtime guards + staleness gates still apply. The
+continuous paper shadow is unconditionally `SUBMIT_ORDERS=0`/`PAPER_MODE=1`
+(verified fail-loud on every deploy). Everything is demo-account-only.

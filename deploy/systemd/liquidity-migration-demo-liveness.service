@@ -19,7 +19,6 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 # stopLoss), ledger<->venue mismatch, WS feed stall, and exchange errors so the
 # operator can manually close. Exits 0 always (a watchdog must never crash-loop).
 ExecStart=/opt/liquidity-migration/.venv/bin/python scripts/check_demo_liveness.py \
-    --data-root /opt/liquidity-migration/data/bybit-demo-event \
     --continuous-root /opt/liquidity-migration/data/bybit-continuous-demo-event \
     --continuous-paper-root /opt/liquidity-migration/data/bybit-continuous-paper-event \
     --long-root /opt/liquidity-migration/data/bybit-long-demo-event \

@@ -51,11 +51,15 @@ _logger = logging.getLogger("liquidity_migration.long_native_event_demo_daemon")
 class LongNativeDemoDaemon:
     """Long-running cycle loop for the v11a long sleeve.
 
-    Mirrors EventDemoDaemon (event_demo_daemon.py) without the kline cache
-    warmer — the long sleeve's universe of ≤10 symbols means the in-cycle
-    kline pull is already fast (<3s typical) and a warmer would risk
-    rate-limit contention with the short sleeve.
+    Also the scaffolding base for ContinuousDemoDaemon — subclasses must
+    override the sleeve labels below or their telegrams misattribute the
+    sleeve (audit 2026-06-11: a continuous cycle crash paged "long sleeve
+    cycle failed" while the long sleeve was toggled off).
     """
+
+    # Sleeve identity used in operator-facing telegram text. Subclasses override.
+    _sleeve_label = "long"
+    _daemon_label = "long-native MultiStratV1"
 
     def __init__(
         self,
@@ -377,7 +381,7 @@ class LongNativeDemoDaemon:
         )
         if self._startup_telegram:
             self._send_telegram(
-                f"\U0001f7e2 long-native MultiStratV1 daemon started "
+                f"\U0001f7e2 {self._daemon_label} daemon started "
                 f"interval={self.interval_seconds:.0f}s "
                 f"submit_orders={'on' if self.demo_config.submit_orders else 'off'} "
                 f"ws={ws_status} ws_klines={kline_status} ws_state={cache_status}"
@@ -418,7 +422,7 @@ class LongNativeDemoDaemon:
         )
         if self._shutdown_telegram:
             self._send_telegram(
-                f"\U0001f6d1 long-native MultiStratV1 daemon stopped "
+                f"\U0001f6d1 {self._daemon_label} daemon stopped "
                 f"cycles={self._cycles_run} errors={self._cycle_errors} "
                 f"ws_events={router_stats['events_received']} "
                 f"ws_satisfied={router_stats['waits_satisfied_by_ws']}"
@@ -466,9 +470,9 @@ class LongNativeDemoDaemon:
             self._cycles_run += 1
         except Exception as exc:  # noqa: BLE001
             self._cycle_errors += 1
-            _logger.exception("long cycle failed: %s", exc)
+            _logger.exception("%s cycle failed: %s", self._sleeve_label, exc)
             self._send_telegram(
-                f"❌ liquidity-migration | long sleeve cycle failed: {str(exc)[:200]}"
+                f"❌ liquidity-migration | {self._sleeve_label} sleeve cycle failed: {str(exc)[:200]}"
             )
         elapsed = time.monotonic() - cycle_started
         self._max_cycle_seconds = max(self._max_cycle_seconds, elapsed)

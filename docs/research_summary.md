@@ -8,7 +8,7 @@
 > the long/continuous findings interleave with them — they describe nothing that
 > can run today. The continuous fade book and the long v11a sleeve are what remain.
 
-**Updated:** 2026-06-10
+**Updated:** 2026-06-12
 **Status:** research-stage only. Demo and paper evidence are allowed; real-money promotion is not.
 
 This file is the single research source of truth. Old per-experiment receipts and one-off
@@ -19,8 +19,10 @@ change is meant to become a formal candidate/promotion decision.
 ## Non-Negotiable Status
 
 - Nothing is approved for real money.
-- The short sleeve and long sleeve can run on demo/paper only; they are currently
-  toggled off on the live box but remain promoted-in-code and redeployable.
+- The daily SHORT sleeve was ERASED from the system 2026-06-11 (operator order)
+  — it is gone, not toggled off; git history is the archive. The LONG sleeve can
+  run on demo/paper only; it is currently toggled off on the live box but
+  remains promoted-in-code and redeployable.
 - The continuous sleeve is not promoted. As of the 2026-06-09 rebuilt VPS, it is
   the only live sleeve: demo orders ON plus a no-order paper shadow, collecting
   forward execution evidence. Demo fills are not alpha proof.
@@ -585,7 +587,7 @@ and opened the regime program (plan folded 2026-06-10; git history is the archiv
   adaptive re-weighting actively hurts (wandering choices + switch costs). Live weight
   policy: FROZEN receipt weights, no re-estimation. Receipt:
   `continuous-walkforward-allocator-2026-06-09.md`. Program doc:
-  `docs/research_plan_continuous_live_readiness_2026-06-09.md`.
+  `docs/research_plan_continuous_live_readiness_2026-06-09.md` *(deleted in the 2026-06-10/11 receipt consolidation — recover via git history)*.
 
 ## Rejected Continuous Ideas
 
@@ -637,7 +639,7 @@ Do not re-run these unless there is a new reason:
 The deployed `btc_trend_gate=uptrend` (operator-directed 2026-06-04, validation was
 PENDING) got its binding Tier-2 battery: gate off vs uptrend, both venues, full-PIT
 clean, exact deployed profile. Receipt with full numbers:
-`docs/preregistration/btc-gate-tier2-validation-2026-06-09.md`.
+`docs/preregistration/btc-gate-tier2-validation-2026-06-09.md` *(deleted in the 2026-06-10/11 receipt consolidation — recover via git history)*.
 
 Verdict line: `by MARΔ +1.52  bn MARΔ −0.12  pooled +0.70 → DEMO-ELIGIBLE`.
 
@@ -1122,7 +1124,7 @@ book cost; DD not worse; improves 2024 AND 2025 on bybit (per-year Sharpe 1.55�
 
 **4. §4-B participation-capped sizing — pre-registered NULL on dominance (B3), with a
 usable capacity frontier (receipt:**
-`docs/preregistration/continuous-participation-cap-2026-06-10.md`**).** Per-trade
+`docs/preregistration/continuous-participation-cap-2026-06-10.md` *(deleted in the 2026-06-10/11 receipt consolidation — recover via git history)***).** Per-trade
 participation at $1M inverted EXACTLY from the ledger cost model; cap m=min(1,
 5%/(k·4·cw·π)); daily paths rebuilt per-trade from panel midnight closes (P0 parity vs
 the official control: corr 0.9999/0.9998, deltas ≈0 — the split machinery is a verified
@@ -1138,7 +1140,7 @@ adopted; binance-only cap not proposed (venue-specific tuning). Do not re-mine w
 calibrated impact.
 
 **5. §8-P4 residual attribution of the continuous book (analysis, receipt:**
-`docs/preregistration/continuous-residual-attribution-2026-06-10.md`**):
+`docs/preregistration/continuous-residual-attribution-2026-06-10.md` *(deleted in the 2026-06-10/11 receipt consolidation — recover via git history)***):
 residual-alpha-positive vs the validated 6-factor model + market legs.** S3 residual
 Sharpe 3.91/3.91 (on-joined-days convention — don't mix with calendar-grid receipt
 Sharpes), S3 R² of the 2f-hedged book just 1.5%/6.8%, alpha ≈ +40%/yr at max4. The

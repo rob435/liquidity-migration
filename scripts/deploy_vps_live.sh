@@ -144,6 +144,12 @@ systemctl enable liquidity-migration-bybit-risk.service
 # so a bounce loses at most the in-flight websocket messages.
 systemctl enable liquidity-migration-liquidation-collector.service
 systemctl restart liquidity-migration-liquidation-collector.service
+# The depth collector is operator-gated (deploy installs the unit but never enables it).
+# If the operator HAS enabled it, restart it for the same reason as the liquidation
+# collector: deployed collector code must take effect, not wait for the next reboot.
+if systemctl is-enabled --quiet liquidity-migration-depth-collector.service 2>/dev/null; then
+    systemctl restart liquidity-migration-depth-collector.service
+fi
 # One-time cleanup for the ERASED daily-short sleeve (2026-06-11): stop, disable,
 # and remove its units from the host so stale enabled units can't crash-loop on a
 # deleted entrypoint.
@@ -175,11 +181,10 @@ apply_timer_enable on $CONTINUOUS_SLEEVE_TIMERS $CONTINUOUS_FORWARD_REPORT_TIMER
 echo "Seeding continuous rmom gate (residual_momentum.parquet) ..."
 systemctl start liquidity-migration-continuous-rmom-refresh.service \
   || echo "WARN: rmom seed service failed; the 00:20 timer + rmom watchdog will cover it." >&2
-if sleeve_on "$CONTINUOUS_SLEEVE"; then
-  _rmom_root="data/bybit-continuous-demo-event/residual_momentum.parquet"
-else
-  _rmom_root="data/bybit-continuous-paper-event/residual_momentum.parquet"
-fi
+# The refresher always (re)builds the DEMO root's gate — the paper shadow FOLLOWS
+# that root (KLINES_FOLLOW_ROOT), so the demo parquet is the one to check in both
+# demo and paper-only modes (run_continuous_rmom_refresh.sh never writes the paper root).
+_rmom_root="data/bybit-continuous-demo-event/residual_momentum.parquet"
 _rmom_rows="$(RMOM_ROOT="$_rmom_root" "$PYTHON" - <<'PY' 2>/dev/null || echo 0
 import os
 import pathlib, polars as pl
@@ -227,38 +232,24 @@ fi
 verify_timer "$CONTINUOUS_SLEEVE" $CONTINUOUS_HEDGE_TIMERS
 # Timer verification: is-enabled catches "we never enabled it"; is-active
 # catches "we enabled it but something stopped it." Both are fail-loud here
-# so deploys can't silently leave the watchdog or daily report off.
-systemctl is-enabled --quiet liquidity-migration-demo-health.timer
+# so deploys can't silently leave the watchdog or daily report off. (The
+# demo-health watchdog was erased with the short sleeve 2026-06-11 and is
+# actively removed from the host above — do not re-add checks for it.)
 systemctl is-enabled --quiet liquidity-migration-demo-liveness.timer
 systemctl is-enabled --quiet liquidity-migration-combined-book-report.timer
-systemctl is-active --quiet liquidity-migration-demo-health.timer
 systemctl is-active --quiet liquidity-migration-demo-liveness.timer
 systemctl is-active --quiet liquidity-migration-combined-book-report.timer
 
-systemctl show liquidity-migration-bybit-demo.service \
-  --property=ActiveState \
-  --property=SubState \
-  --property=MainPID \
-  --property=ExecMainStatus \
-  --no-pager
 systemctl show liquidity-migration-bybit-risk.service \
   --property=ActiveState \
   --property=SubState \
   --property=MainPID \
   --property=ExecMainStatus \
   --no-pager
-systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=STRATEGY_PROFILE=promoted'
-systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=INTERVAL_SECONDS=60'
-systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=UNIVERSE_RANK_END=0'
-systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=UNIVERSE_MAX_SYMBOLS=0'
-systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=UNIVERSE_MIN_TURNOVER_24H=0'
-systemctl cat liquidity-migration-bybit-demo.service --no-pager | grep -E 'Environment=MAX_ACTIVE_SYMBOLS=12'
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=ORDER_SUBMIT_MODE=ws_then_rest'
 # SHARED-ACCOUNT SAFETY: the single risk service must read EVERY sleeve's ledger
 # root, else a sibling sleeve's live positions look untracked and get flattened.
-# Fail the deploy loud if the risk unit isn't wired to track the long sleeve. (Continuous
-# is OFF/de-promoted; the risk unit still reads its root so any legacy open positions stay
-# tracked rather than flattened.)
+# Fail the deploy loud if the risk unit isn't wired to both sibling sleeve roots.
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=LONG_DATA_ROOT=data/bybit-long-demo-event'
 systemctl cat liquidity-migration-bybit-risk.service --no-pager | grep -E 'Environment=CONTINUOUS_DATA_ROOT=data/bybit-continuous-demo-event'
 # Order-submitting continuous sleeve assertions: submit-orders config + disaster stop present.

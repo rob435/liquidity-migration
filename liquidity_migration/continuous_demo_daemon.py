@@ -190,6 +190,12 @@ class ContinuousDemoDaemon(LongNativeDemoDaemon):
     # checker. (mypy surfaced this real divergence — see the deferred BaseDemoDaemon note.)
     demo_config: ContinuousDemoCycleConfig
 
+    # Operator-facing telegram identity — without these the inherited failure/startup
+    # text says "long sleeve", misattributing a LIVE continuous crash to a toggled-off
+    # sleeve (same bug class as the inherited cycle-summary formatter, audit 2026-06-02).
+    _sleeve_label = "continuous"
+    _daemon_label = "continuous-fade"
+
     def __init__(
         self,
         data_root: str | Path,

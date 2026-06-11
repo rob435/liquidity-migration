@@ -30,8 +30,10 @@ python -m liquidity_migration <subcommand> --help
   as the Bybit root. Use it for side-by-side venue validation; agreement
   across both venues is the robustness signal, disagreement flags a regime
   or microstructure artefact.
-- **Live demo ledgers** → `data/bybit-demo-event`. NEVER point a research run
-  here, and never point demo ledgers at the research root.
+- **Live demo ledgers** → `data/bybit-continuous-demo-event` +
+  `data/bybit-long-demo-event` (`data/bybit-demo-event` is the erased short
+  sleeve's inert legacy root). NEVER point a research run at a live ledger
+  root, and never point demo ledgers at the research root.
 - **Paper-shadow ledgers** → `data/bybit-paper-event`. Reconciliation is fully
   scripted — run `bash scripts/reconcile.sh` (skill: `pit-reconcile`) for the
   demo↔paper↔backtest↔Bybit reconcile; do not hand-assemble `reconcile-*` calls.
@@ -44,28 +46,28 @@ python -m liquidity_migration <subcommand> --help
 
 ## Canonical commands
 
-Research cell / sweep — the official path (fills the ~30 baseline flags; do not
-hand-assemble `volume-events` flags):
-
-```bash
-bash scripts/volume_events_cell.sh --venue <bybit|binance> --cell-id <id> \
-  --phase <tag> --overrides 'KEY=VAL,…'   # DRY_RUN=1 to preview
-```
+Research sweeps — write a `scripts/_sweep_runtime.py`-based dispatcher (declare
+`BASELINE_PARAMS` + a list of `Cell`s and import the runtime; existing examples:
+`scripts/alpha_sweep.py`, `scripts/long_improve_sweep.py`). The erased
+`volume_events_cell.sh` single-cell path has NO replacement — the daily-short
+engine it drove is gone.
 
 Build/verify the per-venue full-PIT data roots (archives old roots, builds both
-roots — manifest + klines — and validates coverage; see `docs/data_roots.md`), then
-run the `volume-events` backtest above against the rebuilt root:
+roots — manifest + klines — and validates coverage; see `docs/data_roots.md`):
 
 ```bash
 bash scripts/build_full_pit_roots.sh        # full pipeline (bybit + binance)
 bash scripts/verify_full_pit_rebuild.sh     # standalone coverage / data-layer-audit gates
 ```
 
-Demo forward, one dry cycle:
+Demo forward, one dry cycle (the live roots are `data/bybit-continuous-demo-event`
+and `data/bybit-long-demo-event`):
 
 ```bash
-python -m liquidity_migration --data-root data/bybit-demo-event \
-  --config configs/volume_alpha.default.yaml event-demo-cycle
+python -m liquidity_migration --data-root data/bybit-continuous-demo-event \
+  --config configs/volume_alpha.default.yaml continuous-event-demo-cycle
+python -m liquidity_migration --data-root data/bybit-long-demo-event \
+  --config configs/volume_alpha.default.yaml long-native-event-demo-cycle
 ```
 
 ## Subcommands
@@ -75,8 +77,8 @@ subcommand list — do not maintain a copy here.
 
 ## Guardrails
 
-- `volume-events` requires full PIT by default; `--allow-partial-pit` is only
-  for explicitly biased diagnostics, and that run must be labelled biased.
+- Every backtest engine requires full PIT by default; `--allow-partial-pit` is
+  only for explicitly biased diagnostics, and that run must be labelled biased.
 - Demo order submission is allowed only for the deployed `STRATEGY_PROFILE`
   (see STATE.md > What's running) — the runner refuses `SUBMIT_ORDERS=1`
   otherwise. Demo vs mainnet is the `DEMO` / `REAL_MONEY` `.env` toggle
