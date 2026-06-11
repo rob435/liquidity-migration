@@ -1369,6 +1369,14 @@ cross-venue consistency as the filter, and the application path fixed up front
   tier, trailing book PnL, btc30 magnitude) showed no consistently-signed effect.
   The spent window again declined to mint in-sample alpha; the leads now ride the
   forward clocks where they can be judged for free.
+- **TA2 follow-on (`trade-atlas-2-funding-2026-06-11.md`, the LAST atlas on this
+  window): funding-at-entry and its 30d percentile are NULL in all four books**
+  (the crowding price doesn't separate winners from losers at entry), and the
+  cross-book feature is DEGENERATE in the most informative way possible: **zero
+  same-name overlaps within 30d across all 952 trades — the SHORT and LONG books
+  are structurally name-disjoint**, which upgrades the combined-book corr ≈ −0.03
+  finding from statistical to structural. Cumulative atlas harvest (14 features):
+  2 forward-armed leads, 1 causality catch, 1 structural discovery, rest null.
 
 ## What To Keep In Repo
 
