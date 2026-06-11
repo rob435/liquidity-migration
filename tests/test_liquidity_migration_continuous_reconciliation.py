@@ -312,6 +312,7 @@ def test_continuous_vs_daily_forward_accepts_same_window_outperformance(tmp_path
     )
 
     assert payload["ok"] is True
+    assert payload["summary"]["mode"] == "comparison"
     assert payload["summary"]["continuous_beats_return"] is True
     assert payload["summary"]["continuous_beats_mar"] is True
     assert payload["summary"]["daily_observed_days"] == 3
@@ -386,7 +387,10 @@ def test_continuous_vs_daily_forward_uses_daily_cycles_as_zero_return_days(tmp_p
         output_dir=tmp_path / "out",
     )
 
-    assert payload["ok"] is False
+    # 2026-06-11 operator semantics: an immature common window is a NOTE, not a
+    # blocking issue — the continuous read stands alone.
+    assert payload["ok"] is True
+    assert payload["summary"]["mode"] == "continuous_only"
     assert payload["summary"]["common_days"] == 1
     assert payload["summary"]["common_days_remaining"] == 29
     assert payload["summary"]["maturity_day_ts"] == day0 + 29 * MS_PER_DAY
@@ -395,7 +399,9 @@ def test_continuous_vs_daily_forward_uses_daily_cycles_as_zero_return_days(tmp_p
     assert payload["summary"]["continuous_observed_days"] == 1
     assert payload["summary"]["latest_daily_day_ts"] == day0
     assert payload["summary"]["latest_continuous_day_ts"] == day0
+    assert payload["summary"]["continuous_full_days"] == 1
     assert payload["daily"]["total_return"] == 0.0
+    assert any("below min_common_days" in note for note in payload["notes"])
     assert not any("daily return series is empty" in issue for issue in payload["issues"])
     assert not any("continuous return" in issue for issue in payload["issues"])
 

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
+MS_PER_DAY = 86_400_000
 
 
 def _load_module():
@@ -18,70 +20,73 @@ def _load_module():
     return module
 
 
-def test_format_message_collecting_until_common_window_matures() -> None:
-    mod = _load_module()
-    payload = {
-        "ok": False,
+def _today_ms() -> int:
+    return (int(datetime.now(timezone.utc).timestamp() * 1000) // MS_PER_DAY) * MS_PER_DAY
+
+
+def _payload(*, daily_days: int, daily_latest: int, cont_days: int, cont_latest: int,
+             common_days: int, ok: bool) -> dict:
+    return {
+        "ok": ok,
         "summary": {
-            "common_days": 4,
+            "common_days": common_days,
             "min_common_days": 30,
             "maturity_day_ts": 1_702_505_600_000,
-            "daily_observed_days": 4,
-            "latest_daily_day_ts": 1_700_000_000_000,
-            "continuous_observed_days": 5,
-            "latest_continuous_day_ts": 1_700_086_400_000,
+            "daily_observed_days": daily_days,
+            "latest_daily_day_ts": daily_latest,
+            "continuous_observed_days": cont_days,
+            "latest_continuous_day_ts": cont_latest,
+            "continuous_full_days": cont_days,
+            "continuous_full_total_return": 0.02,
+            "continuous_full_mar": 0.8,
+            "mode": "continuous_only" if common_days < 30 else "comparison",
         },
         "daily": {"total_return": 0.01, "mar": 0.5},
         "continuous": {"total_return": 0.02, "mar": 0.8},
-        "issues": ["common forward window 4d below min_common_days 30"],
+        "issues": [],
+        "notes": [],
         "report_path": "report.md",
         "json_path": "report.json",
     }
 
-    message = mod.format_message(payload)
 
+def test_collecting_when_both_legs_fresh_and_window_immature() -> None:
+    mod = _load_module()
+    today = _today_ms()
+    payload = _payload(daily_days=4, daily_latest=today - MS_PER_DAY, cont_days=5,
+                       cont_latest=today, common_days=4, ok=True)
+    message = mod.format_message(payload)
     assert "continuous-vs-daily forward: COLLECTING" in message
     assert "common_days=4/30" in message
-    assert "maturity_day_ts=1702505600000" in message
-    assert "coverage daily=4d latest=1700000000000; continuous=5d latest=1700086400000" in message
     assert "coverage_gap_days=1 lagging=daily" in message
-    assert "continuous return=2.00% MAR=0.80" in message
-    assert "json=report.json" in message
+    assert "continuous OWN-WINDOW: 5d return=2.00% MAR=0.80" in message
 
 
-def test_format_message_stale_when_one_ledger_lags() -> None:
+def test_continuous_only_when_daily_leg_dead() -> None:
+    # 2026-06-11 operator decision: a lagging/absent DAILY leg is never an alarm —
+    # the continuous report stands alone.
     mod = _load_module()
-    payload = {
-        "ok": False,
-        "summary": {
-            "common_days": 4,
-            "min_common_days": 30,
-            "daily_observed_days": 4,
-            "latest_daily_day_ts": 1_700_000_000_000,
-            "continuous_observed_days": 6,
-            "latest_continuous_day_ts": 1_700_172_800_000,
-        },
-        "daily": {"total_return": 0.01, "mar": 0.5},
-        "continuous": {"total_return": 0.02, "mar": 0.8},
-        "issues": ["common forward window 4d below min_common_days 30"],
-        "report_path": "report.md",
-    }
+    today = _today_ms()
+    lagging = _payload(daily_days=1, daily_latest=today - 5 * MS_PER_DAY, cont_days=10,
+                       cont_latest=today, common_days=1, ok=True)
+    assert "continuous-vs-daily forward: CONTINUOUS-ONLY" in mod.format_message(lagging)
+    empty = _payload(daily_days=0, daily_latest=0, cont_days=10,
+                     cont_latest=today, common_days=0, ok=True)
+    assert "continuous-vs-daily forward: CONTINUOUS-ONLY" in mod.format_message(empty)
 
+
+def test_stale_only_when_continuous_itself_lags_today() -> None:
+    mod = _load_module()
+    today = _today_ms()
+    payload = _payload(daily_days=4, daily_latest=today - 4 * MS_PER_DAY, cont_days=6,
+                       cont_latest=today - 4 * MS_PER_DAY, common_days=4, ok=True)
     message = mod.format_message(payload, stale_coverage_gap_days=2)
-
     assert "continuous-vs-daily forward: STALE" in message
-    assert "coverage_gap_days=2 lagging=daily" in message
 
 
-def test_format_message_pass_after_common_window_matures() -> None:
+def test_pass_after_common_window_matures() -> None:
     mod = _load_module()
-    payload = {
-        "ok": True,
-        "summary": {"common_days": 31, "min_common_days": 30},
-        "daily": {"total_return": 0.01, "mar": 0.5},
-        "continuous": {"total_return": 0.02, "mar": 0.8},
-        "issues": [],
-        "report_path": "report.md",
-    }
-
+    today = _today_ms()
+    payload = _payload(daily_days=31, daily_latest=today, cont_days=31,
+                       cont_latest=today, common_days=31, ok=True)
     assert "continuous-vs-daily forward: PASS" in mod.format_message(payload)

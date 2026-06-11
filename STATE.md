@@ -83,12 +83,11 @@ OFF (`deploy/sleeves.env`).
    Bybit has no historical book data — every month unenabled is deployed-venue
    capacity data lost forever (DC1 measured binance only). Enable on the VPS:
    `systemctl enable --now liquidity-migration-depth-collector`.
-8. FIXED-PENDING-PUSH (2026-06-11): the continuous-vs-daily forward comparator was
-   structurally starved (`SHORT_PAPER_SLEEVE=off` since the 06-09 re-shape → daily
-   leg frozen at 1 common day, `lagging=daily`). `deploy/sleeves.env` now re-enables
-   the SHORT **paper** shadow (no orders — the "only continuous trades" instruction
-   stands). Takes effect at the next push/deploy; the 30-common-day clock matures
-   ~30d after that.
+8. FIXED (2026-06-11, operator-directed): the continuous-vs-daily comparator no
+   longer depends on the short sleeve at all — with no/insufficient daily-leg data
+   it degrades to a CONTINUOUS-ONLY forward report (return/MAR over the continuous
+   ledger's own window) instead of a blocking STALE. `SHORT_PAPER_SLEEVE` stays
+   off per the same instruction.
 9. ARMED (data-refresh-triggered, no operator action needed until then): PE2
    long provisional-entry OOS re-judgment — when BOTH full-PIT roots extend ≥60d
    past 2026-05-28 (and ≥30 prov trades/venue), run the pre-registered cells per

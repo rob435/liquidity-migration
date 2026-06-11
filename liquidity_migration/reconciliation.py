@@ -1996,8 +1996,18 @@ def format_continuous_vs_daily_forward_report(payload: dict[str, Any]) -> str:
         "# Continuous vs Daily Forward Comparator",
         "",
         f"ok: `{payload['ok']}`",
+        f"mode: `{summary.get('mode', 'comparison')}`",
         "",
         "This compares realized forward ledger performance over the same calendar window.",
+        "The daily leg is OPTIONAL (2026-06-11 operator decision): in `continuous_only`",
+        "mode the binding read is the continuous ledger over its OWN window (below).",
+        "",
+        "## Continuous (own full window — the standalone read)",
+        "",
+        f"- days: `{summary.get('continuous_full_days', 0)}`",
+        f"- total_return: `{summary.get('continuous_full_total_return', 0.0):.6f}`",
+        f"- mar: `{_format_mar(summary.get('continuous_full_mar'))}`",
+        f"- max_drawdown: `{summary.get('continuous_full_max_drawdown', 0.0):.6f}`",
         "",
         "## Summary",
         "",
@@ -2036,6 +2046,10 @@ def format_continuous_vs_daily_forward_report(payload: dict[str, Any]) -> str:
         lines.extend(["", "## Blocking Issues", ""])
         for issue in payload["issues"]:
             lines.append(f"- {issue}")
+    if payload.get("notes"):
+        lines.extend(["", "## Notes (non-blocking)", ""])
+        for note in payload["notes"]:
+            lines.append(f"- {note}")
     return "\n".join(lines) + "\n"
 
 
@@ -2063,10 +2077,15 @@ def run_continuous_vs_daily_forward_comparison(
         continuous_returns = _trade_ledger_daily_returns(read_dataset(continuous_root_p, continuous_trades_dataset))
         continuous_source = continuous_trades_dataset
 
+    # 2026-06-11 operator decision: the continuous forward report must NOT depend on the
+    # short sleeve. The daily leg is OPTIONAL — daily-side gaps are informational notes,
+    # never blocking issues; the comparison block only binds once both legs matured.
     issues: list[str] = []
+    notes: list[str] = []
     if not daily_returns:
-        issues.append(
-            f"daily return series is empty from {daily_root_p}/{daily_cycles_dataset}+{daily_trades_dataset}"
+        notes.append(
+            f"daily return series is empty from {daily_root_p}/{daily_cycles_dataset}+{daily_trades_dataset} "
+            "(short sleeve off — continuous-only mode)"
         )
     if not continuous_returns:
         issues.append(f"continuous return series is empty from {continuous_root_p}/{continuous_source}")
@@ -2075,10 +2094,17 @@ def run_continuous_vs_daily_forward_comparison(
     end = min(max(daily_returns) if daily_returns else 0, max(continuous_returns) if continuous_returns else 0)
     common_days = ((end - start) // MS_PER_DAY + 1) if start > 0 and end >= start else 0
     if common_days < int(min_common_days):
-        issues.append(f"common forward window {common_days}d below min_common_days {int(min_common_days)}")
+        notes.append(f"common forward window {common_days}d below min_common_days {int(min_common_days)}")
 
     daily = _calendar_metrics(daily_returns, start_day=start, end_day=end)
     continuous = _calendar_metrics(continuous_returns, start_day=start, end_day=end)
+    # standalone continuous view over its OWN window — the primary read when the
+    # daily leg is off/immature
+    continuous_full = _calendar_metrics(
+        continuous_returns,
+        start_day=min(continuous_returns) if continuous_returns else 0,
+        end_day=max(continuous_returns) if continuous_returns else 0,
+    )
     continuous_beats_return = bool(continuous["total_return"] > daily["total_return"])
     daily_mar = daily["mar"]
     continuous_mar = continuous["mar"]
@@ -2094,6 +2120,11 @@ def run_continuous_vs_daily_forward_comparison(
         issues.append(f"continuous MAR {_format_mar(continuous_mar)} <= daily MAR {_format_mar(daily_mar)}")
 
     summary = {
+        "mode": "comparison" if performance_window_ready else "continuous_only",
+        "continuous_full_days": len(continuous_returns),
+        "continuous_full_total_return": continuous_full["total_return"],
+        "continuous_full_mar": continuous_full["mar"],
+        "continuous_full_max_drawdown": continuous_full["max_drawdown"],
         "common_start_day_ts": start,
         "common_end_day_ts": end,
         "common_days": common_days,
@@ -2123,7 +2154,9 @@ def run_continuous_vs_daily_forward_comparison(
         "summary": summary,
         "daily": {k: v for k, v in daily.items() if k != "equity"},
         "continuous": {k: v for k, v in continuous.items() if k != "equity"},
+        "continuous_full": {k: v for k, v in continuous_full.items() if k != "equity"},
         "issues": issues,
+        "notes": notes,
     }
     report = format_continuous_vs_daily_forward_report(payload)
     report_dir = Path(output_dir).expanduser() if output_dir else continuous_root_p / "reports" / "continuous_vs_daily_forward"

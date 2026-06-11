@@ -42,12 +42,32 @@ def _lagging_side(summary: dict[str, Any]) -> str:
     return "daily" if daily < continuous else "continuous"
 
 
+def _continuous_age_days(summary: dict[str, Any]) -> int:
+    """Days the CONTINUOUS ledger lags behind today (UTC) — the real staleness signal."""
+    latest = int(summary.get("latest_continuous_day_ts") or 0)
+    if latest <= 0:
+        return 0
+    from datetime import datetime, timezone
+
+    today = (int(datetime.now(timezone.utc).timestamp() * 1000) // MS_PER_DAY) * MS_PER_DAY
+    return max(today - latest, 0) // MS_PER_DAY
+
+
 def _status(payload: dict[str, Any], *, stale_coverage_gap_days: int = 2) -> str:
+    """Continuous-first status (2026-06-11 operator decision: no dependence on the
+    short sleeve). STALE = OUR continuous ledger stopped ticking; the daily leg
+    lagging or being off is CONTINUOUS-ONLY, never an alarm."""
     summary = payload.get("summary", {})
     common_days = int(summary.get("common_days") or 0)
     min_common_days = int(summary.get("min_common_days") or 30)
-    if _coverage_gap_days(summary) >= max(int(stale_coverage_gap_days), 1):
+    if _continuous_age_days(summary) >= max(int(stale_coverage_gap_days), 1) + 1:
         return "STALE"
+    daily_dead = (
+        int(summary.get("daily_observed_days") or 0) == 0
+        or _coverage_gap_days(summary) >= max(int(stale_coverage_gap_days), 1)
+    )
+    if daily_dead:
+        return "CONTINUOUS-ONLY"
     if common_days < min_common_days:
         return "COLLECTING"
     return "PASS" if payload.get("ok") else "FAIL"
@@ -71,7 +91,12 @@ def format_message(payload: dict[str, Any], *, stale_coverage_gap_days: int = 2)
             f"latest={summary.get('latest_continuous_day_ts', 0)}"
         ),
         f"coverage_gap_days={gap_days} lagging={lagging or 'none'}",
-        f"continuous return={_fmt(continuous.get('total_return'), pct=True)} MAR={_fmt(continuous.get('mar'))}",
+        (
+            f"continuous OWN-WINDOW: {summary.get('continuous_full_days', 0)}d "
+            f"return={_fmt(summary.get('continuous_full_total_return'), pct=True)} "
+            f"MAR={_fmt(summary.get('continuous_full_mar'))}"
+        ),
+        f"continuous (common window) return={_fmt(continuous.get('total_return'), pct=True)} MAR={_fmt(continuous.get('mar'))}",
         f"daily return={_fmt(daily.get('total_return'), pct=True)} MAR={_fmt(daily.get('mar'))}",
         f"report={payload.get('report_path', '')}",
         f"json={payload.get('json_path', '')}",
@@ -123,7 +148,8 @@ def main() -> int:
     print(message)
     status = _status(payload, stale_coverage_gap_days=args.stale_coverage_gap_days)
     sent = False
-    if args.telegram and (args.telegram_before_min_common_days or status != "COLLECTING"):
+    quiet = status in ("COLLECTING", "CONTINUOUS-ONLY")  # routine accumulation — no Telegram noise
+    if args.telegram and (args.telegram_before_min_common_days or not quiet):
         try:
             sent = send_telegram_message(message, enabled=True)
         except Exception as exc:  # noqa: BLE001 - report must not fail because Telegram is down
